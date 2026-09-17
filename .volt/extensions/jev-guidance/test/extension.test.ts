@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import type { ExtensionAPI, ExtensionContext, RegisteredCommand } from "@hansjm10/volt-coding-agent";
+import type { ExtensionAPI, ExtensionContext, PromptRouteResult, RegisteredCommand } from "@hansjm10/volt-coding-agent";
 import { QUESTIONS } from "../client.ts";
 import jevGuidance from "../index.ts";
 
@@ -17,7 +17,7 @@ function harness(mode: ExtensionContext["mode"] = "tui", flag = "off") {
 			handlers.set(name, handler);
 		},
 		registerFlag: () => {},
-		getFlag: () => flag,
+		getFlag: (name) => (name === "jev" ? flag : "mock/worker"),
 		registerCommand: (name, command) => {
 			commands.set(name, command);
 		},
@@ -32,7 +32,13 @@ function harness(mode: ExtensionContext["mode"] = "tui", flag = "off") {
 			notify: (message: string) => notifications.push(message),
 			setStatus: (_key: string, value: string | undefined) => statuses.push(value),
 		},
+		model: { provider: "mock", id: "primary" },
+		sessionManager: { getBranch: () => [] },
 		modelRegistry: {
+			getAvailable: () => [
+				{ provider: "mock", id: "primary" },
+				{ provider: "mock", id: "worker" },
+			],
 			getApiKeyForProvider: async (provider: string) => {
 				assert.equal(provider, "vercel-ai-gateway");
 				authLookups++;
@@ -57,6 +63,13 @@ function harness(mode: ExtensionContext["mode"] = "tui", flag = "off") {
 		},
 		fire,
 		start: () => fire("session_start", { type: "session_start", reason: "startup" }),
+		route: async (prompt = "Create a PR for the verified committed changes", signal = new AbortController().signal) =>
+			(await fire("prompt_route", {
+				type: "prompt_route",
+				prompt,
+				signal,
+				agents: [{ name: "general", description: "General worker" }],
+			})) as PromptRouteResult | undefined,
 		context: async (messages: AgentMessage[]) =>
 			(await fire("context", { type: "context", messages })) as { messages?: AgentMessage[] } | undefined,
 		command: async (args: string) => {
@@ -148,6 +161,124 @@ test("advise appends only transient advisory context and off stops future evalua
 	assert.equal(await host.context(messages), undefined);
 	assert.equal(calls, 1);
 	assert.equal(host.statuses.at(-1), undefined);
+});
+
+function routingResponse(choice = "pr_worker", probability: number | undefined = 0.99): Response {
+	return Response.json({
+		answers: {
+			reminder: {
+				type: "choice",
+				choice,
+				...(probability === undefined
+					? {}
+					: {
+							probabilities: {
+								pr_worker: choice === "pr_worker" ? probability : 0,
+								none: choice === "none" ? probability : choice === "pr_worker" ? 1 - probability : 0,
+								insufficient_context: choice === "insufficient_context" ? probability : 0,
+							},
+						}),
+			},
+		},
+		usage: { inputTokens: 40, outputTokens: 0 },
+	});
+}
+
+test("routing is separately opt-in, selects the configured worker, and makes no guidance requests", async (t) => {
+	let calls = 0;
+	t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+		calls++;
+		const body = JSON.parse(String(init?.body));
+		assert.ok(body.questions.reminder.criteria.pr_worker);
+		assert.ok(!String(init?.body).includes("synthetic-key"));
+		return routingResponse();
+	});
+	const host = harness();
+	await host.start();
+	assert.equal(await host.route(), undefined);
+	assert.equal(calls, 0);
+	await host.command("route mock/worker");
+	assert.equal(await host.context(messages), undefined);
+	const result = await host.route();
+	assert.equal(result?.agent, "general");
+	assert.equal(result?.model, "mock/worker");
+	assert.match(result?.task ?? "", /existing committed branch only/);
+	assert.match(result?.task ?? "", /Create a PR for the verified committed changes/);
+	assert.equal(calls, 1);
+	assert.equal(host.entries.length, 1);
+	assert.ok(!JSON.stringify(host.entries).includes("Create a PR"));
+	await host.command("status");
+	assert.ok(host.notifications.some((text) => text.includes("1 route nominations")));
+});
+
+test("routing ignores non-PR and oversized requests without resolving credentials", async (t) => {
+	t.mock.method(globalThis, "fetch", async () => assert.fail("No request expected"));
+	const host = harness("tui", "route");
+	await host.start();
+	assert.equal(await host.route("Explain this implementation"), undefined);
+	assert.equal(await host.route(`Create a PR ${"a".repeat(3_000)} and fix authentication`), undefined);
+	assert.equal(host.authLookups, 0);
+});
+
+test("routing refuses unconfigured and same-as-primary models", async (t) => {
+	t.mock.method(globalThis, "fetch", async () => assert.fail("No request expected"));
+	const host = harness();
+	await host.start();
+	await host.command("route missing/model");
+	assert.equal(await host.route(), undefined);
+	await host.command("route mock/primary");
+	assert.equal(await host.route(), undefined);
+	assert.equal(host.authLookups, 0);
+	assert.ok(host.notifications.some((text) => text.includes("different from the primary")));
+});
+
+test("uncertain, abstaining, malformed, or failed routing never nominates a worker", async (t) => {
+	for (const result of [
+		routingResponse("pr_worker", 0.94),
+		routingResponse("none", 1),
+		routingResponse("insufficient_context", 1),
+		Response.json({ answers: { reminder: { type: "choice", choice: "pr_worker" } }, usage: {} }),
+		Response.json({ answers: { reminder: { type: "choice", choice: "run_shell" } } }),
+		Response.json({ error: "Synthetic outage" }, { status: 503 }),
+	]) {
+		const mock = t.mock.method(globalThis, "fetch", async () => result);
+		const host = harness("tui", "route");
+		await host.start();
+		assert.equal(await host.route(), undefined);
+		assert.equal(mock.mock.callCount(), 1);
+		mock.mock.restore();
+	}
+});
+
+test("turning routing off aborts classification and suppresses late nominations", async (t) => {
+	const started = Promise.withResolvers<AbortSignal>();
+	t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
+		const signal = init?.signal;
+		assert.ok(signal);
+		started.resolve(signal);
+		return await new Promise<Response>((_resolve, reject) =>
+			signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true }),
+		);
+	});
+	const host = harness("tui", "route");
+	await host.start();
+	const nomination = host.route();
+	const signal = await started.promise;
+	await host.command("off");
+	assert.equal(await nomination, undefined);
+	assert.equal(signal.aborted, true);
+	assert.equal(host.entries.length, 0);
+});
+
+test("non-TUI routing flags never resolve credentials", async (t) => {
+	t.mock.method(globalThis, "fetch", async () => assert.fail("No request expected"));
+	for (const mode of ["rpc", "json", "print"] as const) {
+		const host = harness(mode, "route");
+		await host.start();
+		await host.command("route mock/worker");
+		assert.equal(await host.route(), undefined);
+		assert.equal(host.authLookups, 0);
+	}
 });
 
 test("shutdown aborts pending fetch and prevents late records or model context changes", async (t) => {

@@ -297,6 +297,7 @@ user sends prompt ────────────────────�
   ├─► (extension commands checked first, bypass if found)  │
   ├─► input (can intercept, transform, or handle)          │
   ├─► (skill/template expansion if not handled)            │
+  ├─► prompt_route (eligible local TUI input only; optional child dispatch)
   ├─► before_agent_start (can inject message, modify system prompt)
   ├─► agent_start                                          │
   ├─► message_start / message_update / message_end         │
@@ -515,6 +516,32 @@ volt.on("session_shutdown", async (event, ctx) => {
 ```
 
 ### Agent Events
+
+#### prompt_route
+
+Optional pre-inference routing for fresh, text-only **local TUI** input. This event runs after input transforms and skill/template expansion, before parent-model authentication, compaction, or `before_agent_start`. It is omitted in Plan mode, while any plan exists, in review discussions, in child runtimes, for RPC/extension-originated input, and when background jobs or pending context make a handoff ambiguous. The native `subagent` tool must be active and unmodified. Sessions with registered host turn policies or extension `tool_call` gates stay on the ordinary model loop, rather than bypassing those controls.
+
+```typescript
+volt.on("prompt_route", async (event, ctx) => {
+  // event.prompt: expanded request
+  // event.agents: eligible { name, description } definitions
+  // event.signal: host cancellation covering the entire routing operation
+  // Return undefined to keep the primary model.
+  const decision = await classifyRequest(event.prompt, event.signal);
+  if (!decision.delegate) return;
+  return {
+    agent: "general",
+    model: "provider/exact-configured-model-id",
+    task: "A self-contained task with sufficient scope and constraints...",
+  };
+});
+```
+
+The first valid nomination wins. The host requires an eligible named agent and an exact available model different from the primary model; task text is capped at 64 KB. Invalid/unavailable nominations and hook failures use the ordinary parent flow before dispatch. Returned text and classifier confidence never widen host tool grants or replace user authorization. Classifiers must abstain when context is insufficient; extensions are responsible for bounded, cancellation-aware evaluation and any additional provider data disclosure.
+
+Once dispatched, the host records the user input, uses `SubagentManager` with policy-clamped tools, and persists an attributed `prompt-delegation` custom message containing the bounded result, child IDs, status, and reported worker usage. The selected primary model and its defaults are unchanged. Parent inference, parent compaction, and an automatic parent summary are skipped. Parent model-turn extension hooks are not invoked; the child runs its normal hooks. Child activity remains available through `/subagents`.
+
+Stop/shutdown cancels routing and joins child cleanup. New user prompts/steering/follow-ups are rejected while the worker is active; wait or Stop first. Plan entry, compaction, and reload are blocked until routing settles, and removal of inherited tools cancels it. A dispatched failure never automatically retries the task on the primary model; external effects may already have occurred. Running notices retained after restart are historical. Durable spawn linkage allows the existing subagent registry to recover results; uncollected recovered work bypasses automatic routing until it has been inspected. Orderly teardown records an aborted result, while a crash never automatically restarts external actions. Hook abstention leaves ordinary prompting unchanged.
 
 #### before_agent_start
 

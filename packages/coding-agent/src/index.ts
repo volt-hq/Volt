@@ -114,6 +114,8 @@ export type {
 	ProjectTrustEventDecision,
 	ProjectTrustEventResult,
 	ProjectTrustHandler,
+	PromptRouteEvent,
+	PromptRouteResult,
 	ProviderConfig,
 	ProviderModelConfig,
 	ReadToolCallEvent,

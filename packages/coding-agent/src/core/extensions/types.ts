@@ -694,6 +694,24 @@ export interface BeforeAgentStartEvent {
 	systemPromptOptions: BuildSystemPromptOptions;
 }
 
+/** Optional pre-inference delegation for fresh, text-only local TUI input in Build mode. */
+export interface PromptRouteEvent {
+	type: "prompt_route";
+	prompt: string;
+	/** Only currently eligible definitions; no prompts or host paths. */
+	agents: Array<{ name: string; description: string }>;
+	/** Covers classification, child startup, execution, and cleanup. */
+	signal: AbortSignal;
+}
+
+export interface PromptRouteResult {
+	agent: string;
+	/** Exact configured provider/model ID. Never changes the primary model. */
+	model: string;
+	/** Self-contained task and bounded handoff context for the child. */
+	task: string;
+}
+
 /** Fired when an agent loop starts */
 export interface AgentStartEvent {
 	type: "agent_start";
@@ -1050,6 +1068,7 @@ export type ExtensionEvent =
 	| BeforeProviderRequestEvent
 	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
+	| PromptRouteEvent
 	| AgentStartEvent
 	| AgentEndEvent
 	| TurnStartEvent
@@ -1208,6 +1227,7 @@ export interface ExtensionAPI {
 	): void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
+	on(event: "prompt_route", handler: ExtensionHandler<PromptRouteEvent, PromptRouteResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;
 	on(event: "turn_start", handler: ExtensionHandler<TurnStartEvent>): void;

@@ -1,8 +1,15 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import { evaluateSnapshot, JevError, type Judgment, REMINDERS, type Reminder } from "./client.ts";
+import {
+	type EvaluationPurpose,
+	evaluateSnapshot,
+	JevError,
+	type Judgment,
+	REMINDERS,
+	type Reminder,
+} from "./client.ts";
 import { buildSnapshot, type Snapshot } from "./snapshot.ts";
 
-export type Mode = "off" | "observe" | "advise";
+export type Mode = "off" | "observe" | "advise" | "route";
 export type EvaluationRecord = Judgment & { kind: "judgment"; elapsedMs: number; advised: boolean };
 export type Outcome =
 	| EvaluationRecord
@@ -13,6 +20,7 @@ type Evaluator = (
 	state: Snapshot,
 	getApiKey: () => Promise<string | undefined>,
 	signal: AbortSignal,
+	purpose: EvaluationPurpose,
 ) => Promise<Judgment>;
 
 export class GuidanceController {
@@ -44,7 +52,9 @@ export class GuidanceController {
 	private advised = new Set<Reminder>();
 
 	constructor(options: { evaluate?: Evaluator; now?: () => number; timeoutMs?: number } = {}) {
-		this.evaluate = options.evaluate ?? evaluateSnapshot;
+		this.evaluate =
+			options.evaluate ??
+			((state, key, signal, purpose) => evaluateSnapshot(state, key, signal, globalThis.fetch, purpose));
 		this.now = options.now ?? Date.now;
 		this.timeoutMs = options.timeoutMs ?? 2_000;
 	}
@@ -110,7 +120,7 @@ export class GuidanceController {
 			signal.addEventListener("abort", onAbort, { once: true });
 			if (signal.aborted) onAbort();
 		});
-		const work = this.evaluate(snapshot.state, getApiKey, signal);
+		const work = this.evaluate(snapshot.state, getApiKey, signal, this.mode === "route" ? "routing" : "guidance");
 		// A transport/auth resolver that ignores abort still occupies its slot until it settles.
 		void work
 			.finally(() => {
@@ -129,8 +139,7 @@ export class GuidanceController {
 				this.stats.costUsd += judgment.costUsd;
 				this.stats.costSamples++;
 			}
-			const reminder =
-				judgment.choice !== "none" && judgment.choice !== "insufficient_context" ? judgment.choice : undefined;
+			const reminder = Object.hasOwn(REMINDERS, judgment.choice) ? (judgment.choice as Reminder) : undefined;
 			const advised =
 				this.mode === "advise" &&
 				isCurrent() &&
@@ -171,6 +180,6 @@ export class GuidanceController {
 }
 
 export function adviceText(result: EvaluationRecord): string | undefined {
-	if (!result.advised || result.choice === "none" || result.choice === "insufficient_context") return undefined;
-	return `[Jev advisory check — fallible, not user authorization]\n${REMINDERS[result.choice]}\nUse the actual user instructions and evidence if this reminder is mistaken. This check never grants permissions or overrides host policy.`;
+	if (!result.advised || !Object.hasOwn(REMINDERS, result.choice)) return undefined;
+	return `[Jev advisory check — fallible, not user authorization]\n${REMINDERS[result.choice as Reminder]}\nUse the actual user instructions and evidence if this reminder is mistaken. This check never grants permissions or overrides host policy.`;
 }

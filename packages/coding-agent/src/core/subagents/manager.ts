@@ -14,7 +14,7 @@ import type { ResourceDiagnostic } from "../diagnostics.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../rpc/types.ts";
-import { SessionManager, type SessionReference } from "../session-manager.ts";
+import { type SessionEntry, SessionManager, type SessionReference } from "../session-manager.ts";
 import type {
 	SubagentCapacityLimitSnapshot,
 	SubagentSpawnCapacityConstraint,
@@ -205,6 +205,8 @@ export interface SubagentSpawnRecordContext {
 
 export interface SubagentStartByNameOptions extends SubagentStartOptions {
 	resourceLoader?: ResourceLoader;
+	/** Host-selected model override for this run, without modifying the definition or parent. */
+	model?: string;
 	/** Maximum tool policy inherited from the parent context. Definition tools are intersected with this list. */
 	allowedTools?: string[];
 }
@@ -452,6 +454,11 @@ function messageText(content: Message["content"]): string {
 function collectSettledToolCallIds(sessionManager: SessionManager): Set<string> {
 	const settled = new Set<string>();
 	for (const entry of sessionManager.getEntries()) {
+		const route = promptRouteDispatch(entry);
+		if (route && route.status !== "running") {
+			settled.add(route.id);
+			continue;
+		}
 		if (entry.type !== "message" || entry.message.role !== "toolResult") {
 			continue;
 		}
@@ -464,10 +471,27 @@ function collectSettledToolCallIds(sessionManager: SessionManager): Set<string> 
 	return settled;
 }
 
-/** ToolCall ids present anywhere in the transcript; an edge without one is stranded (design §3). */
+/** Host-owned route messages provide spawn attribution without inventing a model tool call. */
+function promptRouteDispatch(entry: SessionEntry): { id: string; status: string } | undefined {
+	if (entry.type !== "custom_message" || entry.customType !== "prompt-delegation") return undefined;
+	const details = entry.details;
+	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
+	if (
+		typeof details.dispatchId !== "string" ||
+		!details.dispatchId.startsWith("prompt-route:") ||
+		typeof details.status !== "string" ||
+		!["running", "completed", "failed", "aborted"].includes(details.status)
+	)
+		return undefined;
+	return { id: details.dispatchId, status: details.status };
+}
+
+/** ToolCall or host-route ids present in the transcript; an edge without one is stranded (design §3). */
 function collectToolCallIds(sessionManager: SessionManager): Set<string> {
 	const ids = new Set<string>();
 	for (const entry of sessionManager.getEntries()) {
+		const route = promptRouteDispatch(entry);
+		if (route?.status === "running") ids.add(route.id);
 		if (entry.type !== "message" || entry.message.role !== "assistant") {
 			continue;
 		}
@@ -1191,7 +1215,8 @@ export class SubagentManager {
 		let managerTransferred = false;
 		try {
 			finishStart = this.beginStart();
-			const definition = this.getDefinition(agentName, { resourceLoader: options.resourceLoader });
+			const configured = this.getDefinition(agentName, { resourceLoader: options.resourceLoader });
+			const definition = options.model === undefined ? configured : { ...configured, model: options.model };
 			if (options.spawnBatchLease) {
 				const admission = this.batchAdmissions.get(options.spawnBatchLease);
 				if (!admission) {

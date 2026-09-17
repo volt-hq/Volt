@@ -1,10 +1,29 @@
-import type { ExtensionAPI, ExtensionContext } from "@hansjm10/volt-coding-agent";
+import { buildSessionContext, type ExtensionAPI, type ExtensionContext } from "@hansjm10/volt-coding-agent";
 import { adviceText, GuidanceController, type Mode } from "./controller.ts";
+import { prWorkerTask } from "./pr-routing.ts";
 import { MESSAGE_TYPE } from "./snapshot.ts";
 
 export default function jevGuidance(volt: ExtensionAPI): void {
 	const controller = new GuidanceController();
 	let revision = 0;
+	let workerModel: string | undefined;
+	let nominations = 0;
+
+	function selectWorkerModel(value: unknown, ctx: ExtensionContext): boolean {
+		if (
+			typeof value !== "string" ||
+			!ctx.modelRegistry.getAvailable().some((model) => `${model.provider}/${model.id}` === value)
+		) {
+			ctx.ui.notify("Choose an exact configured provider/model with /jev route <provider/model>.", "warning");
+			return false;
+		}
+		if (ctx.model && `${ctx.model.provider}/${ctx.model.id}` === value) {
+			ctx.ui.notify("Choose a worker model different from the primary model.", "warning");
+			return false;
+		}
+		workerModel = value;
+		return true;
+	}
 
 	function refreshStatus(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
@@ -37,11 +56,15 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 	volt.registerFlag("jev", {
 		type: "string",
 		default: "off",
-		description: "Local Jev guidance: off, observe, or advise (non-ZDR)",
+		description: "Local Jev: off, observe, advise, or route (non-ZDR)",
+	});
+	volt.registerFlag("jev-pr-model", {
+		type: "string",
+		description: "Exact configured provider/model for opt-in --jev route PR workers",
 	});
 	volt.registerCommand("jev", {
 		description:
-			"Jev guidance: off | observe | advise | status | interval <seconds>. Observe/advise upload selected context without ZDR.",
+			"Jev: off | observe | advise | route <provider/model> | status | interval <seconds>. Enabled modes upload selected context without ZDR.",
 		remoteSafe: false,
 		async handler(args, ctx) {
 			if (ctx.mode !== "tui") {
@@ -49,6 +72,16 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 				return;
 			}
 			const [action = "status", value, extra] = args.trim().split(/\s+/);
+			if (action === "route" && extra === undefined) {
+				if (selectWorkerModel(value ?? workerModel, ctx)) {
+					changeMode("route", ctx);
+					ctx.ui.notify(
+						`PR routing enabled: general on ${workerModel}. Only standalone requests for completed, committed changes qualify.`,
+						"info",
+					);
+				}
+				return;
+			}
 			if (["off", "observe", "advise"].includes(action) && value === undefined) {
 				changeMode(action as Mode, ctx);
 				return;
@@ -67,18 +100,25 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 					? `$${stats.costUsd.toFixed(6)} reported across ${stats.costSamples} calls`
 					: "cost unavailable";
 				ctx.ui.notify(
-					`Jev ${controller.mode}; interval ${controller.intervalMs / 1_000}s; wait ${Math.ceil(controller.waitMs / 1_000)}s.\n${stats.evaluations} attempts, ${stats.advised} reminders, ${stats.skipped} skipped, ${stats.errors} errors.\nTokens ${stats.inputTokens} in / ${stats.outputTokens} out; ${cost}.\nLast: ${JSON.stringify(controller.last ?? null)}`,
+					`Jev ${controller.mode}; interval ${controller.intervalMs / 1_000}s; wait ${Math.ceil(controller.waitMs / 1_000)}s.\n${stats.evaluations} attempts, ${stats.advised} reminders, ${stats.skipped} skipped, ${stats.errors} errors.\nPR worker ${workerModel ?? "not configured"}; ${nominations} route nominations (not proof of completion).\nTokens ${stats.inputTokens} in / ${stats.outputTokens} out; ${cost}.\nLast: ${JSON.stringify(controller.last ?? null)}`,
 					"info",
 				);
 				return;
 			}
-			ctx.ui.notify("Usage: /jev off|observe|advise|status or /jev interval <1–300 seconds>", "warning");
+			ctx.ui.notify(
+				"Usage: /jev off|observe|advise|status, /jev route <provider/model>, or /jev interval <1–300 seconds>",
+				"warning",
+			);
 		},
 	});
 
 	volt.on("session_start", (_event, ctx) => {
 		const requested = volt.getFlag("jev");
-		changeMode(ctx.mode === "tui" && (requested === "observe" || requested === "advise") ? requested : "off", ctx);
+		if (ctx.mode === "tui" && requested === "route" && selectWorkerModel(volt.getFlag("jev-pr-model"), ctx)) {
+			changeMode("route", ctx);
+		} else {
+			changeMode(ctx.mode === "tui" && (requested === "observe" || requested === "advise") ? requested : "off", ctx);
+		}
 	});
 	volt.on("session_shutdown", (_event, ctx) => changeMode("off", ctx));
 	const invalidate = () => {
@@ -89,8 +129,38 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 	volt.on("session_compact", invalidate);
 	volt.on("input", invalidate);
 
+	volt.on("prompt_route", async (event, ctx) => {
+		if (ctx.mode !== "tui" || controller.mode !== "route" || !workerModel) return;
+		// Cheap prefilter only, not an authorization decision. Never classify a truncated current request.
+		if (event.prompt.length > 3_000 || !/\b(?:pr|pull[\s-]+request)\b/i.test(event.prompt)) return;
+		if (!event.agents.some((agent) => agent.name === "general")) return;
+		const current = revision;
+		const model = workerModel;
+		const messages = [
+			...buildSessionContext(ctx.sessionManager.getBranch()).messages,
+			{ role: "user" as const, content: event.prompt, timestamp: Date.now() },
+		];
+		const outcome = await controller.inspect(
+			messages,
+			() => ctx.modelRegistry.getApiKeyForProvider("vercel-ai-gateway"),
+			event.signal,
+		);
+		if (current !== revision || event.signal.aborted) return;
+		if (outcome.kind !== "skipped") volt.appendEntry(MESSAGE_TYPE, { mode: controller.mode, ...outcome });
+		refreshStatus(ctx);
+		if (
+			outcome.kind !== "judgment" ||
+			outcome.choice !== "pr_worker" ||
+			!Number.isFinite(outcome.probability) ||
+			!((outcome.probability ?? 0) >= 0.95 && (outcome.probability ?? 0) <= 1)
+		)
+			return;
+		nominations++;
+		return { agent: "general", model, task: prWorkerTask(event.prompt, messages) };
+	});
+
 	volt.on("context", async (event, ctx) => {
-		if (ctx.mode !== "tui" || controller.mode === "off") return;
+		if (ctx.mode !== "tui" || controller.mode === "off" || controller.mode === "route") return;
 		const current = revision;
 		const outcome = await controller.inspect(
 			event.messages,
