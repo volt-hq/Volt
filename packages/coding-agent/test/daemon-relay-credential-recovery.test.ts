@@ -555,7 +555,8 @@ describe("managed relay credential recovery", () => {
 			await expect.poll(() => refreshStarted).toBe(true);
 			expect(await fixture.control.request({ type: "pair_request" })).toMatchObject({ type: "pair_started" });
 			expect(fixture.readState().pendingPairingTickets).toHaveLength(1);
-			expect(await fixture.control.request({ type: "relay_credential_revoke" })).toMatchObject({ type: "ok" });
+			const reset = await fixture.control.request({ type: "relay_credential_revoke" });
+			expect(reset, JSON.stringify(reset)).toMatchObject({ type: "ok" });
 			expect(fixture.readState().pendingPairingTickets).toEqual([]);
 			expect(fixture.events).toContainEqual(
 				expect.objectContaining({
