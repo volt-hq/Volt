@@ -1683,9 +1683,23 @@ export class AgentSession {
 			Math.ceil((context.systemPrompt?.length ?? 0) / 4);
 		// One byte per remaining token is deliberately conservative for optional text.
 		const maxBytes = Math.max(0, Math.floor(model.contextWindow - reserve - mandatory - 32));
-		const suffix = await manager.collect(boundary.cursor.revision, maxBytes);
+		const runner = this._extensionRunner;
+		const policyRevision = this._workPolicyRevision;
+		const extensionPoliciesCurrent = runner.captureToolPolicyGuard();
+		const policies = Array.from(this._workToolPolicies, ({ policy }) => ({
+			policy,
+			callback: policy.beforeToolCall,
+		}));
+		// Earlier validations must not survive a policy change while later sources await.
+		const policiesCurrent = () =>
+			runner === this._extensionRunner &&
+			policyRevision === this._workPolicyRevision &&
+			policies.every(({ policy, callback }) => policy.beforeToolCall === callback) &&
+			extensionPoliciesCurrent();
+		const suffix = await manager.collect(boundary.cursor.revision, policiesCurrent, maxBytes);
 		if (
 			!suffix ||
+			!policiesCurrent() ||
 			signal?.aborted ||
 			!this._extensionWorkIsCurrent() ||
 			this._extensionWorkKey !== batch.id ||

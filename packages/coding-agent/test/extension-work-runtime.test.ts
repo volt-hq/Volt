@@ -120,11 +120,11 @@ describe("extension managed work", () => {
 	it("collects real evidence after the producing task completes and rejects changed sources", async () => {
 		const { manager, execute } = setup();
 		await contribute(manager);
-		expect(await manager.collect(1)).toContain('"/repo/file.ts":1-1');
+		expect(await manager.collect(1, () => true)).toContain('"/repo/file.ts":1-1');
 		expect(execute).toHaveBeenCalledTimes(2);
 		expect(manager.getStatus("one").contributions[0].status).toBe("admitted");
 		execute.mockResolvedValue(readResult("v2"));
-		expect(await manager.collect(1)).toBeUndefined();
+		expect(await manager.collect(1, () => true)).toBeUndefined();
 		expect(manager.getStatus("one").contributions[0].reason).toBe("source_unverified");
 	});
 
@@ -138,7 +138,7 @@ describe("extension managed work", () => {
 			entered.resolve();
 			return release.promise;
 		});
-		const collecting = manager.collect(1);
+		const collecting = manager.collect(1, () => true);
 		await entered.promise;
 		await start(context(manager), async (task) => {
 			if (action === "remove") task.context.remove("source");
@@ -146,7 +146,7 @@ describe("extension managed work", () => {
 		}).wait();
 		release.resolve(readResult());
 		expect(await collecting).toBeUndefined();
-		const next = await manager.collect(1);
+		const next = await manager.collect(1, () => true);
 		if (action === "replace") expect(next).toContain("replacement");
 		else expect(next).toBeUndefined();
 	});
@@ -245,10 +245,10 @@ describe("extension managed work", () => {
 		await contribute(manager);
 		const release = deferred<ExtensionWorkExecutionResult>();
 		execute.mockImplementation(async () => release.promise);
-		const collecting = manager.collect(1);
+		const collecting = manager.collect(1, () => true);
 		await vi.advanceTimersByTimeAsync(25);
 		expect(await collecting).toBeUndefined();
-		expect(await manager.collect(1)).toBeUndefined();
+		expect(await manager.collect(1, () => true)).toBeUndefined();
 		let closed = false;
 		const closing = manager.close().then(() => {
 			closed = true;
@@ -271,7 +271,7 @@ describe("extension managed work", () => {
 				clock.mockReturnValue(26);
 				return readResult();
 			});
-			expect(await manager.collect(1)).toBeUndefined();
+			expect(await manager.collect(1, () => true)).toBeUndefined();
 			expect(execute).toHaveBeenCalledTimes(2);
 			expect(manager.getStatus("one").contributions.every((item) => item.reason === "source_unverified")).toBe(true);
 		} finally {
@@ -289,10 +289,10 @@ describe("extension managed work", () => {
 		await start(one, async (task) => {
 			task.context.put({ key: "first", text: "first suggestion" });
 		}).wait();
-		const suffix = await manager.collect(1);
+		const suffix = await manager.collect(1, () => true);
 		expect(suffix!.indexOf("first suggestion")).toBeLessThan(suffix!.indexOf("second suggestion"));
 		manager.boundary(boundary("input-1", 2));
-		expect(await manager.collect(2)).toBeUndefined();
+		expect(await manager.collect(2, () => true)).toBeUndefined();
 		expect(manager.getStatus("one").contributions[0].reason).toBe("snapshot_changed");
 		await start(context(manager), async (task) => {
 			expect(task.context.put({ key: "forged", text: "source", evidenceIds: ["invented"] })).toMatchObject({
@@ -305,19 +305,19 @@ describe("extension managed work", () => {
 		const release = deferred<void>();
 		const { manager, execute } = setup();
 		const task = start(context(manager), async () => release.promise);
-		expect(await manager.collect(1)).toBeUndefined();
+		expect(await manager.collect(1, () => true)).toBeUndefined();
 		release.resolve();
 		await task.wait();
 		await contribute(manager);
 		execute.mockClear();
-		expect(await manager.collect(1, 0)).toBeUndefined();
+		expect(await manager.collect(1, () => true, 0)).toBeUndefined();
 		expect(execute).not.toHaveBeenCalled();
 	});
 
 	it("charges shared operation budgets and rejects host limit expansion", async () => {
 		const { manager, execute } = setup({ limits: { scopeOperations: 1 } });
 		await contribute(manager);
-		expect(await manager.collect(1)).toBeUndefined();
+		expect(await manager.collect(1, () => true)).toBeUndefined();
 		expect(execute).toHaveBeenCalledTimes(1);
 		expect(
 			() =>
