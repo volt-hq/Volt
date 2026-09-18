@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, linkSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessageEvent } from "@hansjm10/volt-ai";
@@ -181,11 +181,14 @@ describe("bounded tool diagnostics", () => {
 		writeFileSync(target, "preserve");
 		const path = await collector.capture();
 		rmSync(path);
-		symlinkSync(target, path);
+		// Hard links exercise write-through protection without Windows symlink privileges.
+		if (process.platform === "win32") linkSync(target, path);
+		else symlinkSync(target, path);
 		expect(await collector.capture()).toBe(path);
+		expect(JSON.parse(readFileSync(path, "utf8")).reason).toBe("manual");
 		expect(readFileSync(target, "utf8")).toBe("preserve");
 		rmSync(join(directory, "debug"), { recursive: true });
-		symlinkSync(directory, join(directory, "debug"), "dir");
+		symlinkSync(directory, join(directory, "debug"), process.platform === "win32" ? "junction" : "dir");
 		await expect(collector.capture()).rejects.toThrow(
 			process.platform === "win32"
 				? "Could not retain private Windows review diagnostics."

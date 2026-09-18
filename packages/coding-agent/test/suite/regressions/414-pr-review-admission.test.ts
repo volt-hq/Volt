@@ -1,9 +1,9 @@
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
@@ -33,6 +33,13 @@ import { PrReviewCheckoutManager, type PrReviewPreparationRequest } from "../../
 import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
+import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
+
+let gitSeed: ReturnType<typeof createPrReviewGitSeed>;
+beforeAll(() => {
+	gitSeed = createPrReviewGitSeed("parent\n", "PR head");
+});
+afterAll(() => gitSeed?.dispose());
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -52,25 +59,8 @@ async function fixture(nested = false, workspaceName = "project") {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-414-admission-")));
 	const workspace = { name: workspaceName, path: join(root, "workspace") };
 	const source = nested ? join(workspace.path, "nested") : workspace.path;
-	mkdirSync(source, { recursive: true });
-	git(source, "init", "--initial-branch=main");
-	git(source, "config", "user.name", "Test");
-	git(source, "config", "user.email", "test@example.test");
-	git(source, "config", "commit.gpgsign", "false");
-	// Pin checkout bytes independently of the host's core.autocrlf setting.
-	writeFileSync(join(source, ".gitattributes"), "value.txt text eol=lf\n");
-	writeFileSync(join(source, "value.txt"), "parent\n");
-	git(source, "add", ".gitattributes", "value.txt");
-	git(source, "commit", "-m", "base");
-	const base = git(source, "rev-parse", "HEAD");
-	git(source, "checkout", "-b", "topic");
-	writeFileSync(join(source, "value.txt"), "PR head\n");
-	git(source, "commit", "-am", "PR head");
-	const head = git(source, "rev-parse", "HEAD");
 	const remote = join(root, "remote.git");
-	git(root, "init", "--bare", remote);
-	git(source, "push", remote, "HEAD:refs/pull/414/head");
-	git(source, "checkout", "main");
+	const { base, head } = gitSeed.copyTo(source, remote);
 	const agentDir = join(root, "agent");
 	const sessionDir = getDefaultSessionDir(workspace.path, agentDir);
 	const harness = await createHarness({ settings: { lsp: { enabled: false }, compaction: { enabled: false } } });

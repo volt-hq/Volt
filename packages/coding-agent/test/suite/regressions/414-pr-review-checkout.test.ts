@@ -1,6 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	chmodSync,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
@@ -12,7 +13,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
 import {
 	assertPrReviewCheckout,
@@ -34,7 +35,16 @@ import {
 	getWorktreeCheckoutPath,
 	WorktreeManager,
 } from "../../../src/daemon/worktree-manager.ts";
+import * as checkoutCleanliness from "../../../src/utils/pr-review-clean-checkout.ts";
+import * as gitPaths from "../../../src/utils/pr-review-git-paths.ts";
 import { createHarness } from "../harness.ts";
+import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
+
+let gitSeed: ReturnType<typeof createPrReviewGitSeed>;
+beforeAll(() => {
+	gitSeed = createPrReviewGitSeed("base\n", "head");
+});
+afterAll(() => gitSeed?.dispose());
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -62,25 +72,8 @@ function isolateGitHome(root: string): string {
 async function fixture(nested = false, fileBacked = true, workspaceName = "project") {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-414-checkout-")));
 	const source = join(root, "workspace", ...(nested ? ["nested"] : []));
-	mkdirSync(source, { recursive: true });
-	git(source, "init", "--initial-branch=main");
-	git(source, "config", "user.name", "Test");
-	git(source, "config", "user.email", "test@example.test");
-	git(source, "config", "commit.gpgsign", "false");
-	// Keep byte assertions stable in worktrees and clones, even with core.autocrlf=true.
-	writeFileSync(join(source, ".gitattributes"), "value.txt text eol=lf\n");
-	writeFileSync(join(source, "value.txt"), "base\n");
-	git(source, "add", ".");
-	git(source, "commit", "-m", "base");
-	const base = git(source, "rev-parse", "HEAD");
-	git(source, "checkout", "-b", "topic");
-	writeFileSync(join(source, "value.txt"), "PR head\n");
-	git(source, "commit", "-am", "head");
-	const head = git(source, "rev-parse", "HEAD");
 	const remote = join(root, "remote.git");
-	git(root, "init", "--bare", remote);
-	git(source, "push", remote, "HEAD:refs/pull/414/head");
-	git(source, "checkout", "main");
+	const { base, head } = gitSeed.copyTo(source, remote);
 	const workspace = { name: workspaceName, path: nested ? join(root, "workspace") : source };
 	const statePath = join(root, "state.json");
 	await writeIrohRemoteHostState(statePath, {
@@ -228,6 +221,34 @@ async function submoduleFixture(nested = false) {
 }
 
 describe("#414 prepared PR checkouts", () => {
+	it("keeps seeded repositories, remotes, and configuration isolated", async () => {
+		const first = await fixture();
+		const second = await fixture(true);
+		git(first.source, "config", "user.name", "Changed fixture");
+		git(first.source, "branch", "fixture-only");
+		writeFileSync(join(first.source, "value.txt"), "fixture-only change\n");
+		git(first.source, "add", "value.txt");
+		git(first.source, "worktree", "add", "--detach", join(first.root, "extra"), first.head);
+		git(first.target.remoteUrl, "update-ref", "refs/pull/414/head", first.base);
+		// Mutate an existing object in place to catch hardlinks as well as shared refs/config.
+		const object = join(first.source, ".git", "objects", first.head.slice(0, 2), first.head.slice(2));
+		chmodSync(object, 0o600);
+		writeFileSync(object, "corrupt");
+
+		// A copy made after those mutations must still come from the pristine seed.
+		const third = await fixture();
+		for (const other of [second, third]) {
+			expect(git(other.source, "config", "user.name")).toBe("Test");
+			expect(git(other.source, "status", "--porcelain")).toBe("");
+			expect(git(other.source, "branch", "--list", "fixture-only")).toBe("");
+			expect(git(other.source, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+			expect(git(other.source, "show", `${other.base}:value.txt`)).toBe("base");
+			expect(git(other.source, "show", `${other.head}:value.txt`)).toBe("PR head");
+			expect(git(other.target.remoteUrl, "rev-parse", "refs/pull/414/head")).toBe(other.head);
+			expect(git(other.target.remoteUrl, "show", "refs/pull/414/head:value.txt")).toBe("PR head");
+		}
+	});
+
 	it.each([false, true])(
 		"creates the exact fork PR head without changing the %s nested parent checkout",
 		async (nested) => {
@@ -503,6 +524,97 @@ describe("#414 prepared PR checkouts", () => {
 		);
 		writeFileSync(join(home, ".gitconfig"), "");
 		await expect(assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path)).resolves.toBeUndefined();
+	});
+
+	it.each([
+		"MERGE_HEAD",
+		"CHERRY_PICK_HEAD",
+		"REVERT_HEAD",
+		"BISECT_LOG",
+		"rebase-merge",
+		"rebase-apply",
+		"sequencer",
+	])("rejects batched operation marker %s in both validators and rechecks after removal", async (marker) => {
+		const f = await fixture();
+		const path = join(f.root, "existing worktree");
+		git(f.source, "worktree", "add", path, "topic");
+		expect((await f.worktrees.adopt(f.workspace, { path, id: "existing" })).ok).toBe(true);
+		const prepared = await f.manager.prepare(f.workspace, f.request, f.authority);
+		expect(prepared.disposition).toBe("reused");
+		const placement = (await f.state.listWorktrees())[0].prReviewLaunches![0].placement;
+		const markerPath = git(path, "rev-parse", "--path-format=absolute", "--git-path", marker);
+		if (["rebase-merge", "rebase-apply", "sequencer"].includes(marker)) mkdirSync(markerPath);
+		else writeFileSync(markerPath, `${f.base}\n`);
+		await expect(assertPrReviewCheckout(placement, path)).rejects.toThrow(PR_CHECKOUT_CHANGED);
+		await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+			code: "review_preparation_stale",
+		});
+		rmSync(markerPath, { recursive: true });
+		await expect(assertPrReviewCheckout(placement, path)).resolves.toBeUndefined();
+		expect(await f.manager.prepare(f.workspace, f.request, f.authority)).toEqual(prepared);
+	});
+
+	it.each(["repository", "operations"])(
+		"fails closed on malformed batched %s paths in both validators",
+		async (kind) => {
+			const f = await fixture();
+			await f.manager.prepare(f.workspace, f.request, f.authority);
+			const record = (await f.state.listWorktrees())[0];
+			let cleanReadFinished = false;
+			const checkClean = checkoutCleanliness.isPrReviewCheckoutClean;
+			vi.spyOn(checkoutCleanliness, "isPrReviewCheckoutClean").mockImplementation(async (...args) => {
+				try {
+					return await checkClean(...args);
+				} finally {
+					cleanReadFinished = true;
+				}
+			});
+			// Corrupt successful Git output while retaining the real query and parser.
+			if (kind === "repository") {
+				const read = gitPaths.readPrReviewRepositoryPaths;
+				vi.spyOn(gitPaths, "readPrReviewRepositoryPaths").mockImplementation((readGit) =>
+					read(async (args) => (await readGit(args)).split("\n").slice(1).join("\n")),
+				);
+			} else {
+				const read = gitPaths.readPrReviewOperationPaths;
+				vi.spyOn(gitPaths, "readPrReviewOperationPaths").mockImplementation((readGit) =>
+					read(async (args) => (await readGit(args)).split("\n").slice(1).join("\n")),
+				);
+			}
+			f.provider.resolvePullRequestCheckout.mockClear();
+			await expect(assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path)).rejects.toThrow(
+				PR_CHECKOUT_CHANGED,
+			);
+			expect(cleanReadFinished).toBe(true);
+			await expect(f.manager.prepare(f.workspace, f.request, f.authority)).rejects.toMatchObject({
+				code: "review_preparation_stale",
+			});
+			expect(f.provider.resolvePullRequestCheckout).not.toHaveBeenCalled();
+			expect(await f.state.listWorktrees()).toHaveLength(1);
+		},
+	);
+
+	it("honors cancellation after a batched operation query before admission", async () => {
+		const f = await fixture();
+		await f.manager.prepare(f.workspace, f.request, f.authority);
+		const record = (await f.state.listWorktrees())[0];
+		const controller = new AbortController();
+		const manager = new PrReviewCheckoutManager({
+			...f.options,
+			runGit: async (args, cwd, options) => {
+				const result = await runPrReviewGit(args, cwd, options);
+				if (args.includes("--git-path")) controller.abort();
+				return result;
+			},
+		});
+		await expect(
+			manager.prepare(f.workspace, f.request, { ...f.authority, signal: controller.signal }),
+		).rejects.toMatchObject({ name: "AbortError" });
+		await expect(
+			assertPrReviewCheckout(record.prReviewLaunches![0].placement, record.path, controller.signal),
+		).rejects.toThrow(PR_CHECKOUT_UNAVAILABLE);
+		expect(await f.state.listWorktrees()).toHaveLength(1);
+		expect((await f.state.listWorktrees())[0].prReviewLaunches![0].sessionGeneration).toBeUndefined();
 	});
 
 	it.each(["dirty", "busy", "head", "operation", "unreadable"])("does not reuse a %s candidate", async (kind) => {

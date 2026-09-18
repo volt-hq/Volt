@@ -4,6 +4,7 @@ import { realpath } from "node:fs/promises";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
+import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
 import {
 	getPrReviewGitArgs,
 	getPrReviewGitEnvironment,
@@ -114,35 +115,29 @@ export async function assertPrReviewCheckout(
 		const sourceRoot = await realpath(binding.sourceCwd);
 		const common = await realpath(binding.commonDirectory);
 		if ((await realpath(cwd)) !== (await realpath(binding.cwd))) throw new Error("cwd changed");
-		const [root, commonDir, head, clean, originalRoot, originalCommon] = await Promise.all([
-			readGit(cwd, ["rev-parse", "--show-toplevel"], signal),
-			readGit(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], signal),
+		const reads = [
+			readPrReviewRepositoryPaths((args) => readGit(cwd, args, signal)),
 			readGit(cwd, ["rev-parse", "--verify", "HEAD"], signal),
 			isPrReviewCheckoutClean(cwd, (path, args) => readGit(path, args, signal), signal),
-			readGit(binding.sourceCwd, ["rev-parse", "--show-toplevel"], signal),
-			readGit(binding.sourceCwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], signal),
-		]);
+			readPrReviewRepositoryPaths((args) => readGit(binding.sourceCwd, args, signal)),
+		] as const;
+		const [paths, head, clean, originalPaths] = await Promise.all(reads).catch(async (cause: unknown) => {
+			// A malformed batch can fail before sibling Git reads finish. Drain them
+			// before the caller disposes the checkout, preserving the original error.
+			await Promise.allSettled(reads);
+			throw cause;
+		});
 		if (
-			(await realpath(root.trim())) !== expectedRoot ||
-			(await realpath(commonDir.trim())) !== common ||
-			(await realpath(originalRoot.trim())) !== sourceRoot ||
-			(await realpath(originalCommon.trim())) !== common ||
+			(await realpath(paths.root)) !== expectedRoot ||
+			(await realpath(paths.commonDirectory)) !== common ||
+			(await realpath(originalPaths.root)) !== sourceRoot ||
+			(await realpath(originalPaths.commonDirectory)) !== common ||
 			head.trim() !== binding.pullRequest.headRefOid ||
 			!clean
 		)
 			throw new Error("checkout identity or status changed");
-		for (const marker of [
-			"MERGE_HEAD",
-			"CHERRY_PICK_HEAD",
-			"REVERT_HEAD",
-			"BISECT_LOG",
-			"rebase-merge",
-			"rebase-apply",
-			"sequencer",
-		]) {
-			const path = await readGit(cwd, ["rev-parse", "--git-path", marker], signal);
-			if (existsSync(resolve(cwd, path.trim()))) throw new Error("Git operation in progress");
-		}
+		const operationPaths = await readPrReviewOperationPaths((args) => readGit(cwd, args, signal));
+		if (operationPaths.some((path) => existsSync(path))) throw new Error("Git operation in progress");
 	} catch (cause) {
 		throw new Error(cause instanceof PrReviewGitReadError ? PR_CHECKOUT_UNAVAILABLE : PR_CHECKOUT_CHANGED, {
 			cause,
