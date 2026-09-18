@@ -307,9 +307,10 @@ describe("offline LSP audit", () => {
 		broken.db.close();
 		writeFileSync(join(broken.sessionDir, "sessions.sqlite"), "corrupt");
 		mkdirSync(join(source.root, "sessions"));
-		symlinkSync(source.sessionDir, join(source.root, "sessions", "source"));
-		symlinkSync(fork.sessionDir, join(source.root, "sessions", "fork"));
-		symlinkSync(broken.sessionDir, join(source.root, "sessions", "broken"));
+		const linkType = process.platform === "win32" ? "junction" : "dir";
+		symlinkSync(source.sessionDir, join(source.root, "sessions", "source"), linkType);
+		symlinkSync(fork.sessionDir, join(source.root, "sessions", "fork"), linkType);
+		symlinkSync(broken.sessionDir, join(source.root, "sessions", "broken"), linkType);
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", source.root);
 		vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", "");
 		const report = await auditLsp({ cwd: fork.cwd, now, allWorkspaces: true });
@@ -339,7 +340,7 @@ describe("offline LSP audit", () => {
 	it("canonicalizes custom-store cwd filters and defaults to fourteen days", async () => {
 		const { db, root, cwd, sessionDir } = fixture();
 		const alias = join(root, "alias");
-		symlinkSync(cwd, alias);
+		symlinkSync(cwd, alias, process.platform === "win32" ? "junction" : "dir");
 		session(db, "root", alias);
 		result(db, "root", 1, "lsp", operation("alias"));
 		const report = await auditLsp({ cwd, sessionDir, now });
@@ -441,8 +442,9 @@ describe("offline LSP audit", () => {
 		expect((await auditLsp({ cwd, sessionDir, now })).totals.operations).toBe(1);
 		vi.stubEnv("VOLT_CODING_AGENT_SESSION_DIR", "");
 		mkdirSync(join(root, "sessions"));
-		symlinkSync(sessionDir, join(root, "sessions", "one"));
-		symlinkSync(sessionDir, join(root, "sessions", "two"));
+		const linkType = process.platform === "win32" ? "junction" : "dir";
+		symlinkSync(sessionDir, join(root, "sessions", "one"), linkType);
+		symlinkSync(sessionDir, join(root, "sessions", "two"), linkType);
 		const all = await auditLsp({ cwd, now, allWorkspaces: true });
 		expect(all.coverage.storesRead).toBe(1);
 		expect(all.totals.operations).toBe(1);
