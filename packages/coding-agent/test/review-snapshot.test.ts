@@ -2,8 +2,10 @@ import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import {
 	chmodSync,
+	cpSync,
 	existsSync,
 	mkdirSync,
+	mkdtempSync,
 	readFileSync,
 	renameSync,
 	rmSync,
@@ -15,7 +17,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { delimiter, join, relative, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { capturePullRequestContextWithGitHubCli } from "../src/core/code-host/github-cli-context.ts";
 import * as githubDiscovery from "../src/core/code-host/github-cli-discovery.ts";
 import { normalizeReviewPath, type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
@@ -198,6 +200,26 @@ describe("review snapshots", () => {
 		),
 	);
 
+	let repositorySeedRoot: string;
+	beforeAll(() => {
+		repositorySeedRoot = mkdtempSync(join(tmpdir(), "volt-review-snapshot-seeds-"));
+		const unborn = join(repositorySeedRoot, "unborn");
+		mkdirSync(unborn);
+		git(unborn, "init", "--initial-branch=main");
+		git(unborn, "config", "user.email", "review@example.com");
+		git(unborn, "config", "user.name", "Review Test");
+		git(unborn, "config", "commit.gpgsign", "false");
+
+		const committed = join(repositorySeedRoot, "committed");
+		cpSync(unborn, committed, { recursive: true, force: false, errorOnExist: true });
+		writeFileSync(join(committed, "tracked.txt"), "before\n");
+		git(committed, "add", "tracked.txt");
+		git(committed, "commit", "-m", "initial");
+	});
+	afterAll(() => {
+		if (repositorySeedRoot) rmSync(repositorySeedRoot, { recursive: true, force: true });
+	});
+
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
@@ -227,15 +249,13 @@ describe("review snapshots", () => {
 		);
 		mkdirSync(directory, { recursive: true });
 		tempDirectories.push(directory);
-		git(directory, "init", "--initial-branch=main");
-		git(directory, "config", "user.email", "review@example.com");
-		git(directory, "config", "user.name", "Review Test");
-		git(directory, "config", "commit.gpgsign", "false");
-		if (withCommit) {
-			writeFileSync(join(directory, "tracked.txt"), "before\n");
-			git(directory, "add", "tracked.txt");
-			git(directory, "commit", "-m", "initial");
-		}
+		// Copy standalone repositories, not linked worktrees or shared object stores.
+		// Config, refs, index, objects and working files remain independent per test.
+		cpSync(join(repositorySeedRoot, withCommit ? "committed" : "unborn"), directory, {
+			recursive: true,
+			force: false,
+			errorOnExist: true,
+		});
 		return directory;
 	}
 
@@ -492,6 +512,47 @@ describe("review snapshots", () => {
 		if (!file || !file.available) throw new Error(`Expected ${path} to be available`);
 		return file;
 	}
+
+	it.each([false, true])("keeps seeded repositories isolated (with commit: %s)", (withCommit) => {
+		const first = createRepository(withCommit);
+		const second = createRepository(withCommit);
+		const initialHead = withCommit ? git(first, "rev-parse", "HEAD") : undefined;
+		git(first, "config", "user.name", "Changed fixture");
+		git(first, "checkout", "-b", "fixture-only");
+		writeFileSync(join(first, "tracked.txt"), "fixture-only commit\n");
+		git(first, "add", "tracked.txt");
+		git(first, "commit", "-m", "fixture-only");
+		writeFileSync(join(first, "tracked.txt"), "fixture-only staged change\n");
+		git(first, "add", "tracked.txt");
+		git(first, "remote", "add", "fixture-only", second);
+		git(first, "worktree", "add", "--detach", join(first, "extra-worktree"), "HEAD");
+		if (initialHead) {
+			// Git objects are read-only; corrupt this copy in place to detect hardlinks.
+			const object = join(first, ".git", "objects", initialHead.slice(0, 2), initialHead.slice(2));
+			chmodSync(object, 0o600);
+			writeFileSync(object, "corrupt");
+		}
+
+		// Check both an existing sibling and a later copy of the seed.
+		const third = createRepository(withCommit);
+		for (const other of [second, third]) {
+			expect(git(other, "config", "user.name")).toBe("Review Test");
+			expect(git(other, "symbolic-ref", "--short", "HEAD")).toBe("main");
+			expect(git(other, "status", "--porcelain")).toBe("");
+			expect(git(other, "branch", "--list", "fixture-only")).toBe("");
+			expect(git(other, "remote")).toBe("");
+			expect(git(other, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+			expect(git(other, "ls-files")).toBe(withCommit ? "tracked.txt" : "");
+			if (withCommit) {
+				expect(git(other, "rev-parse", "HEAD")).toBe(initialHead);
+				expect(git(other, "show", "HEAD:tracked.txt")).toBe("before");
+				expect(readFileSync(join(other, "tracked.txt"), "utf8")).toBe("before\n");
+			} else {
+				expect(git(other, "for-each-ref", "--format=%(refname)")).toBe("");
+				expect(existsSync(join(other, "tracked.txt"))).toBe(false);
+			}
+		}
+	});
 
 	it("captures staged, unstaged, untracked, deleted, binary, executable, and symlink state immutably", async () => {
 		const repository = createRepository();

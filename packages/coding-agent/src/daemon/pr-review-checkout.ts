@@ -17,6 +17,7 @@ import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/r
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
+import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
 import { getResolvedTargetSessionId } from "./integrated-runtimes.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { getWorktreeCheckoutPath, type WorktreeGitRunner, type WorktreeManager } from "./worktree-manager.ts";
@@ -74,11 +75,11 @@ export class PrReviewCheckoutManager {
 		this.options = options;
 	}
 
-	private async git(args: string[], cwd: string, signal?: AbortSignal): Promise<string> {
+	private async git(args: string[], cwd: string, signal?: AbortSignal, trimOutput = true): Promise<string> {
 		const result = await (this.options.runGit ?? runPrReviewGit)(args, cwd, { signal });
 		signal?.throwIfAborted();
 		if (!result.ok) throw new PrReviewCheckoutError();
-		return result.stdout.trim();
+		return trimOutput ? result.stdout.trim() : result.stdout;
 	}
 
 	private async source(
@@ -98,16 +99,15 @@ export class PrReviewCheckoutManager {
 			worktree?.sourceRootRelativePath ?? request.workingDirectory,
 		);
 		if (!selected.ok) throw new PrReviewCheckoutError();
-		const root = await realpath(
-			await this.git(["rev-parse", "--show-toplevel"], selected.directory.absolutePath, signal),
+		const paths = await readPrReviewRepositoryPaths((args) =>
+			this.git(args, selected.directory.absolutePath, signal, false),
 		);
+		const root = await realpath(paths.root);
 		const workspaceRoot = await realpath(workspace.path);
 		const rootRelative = relative(workspaceRoot, root);
 		if (isAbsolute(rootRelative) || rootRelative === ".." || rootRelative.startsWith(`..${sep}`))
 			throw new PrReviewCheckoutError();
-		const commonDirectory = await realpath(
-			resolve(root, await this.git(["rev-parse", "--git-common-dir"], root, signal)),
-		);
+		const commonDirectory = await realpath(paths.commonDirectory);
 		const cwd = worktree ? await realpath(worktree.path) : root;
 		if (
 			(await realpath(resolve(cwd, await this.git(["rev-parse", "--git-common-dir"], cwd, signal)))) !==
@@ -181,15 +181,9 @@ export class PrReviewCheckoutManager {
 		signal?: AbortSignal,
 	): Promise<boolean> {
 		try {
-			if (
-				(await realpath(path)) !== (await realpath(await this.git(["rev-parse", "--show-toplevel"], path, signal)))
-			)
-				return false;
-			if (
-				(await realpath(resolve(path, await this.git(["rev-parse", "--git-common-dir"], path, signal)))) !==
-				commonDirectory
-			)
-				return false;
+			const paths = await readPrReviewRepositoryPaths((args) => this.git(args, path, signal, false));
+			if ((await realpath(path)) !== (await realpath(paths.root))) return false;
+			if ((await realpath(paths.commonDirectory)) !== commonDirectory) return false;
 			if ((await this.git(["rev-parse", "--verify", "HEAD"], path, signal)) !== head) return false;
 			if (!(await isPrReviewCheckoutClean(path, (cwd, args) => this.git(args, cwd, signal), signal))) return false;
 			const listed = await this.git(["worktree", "list", "--porcelain", "-z"], path, signal);
@@ -199,18 +193,8 @@ export class PrReviewCheckoutManager {
 				.map((field) => field.slice(9));
 			if (!(await Promise.all(roots.map((root) => realpath(root).catch(() => "")))).includes(await realpath(path)))
 				return false;
-			for (const marker of [
-				"MERGE_HEAD",
-				"CHERRY_PICK_HEAD",
-				"REVERT_HEAD",
-				"BISECT_LOG",
-				"rebase-merge",
-				"rebase-apply",
-				"sequencer",
-			]) {
-				if (existsSync(resolve(path, await this.git(["rev-parse", "--git-path", marker], path, signal))))
-					return false;
-			}
+			const operationPaths = await readPrReviewOperationPaths((args) => this.git(args, path, signal, false));
+			if (operationPaths.some((operationPath) => existsSync(operationPath))) return false;
 			return true;
 		} catch {
 			signal?.throwIfAborted();
