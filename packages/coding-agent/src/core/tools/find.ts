@@ -5,11 +5,12 @@ import path from "path";
 import { type Static, Type } from "typebox";
 import { keyHint } from "../../modes/interactive/components/keybinding-hints.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
-import { ensureTool } from "../../utils/tools-manager.ts";
+import { ensureTool, getToolPath } from "../../utils/tools-manager.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import type { Theme } from "../theme/runtime.ts";
 import { pathExists, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, invalidArgText, shortenPath, str } from "./render-utils.ts";
+import { getRepositoryObservationContext, RepositoryObservationError } from "./repository-observation.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
@@ -169,6 +170,7 @@ export function createFindToolDefinition(
 			_onUpdate?,
 			_ctx?,
 		) {
+			const observation = getRepositoryObservationContext();
 			return new Promise((resolve, reject) => {
 				if (signal?.aborted) {
 					reject(new Error("Operation aborted"));
@@ -186,7 +188,8 @@ export function createFindToolDefinition(
 				};
 				const onAbort = () => {
 					stopChild?.();
-					settle(() => reject(new Error("Operation aborted")));
+					// Managed calls remain pending until the producer has actually stopped.
+					if (!observation) settle(() => reject(new Error("Operation aborted")));
 				};
 				signal?.addEventListener("abort", onAbort, { once: true });
 
@@ -198,12 +201,13 @@ export function createFindToolDefinition(
 
 						// If custom operations provide glob(), use that instead of fd.
 						if (customOps?.glob) {
-							if (!(await ops.exists(searchPath))) {
-								settle(() => reject(new Error(`Path not found: ${searchPath}`)));
-								return;
-							}
+							const exists = await ops.exists(searchPath);
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
+								return;
+							}
+							if (!exists) {
+								settle(() => reject(new Error(`Path not found: ${searchPath}`)));
 								return;
 							}
 							const results = await ops.glob(pattern, searchPath, {
@@ -215,6 +219,7 @@ export function createFindToolDefinition(
 								return;
 							}
 							if (results.length === 0) {
+								observation?.capture({ kind: "find", paths: [], truncated: false });
 								settle(() => resolve({ content: [{ type: "text", text: "No files found matching pattern" }] }));
 								return;
 							}
@@ -227,6 +232,11 @@ export function createFindToolDefinition(
 							const resultLimitReached = relativized.length >= effectiveLimit;
 							const rawOutput = relativized.join("\n");
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+							observation?.capture({
+								kind: "find",
+								paths: results.map((entry) => path.resolve(searchPath, entry)),
+								truncated: resultLimitReached || truncation.truncated,
+							});
 							let resultOutput = truncation.content;
 							const details: FindToolDetails = {};
 							const notices: string[] = [];
@@ -251,13 +261,24 @@ export function createFindToolDefinition(
 						}
 
 						// Default implementation uses fd.
-						const fdPath = await ensureTool("fd", true);
+						// ensureTool's boolean controls logging, not installation. Managed reads only look up tools.
+						const fdPath = observation ? getToolPath("fd") : await ensureTool("fd", true);
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));
 							return;
 						}
 						if (!fdPath) {
-							settle(() => reject(new Error("fd is not available and could not be downloaded")));
+							settle(() =>
+								reject(
+									observation
+										? new RepositoryObservationError(
+												"unavailable",
+												"backend_unavailable",
+												"fd is not available",
+											)
+										: new Error("fd is not available and could not be downloaded"),
+								),
+							);
 							return;
 						}
 
@@ -275,10 +296,13 @@ export function createFindToolDefinition(
 						const child = spawnProcess(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
 						const rl = createInterface({ input: child.stdout });
 						let stderr = "";
+						let childError: Error | undefined;
 						const lines: string[] = [];
+						let stopRequested = false;
 
 						stopChild = () => {
-							if (!child.killed) {
+							if (!child.killed && !stopRequested) {
+								stopRequested = true;
 								child.kill();
 							}
 						};
@@ -296,14 +320,23 @@ export function createFindToolDefinition(
 						});
 
 						child.on("error", (error) => {
+							childError = new Error(`Failed to run fd: ${error.message}`);
+							if (observation) {
+								stopChild?.();
+								return; // Node emits close after spawn errors too; retain ownership until then.
+							}
 							cleanup();
-							settle(() => reject(new Error(`Failed to run fd: ${error.message}`)));
+							settle(() => reject(childError));
 						});
 
 						child.on("close", (code) => {
 							cleanup();
 							if (signal?.aborted) {
 								settle(() => reject(new Error("Operation aborted")));
+								return;
+							}
+							if (childError) {
+								settle(() => reject(childError));
 								return;
 							}
 							if (code !== 0) {
@@ -338,12 +371,18 @@ export function createFindToolDefinition(
 							}
 
 							if (relativized.length === 0) {
+								observation?.capture({ kind: "find", paths: [], truncated: code !== 0 });
 								settle(() => resolve({ content: [{ type: "text", text: "No files found matching pattern" }] }));
 								return;
 							}
 							if (!patternUsesPath && relativized.length >= effectiveLimit) resultLimitReached = true;
 							const rawOutput = relativized.join("\n");
 							const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+							observation?.capture({
+								kind: "find",
+								paths: relativized.map((entry) => path.resolve(searchPath, entry)),
+								truncated: resultLimitReached || truncation.truncated || code !== 0,
+							});
 							let resultOutput = truncation.content;
 							const details: FindToolDetails = {};
 							const notices: string[] = [];
@@ -367,6 +406,7 @@ export function createFindToolDefinition(
 								}),
 							);
 						});
+						if (observation && signal?.aborted) stopChild();
 					} catch (e) {
 						if (signal?.aborted) {
 							settle(() => reject(new Error("Operation aborted")));

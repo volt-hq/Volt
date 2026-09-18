@@ -6,6 +6,7 @@ import {
 	estimateToolDefinitionTokens,
 	type ImageContent,
 	type JsonValue,
+	type Message,
 	type Model,
 	streamSimple,
 	type UserMessage,
@@ -58,6 +59,7 @@ import type {
 	AgentHarnessOwnEvent,
 	AgentHarnessPhase,
 	AgentHarnessPromptOptions,
+	AgentHarnessRequestBoundary,
 	AgentHarnessResources,
 	AgentHarnessRunOptions,
 	AgentHarnessStreamOptions,
@@ -460,6 +462,7 @@ interface AgentHarnessTurnState<
 	thinkingLevel: ThinkingLevel;
 	tools: TTool[];
 	activeTools: TTool[];
+	boundary?: Omit<AgentHarnessRequestBoundary, "attemptId" | "cursor">;
 }
 
 function isTurnProviderRequestState(
@@ -499,6 +502,9 @@ export class AgentHarness<
 	private readonly persistActiveToolChanges: boolean;
 	private readonly streamFn: StreamFn;
 	private readonly convertMessages: NonNullable<AgentHarnessOptions["convertToLlm"]>;
+	private readonly requestBoundary: AgentHarnessOptions["requestBoundary"];
+	private requestBatch: AgentHarnessRequestBoundary["batch"];
+	private pendingRequestDeliveries: NonNullable<AgentHarnessRequestBoundary["batch"]>["deliveries"][number][] = [];
 	private systemPrompt: AgentHarnessOptions<TSkill, TPromptTemplate, TTool>["systemPrompt"];
 	private streamOptions: AgentHarnessStreamOptions;
 	private getApiKeyAndHeaders?: AgentHarnessOptions["getApiKeyAndHeaders"];
@@ -537,6 +543,7 @@ export class AgentHarness<
 		this.getApiKeyAndHeaders = options.getApiKeyAndHeaders;
 		this.streamFn = options.streamFn ?? streamSimple;
 		this.convertMessages = options.convertToLlm ?? defaultConvertToLlm;
+		this.requestBoundary = options.requestBoundary;
 		this.defaultDeliveryOwner = options.deliveryOwner ?? this.createDefaultDeliveryOwner();
 		this.validateUniqueNames(
 			(options.tools ?? []).map((tool) => tool.name),
@@ -1036,6 +1043,8 @@ export class AgentHarness<
 				const configurationEpoch = this.runtimeConfigurationEpoch;
 				const admittedModel = this.model ?? model;
 				let admittedContext = context;
+				let optionalMessages: readonly Message[] | undefined;
+				const optionalBatch = this.requestBatch;
 				let admittedReasoning = isTurnProviderRequestState(requestState)
 					? this.thinkingLevel === "off"
 						? undefined
@@ -1144,6 +1153,33 @@ export class AgentHarness<
 				) {
 					continue;
 				}
+				if (isTurnProviderRequestState(requestState) && requestState.boundary && this.requestBoundary) {
+					const basis = hookCommitBasis!;
+					const { batch, ...boundary } = requestState.boundary;
+					const suffix = await this.requestBoundary(
+						{
+							...boundary,
+							newInput: boundary.newInput && batch === this.requestBatch,
+							...(batch && batch === this.requestBatch ? { batch: structuredClone(batch) } : {}),
+							attemptId: `harness-request:${globalThis.crypto.randomUUID()}`,
+							cursor: basis,
+						},
+						{ ...admittedContext, messages: structuredClone(admittedContext.messages) },
+						signal,
+					);
+					if (signal?.aborted) return createAbortedAssistantStream(admittedModel);
+					const current = (await this.session.getBranchSnapshot()).cursor;
+					if (
+						current.authorityGeneration !== basis.authorityGeneration ||
+						current.revision !== basis.revision ||
+						current.branchIdentity !== basis.branchIdentity ||
+						this.pendingSessionWrites.length > 0 ||
+						configurationEpoch !== this.runtimeConfigurationEpoch ||
+						configurationBarrier !== this.runtimeConfigurationBarrier
+					)
+						continue;
+					optionalMessages = suffix === undefined ? undefined : structuredClone(suffix);
+				}
 				this.beginProviderAdmission();
 				if (configurationEpoch !== this.runtimeConfigurationEpoch) {
 					this.endProviderAdmission();
@@ -1170,6 +1206,13 @@ export class AgentHarness<
 						this.applyVerifiedProjectionAdvance(commit.advance);
 					}
 					if (signal?.aborted) return createAbortedAssistantStream(admittedModel);
+					// A steer or host revocation during the hook commit cannot publish an old suffix.
+					if (optionalMessages?.length && this.requestBatch === optionalBatch) {
+						admittedContext = {
+							...admittedContext,
+							messages: [...admittedContext.messages, ...optionalMessages],
+						};
+					}
 					const response = this.streamFn(admittedModel, admittedContext, {
 						...(requestOptions.cacheRetention === undefined
 							? {}
@@ -1636,6 +1679,14 @@ export class AgentHarness<
 				run.requestAccepted = false;
 			}
 			if (outcome.outcome === "committed") {
+				const users = delivery.messages.filter((message): message is UserMessage => message.role === "user");
+				if (users.length > 0 && owner.requestInput !== false) {
+					this.pendingRequestDeliveries.push({
+						deliveryId: delivery.deliveryId,
+						kind,
+						messages: structuredClone(users),
+					});
+				}
 				run?.observationalDeliveryIds.add(delivery.deliveryId);
 				if (verified.advance) this.applyVerifiedProjectionAdvance(verified.advance);
 			}
@@ -1898,7 +1949,7 @@ export class AgentHarness<
 			nextAction: async (context) =>
 				await this.resolveNextAction(context, startState, systemPromptOverride ?? getTurnState().systemPrompt),
 			beginDelivery: async (delivery) => await this.beginActiveDelivery(delivery),
-			prepareRequest: async () => {
+			prepareRequest: async (request) => {
 				await this.flushPendingSessionWrites();
 				await this.runtimeConfigurationBarrier;
 				const projection = await this.requireValidContextProjection();
@@ -1910,6 +1961,25 @@ export class AgentHarness<
 					contextMessages,
 					systemPromptOverride,
 				);
+				const newInput = this.pendingRequestDeliveries.length > 0;
+				if (newInput) {
+					this.requestBatch = {
+						id: `harness-input:${globalThis.crypto.randomUUID()}`,
+						deliveries: this.pendingRequestDeliveries.splice(0),
+					};
+				}
+				nextTurnState.boundary = {
+					...(this.requestBatch ? { batch: this.requestBatch } : {}),
+					newInput,
+					requestAuthority: request.reason === "final_response" ? "final_response" : request.requestAuthority,
+					cause: newInput
+						? "input"
+						: request.completedTurn?.toolResults.length
+							? "tools"
+							: !request.completedTurn && projection?.token.source === "retry"
+								? "retry"
+								: "continuation",
+				};
 				setTurnState(nextTurnState);
 				return {
 					context: this.createContext(nextTurnState, systemPromptOverride),
@@ -3246,6 +3316,12 @@ export class AgentHarness<
 		} finally {
 			this.operations.finish(operation);
 		}
+	}
+
+	/** Revoke observational input identity without changing delivery or continuation ownership. */
+	invalidateRequestBoundary(): void {
+		this.requestBatch = undefined;
+		this.pendingRequestDeliveries = [];
 	}
 
 	getModel(): Model<any> | undefined {

@@ -88,6 +88,14 @@ import type {
 	WriteToolInput,
 } from "../tools/index.ts";
 
+import type {
+	ExtensionOperationEvent,
+	ExtensionOperationOrigin,
+	ExtensionWorkContext,
+	ExtensionWorkStatus,
+	RequestBoundaryEvent,
+} from "./work-types.ts";
+
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
 export type { AgentToolResult, AgentToolUpdateCallback, ToolExecutionMode };
@@ -310,6 +318,8 @@ export interface CompactOptions {
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
 export interface ExtensionContext {
+	/** Optional managed work for this captured conversational scope; absent in policy/idle contexts. */
+	readonly work?: ExtensionWorkContext;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
@@ -834,6 +844,8 @@ export type InputEventResult =
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
+	/** Host-owned attribution; absent on ordinary foreground calls is equivalent to agent. */
+	origin?: ExtensionOperationOrigin;
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -907,6 +919,8 @@ export type ToolCallEvent =
 interface ToolResultEventBase {
 	type: "tool_result";
 	toolCallId: string;
+	/** Host-owned attribution, never supplied by a tool result. */
+	origin?: ExtensionOperationOrigin;
 	input: JsonObject;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
@@ -1043,6 +1057,8 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 
 /** Union of all event types */
 export type ExtensionEvent =
+	| RequestBoundaryEvent
+	| ExtensionOperationEvent
 	| ProjectTrustEvent
 	| ResourcesDiscoverEvent
 	| SessionEvent
@@ -1185,6 +1201,10 @@ export interface ExtensionAPI {
 	// Event Subscription
 	// =========================================================================
 
+	/** Notification-only; promises are observed for errors but do not delay provider admission. */
+	on(event: "request_boundary", handler: (event: RequestBoundaryEvent, ctx: ExtensionContext) => void): void;
+	/** Diagnostic-only; managed execution is prohibited throughout the handler's async lineage. */
+	on(event: "extension_operation", handler: (event: ExtensionOperationEvent, ctx: ExtensionContext) => void): void;
 	on(event: "project_trust", handler: ProjectTrustHandler): void;
 	on(event: "resources_discover", handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>): void;
 	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): void;
@@ -1304,6 +1324,9 @@ export interface ExtensionAPI {
 
 	/** Set or clear a label on an entry. Labels are user-defined markers for bookmarking/navigation. */
 	setLabel(entryId: string, label: string | undefined): void;
+
+	/** Bounded metadata for this extension's managed work; does not grant execution authority. */
+	getWorkStatus(): ExtensionWorkStatus;
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
@@ -1557,6 +1580,7 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
+	getWorkStatus(owner: string): ExtensionWorkStatus;
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;

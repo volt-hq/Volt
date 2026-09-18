@@ -17,6 +17,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import type {
 	AgentAbortSource,
 	AgentDeliveryCommitContext,
@@ -29,6 +30,7 @@ import type {
 	AgentEvent,
 	AgentHarnessContextProjectionToken,
 	AgentHarnessNextActionPolicy,
+	AgentHarnessRequestBoundary,
 	AgentHarnessRunReservation,
 	AgentHarnessStreamOptions,
 	AgentHarnessStructuralOperationContext,
@@ -49,6 +51,7 @@ import { NodeExecutionEnv } from "@hansjm10/volt-agent-core/node";
 import type {
 	Api,
 	AssistantMessage,
+	Context,
 	ImageContent,
 	JsonObject,
 	JsonValue,
@@ -68,6 +71,7 @@ import {
 	isContextOverflow,
 	modelsAreEqual,
 	streamSimple,
+	validateToolArguments,
 } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
 import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
@@ -124,6 +128,9 @@ import {
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import type { ExtensionWorkExecution, ExtensionWorkExecutionResult } from "./extensions/work-host.ts";
+import { ExtensionWorkManager, withoutExtensionWork } from "./extensions/work-runtime.ts";
+import type { ExtensionWorkFailure, ExtensionWorkLimits, ExtensionWorkService } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import { createSessionManagerHarnessSession, SessionManagerHarnessStorage } from "./harness-session-adapter.ts";
 import type { HostInteraction } from "./host-interaction.ts";
@@ -213,6 +220,7 @@ import {
 	type PlanStepInput,
 	planStepsSemanticallyEqual,
 } from "./tools/planning.ts";
+import { RepositoryObservationError, withRepositoryObservation } from "./tools/repository-observation.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
 
 function cloneAgentMessages(messages: readonly AgentMessage[]): AgentMessage[] {
@@ -376,6 +384,8 @@ export interface AgentSessionConfig {
 	streamFn: StreamFn;
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	streamOptions?: AgentHarnessStreamOptions;
+	/** Optional managed extension-work limits; may only tighten the host ceilings. */
+	extensionWorkLimits?: Partial<ExtensionWorkLimits>;
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
 	settingsManager: SettingsManager;
@@ -592,6 +602,11 @@ export class AgentSessionConstructionCleanupError extends AggregateError {}
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const MAX_COMPACTION_SUMMARY_RETRIES = 2;
 const MAX_COMPACTION_RETRY_DELAY_MS = 30_000;
+const EXTENSION_WORK_TOOLS = { readText: "read", findPaths: "find", searchText: "grep" } as const;
+const EXTENSION_WORK_GRANT: OperationGrantProfile = {
+	id: "extension-preparation-read",
+	capabilities: new Set(["workspace.read"]),
+};
 
 // ============================================================================
 // AgentSession Class
@@ -750,6 +765,22 @@ export class AgentSession {
 
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
+	private _extensionWork!: ExtensionWorkManager;
+	private readonly _extensionWorkLimits: Partial<ExtensionWorkLimits> | undefined;
+	private _extensionWorkKey: string | undefined;
+	private _extensionWorkSignal: AbortSignal | undefined;
+	private _extensionWorkAbort: (() => void) | undefined;
+	private _unsubscribeWorkAuthority?: () => void;
+	private readonly _workToolPolicies = new Set<{ policy: AgentSessionTurnPolicy }>();
+	private _workPolicyRevision = 0;
+	private readonly _workImplementations = new WeakMap<
+		AgentTool,
+		{
+			execute: AgentTool["execute"];
+			definitionExecute: ToolDefinition["execute"];
+			parameters: AgentTool["parameters"];
+		}
+	>();
 	private _turnIndex = 0;
 
 	private _resourceLoader: ResourceLoader;
@@ -820,8 +851,11 @@ export class AgentSession {
 		finish: async (context) => await this._finishOwnedDelivery(context),
 	};
 
+	private readonly _auxiliaryDeliveryOwner: AgentDeliveryOwner = { ...this._deliveryOwner, requestInput: false };
+
 	constructor(config: AgentSessionConfig) {
 		this.sessionManager = config.sessionManager;
+		this._extensionWorkLimits = config.extensionWorkLimits;
 		this._streamFn = config.streamFn;
 		this._backgroundDiagnostics = new BackgroundJobDiagnostics({
 			agentDir: resolvePath(config.agentDir ?? getAgentDir()),
@@ -998,6 +1032,7 @@ export class AgentSession {
 				this._toolProgressDiagnostics.setQueueMetricsReader(() => stream.getQueueMetrics());
 				return stream;
 			},
+			requestBoundary: (boundary, context, signal) => this._collectExtensionWork(boundary, context, signal),
 			convertToLlm: config.convertToLlm,
 			...(config.streamOptions === undefined ? {} : { streamOptions: config.streamOptions }),
 			...(config.steeringMode === undefined ? {} : { steeringMode: config.steeringMode }),
@@ -1036,6 +1071,10 @@ export class AgentSession {
 			this._mcpManager = config.mcpManager;
 			this._mcpManagerFactory = config.mcpManagerFactory;
 			this._attachMcpManagerEvents();
+			this._extensionWork = this._createExtensionWorkManager();
+			this._unsubscribeWorkAuthority = this.sessionManager.subscribeConversationAuthorityChanges(() =>
+				this._invalidateExtensionWork(),
+			);
 
 			// Always subscribe to finalized Harness events for internal handling.
 			this._unsubscribeAgent = this._harness.subscribe(async (event) => {
@@ -1095,6 +1134,8 @@ export class AgentSession {
 		} catch (error) {
 			this._disposed = true;
 			this._canonicalProducerRetired = true;
+			this._unsubscribeWorkAuthority?.();
+			void this._extensionWork?.close();
 			void this._backgroundJobs.close();
 			void this._backgroundDiagnostics.close();
 			const cleanupErrors: unknown[] = [];
@@ -1377,6 +1418,7 @@ export class AgentSession {
 			return this._backgroundNotificationAction(event);
 		});
 		this._harness.on("next_action_resolved", (event) => {
+			if (event.stopReason === "policy" || event.stopReason === "tool") this._invalidateExtensionWork();
 			if (this._backgroundContinuationAttempt) this._backgroundContinuationAttempt.decisionResolved = true;
 			if (
 				event.requestAuthority === "final_response" ||
@@ -1558,6 +1600,265 @@ export class AgentSession {
 		}
 	}
 
+	private _extensionWorkIsCurrent(): boolean {
+		return (
+			!this._disposed &&
+			!this._canonicalProducerRetired &&
+			!this._reloadInProgress &&
+			this._admissionGate.isOpen &&
+			this._isConversationAuthorityAvailable()
+		);
+	}
+
+	private _createExtensionWorkManager(): ExtensionWorkManager {
+		const manager = new ExtensionWorkManager({
+			limits: this._extensionWorkLimits,
+			isCurrent: () => this._extensionWork === manager && this._extensionWorkIsCurrent(),
+			execute: (request) => this._executeExtensionWork(request),
+			onBoundary: (event) => this._extensionRunner.emitRequestBoundary(event),
+			onOperation: (event) => {
+				if (this._extensionWork === manager) this._extensionRunner.emitExtensionOperation(event);
+			},
+		});
+		return manager;
+	}
+
+	private _invalidateExtensionWork(): void {
+		this._extensionWorkKey = undefined;
+		if (this._extensionWorkAbort) this._extensionWorkSignal?.removeEventListener("abort", this._extensionWorkAbort);
+		this._extensionWorkSignal = undefined;
+		this._extensionWorkAbort = undefined;
+		this._harness.invalidateRequestBoundary();
+		this._extensionWork?.invalidate();
+	}
+
+	private async _collectExtensionWork(
+		boundary: AgentHarnessRequestBoundary,
+		context: Context,
+		signal?: AbortSignal,
+	): Promise<Message[] | undefined> {
+		if (!this._extensionWorkIsCurrent() || signal?.aborted) return undefined;
+		const batch = boundary.batch;
+		if (!batch || (!boundary.newInput && this._extensionWorkKey !== batch.id)) return undefined;
+		this._extensionWorkKey = batch.id;
+		if (this._extensionWorkSignal !== signal) {
+			if (this._extensionWorkAbort)
+				this._extensionWorkSignal?.removeEventListener("abort", this._extensionWorkAbort);
+			this._extensionWorkSignal = signal;
+			this._extensionWorkAbort = () => this._invalidateExtensionWork();
+			signal?.addEventListener("abort", this._extensionWorkAbort, { once: true });
+		}
+		const manager = this._extensionWork;
+		const model = this.model;
+		manager.boundary({
+			key: batch.id,
+			attemptId: boundary.attemptId,
+			cause: boundary.cause,
+			allowNewWork: boundary.requestAuthority !== "final_response",
+			snapshot: {
+				branchId: `${this.sessionId}:${this._conversationGenerationRevision}`,
+				revision: boundary.cursor.revision,
+				cwd: this._cwd,
+				mode: this._planningState.mode,
+				...(model ? { model: { provider: model.provider, id: model.id } } : {}),
+				inputs: batch.deliveries.flatMap((delivery) =>
+					delivery.messages.map((message) => ({
+						text: this._extractUserMessageText(message.content),
+						kind: delivery.kind,
+					})),
+				),
+				services: (Object.keys(EXTENSION_WORK_TOOLS) as ExtensionWorkService[]).filter((service) => {
+					const name = EXTENSION_WORK_TOOLS[service];
+					return (
+						this._effectiveActiveToolNames.includes(name) && this._getTrustedOperationResolver(name) !== undefined
+					);
+				}),
+			},
+		});
+		if (!model || !Number.isFinite(model.contextWindow) || model.contextWindow <= 0) return undefined;
+		const reserve = this.settingsManager.getCompactionSettings(model).reserveTokens;
+		const mandatory =
+			estimateMessagesTokens(context.messages) +
+			estimateToolDefinitionTokens(context.tools) +
+			Math.ceil((context.systemPrompt?.length ?? 0) / 4);
+		// One byte per remaining token is deliberately conservative for optional text.
+		const maxBytes = Math.max(0, Math.floor(model.contextWindow - reserve - mandatory - 32));
+		const runner = this._extensionRunner;
+		const policyRevision = this._workPolicyRevision;
+		const extensionPoliciesCurrent = runner.captureToolPolicyGuard();
+		const policies = Array.from(this._workToolPolicies, ({ policy }) => ({
+			policy,
+			callback: policy.beforeToolCall,
+		}));
+		// Earlier validations must not survive a policy change while later sources await.
+		const policiesCurrent = () =>
+			runner === this._extensionRunner &&
+			policyRevision === this._workPolicyRevision &&
+			policies.every(({ policy, callback }) => policy.beforeToolCall === callback) &&
+			extensionPoliciesCurrent();
+		const suffix = await manager.collect(boundary.cursor.revision, policiesCurrent, maxBytes);
+		if (
+			!suffix ||
+			!policiesCurrent() ||
+			signal?.aborted ||
+			!this._extensionWorkIsCurrent() ||
+			this._extensionWorkKey !== batch.id ||
+			this._extensionWork !== manager
+		)
+			return undefined;
+		return [{ role: "user", content: suffix, timestamp: Date.now() }];
+	}
+
+	private async _executeExtensionWork(request: ExtensionWorkExecution): Promise<ExtensionWorkExecutionResult> {
+		const name = EXTENSION_WORK_TOOLS[request.service];
+		const tool = this._toolRegistry.get(name);
+		const definition = this._toolDefinitions.get(name)?.definition;
+		const runner = this._extensionRunner;
+		const implementation = tool && this._workImplementations.get(tool);
+		const generation = this._conversationGenerationRevision;
+		const policyRevision = this._workPolicyRevision;
+		const extensionPoliciesCurrent = runner.captureToolPolicyGuard();
+		const policies = Array.from(this._workToolPolicies, ({ policy }) => ({
+			policy,
+			callback: policy.beforeToolCall,
+		}));
+		const key = this._extensionWorkKey;
+		if (
+			!tool ||
+			!definition ||
+			!implementation ||
+			!this._effectiveActiveToolNames.includes(name) ||
+			!this._getTrustedOperationResolver(name)
+		) {
+			return { status: "unavailable", reason: "inactive_or_untrusted_tool" };
+		}
+		const check = (input: JsonObject): ExtensionWorkExecutionResult | undefined => {
+			if (request.signal.aborted) return { status: "cancelled", reason: "cancelled" };
+			if (
+				!this._extensionWorkIsCurrent() ||
+				key === undefined ||
+				key !== this._extensionWorkKey ||
+				generation !== this._conversationGenerationRevision ||
+				runner !== this._extensionRunner ||
+				policyRevision !== this._workPolicyRevision ||
+				policies.some(({ policy, callback }) => policy.beforeToolCall !== callback) ||
+				!extensionPoliciesCurrent() ||
+				this._toolRegistry.get(name) !== tool ||
+				this._toolDefinitions.get(name)?.definition !== definition ||
+				tool.execute !== implementation.execute ||
+				definition.execute !== implementation.definitionExecute ||
+				tool.parameters !== implementation.parameters
+			) {
+				return { status: "invalidated", reason: "authority_changed" };
+			}
+			const resolver = this._getTrustedOperationResolver(name);
+			const profile = this._getOperationGrantProfile();
+			if (
+				!this._effectiveActiveToolNames.includes(name) ||
+				!authorizeToolOperation(resolver, input, EXTENSION_WORK_GRANT).allowed ||
+				(profile && !authorizeToolOperation(resolver, input, profile).allowed)
+			) {
+				return { status: "denied", reason: "read_grant_denied" };
+			}
+			return undefined;
+		};
+		const toolCallId = `extension-operation:${randomUUID()}`;
+		const validate = (input: JsonObject): JsonObject =>
+			cloneCanonicalData(
+				validateToolArguments(tool, { type: "toolCall", name, id: toolCallId, arguments: input }) as JsonObject,
+				"Managed repository arguments",
+			);
+		let input: JsonObject;
+		try {
+			input = validate(request.input);
+		} catch {
+			return { status: "failed", reason: "invalid_arguments" };
+		}
+		let failure = check(input);
+		if (failure) return failure;
+		const event = { type: "tool_call" as const, toolName: name, toolCallId, input };
+		try {
+			const decision = await withoutExtensionWork(() =>
+				runner.emitToolCall(event, {
+					signal: request.signal,
+					origin: request.origin,
+					strict: true,
+				}),
+			);
+			failure = check(input);
+			if (failure) return failure;
+			if (decision?.block) return { status: "denied", reason: "extension_gate" };
+			input = validate(event.input);
+			for (const { policy, callback } of policies) {
+				const result = await withoutExtensionWork(() =>
+					callback?.call(policy, { ...event, input }, request.signal),
+				);
+				failure = check(input);
+				if (failure) return failure;
+				if (result?.block) return { status: "denied", reason: "host_gate" };
+				input = validate(input);
+			}
+			failure = check(input);
+			if (failure) return failure;
+			let producerFailure: ExtensionWorkFailure | undefined;
+			const captured = await withRepositoryObservation<Awaited<ReturnType<AgentTool["execute"]>>>(async () => {
+				try {
+					return await tool.execute(toolCallId, input, request.signal);
+				} catch (error) {
+					if (error instanceof RepositoryObservationError)
+						producerFailure = { status: error.status, reason: error.reason };
+					return {
+						content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+						isError: true,
+					};
+				}
+			});
+			failure = check(input);
+			if (failure) return failure;
+			const original = cloneCanonicalData(
+				{
+					content: captured.result.content,
+					...(captured.result.details === undefined ? {} : { details: captured.result.details as JsonValue }),
+					isError: captured.result.isError === true,
+				},
+				"Managed repository result",
+			);
+			const resultEvent = {
+				type: "tool_result" as const,
+				toolName: name,
+				toolCallId,
+				input,
+				...structuredClone(original),
+			};
+			const patch = await withoutExtensionWork(() =>
+				runner.emitToolResult(resultEvent, {
+					signal: request.signal,
+					origin: request.origin,
+					strict: true,
+				}),
+			);
+			failure = check(input);
+			if (failure) return failure;
+			// Runner returns the complete reduced projection, including detail removal.
+			const reduced =
+				patch === undefined
+					? original
+					: {
+							content: patch.content ?? original.content,
+							...(patch.details === undefined ? {} : { details: patch.details }),
+							isError: patch.isError ?? original.isError,
+						};
+			if (!isDeepStrictEqual(original, reduced)) return { status: "unavailable", reason: "transformed_result" };
+			if (original.isError) return producerFailure ?? { status: "failed", reason: "tool_failed" };
+			if (!captured.observation) return { status: "unsupported", reason: "no_structured_observation" };
+			return { status: "ok", observation: captured.observation, implementation: tool };
+		} catch {
+			return request.signal.aborted
+				? { status: "cancelled", reason: "cancelled" }
+				: { status: "failed", reason: "operation_failed" };
+		}
+	}
+
 	private async _handleToolCallPolicy(event: {
 		toolName: string;
 		toolCallId: string;
@@ -1574,7 +1875,13 @@ export class AgentSession {
 		}
 		let extensionDecision: { block?: boolean; reason?: string } | undefined;
 		if (this._extensionRunner.hasHandlers("tool_call")) {
-			extensionDecision = await this._extensionRunner.emitToolCall({ type: "tool_call", ...event });
+			extensionDecision = await this._extensionRunner.emitToolCall(
+				{ type: "tool_call", ...event },
+				{
+					origin: { kind: "agent" },
+					signal: this._harness.signal,
+				},
+			);
 			if (extensionDecision?.block) return extensionDecision;
 		}
 		const profile = this._getOperationGrantProfile();
@@ -1655,10 +1962,16 @@ export class AgentSession {
 				? { content: event.content, details: abortedSubagentDetails, isError: event.isError }
 				: undefined;
 		}
-		const hookResult = await this._extensionRunner.emitToolResult({
-			type: "tool_result",
-			...event,
-		} satisfies ToolResultEvent);
+		const hookResult = await this._extensionRunner.emitToolResult(
+			{
+				type: "tool_result",
+				...event,
+			} satisfies ToolResultEvent,
+			{
+				origin: { kind: "agent" },
+				signal: this._backgroundToolContext.getStore()?.signal ?? this._harness.signal,
+			},
+		);
 		const finalDetails =
 			hookResult?.details !== undefined
 				? (hookResult.details as JsonValue)
@@ -2681,6 +2994,9 @@ export class AgentSession {
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
+			this._invalidateExtensionWork();
+			this._unsubscribeWorkAuthority?.();
+			this._unsubscribeWorkAuthority = undefined;
 			this._activeAgentOperation = undefined;
 			this._agentConversationMutationInFlight = false;
 			this._unsubscribeBackgroundJobs?.();
@@ -2730,6 +3046,7 @@ export class AgentSession {
 			operation.rejectCompletion(disposalError);
 		}
 		this._liveClientInputs.clear();
+		await this._extensionWork.close();
 		try {
 			this.abortRetry();
 			this.abortCompaction();
@@ -3228,11 +3545,17 @@ export class AgentSession {
 	}
 
 	registerTurnPolicy(policy: AgentSessionTurnPolicy): () => void {
+		const workPolicy = { policy };
+		if (policy.beforeToolCall) {
+			this._workToolPolicies.add(workPolicy);
+			this._workPolicyRevision++;
+			this._invalidateExtensionWork();
+		}
 		const unregisterToolCall = policy.beforeToolCall
 			? this._harness.on("tool_call", async (event) => {
 					const signal = this._harness.signal;
 					if (!signal) return undefined;
-					return await policy.beforeToolCall!(event, signal);
+					return await withoutExtensionWork(() => policy.beforeToolCall!(event, signal));
 				})
 			: undefined;
 		const unregisterNextAction = policy.nextAction
@@ -3246,6 +3569,10 @@ export class AgentSession {
 		return () => {
 			if (!registered) return;
 			registered = false;
+			if (this._workToolPolicies.delete(workPolicy)) {
+				this._workPolicyRevision++;
+				this._invalidateExtensionWork();
+			}
 			unregisterToolCall?.();
 			if (unregisterNextAction) {
 				unregisterNextAction();
@@ -3360,6 +3687,7 @@ export class AgentSession {
 				validToolNames.push(name);
 			}
 		}
+		this._invalidateExtensionWork();
 		this._effectiveActiveToolNames = validToolNames;
 		this._backgroundJobs.cancelInaccessible();
 		this._applyHarnessMutation(this._harness.setTools([...this._toolRegistry.values()], validToolNames));
@@ -4360,6 +4688,7 @@ export class AgentSession {
 		abortGeneration = this._abortGeneration,
 		resumeRetainedPrompt = false,
 		reservedRun?: AgentHarnessRunReservation,
+		auxiliaryInput = false,
 	): Promise<void> {
 		this._assertConversationAuthorityAvailable();
 		if (this._hasSessionOperationBarrier) {
@@ -4407,7 +4736,9 @@ export class AgentSession {
 							? reservation
 								? this._harness.continueReserved(reservation)
 								: this._harness.continue()
-							: this._harness.runReserved(reservation!, messages),
+							: this._harness.runReserved(reservation!, messages, {
+									...(auxiliaryInput ? { deliveryOwner: this._auxiliaryDeliveryOwner } : {}),
+								}),
 					);
 				} finally {
 					this._sessionPromptOwnsInitialDelivery = false;
@@ -4468,6 +4799,7 @@ export class AgentSession {
 
 	private _emitAgentSettledIfIdle(): void {
 		if (this._harness.getPhase() === "idle") {
+			this._invalidateExtensionWork();
 			this._agentSettlementRevision += 1;
 			this._emit({ type: "agent_settled" });
 			const resolveSettlement = this._resolveAgentSettlementBarrier;
@@ -4857,9 +5189,21 @@ export class AgentSession {
 					);
 				}
 				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages, options.clientMessageId, operation);
+					await this._queueFollowUp(
+						expandedText,
+						currentImages,
+						options.clientMessageId,
+						operation,
+						options.source === "extension",
+					);
 				} else {
-					await this._queueSteer(expandedText, currentImages, options.clientMessageId, operation);
+					await this._queueSteer(
+						expandedText,
+						currentImages,
+						options.clientMessageId,
+						operation,
+						options.source === "extension",
+					);
 				}
 				preflightResult?.({ success: true, outcome: "admitted" });
 				if (runReservation) this._harness.cancelReservedRun(runReservation);
@@ -5034,7 +5378,7 @@ export class AgentSession {
 			// provider turn.
 			preflightResult?.({ success: true, outcome: "admitted" });
 		}
-		await this._runAgentPrompt(messages, abortGeneration, false, runReservation);
+		await this._runAgentPrompt(messages, abortGeneration, false, runReservation, options?.source === "extension");
 		return "run";
 	}
 
@@ -5245,6 +5589,7 @@ export class AgentSession {
 		images?: ImageContent[],
 		clientMessageId?: string,
 		operation?: LiveClientInputOperation,
+		auxiliaryInput = false,
 	): Promise<void> {
 		this._assertConversationAuthorityAvailable();
 		if (this.pendingMessageCount >= AGENT_SESSION_MAX_QUEUED_MESSAGES) {
@@ -5258,12 +5603,16 @@ export class AgentSession {
 			content.push(...images);
 		}
 		const queueEntryId = createRuntimeQueueEntryId();
-		const deliveryId = this._harness.queueSteer({
-			role: "user",
-			content,
-			clientMessageId: queueEntryId,
-			timestamp: Date.now(),
-		});
+		this._invalidateExtensionWork();
+		const deliveryId = this._harness.queueSteer(
+			{
+				role: "user",
+				content,
+				clientMessageId: queueEntryId,
+				timestamp: Date.now(),
+			},
+			auxiliaryInput ? this._auxiliaryDeliveryOwner : undefined,
+		);
 		this._queueDeliveryIds.set(queueEntryId, deliveryId);
 		this._steeringMessages.push({
 			queueEntryId,
@@ -5281,6 +5630,7 @@ export class AgentSession {
 		images?: ImageContent[],
 		clientMessageId?: string,
 		operation?: LiveClientInputOperation,
+		auxiliaryInput = false,
 	): Promise<void> {
 		this._assertConversationAuthorityAvailable();
 		if (this.pendingMessageCount >= AGENT_SESSION_MAX_QUEUED_MESSAGES) {
@@ -5294,12 +5644,15 @@ export class AgentSession {
 			content.push(...images);
 		}
 		const queueEntryId = createRuntimeQueueEntryId();
-		const deliveryId = this._harness.queueFollowUp({
-			role: "user",
-			content,
-			clientMessageId: queueEntryId,
-			timestamp: Date.now(),
-		});
+		const deliveryId = this._harness.queueFollowUp(
+			{
+				role: "user",
+				content,
+				clientMessageId: queueEntryId,
+				timestamp: Date.now(),
+			},
+			auxiliaryInput ? this._auxiliaryDeliveryOwner : undefined,
+		);
 		this._queueDeliveryIds.set(queueEntryId, deliveryId);
 		this._followUpMessages.push({
 			queueEntryId,
@@ -5371,6 +5724,7 @@ export class AgentSession {
 			if (options?.deliverAs === "followUp") {
 				this._harness.queueFollowUp(appMessage);
 			} else {
+				this._invalidateExtensionWork();
 				this._harness.queueSteer(appMessage);
 			}
 		} else if (options?.triggerTurn) {
@@ -5566,6 +5920,7 @@ export class AgentSession {
 			return this._abortPromise;
 		}
 		const releaseAdmission = this._admissionGate.suspend();
+		this._invalidateExtensionWork();
 		this._backgroundJobs.suppressContinuations();
 		this._cancelBackgroundContinuationSchedule();
 		let resolveAbort!: () => void;
@@ -5591,6 +5946,7 @@ export class AgentSession {
 			() => this.abortRetry(),
 			() => this.abortCompaction(),
 			() => this._backgroundJobs.cancelAll(),
+			() => this._extensionWork.drain(),
 			() => this.waitForIdle(),
 		]) {
 			try {
@@ -5958,7 +6314,9 @@ export class AgentSession {
 			sourceMessageCount: messages.length,
 			retainedMessageCount: retainedCount,
 			context: async (signal) => {
-				const transformed = await this._extensionRunner.emitContext(cloneAgentMessages(messages));
+				const transformed = await withoutExtensionWork(() =>
+					this._extensionRunner.emitContext(cloneAgentMessages(messages)),
+				);
 				signal.throwIfAborted();
 				const llmMessages = await this._convertToLlm(transformed);
 				signal.throwIfAborted();
@@ -6760,6 +7118,7 @@ export class AgentSession {
 	}
 
 	private _bindExtensionCore(runner: ExtensionRunner): void {
+		runner.bindWork(this._extensionWork);
 		const getCommands = (): SlashCommandInfo[] => {
 			const extensionCommands: SlashCommandInfo[] = runner.getRegisteredCommands().map((command) => ({
 				name: command.invocationName,
@@ -6875,6 +7234,7 @@ export class AgentSession {
 	}
 
 	private _refreshToolRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
+		this._invalidateExtensionWork();
 		const previousRegistryNames = new Set(this._toolRegistry.keys());
 		const previousActiveToolNames = this._planningRuntimeInitialized
 			? [...this._requestedBuildToolNames]
@@ -6950,6 +7310,17 @@ export class AgentSession {
 			toolRegistry.set(tool.name, tool);
 		}
 		this._toolRegistry = toolRegistry;
+		for (const name of Object.values(EXTENSION_WORK_TOOLS)) {
+			const tool = toolRegistry.get(name);
+			const entry = definitionRegistry.get(name);
+			if (tool && entry?.sourceInfo.source === "builtin" && this._trustedHostToolNames.has(name)) {
+				this._workImplementations.set(tool, {
+					execute: tool.execute,
+					definitionExecute: entry.definition.execute,
+					parameters: tool.parameters,
+				});
+			}
+		}
 
 		const nextActiveToolNames = (
 			options?.activeToolNames ? [...options.activeToolNames] : [...previousActiveToolNames]
@@ -7305,7 +7676,10 @@ export class AgentSession {
 			);
 		}
 		this._reloadInProgress = true;
+		this._invalidateExtensionWork();
 		try {
+			await this._extensionWork.close();
+			this._extensionWork = this._createExtensionWorkManager();
 			const previousFlagValues = this._extensionRunner.getFlagValues();
 			await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
 			this._assertConversationAuthorityAvailable();
@@ -7736,6 +8110,7 @@ export class AgentSession {
 		if (this._reloadInProgress || this._harness.getPhase() === "branch_summary") {
 			return Promise.reject(new Error("Cannot navigate the session tree while another session mutation is active"));
 		}
+		this._invalidateExtensionWork();
 		return this._harness
 			.requestTreeOperation((operation) => this._navigateTree(operation, targetId, options))
 			.finally(() => this._scheduleBackgroundContinuation());
