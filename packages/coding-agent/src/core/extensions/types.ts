@@ -699,7 +699,7 @@ export interface PromptRouteEvent {
 	type: "prompt_route";
 	prompt: string;
 	/** Only currently eligible definitions; no prompts or host paths. */
-	agents: Array<{ name: string; description: string }>;
+	agents: Array<{ name: string; description: string; model?: string }>;
 	/** Covers classification, child startup, execution, and cleanup. */
 	signal: AbortSignal;
 }

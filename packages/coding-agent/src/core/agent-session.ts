@@ -5118,7 +5118,12 @@ export class AgentSession {
 		reservationSignal: AbortSignal,
 	): Promise<boolean> {
 		const manager = this._subagentToolManager!;
-		const agents = manager.listAvailableDefinitions?.().map(({ name, description }) => ({ name, description })) ?? [];
+		const agents =
+			manager.listAvailableDefinitions?.().map(({ name, description, model }) => ({
+				name,
+				description,
+				...(model ? { model } : {}),
+			})) ?? [];
 		if (agents.length === 0) return false;
 		const finished = Promise.withResolvers<void>();
 		const controller = new AbortController();

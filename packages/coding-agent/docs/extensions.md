@@ -524,7 +524,7 @@ Optional pre-inference routing for fresh, text-only **local TUI** input. This ev
 ```typescript
 volt.on("prompt_route", async (event, ctx) => {
   // event.prompt: expanded request
-  // event.agents: eligible { name, description } definitions
+  // event.agents: eligible { name, description, model? } definitions
   // event.signal: host cancellation covering the entire routing operation
   // Return undefined to keep the primary model.
   const decision = await classifyRequest(event.prompt, event.signal);
@@ -536,6 +536,8 @@ volt.on("prompt_route", async (event, ctx) => {
   };
 });
 ```
+
+Each eligible agent's optional `model` is the model reference from its loaded definition, not a resolved model ID. Extensions can use an exact available `provider/model` reference directly, or resolve other patterns before nominating. The agent's instructions, thinking level, and tool policy still apply when it starts.
 
 The first valid nomination wins. The host requires an eligible named agent and an exact available model different from the primary model; task text is capped at 64 KB. Invalid/unavailable nominations and hook failures use the ordinary parent flow before dispatch. Returned text and classifier confidence never widen host tool grants or replace user authorization. Classifiers must abstain when context is insufficient; extensions are responsible for bounded, cancellation-aware evaluation and any additional provider data disclosure.
 

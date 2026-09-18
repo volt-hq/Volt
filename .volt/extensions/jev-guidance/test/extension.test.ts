@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import type { ExtensionAPI, ExtensionContext, PromptRouteResult, RegisteredCommand } from "@hansjm10/volt-coding-agent";
+import { getModels, getSupportedThinkingLevels } from "@hansjm10/volt-ai";
+import {
+	discoverSubagentDefinitions,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type PromptRouteEvent,
+	type PromptRouteResult,
+	type RegisteredCommand,
+} from "@hansjm10/volt-coding-agent";
 import { QUESTIONS } from "../client.ts";
 import jevGuidance from "../index.ts";
 
-function harness(mode: ExtensionContext["mode"] = "tui", flag = "off") {
+function harness(
+	mode: ExtensionContext["mode"] = "tui",
+	flag = "off",
+	agents: PromptRouteEvent["agents"] = [{ name: "pr", description: "PR worker", model: "mock/worker" }],
+) {
 	const handlers = new Map<string, unknown>();
 	const commands = new Map<string, Omit<RegisteredCommand, "name" | "sourceInfo">>();
 	const entries: unknown[] = [];
@@ -17,7 +30,7 @@ function harness(mode: ExtensionContext["mode"] = "tui", flag = "off") {
 			handlers.set(name, handler);
 		},
 		registerFlag: () => {},
-		getFlag: (name) => (name === "jev" ? flag : "mock/worker"),
+		getFlag: (name) => (name === "jev" ? flag : undefined),
 		registerCommand: (name, command) => {
 			commands.set(name, command);
 		},
@@ -68,7 +81,7 @@ function harness(mode: ExtensionContext["mode"] = "tui", flag = "off") {
 				type: "prompt_route",
 				prompt,
 				signal,
-				agents: [{ name: "general", description: "General worker" }],
+				agents,
 			})) as PromptRouteResult | undefined,
 		context: async (messages: AgentMessage[]) =>
 			(await fire("context", { type: "context", messages })) as { messages?: AgentMessage[] } | undefined,
@@ -184,7 +197,7 @@ function routingResponse(choice = "pr_worker", probability: number | undefined =
 	});
 }
 
-test("routing is separately opt-in, selects the configured worker, and makes no guidance requests", async (t) => {
+test("routing is separately opt-in, selects the pr definition's model, and makes no guidance requests", async (t) => {
 	let calls = 0;
 	t.mock.method(globalThis, "fetch", async (_input: unknown, init?: RequestInit) => {
 		calls++;
@@ -197,12 +210,12 @@ test("routing is separately opt-in, selects the configured worker, and makes no 
 	await host.start();
 	assert.equal(await host.route(), undefined);
 	assert.equal(calls, 0);
-	await host.command("route mock/worker");
+	await host.command("route");
 	assert.equal(await host.context(messages), undefined);
 	const result = await host.route();
-	assert.equal(result?.agent, "general");
+	assert.equal(result?.agent, "pr");
 	assert.equal(result?.model, "mock/worker");
-	assert.match(result?.task ?? "", /existing committed branch only/);
+	assert.match(result?.task ?? "", /using your PR agent instructions/);
 	assert.match(result?.task ?? "", /Create a PR for the verified committed changes/);
 	assert.equal(calls, 1);
 	assert.equal(host.entries.length, 1);
@@ -220,16 +233,52 @@ test("routing ignores non-PR and oversized requests without resolving credential
 	assert.equal(host.authLookups, 0);
 });
 
-test("routing refuses unconfigured and same-as-primary models", async (t) => {
+test("routing skips missing pr definitions and unconfigured or same-as-primary models before calling Jev", async (t) => {
+	t.mock.method(globalThis, "fetch", async () => assert.fail("No request expected"));
+	for (const agents of [
+		[],
+		[{ name: "general", description: "General worker", model: "mock/worker" }],
+		[{ name: "pr", description: "PR worker" }],
+		[{ name: "pr", description: "PR worker", model: "missing/model" }],
+		[{ name: "pr", description: "PR worker", model: "mock/primary" }],
+	]) {
+		const host = harness("tui", "route", agents);
+		await host.start();
+		assert.equal(await host.route(), undefined);
+		assert.equal(host.authLookups, 0);
+		assert.ok(host.notifications.some((text) => text.includes("PR routing skipped")));
+	}
+});
+
+test("routing does not accept a session model override", async (t) => {
 	t.mock.method(globalThis, "fetch", async () => assert.fail("No request expected"));
 	const host = harness();
 	await host.start();
-	await host.command("route missing/model");
-	assert.equal(await host.route(), undefined);
-	await host.command("route mock/primary");
+	await host.command("route mock/worker");
 	assert.equal(await host.route(), undefined);
 	assert.equal(host.authLookups, 0);
-	assert.ok(host.notifications.some((text) => text.includes("different from the primary")));
+	assert.ok(host.notifications.some((text) => text.includes("Configure the PR model in .volt/agents/pr.md")));
+});
+
+test("the project pr agent pins Luna with max thinking and loads only with project trust", () => {
+	const options = {
+		cwd: fileURLToPath(new URL("../../../../", import.meta.url)),
+		agentDir: fileURLToPath(new URL(".", import.meta.url)),
+	};
+	const untrusted = discoverSubagentDefinitions({ ...options, projectTrusted: false });
+	assert.ok(!untrusted.definitions.some((definition) => definition.name === "pr"));
+	const trusted = discoverSubagentDefinitions({ ...options, projectTrusted: true });
+	assert.deepEqual(trusted.diagnostics, []);
+	const pr = trusted.definitions.find((definition) => definition.name === "pr");
+	assert.ok(pr);
+	assert.equal(pr.source, "project");
+	assert.equal(pr.model, "openai-codex/gpt-5.6-luna");
+	assert.equal(pr.thinking, "max");
+	assert.equal(pr.maxChildAgents, 0);
+	assert.deepEqual(pr.tools, ["read", "bash", "write", "grep", "find", "ls"]);
+	const model = getModels("openai-codex").find((model) => `${model.provider}/${model.id}` === pr.model);
+	assert.ok(model);
+	assert.ok(getSupportedThinkingLevels(model).includes("max"));
 });
 
 test("uncertain, abstaining, malformed, or failed routing never nominates a worker", async (t) => {
@@ -275,7 +324,7 @@ test("non-TUI routing flags never resolve credentials", async (t) => {
 	for (const mode of ["rpc", "json", "print"] as const) {
 		const host = harness(mode, "route");
 		await host.start();
-		await host.command("route mock/worker");
+		await host.command("route");
 		assert.equal(await host.route(), undefined);
 		assert.equal(host.authLookups, 0);
 	}

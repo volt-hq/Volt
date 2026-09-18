@@ -118,7 +118,7 @@ async function setup(
 		},
 	});
 	await fixture.session.bindExtensions({ mode: options.mode ?? "tui" });
-	return { fixture, manager, start, route, children, cleanup: () => fixture.cleanupAsync() };
+	return { fixture, manager, start, route, children, definitions, cleanup: () => fixture.cleanupAsync() };
 }
 
 describe("host-owned prompt routing", () => {
@@ -162,6 +162,62 @@ describe("host-owned prompt routing", () => {
 			context.route.mockResolvedValueOnce(undefined);
 			await fixture.session.prompt("Explain the implementation");
 			expect(fixture.session.getLastAssistantText()).toBe("Primary answers the next request");
+		} finally {
+			await context.cleanup();
+		}
+	});
+
+	it("routes to a named agent with its own model, max thinking, and instructions without changing the parent", async () => {
+		const context = await setup();
+		const { fixture } = context;
+		try {
+			const primary = fixture.session.model;
+			const defaults = fixture.settingsManager.getDefaultModel();
+			const defaultThinking = fixture.settingsManager.getDefaultThinkingLevel();
+			fixture.session.modelRegistry.registerProvider(fixture.getModel().provider, {
+				api: fixture.faux.api,
+				baseUrl: fixture.getModel().baseUrl,
+				apiKey: "faux-key",
+				models: fixture.faux.models.map((model) => ({
+					...model,
+					reasoning: true,
+					thinkingLevelMap: { max: "max" },
+				})),
+			});
+			const definition = {
+				...createBuiltInSubagentDefinitions()[0]!,
+				name: "pr",
+				description: "Dedicated PR worker",
+				model: `${fixture.getModel().provider}/worker`,
+				thinking: "max",
+				systemPrompt: "Dedicated PR workflow: publish existing committed changes only.",
+			};
+			context.definitions.push(definition);
+			context.route.mockImplementation(async (event) => {
+				const agent = event.agents.find((agent) => agent.name === "pr");
+				expect(agent).toEqual({
+					name: definition.name,
+					description: definition.description,
+					model: definition.model,
+				});
+				return { agent: definition.name, model: definition.model, task: "Create the PR" };
+			});
+			fixture.setResponses([
+				(input) => {
+					expect(input.systemPrompt).toContain(definition.systemPrompt);
+					return fauxAssistantMessage("PR URL");
+				},
+			]);
+			await fixture.session.prompt("Create a PR");
+			expect(context.start).toHaveBeenCalledWith("pr", expect.objectContaining({ model: definition.model }));
+			expect(fixture.faux.state.callCount).toBe(1);
+			expect(context.children[0].model?.id).toBe("worker");
+			expect(context.children[0].thinkingLevel).toBe("max");
+			expect(fixture.session.model).toEqual(primary);
+			expect(fixture.session.thinkingLevel).toBe("off");
+			expect(fixture.settingsManager.getDefaultModel()).toBe(defaults);
+			expect(fixture.settingsManager.getDefaultThinkingLevel()).toBe(defaultThinking);
+			expect(fixture.session.messages.at(-1)).toMatchObject({ details: { agent: "pr", status: "completed" } });
 		} finally {
 			await context.cleanup();
 		}

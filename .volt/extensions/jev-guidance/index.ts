@@ -6,24 +6,7 @@ import { MESSAGE_TYPE } from "./snapshot.ts";
 export default function jevGuidance(volt: ExtensionAPI): void {
 	const controller = new GuidanceController();
 	let revision = 0;
-	let workerModel: string | undefined;
 	let nominations = 0;
-
-	function selectWorkerModel(value: unknown, ctx: ExtensionContext): boolean {
-		if (
-			typeof value !== "string" ||
-			!ctx.modelRegistry.getAvailable().some((model) => `${model.provider}/${model.id}` === value)
-		) {
-			ctx.ui.notify("Choose an exact configured provider/model with /jev route <provider/model>.", "warning");
-			return false;
-		}
-		if (ctx.model && `${ctx.model.provider}/${ctx.model.id}` === value) {
-			ctx.ui.notify("Choose a worker model different from the primary model.", "warning");
-			return false;
-		}
-		workerModel = value;
-		return true;
-	}
 
 	function refreshStatus(ctx: ExtensionContext): void {
 		if (ctx.mode !== "tui") return;
@@ -58,13 +41,9 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 		default: "off",
 		description: "Local Jev: off, observe, advise, or route (non-ZDR)",
 	});
-	volt.registerFlag("jev-pr-model", {
-		type: "string",
-		description: "Exact configured provider/model for opt-in --jev route PR workers",
-	});
 	volt.registerCommand("jev", {
 		description:
-			"Jev: off | observe | advise | route <provider/model> | status | interval <seconds>. Enabled modes upload selected context without ZDR.",
+			"Jev: off | observe | advise | route | status | interval <seconds>. PR model/thinking come from the pr agent definition. Enabled modes upload selected context without ZDR.",
 		remoteSafe: false,
 		async handler(args, ctx) {
 			if (ctx.mode !== "tui") {
@@ -72,14 +51,12 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 				return;
 			}
 			const [action = "status", value, extra] = args.trim().split(/\s+/);
-			if (action === "route" && extra === undefined) {
-				if (selectWorkerModel(value ?? workerModel, ctx)) {
-					changeMode("route", ctx);
-					ctx.ui.notify(
-						`PR routing enabled: general on ${workerModel}. Only standalone requests for completed, committed changes qualify.`,
-						"info",
-					);
-				}
+			if (action === "route" && value === undefined) {
+				changeMode("route", ctx);
+				ctx.ui.notify(
+					"PR routing enabled: pr, using the model and thinking level in its agent definition. Only standalone requests for completed, committed changes qualify.",
+					"info",
+				);
 				return;
 			}
 			if (["off", "observe", "advise"].includes(action) && value === undefined) {
@@ -100,13 +77,13 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 					? `$${stats.costUsd.toFixed(6)} reported across ${stats.costSamples} calls`
 					: "cost unavailable";
 				ctx.ui.notify(
-					`Jev ${controller.mode}; interval ${controller.intervalMs / 1_000}s; wait ${Math.ceil(controller.waitMs / 1_000)}s.\n${stats.evaluations} attempts, ${stats.advised} reminders, ${stats.skipped} skipped, ${stats.errors} errors.\nPR worker ${workerModel ?? "not configured"}; ${nominations} route nominations (not proof of completion).\nTokens ${stats.inputTokens} in / ${stats.outputTokens} out; ${cost}.\nLast: ${JSON.stringify(controller.last ?? null)}`,
+					`Jev ${controller.mode}; interval ${controller.intervalMs / 1_000}s; wait ${Math.ceil(controller.waitMs / 1_000)}s.\n${stats.evaluations} attempts, ${stats.advised} reminders, ${stats.skipped} skipped, ${stats.errors} errors.\nPR worker pr (model/thinking from its agent definition); ${nominations} route nominations (not proof of completion).\nTokens ${stats.inputTokens} in / ${stats.outputTokens} out; ${cost}.\nLast: ${JSON.stringify(controller.last ?? null)}`,
 					"info",
 				);
 				return;
 			}
 			ctx.ui.notify(
-				"Usage: /jev off|observe|advise|status, /jev route <provider/model>, or /jev interval <1–300 seconds>",
+				"Usage: /jev off|observe|advise|route|status, or /jev interval <1–300 seconds>. Configure the PR model in .volt/agents/pr.md.",
 				"warning",
 			);
 		},
@@ -114,11 +91,12 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 
 	volt.on("session_start", (_event, ctx) => {
 		const requested = volt.getFlag("jev");
-		if (ctx.mode === "tui" && requested === "route" && selectWorkerModel(volt.getFlag("jev-pr-model"), ctx)) {
-			changeMode("route", ctx);
-		} else {
-			changeMode(ctx.mode === "tui" && (requested === "observe" || requested === "advise") ? requested : "off", ctx);
-		}
+		changeMode(
+			ctx.mode === "tui" && (requested === "observe" || requested === "advise" || requested === "route")
+				? requested
+				: "off",
+			ctx,
+		);
 	});
 	volt.on("session_shutdown", (_event, ctx) => changeMode("off", ctx));
 	const invalidate = () => {
@@ -130,12 +108,30 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 	volt.on("input", invalidate);
 
 	volt.on("prompt_route", async (event, ctx) => {
-		if (ctx.mode !== "tui" || controller.mode !== "route" || !workerModel) return;
+		if (ctx.mode !== "tui" || controller.mode !== "route") return;
 		// Cheap prefilter only, not an authorization decision. Never classify a truncated current request.
 		if (event.prompt.length > 3_000 || !/\b(?:pr|pull[\s-]+request)\b/i.test(event.prompt)) return;
-		if (!event.agents.some((agent) => agent.name === "general")) return;
+		const worker = event.agents.find((agent) => agent.name === "pr");
+		const model = worker?.model;
+		if (
+			!worker ||
+			!model ||
+			!ctx.modelRegistry.getAvailable().some((entry) => `${entry.provider}/${entry.id}` === model)
+		) {
+			ctx.ui.notify(
+				"PR routing skipped: load a trusted pr agent with an exact configured provider/model in its definition. The primary model will handle this request.",
+				"warning",
+			);
+			return;
+		}
+		if (ctx.model && `${ctx.model.provider}/${ctx.model.id}` === model) {
+			ctx.ui.notify(
+				"PR routing skipped: the pr agent must use a model different from the primary model.",
+				"warning",
+			);
+			return;
+		}
 		const current = revision;
-		const model = workerModel;
 		const messages = [
 			...buildSessionContext(ctx.sessionManager.getBranch()).messages,
 			{ role: "user" as const, content: event.prompt, timestamp: Date.now() },
@@ -156,7 +152,7 @@ export default function jevGuidance(volt: ExtensionAPI): void {
 		)
 			return;
 		nominations++;
-		return { agent: "general", model, task: prWorkerTask(event.prompt, messages) };
+		return { agent: worker.name, model, task: prWorkerTask(event.prompt, messages) };
 	});
 
 	volt.on("context", async (event, ctx) => {

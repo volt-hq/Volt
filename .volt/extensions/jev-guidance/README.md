@@ -1,6 +1,6 @@
 # Jev guidance dogfooding extension
 
-Project-local, opt-in guidance and PR routing for Volt's **local TUI**. The selected primary model stays unchanged. Jev runs through Vercel AI Gateway to choose a predefined reminder, or to route a standalone PR-creation request to a configured cheaper worker before primary-model inference.
+Project-local, opt-in guidance and PR routing for Volt's **local TUI**. The selected primary model stays unchanged. Jev runs through Vercel AI Gateway to choose a predefined reminder, or to route a standalone PR-creation request to a dedicated `pr` subagent before primary-model inference.
 
 ## Setup
 
@@ -16,20 +16,33 @@ Restart Volt from this branch to load the new core routing hook (an extension-on
 
 - `/jev observe`: make real evaluations and show judgments, without steering the coding model.
 - `/jev advise`: also append a qualifying reminder to the current model request only.
-- `/jev route <provider/model>`: enable automatic PR routing to that exact configured model. Choose a cheaper model different from the primary model; Volt does not infer subscription pricing or select a provider for you.
+- `/jev route`: enable automatic routing to the `pr` agent. Its model and thinking level come from its agent definition, not the primary session or a routing flag.
 - `/jev off`: cancel an active evaluation and stop future calls. Use Stop/Escape to cancel an already-dispatched worker.
 - `/jev status`: show the last result, attempts, skipped evaluations, errors, reported tokens/cost, and cooldown.
 - `/jev interval 2`: change minimum spacing between attempts to two seconds (1–300 allowed; default 15). Existing cooldowns still apply.
 
-Alternatively, start the TUI with `--jev observe`, `--jev advise`, or `--jev route --jev-pr-model <provider/model>`. Routing and advisory guidance are separate modes; route mode does not run per-turn reminder evaluations. With no flag, guidance starts **off**, including after reload or session replacement. Mode and counters are not restored from session history. Print, JSON, RPC/phone-owned, and subagent runtimes do not activate guidance. A local TUI that owns a phone-shared conversation can evaluate that conversation while explicitly enabled.
+Alternatively, start the TUI with `--jev observe`, `--jev advise`, or `--jev route`. Routing and advisory guidance are separate modes; route mode does not run per-turn reminder evaluations. With no flag, guidance starts **off**, including after reload or session replacement. Mode and counters are not restored from session history. Print, JSON, RPC/phone-owned, and subagent runtimes do not activate guidance. A local TUI that owns a phone-shared conversation can evaluate that conversation while explicitly enabled.
+
+## PR agent configuration
+
+The project agent is defined in [`.volt/agents/pr.md`](../../agents/pr.md). It pins:
+
+```yaml
+model: openai-codex/gpt-5.6-luna
+thinking: max
+```
+
+Edit those frontmatter fields to experiment, then `/reload` and re-enable `/jev route` (or restart with `--jev route`). The same definition applies when the primary model delegates directly to `pr` through the native `subagent` tool. Other custom agents can independently set their own `model` and `thinking`; the primary model and its defaults remain unchanged.
+
+For Jev routing, `model` must be an exact available `provider/model` different from the primary model. A missing/untrusted `pr` definition, an unavailable or unspecified model, or the same model as the primary skips Jev and leaves the request with the primary. The extension does not guess a cheaper model or fall back to `general`. The earlier `/jev route <provider/model>` argument and `--jev-pr-model` flag are replaced by the definition's `model` field.
 
 ## Automatic PR routing
 
 Routing is an experimental opt-in fast path, not a general task scheduler. Only fresh text-only local-TUI Build prompts qualify. Plan state, review discussions, active background jobs, pending context, child runtimes, and RPC/extension-originated input bypass routing. The native `subagent` tool must remain available. Host turn policies and extension `tool_call` gates disable routing so those controls are not bypassed. Requests without a PR/pull-request mention, or over 3,000 characters, do not call Jev.
 
-For a qualifying request, Jev chooses `pr_worker`, `none`, or `insufficient_context`. Only `pr_worker` with a selected-choice probability of at least 0.95 nominates the built-in `general` worker on your configured model. This is **not a calibrated safety threshold**. Discussion, mixed implementation-and-PR requests, and incomplete handoffs should remain with the primary model. Validate classification quality on your own requests before relying on routing.
+For a qualifying request, Jev chooses `pr_worker`, `none`, or `insufficient_context`. Only `pr_worker` with a selected-choice probability of at least 0.95 nominates the named `pr` agent on the model pinned in its definition. This is **not a calibrated safety threshold**. Discussion, mixed implementation-and-PR requests, and incomplete handoffs should remain with the primary model. Validate classification quality on your own requests before relying on routing.
 
-The fixed worker instructions limit this pilot to **existing committed changes**: inspect repository rules, status/diff/remotes and existing PRs; draft a description using actual verification evidence; publish only an unambiguous authorized branch; and return the verified PR URL. Uncommitted work, missing scope, unfinished implementation, or conflicts are blockers, not permission to fix or commit anything. This workflow restriction is prompt guidance, not a shell sandbox: the worker inherits policy-clamped parent tools, including Bash if the parent grants it.
+The `pr` agent's instructions limit this pilot to **existing committed changes**: inspect repository rules, status/diff/remotes and existing PRs; draft a description using actual verification evidence; publish only an unambiguous authorized branch; and return the verified PR URL. Uncommitted work, missing scope, unfinished implementation, or conflicts are blockers, not permission to fix or commit anything. This workflow restriction is prompt guidance, not a shell sandbox: the agent requests `read`, `bash`, `write`, `grep`, `find`, and `ls`, clamped by parent policy, with no nested delegation. Bash can still mutate files and run commands; `write` is intended for the temporary PR body.
 
 The host owns execution and cancellation through the existing subagent manager. The worker receives the original request and bounded excerpts, not the entire parent conversation. It appears in `/subagents`; attributed running/completion messages and worker usage remain in the parent transcript. No primary-model call, parent compaction, parent auto-naming, or summary call is needed for a routed task. Worker inference, automatic worker recovery, and child naming may still incur costs; recorded worker usage does not include cosmetic naming requests.
 
@@ -61,7 +74,7 @@ Vercel's [pricing documentation](https://vercel.com/docs/ai-gateway/pricing) dis
 
 ## Development
 
-AI SDK `7.0.105` and its lockfile are isolated here; no root dependency, model-provider, or RPC protocol changes are required. The host's `prompt_route` extension event owns the optional dispatch path, and named subagent starts accept a host-only per-run model override. The SDK's experimental evaluation API validates structured answers; the extension strips raw SDK errors before reporting failures.
+AI SDK `7.0.105` and its lockfile are isolated here; no root dependency, model-provider, or RPC protocol changes are required. The host's `prompt_route` extension event owns the optional dispatch path and exposes each eligible agent's optional model reference. Jev nominates the `pr` definition's exact model; the subagent manager applies its instructions, thinking level, and tool policy. The SDK's experimental evaluation API validates structured answers; the extension strips raw SDK errors before reporting failures.
 
 ```bash
 cd .volt/extensions/jev-guidance
