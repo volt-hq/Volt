@@ -8,6 +8,7 @@ import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import type { ExtensionWorkLimits } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import { accountInference, type InferenceAccounting } from "./inference-accounting.ts";
@@ -125,6 +126,8 @@ export interface CreateAgentSessionOptions {
 	excludeTools?: string[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
+	/** Managed extension-work ceilings; supplied limits may only tighten defaults. */
+	extensionWorkLimits?: Partial<ExtensionWorkLimits>;
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
@@ -626,6 +629,7 @@ async function createAgentSessionWithTrackedResources(
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
+		extensionWorkLimits: options.extensionWorkLimits,
 		modelRegistry,
 		initialActiveToolNames,
 		allowedToolNames,

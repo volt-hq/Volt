@@ -189,6 +189,7 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		appendEntry: notInitialized,
 		setSessionName: notInitialized,
 		getSessionName: notInitialized,
+		getWorkStatus: notInitialized,
 		setLabel: notInitialized,
 		getActiveTools: notInitialized,
 		getAllTools: notInitialized,
@@ -328,6 +329,11 @@ function createExtensionAPI(
 		setLabel(entryId: string, label: string | undefined): void {
 			runtime.assertActive();
 			runtime.setLabel(entryId, label);
+		},
+
+		getWorkStatus() {
+			runtime.assertActive();
+			return runtime.getWorkStatus(extension.path);
 		},
 
 		exec(command: string, args: string[], options?: ExecOptions) {

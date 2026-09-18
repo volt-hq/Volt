@@ -1746,6 +1746,75 @@ volt.registerCommand("my-setup-teardown", {
 });
 ```
 
+## Managed context preparation
+
+Extensions can prepare optional repository context without running another agent or changing the selected model. Nothing runs automatically: an extension must subscribe and start work. This API ships no classifier or preparation extension.
+
+### Request boundaries and ownership
+
+`request_boundary` is a notification-only event before conversational model requests, after committed user delivery and normal context processing. It provides `attemptId`, `cause` (`input`, `tools`, `continuation`, or `retry`), and `first` for the request scope. Returned promises do not delay the model; exceptions are contained.
+
+`ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, conversation revision, cwd, mode, model identity, committed input text and delivery class, and available read services. It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
+
+Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload/replacement, and authority loss. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
+
+```typescript
+// Illustrative API use, not a built-in extension or default behavior.
+volt.on("request_boundary", (event, ctx) => {
+  if (!event.first || !ctx.work) return;
+  ctx.work.tasks.start({ key: "readme", label: "Read project overview" }, async (task) => {
+    const result = await task.repository.readText({ path: "README.md", limit: 40 });
+    if (result.status !== "ok") return;
+    task.context.put({
+      key: "overview",
+      text: result.text,
+      dependency: "sources",
+      evidenceIds: [result.evidence.id],
+    });
+  });
+});
+```
+
+### Tasks and repository services
+
+`tasks.start({ key, label, timeoutMs? }, callback)` returns `{ status: "started" | "already_running", task }` or a typed failure. A live key deduplicates only this extension's task in this scope. It is not a cache of equivalent tool calls.
+
+The handle has `id`, `status()`, `cancel()`, and `wait({ signal? })`. Cancelling a wait does not cancel its task. The callback receives a fixed `snapshot`, `signal`, absolute `deadline`, `repository`, and `context`. Pass its signal to nested async operations. Nested managed task starts and managed execution from policy/diagnostic callbacks are prohibited, including asynchronous continuations through captured facades.
+
+| Service | Arguments | Successful result |
+| --- | --- | --- |
+| `readText` | `path`, optional `offset`/`limit` | `text`, `truncated`, and an `evidence` handle with path/range/observation time |
+| `findPaths` | `pattern`, optional `path`/`limit` | `paths`, `truncated` |
+| `searchText` | `pattern`, optional `path`, `glob`, `literal`, `ignoreCase`, `context`, `limit` | `matches` with path/line/text, `truncated` |
+
+Results discriminate on `status`: `ok`, `denied`, `unavailable`, `unsupported`, `invalidated`, `cancelled`, `deadline_exceeded`, `limit_exceeded`, or `failed`. Failures include a bounded host reason code. An empty successful search is not an execution failure. Discovery paths are absolute and can be passed directly to `readText`, including searches below a nested directory. Discovery matches are hints, not freshness-verified source evidence; use `readText` before citing their contents.
+
+Services require the corresponding active, trusted native `read`, `find`, or `grep` tool. They do not enable tools, fall back through Bash/local files around an override, or download missing search executables. SDK/custom/extension overrides without a trusted structured implementation are unavailable. Text reads do not convert or return images.
+
+Managed calls honor applicable tool-call and host policy gates. Arguments are revalidated after hooks. `tool_call` and `tool_result` receive host `origin` attribution for managed operations; absent origin on an ordinary call means agent work. Result reducers run before structured data is exposed: if they change the result, the service withholds the raw observations (`transformed_result`); managed reducer errors fail closed. No-op reducers can coexist. Managed reads do not count as the main agent's Plan-mode research or create synthetic assistant tool calls.
+
+### Ready-only context
+
+`task.context.put({ key, text, evidenceIds?, dependency? })` proposes context; `remove(key)` retracts it. Keys are extension-local. The default dependency is `snapshot`: conversation changes make it ineligible until refreshed. `sources` permits direct source evidence to survive ordinary appends, but requires valid evidence handles and never survives a new request scope. Suggestions without source handles are labeled unverified.
+
+Volt collects already-ready contributions at eligible conversational boundaries, validates source identity/content and current authorization, and appends a bounded untrusted suffix to the request-local projection. It does not modify canonical history or mandatory instructions. Late, stale, unauthorized, oversized, or uncheckable contributions are omitted. No compaction is triggered to fit optional context.
+
+There is no blocking preparation wait in this version, so first-call improvement is not guaranteed. Source validation has a separate bounded collection deadline; ready-only is not a zero-latency promise. A validated file is a checked-at observation, not an atomic repository snapshot or proof that tests passed. `admitted` means included by this API, not that later trusted payload hooks preserved it or the model used it.
+
+### Limits, diagnostics, and disable behavior
+
+Defaults allow two unsettled tasks per extension, four per runtime, and eight process-wide. Task deadlines default to 10 seconds with a 30-second ceiling. Each task can make 16 managed calls and return 256 KiB of source data; the scope shares 64 calls and 1 MiB including validation. Contributions are capped at 4 KiB each, 8 KiB per extension, and a 16 KiB request suffix. Source collection is bounded to 25 ms. A host can tighten limits through SDK `extensionWorkLimits`.
+
+Task completion includes draining owned operations. Return, throw, or cancellation does not release capacity while an unawaited host operation remains active. Non-cooperative callbacks remain fenced and charged; arbitrary in-process code is not forcibly terminated.
+
+`volt.getWorkStatus()` returns this extension's bounded task summaries and contribution states/reasons, including while idle. `extension_operation` provides content-free operation metadata. It is diagnostic-only, suppresses the initiating extension's own observations, and grants no reactive execution. Use foreground `tool_execution_end` for triage instead of scheduling managed work from a result reducer.
+
+Use the existing extension resource configuration and reload/restart to disable an extension. Excluded modules do not run their factories; reload revokes old managed work. Explicit CLI `-e` and SDK-injected factories remain explicit loads.
+
+**Trust boundary:** extensions remain trusted code with full process permissions. These services do not sandbox Node filesystem/HTTP access, existing `volt.exec`, or captured messaging APIs. Auxiliary-provider data export must be explicitly configured by that extension. There is no auxiliary inference, network upload, LSP service, skill-file service, or transparent tool-result cache built into this API.
+
+Maintainer contracts: [foundation design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-design.md) and [first-PR scope](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-implementation-plan-design.md).
+
 ## State Management
 
 Extensions with state should store it in tool result `details` for proper branching support:

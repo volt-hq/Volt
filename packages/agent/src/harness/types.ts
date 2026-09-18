@@ -1,4 +1,5 @@
 import type {
+	Context,
 	ImageContent,
 	InferenceSpeed,
 	JsonObject,
@@ -13,6 +14,7 @@ import type {
 	Transport,
 } from "@hansjm10/volt-ai";
 import type {
+	AgentDeliveryKind,
 	AgentDeliveryOwner,
 	AgentEvent,
 	AgentLoopNextAction,
@@ -1021,6 +1023,24 @@ export interface BranchSummaryResult {
 	modifiedFiles: string[];
 }
 
+/** Host-only post-delivery boundary. Structural requests never enter this callback. */
+export interface AgentHarnessRequestBoundary {
+	readonly attemptId: string;
+	readonly cause: "input" | "tools" | "continuation" | "retry";
+	readonly requestAuthority: AgentLoopNextActionContext["requestAuthority"];
+	readonly cursor: ProjectionCursor;
+	/** Most recent verified, user-bearing delivery batch; never inferred from transcript text. */
+	readonly batch?: {
+		readonly id: string;
+		readonly deliveries: readonly {
+			readonly deliveryId: string;
+			readonly kind: AgentDeliveryKind;
+			readonly messages: readonly Extract<AgentMessage, { role: "user" }>[];
+		}[];
+	};
+	readonly newInput: boolean;
+}
+
 export interface AgentHarnessOptions<
 	TSkill extends Skill = Skill,
 	TPromptTemplate extends PromptTemplate = PromptTemplate,
@@ -1052,6 +1072,12 @@ export interface AgentHarnessOptions<
 	) => Promise<{ apiKey: string; headers?: Record<string, string>; env?: ProviderEnv } | undefined>;
 	/** Base provider stream implementation wrapped by Harness lifecycle policy. */
 	streamFn?: StreamFn;
+	/** Append optional request-local messages after context reconciliation; never writes canonical history. */
+	requestBoundary?: (
+		boundary: AgentHarnessRequestBoundary,
+		context: Context,
+		signal?: AbortSignal,
+	) => Promise<readonly Message[] | undefined>;
 	/** Convert application messages into provider-compatible messages. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** Curated stream/provider request options. Snapshotted at turn start. */
