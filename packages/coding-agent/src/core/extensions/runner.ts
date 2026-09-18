@@ -43,8 +43,6 @@ import type {
 	ProjectTrustContext,
 	ProjectTrustEvent,
 	ProjectTrustEventResult,
-	PromptRouteEvent,
-	PromptRouteResult,
 	ProviderConfig,
 	RegisteredCommand,
 	RegisteredTool,
@@ -130,7 +128,6 @@ type RunnerEmitEvent = Exclude<
 	| ContextEvent
 	| BeforeProviderRequestEvent
 	| BeforeAgentStartEvent
-	| PromptRouteEvent
 	| MessageEndEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
@@ -1185,41 +1182,6 @@ export class ExtensionRunner {
 			};
 		}
 
-		return undefined;
-	}
-
-	/** First valid nomination wins. Errors and abstentions leave ordinary prompting unchanged. */
-	async emitPromptRoute(event: PromptRouteEvent): Promise<PromptRouteResult | undefined> {
-		if (this.isInert || event.signal.aborted) return undefined;
-		const ctx = this.createContext();
-		for (const ext of this.extensions) {
-			for (const handler of ext.handlers.get("prompt_route") ?? []) {
-				try {
-					const result = await handler({ ...event, agents: structuredClone(event.agents) }, ctx);
-					if (this.isInert || event.signal.aborted) return undefined;
-					if (result === undefined) continue;
-					const owned = cloneCanonicalData(result, "Extension prompt_route output") as PromptRouteResult;
-					if (
-						typeof owned.agent !== "string" ||
-						!event.agents.some((agent) => agent.name === owned.agent) ||
-						typeof owned.model !== "string" ||
-						owned.model.length > 512 ||
-						!owned.model.includes("/") ||
-						typeof owned.task !== "string" ||
-						!owned.task.trim() ||
-						Buffer.byteLength(owned.task) > 64_000
-					)
-						throw new Error("Invalid prompt route nomination");
-					return { agent: owned.agent, model: owned.model, task: owned.task };
-				} catch {
-					this.emitErrorContained({
-						extensionPath: ext.path,
-						event: "prompt_route",
-						error: "Prompt routing unavailable; using the primary model.",
-					});
-				}
-			}
-		}
 		return undefined;
 	}
 
