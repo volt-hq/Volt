@@ -1,6 +1,6 @@
 import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
-import { realpath } from "node:fs/promises";
+import { open, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@hansjm10/volt-ai";
@@ -249,6 +249,13 @@ export function createReadToolDefinition(
 							// acquire local identity evidence for potentially unrelated remote content.
 							const canonicalPath = observation && !customOps ? await realpath(absolutePath) : undefined;
 							if (aborted) throw new Error("Operation aborted");
+							const expected = observation?.expectedRead;
+							if (expected && canonicalPath !== expected.path)
+								throw new RepositoryObservationError(
+									"invalidated",
+									"resource_changed",
+									"Skill resource identity changed",
+								);
 							const readPath = canonicalPath ?? absolutePath;
 							// Check if file exists and is readable.
 							await ops.access(readPath);
@@ -302,8 +309,24 @@ export function createReadToolDefinition(
 									];
 								}
 							} else {
-								// Read text content.
-								const buffer = await ops.readFile(readPath);
+								// Exact skill grants read only through a descriptor with the issued identity.
+								let buffer: Buffer;
+								if (expected) {
+									const file = await open(readPath, "r");
+									try {
+										const stat = await file.stat();
+										if (aborted) throw new Error("Operation aborted");
+										if (stat.dev !== expected.device || stat.ino !== expected.inode)
+											throw new RepositoryObservationError(
+												"invalidated",
+												"resource_changed",
+												"Skill resource identity changed",
+											);
+										buffer = await file.readFile();
+									} finally {
+										await file.close();
+									}
+								} else buffer = await ops.readFile(readPath);
 								if (aborted) throw new Error("Operation aborted");
 								if (
 									observation &&

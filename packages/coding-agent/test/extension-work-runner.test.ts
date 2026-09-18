@@ -53,6 +53,8 @@ async function setup(factories: ExtensionFactory[]) {
 				mode: "build",
 				inputs: [{ text: "request", kind: "prompt" }],
 				services: ["readText"],
+				skills: [],
+				skillsTruncated: false,
 			},
 		});
 	return { runner, work, boundary };

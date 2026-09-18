@@ -18,7 +18,7 @@ import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { SubagentToolManager } from "../../src/core/tools/subagent.ts";
-import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
+import type { ExtensionFactory, ExtensionWorkLimits, ResourceLoader } from "../../src/index.ts";
 import { createAgentSessionTestControl, type LegacyPrepareDelivery } from "../agent-session-test-control.ts";
 import {
 	type CreateTestExtensionsResultInput,
@@ -63,6 +63,7 @@ export interface HarnessOptions {
 	tokensPerSecond?: number;
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
+	extensionWorkLimits?: Partial<ExtensionWorkLimits>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
 	initialActiveToolNames?: string[];
@@ -159,6 +160,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		streamFn: streamSimple,
 		convertToLlm,
 		settingsManager,
+		extensionWorkLimits: options.extensionWorkLimits,
 		cwd: tempDir,
 		agentDir: options.agentDir ?? tempDir,
 		modelRegistry,

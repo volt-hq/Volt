@@ -1,4 +1,5 @@
 import type { JsonObject } from "@hansjm10/volt-ai";
+import type { ManagedLspObservation } from "../lsp/managed-observation.ts";
 import type { RepositoryObservation } from "../tools/repository-observation.ts";
 import type {
 	ExtensionOperationEvent,
@@ -20,7 +21,7 @@ export interface ExtensionWorkExecution {
 
 export type ExtensionWorkExecutionResult =
 	| ExtensionWorkFailure
-	| { status: "ok"; observation: RepositoryObservation; implementation: object };
+	| { status: "ok"; observation: RepositoryObservation | ManagedLspObservation; implementation: object };
 
 export interface ExtensionWorkBoundary {
 	/** Stable identity of the most recent committed user-delivery batch, retained over retries. */

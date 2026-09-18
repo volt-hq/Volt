@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, readFileSync, statSync } from "fs";
+import { closeSync, existsSync, fstatSync, openSync, readdirSync, readFileSync, realpathSync, statSync } from "fs";
 import ignore from "ignore";
 import { basename, dirname, join, relative, resolve, sep } from "path";
 import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
@@ -79,6 +79,14 @@ export interface Skill {
 	sourceInfo: SourceInfo;
 	disableModelInvocation: boolean;
 }
+
+/** Internal native-resource provenance; metadata-only overrides do not acquire file authority. */
+export interface SkillFileIdentity {
+	path: string;
+	device: number;
+	inode: number;
+}
+export const skillFileIdentities = new WeakMap<Skill, Readonly<SkillFileIdentity>>();
 
 export interface LoadSkillsResult {
 	skills: Skill[];
@@ -281,7 +289,17 @@ function loadSkillFromFile(
 	const diagnostics: ResourceDiagnostic[] = [];
 
 	try {
-		const rawContent = readFileSync(filePath, "utf-8");
+		const canonicalPath = realpathSync(filePath);
+		const descriptor = openSync(canonicalPath, "r");
+		let rawContent: string;
+		let identity: SkillFileIdentity;
+		try {
+			const stat = fstatSync(descriptor);
+			identity = { path: canonicalPath, device: stat.dev, inode: stat.ino };
+			rawContent = readFileSync(descriptor, "utf-8");
+		} finally {
+			closeSync(descriptor);
+		}
 		const { frontmatter } = parseFrontmatter<SkillFrontmatter>(rawContent);
 		const skillDir = dirname(filePath);
 		const parentDirName = basename(skillDir);
@@ -306,17 +324,16 @@ function loadSkillFromFile(
 			return { skill: null, diagnostics };
 		}
 
-		return {
-			skill: {
-				name,
-				description: frontmatter.description,
-				filePath,
-				baseDir: skillDir,
-				sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
-				disableModelInvocation: frontmatter["disable-model-invocation"] === true,
-			},
-			diagnostics,
+		const skill: Skill = {
+			name,
+			description: frontmatter.description,
+			filePath,
+			baseDir: skillDir,
+			sourceInfo: createSkillSourceInfo(filePath, skillDir, source),
+			disableModelInvocation: frontmatter["disable-model-invocation"] === true,
 		};
+		skillFileIdentities.set(skill, Object.freeze(identity));
+		return { skill, diagnostics };
 	} catch (error) {
 		const message = error instanceof Error ? error.message : "failed to parse skill file";
 		diagnostics.push({ type: "warning", message, path: filePath });

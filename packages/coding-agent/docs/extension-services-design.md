@@ -1,11 +1,11 @@
 # Extension services foundation
 
-- Status: Proposed; design only, not an implemented API.
+- Status: Design intent. Text/search, tasks, and ready-only context shipped in #432; [completion scope](extension-services-completion-design.md) adds bounded waiting, semantic discovery, and skill resources. See [extensions](extensions.md#managed-context-preparation) for the actual public API.
 - Date: 2026-09-18
 - Audience: Volt maintainers and extension API implementers.
 - Scope: Read services, managed request-scoped tasks, and optional context contributions.
 - Decision: Foundation first. Transparent tool-cache reuse and autonomous workflows are deferred.
-- Delivery plan: [First implementation PR](extension-services-implementation-plan-design.md). It proposes a smaller text/search, task, and ready-only context slice; LSP, skill-file reads, and blocking waits below remain follow-on work.
+- Delivery plan: [First implementation PR](extension-services-implementation-plan-design.md). It records the smaller text/search, task, and ready-only context slice; LSP, skill-file reads, and bounded waits are covered by the separate completion scope.
 
 ## 1. Objective
 

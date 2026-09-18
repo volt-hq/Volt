@@ -130,11 +130,13 @@ import {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { ExtensionWorkExecution, ExtensionWorkExecutionResult } from "./extensions/work-host.ts";
 import { ExtensionWorkManager, withoutExtensionWork } from "./extensions/work-runtime.ts";
+import { ExtensionSkillCatalog } from "./extensions/work-skills.ts";
 import type { ExtensionWorkFailure, ExtensionWorkLimits, ExtensionWorkService } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import { createSessionManagerHarnessSession, SessionManagerHarnessStorage } from "./harness-session-adapter.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import { resolveLspConfig } from "./lsp/config.ts";
+import { withManagedLspObservation } from "./lsp/managed-observation.ts";
 import { LspManager, type LspServerStatus } from "./lsp/manager.ts";
 import { createMcpDirectToolDefinitions } from "./mcp/direct-tools.ts";
 import type { McpManager } from "./mcp/manager.ts";
@@ -602,7 +604,15 @@ export class AgentSessionConstructionCleanupError extends AggregateError {}
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const MAX_COMPACTION_SUMMARY_RETRIES = 2;
 const MAX_COMPACTION_RETRY_DELAY_MS = 30_000;
-const EXTENSION_WORK_TOOLS = { readText: "read", findPaths: "find", searchText: "grep" } as const;
+const EXTENSION_WORK_TOOLS = {
+	readText: "read",
+	findPaths: "find",
+	searchText: "grep",
+	readSkill: "read",
+	symbols: "lsp",
+	definition: "lsp",
+	references: "lsp",
+} as const;
 const EXTENSION_WORK_GRANT: OperationGrantProfile = {
 	id: "extension-preparation-read",
 	capabilities: new Set(["workspace.read"]),
@@ -766,6 +776,7 @@ export class AgentSession {
 	// Extension system
 	private _extensionRunner!: ExtensionRunner;
 	private _extensionWork!: ExtensionWorkManager;
+	private _extensionSkills!: ExtensionSkillCatalog;
 	private readonly _extensionWorkLimits: Partial<ExtensionWorkLimits> | undefined;
 	private _extensionWorkKey: string | undefined;
 	private _extensionWorkSignal: AbortSignal | undefined;
@@ -1611,6 +1622,7 @@ export class AgentSession {
 	}
 
 	private _createExtensionWorkManager(): ExtensionWorkManager {
+		this._extensionSkills = new ExtensionSkillCatalog();
 		const manager = new ExtensionWorkManager({
 			limits: this._extensionWorkLimits,
 			isCurrent: () => this._extensionWork === manager && this._extensionWorkIsCurrent(),
@@ -1650,6 +1662,7 @@ export class AgentSession {
 		}
 		const manager = this._extensionWork;
 		const model = this.model;
+		const catalog = this._extensionSkills.snapshot(this._resourceLoader.getSkills().skills);
 		manager.boundary({
 			key: batch.id,
 			attemptId: boundary.attemptId,
@@ -1660,6 +1673,7 @@ export class AgentSession {
 				revision: boundary.cursor.revision,
 				cwd: this._cwd,
 				mode: this._planningState.mode,
+				...catalog,
 				...(model ? { model: { provider: model.provider, id: model.id } } : {}),
 				inputs: batch.deliveries.flatMap((delivery) =>
 					delivery.messages.map((message) => ({
@@ -1670,12 +1684,19 @@ export class AgentSession {
 				services: (Object.keys(EXTENSION_WORK_TOOLS) as ExtensionWorkService[]).filter((service) => {
 					const name = EXTENSION_WORK_TOOLS[service];
 					return (
-						this._effectiveActiveToolNames.includes(name) && this._getTrustedOperationResolver(name) !== undefined
+						(service === "readSkill"
+							? catalog.skills.length > 0
+							: this._effectiveActiveToolNames.includes(name)) &&
+						this._getTrustedOperationResolver(name) !== undefined
 					);
 				}),
 			},
 		});
-		if (!model || !Number.isFinite(model.contextWindow) || model.contextWindow <= 0) return undefined;
+		if (!model || !Number.isFinite(model.contextWindow) || model.contextWindow <= 0) {
+			// Unknown headroom still consumes this scope's one preparation allowance.
+			await manager.collect(boundary.cursor.revision, () => false, 0);
+			return undefined;
+		}
 		const reserve = this.settingsManager.getCompactionSettings(model).reserveTokens;
 		const mandatory =
 			estimateMessagesTokens(context.messages) +
@@ -1711,6 +1732,13 @@ export class AgentSession {
 
 	private async _executeExtensionWork(request: ExtensionWorkExecution): Promise<ExtensionWorkExecutionResult> {
 		const name = EXTENSION_WORK_TOOLS[request.service];
+		const resourceId =
+			request.service === "readSkill" && typeof request.input.resourceId === "string"
+				? request.input.resourceId
+				: undefined;
+		const catalog = this._extensionSkills;
+		const resource = resourceId ? catalog.resolve(resourceId, this._resourceLoader.getSkills().skills) : undefined;
+		if (request.service === "readSkill" && !resource) return { status: "denied", reason: "invalid_skill_resource" };
 		const tool = this._toolRegistry.get(name);
 		const definition = this._toolDefinitions.get(name)?.definition;
 		const runner = this._extensionRunner;
@@ -1727,7 +1755,7 @@ export class AgentSession {
 			!tool ||
 			!definition ||
 			!implementation ||
-			!this._effectiveActiveToolNames.includes(name) ||
+			(!resource && !this._effectiveActiveToolNames.includes(name)) ||
 			!this._getTrustedOperationResolver(name)
 		) {
 			return { status: "unavailable", reason: "inactive_or_untrusted_tool" };
@@ -1751,10 +1779,20 @@ export class AgentSession {
 			) {
 				return { status: "invalidated", reason: "authority_changed" };
 			}
+			if (
+				resource &&
+				(catalog !== this._extensionSkills ||
+					catalog.resolve(resourceId!, this._resourceLoader.getSkills().skills) !== resource)
+			)
+				return { status: "invalidated", reason: "skill_resource_changed" };
+			if (resource && input.path !== resource.identity.path)
+				return { status: "denied", reason: "skill_target_changed" };
+			if (name === "lsp" && input.action !== request.service)
+				return { status: "denied", reason: "semantic_action_changed" };
 			const resolver = this._getTrustedOperationResolver(name);
 			const profile = this._getOperationGrantProfile();
 			if (
-				!this._effectiveActiveToolNames.includes(name) ||
+				(!resource && !this._effectiveActiveToolNames.includes(name)) ||
 				!authorizeToolOperation(resolver, input, EXTENSION_WORK_GRANT).allowed ||
 				(profile && !authorizeToolOperation(resolver, input, profile).allowed)
 			) {
@@ -1770,7 +1808,15 @@ export class AgentSession {
 			);
 		let input: JsonObject;
 		try {
-			input = validate(request.input);
+			input = validate(
+				resource
+					? {
+							path: resource.identity.path,
+							...(request.input.offset === undefined ? {} : { offset: request.input.offset }),
+							...(request.input.limit === undefined ? {} : { limit: request.input.limit }),
+						}
+					: request.input,
+			);
 		} catch {
 			return { status: "failed", reason: "invalid_arguments" };
 		}
@@ -1789,6 +1835,8 @@ export class AgentSession {
 			if (failure) return failure;
 			if (decision?.block) return { status: "denied", reason: "extension_gate" };
 			input = validate(event.input);
+			failure = check(input);
+			if (failure) return failure;
 			for (const { policy, callback } of policies) {
 				const result = await withoutExtensionWork(() =>
 					callback?.call(policy, { ...event, input }, request.signal),
@@ -1801,7 +1849,7 @@ export class AgentSession {
 			failure = check(input);
 			if (failure) return failure;
 			let producerFailure: ExtensionWorkFailure | undefined;
-			const captured = await withRepositoryObservation<Awaited<ReturnType<AgentTool["execute"]>>>(async () => {
+			const execute = async (): Promise<Awaited<ReturnType<AgentTool["execute"]>>> => {
 				try {
 					return await tool.execute(toolCallId, input, request.signal);
 				} catch (error) {
@@ -1812,7 +1860,11 @@ export class AgentSession {
 						isError: true,
 					};
 				}
-			});
+			};
+			const captured =
+				name === "lsp"
+					? await withManagedLspObservation(execute)
+					: await withRepositoryObservation(execute, resource?.identity);
 			failure = check(input);
 			if (failure) return failure;
 			const original = cloneCanonicalData(
@@ -1849,7 +1901,20 @@ export class AgentSession {
 							isError: patch.isError ?? original.isError,
 						};
 			if (!isDeepStrictEqual(original, reduced)) return { status: "unavailable", reason: "transformed_result" };
-			if (original.isError) return producerFailure ?? { status: "failed", reason: "tool_failed" };
+			if (original.isError) {
+				const outcome = "outcome" in captured ? captured.outcome : undefined;
+				if (outcome)
+					return {
+						status:
+							outcome === "unavailable" || outcome === "unsupported" || outcome === "cancelled"
+								? outcome
+								: outcome === "timeout"
+									? "deadline_exceeded"
+									: "failed",
+						reason: `lsp_${outcome.replaceAll("-", "_")}`,
+					};
+				return producerFailure ?? { status: "failed", reason: "tool_failed" };
+			}
 			if (!captured.observation) return { status: "unsupported", reason: "no_structured_observation" };
 			return { status: "ok", observation: captured.observation, implementation: tool };
 		} catch {
