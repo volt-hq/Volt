@@ -256,25 +256,31 @@ describe("private repository observations", () => {
 		expect(await withRepositoryObservation(async () => 42)).toEqual({ result: 42 });
 	});
 
-	it("captures native fd paths before formatting and preserves foreground results", async () => {
-		prepareProcess((child) => {
-			child.stdout.write(`${join(cwd, "a:3: item.ts")}\n${join(cwd, "b.ts")}\n`);
-			child.close();
-		});
-		const tool = createFindTool(cwd);
-		const managed = await withRepositoryObservation(() => tool.execute("managed", { pattern: "*.ts" }));
-		expect(ensureTool).not.toHaveBeenCalled();
-		expect(getToolPath).toHaveBeenCalledExactlyOnceWith("fd");
-		const foreground = await tool.execute("foreground", { pattern: "*.ts" });
-		expect(managed.result).toEqual(foreground);
-		expect(foreground).toEqual({ content: [{ type: "text", text: "a:3: item.ts\nb.ts" }] });
-		expect(managed.observation).toEqual({
-			kind: "find",
-			paths: [join(cwd, "a:3: item.ts"), join(cwd, "b.ts")],
-			truncated: false,
-		});
-		expect(ensureTool).toHaveBeenCalledExactlyOnceWith("fd", true);
-	});
+	it.for(["a item.ts", "a:3: item.ts"])(
+		"captures native fd paths before formatting and preserves foreground results for %j",
+		async (fileName, context) => {
+			if (process.platform === "win32" && fileName.includes(":")) {
+				context.skip("Colons are not supported in Windows filenames");
+			}
+			prepareProcess((child) => {
+				child.stdout.write(`${join(cwd, fileName)}\n${join(cwd, "b.ts")}\n`);
+				child.close();
+			});
+			const tool = createFindTool(cwd);
+			const managed = await withRepositoryObservation(() => tool.execute("managed", { pattern: "*.ts" }));
+			expect(ensureTool).not.toHaveBeenCalled();
+			expect(getToolPath).toHaveBeenCalledExactlyOnceWith("fd");
+			const foreground = await tool.execute("foreground", { pattern: "*.ts" });
+			expect(managed.result).toEqual(foreground);
+			expect(foreground).toEqual({ content: [{ type: "text", text: `${fileName}\nb.ts` }] });
+			expect(managed.observation).toEqual({
+				kind: "find",
+				paths: [join(cwd, fileName), join(cwd, "b.ts")],
+				truncated: false,
+			});
+			expect(ensureTool).toHaveBeenCalledExactlyOnceWith("fd", true);
+		},
+	);
 
 	it.each(["find", "grep", "grep-file"] as const)("returns reusable paths for nested-root %s", async (kind) => {
 		const directory = join(cwd, "nested");
@@ -390,9 +396,12 @@ describe("private repository observations", () => {
 		});
 	});
 
-	it.each(["source.ts", "source\nname.ts"])(
+	it.for(["source.ts", "source\nname.ts"])(
 		"does not capture matches excluded by native context-output truncation in %j",
-		async (fileName) => {
+		async (fileName, context) => {
+			if (process.platform === "win32" && fileName.includes("\n")) {
+				context.skip("Newlines are not supported in Windows filenames");
+			}
 			await writeFile(join(cwd, fileName), Array.from({ length: 200 }, () => "x".repeat(500)).join("\n"));
 			prepareProcess((child) => {
 				child.stdout.write(matchEvent(join(cwd, fileName), 150, "x".repeat(500)));
