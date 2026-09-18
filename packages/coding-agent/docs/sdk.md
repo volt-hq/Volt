@@ -265,8 +265,6 @@ try {
 }
 ```
 
-Host callers may pass `startByName("scout", { model: "provider/model-id" })` to override the definition's model for that run without changing the definition, primary model, or default settings. Normal availability/auth checks still apply; this option is not a model-facing tool argument.
-
 During normal execution, `waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, queued continuations, and child background jobs. Native background delegation keeps parent cancellation and delegation ownership until that work settles. Direct SDK callers using `retainRuntimeOnDispose: true` must abort and drain active child work before disposing the handle; the external owner must retain and eventually dispose the runtime. Retaining a runtime alone does not preserve delegation ownership after direct handle disposal. The result has this contract:
 
 ```typescript

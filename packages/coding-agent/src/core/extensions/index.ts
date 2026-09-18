@@ -103,8 +103,6 @@ export type {
 	ProjectTrustEventDecision,
 	ProjectTrustEventResult,
 	ProjectTrustHandler,
-	PromptRouteEvent,
-	PromptRouteResult,
 	// Provider Registration
 	ProviderConfig,
 	ProviderModelConfig,

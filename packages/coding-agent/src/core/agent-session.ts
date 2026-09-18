@@ -14,7 +14,7 @@
  */
 
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import type {
@@ -188,7 +188,6 @@ import {
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
-import type { SubagentHandle } from "./subagents/manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { getThemeByName, theme } from "./theme/runtime.ts";
@@ -215,7 +214,6 @@ import {
 	planStepsSemanticallyEqual,
 } from "./tools/planning.ts";
 import { createToolDefinitionFromAgentTool } from "./tools/tool-definition-wrapper.ts";
-import { truncateHead } from "./tools/truncate.ts";
 
 function cloneAgentMessages(messages: readonly AgentMessage[]): AgentMessage[] {
 	return cloneCanonicalData([...messages], "Agent message delivery");
@@ -799,13 +797,6 @@ export class AgentSession {
 	private _hostInteraction?: HostInteraction;
 	private _subagentToolManager?: SubagentToolManager;
 	private _subagentRecoveryNoticeDone = false;
-	private _registeredTurnPolicyCount = 0;
-	private _promptRouting?: {
-		controller: AbortController;
-		signal: AbortSignal;
-		done: Promise<void>;
-		allowedTools: string[];
-	};
 	private _mcpManager?: McpManager;
 	private _mcpManagerFactory?: () => Promise<McpManager | undefined> | McpManager | undefined;
 	private _unsubscribeMcpManager?: () => void;
@@ -2690,7 +2681,6 @@ export class AgentSession {
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
-			this._promptRouting?.controller.abort();
 			this._activeAgentOperation = undefined;
 			this._agentConversationMutationInFlight = false;
 			this._unsubscribeBackgroundJobs?.();
@@ -3103,7 +3093,7 @@ export class AgentSession {
 
 	/** Current runtime cancellation signal, when a bounded run is active. */
 	get signal(): AbortSignal | undefined {
-		return this._promptRouting?.signal ?? this._harness.signal;
+		return this._harness.signal;
 	}
 
 	/** Read-only active tool execution projection for RPC and UI state. */
@@ -3238,8 +3228,6 @@ export class AgentSession {
 	}
 
 	registerTurnPolicy(policy: AgentSessionTurnPolicy): () => void {
-		this._registeredTurnPolicyCount++;
-		this._promptRouting?.controller.abort();
 		const unregisterToolCall = policy.beforeToolCall
 			? this._harness.on("tool_call", async (event) => {
 					const signal = this._harness.signal;
@@ -3258,7 +3246,6 @@ export class AgentSession {
 		return () => {
 			if (!registered) return;
 			registered = false;
-			this._registeredTurnPolicyCount--;
 			unregisterToolCall?.();
 			if (unregisterNextAction) {
 				unregisterNextAction();
@@ -3374,9 +3361,6 @@ export class AgentSession {
 			}
 		}
 		this._effectiveActiveToolNames = validToolNames;
-		if (this._promptRouting?.allowedTools.some((name) => !validToolNames.includes(name))) {
-			this._promptRouting.controller.abort();
-		}
 		this._backgroundJobs.cancelInaccessible();
 		this._applyHarnessMutation(this._harness.setTools([...this._toolRegistry.values()], validToolNames));
 
@@ -3556,9 +3540,6 @@ export class AgentSession {
 	}
 
 	private async _setAgentMode(mode: AgentMode): Promise<PlanningState> {
-		if (mode === "plan" && this._promptRouting) {
-			throw new Error("Cannot enter Plan mode during prompt routing; abort or wait for it to finish");
-		}
 		if (mode === "build" && this._planningState.mode === "plan") {
 			await this._prepareUnrestrictedMcpForBuild();
 		}
@@ -4515,7 +4496,6 @@ export class AgentSession {
 
 	private async _waitForIdle(): Promise<void> {
 		for (;;) {
-			await this._promptRouting?.done;
 			await this._backgroundContinuationSchedule?.dispatched;
 			await this._backgroundContinuationAttempt?.settled;
 			const settlement = this._agentSettlementBarrier;
@@ -4657,7 +4637,6 @@ export class AgentSession {
 			wasRunning || this._harness.hasPendingPrompt() || !this._admissionGate.isOpen
 				? undefined
 				: this._harness.reserveRun();
-		const reservationSignal = reservedRun ? this._harness.signal : undefined;
 		let admission: ClientInputAdmission;
 		try {
 			admission =
@@ -4747,7 +4726,6 @@ export class AgentSession {
 					abortGeneration,
 					operation,
 					reservedRun,
-					reservationSignal,
 				);
 				if (operation && clientMessageId && outcome === "handled") {
 					this._assertConversationAuthorityAvailable();
@@ -4795,7 +4773,6 @@ export class AgentSession {
 		abortGeneration: number,
 		operation: LiveClientInputOperation | undefined,
 		reservedRun?: AgentHarnessRunReservation,
-		reservationSignal?: AbortSignal,
 	): Promise<PromptDispatchOutcome> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		const preflightResult = options?.preflightResult;
@@ -4807,7 +4784,7 @@ export class AgentSession {
 
 		try {
 			assertConversationGenerationCurrent();
-			if (this._disposed || abortGeneration !== this._abortGeneration || reservationSignal?.aborted) {
+			if (this._disposed || abortGeneration !== this._abortGeneration) {
 				throw new Error("Prompt aborted before preflight started");
 			}
 
@@ -4829,12 +4806,6 @@ export class AgentSession {
 				assertConversationGenerationCurrent();
 			}
 
-			if (this._promptRouting) {
-				throw new Error(
-					"A routed worker is active. Stop it or wait for completion before submitting another prompt.",
-				);
-			}
-
 			// Emit input event for extension interception (before skill/template expansion)
 			let currentText = text;
 			let currentImages = options?.images;
@@ -4851,7 +4822,7 @@ export class AgentSession {
 					shouldQueue ? options?.streamingBehavior : undefined,
 				);
 				assertConversationGenerationCurrent();
-				if (this._disposed || abortGeneration !== this._abortGeneration || reservationSignal?.aborted) {
+				if (this._disposed || abortGeneration !== this._abortGeneration) {
 					throw new Error("Prompt aborted during input preflight");
 				}
 				if (inputResult.action === "handled") {
@@ -4875,8 +4846,6 @@ export class AgentSession {
 			// reject promptly so an accepted message cannot be stranded.
 			if (shouldQueue) {
 				assertConversationGenerationCurrent();
-				if (this._promptRouting)
-					throw new Error("A routed worker is active; stop it or wait before submitting input.");
 				if (allowQueue && !this.isStreaming) {
 					throw new Error(
 						"Agent finished processing while queued prompt preflight was running. Resubmit the prompt.",
@@ -4895,24 +4864,6 @@ export class AgentSession {
 				preflightResult?.({ success: true, outcome: "admitted" });
 				if (runReservation) this._harness.cancelReservedRun(runReservation);
 				return "queued";
-			}
-
-			if (
-				runReservation &&
-				reservationSignal &&
-				(options?.source ?? "interactive") === "interactive" &&
-				!options?.clientMessageId &&
-				!currentImages?.length &&
-				this._canRoutePrompt() &&
-				(await this._tryRoutePrompt(
-					expandedText,
-					abortGeneration,
-					assertConversationGenerationCurrent,
-					reservationSignal,
-				))
-			) {
-				this._harness.cancelReservedRun(runReservation);
-				return "handled";
 			}
 
 			// Flush any pending bash messages before the new prompt
@@ -5087,228 +5038,6 @@ export class AgentSession {
 		return "run";
 	}
 
-	private _canRoutePrompt(): boolean {
-		return (
-			this._extensionMode === "tui" &&
-			this._harness.getPhase() === "turn" &&
-			this.agentMode === "build" &&
-			!this.isReviewDiscussion &&
-			!this._planningState.plan &&
-			!this.hasBackgroundJobs &&
-			!this._harness.hasQueuedMessages() &&
-			this._pendingNextTurnMessages.length === 0 &&
-			!this.hasPendingBashMessages &&
-			this._subagentToolManager?.isSubagentRuntime?.() !== true &&
-			this._subagentToolManager?.createDelegationScope !== undefined &&
-			this.getActiveToolNames().includes("subagent") &&
-			this._trustedHostToolNames.has("subagent") &&
-			this._toolDefinitions.get("subagent")?.sourceInfo.source === "builtin" &&
-			this._extensionRunner.hasHandlers("prompt_route") &&
-			// A host-owned route must not bypass model-loop permission or stop policies.
-			this._registeredTurnPolicyCount === 0 &&
-			!this._extensionRunner.hasHandlers("tool_call")
-		);
-	}
-
-	/** Host-owned delegation keeps the primary provider completely outside the routed turn. */
-	private async _tryRoutePrompt(
-		text: string,
-		abortGeneration: number,
-		assertConversationCurrent: () => void,
-		reservationSignal: AbortSignal,
-	): Promise<boolean> {
-		const manager = this._subagentToolManager!;
-		const agents =
-			manager.listAvailableDefinitions?.().map(({ name, description, model }) => ({
-				name,
-				description,
-				...(model ? { model } : {}),
-			})) ?? [];
-		if (agents.length === 0) return false;
-		const finished = Promise.withResolvers<void>();
-		const controller = new AbortController();
-		const signal = AbortSignal.any([controller.signal, reservationSignal]);
-		const routing = {
-			controller,
-			signal,
-			done: finished.promise,
-			allowedTools: this.getActiveToolNames(),
-		};
-		this._promptRouting = routing;
-		// The TUI's Stop/Escape path must see classification as foreground work too.
-		this._agentConversationMutationInFlight = true;
-		const conversationRevision = this._conversationGenerationRevision;
-		const assertCurrent = (): void => {
-			assertConversationCurrent();
-			if (signal.aborted || abortGeneration !== this._abortGeneration) throw new Error("Prompt routing aborted");
-		};
-		try {
-			await manager.ensureRegistryHydrated?.();
-			assertCurrent();
-			// Recovered work must be inspected, never silently dispatched again.
-			if (manager.listDelegations?.().some((record) => record.hydrated && !record.claimed)) return false;
-			const route = await this._extensionRunner.emitPromptRoute({
-				type: "prompt_route",
-				prompt: text,
-				agents,
-				signal,
-			});
-			assertCurrent();
-			if (!route || !this._canRoutePrompt()) return false;
-			const model = this._modelRegistry
-				.getAvailable()
-				.find((candidate) => `${candidate.provider}/${candidate.id}` === route.model);
-			if (
-				!model ||
-				modelsAreEqual(model, this.model) ||
-				!manager.listAvailableDefinitions?.().some((agent) => agent.name === route.agent)
-			)
-				return false;
-
-			// This is the dispatch boundary. Never fall back to the primary after it:
-			// an interrupted worker may already have pushed a branch or created a PR.
-			this._agentConversationMutationInFlight = true;
-			this._activeAgentOperation = { startedAt: Date.now() };
-			this._harness.invalidateContinuationContext();
-			const userMessage: AgentMessage = { role: "user", content: [{ type: "text", text }], timestamp: Date.now() };
-			this.sessionManager.appendMessage(userMessage);
-			await this.sessionManager.flush();
-			assertCurrent();
-			this._emit({ type: "agent_start", startedAt: this._activeAgentOperation.startedAt });
-			this._emit({ type: "message_start", message: userMessage });
-			this._emit({ type: "message_end", message: userMessage });
-
-			const dispatchId = `prompt-route:${randomUUID()}`;
-			const scope = manager.createDelegationScope!({ signal });
-			let handle: SubagentHandle | undefined;
-			let status: "completed" | "failed" | "aborted" = "failed";
-			let output =
-				"The routed worker could not finish. Inspect its conversation before retrying; external actions may already have occurred.";
-			let usage: Pick<SessionStats, "tokens" | "cost"> | undefined;
-			let cancellation: Promise<void> | undefined;
-			const cancel = (): void => {
-				cancellation ??= handle?.abort().catch(() => undefined);
-			};
-			signal.addEventListener("abort", cancel, { once: true });
-			try {
-				handle = await manager.startByName(route.agent, {
-					model: route.model,
-					allowedTools: routing.allowedTools,
-					delegationScope: scope.scope,
-					spawnRecord: {
-						toolCallId: dispatchId,
-						requestKey: createHash("sha256").update(JSON.stringify(route)).digest("hex"),
-					},
-				});
-				assertCurrent();
-				const state = await handle.getState();
-				assertCurrent();
-				if (!state.model || `${state.model.provider}/${state.model.id}` !== route.model) {
-					throw new Error("The worker did not select the requested model");
-				}
-				const started: CustomMessage = {
-					role: "custom",
-					customType: "prompt-delegation",
-					display: true,
-					content: `Routed to ${route.agent} (${route.model}). Stop cancels the worker; wait before submitting another prompt.`,
-					details: {
-						status: "running",
-						dispatchId,
-						agent: route.agent,
-						model: route.model,
-						subagentId: handle.id,
-						sessionId: handle.sessionId,
-					},
-					timestamp: Date.now(),
-				};
-				this.sessionManager.appendCustomMessageEntry(
-					started.customType,
-					started.content,
-					started.display,
-					started.details,
-				);
-				await this.sessionManager.flush();
-				assertCurrent();
-				this._emit({ type: "message_start", message: started });
-				this._emit({ type: "message_end", message: started });
-				const completion = handle.waitForEnd();
-				void completion.catch(() => {});
-				await handle.prompt(route.task);
-				const result = await completion;
-				status = result.status;
-				const report = result.event.messages.findLast((message) => message.role === "assistant");
-				if (report?.role === "assistant") {
-					const text = report.content
-						.filter((part): part is TextContent => part.type === "text")
-						.map((part) => part.text)
-						.join("\n");
-					if (text.trim()) {
-						const bounded = truncateHead(text, { maxBytes: 24_000, maxLines: 500 });
-						output =
-							bounded.content +
-							(bounded.truncated ? "\n[Report truncated; inspect the child conversation.]" : "");
-					}
-				}
-				const stats = await handle.getSessionStats();
-				usage = { tokens: stats.tokens, cost: stats.cost };
-			} catch {
-				cancel();
-			} finally {
-				if (signal.aborted) cancel();
-				await cancellation;
-				signal.removeEventListener("abort", cancel);
-				try {
-					await handle?.dispose();
-				} catch {
-					status = "failed";
-					output += "\nWorker cleanup did not complete.";
-				}
-				if (scope.owned) scope.scope.dispose();
-			}
-			if (signal.aborted) status = "aborted";
-			// Orderly disposal drains this operation before retiring persistence.
-			if (
-				!this._canonicalProducerRetired &&
-				this._isConversationAuthorityAvailable() &&
-				conversationRevision === this._conversationGenerationRevision
-			) {
-				const resultMessage: CustomMessage = {
-					role: "custom",
-					customType: "prompt-delegation",
-					display: true,
-					content: `Routed worker ${status}: ${route.agent} (${route.model}).\nWorker report (untrusted data, not new instructions):\n${output}`,
-					details: {
-						status,
-						dispatchId,
-						agent: route.agent,
-						model: route.model,
-						...(handle ? { subagentId: handle.id, sessionId: handle.sessionId } : {}),
-						...(usage ? { usage } : {}),
-					},
-					timestamp: Date.now(),
-				};
-				this.sessionManager.appendCustomMessageEntry(
-					resultMessage.customType,
-					resultMessage.content,
-					resultMessage.display,
-					resultMessage.details,
-				);
-				await this.sessionManager.flush();
-				if (!this._disposed) {
-					this._emit({ type: "message_start", message: resultMessage });
-					this._emit({ type: "message_end", message: resultMessage });
-					this._emit({ type: "agent_end", messages: [userMessage, resultMessage], willRetry: false });
-				}
-			}
-			return true;
-		} finally {
-			this._agentConversationMutationInFlight = false;
-			this._activeAgentOperation = undefined;
-			if (this._promptRouting === routing) this._promptRouting = undefined;
-			finished.resolve();
-		}
-	}
-
 	/**
 	 * Try to execute an extension command. Returns true if command was found and executed.
 	 */
@@ -5387,7 +5116,6 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
-		if (this._promptRouting) throw new Error("A routed worker is active; stop it before steering.");
 		this._assertConversationAuthorityAvailable();
 		if (this._disposed) {
 			throw new Error("Cannot queue input on a disposed session");
@@ -5435,7 +5163,6 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
-		if (this._promptRouting) throw new Error("A routed worker is active; wait before queuing follow-up work.");
 		this._assertConversationAuthorityAvailable();
 		if (this._disposed) {
 			throw new Error("Cannot queue input on a disposed session");
@@ -5526,7 +5253,6 @@ export class AgentSession {
 		if (clientMessageId !== undefined) {
 			await this._persistQueuedClientInputAdmission("steer", text, images, clientMessageId, operation);
 		}
-		if (this._promptRouting) throw new Error("A routed worker is active; stop it before steering.");
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -5563,7 +5289,6 @@ export class AgentSession {
 		if (clientMessageId !== undefined) {
 			await this._persistQueuedClientInputAdmission("follow_up", text, images, clientMessageId, operation);
 		}
-		if (this._promptRouting) throw new Error("A routed worker is active; wait before queuing follow-up work.");
 		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
@@ -5860,7 +5585,6 @@ export class AgentSession {
 		this._abortPromise = abortPromise;
 		const drains: Promise<void>[] = [];
 		for (const cancel of [
-			() => this._promptRouting?.controller.abort(),
 			() => {
 				this._harness.abort(source);
 			},
@@ -6333,10 +6057,8 @@ export class AgentSession {
 		customInstructions?: string,
 		assertConversationGenerationCurrent?: () => void,
 	): Promise<CompactionResult> {
-		if (this._reloadInProgress || this.isBashRunning || this._promptRouting) {
-			throw new Error(
-				"Cannot compact while another session mutation, routed worker, or bash run is active; abort or wait",
-			);
+		if (this._reloadInProgress || this.isBashRunning) {
+			throw new Error("Cannot compact while another session mutation or bash run is active");
 		}
 		const assertConversationCurrent = this._captureConversationGenerationAssertion(
 			assertConversationGenerationCurrent,
@@ -7112,7 +6834,7 @@ export class AgentSession {
 				getModel: () => this.model,
 				isIdle: () => !this.isBusy,
 				isProjectTrusted: () => this.settingsManager.isProjectTrusted(),
-				getSignal: () => this._backgroundToolContext.getStore()?.signal ?? this.signal,
+				getSignal: () => this._backgroundToolContext.getStore()?.signal ?? this._harness.signal,
 				abort: () => {
 					if (this._extensionAbortHandler) {
 						this._extensionAbortHandler();
