@@ -42,11 +42,29 @@ function selectSkill(prompt: string, skills: readonly ExtensionWorkSkill[]): Ext
 	return ranked[0].skill;
 }
 
+function* sourceSpans(prompt: string): Generator<string> {
+	let start = 0;
+	let quote: string | undefined;
+	for (let index = 0; index < prompt.length; index++) {
+		const char = prompt[index];
+		if (quote) {
+			if (char === quote) quote = undefined;
+		} else if (/[`"']/.test(char)) {
+			quote = char;
+		} else if (/\s/.test(char)) {
+			if (index > start) yield prompt.slice(start, index);
+			start = index + 1;
+		}
+	}
+	// An unterminated quote invalidates its whole connected span, including any path suffix.
+	if (!quote && start < prompt.length) yield prompt.slice(start);
+}
+
 function selectSources(prompt: string): SourceCandidate[] {
 	const sources: SourceCandidate[] = [];
 	const seen = new Set<string>();
 	// Preserve connected spans, including quoted spaces, until every part is validated.
-	for (const span of prompt.match(/(?:`[^`]*`|"[^"]*"|'[^']*'|\S)+/g) ?? []) {
+	for (const span of sourceSpans(prompt)) {
 		const tokens = span.replace(/[.!?]+$/, "").match(/`[^`]*`|"[^"]*"|'[^']*'|[^\s`"'(),;<>]+/g) ?? [];
 		const candidates: SourceCandidate[] = [];
 		for (const token of tokens) {

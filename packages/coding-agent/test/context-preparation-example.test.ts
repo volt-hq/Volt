@@ -230,6 +230,36 @@ describe("deterministic preparation selection", () => {
 		expect(test.requestWait).not.toHaveBeenCalled();
 	});
 
+	it.each(
+		['"', "'", "`"].flatMap((quote) => [
+			`Explain ${quote}my files/source.ts`,
+			`Explain (${quote}my files/source.ts)`,
+			`Explain ${quote}files/source.ts`,
+			`Explain ${quote}my\tfiles/source.ts`,
+			`Explain ${quote}my\nfiles/source.ts`,
+			`Explain ${quote}my files/source.ts:19`,
+			`Explain ${quote}my files/source.ts#target`,
+			`src/a.ts,src/b.ts,${quote}my files/source.ts`,
+			`Explain ${quote}my files/source.ts${quote === '"' ? "'" : '"'}`,
+		]),
+	)("does not read sources from the unterminated quoted span %s", async (prompt) => {
+		const test = setup();
+		await test.emit(prompt);
+		expect(test.repository.readText).not.toHaveBeenCalled();
+		expect(test.repository.symbols).not.toHaveBeenCalled();
+		expect(test.put).not.toHaveBeenCalled();
+		expect(test.start).not.toHaveBeenCalled();
+		expect(test.requestWait).not.toHaveBeenCalled();
+	});
+
+	it.each(['"', "'", "`"])("preserves an independent path before an unterminated %s quote", async (quote) => {
+		const test = setup();
+		await test.emit(`src/a.ts:19 ${quote}my files/source.ts`);
+		expect(test.repository.readText).toHaveBeenCalledExactlyOnceWith({ path: "src/a.ts", offset: 19, limit: 40 });
+		expect(test.repository.symbols).not.toHaveBeenCalled();
+		expect(test.put).toHaveBeenCalledTimes(1);
+	});
+
 	it.each([
 		"src/a.ts:19,src/b.ts#target",
 		"src/a.ts:19,src/a.ts,src/b.ts#target",
@@ -237,6 +267,7 @@ describe("deterministic preparation selection", () => {
 		"(src/a.ts:19);<src/b.ts#target>",
 		"(src/a.ts:19);<src/b.ts#target>.",
 		"`src/a.ts:19`,'src/b.ts#target'",
+		'"src/a.ts:19","src/b.ts#target"',
 		"`src/a.ts:19`, 'src/b.ts#target'?!",
 	])("preserves relative-path lists and anchors in %s", async (prompt) => {
 		const test = setup();
