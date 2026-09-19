@@ -45,32 +45,41 @@ function selectSkill(prompt: string, skills: readonly ExtensionWorkSkill[]): Ext
 function selectSources(prompt: string): SourceCandidate[] {
 	const sources: SourceCandidate[] = [];
 	const seen = new Set<string>();
-	// Deliberately parse whole tokens, never a path substring inside a URL or an absolute path.
-	for (const token of prompt.match(/`[^`]*`|"[^"]*"|'[^']*'|[^\s`"'(),;<>]+/g) ?? []) {
-		// Keep quoted paths whole: a space must not turn their trailing component into a new target.
-		const value = /^[`"']/.test(token) ? token.slice(1, -1) : token;
-		const match = value
-			.replace(/[.!?]+$/, "")
-			.match(
-				/^(?:\.\/)?([a-zA-Z0-9_-][a-zA-Z0-9_./-]*\.(?:ts|tsx|js|jsx|mjs|cjs|py|rs|go|swift|java|kt|c|h|cpp|hpp|cs|rb|php|sh|md|txt|json|yaml|yml|toml))(?::([1-9][0-9]{0,6})|#([a-zA-Z_$][a-zA-Z0-9_$]{0,63}))?$/,
-			);
-		if (!match) continue;
-		const path = match[1];
-		if (
-			path.length > 256 ||
-			path
-				.split("/")
-				.some((part) => !part || part.startsWith(".") || part === "node_modules" || part === "vendor") ||
-			seen.has(path)
-		)
-			continue;
-		seen.add(path);
-		sources.push({
-			path,
-			...(match[2] ? { line: Number(match[2]) } : {}),
-			...(match[3] ? { symbol: match[3] } : {}),
-		});
-		if (sources.length === 2) break;
+	// Preserve connected spans, including quoted spaces, until every part is validated.
+	for (const span of prompt.match(/(?:`[^`]*`|"[^"]*"|'[^']*'|\S)+/g) ?? []) {
+		const tokens = span.replace(/[.!?]+$/, "").match(/`[^`]*`|"[^"]*"|'[^']*'|[^\s`"'(),;<>]+/g) ?? [];
+		const candidates: SourceCandidate[] = [];
+		for (const token of tokens) {
+			// Keep quoted paths whole: a space must not turn their trailing component into a new target.
+			const value = /^[`"']/.test(token) ? token.slice(1, -1) : token;
+			const match = value
+				.replace(/[.!?]+$/, "")
+				.match(
+					/^(?:\.\/)?([a-zA-Z0-9_-][a-zA-Z0-9_./-]*\.(?:ts|tsx|js|jsx|mjs|cjs|py|rs|go|swift|java|kt|c|h|cpp|hpp|cs|rb|php|sh|md|txt|json|yaml|yml|toml))(?::([1-9][0-9]{0,6})|#([a-zA-Z_$][a-zA-Z0-9_$]{0,63}))?$/,
+				);
+			if (!match) break;
+			const path = match[1];
+			if (
+				path.length > 256 ||
+				path
+					.split("/")
+					.some((part) => !part || part.startsWith(".") || part === "node_modules" || part === "vendor")
+			)
+				break;
+			candidates.push({
+				path,
+				...(match[2] ? { line: Number(match[2]) } : {}),
+				...(match[3] ? { symbol: match[3] } : {}),
+			});
+		}
+		// Never salvage a suffix from a URL, absolute path, or other unsupported span.
+		if (candidates.length !== tokens.length) continue;
+		for (const candidate of candidates) {
+			if (seen.has(candidate.path)) continue;
+			seen.add(candidate.path);
+			sources.push(candidate);
+			if (sources.length === 2) return sources;
+		}
 	}
 	return sources;
 }

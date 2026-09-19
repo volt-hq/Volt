@@ -194,6 +194,72 @@ describe("deterministic preparation selection", () => {
 		expect(test.start).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		"https://host/a,src/config.ts",
+		"https://host/a;src/config.ts",
+		"https://host/a(src/config.ts)",
+		"https://host/a)src/config.ts",
+		"https://host/a?files=one,src/config.ts:20",
+		"https://host/a,src/config.ts#target",
+		"https://host/a'src/config.ts'",
+		"file:/tmp/a,src/config.ts",
+		"/tmp/a,src/config.ts",
+		"/tmp/a;src/config.ts",
+		"/tmp/a(src/config.ts)",
+		"/tmp/a)src/config.ts",
+		"/tmp/a,src/config.ts#target",
+		"C:/tmp/a,src/config.ts",
+		"C:\\tmp\\a;src/config.ts",
+		"\\\\host\\share\\a(src/config.ts)",
+		"(https://host/a,src/config.ts)",
+		"</tmp/a,src/config.ts>",
+		"`https://host/a,src/config.ts`",
+		'"/tmp/a,src/config.ts"',
+		"'C:/tmp/a,src/config.ts'",
+		"src/a.ts,https://host/a,src/config.ts",
+		"src/a.ts,src/b.ts,https://host/a,src/config.ts",
+		"src/a.ts;/tmp/a,src/config.ts",
+		'("my files/src/config.ts")',
+	])("does not read a source suffix from the connected span %s", async (prompt) => {
+		const test = setup();
+		await test.emit(prompt);
+		expect(test.repository.readText).not.toHaveBeenCalled();
+		expect(test.repository.symbols).not.toHaveBeenCalled();
+		expect(test.put).not.toHaveBeenCalled();
+		expect(test.start).not.toHaveBeenCalled();
+		expect(test.requestWait).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		"src/a.ts:19,src/b.ts#target",
+		"src/a.ts:19,src/a.ts,src/b.ts#target",
+		"src/a.ts:19;src/b.ts#target",
+		"(src/a.ts:19);<src/b.ts#target>",
+		"(src/a.ts:19);<src/b.ts#target>.",
+		"`src/a.ts:19`,'src/b.ts#target'",
+		"`src/a.ts:19`, 'src/b.ts#target'?!",
+	])("preserves relative-path lists and anchors in %s", async (prompt) => {
+		const test = setup();
+		await test.emit(prompt);
+		expect(test.repository.readText.mock.calls.map(([input]) => input)).toEqual([
+			{ path: "src/a.ts", offset: 19, limit: 40 },
+			{ path: "src/b.ts", offset: 20, limit: 5 },
+		]);
+		expect(test.repository.symbols).toHaveBeenCalledExactlyOnceWith({ path: "src/b.ts" });
+		expect(test.put).toHaveBeenCalledTimes(2);
+	});
+
+	it("prepares independent relative paths alongside ignored spans", async () => {
+		const test = setup();
+		await test.emit("https://host/a,src/config.ts src/a.ts:19 /tmp/a,src/config.ts#target src/b.ts#target");
+		expect(test.repository.readText.mock.calls.map(([input]) => input)).toEqual([
+			{ path: "src/a.ts", offset: 19, limit: 40 },
+			{ path: "src/b.ts", offset: 20, limit: 5 },
+		]);
+		expect(test.repository.symbols).toHaveBeenCalledExactlyOnceWith({ path: "src/b.ts" });
+		expect(test.put).toHaveBeenCalledTimes(2);
+	});
+
 	it.each(["/skill:pdf-tools src/a.ts", '<skill name="pdf-tools" location="/global/SKILL.md">\nsrc/a.ts\n</skill>'])(
 		"does not reinterpret explicit skill invocation: %s",
 		async (prompt) => {
