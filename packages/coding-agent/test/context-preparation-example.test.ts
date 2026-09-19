@@ -131,6 +131,35 @@ describe("deterministic preparation selection", () => {
 		expect(test.requestWait).toHaveBeenCalledTimes(selected ? 1 : 0);
 	});
 
+	it.each(["Extract tables", "Use pdf-tools"])("abstains from a truncated skill catalog for %s", async (prompt) => {
+		const test = setup([skill("pdf-tools", "Extract tables")]);
+		test.snapshot.skillsTruncated = true;
+		await test.emit(prompt);
+		expect(test.repository.readSkill).not.toHaveBeenCalled();
+		expect(test.put).not.toHaveBeenCalled();
+		expect(test.start).not.toHaveBeenCalled();
+		expect(test.requestWait).not.toHaveBeenCalled();
+	});
+
+	it.each([
+		["src/a.ts:19", 19, 40],
+		["src/a.ts#target", 20, 5],
+	] as const)("prepares explicit source %s despite a truncated skill catalog", async (source, offset, limit) => {
+		const test = setup([skill("pdf-tools", "Extract tables")]);
+		test.snapshot.skillsTruncated = true;
+		await test.emit(`Extract tables from ${source}`);
+		expect(test.repository.readSkill).not.toHaveBeenCalled();
+		expect(test.repository.readText).toHaveBeenCalledExactlyOnceWith({ path: "src/a.ts", offset, limit });
+		expect(test.put).toHaveBeenCalledExactlyOnceWith({
+			key: "source-1",
+			text: expect.stringContaining("observed source"),
+			dependency: "sources",
+			evidenceIds: ["/repo/src/a.ts"],
+		});
+		expect(test.start).toHaveBeenCalledTimes(1);
+		expect(test.requestWait).toHaveBeenCalledExactlyOnceWith(100);
+	});
+
 	it("reads only two distinct explicit targets and honors a line anchor", async () => {
 		const test = setup();
 		await test.emit("Check `./src/first.ts:19`, src/first.ts and src/second.py. Then src/third.rs");

@@ -130,9 +130,11 @@ export default function contextPreparation(volt: ExtensionAPI): void {
 		const prompt = inputs.join("\n").slice(0, 8192);
 		// Lexical matching cannot interpret exclusions: abstain on common negative cues.
 		if (/\b(?:do not|don['’]t|never|avoid|skip|without)\b/i.test(prompt)) return;
-		const skill = work.snapshot.services.includes("readSkill")
-			? selectSkill(prompt, work.snapshot.skills)
-			: undefined;
+		// A partial catalog cannot establish an unambiguous skill match.
+		const skill =
+			!work.snapshot.skillsTruncated && work.snapshot.services.includes("readSkill")
+				? selectSkill(prompt, work.snapshot.skills)
+				: undefined;
 		const sources = work.snapshot.services.includes("readText")
 			? selectSources(prompt).filter((source) => !source.symbol || work.snapshot.services.includes("symbols"))
 			: [];
