@@ -129,7 +129,7 @@ import {
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { ExtensionWorkExecution, ExtensionWorkExecutionResult } from "./extensions/work-host.ts";
-import { ExtensionWorkManager, withoutExtensionWork } from "./extensions/work-runtime.ts";
+import { ExtensionWorkManager, isExtensionWorkInvocation, withoutExtensionWork } from "./extensions/work-runtime.ts";
 import { ExtensionSkillCatalog } from "./extensions/work-skills.ts";
 import type { ExtensionWorkFailure, ExtensionWorkLimits, ExtensionWorkService } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
@@ -778,6 +778,12 @@ export class AgentSession {
 	private _extensionWork!: ExtensionWorkManager;
 	private _extensionSkills!: ExtensionSkillCatalog;
 	private readonly _extensionWorkLimits: Partial<ExtensionWorkLimits> | undefined;
+	/** Runtime-owned, shared by all extensions and retained across resource reload only. */
+	private _preparationWaitMs: number;
+	private readonly _maxPreparationWaitMs: number;
+	private _preparationWaitRequestRevision = 0;
+	private _preparationWaitConfirm?: ExtensionUIContext["confirm"];
+	private _preparationWaitConfirmation?: AbortController;
 	private _extensionWorkKey: string | undefined;
 	private _extensionWorkSignal: AbortSignal | undefined;
 	private _extensionWorkAbort: (() => void) | undefined;
@@ -866,7 +872,9 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.sessionManager = config.sessionManager;
-		this._extensionWorkLimits = config.extensionWorkLimits;
+		this._extensionWorkLimits = config.extensionWorkLimits ? { ...config.extensionWorkLimits } : undefined;
+		this._preparationWaitMs = config.extensionWorkLimits?.firstRequestWaitMs ?? 0;
+		this._maxPreparationWaitMs = config.extensionWorkLimits?.firstRequestWaitMs ?? 1000;
 		this._streamFn = config.streamFn;
 		this._backgroundDiagnostics = new BackgroundJobDiagnostics({
 			agentDir: resolvePath(config.agentDir ?? getAgentDir()),
@@ -1632,7 +1640,84 @@ export class AgentSession {
 				if (this._extensionWork === manager) this._extensionRunner.emitExtensionOperation(event);
 			},
 		});
+		manager.setFirstRequestWaitMs(this._preparationWaitMs);
 		return manager;
+	}
+
+	private async _requestPreparationWait(milliseconds: number, runner: ExtensionRunner): Promise<number | undefined> {
+		if (!Number.isSafeInteger(milliseconds) || milliseconds < 0 || milliseconds > 1000)
+			throw new TypeError("Preparation wait must be an integer between 0 and 1000 ms");
+		// Reject before awaiting idle: joining a run from its own managed callback deadlocks.
+		if (isExtensionWorkInvocation() || this._extensionMode !== "tui" || !this._extensionUIContext) return undefined;
+		const confirm = this._preparationWaitConfirm;
+		if (!confirm) return undefined;
+		const requestRevision = this._invalidatePreparationWaitRequests();
+		const manager = this._extensionWork;
+		const generation = this._conversationGenerationRevision;
+		const sessionId = this.sessionId;
+		const abortGeneration = this._abortGeneration;
+		const model = this.model;
+		const planning = this._planningState;
+		const tools = this._effectiveActiveToolNames;
+		const registry = this._toolRegistry;
+		const policyRevision = this._workPolicyRevision;
+		const policies = Array.from(this._workToolPolicies, ({ policy }) => ({
+			policy,
+			callback: policy.beforeToolCall,
+		}));
+		const extensionPoliciesCurrent = runner.captureToolPolicyGuard();
+		const current = () =>
+			this._extensionWorkIsCurrent() &&
+			requestRevision === this._preparationWaitRequestRevision &&
+			runner === this._extensionRunner &&
+			manager === this._extensionWork &&
+			generation === this._conversationGenerationRevision &&
+			sessionId === this.sessionId &&
+			abortGeneration === this._abortGeneration &&
+			model === this.model &&
+			planning === this._planningState &&
+			tools === this._effectiveActiveToolNames &&
+			registry === this._toolRegistry &&
+			policyRevision === this._workPolicyRevision &&
+			policies.every(({ policy, callback }) => policy.beforeToolCall === callback) &&
+			extensionPoliciesCurrent() &&
+			this._extensionMode === "tui" &&
+			confirm === this._preparationWaitConfirm;
+		if (!current()) return undefined;
+		await this._waitForIdle();
+		if (!current() || this._harness.getPhase() !== "idle" || this.isStreaming) return undefined;
+		const waitMs = Math.min(milliseconds, this._maxPreparationWaitMs);
+		if (waitMs === this._preparationWaitMs) return waitMs;
+		const confirmation = new AbortController();
+		this._preparationWaitConfirmation = confirmation;
+		try {
+			const approved = await confirm(
+				"Change shared extension preparation wait?",
+				`Allow a shared budget of up to ${waitMs} ms before initial model requests, only when extensions request preparation time? ` +
+					"This applies to all extensions, not just this command. It does not enable any extension or export. " +
+					"The allowance lasts for this runtime, including resource reloads, and resets on restart.",
+				{ signal: confirmation.signal },
+			);
+			if (!approved || confirmation.signal.aborted || !current()) return undefined;
+		} catch {
+			return undefined;
+		} finally {
+			if (this._preparationWaitConfirmation === confirmation) this._preparationWaitConfirmation = undefined;
+		}
+		// A foreground turn may have started while the confirmation was open.
+		await this._waitForIdle();
+		if (!current() || this._harness.getPhase() !== "idle" || this.isStreaming) return undefined;
+		manager.setFirstRequestWaitMs(waitMs);
+		this._preparationWaitMs = waitMs;
+		return waitMs;
+	}
+
+	private _invalidatePreparationWaitRequests(): number {
+		const revision = ++this._preparationWaitRequestRevision;
+		const confirmation = this._preparationWaitConfirmation;
+		this._preparationWaitConfirmation = undefined;
+		confirmation?.abort();
+		return revision;
 	}
 
 	private _invalidateExtensionWork(): void {
@@ -3059,6 +3144,7 @@ export class AgentSession {
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
+			this._invalidatePreparationWaitRequests();
 			this._invalidateExtensionWork();
 			this._unsubscribeWorkAuthority?.();
 			this._unsubscribeWorkAuthority = undefined;
@@ -3623,8 +3709,11 @@ export class AgentSession {
 					return await withoutExtensionWork(() => policy.beforeToolCall!(event, signal));
 				})
 			: undefined;
-		const unregisterNextAction = policy.nextAction
-			? this._harness.registerNextActionPolicy(policy.nextAction)
+		const nextAction = policy.nextAction;
+		const unregisterNextAction = nextAction
+			? this._harness.registerNextActionPolicy((context, signal) =>
+					withoutExtensionWork(() => nextAction(context, signal)),
+				)
 			: undefined;
 		if (unregisterNextAction) {
 			this._backgroundContinuationRevision++;
@@ -6042,6 +6131,7 @@ export class AgentSession {
 	): Promise<void> {
 		this._assertConversationAuthorityAvailable();
 		if (modelsAreEqual(previousModel, nextModel)) return;
+		this._invalidatePreparationWaitRequests();
 		await this._extensionRunner.emit({
 			type: "model_select",
 			model: nextModel,
@@ -7056,8 +7146,11 @@ export class AgentSession {
 
 	private async _bindExtensions(bindings: ExtensionBindings): Promise<void> {
 		this._assertConversationAuthorityAvailable();
+		this._invalidatePreparationWaitRequests();
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
+			// Retain the host binding, not a confirm method later replaced through ctx.ui.
+			this._preparationWaitConfirm = bindings.uiContext.confirm.bind(bindings.uiContext);
 		}
 		if (bindings.mode !== undefined) {
 			this._extensionMode = bindings.mode;
@@ -7284,6 +7377,8 @@ export class AgentSession {
 				},
 				getSystemPrompt: () => this.systemPrompt,
 				getSystemPromptOptions: () => this._baseSystemPromptOptions,
+				getPreparationWait: () => ({ waitMs: this._preparationWaitMs, maxWaitMs: this._maxPreparationWaitMs }),
+				requestPreparationWait: (milliseconds) => this._requestPreparationWait(milliseconds, runner),
 			},
 			{
 				registerProvider: (name, config) => {
@@ -7741,6 +7836,7 @@ export class AgentSession {
 			);
 		}
 		this._reloadInProgress = true;
+		this._invalidatePreparationWaitRequests();
 		this._invalidateExtensionWork();
 		try {
 			await this._extensionWork.close();

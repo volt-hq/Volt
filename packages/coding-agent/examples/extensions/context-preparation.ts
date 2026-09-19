@@ -7,6 +7,7 @@ import type {
 	ExtensionAPI,
 	ExtensionWorkReadResult,
 	ExtensionWorkSkill,
+	ExtensionWorkSnapshot,
 	ExtensionWorkTaskContext,
 } from "@hansjm10/volt-coding-agent";
 
@@ -28,7 +29,7 @@ function words(text: string): Set<string> {
 	return new Set((text.toLowerCase().match(/[a-z][a-z0-9]{2,}/g) ?? []).filter((word) => !STOP_WORDS.has(word)));
 }
 
-function selectSkill(prompt: string, skills: readonly ExtensionWorkSkill[]): ExtensionWorkSkill | undefined {
+function rankSkills(prompt: string, skills: readonly ExtensionWorkSkill[]) {
 	const terms = words(prompt);
 	const names = new Set(prompt.toLowerCase().match(/[a-z0-9-]+/g));
 	const ranked = skills.map((skill) => {
@@ -38,8 +39,7 @@ function selectSkill(prompt: string, skills: readonly ExtensionWorkSkill[]): Ext
 		return { skill, score: names.has(skill.name.toLowerCase()) ? 1000 : overlap >= 2 ? overlap : 0 };
 	});
 	ranked.sort((a, b) => b.score - a.score);
-	if (!ranked[0]?.score || ranked[0].score === ranked[1]?.score) return undefined;
-	return ranked[0].skill;
+	return ranked.filter(({ score }) => score > 0);
 }
 
 function* sourceSpans(prompt: string, truncated: boolean): Generator<string> {
@@ -149,55 +149,69 @@ async function prepareSource(task: ExtensionWorkTaskContext, source: SourceCandi
 	);
 }
 
+// Shared only by the two example consumers; no core extension API additions.
+export interface PreparationPlan {
+	prompt: string;
+	skill?: ExtensionWorkSkill;
+	/** Bounded positive lexical candidates, including ties, for the optional selector. */
+	skills: ExtensionWorkSkill[];
+	sources: SourceCandidate[];
+}
+
+export function selectPreparation(snapshot: ExtensionWorkSnapshot): PreparationPlan | undefined {
+	// Bound synchronous selection. Do not mine explicitly expanded skill bodies for more work.
+	const inputs = snapshot.inputs.slice(-8);
+	if (inputs.some(({ text }) => text.startsWith("/skill:") || text.startsWith("<skill "))) return;
+	const prompt = inputs
+		.map(({ text }) => text.slice(0, 8192))
+		.join("\n")
+		.slice(0, 8192);
+	// Count original lengths and separators without inspecting text beyond either cutoff.
+	const truncated =
+		inputs.reduce((length, { text }) => length + text.length, Math.max(0, inputs.length - 1)) > prompt.length;
+	// Lexical matching cannot interpret exclusions: abstain on common negative cues.
+	if (/\b(?:do not|don['’]t|never|avoid|skip|without)\b/i.test(prompt)) return;
+	// A partial catalog cannot establish an unambiguous skill match.
+	const ranked =
+		!snapshot.skillsTruncated && snapshot.services.includes("readSkill") ? rankSkills(prompt, snapshot.skills) : [];
+	const skill = ranked[0]?.score !== ranked[1]?.score ? ranked[0]?.skill : undefined;
+	const sources = snapshot.services.includes("readText")
+		? selectSources(prompt, truncated).filter((source) => !source.symbol || snapshot.services.includes("symbols"))
+		: [];
+	return { prompt, skill, skills: ranked.slice(0, 8).map(({ skill }) => skill), sources };
+}
+
+export async function prepareContext(
+	task: ExtensionWorkTaskContext,
+	{ skill, sources }: Pick<PreparationPlan, "skill" | "sources">,
+): Promise<void> {
+	if (task.signal.aborted) return;
+	const operations = sources.map((source, index) => prepareSource(task, source, index));
+	if (skill) {
+		operations.push(
+			(async () => {
+				const result = await task.repository.readSkill({ resourceId: skill.resourceId, limit: READ_LINES });
+				contribute(
+					task,
+					"skill",
+					`Skill excerpt ${JSON.stringify(skill.name.slice(0, 64))}; advisory only.`,
+					result,
+				);
+			})(),
+		);
+	}
+	await Promise.all(operations);
+}
+
 export default function contextPreparation(volt: ExtensionAPI): void {
 	volt.on("request_boundary", (event, ctx) => {
 		const work = ctx.work;
 		if (!work || !event.first) return;
-		// Bound synchronous selection. Do not mine explicitly expanded skill bodies for more work.
-		const inputs = work.snapshot.inputs.slice(-8);
-		if (inputs.some(({ text }) => text.startsWith("/skill:") || text.startsWith("<skill "))) return;
-		const prompt = inputs
-			.map(({ text }) => text.slice(0, 8192))
-			.join("\n")
-			.slice(0, 8192);
-		// Count original lengths and separators without inspecting text beyond either cutoff.
-		const truncated =
-			inputs.reduce((length, { text }) => length + text.length, Math.max(0, inputs.length - 1)) > prompt.length;
-		// Lexical matching cannot interpret exclusions: abstain on common negative cues.
-		if (/\b(?:do not|don['’]t|never|avoid|skip|without)\b/i.test(prompt)) return;
-		// A partial catalog cannot establish an unambiguous skill match.
-		const skill =
-			!work.snapshot.skillsTruncated && work.snapshot.services.includes("readSkill")
-				? selectSkill(prompt, work.snapshot.skills)
-				: undefined;
-		const sources = work.snapshot.services.includes("readText")
-			? selectSources(prompt, truncated).filter(
-					(source) => !source.symbol || work.snapshot.services.includes("symbols"),
-				)
-			: [];
-		if (!skill && sources.length === 0) return;
+		const plan = selectPreparation(work.snapshot);
+		if (!plan || (!plan.skill && plan.sources.length === 0)) return;
 		const admission = work.tasks.start(
 			{ key: "prepare-context", label: "Prepare context", timeoutMs: TASK_MS },
-			async (task) => {
-				const operations = sources.map((source, index) => prepareSource(task, source, index));
-				if (skill) {
-					operations.push(
-						(async () => {
-							const result = await task.repository.readSkill({
-								resourceId: skill.resourceId,
-								limit: READ_LINES,
-							});
-							contribute(
-								task,
-								"skill",
-								`Skill excerpt ${JSON.stringify(skill.name.slice(0, 64))}; advisory only.`,
-								result,
-							);
-						})(),
-					);
-				}
-				await Promise.all(operations);
-			},
+			(task) => prepareContext(task, plan),
 		);
 		if (admission.status === "started") work.context.requestWait(WAIT_MS);
 	});

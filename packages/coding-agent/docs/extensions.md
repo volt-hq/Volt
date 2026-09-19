@@ -1069,6 +1069,26 @@ volt.registerCommand("my-cmd", {
 });
 ```
 
+### ctx.getPreparationWait() / ctx.requestPreparationWait(milliseconds)
+
+Command handlers can inspect and request a change to the runtime's **shared** first-request preparation allowance:
+
+```typescript
+volt.registerCommand("preparation-wait", {
+  description: "Configure the shared preparation allowance",
+  handler: async (_args, ctx) => {
+    const { waitMs, maxWaitMs } = ctx.getPreparationWait();
+    ctx.ui.notify(`Current allowance: ${waitMs} ms; host ceiling: ${maxWaitMs} ms`, "info");
+    const applied = await ctx.requestPreparationWait(800);
+    if (applied !== undefined) ctx.ui.notify(`Allowance: ${applied} ms`, "info");
+  },
+});
+```
+
+`requestPreparationWait()` requires local TUI mode and uses a **host-owned confirmation**, not extension-supplied approval. It waits for foreground settlement and applies only to future request scopes. The input must be a safe integer from 0 through 1,000; invalid inputs throw. Requests are clamped to the host ceiling. The result is the applied allowance, including zero, or `undefined` when declined, unavailable, or invalidated before application. Requesting the current value needs no confirmation. Stale command contexts remain invalid; do not retain them across reload or session replacement.
+
+With no explicit SDK `extensionWorkLimits.firstRequestWaitMs`, the initial allowance is zero and the interactive ceiling is 1,000 ms. An explicit value sets both the initial allowance and the hard ceiling, including explicit zero; CLI `--preparation-wait-ms` uses the same rule. Extensions cannot raise that ceiling. The allowance is shared across extensions, survives resource `/reload` in the same runtime, and is not persisted across runtime replacement or restart. It does not enable an extension, authorize network export, or add a delay unless an extension synchronously requests a wait at the first boundary. Later turns/retries receive no renewed allowance. Allowance changes are unavailable from managed-task or policy/diagnostic lineage, even through a captured command context.
+
 ### ctx.newSession(options?)
 
 Create a new session:
@@ -1806,7 +1826,7 @@ Semantic locations have canonical absolute paths and 1-based `startLine`, `start
 
 ### Optional first-request waiting
 
-Ready-only remains the default. A host may configure SDK `extensionWorkLimits.firstRequestWaitMs` from 0 to 100. During the synchronous first `request_boundary` callback, an extension may call `ctx.work.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
+Ready-only remains the default. A host may configure SDK `extensionWorkLimits.firstRequestWaitMs` from 0 to 1,000 ms, or use CLI `--preparation-wait-ms <0-1000>` for locally created runtimes. An explicit value is both the initial allowance and the interactive hard ceiling; if omitted, the initial allowance is zero and the ceiling is 1,000 ms. A local command can use [host-confirmed allowance controls](#ctxgetpreparationwait--ctxrequestpreparationwaitmilliseconds) to change the allowance within that ceiling for future requests. The CLI flag does not reconfigure already-running remote runtimes. Configuration alone neither enables an extension nor adds a delay. During the synchronous first `request_boundary` callback, an extension may call `ctx.work.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
 
 The first collection waits for the tasks admitted at that boundary, only until they settle, the allowance expires, or the scope is revoked. Timeout does not cancel useful ongoing preparation. Retries and later turns receive no renewed wait; late contributions cannot enter an already collected request. CPU-bound trusted extension code is not preempted, but results beyond the deadline are excluded from that attempt.
 

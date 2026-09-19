@@ -105,6 +105,7 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 |-----------|-------------|
 | `dynamic-resources/` | Loads skills, prompts, and themes using `resources_discover` |
 | `context-preparation.ts` | Opt-in deterministic skill/source excerpts through managed services; [SDK configuration and evaluation](#context-preparation) |
+| `jev-context-preparation.ts` | Opt-in Jev selector with `/jev` controls, footer status, and deterministic fallback; [export consent, credentials, and evaluation](#jev-assisted-context-preparation) |
 
 ### Messages & Communication
 
@@ -185,6 +186,96 @@ The SDK-harness comparison uses native temporary skill/source files and a faux p
 Positive admission tests hold virtual deadlines while native I/O settles; the cutoff test advances the virtual clock explicitly. They establish deterministic retrieval and timing contracts, **not production latency, broad retrieval accuracy, or real-model answer quality**. Token estimates include host evidence framing and vary with temporary paths. The two-file cap intentionally misses additional relevant files.
 
 Before adding auxiliary inference, evaluate representative tasks with the same main model, tools, repository state, and host wait settings, enabled versus disabled. Record end-to-end correctness and latency, provider-input token deltas, used versus unused excerpts, stale omissions, and negative/context-induced regressions. Do not infer usefulness merely from context admission or this small fixture corpus.
+
+## Jev-assisted context preparation
+
+`jev-context-preparation.ts` is an experimental alternative to the deterministic example, not a default feature or a main-model replacement. In a new session, loading/discovering it alone performs no preparation, credential lookup, or inference. Load it, then use **`/jev`** in the local TUI to enable it after reviewing the data-sharing confirmation:
+
+```bash
+# From packages/coding-agent (use ./volt-test.sh and the full example path from the repo root).
+volt -e ./examples/extensions/jev-context-preparation.ts
+```
+
+`/jev` opens an enable/disable/wait/status panel; `/jev on`, `/jev off`, `/jev wait`, and `/jev status` are direct shortcuts with argument completion. Enabling requires data-sharing confirmation, followed by a separate host offer of an 800 ms allowance (clamped to the host ceiling) when the current allowance is zero. Declining the wait still enables ready-only Jev. The command itself makes no model request or credential lookup. State changes wait for any active turn to finish; abort that turn first if you need to disable promptly. Commands are local-only, not remote-safe.
+
+The footer shows `Jev: off` or `Jev: on`, with preparation/evaluation/fallback status when available. `evaluated` does **not** mean the context was admitted or useful. A zero host allowance is marked `ready-only` when the panel observes it or at a request boundary. `/jev status` explains the retention policy and shows the current shared allowance and host ceiling.
+
+The choice is stored outside model context on the **current session branch**, restored on reload/resume, and follows tree navigation and forks. A new session starts off unless explicitly enabled through the CLI or SDK. A changed retention policy requires fresh command consent. The latest saved branch choice overrides initial CLI/SDK enablement; SDK `enabled: false` always prohibits enabling. Removing the extension disables it regardless of saved state.
+
+**Preparation wait** offers 0 (ready-only), 100, 400, 800, or 1,000 ms, plus any custom current value or ceiling. Choices above the host ceiling are omitted. The host confirms each changed allowance; opening or cancelling the selector changes nothing. This is a **shared runtime allowance**, not a Jev-only delay: other preparation extensions also use it, while Jev itself still requests at most 800 ms. Setting zero does not disable Jev, and disabling Jev does not change the shared allowance.
+
+The allowance defaults to zero and is not saved with the branch's on/off choice. It survives `/reload` in the same runtime but resets on restart or session replacement. Without a startup limit, the user can approve up to 1,000 ms through the panel. An explicit CLI `--preparation-wait-ms` or SDK `extensionWorkLimits.firstRequestWaitMs` sets both the initial allowance and its hard ceiling, including explicit zero. The panel cannot raise that ceiling. For non-interactive opt-in, keep the existing `--jev-context-preparation` and `--preparation-wait-ms 800` flags or equivalent SDK configuration.
+
+Keep `context-preparation.ts` beside it for the shared parser/read helpers, but **load only one consumer**. Importing the helper file does not enable its deterministic extension factory. Do not copy both files into an auto-discovered extensions directory as separate enabled consumers.
+
+### Export consent and credentials
+
+Enabling this extension consents to sending bounded committed request text and candidate metadata to **Vercel AI Gateway / TypeSafe AI**, even when the main model uses another provider. **Zero Data Retention is off by default.** Normal Gateway/provider retention and training policies apply. Source/skill bodies, absolute cwd, host resource IDs, system instructions, image bytes, and the full transcript are not automatically exported. Request text and descriptions can themselves contain code, secrets, or private information: these bounds are not redaction or a secret detector. Managed read permission is not export consent.
+
+The adapter resolves `vercel-ai-gateway` through the current session's `modelRegistry.getApiKeyForProvider()`: existing Volt `/login` credentials work, as do supported environment/provider-key configuration. No separate TypeSafe key or `models.json` Jev chat entry is needed. The endpoint is fixed to `https://ai-gateway.vercel.sh/v4/ai/evaluation-model`; redirects are refused and chat endpoint/header overrides are not forwarded. Missing credentials and failures retain deterministic fallback. No credentials, prompts, raw response bodies, or provider error strings enter evaluation diagnostics.
+
+For SDK use, enable the factory and grant an 800 ms first-request allowance:
+
+```typescript
+import { createAgentSession, DefaultResourceLoader, SessionManager } from "@hansjm10/volt-coding-agent";
+import { createJevContextPreparation } from "./examples/extensions/jev-context-preparation.ts";
+
+const resourceLoader = new DefaultResourceLoader({
+  extensionFactories: [createJevContextPreparation({
+    enabled: true,
+    // Set true only with ZDR-capable Gateway access; rejection never retries without ZDR.
+    zeroDataRetention: false,
+    // Optional metadata only; this does not establish context admission or usefulness.
+    onEvaluation: (result) => console.log(result),
+  })],
+});
+await resourceLoader.reload();
+const { session } = await createAgentSession({
+  resourceLoader,
+  sessionManager: SessionManager.inMemory(),
+  extensionWorkLimits: { firstRequestWaitMs: 800 },
+});
+try {
+  await session.prompt("Explain src/config.ts:20");
+} finally {
+  session.dispose();
+  await session.waitForClosed();
+}
+```
+
+Use `/jev off`, omit the factory, or set SDK `enabled: false` to disable. Removing only the CLI enablement flag does not override a saved on choice in a resumed session. Loading the extension alone does not raise the default zero wait. The host allowance accepts 0–1,000 ms through the CLI or SDK; configuration alone neither enables Jev nor adds a delay. The CLI flag applies to locally created runtimes, not already-running remote runtimes. `fetch` is an optional trusted transport override for offline experiments; it must honor cancellation. Observer callbacks are nonblocking: synchronous exceptions and rejected promises are contained, but observer side effects remain the SDK host's responsibility. There are no new dependencies, provider-registry entries, or wire/storage protocol changes.
+
+### Selection, fallback, and timing
+
+- Reuse the deterministic input/path guards and excerpt limits above. Offer at most eight positively ranked lexical skill candidates (ties allowed) and two explicit source candidates. Truncated skill catalogs still skip skills. This is a bounded shortlist, not exhaustive retrieval; Jev cannot repair missing candidates.
+- Export at most 8,192 request characters, 64 characters per skill name, and 256 per description, plus relative source paths/anchors. Both serialized requests and response bodies are capped at 64 KiB. Request-level truncation means context may be missing.
+- Send one evaluation with at most three choice questions: one skill or `none`, and include/omit each offered source. Validate every answer against its own finite option set and reject incomplete/extra/malformed answers atomically. Probabilities are ignored; they are not calibrated task-success confidence. Jev cannot invent a path, resource ID, or operation.
+- One managed task with a 1.5-second deadline prepares deterministic evidence concurrently with the evaluation. It requests up to 800 ms of the shared first-request allowance, subject to a tighter host limit, and ends the wait early when preparation settles. Fast valid decisions can prune evidence or select one alternate skill before initial collection. Slow decisions leave deterministic fallback available at the effective cutoff (800 ms with the configuration above), and may only refine a later already-authorized tool continuation. Late changes wait for initial payload preparation (or a subsequent boundary for SDK streams without payload notification), so they cannot revoke fallback during initial source validation. `none` cannot retract evidence already sent in an earlier request. With zero host wait, initial preparation is normally absent. Source validation has a separate 25 ms host budget; neither allowance nor task deadline is a total-latency guarantee. The deterministic-only consumer still requests 100 ms and a one-second task deadline.
+- Reuse already prepared source/skill evidence rather than rereading it. A changed skill selection makes at most one additional managed skill read: at most six production operations overall, plus host validation. All reads and later admission retain native policy, reducer, identity, freshness, and cancellation checks. Read failures omit optional text; a selected-but-unreadable skill does not silently substitute another skill.
+- No retries, cache, wake authority, transcript rewriting, or additional wait on later boundaries. One HTTP call maximum per eligible request scope; task cancellation propagates through fetch and response streaming. Foreground settlement/revocation cancels outstanding work. The adapter awaits its work; authentication configuration commands and trusted transport implementations are not automatically sandboxed or metered by managed services.
+- A slow evaluation can consume the full allowed initial wait even when deterministic evidence is ready. Work can incur cost and still be discarded. Request-size/call/deadline bounds are not enforced dollar limits, and client cancellation does not guarantee provider-side cancellation or zero billing.
+
+### Evidence and reproducible comparison
+
+The adapter follows the experimental Gateway v4 contract verified against [Vercel AI SDK source at `73ec7015`](https://github.com/vercel/ai/blob/73ec7015edd4f04ca9144ce93a8a037a731e5db8/packages/gateway/src/gateway-evaluation-model.ts) and its [provider setup](https://github.com/vercel/ai/blob/73ec7015edd4f04ca9144ce93a8a037a731e5db8/packages/gateway/src/gateway-provider.ts). This is not the chat-completions API. Experimental wire changes require re-verification; there is no compatibility fallback.
+
+Two synthetic, non-ZDR local smoke calls succeeded:
+
+| Probe | Round trip | Input / output tokens | Gateway-reported cost |
+| --- | --- | --- | --- |
+| Initial single-choice contract probe | 695 ms | 425 / 44 | `0` |
+| Actual adapter, three questions | 484 ms | 553 / 101 | `0` |
+
+The adapter selected the expected skill/source and omitted the unrelated source. Both calls missed the original 100 ms first-request allowance. Their observed round trips fit within 800 ms, but do not establish how often evaluation plus local preparation and validation will fit. These are smoke tests, not a latency distribution or quality benchmark; the probe used an independent measurement deadline. Gateway rejected the earlier ZDR probe because that credential's plan lacked ZDR; the adapter does not silently remove an explicitly requested retention constraint. Check [current Jev pricing](https://vercel.com/ai-gateway/models/jev) rather than assuming future calls are free.
+
+```bash
+# From packages/coding-agent; no real provider calls in these tests.
+node node_modules/vitest/dist/cli.js --run test/jev-context-preparation.test.ts test/suite/jev-context-preparation.test.ts test/suite/jev-context-command.test.ts test/context-preparation-example.test.ts test/suite/context-preparation.test.ts
+```
+
+The three-way SDK fixture comparison holds the main faux provider, tools, and source content fixed. Scripted Jev answers test equal selection, resolving a lexical tie, pruning an irrelevant source, abstention, and negative/irrelevant input. It reports context-token estimates, native operation counts, and auxiliary call counts. Clock/barrier cases verify 400/700 ms decisions admitted initially with early completion, fallback under 100/800/1,000 ms host allowances, later-boundary refinement without renewed waits, 1.5-second deadline cancellation, and no wake. Mock transport cases cover wire shape, opt-in, finite answers, byte limits, auth/errors, and cancellation without live credentials.
+
+These tests establish integration contracts only. Real main-model correctness, end-to-end latency, context-induced regressions, and whether admitted excerpts are used remain unmeasured. Keep this experimental and opt-in until a representative real-task comparison demonstrates benefit.
 
 ## Writing Extensions
 

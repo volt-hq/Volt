@@ -314,6 +314,8 @@ export class ExtensionRunner {
 	private compactFn: (options?: CompactOptions) => void = () => {};
 	private getSystemPromptFn: () => string = () => "";
 	private getSystemPromptOptionsFn: () => BuildSystemPromptOptions = () => ({ cwd: this.cwd });
+	private getPreparationWaitFn: ExtensionCommandContext["getPreparationWait"] = () => ({ waitMs: 0, maxWaitMs: 0 });
+	private requestPreparationWaitFn: ExtensionCommandContext["requestPreparationWait"] = async () => undefined;
 	private newSessionHandler: NewSessionHandler = async () => ({ cancelled: false, seeded: false });
 	private forkHandler: ForkHandler = async () => ({ cancelled: false, seeded: false });
 	private navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -415,6 +417,8 @@ export class ExtensionRunner {
 		this.compactFn = contextActions.compact;
 		this.getSystemPromptFn = contextActions.getSystemPrompt;
 		this.getSystemPromptOptionsFn = contextActions.getSystemPromptOptions ?? (() => ({ cwd: this.cwd }));
+		this.getPreparationWaitFn = contextActions.getPreparationWait ?? (() => ({ waitMs: 0, maxWaitMs: 0 }));
+		this.requestPreparationWaitFn = contextActions.requestPreparationWait ?? (async () => undefined);
 
 		// Flush provider registrations queued during extension loading
 		for (const { name, config, extensionPath } of this.runtime.pendingProviderRegistrations) {
@@ -823,6 +827,14 @@ export class ExtensionRunner {
 		context.getSystemPromptOptions = () => {
 			this.assertActive();
 			return this.getSystemPromptOptionsFn();
+		};
+		context.getPreparationWait = () => {
+			this.assertActive();
+			return this.getPreparationWaitFn();
+		};
+		context.requestPreparationWait = (milliseconds) => {
+			this.assertActive();
+			return this.requestPreparationWaitFn(milliseconds);
 		};
 		context.waitForIdle = () => {
 			this.assertActive();
