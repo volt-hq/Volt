@@ -6,7 +6,7 @@
 
 ## First-request allowance
 
-`extensionWorkLimits.firstRequestWaitMs` defaults to zero and permits at most 100 ms. Only a synchronous first-boundary notification may request a wait through `ctx.work.context.requestWait(ms)`. Host-clamped requests combine by maximum across extensions, not sum. An async observer's returned promise remains observational, not a wait request.
+`extensionWorkLimits.firstRequestWaitMs` defaults to zero. The original 100 ms maximum was expanded to 1,000 ms with CLI `--preparation-wait-ms` in [#440](https://github.com/volt-hq/Volt/pull/440); configuration alone adds no delay. Only a synchronous first-boundary notification may request a wait through `ctx.work.context.requestWait(ms)`. Host-clamped requests combine by maximum across extensions, not sum. An async observer's returned promise remains observational, not a wait request.
 
 The allowance is consumed by the first collection even if context headroom is absent. Collection snapshots admitted tasks, waits until they settle/revocation/the shared deadline, and then performs the existing separately bounded source validation. Retries and later turns cannot renew the allowance. A monotonic publication cutoff excludes contributions that finish after the deadline even if timer delivery is delayed. Timeout leaves otherwise valid tasks running for later turns; completion still has no wake authority.
 

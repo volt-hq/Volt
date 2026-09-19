@@ -74,7 +74,7 @@ async function setup(
 	mode: "disabled" | "deterministic" | "jev",
 	options: JevPreparationOptions = {},
 	extra?: ExtensionFactory,
-	firstRequestWaitMs = 100,
+	firstRequestWaitMs = 800,
 	excludedToolNames?: string[],
 ) {
 	let api!: ExtensionAPI;
@@ -288,7 +288,7 @@ describe("Jev three-way SDK evaluation", () => {
 		expect(selected(await run(test.harness, "Extract invoice tables from src/invoice.ts"))).toEqual([]);
 	});
 
-	it("aborts auxiliary HTTP at the one-second task deadline while the main turn remains active", async () => {
+	it("aborts auxiliary HTTP at the 1.5-second task deadline while the main turn remains active", async () => {
 		const entered = deferred();
 		const evaluated = deferred();
 		let signal: AbortSignal | null | undefined;
@@ -318,7 +318,7 @@ describe("Jev three-way SDK evaluation", () => {
 		// Ambiguous candidates avoid native I/O and deterministic evidence in this deadline test.
 		const running = test.harness.session.prompt("Read spreadsheet columns");
 		await entered.promise;
-		await vi.advanceTimersByTimeAsync(999);
+		await vi.advanceTimersByTimeAsync(1499);
 		expect(signal?.aborted).toBe(false);
 		expect(test.harness.faux.state.callCount).toBe(1);
 		await vi.advanceTimersByTimeAsync(1);
@@ -327,6 +327,33 @@ describe("Jev three-way SDK evaluation", () => {
 		expect(test.fetch).toHaveBeenCalledOnce();
 		expect(test.harness.faux.state.callCount).toBe(2);
 	});
+
+	it.each([400, 700])(
+		"admits a %i ms Jev selection on the first request and ends the 800 ms wait early",
+		async (latency) => {
+			const read = deferred();
+			const release = deferred();
+			let taskReads = 0;
+			const test = await setup("jev", {}, (volt) => {
+				volt.on("extension_operation", (event) => {
+					if (event.ownerKind === "task" && ++taskReads === 2) read.resolve();
+				});
+			});
+			test.fetch.mockImplementation(async (_url, request) => {
+				await release.promise;
+				return responseFor(request, undefined, [1]);
+			});
+			const running = run(test.harness, "Inspect src/invoice.ts and src/mail.ts");
+			await read.promise;
+			await vi.advanceTimersByTimeAsync(latency);
+			expect(test.harness.faux.state.callCount).toBe(0);
+			release.resolve();
+			const projection = await running;
+			expect(selected(projection)).toEqual(["INVOICE_BODY"]);
+			expect(performance.now()).toBe(latency);
+			expect(test.fetch).toHaveBeenCalledOnce();
+		},
+	);
 
 	it("keeps the default zero wait and cancels pending HTTP at foreground settlement without a wake", async () => {
 		let signal: AbortSignal | null | undefined;
@@ -347,108 +374,125 @@ describe("Jev three-way SDK evaluation", () => {
 		expect(test.harness.faux.state.callCount).toBe(1);
 	});
 
-	it("does not let a post-cutoff decision revoke fallback during first-request validation", async () => {
-		const read = deferred();
-		const validation = deferred();
-		const releaseValidation = deferred();
-		const releaseEvaluation = deferred();
-		const evaluated = deferred();
-		let taskReads = 0;
-		const test = await setup("jev", { onEvaluation: evaluated.resolve }, (volt) => {
-			volt.on("extension_operation", (event) => {
-				if (event.ownerKind === "task" && ++taskReads === 2) read.resolve();
-			});
-			volt.on("tool_call", async (event) => {
-				if (event.origin?.kind === "extension" && event.origin.ownerKind === "validation") {
-					validation.resolve();
-					await releaseValidation.promise;
-				}
-			});
-			volt.registerTool({
-				name: "checkpoint",
-				label: "Checkpoint",
-				description: "Test synchronization",
-				parameters: Type.Object({}),
-				execute: async () => ({ content: [{ type: "text", text: "checkpoint" }] }),
-			});
-		});
-		test.fetch.mockImplementation(async (_url, request) => {
-			await releaseEvaluation.promise;
-			return responseFor(request, undefined, [1]);
-		});
-		const projections: Context[] = [];
-		test.harness.setResponses([
-			(context) => {
-				projections.push({ ...context, messages: structuredClone(context.messages) });
-				return fauxAssistantMessage([fauxToolCall("checkpoint", {})], { stopReason: "toolUse" });
-			},
-			(context) => {
-				projections.push({ ...context, messages: structuredClone(context.messages) });
-				return fauxAssistantMessage("done");
-			},
-		]);
-		const running = test.harness.session.prompt("Inspect src/invoice.ts and src/mail.ts");
-		await read.promise;
-		await vi.advanceTimersByTimeAsync(100);
-		await validation.promise;
-		await vi.advanceTimersByTimeAsync(5);
-		releaseEvaluation.resolve();
-		await evaluated.promise;
-		expect(test.harness.faux.state.callCount).toBe(0);
-		releaseValidation.resolve();
-		await running;
-		expect(selected(projections[0])).toEqual(["INVOICE_BODY", "MAIL_BODY"]);
-		expect(selected(projections[1])).toEqual(["INVOICE_BODY"]);
-		expect(test.fetch).toHaveBeenCalledOnce();
-	});
-
-	it("uses fallback at 100 ms, then prunes at a later authorized tool boundary without another evaluation", async () => {
-		const read = deferred();
-		const release = deferred();
-		const evaluated = deferred();
-		let taskReads = 0;
-		const test = await setup("jev", { onEvaluation: evaluated.resolve }, (volt) => {
-			volt.on("extension_operation", (event) => {
-				if (event.ownerKind === "task" && ++taskReads === 2) read.resolve();
-			});
-			volt.registerTool({
-				name: "checkpoint",
-				label: "Checkpoint",
-				description: "Test synchronization",
-				parameters: Type.Object({}),
-				execute: async () => {
-					release.resolve();
-					await evaluated.promise;
-					return { content: [{ type: "text", text: "checkpoint" }] };
+	it.each([100, 800])(
+		"does not let a post-cutoff decision revoke fallback during validation with a %i ms allowance",
+		async (wait) => {
+			const read = deferred();
+			const validation = deferred();
+			const releaseValidation = deferred();
+			const releaseEvaluation = deferred();
+			const evaluated = deferred();
+			let taskReads = 0;
+			const test = await setup(
+				"jev",
+				{ onEvaluation: evaluated.resolve },
+				(volt) => {
+					volt.on("extension_operation", (event) => {
+						if (event.ownerKind === "task" && ++taskReads === 2) read.resolve();
+					});
+					volt.on("tool_call", async (event) => {
+						if (event.origin?.kind === "extension" && event.origin.ownerKind === "validation") {
+							validation.resolve();
+							await releaseValidation.promise;
+						}
+					});
+					volt.registerTool({
+						name: "checkpoint",
+						label: "Checkpoint",
+						description: "Test synchronization",
+						parameters: Type.Object({}),
+						execute: async () => ({ content: [{ type: "text", text: "checkpoint" }] }),
+					});
 				},
+				wait,
+			);
+			test.fetch.mockImplementation(async (_url, request) => {
+				await releaseEvaluation.promise;
+				return responseFor(request, undefined, [1]);
 			});
-		});
-		test.fetch.mockImplementation(async (_url, request) => {
-			await release.promise;
-			return responseFor(request, undefined, [1]);
-		});
-		const projections: Context[] = [];
-		test.harness.setResponses([
-			(context) => {
-				projections.push({ ...context, messages: structuredClone(context.messages) });
-				return fauxAssistantMessage([fauxToolCall("checkpoint", {})], { stopReason: "toolUse" });
-			},
-			(context) => {
-				projections.push({ ...context, messages: structuredClone(context.messages) });
-				return fauxAssistantMessage("done");
-			},
-		]);
-		const running = test.harness.session.prompt("Inspect src/invoice.ts and src/mail.ts");
-		await read.promise;
-		await vi.advanceTimersByTimeAsync(99);
-		expect(test.harness.faux.state.callCount).toBe(0);
-		await vi.advanceTimersByTimeAsync(1);
-		await running;
-		expect(performance.now()).toBe(100);
-		expect(projections).toHaveLength(2);
-		expect(selected(projections[0])).toEqual(["INVOICE_BODY", "MAIL_BODY"]);
-		expect(selected(projections[1])).toEqual(["INVOICE_BODY"]);
-		expect(test.fetch).toHaveBeenCalledOnce();
-		expect(test.harness.faux.state.callCount).toBe(2);
-	});
+			const projections: Context[] = [];
+			test.harness.setResponses([
+				(context) => {
+					projections.push({ ...context, messages: structuredClone(context.messages) });
+					return fauxAssistantMessage([fauxToolCall("checkpoint", {})], { stopReason: "toolUse" });
+				},
+				(context) => {
+					projections.push({ ...context, messages: structuredClone(context.messages) });
+					return fauxAssistantMessage("done");
+				},
+			]);
+			const running = test.harness.session.prompt("Inspect src/invoice.ts and src/mail.ts");
+			await read.promise;
+			await vi.advanceTimersByTimeAsync(wait);
+			await validation.promise;
+			await vi.advanceTimersByTimeAsync(5);
+			releaseEvaluation.resolve();
+			await evaluated.promise;
+			expect(test.harness.faux.state.callCount).toBe(0);
+			releaseValidation.resolve();
+			await running;
+			expect(selected(projections[0])).toEqual(["INVOICE_BODY", "MAIL_BODY"]);
+			expect(selected(projections[1])).toEqual(["INVOICE_BODY"]);
+			expect(test.fetch).toHaveBeenCalledOnce();
+		},
+	);
+
+	it.each([100, 800, 1000])(
+		"uses bounded fallback with a %i ms host allowance, then prunes without another evaluation",
+		async (hostWait) => {
+			const wait = Math.min(hostWait, 800);
+			const read = deferred();
+			const release = deferred();
+			const evaluated = deferred();
+			let taskReads = 0;
+			const test = await setup(
+				"jev",
+				{ onEvaluation: evaluated.resolve },
+				(volt) => {
+					volt.on("extension_operation", (event) => {
+						if (event.ownerKind === "task" && ++taskReads === 2) read.resolve();
+					});
+					volt.registerTool({
+						name: "checkpoint",
+						label: "Checkpoint",
+						description: "Test synchronization",
+						parameters: Type.Object({}),
+						execute: async () => {
+							release.resolve();
+							await evaluated.promise;
+							return { content: [{ type: "text", text: "checkpoint" }] };
+						},
+					});
+				},
+				hostWait,
+			);
+			test.fetch.mockImplementation(async (_url, request) => {
+				await release.promise;
+				return responseFor(request, undefined, [1]);
+			});
+			const projections: Context[] = [];
+			test.harness.setResponses([
+				(context) => {
+					projections.push({ ...context, messages: structuredClone(context.messages) });
+					return fauxAssistantMessage([fauxToolCall("checkpoint", {})], { stopReason: "toolUse" });
+				},
+				(context) => {
+					projections.push({ ...context, messages: structuredClone(context.messages) });
+					return fauxAssistantMessage("done");
+				},
+			]);
+			const running = test.harness.session.prompt("Inspect src/invoice.ts and src/mail.ts");
+			await read.promise;
+			await vi.advanceTimersByTimeAsync(wait - 1);
+			expect(test.harness.faux.state.callCount).toBe(0);
+			await vi.advanceTimersByTimeAsync(1);
+			await running;
+			expect(performance.now()).toBe(wait);
+			expect(projections).toHaveLength(2);
+			expect(selected(projections[0])).toEqual(["INVOICE_BODY", "MAIL_BODY"]);
+			expect(selected(projections[1])).toEqual(["INVOICE_BODY"]);
+			expect(test.fetch).toHaveBeenCalledOnce();
+			expect(test.harness.faux.state.callCount).toBe(2);
+		},
+	);
 });

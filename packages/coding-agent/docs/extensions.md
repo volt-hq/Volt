@@ -1806,7 +1806,7 @@ Semantic locations have canonical absolute paths and 1-based `startLine`, `start
 
 ### Optional first-request waiting
 
-Ready-only remains the default. A host may configure SDK `extensionWorkLimits.firstRequestWaitMs` from 0 to 100. During the synchronous first `request_boundary` callback, an extension may call `ctx.work.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
+Ready-only remains the default. A host may configure SDK `extensionWorkLimits.firstRequestWaitMs` from 0 to 1,000 ms, or use CLI `--preparation-wait-ms <0-1000>` for locally created runtimes. The CLI flag does not reconfigure already-running remote runtimes. The default is zero; configuration alone neither enables an extension nor adds a delay. During the synchronous first `request_boundary` callback, an extension may call `ctx.work.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
 
 The first collection waits for the tasks admitted at that boundary, only until they settle, the allowance expires, or the scope is revoked. Timeout does not cancel useful ongoing preparation. Retries and later turns receive no renewed wait; late contributions cannot enter an already collected request. CPU-bound trusted extension code is not preempted, but results beyond the deadline are excluded from that attempt.
 

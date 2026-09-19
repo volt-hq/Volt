@@ -804,12 +804,12 @@ const { session } = await createAgentSession({
     taskTimeoutMs: 3000,
     maxTaskTimeoutMs: 5000,
     suffixBytes: 8192,
-    firstRequestWaitMs: 50, // Default 0; at most 100 ms, shared across extensions.
+    firstRequestWaitMs: 800, // Default 0; at most 1000 ms, shared across extensions.
   },
 });
 ```
 
-All supplied limits must be finite nonnegative integers. Resource ceilings can only tighten defaults; `firstRequestWaitMs` is the exception, with default 0 and maximum 100. Extensions must synchronously request that allowance at the first boundary; configuration alone does not add a delay. Workspace services require active trusted native `read`, `find`, `grep`, or `lsp` implementations. `readSkill` uses an exact native-loaded catalog resource grant and a registered trusted read implementation, without activating general reads. Custom overrides are not silently bypassed. Metadata-only SDK skills have no native file identity and are omitted from the managed catalog; use `DefaultResourceLoader` or the native `loadSkills`/`loadSkillsFromDir` results for resource-backed skills. Managed task completion cannot start model inference; cleanup participates in session teardown. The process-wide ceiling includes revoked callbacks that have not settled.
+All supplied limits must be finite nonnegative integers. Resource ceilings can only tighten defaults; `firstRequestWaitMs` is the exception, with default 0 and maximum 1,000 ms. Extensions must synchronously request that allowance at the first boundary; configuration alone neither enables an extension nor adds a delay. CLI `--preparation-wait-ms 800` grants the same allowance to locally created runtimes; it does not reconfigure already-running remote runtimes. Workspace services require active trusted native `read`, `find`, `grep`, or `lsp` implementations. `readSkill` uses an exact native-loaded catalog resource grant and a registered trusted read implementation, without activating general reads. Custom overrides are not silently bypassed. Metadata-only SDK skills have no native file identity and are omitted from the managed catalog; use `DefaultResourceLoader` or the native `loadSkills`/`loadSkillsFromDir` results for resource-backed skills. Managed task completion cannot start model inference; cleanup participates in session teardown. The process-wide ceiling includes revoked callbacks that have not settled.
 
 This is a trusted-extension execution convenience, not a sandbox, provider spending cap, transparent cache, or additional permission for network export. Generic operation diagnostics contain metadata, not source text.
 

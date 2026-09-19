@@ -132,7 +132,7 @@ export class ExtensionWorkManager {
 				value === undefined ||
 				!Number.isSafeInteger(value) ||
 				value < 0 ||
-				value > (key === "firstRequestWaitMs" ? 100 : this.limits[key])
+				value > (key === "firstRequestWaitMs" ? 1000 : this.limits[key])
 			) {
 				throw new TypeError(`Invalid extension work limit: ${key}`);
 			}

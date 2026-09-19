@@ -215,7 +215,7 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			const started = performance.now();
 			let initialCutoff = started;
 			const admission = work.tasks.start(
-				{ key: "prepare-context", label: "Prepare context with Jev", timeoutMs: 1000 },
+				{ key: "prepare-context", label: "Prepare context with Jev", timeoutMs: 1500 },
 				async (task) => {
 					task.signal.addEventListener("abort", release, { once: true });
 					try {
@@ -259,7 +259,7 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			);
 			if (admission.status === "started") {
 				pendingProjection = pending;
-				initialCutoff = started + work.context.requestWait(100);
+				initialCutoff = started + work.context.requestWait(800);
 			}
 		});
 	};
