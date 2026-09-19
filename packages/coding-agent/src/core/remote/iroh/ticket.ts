@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
 import { isIP } from "node:net";
+import { IROH_DEPLOYMENT_PROFILE } from "../../../remote/iroh-deployment.ts";
 import {
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_TICKET_PREFIX,
@@ -110,6 +111,12 @@ function normalizePairingRelayOrigins(values: string[], relayMode: IrohRemoteRel
 }
 
 function normalizeHttpsRelayOrigin(value: string): string {
+	if (IROH_DEPLOYMENT_PROFILE.caRootsDer !== undefined) {
+		const expected = IROH_DEPLOYMENT_PROFILE.deployments[0].relayUrls;
+		const origin = expected.find((candidate) => value === candidate || value === `${candidate}/`);
+		if (origin === undefined) throw new Error("private deployment ticket cannot use another relay authority");
+		return origin;
+	}
 	let url: URL;
 	try {
 		url = new URL(value.trim());
