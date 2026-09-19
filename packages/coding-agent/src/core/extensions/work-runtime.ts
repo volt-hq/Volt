@@ -680,6 +680,8 @@ export class ExtensionWorkManager {
 				if (signal.aborted) done();
 			});
 			if (!this.current(scope) || scope.snapshot.revision !== revision || !policiesCurrent()) return undefined;
+			// Other collections may have acquired a lease while preparation yielded.
+			if (this.collection || processCollections >= MAX_PROCESS_COLLECTIONS) return undefined;
 		}
 		const readyBy = waitMs > 0 ? Math.min(deadline, performance.now()) : performance.now();
 		const candidates: Array<{ owner: string; contribution: Contribution }> = [];

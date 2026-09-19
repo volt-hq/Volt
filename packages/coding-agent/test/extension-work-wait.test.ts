@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ExtensionWorkBoundary } from "../src/core/extensions/work-host.ts";
+import type {
+	ExtensionWorkBoundary,
+	ExtensionWorkExecutionResult,
+	ExtensionWorkManagerOptions,
+} from "../src/core/extensions/work-host.ts";
 import { ExtensionWorkManager, withoutExtensionWork } from "../src/core/extensions/work-runtime.ts";
 import type {
 	ExtensionWorkContext,
@@ -41,16 +45,57 @@ function boundary(key = "request"): ExtensionWorkBoundary {
 		},
 	};
 }
-function setup(onBoundary: (work: ExtensionWorkContext, event: RequestBoundaryEvent) => void, wait?: number) {
+function setup(
+	onBoundary: (work: ExtensionWorkContext, event: RequestBoundaryEvent) => void,
+	wait?: number,
+	execute: ExtensionWorkManagerOptions["execute"] = async () => ({ status: "unavailable", reason: "test" }),
+) {
 	const manager = new ExtensionWorkManager({
 		limits: wait === undefined ? {} : { firstRequestWaitMs: wait },
 		isCurrent: () => true,
-		execute: async () => ({ status: "unavailable", reason: "test" }),
+		execute,
 		onOperation: () => {},
 		onBoundary: (event) => onBoundary(manager.getContext("one")!, event),
 	});
 	managers.push(manager);
 	return manager;
+}
+
+async function prepareCollection(wait: number) {
+	const gate = deferred();
+	const validation = vi.fn<(signal: AbortSignal) => Promise<void>>(() => gate.promise);
+	const result: ExtensionWorkExecutionResult = {
+		status: "ok",
+		implementation: {},
+		observation: {
+			kind: "read",
+			path: "/repo/file.ts",
+			text: "prepared source",
+			startLine: 1,
+			endLine: 1,
+			revision: "v1",
+			truncated: false,
+		},
+	};
+	const manager = setup(
+		(work) => work.context.requestWait(wait),
+		wait,
+		async ({ origin, signal }) => {
+			if (origin.ownerKind === "validation") await validation(signal);
+			return result;
+		},
+	);
+	manager.boundary(boundary());
+	const admission = manager.getContext("one")!.tasks.start({ key: "source", label: "Source" }, async (task) => {
+		const read = await task.repository.readText({ path: "file.ts" });
+		if (read.status !== "ok") throw new Error(read.status);
+		expect(
+			task.context.put({ key: "source", text: read.text, dependency: "sources", evidenceIds: [read.evidence.id] }),
+		).toEqual({ status: "accepted" });
+	});
+	if (admission.status !== "started") throw new Error(admission.status);
+	expect((await admission.task.wait()).state).toBe("completed");
+	return { manager, validation, gate };
 }
 
 describe("bounded first-request preparation wait", () => {
@@ -110,6 +155,56 @@ describe("bounded first-request preparation wait", () => {
 		expect(await manager.collect(1, () => true)).toContain("prepared before inference");
 		expect(handle?.status().state).toBe("completed");
 		expect(vi.getTimerCount()).toBe(0);
+	});
+
+	it.each([0, 100])("retains the process collection ceiling with a %i ms preparation allowance", async (wait) => {
+		vi.useFakeTimers();
+		vi.spyOn(performance, "now").mockReturnValue(0);
+		const runtimes = [];
+		for (let i = 0; i < 5; i++) runtimes.push(await prepareCollection(wait));
+
+		const collecting = runtimes.map(({ manager }) => manager.collect(1, () => true));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(runtimes.map(({ validation }) => validation.mock.calls.length)).toEqual([1, 1, 1, 1, 0]);
+		expect(await collecting[4]).toBeUndefined();
+		expect(runtimes[4].manager.getStatus("one").contributions).toEqual([{ key: "source", status: "ready" }]);
+
+		// Timeouts abort validation, but cannot release capacity before the operations drain.
+		await vi.advanceTimersByTimeAsync(25);
+		expect(await Promise.all(collecting)).toEqual(Array(5).fill(undefined));
+		for (const { validation } of runtimes.slice(0, 4)) expect(validation.mock.calls[0][0].aborted).toBe(true);
+		expect(await runtimes[4].manager.collect(1, () => true)).toBeUndefined();
+		expect(runtimes[4].validation).not.toHaveBeenCalled();
+
+		runtimes[0].gate.resolve();
+		await runtimes[0].manager.drain();
+		runtimes[4].gate.resolve();
+		expect(await runtimes[4].manager.collect(1, () => true)).toContain("prepared source");
+		expect(runtimes[4].validation).toHaveBeenCalledTimes(1);
+	});
+
+	it("does not replace a same-runtime collection acquired during preparation waiting", async () => {
+		vi.useFakeTimers();
+		vi.spyOn(performance, "now").mockReturnValue(0);
+		const { manager, validation, gate } = await prepareCollection(100);
+		const waiting = manager.collect(1, () => true);
+		const overtaking = manager.collect(1, () => true);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(validation).toHaveBeenCalledTimes(1);
+		expect(await waiting).toBeUndefined();
+
+		manager.invalidate();
+		expect(validation.mock.calls[0][0].aborted).toBe(true);
+		let drained = false;
+		const draining = manager.drain().then(() => {
+			drained = true;
+		});
+		await Promise.resolve();
+		expect(drained).toBe(false);
+		gate.resolve();
+		expect(await overtaking).toBeUndefined();
+		await draining;
+		expect(drained).toBe(true);
 	});
 
 	it("consumes the allowance even when the first request has no context headroom", async () => {
