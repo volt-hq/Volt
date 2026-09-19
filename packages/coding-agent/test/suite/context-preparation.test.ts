@@ -142,8 +142,9 @@ describe("context-preparation SDK evaluation", () => {
 			expect(baseline.operations).toEqual([]);
 			expect(baseline.api.getWorkStatus().tasks).toEqual([]);
 			expect(disabled.messages.map(getMessageText)).toEqual([example.prompt]);
-			expect(enabled.systemPrompt?.replaceAll(consumer.harness.tempDir, "<cwd>")).toBe(
-				disabled.systemPrompt?.replaceAll(baseline.harness.tempDir, "<cwd>"),
+			// System prompts render cwd with forward slashes, including on Windows.
+			expect(enabled.systemPrompt?.replaceAll(consumer.harness.tempDir.replaceAll("\\", "/"), "<cwd>")).toBe(
+				disabled.systemPrompt?.replaceAll(baseline.harness.tempDir.replaceAll("\\", "/"), "<cwd>"),
 			);
 			expect(enabled.messages.slice(0, disabled.messages.length).map(getMessageText)).toEqual(
 				disabled.messages.map(getMessageText),
