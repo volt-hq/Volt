@@ -30,7 +30,7 @@ function words(text: string): Set<string> {
 
 function selectSkill(prompt: string, skills: readonly ExtensionWorkSkill[]): ExtensionWorkSkill | undefined {
 	const terms = words(prompt);
-	const names = new Set(prompt.toLowerCase().match(/[a-z][a-z0-9-]*/g));
+	const names = new Set(prompt.toLowerCase().match(/[a-z0-9-]+/g));
 	const ranked = skills.map((skill) => {
 		const overlap = [...words(`${skill.name.slice(0, 64)} ${skill.description.slice(0, 1024)}`)].filter((word) =>
 			terms.has(word),

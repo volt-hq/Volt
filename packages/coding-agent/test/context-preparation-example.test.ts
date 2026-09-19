@@ -112,6 +112,18 @@ function setup(skills: ExtensionWorkSkill[] = []) {
 describe("deterministic preparation selection", () => {
 	it.each([
 		["Use pdf-tools", [skill("pdf-tools"), skill("review")], "id-pdf-tools"],
+		["Use 3d-tools", [skill("3d-tools")], "id-3d-tools"],
+		["Use 3d-tools", [skill("d-tools"), skill("3d-tools")], "id-3d-tools"],
+		["Use 3d-tools", [skill("d-tools")], undefined],
+		["Use 123", [skill("123"), skill("23")], "id-123"],
+		["Use 7", [skill("7")], "id-7"],
+		["Use (`3D-TOOLS`).", [skill("3d-tools"), skill("d-tools")], "id-3d-tools"],
+		['Use "123".', [skill("123")], "id-123"],
+		["Use 3d-tools-extra", [skill("3d-tools"), skill("d-tools")], undefined],
+		["Use x3d-tools", [skill("3d-tools"), skill("d-tools")], undefined],
+		["Use 1234", [skill("123"), skill("234")], undefined],
+		["Use 3d-tools and 123", [skill("3d-tools"), skill("123")], undefined],
+		["Use 3d-tools and d-tools", [skill("3d-tools"), skill("d-tools")], undefined],
 		[
 			"Extract invoice tables",
 			[skill("pdf-tools", "Extract invoice tables from PDFs"), skill("review", "Review code changes")],
@@ -126,6 +138,9 @@ describe("deterministic preparation selection", () => {
 		await test.emit(prompt);
 		expect(test.repository.readSkill.mock.calls.map(([input]) => input.resourceId)).toEqual(
 			selected ? [selected] : [],
+		);
+		expect(test.put.mock.calls.map(([contribution]) => contribution.evidenceIds)).toEqual(
+			selected ? [[selected]] : [],
 		);
 		expect(test.start).toHaveBeenCalledTimes(selected ? 1 : 0);
 		expect(test.requestWait).toHaveBeenCalledTimes(selected ? 1 : 0);
