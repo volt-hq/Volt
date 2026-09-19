@@ -104,6 +104,7 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `dynamic-resources/` | Loads skills, prompts, and themes using `resources_discover` |
+| `context-preparation.ts` | Opt-in deterministic skill/source excerpts through managed services; [SDK configuration and evaluation](#context-preparation) |
 
 ### Messages & Communication
 
@@ -132,6 +133,58 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 |-----------|-------------|
 | `with-deps/` | Extension with its own package.json and dependencies (demonstrates jiti module resolution) |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation |
+
+## Context preparation
+
+`context-preparation.ts` is an experimental, deterministic consumer of [managed context preparation](../../docs/extensions.md#managed-context-preparation). It is **not enabled by default** and uses no auxiliary model, raw filesystem/process access, repository index, or cache. Loading it explicitly with `volt -e ./examples/extensions/context-preparation.ts` opts into ready-only preparation; it does not change the CLI's zero first-request wait.
+
+For an SDK host, inject the factory and explicitly allow a bounded wait (adjust the example import path to your script):
+
+```typescript
+import { createAgentSession, DefaultResourceLoader, SessionManager } from "@hansjm10/volt-coding-agent";
+import contextPreparation from "./examples/extensions/context-preparation.ts";
+
+const resourceLoader = new DefaultResourceLoader({ extensionFactories: [contextPreparation] });
+await resourceLoader.reload();
+const { session } = await createAgentSession({
+  resourceLoader,
+  sessionManager: SessionManager.inMemory(),
+  extensionWorkLimits: { firstRequestWaitMs: 100 },
+});
+try {
+  await session.prompt("Explain src/config.ts:20");
+} finally {
+  session.dispose();
+  await session.waitForClosed();
+}
+```
+
+This uses your normal main-model configuration; it makes no helper-model request. Omit the factory (or remove the explicitly loaded extension and reload/restart) to disable it. See the [SDK guide](../../docs/sdk.md) for model/auth setup.
+
+### Selection and bounds
+
+- On the first boundary only, inspect at most 8 recent committed input texts, capped at 8,192 characters combined. Explicit skill commands/expansions and common negative cues (`do not`, `don't`, `never`, `avoid`, `skip`, `without`) cause abstention.
+- Select at most one loaded skill: an exact name token wins; otherwise require at least two distinct non-generic words shared with its name/description. Tied top scores abstain. Truncated catalogs skip all skill selection, including exact-name matches, without suppressing explicit-source preparation. This is English-oriented lexical matching, not an intent classifier.
+- Select the first two distinct relative source/document paths. Use forward slashes and supported common file extensions, optionally with `:line` or `#Symbol`, for example `src/config.ts:20` or `src/config.ts#parseConfig`. Absolute paths, URLs, traversal, hidden path components, `node_modules`, and `vendor` are ignored. Paths with spaces and unrecognized syntax abstain; there is no search fallback. Punctuation-separated lists are accepted only when every entry in the connected span is a supported relative path; otherwise the whole span is ignored. Use whitespace to separate independent paths from URLs or other unsupported text.
+- A `#Symbol` hint uses document `symbols` only when advertised. A unique exact match in an untruncated result chooses a range. The subsequent read must confirm the same canonical file; discovery never authorizes reading another target. Unknown index coverage remains unknown, and selection ranges may cover only a name rather than a whole definition.
+- One managed task, at most three concurrent branches and five production operations (three reads plus two symbol queries). Each read requests at most 40 lines; each contributed excerpt contains at most 1,536 UTF-8 bytes plus a short label. Partial excerpts are marked. References inside skill/source bodies are not followed.
+- The task requests a 1-second deadline and a shared first-request wait of up to 100 ms, subject to tighter host limits. Source validation uses the host's separate collection budget; 100 ms is **not** a total latency guarantee. Native reads can consume more bytes than the retained excerpt. LSP startup/indexing and cancellation drain may outlive the foreground allowance.
+
+Only successful managed reads contribute source-backed text. Policies, overrides, revocation, and fresh-source validation remain authoritative; failures silently omit optional context. Contributions do not replace instructions, count as a completed skill workflow, satisfy Plan research, or prove tests passed. The file filters are not a sandbox or secret detector, and ordinary source reads still follow native path/symlink semantics. Configured LSP servers may start, and managed-read contention can temporarily reject overlapping foreground command-based fixes.
+
+### Reproducible evaluation
+
+From `packages/coding-agent`, using the installed Vitest CLI:
+
+```bash
+node node_modules/vitest/dist/cli.js --run test/context-preparation-example.test.ts test/suite/context-preparation.test.ts
+```
+
+The SDK-harness comparison uses native temporary skill/source files and a faux provider, with preparation enabled versus omitted. It reports labeled evidence selection, estimated extra message tokens, and production-plus-validation operation counts. Cases cover a skill plus file, a named skill, the two-file cap, ambiguous metadata, irrelevant input, and a negated request. Unit cases also exercise semantic ranges, truncation, unavailable services, and UTF-8 limits. SDK cases verify policy/redaction/staleness omission, the default zero wait, and a slow read reaching the 100 ms cutoff without waking another inference.
+
+Positive admission tests hold virtual deadlines while native I/O settles; the cutoff test advances the virtual clock explicitly. They establish deterministic retrieval and timing contracts, **not production latency, broad retrieval accuracy, or real-model answer quality**. Token estimates include host evidence framing and vary with temporary paths. The two-file cap intentionally misses additional relevant files.
+
+Before adding auxiliary inference, evaluate representative tasks with the same main model, tools, repository state, and host wait settings, enabled versus disabled. Record end-to-end correctness and latency, provider-input token deltas, used versus unused excerpts, stale omissions, and negative/context-induced regressions. Do not infer usefulness merely from context admission or this small fixture corpus.
 
 ## Writing Extensions
 
