@@ -11,6 +11,7 @@ import type {
 	ExtensionWorkEvidence,
 	ExtensionWorkFailure,
 	ExtensionWorkLimits,
+	ExtensionWorkReadResult,
 	ExtensionWorkService,
 	ExtensionWorkSnapshot,
 	ExtensionWorkStatus,
@@ -52,6 +53,7 @@ export const DEFAULT_EXTENSION_WORK_LIMITS: Readonly<ExtensionWorkLimits> = Obje
 	extensionContributionBytes: 8 * 1024,
 	suffixBytes: 16 * 1024,
 	collectionMs: 25,
+	firstRequestWaitMs: 0,
 });
 
 interface Budget {
@@ -64,6 +66,7 @@ interface Evidence {
 	public: ExtensionWorkEvidence;
 	owner: string;
 	input: JsonObject;
+	service: "readText" | "readSkill";
 	observation: Extract<RepositoryObservation, { kind: "read" }>;
 	implementation: object;
 }
@@ -71,6 +74,7 @@ interface Evidence {
 interface Contribution {
 	value: ExtensionWorkContribution;
 	revision: number;
+	readyAt: number;
 	status: "ready" | "admitted" | "omitted";
 	reason?: string;
 }
@@ -80,6 +84,8 @@ interface Scope {
 	snapshot: ExtensionWorkSnapshot;
 	controller: AbortController;
 	allowNewWork: boolean;
+	waitRequestedMs: number;
+	waitPending: boolean;
 	budget: Budget;
 	evidence: Map<string, Evidence>;
 	contributions: Map<string, Map<string, Contribution>>;
@@ -112,6 +118,7 @@ export class ExtensionWorkManager {
 	private readonly operations = new Set<Promise<unknown>>();
 	private scope: Scope | undefined;
 	private blockedKey: string | undefined;
+	private waitRequestScope: Scope | undefined;
 	private collection: { controller: AbortController; settled: Promise<void> } | undefined;
 	private closed = false;
 
@@ -125,7 +132,7 @@ export class ExtensionWorkManager {
 				value === undefined ||
 				!Number.isSafeInteger(value) ||
 				value < 0 ||
-				value > this.limits[key]
+				value > (key === "firstRequestWaitMs" ? 100 : this.limits[key])
 			) {
 				throw new TypeError(`Invalid extension work limit: ${key}`);
 			}
@@ -165,6 +172,8 @@ export class ExtensionWorkManager {
 				},
 				controller: new AbortController(),
 				allowNewWork: boundary.allowNewWork,
+				waitRequestedMs: 0,
+				waitPending: true,
 				budget: { operations: 0, bytes: 0, reservedBytes: 0 },
 				evidence: new Map(),
 				contributions: new Map(),
@@ -177,6 +186,7 @@ export class ExtensionWorkManager {
 			};
 			this.scope.allowNewWork = boundary.allowNewWork;
 		}
+		this.waitRequestScope = first && boundary.allowNewWork ? this.scope : undefined;
 		try {
 			void Promise.resolve(
 				this.options.onBoundary({
@@ -184,10 +194,13 @@ export class ExtensionWorkManager {
 					attemptId: boundary.attemptId,
 					cause: boundary.cause,
 					first,
+					waitAvailableMs: this.waitRequestScope ? this.limits.firstRequestWaitMs : 0,
 				}),
 			).catch(() => {});
 		} catch {
 			// Observations cannot change provider admission.
+		} finally {
+			this.waitRequestScope = undefined;
 		}
 	}
 
@@ -198,6 +211,24 @@ export class ExtensionWorkManager {
 		const snapshot = cloneCanonicalData(scope.snapshot, "Extension work context");
 		return {
 			snapshot: cloneCanonicalData(snapshot, "Extension work snapshot"),
+			context: {
+				requestWait: (milliseconds) => {
+					if (!Number.isSafeInteger(milliseconds) || milliseconds < 0)
+						throw new TypeError("Invalid extension wait request");
+					if (
+						invocation.getStore() ||
+						!this.current(scope) ||
+						this.waitRequestScope !== scope ||
+						!scope.waitPending
+					)
+						return 0;
+					scope.waitRequestedMs = Math.max(
+						scope.waitRequestedMs,
+						Math.min(milliseconds, this.limits.firstRequestWaitMs),
+					);
+					return scope.waitRequestedMs;
+				},
+			},
 			tasks: { start: (spec, callback) => this.start(scope, owner, snapshot, spec, callback) },
 		};
 	}
@@ -347,33 +378,23 @@ export class ExtensionWorkManager {
 			signal: task.controller.signal,
 			deadline: task.deadline,
 			repository: {
-				readText: async (input) => {
-					const result = await this.taskOperation(task, "readText", input);
+				readText: (input) => this.readTask(task, "readText", input),
+				readSkill: (input) => this.readTask(task, "readSkill", input),
+				symbols: async (input) => {
+					const result = await this.taskOperation(task, "symbols", { ...input, action: "symbols" });
 					if (result.status !== "ok") return result;
-					const revoked = this.taskFailure(task);
-					if (revoked) return revoked;
-					if (result.observation.kind !== "read") return failure("unsupported", "observation_unavailable");
-					const publicEvidence: ExtensionWorkEvidence = {
-						id: randomUUID(),
-						path: result.observation.path,
-						startLine: result.observation.startLine,
-						endLine: result.observation.endLine,
-						observedAt: Date.now(),
-					};
-					task.scope.evidence.set(publicEvidence.id, {
-						public: publicEvidence,
-						owner: task.owner,
-						input: cloneCanonicalData(input, "Read arguments"),
-						observation: result.observation,
-						implementation: result.implementation,
-					});
-					return {
-						status: "ok",
-						text: result.observation.text,
-						truncated: result.observation.truncated,
-						evidence: { ...publicEvidence },
-					};
+					return result.observation.kind === "symbols"
+						? {
+								status: "ok",
+								symbols: result.observation.symbols,
+								truncated: result.observation.truncated,
+								coverage: result.observation.coverage,
+								observedAt: Date.now(),
+							}
+						: failure("unsupported", "observation_unavailable");
 				},
+				definition: (input) => this.locationTask(task, "definition", input),
+				references: (input) => this.locationTask(task, "references", input),
 				findPaths: async (input) => {
 					const result = await this.taskOperation(task, "findPaths", input);
 					if (result.status !== "ok") return result;
@@ -397,6 +418,60 @@ export class ExtensionWorkManager {
 				},
 			},
 		};
+	}
+
+	private async readTask(
+		task: Task,
+		service: "readText" | "readSkill",
+		raw: JsonObject,
+	): Promise<ExtensionWorkReadResult> {
+		let input: JsonObject;
+		try {
+			input = cloneCanonicalData(raw, "Read arguments");
+		} catch {
+			return failure("failed", "invalid_arguments");
+		}
+		const result = await this.taskOperation(task, service, input);
+		if (result.status !== "ok") return result;
+		const revoked = this.taskFailure(task);
+		if (revoked) return revoked;
+		if (result.observation.kind !== "read") return failure("unsupported", "observation_unavailable");
+		const publicEvidence: ExtensionWorkEvidence = {
+			id: randomUUID(),
+			path: result.observation.path,
+			startLine: result.observation.startLine,
+			endLine: result.observation.endLine,
+			observedAt: Date.now(),
+			...(service === "readSkill" && typeof input.resourceId === "string" ? { resourceId: input.resourceId } : {}),
+		};
+		task.scope.evidence.set(publicEvidence.id, {
+			public: publicEvidence,
+			owner: task.owner,
+			service,
+			input,
+			observation: result.observation,
+			implementation: result.implementation,
+		});
+		return {
+			status: "ok",
+			text: result.observation.text,
+			truncated: result.observation.truncated,
+			evidence: { ...publicEvidence },
+		};
+	}
+
+	private async locationTask(task: Task, service: "definition" | "references", input: JsonObject) {
+		const result = await this.taskOperation(task, service, { ...input, action: service });
+		if (result.status !== "ok") return result;
+		return result.observation.kind === "locations"
+			? {
+					status: "ok" as const,
+					locations: result.observation.locations,
+					truncated: result.observation.truncated,
+					coverage: result.observation.coverage,
+					observedAt: Date.now(),
+				}
+			: failure("unsupported", "observation_unavailable");
 	}
 
 	private taskFailure(task: Task): ExtensionWorkFailure | undefined {
@@ -566,7 +641,7 @@ export class ExtensionWorkManager {
 			) > this.limits.extensionContributionBytes
 		)
 			return failure("limit_exceeded", "contribution_budget");
-		entries.set(value.key, { value, revision: task.snapshot.revision, status: "ready" });
+		entries.set(value.key, { value, revision: task.snapshot.revision, readyAt: performance.now(), status: "ready" });
 		task.scope.contributions.set(task.owner, entries);
 		return { status: "accepted" };
 	}
@@ -577,6 +652,8 @@ export class ExtensionWorkManager {
 		maxBytes = this.limits.suffixBytes,
 	): Promise<string | undefined> {
 		const scope = this.scope;
+		const waitMs = scope?.waitPending ? scope.waitRequestedMs : 0;
+		if (scope) scope.waitPending = false;
 		if (
 			!scope ||
 			!this.current(scope) ||
@@ -587,11 +664,34 @@ export class ExtensionWorkManager {
 			maxBytes <= 0
 		)
 			return undefined;
+		const deadline = performance.now() + waitMs;
+		if (waitMs > 0) {
+			const tasks = [...this.tasks].filter((task) => task.scope === scope);
+			await new Promise<void>((resolve) => {
+				const signal = scope.controller.signal;
+				const done = () => {
+					clearTimeout(timer);
+					signal.removeEventListener("abort", done);
+					resolve();
+				};
+				const timer = setTimeout(done, Math.max(0, deadline - performance.now()));
+				signal.addEventListener("abort", done, { once: true });
+				void Promise.allSettled(tasks.map((task) => task.settled)).then(done);
+				if (signal.aborted) done();
+			});
+			if (!this.current(scope) || scope.snapshot.revision !== revision || !policiesCurrent()) return undefined;
+			// Other collections may have acquired a lease while preparation yielded.
+			if (this.collection || processCollections >= MAX_PROCESS_COLLECTIONS) return undefined;
+		}
+		const readyBy = waitMs > 0 ? Math.min(deadline, performance.now()) : performance.now();
 		const candidates: Array<{ owner: string; contribution: Contribution }> = [];
 		for (const owner of this.extensionIds.keys()) {
 			const entries = scope.contributions.get(owner);
 			if (entries)
-				for (const key of [...entries.keys()].sort()) candidates.push({ owner, contribution: entries.get(key)! });
+				for (const key of [...entries.keys()].sort()) {
+					const contribution = entries.get(key)!;
+					if (waitMs === 0 || contribution.readyAt <= readyBy) candidates.push({ owner, contribution });
+				}
 		}
 		if (candidates.length === 0) return undefined;
 		const controller = new AbortController();
@@ -614,13 +714,13 @@ export class ExtensionWorkManager {
 		}
 		let next = 0;
 		const leaseId = randomUUID();
-		const deadline = performance.now() + this.limits.collectionMs;
+		const validationDeadline = performance.now() + this.limits.collectionMs;
 		const validate = async () => {
 			while (
 				next < evidence.length &&
 				!controller.signal.aborted &&
 				this.current(scope) &&
-				performance.now() < deadline
+				performance.now() < validationDeadline
 			) {
 				const item = evidence[next++];
 				const result = await this.execute(
@@ -628,11 +728,11 @@ export class ExtensionWorkManager {
 					item.owner,
 					leaseId,
 					"validation",
-					"readText",
+					item.service,
 					item.input,
 					controller.signal,
 				);
-				if (performance.now() >= deadline) {
+				if (performance.now() >= validationDeadline) {
 					controller.abort();
 					return;
 				}

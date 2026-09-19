@@ -15,6 +15,7 @@ import { spawnProcess, spawnProcessSync } from "../../utils/child-process.ts";
 import { getSubprocessEnv } from "../../utils/process-env.ts";
 import type { LspLaunchSource } from "./command-resolver.ts";
 import { languageIdForExtension } from "./config.ts";
+import { isManagedLspObservation } from "./managed-observation.ts";
 import { LspOperationError, type LspResult, lspErrorResult, lspResult, waitForLsp } from "./outcome.ts";
 import type { LspTracer } from "./trace.ts";
 import type { AppliedWorkspaceChange, WorkspaceEditDocumentSnapshot } from "./workspace-edit-applier.ts";
@@ -60,6 +61,8 @@ export interface LspClientOptions {
 	requestTimeoutMs?: number;
 	/** Handler for server-initiated workspace/applyEdit requests. */
 	onApplyEdit?: (edit: unknown) => Promise<boolean | LspApplyEditResult>;
+	/** @internal Record a client-side rejection without invoking the edit handler. */
+	onApplyEditRejected?: (failureReason: string) => void;
 	/** Protocol tracer. Can also be set later via setTracer(). */
 	tracer?: LspTracer;
 	/** @internal Injectable process spawner for deterministic transport tests. */
@@ -124,6 +127,7 @@ interface JsonRpcMessage {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
+const MAX_UNRESOLVED_MANAGED_REQUESTS = 64;
 const MAX_STARTUP_STDERR_CHARS = 8000;
 const STARTUP_STDERR_IDLE_GRACE_MS = 100;
 const STARTUP_STDERR_MAX_DRAIN_MS = 1000;
@@ -297,6 +301,9 @@ export class LspClient {
 
 	private nextRequestId = 1;
 	private pendingRequests = new Map<number, PendingRequest>();
+	private managedReads = 0;
+	/** Includes timed-out requests: local settlement does not acknowledge server completion. */
+	private unresolvedManagedRequests = new Set<number>();
 	private readBuffer: Buffer = Buffer.alloc(0);
 
 	private supportsPullDiagnostics = false;
@@ -363,6 +370,18 @@ export class LspClient {
 		this.options = options;
 		this.rootUri = pathToFileURL(options.rootDir).toString();
 		this.tracer = options.tracer;
+	}
+
+	/** @internal Shared transport requests have no parent request ID: deny writes
+	 * conservatively while any managed read owns this client. */
+	acquireManagedRead(): () => void {
+		this.managedReads++;
+		let released = false;
+		return () => {
+			if (released) return;
+			released = true;
+			this.managedReads--;
+		};
 	}
 
 	/** Enable or disable protocol tracing for this client. */
@@ -1068,7 +1087,19 @@ export class LspClient {
 		if (signal?.aborted) {
 			return Promise.reject(new LspOperationError("cancelled", "aborted", `LSP request "${method}" was aborted`));
 		}
+		const managed = isManagedLspObservation();
+		// Reserve before sending, so concurrent requests cannot overflow timeout bookkeeping.
+		if (managed && this.unresolvedManagedRequests.size >= MAX_UNRESOLVED_MANAGED_REQUESTS) {
+			return Promise.reject(
+				new LspOperationError(
+					"unavailable",
+					"managed-request-limit",
+					"Too many unresolved managed LSP requests; wait for server replies or restart the language server.",
+				),
+			);
+		}
 		const id = this.nextRequestId++;
+		if (managed) this.unresolvedManagedRequests.add(id);
 		return new Promise((resolve, reject) => {
 			// Wrap both settle paths so the timer and abort listener are always
 			// cleaned up, no matter who settles the request (response, exit,
@@ -1077,10 +1108,24 @@ export class LspClient {
 				return (value: T): void => {
 					clearTimeout(timer);
 					signal?.removeEventListener("abort", onAbort);
-					fn(value);
+					if (managed && signal?.aborted) {
+						reject(new LspOperationError("cancelled", "aborted", `LSP request "${method}" was aborted`));
+					} else {
+						fn(value);
+					}
 				};
 			};
 			const onAbort = (): void => {
+				if (managed) {
+					// Drain locally until the original deadline. The unresolved ID keeps
+					// writes denied beyond that deadline until a terminal server reply.
+					try {
+						this.notify("$/cancelRequest", { id });
+					} catch {
+						// The normal terminal path still drains the request.
+					}
+					return;
+				}
 				this.pendingRequests.delete(id);
 				settle(reject)(new LspOperationError("cancelled", "aborted", `LSP request "${method}" was aborted`));
 			};
@@ -1100,6 +1145,7 @@ export class LspClient {
 			try {
 				this.sendMessage({ jsonrpc: "2.0", id, method, params });
 			} catch (error) {
+				this.unresolvedManagedRequests.delete(id);
 				this.pendingRequests.delete(id);
 				settle(reject)(error instanceof Error ? error : new Error(String(error)));
 			}
@@ -1156,9 +1202,12 @@ export class LspClient {
 			return;
 		}
 		if (message.id !== undefined) {
-			const pending = this.pendingRequests.get(Number(message.id));
+			const id = Number(message.id);
+			// A late success or error acknowledges completion even after local timeout cleanup.
+			if (Object.hasOwn(message, "result") || message.error) this.unresolvedManagedRequests.delete(id);
+			const pending = this.pendingRequests.get(id);
 			if (pending) {
-				this.pendingRequests.delete(Number(message.id));
+				this.pendingRequests.delete(id);
 				clearTimeout(pending.timer);
 				if (message.error) {
 					pending.reject(new LspResponseError(message.error.code, message.error.message));
@@ -1218,6 +1267,22 @@ export class LspClient {
 	}
 
 	private handleServerRequest(id: number | string, method: string, params: unknown): void {
+		// Disposal revokes the old transport before the process necessarily exits.
+		if (!this.isAlive) return;
+		if (method === "workspace/applyEdit" && (this.managedReads > 0 || this.unresolvedManagedRequests.size > 0)) {
+			const failureReason = "Managed LSP discovery is read-only.";
+			this.options.onApplyEditRejected?.(failureReason);
+			try {
+				this.sendMessage({
+					jsonrpc: "2.0",
+					id,
+					result: { applied: false, failureReason },
+				});
+			} catch {
+				// Server may have exited.
+			}
+			return;
+		}
 		if (method === "workspace/applyEdit" && this.options.onApplyEdit) {
 			const edit = (params as { edit?: unknown } | undefined)?.edit;
 			void this.options
@@ -1267,6 +1332,7 @@ export class LspClient {
 			pending.reject(this.exitError);
 		}
 		this.pendingRequests.clear();
+		this.unresolvedManagedRequests.clear();
 		for (const waiter of [...this.publishWaiters]) {
 			waiter.resolve();
 		}

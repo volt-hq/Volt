@@ -29,6 +29,7 @@ import {
 	type ResolvedLspServerConfig,
 	SEVERITY_NAMES,
 } from "./config.ts";
+import { isManagedLspObservation, recordManagedLspLocations, recordManagedLspSymbols } from "./managed-observation.ts";
 import { LspOperationError, type LspResult, lspErrorResult, lspResult, lspSucceeded, waitForLsp } from "./outcome.ts";
 import { LspTracer } from "./trace.ts";
 import { type LspVersionProbe, LspVersionProbes } from "./version-probe.ts";
@@ -202,8 +203,9 @@ interface LspLocationLink {
 interface LspDocumentSymbol {
 	name: string;
 	kind: number;
+	range?: LspRange;
 	selectionRange?: LspRange;
-	location?: { range: LspRange };
+	location?: { uri?: string; range: LspRange };
 	children?: LspDocumentSymbol[];
 }
 
@@ -502,7 +504,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private launches = new Map<string, LspLaunchDescriptor>();
 	private startAttempts = new Map<string, number>();
 	private versionProbes = new LspVersionProbes();
-	private operationContext = new AsyncLocalStorage<{ coldStartMs: number }>();
+	private operationContext = new AsyncLocalStorage<{
+		coldStartMs: number;
+		managedReads: Map<LspClient, () => void>;
+	}>();
 	private versions = new Map<string, string>();
 	private startupEvidence = new Map<string, Pick<LspServerStatus, "serverInfo" | "capabilities" | "startupStderr">>();
 	private metrics = new Map<
@@ -740,7 +745,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const server = this.findServer(path);
 		const root = server ? this.findRoot(path, server.rootMarkers) : this.projectCwd;
 		const key = this.serverKey(server?.name ?? "none", root);
-		const context = { coldStartMs: 0 };
+		const context = { coldStartMs: 0, managedReads: new Map<LspClient, () => void>() };
 		this.activeOperations.set(key, (this.activeOperations.get(key) ?? 0) + 1);
 		let operationResult: LspOperationResult;
 		try {
@@ -748,6 +753,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		} catch (error) {
 			operationResult = lspErrorResult(error);
 		} finally {
+			for (const release of context.managedReads.values()) release();
 			this.activeOperations.set(key, Math.max(0, (this.activeOperations.get(key) ?? 1) - 1));
 		}
 		const durationMs = performance.now() - startedAt;
@@ -1128,6 +1134,12 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				{ textDocument: { uri: session.uri } },
 				signal,
 			)) as LspDocumentSymbol[] | null;
+			await recordManagedLspSymbols(
+				result ?? [],
+				session.absolutePath,
+				(uri) => this.resolveLocationPath(uri),
+				MAX_SYMBOL_LINES,
+			);
 			if (!result || result.length === 0) {
 				return lspResult("empty", `No symbols found in ${this.displayPath(absolutePath)}.`);
 			}
@@ -1135,7 +1147,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			this.appendSymbolLines(result, 0, lines);
 			if (lines.length > MAX_SYMBOL_LINES) {
 				const extra = lines.length - MAX_SYMBOL_LINES;
-				return lspResult("success", [...lines.slice(0, MAX_SYMBOL_LINES), `... and ${extra} more`].join("\n"), {
+				const omitted = isManagedLspObservation() ? "... additional symbols omitted" : `... and ${extra} more`;
+				return lspResult("success", [...lines.slice(0, MAX_SYMBOL_LINES), omitted].join("\n"), {
 					resultCount: lines.length,
 				});
 			}
@@ -1235,6 +1248,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				containerName?: string;
 				location?: { uri: string; range?: LspRange };
 			}> | null;
+			await recordManagedLspSymbols(result ?? [], undefined, (uri) => this.resolveLocationPath(uri), MAX_REFERENCES);
 			if (!result || result.length === 0) {
 				return lspResult("empty", `No workspace symbols matching "${query}".`);
 			}
@@ -1321,6 +1335,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				signal,
 			);
 			const locations = normalizeLocations(result);
+			if (method === "textDocument/definition" || method === "textDocument/references") {
+				await recordManagedLspLocations(locations, (uri) => this.resolveLocationPath(uri), MAX_REFERENCES);
+			}
 			if (locations.length === 0) {
 				return lspResult("empty", `No ${label} found for "${symbol}".`);
 			}
@@ -1701,6 +1718,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 
 	private appendSymbolLines(symbols: LspDocumentSymbol[], depth: number, lines: string[]): void {
 		for (const symbol of symbols) {
+			// Foreground keeps its full count. Managed discovery must not traverse
+			// an unbounded/deep tree again merely to render discarded tool text.
+			if (isManagedLspObservation() && lines.length > MAX_SYMBOL_LINES) return;
 			const range = symbol.selectionRange ?? symbol.location?.range;
 			const line = range ? `:${range.start.line + 1}` : "";
 			const kind = SYMBOL_KIND_NAMES[symbol.kind] ?? "symbol";
@@ -1799,6 +1819,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		signal?: AbortSignal,
 	): Promise<void> {
 		if (signal?.aborted) throw new LspOperationError("cancelled", "aborted", "LSP operation aborted");
+		const operation = this.operationContext.getStore();
+		if (isManagedLspObservation() && operation && !operation.managedReads.has(client)) {
+			operation.managedReads.set(client, client.acquireManagedRead());
+		}
 		if (client.isReady) return;
 		const startedAt = performance.now();
 		let startup = this.startups.get(client);
@@ -1827,6 +1851,12 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			// This manager-owned chain must settle even when every operation has cancelled.
 			void owned.promise.catch(() => {});
 			startup = owned;
+		}
+		// A cancelled waiter must not release read-only startup ownership while the
+		// shared handshake can still issue server-to-host requests.
+		if (isManagedLspObservation()) {
+			const release = client.acquireManagedRead();
+			void startup.promise.then(release, release);
 		}
 		try {
 			await waitForLsp(startup.promise, signal);
@@ -1904,6 +1934,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				const canonical = await this.canonicalizeRequestedPath(absolutePath);
 				return "error" in canonical ? undefined : canonical.path;
 			},
+			onApplyEditRejected: (failureReason) => {
+				const context = this.commandApplyContexts.get(clientRef);
+				if (context) context.failure = failureReason;
+			},
 			onApplyEdit: async (edit) => {
 				const context = this.commandApplyContexts.get(clientRef);
 				const snapshots = context?.snapshots ?? clientRef.captureWorkspaceEditSnapshots();
@@ -1962,6 +1996,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		error: MissingLspExecutableError,
 		signal?: AbortSignal,
 	): Promise<LspClientErrorResult> {
+		// Do not join a foreground install or consume its prompt/breaker state.
+		// This policy belongs to the operation, not the shared server startup.
+		if (isManagedLspObservation()) return { retry: false, message: error.message };
 		const failure = this.startFailures.get(error.key);
 		const recipe = server.installRecipe;
 		const installEligible =
@@ -2027,7 +2064,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		recipe: LspInstallRecipe,
 		signal?: AbortSignal,
 	): Promise<LspInstallAttemptResult> {
-		if (!this.installAllowed() || /^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? ""))
+		if (isManagedLspObservation() || !this.installAllowed() || /^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? ""))
 			return { retry: false, message: "Automatic LSP repair is unavailable in offline/restricted contexts." };
 		const interaction = this.hostInteraction;
 		const identity = installRecipeIdentity(recipe);

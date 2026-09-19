@@ -1,4 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import type { SkillFileIdentity } from "../skills.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES } from "./truncate.ts";
 
 /** Internal producer data, never added to ordinary tool results or public exports. */
@@ -17,12 +18,12 @@ export type RepositoryObservation =
 
 /** Machine-readable producer failures, kept private to managed execution. */
 export class RepositoryObservationError extends Error {
-	readonly status: "unsupported" | "unavailable";
-	readonly reason: "non_text_input" | "backend_unavailable";
+	readonly status: "unsupported" | "unavailable" | "invalidated";
+	readonly reason: "non_text_input" | "backend_unavailable" | "resource_changed";
 
 	constructor(
-		status: "unsupported" | "unavailable",
-		reason: "non_text_input" | "backend_unavailable",
+		status: "unsupported" | "unavailable" | "invalidated",
+		reason: "non_text_input" | "backend_unavailable" | "resource_changed",
 		message: string,
 	) {
 		super(message);
@@ -32,6 +33,7 @@ export class RepositoryObservationError extends Error {
 }
 
 interface RepositoryObservationContext {
+	expectedRead?: Readonly<SkillFileIdentity>;
 	capture(observation: RepositoryObservation): void;
 }
 
@@ -112,11 +114,13 @@ function boundedObservation(observation: RepositoryObservation): RepositoryObser
 /** Run the same live native tool in a private, isolated observation scope. */
 export async function withRepositoryObservation<T>(
 	run: () => Promise<T>,
+	expectedRead?: Readonly<SkillFileIdentity>,
 ): Promise<{ result: T; observation?: RepositoryObservation }> {
 	let active = true;
 	let observation: RepositoryObservation | undefined;
 	return observationStorage.run(
 		{
+			expectedRead,
 			capture(value) {
 				if (active) observation = boundedObservation(value);
 			},

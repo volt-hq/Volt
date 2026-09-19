@@ -792,9 +792,9 @@ eventBus.on("my-extension:status", (data) => console.log(data));
 
 ### Managed extension work
 
-Extensions can use `request_boundary`, `ctx.work`, and `volt.getWorkStatus()` to prepare bounded read-only context. No extension or auxiliary model is enabled by the SDK. See [Managed context preparation](extensions.md#managed-context-preparation) for task ownership, services, and ready-only contribution semantics.
+Extensions can use `request_boundary`, `ctx.work`, and `volt.getWorkStatus()` to prepare bounded read-only context. No extension or auxiliary model is enabled by the SDK. See [Managed context preparation](extensions.md#managed-context-preparation) for task ownership, services, and context admission semantics.
 
-Hosts may tighten the default ceilings when constructing a session:
+Hosts may tighten the default resource ceilings and opt into a bounded first-request preparation wait when constructing a session:
 
 ```typescript
 const { session } = await createAgentSession({
@@ -804,11 +804,12 @@ const { session } = await createAgentSession({
     taskTimeoutMs: 3000,
     maxTaskTimeoutMs: 5000,
     suffixBytes: 8192,
+    firstRequestWaitMs: 50, // Default 0; at most 100 ms, shared across extensions.
   },
 });
 ```
 
-All supplied limits must be finite nonnegative integers no greater than the defaults. Normal tool grants remain authoritative: managed reads require active trusted native `read`, `find`, or `grep` implementations. Custom overrides are not silently bypassed. Managed task completion cannot start model inference; cleanup participates in session teardown. The process-wide ceiling includes revoked callbacks that have not settled.
+All supplied limits must be finite nonnegative integers. Resource ceilings can only tighten defaults; `firstRequestWaitMs` is the exception, with default 0 and maximum 100. Extensions must synchronously request that allowance at the first boundary; configuration alone does not add a delay. Workspace services require active trusted native `read`, `find`, `grep`, or `lsp` implementations. `readSkill` uses an exact native-loaded catalog resource grant and a registered trusted read implementation, without activating general reads. Custom overrides are not silently bypassed. Metadata-only SDK skills have no native file identity and are omitted from the managed catalog; use `DefaultResourceLoader` or the native `loadSkills`/`loadSkillsFromDir` results for resource-backed skills. Managed task completion cannot start model inference; cleanup participates in session teardown. The process-wide ceiling includes revoked callbacks that have not settled.
 
 This is a trusted-extension execution convenience, not a sandbox, provider spending cap, transparent cache, or additional permission for network export. Generic operation diagnostics contain metadata, not source text.
 

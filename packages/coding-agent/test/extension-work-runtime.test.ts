@@ -49,6 +49,8 @@ function boundary(key = "input-1", revision = 1): ExtensionWorkBoundary {
 			mode: "build",
 			inputs: [{ text: "look at file.ts", kind: "prompt" }],
 			services: ["readText", "findPaths", "searchText"],
+			skills: [],
+			skillsTruncated: false,
 		},
 	};
 }

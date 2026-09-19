@@ -12,6 +12,7 @@ import { StringEnum } from "@hansjm10/volt-ai";
 import { Text } from "@hansjm10/volt-tui";
 import { type Static, Type } from "typebox";
 import type { ToolDefinition } from "../extensions/types.ts";
+import { isManagedLspObservation, recordManagedLspOutcome } from "../lsp/managed-observation.ts";
 import {
 	type LspOperationMetadata,
 	type LspResult,
@@ -170,11 +171,20 @@ export function createLspToolDefinition(
 		parameters: lspSchema,
 		async execute(_toolCallId, input: LspToolInput, signal?: AbortSignal, _onUpdate?, _ctx?) {
 			const startedAt = performance.now();
-			const finish = (result: LspResult) => ({
-				content: [{ type: "text" as const, text: result.text }],
-				details: { action: input.action, lsp: lspOperationMetadata(result, "explicit", input.action, startedAt) },
-				isError: !lspSucceeded(result),
-			});
+			const finish = (result: LspResult) => {
+				recordManagedLspOutcome(result.outcome);
+				return {
+					content: [{ type: "text" as const, text: result.text }],
+					details: {
+						action: input.action,
+						lsp: lspOperationMetadata(result, "explicit", input.action, startedAt),
+					},
+					isError: !lspSucceeded(result),
+				};
+			};
+			if (isManagedLspObservation() && (input.action === "rename" || input.action === "fix")) {
+				return finish(lspResult("invalid-input", "Managed LSP discovery is read-only."));
+			}
 			if (!provider)
 				return finish(
 					lspResult(
@@ -252,6 +262,11 @@ export function createLspToolDefinition(
 				}
 			} catch (error) {
 				result = lspErrorResult(error);
+			}
+			// Canonicalization, disk reads and synchronization remain awaited even
+			// after cancellation; do not publish their late discovery as success.
+			if (isManagedLspObservation() && signal?.aborted) {
+				result = lspResult("cancelled", "LSP operation aborted", { reason: "aborted" });
 			}
 			return finish(result);
 		},

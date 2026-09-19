@@ -1752,9 +1752,9 @@ Extensions can prepare optional repository context without running another agent
 
 ### Request boundaries and ownership
 
-`request_boundary` is a notification-only event before conversational model requests, after committed user delivery and normal context processing. It provides `attemptId`, `cause` (`input`, `tools`, `continuation`, or `retry`), and `first` for the request scope. Returned promises do not delay the model; exceptions are contained.
+`request_boundary` is a notification-only event before conversational model requests, after committed user delivery and normal context processing. It provides `attemptId`, `cause` (`input`, `tools`, `continuation`, or `retry`), `first` for the request scope, and `waitAvailableMs` for the host's first-boundary allowance. Returned promises do not delay the model; exceptions are contained.
 
-`ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, conversation revision, cwd, mode, model identity, committed input text and delivery class, and available read services. It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
+`ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, conversation revision, cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
 
 Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload/replacement, and authority loss. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
 
@@ -1786,20 +1786,37 @@ The handle has `id`, `status()`, `cancel()`, and `wait({ signal? })`. Cancelling
 | `readText` | `path`, optional `offset`/`limit` | `text`, `truncated`, and an `evidence` handle with path/range/observation time |
 | `findPaths` | `pattern`, optional `path`/`limit` | `paths`, `truncated` |
 | `searchText` | `pattern`, optional `path`, `glob`, `literal`, `ignoreCase`, `context`, `limit` | `matches` with path/line/text, `truncated` |
+| `symbols` | `path`, optional `symbol` for a workspace query | Flattened `symbols` with name, LSP kind and source range; `truncated`, `coverage`, `observedAt` |
+| `definition` / `references` | `path`, `symbol`, optional `line` | `locations` with source ranges; `truncated`, `coverage`, `observedAt` |
+| `readSkill` | `resourceId`, optional `offset`/`limit` | Text-read result with the resource ID also attached to its evidence |
 
 Results discriminate on `status`: `ok`, `denied`, `unavailable`, `unsupported`, `invalidated`, `cancelled`, `deadline_exceeded`, `limit_exceeded`, or `failed`. Failures include a bounded host reason code. An empty successful search is not an execution failure. Discovery paths are absolute and can be passed directly to `readText`, including searches below a nested directory. Discovery matches are hints, not freshness-verified source evidence; use `readText` before citing their contents.
 
-Services require the corresponding active, trusted native `read`, `find`, or `grep` tool. They do not enable tools, fall back through Bash/local files around an override, or download missing search executables. SDK/custom/extension overrides without a trusted structured implementation are unavailable. Text reads do not convert or return images.
+Workspace services require the corresponding active, trusted native `read`, `find`, `grep`, or `lsp` tool. They do not enable tools, fall back through Bash/local files around an override, or download missing search executables. SDK/custom/extension overrides without a trusted structured implementation are unavailable. Text reads do not convert or return images.
 
 Managed calls honor applicable tool-call and host policy gates. Arguments are revalidated after hooks. `tool_call` and `tool_result` receive host `origin` attribution for managed operations; absent origin on an ordinary call means agent work. Result reducers run before structured data is exposed: if they change the result, the service withholds the raw observations (`transformed_result`); managed reducer errors fail closed. No-op reducers can coexist. Managed reads do not count as the main agent's Plan-mode research or create synthetic assistant tool calls.
 
-### Ready-only context
+Semantic locations have canonical absolute paths and 1-based `startLine`, `startColumn`, `endLine`, and `endColumn`; columns use LSP UTF-16 units. Coverage is `unknown`, even for a successful query: the server may not have indexed everything. Managed queries reuse the configured LSP manager, may start configured servers, and never offer or run an installation. On the shared transport, server-initiated edits are rejected while managed reads remain outstanding, including unresolved timed-out requests. An overlapping command-based foreground fix can therefore fail explicitly; acknowledged completion or server restart restores ordinary edit handling.
+
+### Loaded skill resources
+
+`task.snapshot.skills` contains opaque `resourceId`, name, description, scope, and origin for native-loaded, model-invocable skills. User-only (`disable-model-invocation`) skills and metadata-only SDK overrides receive no managed read handles. The catalog holds at most 128 descriptors within 64 KiB; `skillsTruncated` reports omissions. It does not expose paths or bodies automatically.
+
+`readSkill` authorizes only the issued file, not adjacent files or referenced scripts. It requires current catalog membership and a registered trusted native read implementation, but does not require general `read` to be active. Excluded or overridden read implementations are not bypassed. Existing read-shaped call/result policies still run; a hook cannot redirect the target. The host checks the opened descriptor against the file identity captured during skill loading. Replaced or retargeted files require a resource reload; removal and reload revoke old handles. Source validation also rechecks current membership and bytes. Skill contributions remain untrusted data and cannot suppress explicitly invoked skills or project instructions.
+
+### Optional first-request waiting
+
+Ready-only remains the default. A host may configure SDK `extensionWorkLimits.firstRequestWaitMs` from 0 to 100. During the synchronous first `request_boundary` callback, an extension may call `ctx.work.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
+
+The first collection waits for the tasks admitted at that boundary, only until they settle, the allowance expires, or the scope is revoked. Timeout does not cancel useful ongoing preparation. Retries and later turns receive no renewed wait; late contributions cannot enter an already collected request. CPU-bound trusted extension code is not preempted, but results beyond the deadline are excluded from that attempt.
+
+### Context admission
 
 `task.context.put({ key, text, evidenceIds?, dependency? })` proposes context; `remove(key)` retracts it. Keys are extension-local. The default dependency is `snapshot`: conversation changes make it ineligible until refreshed. `sources` permits direct source evidence to survive ordinary appends, but requires valid evidence handles and never survives a new request scope. Suggestions without source handles are labeled unverified.
 
 Volt collects already-ready contributions at eligible conversational boundaries, validates source identity/content and current authorization, and appends a bounded untrusted suffix to the request-local projection. It does not modify canonical history or mandatory instructions. Late, stale, unauthorized, oversized, or uncheckable contributions are omitted. No compaction is triggered to fit optional context.
 
-There is no blocking preparation wait in this version, so first-call improvement is not guaranteed. Source validation has a separate bounded collection deadline; ready-only is not a zero-latency promise. A validated file is a checked-at observation, not an atomic repository snapshot or proof that tests passed. `admitted` means included by this API, not that later trusted payload hooks preserved it or the model used it.
+Even with an opted-in wait, first-call improvement is not guaranteed. Source validation has a separate bounded collection deadline; ready-only is not a zero-latency promise. A validated file is a checked-at observation, not an atomic repository snapshot or proof that tests passed. `admitted` means included by this API, not that later trusted payload hooks preserved it or the model used it.
 
 ### Limits, diagnostics, and disable behavior
 
@@ -1811,9 +1828,9 @@ Task completion includes draining owned operations. Return, throw, or cancellati
 
 Use the existing extension resource configuration and reload/restart to disable an extension. Excluded modules do not run their factories; reload revokes old managed work. Explicit CLI `-e` and SDK-injected factories remain explicit loads.
 
-**Trust boundary:** extensions remain trusted code with full process permissions. These services do not sandbox Node filesystem/HTTP access, existing `volt.exec`, or captured messaging APIs. Auxiliary-provider data export must be explicitly configured by that extension. There is no auxiliary inference, network upload, LSP service, skill-file service, or transparent tool-result cache built into this API.
+**Trust boundary:** extensions remain trusted code with full process permissions. These services do not sandbox Node filesystem/HTTP access, existing `volt.exec`, or captured messaging APIs. Auxiliary-provider data export must be explicitly configured by that extension. There is no auxiliary inference, network upload, or transparent tool-result cache built into this API.
 
-Maintainer contracts: [foundation design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-design.md) and [first-PR scope](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-implementation-plan-design.md).
+Maintainer contracts: [foundation design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-design.md), [first-PR scope](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-implementation-plan-design.md), and [completion scope](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-completion-design.md).
 
 ## State Management
 
