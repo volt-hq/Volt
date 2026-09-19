@@ -3,11 +3,12 @@
  * without ZDR by default; never automatically exports source bodies. See README.md.
  * The main model, host wait ceiling, and managed read authority remain unchanged.
  */
-import type { ExtensionAPI, ExtensionFactory } from "@hansjm10/volt-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@hansjm10/volt-coding-agent";
 import { type PreparationPlan, prepareContext, selectPreparation } from "./context-preparation.ts";
 
 const ENDPOINT = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model";
 const MAX_BYTES = 65_536;
+const STATE_TYPE = "jev-context-preparation";
 
 type Decision =
 	| { status: "selected"; choices: Record<string, string> }
@@ -25,7 +26,7 @@ export type JevEvaluation = Decision & {
 	cost?: string;
 };
 export interface JevPreparationOptions {
-	/** Explicit SDK opt-in; otherwise the extension flag must be true. */
+	/** Initial SDK opt-in; false prohibits enablement, including through /jev or saved state. */
 	enabled?: boolean;
 	zeroDataRetention?: boolean;
 	/** Trusted transport override for offline evaluation; must honor AbortSignal. */
@@ -182,19 +183,195 @@ export async function evaluateJev(
 
 export function createJevContextPreparation(options: JevPreparationOptions = {}): ExtensionFactory {
 	return (volt: ExtensionAPI) => {
+		let sessionEnabled: boolean | undefined;
+		let detail = "";
+		let waitMs: number | undefined;
+		let generation = 0;
+		let commandOpen = false;
 		let pendingProjection: { scopeId: string; release: () => void } | undefined;
+
+		function isEnabled(): boolean {
+			return options.enabled !== false && (sessionEnabled ?? options.enabled ?? volt.getFlag(STATE_TYPE) === true);
+		}
+
+		function statusText(): string {
+			if (!isEnabled()) return "Jev: off";
+			return `Jev: on${waitMs === 0 ? " · ready-only" : ""}${detail ? ` · ${detail}` : ""}`;
+		}
+
+		function updateStatus(ctx: ExtensionContext, nextDetail = ""): void {
+			detail = nextDetail;
+			if (ctx.mode === "tui") ctx.ui.setStatus(STATE_TYPE, statusText());
+		}
+
+		function restoreState(ctx: ExtensionContext): void {
+			generation++;
+			pendingProjection?.release();
+			pendingProjection = undefined;
+			sessionEnabled = undefined;
+			waitMs = undefined;
+			for (const entry of ctx.sessionManager.getBranch()) {
+				if (entry.type !== "custom" || entry.customType !== STATE_TYPE) continue;
+				const data: unknown = entry.data;
+				// Malformed state and a changed retention policy require fresh consent.
+				sessionEnabled =
+					isRecord(data) &&
+					data.enabled === true &&
+					data.zeroDataRetention === (options.zeroDataRetention === true);
+			}
+			updateStatus(ctx);
+		}
+
+		volt.on("session_start", (_event, ctx) => restoreState(ctx));
+		volt.on("session_tree", (_event, ctx) => restoreState(ctx));
+		volt.on("session_shutdown", (_event, ctx) => {
+			generation++;
+			pendingProjection?.release();
+			pendingProjection = undefined;
+			if (ctx.mode === "tui") ctx.ui.setStatus(STATE_TYPE, undefined);
+		});
+		volt.registerCommand("jev", {
+			description: "Configure Jev context preparation and shared wait allowance (on/off/status/wait)",
+			getArgumentCompletions: (prefix) =>
+				["on", "off", "status", "wait"]
+					.filter((value) => value.startsWith(prefix))
+					.map((value) => ({ value, label: value })),
+			handler: async (args, ctx) => {
+				if (ctx.mode !== "tui") {
+					ctx.ui.notify("/jev requires the local TUI; use explicit CLI or SDK opt-in in other modes.", "warning");
+					return;
+				}
+				if (commandOpen) return;
+				commandOpen = true;
+				const openedGeneration = generation;
+				try {
+					const allowance = ctx.getPreparationWait();
+					waitMs = Math.min(allowance.waitMs, 800);
+					updateStatus(ctx, detail);
+					let action = args.trim();
+					if (!action) {
+						const waitLabel = `Preparation wait: ${allowance.waitMs} ms`;
+						const choice = await ctx.ui.select(statusText(), [
+							isEnabled() ? "Disable Jev" : "Enable Jev",
+							waitLabel,
+							"Show status",
+						]);
+						if (!choice || openedGeneration !== generation) return;
+						action =
+							choice === waitLabel
+								? "wait"
+								: choice === "Enable Jev"
+									? "on"
+									: choice === "Disable Jev"
+										? "off"
+										: "status";
+					}
+					if (action === "wait") {
+						const { waitMs: currentWait, maxWaitMs } = ctx.getPreparationWait();
+						const choices = new Map(
+							[...new Set([0, 100, 400, 800, 1000, currentWait, maxWaitMs])]
+								.filter((value) => value <= maxWaitMs)
+								.sort((a, b) => a - b)
+								.map((value) => [
+									value === 0 ? "0 ms (ready-only)" : value === 800 ? "800 ms (recommended)" : `${value} ms`,
+									value,
+								]),
+						);
+						const choice = await ctx.ui.select(
+							`Shared preparation allowance: ${currentWait} ms (host limit: ${maxWaitMs} ms)\nRuntime only; Jev requests up to 800 ms.`,
+							[...choices.keys()],
+						);
+						if (!choice || openedGeneration !== generation) return;
+						const requested = choices.get(choice);
+						if (requested === undefined) return;
+						const applied = await ctx.requestPreparationWait(requested);
+						if (openedGeneration !== generation) return;
+						waitMs = Math.min(ctx.getPreparationWait().waitMs, 800);
+						if (applied !== undefined) generation++;
+						updateStatus(ctx, applied === undefined ? detail : "");
+						ctx.ui.notify(
+							applied === undefined
+								? "Preparation allowance unchanged."
+								: `Shared preparation allowance: ${applied} ms; runtime only.`,
+							"info",
+						);
+						return;
+					}
+					if (action === "status") {
+						ctx.ui.notify(
+							`${statusText()}. ${options.zeroDataRetention ? "ZDR required." : "Zero Data Retention is off."} ` +
+								`Shared allowance: ${allowance.waitMs} ms; host limit: ${allowance.maxWaitMs} ms. ` +
+								"Use /jev wait to change it for this runtime. Jev requests up to 800 ms. " +
+								"Evaluation status does not prove context admission.",
+							"info",
+						);
+						return;
+					}
+					if (action !== "on" && action !== "off") {
+						ctx.ui.notify("Usage: /jev [on|off|status|wait]", "warning");
+						return;
+					}
+					// Commands themselves count as busy; this wait excludes command transactions.
+					await ctx.waitForIdle();
+					if (openedGeneration !== generation) return;
+					if (action === "on") {
+						if (options.enabled === false) {
+							ctx.ui.notify("Jev is disabled by the SDK host.", "warning");
+							return;
+						}
+						if (isEnabled()) {
+							ctx.ui.notify(statusText(), "info");
+							return;
+						}
+						const confirmed = await ctx.ui.confirm(
+							"Enable Jev context preparation?",
+							"Send bounded request text and skill/source metadata to Vercel AI Gateway / TypeSafe AI, " +
+								"even when your main model uses another provider. Text may contain secrets; it is not redacted. " +
+								(options.zeroDataRetention
+									? "Zero Data Retention is required; rejection will not retry without it. "
+									: "Zero Data Retention is off; normal provider retention and training policies apply. ") +
+								"Calls may cost money. Save this choice for the current session branch?",
+						);
+						if (!confirmed || openedGeneration !== generation) return;
+						await ctx.waitForIdle();
+						if (openedGeneration !== generation) return;
+						const currentAllowance = ctx.getPreparationWait();
+						if (currentAllowance.waitMs === 0 && currentAllowance.maxWaitMs > 0) {
+							// Separate host consent: declining this offer still permits ready-only Jev.
+							await ctx.requestPreparationWait(Math.min(800, currentAllowance.maxWaitMs));
+							if (openedGeneration !== generation) return;
+						}
+					}
+					volt.appendEntry(STATE_TYPE, {
+						enabled: action === "on",
+						zeroDataRetention: options.zeroDataRetention === true,
+					});
+					sessionEnabled = action === "on";
+					generation++;
+					waitMs = Math.min(ctx.getPreparationWait().waitMs, 800);
+					updateStatus(ctx);
+					ctx.ui.notify(
+						`${statusText()}; on/off saved for this session branch. ` +
+							`Shared allowance: ${ctx.getPreparationWait().waitMs} ms (runtime only).`,
+						"info",
+					);
+				} finally {
+					commandOpen = false;
+				}
+			},
+		});
 		// Observation only: the request-local suffix is immutable by this stage.
 		volt.on("before_provider_request", () => {
 			pendingProjection?.release();
 			pendingProjection = undefined;
 		});
-		volt.registerFlag("jev-context-preparation", {
+		volt.registerFlag(STATE_TYPE, {
 			type: "boolean",
 			default: false,
 			description: "Opt in to sending bounded request text and candidate metadata to Jev",
 		});
 		volt.on("request_boundary", (event, ctx) => {
-			if (!(options.enabled ?? volt.getFlag("jev-context-preparation") === true)) return;
+			if (!isEnabled()) return;
 			const work = ctx.work;
 			if (!work) return;
 			if (!event.first) {
@@ -205,6 +382,9 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 				}
 				return;
 			}
+			const workGeneration = ++generation;
+			waitMs = Math.min(event.waitAvailableMs, 800);
+			updateStatus(ctx);
 			const plan = selectPreparation(work.snapshot);
 			if (!plan || (!plan.skills.length && !plan.sources.length)) return;
 			let release!: () => void;
@@ -232,6 +412,16 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 						]);
 						if (evaluated.status !== "fulfilled") return;
 						const result = evaluated.value;
+						if (generation === workGeneration) {
+							updateStatus(
+								ctx,
+								result.status === "selected"
+									? "evaluated"
+									: result.status === "cancelled"
+										? "cancelled"
+										: `fallback (${result.reason === "credentials" ? "no credentials" : result.reason})`,
+							);
+						}
 						try {
 							void Promise.resolve(options.onEvaluation?.(structuredClone(result))).catch(() => {});
 						} catch {
@@ -252,6 +442,7 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 							if (selected) await prepareContext(task, { skill: selected, sources: [] });
 						}
 					} finally {
+						if (task.signal.aborted && generation === workGeneration) updateStatus(ctx, "cancelled");
 						task.signal.removeEventListener("abort", release);
 						if (pendingProjection === pending) pendingProjection = undefined;
 					}
@@ -260,6 +451,9 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			if (admission.status === "started") {
 				pendingProjection = pending;
 				initialCutoff = started + work.context.requestWait(800);
+				updateStatus(ctx, "preparing");
+			} else {
+				updateStatus(ctx, "preparation unavailable");
 			}
 		});
 	};

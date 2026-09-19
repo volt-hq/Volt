@@ -40,6 +40,11 @@ export function extensionWorkForbidden(): boolean {
 	return invocation.getStore() === "forbidden";
 }
 
+/** Command-owned host interactions must never run in managed task or policy lineage. */
+export function isExtensionWorkInvocation(): boolean {
+	return invocation.getStore() !== undefined;
+}
+
 export const DEFAULT_EXTENSION_WORK_LIMITS: Readonly<ExtensionWorkLimits> = Object.freeze({
 	perExtensionTasks: 2,
 	perRuntimeTasks: 4,
@@ -139,6 +144,17 @@ export class ExtensionWorkManager {
 			this.limits[key] = value;
 		}
 		this.limits.taskTimeoutMs = Math.min(this.limits.taskTimeoutMs, this.limits.maxTaskTimeoutMs);
+	}
+
+	/** Host-only allowance update; never invalidates work or rearms an already-consumed wait. */
+	setFirstRequestWaitMs(milliseconds: number): void {
+		if (
+			!Number.isSafeInteger(milliseconds) ||
+			milliseconds < 0 ||
+			milliseconds > (this.options.limits?.firstRequestWaitMs ?? 1000)
+		)
+			throw new TypeError("Invalid extension preparation allowance");
+		this.limits.firstRequestWaitMs = milliseconds;
 	}
 
 	private current(scope: Scope): boolean {

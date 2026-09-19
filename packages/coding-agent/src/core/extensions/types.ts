@@ -362,6 +362,17 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Get the current base system-prompt construction options. */
 	getSystemPromptOptions(): BuildSystemPromptOptions;
 
+	/** Current shared first-request preparation allowance and its host-configured ceiling, in milliseconds. */
+	getPreparationWait(): { waitMs: number; maxWaitMs: number };
+
+	/**
+	 * Request an allowance of 0–1000 ms, clamped to the host ceiling. Changes require
+	 * host-owned local TUI confirmation and an idle agent. Returns the applied value,
+	 * including zero, or undefined when cancelled, unavailable, or invalidated.
+	 * Does not enable extensions or exports, and adds no wait unless extensions request it.
+	 */
+	requestPreparationWait(milliseconds: number): Promise<number | undefined>;
+
 	/** Wait for the agent to finish streaming */
 	waitForIdle(): Promise<void>;
 
@@ -1635,6 +1646,9 @@ export interface ExtensionContextActions {
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
+	/** Host-owned command controls, deliberately absent from ordinary event contexts. */
+	getPreparationWait?: ExtensionCommandContext["getPreparationWait"];
+	requestPreparationWait?: ExtensionCommandContext["requestPreparationWait"];
 }
 
 /**

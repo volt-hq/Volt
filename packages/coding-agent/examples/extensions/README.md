@@ -105,7 +105,7 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 |-----------|-------------|
 | `dynamic-resources/` | Loads skills, prompts, and themes using `resources_discover` |
 | `context-preparation.ts` | Opt-in deterministic skill/source excerpts through managed services; [SDK configuration and evaluation](#context-preparation) |
-| `jev-context-preparation.ts` | Explicitly opt-in Jev selector with deterministic fallback; [export consent, credentials, and evaluation](#jev-assisted-context-preparation) |
+| `jev-context-preparation.ts` | Opt-in Jev selector with `/jev` controls, footer status, and deterministic fallback; [export consent, credentials, and evaluation](#jev-assisted-context-preparation) |
 
 ### Messages & Communication
 
@@ -189,11 +189,22 @@ Before adding auxiliary inference, evaluate representative tasks with the same m
 
 ## Jev-assisted context preparation
 
-`jev-context-preparation.ts` is an experimental alternative to the deterministic example, not a default feature or a main-model replacement. Loading/discovering it alone performs no preparation, credential lookup, or inference. Explicitly enable its flag:
+`jev-context-preparation.ts` is an experimental alternative to the deterministic example, not a default feature or a main-model replacement. In a new session, loading/discovering it alone performs no preparation, credential lookup, or inference. Load it, then use **`/jev`** in the local TUI to enable it after reviewing the data-sharing confirmation:
 
 ```bash
-volt -e ./examples/extensions/jev-context-preparation.ts --jev-context-preparation --preparation-wait-ms 800
+# From packages/coding-agent (use ./volt-test.sh and the full example path from the repo root).
+volt -e ./examples/extensions/jev-context-preparation.ts
 ```
+
+`/jev` opens an enable/disable/wait/status panel; `/jev on`, `/jev off`, `/jev wait`, and `/jev status` are direct shortcuts with argument completion. Enabling requires data-sharing confirmation, followed by a separate host offer of an 800 ms allowance (clamped to the host ceiling) when the current allowance is zero. Declining the wait still enables ready-only Jev. The command itself makes no model request or credential lookup. State changes wait for any active turn to finish; abort that turn first if you need to disable promptly. Commands are local-only, not remote-safe.
+
+The footer shows `Jev: off` or `Jev: on`, with preparation/evaluation/fallback status when available. `evaluated` does **not** mean the context was admitted or useful. A zero host allowance is marked `ready-only` when the panel observes it or at a request boundary. `/jev status` explains the retention policy and shows the current shared allowance and host ceiling.
+
+The choice is stored outside model context on the **current session branch**, restored on reload/resume, and follows tree navigation and forks. A new session starts off unless explicitly enabled through the CLI or SDK. A changed retention policy requires fresh command consent. The latest saved branch choice overrides initial CLI/SDK enablement; SDK `enabled: false` always prohibits enabling. Removing the extension disables it regardless of saved state.
+
+**Preparation wait** offers 0 (ready-only), 100, 400, 800, or 1,000 ms, plus any custom current value or ceiling. Choices above the host ceiling are omitted. The host confirms each changed allowance; opening or cancelling the selector changes nothing. This is a **shared runtime allowance**, not a Jev-only delay: other preparation extensions also use it, while Jev itself still requests at most 800 ms. Setting zero does not disable Jev, and disabling Jev does not change the shared allowance.
+
+The allowance defaults to zero and is not saved with the branch's on/off choice. It survives `/reload` in the same runtime but resets on restart or session replacement. Without a startup limit, the user can approve up to 1,000 ms through the panel. An explicit CLI `--preparation-wait-ms` or SDK `extensionWorkLimits.firstRequestWaitMs` sets both the initial allowance and its hard ceiling, including explicit zero. The panel cannot raise that ceiling. For non-interactive opt-in, keep the existing `--jev-context-preparation` and `--preparation-wait-ms 800` flags or equivalent SDK configuration.
 
 Keep `context-preparation.ts` beside it for the shared parser/read helpers, but **load only one consumer**. Importing the helper file does not enable its deterministic extension factory. Do not copy both files into an auto-discovered extensions directory as separate enabled consumers.
 
@@ -232,7 +243,7 @@ try {
 }
 ```
 
-Omit the factory, set `enabled: false`, or remove the Jev enablement flag and reload/restart to disable. Loading the extension alone does not raise the default zero wait. The host allowance accepts 0–1,000 ms through the CLI or SDK; configuration alone neither enables Jev nor adds a delay. The CLI flag applies to locally created runtimes, not already-running remote runtimes. `fetch` is an optional trusted transport override for offline experiments; it must honor cancellation. Observer callbacks are nonblocking: synchronous exceptions and rejected promises are contained, but observer side effects remain the SDK host's responsibility. There are no new dependencies, provider-registry entries, or wire/storage protocol changes.
+Use `/jev off`, omit the factory, or set SDK `enabled: false` to disable. Removing only the CLI enablement flag does not override a saved on choice in a resumed session. Loading the extension alone does not raise the default zero wait. The host allowance accepts 0–1,000 ms through the CLI or SDK; configuration alone neither enables Jev nor adds a delay. The CLI flag applies to locally created runtimes, not already-running remote runtimes. `fetch` is an optional trusted transport override for offline experiments; it must honor cancellation. Observer callbacks are nonblocking: synchronous exceptions and rejected promises are contained, but observer side effects remain the SDK host's responsibility. There are no new dependencies, provider-registry entries, or wire/storage protocol changes.
 
 ### Selection, fallback, and timing
 
@@ -259,7 +270,7 @@ The adapter selected the expected skill/source and omitted the unrelated source.
 
 ```bash
 # From packages/coding-agent; no real provider calls in these tests.
-node node_modules/vitest/dist/cli.js --run test/jev-context-preparation.test.ts test/suite/jev-context-preparation.test.ts test/context-preparation-example.test.ts test/suite/context-preparation.test.ts
+node node_modules/vitest/dist/cli.js --run test/jev-context-preparation.test.ts test/suite/jev-context-preparation.test.ts test/suite/jev-context-command.test.ts test/context-preparation-example.test.ts test/suite/context-preparation.test.ts
 ```
 
 The three-way SDK fixture comparison holds the main faux provider, tools, and source content fixed. Scripted Jev answers test equal selection, resolving a lexical tie, pruning an irrelevant source, abstention, and negative/irrelevant input. It reports context-token estimates, native operation counts, and auxiliary call counts. Clock/barrier cases verify 400/700 ms decisions admitted initially with early completion, fallback under 100/800/1,000 ms host allowances, later-boundary refinement without renewed waits, 1.5-second deadline cancellation, and no wake. Mock transport cases cover wire shape, opt-in, finite answers, byte limits, auth/errors, and cancellation without live credentials.

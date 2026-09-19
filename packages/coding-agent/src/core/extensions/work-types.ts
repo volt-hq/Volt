@@ -209,6 +209,6 @@ export interface ExtensionWorkLimits {
 	extensionContributionBytes: number;
 	suffixBytes: number;
 	collectionMs: number;
-	/** Opt-in shared preparation wait on the first request, default 0, maximum 1000 ms. */
+	/** Initial shared first-request wait and hard ceiling for command changes. Omitted: initial 0, ceiling 1000 ms. */
 	firstRequestWaitMs: number;
 }
