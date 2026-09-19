@@ -175,6 +175,35 @@ describe("deterministic preparation selection", () => {
 		expect(test.requestWait).toHaveBeenCalledExactlyOnceWith(100);
 	});
 
+	describe.each([
+		"Please explain what's in",
+		"Explain the user's code in",
+		"Explain the users' code in",
+		"Explain the end-user's code in",
+	])("prose apostrophes: %s", (prefix) => {
+		it.each([
+			["src/a.ts", 1, 40],
+			["src/a.ts:19", 19, 40],
+			["src/a.ts#target", 20, 5],
+			["'src/a.ts:19'", 19, 40],
+			['"src/a.ts#target"', 20, 5],
+			["`src/a.ts`", 1, 40],
+		] as const)("prepares the independent source %s", async (source, offset, limit) => {
+			const test = setup();
+			await test.emit(`${prefix} ${source}`);
+			expect(test.repository.readText).toHaveBeenCalledExactlyOnceWith({ path: "src/a.ts", offset, limit });
+			expect(test.repository.symbols.mock.calls).toEqual(source.includes("#target") ? [[{ path: "src/a.ts" }]] : []);
+			expect(test.put).toHaveBeenCalledExactlyOnceWith({
+				key: "source-1",
+				text: expect.stringContaining("observed source"),
+				dependency: "sources",
+				evidenceIds: ["/repo/src/a.ts"],
+			});
+			expect(test.start).toHaveBeenCalledTimes(1);
+			expect(test.requestWait).toHaveBeenCalledExactlyOnceWith(100);
+		});
+	});
+
 	it("reads only two distinct explicit targets and honors a line anchor", async () => {
 		const test = setup();
 		await test.emit("Check `./src/first.ts:19`, src/first.ts and src/second.py. Then src/third.rs");
@@ -217,6 +246,9 @@ describe("deterministic preparation selection", () => {
 		"https://host/a?files=one,src/config.ts:20",
 		"https://host/a,src/config.ts#target",
 		"https://host/a'src/config.ts'",
+		"https://host/a' src/config.ts",
+		"/tmp/a' src/config.ts",
+		"src/a.ts' src/config.ts",
 		"file:/tmp/a,src/config.ts",
 		"/tmp/a,src/config.ts",
 		"/tmp/a;src/config.ts",
@@ -254,6 +286,9 @@ describe("deterministic preparation selection", () => {
 			`Explain ${quote}my\nfiles/source.ts`,
 			`Explain ${quote}my files/source.ts:19`,
 			`Explain ${quote}my files/source.ts#target`,
+			`Explain what's in ${quote}my files/source.ts`,
+			`Explain the user's code in ${quote}files/source.ts:19`,
+			`Explain the users' code in ${quote}files/source.ts#target`,
 			`src/a.ts,src/b.ts,${quote}my files/source.ts`,
 			`Explain ${quote}my files/source.ts${quote === '"' ? "'" : '"'}`,
 		]),

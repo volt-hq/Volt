@@ -50,7 +50,9 @@ function* sourceSpans(prompt: string, truncated: boolean): Generator<string> {
 		if (quote) {
 			if (char === quote) quote = undefined;
 		} else if (/[`"']/.test(char)) {
-			quote = char;
+			// Prose apostrophes (what's, users') do not join independent whitespace-separated spans.
+			// Require a whole word prefix so quotes attached to paths or URLs remain significant.
+			if (char !== "'" || !/^[a-z]+(?:['-][a-z]+)*$/i.test(prompt.slice(start, index))) quote = char;
 		} else if (/\s/.test(char)) {
 			if (index > start) yield prompt.slice(start, index);
 			start = index + 1;
