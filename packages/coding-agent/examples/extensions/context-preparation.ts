@@ -42,7 +42,7 @@ function selectSkill(prompt: string, skills: readonly ExtensionWorkSkill[]): Ext
 	return ranked[0].skill;
 }
 
-function* sourceSpans(prompt: string): Generator<string> {
+function* sourceSpans(prompt: string, truncated: boolean): Generator<string> {
 	let start = 0;
 	let quote: string | undefined;
 	for (let index = 0; index < prompt.length; index++) {
@@ -56,15 +56,15 @@ function* sourceSpans(prompt: string): Generator<string> {
 			start = index + 1;
 		}
 	}
-	// An unterminated quote invalidates its whole connected span, including any path suffix.
-	if (!quote && start < prompt.length) yield prompt.slice(start);
+	// An unterminated quote or artificial EOF invalidates the whole final connected span.
+	if (!truncated && !quote && start < prompt.length) yield prompt.slice(start);
 }
 
-function selectSources(prompt: string): SourceCandidate[] {
+function selectSources(prompt: string, truncated: boolean): SourceCandidate[] {
 	const sources: SourceCandidate[] = [];
 	const seen = new Set<string>();
 	// Preserve connected spans, including quoted spaces, until every part is validated.
-	for (const span of sourceSpans(prompt)) {
+	for (const span of sourceSpans(prompt, truncated)) {
 		const tokens = span.replace(/[.!?]+$/, "").match(/`[^`]*`|"[^"]*"|'[^']*'|[^\s`"'(),;<>]+/g) ?? [];
 		const candidates: SourceCandidate[] = [];
 		for (const token of tokens) {
@@ -152,9 +152,15 @@ export default function contextPreparation(volt: ExtensionAPI): void {
 		const work = ctx.work;
 		if (!work || !event.first) return;
 		// Bound synchronous selection. Do not mine explicitly expanded skill bodies for more work.
-		const inputs = work.snapshot.inputs.slice(-8).map(({ text }) => text.slice(0, 8192));
-		if (inputs.some((text) => text.startsWith("/skill:") || text.startsWith("<skill "))) return;
-		const prompt = inputs.join("\n").slice(0, 8192);
+		const inputs = work.snapshot.inputs.slice(-8);
+		if (inputs.some(({ text }) => text.startsWith("/skill:") || text.startsWith("<skill "))) return;
+		const prompt = inputs
+			.map(({ text }) => text.slice(0, 8192))
+			.join("\n")
+			.slice(0, 8192);
+		// Count original lengths and separators without inspecting text beyond either cutoff.
+		const truncated =
+			inputs.reduce((length, { text }) => length + text.length, Math.max(0, inputs.length - 1)) > prompt.length;
 		// Lexical matching cannot interpret exclusions: abstain on common negative cues.
 		if (/\b(?:do not|don['’]t|never|avoid|skip|without)\b/i.test(prompt)) return;
 		// A partial catalog cannot establish an unambiguous skill match.
@@ -163,7 +169,9 @@ export default function contextPreparation(volt: ExtensionAPI): void {
 				? selectSkill(prompt, work.snapshot.skills)
 				: undefined;
 		const sources = work.snapshot.services.includes("readText")
-			? selectSources(prompt).filter((source) => !source.symbol || work.snapshot.services.includes("symbols"))
+			? selectSources(prompt, truncated).filter(
+					(source) => !source.symbol || work.snapshot.services.includes("symbols"),
+				)
 			: [];
 		if (!skill && sources.length === 0) return;
 		const admission = work.tasks.start(

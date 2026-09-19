@@ -99,8 +99,8 @@ function setup(skills: ExtensionWorkSkill[] = []) {
 		start,
 		requestWait,
 		put,
-		async emit(text: string, first = true, available = true) {
-			snapshot.inputs = [{ text, kind: "prompt" }];
+		async emit(input: string | string[], first = true, available = true) {
+			snapshot.inputs = (typeof input === "string" ? [input] : input).map((text) => ({ text, kind: "prompt" }));
 			handler({ type: "request_boundary", first, cause: "input", attemptId: "attempt", waitAvailableMs: 100 }, {
 				work: available ? work : undefined,
 			} as ExtensionContext);
@@ -319,6 +319,67 @@ describe("deterministic preparation selection", () => {
 		const test = setup([skill("pdf-tools")]);
 		await test.emit(`${" ".repeat(8192)} pdf-tools src/a.ts`);
 		expect(test.start).not.toHaveBeenCalled();
+	});
+
+	describe.each(["single", "combined"])("%s input cutoff", (kind) => {
+		const earlierInputs = kind === "combined" ? [" ".repeat(4096)] : [];
+		const remaining = 8192 - earlierInputs.reduce((length, text) => length + text.length + 1, 0);
+
+		it.each([
+			["src/a.ts", "x"],
+			["src/a.ts", ":19"],
+			["src/a.ts:1", "9"],
+			["src/a.ts", "#target"],
+			["src/a.ts#target", "Extra"],
+			["src/a.ts,src/b.ts", "x"],
+			["src/a.ts;", "https://host/a"],
+			["`src/a.ts`", ",https://host/a"],
+			['"src/a.ts",src/b.ts', "x"],
+			["'src/a.ts',src/b.ts", "x"],
+			['src/a.ts,"my files/src/b.ts', '"'],
+		])("discards the connected span %s when %s is omitted", async (retained, omitted) => {
+			const test = setup();
+			await test.emit([...earlierInputs, " ".repeat(remaining - retained.length) + retained + omitted]);
+			expect(test.repository.readText).not.toHaveBeenCalled();
+			expect(test.repository.symbols).not.toHaveBeenCalled();
+			expect(test.put).not.toHaveBeenCalled();
+			expect(test.start).not.toHaveBeenCalled();
+			expect(test.requestWait).not.toHaveBeenCalled();
+		});
+
+		it("preserves an independent source before a cut span", async () => {
+			const test = setup();
+			const retained = "src/a.ts";
+			await test.emit([...earlierInputs, "src/earlier.ts:19 ".padEnd(remaining - retained.length) + retained + "x"]);
+			expect(test.repository.readText).toHaveBeenCalledExactlyOnceWith({
+				path: "src/earlier.ts",
+				offset: 19,
+				limit: 40,
+			});
+			expect(test.repository.symbols).not.toHaveBeenCalled();
+			expect(test.put).toHaveBeenCalledExactlyOnceWith({
+				key: "source-1",
+				text: expect.stringContaining("observed source"),
+				dependency: "sources",
+				evidenceIds: ["/repo/src/earlier.ts"],
+			});
+		});
+
+		it.each(["", " trailing", "\ttrailing", "\ntrailing"])(
+			"preserves a source completed by EOF or inspected whitespace: %j",
+			async (suffix) => {
+				const test = setup();
+				const source = "src/a.ts:19";
+				const padding = remaining - source.length - (suffix ? 1 : 0);
+				await test.emit([...earlierInputs, " ".repeat(padding) + source + suffix]);
+				expect(test.repository.readText).toHaveBeenCalledExactlyOnceWith({
+					path: "src/a.ts",
+					offset: 19,
+					limit: 40,
+				});
+				expect(test.put).toHaveBeenCalledTimes(1);
+			},
+		);
 	});
 
 	it("does not request a wait when task admission is denied", async () => {
