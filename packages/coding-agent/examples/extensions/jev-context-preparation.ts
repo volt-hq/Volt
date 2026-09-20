@@ -3,12 +3,14 @@
  * without ZDR by default; never automatically exports source bodies. See README.md.
  * The main model, host wait ceiling, and managed read authority remain unchanged.
  */
-import type { ExtensionAPI, ExtensionContext, ExtensionFactory } from "@hansjm10/volt-coding-agent";
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionContext, ExtensionFactory, JsonValue } from "@hansjm10/volt-coding-agent";
 import { type PreparationPlan, prepareContext, selectPreparation } from "./context-preparation.ts";
 
 const ENDPOINT = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model";
 const MAX_BYTES = 65_536;
 const STATE_TYPE = "jev-context-preparation";
+const CALL_TYPE = "jev-context-call";
 
 type Decision =
 	| { status: "selected"; choices: Record<string, string> }
@@ -181,12 +183,64 @@ export async function evaluateJev(
 	}
 }
 
+/** Read only allowlisted metadata; saved/custom entries are not trusted display text. */
+function callHistoryText(ctx: ExtensionContext, pending: readonly Record<string, JsonValue>[]): string {
+	const records = ctx.sessionManager
+		.getBranch()
+		.flatMap((entry) => (entry.type === "custom" && entry.customType === CALL_TYPE ? [entry.data] : []));
+	const calls = new Map<string, { timestamp: string; custom: boolean; result?: string; successful?: boolean }>();
+	for (const data of [...records, ...pending]) {
+		if (!isRecord(data) || typeof data.callId !== "string" || !/^[a-f0-9-]{36}$/.test(data.callId)) continue;
+		if (data.phase === "started" && (data.transport === "gateway" || data.transport === "custom")) {
+			const time = typeof data.timestamp === "string" ? Date.parse(data.timestamp) : NaN;
+			if (!calls.has(data.callId) && Number.isFinite(time))
+				calls.set(data.callId, { timestamp: new Date(time).toISOString(), custom: data.transport === "custom" });
+		} else if (data.phase === "finished") {
+			const call = calls.get(data.callId);
+			if (!call || call.result) continue;
+			if (data.status !== "selected" && data.status !== "unavailable" && data.status !== "cancelled") continue;
+			const reason =
+				typeof data.reason === "string" &&
+				["credentials", "size", "http", "response", "transport", "aborted"].includes(data.reason)
+					? ` (${data.reason})`
+					: "";
+			const http =
+				typeof data.httpStatus === "number" &&
+				Number.isSafeInteger(data.httpStatus) &&
+				data.httpStatus >= 100 &&
+				data.httpStatus <= 599
+					? `HTTP ${data.httpStatus}`
+					: "no HTTP status recorded";
+			const elapsed =
+				typeof data.elapsedMs === "number" && Number.isFinite(data.elapsedMs) && data.elapsedMs >= 0
+					? `; ${Math.round(data.elapsedMs)} ms`
+					: "";
+			call.result = `${data.status}${reason}; ${http}${elapsed}`;
+			call.successful = data.status === "selected";
+		}
+	}
+	const history = [...calls.values()];
+	const last = history.at(-1);
+	return (
+		`Recorded calls on this branch: ${history.length} attempted, ${history.filter((call) => call.result).length} finished, ` +
+		`${history.filter((call) => call.successful).length} successful; ${history.filter((call) => call.custom).length} via custom transport.\n` +
+		(last
+			? `Last call: ${last.timestamp} (${last.custom ? "custom transport" : "Gateway"}); ${last.result ?? "result not recorded (in flight or interrupted)"}.\n`
+			: "No endpoint calls recorded.\n") +
+		"Attempts do not prove server receipt; older unlogged calls are unknown."
+	);
+}
+
 export function createJevContextPreparation(options: JevPreparationOptions = {}): ExtensionFactory {
 	return (volt: ExtensionAPI) => {
 		let sessionEnabled: boolean | undefined;
 		let detail = "";
 		let waitMs: number | undefined;
 		let generation = 0;
+		// Commands and call history survive new requests, but not branch/runtime changes.
+		let lifecycleGeneration = 0;
+		let loggingFailed = false;
+		let pendingRecords: Record<string, JsonValue>[] = [];
 		let commandOpen = false;
 		let pendingProjection: { scopeId: string; release: () => void } | undefined;
 
@@ -204,8 +258,21 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			if (ctx.mode === "tui") ctx.ui.setStatus(STATE_TYPE, statusText());
 		}
 
+		function flushRecords(): void {
+			// Custom entries advance the canonical cursor. Never append during request collection.
+			for (const record of pendingRecords.splice(0)) {
+				try {
+					volt.appendEntry(CALL_TYPE, record);
+				} catch {
+					loggingFailed = true;
+				}
+			}
+		}
+
 		function restoreState(ctx: ExtensionContext): void {
 			generation++;
+			lifecycleGeneration++;
+			pendingRecords = [];
 			pendingProjection?.release();
 			pendingProjection = undefined;
 			sessionEnabled = undefined;
@@ -223,9 +290,13 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 		}
 
 		volt.on("session_start", (_event, ctx) => restoreState(ctx));
+		volt.on("before_agent_start", () => flushRecords());
+		volt.on("agent_end", () => flushRecords());
 		volt.on("session_tree", (_event, ctx) => restoreState(ctx));
 		volt.on("session_shutdown", (_event, ctx) => {
+			flushRecords();
 			generation++;
+			lifecycleGeneration++;
 			pendingProjection?.release();
 			pendingProjection = undefined;
 			if (ctx.mode === "tui") ctx.ui.setStatus(STATE_TYPE, undefined);
@@ -243,7 +314,7 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 				}
 				if (commandOpen) return;
 				commandOpen = true;
-				const openedGeneration = generation;
+				const openedGeneration = lifecycleGeneration;
 				try {
 					const allowance = ctx.getPreparationWait();
 					waitMs = Math.min(allowance.waitMs, 800);
@@ -256,7 +327,7 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 							waitLabel,
 							"Show status",
 						]);
-						if (!choice || openedGeneration !== generation) return;
+						if (!choice || openedGeneration !== lifecycleGeneration) return;
 						action =
 							choice === waitLabel
 								? "wait"
@@ -281,11 +352,11 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 							`Shared preparation allowance: ${currentWait} ms (host limit: ${maxWaitMs} ms)\nRuntime only; Jev requests up to 800 ms.`,
 							[...choices.keys()],
 						);
-						if (!choice || openedGeneration !== generation) return;
+						if (!choice || openedGeneration !== lifecycleGeneration) return;
 						const requested = choices.get(choice);
 						if (requested === undefined) return;
 						const applied = await ctx.requestPreparationWait(requested);
-						if (openedGeneration !== generation) return;
+						if (openedGeneration !== lifecycleGeneration) return;
 						waitMs = Math.min(ctx.getPreparationWait().waitMs, 800);
 						if (applied !== undefined) generation++;
 						updateStatus(ctx, applied === undefined ? detail : "");
@@ -302,7 +373,9 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 							`${statusText()}. ${options.zeroDataRetention ? "ZDR required." : "Zero Data Retention is off."} ` +
 								`Shared allowance: ${allowance.waitMs} ms; host limit: ${allowance.maxWaitMs} ms. ` +
 								"Use /jev wait to change it for this runtime. Jev requests up to 800 ms. " +
-								"Evaluation status does not prove context admission.",
+								"Evaluation status does not prove context admission.\n" +
+								callHistoryText(ctx, pendingRecords) +
+								(loggingFailed ? "\nCall recording failed; history may be incomplete." : ""),
 							"info",
 						);
 						return;
@@ -313,7 +386,8 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 					}
 					// Commands themselves count as busy; this wait excludes command transactions.
 					await ctx.waitForIdle();
-					if (openedGeneration !== generation) return;
+					if (openedGeneration !== lifecycleGeneration) return;
+					flushRecords();
 					if (action === "on") {
 						if (options.enabled === false) {
 							ctx.ui.notify("Jev is disabled by the SDK host.", "warning");
@@ -332,14 +406,14 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 									: "Zero Data Retention is off; normal provider retention and training policies apply. ") +
 								"Calls may cost money. Save this choice for the current session branch?",
 						);
-						if (!confirmed || openedGeneration !== generation) return;
+						if (!confirmed || openedGeneration !== lifecycleGeneration) return;
 						await ctx.waitForIdle();
-						if (openedGeneration !== generation) return;
+						if (openedGeneration !== lifecycleGeneration) return;
 						const currentAllowance = ctx.getPreparationWait();
 						if (currentAllowance.waitMs === 0 && currentAllowance.maxWaitMs > 0) {
 							// Separate host consent: declining this offer still permits ready-only Jev.
 							await ctx.requestPreparationWait(Math.min(800, currentAllowance.maxWaitMs));
-							if (openedGeneration !== generation) return;
+							if (openedGeneration !== lifecycleGeneration) return;
 						}
 					}
 					volt.appendEntry(STATE_TYPE, {
@@ -383,6 +457,7 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 				return;
 			}
 			const workGeneration = ++generation;
+			const workHistoryGeneration = lifecycleGeneration;
 			waitMs = Math.min(event.waitAvailableMs, 800);
 			updateStatus(ctx);
 			const plan = selectPreparation(work.snapshot);
@@ -397,18 +472,50 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			const admission = work.tasks.start(
 				{ key: "prepare-context", label: "Prepare context with Jev", timeoutMs: 1500 },
 				async (task) => {
+					const callId = randomUUID();
+					let attempted = false;
+					const record = (data: Record<string, JsonValue>): void => {
+						// Never attach a late outcome to a replacement runtime or navigated branch.
+						if (lifecycleGeneration !== workHistoryGeneration) return;
+						try {
+							pendingRecords.push({ callId, timestamp: new Date().toISOString(), ...data });
+							// Late cancellation can settle after agent_end; persist immediately only when idle.
+							if (ctx.isIdle()) flushRecords();
+						} catch {
+							// A retired context must not change the evaluation outcome or observer behavior.
+							loggingFailed = true;
+						}
+					};
 					task.signal.addEventListener("abort", release, { once: true });
 					try {
 						// Publish the same fallback as the deterministic consumer without waiting for HTTP.
 						// Join both branches, even on failure; never abandon an auxiliary request.
 						const [, evaluated] = await Promise.allSettled([
 							prepareContext(task, plan),
-							evaluateJev(
-								plan,
-								() => ctx.modelRegistry.getApiKeyForProvider("vercel-ai-gateway"),
-								task.signal,
-								options,
-							),
+							evaluateJev(plan, () => ctx.modelRegistry.getApiKeyForProvider("vercel-ai-gateway"), task.signal, {
+								zeroDataRetention: options.zeroDataRetention,
+								fetch: (input, init) => {
+									attempted = true;
+									record({ phase: "started", transport: options.fetch ? "custom" : "gateway" });
+									return (options.fetch ?? globalThis.fetch)(input, init);
+								},
+							}).then((result) => {
+								if (attempted) {
+									// Explicit allowlist: never store choices, request text, or raw responses/errors.
+									record({
+										phase: "finished",
+										status: result.status,
+										...(result.status === "selected" ? {} : { reason: result.reason }),
+										elapsedMs: result.elapsedMs,
+										requestBytes: result.requestBytes,
+										...(result.httpStatus === undefined ? {} : { httpStatus: result.httpStatus }),
+										...(result.inputTokens === undefined ? {} : { inputTokens: result.inputTokens }),
+										...(result.outputTokens === undefined ? {} : { outputTokens: result.outputTokens }),
+										...(result.cost === undefined ? {} : { cost: result.cost }),
+									});
+								}
+								return result;
+							}),
 						]);
 						if (evaluated.status !== "fulfilled") return;
 						const result = evaluated.value;

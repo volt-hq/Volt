@@ -9,13 +9,14 @@ import {
 	type JevPreparationOptions,
 } from "../../examples/extensions/jev-context-preparation.ts";
 import type { ExtensionAPI, ExtensionUIContext } from "../../src/core/extensions/types.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { type CustomEntry, SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
 const harnesses: Harness[] = [];
 const directories: string[] = [];
 const releases: Array<() => void> = [];
 const stateType = "jev-context-preparation";
+const callType = "jev-context-call";
 const invalidStates: JsonValue[] = [null, { enabled: "true" }, { enabled: true, zeroDataRetention: true }];
 
 beforeEach(() => {
@@ -78,6 +79,12 @@ function savedState(harness: Harness) {
 	return harness.sessionManager
 		.getBranch()
 		.filter((entry) => entry.type === "custom" && entry.customType === stateType);
+}
+
+function callRecords(harness: Harness) {
+	return harness.sessionManager
+		.getBranch()
+		.filter((entry): entry is CustomEntry => entry.type === "custom" && entry.customType === callType);
 }
 
 async function prompt(harness: Harness, text = "Explain example.ts") {
@@ -387,6 +394,47 @@ describe("Jev extension command and TUI status", () => {
 		expect(test.setStatus).toHaveBeenLastCalledWith(stateType, "Jev: off");
 	});
 
+	it.each(["Thanks for the update", "Explain example.ts"])(
+		"applies /jev off after a queued follow-up runs while waiting: %s",
+		async (followUp) => {
+			const entered = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const commandEntered = Promise.withResolvers<void>();
+			releases.push(release.resolve);
+			const test = await setup();
+			await test.harness.session.prompt("/jev on");
+			test.harness.setResponses([
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return fauxAssistantMessage("done");
+				},
+				fauxAssistantMessage("follow-up done"),
+			]);
+			const running = test.harness.session.prompt("Explain example.ts");
+			await entered.promise;
+			await test.harness.session.followUp(followUp);
+			test.setStatus.mockImplementation(() => commandEntered.resolve());
+			const disabling = test.harness.session.prompt("/jev off");
+			await commandEntered.promise;
+			expect(savedState(test.harness)).toHaveLength(1);
+			release.resolve();
+			await Promise.all([running, disabling]);
+			expect(test.harness.faux.state.callCount).toBe(2);
+			expect(savedState(test.harness)).toMatchObject([{ data: { enabled: true } }, { data: { enabled: false } }]);
+			expect(test.setStatus).toHaveBeenLastCalledWith(stateType, "Jev: off");
+			expect(test.notify.mock.lastCall?.[0]).toContain("Jev: off; on/off saved for this session branch");
+			const calls = followUp === "Explain example.ts" ? 2 : 1;
+			expect(test.fetch).toHaveBeenCalledTimes(calls);
+			expect(await prompt(test.harness)).not.toContain("PREPARED_SOURCE");
+			expect(test.fetch).toHaveBeenCalledTimes(calls);
+			await test.harness.session.reload();
+			expect(test.setStatus).toHaveBeenLastCalledWith(stateType, "Jev: off");
+			expect(await prompt(test.harness)).not.toContain("PREPARED_SOURCE");
+			expect(test.fetch).toHaveBeenCalledTimes(calls);
+		},
+	);
+
 	it("does not let an old cancelled evaluation overwrite status after toggling off and on", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -433,21 +481,259 @@ describe("Jev extension command and TUI status", () => {
 		expect(test.setStatus).toHaveBeenLastCalledWith(stateType, "Jev: on · ready-only");
 	});
 
-	it("does not apply a confirmation that outlives session reload", async () => {
+	it.each(["reload", "tree navigation"])("does not apply a confirmation that outlives session %s", async (change) => {
 		const entered = Promise.withResolvers<void>();
 		const answer = Promise.withResolvers<boolean>();
 		releases.push(() => answer.resolve(false));
 		const test = await setup();
+		const root = test.harness.sessionManager.getLeafId()!;
+		test.harness.session.setSessionName("Before Jev consent");
 		test.confirm.mockImplementation(async () => {
 			entered.resolve();
 			return answer.promise;
 		});
 		const command = test.harness.session.prompt("/jev on");
 		await entered.promise;
-		await test.harness.session.reload();
+		if (change === "reload") await test.harness.session.reload();
+		else await test.harness.session.navigateTree(root);
 		answer.resolve(true);
 		await command;
 		expect(savedState(test.harness)).toEqual([]);
 		expect(test.setStatus).toHaveBeenLastCalledWith(stateType, "Jev: off");
+	});
+});
+
+describe("Jev call history", () => {
+	it("counts dispatch immediately and persists a sanitized result outside model context", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		releases.push(release.resolve);
+		const test = await setup();
+		test.fetch.mockImplementation(async () => {
+			// Persistence waits until collection/dispatch finishes; live status includes buffered records.
+			expect(callRecords(test.harness)).toEqual([]);
+			entered.resolve();
+			await release.promise;
+			return Response.json({
+				answers: { "source-1": { type: "choice", choice: "source-1" } },
+				usage: { inputTokens: 100, outputTokens: 10 },
+				providerMetadata: { gateway: { cost: "0.001", secret: "RAW_PROVIDER_SECRET" } },
+			});
+		});
+		await test.harness.session.prompt("/jev on");
+		const running = prompt(test.harness, "Explain example.ts REQUEST_SECRET");
+		await entered.promise;
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("1 attempted, 0 finished, 0 successful; 1 via custom transport");
+		expect(test.notify.mock.lastCall?.[0]).toContain("result not recorded (in flight or interrupted)");
+		release.resolve();
+		const projection = await running;
+		expect(projection).toContain("PREPARED_SOURCE");
+		expect(projection).not.toContain(callType);
+		expect(JSON.stringify(test.harness.session.messages)).not.toContain(callType);
+		const records = callRecords(test.harness);
+		expect(records).toHaveLength(2);
+		expect(records[1].data).toEqual({
+			callId: expect.any(String),
+			timestamp: expect.any(String),
+			phase: "finished",
+			status: "selected",
+			elapsedMs: 0,
+			requestBytes: Buffer.byteLength(String(test.fetch.mock.calls[0][1]?.body)),
+			httpStatus: 200,
+			inputTokens: 100,
+			outputTokens: 10,
+			cost: "0.001",
+		});
+		expect(JSON.stringify(records)).not.toMatch(
+			/example\.ts|PREPARED_SOURCE|REQUEST_SECRET|RAW_PROVIDER_SECRET|synthetic-key|choices/,
+		);
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("1 attempted, 1 finished, 1 successful; 1 via custom transport");
+		expect(test.notify.mock.lastCall?.[0]).toContain("(custom transport); selected; HTTP 200; 0 ms");
+		expect(test.harness.faux.state.callCount).toBe(1);
+	});
+
+	it("labels the default transport as Gateway without making a live request", async () => {
+		const test = await setup({ fetch: undefined });
+		const fetch = vi.fn<typeof globalThis.fetch>(async () =>
+			Response.json({ answers: { "source-1": { type: "choice", choice: "source-1" } } }),
+		);
+		vi.stubGlobal("fetch", fetch);
+		await test.harness.session.prompt("/jev on");
+		await prompt(test.harness);
+		expect(fetch).toHaveBeenCalledOnce();
+		expect(fetch.mock.calls[0][0]).toBe("https://ai-gateway.vercel.sh/v4/ai/evaluation-model");
+		expect(callRecords(test.harness)[0]).toMatchObject({ data: { phase: "started", transport: "gateway" } });
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("1 successful; 0 via custom transport");
+		expect(test.notify.mock.lastCall?.[0]).toContain("(Gateway); selected; HTTP 200");
+	});
+
+	it.each(["disabled", "no candidates", "missing credentials"])(
+		"does not count %s as an endpoint call",
+		async (kind) => {
+			const test = await setup();
+			if (kind !== "disabled") await test.harness.session.prompt("/jev on");
+			if (kind === "missing credentials") test.harness.authStorage.remove("vercel-ai-gateway");
+			await prompt(test.harness, kind === "no candidates" ? "Thanks" : "Explain example.ts");
+			await test.harness.session.prompt("/jev status");
+			expect(test.fetch).not.toHaveBeenCalled();
+			expect(callRecords(test.harness)).toEqual([]);
+			expect(test.notify.mock.lastCall?.[0]).toContain("0 attempted, 0 finished, 0 successful");
+			expect(test.notify.mock.lastCall?.[0]).toContain("older unlogged calls are unknown");
+		},
+	);
+
+	it.each(["http", "response", "transport"])("records %s failures without raw errors", async (kind) => {
+		const test = await setup();
+		if (kind === "http") test.fetch.mockResolvedValue(Response.json({ error: "RAW_SECRET" }, { status: 403 }));
+		if (kind === "response") test.fetch.mockResolvedValue(Response.json({ answers: { secret: "RAW_SECRET" } }));
+		if (kind === "transport")
+			test.fetch.mockImplementation(() => {
+				throw new Error("RAW_SECRET");
+			});
+		await test.harness.session.prompt("/jev on");
+		expect(await prompt(test.harness)).toContain("PREPARED_SOURCE");
+		expect(callRecords(test.harness)).toHaveLength(2);
+		expect(callRecords(test.harness)[1]).toMatchObject({
+			data: { phase: "finished", status: "unavailable", reason: kind },
+		});
+		expect(JSON.stringify(callRecords(test.harness))).not.toContain("RAW_SECRET");
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("1 attempted, 1 finished, 0 successful");
+		expect(test.notify.mock.lastCall?.[0]).toContain(`unavailable (${kind})`);
+		expect(test.notify.mock.lastCall?.[0]).toContain(
+			kind === "transport" ? "no HTTP status recorded" : `HTTP ${kind === "http" ? 403 : 200}`,
+		);
+	});
+
+	it("records cancellation after dispatch without waking the main model", async () => {
+		const entered = Promise.withResolvers<void>();
+		const evaluated = Promise.withResolvers<void>();
+		const test = await setup(
+			{ onEvaluation: () => evaluated.resolve() },
+			{ extensionWorkLimits: { firstRequestWaitMs: 0 } },
+		);
+		test.fetch.mockImplementation(
+			(_input, init) =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(new Error("RAW_SECRET")), { once: true });
+					entered.resolve();
+				}),
+		);
+		await test.harness.session.prompt("/jev on");
+		test.harness.setResponses([
+			async () => {
+				await entered.promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Explain example.ts");
+		await evaluated.promise;
+		await test.harness.session.prompt("/jev off");
+		expect(callRecords(test.harness)[1]).toMatchObject({
+			data: { phase: "finished", status: "cancelled", reason: "aborted" },
+		});
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("1 attempted, 1 finished, 0 successful");
+		expect(test.notify.mock.lastCall?.[0]).toContain("cancelled (aborted)");
+		expect(test.harness.faux.state.callCount).toBe(1);
+	});
+
+	it("restores branch-local history across reload, navigation, and persistent resume", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "volt-jev-history-"));
+		directories.push(directory);
+		const manager = await SessionManager.create(directory, directory);
+		const first = await setup({}, { sessionManager: manager });
+		await first.harness.session.prompt("/jev on");
+		const root = manager.getLeafId()!;
+		await prompt(first.harness);
+		const recorded = manager.getLeafId()!;
+		await first.harness.session.reload();
+		await first.harness.session.prompt("/jev status");
+		expect(first.notify.mock.lastCall?.[0]).toContain("1 attempted, 1 finished, 1 successful");
+		await first.harness.session.navigateTree(root);
+		await first.harness.session.prompt("/jev status");
+		expect(first.notify.mock.lastCall?.[0]).toContain("0 attempted, 0 finished, 0 successful");
+		await first.harness.session.navigateTree(recorded);
+		const ref = manager.getSessionRef()!;
+		first.harness.session.dispose();
+		await first.harness.session.waitForClosed();
+		const second = await setup({}, { sessionManager: await SessionManager.open(ref) });
+		await second.harness.session.prompt("/jev status");
+		expect(second.notify.mock.lastCall?.[0]).toContain("1 attempted, 1 finished, 1 successful");
+		expect(second.notify.mock.lastCall?.[0]).toContain("HTTP 200");
+		expect(second.fetch).not.toHaveBeenCalled();
+	});
+
+	it("does not append late results to a navigated branch", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const evaluated = Promise.withResolvers<void>();
+		releases.push(release.resolve);
+		const test = await setup(
+			{ onEvaluation: () => evaluated.resolve() },
+			{ extensionWorkLimits: { firstRequestWaitMs: 0 } },
+		);
+		test.fetch.mockImplementation(async () => {
+			entered.resolve();
+			await release.promise;
+			return Response.json({ answers: { "source-1": { type: "choice", choice: "source-1" } } });
+		});
+		await test.harness.session.prompt("/jev on");
+		const root = test.harness.sessionManager.getLeafId()!;
+		test.harness.setResponses([
+			async () => {
+				await entered.promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Explain example.ts");
+		expect(callRecords(test.harness)).toHaveLength(1);
+		const recorded = test.harness.sessionManager.getLeafId()!;
+		await test.harness.session.navigateTree(root);
+		release.resolve();
+		await evaluated.promise;
+		expect(callRecords(test.harness)).toEqual([]);
+		await test.harness.session.navigateTree(recorded);
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("1 attempted, 0 finished, 0 successful");
+		expect(test.notify.mock.lastCall?.[0]).toContain("result not recorded (in flight or interrupted)");
+		expect(test.harness.faux.state.callCount).toBe(1);
+	});
+
+	it("ignores malformed persisted records and never renders arbitrary saved status text", async () => {
+		const manager = SessionManager.inMemory();
+		const callId = "11111111-1111-4111-8111-111111111111";
+		manager.appendCustomEntry(callType, null);
+		manager.appendCustomEntry(callType, { callId: "RAW_SECRET", phase: "started", transport: "gateway" });
+		manager.appendCustomEntry(callType, {
+			callId,
+			phase: "started",
+			transport: "gateway",
+			timestamp: "2026-09-19T00:00:00.000Z",
+		});
+		manager.appendCustomEntry(callType, { callId, phase: "finished", status: "RAW_SECRET", reason: "RAW_SECRET" });
+		const test = await setup({}, { sessionManager: manager });
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("1 attempted, 0 finished, 0 successful");
+		expect(test.notify.mock.lastCall?.[0]).not.toContain("RAW_SECRET");
+		expect(test.fetch).not.toHaveBeenCalled();
+	});
+
+	it("contains call-recording failures without changing preparation or inference", async () => {
+		const test = await setup();
+		const append = test.harness.sessionManager.appendCustomEntry.bind(test.harness.sessionManager);
+		vi.spyOn(test.harness.sessionManager, "appendCustomEntry").mockImplementation((type, data) => {
+			if (type === callType) throw new Error("private persistence error");
+			return append(type, data);
+		});
+		await test.harness.session.prompt("/jev on");
+		expect(await prompt(test.harness)).toContain("PREPARED_SOURCE");
+		expect(test.fetch).toHaveBeenCalledOnce();
+		await test.harness.session.prompt("/jev status");
+		expect(test.notify.mock.lastCall?.[0]).toContain("Call recording failed; history may be incomplete");
+		expect(test.notify.mock.lastCall?.[0]).not.toContain("private persistence error");
 	});
 });
