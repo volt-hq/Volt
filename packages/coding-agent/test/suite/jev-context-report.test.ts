@@ -1,10 +1,10 @@
-import { writeFile } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createJevContextPreparation } from "../../examples/extensions/jev-context-preparation.ts";
-import type { ExtensionAPI, ExtensionUIContext } from "../../src/index.ts";
+import { type ExtensionAPI, type ExtensionUIContext, loadSkillsFromDir } from "../../src/index.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
 const harnesses: Harness[] = [];
@@ -63,6 +63,20 @@ async function setup(options: HarnessOptions = {}, enabled = true) {
 	};
 }
 
+async function addSkills(harness: Harness) {
+	const root = join(harness.tempDir, "skills");
+	for (const name of ["alpha", "beta"]) {
+		const directory = join(root, name);
+		await mkdir(directory, { recursive: true });
+		await writeFile(
+			join(directory, "SKILL.md"),
+			`---\nname: ${name}\ndescription: Specialized workflow\n---\nSKILL_BODY_SECRET_${name}\n`,
+		);
+	}
+	const skills = loadSkillsFromDir({ dir: root, source: "user" });
+	harness.session.resourceLoader.getSkills = () => skills;
+}
+
 async function prompt(harness: Harness, observe = true, text = "Explain example.ts REQUEST_SECRET") {
 	let projected = "";
 	harness.setResponses([
@@ -84,6 +98,11 @@ describe("Live Jev evaluation report", () => {
 		const entries = test.harness.sessionManager.getBranch().length;
 		const report = await test.report();
 		expect(report).toContain("Evaluated: selected (valid response)");
+		expect(report).toContain("Candidates offered: skills=0, sources=1");
+		expect(report).toContain("Choices: source-1=source-1");
+		expect(report).toContain("Decision application: applied");
+		expect(report).toContain("readText source-1: ok; empty=false; truncated=false");
+		expect(report).toContain("put source-1: accepted");
 		expect(report).toContain("Evidence prepared: 1 accepted publications; 0 rejected; 0 removed");
 		expect(report).toContain("Preparation task: completed");
 		expect(report).toContain("#1 input, allowance 800 ms: payload hook observed");
@@ -100,6 +119,87 @@ describe("Live Jev evaluation report", () => {
 		expect(command?.getArgumentCompletions?.("rep")).toEqual([{ value: "report", label: "report" }]);
 	});
 
+	it("distinguishes an explicit skill abstention from failed preparation", async () => {
+		const test = await setup();
+		await addSkills(test.harness);
+		test.fetch.mockResolvedValue(Response.json({ answers: { skill: { type: "choice", choice: "none" } } }));
+		expect(await prompt(test.harness, true, "Thanks for the update")).not.toContain("SKILL_BODY_SECRET");
+		const report = await test.report();
+		expect(report).toContain("Evaluated: abstained (valid response)");
+		expect(report).toContain("Candidates offered: skills=2, sources=0");
+		expect(report).toContain("Choices: skill=none");
+		expect(report).toContain("Decision application: applied");
+		expect(report).toContain("Preparation operations (not host validation):\n  none observed");
+		expect(report).toContain("0 accepted publications; 0 rejected; 0 removed");
+		expect(report).toContain("preceding conversation is not included");
+		expect(test.fetch).toHaveBeenCalledOnce();
+	});
+
+	it.each(["ok", "denied", "redacted"])("reports a Jev-selected skill with an %s read outcome", async (outcome) => {
+		const test = await setup({
+			extensionFactories: [
+				(volt) => {
+					volt.on("tool_call", (event) => {
+						if (outcome === "denied" && event.origin?.kind === "extension")
+							return { block: true, reason: "PRIVATE_POLICY_ERROR" };
+					});
+					volt.on("tool_result", (event) => {
+						if (outcome === "redacted" && event.origin?.kind === "extension")
+							return { content: [{ type: "text", text: "PRIVATE_REDACTION" }] };
+					});
+				},
+			],
+		});
+		await addSkills(test.harness);
+		test.fetch.mockResolvedValue(Response.json({ answers: { skill: { type: "choice", choice: "skill-2" } } }));
+		const projection = await prompt(test.harness, true, "Help with the task");
+		const report = await test.report();
+		expect(report).toContain('Choices: skill=skill-2 ("beta")');
+		expect(report).toContain(
+			`readSkill skill-2 ("beta"): ${outcome === "ok" ? "ok; empty=false; truncated=false" : outcome === "denied" ? "denied (extension_gate)" : "unavailable (transformed_result)"}`,
+		);
+		if (outcome === "ok") {
+			expect(projection).toContain("SKILL_BODY_SECRET_beta");
+			expect(report).toContain("put skill: accepted");
+		} else {
+			expect(projection).not.toContain("SKILL_BODY_SECRET");
+			expect(report).toContain("0 accepted publications; 0 rejected; 0 removed");
+			expect(report).not.toContain("put skill:");
+		}
+		expect(report).not.toMatch(/SKILL_BODY_SECRET|PRIVATE_POLICY_ERROR|PRIVATE_REDACTION|SKILL\.md/);
+		expect(report).not.toContain(test.harness.tempDir);
+		const history = test.harness.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "custom" && entry.customType === "jev-context-call");
+		expect(JSON.stringify(history)).not.toMatch(/skill-2|beta|choices|operations/);
+	});
+
+	it("distinguishes empty source reads from rejected publications", async () => {
+		const test = await setup();
+		await writeFile(join(test.harness.tempDir, "example.ts"), "   \n");
+		await prompt(test.harness);
+		const report = await test.report();
+		expect(report).toContain("Choices: source-1=source-1");
+		expect(report).toContain("readText source-1: ok; empty=true");
+		expect(report).toContain("0 accepted publications; 0 rejected");
+		expect(report).not.toContain("put source-1:");
+	});
+
+	it("separates fallback reads from a changed Jev skill selection", async () => {
+		const test = await setup();
+		await addSkills(test.harness);
+		test.fetch.mockResolvedValue(Response.json({ answers: { skill: { type: "choice", choice: "skill-2" } } }));
+		const projection = await prompt(test.harness, true, "Use alpha");
+		expect(projection).not.toContain("SKILL_BODY_SECRET_alpha");
+		expect(projection).toContain("SKILL_BODY_SECRET_beta");
+		const report = await test.report();
+		expect(report).toContain('Choices: skill=skill-2 ("beta")');
+		expect(report).toContain('readSkill skill-1 ("alpha"): ok');
+		expect(report).toContain('readSkill skill-2 ("beta"): ok');
+		expect(report).toContain("remove skill: Jev selected a different skill");
+		expect(report).toContain("2 accepted publications; 0 rejected; 1 removed");
+	});
+
 	it("reports pending work during an active request without waiting or starting inference", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();
@@ -114,6 +214,8 @@ describe("Live Jev evaluation report", () => {
 		await entered.promise;
 		const report = await test.report();
 		expect(report).toContain("Evaluated: pending");
+		expect(report).toContain("Choices: pending");
+		expect(report).toContain("Decision application: pending");
 		expect(report).toContain("provider admission unobserved");
 		expect(test.fetch).toHaveBeenCalledOnce();
 		expect(test.harness.faux.state.callCount).toBe(0);
@@ -166,6 +268,8 @@ describe("Live Jev evaluation report", () => {
 		expect(await prompt(test.harness)).not.toContain("SOURCE_SECRET");
 		const report = await test.report();
 		expect(report).toContain("Evidence prepared: 0 accepted publications; 1 rejected");
+		expect(report).toContain("readText source-1: ok; empty=false");
+		expect(report).toContain("put source-1: limit_exceeded (contribution_budget)");
 		expect(report).toContain("Host admission snapshot: no contributions");
 	});
 
@@ -175,6 +279,8 @@ describe("Live Jev evaluation report", () => {
 		expect(await prompt(test.harness)).toContain("SOURCE_SECRET");
 		const report = await test.report();
 		expect(report).toContain("Evaluated: unavailable (credentials)");
+		expect(report).toContain("Choices: unavailable (no valid decision)");
+		expect(report).toContain("Decision application: deterministic fallback (no valid decision)");
 		expect(report).toContain("source-1 admitted");
 		expect(test.fetch).not.toHaveBeenCalled();
 	});
@@ -246,11 +352,15 @@ describe("Live Jev evaluation report", () => {
 		expect(projections[0]).toContain("SOURCE_SECRET");
 		expect(projections[1]).not.toContain("SOURCE_SECRET");
 		const report = await test.report();
-		expect(report).toContain("Evaluated: selected (valid response); 800 ms");
+		expect(report).toContain("Evaluated: abstained (valid response); 800 ms");
+		expect(report).toContain("Choices: source-1=none");
+		expect(report).toContain("remove source-1: Jev chose none");
+		expect(report).toContain("Choices at observation: pending; decision application: pending");
+		expect(report).toContain("Choices at observation: source-1=none; decision application: applied");
 		expect(report).toContain("0 rejected; 1 removed");
 		expect(report).toContain("#1 input, allowance 800 ms: payload hook observed; evaluation pending; 1 prepared");
 		expect(report).toContain("source-1 admitted");
-		expect(report).toContain("#2 tools, allowance 0 ms: payload hook observed; evaluation selected");
+		expect(report).toContain("#2 tools, allowance 0 ms: payload hook observed; evaluation abstained");
 		expect(report).toContain("Host admission snapshot: no contributions");
 		expect(test.fetch).toHaveBeenCalledOnce();
 		expect(test.harness.faux.state.callCount).toBe(2);
@@ -267,6 +377,8 @@ describe("Live Jev evaluation report", () => {
 		expect(report).not.toContain("source-1 admitted");
 		if (change === "new input") {
 			expect(report).toContain("Evaluated: not started (no candidates)");
+			expect(report).toContain("Choices: not evaluated");
+			expect(report).toContain("Preparation operations (not host validation):\n  none observed");
 			expect(report).toContain("Evidence prepared: 0 accepted publications");
 		} else expect(report).toContain("No Jev evaluation report");
 	});

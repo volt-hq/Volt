@@ -8,6 +8,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionWorkReadResult,
 	ExtensionWorkStatus,
 	ExtensionWorkTaskHandle,
 	JsonValue,
@@ -47,6 +48,10 @@ export interface JevPreparationOptions {
 
 interface PreparationReport {
 	evaluation: string;
+	candidates: { skills: number; sources: number };
+	choices: string;
+	decision: string;
+	operations: Array<{ label: string; outcome: string }>;
 	prepared: number;
 	rejected: number;
 	removed: number;
@@ -60,6 +65,8 @@ interface PreparationReport {
 		waitMs: number;
 		observation?: {
 			evaluation: string;
+			choices: string;
+			decision: string;
 			prepared: number;
 			contributions: ExtensionWorkStatus["contributions"];
 		};
@@ -68,6 +75,12 @@ interface PreparationReport {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function workOutcome(result: { status: string; reason?: string }): string {
+	// Host reason codes only; never render arbitrary failure messages or terminal controls.
+	const reason = result.reason && /^[a-z0-9_]{1,80}$/.test(result.reason) ? result.reason : undefined;
+	return `${result.status}${reason ? ` (${reason})` : ""}`;
 }
 
 /** Thin adapter for Gateway's experimental v4 evaluation wire contract; no AI SDK dependency. */
@@ -281,17 +294,27 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			const lines = [
 				"Jev evaluation report (latest request scope; runtime only)",
 				`Evaluated: ${report.evaluation}.`,
+				"Selector input: new committed request text only; preceding conversation is not included.",
+				`Candidates offered: skills=${report.candidates.skills}, sources=${report.candidates.sources}.`,
+				`Choices: ${report.choices}.`,
+				`Decision application: ${report.decision}.`,
 				`Evidence prepared: ${report.prepared} accepted publications; ${report.rejected} rejected; ${report.removed} removed.`,
 				`Preparation task: ${task ? `${task.state}${task.reason ? ` (${task.reason})` : ""}` : report.admission}.`,
-				`Provider request observations: ${report.boundaries} boundaries; showing the last ${report.attempts.length}.`,
 			];
+			lines.push("Preparation operations (not host validation):");
+			if (!report.operations.length) lines.push("  none observed");
+			for (const operation of report.operations) lines.push(`  ${operation.label}: ${operation.outcome}`);
+			lines.push(
+				`Provider request observations: ${report.boundaries} boundaries; showing the last ${report.attempts.length}.`,
+			);
 			for (const attempt of report.attempts) {
 				const observation = attempt.observation;
 				lines.push(
 					`#${attempt.number} ${attempt.cause}, allowance ${attempt.waitMs} ms: ` +
 						(observation
 							? `payload hook observed; evaluation ${observation.evaluation}; ${observation.prepared} prepared at observation. ` +
-								`Host admission snapshot: ${observation.contributions.map((item) => `${item.key} ${item.status}${item.reason ? ` (${item.reason})` : ""}`).join(", ") || "no contributions"}.`
+								`Host admission snapshot: ${observation.contributions.map((item) => `${item.key} ${item.status}${item.reason ? ` (${item.reason})` : ""}`).join(", ") || "no contributions"}.\n` +
+								`  Choices at observation: ${observation.choices}; decision application: ${observation.decision}.`
 							: "provider admission unobserved (no payload-hook snapshot)."),
 				);
 			}
@@ -513,6 +536,8 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 					// Snapshot before releasing late selection. Never retain provider payloads or source text.
 					pendingReportAttempt.observation = {
 						evaluation: report.evaluation,
+						choices: report.choices,
+						decision: report.decision,
 						prepared: report.prepared,
 						contributions: volt.getWorkStatus().contributions.filter((item) => report?.keys.has(item.key)),
 					};
@@ -541,6 +566,10 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			if (event.first) {
 				report = {
 					evaluation: "not started (no candidates)",
+					candidates: { skills: 0, sources: 0 },
+					choices: "not evaluated",
+					decision: "not evaluated",
+					operations: [],
 					prepared: 0,
 					rejected: 0,
 					removed: 0,
@@ -570,7 +599,16 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			const plan = selectPreparation(work.snapshot, "catalog");
 			if (!plan || (!plan.skills.length && !plan.sources.length)) return;
 			const scopeReport = report!;
+			scopeReport.candidates = { skills: plan.skills.length, sources: plan.sources.length };
 			scopeReport.evaluation = "pending";
+			scopeReport.choices = "pending";
+			scopeReport.decision = "pending";
+			const skillLabels = new Map(
+				plan.skills.map((skill, index) => [
+					skill.resourceId,
+					`skill-${index + 1} (${JSON.stringify(skill.name.slice(0, 64))})`,
+				]),
+			);
 			let release!: () => void;
 			const projected = new Promise<void>((resolve) => {
 				release = resolve;
@@ -581,13 +619,57 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 			const admission = work.tasks.start(
 				{ key: "prepare-context", label: "Prepare context with Jev", timeoutMs: 1500 },
 				async (task) => {
-					// Observe accepted contributions, not just successful reads or evaluation choices.
+					// Observe existing operations only. Keep bodies, paths and host resource IDs out of the report.
+					const observeRead = async (label: string, read: () => Promise<ExtensionWorkReadResult>) => {
+						const operation = { label, outcome: "pending" };
+						scopeReport.operations.push(operation);
+						try {
+							const result = await read();
+							operation.outcome =
+								result.status === "ok"
+									? `ok; empty=${!result.text.trim()}; truncated=${result.truncated}${task.signal.aborted ? "; cancelled before publication" : ""}`
+									: workOutcome(result);
+							return result;
+						} catch (error) {
+							operation.outcome = "failed (read_exception)";
+							throw error;
+						}
+					};
 					const observedTask = {
 						...task,
+						repository: {
+							...task.repository,
+							readSkill: (input: Parameters<typeof task.repository.readSkill>[0]) =>
+								observeRead(`readSkill ${skillLabels.get(input.resourceId) ?? "unknown candidate"}`, () =>
+									task.repository.readSkill(input),
+								),
+							readText: (input: Parameters<typeof task.repository.readText>[0]) =>
+								observeRead(
+									`readText source-${plan.sources.findIndex((source) => source.path === input.path) + 1}`,
+									() => task.repository.readText(input),
+								),
+							symbols: async (input: Parameters<typeof task.repository.symbols>[0]) => {
+								const index = plan.sources.findIndex((source) => source.path === input.path);
+								const operation = { label: `symbols source-${index + 1}`, outcome: "pending" };
+								scopeReport.operations.push(operation);
+								try {
+									const result = await task.repository.symbols(input);
+									operation.outcome =
+										result.status === "ok"
+											? `ok; truncated=${result.truncated}; exact_matches=${result.symbols.filter((symbol) => symbol.name === plan.sources[index]?.symbol).length}`
+											: workOutcome(result);
+									return result;
+								} catch (error) {
+									operation.outcome = "failed (symbols_exception)";
+									throw error;
+								}
+							},
+						},
 						context: {
 							...task.context,
 							put: (contribution: Parameters<typeof task.context.put>[0]) => {
 								const result = task.context.put(contribution);
+								scopeReport.operations.push({ label: `put ${contribution.key}`, outcome: workOutcome(result) });
 								if (result.status === "accepted") {
 									scopeReport.prepared++;
 									scopeReport.keys.add(contribution.key);
@@ -624,7 +706,26 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 									return (options.fetch ?? globalThis.fetch)(input, init);
 								},
 							}).then((result) => {
-								scopeReport.evaluation = `${result.status}${result.status === "selected" ? " (valid response)" : ` (${result.reason})`}; ${Math.round(result.elapsedMs)} ms`;
+								const abstained =
+									result.status === "selected" &&
+									Object.values(result.choices).every((choice) => choice === "none");
+								scopeReport.evaluation = `${abstained ? "abstained" : result.status}${result.status === "selected" ? " (valid response)" : ` (${result.reason})`}; ${Math.round(result.elapsedMs)} ms`;
+								scopeReport.choices =
+									result.status === "selected"
+										? Object.entries(result.choices)
+												.map(([question, choice]) => {
+													const skill =
+														question === "skill"
+															? plan.skills.find((_skill, index) => choice === `skill-${index + 1}`)
+															: undefined;
+													return `${question}=${skill ? skillLabels.get(skill.resourceId) : choice}`;
+												})
+												.join("; ")
+										: "unavailable (no valid decision)";
+								scopeReport.decision =
+									result.status === "selected"
+										? "awaiting fallback preparation"
+										: "deterministic fallback (no valid decision)";
 								if (attempted) {
 									// Explicit allowlist: never store choices, request text, or raw responses/errors.
 									record({
@@ -662,22 +763,33 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 						if (task.signal.aborted || result.status !== "selected") return;
 						// A late removal/replacement must not revoke fallback already being validated.
 						// This conservative cutoff starts before host collection, never after it.
-						if (performance.now() >= initialCutoff) await projected;
+						if (performance.now() >= initialCutoff) {
+							scopeReport.decision = "waiting for initial projection";
+							await projected;
+						}
 						if (task.signal.aborted) return;
+						scopeReport.decision = "applying";
 						for (const [index] of plan.sources.entries()) {
 							const id = `source-${index + 1}`;
 							if (result.choices[id] === "none") {
 								task.context.remove(id);
 								if (scopeReport.keys.delete(id)) scopeReport.removed++;
+								scopeReport.operations.push({ label: `remove ${id}`, outcome: "Jev chose none" });
 							}
 						}
 						const selected = plan.skills.find((_skill, index) => result.choices.skill === `skill-${index + 1}`);
 						if (selected?.resourceId !== plan.skill?.resourceId) {
 							task.context.remove("skill");
 							if (scopeReport.keys.delete("skill")) scopeReport.removed++;
+							scopeReport.operations.push({
+								label: "remove skill",
+								outcome: selected ? "Jev selected a different skill" : "Jev chose none",
+							});
 							if (selected) await prepareContext(observedTask, { skill: selected, sources: [] });
 						}
+						scopeReport.decision = "applied";
 					} finally {
+						if (task.signal.aborted) scopeReport.decision = "interrupted (task cancelled)";
 						if (task.signal.aborted && generation === workGeneration) updateStatus(ctx, "cancelled");
 						task.signal.removeEventListener("abort", release);
 						if (pendingProjection === pending) pendingProjection = undefined;
@@ -694,6 +806,8 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 				updateStatus(ctx, "preparing");
 			} else {
 				scopeReport.evaluation = "not started (preparation unavailable)";
+				scopeReport.choices = "not evaluated";
+				scopeReport.decision = "not evaluated";
 				updateStatus(ctx, "preparation unavailable");
 			}
 		});
