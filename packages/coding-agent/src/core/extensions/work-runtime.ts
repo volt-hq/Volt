@@ -332,7 +332,8 @@ export class ExtensionWorkManager {
 				if (task.summary.state !== "cancelling") task.summary.state = "draining";
 				// Returned/throwing callbacks cannot leave orphaned operations behind.
 				const cancelled = task.summary.state === "cancelling";
-				task.controller.abort();
+				// Abort listeners run in the dispatching context, not their registration lineage.
+				withoutExtensionWork(() => task.controller.abort());
 				await Promise.allSettled([...task.operations]);
 				clearTimeout(timer);
 				task.summary.state =
@@ -356,7 +357,7 @@ export class ExtensionWorkManager {
 		task.accepting = false;
 		task.summary.state = "cancelling";
 		task.summary.reason = reason;
-		task.controller.abort();
+		withoutExtensionWork(() => task.controller.abort());
 	}
 
 	private handle(task: Task): ExtensionWorkTaskHandle {
