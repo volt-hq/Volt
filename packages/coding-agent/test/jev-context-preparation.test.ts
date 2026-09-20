@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
-import type { PreparationPlan } from "../examples/extensions/context-preparation.ts";
+import { type PreparationPlan, selectPreparation } from "../examples/extensions/context-preparation.ts";
 import { evaluateJev } from "../examples/extensions/jev-context-preparation.ts";
+import type { ExtensionWorkSnapshot } from "../src/index.ts";
 
 const plan: PreparationPlan = {
 	prompt: "Extract invoice tables from src/invoice.ts:2",
@@ -35,6 +36,62 @@ function setup(response: () => Promise<Response> = async () => Response.json({ a
 			evaluateJev(input, key, controller.signal, { fetch, zeroDataRetention }),
 	};
 }
+
+function snapshot(prompt: string): ExtensionWorkSnapshot {
+	return {
+		scopeId: "scope",
+		branchId: "branch",
+		runtimeId: "runtime",
+		revision: 1,
+		cwd: "/repo",
+		mode: "build",
+		inputs: [{ text: prompt, kind: "prompt" }],
+		services: ["readText", "readSkill"],
+		skills: plan.skills,
+		skillsTruncated: false,
+	};
+}
+
+describe("Jev catalog selection", () => {
+	it.each(["Fix the bug", "Thanks", "Fix the bug without changing the API", "Do not use invoice for src/invoice.ts"])(
+		"offers loaded skills without lexical or negative-cue gating: %s",
+		(prompt) => {
+			const result = selectPreparation(snapshot(prompt), "catalog");
+			expect(result).toEqual({ prompt, skill: undefined, skills: plan.skills, sources: [] });
+		},
+	);
+
+	it.each(["/skill:invoice", '<skill name="invoice">private skill body</skill>'])(
+		"does not re-evaluate an explicit skill invocation: %s",
+		(prompt) => {
+			expect(selectPreparation(snapshot(prompt), "catalog")).toBeUndefined();
+		},
+	);
+
+	it.each(["truncated", "unavailable"])("retains the %s catalog guard", (kind) => {
+		const input = snapshot("Fix the bug");
+		if (kind === "truncated") input.skillsTruncated = true;
+		else input.services = ["readText"];
+		expect(selectPreparation(input, "catalog")?.skills).toEqual([]);
+	});
+
+	it("offers the full bounded catalog rather than an eight-skill shortlist", async () => {
+		const input = snapshot("Help me with this task");
+		input.skills = Array.from({ length: 128 }, (_, index) => ({
+			...plan.skills[0],
+			resourceId: `private-${index}`,
+			name: `skill-${index}`,
+		}));
+		const selected = selectPreparation(input, "catalog")!;
+		expect(selected.skills).toEqual(input.skills);
+		expect(selected.skill).toBeUndefined();
+		const test = setup(async () => Response.json({ answers: { skill: { type: "choice", choice: "skill-128" } } }));
+		expect(await test.run(selected)).toMatchObject({ status: "selected", choices: { skill: "skill-128" } });
+		const request = JSON.parse(String(test.fetch.mock.calls[0][1]?.body));
+		expect(Object.keys(request.questions.skill.criteria)).toHaveLength(129);
+		expect(request.questions.skill.criteria["skill-128"].name).toBe("skill-127");
+	});
+});
 
 describe("Jev evaluation adapter (no live network)", () => {
 	it("uses the verified Gateway evaluation contract and validates finite choices", async () => {

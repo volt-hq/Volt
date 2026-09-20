@@ -159,7 +159,7 @@ describe("Jev extension command and TUI status", () => {
 		await test.harness.session.prompt("/jev");
 		expect(test.notify.mock.lastCall?.[0]).toContain("Jev: off");
 		await test.harness.session.prompt("/jev maybe");
-		expect(test.notify).toHaveBeenLastCalledWith("Usage: /jev [on|off|status|wait]", "warning");
+		expect(test.notify).toHaveBeenLastCalledWith("Usage: /jev [on|off|status|wait|report]", "warning");
 		expect(test.confirm).not.toHaveBeenCalled();
 		expect(savedState(test.harness)).toEqual([]);
 		expect(test.harness.faux.state.callCount).toBe(0);

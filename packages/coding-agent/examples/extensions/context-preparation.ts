@@ -153,12 +153,15 @@ async function prepareSource(task: ExtensionWorkTaskContext, source: SourceCandi
 export interface PreparationPlan {
 	prompt: string;
 	skill?: ExtensionWorkSkill;
-	/** Bounded positive lexical candidates, including ties, for the optional selector. */
+	/** Host-observed candidates for the optional selector; never skill bodies or invented paths. */
 	skills: ExtensionWorkSkill[];
 	sources: SourceCandidate[];
 }
 
-export function selectPreparation(snapshot: ExtensionWorkSnapshot): PreparationPlan | undefined {
+export function selectPreparation(
+	snapshot: ExtensionWorkSnapshot,
+	skillCandidates: "lexical" | "catalog" = "lexical",
+): PreparationPlan | undefined {
 	// Bound synchronous selection. Do not mine explicitly expanded skill bodies for more work.
 	const inputs = snapshot.inputs.slice(-8);
 	if (inputs.some(({ text }) => text.startsWith("/skill:") || text.startsWith("<skill "))) return;
@@ -169,16 +172,23 @@ export function selectPreparation(snapshot: ExtensionWorkSnapshot): PreparationP
 	// Count original lengths and separators without inspecting text beyond either cutoff.
 	const truncated =
 		inputs.reduce((length, { text }) => length + text.length, Math.max(0, inputs.length - 1)) > prompt.length;
-	// Lexical matching cannot interpret exclusions: abstain on common negative cues.
-	if (/\b(?:do not|don['’]t|never|avoid|skip|without)\b/i.test(prompt)) return;
-	// A partial catalog cannot establish an unambiguous skill match.
-	const ranked =
-		!snapshot.skillsTruncated && snapshot.services.includes("readSkill") ? rankSkills(prompt, snapshot.skills) : [];
+	// Exclusions still suppress speculative fallback reads, not the Jev skill decision.
+	const negated = /\b(?:do not|don['’]t|never|avoid|skip|without)\b/i.test(prompt);
+	if (negated && skillCandidates === "lexical") return;
+	// Keep the host's complete-catalog and native read authority requirements.
+	const catalog = !snapshot.skillsTruncated && snapshot.services.includes("readSkill") ? snapshot.skills : [];
+	const ranked = negated ? [] : rankSkills(prompt, catalog);
 	const skill = ranked[0]?.score !== ranked[1]?.score ? ranked[0]?.skill : undefined;
-	const sources = snapshot.services.includes("readText")
-		? selectSources(prompt, truncated).filter((source) => !source.symbol || snapshot.services.includes("symbols"))
-		: [];
-	return { prompt, skill, skills: ranked.slice(0, 8).map(({ skill }) => skill), sources };
+	const sources =
+		!negated && snapshot.services.includes("readText")
+			? selectSources(prompt, truncated).filter((source) => !source.symbol || snapshot.services.includes("symbols"))
+			: [];
+	return {
+		prompt,
+		skill,
+		skills: skillCandidates === "catalog" ? [...catalog] : ranked.slice(0, 8).map(({ skill }) => skill),
+		sources,
+	};
 }
 
 export async function prepareContext(

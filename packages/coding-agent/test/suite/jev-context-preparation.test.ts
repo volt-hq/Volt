@@ -174,8 +174,24 @@ describe("Jev three-way SDK evaluation", () => {
 				calls: 1,
 			},
 			{ prompt: "Use csv and xlsx", deterministic: [], jev: [], skill: undefined, sources: [], calls: 1 },
-			{ prompt: "Thanks for the update", deterministic: [], jev: [], skill: undefined, sources: [], calls: 0 },
-			{ prompt: "Do not read src/invoice.ts", deterministic: [], jev: [], skill: undefined, sources: [], calls: 0 },
+			{
+				prompt: "Turn this workbook into a monthly revenue summary",
+				deterministic: [],
+				jev: ["XLSX_BODY"],
+				skill: "xlsx",
+				sources: [],
+				calls: 1,
+			},
+			{
+				prompt: "Turn this workbook into a monthly revenue summary without losing formatting",
+				deterministic: [],
+				jev: ["XLSX_BODY"],
+				skill: "xlsx",
+				sources: [],
+				calls: 1,
+			},
+			{ prompt: "Thanks for the update", deterministic: [], jev: [], skill: undefined, sources: [], calls: 1 },
+			{ prompt: "Do not read src/invoice.ts", deterministic: [], jev: [], skill: undefined, sources: [], calls: 1 },
 		];
 		const report = [];
 		for (const example of cases) {
@@ -203,6 +219,15 @@ describe("Jev three-way SDK evaluation", () => {
 				}
 				for (const [, request] of test.fetch.mock.calls) {
 					const body = String(request?.body);
+					const evaluation = JSON.parse(body) as EvaluationRequest;
+					expect(Object.values(evaluation.questions.skill.criteria)).toEqual(
+						expect.arrayContaining([
+							"No clearly useful skill",
+							expect.objectContaining({ name: "invoice-pdf" }),
+							expect.objectContaining({ name: "csv" }),
+							expect.objectContaining({ name: "xlsx" }),
+						]),
+					);
 					for (const marker of markers) expect(body).not.toContain(marker);
 					expect(body).not.toContain(test.harness.tempDir);
 					expect(body).not.toContain("MANDATORY");
@@ -221,6 +246,22 @@ describe("Jev three-way SDK evaluation", () => {
 		}
 		// Mocked answers verify integration and retrieval proxies, not model quality or real latency.
 		console.table(report);
+	});
+
+	it("evaluates again for a new user request even when neither request has lexical matches", async () => {
+		const test = await setup("jev");
+		test.fetch.mockImplementation(async (_url, request) => responseFor(request, undefined, []));
+		await run(test.harness, "Hello");
+		test.harness.setResponses([fauxAssistantMessage("done")]);
+		await test.harness.session.prompt("Thanks");
+		expect(test.fetch).toHaveBeenCalledTimes(2);
+		expect(
+			test.fetch.mock.calls.map(
+				([, request]) => (JSON.parse(String(request?.body)) as EvaluationRequest).state.request,
+			),
+		).toEqual(["Hello", "Thanks"]);
+		expect(test.operations).toEqual([]);
+		expect(test.harness.faux.state.callCount).toBe(2);
 	});
 
 	it("does nothing when discovered without explicit opt-in", async () => {
@@ -268,6 +309,7 @@ describe("Jev three-way SDK evaluation", () => {
 			kind === "excluded" ? ["read"] : undefined,
 		);
 		file = join(test.harness.tempDir, "src/invoice.ts");
+		test.fetch.mockImplementation(async (_url, request) => responseFor(request, undefined, [1]));
 		if (kind === "gate") test.harness.session.registerTurnPolicy({ beforeToolCall: () => ({ block: true }) });
 		expect(selected(await run(test.harness, "Inspect src/invoice.ts"))).toEqual([]);
 		if (kind === "excluded") expect(test.fetch).not.toHaveBeenCalled();
