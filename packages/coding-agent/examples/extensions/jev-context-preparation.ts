@@ -766,6 +766,27 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 							/* Observation cannot change preparation. */
 						}
 						if (task.signal.aborted || result.status !== "selected") return;
+						const selected = plan.skills.find((_skill, index) => result.choices.skill === `skill-${index + 1}`);
+						let replacement: Parameters<typeof task.context.put>[0] | undefined;
+						if (selected && selected.resourceId !== plan.skill?.resourceId) {
+							scopeReport.decision = "preparing selected skill";
+							await prepareContext(
+								{
+									...observedTask,
+									context: {
+										...observedTask.context,
+										put: (contribution) => {
+											// Stage locally; host publication and diagnostics happen after the cutoff check.
+											replacement = contribution;
+											return { status: "accepted" };
+										},
+									},
+								},
+								{ skill: selected, sources: [] },
+							);
+						}
+						if (task.signal.aborted) return;
+						// Recheck after all preparation: alternate reads can cross the cutoff too.
 						// A late removal/replacement must not revoke fallback already being validated.
 						// This conservative cutoff starts before host collection, never after it.
 						if (performance.now() >= initialCutoff) {
@@ -782,7 +803,6 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 								scopeReport.operations.push({ label: `remove ${id}`, outcome: "Jev chose none" });
 							}
 						}
-						const selected = plan.skills.find((_skill, index) => result.choices.skill === `skill-${index + 1}`);
 						if (selected?.resourceId !== plan.skill?.resourceId) {
 							task.context.remove("skill");
 							if (scopeReport.keys.delete("skill")) scopeReport.removed++;
@@ -790,7 +810,7 @@ export function createJevContextPreparation(options: JevPreparationOptions = {})
 								label: "remove skill",
 								outcome: selected ? "Jev selected a different skill" : "Jev chose none",
 							});
-							if (selected) await prepareContext(observedTask, { skill: selected, sources: [] });
+							if (replacement) observedTask.context.put(replacement);
 						}
 						scopeReport.decision = "applied";
 					} finally {
