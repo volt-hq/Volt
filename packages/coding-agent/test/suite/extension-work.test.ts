@@ -4,7 +4,7 @@ import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSessionTurnPolicy } from "../../src/core/agent-session.ts";
-import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/types.ts";
+import type { ExtensionAPI, ExtensionFactory, PolicyRegistration } from "../../src/core/extensions/types.ts";
 import type {
 	ExtensionWorkContext,
 	ExtensionWorkReadResult,
@@ -276,16 +276,17 @@ describe("managed extension work through AgentSession", () => {
 		});
 		const harness = await setup({ extensionFactories: [extension.factory] });
 		await writeFile(join(harness.tempDir, "source.txt"), "must not publish");
+		let registration: PolicyRegistration<AgentSessionTurnPolicy>;
 		const policy: AgentSessionTurnPolicy = {
 			beforeToolCall: async (event) => {
 				if (timing !== "during" || event.toolName !== "read") return;
 				await Promise.resolve();
-				policy.beforeToolCall = () => ({ block: true });
+				registration.update({ beforeToolCall: () => ({ block: true }) });
 			},
 		};
-		harness.session.registerTurnPolicy(policy);
+		registration = harness.session.registerTurnPolicy(policy);
 		if (timing === "before")
-			policy.beforeToolCall = (event) => (event.toolName === "read" ? { block: true } : undefined);
+			registration.update({ beforeToolCall: (event) => (event.toolName === "read" ? { block: true } : undefined) });
 		throughCheckpoint(harness, () => {});
 		await harness.session.prompt("inspect");
 		expect(result).toMatchObject(

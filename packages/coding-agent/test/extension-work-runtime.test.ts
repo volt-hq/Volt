@@ -122,7 +122,10 @@ describe("extension managed work", () => {
 	it("collects real evidence after the producing task completes and rejects changed sources", async () => {
 		const { manager, execute } = setup();
 		await contribute(manager);
-		expect(await manager.collect(1, () => true)).toContain('"/repo/file.ts":1-1');
+		const collection = await manager.collect(1, () => true);
+		expect(collection?.text).toContain('"/repo/file.ts":1-1');
+		expect(manager.getStatus("one").contributions[0].status).toBe("ready");
+		collection!.authorization.settle(true);
 		expect(execute).toHaveBeenCalledTimes(2);
 		expect(manager.getStatus("one").contributions[0].status).toBe("admitted");
 		execute.mockResolvedValue(readResult("v2"));
@@ -149,8 +152,50 @@ describe("extension managed work", () => {
 		release.resolve(readResult());
 		expect(await collecting).toBeUndefined();
 		const next = await manager.collect(1, () => true);
-		if (action === "replace") expect(next).toContain("replacement");
+		if (action === "replace") expect(next?.text).toContain("replacement");
 		else expect(next).toBeUndefined();
+	});
+
+	it.each(["policy", "scope", "replace", "remove"] as const)(
+		"rejects a collected token after %s changes without stale diagnostic writes",
+		async (change) => {
+			const { manager } = setup();
+			await contribute(manager);
+			let current = true;
+			const collection = (await manager.collect(1, () => current))!;
+			expect(collection.authorization.isCurrent()).toBe(true);
+			expect(manager.getStatus("one").contributions[0].status).toBe("ready");
+			if (change === "policy") current = false;
+			if (change === "scope") manager.boundary(boundary("input-2"));
+			if (change === "replace" || change === "scope") {
+				await start(context(manager), async (task) => {
+					task.context.put({ key: "source", text: "new candidate" });
+				}).wait();
+			}
+			if (change === "remove")
+				await start(context(manager), async (task) => {
+					task.context.remove("source");
+				}).wait();
+			expect(collection.authorization.isCurrent()).toBe(false);
+			collection.authorization.settle(false);
+			collection.authorization.settle(true);
+			const contributions = manager.getStatus("one").contributions;
+			if (change === "policy")
+				expect(contributions).toEqual([{ key: "source", status: "omitted", reason: "authority_changed" }]);
+			else if (change === "remove") expect(contributions).toEqual([]);
+			else expect(contributions).toEqual([{ key: "source", status: "ready" }]);
+		},
+	);
+
+	it("older collection settlement cannot overwrite a newer admission for the same contribution", async () => {
+		const { manager } = setup();
+		await contribute(manager);
+		const first = (await manager.collect(1, () => true))!;
+		const second = (await manager.collect(1, () => true))!;
+		expect(first.authorization.isCurrent()).toBe(false);
+		second.authorization.settle(true);
+		first.authorization.settle(false);
+		expect(manager.getStatus("one").contributions).toEqual([{ key: "source", status: "admitted" }]);
 	});
 
 	it("deduplicates live keys and bounds admission without a pending queue", async () => {
@@ -292,7 +337,7 @@ describe("extension managed work", () => {
 			task.context.put({ key: "first", text: "first suggestion" });
 		}).wait();
 		const suffix = await manager.collect(1, () => true);
-		expect(suffix!.indexOf("first suggestion")).toBeLessThan(suffix!.indexOf("second suggestion"));
+		expect(suffix!.text.indexOf("first suggestion")).toBeLessThan(suffix!.text.indexOf("second suggestion"));
 		manager.boundary(boundary("input-1", 2));
 		expect(await manager.collect(2, () => true)).toBeUndefined();
 		expect(manager.getStatus("one").contributions[0].reason).toBe("snapshot_changed");

@@ -135,6 +135,12 @@ export function createAgentSessionTestControl(session: AgentSession) {
 		}
 	};
 	return {
+		onBeforeProviderRequest: (handler: () => Promise<void>) =>
+			harness.on("before_provider_request", async () => {
+				await handler();
+				return undefined;
+			}),
+		appendHarnessMessage: (message: AgentMessage) => harness.appendMessage(message),
 		run: (input: AgentMessage | readonly AgentMessage[]) => harness.run(input),
 		continue: (options?: { drainFollowUps?: boolean; context?: readonly AgentMessage[] }) =>
 			harness.continue(options),

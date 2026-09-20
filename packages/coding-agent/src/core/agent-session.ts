@@ -31,6 +31,7 @@ import type {
 	AgentHarnessContextProjectionToken,
 	AgentHarnessNextActionPolicy,
 	AgentHarnessRequestBoundary,
+	AgentHarnessRequestContext,
 	AgentHarnessRunReservation,
 	AgentHarnessStreamOptions,
 	AgentHarnessStructuralOperationContext,
@@ -127,6 +128,7 @@ import {
 	type TurnStartEvent,
 	wrapRegisteredTools,
 } from "./extensions/index.ts";
+import type { PolicyRegistration } from "./extensions/policy-registration.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import type { ExtensionWorkExecution, ExtensionWorkExecutionResult } from "./extensions/work-host.ts";
 import { ExtensionWorkManager, isExtensionWorkInvocation, withoutExtensionWork } from "./extensions/work-runtime.ts";
@@ -530,6 +532,16 @@ export interface AgentSessionTurnPolicy {
 	nextAction?: AgentHarnessNextActionPolicy;
 }
 
+function ownTurnPolicy(policy: AgentSessionTurnPolicy): Readonly<AgentSessionTurnPolicy> {
+	const { beforeToolCall, nextAction } = policy;
+	if (
+		(beforeToolCall !== undefined && typeof beforeToolCall !== "function") ||
+		(nextAction !== undefined && typeof nextAction !== "function")
+	)
+		throw new TypeError("Expected turn policy callbacks");
+	return Object.freeze({ beforeToolCall, nextAction });
+}
+
 interface PreparedQueueEntry {
 	kind: "steer" | "followUp";
 	entry: AgentSessionQueuedMessage;
@@ -788,8 +800,8 @@ export class AgentSession {
 	private _extensionWorkSignal: AbortSignal | undefined;
 	private _extensionWorkAbort: (() => void) | undefined;
 	private _unsubscribeWorkAuthority?: () => void;
-	private readonly _workToolPolicies = new Set<{ policy: AgentSessionTurnPolicy }>();
-	private _workPolicyRevision = 0;
+	private readonly _workToolPolicies = new Set<{ policy: Readonly<AgentSessionTurnPolicy> }>();
+	private _workPolicyRevision = 0n;
 	private readonly _workImplementations = new WeakMap<
 		AgentTool,
 		{
@@ -1661,10 +1673,6 @@ export class AgentSession {
 		const tools = this._effectiveActiveToolNames;
 		const registry = this._toolRegistry;
 		const policyRevision = this._workPolicyRevision;
-		const policies = Array.from(this._workToolPolicies, ({ policy }) => ({
-			policy,
-			callback: policy.beforeToolCall,
-		}));
 		const extensionPoliciesCurrent = runner.captureToolPolicyGuard();
 		const current = () =>
 			this._extensionWorkIsCurrent() &&
@@ -1679,7 +1687,6 @@ export class AgentSession {
 			tools === this._effectiveActiveToolNames &&
 			registry === this._toolRegistry &&
 			policyRevision === this._workPolicyRevision &&
-			policies.every(({ policy, callback }) => policy.beforeToolCall === callback) &&
 			extensionPoliciesCurrent() &&
 			this._extensionMode === "tui" &&
 			confirm === this._preparationWaitConfirm;
@@ -1733,7 +1740,7 @@ export class AgentSession {
 		boundary: AgentHarnessRequestBoundary,
 		context: Context,
 		signal?: AbortSignal,
-	): Promise<Message[] | undefined> {
+	): Promise<AgentHarnessRequestContext | undefined> {
 		if (!this._extensionWorkIsCurrent() || signal?.aborted) return undefined;
 		const batch = boundary.batch;
 		if (!batch || (!boundary.newInput && this._extensionWorkKey !== batch.id)) return undefined;
@@ -1792,27 +1799,25 @@ export class AgentSession {
 		const runner = this._extensionRunner;
 		const policyRevision = this._workPolicyRevision;
 		const extensionPoliciesCurrent = runner.captureToolPolicyGuard();
-		const policies = Array.from(this._workToolPolicies, ({ policy }) => ({
-			policy,
-			callback: policy.beforeToolCall,
-		}));
 		// Earlier validations must not survive a policy change while later sources await.
 		const policiesCurrent = () =>
-			runner === this._extensionRunner &&
-			policyRevision === this._workPolicyRevision &&
-			policies.every(({ policy, callback }) => policy.beforeToolCall === callback) &&
-			extensionPoliciesCurrent();
-		const suffix = await manager.collect(boundary.cursor.revision, policiesCurrent, maxBytes);
-		if (
-			!suffix ||
-			!policiesCurrent() ||
-			signal?.aborted ||
-			!this._extensionWorkIsCurrent() ||
-			this._extensionWorkKey !== batch.id ||
-			this._extensionWork !== manager
-		)
+			runner === this._extensionRunner && policyRevision === this._workPolicyRevision && extensionPoliciesCurrent();
+		const collection = await manager.collect(boundary.cursor.revision, policiesCurrent, maxBytes);
+		if (!collection) return undefined;
+		const isCurrent = () =>
+			!signal?.aborted &&
+			this._extensionWorkIsCurrent() &&
+			this._extensionWorkKey === batch.id &&
+			this._extensionWork === manager &&
+			collection.authorization.isCurrent();
+		if (!isCurrent()) {
+			collection.authorization.settle(false);
 			return undefined;
-		return [{ role: "user", content: suffix, timestamp: Date.now() }];
+		}
+		return {
+			messages: [{ role: "user", content: collection.text, timestamp: Date.now() }],
+			authorization: { isCurrent, settle: collection.authorization.settle },
+		};
 	}
 
 	private async _executeExtensionWork(request: ExtensionWorkExecution): Promise<ExtensionWorkExecutionResult> {
@@ -1854,7 +1859,6 @@ export class AgentSession {
 				generation !== this._conversationGenerationRevision ||
 				runner !== this._extensionRunner ||
 				policyRevision !== this._workPolicyRevision ||
-				policies.some(({ policy, callback }) => policy.beforeToolCall !== callback) ||
 				!extensionPoliciesCurrent() ||
 				this._toolRegistry.get(name) !== tool ||
 				this._toolDefinitions.get(name)?.definition !== definition ||
@@ -3695,45 +3699,56 @@ export class AgentSession {
 		});
 	}
 
-	registerTurnPolicy(policy: AgentSessionTurnPolicy): () => void {
-		const workPolicy = { policy };
-		if (policy.beforeToolCall) {
-			this._workToolPolicies.add(workPolicy);
-			this._workPolicyRevision++;
-			this._invalidateExtensionWork();
-		}
-		const unregisterToolCall = policy.beforeToolCall
-			? this._harness.on("tool_call", async (event) => {
-					const signal = this._harness.signal;
-					if (!signal) return undefined;
-					return await withoutExtensionWork(() => policy.beforeToolCall!(event, signal));
-				})
-			: undefined;
-		const nextAction = policy.nextAction;
-		const unregisterNextAction = nextAction
-			? this._harness.registerNextActionPolicy((context, signal) =>
-					withoutExtensionWork(() => nextAction(context, signal)),
-				)
-			: undefined;
-		if (unregisterNextAction) {
-			this._backgroundContinuationRevision++;
-			this._scheduleBackgroundContinuation();
-		}
-		let registered = true;
-		return () => {
-			if (!registered) return;
-			registered = false;
-			if (this._workToolPolicies.delete(workPolicy)) {
-				this._workPolicyRevision++;
-				this._invalidateExtensionWork();
-			}
-			unregisterToolCall?.();
-			if (unregisterNextAction) {
-				unregisterNextAction();
+	/** Own callback snapshots; explicit updates/invalidation revoke earlier managed authorization. */
+	registerTurnPolicy(policy: AgentSessionTurnPolicy): PolicyRegistration<AgentSessionTurnPolicy> {
+		this._assertConversationAuthorityAvailable();
+		const workPolicy = { policy: ownTurnPolicy(policy) };
+		const changed = (previous: Readonly<AgentSessionTurnPolicy>, next: Readonly<AgentSessionTurnPolicy>) => {
+			if (previous.beforeToolCall || next.beforeToolCall) this._workPolicyRevision++;
+			if (previous.nextAction || next.nextAction) {
 				this._backgroundContinuationRevision++;
 				this._scheduleBackgroundContinuation();
 			}
 		};
+		this._workToolPolicies.add(workPolicy);
+		const unregisterToolCall = this._harness.on("tool_call", async (event) => {
+			const signal = this._harness.signal;
+			const snapshot = workPolicy.policy;
+			if (!signal) return undefined;
+			return await withoutExtensionWork(() => snapshot.beforeToolCall?.(event, signal));
+		});
+		const unregisterNextAction = this._harness.registerNextActionPolicy((context, signal) => {
+			const snapshot = workPolicy.policy;
+			return withoutExtensionWork(() => snapshot.nextAction?.(context, signal));
+		});
+		changed({}, workPolicy.policy);
+		let registered = true;
+		const assertRegistered = () => {
+			this._assertConversationAuthorityAvailable();
+			if (!registered) throw new Error("Policy registration has been removed");
+		};
+		const remove = () => {
+			if (!registered) return;
+			registered = false;
+			this._workToolPolicies.delete(workPolicy);
+			unregisterToolCall();
+			unregisterNextAction();
+			changed(workPolicy.policy, {});
+		};
+		return Object.freeze(
+			Object.assign(remove, {
+				update: (next: AgentSessionTurnPolicy) => {
+					assertRegistered();
+					const previous = workPolicy.policy;
+					workPolicy.policy = ownTurnPolicy(next);
+					changed(previous, workPolicy.policy);
+				},
+				invalidate: () => {
+					assertRegistered();
+					changed(workPolicy.policy, workPolicy.policy);
+				},
+			}),
+		);
 	}
 
 	private _setHarnessStreamOptions(options: AgentHarnessStreamOptions): Promise<void> {

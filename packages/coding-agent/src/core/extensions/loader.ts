@@ -30,6 +30,7 @@ import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
+import { type ExtensionHandlerFn, ExtensionHandlerRegistry } from "./policy-registration.ts";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -160,8 +161,6 @@ function getAliases(): Record<string, string> {
 	return _aliases;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
-
 export function validateExtensionCommandName(name: string): void {
 	if (typeof name !== "string" || name.length === 0 || /[\s/]/u.test(name)) {
 		throw new Error("Extension command name must be non-empty and must not contain whitespace or '/'");
@@ -234,11 +233,8 @@ function createExtensionAPI(
 ): ExtensionAPI {
 	const api = {
 		// Registration methods - write to extension
-		on(event: string, handler: HandlerFn): void {
-			runtime.assertActive();
-			const list = extension.handlers.get(event) ?? [];
-			list.push(handler);
-			extension.handlers.set(event, list);
+		on(event: string, handler: ExtensionHandlerFn) {
+			return extension.handlers.register(event, handler, runtime.assertActive);
 		},
 
 		registerTool(tool: ToolDefinition): void {
@@ -422,7 +418,7 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 		path: extensionPath,
 		resolvedPath,
 		sourceInfo: createSyntheticSourceInfo(extensionPath, { source, baseDir }),
-		handlers: new Map(),
+		handlers: new ExtensionHandlerRegistry(),
 		tools: new Map(),
 		messageRenderers: new Map(),
 		commands: new Map(),

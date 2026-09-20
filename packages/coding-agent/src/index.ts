@@ -137,6 +137,7 @@ export type {
 	LsToolCallEvent,
 	MessageRenderer,
 	MessageRenderOptions,
+	PolicyRegistration,
 	ProjectTrustContext,
 	ProjectTrustEvent,
 	ProjectTrustEventDecision,

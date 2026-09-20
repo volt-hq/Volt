@@ -1041,6 +1041,17 @@ export interface AgentHarnessRequestBoundary {
 	readonly newInput: boolean;
 }
 
+/** Optional provider-only messages with host-owned, synchronous final admission authorization. */
+export interface AgentHarnessRequestContext {
+	readonly messages: readonly Message[];
+	readonly authorization: {
+		/** Recheck current host authority after the final admission await. Must be synchronous. */
+		isCurrent: () => boolean;
+		/** Report inclusion or discard exactly once. Must be synchronous. */
+		settle: (admitted: boolean) => void;
+	};
+}
+
 export interface AgentHarnessOptions<
 	TSkill extends Skill = Skill,
 	TPromptTemplate extends PromptTemplate = PromptTemplate,
@@ -1077,7 +1088,7 @@ export interface AgentHarnessOptions<
 		boundary: AgentHarnessRequestBoundary,
 		context: Context,
 		signal?: AbortSignal,
-	) => Promise<readonly Message[] | undefined>;
+	) => Promise<AgentHarnessRequestContext | undefined>;
 	/** Convert application messages into provider-compatible messages. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** Curated stream/provider request options. Snapshotted at turn start. */
