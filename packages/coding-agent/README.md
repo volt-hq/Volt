@@ -661,6 +661,7 @@ Available built-in tools: `request_user_input` (root local TUI only), `read`, `b
 |--------|-------------|
 | `-e`, `--extension <source>` | Load extension from path, npm, or git (repeatable) |
 | `--no-extensions` | Disable extension discovery |
+| `--preparation-wait-ms <0-1000>` | Shared first-request preparation allowance for local runtimes (default: 0); requires an extension wait request |
 | `--skill <path>` | Load skill (repeatable) |
 | `--no-skills` | Disable skill discovery |
 | `--prompt-template <path>` | Load prompt template (repeatable) |

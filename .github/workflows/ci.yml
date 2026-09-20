@@ -354,9 +354,21 @@ jobs:
 
       - name: Load committed musl addon with Node.js 22.19 on Alpine
         shell: bash
+        env:
+          NODE_IMAGE: node:22.19.0-alpine@sha256:d2166de198f26e17e5a442f537754dd616ab069c47cc57b889310a717e0abbf9
         run: |
-          docker run --rm \
+          # Retry registry transport failures, never a failed native verification.
+          for attempt in 1 2 3; do
+            if docker pull "$NODE_IMAGE"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          docker run --rm --pull=never \
             --volume "${PWD}:/workspace:ro" \
             --workdir /workspace \
-            node:22.19.0-alpine@sha256:d2166de198f26e17e5a442f537754dd616ab069c47cc57b889310a717e0abbf9 \
+            "$NODE_IMAGE" \
             sh -c 'test "$(node --version)" = "v22.19.0" && node scripts/workspace-fs-native.mjs verify'

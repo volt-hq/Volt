@@ -215,10 +215,10 @@ describe("context-preparation SDK evaluation", () => {
 		expect(projection.messages.map(getMessageText).join("\n")).not.toContain("INVOICE_IMPLEMENTATION");
 	});
 
-	it("caps added first-request waiting and prevents late work from waking inference", async () => {
+	it("still caps waiting at 100 ms with a larger host allowance and never wakes inference", async () => {
 		const entered = deferred();
 		const release = deferred();
-		const test = await setup(true);
+		const test = await setup(true, 1000);
 		test.harness.session.registerTurnPolicy({
 			beforeToolCall: async (event) => {
 				if (event.toolName !== "read") return;

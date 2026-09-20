@@ -1,12 +1,29 @@
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message } from "@hansjm10/volt-ai";
 import * as fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { type SessionCanonicalAppend, SessionManager } from "../../src/core/session-manager.ts";
+import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";
 
 const PROPERTY_SEED = 329_003;
+
+async function withPropertyStore(run: (root: string, sessionDir: string) => Promise<void>): Promise<void> {
+	const root = mkdtempSync(join(tmpdir(), "volt-session-projection-property-"));
+	const sessionDir = join(root, "sessions");
+	try {
+		// Reuse only worker/schema setup. Every generated case, including shrinks, creates a fresh session.
+		const lease = await acquireSharedSQLiteSessionStore(sessionDir);
+		try {
+			await run(root, sessionDir);
+		} finally {
+			await lease.release();
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+}
 
 type GeneratedOperation =
 	| { kind: "user"; text: string; timestamp: number }
@@ -198,65 +215,68 @@ async function applyStatefulOperation(
 }
 
 describe("session projection reducer properties", () => {
-	// Both properties repeatedly reopen disk-backed SQLite workers; allow for full-suite I/O contention.
 	it(`keeps incremental and replay state equal across transaction partitions (seed ${PROPERTY_SEED})`, async () => {
-		await fc.assert(
-			fc.asyncProperty(
-				fc.array(generatedOperation, { minLength: 1, maxLength: 8 }),
-				fc.array(fc.boolean(), { minLength: 1, maxLength: 8 }),
-				async (operations, cuts) => {
-					const root = mkdtempSync(join(tmpdir(), "volt-session-projection-property-"));
-					const cwd = join(root, "workspace");
-					const sessionDir = join(root, "sessions");
-					mkdirSync(cwd, { recursive: true });
-					let manager: SessionManager | undefined;
-					try {
-						manager = await SessionManager.create(cwd, sessionDir);
-						let batch: GeneratedOperation[] = [];
-						for (const [index, operation] of operations.entries()) {
-							batch.push(operation);
-							if (index !== operations.length - 1 && cuts[index % cuts.length] !== true) continue;
-							const projection = manager.issueCanonicalProjection();
-							await manager.commitCanonicalCommand({
-								guard: { kind: "exact", token: projection.token },
-								mutations: batch.map((entry) => ({ kind: "append" as const, entry: canonicalAppend(entry) })),
-							});
-							batch = [];
-							await expectReplayMatches(manager);
+		await withPropertyStore(async (root, sessionDir) => {
+			await fc.assert(
+				fc.asyncProperty(
+					fc.array(generatedOperation, { minLength: 1, maxLength: 8 }),
+					fc.array(fc.boolean(), { minLength: 1, maxLength: 8 }),
+					async (operations, cuts) => {
+						const cwd = mkdtempSync(join(root, "workspace-"));
+						let manager: SessionManager | undefined;
+						try {
+							manager = await SessionManager.create(cwd, sessionDir);
+							expect(manager.getEntries()).toEqual([]);
+							let batch: GeneratedOperation[] = [];
+							for (const [index, operation] of operations.entries()) {
+								batch.push(operation);
+								if (index !== operations.length - 1 && cuts[index % cuts.length] !== true) continue;
+								const projection = manager.issueCanonicalProjection();
+								await manager.commitCanonicalCommand({
+									guard: { kind: "exact", token: projection.token },
+									mutations: batch.map((entry) => ({
+										kind: "append" as const,
+										entry: canonicalAppend(entry),
+									})),
+								});
+								batch = [];
+								await expectReplayMatches(manager);
+							}
+						} finally {
+							await manager?.closePersistence();
 						}
-					} finally {
-						await manager?.closePersistence().catch(() => undefined);
-						rmSync(root, { recursive: true, force: true });
-					}
-				},
-			),
-			{ seed: PROPERTY_SEED, numRuns: 20 },
-		);
+					},
+				),
+				{ seed: PROPERTY_SEED, numRuns: 20 },
+			);
+		});
 	}, 60_000);
 
 	it(`keeps stateful projections replayable across branch, metadata, and rollback operations (seed ${PROPERTY_SEED + 1})`, async () => {
-		await fc.assert(
-			fc.asyncProperty(fc.array(generatedStatefulOperation, { minLength: 1, maxLength: 10 }), async (operations) => {
-				const root = mkdtempSync(join(tmpdir(), "volt-session-projection-stateful-"));
-				const cwd = join(root, "workspace");
-				const sessionDir = join(root, "sessions");
-				mkdirSync(cwd, { recursive: true });
-				let manager: SessionManager | undefined;
-				const clientMessageIds: string[] = [];
-				try {
-					manager = await SessionManager.create(cwd, sessionDir);
-					manager.appendMessage({ role: "user", content: "seed", timestamp: 1_700_000_000_000 });
-					await manager.flush();
-					for (const [index, operation] of operations.entries()) {
-						await applyStatefulOperation(manager, operation, index, clientMessageIds);
-						await expectReplayMatches(manager, clientMessageIds);
-					}
-				} finally {
-					await manager?.closePersistence().catch(() => undefined);
-					rmSync(root, { recursive: true, force: true });
-				}
-			}),
-			{ seed: PROPERTY_SEED + 1, numRuns: 15 },
-		);
+		await withPropertyStore(async (root, sessionDir) => {
+			await fc.assert(
+				fc.asyncProperty(
+					fc.array(generatedStatefulOperation, { minLength: 1, maxLength: 10 }),
+					async (operations) => {
+						const cwd = mkdtempSync(join(root, "workspace-"));
+						let manager: SessionManager | undefined;
+						const clientMessageIds: string[] = [];
+						try {
+							manager = await SessionManager.create(cwd, sessionDir);
+							expect(manager.getEntries()).toEqual([]);
+							manager.appendMessage({ role: "user", content: "seed", timestamp: 1_700_000_000_000 });
+							await manager.flush();
+							for (const [index, operation] of operations.entries()) {
+								await applyStatefulOperation(manager, operation, index, clientMessageIds);
+								await expectReplayMatches(manager, clientMessageIds);
+							}
+						} finally {
+							await manager?.closePersistence();
+						}
+					},
+				),
+				{ seed: PROPERTY_SEED + 1, numRuns: 15 },
+			);
+		});
 	}, 60_000);
 });

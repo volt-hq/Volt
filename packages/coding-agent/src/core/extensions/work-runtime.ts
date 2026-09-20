@@ -40,6 +40,11 @@ export function extensionWorkForbidden(): boolean {
 	return invocation.getStore() === "forbidden";
 }
 
+/** Command-owned host interactions must never run in managed task or policy lineage. */
+export function isExtensionWorkInvocation(): boolean {
+	return invocation.getStore() !== undefined;
+}
+
 export const DEFAULT_EXTENSION_WORK_LIMITS: Readonly<ExtensionWorkLimits> = Object.freeze({
 	perExtensionTasks: 2,
 	perRuntimeTasks: 4,
@@ -132,13 +137,24 @@ export class ExtensionWorkManager {
 				value === undefined ||
 				!Number.isSafeInteger(value) ||
 				value < 0 ||
-				value > (key === "firstRequestWaitMs" ? 100 : this.limits[key])
+				value > (key === "firstRequestWaitMs" ? 1000 : this.limits[key])
 			) {
 				throw new TypeError(`Invalid extension work limit: ${key}`);
 			}
 			this.limits[key] = value;
 		}
 		this.limits.taskTimeoutMs = Math.min(this.limits.taskTimeoutMs, this.limits.maxTaskTimeoutMs);
+	}
+
+	/** Host-only allowance update; never invalidates work or rearms an already-consumed wait. */
+	setFirstRequestWaitMs(milliseconds: number): void {
+		if (
+			!Number.isSafeInteger(milliseconds) ||
+			milliseconds < 0 ||
+			milliseconds > (this.options.limits?.firstRequestWaitMs ?? 1000)
+		)
+			throw new TypeError("Invalid extension preparation allowance");
+		this.limits.firstRequestWaitMs = milliseconds;
 	}
 
 	private current(scope: Scope): boolean {
@@ -316,7 +332,8 @@ export class ExtensionWorkManager {
 				if (task.summary.state !== "cancelling") task.summary.state = "draining";
 				// Returned/throwing callbacks cannot leave orphaned operations behind.
 				const cancelled = task.summary.state === "cancelling";
-				task.controller.abort();
+				// Abort listeners run in the dispatching context, not their registration lineage.
+				withoutExtensionWork(() => task.controller.abort());
 				await Promise.allSettled([...task.operations]);
 				clearTimeout(timer);
 				task.summary.state =
@@ -340,7 +357,7 @@ export class ExtensionWorkManager {
 		task.accepting = false;
 		task.summary.state = "cancelling";
 		task.summary.reason = reason;
-		task.controller.abort();
+		withoutExtensionWork(() => task.controller.abort());
 	}
 
 	private handle(task: Task): ExtensionWorkTaskHandle {
