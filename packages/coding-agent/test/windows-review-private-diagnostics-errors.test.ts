@@ -187,18 +187,45 @@ describe("Windows diagnostic subprocess failure containment", () => {
 		const path = join(root, "private '$(); 界", "capture.jsonl");
 		const content = '$(throw \'not code\'); 界\r\n{"capture":"private"}\n';
 		let child: ChildProcessWithoutNullStreams | undefined;
+		const stages: string[] = [];
+		let inputWritten = false;
+		let exitCode: number | null | undefined;
+		let exitSignal: NodeJS.Signals | null | undefined;
+		const startedAt = performance.now();
 		processMocks.execFile.mockImplementation((file, args, options, callback) => {
-			const running = spawn(file, args, options);
+			// Report only fixed markers and process facts, never private paths, input, or raw stderr.
+			const marker = (stage: string) => `[Console]::Out.WriteLine('VOLT_DIAGNOSTIC_STAGE:${stage}')`;
+			const script = `${marker("entered")}\n${Buffer.from(args.at(-1)!, "base64").toString("utf16le")}`
+				.replace("$stream = $null", `${marker("input_encoding")}\n$stream = $null`)
+				.replace("    $directory =", `    ${marker("request_read")}\n    $directory =`)
+				.replace("    $fileSecurity =", `    ${marker("directory_secured")}\n    $fileSecurity =`)
+				.replace("    $stream.Flush($true)", `    $stream.Flush($true)\n    ${marker("file_flushed")}`);
+			const running = spawn(
+				file,
+				[...args.slice(0, -1), Buffer.from(script, "utf16le").toString("base64")],
+				options,
+			);
 			child = running;
-			running.stdout.resume();
+			let output = "";
+			running.stdout.setEncoding("utf8");
+			running.stdout.on("data", (chunk: string) => {
+				output = `${output}${chunk}`.slice(-4096);
+				for (const stage of ["entered", "input_encoding", "request_read", "directory_secured", "file_flushed"])
+					if (output.includes(`VOLT_DIAGNOSTIC_STAGE:${stage}`) && !stages.includes(stage)) stages.push(stage);
+			});
 			running.stderr.resume();
 			running.on("error", (error) => callback(error, "", ""));
-			running.on("close", (code) => {
+			running.on("close", (code, signal) => {
+				exitCode = code;
+				exitSignal = signal;
 				callback(code === 0 ? null : new Error("Diagnostic child failed or timed out"), "", "");
 			});
 			const input = new Writable({
 				write(chunk, encoding, done) {
-					running.stdin.write(chunk, encoding, done);
+					running.stdin.write(chunk, encoding, (error) => {
+						inputWritten = !error;
+						done(error);
+					});
 				},
 				// Deliberately withhold EOF from the actual child. ReadToEnd would
 				// block until the existing subprocess deadline kills it.
@@ -215,7 +242,14 @@ describe("Windows diagnostic subprocess failure containment", () => {
 			return observed;
 		});
 		try {
-			await writeWindowsReviewDiagnostic(path, content);
+			const failure = await writeWindowsReviewDiagnostic(path, content).then(
+				() => false,
+				() => true,
+			);
+			expect(
+				failure,
+				JSON.stringify({ stages, inputWritten, exitCode, exitSignal, elapsedMs: performance.now() - startedAt }),
+			).toBe(false);
 			expect(child?.stdin.writableEnded).toBe(false);
 			expect(readFileSync(path, "utf8")).toBe(content);
 		} finally {

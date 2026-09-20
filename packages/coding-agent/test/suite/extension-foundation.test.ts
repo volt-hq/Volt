@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionAPI, ExtensionFactory } from "../../src/core/extensions/types.ts";
 import type {
 	ExtensionWorkLocationsResult,
@@ -20,6 +20,7 @@ import { createHarness, getMessageText, type Harness, type HarnessOptions } from
 const harnesses: Harness[] = [];
 const directories: string[] = [];
 afterEach(async () => {
+	vi.useRealTimers();
 	for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
 	for (const directory of directories.splice(0)) await rm(directory, { recursive: true, force: true });
 });
@@ -51,6 +52,8 @@ function consumer(run: (task: ExtensionWorkTaskContext) => Promise<void>, extra?
 			parameters: Type.Object({}),
 			execute: async () => {
 				await handle.wait();
+				// Test source authority, not whether real I/O fits the 25 ms collection budget.
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 				return { content: [] };
 			},
 		});
@@ -138,6 +141,7 @@ describe("remaining extension foundation through AgentSession", () => {
 		expect(extension.snapshot().skills[0]).toMatchObject({ name: "sample", scope: "user", origin: "top-level" });
 		expect(extension.snapshot().skills[0]).not.toHaveProperty("filePath");
 		expect(context.messages.map(getMessageText).join("\n")).toContain("prepared skill body");
+		expect(extension.api().getWorkStatus().contributions).toEqual([{ key: "skill", status: "admitted" }]);
 		expect(JSON.stringify(harness.session.messages)).not.toContain("prepared skill body");
 	});
 
