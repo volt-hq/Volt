@@ -4,7 +4,7 @@ import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionTurnPolicy } from "../../../src/core/agent-session.ts";
-import type { ExtensionAPI } from "../../../src/core/extensions/types.ts";
+import type { ExtensionAPI, PolicyRegistration } from "../../../src/core/extensions/types.ts";
 import type { ExtensionWorkTaskHandle } from "../../../src/core/extensions/work-types.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
@@ -23,7 +23,7 @@ describe("managed context collection policy fence (#431)", () => {
 			const validationResults: string[] = [];
 			let bPending = false;
 			let changed = false;
-			const policy: AgentSessionTurnPolicy = { beforeToolCall: () => undefined };
+			let policy!: PolicyRegistration<AgentSessionTurnPolicy>;
 			const harness = await createHarness({
 				settings: { compaction: { enabled: false }, retry: { enabled: false } },
 				extensionFactories: [
@@ -90,8 +90,10 @@ describe("managed context collection policy fence (#431)", () => {
 										: undefined,
 								);
 							if (kind === "host_callback")
-								policy.beforeToolCall = (call) =>
-									call.toolName === "read" && call.input.path === "a.txt" ? { block: true } : undefined;
+								policy.update({
+									beforeToolCall: (call) =>
+										call.toolName === "read" && call.input.path === "a.txt" ? { block: true } : undefined,
+								});
 							changed = kind !== "unchanged";
 							releaseB();
 						});
@@ -104,7 +106,7 @@ describe("managed context collection policy fence (#431)", () => {
 			});
 			try {
 				harness.session.setSessionName("collection policy fence");
-				harness.session.registerTurnPolicy(policy);
+				policy = harness.session.registerTurnPolicy({ beforeToolCall: () => undefined });
 				for (const key of ["a", "b", "c"])
 					await writeFile(join(harness.tempDir, `${key}.txt`), `prepared source ${key}`);
 				harness.setResponses([

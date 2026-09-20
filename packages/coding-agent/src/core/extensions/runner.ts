@@ -988,27 +988,19 @@ export class ExtensionRunner {
 		return modified ? currentMessage : undefined;
 	}
 
-	/** Internal operation fence for policy registration or replacement across awaits. */
+	/** Monotonic policy revisions detect replacement, change-and-restore, and explicit invalidation. */
 	captureToolPolicyGuard(): () => boolean {
 		const policies = this.extensions.map((extension) => ({
 			extension,
-			call: [...(extension.handlers.get("tool_call") ?? [])],
-			result: [...(extension.handlers.get("tool_result") ?? [])],
+			revision: extension.handlers.authorizationRevision,
 		}));
 		return () =>
 			!this.isInert &&
 			policies.length === this.extensions.length &&
-			policies.every(({ extension, call, result }, index) => {
-				const currentCall = extension.handlers.get("tool_call") ?? [];
-				const currentResult = extension.handlers.get("tool_result") ?? [];
-				return (
-					this.extensions[index] === extension &&
-					call.length === currentCall.length &&
-					result.length === currentResult.length &&
-					call.every((handler, i) => handler === currentCall[i]) &&
-					result.every((handler, i) => handler === currentResult[i])
-				);
-			});
+			policies.every(
+				({ extension, revision }, index) =>
+					this.extensions[index] === extension && extension.handlers.authorizationRevision === revision,
+			);
 	}
 
 	async emitToolResult(

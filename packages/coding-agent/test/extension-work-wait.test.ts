@@ -144,6 +144,38 @@ describe("bounded first-request preparation wait", () => {
 		},
 	);
 
+	it("policy invalidation during preparation omits ready contributions without renewing the wait", async () => {
+		vi.useFakeTimers();
+		const gate = deferred();
+		let current = true;
+		let handle: ExtensionWorkTaskHandle | undefined;
+		const manager = setup((work, event) => {
+			if (!event.first) {
+				expect(work.context.requestWait(100)).toBe(0);
+				return;
+			}
+			work.context.requestWait(100);
+			const admission = work.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
+				task.context.put({ key: "context", text: "ready but revoked" });
+				await gate.promise;
+			});
+			if (admission.status === "started") handle = admission.task;
+		}, 100);
+		manager.boundary(boundary());
+		const collection = manager.collect(1, () => current);
+		await vi.advanceTimersByTimeAsync(50);
+		current = false;
+		await vi.advanceTimersByTimeAsync(50);
+		expect(await collection).toBeUndefined();
+		expect(manager.getStatus("one").contributions).toEqual([
+			{ key: "context", status: "omitted", reason: "authority_changed" },
+		]);
+		manager.boundary({ ...boundary(), cause: "retry" });
+		expect(await manager.collect(1, () => current)).toBeUndefined();
+		gate.resolve();
+		await handle!.wait();
+	});
+
 	it("clamps requests and collects completed preparation without spending the remaining wait", async () => {
 		vi.useFakeTimers();
 		let handle: ExtensionWorkTaskHandle | undefined;
@@ -155,7 +187,7 @@ describe("bounded first-request preparation wait", () => {
 			if (admission.status === "started") handle = admission.task;
 		}, 25);
 		manager.boundary(boundary());
-		expect(await manager.collect(1, () => true)).toContain("prepared before inference");
+		expect((await manager.collect(1, () => true))?.text).toContain("prepared before inference");
 		expect(handle?.status().state).toBe("completed");
 		expect(vi.getTimerCount()).toBe(0);
 	});
@@ -184,7 +216,7 @@ describe("bounded first-request preparation wait", () => {
 			runtimes[0].gate.resolve();
 			await runtimes[0].manager.drain();
 			runtimes[4].gate.resolve();
-			expect(await runtimes[4].manager.collect(1, () => true)).toContain("prepared source");
+			expect((await runtimes[4].manager.collect(1, () => true))?.text).toContain("prepared source");
 			expect(runtimes[4].validation).toHaveBeenCalledTimes(1);
 		},
 	);
@@ -251,7 +283,7 @@ describe("bounded first-request preparation wait", () => {
 		manager.boundary(boundary());
 		expect(await manager.collect(1, () => true)).toBeUndefined();
 		manager.boundary(boundary());
-		expect(await manager.collect(1, () => true)).toContain("late context");
+		expect((await manager.collect(1, () => true))?.text).toContain("late context");
 	});
 
 	it("rejects asynchronous and policy-lineage wait requests", async () => {

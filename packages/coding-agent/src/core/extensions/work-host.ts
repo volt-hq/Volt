@@ -12,6 +12,14 @@ import type {
 	RequestBoundaryEvent,
 } from "./work-types.ts";
 
+export interface ExtensionWorkCollection {
+	readonly text: string;
+	readonly authorization: {
+		isCurrent(): boolean;
+		settle(admitted: boolean): void;
+	};
+}
+
 export interface ExtensionWorkExecution {
 	service: ExtensionWorkService;
 	input: JsonObject;

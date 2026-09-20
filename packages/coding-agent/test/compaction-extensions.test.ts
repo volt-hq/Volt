@@ -16,6 +16,7 @@ import {
 	type SessionCompactEvent,
 	type SessionEvent,
 } from "../src/core/extensions/index.ts";
+import { ExtensionHandlerRegistry } from "../src/core/extensions/policy-registration.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -75,7 +76,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			path: "test-extension",
 			resolvedPath: "/test/test-extension.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:test-extension>", { source: "test" }),
-			handlers,
+			handlers: new ExtensionHandlerRegistry(handlers),
 			tools: new Map(),
 			messageRenderers: new Map(),
 			commands: new Map(),
@@ -226,12 +227,12 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			path: "throwing-extension",
 			resolvedPath: "/test/throwing-extension.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:throwing-extension>", { source: "test" }),
-			handlers: new Map<string, ((event: any, ctx: any) => Promise<any>)[]>([
+			handlers: new ExtensionHandlerRegistry([
 				[
 					"session_before_compact",
 					[
-						async (event: SessionBeforeCompactEvent) => {
-							capturedEvents.push(event);
+						async (event) => {
+							capturedEvents.push(event as SessionBeforeCompactEvent);
 							throw new Error("Extension intentionally throws");
 						},
 					],
@@ -239,8 +240,8 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 				[
 					"session_compact",
 					[
-						async (event: SessionCompactEvent) => {
-							capturedEvents.push(event);
+						async (event) => {
+							capturedEvents.push(event as SessionCompactEvent);
 							return undefined;
 						},
 					],
@@ -275,7 +276,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			path: "extension1",
 			resolvedPath: "/test/extension1.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:extension1>", { source: "test" }),
-			handlers: new Map<string, ((event: any, ctx: any) => Promise<any>)[]>([
+			handlers: new ExtensionHandlerRegistry([
 				[
 					"session_before_compact",
 					[
@@ -306,7 +307,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			path: "extension2",
 			resolvedPath: "/test/extension2.ts",
 			sourceInfo: createSyntheticSourceInfo("<test:extension2>", { source: "test" }),
-			handlers: new Map<string, ((event: any, ctx: any) => Promise<any>)[]>([
+			handlers: new ExtensionHandlerRegistry([
 				[
 					"session_before_compact",
 					[

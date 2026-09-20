@@ -88,6 +88,10 @@ import type {
 	WriteToolInput,
 } from "../tools/index.ts";
 
+import type { ExtensionHandlerRegistry, PolicyRegistration } from "./policy-registration.ts";
+
+export type { PolicyRegistration } from "./policy-registration.ts";
+
 import type {
 	ExtensionOperationEvent,
 	ExtensionOperationOrigin,
@@ -1251,8 +1255,15 @@ export interface ExtensionAPI {
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
 	on(event: "model_select", handler: ExtensionHandler<ModelSelectEvent>): void;
 	on(event: "thinking_level_select", handler: ExtensionHandler<ThinkingLevelSelectEvent>): void;
-	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
-	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
+	/** Owns the callback; use the returned handle to update, remove, or invalidate closure-state changes. */
+	on(
+		event: "tool_call",
+		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>,
+	): PolicyRegistration<ExtensionHandler<ToolCallEvent, ToolCallEventResult>>;
+	on(
+		event: "tool_result",
+		handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>,
+	): PolicyRegistration<ExtensionHandler<ToolResultEvent, ToolResultEventResult>>;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 
@@ -1545,8 +1556,6 @@ export interface ExtensionShortcut {
 	extensionPath: string;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
-
 export type SendMessageHandler = <T>(
 	message: CustomMessageInput<T>,
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
@@ -1688,7 +1697,7 @@ export interface Extension {
 	path: string;
 	resolvedPath: string;
 	sourceInfo: SourceInfo;
-	handlers: Map<string, HandlerFn[]>;
+	readonly handlers: ExtensionHandlerRegistry;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;

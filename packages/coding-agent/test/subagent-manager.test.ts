@@ -354,14 +354,17 @@ describe("SubagentManager", () => {
 		const registerSpy = vi.spyOn(AgentSession.prototype, "registerTurnPolicy").mockImplementation(function (
 			this: AgentSession,
 			policy,
-		): () => void {
+		) {
 			const unregister = registerTurnPolicy.call(this, policy);
 			budgetPolicyRegistered = true;
-			return () => {
-				unregisterBudgetPolicyCalls++;
-				unregister();
-				throw wiringCleanupError;
-			};
+			return Object.assign(
+				() => {
+					unregisterBudgetPolicyCalls++;
+					unregister();
+					throw wiringCleanupError;
+				},
+				{ update: unregister.update, invalidate: unregister.invalidate },
+			);
 		});
 		const subscribeSpy = vi.spyOn(AgentSession.prototype, "subscribe").mockImplementation(function (
 			this: AgentSession,

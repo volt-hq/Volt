@@ -765,6 +765,26 @@ volt.on("tool_call", async (event, ctx) => {
 });
 ```
 
+#### Updating tool policies
+
+`volt.on("tool_call", handler)` and `volt.on("tool_result", handler)` return a host-owned `PolicyRegistration` handle. Call the handle to remove that registration, `handle.update(nextHandler)` to replace its callback without changing order, or `handle.invalidate()` after changing state captured by its callback:
+
+```typescript
+let denyReads = false;
+const policy = volt.on("tool_call", (event) => {
+  if (denyReads && event.toolName === "read") return { block: true };
+});
+
+// Change closure state and invalidate synchronously, with no await between them.
+denyReads = true;
+policy.invalidate();
+// policy.update(nextHandler) replaces this registration; policy() removes it.
+```
+
+Every registration, update, removal, and explicit invalidation advances host-owned authorization revisions. Replacing a callback and restoring the original still revokes older managed authorization. Closure changes cannot be detected automatically: always invalidate when captured state changes policy behavior. Removed handles cannot update or invalidate, and old runtime handles cannot be used after reload/replacement.
+
+These revisions protect managed reads and optional context, not arbitrary Node access by trusted extensions. Loaded handler lists are host-owned; use registration handles rather than modifying `Extension.handlers`.
+
 #### Typing custom tool input
 
 Custom tools should export their input type:
@@ -1834,7 +1854,7 @@ The first collection waits for the tasks admitted at that boundary, only until t
 
 `task.context.put({ key, text, evidenceIds?, dependency? })` proposes context; `remove(key)` retracts it. Keys are extension-local. The default dependency is `snapshot`: conversation changes make it ineligible until refreshed. `sources` permits direct source evidence to survive ordinary appends, but requires valid evidence handles and never survives a new request scope. Suggestions without source handles are labeled unverified.
 
-Volt collects already-ready contributions at eligible conversational boundaries, validates source identity/content and current authorization, and appends a bounded untrusted suffix to the request-local projection. It does not modify canonical history or mandatory instructions. Late, stale, unauthorized, oversized, or uncheckable contributions are omitted. No compaction is triggered to fit optional context.
+Volt collects already-ready contributions at eligible conversational boundaries, validates source identity/content and current authorization, and appends a bounded untrusted suffix to the request-local projection. One captured authorization revision set covers the entire collection and remains attached through the final Harness admission await. A mismatch omits the whole optional suffix with `authority_changed`, continues mandatory context, and does not retry validation or extend preparation/collection deadlines. Contributions remain `ready` until final admission; rejected contributions report `omitted`. It does not modify canonical history or mandatory instructions. Late, stale, unauthorized, oversized, or uncheckable contributions are omitted. No compaction is triggered to fit optional context.
 
 Even with an opted-in wait, first-call improvement is not guaranteed. Source validation has a separate bounded collection deadline; ready-only is not a zero-latency promise. A validated file is a checked-at observation, not an atomic repository snapshot or proof that tests passed. `admitted` means included by this API, not that later trusted payload hooks preserved it or the model used it.
 

@@ -60,6 +60,7 @@ import type {
 	AgentHarnessPhase,
 	AgentHarnessPromptOptions,
 	AgentHarnessRequestBoundary,
+	AgentHarnessRequestContext,
 	AgentHarnessResources,
 	AgentHarnessRunOptions,
 	AgentHarnessStreamOptions,
@@ -1044,6 +1045,12 @@ export class AgentHarness<
 				const admittedModel = this.model ?? model;
 				let admittedContext = context;
 				let optionalMessages: readonly Message[] | undefined;
+				let optionalAuthorization: AgentHarnessRequestContext["authorization"] | undefined;
+				const settleOptionalContext = (admitted: boolean): void => {
+					const authorization = optionalAuthorization;
+					optionalAuthorization = undefined;
+					authorization?.settle(admitted);
+				};
 				const optionalBatch = this.requestBatch;
 				let admittedReasoning = isTurnProviderRequestState(requestState)
 					? this.thinkingLevel === "off"
@@ -1153,39 +1160,40 @@ export class AgentHarness<
 				) {
 					continue;
 				}
-				if (isTurnProviderRequestState(requestState) && requestState.boundary && this.requestBoundary) {
-					const basis = hookCommitBasis!;
-					const { batch, ...boundary } = requestState.boundary;
-					const suffix = await this.requestBoundary(
-						{
-							...boundary,
-							newInput: boundary.newInput && batch === this.requestBatch,
-							...(batch && batch === this.requestBatch ? { batch: structuredClone(batch) } : {}),
-							attemptId: `harness-request:${globalThis.crypto.randomUUID()}`,
-							cursor: basis,
-						},
-						{ ...admittedContext, messages: structuredClone(admittedContext.messages) },
-						signal,
-					);
-					if (signal?.aborted) return createAbortedAssistantStream(admittedModel);
-					const current = (await this.session.getBranchSnapshot()).cursor;
-					if (
-						current.authorityGeneration !== basis.authorityGeneration ||
-						current.revision !== basis.revision ||
-						current.branchIdentity !== basis.branchIdentity ||
-						this.pendingSessionWrites.length > 0 ||
-						configurationEpoch !== this.runtimeConfigurationEpoch ||
-						configurationBarrier !== this.runtimeConfigurationBarrier
-					)
-						continue;
-					optionalMessages = suffix === undefined ? undefined : structuredClone(suffix);
-				}
-				this.beginProviderAdmission();
-				if (configurationEpoch !== this.runtimeConfigurationEpoch) {
-					this.endProviderAdmission();
-					continue;
-				}
 				try {
+					if (isTurnProviderRequestState(requestState) && requestState.boundary && this.requestBoundary) {
+						const basis = hookCommitBasis!;
+						const { batch, ...boundary } = requestState.boundary;
+						const suffix = await this.requestBoundary(
+							{
+								...boundary,
+								newInput: boundary.newInput && batch === this.requestBatch,
+								...(batch && batch === this.requestBatch ? { batch: structuredClone(batch) } : {}),
+								attemptId: `harness-request:${globalThis.crypto.randomUUID()}`,
+								cursor: basis,
+							},
+							{ ...admittedContext, messages: structuredClone(admittedContext.messages) },
+							signal,
+						);
+						optionalAuthorization = suffix?.authorization;
+						if (signal?.aborted) return createAbortedAssistantStream(admittedModel);
+						optionalMessages = suffix === undefined ? undefined : structuredClone(suffix.messages);
+						const current = (await this.session.getBranchSnapshot()).cursor;
+						if (
+							current.authorityGeneration !== basis.authorityGeneration ||
+							current.revision !== basis.revision ||
+							current.branchIdentity !== basis.branchIdentity ||
+							this.pendingSessionWrites.length > 0 ||
+							configurationEpoch !== this.runtimeConfigurationEpoch ||
+							configurationBarrier !== this.runtimeConfigurationBarrier
+						)
+							continue;
+					}
+					this.beginProviderAdmission();
+					if (configurationEpoch !== this.runtimeConfigurationEpoch) {
+						this.endProviderAdmission();
+						continue;
+					}
 					if (logicalHookWrites.length > 0) {
 						if (!hookCommitBasis) {
 							throw new AgentHarnessError("invalid_state", "Provider hook mutation basis is unavailable");
@@ -1206,14 +1214,7 @@ export class AgentHarness<
 						this.applyVerifiedProjectionAdvance(commit.advance);
 					}
 					if (signal?.aborted) return createAbortedAssistantStream(admittedModel);
-					// A steer or host revocation during the hook commit cannot publish an old suffix.
-					if (optionalMessages?.length && this.requestBatch === optionalBatch) {
-						admittedContext = {
-							...admittedContext,
-							messages: [...admittedContext.messages, ...optionalMessages],
-						};
-					}
-					const response = this.streamFn(admittedModel, admittedContext, {
+					const admittedOptions: Parameters<StreamFn>[2] = {
 						...(requestOptions.cacheRetention === undefined
 							? {}
 							: { cacheRetention: requestOptions.cacheRetention }),
@@ -1249,11 +1250,26 @@ export class AgentHarness<
 							? {}
 							: { websocketConnectTimeoutMs: requestOptions.websocketConnectTimeoutMs }),
 						...(admittedAuth?.apiKey === undefined ? {} : { apiKey: admittedAuth.apiKey }),
-					});
+					};
+					// Admission is the handoff, not provider success. Seal diagnostics before
+					// synchronous provider/payload code can revoke an already-delivered suffix.
+					const includeOptionalContext =
+						!!optionalMessages?.length &&
+						this.requestBatch === optionalBatch &&
+						optionalAuthorization?.isCurrent() === true;
+					if (includeOptionalContext) {
+						admittedContext = {
+							...admittedContext,
+							messages: [...admittedContext.messages, ...optionalMessages!],
+						};
+					}
+					settleOptionalContext(includeOptionalContext);
+					const response = this.streamFn(admittedModel, admittedContext, admittedOptions);
 					this.endProviderAdmission();
 					return response;
 				} finally {
 					if (this.releaseProviderAdmission) this.endProviderAdmission();
+					settleOptionalContext(false);
 				}
 			}
 		};
