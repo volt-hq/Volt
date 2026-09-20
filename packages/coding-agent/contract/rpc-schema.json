@@ -80,7 +80,8 @@
 			"review_source_unavailable",
 			"review_preparation_failed",
 			"review_preparation_stale",
-			"review_preparation_conflict"
+			"review_preparation_conflict",
+			"worktree_limit_reached"
 		],
 		"remoteErrorStrings": [
 			"invalid_cursor",
@@ -4511,9 +4512,11 @@
 								"review_preparation_failed",
 								"review_preparation_stale",
 								"review_preparation_conflict",
+								"worktree_limit_reached",
 								"review_preparation_failed",
 								"review_preparation_stale",
-								"review_preparation_conflict"
+								"review_preparation_conflict",
+								"worktree_limit_reached"
 							]
 						}
 					},
@@ -4561,9 +4564,11 @@
 								"review_preparation_failed",
 								"review_preparation_stale",
 								"review_preparation_conflict",
+								"worktree_limit_reached",
 								"review_preparation_failed",
 								"review_preparation_stale",
-								"review_preparation_conflict"
+								"review_preparation_conflict",
+								"worktree_limit_reached"
 							]
 						}
 					},

@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import {
@@ -1999,7 +2001,11 @@ describe("review pipeline", () => {
 	});
 
 	it("does not retain stale prior anchors for files re-reviewed incrementally", async () => {
-		const harness = await createHarness();
+		vi.stubEnv("VOLT_BACKGROUND_JOB_DIAGNOSTICS", "1");
+		// Runtime diagnostics belong to host state, not the repository being reviewed.
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-review-agent-"));
+		onTestFinished(() => rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+		const harness = await createHarness({ agentDir });
 		harnesses.push(harness);
 		const sessionManager = harness.session.sessionManager;
 		if (!sessionManager) throw new Error("Expected the harness session to have durable state");
@@ -2036,7 +2042,7 @@ describe("review pipeline", () => {
 				},
 			},
 			cwd: harness.tempDir,
-			agentDir: harness.tempDir,
+			agentDir,
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
@@ -2046,6 +2052,8 @@ describe("review pipeline", () => {
 		expect(priorOutcome.status).toBe("completed");
 		if (priorOutcome.status !== "completed") throw new Error(`Prior review ended with ${priorOutcome.status}`);
 		const priorFinding = priorOutcome.parsed.findings[0]!;
+		expect(readdirSync(join(agentDir, "background-job-diagnostics")).length).toBeGreaterThan(0);
+		expect(existsSync(join(harness.tempDir, "background-job-diagnostics"))).toBe(false);
 
 		writeFileSync(
 			join(harness.tempDir, "src", "value.ts"),
@@ -2086,7 +2094,7 @@ describe("review pipeline", () => {
 		const currentOutcome = await executeReviewWorkflow({
 			prepared,
 			cwd: harness.tempDir,
-			agentDir: harness.tempDir,
+			agentDir,
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,

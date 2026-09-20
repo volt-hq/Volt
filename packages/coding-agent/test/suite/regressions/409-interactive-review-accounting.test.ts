@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -31,8 +31,11 @@ describe("#409 interactive terminal review accounting", () => {
 	it.each(["failed", "cancelled"] as const)(
 		"shows final accounting once after a %s review clears transient usage",
 		async (status) => {
-			const cwd = mkdtempSync(join(tmpdir(), "volt-review-accounting-ui-"));
-			const manager = await SessionManager.create(cwd, join(cwd, "sessions"));
+			const root = mkdtempSync(join(tmpdir(), "volt-review-accounting-ui-"));
+			const cwd = join(root, "workspace");
+			mkdirSync(cwd);
+			// A live session database must not be part of the review snapshot.
+			const manager = await SessionManager.create(cwd, join(root, "sessions"));
 			const h = await createHarness({
 				sessionManager: manager,
 				settings: { retry: { enabled: false }, compaction: { enabled: false }, lsp: { enabled: false } },
@@ -134,14 +137,14 @@ describe("#409 interactive terminal review accounting", () => {
 				);
 
 				const record = listReviewRuns(manager).runs[0];
-				expect(record?.status).toBe(status);
+				const rendered = chatContainer.render(120).lines.map(stripAnsi).join("\n");
+				expect(record?.status, rendered).toBe(status);
 				expect(record?.usage?.summary.tokens?.input).toBeGreaterThanOrEqual(10);
 				expect(h.faux.state.callCount).toBe(2);
 				expect(newSession).not.toHaveBeenCalled();
 				expect(footer.setTransientUsage.mock.calls.some(([value]) => value !== undefined)).toBe(true);
 				expect(footer.setTransientUsage).toHaveBeenLastCalledWith(undefined);
 				expect(editorContainer.children).toEqual([editor]);
-				const rendered = chatContainer.render(120).lines.map(stripAnsi).join("\n");
 				expect(rendered).toContain("Original conversation");
 				expect(rendered).not.toContain("Transient review output");
 				expect(rendered.match(/Tokens: \d+ input/g)).toHaveLength(1);
@@ -160,7 +163,7 @@ describe("#409 interactive terminal review accounting", () => {
 				).toHaveLength(1);
 			} finally {
 				await h.cleanupAsync();
-				await rm(cwd, { recursive: true, force: true });
+				await rm(root, { recursive: true, force: true });
 			}
 		},
 	);

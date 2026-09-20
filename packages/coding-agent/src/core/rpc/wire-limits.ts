@@ -184,6 +184,7 @@ export const RPC_STABLE_ERROR_CODES = [
 	"review_preparation_failed",
 	"review_preparation_stale",
 	"review_preparation_conflict",
+	"worktree_limit_reached",
 ] as const;
 export type RpcStableErrorCode = (typeof RPC_STABLE_ERROR_CODES)[number];
 

@@ -61,13 +61,13 @@ export interface VoltdStateFileV1 {
 		relayCredentialAppEndpoints?: IrohManagedRelayAppEndpoint[];
 		/** Durable, non-usable credential retained only to finish broker revocation. */
 		relayCredentialRevocation?: IrohManagedRelayCredential;
-		/** Worktree cleanup policies (design §5.3); all opt-in except pruneOnStart. */
+		/** Worktree checkout retention and startup reconciliation policies. */
 		worktreeCleanup?: WorktreeCleanupSettings;
 	};
 }
 
 export interface WorktreeCleanupSettings {
-	/** Remove clean, fully merged worktrees after the TTL once their runtime is disposed. */
+	/** Archive inactive disposable checkouts after the TTL (default enabled, one hour). */
 	retention?: { enabled: boolean; ttlMs: number };
 	/** Reconcile worktree records/checkouts during daemon startup (default true). */
 	pruneOnStart?: boolean;
@@ -78,15 +78,18 @@ export interface ResolvedWorktreeCleanupPolicy {
 	pruneOnStart: boolean;
 }
 
-/** Apply worktree-cleanup defaults: retention off, pruneOnStart on. */
+/** Apply defaults: one-hour retention and startup reconciliation. */
 export function resolveWorktreeCleanupPolicy(
 	settings: Pick<VoltdStateFileV1["settings"], "worktreeCleanup">,
 ): ResolvedWorktreeCleanupPolicy {
 	const cleanup = settings.worktreeCleanup;
 	const retention =
-		cleanup?.retention?.enabled && cleanup.retention.ttlMs > 0
-			? { enabled: true, ttlMs: cleanup.retention.ttlMs }
-			: undefined;
+		cleanup?.retention?.enabled === false
+			? undefined
+			: {
+					enabled: true,
+					ttlMs: cleanup?.retention?.ttlMs && cleanup.retention.ttlMs > 0 ? cleanup.retention.ttlMs : 3_600_000,
+				};
 	return { retention, pruneOnStart: cleanup?.pruneOnStart !== false };
 }
 

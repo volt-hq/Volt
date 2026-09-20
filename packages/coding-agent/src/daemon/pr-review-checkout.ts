@@ -12,7 +12,7 @@ import type { PrReviewLaunch, PrReviewPlacement } from "../core/pr-review-placem
 import { hasIrohRemoteRpcCapability } from "../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import type { IrohRemoteHello } from "../core/remote/iroh/handshake.ts";
-import { PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
+import { PrReviewPreparationError, type PrReviewPreparationErrorCode } from "../core/remote/iroh/pr-review-rpc.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
@@ -47,7 +47,7 @@ export interface PreparedPrReview {
 
 /** Safe codes only; utility routing translates these without exposing Git stderr. */
 export class PrReviewCheckoutError extends Error {
-	readonly code: "review_preparation_failed" | "review_preparation_stale" | "review_preparation_conflict";
+	readonly code: PrReviewPreparationErrorCode;
 	constructor(code: PrReviewCheckoutError["code"] = "review_preparation_failed") {
 		super(code);
 		this.code = code;
@@ -241,9 +241,10 @@ export class PrReviewCheckoutManager {
 		const prior = matches[0];
 		if (prior) {
 			if (prior.requestFingerprint !== fingerprint) throw new PrReviewCheckoutError("review_preparation_conflict");
-			const worktree = records.find(
-				(record) => record.workspaceName === workspace.name && record.id === prior.placement.worktreeId,
-			);
+			const worktree =
+				prior.sessionGeneration === undefined
+					? records.find((record) => record.id === prior.placement.worktreeId)
+					: await this.options.worktrees.resolveSessionWorktree(workspace.name, prior.sessionId);
 			if (!worktree || (await realpath(worktree.path).catch(() => "")) !== prior.placement.cwd)
 				throw new PrReviewCheckoutError("review_preparation_stale");
 			if (!prior.sessionGeneration) await this.validatePlacement(workspace, prior.placement, authority);
@@ -364,7 +365,10 @@ export class PrReviewCheckoutManager {
 			prReviewLaunch: launch,
 			assertCurrent: authority.assertCurrent,
 		});
-		if (!created.ok) throw new PrReviewCheckoutError();
+		if (!created.ok)
+			throw new PrReviewCheckoutError(
+				created.error === "worktree_limit_reached" ? created.error : "review_preparation_failed",
+			);
 		authority.assertCurrent();
 		await this.validatePlacement(workspace, launch.placement, authority);
 		return this.response(launch);

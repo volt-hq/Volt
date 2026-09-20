@@ -428,8 +428,13 @@ Keep the session ID and complete request stable for a retry. Changing source,
 PR or expected head requires a new launch intent. Pending placement survives
 restart and is revalidated before session creation. Error codes are
 `review_preparation_stale` (head/checkout changed), `review_preparation_conflict`
-(identity/placement conflicts), or `review_preparation_failed` (safe generic
-failure); normal capability-denial errors remain distinct. Successful worktrees
+(identity/placement conflicts), `worktree_limit_reached` (no safe checkout capacity
+could be reclaimed), or `review_preparation_failed` (safe generic failure).
+Capacity failures carry both `error:"worktree_limit_reached"` and
+`errorCode:"worktree_limit_reached"`. Preserve the launch intent and offer Retry
+once active sessions finish or protected checkouts are explicitly cleaned up;
+do not suggest GitHub authentication or automatic forced removal. Normal
+capability-denial errors remain distinct. Successful worktrees
 are retained on cancellation or later failure. Retry or offer explicit cleanup;
 never automatically delete a reused checkout. An unconfirmed review invocation
 must be reconciled through workflow state, not blindly invoked again.
@@ -457,6 +462,14 @@ A `manage_worktrees` management stream drives daemon-managed git worktrees for t
 ```
 
 Failures use the standard error response with reasons such as `not_a_git_repository`, `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached`, `invalid_worktree_id`, `invalid_working_directory`, or `git_failed`. The wire `workingDirectory` remains registered-workspace-relative for both root and nested-repo worktrees; host-local nested repo roots and checkout paths are never exposed.
+
+The 16-worktree limit counts retained checkouts, not archived provenance records.
+The host attempts safe reclamation before returning `worktree_limit_reached`.
+Inactive disposable checkouts may be archived while their branches, exact commits,
+session bindings and review receipts remain durable. Archived records report
+`available:false`; resuming a bound session recreates the original checkout when
+its repository and branch still match. Clients must not interpret checkout
+unavailability as transcript deletion or redirect the session to another worktree.
 
 `list_worktrees` reports each worktree with availability, dirtiness, bound session ids, and merge-back counts (`aheadBehind` compares the worktree branch against its recorded base ref):
 
