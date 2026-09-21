@@ -15,6 +15,8 @@ import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode
 import { traceWindowsDiagnosticWrites } from "../../windows-diagnostic-trace.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal()) }));
+
 interface ModeControl {
 	renderer: TuiMainScreen | TuiAltScreen;
 	ui: TUI;

@@ -8,6 +8,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundJobDiagnosticEvent, BackgroundJobDiagnostics } from "../src/core/background-job-diagnostics.ts";
 import { traceWindowsDiagnosticWrites } from "./windows-diagnostic-trace.ts";
 
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal()) }));
+
 interface RecordData extends BackgroundJobDiagnosticEvent {
 	schemaVersion: number;
 	timestamp: string;

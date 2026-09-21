@@ -13,11 +13,10 @@ interface DiagnosticProcessEvent {
 /** Temporary CI tracing: never retain command arguments, paths, content, or raw process errors. */
 export function traceWindowsDiagnosticWrites(): DiagnosticProcessEvent[][] {
 	const traces: DiagnosticProcessEvent[][] = [];
-	if (process.platform !== "win32") return traces;
 	const original = childProcess.execFile;
 	vi.spyOn(childProcess, "execFile").mockImplementation((...invocation) => {
 		const [file, args, options, callback] = invocation;
-		if (!args?.includes("-EncodedCommand") || !callback) return original(...invocation);
+		if (!Array.isArray(args) || !args.includes("-EncodedCommand") || !callback) return original(...invocation);
 		const script = Buffer.from(args.at(-1)!, "base64").toString("utf16le");
 		if (!script.includes("Could not retain private Windows review diagnostics.")) return original(...invocation);
 		const trace: DiagnosticProcessEvent[] = [];

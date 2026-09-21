@@ -49,6 +49,8 @@ import { createTestBodyOwner } from "../test-body-owner.ts";
 import { traceWindowsDiagnosticWrites } from "../windows-diagnostic-trace.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal()) }));
+
 function git(cwd: string, ...args: string[]): string {
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
 	if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
