@@ -11,6 +11,7 @@ import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/sess
 import { PrReviewCheckoutError, PrReviewCheckoutManager } from "../../../src/daemon/pr-review-checkout.ts";
 import { runPrReviewGit } from "../../../src/daemon/pr-review-git.ts";
 import { WorktreeLifecycle } from "../../../src/daemon/worktree-lifecycle.ts";
+import { tryAcquireWorktreeLock } from "../../../src/daemon/worktree-lock.ts";
 import {
 	getWorktreeCheckoutPath,
 	type WorktreeGitRunner,
@@ -143,12 +144,62 @@ async function fixture(maxWorktreesPerWorkspace = 1, runReviewGit?: WorktreeGitR
 }
 
 describe("#442 worktree reclamation", () => {
+	it("excludes runtime lock acquisition through the last reclamation mutation", async () => {
+		const f = await fixture();
+		const record = await f.create("exclusive");
+		const observations: Array<{ operation: string; protected: boolean }> = [];
+		const lifecycle = new WorktreeLifecycle({
+			agentDir: f.agentDir,
+			stateManager: f.state,
+			auditLogger: f.auditLogger,
+			checkoutPath: (workspace, id) => getWorktreeCheckoutPath(f.agentDir, workspace.path, id),
+			sourcePath: async () => f.source,
+			isPreparing: () => false,
+			reserveSessions: () => () => {},
+			storedSessionIds: async () => [],
+			runGit: async (args, cwd, options) => {
+				if (args[0] === "worktree" && (args[1] === "move" || args[1] === "remove")) {
+					const lock = tryAcquireWorktreeLock(f.agentDir, record.path, true);
+					observations.push({ operation: args[1], protected: lock === undefined });
+					lock?.close();
+				}
+				return runPrReviewGit(args, cwd, options);
+			},
+		});
+		expect(await lifecycle.archive(f.workspace.name, record.id)).toEqual({ removed: true });
+		expect(observations).toEqual([
+			{ operation: "move", protected: true },
+			{ operation: "remove", protected: true },
+		]);
+		const lock = tryAcquireWorktreeLock(f.agentDir, record.path, true);
+		try {
+			expect(lock).toBeDefined();
+		} finally {
+			lock?.close();
+		}
+	});
+
+	it("does not quarantine an unrecognized checkout while a process owns protection", async () => {
+		const f = await fixture();
+		const record = await f.create("orphan");
+		const lock = tryAcquireWorktreeLock(f.agentDir, record.path, true)!;
+		await f.state.removeWorktree(f.workspace.name, record.id);
+		try {
+			expect((await f.manager.prune(f.workspace)).orphanCheckouts).toEqual([]);
+			expect(existsSync(record.path)).toBe(true);
+		} finally {
+			lock.close();
+		}
+		expect((await f.manager.prune(f.workspace)).orphanCheckouts).toEqual([record.id]);
+	});
+
 	it.each(["normalized", "duplicate", "different-checkout"])(
 		"handles %s porcelain paths without weakening checkout identity",
 		async (kind) => {
 			const f = await fixture();
 			const record = await f.create("paths");
 			const lifecycle = new WorktreeLifecycle({
+				agentDir: f.agentDir,
 				stateManager: f.state,
 				auditLogger: f.auditLogger,
 				checkoutPath: (workspace, id) => getWorktreeCheckoutPath(f.agentDir, workspace.path, id),

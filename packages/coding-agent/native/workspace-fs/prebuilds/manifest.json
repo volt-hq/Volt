@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "apiVersion": "volt-workspace-fs-v1",
-  "sourceFingerprint": "acb34379b274e951f94c4c734216b2c7d679d07d4fad67d7318d3b91f81abff2",
+  "sourceFingerprint": "05159d2ab93ee4445446a77198077fec672dafc0ad93bb85e5d0ad541d6f1282",
   "artifacts": [
     {
       "target": "darwin-arm64",
@@ -26,7 +26,7 @@
     {
       "target": "linux-x64-gnu",
       "path": "linux-x64-gnu/workspace-fs.node",
-      "sha256": "sha256:f3b64e0e2830fbd62effea104eb4fd804123430acd2a686bfec8b6edb92826c8"
+      "sha256": "sha256:79c568e4f6d894b0da6e69c69d6bc18c61eed30268f16d16bea67417e33b2797"
     },
     {
       "target": "linux-x64-musl",

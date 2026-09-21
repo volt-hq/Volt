@@ -12,6 +12,7 @@ import {
 	isIrohRemoteWorktreePersistenceError,
 } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager, type SessionReference } from "../core/session-manager.ts";
+import type { NativeFileLock } from "../core/workspace-fs/native-loader.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
@@ -20,6 +21,7 @@ import { type ControlConnection, retainControlConnectionResource } from "./contr
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import { hasRetainedWorktreeCheckout, WorktreeLifecycle, WorktreeRestorePreflightError } from "./worktree-lifecycle.ts";
+import { tryAcquireWorktreeLock } from "./worktree-lock.ts";
 
 /** join(agentDir, "worktrees") — sibling of sessions/, daemon/, trust.json. */
 export function getWorktreesRoot(agentDir: string): string {
@@ -348,6 +350,7 @@ export class WorktreeManager {
 		this.flushState = options.flushState;
 		this.now = options.now ?? Date.now;
 		this.lifecycle = new WorktreeLifecycle({
+			agentDir: this.agentDir,
 			stateManager: this.stateManager,
 			auditLogger: this.auditLogger,
 			checkoutPath: (workspace, id) => getWorktreeCheckoutPath(this.agentDir, workspace.path, id),
@@ -1034,6 +1037,7 @@ export class WorktreeManager {
 		let preservedRecovery = false;
 		let cleanRecoveryPath: string | undefined;
 		let releaseSessionRemoval: (() => void) | undefined;
+		let removalLock: NativeFileLock | undefined;
 		try {
 			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<WorktreeResult<Record<never, never>>>(
 				workspace.name,
@@ -1069,6 +1073,8 @@ export class WorktreeManager {
 							return { result: { ok: false, error: "worktree_busy" } };
 						}
 					}
+					removalLock = tryAcquireWorktreeLock(this.agentDir, record.path, false);
+					if (!removalLock) return { result: { ok: false, error: "worktree_busy" } };
 					const sourceRootPath = await this.resolveRecordSourceRootPath(current.workspace, record);
 					if (existsSync(record.path)) {
 						if (sourceRootPath === undefined) {
@@ -1157,7 +1163,11 @@ export class WorktreeManager {
 			}
 			throw error;
 		} finally {
-			releaseSessionRemoval?.();
+			try {
+				releaseSessionRemoval?.();
+			} finally {
+				removalLock?.close();
+			}
 		}
 	}
 
@@ -1232,11 +1242,16 @@ export class WorktreeManager {
 					if (!entry.isDirectory() || entry.name.includes(".orphan-")) continue;
 					const entryPath = resolve(join(workspaceDir, entry.name));
 					if (recordedPaths.has(entryPath)) continue;
+					let removalLock: NativeFileLock | undefined;
 					try {
+						removalLock = tryAcquireWorktreeLock(this.agentDir, entryPath, false);
+						if (!removalLock) continue;
 						await rename(entryPath, `${entryPath}.orphan-${this.now()}`);
 						orphanCheckouts.push(entry.name);
 					} catch {
 						// Quarantine is best-effort; a busy directory stays put for the next prune.
+					} finally {
+						removalLock?.close();
 					}
 				}
 			}

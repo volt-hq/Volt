@@ -164,6 +164,7 @@ function reviewManager(f: Awaited<ReturnType<typeof fixture>>) {
 
 function lifecycle(f: Awaited<ReturnType<typeof fixture>>, runGit: WorktreeGitRunner) {
 	return new WorktreeLifecycle({
+		agentDir: f.agentDir,
 		stateManager: f.state,
 		auditLogger: f.auditLogger,
 		checkoutPath: (workspace, id) => getWorktreeCheckoutPath(f.agentDir, workspace.path, id),

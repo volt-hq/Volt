@@ -5,8 +5,10 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
+import type { NativeFileLock } from "../core/workspace-fs/native-loader.ts";
 import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
+import { tryAcquireWorktreeLock } from "./worktree-lock.ts";
 import type { WorktreeGitRunner } from "./worktree-manager.ts";
 
 export function hasRetainedWorktreeCheckout(record: IrohRemoteWorkspaceWorktree): boolean {
@@ -19,6 +21,7 @@ export function hasRetainedWorktreeCheckout(record: IrohRemoteWorkspaceWorktree)
 }
 
 export interface WorktreeLifecycleOptions {
+	agentDir: string;
 	stateManager: IrohRemoteHostStateManager;
 	auditLogger: IrohRemoteAuditLogger;
 	checkoutPath(workspace: IrohRemoteWorkspace, id: string): string;
@@ -125,6 +128,7 @@ export class WorktreeLifecycle {
 
 	async archive(workspaceName: string, id: string): Promise<{ removed: true } | { removed: false; reason: string }> {
 		let release: (() => void) | undefined;
+		let removalLock: NativeFileLock | undefined;
 		let preserved = false;
 		try {
 			await this.options.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async (current) => {
@@ -175,6 +179,8 @@ export class WorktreeLifecycle {
 					)
 				)
 					throw new Error("ownership_changed");
+				removalLock = tryAcquireWorktreeLock(this.options.agentDir, record.path, false);
+				if (!removalLock) throw new Error("busy");
 				const identity = await this.identity(current.workspace, record);
 				await this.clean(record.path);
 				const snapshot = record.prReviewLaunches?.some(
@@ -264,7 +270,11 @@ export class WorktreeLifecycle {
 			await this.audit(workspaceName, id, false, reason);
 			return { removed: false, reason };
 		} finally {
-			release?.();
+			try {
+				release?.();
+			} finally {
+				removalLock?.close();
+			}
 		}
 	}
 

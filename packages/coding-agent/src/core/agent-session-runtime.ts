@@ -872,6 +872,9 @@ export class AgentSessionRuntime {
 				// Defense in depth for unexpected re-entrant review starts after an
 				// operation-specific pre-preparation check.
 				this.assertNoActiveDetachedReview();
+				retainLocalSessionWorktree(this.session.sessionManager, options.sessionManager);
+				await restoreLocalSessionWorktree(options.sessionManager, this.services.agentDir);
+				this.assertStructuralOperationCurrent(options.operation);
 				const transaction = sameSessionIdentity
 					? undefined
 					: await this.prepareSessionReplacement?.({
@@ -879,7 +882,6 @@ export class AgentSessionRuntime {
 							sessionId,
 							cwd: options.sessionManager.getCwd(),
 						});
-				retainLocalSessionWorktree(this.session.sessionManager, options.sessionManager);
 				let invalidated = false;
 				let created: CreateAgentSessionRuntimeResult | undefined;
 				let applied = false;

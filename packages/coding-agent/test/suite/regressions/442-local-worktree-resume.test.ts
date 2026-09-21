@@ -23,10 +23,12 @@ import { isControlRequest } from "../../../src/daemon/control-protocol.ts";
 import { startControlServer } from "../../../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../../../src/daemon/paths.ts";
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
+import { tryAcquireWorktreeLock } from "../../../src/daemon/worktree-lock.ts";
 import {
 	handleWorktreeControlRequest,
 	isWorktreeControlRequest,
 	WorktreeManager,
+	WorktreeRetentionSweeper,
 } from "../../../src/daemon/worktree-manager.ts";
 import { main } from "../../../src/main.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
@@ -140,6 +142,7 @@ async function fixture(archive = true) {
 		agentDir,
 		sessionDir,
 		workspace,
+		statePath,
 		state,
 		manager,
 		record,
@@ -300,6 +303,131 @@ describe("#442 local archived-worktree resume", () => {
 		expect(existsSync(f.record.path)).toBe(false);
 	});
 
+	it.each(["disconnect", "restart"])("protects active local work through daemon %s", async (failure) => {
+		const f = await fixture();
+		const runtime = await createAgentSessionRuntime(f.factory, {
+			cwd: f.record.path,
+			agentDir: f.agentDir,
+			sessionManager: await SessionManager.open(f.ref),
+		});
+		cleanups.push(() => runtime.dispose());
+		const entered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		f.harness.setResponses([
+			async () => {
+				entered.resolve();
+				await finish.promise;
+				return fauxAssistantMessage("Continued safely");
+			},
+		]);
+		const turn = runtime.session.prompt("Continue");
+		try {
+			await entered.promise;
+			for (const connection of f.server.connections()) connection.close();
+			await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+			const state = failure === "restart" ? new IrohRemoteHostStateManager({ statePath: f.statePath }) : f.state;
+			const auditLogger = new IrohRemoteAuditLogger({ sink: { write: () => {} } });
+			const manager =
+				failure === "restart"
+					? new WorktreeManager({
+							agentDir: f.agentDir,
+							stateManager: state,
+							auditLogger,
+							maxWorktreesPerWorkspace: 1,
+							hasActiveRuntimeForSession: () => false,
+							reserveSessionsForRemoval: () => () => {},
+						})
+					: f.manager;
+			expect(runtime.session.isStreaming).toBe(true);
+			expect(await manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+				removed: false,
+				reason: "busy",
+			});
+			expect(await manager.create(f.workspace, { id: "capacity-pressure" })).toMatchObject({
+				ok: false,
+				error: "worktree_limit_reached",
+			});
+			expect(await manager.remove(f.workspace, f.record.id, { force: true })).toEqual({
+				ok: false,
+				error: "worktree_busy",
+			});
+			const swept = Promise.withResolvers<void>();
+			const sweeper = new WorktreeRetentionSweeper({
+				manager,
+				stateManager: state,
+				auditLogger: new IrohRemoteAuditLogger({
+					sink: {
+						write: (event) => {
+							if (event.type === "worktree_retention_skipped_dirty" && event.details?.reason === "busy")
+								swept.resolve();
+						},
+					},
+				}),
+				getRetentionPolicy: () => ({ enabled: true, ttlMs: 60_000 }),
+				now: () => Date.now() + 120_000,
+			});
+			try {
+				await swept.promise;
+			} finally {
+				sweeper.dispose();
+			}
+			expect(existsSync(f.record.path)).toBe(true);
+			expect(runtime.session.isStreaming).toBe(true);
+		} finally {
+			finish.resolve();
+			await turn;
+		}
+		expect(runtime.session.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "Continued safely" }],
+		});
+		// Same-cwd replacement inherits the actual lock, not a stale socket state.
+		await runtime.newSession();
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		await runtime.dispose();
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it("refuses cwd-bound startup while reclamation owns the exclusive lock", async () => {
+		const f = await fixture(false);
+		const lock = tryAcquireWorktreeLock(f.agentDir, f.record.path, false)!;
+		const factory = vi.fn(f.factory);
+		try {
+			await expect(
+				createAgentSessionRuntime(factory, {
+					cwd: f.record.path,
+					agentDir: f.agentDir,
+					sessionManager: await SessionManager.open(f.ref),
+				}),
+			).rejects.toThrow("being reclaimed");
+			expect(factory).not.toHaveBeenCalled();
+		} finally {
+			lock.close();
+		}
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it("protects an ephemeral managed-checkout session without a daemon connection", async () => {
+		const f = await fixture(false);
+		const runtime = await createAgentSessionRuntime(f.factory, {
+			cwd: f.record.path,
+			agentDir: f.agentDir,
+			sessionManager: SessionManager.inMemory(f.record.path),
+		});
+		cleanups.push(() => runtime.dispose());
+		expect(f.requests).toEqual([]);
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		await runtime.dispose();
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
 	it("releases protection when runtime creation fails", async () => {
 		const f = await fixture();
 		await expect(
@@ -378,6 +506,8 @@ describe("#442 local archived-worktree resume", () => {
 			sessionManager: await SessionManager.open(f.ref),
 		});
 		cleanups.push(() => runtime.dispose());
+		for (const connection of f.server.connections()) connection.close();
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
 		const entered = Promise.withResolvers<void>();
 		const finish = Promise.withResolvers<void>();
 		const dispose = runtime.session.disposeSubagentToolManager.bind(runtime.session);
@@ -419,6 +549,7 @@ describe("#442 local archived-worktree resume", () => {
 		});
 		cleanups.push(() => runtime.dispose());
 		expect(f.requests).not.toContain("worktree_restore");
+		await preparation.release();
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
 			removed: false,
 			reason: "busy",

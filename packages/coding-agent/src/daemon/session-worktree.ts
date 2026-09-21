@@ -1,8 +1,12 @@
+import { existsSync } from "node:fs";
+import { join, relative, sep } from "node:path";
 import { VERSION } from "../config.ts";
 import type { SessionManager } from "../core/session-manager.ts";
+import type { NativeFileLock } from "../core/workspace-fs/native-loader.ts";
 import { createDaemonClient, type DaemonClient } from "./control-client.ts";
 import { ensureDaemonRunning } from "./spawn.ts";
-import { isPathUnderWorktreesRoot } from "./worktree-manager.ts";
+import { tryAcquireWorktreeLock } from "./worktree-lock.ts";
+import { getWorktreesRoot, isPathUnderWorktreesRoot } from "./worktree-manager.ts";
 
 export class LocalSessionWorktreeRestoreError extends Error {
 	constructor(cwd: string, cause: unknown) {
@@ -15,7 +19,8 @@ export class LocalSessionWorktreeRestoreError extends Error {
 }
 
 interface LocalWorktreeOwnership {
-	client: DaemonClient;
+	lock: NativeFileLock;
+	client?: DaemonClient;
 	owners: Set<SessionManager>;
 }
 
@@ -35,7 +40,13 @@ export async function releaseLocalSessionWorktree(manager: SessionManager): Prom
 	if (!ownership) return;
 	localWorktrees.delete(manager);
 	ownership.owners.delete(manager);
-	if (ownership.owners.size === 0) await ownership.client.close();
+	if (ownership.owners.size === 0) {
+		try {
+			await ownership.client?.close();
+		} finally {
+			ownership.lock.close();
+		}
+	}
 }
 
 export async function closeLocalSessionManager(manager: SessionManager): Promise<void> {
@@ -46,19 +57,32 @@ export async function closeLocalSessionManager(manager: SessionManager): Promise
 	}
 }
 
-/** Restore and pin through the owning daemon before any local cwd-bound startup. */
+/** Restore through the daemon, then retain process-owned protection through teardown. */
 export async function restoreLocalSessionWorktree(sessionManager: SessionManager, agentDir: string): Promise<void> {
 	const cwd = sessionManager.getCwd();
 	const sessionRef = sessionManager.getSessionRef();
-	if (!sessionRef || !isPathUnderWorktreesRoot(agentDir, cwd)) return;
-	const retained = localWorktrees.get(sessionManager);
-	if (retained) {
-		if (retained.client.connectionState !== "connected")
-			throw new LocalSessionWorktreeRestoreError(cwd, "Managed checkout protection was lost; retry the session.");
-		return;
-	}
+	if (!isPathUnderWorktreesRoot(agentDir, cwd) || localWorktrees.has(sessionManager)) return;
 
 	try {
+		const root = getWorktreesRoot(agentDir);
+		const segments = relative(root, cwd).split(sep);
+		if (segments.length < 2) throw new Error("The session cwd is not inside a managed checkout");
+		const checkoutPath = join(root, segments[0], segments[1]);
+		const retain = (client?: DaemonClient) => {
+			const lock = tryAcquireWorktreeLock(agentDir, checkoutPath, true);
+			if (!lock) throw new Error("Managed checkout is being reclaimed; retry the session.");
+			if (!existsSync(cwd)) {
+				lock.close();
+				throw new Error("The session's managed checkout is unavailable; retry the session.");
+			}
+			localWorktrees.set(sessionManager, { lock, client, owners: new Set([sessionManager]) });
+		};
+		// Ephemeral sessions cannot request durable restoration, but must still
+		// hold checkout protection before running in an existing managed cwd.
+		if (!sessionRef) {
+			retain();
+			return;
+		}
 		const ensured = await ensureDaemonRunning(agentDir);
 		if (!ensured.healthy) {
 			throw new Error(
@@ -67,7 +91,10 @@ export async function restoreLocalSessionWorktree(sessionManager: SessionManager
 		}
 		// Daemon-owned runtimes already hold a preparation/lease through their host.
 		// Re-entering worktree_restore would contend with that exact preparation.
-		if (ensured.pid === process.pid) return;
+		if (ensured.pid === process.pid) {
+			retain();
+			return;
+		}
 		const client = createDaemonClient({
 			socketPath: ensured.socketPath,
 			authToken: ensured.authToken,
@@ -84,7 +111,10 @@ export async function restoreLocalSessionWorktree(sessionManager: SessionManager
 			if (response.type !== "ok") {
 				throw new Error(response.type === "error" ? response.message : "unexpected daemon response");
 			}
-			localWorktrees.set(sessionManager, { client, owners: new Set([sessionManager]) });
+			// The connection reservation bridges restoration into process-owned
+			// protection. If disconnect raced reclamation, exclusive ownership or
+			// the missing cwd rejects startup instead of publishing an unsafe runtime.
+			retain(client);
 		} catch (error) {
 			await client.close();
 			throw error;
