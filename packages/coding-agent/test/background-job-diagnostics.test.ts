@@ -6,9 +6,6 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type BackgroundJobDiagnosticEvent, BackgroundJobDiagnostics } from "../src/core/background-job-diagnostics.ts";
-import { traceWindowsDiagnosticWrites } from "./windows-diagnostic-trace.ts";
-
-vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal()) }));
 
 interface RecordData extends BackgroundJobDiagnosticEvent {
 	schemaVersion: number;
@@ -370,12 +367,11 @@ describe("background job metadata diagnostics", () => {
 	});
 
 	it("uses the private atomic platform sink for completed JSONL batches", async () => {
-		const trace = traceWindowsDiagnosticWrites();
 		const warn = vi.fn();
 		const instance = collector({ warn });
 		instance.record({ kind: "run_end" });
 		await instance.close();
-		expect(warn, JSON.stringify(trace)).not.toHaveBeenCalled();
+		expect(warn).not.toHaveBeenCalled();
 		const target = join(directory, "background-job-diagnostics");
 		const names = await readdir(target);
 		expect(names).toHaveLength(1);
