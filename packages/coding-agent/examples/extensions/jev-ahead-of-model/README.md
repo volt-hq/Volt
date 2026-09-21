@@ -70,6 +70,8 @@ The request snapshot is capped at 8,192 bytes, recent conversation at eight text
 
 Credentials resolve through the session's `modelRegistry.getApiKeyForProvider("vercel-ai-gateway")`. Existing Volt `/login`, supported environment credentials, and provider key configuration apply. The public endpoint is fixed to `https://ai-gateway.vercel.sh/v1/evaluate`; redirects are refused. **Zero Data Retention is off by default.** SDK `zeroDataRetention: true` requires Gateway ZDR support and never retries with it disabled.
 
+The default credential file is `~/.volt/agent/auth.json`, with the key stored under `vercel-ai-gateway`. `VOLT_CODING_AGENT_DIR` changes the agent directory; `AI_GATEWAY_API_KEY` is also supported. The demo reads the existing credential and passes it through an in-memory override without copying it into its temporary workspace or report.
+
 All repository access uses managed native services and their active tool authority, policy hooks, result reducers, cancellation, and source validation. A denial of `read` does not automatically deny `grep`: both can disclose source content, so policies protecting source must cover both. Native access permission and external-export consent are separate. Missing credentials, invalid answers, unavailable services, or denied reads omit optional preparation; the main request continues.
 
 `/ahead report` is an in-memory diagnostic view containing relative candidate paths, scores, probabilities, operation outcomes, and validated usage/cost metadata. It does not include prompt/source bodies, keys, or raw provider errors. Host admission observations are not final-payload delivery receipts and do not establish that the model used the evidence. Reports retain the latest scope and up to eight request-boundary observations. No report command triggers inference or additional reads.
@@ -125,6 +127,16 @@ node node_modules/vitest/dist/cli.js --run test/jev-ahead-of-model.test.ts test/
 
 `--live` is explicit consent to up to twelve paid Jev evaluations of synthetic data. It fails clearly when Gateway credentials are unavailable, and exits unsuccessfully if no evaluation succeeds or no source reaches a main-request projection. It is not a quality benchmark: the main responses are fixed, and their timing must not be presented as reasoning savings. The offline tests exercise four-stage selection and navigation, native source/skill admission, tool-driven refresh, consent, access controls, cancellation, finite answers, and bounded transport.
 
-Validation on 2026-09-21: 34 targeted tests and the full repository check passed. The standalone SDK demo also completed with a substituted offline transport imposing 500 ms per evaluation: three cycles / nine evaluations, no initial prepared packet, then source evidence in all three later projections. Both enabled and disabled runs made exactly four scripted main requests. The real Gateway run stopped before network access because credentials were unavailable, so live decision quality and latency remain unverified.
+Validation on 2026-09-21: 34 targeted tests and the full repository check passed. The standalone SDK demo also completed with a substituted offline transport imposing 500 ms per evaluation: three cycles / nine evaluations, no initial prepared packet, then source evidence in all three later projections. Both enabled and disabled runs made exactly four scripted main requests.
+
+A subsequent live run using the existing Volt Gateway credential completed all nine evaluations successfully: **54 typed questions**, 11,032 reported input tokens, and 1,536 reported output tokens. Individual HTTP evaluation times ranged from **185 to 829 ms**, with a **255 ms median**. Gateway reported cost `0` for each call; this is observed metadata, not a promise of free future usage.
+
+| Cycle | Summed evaluation time, excluding native operations | Published evidence |
+| --- | --- | --- |
+| Initial | 1,425 ms | Session source, session-debugging skill, checkpoint observation |
+| First tool update | 637 ms | Same three relevant excerpts, freshly assessed |
+| Second tool update | 757 ms | Same three relevant excerpts, freshly assessed |
+
+Jev ranked `src/session.ts` at 2.83–2.89 and the unrelated `src/colors.ts` at 0.01; it omitted the latter in every cycle. The first packet missed the 1,000 ms initial allowance, and all three later main-request projections contained the prepared source and three excerpts with no renewed preparation wait. The main provider made exactly four scripted requests. This fixture has no LSP service, so live semantic navigation was not exercised. These results validate the live evaluation contract and synthetic selection/admission behavior; real main-model correctness, reasoning savings, and performance distributions remain unmeasured.
 
 The implementation follows the [Gateway evaluation contract](https://vercel.com/docs/ai-gateway/modalities/evaluation). The shortlist-then-inspect approach is informed by [TypeSafe's skill-suggestion cookbook](https://docs.typesafe.ai/cookbooks/skill_suggestion). A real-task comparison should hold the main model, request corpus, and tools fixed and measure task correctness, foreground calls, elapsed time, added context, auxiliary cost, and regressions from irrelevant evidence before making this a default.
