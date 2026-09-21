@@ -29,7 +29,9 @@ import {
 } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
+import { releaseLocalSessionWorktree } from "../src/daemon/session-worktree.ts";
 import type { EnsureDaemonResult } from "../src/daemon/spawn.ts";
+import * as daemonSpawn from "../src/daemon/spawn.ts";
 import {
 	evaluateWorktreeRelayGate,
 	getWorktreeCheckoutPath,
@@ -755,12 +757,37 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 	}
 
 	it("creates the session with the worktree cwd in the PARENT workspace's session dir", async () => {
-		const agentDir = makeTempDir("volt-wt-newsession-");
-		const parentCwd = join(agentDir, "parent-repo");
-		const worktreeCwd = join(getWorktreesRoot(agentDir), "--parent-repo--", "fix-login");
-		mkdirSync(parentCwd, { recursive: true });
-		mkdirSync(worktreeCwd, { recursive: true });
+		const {
+			agentDir,
+			workspacePath: parentCwd,
+			checkoutPath: worktreeCwd,
+			manager,
+			stateManager,
+		} = await createWorktreeFixture();
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+		const server = await startControlServer({
+			socketPath: paths.socketPath,
+			version: "test",
+			handlers: {
+				async onRequest(connection, request) {
+					if (request.type !== "worktree_restore") throw new Error(`Unexpected request: ${request.type}`);
+					await handleWorktreeControlRequest(connection, request, { manager, stateManager });
+				},
+			},
+		});
+		cleanups.push(() => server.close());
+		const ensure = vi.spyOn(daemonSpawn, "ensureDaemonRunning").mockResolvedValue({
+			healthy: true,
+			state: "healthy",
+			spawned: false,
+			socketPath: paths.socketPath,
+		});
+		cleanups.push(() => {
+			ensure.mockRestore();
+		});
 		const fixture = await createRuntimeFixture(parentCwd, agentDir);
+		cleanups.push(() => releaseLocalSessionWorktree(fixture.runtime.session.sessionManager));
 
 		const result = await fixture.runtime.newSession({
 			cwd: worktreeCwd,
