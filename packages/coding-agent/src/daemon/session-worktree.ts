@@ -49,7 +49,8 @@ export async function closeLocalSessionManager(manager: SessionManager): Promise
 /** Restore and pin through the owning daemon before any local cwd-bound startup. */
 export async function restoreLocalSessionWorktree(sessionManager: SessionManager, agentDir: string): Promise<void> {
 	const cwd = sessionManager.getCwd();
-	if (!sessionManager.getSessionRef() || !isPathUnderWorktreesRoot(agentDir, cwd)) return;
+	const sessionRef = sessionManager.getSessionRef();
+	if (!sessionRef || !isPathUnderWorktreesRoot(agentDir, cwd)) return;
 	const retained = localWorktrees.get(sessionManager);
 	if (retained) {
 		if (retained.client.connectionState !== "connected")
@@ -78,7 +79,7 @@ export async function restoreLocalSessionWorktree(sessionManager: SessionManager
 			const response = await client.request({
 				type: "worktree_restore",
 				path: cwd,
-				sessionId: sessionManager.getSessionId(),
+				sessionRef,
 			});
 			if (response.type !== "ok") {
 				throw new Error(response.type === "error" ? response.message : "unexpected daemon response");

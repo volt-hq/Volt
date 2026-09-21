@@ -15,6 +15,8 @@ import {
 } from "../core/remote/iroh/push.ts";
 import type { IrohRemoteClient } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteWorkspaceMetadataSnapshot } from "../core/remote/iroh/workspace.ts";
+import { parseSessionReference } from "../core/session-entry-codec.ts";
+import type { SessionReference } from "../core/session-manager.ts";
 
 /**
  * Wire types and framing for the voltd control plane: JSONL over the unix
@@ -161,8 +163,8 @@ export type ControlRequest =
 	| { type: "worktree_prune"; id: string; workspaceName?: string; purgeRecovery?: boolean }
 	/** Resolve a filesystem path to the daemon-managed worktree containing it. */
 	| { type: "worktree_resolve"; id: string; path: string }
-	/** Restore a locally resumed session's managed checkout without changing its stored cwd. */
-	| { type: "worktree_restore"; id: string; path: string; sessionId: string }
+	/** Restore and pin an exact local session's managed checkout without changing its stored cwd. */
+	| { type: "worktree_restore"; id: string; path: string; sessionRef: SessionReference }
 	/** Bind a session id to a worktree (TUI-created worktree sessions). */
 	| {
 			type: "worktree_bind";
@@ -836,7 +838,13 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 		case "worktree_resolve":
 			return typeof value.path === "string";
 		case "worktree_restore":
-			return typeof value.path === "string" && typeof value.sessionId === "string";
+			if (typeof value.path !== "string") return false;
+			try {
+				parseSessionReference(value.sessionRef);
+				return true;
+			} catch {
+				return false;
+			}
 		case "worktree_bind":
 			return (
 				typeof value.workspaceName === "string" &&

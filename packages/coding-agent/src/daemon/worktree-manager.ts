@@ -11,7 +11,7 @@ import {
 	isIrohRemoteWorktreeParentWorkspaceNotFoundError,
 	isIrohRemoteWorktreePersistenceError,
 } from "../core/remote/iroh/state-manager.ts";
-import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
+import { getDefaultSessionDirPath, SessionManager, type SessionReference } from "../core/session-manager.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
@@ -1330,12 +1330,42 @@ export class WorktreeManager {
 	}
 
 	/** Restore and publish a local runtime pin under the same lock used by reclamation. */
-	async acquireLocalSessionWorktree(workspaceName: string, sessionId: string, cwd: string): Promise<() => void> {
-		const record = await this.findSessionWorktree(workspaceName, sessionId, cwd);
-		if (!record) throw new Error("The session has no managed worktree binding");
+	async acquireLocalSessionWorktree(
+		workspaceName: string,
+		sessionRef: SessionReference,
+		cwd: string,
+	): Promise<() => void> {
+		// Local sessions can live in checkout-keyed or custom stores. Validate the
+		// exact store and generation even when an ID-only daemon binding exists.
+		const session = await SessionManager.open(sessionRef);
+		let storedCwd: string;
+		try {
+			storedCwd = session.getCwd();
+		} finally {
+			await session.closePersistence();
+		}
+		const cwdReal = await realpathOrResolve(storedCwd);
+		if (!isSamePath(cwdReal, await realpathOrResolve(cwd)))
+			throw new Error("Local session cwd does not match its stored cwd");
+		const worktrees = await this.stateManager.listWorktrees(workspaceName);
+		let record: IrohRemoteWorkspaceWorktree | undefined;
+		let matchedPathLength = -1;
+		for (const worktree of worktrees) {
+			const checkoutPath = await realpathOrResolve(worktree.path);
+			if (isPathContained(checkoutPath, cwdReal) && checkoutPath.length > matchedPathLength) {
+				record = worktree;
+				matchedPathLength = checkoutPath.length;
+			}
+		}
+		if (!record) throw new Error("The session cwd is not inside a daemon-managed worktree");
+		const bound = await this.stateManager.findWorktreeForSession(workspaceName, sessionRef.sessionId);
+		if (bound && bound.id !== record.id)
+			throw new Error("Stored session cwd does not match its managed worktree binding");
+		// Do not turn a store/generation-qualified local reference into an ID-only
+		// durable binding. This connection owns a checkout pin, not a conversation lease.
 		// Preparation restores and reserves under the lifecycle lock; publication
 		// replaces that protection with the local runtime pin without a gap.
-		const preparation = await this.beginRuntimePreparation(workspaceName, record.id, sessionId);
+		const preparation = await this.beginRuntimePreparation(workspaceName, record.id, sessionRef.sessionId);
 		try {
 			return await preparation.publish(() => {
 				if (!existsSync(cwd)) throw new Error("The session's managed checkout could not be restored");
@@ -1997,7 +2027,7 @@ export async function handleWorktreeControlRequest(
 			try {
 				const release = await hooks.manager.acquireLocalSessionWorktree(
 					workspace.name,
-					request.sessionId,
+					request.sessionRef,
 					request.path,
 				);
 				retainControlConnectionResource(connection, release);

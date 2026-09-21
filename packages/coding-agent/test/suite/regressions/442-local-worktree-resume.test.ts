@@ -19,6 +19,7 @@ import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/sess
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import { createDaemonClient } from "../../../src/daemon/control-client.ts";
+import { isControlRequest } from "../../../src/daemon/control-protocol.ts";
 import { startControlServer } from "../../../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../../../src/daemon/paths.ts";
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
@@ -52,7 +53,7 @@ function git(cwd: string, ...args: string[]): string {
 	}).trim();
 }
 
-async function fixture() {
+async function fixture(archive = true) {
 	const harness = await createHarness({ settings: { lsp: { enabled: false } } });
 	cleanups.push(() => harness.cleanupAsync());
 	const root = realpathSync(harness.tempDir);
@@ -83,8 +84,10 @@ async function fixture() {
 	const ref = session.getSessionRef()!;
 	await session.closePersistence();
 	await manager.bindSession(workspace.name, record.id, ref.sessionId);
-	expect(await manager.archiveDisposable(workspace.name, record.id)).toEqual({ removed: true });
-	expect(existsSync(record.path)).toBe(false);
+	if (archive) {
+		expect(await manager.archiveDisposable(workspace.name, record.id)).toEqual({ removed: true });
+		expect(existsSync(record.path)).toBe(false);
+	}
 
 	const requests: string[] = [];
 	const server = await startControlServer({
@@ -149,6 +152,87 @@ async function fixture() {
 }
 
 describe("#442 local archived-worktree resume", () => {
+	it("requires a complete session reference on the local control protocol", () => {
+		const request = { type: "worktree_restore", id: "request", path: "/checkout" };
+		const sessionRef = {
+			sessionDirectory: "/sessions",
+			storeId: "store",
+			sessionId: "session",
+			sessionGeneration: "generation",
+		};
+		expect(isControlRequest({ ...request, sessionRef })).toBe(true);
+		expect(isControlRequest({ ...request, sessionId: "session" })).toBe(false);
+		for (const field of Object.keys(sessionRef)) {
+			expect(isControlRequest({ ...request, sessionRef: { ...sessionRef, [field]: "" } })).toBe(false);
+		}
+	});
+
+	it.each(["default", "custom"])("restores unbound local sessions from their %s store", async (store) => {
+		const f = await fixture(false);
+		vi.stubEnv(ENV_AGENT_DIR, f.agentDir);
+		const local = await SessionManager.create(
+			f.record.path,
+			store === "custom" ? join(f.harness.tempDir, "custom-sessions") : undefined,
+		);
+		const ref = local.getSessionRef()!;
+		await local.closePersistence();
+		expect(ref.sessionDirectory).not.toBe(f.sessionDir);
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+		const runtime = await createAgentSessionRuntime(f.factory, {
+			cwd: f.record.path,
+			agentDir: f.agentDir,
+			sessionManager: await SessionManager.open(ref),
+		});
+		cleanups.push(() => runtime.dispose());
+		expect(runtime.cwd).toBe(f.record.path);
+		expect(runtime.session.sessionId).toBe(ref.sessionId);
+		expect(await f.state.findWorktreeForSession(f.workspace.name, ref.sessionId)).toBeUndefined();
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		await runtime.dispose();
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it.each(["store", "generation", "cwd", "same-id-other-store"])(
+		"rejects an invalid %s reference even with an existing ID binding",
+		async (invalid) => {
+			const f = await fixture();
+			let sessionRef = f.ref;
+			if (invalid === "store") sessionRef = { ...f.ref, storeId: "wrong-store" };
+			if (invalid === "generation") {
+				await SessionManager.delete(f.ref);
+				const replacement = await SessionManager.create(f.record.path, f.sessionDir, { id: f.ref.sessionId });
+				await replacement.closePersistence();
+			}
+			if (invalid === "same-id-other-store") {
+				const other = await SessionManager.create(f.source, join(f.harness.tempDir, "other-store"), {
+					id: f.ref.sessionId,
+				});
+				sessionRef = other.getSessionRef()!;
+				await other.closePersistence();
+			}
+			const client = createDaemonClient({
+				socketPath: f.server.socketPath,
+				client: "cli",
+				version: "test",
+				reconnect: false,
+			});
+			cleanups.push(() => client.close());
+			expect(
+				await client.request({
+					type: "worktree_restore",
+					path: invalid === "cwd" ? join(f.record.path, "subdirectory") : f.record.path,
+					sessionRef,
+				}),
+			).toMatchObject({ type: "error", code: "worktree_restore_failed" });
+			expect(existsSync(f.record.path)).toBe(false);
+			expect(await f.manager.create(f.workspace, { id: "after-rejection" })).toMatchObject({ ok: true });
+		},
+	);
+
 	it.each(["startup", "switch"])("restores the original checkout before runtime %s", async (mode) => {
 		const f = await fixture();
 		const runtime = await createAgentSessionRuntime(f.factory, {
@@ -256,7 +340,7 @@ describe("#442 local archived-worktree resume", () => {
 			() => first.close(),
 			() => second.close(),
 		);
-		const request = { type: "worktree_restore", path: f.record.path, sessionId: f.ref.sessionId } as const;
+		const request = { type: "worktree_restore", path: f.record.path, sessionRef: f.ref } as const;
 		expect(await first.request(request)).toMatchObject({ type: "ok" });
 		const entered = Promise.withResolvers<void>();
 		const finish = Promise.withResolvers<void>();
@@ -401,8 +485,15 @@ describe("#442 local archived-worktree resume", () => {
 		}
 	});
 
-	it.each(["print", "json"])("protects CLI %s continuation through provider completion", async (mode) => {
-		const f = await fixture();
+	it.each([
+		["print", "continue"],
+		["json", "continue"],
+		["print", "fresh-default"],
+		["json", "fresh-default"],
+		["print", "fresh-custom"],
+		["json", "fresh-custom"],
+	])("protects CLI %s %s through provider completion", async (mode, start) => {
+		const f = await fixture(start === "continue");
 		const previousCwd = process.cwd();
 		const previousExitCode = process.exitCode;
 		const stdinDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
@@ -422,7 +513,14 @@ describe("#442 local archived-worktree resume", () => {
 		);
 		vi.stubEnv("HOME", f.harness.tempDir);
 		vi.stubEnv(ENV_AGENT_DIR, f.agentDir);
-		vi.stubEnv(ENV_SESSION_DIR, f.sessionDir);
+		vi.stubEnv(
+			ENV_SESSION_DIR,
+			start === "continue"
+				? f.sessionDir
+				: start === "fresh-custom"
+					? join(f.harness.tempDir, "custom-sessions")
+					: "",
+		);
 		vi.stubEnv("VOLT_PROFILE", "");
 		vi.stubEnv("VOLT_OFFLINE", "1");
 		vi.stubEnv("VOLT_SKIP_VERSION_CHECK", "1");
@@ -435,10 +533,10 @@ describe("#442 local archived-worktree resume", () => {
 			},
 		]);
 		try {
-			process.chdir(f.source);
+			process.chdir(start === "continue" ? f.source : f.record.path);
 			Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
 			await main([
-				"--continue",
+				...(start === "continue" ? ["--continue"] : []),
 				...(mode === "print" ? ["--print"] : ["--mode", "json"]),
 				"--offline",
 				"--no-approve",
