@@ -20,7 +20,12 @@ import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
 import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
 import { getResolvedTargetSessionId } from "./integrated-runtimes.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
-import { getWorktreeCheckoutPath, type WorktreeGitRunner, type WorktreeManager } from "./worktree-manager.ts";
+import {
+	getWorktreeCheckoutPath,
+	WorktreeCapacityError,
+	type WorktreeGitRunner,
+	type WorktreeManager,
+} from "./worktree-manager.ts";
 
 export interface PrReviewSource {
 	workingDirectory?: string;
@@ -156,6 +161,9 @@ export class PrReviewCheckoutManager {
 		this.lanes.set(workspace.name, operation);
 		try {
 			return await operation;
+		} catch (error) {
+			if (error instanceof WorktreeCapacityError) throw new PrReviewCheckoutError(error.code);
+			throw error;
 		} finally {
 			if (this.lanes.get(workspace.name) === operation) this.lanes.delete(workspace.name);
 		}

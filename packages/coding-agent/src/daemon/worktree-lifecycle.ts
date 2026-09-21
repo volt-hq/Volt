@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { lstat, realpath } from "node:fs/promises";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
@@ -30,6 +30,9 @@ export interface WorktreeLifecycleOptions {
 	runGit?: WorktreeGitRunner;
 	now?: () => number;
 }
+
+/** Restoration rejected before any checkout mutation was attempted. */
+export class WorktreeRestorePreflightError extends Error {}
 
 /** A checkout is expendable; its binding, branch and exact commit are not. */
 export class WorktreeLifecycle {
@@ -84,7 +87,10 @@ export class WorktreeLifecycle {
 		const branch = (await this.git(["symbolic-ref", "HEAD"], path)).trim();
 		if (branch !== `refs/heads/${record.branch}`) throw new Error("ownership_changed");
 		const listed = await this.git(["worktree", "list", "--porcelain", "-z"], source);
-		const entries = listed.split("\0\0").filter((entry) => entry.split("\0")[0] === `worktree ${path}`);
+		const entries = listed.split("\0\0").filter((entry) => {
+			const field = entry.split("\0")[0];
+			return field.startsWith("worktree ") && resolve(field.slice("worktree ".length)) === path;
+		});
 		if (entries.length !== 1 || !entries[0].split("\0").includes(`branch ${branch}`))
 			throw new Error("ownership_changed");
 		if (entries[0].split("\0").some((field) => field === "locked" || field.startsWith("locked ")))
@@ -139,7 +145,15 @@ export class WorktreeLifecycle {
 					throw new Error("not_disposable");
 				if (
 					this.options.isPreparing(workspaceName, id) ||
-					record.prReviewLaunches?.some((launch) => launch.sessionGeneration === undefined)
+					record.prReviewLaunches?.some((launch) => launch.sessionGeneration === undefined) ||
+					current.allWorktrees.some((entry) =>
+						entry.prReviewLaunches?.some((launch) => {
+							if (launch.sessionGeneration !== undefined) return false;
+							// Admission still resolves the PR from this source, not just its target checkout.
+							const source = relative(record.path, launch.placement.sourceCwd);
+							return source !== ".." && !source.startsWith(`..${sep}`) && !isAbsolute(source);
+						}),
+					)
 				)
 					throw new Error("busy");
 				const sessionIds = [
@@ -261,17 +275,31 @@ export class WorktreeLifecycle {
 	): Promise<IrohRemoteWorkspaceWorktree> {
 		const archive = record.checkoutArchive;
 		if (!archive) return record;
-		const expected = this.options.checkoutPath(workspace, record.id);
-		const quarantinePath = this.quarantinePath(workspace, record);
-		const source = await this.options.sourcePath(workspace, record);
-		if (!source || record.path !== expected || (await realpath(dirname(expected))) !== dirname(expected))
-			throw new Error("Archived worktree ownership changed; inspect the checkout before resuming.");
-		const paths = await readPrReviewRepositoryPaths((args) => this.git(args, source));
-		if ((await realpath(paths.commonDirectory)) !== archive.commonDirectory)
-			throw new Error("Archived worktree repository changed; inspect the checkout before resuming.");
-		const head = (await this.git(["rev-parse", "--verify", `refs/heads/${record.branch}^{commit}`], source)).trim();
-		if (head !== archive.head)
-			throw new Error("Archived worktree branch changed; restore its recorded commit before resuming.");
+		let source: string;
+		let quarantinePath: string;
+		try {
+			const expected = this.options.checkoutPath(workspace, record.id);
+			quarantinePath = this.quarantinePath(workspace, record);
+			const selectedSource = await this.options.sourcePath(workspace, record);
+			if (!selectedSource || record.path !== expected || (await realpath(dirname(expected))) !== dirname(expected))
+				throw new Error("Archived worktree ownership changed; inspect the checkout before resuming.");
+			source = selectedSource;
+			const paths = await readPrReviewRepositoryPaths((args) => this.git(args, source));
+			if ((await realpath(paths.commonDirectory)) !== archive.commonDirectory)
+				throw new Error("Archived worktree repository changed; inspect the checkout before resuming.");
+			const head = (
+				await this.git(["rev-parse", "--verify", `refs/heads/${record.branch}^{commit}`], source)
+			).trim();
+			if (head !== archive.head)
+				throw new Error("Archived worktree branch changed; restore its recorded commit before resuming.");
+		} catch (error) {
+			throw new WorktreeRestorePreflightError(
+				error instanceof Error ? error.message : "Restoration preflight failed.",
+				{
+					cause: error,
+				},
+			);
+		}
 		if (existsSync(quarantinePath)) {
 			if (existsSync(record.path))
 				throw new Error("Archived worktree path is occupied; recover the preserved checkout before resuming.");

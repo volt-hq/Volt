@@ -19,7 +19,7 @@ import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.t
 import type { ControlConnection } from "./control-server.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
-import { hasRetainedWorktreeCheckout, WorktreeLifecycle } from "./worktree-lifecycle.ts";
+import { hasRetainedWorktreeCheckout, WorktreeLifecycle, WorktreeRestorePreflightError } from "./worktree-lifecycle.ts";
 
 /** join(agentDir, "worktrees") — sibling of sessions/, daemon/, trust.json. */
 export function getWorktreesRoot(agentDir: string): string {
@@ -199,6 +199,16 @@ export type WorktreeError =
 	| "invalid_working_directory"
 	| "nested_git_repository_unsupported"
 	| "git_failed";
+
+export class WorktreeCapacityError extends Error {
+	readonly code = "worktree_limit_reached";
+
+	constructor() {
+		super(
+			"Worktree capacity exhausted. Finish active sessions or inspect protected checkouts with volt remote worktree list before resuming.",
+		);
+	}
+}
 
 export type WorktreeGitRunner = (
 	args: string[],
@@ -406,7 +416,13 @@ export class WorktreeManager {
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
 		for (let attempt = 0; ; attempt++) {
 			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<
-				{ capacity: true } | { capacity: false; retry?: boolean; record?: IrohRemoteWorkspaceWorktree }
+				| { capacity: true }
+				| {
+						capacity: false;
+						retry?: boolean;
+						record?: IrohRemoteWorkspaceWorktree;
+						error?: WorktreeRestorePreflightError;
+				  }
 			>(workspaceName, async (current) => {
 				const record = current.worktrees.find((entry) => entry.id === id);
 				if (!record) return { result: { capacity: false } };
@@ -430,7 +446,23 @@ export class WorktreeManager {
 						worktree: { ...record, checkoutArchive: { ...record.checkoutArchive, restoring: true } },
 					};
 				}
-				const restored = await this.lifecycle.restore(current.workspace, record);
+				let restored: IrohRemoteWorkspaceWorktree;
+				try {
+					restored = await this.lifecycle.restore(current.workspace, record);
+				} catch (error) {
+					if (
+						error instanceof WorktreeRestorePreflightError &&
+						record.checkoutArchive?.restoring &&
+						!existsSync(record.path) &&
+						!existsSync(record.checkoutArchive.quarantinePath)
+					) {
+						// Persist the released reservation before surfacing the failure. Never clear
+						// recovery intent once checkout mutation has begun or preserved data exists.
+						const { restoring: _restoring, ...checkoutArchive } = record.checkoutArchive;
+						return { result: { capacity: false, error }, worktree: { ...record, checkoutArchive } };
+					}
+					throw error;
+				}
 				if (preparation && !existsSync(restored.path))
 					throw new Error(`Worktree ${id} is unavailable for runtime preparation`);
 				return {
@@ -442,13 +474,12 @@ export class WorktreeManager {
 				};
 			});
 			if (!result.capacity) {
+				if (result.error) throw result.error;
 				if (result.retry) continue;
 				return result.record;
 			}
 			if (attempt >= this.maxWorktreesPerWorkspace || !(await this.reclaimCapacity(workspaceName, id)))
-				throw new Error(
-					"Worktree capacity exhausted. Finish active sessions or inspect protected checkouts with volt remote worktree list before resuming.",
-				);
+				throw new WorktreeCapacityError();
 		}
 	}
 
