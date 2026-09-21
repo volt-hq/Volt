@@ -106,6 +106,7 @@ cp permission-gate.ts ~/.volt/agent/extensions/
 | `dynamic-resources/` | Loads skills, prompts, and themes using `resources_discover` |
 | `context-preparation.ts` | Opt-in deterministic skill/source excerpts through managed services; [SDK configuration and evaluation](#context-preparation) |
 | `jev-context-preparation.ts` | Opt-in Jev selector with `/jev` controls, footer status, and deterministic fallback; [export consent, credentials, and evaluation](#jev-assisted-context-preparation) |
+| [`jev-ahead-of-model/`](./jev-ahead-of-model/README.md) | Ahead of Model Work proof of concept: repeated Jev routing, skill inspection, repository ranking, semantic navigation, and evidence assessment; `/ahead` controls and a synthetic live demo |
 
 ### Messages & Communication
 
