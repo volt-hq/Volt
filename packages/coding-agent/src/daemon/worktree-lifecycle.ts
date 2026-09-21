@@ -292,6 +292,13 @@ export class WorktreeLifecycle {
 			).trim();
 			if (head !== archive.head)
 				throw new Error("Archived worktree branch changed; restore its recorded commit before resuming.");
+			if (!existsSync(record.path) && !existsSync(quarantinePath)) {
+				// Reject occupied branches before attempting add so a nonexistent checkout
+				// does not retain a durable restoration reservation after Git refuses it.
+				const listed = await this.git(["worktree", "list", "--porcelain", "-z"], source);
+				if (listed.split("\0").includes(`branch refs/heads/${record.branch}`))
+					throw new Error("Archived worktree branch is checked out elsewhere; release it before resuming.");
+			}
 		} catch (error) {
 			throw new WorktreeRestorePreflightError(
 				error instanceof Error ? error.message : "Restoration preflight failed.",

@@ -333,6 +333,7 @@ export class WorktreeManager {
 	private readonly flushState: (() => Promise<void>) | undefined;
 	private readonly now: () => number;
 	private readonly runtimePreparations = new Map<string, symbol>();
+	private readonly reviewSourceReservations = new Map<string, Set<symbol>>();
 	private readonly lifecycle: WorktreeLifecycle;
 
 	constructor(options: WorktreeManagerOptions) {
@@ -350,7 +351,8 @@ export class WorktreeManager {
 			auditLogger: this.auditLogger,
 			checkoutPath: (workspace, id) => getWorktreeCheckoutPath(this.agentDir, workspace.path, id),
 			sourcePath: (workspace, record) => this.resolveRecordSourceRootPath(workspace, record),
-			isPreparing: (workspaceName, id) => this.isRuntimePreparing(workspaceName, id),
+			isPreparing: (workspaceName, id) =>
+				this.isRuntimePreparing(workspaceName, id) || this.reviewSourceReservations.has(`${workspaceName}\0${id}`),
 			hasActiveSession: this.hasActiveRuntimeForSession,
 			reserveSessions: this.reserveSessionsForRemoval,
 			storedSessionIds: async (workspace, record) => {
@@ -1363,6 +1365,24 @@ export class WorktreeManager {
 		// write did; the next lookup simply falls back again.
 		await this.bindSession(workspaceName, match.worktree.id, sessionId).catch(() => undefined);
 		return match.worktree;
+	}
+
+	/** Pin an existing review source before async resolution, serialized against reclamation. */
+	async reserveReviewSource(workspaceName: string, worktreeId: string): Promise<(() => void) | undefined> {
+		return this.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async ({ worktrees }) => {
+			const record = worktrees.find((entry) => entry.id === worktreeId);
+			if (!record || record.checkoutArchive || !existsSync(record.path)) return { result: undefined };
+			const key = `${workspaceName}\0${worktreeId}`;
+			const token = Symbol(key);
+			const reservations = this.reviewSourceReservations.get(key) ?? new Set<symbol>();
+			reservations.add(token);
+			this.reviewSourceReservations.set(key, reservations);
+			return {
+				result: () => {
+					if (reservations.delete(token) && reservations.size === 0) this.reviewSourceReservations.delete(key);
+				},
+			};
+		});
 	}
 
 	isRuntimePreparing(workspaceName: string, worktreeId: string): boolean {

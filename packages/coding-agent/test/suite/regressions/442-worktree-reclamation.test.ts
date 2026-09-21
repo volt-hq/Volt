@@ -11,7 +11,11 @@ import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/sess
 import { PrReviewCheckoutError, PrReviewCheckoutManager } from "../../../src/daemon/pr-review-checkout.ts";
 import { runPrReviewGit } from "../../../src/daemon/pr-review-git.ts";
 import { WorktreeLifecycle } from "../../../src/daemon/worktree-lifecycle.ts";
-import { getWorktreeCheckoutPath, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
+import {
+	getWorktreeCheckoutPath,
+	type WorktreeGitRunner,
+	WorktreeManager,
+} from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
 
@@ -33,7 +37,7 @@ function git(cwd: string, ...args: string[]): string {
 	}).trim();
 }
 
-async function fixture(maxWorktreesPerWorkspace = 1) {
+async function fixture(maxWorktreesPerWorkspace = 1, runReviewGit?: WorktreeGitRunner) {
 	const harness = await createHarness({ settings: { lsp: { enabled: false } } });
 	cleanups.push(() => harness.cleanupAsync());
 	const root = realpathSync(harness.tempDir);
@@ -92,6 +96,7 @@ async function fixture(maxWorktreesPerWorkspace = 1) {
 		stateManager: state,
 		worktrees: manager,
 		hasActiveSession: () => false,
+		runGit: runReviewGit,
 		provider: {
 			...githubCliCodeHostProvider,
 			resolvePullRequestCheckout: async ({ cwd }) => {
@@ -211,6 +216,44 @@ describe("#442 worktree reclamation", () => {
 		expect(await restarted.manager.create(f.workspace, { id: "next" })).toMatchObject({ ok: true });
 	});
 
+	it.each(["linked", "main"])(
+		"releases restoration capacity when the branch occupies the %s checkout",
+		async (kind) => {
+			const f = await fixture();
+			const record = await f.create("occupied");
+			expect(await f.manager.archiveDisposable(f.workspace.name, record.id)).toEqual({ removed: true });
+			const otherPath = kind === "main" ? f.source : join(f.root, "other-checkout");
+			if (kind === "main") git(f.source, "checkout", record.branch);
+			else git(f.source, "worktree", "add", otherPath, record.branch);
+			expect(git(otherPath, "rev-parse", "HEAD")).toBe(f.base);
+			const before = git(f.source, "worktree", "list", "--porcelain");
+
+			await expect(f.manager.resolveSessionWorktree(f.workspace.name, "session-occupied")).rejects.toThrow(
+				"branch is checked out elsewhere",
+			);
+			const restarted = f.open();
+			const archived = (await restarted.state.listWorktrees())[0];
+			expect(existsSync(record.path)).toBe(false);
+			expect(existsSync(archived.checkoutArchive!.quarantinePath)).toBe(false);
+			expect(archived.checkoutArchive?.restoring).toBeUndefined();
+			expect(archived.sessionIds).toContain("session-occupied");
+			expect(git(f.source, "worktree", "list", "--porcelain")).toBe(before);
+			expect(await restarted.manager.archiveDisposable(f.workspace.name, record.id)).toEqual({
+				removed: false,
+				reason: "already_archived",
+			});
+			expect(await restarted.manager.create(f.workspace, { id: "next" })).toMatchObject({ ok: true });
+			expect(await restarted.manager.remove(f.workspace, "next")).toEqual({ ok: true });
+
+			git(otherPath, "checkout", "--detach");
+			const restored = await restarted.manager.resolveSessionWorktree(f.workspace.name, "session-occupied");
+			expect(restored?.path).toBe(record.path);
+			expect(restored?.checkoutArchive).toBeUndefined();
+			expect(git(record.path, "rev-parse", "HEAD")).toBe(f.base);
+			expect(git(record.path, "status", "--porcelain")).toBe("");
+		},
+	);
+
 	it("retains capacity and recovery intent for a partial checkout when preflight fails", async () => {
 		const f = await fixture();
 		const record = await f.create("partial");
@@ -228,6 +271,97 @@ describe("#442 worktree reclamation", () => {
 		expect(await restarted.manager.create(f.workspace, { id: "next" })).toEqual({
 			ok: false,
 			error: "worktree_limit_reached",
+		});
+	});
+
+	it.each([
+		["source resolution", "retention"],
+		["source resolution", "capacity"],
+		["fetch", "retention"],
+		["fetch", "capacity"],
+	])("protects a review source during %s from concurrent %s", async (stage, pressure) => {
+		let interleave: (() => Promise<void>) | undefined;
+		const f = await fixture(2, async (args, cwd, options) => {
+			if (interleave && (stage === "source resolution" || args[0] === "fetch")) {
+				const operation = interleave;
+				interleave = undefined;
+				await operation();
+			}
+			return runPrReviewGit(args, cwd, options);
+		});
+		const source = await f.create("review-source");
+		if (pressure === "capacity") {
+			// An unbound checkout fills the remaining capacity without being reclaimable.
+			expect(await f.manager.create(f.workspace, { id: "protected" })).toMatchObject({ ok: true });
+		}
+		interleave = async () => {
+			expect((await f.state.listWorktrees()).flatMap((record) => record.prReviewLaunches ?? [])).toEqual([]);
+			if (pressure === "retention") {
+				expect(await f.manager.archiveDisposable(f.workspace.name, source.id)).toEqual({
+					removed: false,
+					reason: "busy",
+				});
+			} else {
+				expect(await f.manager.create(f.workspace, { id: "unrelated" })).toEqual({
+					ok: false,
+					error: "worktree_limit_reached",
+				});
+				// Make room for the review once the unrelated capacity attempt has completed.
+				expect(await f.manager.remove(f.workspace, "protected")).toEqual({ ok: true });
+			}
+			expect(existsSync(source.path)).toBe(true);
+		};
+		const request = { ...f.request, sourceWorktreeId: source.id };
+		const prepared = await f.reviews.prepare(f.workspace, request, f.authority);
+		expect(interleave).toBeUndefined();
+		expect(await f.reviews.prepare(f.workspace, request, f.authority)).toEqual(prepared);
+		// Persistence takes over protection, even after the in-flight reservation is released.
+		expect(await f.manager.archiveDisposable(f.workspace.name, source.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		expect(await f.manager.remove(f.workspace, prepared.worktreeId, { force: true })).toEqual({ ok: true });
+		expect(await f.manager.archiveDisposable(f.workspace.name, source.id)).toEqual({ removed: true });
+	});
+
+	it.each(["source resolution", "fetch", "cancelled fetch"])(
+		"releases the review source after failed %s",
+		async (stage) => {
+			const controller = new AbortController();
+			const failure = new Error("interrupted review preparation");
+			const f = await fixture(2, async (args, cwd, options) => {
+				if (stage === "source resolution" || args[0] === "fetch") {
+					if (stage === "cancelled fetch") {
+						controller.abort(failure);
+						options?.signal?.throwIfAborted();
+					}
+					throw failure;
+				}
+				return runPrReviewGit(args, cwd, options);
+			});
+			const source = await f.create("review-source");
+			await expect(
+				f.reviews.prepare(
+					f.workspace,
+					{ ...f.request, sourceWorktreeId: source.id },
+					{ ...f.authority, signal: controller.signal },
+				),
+			).rejects.toBe(failure);
+			expect((await f.state.listWorktrees()).flatMap((record) => record.prReviewLaunches ?? [])).toEqual([]);
+			expect(await f.manager.archiveDisposable(f.workspace.name, source.id)).toEqual({ removed: true });
+		},
+	);
+
+	it("can reuse its reserved source when it already matches the review head", async () => {
+		const f = await fixture();
+		const source = await f.create("review-source");
+		git(source.path, "checkout", "topic");
+		await f.state.upsertWorktree({ ...source, branch: "topic" });
+		expect(
+			await f.reviews.prepare(f.workspace, { ...f.request, sourceWorktreeId: source.id }, f.authority),
+		).toMatchObject({
+			worktreeId: source.id,
+			disposition: "reused",
 		});
 	});
 

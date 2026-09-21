@@ -266,6 +266,25 @@ export class PrReviewCheckoutManager {
 			)
 		)
 			throw new PrReviewCheckoutError("review_preparation_conflict");
+		const releaseSource =
+			request.sourceWorktreeId === undefined
+				? undefined
+				: await this.options.worktrees.reserveReviewSource(workspace.name, request.sourceWorktreeId);
+		if (request.sourceWorktreeId !== undefined && !releaseSource) throw new PrReviewCheckoutError();
+		try {
+			return await this.prepareFromSource(workspace, request, authority, fingerprint);
+		} finally {
+			// Persisted launches take over source protection; failures must not leak the reservation.
+			releaseSource?.();
+		}
+	}
+
+	private async prepareFromSource(
+		workspace: IrohRemoteWorkspace,
+		request: PrReviewPreparationRequest,
+		authority: PrReviewPreparationAuthority,
+		fingerprint: string,
+	): Promise<PreparedPrReview> {
 		const source = await this.source(workspace, request, authority.signal);
 		const target = await this.target(source, request, authority.signal);
 		if (
