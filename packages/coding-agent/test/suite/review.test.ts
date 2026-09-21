@@ -46,6 +46,7 @@ import { MAX_ACTIVE_REVIEW_WORKFLOWS, ReviewWorkflowManager } from "../../src/co
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
 import { createTestBodyOwner } from "../test-body-owner.ts";
+import { traceWindowsDiagnosticWrites } from "../windows-diagnostic-trace.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function git(cwd: string, ...args: string[]): string {
@@ -760,6 +761,7 @@ describe("review pipeline", () => {
 			if (delivery === "pending observer") return new Promise<void>(() => {});
 		});
 		const useObserver = delivery.includes("observer") || delivery === "disabled" || delivery === "retained";
+		const diagnosticsTrace = delivery === "retained" ? traceWindowsDiagnosticWrites() : [];
 		const events: Array<Record<string, unknown>> = [];
 		const result = await runReview({
 			cwd: harness.tempDir,
@@ -783,7 +785,7 @@ describe("review pipeline", () => {
 		expect(existsSync(checkout)).toBe(false);
 		expect(harness.faux.state.callCount).toBe(8);
 		const failedRetention = delivery !== "disabled" && delivery !== "retained";
-		expect(onDiagnosticRetentionWarning.mock.calls).toEqual(
+		expect(onDiagnosticRetentionWarning.mock.calls, JSON.stringify(diagnosticsTrace)).toEqual(
 			failedRetention && useObserver ? [[DIAGNOSTIC_RETENTION_WARNING]] : [],
 		);
 		expect(stderrWarning.mock.calls).toEqual(

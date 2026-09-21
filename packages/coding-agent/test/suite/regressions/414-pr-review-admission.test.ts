@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionRuntime,
@@ -31,6 +31,7 @@ import { getDefaultSessionDir, SessionManager } from "../../../src/core/session-
 import { IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationRequest } from "../../../src/daemon/pr-review-checkout.ts";
 import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
+import * as daemonSpawn from "../../../src/daemon/spawn.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
@@ -42,6 +43,17 @@ beforeAll(() => {
 afterAll(() => gitSeed?.dispose());
 
 const cleanups: Array<() => Promise<void>> = [];
+beforeEach(() => {
+	// This fixture owns daemon runtimes in-process, not in a separately spawned
+	// daemon whose state file would not contain the fixture's worktrees.
+	vi.spyOn(daemonSpawn, "ensureDaemonRunning").mockResolvedValue({
+		healthy: true,
+		state: "healthy",
+		spawned: false,
+		socketPath: "unused",
+		pid: process.pid,
+	});
+});
 afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	vi.restoreAllMocks();

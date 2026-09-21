@@ -765,6 +765,9 @@ describe("#442 local archived-worktree resume", () => {
 			expect(process.exitCode).not.toBe(1);
 			expect(reclamation).toMatchObject({ ok: false, error: "worktree_limit_reached" });
 			await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+			// A real CLI has exited at this point. Release the test process's cwd
+			// before reclamation because Windows cannot move its current directory.
+			process.chdir(previousCwd);
 			expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
 		} finally {
 			restoreStdout();
