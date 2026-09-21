@@ -161,6 +161,8 @@ export type ControlRequest =
 	| { type: "worktree_prune"; id: string; workspaceName?: string; purgeRecovery?: boolean }
 	/** Resolve a filesystem path to the daemon-managed worktree containing it. */
 	| { type: "worktree_resolve"; id: string; path: string }
+	/** Restore a locally resumed session's managed checkout without changing its stored cwd. */
+	| { type: "worktree_restore"; id: string; path: string; sessionId: string }
 	/** Bind a session id to a worktree (TUI-created worktree sessions). */
 	| {
 			type: "worktree_bind";
@@ -833,6 +835,8 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 			);
 		case "worktree_resolve":
 			return typeof value.path === "string";
+		case "worktree_restore":
+			return typeof value.path === "string" && typeof value.sessionId === "string";
 		case "worktree_bind":
 			return (
 				typeof value.workspaceName === "string" &&

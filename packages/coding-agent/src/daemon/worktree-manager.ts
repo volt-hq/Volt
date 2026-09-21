@@ -1304,9 +1304,13 @@ export class WorktreeManager {
 	async resolveSessionWorktree(
 		workspaceName: string,
 		sessionId: string,
+		expectedCwd?: string,
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
 		const bound = await this.stateManager.findWorktreeForSession(workspaceName, sessionId);
 		const record = bound ?? (await this.resolveSessionWorktreeByStoredCwd(workspaceName, sessionId));
+		if (record && expectedCwd !== undefined && !isPathContained(record.path, expectedCwd)) {
+			throw new Error("Stored session cwd does not match its managed worktree binding");
+		}
 		return record?.checkoutArchive ? this.restoreForResume(workspaceName, record.id) : record;
 	}
 
@@ -1803,6 +1807,7 @@ export type WorktreeControlRequest = Extract<
 			| "worktree_remove"
 			| "worktree_prune"
 			| "worktree_resolve"
+			| "worktree_restore"
 			| "worktree_bind";
 	}
 >;
@@ -1832,6 +1837,7 @@ export function isWorktreeControlRequest(request: ControlRequest): request is Wo
 		request.type === "worktree_remove" ||
 		request.type === "worktree_prune" ||
 		request.type === "worktree_resolve" ||
+		request.type === "worktree_restore" ||
 		request.type === "worktree_bind"
 	);
 }
@@ -1931,7 +1937,7 @@ export async function handleWorktreeControlRequest(
 		return;
 	}
 
-	if (request.type === "worktree_resolve") {
+	if (request.type === "worktree_resolve" || request.type === "worktree_restore") {
 		const worktrees = await hooks.stateManager.listWorktrees();
 		const match = worktrees
 			.filter((worktree) => isPathContained(worktree.path, request.path))
@@ -1944,6 +1950,27 @@ export async function handleWorktreeControlRequest(
 				code: "not_found",
 				message: "path is not inside a daemon-managed worktree",
 			});
+			return;
+		}
+		if (request.type === "worktree_restore") {
+			try {
+				const restored = await hooks.manager.resolveSessionWorktree(
+					workspace.name,
+					request.sessionId,
+					request.path,
+				);
+				if (!restored || !existsSync(request.path)) {
+					throw new Error("The session's managed checkout is missing and could not be restored");
+				}
+				connection.send({ type: "ok", id: request.id });
+			} catch (error) {
+				connection.send({
+					type: "error",
+					id: request.id,
+					code: error instanceof WorktreeCapacityError ? error.code : "worktree_restore_failed",
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
 			return;
 		}
 		connection.send({

@@ -170,6 +170,7 @@ import {
 	decorateRemoteHostState,
 	type IntegratedConversationSessionSelection,
 } from "../../daemon/handshake-responses.ts";
+import { LocalSessionWorktreeRestoreError } from "../../daemon/session-worktree.ts";
 import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
 import {
 	findCatalogPackage,
@@ -7621,6 +7622,10 @@ export class InteractiveMode {
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
+			if (error instanceof LocalSessionWorktreeRestoreError) {
+				this.showError(error.message);
+				return { cancelled: true, seeded: false };
+			}
 			if (error instanceof MissingSessionCwdError) {
 				const selectedCwd = await this.promptForMissingSessionCwd(error);
 				if (!selectedCwd) {

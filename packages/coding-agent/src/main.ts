@@ -70,6 +70,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { handleDaemonCommand } from "./daemon/cli.ts";
 import { handleRemoteControlCommand } from "./daemon/remote-cli.ts";
+import { restoreLocalSessionWorktree } from "./daemon/session-worktree.ts";
 import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemon/worktree-manager.ts";
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
@@ -850,6 +851,7 @@ export async function main(args: string[], options?: MainOptions) {
 	);
 	let missingSessionCwdIssue: SessionCwdIssue | undefined;
 	try {
+		await restoreLocalSessionWorktree(sessionManagerOwner.current, agentDir);
 		missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManagerOwner.current, cwd);
 	} catch (error) {
 		return await sessionManagerOwner.fail(error, "Session cwd validation failed and its manager could not be closed");

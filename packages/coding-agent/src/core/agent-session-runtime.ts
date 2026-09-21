@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { restoreLocalSessionWorktree } from "../daemon/session-worktree.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -1249,6 +1250,8 @@ export class AgentSessionRuntime {
 		let managerTransferred = false;
 		try {
 			this.assertStructuralOperationCurrent(operation);
+			await restoreLocalSessionWorktree(sessionManager, this.services.agentDir);
+			this.assertStructuralOperationCurrent(operation);
 			assertSessionCwdExists(sessionManager, this.cwd);
 			managerTransferred = true;
 			const replacement = await this.replaceCurrentSession({
@@ -1914,6 +1917,7 @@ export async function createAgentSessionRuntime(
 ): Promise<AgentSessionRuntime> {
 	let result: CreateAgentSessionRuntimeResult;
 	try {
+		await restoreLocalSessionWorktree(options.sessionManager, options.agentDir);
 		assertSessionCwdExists(options.sessionManager, options.cwd);
 		result = await createRuntime(options);
 	} catch (error) {
