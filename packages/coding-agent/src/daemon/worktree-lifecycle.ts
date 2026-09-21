@@ -148,8 +148,8 @@ export class WorktreeLifecycle {
 					record.prReviewLaunches?.some((launch) => launch.sessionGeneration === undefined) ||
 					current.allWorktrees.some((entry) =>
 						entry.prReviewLaunches?.some((launch) => {
-							if (launch.sessionGeneration !== undefined) return false;
-							// Admission still resolves the PR from this source, not just its target checkout.
+							// Pending and bound reviews still validate and resolve the PR from this source,
+							// even when their own checkout is archived for later resume.
 							const source = relative(record.path, launch.placement.sourceCwd);
 							return source !== ".." && !source.startsWith(`..${sep}`) && !isAbsolute(source);
 						}),

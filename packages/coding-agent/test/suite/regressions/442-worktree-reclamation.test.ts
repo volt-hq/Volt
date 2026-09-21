@@ -3,6 +3,7 @@ import { existsSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
+import { assertPrReviewCheckout } from "../../../src/core/pr-review-binding.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import { createEmptyIrohRemoteHostState, writeIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
@@ -256,8 +257,52 @@ describe("#442 worktree reclamation", () => {
 				f.authority,
 			),
 		).toMatchObject({ sourceCwd: source.path });
+	});
+
+	it.each(["retention", "capacity"])("preserves a bound review's source through %s and resume", async (pressure) => {
+		const f = await fixture(2);
+		const source = await f.create("review-source");
+		const prepared = await f.reviews.prepare(f.workspace, { ...f.request, sourceWorktreeId: source.id }, f.authority);
 		await f.bindReview(prepared.worktreeId);
-		expect(await restarted.manager.archiveDisposable(f.workspace.name, source.id)).toEqual({ removed: true });
+		const restarted = f.open();
+		if (pressure === "retention") {
+			expect(await restarted.manager.archiveDisposable(f.workspace.name, source.id)).toEqual({
+				removed: false,
+				reason: "busy",
+			});
+			expect(await restarted.manager.archiveDisposable(f.workspace.name, prepared.worktreeId)).toEqual({
+				removed: true,
+			});
+		} else {
+			expect(await restarted.manager.create(f.workspace, { id: "unrelated" })).toMatchObject({ ok: true });
+			await restarted.manager.bindSession(f.workspace.name, "unrelated", "session-unrelated");
+		}
+		const archived = (await restarted.state.listWorktrees()).find((entry) => entry.id === prepared.worktreeId)!;
+		expect(archived.checkoutArchive).toBeDefined();
+		expect(existsSync(archived.path)).toBe(false);
+		expect(existsSync(source.path)).toBe(true);
+		// The source remains a dependency even while the review's own checkout is archived.
+		expect(await restarted.manager.archiveDisposable(f.workspace.name, source.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		const resumed = f.open();
+		const restored = await resumed.manager.resolveSessionWorktree(f.workspace.name, f.request.sessionId);
+		expect(restored?.path).toBe(archived.path);
+		expect(restored?.checkoutArchive).toBeUndefined();
+		const ref = await SessionManager.findForResume(
+			getDefaultSessionDirPath(f.source, f.agentDir),
+			f.request.sessionId,
+		);
+		const session = await SessionManager.open(ref!);
+		try {
+			const binding = session.getPrReviewBinding()!;
+			expect(binding.sourceCwd).toBe(source.path);
+			await expect(assertPrReviewCheckout(binding, session.getCwd())).resolves.toBeUndefined();
+			await expect(f.reviews.validatePlacement(f.workspace, binding, f.authority)).resolves.toBeUndefined();
+		} finally {
+			await session.closePersistence();
+		}
 	});
 
 	it("reports the same typed capacity error for fresh and archived review preparation", async () => {
