@@ -67,6 +67,9 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Test native prebuild workflow and bundle assembly
+        run: node --test scripts/workspace-fs-prebuilds.test.mjs
+
       - name: Require changesets for product changes
         if: github.event_name == 'pull_request'
         env:
