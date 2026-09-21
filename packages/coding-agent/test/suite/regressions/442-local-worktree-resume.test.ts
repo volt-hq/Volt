@@ -170,6 +170,82 @@ describe("#442 local archived-worktree resume", () => {
 		}
 	});
 
+	it.each([false, true])("shares overlapping local pins when archived=%s", async (archive) => {
+		const f = await fixture(archive);
+		const child = await SessionManager.create(f.record.path, f.sessionDir);
+		const childRef = child.getSessionRef()!;
+		await child.closePersistence();
+		const clients = [f.ref, childRef].map(() =>
+			createDaemonClient({
+				socketPath: f.server.socketPath,
+				client: "cli",
+				version: "test",
+				reconnect: false,
+			}),
+		);
+		for (const client of clients) cleanups.push(() => client.close());
+		// Finish both callers' validation together so their restoration transactions
+		// queue before either caller can publish in a separate transaction.
+		const validated = Promise.withResolvers<void>();
+		let arrivals = 0;
+		const find = f.state.findWorktreeForSession.bind(f.state);
+		vi.spyOn(f.state, "findWorktreeForSession").mockImplementation(async (...args) => {
+			const record = await find(...args);
+			if (++arrivals === 2) validated.resolve();
+			await validated.promise;
+			return record;
+		});
+		const responses = await Promise.all(
+			[f.ref, childRef].map((sessionRef, index) =>
+				clients[index].request({ type: "worktree_restore", path: f.record.path, sessionRef }),
+			),
+		);
+		expect(responses).toEqual([expect.objectContaining({ type: "ok" }), expect.objectContaining({ type: "ok" })]);
+		expect(existsSync(f.record.path)).toBe(true);
+		expect(await f.state.findWorktreeForSession(f.workspace.name, childRef.sessionId)).toBeUndefined();
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		await clients[0].close();
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(1));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		await clients[1].close();
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it("does not leak a local pin when the restored session subdirectory is missing", async () => {
+		const f = await fixture();
+		const cwd = join(f.record.path, "missing");
+		const local = await SessionManager.create(cwd, f.sessionDir);
+		const ref = local.getSessionRef()!;
+		await local.closePersistence();
+		await expect(f.manager.acquireLocalSessionWorktree(f.workspace.name, ref, cwd)).rejects.toThrow(
+			"managed checkout could not be restored",
+		);
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it("keeps exclusive runtime preparation separate from shared local pins", async () => {
+		const f = await fixture(false);
+		const preparation = await f.manager.beginRuntimePreparation(f.workspace.name, f.record.id, f.ref.sessionId);
+		try {
+			await expect(f.manager.acquireLocalSessionWorktree(f.workspace.name, f.ref, f.record.path)).rejects.toThrow(
+				"unavailable for runtime preparation",
+			);
+		} finally {
+			await preparation.release();
+		}
+		const release = await f.manager.acquireLocalSessionWorktree(f.workspace.name, f.ref, f.record.path);
+		release();
+		release();
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
 	it.each(["default", "custom"])("restores unbound local sessions from their %s store", async (store) => {
 		const f = await fixture(false);
 		vi.stubEnv(ENV_AGENT_DIR, f.agentDir);

@@ -420,7 +420,7 @@ export class WorktreeManager {
 	private async restoreForResume(
 		workspaceName: string,
 		id: string,
-		preparation?: { token: symbol; sessionId?: string },
+		preparation?: { sessionId?: string } & ({ token: symbol } | { publishLocalPin: () => void }),
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
 		for (let attempt = 0; ; attempt++) {
 			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<
@@ -477,7 +477,10 @@ export class WorktreeManager {
 					result: { capacity: false, record: restored },
 					worktree: restored,
 					afterPersistWhileLocked: async () => {
-						if (preparation) this.runtimePreparations.set(key, preparation.token);
+						if (preparation) {
+							if ("token" in preparation) this.runtimePreparations.set(key, preparation.token);
+							else preparation.publishLocalPin();
+						}
 					},
 				};
 			});
@@ -1378,25 +1381,31 @@ export class WorktreeManager {
 			throw new Error("Stored session cwd does not match its managed worktree binding");
 		// Do not turn a store/generation-qualified local reference into an ID-only
 		// durable binding. This connection owns a checkout pin, not a conversation lease.
-		// Preparation restores and reserves under the lifecycle lock; publication
-		// replaces that protection with the local runtime pin without a gap.
-		const preparation = await this.beginRuntimePreparation(workspaceName, record.id, sessionRef.sessionId);
+		// Publish each shared pin after restoration is persisted, before releasing
+		// the lifecycle lock. Local callers must not compete for an exclusive token.
+		const key = `${workspaceName}\0${record.id}`;
+		let release: (() => void) | undefined;
 		try {
-			return await preparation.publish(() => {
-				if (!existsSync(cwd)) throw new Error("The session's managed checkout could not be restored");
-				const key = `${workspaceName}\0${record.id}`;
-				this.localRuntimeReservations.set(key, (this.localRuntimeReservations.get(key) ?? 0) + 1);
-				let released = false;
-				return () => {
-					if (released) return;
-					released = true;
-					const remaining = this.localRuntimeReservations.get(key)! - 1;
-					if (remaining === 0) this.localRuntimeReservations.delete(key);
-					else this.localRuntimeReservations.set(key, remaining);
-				};
+			await this.restoreForResume(workspaceName, record.id, {
+				sessionId: sessionRef.sessionId,
+				publishLocalPin: () => {
+					this.localRuntimeReservations.set(key, (this.localRuntimeReservations.get(key) ?? 0) + 1);
+					let released = false;
+					release = () => {
+						if (released) return;
+						released = true;
+						const remaining = this.localRuntimeReservations.get(key)! - 1;
+						if (remaining === 0) this.localRuntimeReservations.delete(key);
+						else this.localRuntimeReservations.set(key, remaining);
+					};
+				},
 			});
-		} finally {
-			await preparation.release();
+			if (!release) throw new Error(`Worktree ${record.id} is unavailable for runtime preparation`);
+			if (!existsSync(cwd)) throw new Error("The session's managed checkout could not be restored");
+			return release;
+		} catch (error) {
+			release?.();
+			throw error;
 		}
 	}
 
