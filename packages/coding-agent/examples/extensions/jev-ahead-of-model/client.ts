@@ -87,6 +87,7 @@ export async function evaluateAhead(
 	resolveKey: () => Promise<string | undefined>,
 	parentSignal: AbortSignal,
 	options: JevTransportOptions = {},
+	observeRequest?: (body: string) => void,
 ): Promise<JevResult> {
 	const started = performance.now();
 	const timeout = AbortSignal.timeout(2000);
@@ -113,6 +114,11 @@ export async function evaluateAhead(
 		});
 		metadata.requestBytes = Buffer.byteLength(body);
 		if (metadata.requestBytes > MAX_BYTES) return finish({ status: "unavailable", reason: "size" });
+		try {
+			observeRequest?.(body);
+		} catch {
+			/* Audit failures never control optional preparation. */
+		}
 		const key = await resolveKey();
 		signal.throwIfAborted();
 		if (!key) return finish({ status: "unavailable", reason: "credentials" });

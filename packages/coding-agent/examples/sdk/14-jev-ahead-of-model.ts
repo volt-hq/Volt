@@ -8,6 +8,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { isDeepStrictEqual } from "node:util";
 import { type Context, fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
 import {
 	AuthStorage,
@@ -18,6 +19,7 @@ import {
 	SessionManager,
 	SettingsManager,
 } from "@hansjm10/volt-coding-agent";
+import { AHEAD_AUDIT_TYPE } from "../extensions/jev-ahead-of-model/audit.ts";
 import { type AheadReport, createJevAheadOfModel } from "../extensions/jev-ahead-of-model/index.ts";
 
 if (process.argv.length !== 3 || !["--live", "--disabled"].includes(process.argv[2])) {
@@ -83,6 +85,7 @@ if (process.argv.length !== 3 || !["--live", "--disabled"].includes(process.argv
 				],
 			});
 			await resourceLoader.reload();
+			const sessionManager = await SessionManager.create(cwd, join(agentDir, "sessions"));
 			const { session } = await createAgentSession({
 				cwd,
 				agentDir,
@@ -91,7 +94,7 @@ if (process.argv.length !== 3 || !["--live", "--disabled"].includes(process.argv
 				resourceLoader,
 				modelRegistry: ModelRegistry.inMemory(authStorage),
 				model: faux.getModel(),
-				sessionManager: SessionManager.inMemory(cwd),
+				sessionManager,
 				tools: ["read", "find", "grep"],
 				disableMcp: true,
 				extensionWorkLimits: { firstRequestWaitMs: 1000 },
@@ -132,14 +135,28 @@ if (process.argv.length !== 3 || !["--live", "--disabled"].includes(process.argv
 					return fauxAssistantMessage("Synthetic workflow finished. This is not a model-quality evaluation.");
 				},
 			]);
+			let savedAudits: ReturnType<SessionManager["getEntries"]> = [];
 			try {
 				await session.bindExtensions({});
 				await session.prompt(
 					"Investigate why resume restores the wrong branch. Explain the cause without editing files.",
 				);
+				savedAudits = sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "custom" && entry.customType === AHEAD_AUDIT_TYPE);
 			} finally {
 				session.dispose();
 				await session.waitForClosed();
+			}
+			const reopened = await SessionManager.open(sessionManager.getSessionRef()!);
+			let auditRoundTrip = false;
+			try {
+				const restored = reopened
+					.getEntries()
+					.filter((entry) => entry.type === "custom" && entry.customType === AHEAD_AUDIT_TYPE);
+				auditRoundTrip = isDeepStrictEqual(savedAudits, restored) && restored.length === (enabled ? 1 : 0);
+			} finally {
+				await reopened.closePersistence();
 			}
 			console.log(
 				JSON.stringify(
@@ -151,6 +168,7 @@ if (process.argv.length !== 3 || !["--live", "--disabled"].includes(process.argv
 						cycles: report?.cycles,
 						evaluations: report?.evaluations,
 						boundaries: report?.boundaries,
+						audit: { sqliteRoundTrip: auditRoundTrip, requests: savedAudits.length },
 						limitation:
 							"Synthetic source and fixed main turns; measures wiring and availability, not reasoning savings or task quality.",
 					},
@@ -159,9 +177,10 @@ if (process.argv.length !== 3 || !["--live", "--disabled"].includes(process.argv
 				),
 			);
 			if (
-				enabled &&
-				(!report?.evaluations.some((call) => call.result.status === "ok") ||
-					!projections.some((projection) => projection.hasResumeSource))
+				!auditRoundTrip ||
+				(enabled &&
+					(!report?.evaluations.some((call) => call.result.status === "ok") ||
+						!projections.some((projection) => projection.hasResumeSource)))
 			)
 				process.exitCode = 1;
 		} finally {

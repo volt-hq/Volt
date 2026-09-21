@@ -18,7 +18,7 @@ For explicit noninteractive consent, add `--jev-ahead-of-model`. Loading the ext
 
 The tool allowlist enables `find` and `grep`, which are needed for broad repository discovery and are absent from Volt's default active tool set. Adjust the allowlist for your workflow. The extension does not activate tools itself; with only `read`, it can inspect skills and explicit paths but cannot discover other files.
 
-The TUI choice is runtime-only and resets on reload, tree navigation, or session replacement. The CLI flag and SDK `enabled: true` are explicit initial enablement for those runtimes. SDK `enabled: false` prevents command enablement. Nothing is persisted in session history.
+The TUI choice is runtime-only and resets on reload, tree navigation, or session replacement. The CLI flag and SDK `enabled: true` are explicit initial enablement for those runtimes. SDK `enabled: false` prevents command enablement. Audit data persists with the session; saved audits never restore consent.
 
 ## What Jev controls
 
@@ -76,6 +76,38 @@ All repository access uses managed native services and their active tool authori
 
 `/ahead report` is an in-memory diagnostic view containing relative candidate paths, scores, probabilities, operation outcomes, and validated usage/cost metadata. It does not include prompt/source bodies, keys, or raw provider errors. Host admission observations are not final-payload delivery receipts and do not establish that the model used the evidence. Reports retain the latest scope and up to eight request-boundary observations. No report command triggers inference or additional reads.
 
+## Persistent audit history
+
+After a request ends, use `/ahead history` to list the latest ten audited requests across the current session's branches. Use `/ahead audit` for the latest full audit, or `/ahead audit <entry-id>` for a specific one. These commands work after reopening the session with this extension loaded, even while Jev is disabled, and make no model or repository calls. History identifies in-memory SDK sessions as non-durable.
+
+Each `jev-ahead-audit` custom session entry records:
+
+- Session, request scope, runtime and branch identifiers, start/seal timestamps, and whether work was interrupted.
+- Each cycle/stage's exact bounded request JSON in `evaluations[].requestBody`, including the supplied state, questions and retention option. Evaluation start, dispatch and finish timestamps distinguish a local attempt from an HTTP call. Oversized inputs are rejected before capture; their bodies are omitted and the size failure is recorded.
+- Validated answers, complete probability distributions, input/output token counts, reported cost, HTTP status, elapsed time and request bytes. Missing provider metrics stay unknown. Credentials, HTTP headers and raw provider error bodies are excluded.
+- File selections and omissions, native operation outcomes, selected contribution text and evidence IDs, publication results, and host admission observations keyed by model-request attempt and publication cycle. A missing publication result means publication was not observed before sealing. These observations do not prove final payload delivery or model use.
+
+Audits contain the actual exported conversation, tool text, source and skill content, which can include sensitive material. They use the existing session retention and export behavior; deleting or exporting a session affects its audit data too. They are custom entries, not model messages, and are excluded from both the main model's context and later Jev conversation snapshots. `onReport` remains a metadata-only callback.
+
+One detached audit is appended when the foreground run ends, or at a safe shutdown/supersession boundary. Writing custom entries during preparation would move the canonical session cursor and invalidate prepared context. Pending calls are therefore buffered until sealing; an abrupt process crash before sealing or SQLite persistence can lose that request's audit. Work still running at sealing is marked `interrupted`, missing results remain unobserved, and late callbacks cannot mutate the saved record or write into another branch. Audit append failures warn without blocking the main response. Normal session close drains SQLite persistence.
+
+The records are in the existing `entries` table's `payload_json`, with `entry_type = 'custom'` and `customType = 'jev-ahead-audit'`. `/ahead history` shows the entry IDs. To inspect the database directly, locate the session's `sessions.sqlite` under `~/.volt/agent/sessions/` (or the configured agent directory) and run this read-only query:
+
+```sql
+SELECT session_id, entry_id, timestamp,
+       json_extract(payload_json, '$.data.requestId') AS request_id,
+       json_array_length(json_extract(payload_json, '$.data.evaluations')) AS evaluations,
+       json_extract(payload_json, '$.data.interrupted') AS interrupted,
+       json_extract(payload_json, '$.data') AS audit
+FROM entries
+WHERE entry_type = 'custom'
+  AND json_extract(payload_json, '$.customType') = 'jev-ahead-audit'
+ORDER BY timestamp DESC
+LIMIT 10;
+```
+
+The older `/jev` extension's `jev-context-call` entries remain metadata-only; this full audit applies to the `/ahead` pipeline.
+
 ## SDK integration
 
 ```typescript
@@ -97,7 +129,7 @@ const { session } = await createAgentSession({
   cwd,
   resourceLoader,
   tools: ["read", "find", "grep", "lsp"],
-  sessionManager: SessionManager.inMemory(cwd),
+  sessionManager: await SessionManager.create(cwd), // SQLite-backed audit history.
   extensionWorkLimits: { firstRequestWaitMs: 1000 },
 });
 try {
@@ -109,11 +141,11 @@ try {
 }
 ```
 
-Adapt the example import to your script location. Semantic navigation is optional and requires an available native LSP service. `fetch` is a trusted transport override for offline fixtures and must honor cancellation. Diagnostic callbacks must remain fast; callback failures are contained.
+Adapt the example import to your script location. Use `SessionManager.inMemory(cwd)` for a temporary session whose audits disappear on exit. Semantic navigation is optional and requires an available native LSP service. `fetch` is a trusted transport override for offline fixtures and must honor cancellation. Diagnostic callbacks must remain fast; callback failures are contained.
 
 ## Reproducible demonstration and tests
 
-The SDK demonstration creates an isolated synthetic workspace and skill. The main provider is scripted: four requests with three fixed 2.5-second work periods and ordinary read-tool checkpoints. These fixed delays allow observation of background preparation; the extension never introduces them. Live mode calls the real Jev endpoint, exports only the synthetic fixture, and prints decisions, per-call timing/usage, and which main-request projections contained prepared source. It cleans up its temporary workspace and uses an in-memory session.
+The SDK demonstration creates an isolated synthetic workspace and skill. The main provider is scripted: four requests with three fixed 2.5-second work periods and ordinary read-tool checkpoints. These fixed delays allow observation of background preparation; the extension never introduces them. Live mode calls the real Jev endpoint, exports only the synthetic fixture, and prints decisions, per-call timing/usage, and which main-request projections contained prepared source. It also closes and reopens its SQLite session to verify the audit round trip, then deletes the temporary workspace and database.
 
 ```bash
 # Repository root. Uses the same Jiti path mapping as Volt's source launcher.
@@ -125,9 +157,11 @@ cd packages/coding-agent
 node node_modules/vitest/dist/cli.js --run test/jev-ahead-of-model.test.ts test/suite/jev-ahead-of-model.test.ts
 ```
 
-`--live` is explicit consent to up to twelve paid Jev evaluations of synthetic data. It fails clearly when Gateway credentials are unavailable, and exits unsuccessfully if no evaluation succeeds or no source reaches a main-request projection. It is not a quality benchmark: the main responses are fixed, and their timing must not be presented as reasoning savings. The offline tests exercise four-stage selection and navigation, native source/skill admission, tool-driven refresh, consent, access controls, cancellation, finite answers, and bounded transport.
+`--live` is explicit consent to up to twelve paid Jev evaluations of synthetic data. It fails clearly when Gateway credentials are unavailable, and exits unsuccessfully if no evaluation succeeds, no source reaches a main-request projection, or its audit fails the SQLite round trip. It is not a quality benchmark: the main responses are fixed, and their timing must not be presented as reasoning savings. The offline tests also cover exact audit payloads and results, SQLite close/reopen, history commands without inference, interrupted work, branch isolation, and append failures.
 
 Validation on 2026-09-21: 34 targeted tests and the full repository check passed. The standalone SDK demo also completed with a substituted offline transport imposing 500 ms per evaluation: three cycles / nine evaluations, no initial prepared packet, then source evidence in all three later projections. Both enabled and disabled runs made exactly four scripted main requests.
+
+Audit validation on 2026-09-21: 40 targeted tests cover persistence and retrieval alongside the existing preparation contracts. The updated live demo completed nine HTTP 200 evaluations and recovered its audit unchanged after closing and reopening SQLite; the disabled demo recovered zero audits. Both made four scripted main requests.
 
 A subsequent live run using the existing Volt Gateway credential completed all nine evaluations successfully: **54 typed questions**, 11,032 reported input tokens, and 1,536 reported output tokens. Individual HTTP evaluation times ranged from **185 to 829 ms**, with a **255 ms median**. Gateway reported cost `0` for each call; this is observed metadata, not a promise of free future usage.
 

@@ -81,6 +81,35 @@ describe("Ahead Jev HTTP adapter", () => {
 		expect(fetch).not.toHaveBeenCalled();
 	});
 
+	it("captures only bounded request bodies and contains audit observer failures", async () => {
+		const observe = vi.fn(() => {
+			throw new Error("audit failure");
+		});
+		const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({ answers }));
+		const options = { fetch, zeroDataRetention: true };
+		const result = await evaluateAhead(
+			{},
+			questions,
+			async () => "private-key",
+			new AbortController().signal,
+			options,
+			observe,
+		);
+		expect(result.status).toBe("ok");
+		expect(observe).toHaveBeenCalledWith(fetch.mock.calls[0][1]?.body);
+		expect(JSON.stringify(observe.mock.calls)).not.toContain("private-key");
+		await evaluateAhead(
+			"界".repeat(30_000),
+			questions,
+			async () => "key",
+			new AbortController().signal,
+			options,
+			observe,
+		);
+		expect(observe).toHaveBeenCalledOnce();
+		expect(fetch).toHaveBeenCalledOnce();
+	});
+
 	it("contains upstream failures and never retries or weakens ZDR", async () => {
 		const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response("private error", { status: 429 }));
 		const result = await evaluateAhead({}, questions, async () => "key", new AbortController().signal, {

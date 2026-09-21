@@ -6,7 +6,9 @@ import type {
 	ExtensionWorkContribution,
 	ExtensionWorkStatus,
 	ExtensionWorkTaskHandle,
+	JsonValue,
 } from "@hansjm10/volt-coding-agent";
+import { AHEAD_AUDIT_TYPE, type AheadAudit, type AheadEvaluationAudit, auditText } from "./audit.ts";
 import { evaluateAhead, type JevResult, type JevTransportOptions } from "./client.ts";
 import { type AheadCycle, type AheadStage, type AheadState, boundedText, prepareAhead } from "./pipeline.ts";
 
@@ -17,9 +19,15 @@ export interface AheadReport {
 	cycles: AheadCycle[];
 	evaluations: Array<{ cycle: number; stage: AheadStage; questions: number; result: JevResult }>;
 	boundaries: Array<{
+		attemptId: string;
 		cause: string;
 		waitMs: number;
-		observation?: { at: string; evaluations: number; contributions: ExtensionWorkStatus["contributions"] };
+		observation?: {
+			at: string;
+			cycle?: number;
+			evaluations: number;
+			contributions: ExtensionWorkStatus["contributions"];
+		};
 	}>;
 	coalescedToolResults: number;
 	status: string;
@@ -39,6 +47,11 @@ interface Scope {
 	tools: AheadState["tools"];
 	pending: boolean;
 	stopped: boolean;
+	startedAt: string;
+	auditState: "collecting" | "appended" | "failed";
+	auditEvaluations: AheadEvaluationAudit[];
+	auditPublications: AheadAudit["publications"];
+	publishedCycle?: number;
 	handle?: ExtensionWorkTaskHandle;
 	projection?: { cutoff: number; promise: Promise<void>; release: () => void };
 }
@@ -114,8 +127,44 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				);
 		}
 
-		function stop(): void {
+		function stop(reason?: AheadAudit["reason"]): void {
 			if (!scope) return;
+			const current = scope;
+			// Custom entries move the canonical cursor. Seal once, only outside request collection.
+			// Never wait for an uncooperative transport or append its late results to another branch.
+			if (reason && current.auditState === "collecting") {
+				current.auditState = "failed";
+				try {
+					const snapshot = current.ctx.work!.snapshot;
+					const audit: AheadAudit = {
+						requestId: current.id,
+						sessionId: current.ctx.sessionManager.getSessionId(),
+						branchId: snapshot.branchId,
+						runtimeId: snapshot.runtimeId,
+						startedAt: current.startedAt,
+						sealedAt: new Date().toISOString(),
+						reason,
+						interrupted: current.handle !== undefined,
+						evaluations: current.auditEvaluations,
+						publications: current.auditPublications,
+						report: current.report,
+					};
+					try {
+						audit.finalContributions = volt.getWorkStatus().contributions;
+					} catch {
+						/* Host admission remains unobserved. */
+					}
+					// Drop undefined optional properties and detach the immutable audit from live callbacks.
+					volt.appendEntry(AHEAD_AUDIT_TYPE, JSON.parse(JSON.stringify(audit)) as Record<string, JsonValue>);
+					current.auditState = "appended";
+				} catch {
+					try {
+						current.ctx.ui.notify("Ahead audit could not be appended to the session.", "warning");
+					} catch {
+						/* A failing diagnostic UI must not prevent task cancellation. */
+					}
+				}
+			}
 			scope.stopped = true;
 			scope.pending = false;
 			scope.projection?.release();
@@ -177,6 +226,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				);
 			lines.push(
 				"Runtime-only report. Host admission observations are not final-payload receipts. Task usefulness and reasoning savings are unmeasured.",
+				`Audit: ${scope.auditState}. Use /ahead history after the request ends.`,
 			);
 			return lines.join("\n");
 		}
@@ -188,6 +238,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				if (boundary)
 					boundary.observation = {
 						at,
+						cycle: scope.publishedCycle,
 						evaluations: scope.report.evaluations.length,
 						contributions: volt.getWorkStatus().contributions,
 					};
@@ -232,13 +283,31 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 							state,
 							cycle,
 							async (stage, input, questions) => {
+								const call: AheadEvaluationAudit = {
+									cycle: cycle.number,
+									stage,
+									startedAt: new Date().toISOString(),
+									questions: Object.keys(questions).length,
+								};
+								current.auditEvaluations.push(call);
 								const result = await evaluateAhead(
 									input,
 									questions,
 									() => current.ctx.modelRegistry.getApiKeyForProvider("vercel-ai-gateway"),
 									task.signal,
-									options,
+									{
+										...options,
+										fetch: (url, init) => {
+											call.dispatchedAt = new Date().toISOString();
+											return (options.fetch ?? globalThis.fetch)(url, init);
+										},
+									},
+									(body) => {
+										call.requestBody = body;
+									},
 								);
+								call.finishedAt = new Date().toISOString();
+								call.result = result;
 								current.report.evaluations.push({
 									cycle: cycle.number,
 									stage,
@@ -249,6 +318,11 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 								return result;
 							},
 							async (contributions: ExtensionWorkContribution[]) => {
+								const publications: AheadAudit["publications"] = contributions.map((contribution) => ({
+									cycle: cycle.number,
+									contribution,
+								}));
+								current.auditPublications.push(...publications);
 								// Never replace a packet while the host may be validating the prior version.
 								while (
 									current.projection &&
@@ -266,11 +340,14 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 									}
 								}
 								if (task.signal.aborted || scope !== current || current.stopped) return;
+								current.publishedCycle = cycle.number;
 								for (let i = 0; i < 6; i++) task.context.remove(`ahead-${i}`);
-								for (const contribution of contributions) {
+								for (const publication of publications) {
+									const { contribution } = publication;
 									const result = task.context.put(contribution);
-									const publication = cycle.publications.find((item) => item.key === contribution.key);
-									if (publication) publication.status = result.status;
+									publication.result = result;
+									const reported = cycle.publications.find((item) => item.key === contribution.key);
+									if (reported) reported.status = result.status;
 								}
 							},
 						);
@@ -313,12 +390,13 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		volt.on("session_start", (_event, ctx) => reset(ctx));
 		volt.on("session_tree", (_event, ctx) => reset(ctx));
 		volt.on("session_shutdown", (_event, ctx) => {
-			stop();
+			stop("session_shutdown");
 			generation++;
 			scope = undefined;
 			if (ctx.mode === "tui") ctx.ui.setStatus(FLAG, undefined);
 		});
-		volt.on("agent_end", () => stop());
+		volt.on("before_agent_start", () => stop("superseded"));
+		volt.on("agent_end", () => stop("agent_end"));
 		volt.on("before_provider_request", () => releaseProjection("before_provider_request"));
 		volt.on("after_provider_response", () => releaseProjection("provider_response"));
 		// Some SDK providers have no payload hook. Actual assistant output also proves
@@ -335,6 +413,10 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 					ctx,
 					pending: false,
 					stopped: false,
+					startedAt: new Date().toISOString(),
+					auditState: "collecting",
+					auditEvaluations: [],
+					auditPublications: [],
 					tools: [],
 					report: { cycles: [], evaluations: [], boundaries: [], coalescedToolResults: 0, status: "starting" },
 				};
@@ -348,7 +430,11 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			});
 			const cutoff = performance.now() + (event.first ? event.waitAvailableMs : 0);
 			scope.projection = { cutoff, promise, release };
-			const boundary: AheadReport["boundaries"][number] = { cause: event.cause, waitMs: 0 };
+			const boundary: AheadReport["boundaries"][number] = {
+				attemptId: event.attemptId,
+				cause: event.cause,
+				waitMs: 0,
+			};
 			scope.report.boundaries.push(boundary);
 			if (scope.report.boundaries.length > 8) scope.report.boundaries.shift();
 			if (event.first && start(scope, "request")) boundary.waitMs = ctx.work.context.requestWait(1000);
@@ -369,13 +455,20 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			start(scope, "tools");
 		});
 		volt.registerCommand("ahead", {
-			description: "Control Jev Ahead of Model Work (on/off/status/report)",
+			description: "Control Jev Ahead of Model Work (on/off/status/report/history/audit)",
 			getArgumentCompletions: (prefix) =>
-				["on", "off", "status", "report"]
+				["on", "off", "status", "report", "history", "audit"]
 					.filter((value) => value.startsWith(prefix))
 					.map((value) => ({ value, label: value })),
 			handler: async (args, ctx) => {
 				const action = args.trim() || "status";
+				if (action === "history" || action === "audit" || action.startsWith("audit ")) {
+					ctx.ui.notify(
+						auditText(ctx, action === "history" ? undefined : action.slice(5).trim() || "latest"),
+						"info",
+					);
+					return;
+				}
 				if (action === "report") {
 					ctx.ui.notify(reportText(), "info");
 					return;
@@ -388,7 +481,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 					return;
 				}
 				if (action !== "on" && action !== "off") {
-					ctx.ui.notify("Usage: /ahead [on|off|status|report]", "warning");
+					ctx.ui.notify("Usage: /ahead [on|off|status|report|history|audit [entry-id]]", "warning");
 					return;
 				}
 				if (ctx.mode !== "tui") {
@@ -410,7 +503,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 							"Enable Ahead of Model Work with Jev?",
 							`Send bounded recent conversation, tool output, repository paths, source excerpts, and skill instructions to Vercel AI Gateway / TypeSafe AI. Content is not redacted and may contain secrets. Up to 12 evaluations per user request may incur cost. ${
 								options.zeroDataRetention ? "Zero Data Retention is required." : "Zero Data Retention is off."
-							} This choice lasts until reload, tree navigation, or session replacement.`,
+							} Exact evaluation inputs, results and selected excerpts are saved locally in the session audit. This choice lasts until reload, tree navigation, or session replacement.`,
 						);
 						if (!consent || opened !== generation) return;
 						if (ctx.getPreparationWait().waitMs === 0) await ctx.requestPreparationWait(1000);
@@ -418,7 +511,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 						if (opened !== generation) return;
 					}
 					enabled = action === "on";
-					if (!enabled) stop();
+					if (!enabled) stop("disabled");
 					status(ctx);
 					ctx.ui.notify(`Ahead: ${enabled ? "on" : "off"}. Runtime only.`, "info");
 				} finally {
