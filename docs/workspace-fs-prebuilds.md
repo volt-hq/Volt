@@ -28,9 +28,9 @@ gh workflow run build-workspace-fs-prebuilds.yml \
 ```
 
 The matrix uses native-architecture macOS, Windows, and Ubuntu runners. The two
-musl builds use Ubuntu's architecture-matched musl linker/runtime with Rust's
-static CRT disabled. Their Rust tests execute against musl, and their addons
-must also load in the pinned Node.js 22.19 Alpine container. Every target runs
+musl builds compile and test inside a digest-pinned Rust 1.97.1 Alpine container
+with Rust's static CRT disabled, rather than mixing Ubuntu's glibc toolchain
+with musl. Their addons must also load in the pinned Node.js 22.19 Alpine container. Every target runs
 Rust formatting, Clippy, and tests, and verifies its embedded source fingerprint
 and native exports before upload. No npm dependency installation is needed.
 
