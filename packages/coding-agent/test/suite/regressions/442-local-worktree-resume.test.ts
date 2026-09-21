@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -18,6 +18,7 @@ import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-
 import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
+import { createDaemonClient } from "../../../src/daemon/control-client.ts";
 import { startControlServer } from "../../../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../../../src/daemon/paths.ts";
 import * as daemonSpawn from "../../../src/daemon/spawn.ts";
@@ -143,6 +144,7 @@ async function fixture() {
 		factory,
 		requests,
 		ensureDaemon,
+		server,
 	};
 }
 
@@ -162,6 +164,181 @@ describe("#442 local archived-worktree resume", () => {
 		expect(git(f.record.path, "rev-parse", "HEAD")).toBe(git(f.source, "rev-parse", "HEAD"));
 		expect((await f.state.listWorktrees())[0].checkoutArchive).toBeUndefined();
 		expect(f.requests).toContain("worktree_restore");
+	});
+
+	it.each(["startup", "switch"])("finishes interrupted restoration before runtime %s", async (mode) => {
+		const f = await fixture();
+		const archived = (await f.state.listWorktrees())[0];
+		await f.state.upsertWorktree({
+			...archived,
+			checkoutArchive: { ...archived.checkoutArchive!, restoring: true },
+		});
+		git(f.source, "worktree", "add", "--no-checkout", f.record.path, f.record.branch);
+		expect(existsSync(join(f.record.path, "value.txt"))).toBe(false);
+		const runtime = await createAgentSessionRuntime(f.factory, {
+			cwd: mode === "startup" ? f.record.path : f.source,
+			agentDir: f.agentDir,
+			sessionManager: mode === "startup" ? await SessionManager.open(f.ref) : SessionManager.inMemory(f.source),
+		});
+		cleanups.push(() => runtime.dispose());
+		if (mode === "switch") await runtime.switchSession(f.ref);
+		expect(readFileSync(join(runtime.cwd, "value.txt"), "utf8")).toBe("base\n");
+		expect((await f.state.listWorktrees())[0].checkoutArchive).toBeUndefined();
+		await expect(f.manager.bindSession(f.workspace.name, f.record.id, f.ref.sessionId)).resolves.toBeUndefined();
+	});
+
+	it("protects startup and same-checkout replacements until switching away", async () => {
+		const f = await fixture();
+		const runtime = await createAgentSessionRuntime(
+			async (options) => {
+				if (options.cwd === f.record.path)
+					expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+						removed: false,
+						reason: "busy",
+					});
+				return f.factory(options);
+			},
+			{
+				cwd: f.record.path,
+				agentDir: f.agentDir,
+				sessionManager: await SessionManager.open(f.ref),
+			},
+		);
+		cleanups.push(() => runtime.dispose());
+		await runtime.newSession();
+		expect(await f.manager.create(f.workspace, { id: "blocked" })).toMatchObject({
+			ok: false,
+			error: "worktree_limit_reached",
+		});
+		await runtime.newSession({ cwd: f.source });
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.create(f.workspace, { id: "replacement" })).toMatchObject({ ok: true });
+		expect(existsSync(f.record.path)).toBe(false);
+	});
+
+	it("releases protection when runtime creation fails", async () => {
+		const f = await fixture();
+		await expect(
+			createAgentSessionRuntime(
+				async () => {
+					expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+						removed: false,
+						reason: "busy",
+					});
+					throw new Error("factory failed");
+				},
+				{
+					cwd: f.record.path,
+					agentDir: f.agentDir,
+					sessionManager: await SessionManager.open(f.ref),
+				},
+			),
+		).rejects.toThrow("factory failed");
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it("releases late restore completions on disconnect without releasing another owner's pin", async () => {
+		const f = await fixture();
+		const first = createDaemonClient({
+			socketPath: f.server.socketPath,
+			client: "cli",
+			version: "test",
+			reconnect: false,
+		});
+		const second = createDaemonClient({
+			socketPath: f.server.socketPath,
+			client: "cli",
+			version: "test",
+			reconnect: false,
+		});
+		cleanups.push(
+			() => first.close(),
+			() => second.close(),
+		);
+		const request = { type: "worktree_restore", path: f.record.path, sessionId: f.ref.sessionId } as const;
+		expect(await first.request(request)).toMatchObject({ type: "ok" });
+		const entered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const acquire = f.manager.acquireLocalSessionWorktree.bind(f.manager);
+		vi.spyOn(f.manager, "acquireLocalSessionWorktree").mockImplementationOnce(async (...args) => {
+			const release = await acquire(...args);
+			entered.resolve();
+			await finish.promise;
+			return release;
+		});
+		const pending = expect(second.request(request)).rejects.toThrow("daemon connection closed");
+		try {
+			await entered.promise;
+			await second.close();
+			await pending;
+			await vi.waitFor(() => expect(f.server.connections()).toHaveLength(1));
+		} finally {
+			finish.resolve();
+		}
+		await f.server.quiesce();
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		await first.close();
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it("retains protection until asynchronous runtime teardown finishes", async () => {
+		const f = await fixture();
+		const runtime = await createAgentSessionRuntime(f.factory, {
+			cwd: f.record.path,
+			agentDir: f.agentDir,
+			sessionManager: await SessionManager.open(f.ref),
+		});
+		cleanups.push(() => runtime.dispose());
+		const entered = Promise.withResolvers<void>();
+		const finish = Promise.withResolvers<void>();
+		const dispose = runtime.session.disposeSubagentToolManager.bind(runtime.session);
+		vi.spyOn(runtime.session, "disposeSubagentToolManager").mockImplementationOnce(async () => {
+			entered.resolve();
+			await finish.promise;
+			await dispose();
+		});
+		const closing = runtime.dispose();
+		try {
+			await entered.promise;
+			expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+				removed: false,
+				reason: "busy",
+			});
+		} finally {
+			finish.resolve();
+			await closing;
+		}
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
+	it("does not re-enter local restoration for a runtime owned by the same daemon process", async () => {
+		const f = await fixture();
+		const preparation = await f.manager.beginRuntimePreparation(f.workspace.name, f.record.id, f.ref.sessionId);
+		cleanups.push(() => preparation.release());
+		f.ensureDaemon.mockResolvedValue({
+			healthy: true,
+			state: "healthy",
+			spawned: false,
+			socketPath: f.server.socketPath,
+			pid: process.pid,
+		});
+		const runtime = await createAgentSessionRuntime(f.factory, {
+			cwd: f.record.path,
+			agentDir: f.agentDir,
+			sessionManager: await SessionManager.open(f.ref),
+		});
+		cleanups.push(() => runtime.dispose());
+		expect(f.requests).not.toContain("worktree_restore");
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
 	});
 
 	it.each([
@@ -224,7 +401,7 @@ describe("#442 local archived-worktree resume", () => {
 		}
 	});
 
-	it("restores CLI continuation before missing-cwd handling and provider startup", async () => {
+	it.each(["print", "json"])("protects CLI %s continuation through provider completion", async (mode) => {
 		const f = await fixture();
 		const previousCwd = process.cwd();
 		const previousExitCode = process.exitCode;
@@ -250,13 +427,19 @@ describe("#442 local archived-worktree resume", () => {
 		vi.stubEnv("VOLT_OFFLINE", "1");
 		vi.stubEnv("VOLT_SKIP_VERSION_CHECK", "1");
 		const selector = vi.spyOn(startupUi, "showStartupSelector");
-		f.harness.setResponses([fauxAssistantMessage("Restored")]);
+		let reclamation: Awaited<ReturnType<WorktreeManager["create"]>> | undefined;
+		f.harness.setResponses([
+			async () => {
+				reclamation = await f.manager.create(f.workspace, { id: "during-prompt" });
+				return fauxAssistantMessage("Restored");
+			},
+		]);
 		try {
 			process.chdir(f.source);
 			Object.defineProperty(process.stdin, "isTTY", { configurable: true, value: true });
 			await main([
 				"--continue",
-				"--print",
+				...(mode === "print" ? ["--print"] : ["--mode", "json"]),
 				"--offline",
 				"--no-approve",
 				"--no-extensions",
@@ -275,6 +458,9 @@ describe("#442 local archived-worktree resume", () => {
 			expect(existsSync(f.record.path)).toBe(true);
 			expect(f.harness.getPendingResponseCount()).toBe(0);
 			expect(process.exitCode).not.toBe(1);
+			expect(reclamation).toMatchObject({ ok: false, error: "worktree_limit_reached" });
+			await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+			expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
 		} finally {
 			restoreStdout();
 			stopThemeWatcher();

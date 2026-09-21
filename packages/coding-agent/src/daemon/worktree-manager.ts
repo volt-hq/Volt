@@ -16,7 +16,7 @@ import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
 import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
-import type { ControlConnection } from "./control-server.ts";
+import { type ControlConnection, retainControlConnectionResource } from "./control-server.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
 import { hasRetainedWorktreeCheckout, WorktreeLifecycle, WorktreeRestorePreflightError } from "./worktree-lifecycle.ts";
@@ -333,6 +333,7 @@ export class WorktreeManager {
 	private readonly flushState: (() => Promise<void>) | undefined;
 	private readonly now: () => number;
 	private readonly runtimePreparations = new Map<string, symbol>();
+	private readonly localRuntimeReservations = new Map<string, number>();
 	private readonly reviewSourceReservations = new Map<string, Set<symbol>>();
 	private readonly lifecycle: WorktreeLifecycle;
 
@@ -352,7 +353,9 @@ export class WorktreeManager {
 			checkoutPath: (workspace, id) => getWorktreeCheckoutPath(this.agentDir, workspace.path, id),
 			sourcePath: (workspace, record) => this.resolveRecordSourceRootPath(workspace, record),
 			isPreparing: (workspaceName, id) =>
-				this.isRuntimePreparing(workspaceName, id) || this.reviewSourceReservations.has(`${workspaceName}\0${id}`),
+				this.isRuntimePreparing(workspaceName, id) ||
+				this.localRuntimeReservations.has(`${workspaceName}\0${id}`) ||
+				this.reviewSourceReservations.has(`${workspaceName}\0${id}`),
 			hasActiveSession: this.hasActiveRuntimeForSession,
 			reserveSessions: this.reserveSessionsForRemoval,
 			storedSessionIds: async (workspace, record) => {
@@ -1049,7 +1052,10 @@ export class WorktreeManager {
 							},
 						};
 					}
-					if (this.runtimePreparations.has(`${current.workspace.name}\0${worktreeId}`)) {
+					if (
+						this.runtimePreparations.has(`${current.workspace.name}\0${worktreeId}`) ||
+						this.localRuntimeReservations.has(`${current.workspace.name}\0${worktreeId}`)
+					) {
 						return { result: { ok: false, error: "worktree_busy" } };
 					}
 					// Preparation reserves the checkout before session binding. Check under the same
@@ -1300,8 +1306,7 @@ export class WorktreeManager {
 		return { removed: true };
 	}
 
-	/** Lookup used by conversation open/resume and relay preamble resolution. */
-	async resolveSessionWorktree(
+	private async findSessionWorktree(
 		workspaceName: string,
 		sessionId: string,
 		expectedCwd?: string,
@@ -1311,7 +1316,43 @@ export class WorktreeManager {
 		if (record && expectedCwd !== undefined && !isPathContained(record.path, expectedCwd)) {
 			throw new Error("Stored session cwd does not match its managed worktree binding");
 		}
+		return record;
+	}
+
+	/** Lookup used by conversation open/resume and relay preamble resolution. */
+	async resolveSessionWorktree(
+		workspaceName: string,
+		sessionId: string,
+		expectedCwd?: string,
+	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		const record = await this.findSessionWorktree(workspaceName, sessionId, expectedCwd);
 		return record?.checkoutArchive ? this.restoreForResume(workspaceName, record.id) : record;
+	}
+
+	/** Restore and publish a local runtime pin under the same lock used by reclamation. */
+	async acquireLocalSessionWorktree(workspaceName: string, sessionId: string, cwd: string): Promise<() => void> {
+		const record = await this.findSessionWorktree(workspaceName, sessionId, cwd);
+		if (!record) throw new Error("The session has no managed worktree binding");
+		// Preparation restores and reserves under the lifecycle lock; publication
+		// replaces that protection with the local runtime pin without a gap.
+		const preparation = await this.beginRuntimePreparation(workspaceName, record.id, sessionId);
+		try {
+			return await preparation.publish(() => {
+				if (!existsSync(cwd)) throw new Error("The session's managed checkout could not be restored");
+				const key = `${workspaceName}\0${record.id}`;
+				this.localRuntimeReservations.set(key, (this.localRuntimeReservations.get(key) ?? 0) + 1);
+				let released = false;
+				return () => {
+					if (released) return;
+					released = true;
+					const remaining = this.localRuntimeReservations.get(key)! - 1;
+					if (remaining === 0) this.localRuntimeReservations.delete(key);
+					else this.localRuntimeReservations.set(key, remaining);
+				};
+			});
+		} finally {
+			await preparation.release();
+		}
 	}
 
 	/**
@@ -1954,14 +1995,12 @@ export async function handleWorktreeControlRequest(
 		}
 		if (request.type === "worktree_restore") {
 			try {
-				const restored = await hooks.manager.resolveSessionWorktree(
+				const release = await hooks.manager.acquireLocalSessionWorktree(
 					workspace.name,
 					request.sessionId,
 					request.path,
 				);
-				if (!restored || !existsSync(request.path)) {
-					throw new Error("The session's managed checkout is missing and could not be restored");
-				}
+				retainControlConnectionResource(connection, release);
 				connection.send({ type: "ok", id: request.id });
 			} catch (error) {
 				connection.send({

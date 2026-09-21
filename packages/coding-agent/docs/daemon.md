@@ -302,6 +302,12 @@ Cleanup policies live in `state.json` under `settings.worktreeCleanup`:
   recorded commit; a moved branch or changed repository fails explicitly rather
   than redirecting the session or resetting user work. Archived records remain
   listed with `available:false` until restored and do not consume checkout capacity.
+- Local resume checks archive recovery state even when the checkout directory
+  already exists. Interactive, print, and JSON runtimes retain a local control
+  connection that pins the checkout until session teardown; startup failures
+  release that protection. The local `worktree_restore` request restores and
+  acquires this connection-owned protection before reporting success. Closing
+  the connection releases it, including when restoration finishes after disconnect.
 - Active runtimes/leases, pending review launches, runtime preparations, locked
   checkouts, dirty/untracked/ignored files, submodules, and ambiguous ownership
   block reclamation. Adopted checkouts and older agent records without disposable

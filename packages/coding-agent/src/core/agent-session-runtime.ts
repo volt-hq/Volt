@@ -1,7 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { restoreLocalSessionWorktree } from "../daemon/session-worktree.ts";
+import {
+	closeLocalSessionManager,
+	releaseLocalSessionWorktree,
+	restoreLocalSessionWorktree,
+	retainLocalSessionWorktree,
+} from "../daemon/session-worktree.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -237,7 +242,7 @@ function sessionRefsEqual(left: SessionReference, right: SessionReference): bool
 
 async function closeOwnedSessionManager(manager: SessionManager, error: unknown, message: string): Promise<never> {
 	try {
-		await manager.closePersistence();
+		await closeLocalSessionManager(manager);
 	} catch (closeError) {
 		throw new AggregateError([error, closeError], message);
 	}
@@ -258,6 +263,11 @@ async function finalizeRuntimeOwnedSession(
 	}
 	try {
 		await finalizeSession();
+	} catch (error) {
+		errors.push(error);
+	}
+	try {
+		await releaseLocalSessionWorktree(session.sessionManager);
 	} catch (error) {
 		errors.push(error);
 	}
@@ -869,6 +879,7 @@ export class AgentSessionRuntime {
 							sessionId,
 							cwd: options.sessionManager.getCwd(),
 						});
+				retainLocalSessionWorktree(this.session.sessionManager, options.sessionManager);
 				let invalidated = false;
 				let created: CreateAgentSessionRuntimeResult | undefined;
 				let applied = false;
@@ -1949,6 +1960,7 @@ export async function createAgentSessionRuntime(
 		} catch (cleanupError) {
 			cleanupErrors.push(cleanupError);
 		}
+		await releaseLocalSessionWorktree(options.sessionManager);
 		if (cleanupErrors.length > 0) {
 			throw new AggregateError(
 				[error, ...cleanupErrors],
