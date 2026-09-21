@@ -133,6 +133,8 @@ test("workflow is manual, read-only, SHA-pinned and builds every native target b
 	for (const entry of matrix) assert.equal(entry["rust-target"], targets[entry.target].rust);
 	for (const job of Object.values(workflow.jobs)) {
 		assert.deepEqual(job.permissions, { contents: "read" });
+		// GitHub evaluates job-level env before the runner context is available.
+		for (const value of Object.values(job.env ?? {})) assert.doesNotMatch(String(value), /runner\./);
 		for (const step of job.steps) {
 			if (step.uses) assert.match(step.uses, /^actions\/[a-z-]+@[0-9a-f]{40}$/);
 			if (step.uses?.startsWith("actions/checkout@")) {
@@ -143,8 +145,13 @@ test("workflow is manual, read-only, SHA-pinned and builds every native target b
 	}
 	const download = workflow.jobs.assemble.steps.find((step) => step.uses?.startsWith("actions/download-artifact@"));
 	assert.deepEqual(download.with, {
-		pattern: "workspace-fs-prebuild-*", path: "${{ env.INPUT_DIRECTORY }}", "merge-multiple": false,
+		pattern: "workspace-fs-prebuild-*", path: "${{ runner.temp }}/native-inputs", "merge-multiple": false,
 	});
+	const muslBuild = workflow.jobs.build.steps.find((step) => step.name === "Build and test with the native musl toolchain");
+	assert.match(muslBuild.env.RUST_IMAGE, /^rust:1\.97\.1-alpine@sha256:[0-9a-f]{64}$/);
+	assert.equal(muslBuild.if, "endsWith(matrix.target, '-musl')");
+	assert.equal(workflow.jobs.build.env.CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER, undefined);
+	assert.equal(workflow.jobs.build.env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER, undefined);
 	const musl = workflow.jobs.build.steps.find((step) => step.name.startsWith("Load and stage musl"));
 	assert.match(musl.env.NODE_IMAGE, /^node:22\.19\.0-alpine@sha256:[0-9a-f]{64}$/);
 	assert.equal(musl.if, "endsWith(matrix.target, '-musl')");
