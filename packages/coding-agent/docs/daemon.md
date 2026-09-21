@@ -291,13 +291,36 @@ Cleanup policies live in `state.json` under `settings.worktreeCleanup`:
 { "worktreeCleanup": { "retention": { "enabled": true, "ttlMs": 3600000 }, "pruneOnStart": true } }
 ```
 
-- `retention` (off by default): after a worktree-bound runtime is disposed,
-  remove the worktree once the TTL expires — but only when it is clean and its
-  branch is fully merged into the base ref. Skips are recorded in the audit
-  log as `worktree_retention_skipped_dirty`; uncommitted work is never
-  deleted.
+- `retention` (on by default, one hour): reclaim inactive, disposable checkouts
+  after their runtime is disposed. Deadlines survive daemon restarts, and skipped
+  checkouts are retried. Clean review snapshots at their recorded PR head and
+  clean agent branches fully merged into their recorded base are eligible.
+  Before refusing a new checkout at the 16-checkout limit, Volt also attempts
+  reclamation regardless of the retention timer setting.
+- Automatic reclamation preserves branches, exact commits, session bindings,
+  transcripts, and review receipts. Resume recreates the same checkout at the
+  recorded commit; a moved branch or changed repository fails explicitly rather
+  than redirecting the session or resetting user work. Archived records remain
+  listed with `available:false` until restored and do not consume checkout capacity.
+- Local resume checks archive recovery state even when the checkout directory
+  already exists. Interactive, print, and JSON runtimes retain a local control
+  connection that pins the checkout until session teardown; startup failures
+  release that protection. The local `worktree_restore` request restores and
+  acquires this connection-owned protection before reporting success. Closing
+  the connection releases it, including when restoration finishes after disconnect.
+- Active runtimes/leases, pending review launches, runtime preparations, locked
+  checkouts, dirty/untracked/ignored files, submodules, and ambiguous ownership
+  block reclamation. Adopted checkouts and older agent records without disposable
+  provenance are retained. Automatic cleanup never forces deletion or deletes
+  branches. Reclamation and skip reasons appear in the audit log.
 - `pruneOnStart` (default `true`): reconcile worktree records and checkouts
-  during daemon startup.
+  during daemon startup, retaining archived records and their session bindings.
+
+If every checkout is protected, `worktree_limit_reached` means checkout capacity,
+not a GitHub-access problem. Finish active sessions, inspect
+`volt remote worktree list --workspace <name>`, preserve or merge outstanding work,
+and explicitly remove only checkouts you no longer need before retrying. Do not
+use `--force` as routine capacity recovery.
 
 Downgrade caveat: older daemons drop the `worktrees` state collection on
 their next write. Checkouts survive on disk as orphans; re-upgrading and

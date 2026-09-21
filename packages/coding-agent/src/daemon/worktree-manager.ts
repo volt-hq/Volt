@@ -11,14 +11,17 @@ import {
 	isIrohRemoteWorktreeParentWorkspaceNotFoundError,
 	isIrohRemoteWorktreePersistenceError,
 } from "../core/remote/iroh/state-manager.ts";
-import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
+import { getDefaultSessionDirPath, SessionManager, type SessionReference } from "../core/session-manager.ts";
+import type { NativeFileLock } from "../core/workspace-fs/native-loader.ts";
 import { spawnProcess, waitForChildProcess } from "../utils/child-process.ts";
 import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
 import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
 import type { ControlRequest, ControlWorktreeStatus } from "./control-protocol.ts";
-import type { ControlConnection } from "./control-server.ts";
+import { type ControlConnection, retainControlConnectionResource } from "./control-server.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
 import { resolveWorkspaceDirectory, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
+import { hasRetainedWorktreeCheckout, WorktreeLifecycle, WorktreeRestorePreflightError } from "./worktree-lifecycle.ts";
+import { tryAcquireWorktreeLock } from "./worktree-lock.ts";
 
 /** join(agentDir, "worktrees") — sibling of sessions/, daemon/, trust.json. */
 export function getWorktreesRoot(agentDir: string): string {
@@ -199,6 +202,16 @@ export type WorktreeError =
 	| "nested_git_repository_unsupported"
 	| "git_failed";
 
+export class WorktreeCapacityError extends Error {
+	readonly code = "worktree_limit_reached";
+
+	constructor() {
+		super(
+			"Worktree capacity exhausted. Finish active sessions or inspect protected checkouts with volt remote worktree list before resuming.",
+		);
+	}
+}
+
 export type WorktreeGitRunner = (
 	args: string[],
 	cwd: string,
@@ -322,6 +335,9 @@ export class WorktreeManager {
 	private readonly flushState: (() => Promise<void>) | undefined;
 	private readonly now: () => number;
 	private readonly runtimePreparations = new Map<string, symbol>();
+	private readonly localRuntimeReservations = new Map<string, number>();
+	private readonly reviewSourceReservations = new Map<string, Set<symbol>>();
+	private readonly lifecycle: WorktreeLifecycle;
 
 	constructor(options: WorktreeManagerOptions) {
 		this.agentDir = options.agentDir;
@@ -333,6 +349,149 @@ export class WorktreeManager {
 		this.reserveSessionsForRemoval = options.reserveSessionsForRemoval;
 		this.flushState = options.flushState;
 		this.now = options.now ?? Date.now;
+		this.lifecycle = new WorktreeLifecycle({
+			agentDir: this.agentDir,
+			stateManager: this.stateManager,
+			auditLogger: this.auditLogger,
+			checkoutPath: (workspace, id) => getWorktreeCheckoutPath(this.agentDir, workspace.path, id),
+			sourcePath: (workspace, record) => this.resolveRecordSourceRootPath(workspace, record),
+			isPreparing: (workspaceName, id) =>
+				this.isRuntimePreparing(workspaceName, id) ||
+				this.localRuntimeReservations.has(`${workspaceName}\0${id}`) ||
+				this.reviewSourceReservations.has(`${workspaceName}\0${id}`),
+			hasActiveSession: this.hasActiveRuntimeForSession,
+			reserveSessions: this.reserveSessionsForRemoval,
+			storedSessionIds: async (workspace, record) => {
+				const sessionDir = getDefaultSessionDirPath(workspace.path, this.agentDir);
+				if (!existsSync(sessionDir)) return [];
+				const sessions = await SessionManager.list(workspace.path, sessionDir, undefined, {
+					includeMessageFreeDurable: true,
+				});
+				return sessions.filter((session) => isPathContained(record.path, session.cwd)).map((session) => session.id);
+			},
+			now: this.now,
+		});
+	}
+
+	/** Reclaim one checkout, then retry admission under the lifecycle lock. */
+	async create(
+		workspace: IrohRemoteWorkspace,
+		options: Parameters<WorktreeManager["createExclusive"]>[1] = {},
+	): Promise<WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>> {
+		for (let attempt = 0; ; attempt++) {
+			const result = await this.createExclusive(workspace, options);
+			if (result.ok || result.error !== "worktree_limit_reached" || attempt >= this.maxWorktreesPerWorkspace)
+				return result;
+			options.signal?.throwIfAborted();
+			options.assertCurrent?.();
+			if (!(await this.reclaimCapacity(workspace.name, undefined, options.prReviewLaunch?.placement.sourceCwd)))
+				return result;
+		}
+	}
+
+	private async reclaimCapacity(workspaceName: string, excludedId?: string, sourceCwd?: string): Promise<boolean> {
+		const records = await this.stateManager.listWorktrees(workspaceName);
+		for (const record of records.sort((a, b) => (a.inactiveAt ?? a.createdAt) - (b.inactiveAt ?? b.createdAt))) {
+			if (
+				record.id === excludedId ||
+				!hasRetainedWorktreeCheckout(record) ||
+				(sourceCwd !== undefined && isPathContained(record.path, sourceCwd))
+			)
+				continue;
+			if ((await this.lifecycle.archive(workspaceName, record.id)).removed) return true;
+		}
+		return false;
+	}
+
+	async archiveDisposable(
+		workspaceName: string,
+		id: string,
+	): Promise<{ removed: true } | { removed: false; reason: string }> {
+		return this.lifecycle.archive(workspaceName, id);
+	}
+
+	async markWorktreeInactive(workspaceName: string, id: string): Promise<void> {
+		await this.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async ({ worktrees }) => {
+			const record = worktrees.find((entry) => entry.id === id);
+			return { result: undefined, ...(record ? { worktree: { ...record, inactiveAt: this.now() } } : {}) };
+		});
+	}
+
+	private async restoreForResume(
+		workspaceName: string,
+		id: string,
+		preparation?: { sessionId?: string } & ({ token: symbol } | { publishLocalPin: () => void }),
+	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		for (let attempt = 0; ; attempt++) {
+			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<
+				| { capacity: true }
+				| {
+						capacity: false;
+						retry?: boolean;
+						record?: IrohRemoteWorkspaceWorktree;
+						error?: WorktreeRestorePreflightError;
+				  }
+			>(workspaceName, async (current) => {
+				const record = current.worktrees.find((entry) => entry.id === id);
+				if (!record) return { result: { capacity: false } };
+				const key = `${workspaceName}\0${id}`;
+				if (
+					preparation &&
+					(this.runtimePreparations.has(key) ||
+						record.prReviewLaunches?.some(
+							(launch) => launch.sessionGeneration === undefined && launch.sessionId !== preparation.sessionId,
+						))
+				)
+					throw new Error(`Worktree ${id} is unavailable for runtime preparation`);
+				if (
+					!hasRetainedWorktreeCheckout(record) &&
+					current.worktrees.filter(hasRetainedWorktreeCheckout).length >= this.maxWorktreesPerWorkspace
+				)
+					return { result: { capacity: true } };
+				if (record.checkoutArchive && !hasRetainedWorktreeCheckout(record)) {
+					return {
+						result: { capacity: false, retry: true },
+						worktree: { ...record, checkoutArchive: { ...record.checkoutArchive, restoring: true } },
+					};
+				}
+				let restored: IrohRemoteWorkspaceWorktree;
+				try {
+					restored = await this.lifecycle.restore(current.workspace, record);
+				} catch (error) {
+					if (
+						error instanceof WorktreeRestorePreflightError &&
+						record.checkoutArchive?.restoring &&
+						!existsSync(record.path) &&
+						!existsSync(record.checkoutArchive.quarantinePath)
+					) {
+						// Persist the released reservation before surfacing the failure. Never clear
+						// recovery intent once checkout mutation has begun or preserved data exists.
+						const { restoring: _restoring, ...checkoutArchive } = record.checkoutArchive;
+						return { result: { capacity: false, error }, worktree: { ...record, checkoutArchive } };
+					}
+					throw error;
+				}
+				if (preparation && !existsSync(restored.path))
+					throw new Error(`Worktree ${id} is unavailable for runtime preparation`);
+				return {
+					result: { capacity: false, record: restored },
+					worktree: restored,
+					afterPersistWhileLocked: async () => {
+						if (preparation) {
+							if ("token" in preparation) this.runtimePreparations.set(key, preparation.token);
+							else preparation.publishLocalPin();
+						}
+					},
+				};
+			});
+			if (!result.capacity) {
+				if (result.error) throw result.error;
+				if (result.retry) continue;
+				return result.record;
+			}
+			if (attempt >= this.maxWorktreesPerWorkspace || !(await this.reclaimCapacity(workspaceName, id)))
+				throw new WorktreeCapacityError();
+		}
 	}
 
 	private async quarantineCheckout(checkoutPath: string, worktreeId: string): Promise<string> {
@@ -370,7 +529,7 @@ export class WorktreeManager {
 	}
 
 	/** git worktree add; persists the record durably after git succeeds. */
-	async create(
+	private async createExclusive(
 		workspace: IrohRemoteWorkspace,
 		options: {
 			id?: string;
@@ -400,7 +559,7 @@ export class WorktreeManager {
 			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<
 				WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>
 			>(workspace.name, async ({ workspace: registeredWorkspace, worktrees: existing }) => {
-				if (existing.length >= this.maxWorktreesPerWorkspace) {
+				if (existing.filter(hasRetainedWorktreeCheckout).length >= this.maxWorktreesPerWorkspace) {
 					return { result: { ok: false, error: "worktree_limit_reached" } };
 				}
 				const checkoutPath = getWorktreeCheckoutPath(this.agentDir, registeredWorkspace.path, id);
@@ -479,6 +638,7 @@ export class WorktreeManager {
 					branch,
 					...(recordedBaseRef === undefined ? {} : { baseRef: recordedBaseRef }),
 					createdAt: this.now(),
+					disposable: true,
 					sessionIds: [],
 					...(options.prReviewLaunch ? { prReviewLaunches: [structuredClone(options.prReviewLaunch)] } : {}),
 				};
@@ -517,7 +677,7 @@ export class WorktreeManager {
 			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<
 				WorktreeResult<{ worktree: IrohRemoteWorkspaceWorktree }>
 			>(workspace.name, async ({ workspace: registeredWorkspace, worktrees: existing }) => {
-				if (existing.length >= this.maxWorktreesPerWorkspace) {
+				if (existing.filter(hasRetainedWorktreeCheckout).length >= this.maxWorktreesPerWorkspace) {
 					return { result: { ok: false, error: "worktree_limit_reached" } };
 				}
 
@@ -880,6 +1040,7 @@ export class WorktreeManager {
 		let preservedRecovery = false;
 		let cleanRecoveryPath: string | undefined;
 		let releaseSessionRemoval: (() => void) | undefined;
+		let removalLock: NativeFileLock | undefined;
 		try {
 			const result = await this.stateManager.runWorkspaceWorktreeLifecycle<WorktreeResult<Record<never, never>>>(
 				workspace.name,
@@ -888,7 +1049,20 @@ export class WorktreeManager {
 					if (!record) {
 						return { result: { ok: false, error: "worktree_not_found" } };
 					}
-					if (this.runtimePreparations.has(`${current.workspace.name}\0${worktreeId}`)) {
+					if (record.checkoutArchive && existsSync(record.checkoutArchive.quarantinePath)) {
+						return {
+							result: {
+								ok: false,
+								error: "worktree_dirty",
+								detail:
+									"Interrupted cleanup preserved checkout data; resume the bound session before removing it.",
+							},
+						};
+					}
+					if (
+						this.runtimePreparations.has(`${current.workspace.name}\0${worktreeId}`) ||
+						this.localRuntimeReservations.has(`${current.workspace.name}\0${worktreeId}`)
+					) {
 						return { result: { ok: false, error: "worktree_busy" } };
 					}
 					// Preparation reserves the checkout before session binding. Check under the same
@@ -902,6 +1076,8 @@ export class WorktreeManager {
 							return { result: { ok: false, error: "worktree_busy" } };
 						}
 					}
+					removalLock = tryAcquireWorktreeLock(this.agentDir, record.path, false);
+					if (!removalLock) return { result: { ok: false, error: "worktree_busy" } };
 					const sourceRootPath = await this.resolveRecordSourceRootPath(current.workspace, record);
 					if (existsSync(record.path)) {
 						if (sourceRootPath === undefined) {
@@ -990,7 +1166,11 @@ export class WorktreeManager {
 			}
 			throw error;
 		} finally {
-			releaseSessionRemoval?.();
+			try {
+				releaseSessionRemoval?.();
+			} finally {
+				removalLock?.close();
+			}
 		}
 	}
 
@@ -1040,7 +1220,7 @@ export class WorktreeManager {
 				const sourceRootPath = await this.resolveRecordSourceRootPath(current.workspace, record);
 				if (signal?.aborted) return outcome();
 				if (sourceRootPath !== undefined) sourceRootPaths.add(sourceRootPath);
-				if (!existsSync(record.path)) removedRecords.push(record.id);
+				if (!record.checkoutArchive && !existsSync(record.path)) removedRecords.push(record.id);
 			}
 			const parentSourceRootPath = await this.resolveRecordSourceRootPath(current.workspace, {
 				id: "root",
@@ -1053,18 +1233,28 @@ export class WorktreeManager {
 			if (signal?.aborted) return outcome();
 			if (parentSourceRootPath !== undefined) sourceRootPaths.add(parentSourceRootPath);
 			const workspaceDir = getWorkspaceWorktreesDir(this.agentDir, current.workspace.path);
-			const recordedPaths = new Set(current.worktrees.map((record) => resolve(record.path)));
+			const recordedPaths = new Set(
+				current.worktrees.flatMap((record) => [
+					resolve(record.path),
+					...(record.checkoutArchive ? [resolve(record.checkoutArchive.quarantinePath)] : []),
+				]),
+			);
 			if (existsSync(workspaceDir)) {
 				for (const entry of await readdir(workspaceDir, { withFileTypes: true })) {
 					if (signal?.aborted) return outcome();
 					if (!entry.isDirectory() || entry.name.includes(".orphan-")) continue;
 					const entryPath = resolve(join(workspaceDir, entry.name));
 					if (recordedPaths.has(entryPath)) continue;
+					let removalLock: NativeFileLock | undefined;
 					try {
+						removalLock = tryAcquireWorktreeLock(this.agentDir, entryPath, false);
+						if (!removalLock) continue;
 						await rename(entryPath, `${entryPath}.orphan-${this.now()}`);
 						orphanCheckouts.push(entry.name);
 					} catch {
 						// Quarantine is best-effort; a busy directory stays put for the next prune.
+					} finally {
+						removalLock?.close();
 					}
 				}
 			}
@@ -1134,14 +1324,89 @@ export class WorktreeManager {
 		return { removed: true };
 	}
 
+	private async findSessionWorktree(
+		workspaceName: string,
+		sessionId: string,
+		expectedCwd?: string,
+	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
+		const bound = await this.stateManager.findWorktreeForSession(workspaceName, sessionId);
+		const record = bound ?? (await this.resolveSessionWorktreeByStoredCwd(workspaceName, sessionId));
+		if (record && expectedCwd !== undefined && !isPathContained(record.path, expectedCwd)) {
+			throw new Error("Stored session cwd does not match its managed worktree binding");
+		}
+		return record;
+	}
+
 	/** Lookup used by conversation open/resume and relay preamble resolution. */
 	async resolveSessionWorktree(
 		workspaceName: string,
 		sessionId: string,
+		expectedCwd?: string,
 	): Promise<IrohRemoteWorkspaceWorktree | undefined> {
-		const bound = await this.stateManager.findWorktreeForSession(workspaceName, sessionId);
-		if (bound) return bound;
-		return this.resolveSessionWorktreeByStoredCwd(workspaceName, sessionId);
+		const record = await this.findSessionWorktree(workspaceName, sessionId, expectedCwd);
+		return record?.checkoutArchive ? this.restoreForResume(workspaceName, record.id) : record;
+	}
+
+	/** Restore and publish a local runtime pin under the same lock used by reclamation. */
+	async acquireLocalSessionWorktree(
+		workspaceName: string,
+		sessionRef: SessionReference,
+		cwd: string,
+	): Promise<() => void> {
+		// Local sessions can live in checkout-keyed or custom stores. Validate the
+		// exact store and generation even when an ID-only daemon binding exists.
+		const session = await SessionManager.open(sessionRef);
+		let storedCwd: string;
+		try {
+			storedCwd = session.getCwd();
+		} finally {
+			await session.closePersistence();
+		}
+		const cwdReal = await realpathOrResolve(storedCwd);
+		if (!isSamePath(cwdReal, await realpathOrResolve(cwd)))
+			throw new Error("Local session cwd does not match its stored cwd");
+		const worktrees = await this.stateManager.listWorktrees(workspaceName);
+		let record: IrohRemoteWorkspaceWorktree | undefined;
+		let matchedPathLength = -1;
+		for (const worktree of worktrees) {
+			const checkoutPath = await realpathOrResolve(worktree.path);
+			if (isPathContained(checkoutPath, cwdReal) && checkoutPath.length > matchedPathLength) {
+				record = worktree;
+				matchedPathLength = checkoutPath.length;
+			}
+		}
+		if (!record) throw new Error("The session cwd is not inside a daemon-managed worktree");
+		const bound = await this.stateManager.findWorktreeForSession(workspaceName, sessionRef.sessionId);
+		if (bound && bound.id !== record.id)
+			throw new Error("Stored session cwd does not match its managed worktree binding");
+		// Do not turn a store/generation-qualified local reference into an ID-only
+		// durable binding. This connection owns a checkout pin, not a conversation lease.
+		// Publish each shared pin after restoration is persisted, before releasing
+		// the lifecycle lock. Local callers must not compete for an exclusive token.
+		const key = `${workspaceName}\0${record.id}`;
+		let release: (() => void) | undefined;
+		try {
+			await this.restoreForResume(workspaceName, record.id, {
+				sessionId: sessionRef.sessionId,
+				publishLocalPin: () => {
+					this.localRuntimeReservations.set(key, (this.localRuntimeReservations.get(key) ?? 0) + 1);
+					let released = false;
+					release = () => {
+						if (released) return;
+						released = true;
+						const remaining = this.localRuntimeReservations.get(key)! - 1;
+						if (remaining === 0) this.localRuntimeReservations.delete(key);
+						else this.localRuntimeReservations.set(key, remaining);
+					};
+				},
+			});
+			if (!release) throw new Error(`Worktree ${record.id} is unavailable for runtime preparation`);
+			if (!existsSync(cwd)) throw new Error("The session's managed checkout could not be restored");
+			return release;
+		} catch (error) {
+			release?.();
+			throw error;
+		}
 	}
 
 	/**
@@ -1201,6 +1466,24 @@ export class WorktreeManager {
 		return match.worktree;
 	}
 
+	/** Pin an existing review source before async resolution, serialized against reclamation. */
+	async reserveReviewSource(workspaceName: string, worktreeId: string): Promise<(() => void) | undefined> {
+		return this.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async ({ worktrees }) => {
+			const record = worktrees.find((entry) => entry.id === worktreeId);
+			if (!record || record.checkoutArchive || !existsSync(record.path)) return { result: undefined };
+			const key = `${workspaceName}\0${worktreeId}`;
+			const token = Symbol(key);
+			const reservations = this.reviewSourceReservations.get(key) ?? new Set<symbol>();
+			reservations.add(token);
+			this.reviewSourceReservations.set(key, reservations);
+			return {
+				result: () => {
+					if (reservations.delete(token) && reservations.size === 0) this.reviewSourceReservations.delete(key);
+				},
+			};
+		});
+	}
+
 	isRuntimePreparing(workspaceName: string, worktreeId: string): boolean {
 		return this.runtimePreparations.has(`${workspaceName}\0${worktreeId}`);
 	}
@@ -1212,21 +1495,8 @@ export class WorktreeManager {
 	): Promise<WorktreeRuntimePreparation> {
 		const key = `${workspaceName}\0${worktreeId}`;
 		const token = Symbol(key);
-		await this.stateManager.runWorkspaceWorktreeLifecycle(workspaceName, async (current) => {
-			const record = current.worktrees.find((entry) => entry.id === worktreeId);
-			if (
-				!record ||
-				!existsSync(record.path) ||
-				this.runtimePreparations.has(key) ||
-				record.prReviewLaunches?.some(
-					(launch) => launch.sessionGeneration === undefined && launch.sessionId !== sessionId,
-				)
-			) {
-				throw new Error(`Worktree ${worktreeId} is unavailable for runtime preparation`);
-			}
-			this.runtimePreparations.set(key, token);
-			return { result: undefined };
-		});
+		if (!(await this.restoreForResume(workspaceName, worktreeId, { token, sessionId })))
+			throw new Error(`Worktree ${worktreeId} is unavailable for runtime preparation`);
 		let settled = false;
 		return {
 			publish: <T>(publish: () => T) =>
@@ -1266,6 +1536,8 @@ export class WorktreeManager {
 			const record = current.worktrees.find((entry) => entry.id === worktreeId);
 			if (
 				record === undefined ||
+				record.checkoutArchive !== undefined ||
+				(afterPersistWhileLocked !== undefined && !existsSync(record.path)) ||
 				record.prReviewLaunches?.some(
 					(launch) => launch.sessionGeneration === undefined && launch.sessionId !== sessionId,
 				)
@@ -1516,16 +1788,15 @@ export interface WorktreeRetentionSweeperOptions {
 	auditLogger: IrohRemoteAuditLogger;
 	/** Resolved at sweep time so settings changes apply without a restart. */
 	getRetentionPolicy: () => { enabled: boolean; ttlMs: number } | undefined;
+	now?: () => number;
 	/** Injectable timers (tests). */
 	setTimer?: (callback: () => void, ttlMs: number) => NodeJS.Timeout;
 	clearTimer?: (timer: NodeJS.Timeout) => void;
 }
 
 /**
- * Opt-in worktree retention (design §5.3): when a worktree-bound runtime is
- * disposed, schedule a TTL sweep that removes the worktree ONLY when it is
- * clean and fully merged into its base ref; otherwise the skip is audited as
- * worktree_retention_skipped_dirty and the checkout stays put.
+ * Reconstruct retention deadlines after restart and retry protected checkouts.
+ * Checkout reclamation retains durable session bindings and review provenance.
  */
 export class WorktreeRetentionSweeper {
 	private readonly options: WorktreeRetentionSweeperOptions;
@@ -1534,6 +1805,22 @@ export class WorktreeRetentionSweeper {
 
 	constructor(options: WorktreeRetentionSweeperOptions) {
 		this.options = options;
+		void this.reconcile().catch(() => undefined);
+	}
+
+	async reconcile(): Promise<void> {
+		const policy = this.options.getRetentionPolicy();
+		if (this.disposed || !policy?.enabled) return;
+		const records = await this.options.stateManager.listWorktrees();
+		for (const record of records) {
+			if (!hasRetainedWorktreeCheckout(record)) continue;
+			if (this.timers.has(`${record.workspaceName}\0${record.id}`)) continue;
+			this.schedule(
+				record.workspaceName,
+				record.id,
+				Math.max(0, (record.inactiveAt ?? record.createdAt) + policy.ttlMs - (this.options.now ?? Date.now)()),
+			);
+		}
 	}
 
 	/** Hooked to IntegratedRuntimeRegistry.onRuntimeDisposed for worktree-bound entries. */
@@ -1545,6 +1832,12 @@ export class WorktreeRetentionSweeper {
 		if (policy === undefined || !policy.enabled) {
 			return;
 		}
+		void this.options.manager.markWorktreeInactive(workspaceName, worktreeId).catch(() => undefined);
+		this.schedule(workspaceName, worktreeId, policy.ttlMs);
+	}
+
+	private schedule(workspaceName: string, worktreeId: string, delay: number): void {
+		if (this.disposed) return;
 		const key = `${workspaceName}\0${worktreeId}`;
 		const existing = this.timers.get(key);
 		if (existing !== undefined) {
@@ -1553,7 +1846,7 @@ export class WorktreeRetentionSweeper {
 		const timer = (this.options.setTimer ?? setTimeout)(() => {
 			this.timers.delete(key);
 			void this.sweep(workspaceName, worktreeId);
-		}, policy.ttlMs);
+		}, delay);
 		timer.unref?.();
 		this.timers.set(key, timer);
 	}
@@ -1563,12 +1856,8 @@ export class WorktreeRetentionSweeper {
 			return;
 		}
 		try {
-			const state = await this.options.stateManager.getState();
-			const workspace = state.workspaces.find((entry) => entry.name === workspaceName);
-			if (!workspace) {
-				return;
-			}
-			const result = await this.options.manager.removeIfCleanAndMerged(workspace, worktreeId);
+			if (!this.options.getRetentionPolicy()?.enabled) return;
+			const result = await this.options.manager.archiveDisposable(workspaceName, worktreeId);
 			if (result.removed) {
 				await this.options.auditLogger.log({
 					type: "worktree_retention_removed",
@@ -1578,7 +1867,7 @@ export class WorktreeRetentionSweeper {
 				});
 				return;
 			}
-			if (result.reason === "worktree_not_found") {
+			if (result.reason === "worktree_not_found" || result.reason === "already_archived") {
 				return;
 			}
 			await this.options.auditLogger.log({
@@ -1588,8 +1877,10 @@ export class WorktreeRetentionSweeper {
 				details: { worktreeId, reason: result.reason },
 			});
 		} catch {
-			// Retention is best-effort; the next disposal reschedules.
+			// Retry transient inspection or persistence failures without losing the deadline.
 		}
+		const policy = this.options.getRetentionPolicy();
+		if (policy?.enabled) this.schedule(workspaceName, worktreeId, policy.ttlMs);
 	}
 
 	dispose(): void {
@@ -1611,6 +1902,7 @@ export type WorktreeControlRequest = Extract<
 			| "worktree_remove"
 			| "worktree_prune"
 			| "worktree_resolve"
+			| "worktree_restore"
 			| "worktree_bind";
 	}
 >;
@@ -1640,6 +1932,7 @@ export function isWorktreeControlRequest(request: ControlRequest): request is Wo
 		request.type === "worktree_remove" ||
 		request.type === "worktree_prune" ||
 		request.type === "worktree_resolve" ||
+		request.type === "worktree_restore" ||
 		request.type === "worktree_bind"
 	);
 }
@@ -1739,7 +2032,7 @@ export async function handleWorktreeControlRequest(
 		return;
 	}
 
-	if (request.type === "worktree_resolve") {
+	if (request.type === "worktree_resolve" || request.type === "worktree_restore") {
 		const worktrees = await hooks.stateManager.listWorktrees();
 		const match = worktrees
 			.filter((worktree) => isPathContained(worktree.path, request.path))
@@ -1752,6 +2045,25 @@ export async function handleWorktreeControlRequest(
 				code: "not_found",
 				message: "path is not inside a daemon-managed worktree",
 			});
+			return;
+		}
+		if (request.type === "worktree_restore") {
+			try {
+				const release = await hooks.manager.acquireLocalSessionWorktree(
+					workspace.name,
+					request.sessionRef,
+					request.path,
+				);
+				retainControlConnectionResource(connection, release);
+				connection.send({ type: "ok", id: request.id });
+			} catch (error) {
+				connection.send({
+					type: "error",
+					id: request.id,
+					code: error instanceof WorktreeCapacityError ? error.code : "worktree_restore_failed",
+					message: error instanceof Error ? error.message : String(error),
+				});
+			}
 			return;
 		}
 		connection.send({

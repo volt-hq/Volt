@@ -32,6 +32,18 @@ export interface IrohRemoteWorkspaceWorktree {
 	branch: string;
 	baseRef?: string;
 	createdAt: number;
+	/** Host-created disposable checkout; adopted directories are never automatically reclaimed. */
+	disposable?: boolean;
+	/** Durable idle timestamp, reconstructed on startup rather than held only in timers. */
+	inactiveAt?: number;
+	/** Durable archive intent. Bindings and review receipts survive checkout reclamation. */
+	checkoutArchive?: {
+		head: string;
+		commonDirectory: string;
+		archivedAt: number;
+		quarantinePath: string;
+		restoring?: boolean;
+	};
 	/** Sessions bound to this worktree (usually exactly one). */
 	sessionIds: string[];
 	/** Host-only PR preparation receipts; at most 64 per checkout. */
@@ -296,8 +308,30 @@ export function parseIrohRemoteWorkspaceWorktree(value: unknown): IrohRemoteWork
 		worktree.sourceRootRelativePath,
 		"worktree sourceRootRelativePath",
 	);
+	let checkoutArchive: IrohRemoteWorkspaceWorktree["checkoutArchive"];
+	if (worktree.checkoutArchive !== undefined) {
+		const archive = expectRecord(worktree.checkoutArchive, "worktree archive");
+		const head = expectString(archive.head, "archive head");
+		if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head)) throw new Error("invalid archive head");
+		checkoutArchive = {
+			head,
+			commonDirectory: expectString(archive.commonDirectory, "archive common directory"),
+			archivedAt: expectNonNegativeSafeInteger(archive.archivedAt, "archive timestamp"),
+			quarantinePath: expectString(archive.quarantinePath, "archive quarantine path"),
+			...(archive.restoring === undefined
+				? {}
+				: { restoring: expectBoolean(archive.restoring, "archive restoring") }),
+		};
+	}
 	return {
 		id: expectWorktreeId(worktree.id),
+		...(worktree.disposable === undefined
+			? {}
+			: { disposable: expectBoolean(worktree.disposable, "disposable checkout") }),
+		...(worktree.inactiveAt === undefined
+			? {}
+			: { inactiveAt: expectNonNegativeSafeInteger(worktree.inactiveAt, "inactive timestamp") }),
+		...(checkoutArchive === undefined ? {} : { checkoutArchive }),
 		workspaceName: expectString(worktree.workspaceName, "worktree workspaceName"),
 		path: expectString(worktree.path, "worktree path"),
 		...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),

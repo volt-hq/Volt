@@ -12,7 +12,7 @@ import type { PrReviewLaunch, PrReviewPlacement } from "../core/pr-review-placem
 import { hasIrohRemoteRpcCapability } from "../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import type { IrohRemoteHello } from "../core/remote/iroh/handshake.ts";
-import { PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
+import { PrReviewPreparationError, type PrReviewPreparationErrorCode } from "../core/remote/iroh/pr-review-rpc.ts";
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
@@ -20,7 +20,12 @@ import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
 import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
 import { getResolvedTargetSessionId } from "./integrated-runtimes.ts";
 import { runPrReviewGit } from "./pr-review-git.ts";
-import { getWorktreeCheckoutPath, type WorktreeGitRunner, type WorktreeManager } from "./worktree-manager.ts";
+import {
+	getWorktreeCheckoutPath,
+	WorktreeCapacityError,
+	type WorktreeGitRunner,
+	type WorktreeManager,
+} from "./worktree-manager.ts";
 
 export interface PrReviewSource {
 	workingDirectory?: string;
@@ -47,7 +52,7 @@ export interface PreparedPrReview {
 
 /** Safe codes only; utility routing translates these without exposing Git stderr. */
 export class PrReviewCheckoutError extends Error {
-	readonly code: "review_preparation_failed" | "review_preparation_stale" | "review_preparation_conflict";
+	readonly code: PrReviewPreparationErrorCode;
 	constructor(code: PrReviewCheckoutError["code"] = "review_preparation_failed") {
 		super(code);
 		this.code = code;
@@ -156,6 +161,9 @@ export class PrReviewCheckoutManager {
 		this.lanes.set(workspace.name, operation);
 		try {
 			return await operation;
+		} catch (error) {
+			if (error instanceof WorktreeCapacityError) throw new PrReviewCheckoutError(error.code);
+			throw error;
 		} finally {
 			if (this.lanes.get(workspace.name) === operation) this.lanes.delete(workspace.name);
 		}
@@ -241,9 +249,10 @@ export class PrReviewCheckoutManager {
 		const prior = matches[0];
 		if (prior) {
 			if (prior.requestFingerprint !== fingerprint) throw new PrReviewCheckoutError("review_preparation_conflict");
-			const worktree = records.find(
-				(record) => record.workspaceName === workspace.name && record.id === prior.placement.worktreeId,
-			);
+			const worktree =
+				prior.sessionGeneration === undefined
+					? records.find((record) => record.id === prior.placement.worktreeId)
+					: await this.options.worktrees.resolveSessionWorktree(workspace.name, prior.sessionId);
 			if (!worktree || (await realpath(worktree.path).catch(() => "")) !== prior.placement.cwd)
 				throw new PrReviewCheckoutError("review_preparation_stale");
 			if (!prior.sessionGeneration) await this.validatePlacement(workspace, prior.placement, authority);
@@ -257,6 +266,25 @@ export class PrReviewCheckoutManager {
 			)
 		)
 			throw new PrReviewCheckoutError("review_preparation_conflict");
+		const releaseSource =
+			request.sourceWorktreeId === undefined
+				? undefined
+				: await this.options.worktrees.reserveReviewSource(workspace.name, request.sourceWorktreeId);
+		if (request.sourceWorktreeId !== undefined && !releaseSource) throw new PrReviewCheckoutError();
+		try {
+			return await this.prepareFromSource(workspace, request, authority, fingerprint);
+		} finally {
+			// Persisted launches take over source protection; failures must not leak the reservation.
+			releaseSource?.();
+		}
+	}
+
+	private async prepareFromSource(
+		workspace: IrohRemoteWorkspace,
+		request: PrReviewPreparationRequest,
+		authority: PrReviewPreparationAuthority,
+		fingerprint: string,
+	): Promise<PreparedPrReview> {
 		const source = await this.source(workspace, request, authority.signal);
 		const target = await this.target(source, request, authority.signal);
 		if (
@@ -287,6 +315,8 @@ export class PrReviewCheckoutManager {
 					this.busy(candidate)
 				)
 					continue;
+				const previous = candidate.prReviewLaunches ?? [];
+				if (previous.some((entry) => entry.placement.pullRequest.url !== target.pullRequest.url)) continue;
 				if (
 					!(await this.cleanHead(
 						candidate.path,
@@ -299,8 +329,6 @@ export class PrReviewCheckoutManager {
 				const branch = await this.git(["symbolic-ref", "--short", "HEAD"], candidate.path, authority.signal).catch(
 					() => "",
 				);
-				const previous = candidate.prReviewLaunches ?? [];
-				if (previous.some((entry) => entry.placement.pullRequest.url !== target.pullRequest.url)) continue;
 				if (
 					branch !== target.pullRequest.headRefName &&
 					!previous.some((entry) => entry.placement.pullRequest.url === target.pullRequest.url)
@@ -364,7 +392,10 @@ export class PrReviewCheckoutManager {
 			prReviewLaunch: launch,
 			assertCurrent: authority.assertCurrent,
 		});
-		if (!created.ok) throw new PrReviewCheckoutError();
+		if (!created.ok)
+			throw new PrReviewCheckoutError(
+				created.error === "worktree_limit_reached" ? created.error : "review_preparation_failed",
+			);
 		authority.assertCurrent();
 		await this.validatePlacement(workspace, launch.placement, authority);
 		return this.response(launch);

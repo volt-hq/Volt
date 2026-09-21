@@ -1,6 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import {
+	closeLocalSessionManager,
+	releaseLocalSessionWorktree,
+	restoreLocalSessionWorktree,
+	retainLocalSessionWorktree,
+} from "../daemon/session-worktree.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -236,7 +242,7 @@ function sessionRefsEqual(left: SessionReference, right: SessionReference): bool
 
 async function closeOwnedSessionManager(manager: SessionManager, error: unknown, message: string): Promise<never> {
 	try {
-		await manager.closePersistence();
+		await closeLocalSessionManager(manager);
 	} catch (closeError) {
 		throw new AggregateError([error, closeError], message);
 	}
@@ -257,6 +263,11 @@ async function finalizeRuntimeOwnedSession(
 	}
 	try {
 		await finalizeSession();
+	} catch (error) {
+		errors.push(error);
+	}
+	try {
+		await releaseLocalSessionWorktree(session.sessionManager);
 	} catch (error) {
 		errors.push(error);
 	}
@@ -861,6 +872,9 @@ export class AgentSessionRuntime {
 				// Defense in depth for unexpected re-entrant review starts after an
 				// operation-specific pre-preparation check.
 				this.assertNoActiveDetachedReview();
+				retainLocalSessionWorktree(this.session.sessionManager, options.sessionManager);
+				await restoreLocalSessionWorktree(options.sessionManager, this.services.agentDir);
+				this.assertStructuralOperationCurrent(options.operation);
 				const transaction = sameSessionIdentity
 					? undefined
 					: await this.prepareSessionReplacement?.({
@@ -1248,6 +1262,8 @@ export class AgentSessionRuntime {
 		const sessionManager = await SessionManager.open(sessionRef, options?.cwdOverride);
 		let managerTransferred = false;
 		try {
+			this.assertStructuralOperationCurrent(operation);
+			await restoreLocalSessionWorktree(sessionManager, this.services.agentDir);
 			this.assertStructuralOperationCurrent(operation);
 			assertSessionCwdExists(sessionManager, this.cwd);
 			managerTransferred = true;
@@ -1914,6 +1930,7 @@ export async function createAgentSessionRuntime(
 ): Promise<AgentSessionRuntime> {
 	let result: CreateAgentSessionRuntimeResult;
 	try {
+		await restoreLocalSessionWorktree(options.sessionManager, options.agentDir);
 		assertSessionCwdExists(options.sessionManager, options.cwd);
 		result = await createRuntime(options);
 	} catch (error) {
@@ -1945,6 +1962,7 @@ export async function createAgentSessionRuntime(
 		} catch (cleanupError) {
 			cleanupErrors.push(cleanupError);
 		}
+		await releaseLocalSessionWorktree(options.sessionManager);
 		if (cleanupErrors.length > 0) {
 			throw new AggregateError(
 				[error, ...cleanupErrors],

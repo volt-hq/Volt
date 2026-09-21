@@ -1,9 +1,12 @@
+import * as childProcess from "node:child_process";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 import { AgentSession } from "../../src/core/agent-session.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import {
@@ -45,6 +48,8 @@ import { SessionManager } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
 import { createTestBodyOwner } from "../test-body-owner.ts";
 import { createHarness, type Harness } from "./harness.ts";
+
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal()) }));
 
 function git(cwd: string, ...args: string[]): string {
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
@@ -758,6 +763,39 @@ describe("review pipeline", () => {
 			if (delivery === "pending observer") return new Promise<void>(() => {});
 		});
 		const useObserver = delivery.includes("observer") || delivery === "disabled" || delivery === "retained";
+		const processTrace: Array<Record<string, string | number | boolean | null | undefined>> = [];
+		if (delivery === "retained") {
+			const original = childProcess.execFile;
+			vi.spyOn(childProcess, "execFile").mockImplementation((...invocation) => {
+				const [file, args, options, callback] = invocation;
+				if (!Array.isArray(args) || !args.includes("-EncodedCommand") || !callback) return original(...invocation);
+				const startedAt = performance.now();
+				const record = (
+					event: string,
+					details: Record<string, string | number | boolean | null | undefined> = {},
+				) => {
+					processTrace.push({ event, elapsedMs: Math.round(performance.now() - startedAt), ...details });
+				};
+				record("invoked");
+				const child = original(file, args, options, (error, stdout, stderr) => {
+					const code = error?.code;
+					record(error ? "callback_error" : "callback_success", {
+						code:
+							typeof code !== "string" || ["ENOENT", "ETIMEDOUT", "EPIPE", "EACCES", "EPERM"].includes(code)
+								? code
+								: "other",
+						killed: error?.killed,
+						signal: error?.signal,
+					});
+					callback(error, stdout, stderr);
+				});
+				child.once("spawn", () => record("spawn"));
+				child.stdin?.once("finish", () => record("stdin_finished"));
+				child.once("exit", (code, signal) => record("exit", { code, signal }));
+				child.once("close", (code, signal) => record("close", { code, signal }));
+				return child;
+			});
+		}
 		const events: Array<Record<string, unknown>> = [];
 		const result = await runReview({
 			cwd: harness.tempDir,
@@ -781,9 +819,17 @@ describe("review pipeline", () => {
 		expect(existsSync(checkout)).toBe(false);
 		expect(harness.faux.state.callCount).toBe(8);
 		const failedRetention = delivery !== "disabled" && delivery !== "retained";
-		expect(onDiagnosticRetentionWarning.mock.calls).toEqual(
-			failedRetention && useObserver ? [[DIAGNOSTIC_RETENTION_WARNING]] : [],
-		);
+		expect(
+			onDiagnosticRetentionWarning.mock.calls,
+			JSON.stringify({
+				processTrace,
+				directoryExists: existsSync(diagnosticsDirectory),
+				fileCount:
+					delivery === "retained" && existsSync(diagnosticsDirectory)
+						? readdirSync(diagnosticsDirectory).length
+						: undefined,
+			}),
+		).toEqual(failedRetention && useObserver ? [[DIAGNOSTIC_RETENTION_WARNING]] : []);
 		expect(stderrWarning.mock.calls).toEqual(
 			failedRetention && delivery !== "observer" && delivery !== "pending observer"
 				? [[`Warning: ${DIAGNOSTIC_RETENTION_WARNING}`]]
@@ -1999,7 +2045,11 @@ describe("review pipeline", () => {
 	});
 
 	it("does not retain stale prior anchors for files re-reviewed incrementally", async () => {
-		const harness = await createHarness();
+		vi.stubEnv("VOLT_BACKGROUND_JOB_DIAGNOSTICS", "1");
+		// Runtime diagnostics belong to host state, not the repository being reviewed.
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-review-agent-"));
+		onTestFinished(() => rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+		const harness = await createHarness({ agentDir });
 		harnesses.push(harness);
 		const sessionManager = harness.session.sessionManager;
 		if (!sessionManager) throw new Error("Expected the harness session to have durable state");
@@ -2036,7 +2086,7 @@ describe("review pipeline", () => {
 				},
 			},
 			cwd: harness.tempDir,
-			agentDir: harness.tempDir,
+			agentDir,
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
@@ -2046,6 +2096,8 @@ describe("review pipeline", () => {
 		expect(priorOutcome.status).toBe("completed");
 		if (priorOutcome.status !== "completed") throw new Error(`Prior review ended with ${priorOutcome.status}`);
 		const priorFinding = priorOutcome.parsed.findings[0]!;
+		expect(readdirSync(join(agentDir, "background-job-diagnostics")).length).toBeGreaterThan(0);
+		expect(existsSync(join(harness.tempDir, "background-job-diagnostics"))).toBe(false);
 
 		writeFileSync(
 			join(harness.tempDir, "src", "value.ts"),
@@ -2086,7 +2138,7 @@ describe("review pipeline", () => {
 		const currentOutcome = await executeReviewWorkflow({
 			prepared,
 			cwd: harness.tempDir,
-			agentDir: harness.tempDir,
+			agentDir,
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,

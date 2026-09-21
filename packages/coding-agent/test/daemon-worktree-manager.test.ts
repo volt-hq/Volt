@@ -976,6 +976,10 @@ describe("worktree manager (fake git)", () => {
 		const auditEvents: IrohRemoteAuditEvent[] = [];
 		const auditLogger = new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } });
 		const manager = createManager(git.runGit, { auditLogger });
+		// Isolate timer scheduling from the real-Git archive eligibility regressions.
+		vi.spyOn(manager, "archiveDisposable").mockImplementation((_workspaceName, id) =>
+			manager.removeIfCleanAndMerged(workspace, id),
+		);
 		const timers: Array<{ callback: () => void; ttlMs: number }> = [];
 		let policy: { enabled: boolean; ttlMs: number } | undefined = { enabled: true, ttlMs: 60_000 };
 		const sweeper = new WorktreeRetentionSweeper({
@@ -1019,6 +1023,7 @@ describe("worktree manager (fake git)", () => {
 			expect(auditEvents.some((event) => event.type === "worktree_retention_removed")).toBe(true);
 		});
 		expect(await stateManager.listWorktrees("repo")).toHaveLength(0);
+		vi.restoreAllMocks();
 
 		sweeper.dispose();
 		timers.length = 0;

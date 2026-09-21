@@ -70,6 +70,7 @@ import { printTimings, resetTimings, time } from "./core/timings.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { handleDaemonCommand } from "./daemon/cli.ts";
 import { handleRemoteControlCommand } from "./daemon/remote-cli.ts";
+import { closeLocalSessionManager, restoreLocalSessionWorktree } from "./daemon/session-worktree.ts";
 import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemon/worktree-manager.ts";
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
@@ -597,7 +598,7 @@ async function throwAfterClosingSessionManager(
 	message: string,
 ): Promise<never> {
 	try {
-		await manager.closePersistence();
+		await closeLocalSessionManager(manager);
 	} catch (closeError) {
 		throw new AggregateError([error, closeError], message);
 	}
@@ -624,7 +625,7 @@ class CliSessionManagerOwner {
 
 	async close(): Promise<void> {
 		const manager = this.release();
-		if (manager) await manager.closePersistence();
+		if (manager) await closeLocalSessionManager(manager);
 	}
 
 	async fail(error: unknown, message: string): Promise<never> {
@@ -636,14 +637,14 @@ class CliSessionManagerOwner {
 	async replace(replacement: SessionManager): Promise<void> {
 		const previous = this.release();
 		if (!previous) {
-			await replacement.closePersistence();
+			await closeLocalSessionManager(replacement);
 			throw new Error("Cannot replace a CLI session manager after ownership transferred");
 		}
 		try {
-			await previous.closePersistence();
+			await closeLocalSessionManager(previous);
 		} catch (error) {
 			try {
-				await replacement.closePersistence();
+				await closeLocalSessionManager(replacement);
 			} catch (replacementCloseError) {
 				throw new AggregateError(
 					[error, replacementCloseError],
@@ -850,6 +851,7 @@ export async function main(args: string[], options?: MainOptions) {
 	);
 	let missingSessionCwdIssue: SessionCwdIssue | undefined;
 	try {
+		await restoreLocalSessionWorktree(sessionManagerOwner.current, agentDir);
 		missingSessionCwdIssue = getMissingSessionCwdIssue(sessionManagerOwner.current, cwd);
 	} catch (error) {
 		return await sessionManagerOwner.fail(error, "Session cwd validation failed and its manager could not be closed");

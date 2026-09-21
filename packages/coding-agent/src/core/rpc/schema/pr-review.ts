@@ -7,6 +7,7 @@ export const RPC_PR_REVIEW_ERROR_CODES = [
 	"review_preparation_failed",
 	"review_preparation_stale",
 	"review_preparation_conflict",
+	"worktree_limit_reached",
 ] as const;
 export type PrReviewPreparationErrorCode = (typeof RPC_PR_REVIEW_ERROR_CODES)[number];
 

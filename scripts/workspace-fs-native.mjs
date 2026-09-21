@@ -19,7 +19,13 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const API_VERSION = "volt-workspace-fs-v1";
-const EXPECTED_EXPORTS = ["WorkspaceRoot", "workspaceFsApiVersion", "workspaceFsSourceFingerprint"];
+const EXPECTED_EXPORTS = [
+	"FileLock",
+	"WorkspaceRoot",
+	"tryAcquireFileLock",
+	"workspaceFsApiVersion",
+	"workspaceFsSourceFingerprint",
+];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const crate = join(root, "packages", "coding-agent", "native", "workspace-fs");
 const prebuilds = join(crate, "prebuilds");

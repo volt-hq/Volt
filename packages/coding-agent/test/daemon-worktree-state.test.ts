@@ -229,14 +229,17 @@ describe("worktreeCleanup settings (§5.3)", () => {
 		}
 	});
 
-	it("resolveWorktreeCleanupPolicy applies defaults: retention off, pruneOnStart on", () => {
-		expect(resolveWorktreeCleanupPolicy({})).toEqual({ retention: undefined, pruneOnStart: true });
+	it("resolveWorktreeCleanupPolicy defaults to one-hour retention and startup reconciliation", () => {
+		expect(resolveWorktreeCleanupPolicy({})).toEqual({
+			retention: { enabled: true, ttlMs: 3_600_000 },
+			pruneOnStart: true,
+		});
 		expect(resolveWorktreeCleanupPolicy({ worktreeCleanup: {} })).toEqual({
-			retention: undefined,
+			retention: { enabled: true, ttlMs: 3_600_000 },
 			pruneOnStart: true,
 		});
 		expect(resolveWorktreeCleanupPolicy({ worktreeCleanup: { pruneOnStart: false } })).toEqual({
-			retention: undefined,
+			retention: { enabled: true, ttlMs: 3_600_000 },
 			pruneOnStart: false,
 		});
 		expect(resolveWorktreeCleanupPolicy({ worktreeCleanup: { retention: { enabled: true, ttlMs: 1000 } } })).toEqual({

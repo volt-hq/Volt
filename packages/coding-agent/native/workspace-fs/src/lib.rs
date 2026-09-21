@@ -1,3 +1,5 @@
+mod file_lock;
+
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, Metadata, OpenOptions, Permissions};
 use napi::bindgen_prelude::{AsyncTask, Buffer, Task};
