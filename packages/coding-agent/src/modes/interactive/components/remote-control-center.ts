@@ -56,6 +56,8 @@ export class RemoteControlRequestError extends Error {
 }
 
 const UNSAFE_TERMINAL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+// One title, three actions, and one keyboard-hint row; no extra borders or header.
+const PAIRING_QR_RESERVED_ROWS = 5;
 
 export type RemoteControlSnapshot =
 	| {
@@ -507,7 +509,7 @@ export class RemoteControlCenterComponent implements Component {
 		const footer = this.renderFooter(width);
 		const pageSize = Math.max(1, height - header.length - footer.length);
 		this.lastPageSize = pageSize;
-		const rows = this.buildRows(width, pageSize).flatMap((row) => {
+		const rows = this.buildRows(width, height).flatMap((row) => {
 			if (!row.wrap) return [row];
 			const safeText = stripAnsi(row.text).replace(UNSAFE_TERMINAL_CHARACTERS, "");
 			return wrapTextWithAnsi(safeText, Math.max(1, width - 2)).map((text) => ({ ...row, text }));
@@ -1083,6 +1085,7 @@ export class RemoteControlCenterComponent implements Component {
 	}
 
 	private renderHeader(width: number): string[] {
+		if (this.view.kind === "pairing" && this.view.showQr) return [];
 		let state = "loading";
 		if (this.view.kind === "offline") state = this.view.snapshot.state;
 		else if (this.view.kind === "confirm-regenerate" || this.view.kind === "confirm-recover") state = "confirmation";
@@ -1107,10 +1110,12 @@ export class RemoteControlCenterComponent implements Component {
 		hints.push(
 			keyHint("tui.select.cancel", this.view.kind === "overview" || this.view.kind === "offline" ? "close" : "back"),
 		);
-		return [truncateToWidth(` ${hints.join("  ")}`, width, ""), new DynamicBorder().render(width).lines[0]!];
+		const hintLine = truncateToWidth(` ${hints.join("  ")}`, width, "");
+		if (this.view.kind === "pairing" && this.view.showQr) return [hintLine];
+		return [hintLine, new DynamicBorder().render(width).lines[0]!];
 	}
 
-	private buildRows(width: number, pageSize: number): DisplayRow[] {
+	private buildRows(width: number, height: number): DisplayRow[] {
 		if (this.view.kind === "loading") return [{ text: this.view.label, tone: "muted" }];
 		if (this.view.kind === "offline") {
 			return [
@@ -1247,7 +1252,7 @@ export class RemoteControlCenterComponent implements Component {
 				{ key: `approve-repair:${repairView.clientNodeId}`, text: "Confirm allow re-pair", tone: "warning" },
 			];
 		}
-		if (this.view.kind === "pairing") return this.buildPairingRows(width, pageSize);
+		if (this.view.kind === "pairing") return this.buildPairingRows(width, height);
 
 		const status = this.view.status;
 		const remotePolicy = status.remotePolicy ?? {
@@ -1402,7 +1407,7 @@ export class RemoteControlCenterComponent implements Component {
 		return rows;
 	}
 
-	private buildPairingRows(width: number, pageSize: number): DisplayRow[] {
+	private buildPairingRows(width: number, height: number): DisplayRow[] {
 		if (this.view.kind !== "pairing") return [];
 		const phaseLabel = {
 			starting: "Creating one-time ticket…",
@@ -1438,10 +1443,10 @@ export class RemoteControlCenterComponent implements Component {
 				qrError = error instanceof Error ? error.message : String(error);
 			}
 		}
-		const qrFits =
-			qrLines !== undefined &&
-			qrLines.length + 4 <= pageSize &&
-			qrLines.every((line) => visibleWidth(line) <= width);
+		const qrWidth = qrLines === undefined ? 0 : Math.max(...qrLines.map((line) => visibleWidth(line)));
+		const qrHeight = (qrLines?.length ?? 0) + PAIRING_QR_RESERVED_ROWS;
+		const qrFits = qrLines !== undefined && qrHeight <= height && qrWidth <= width;
+		const qrSizeWarning = `QR needs ${qrWidth} columns × ${qrHeight} rows; available: ${width} × ${height}.`;
 		if (this.view.showQr) {
 			if (qrFits && qrLines !== undefined) {
 				return [
@@ -1452,7 +1457,7 @@ export class RemoteControlCenterComponent implements Component {
 					{ key: "pairing-back", text: "Cancel pairing", tone: "text" },
 				];
 			}
-			rows.push({ text: "The terminal is no longer large enough to show the complete QR code.", tone: "warning" });
+			rows.push({ text: qrError ? `QR unavailable: ${qrError}` : qrSizeWarning, tone: "warning", wrap: true });
 			rows.push({ key: "pairing-verification", text: "Show verification details", tone: "text" });
 		} else if (this.view.ticket) {
 			try {
@@ -1489,8 +1494,8 @@ export class RemoteControlCenterComponent implements Component {
 			} else if (qrError) {
 				rows.push({ text: `QR unavailable: ${qrError}`, tone: "warning" });
 			} else {
-				rows.push({ text: "Enlarge the terminal to show the complete QR code.", tone: "warning" });
-				rows.push({ text: "Use Copy pairing ticket instead of exposing it in scrollback.", tone: "dim" });
+				rows.push({ text: qrSizeWarning, tone: "warning", wrap: true });
+				rows.push({ text: "Reduce the terminal font size, or use Copy pairing ticket.", tone: "dim", wrap: true });
 			}
 		}
 		if (this.view.ticket) rows.push({ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" });
