@@ -2,6 +2,7 @@ import { visibleWidth } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
+import { formatIrohRemoteTicketQrCode } from "../src/core/remote/iroh/qr.ts";
 import { encodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
@@ -35,6 +36,20 @@ function verificationTicket(): string {
 		relayUrls: ["https://relay-b.example/", "https://relay-a.example:8443"],
 		relayAuthToken: "relay-auth-must-not-render",
 		secret: "pairing-secret-must-not-render",
+		workspace: "volt",
+	});
+}
+
+function managedRelayTicket(): string {
+	return encodeIrohRemoteTicketPayload({
+		alpn: IROH_REMOTE_ALPN,
+		expiresAt: 1_800_000_000_000,
+		irohTicket: "a".repeat(150),
+		nodeId: PAIRING_HOST_NODE_ID,
+		relayMode: "production",
+		relayUrls: ["https://relay.example/"],
+		relayCredentialClaim: { claimId: "a".repeat(24), serviceUrl: "https://broker.example/" },
+		secret: "s".repeat(43),
 		workspace: "volt",
 	});
 }
@@ -248,7 +263,15 @@ function createComponent(backend: FakeBackend, rows = 36, currentPath = "/tmp/vo
 		},
 		onClose,
 	});
-	return { component, requestRender, onClose, copied };
+	return {
+		component,
+		requestRender,
+		onClose,
+		copied,
+		setRows: (value: number) => {
+			rows = value;
+		},
+	};
 }
 
 async function settle(): Promise<void> {
@@ -739,7 +762,7 @@ describe("RemoteControlCenterComponent", () => {
 		text = component.render(40).lines.map(stripAnsi).join("\n");
 		expect(text).toContain("PAIR PHONE · volt · Full access");
 		expect(text).toContain("Scan with Volt, then compare");
-		expect(text).toContain("Enlarge the terminal");
+		expect(text).toContain("Show pairing QR");
 
 		component.handleInput("\x1b[A");
 		component.handleInput("\n");
@@ -924,6 +947,95 @@ describe("RemoteControlCenterComponent", () => {
 		expect(completed).toContain("Paired paired-phone");
 		expect(completed).not.toMatch(/[▀▄█]/);
 	});
+
+	it("fits a complete managed-relay QR and all actions in a 252x53 terminal", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component, copied } = createComponent(backend, 53);
+		await component.start();
+		selectAction(component, "Pair a phone", 252);
+		selectAction(component, "Coding", 252);
+		await settle();
+		const ticket = managedRelayTicket();
+		backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
+		component.render(252);
+		component.handleInput("\x1b[A");
+		component.handleInput("\x1b[A");
+		selectAction(component, "Show pairing QR", 252);
+
+		const lines = component.render(252).lines.map(stripAnsi);
+		const qrLines = formatIrohRemoteTicketQrCode(ticket).trimEnd().split("\n");
+		expect(lines).toHaveLength(53);
+		expect(lines.slice(1, 1 + qrLines.length)).toEqual(qrLines);
+		expect(lines.join("\n")).toContain("PAIR QR · volt");
+		for (const label of ["Show verification details", "Copy pairing ticket", "Cancel pairing"]) {
+			expect(lines.join("\n")).toContain(label);
+		}
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(252);
+
+		selectAction(component, "Show verification details", 252);
+		expect(component.render(252).lines.map(stripAnsi).join("\n")).toContain(PAIRING_HOST_NODE_ID);
+		selectAction(component, "Show pairing QR", 252);
+		selectAction(component, "Copy pairing ticket", 252);
+		await settle();
+		expect(copied).toEqual([ticket]);
+		selectAction(component, "Cancel pairing", 252);
+		expect(backend.pairDisposeCalls).toBe(1);
+		expect(component.render(252).lines.map(stripAnsi).join("\n")).toContain("Remote Access");
+	});
+
+	it.each(["width", "height"] as const)(
+		"hides the entire QR below its minimum %s and restores it after resize",
+		async (dimension) => {
+			const ticket = managedRelayTicket();
+			const qrLines = formatIrohRemoteTicketQrCode(ticket).trimEnd().split("\n");
+			const requiredWidth = Math.max(...qrLines.map(visibleWidth));
+			const requiredHeight = qrLines.length + 5;
+			let width = dimension === "width" ? requiredWidth - 1 : requiredWidth;
+			const height = dimension === "height" ? requiredHeight - 1 : requiredHeight;
+			const backend = new FakeBackend({ kind: "online", status: status() });
+			const { component, setRows } = createComponent(backend, height);
+			await component.start();
+			selectAction(component, "Pair a phone", width);
+			selectAction(component, "Coding", width);
+			await settle();
+			backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
+			const warning = `QR needs ${requiredWidth} columns × ${requiredHeight} rows; available: ${width} × ${height}.`;
+			let text = component.render(width).lines.map(stripAnsi).join("\n");
+			expect(text).toContain(warning);
+			expect(text).not.toContain("Show pairing QR");
+			expect(text).not.toMatch(/[▀▄█]/);
+			expect(text).not.toContain(ticket);
+
+			width = requiredWidth;
+			setRows(requiredHeight);
+			component.render(width);
+			component.handleInput("\x1b[A");
+			component.handleInput("\x1b[A");
+			selectAction(component, "Show pairing QR", width);
+			let lines = component.render(width).lines.map(stripAnsi);
+			expect(lines).toHaveLength(requiredHeight);
+			expect(lines.slice(1, 1 + qrLines.length)).toEqual(qrLines);
+			component.handleInput("\x1b[6~");
+			expect(component.render(width).lines.map(stripAnsi)).toEqual(lines);
+
+			width = dimension === "width" ? requiredWidth - 1 : requiredWidth;
+			setRows(height);
+			text = component.render(width).lines.map(stripAnsi).join("\n");
+			expect(text).toContain(warning);
+			expect(text).not.toMatch(/[▀▄█]/);
+			expect(text).toContain("Copy pairing ticket");
+			expect(text).toContain("Show verification details");
+			expect(text).not.toContain(ticket);
+
+			width = requiredWidth;
+			setRows(requiredHeight);
+			lines = component.render(width).lines.map(stripAnsi);
+			expect(lines.slice(1, 1 + qrLines.length)).toEqual(qrLines);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			component.handleInput("\x1b");
+			expect(backend.pairDisposeCalls).toBe(1);
+		},
+	);
 
 	it("requires confirmation before revoking a paired device", async () => {
 		const backend = new FakeBackend({ kind: "online", status: status() });
