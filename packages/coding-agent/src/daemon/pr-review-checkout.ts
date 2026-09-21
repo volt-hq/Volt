@@ -315,6 +315,8 @@ export class PrReviewCheckoutManager {
 					this.busy(candidate)
 				)
 					continue;
+				const previous = candidate.prReviewLaunches ?? [];
+				if (previous.some((entry) => entry.placement.pullRequest.url !== target.pullRequest.url)) continue;
 				if (
 					!(await this.cleanHead(
 						candidate.path,
@@ -327,8 +329,6 @@ export class PrReviewCheckoutManager {
 				const branch = await this.git(["symbolic-ref", "--short", "HEAD"], candidate.path, authority.signal).catch(
 					() => "",
 				);
-				const previous = candidate.prReviewLaunches ?? [];
-				if (previous.some((entry) => entry.placement.pullRequest.url !== target.pullRequest.url)) continue;
 				if (
 					branch !== target.pullRequest.headRefName &&
 					!previous.some((entry) => entry.placement.pullRequest.url === target.pullRequest.url)

@@ -112,7 +112,7 @@ async function fixture(maxWorktreesPerWorkspace = 16) {
 	};
 }
 
-function reviewManager(f: Awaited<ReturnType<typeof fixture>>) {
+function reviewManager(f: Awaited<ReturnType<typeof fixture>>, runGit: WorktreeGitRunner = runPrReviewGit) {
 	let number = 1;
 	const repository: ResolvedPullRequestCheckout["repository"] = {
 		providerId: "github",
@@ -141,6 +141,7 @@ function reviewManager(f: Awaited<ReturnType<typeof fixture>>) {
 		agentDir: f.agentDir,
 		stateManager: f.state,
 		worktrees: f.manager,
+		runGit,
 		hasActiveSession: (_workspace, id) => f.active.has(id),
 		provider: {
 			...githubCliCodeHostProvider,
@@ -259,6 +260,41 @@ describe("#426 disposable checkout lifecycle", () => {
 		).rejects.toThrow("unavailable");
 		expect(leasePublished).toBe(false);
 		expect((await f.state.listWorktrees())[0].sessionIds).not.toContain("tui");
+	});
+
+	it("skips unrelated PR checkouts before Git inspection and still reuses matching checkouts", async () => {
+		const f = await fixture();
+		const inspected = new Set<string>();
+		const r = reviewManager(f, async (args, cwd, options) => {
+			inspected.add(cwd);
+			return runPrReviewGit(args, cwd, options);
+		});
+		const request = r.request(1);
+		const first = await r.reviews.prepare(f.workspace, request, r.authority);
+		const record = (await f.state.listWorktrees())[0];
+		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.source, f.agentDir), {
+			id: request.sessionId,
+		});
+		try {
+			await r.reviews.bind(f.workspace, session, record.prReviewLaunches![0].placement, r.authority);
+		} finally {
+			await session.closePersistence();
+		}
+
+		inspected.clear();
+		const unrelated = await r.reviews.prepare(f.workspace, r.request(2), r.authority);
+		expect(unrelated.disposition).toBe("created");
+		expect(unrelated.worktreeId).not.toBe(first.worktreeId);
+		expect(inspected.has(record.path)).toBe(false);
+
+		inspected.clear();
+		const matching = await r.reviews.prepare(
+			f.workspace,
+			{ ...r.request(1), sessionId: "review-1-reused" },
+			r.authority,
+		);
+		expect(matching).toMatchObject({ worktreeId: first.worktreeId, disposition: "reused" });
+		expect(inspected.has(record.path)).toBe(true);
 	});
 
 	it("runs more than 16 completed reviews under defaults, preserving history and restoring exact placement after restart", async () => {
