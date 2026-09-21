@@ -10,6 +10,7 @@ import {
 	type AheadReport,
 	createJevAheadOfModel,
 } from "../../examples/extensions/jev-ahead-of-model/index.ts";
+import { MAX_AHEAD_CYCLES } from "../../examples/extensions/jev-ahead-of-model/limits.ts";
 import type { ExtensionAPI, ExtensionFactory, ExtensionUIContext } from "../../src/index.ts";
 import { loadSkillsFromDir, SessionManager } from "../../src/index.ts";
 import { type AheadRequest, aheadAnswers, aheadResponse } from "../fixtures/jev-ahead.ts";
@@ -55,7 +56,7 @@ async function setup(
 ) {
 	let api!: ExtensionAPI;
 	let report: AheadReport | undefined;
-	const completed = [barrier(), barrier(), barrier()];
+	const completed = Array.from({ length: MAX_AHEAD_CYCLES }, () => barrier());
 	const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) => aheadResponse(init));
 	const harness = await createHarness({
 		sessionManager,
@@ -175,7 +176,7 @@ describe("Jev Ahead of Model Work integration", () => {
 		expect(test.report()?.boundaries.map((item) => item.waitMs)).toEqual([1000, 0]);
 	});
 
-	it("repeats after tool results with fresh source and bounded cycles, without creating model turns", async () => {
+	it("continues preparing beyond three cycles without creating model turns", async () => {
 		let root = "";
 		let executions = 0;
 		const test = await setup({}, (volt) => {
@@ -209,12 +210,19 @@ describe("Jev Ahead of Model Work integration", () => {
 				await test.completed[2].promise;
 				return checkpoint();
 			},
-			fauxAssistantMessage("done"),
+			async () => {
+				await test.completed[3].promise;
+				return checkpoint();
+			},
+			async () => {
+				await test.completed[4].promise;
+				return fauxAssistantMessage("done");
+			},
 		]);
 		await test.harness.session.prompt("Investigate resume");
-		expect(test.harness.faux.state.callCount).toBe(4);
-		expect(test.report()?.cycles).toHaveLength(3);
-		expect(test.fetch).toHaveBeenCalledTimes(9);
+		expect(test.harness.faux.state.callCount).toBe(5);
+		expect(test.report()?.cycles).toHaveLength(5);
+		expect(test.fetch).toHaveBeenCalledTimes(15);
 		expect(projections[2]).toContain("UPDATED_EVIDENCE");
 		const requests = test.fetch.mock.calls.map(([, init]) => JSON.parse(String(init?.body)) as AheadRequest);
 		expect(requests[3].state.tools?.[0]).toMatchObject({
@@ -222,14 +230,139 @@ describe("Jev Ahead of Model Work integration", () => {
 			isError: false,
 			text: "resume lookup outcome 1",
 		});
-		expect(test.report()?.boundaries.map((item) => item.waitMs)).toEqual([1000, 0, 0, 0]);
+		expect(test.report()?.boundaries.map((item) => item.waitMs)).toEqual([1000, 0, 0, 0, 0]);
 		const saved = audits(test.harness);
 		expect(saved).toHaveLength(1);
-		expect(saved[0].data.evaluations).toHaveLength(9);
-		expect(saved[0].data.evaluations.map((call) => call.cycle)).toEqual([1, 1, 1, 2, 2, 2, 3, 3, 3]);
+		expect(saved[0].data.evaluations).toHaveLength(15);
+		expect(saved[0].data.evaluations.map((call) => call.cycle)).toEqual([
+			1, 1, 1, 2, 2, 2, 3, 3, 3, 4, 4, 4, 5, 5, 5,
+		]);
 		expect(saved[0].data.evaluations.map((call) => call.requestBody)).toEqual(
 			test.fetch.mock.calls.map(([, init]) => init?.body),
 		);
+	});
+
+	it("coalesces a tool batch into one update and ignores repeated identical results", async () => {
+		const test = await setup();
+		const checkpoint = () =>
+			fauxAssistantMessage(
+				[
+					fauxToolCall("read", { path: "src/irrelevant.ts" }),
+					fauxToolCall("read", { path: "src/irrelevant.ts" }),
+					fauxToolCall("find", { pattern: "**/*.ts" }),
+				],
+				{ stopReason: "toolUse" },
+			);
+		test.harness.setResponses([
+			checkpoint(),
+			async () => {
+				await test.completed[1].promise;
+				return checkpoint();
+			},
+			fauxAssistantMessage("done"),
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(test.report()?.cycles).toHaveLength(2);
+		expect(test.report()?.coalescedToolResults).toBe(1);
+		expect(test.report()?.duplicateToolResults).toBe(4);
+		expect(test.harness.faux.state.callCount).toBe(3);
+		expect(test.fetch).toHaveBeenCalledTimes(6);
+	});
+
+	it("retires prepared source after a foreground read while keeping unread evidence", async () => {
+		const test = await setup();
+		await writeFile(join(test.harness.tempDir, "src/second.ts"), "export const resume = 'SECOND_EVIDENCE';\n");
+		const projections: string[] = [];
+		test.harness.setResponses([
+			(context) => {
+				projections.push(context.messages.map(getMessageText).join("\n"));
+				return fauxAssistantMessage(
+					[fauxToolCall("read", { path: "src/session.ts" }), fauxToolCall("read", { path: "src/second.ts" })],
+					{ stopReason: "toolUse" },
+				);
+			},
+			async (context) => {
+				projections.push(context.messages.map(getMessageText).join("\n"));
+				await test.completed[1].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(projections[0]).toContain('Ahead of Model Work: "src/session.ts"');
+		expect(projections[0]).toContain('Ahead of Model Work: "src/second.ts"');
+		expect(projections[1]).not.toContain('Ahead of Model Work: "src/session.ts"');
+		expect(projections[1]).not.toContain('Ahead of Model Work: "src/second.ts"');
+		expect(projections[1]).toContain("SKILL_INSTRUCTIONS");
+		expect(test.report()?.retired).toContainEqual(
+			expect.objectContaining({ candidate: "src/session.ts", reason: "foreground_read" }),
+		);
+		expect(test.report()?.retired).toContainEqual(
+			expect.objectContaining({ candidate: "src/second.ts", reason: "foreground_read" }),
+		);
+		expect(test.report()?.cycles[1].operations.filter((item) => item.service === "readText")).toEqual([]);
+	});
+
+	it("keeps an excerpt when a foreground read covers only its first line", async () => {
+		const test = await setup();
+		await writeFile(
+			join(test.harness.tempDir, "src/session.ts"),
+			"// resume\nexport function resume() {\n  return 'UNREAD_BODY';\n}\n",
+		);
+		let projection = "";
+		test.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("read", { path: "src/session.ts", limit: 1 })], { stopReason: "toolUse" }),
+			(context) => {
+				projection = context.messages.map(getMessageText).join("\n");
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(projection).toContain('Ahead of Model Work: "src/session.ts"');
+		expect(projection).toContain("UNREAD_BODY");
+		expect(test.report()?.retired).toEqual([]);
+	});
+
+	it("does not publish a late excerpt when the foreground has already read it", async () => {
+		const assessing = barrier();
+		const release = barrier();
+		let calls = 0;
+		const test = await setup(
+			{
+				fetch: async (_url, init) => {
+					if (++calls === 3) {
+						assessing.resolve();
+						await release.promise;
+					}
+					return aheadResponse(init);
+				},
+			},
+			undefined,
+			0,
+		);
+		test.harness.setResponses([
+			async () => {
+				await assessing.promise;
+				return fauxAssistantMessage([fauxToolCall("read", { path: "src/session.ts" })], { stopReason: "toolUse" });
+			},
+			async () => {
+				release.resolve();
+				await test.completed[0].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		const publications = audits(test.harness)[0].data.publications;
+		expect(publications).toContainEqual(
+			expect.objectContaining({
+				omittedReason: "foreground_read",
+				contribution: expect.objectContaining({ text: expect.stringContaining('"src/session.ts"') }),
+			}),
+		);
+		expect(
+			publications
+				.filter((item) => item.contribution.text.includes('"src/session.ts"'))
+				.every((item) => item.result === undefined),
+		).toBe(true);
 	});
 
 	it("includes recent conversation for a follow-up and excludes private reasoning", async () => {

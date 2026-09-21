@@ -1,4 +1,5 @@
 /** Opt-in Ahead of Model Work experiment. See README.md for the expanded data export and budgets. */
+import { createHash } from "node:crypto";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -10,10 +11,21 @@ import type {
 } from "@hansjm10/volt-coding-agent";
 import { AHEAD_AUDIT_TYPE, type AheadAudit, type AheadEvaluationAudit, auditText } from "./audit.ts";
 import { evaluateAhead, type JevResult, type JevTransportOptions } from "./client.ts";
-import { type AheadCycle, type AheadStage, type AheadState, boundedText, prepareAhead } from "./pipeline.ts";
+import { MAX_AHEAD_CYCLES, MAX_AHEAD_EVALUATIONS } from "./limits.ts";
+import {
+	type AheadCycle,
+	type AheadPath,
+	type AheadRead,
+	type AheadStage,
+	type AheadState,
+	alreadyRead,
+	boundedText,
+	observedPaths,
+	prepareAhead,
+	workspacePath,
+} from "./pipeline.ts";
 
 const FLAG = "jev-ahead-of-model";
-const MAX_CYCLES = 3;
 
 export interface AheadReport {
 	cycles: AheadCycle[];
@@ -24,12 +36,15 @@ export interface AheadReport {
 		waitMs: number;
 		observation?: {
 			at: string;
+			observedAt: string;
 			cycle?: number;
 			evaluations: number;
 			contributions: ExtensionWorkStatus["contributions"];
 		};
 	}>;
 	coalescedToolResults: number;
+	duplicateToolResults: number;
+	retired: Array<{ key: string; candidate: string; at: string; reason: "foreground_read" }>;
 	status: string;
 }
 
@@ -45,7 +60,13 @@ interface Scope {
 	ctx: ExtensionContext;
 	report: AheadReport;
 	tools: AheadState["tools"];
+	paths: AheadPath[];
+	reads: AheadRead[];
+	toolInputs: Map<string, { path: string; offset: number; limit?: number }>;
+	seenTools: Set<string>;
+	activePublications: Map<string, AheadCycle["publications"][number]>;
 	pending: boolean;
+	turnReady: boolean;
 	stopped: boolean;
 	startedAt: string;
 	auditState: "collecting" | "appended" | "failed";
@@ -88,6 +109,8 @@ function taskState(scope: Scope): AheadState {
 			continue;
 		const raw = textContent(entry.message.content);
 		if (!raw) continue;
+		if (entry.message.role === "toolResult" && scope.tools.some((tool) => tool.text === boundedText(raw, 2048)))
+			continue;
 		const text = boundedText(raw, Math.min(remaining, 2048));
 		truncated ||= text.length !== raw.length;
 		recent.unshift({ role: entry.message.role, text });
@@ -97,7 +120,14 @@ function taskState(scope: Scope): AheadState {
 			break;
 		}
 	}
-	return { request, recent, tools: structuredClone(scope.tools), truncated };
+	return {
+		request,
+		recent,
+		tools: structuredClone(scope.tools),
+		paths: structuredClone(scope.paths),
+		reads: structuredClone(scope.reads),
+		truncated,
+	};
 }
 
 export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFactory {
@@ -185,7 +215,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			const report = scope.report;
 			const lines = [
 				`Ahead of Model Work: ${report.status}`,
-				`${report.cycles.length}/${MAX_CYCLES} preparation cycles; ${report.evaluations.length}/12 Jev evaluations; ${report.coalescedToolResults} tool results coalesced.`,
+				`${report.cycles.length}/${MAX_AHEAD_CYCLES} preparation cycles; ${report.evaluations.length}/${MAX_AHEAD_EVALUATIONS} Jev evaluations; ${report.coalescedToolResults} tool results coalesced; ${report.duplicateToolResults} duplicates skipped; ${report.retired.length} excerpts retired after foreground reads.`,
 			];
 			for (const cycle of report.cycles) {
 				lines.push(
@@ -238,6 +268,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				if (boundary)
 					boundary.observation = {
 						at,
+						observedAt: new Date().toISOString(),
 						cycle: scope.publishedCycle,
 						evaluations: scope.report.evaluations.length,
 						contributions: volt.getWorkStatus().contributions,
@@ -260,7 +291,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			)
 				return false;
 			if (current.handle) return false;
-			if (current.report.cycles.length >= MAX_CYCLES) {
+			if (current.report.cycles.length >= MAX_AHEAD_CYCLES) {
 				current.pending = false;
 				current.report.status = "cycle budget reached";
 				return false;
@@ -275,7 +306,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			};
 			const state = taskState(current);
 			const admission = current.ctx.work.tasks.start(
-				{ key: `ahead-${cycle.number}`, label: "Ahead of Model Work with Jev", timeoutMs: 8000 },
+				{ key: `ahead-${cycle.number}`, label: "Ahead of Model Work with Jev", timeoutMs: 12_000 },
 				async (task) => {
 					try {
 						await prepareAhead(
@@ -342,12 +373,24 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 								if (task.signal.aborted || scope !== current || current.stopped) return;
 								current.publishedCycle = cycle.number;
 								for (let i = 0; i < 6; i++) task.context.remove(`ahead-${i}`);
+								current.activePublications.clear();
 								for (const publication of publications) {
 									const { contribution } = publication;
+									const reported = cycle.publications.find((item) => item.key === contribution.key);
+									if (
+										reported &&
+										alreadyRead(current.reads, reported.candidate, reported.startLine, reported.endLine)
+									) {
+										reported.status = "already read";
+										publication.omittedReason = "foreground_read";
+										continue;
+									}
 									const result = task.context.put(contribution);
 									publication.result = result;
-									const reported = cycle.publications.find((item) => item.key === contribution.key);
+									publication.publishedAt = new Date().toISOString();
 									if (reported) reported.status = result.status;
+									if (reported && result.status === "accepted")
+										current.activePublications.set(reported.key, reported);
 								}
 							},
 						);
@@ -362,6 +405,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			}
 			current.report.cycles.push(cycle);
 			current.pending = false;
+			current.turnReady = false;
 			current.handle = admission.task;
 			current.report.status = "preparing";
 			status(current.ctx);
@@ -375,7 +419,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 					observe(current);
 					if (scope !== current) return;
 					status(current.ctx);
-					if (current.pending) start(current, "tools");
+					if (current.pending && current.turnReady) start(current, "tools");
 				})
 				.catch(() => {});
 			return true;
@@ -412,17 +456,32 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 					id: ctx.work.snapshot.scopeId,
 					ctx,
 					pending: false,
+					turnReady: false,
 					stopped: false,
 					startedAt: new Date().toISOString(),
 					auditState: "collecting",
 					auditEvaluations: [],
 					auditPublications: [],
 					tools: [],
-					report: { cycles: [], evaluations: [], boundaries: [], coalescedToolResults: 0, status: "starting" },
+					paths: [],
+					reads: [],
+					toolInputs: new Map(),
+					seenTools: new Set(),
+					activePublications: new Map(),
+					report: {
+						cycles: [],
+						evaluations: [],
+						boundaries: [],
+						coalescedToolResults: 0,
+						duplicateToolResults: 0,
+						retired: [],
+						status: "starting",
+					},
 				};
 			}
 			if (!scope || scope.stopped || scope.id !== ctx.work.snapshot.scopeId) return;
 			scope.ctx = ctx;
+			scope.turnReady = event.cause !== "retry" && scope.pending;
 			scope.projection?.release();
 			let release!: () => void;
 			const promise = new Promise<void>((done) => {
@@ -436,23 +495,94 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				waitMs: 0,
 			};
 			scope.report.boundaries.push(boundary);
-			if (scope.report.boundaries.length > 8) scope.report.boundaries.shift();
+			if (scope.report.boundaries.length > 64) scope.report.boundaries.shift();
 			if (event.first && start(scope, "request")) boundary.waitMs = ctx.work.context.requestWait(1000);
-			else if (event.cause !== "retry" && scope.pending) start(scope, "tools");
+			else if (event.cause !== "retry" && scope.pending && scope.turnReady) start(scope, "tools");
 			observe(scope);
+		});
+		volt.on("tool_execution_start", (event, ctx) => {
+			if (!isEnabled() || !scope || scope.stopped) return;
+			const path = typeof event.args.path === "string" ? workspacePath(ctx.cwd, event.args.path) : undefined;
+			if (!path) return;
+			scope.toolInputs.set(event.toolCallId, {
+				path,
+				offset:
+					typeof event.args.offset === "number" && Number.isSafeInteger(event.args.offset) && event.args.offset > 0
+						? event.args.offset
+						: 1,
+				limit:
+					typeof event.args.limit === "number" && Number.isSafeInteger(event.args.limit) && event.args.limit > 0
+						? event.args.limit
+						: undefined,
+			});
+			if (scope.toolInputs.size > 64) scope.toolInputs.delete(scope.toolInputs.keys().next().value!);
 		});
 		volt.on("tool_execution_end", (event, ctx) => {
 			if (!isEnabled() || !scope || scope.stopped || !ctx.work || ctx.work.snapshot.scopeId !== scope.id) return;
 			scope.ctx = ctx;
-			scope.tools.push({
+			const input = scope.toolInputs.get(event.toolCallId);
+			scope.toolInputs.delete(event.toolCallId);
+			const raw = textContent(event.result.content);
+			if (input && !event.isError) {
+				const details = event.result.details;
+				const truncated = details !== null && typeof details === "object" && "truncation" in details;
+				if (event.toolName === "read" && raw && !truncated) {
+					scope.reads.push({
+						path: input.path,
+						startLine: input.offset,
+						endLine: input.limit === undefined ? Number.MAX_SAFE_INTEGER : input.offset + input.limit - 1,
+					});
+					if (scope.reads.length > 64) scope.reads.shift();
+				} else if (["edit", "write"].includes(event.toolName))
+					scope.reads = scope.reads.filter((item) => item.path !== input.path);
+			}
+			const current = scope;
+			const consumed = [...current.activePublications.values()].filter((item) =>
+				alreadyRead(current.reads, item.candidate, item.startLine, item.endLine),
+			);
+			if (consumed.length)
+				ctx.work.tasks.start(
+					{ key: "ahead-retire", label: "Retire evidence read by the foreground", timeoutMs: 1000 },
+					async (task) => {
+						for (const item of consumed) {
+							if (current.activePublications.get(item.key) !== item) continue;
+							task.context.remove(item.key);
+							current.activePublications.delete(item.key);
+							current.report.retired.push({
+								key: item.key,
+								candidate: item.candidate,
+								at: new Date().toISOString(),
+								reason: "foreground_read",
+							});
+						}
+					},
+				);
+			const observed = [
+				...(input ? [{ path: input.path, line: input.offset }] : []),
+				...observedPaths(ctx.cwd, boundedText(raw, 8192)),
+			];
+			const paths = new Map<string, AheadPath>();
+			for (const item of [...observed, ...scope.paths]) if (!paths.has(item.path)) paths.set(item.path, item);
+			scope.paths = [...paths.values()].slice(0, 64);
+			const observation = {
 				name: boundedText(event.toolName, 80),
 				isError: event.isError,
-				text: boundedText(textContent(event.result.content), 2048),
-			});
+				text: boundedText(raw, 2048),
+				...(input ? { path: input.path } : {}),
+			};
+			const fingerprint = createHash("sha256")
+				.update(JSON.stringify({ observation, input, observed }))
+				.digest("hex");
+			if (scope.seenTools.has(fingerprint) && !["edit", "write"].includes(event.toolName)) {
+				scope.report.duplicateToolResults++;
+				return;
+			}
+			scope.seenTools.add(fingerprint);
+			if (scope.seenTools.size > 128) scope.seenTools.delete(scope.seenTools.values().next().value!);
+			scope.tools.push(observation);
 			if (scope.tools.length > 4) scope.tools.shift();
 			if (scope.pending) scope.report.coalescedToolResults++;
 			scope.pending = true;
-			start(scope, "tools");
 		});
 		volt.registerCommand("ahead", {
 			description: "Control Jev Ahead of Model Work (on/off/status/report/history/audit)",
@@ -475,7 +605,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				}
 				if (action === "status") {
 					ctx.ui.notify(
-						`Ahead: ${isEnabled() ? "on" : "off"}. Up to 3 cycles / 12 evaluations per request. Shared wait ${ctx.getPreparationWait().waitMs} ms. ${options.zeroDataRetention ? "ZDR required." : "ZDR off."} Use /ahead report for decisions.`,
+						`Ahead: ${isEnabled() ? "on" : "off"}. Up to ${MAX_AHEAD_CYCLES} cycles / ${MAX_AHEAD_EVALUATIONS} evaluations per request. Shared wait ${ctx.getPreparationWait().waitMs} ms. ${options.zeroDataRetention ? "ZDR required." : "ZDR off."} Use /ahead report for decisions.`,
 						"info",
 					);
 					return;
@@ -501,7 +631,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 						}
 						const consent = await ctx.ui.confirm(
 							"Enable Ahead of Model Work with Jev?",
-							`Send bounded recent conversation, tool output, repository paths, source excerpts, and skill instructions to Vercel AI Gateway / TypeSafe AI. Content is not redacted and may contain secrets. Up to 12 evaluations per user request may incur cost. ${
+							`Send bounded recent conversation, tool output, repository paths, source excerpts, and skill instructions to Vercel AI Gateway / TypeSafe AI. Content is not redacted and may contain secrets. Up to ${MAX_AHEAD_EVALUATIONS} evaluations per user request may incur cost. ${
 								options.zeroDataRetention ? "Zero Data Retention is required." : "Zero Data Retention is off."
 							} Exact evaluation inputs, results and selected excerpts are saved locally in the session audit. This choice lasts until reload, tree navigation, or session replacement.`,
 						);

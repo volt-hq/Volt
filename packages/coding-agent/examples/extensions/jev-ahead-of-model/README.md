@@ -1,6 +1,6 @@
 # Ahead of Model Work with Jev
 
-This proof of concept uses Jev throughout a speculative preparation pipeline. While the main agent works, Jev chooses what to inspect, ranks files, compares actual skill instructions, selects semantic lookups, and assesses the resulting evidence. Volt offers the prepared excerpts at an existing model-request boundary. New foreground tool results can trigger another preparation cycle.
+This proof of concept uses Jev throughout a speculative preparation pipeline. While the main agent works, Jev chooses what to inspect, ranks files, compares actual skill instructions, selects code regions and semantic lookups, and assesses the exact excerpts that will be published. Volt offers the prepared excerpts at an existing model-request boundary. New foreground tool results are grouped into an update at the next boundary.
 
 The aim is to move discovery and context selection ahead of the main model's next request. Whether this reduces reasoning, tool calls, or completion time remains unmeasured. This is an opt-in example using existing managed services; it adds no dependencies or core protocol changes.
 
@@ -27,7 +27,9 @@ flowchart LR
     Request[Request and recent context] --> Orient[Jev: orient]
     Orient --> Discover[Native search and skill reads]
     Discover --> Select[Jev: select]
-    Select --> Read[Native source reads and symbols]
+    Select --> Symbols[Native symbols]
+    Symbols --> Focus[Jev: choose code regions]
+    Focus --> Read[Native source reads]
     Read --> Assess[Jev: assess]
     Assess --> Navigate[Optional native definition or references]
     Navigate --> Refine[Jev: refine]
@@ -40,33 +42,35 @@ flowchart LR
 | Stage | Batched Jev questions | Resulting work |
 | --- | --- | --- |
 | Orient | Choice: task phase, search term, skill. Boolean: repository investigation useful? | Abstain for conversation; otherwise select up to two literal search terms and shortlist up to three loaded skills. |
-| Select | Score and exclusion Boolean per candidate file. Choice and applicability Boolean for shortlisted skills. | Inspect up to three ranked files and retain at most one skill after comparing actual instructions. Request symbols from the highest-ranked file when available. |
+| Select | Score and exclusion Boolean per candidate file. Choice and applicability Boolean for shortlisted skills. | Select up to three ranked files and retain at most one skill after comparing actual instructions. Request symbols from each selected file when available. |
+| Focus | Choice over observed source locations and symbol ranges for each file. | Read the implementation or test region Jev selects instead of automatically taking the file prefix. Fully read regions are excluded. Skip this stage when there is no region choice. |
 | Assess | Usefulness Score and exclusion Boolean per excerpt. Choice over observed symbols and available semantic operations. | Retain useful evidence; optionally follow one definition or references lookup. |
-| Refine | Reassess all excerpts after up to two related source reads. | Publish at most six ranked excerpts with native evidence IDs. |
+| Refine | Reassess all excerpts after up to two related source reads. | Publish ranked excerpts unchanged from assessment, with native evidence IDs, within the packet budget. |
 
 Questions in a stage share one state and one HTTP request. A later stage waits for the actual discovery/read result it evaluates. All three evaluation primitives are used; the entire answer batch must be valid before any decision is applied.
 
-Search terms come from bounded request, recent conversation, and tool text. Files come from managed discovery and explicitly mentioned paths. Navigation choices come from observed native symbols. Jev selects finite candidates; it cannot generate commands, paths, arguments, or code. The ordinary main agent retains implementation and verification work.
+Search terms come from bounded request, recent conversation, and tool text, prioritizing observed file names. Explicit paths, cited lines, foreground tool paths and changed-file lists take precedence over generic discovery. Git output is observed from foreground tools; this extension does not execute Git. Known paths avoid broad scans; otherwise a selected term narrows path discovery. Secondary search terms require at least 0.15 probability. Navigation choices come from observed native symbols. Jev selects finite candidates; it cannot generate commands, paths, arguments, or code. The ordinary main agent retains implementation and verification work.
 
 Each file/excerpt gets its own usefulness score; the threshold is `1.5` on a four-level `0..3` scale. Boolean decisions use `0.6`. Choice distributions order the search/skill shortlist. These are experimental decision rules, not calibrated confidence or proof of relevance. Full skill descriptions are offered initially; truncated catalogs skip skill selection, and oversized requests abort evaluation rather than silently shortening descriptions.
 
 ## Timing and resource bounds
 
-- At most three preparation cycles per committed request: initial preparation plus tool-driven updates. One cycle runs at a time; intermediate tool results coalesce, retaining the latest four results. Retries do not create their own cycles.
-- At most four evaluations per cycle, twelve per request. Each HTTP evaluation has a two-second timeout; each managed task has an eight-second deadline. No HTTP retries or alternate endpoint.
+- At most twelve preparation cycles per committed request: initial preparation plus updates at subsequent model-request boundaries. One cycle runs at a time; a burst of tool results produces one pending update. Identical recent tool observations are skipped. The latest four distinct outputs are retained, together with up to 64 observed paths and 64 foreground read ranges. Retries do not create their own cycles.
+- At most five evaluations per cycle, sixty per request. Each HTTP evaluation has a two-second timeout; each managed task has a twelve-second deadline. No HTTP retries or alternate endpoint.
 - The initial task requests at most 1,000 ms of the host's shared first-request allowance. The host can grant less or zero. Later boundaries add no preparation wait. Several sequential Jev calls can miss the initial allowance; completed evidence can still serve a later authorized continuation.
 - No timer starts a model turn. Foreground completion, cancellation, or scope revocation stops outstanding work. Replacement publications wait while the host may be collecting a prior packet. Native freshness checks can omit stale evidence at admission.
-- Each cycle requests at most 13 native discovery/read operations: one path scan, two searches, three skill reads, three source reads, one symbols query, one navigation lookup, and two related reads. Host task/scope limits and validation work remain independent and can stop preparation sooner.
-- Discovery is deliberately partial: at most 160 scanned paths, 24 hits per selected term, and 24 candidate files for scoring. Read windows are 80 lines per skill, 60 per selected file, and 40 per related source. Excerpts sent for assessment are at most 2,400 bytes; each published source excerpt is at most 900 bytes.
+- Each cycle requests at most 15 native discovery/read operations: one path scan, two searches, three skill reads, three symbols queries, three source reads, one navigation lookup, and two related reads. Known paths avoid unnecessary discovery. Host task/scope limits and validation work remain independent and can stop preparation sooner.
+- Discovery is deliberately partial: at most 160 scanned paths, 24 hits per selected term, and 24 candidate files for scoring. Read windows are 80 lines per skill and at most 120 lines per source region. Jev chooses among the observed location and up to sixteen symbols per selected file, prioritizing functions, methods and classes.
+- Each assessed excerpt is at most 3,000 bytes, ending at a complete line. The published excerpt is identical. The packet contains at most six excerpts and 8,000 bytes including labels; a lower-ranked excerpt that does not fit is omitted rather than shortened after assessment.
 - Request and response JSON are each capped at 64 KiB, with at most 64 questions per call. Managed host contribution limits apply as well. These bounds do not enforce a dollar budget, and aborting a client does not guarantee zero provider billing.
 
-The extension does not cache across requests or transparently fulfill later `read` tool calls. Each new cycle obtains fresh evidence. It prepares evidence, not completed skill workflows or verified outcomes. Source paths with hidden components, dependency/build directories, unusual characters, or unsupported extensions are excluded from its candidate pool; this is not a secret detector or complete repository index.
+Successful, untruncated foreground `read` calls retire covered prepared excerpts and exclude covered regions from later preparation. A read that overtakes an in-flight evaluation also prevents its late publication. Known `edit` and `write` calls invalidate remembered read ranges for that path. Truncated reads, opaque shell reads and external edits are not fully tracked. The extension does not cache across requests or transparently fulfill later `read` tool calls. Each new cycle obtains fresh evidence. It prepares evidence, not completed skill workflows or verified outcomes. Source paths with hidden components, dependency/build directories, unusual characters, or unsupported extensions are excluded from its candidate pool; this is not a secret detector or complete repository index.
 
 ## Export consent and access
 
 **Enabling this example authorizes broader export than `jev-context-preparation.ts`.** It sends bounded request text, recent user/assistant/tool-result text, recent foreground tool output, relative candidate paths, grep snippets, full loaded skill descriptions, and selected skill/source excerpts to **Vercel AI Gateway / TypeSafe AI**. Content is not automatically redacted and may contain private data or secrets. The older `/jev` choice does not enable this example.
 
-The request snapshot is capped at 8,192 bytes, recent conversation at eight text messages / 8,192 bytes from the latest sixteen branch entries, and tool observations at four / 2,048 bytes each. Context before a compaction boundary is skipped. Thinking blocks, system messages, custom session entries, image bytes, host resource IDs, and the absolute cwd are not automatically added. Those values could still appear in user-authored text or source content. Missing or truncated context can cause incorrect decisions.
+The request snapshot is capped at 8,192 bytes, recent conversation at eight text messages / 8,192 bytes from the latest sixteen branch entries, and tool observations at four / 2,048 bytes each. Duplicate tool text is omitted from the recent-conversation window. Up to 64 relative paths can also be extracted from the first 8,192 bytes of each foreground result and observed tool arguments. Up to 64 read ranges describe evidence already available to the foreground. Context before a compaction boundary is skipped. Thinking blocks, system messages, custom session entries, image bytes, host resource IDs, and the absolute cwd are not automatically added. Those values could still appear in user-authored text or source content. Missing or truncated context can cause incorrect decisions.
 
 Credentials resolve through the session's `modelRegistry.getApiKeyForProvider("vercel-ai-gateway")`. Existing Volt `/login`, supported environment credentials, and provider key configuration apply. The public endpoint is fixed to `https://ai-gateway.vercel.sh/v1/evaluate`; redirects are refused. **Zero Data Retention is off by default.** SDK `zeroDataRetention: true` requires Gateway ZDR support and never retries with it disabled.
 
@@ -74,7 +78,7 @@ The default credential file is `~/.volt/agent/auth.json`, with the key stored un
 
 All repository access uses managed native services and their active tool authority, policy hooks, result reducers, cancellation, and source validation. A denial of `read` does not automatically deny `grep`: both can disclose source content, so policies protecting source must cover both. Native access permission and external-export consent are separate. Missing credentials, invalid answers, unavailable services, or denied reads omit optional preparation; the main request continues.
 
-`/ahead report` is an in-memory diagnostic view containing relative candidate paths, scores, probabilities, operation outcomes, and validated usage/cost metadata. It does not include prompt/source bodies, keys, or raw provider errors. Host admission observations are not final-payload delivery receipts and do not establish that the model used the evidence. Reports retain the latest scope and up to eight request-boundary observations. No report command triggers inference or additional reads.
+`/ahead report` is an in-memory diagnostic view containing relative candidate paths, scores, probabilities, operation outcomes, skipped duplicate counts, retired excerpts, and validated usage/cost metadata. It does not include prompt/source bodies, keys, or raw provider errors. Host admission observations are not final-payload delivery receipts and do not establish that the model used the evidence. Reports retain the latest scope and up to 64 timestamped request-boundary observations. No report command triggers inference or additional reads.
 
 ## Persistent audit history
 
@@ -85,7 +89,7 @@ Each `jev-ahead-audit` custom session entry records:
 - Session, request scope, runtime and branch identifiers, start/seal timestamps, and whether work was interrupted.
 - Each cycle/stage's exact bounded request JSON in `evaluations[].requestBody`, including the supplied state, questions and retention option. Evaluation start, dispatch and finish timestamps distinguish a local attempt from an HTTP call. Oversized inputs are rejected before capture; their bodies are omitted and the size failure is recorded.
 - Validated answers, complete probability distributions, input/output token counts, reported cost, HTTP status, elapsed time and request bytes. Missing provider metrics stay unknown. Credentials, HTTP headers and raw provider error bodies are excluded.
-- File selections and omissions, native operation outcomes, selected contribution text and evidence IDs, publication results, and host admission observations keyed by model-request attempt and publication cycle. A missing publication result means publication was not observed before sealing. These observations do not prove final payload delivery or model use.
+- File and region selections, native operation outcomes, selected contribution text and evidence IDs, publication timestamps/results, foreground-read omissions and retirements, and timestamped host admission observations keyed by model-request attempt and publication cycle. A missing publication result without an omission reason means publication was not observed before sealing. These observations do not prove final payload delivery or model use.
 
 Audits contain the actual exported conversation, tool text, source and skill content, which can include sensitive material. They use the existing session retention and export behavior; deleting or exporting a session affects its audit data too. They are custom entries, not model messages, and are excluded from both the main model's context and later Jev conversation snapshots. `onReport` remains a metadata-only callback.
 
@@ -157,7 +161,11 @@ cd packages/coding-agent
 node node_modules/vitest/dist/cli.js --run test/jev-ahead-of-model.test.ts test/suite/jev-ahead-of-model.test.ts
 ```
 
-`--live` is explicit consent to up to twelve paid Jev evaluations of synthetic data. It fails clearly when Gateway credentials are unavailable, and exits unsuccessfully if no evaluation succeeds, no source reaches a main-request projection, or its audit fails the SQLite round trip. It is not a quality benchmark: the main responses are fixed, and their timing must not be presented as reasoning savings. The offline tests also cover exact audit payloads and results, SQLite close/reopen, history commands without inference, interrupted work, branch isolation, and append failures.
+`--live` is explicit consent to up to sixty paid Jev evaluations of synthetic data. It fails clearly when Gateway credentials are unavailable, and exits unsuccessfully if no evaluation succeeds, no source reaches a main-request projection, or its audit fails the SQLite round trip. It is not a quality benchmark: the main responses are fixed, and their timing must not be presented as reasoning savings. The offline tests also cover changed-file discovery, code-region selection, exact assessed/published excerpts, tool-batch coalescing, duplicate suppression, continued preparation beyond three cycles, foreground-read retirement, late-publication suppression, and the existing persistence/lifecycle contracts.
+
+Validation of the expanded implementation on 2026-09-21: 49 focused tests and the full repository check passed. The live synthetic demo completed six HTTP 200 evaluations across two cycles, with a 223 ms median evaluation time, 6,582 reported input tokens and 848 output tokens. Prepared source reached the first main request at 967 ms and remained available in all four projections; later boundaries added no wait. The checkpoint excerpt disappeared after the foreground read it. Repeated identical checkpoint results did not start further cycles. The SQLite audit round trip passed, as did the disabled baseline. Both runs made four scripted main requests. This fixture has no LSP service; symbol-region selection is covered by offline tests, not this live run.
+
+The results below describe the earlier three-cycle implementation.
 
 Validation on 2026-09-21: 34 targeted tests and the full repository check passed. The standalone SDK demo also completed with a substituted offline transport imposing 500 ms per evaluation: three cycles / nine evaluations, no initial prepared packet, then source evidence in all three later projections. Both enabled and disabled runs made exactly four scripted main requests.
 

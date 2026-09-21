@@ -41,6 +41,7 @@ export function aheadAnswers(request: AheadRequest): Record<string, JevAnswer> {
 					Object.entries(question.criteria).find(([, text]) => text.toLowerCase() === "resume")?.[0] ?? "none";
 			if (id === "skill") choice = keys.find((key) => key.startsWith("skill_")) ?? "none";
 			if (id === "followup") choice = keys.find((key) => question.criteria[key].startsWith("definition")) ?? "none";
+			if (id.startsWith("focus_")) choice = keys[1] ?? keys[0];
 			const probabilities = Object.fromEntries(keys.map((key) => [key, key === choice ? 1 : 0]));
 			if (id === "skill" && request.questions.phase && keys.includes("skill_1")) {
 				probabilities.skill_0 = 0.7;

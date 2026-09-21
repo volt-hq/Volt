@@ -3,6 +3,9 @@ import { evaluateAhead, type JevQuestion, type JevResult } from "../examples/ext
 import {
 	type AheadCycle,
 	type AheadStage,
+	type AheadState,
+	alreadyRead,
+	observedPaths,
 	prepareAhead,
 	workspacePath,
 } from "../examples/extensions/jev-ahead-of-model/pipeline.ts";
@@ -276,25 +279,19 @@ function pipeline() {
 		},
 	);
 	const publish = vi.fn(async (_items: ExtensionWorkContribution[]) => {});
-	const run = () =>
-		prepareAhead(
-			task,
-			{ request: "Investigate resume", recent: [], tools: [], truncated: false },
-			cycle,
-			evaluate,
-			publish,
-		);
+	const run = (state: AheadState = { request: "Investigate resume", recent: [], tools: [], truncated: false }) =>
+		prepareAhead(task, state, cycle, evaluate, publish);
 	return { task, calls, cycle, evaluate, publish, run, controller };
 }
 
 describe("Ahead preparation strategy", () => {
-	it("uses four Jev stages to select files, inspect skills, follow symbols, and publish assessed evidence", async () => {
+	it("uses five Jev stages to select files, inspect skills, focus code regions, and follow symbols", async () => {
 		const test = pipeline();
 		await test.run();
-		expect(test.calls.map((call) => call.stage)).toEqual(["orient", "select", "assess", "refine"]);
+		expect(test.calls.map((call) => call.stage)).toEqual(["orient", "select", "focus", "assess", "refine"]);
 		expect(JSON.stringify(test.calls[1].request.state)).toContain("SKILL_BODY_resource-a");
-		expect(JSON.stringify(test.calls[2].request.state)).toContain("SESSION_BODY");
-		expect(JSON.stringify(test.calls[3].request.state)).toContain("RELATED_BODY");
+		expect(JSON.stringify(test.calls[3].request.state)).toContain("SESSION_BODY");
+		expect(JSON.stringify(test.calls[4].request.state)).toContain("RELATED_BODY");
 		expect(test.task.repository.readText).toHaveBeenCalledTimes(2);
 		expect(test.task.repository.definition).toHaveBeenCalledWith({
 			path: "src/session.ts",
@@ -342,7 +339,7 @@ describe("Ahead preparation strategy", () => {
 		await test.run();
 		expect(test.cycle.status).toBe("no readable evidence");
 		expect(test.publish).not.toHaveBeenCalled();
-		expect(test.calls).toHaveLength(2);
+		expect(test.calls.map((call) => call.stage)).toEqual(["orient", "select", "focus"]);
 	});
 
 	it("contains a rejected native read without publishing a partial unassessed packet", async () => {
@@ -350,7 +347,7 @@ describe("Ahead preparation strategy", () => {
 		vi.spyOn(test.task.repository, "readText").mockRejectedValue(new Error("read failed"));
 		await test.run();
 		expect(test.cycle.status).toBe("reads failed");
-		expect(test.calls).toHaveLength(2);
+		expect(test.calls.map((call) => call.stage)).toEqual(["orient", "select", "focus"]);
 		expect(test.publish).not.toHaveBeenCalled();
 	});
 
@@ -366,6 +363,106 @@ describe("Ahead preparation strategy", () => {
 		expect(test.cycle.status).toBe("cancelled");
 		expect(test.task.repository.definition).not.toHaveBeenCalled();
 		expect(test.publish).not.toHaveBeenCalled();
+	});
+
+	it("promotes changed paths from foreground output before unrelated repository discovery", async () => {
+		const test = pipeline();
+		const paths = ["packages/agent/jev/index.ts", "packages/agent/jev/client.ts", "packages/agent/jev/pipeline.ts"];
+		await test.run({
+			request: "Read the current branch against main",
+			recent: [{ role: "toolResult", text: "unused unknown version capabilities operations failures ".repeat(50) }],
+			tools: [{ name: "bash", text: paths.join("\n"), isError: false }],
+			truncated: false,
+		});
+		expect(
+			test.calls.find((call) => call.stage === "select")?.request.state.candidates?.map((item) => item.path),
+		).toEqual(expect.arrayContaining(paths));
+		expect(test.task.repository.findPaths).not.toHaveBeenCalled();
+		expect(test.task.repository.searchText).not.toHaveBeenCalled();
+		expect(test.task.repository.readText).toHaveBeenCalledWith(expect.objectContaining({ path: paths[0] }));
+	});
+
+	it("recognizes diff headers, absolute workspace paths and cited lines without inventing paths", () => {
+		expect(
+			observedPaths(
+				"/repo",
+				"diff --git a/src/session.ts b/src/session.ts\n+++ b/src/session.ts\n/repo/src/client.ts:79\n`src/test.ts:120`\n../secret.ts\nnode_modules/private.ts\n.../truncated.ts\n",
+			),
+		).toEqual([
+			{ path: "src/session.ts", line: 1 },
+			{ path: "src/client.ts", line: 79 },
+			{ path: "src/test.ts", line: 120 },
+		]);
+	});
+
+	it("lets Jev read a function below the import preamble and publishes the exact assessed excerpt", async () => {
+		const test = pipeline();
+		vi.mocked(test.task.repository.symbols).mockResolvedValue({
+			status: "ok",
+			symbols: [
+				{
+					path: "/repo/src/session.ts",
+					name: "resume",
+					kind: 12,
+					startLine: 90,
+					endLine: 140,
+					startColumn: 1,
+					endColumn: 1,
+				},
+			],
+			truncated: false,
+			coverage: "unknown",
+			observedAt: 1,
+		});
+		const source = `export function resume() {\n${"  // useful context\n".repeat(70)}  return 'ASSERTION_AFTER_900_BYTES';\n${"  // more context\n".repeat(100)}}\n`;
+		vi.mocked(test.task.repository.readText).mockImplementation(async ({ path, offset }) => ({
+			status: "ok",
+			text: source,
+			truncated: true,
+			evidence: {
+				id: `evidence:${path}`,
+				path: `/repo/${path}`,
+				startLine: offset ?? 1,
+				endLine: (offset ?? 1) + 119,
+				observedAt: 1,
+			},
+		}));
+		await test.run();
+		expect(test.task.repository.readText).toHaveBeenCalledWith({ path: "src/session.ts", offset: 90, limit: 51 });
+		const assessed = test.calls.findLast((call) => call.stage === "refine")!.request.state.evidence!;
+		const publications = test.publish.mock.calls[0][0];
+		for (const item of publications) {
+			const evidence = assessed.find((entry) => item.text.includes(JSON.stringify(entry.label)))!;
+			expect(item.text.endsWith(evidence.text)).toBe(true);
+			if (evidence.label === "src/session.ts") expect(item.text).toContain("ASSERTION_AFTER_900_BYTES");
+			expect(Buffer.byteLength(item.text)).toBeLessThanOrEqual(4096);
+		}
+		expect(publications.reduce((sum, item) => sum + Buffer.byteLength(item.text), 0)).toBeLessThanOrEqual(8000);
+	});
+
+	it("omits source already read by the foreground while retaining unread skill evidence", async () => {
+		const test = pipeline();
+		await test.run({
+			request: "Investigate resume",
+			recent: [],
+			tools: [],
+			truncated: false,
+			reads: [{ path: "src/session.ts", startLine: 1, endLine: Number.MAX_SAFE_INTEGER }],
+		});
+		expect(test.task.repository.readText).not.toHaveBeenCalled();
+		expect(test.publish.mock.calls[0][0]).toHaveLength(1);
+		expect(test.publish.mock.calls[0][0][0].text).toContain("SKILL_BODY");
+	});
+
+	it("requires full range coverage before treating evidence as already read", () => {
+		const reads = [
+			{ path: "src/session.ts", startLine: 10, endLine: 20 },
+			{ path: "src/session.ts", startLine: 21, endLine: 30 },
+		];
+		expect(alreadyRead(reads, "src/session.ts", 10, 30)).toBe(true);
+		expect(alreadyRead(reads, "src/session.ts", 1, 30)).toBe(false);
+		expect(alreadyRead(reads, "src/session.ts", 20, 31)).toBe(false);
+		expect(alreadyRead(reads, "src/other.ts", 10, 30)).toBe(false);
 	});
 
 	it.each([

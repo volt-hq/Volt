@@ -8,6 +8,7 @@ import type {
 } from "@hansjm10/volt-coding-agent";
 import type { JevResult } from "./client.ts";
 import type { AheadReport } from "./index.ts";
+import { MAX_AHEAD_EVALUATIONS } from "./limits.ts";
 import type { AheadStage } from "./pipeline.ts";
 
 export const AHEAD_AUDIT_TYPE = "jev-ahead-audit";
@@ -38,7 +39,9 @@ export interface AheadAudit {
 	publications: Array<{
 		cycle: number;
 		contribution: ExtensionWorkContribution;
-		/** Absent when sealing preceded publication or a publication result was not observed. */
+		publishedAt?: string;
+		omittedReason?: "foreground_read";
+		/** Absent when omitted, sealing preceded publication, or a publication result was not observed. */
 		result?: ReturnType<ExtensionWorkTaskContext["context"]["put"]>;
 	}>;
 	report: AheadReport;
@@ -59,7 +62,7 @@ function auditData(entry: SessionEntry): Record<string, JsonValue> | undefined {
 		!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(data.startedAt) ||
 		typeof data.interrupted !== "boolean" ||
 		!Array.isArray(data.evaluations) ||
-		data.evaluations.length > 12
+		data.evaluations.length > MAX_AHEAD_EVALUATIONS
 	)
 		return;
 	return data;

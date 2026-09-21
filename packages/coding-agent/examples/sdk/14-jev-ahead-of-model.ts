@@ -2,7 +2,7 @@
  * Synthetic live Jev demonstration; the main provider is scripted and free.
  * From the repository root:
  * JITI_TSCONFIG_PATHS=./tsconfig.json node node_modules/jiti/lib/jiti-cli.mjs packages/coding-agent/examples/sdk/14-jev-ahead-of-model.ts --live
- * --live consents to exporting the synthetic fixture and making up to 12 Jev calls.
+ * --live consents to exporting the synthetic fixture and making up to 60 Jev calls.
  */
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
