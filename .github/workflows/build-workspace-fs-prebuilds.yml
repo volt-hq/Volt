@@ -75,8 +75,6 @@ jobs:
       RUST_TARGET: ${{ matrix.rust-target }}
       # musl cdylibs and test executables must use the dynamic musl runtime.
       RUSTFLAGS: ${{ endsWith(matrix.target, '-musl') && '-C target-feature=-crt-static' || '' }}
-      CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
     steps:
       - name: Checkout exact source
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -89,17 +87,14 @@ jobs:
           node-version: '22.19.0'
           package-manager-cache: false
       - name: Setup pinned Rust toolchain
+        if: ${{ !endsWith(matrix.target, '-musl') }}
         shell: bash
         run: |
           test "$(git rev-parse HEAD)" = "$SOURCE_COMMIT"
           rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
           rustup target add --toolchain 1.97.1 "$RUST_TARGET"
-      - name: Install native-architecture musl linker and runtime
-        if: endsWith(matrix.target, '-musl')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y musl-tools
       - name: Format, lint, and test the target crate
+        if: ${{ !endsWith(matrix.target, '-musl') }}
         shell: bash
         run: |
           cd packages/coding-agent/native/workspace-fs
@@ -107,8 +102,30 @@ jobs:
           cargo clippy --locked --all-targets --target "$RUST_TARGET" -- -D warnings
           cargo test --locked --target "$RUST_TARGET"
       - name: Build fresh target addon
+        if: ${{ !endsWith(matrix.target, '-musl') }}
         shell: bash
         run: node scripts/workspace-fs-native.mjs build "$WORKSPACE_FS_TARGET"
+      - name: Build and test with the native musl toolchain
+        if: endsWith(matrix.target, '-musl')
+        shell: bash
+        env:
+          RUST_IMAGE: rust:1.97.1-alpine@sha256:3c38f3f82c2f3d73da3b38e18d279393a04cb43ddded0e35088a8c3324d40900
+        run: |
+          docker pull "$RUST_IMAGE"
+          docker run --rm --pull=never \
+            --volume "${PWD}:/workspace" \
+            --workdir /workspace/packages/coding-agent/native/workspace-fs \
+            --env RUST_TARGET --env WORKSPACE_FS_TARGET --env RUSTFLAGS \
+            "$RUST_IMAGE" sh -ec '
+              rustup component add --toolchain 1.97.1 clippy rustfmt
+              cargo fmt --all -- --check
+              cargo clippy --locked --all-targets --target "$RUST_TARGET" -- -D warnings
+              cargo test --locked --target "$RUST_TARGET"
+              cargo build --release --locked --target "$RUST_TARGET"
+              mkdir -p "prebuilds/$WORKSPACE_FS_TARGET"
+              cp "target/$RUST_TARGET/release/libvolt_workspace_fs.so" "prebuilds/$WORKSPACE_FS_TARGET/workspace-fs.node"
+              chmod 644 "prebuilds/$WORKSPACE_FS_TARGET/workspace-fs.node"
+            '
       - name: Load and stage native addon
         if: ${{ !endsWith(matrix.target, '-musl') }}
         shell: bash
