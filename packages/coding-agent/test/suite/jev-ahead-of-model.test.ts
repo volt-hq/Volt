@@ -144,6 +144,93 @@ function audits(harness: Harness) {
 }
 
 describe("Jev Ahead of Model Work integration", () => {
+	it("discovers children through the native find observation after directory normalization", async () => {
+		const test = await setup();
+		await rm(join(test.harness.tempDir, "skills"), { recursive: true });
+		test.harness.session.resourceLoader.getSkills = () => ({ skills: [], diagnostics: [] });
+		await mkdir(join(test.harness.tempDir, "src/resume"));
+		await writeFile(
+			join(test.harness.tempDir, "src/resume/index.ts"),
+			"export const implementation = 'DIRECTORY_EVIDENCE';\n",
+		);
+		let projection = "";
+		test.harness.setResponses([
+			(context) => {
+				projection = context.messages.map(getMessageText).join("\n");
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(test.report()?.cycles[0].operations).toContainEqual(
+			expect.objectContaining({ service: "findPaths", candidate: "src/resume", status: "ok" }),
+		);
+		expect(projection).toContain("DIRECTORY_EVIDENCE");
+	});
+
+	it("preserves native grep hit locations and search terms when the input is a file", async () => {
+		const test = await setup();
+		await writeFile(
+			join(test.harness.tempDir, "src/deep.ts"),
+			`${"// setup\n".repeat(1700)}export function settleAfterRetry() { return true; }\n`,
+		);
+		test.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("grep", { path: "src/deep.ts", pattern: "settleAfterRetry" })], {
+				stopReason: "toolUse",
+			}),
+			async () => {
+				await test.completed[1].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate src/session.ts");
+		const orient = audits(test.harness)[0].data.evaluations.find(
+			(call) => call.cycle === 2 && call.stage === "orient",
+		)!;
+		const state = JSON.parse(orient.requestBody!).state;
+		expect(state.paths).toContainEqual({ path: "src/deep.ts", line: 1701, origin: "tool" });
+		expect(state.tools).toContainEqual(expect.objectContaining({ name: "grep", query: "settleAfterRetry" }));
+		expect(test.report()?.cycles[1].publications).toContainEqual(
+			expect.objectContaining({ candidate: "src/deep.ts", startLine: 1701 }),
+		);
+	});
+
+	it("bounds repeated validation and admits newly discovered evidence after seventy foreground requests", async () => {
+		const operations: ExtensionOperationEvent[] = [];
+		const test = await setup({}, (volt) => {
+			volt.on("extension_operation", (event) => {
+				operations.push(event);
+			});
+		});
+		await writeFile(join(test.harness.tempDir, "src/late.ts"), "export const late = 'LATE_EVIDENCE';\n");
+		const projections: string[] = [];
+		test.harness.setResponses(
+			Array.from({ length: 76 }, (_, i) => async (context) => {
+				projections.push(context.messages.map(getMessageText).join("\n"));
+				if (i === 1) await test.completed[1].promise;
+				if (i === 73) await test.completed[2].promise;
+				return i === 75
+					? fauxAssistantMessage("done")
+					: fauxAssistantMessage(
+							[
+								i === 72
+									? fauxToolCall("find", { path: "src", pattern: "late.ts" })
+									: fauxToolCall("read", { path: "src/irrelevant.ts" }),
+							],
+							{ stopReason: "toolUse" },
+						);
+			}),
+		);
+		await test.harness.session.prompt("Investigate src/session.ts");
+		expect(projections.filter((text) => text.includes("SESSION_EVIDENCE"))).toHaveLength(2);
+		expect(projections[74]).toContain("LATE_EVIDENCE");
+		expect(test.harness.faux.state.callCount).toBe(76);
+		expect(operations.filter((event) => event.ownerKind === "validation").length).toBeLessThanOrEqual(8);
+		expect(operations.every((event) => event.status !== "limit_exceeded")).toBe(true);
+		expect(test.report()?.retired).toContainEqual(
+			expect.objectContaining({ candidate: "src/session.ts", reason: "offer_limit" }),
+		);
+	});
+
 	it("caches skill reads and directory checks across read-only foreground turns", async () => {
 		const operations: ExtensionOperationEvent[] = [];
 		const test = await setup({}, (volt) => {
@@ -171,15 +258,15 @@ describe("Jev Ahead of Model Work integration", () => {
 		expect(operations.filter((event) => event.ownerKind === "task" && event.service === "findPaths")).toHaveLength(1);
 		expect(operations.some((event) => event.ownerKind === "validation" && event.service === "readSkill")).toBe(true);
 		const saved = audits(test.harness)[0].data;
-		expect(saved.report.native.cacheHits).toBeGreaterThanOrEqual(4);
+		expect(saved.report.native.cacheHits).toBeGreaterThanOrEqual(2);
 		expect(saved.report.native.validationReservations).toBe(
 			operations.filter((event) => event.ownerKind === "validation").length,
 		);
 	});
 
-	it("omits cached skill evidence when the file changes outside foreground tools", async () => {
+	it("revalidates offered skill evidence after external edits and then retires the packet", async () => {
 		const test = await setup();
-		let projection = "";
+		const projections: string[] = [];
 		test.harness.setResponses([
 			async () => {
 				await writeFile(join(test.harness.tempDir, "skills/resume/SKILL.md"), "UPDATED_SKILL_INSTRUCTIONS\n");
@@ -187,26 +274,26 @@ describe("Jev Ahead of Model Work integration", () => {
 					stopReason: "toolUse",
 				});
 			},
-			async () => {
+			async (context) => {
+				projections.push(context.messages.map(getMessageText).join("\n"));
 				await test.completed[1].promise;
 				return fauxAssistantMessage([fauxToolCall("find", { path: "src", pattern: "*.ts" })], {
 					stopReason: "toolUse",
 				});
 			},
 			async (context) => {
-				projection = context.messages.map(getMessageText).join("\n");
+				projections.push(context.messages.map(getMessageText).join("\n"));
 				return fauxAssistantMessage("done");
 			},
 		]);
 		await test.harness.session.prompt("Investigate src/session.ts");
-		expect(test.report()?.cycles[1].operations).toContainEqual(
-			expect.objectContaining({ service: "readSkill", status: "ok", cached: true }),
-		);
-		expect(projection).not.toContain("SKILL_INSTRUCTIONS");
-		expect(projection).toContain("SESSION_EVIDENCE");
-		expect(test.report()?.boundaries.at(-1)?.observation?.contributions).toContainEqual(
+		expect(projections[0]).not.toContain("SKILL_INSTRUCTIONS");
+		expect(projections[0]).toContain("SESSION_EVIDENCE");
+		expect(test.report()?.boundaries[1]?.observation?.contributions).toContainEqual(
 			expect.objectContaining({ status: "omitted", reason: "source_unverified" }),
 		);
+		expect(projections[1]).not.toContain("SESSION_EVIDENCE");
+		expect(projections[1]).not.toContain("SKILL_INSTRUCTIONS");
 	});
 
 	it("leaves native capacity for evidence admission and stops Jev calls before exhausting the host", async () => {
@@ -240,12 +327,7 @@ describe("Jev Ahead of Model Work integration", () => {
 		expect(operations.every((event) => event.status !== "limit_exceeded")).toBe(true);
 		expect(operations.length).toBeLessThanOrEqual(64);
 		expect(test.harness.faux.state.callCount).toBe(13);
-		expect(
-			test
-				.report()
-				?.boundaries.at(-1)
-				?.observation?.contributions.some((item) => item.status === "admitted"),
-		).toBe(true);
+		expect(test.report()?.boundaries.at(-1)?.observation?.contributions).toEqual([]);
 		expect(test.report()?.native.validationReservations).toBeGreaterThan(0);
 	});
 
@@ -442,7 +524,13 @@ describe("Jev Ahead of Model Work integration", () => {
 		const candidates = (JSON.parse(selection.requestBody!) as AheadRequest).state.candidates!.map(
 			(item) => item.path,
 		);
-		expect(candidates).toEqual(expect.arrayContaining(["src/irrelevant.ts", "src/session.ts"]));
+		expect(candidates).toContain("src/irrelevant.ts");
+		expect(JSON.parse(selection.requestBody!).state.paths).toEqual(
+			expect.arrayContaining([
+				{ path: "src/session.ts", line: 1, origin: "tool" },
+				{ path: "src/irrelevant.ts", line: 1, origin: "tool" },
+			]),
+		);
 		expect(candidates).not.toContain("session.ts");
 		expect(candidates).not.toContain("irrelevant.ts");
 	});
@@ -604,7 +692,7 @@ describe("Jev Ahead of Model Work integration", () => {
 		expect(test.report()?.coalescedToolResults).toBe(1);
 		expect(test.report()?.duplicateToolResults).toBe(4);
 		expect(test.harness.faux.state.callCount).toBe(3);
-		expect(test.fetch).toHaveBeenCalledTimes(6);
+		expect(test.fetch).toHaveBeenCalledTimes(5);
 	});
 
 	it("retires prepared source after a foreground read while keeping unread evidence", async () => {
@@ -657,7 +745,7 @@ describe("Jev Ahead of Model Work integration", () => {
 		await test.harness.session.prompt("Investigate resume");
 		expect(projection).toContain('Ahead of Model Work: "src/session.ts"');
 		expect(projection).toContain("UNREAD_BODY");
-		expect(test.report()?.retired).toEqual([]);
+		expect(test.report()?.retired.filter((item) => item.reason === "foreground_read")).toEqual([]);
 	});
 
 	it("does not publish a late excerpt when the foreground has already read it", async () => {

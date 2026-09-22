@@ -1,4 +1,4 @@
-import { dirname, isAbsolute, relative, resolve } from "node:path";
+import { dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import type {
 	ExtensionWorkReadResult,
 	ExtensionWorkService,
@@ -28,10 +28,12 @@ export type AheadRead = {
 export type AheadState = {
 	request: string;
 	recent: Array<{ role: string; text: string }>;
-	tools: Array<{ name: string; text: string; isError: boolean; path?: string }>;
+	tools: Array<{ name: string; text: string; isError: boolean; path?: string; query?: string }>;
 	truncated: boolean;
 	paths?: AheadPath[];
 	reads?: AheadRead[];
+	/** Previously offered preparation, distinct from confirmed foreground reads. */
+	offered?: AheadRead[];
 };
 export type AheadStage = "orient" | "select" | "focus" | "assess" | "refine";
 export interface AheadCycle {
@@ -48,7 +50,14 @@ export interface AheadCycle {
 		cached?: boolean;
 		reason?: string;
 	}>;
-	publications: Array<{ key: string; candidate: string; status: string; startLine: number; endLine: number }>;
+	publications: Array<{
+		key: string;
+		candidate: string;
+		status: string;
+		startLine: number;
+		endLine: number;
+		reachesEnd: boolean;
+	}>;
 }
 export type AheadEvaluator = (
 	stage: AheadStage,
@@ -348,11 +357,15 @@ export async function prepareAhead(
 			.flatMap((item) => observedPaths(task.snapshot.cwd, item.text)),
 	]) {
 		const path = workspacePath(task.snapshot.cwd, item.path);
-		if (path && !paths.has(path) && paths.size < 64) paths.set(path, { ...item, path });
+		if (!path) continue;
+		const previous = paths.get(path);
+		if ((!previous && paths.size < 64) || (previous?.line === 1 && item.line > 1))
+			paths.set(path, { ...item, path, origin: previous?.origin ?? item.origin });
 	}
 	const terms = [
 		...new Set(
 			[
+				...state.tools.filter((item) => !item.isError).map((item) => item.query ?? ""),
 				...[...paths.keys()].map((path) => path.split("/").at(-1)!),
 				state.request,
 				...state.tools.map((item) => item.text),
@@ -432,6 +445,7 @@ export async function prepareAhead(
 	const addCandidate = (raw: string, line: number, hint: string, priority = 0) => {
 		const path = workspacePath(task.snapshot.cwd, raw);
 		if (!path) return;
+		if (alreadyRead(state.offered ?? [], path, 1, Number.MAX_SAFE_INTEGER)) return;
 		const previous = candidates.get(path);
 		const boundedHint = boundedText(hint, 180);
 		if (
@@ -497,11 +511,12 @@ export async function prepareAhead(
 					);
 					if (result.status === "ok") {
 						for (const path of result.paths) addCandidate(path, 1, "");
-						// Native find matches basenames. Inspect one observed matching directory too,
-						// so a Jev directory can yield index.ts rather than only Jev-named tests.
+						// Native observations normalize paths and remove directory separators.
+						// Probe one observed extensionless path; native find determines whether it
+						// is a directory. Never invent an implementation path beneath it.
 						const directory = result.paths.find(
 							(path) =>
-								/[\\/]$/.test(path) &&
+								!extname(path.replace(/[\\/]+$/, "")) &&
 								workspacePath(task.snapshot.cwd, resolve(task.snapshot.cwd, path, "__ahead_path__.ts")),
 						);
 						if (directory) {
@@ -536,7 +551,9 @@ export async function prepareAhead(
 					})(),
 				);
 	}
-	for (const entry of shortlist)
+	for (const entry of shortlist.filter(
+		(item) => !state.offered?.some((range) => range.path === `Skill ${item.skill.name}`),
+	))
 		discovery.push(
 			(async () => {
 				const result = await operation(
@@ -648,12 +665,29 @@ export async function prepareAhead(
 	const regions = new Map<string, Array<{ startLine: number; endLine: number; name: string }>>();
 	let regionSearches = 0;
 	for (const file of selectedFiles) {
+		const queryTerms = [
+			...new Set(
+				state.tools
+					.filter((item) => !item.isError && (!item.path || item.path === file.path))
+					.flatMap((item) => item.query?.match(/[a-zA-Z_][a-zA-Z0-9_]{2,63}/g) ?? []),
+			),
+		]
+			.filter((term) => !STOP.has(term.toLowerCase()))
+			.slice(0, 8);
+		const relevance = (name: string) =>
+			[...queryTerms, ...selectedTerms].filter((term) => name.toLowerCase().includes(term.toLowerCase())).length;
 		const observed = symbols
 			.filter((item) => workspacePath(task.snapshot.cwd, item.path) === file.path)
 			// Imported aliases and local variables are not implementation entry points.
 			// Keep declarations and methods; find test/arrow bodies through native text search.
 			.filter((item) => [5, 6, 9, 10, 11, 12, 23].includes(item.kind) && symbolPriority(item) > 0)
-			.sort((a, b) => symbolPriority(b) - symbolPriority(a) || a.startLine - b.startLine)
+			.sort(
+				(a, b) =>
+					relevance(b.name) - relevance(a.name) ||
+					symbolPriority(b) - symbolPriority(a) ||
+					a.startLine - b.startLine,
+			)
+			.filter((item) => !alreadyRead(state.offered ?? [], file.path, item.startLine, item.startLine))
 			.slice(0, 16)
 			.map((item) => ({
 				startLine: item.startLine,
@@ -667,17 +701,21 @@ export async function prepareAhead(
 			services.includes("searchText") &&
 			regionSearches < 2 &&
 			nativeOperations < 10 &&
-			(!observed.length || truncatedSymbols.has(file.path) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file.path)) &&
+			(queryTerms.length ||
+				!observed.length ||
+				truncatedSymbols.has(file.path) ||
+				/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file.path)) &&
 			/\.[cm]?[jt]sx?$/.test(file.path)
 		) {
 			regionSearches++;
-			const pattern =
-				"^\\s*(export\\s+)?(default\\s+)?(async\\s+)?(function\\b|class\\b|interface\\b|type\\s+\\w+\\s*=|(?:const|let)\\s+\\w+\\s*=|(?:describe|it|test)(?:\\.[A-Za-z]+)*\\s*\\()";
+			const pattern = queryTerms.length
+				? `\\b(?:${queryTerms.join("|")})\\b`
+				: "^\\s*(export\\s+)?(default\\s+)?(async\\s+)?(function\\b|class\\b|interface\\b|type\\s+\\w+\\s*=|(?:const|let)\\s+\\w+\\s*=|(?:describe|it|test)(?:\\.[A-Za-z]+)*\\s*\\(|(?:(?:private|protected|public|static|async|override)\\s+)*[A-Za-z_$][\\w$]*\\s*\\([^;]*\\)\\s*(?::[^=]+)?\\s*\\{)";
 			const result = await operation(
 				"searchText",
 				file.path,
 				() => task.repository.searchText({ path: file.path, pattern, limit: 24 }),
-				`regions:${file.path}`,
+				`regions:${file.path}:${pattern}`,
 			);
 			if (result.status === "ok")
 				for (const hit of result.matches) {
@@ -690,15 +728,28 @@ export async function prepareAhead(
 			...(file.line > 1 || !observed.length
 				? [{ startLine: file.line, endLine: file.line + 119, name: "Observed location" }]
 				: []),
-			...observed,
+			...observed.sort((a, b) => relevance(b.name) - relevance(a.name)),
 		];
 		regions.set(
 			file.id,
 			choices
+				// A window overlapping a prior read starts at the first unread line.
+				// Merely overhanging that read must not reintroduce its covered prefix.
+				.map((item) => {
+					let startLine = item.startLine;
+					for (const read of (state.reads ?? [])
+						.filter((read) => read.path === file.path)
+						.sort((a, b) => a.startLine - b.startLine)) {
+						if (read.startLine > startLine) break;
+						startLine = Math.max(startLine, read.endLine + 1);
+					}
+					return { ...item, startLine };
+				})
 				.filter(
-					(item, index) =>
-						choices.findIndex((other) => other.startLine === item.startLine) === index &&
-						!alreadyRead(state.reads ?? [], file.path, item.startLine, item.endLine),
+					(item, index, unread) =>
+						item.startLine <= item.endLine &&
+						unread.findIndex((other) => other.startLine === item.startLine) === index &&
+						!alreadyRead(state.offered ?? [], file.path, item.startLine, item.startLine),
 				)
 				.slice(0, 24),
 		);
@@ -801,7 +852,8 @@ export async function prepareAhead(
 				if (
 					!path ||
 					existing.has(key) ||
-					alreadyRead(state.reads ?? [], path, location.startLine, location.startLine + 119)
+					alreadyRead(state.reads ?? [], path, location.startLine, location.startLine + 119) ||
+					alreadyRead(state.offered ?? [], path, location.startLine, location.startLine)
 				)
 					continue;
 				existing.add(key);
@@ -850,6 +902,7 @@ export async function prepareAhead(
 			candidate: item.label,
 			startLine: item.result.evidence.startLine,
 			endLine: item.endLine,
+			reachesEnd: !item.result.truncated && item.text === item.result.text,
 			status: "pending",
 		});
 		return [

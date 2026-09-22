@@ -56,7 +56,7 @@ export interface AheadReport {
 		remaining: number;
 		blockedReason?: string;
 	};
-	retired: Array<{ key: string; candidate: string; at: string; reason: "foreground_read" }>;
+	retired: Array<{ key: string; candidate: string; at: string; reason: "foreground_read" | "offer_limit" }>;
 	status: string;
 }
 
@@ -74,10 +74,13 @@ interface Scope {
 	tools: AheadState["tools"];
 	paths: AheadPath[];
 	reads: AheadRead[];
+	offered: AheadRead[];
+	offerCounts: Map<AheadCycle["publications"][number], number>;
+	expired: Set<AheadCycle["publications"][number]>;
 	resources: AheadResources;
 	resourceSignature: string;
 	mutatingTools: Set<string>;
-	toolInputs: Map<string, { path?: string; searchRoot?: string; offset: number; limit?: number }>;
+	toolInputs: Map<string, { path?: string; searchRoot?: string; offset: number; limit?: number; query?: string }>;
 	seenTools: Set<string>;
 	activePublications: Map<string, AheadCycle["publications"][number]>;
 	pending: boolean;
@@ -141,6 +144,7 @@ function taskState(scope: Scope): AheadState {
 		tools: structuredClone(scope.tools),
 		paths: structuredClone(scope.paths),
 		reads: structuredClone(scope.reads),
+		offered: structuredClone(scope.offered),
 		truncated,
 	};
 }
@@ -238,7 +242,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			const report = scope.report;
 			const lines = [
 				`Ahead of Model Work: ${report.status}`,
-				`${report.cycles.length}/${MAX_AHEAD_CYCLES} preparation cycles; ${report.evaluations.length}/${MAX_AHEAD_EVALUATIONS} Jev evaluations; ${report.coalescedToolResults} tool results coalesced; ${report.duplicateToolResults} duplicates skipped; ${report.retired.length} excerpts retired after foreground reads.`,
+				`${report.cycles.length}/${MAX_AHEAD_CYCLES} preparation cycles; ${report.evaluations.length}/${MAX_AHEAD_EVALUATIONS} Jev evaluations; ${report.coalescedToolResults} tool results coalesced; ${report.duplicateToolResults} duplicates skipped; ${report.retired.length} excerpts retired.`,
 				`Native work: ${report.native.preparation} preparation attempts; ${report.native.validationReservations} validation reservations; ${report.native.cacheHits} cache hits; ${report.native.remaining} preparation operations remaining${report.native.blockedReason ? ` (${report.native.blockedReason})` : ""}.`,
 			];
 			for (const cycle of report.cycles) {
@@ -294,6 +298,21 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				// per offered excerpt at each boundary, including omissions. This is an upper
 				// bound, not a claim that every validation executed.
 				scope.resources.validationReservations += contributions.length;
+				for (const contribution of contributions) {
+					if (contribution.status === "ready") continue;
+					const item = scope.activePublications.get(contribution.key);
+					if (!item) continue;
+					const count = (scope.offerCounts.get(item) ?? 0) + 1;
+					scope.offerCounts.set(item, count);
+					if (count === 1) {
+						scope.offered.push({
+							path: item.candidate,
+							startLine: item.startLine,
+							endLine: item.reachesEnd ? Number.MAX_SAFE_INTEGER : item.endLine,
+						});
+					}
+					if (count >= 2) scope.expired.add(item);
+				}
 				if (boundary)
 					boundary.observation = {
 						at,
@@ -308,6 +327,41 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			scope.projection.release();
 			scope.projection = undefined;
 			observe(scope);
+		}
+
+		function retire(
+			current: Scope,
+			items: AheadCycle["publications"],
+			reason: AheadReport["retired"][number]["reason"],
+		): Promise<unknown> | undefined {
+			if (!items.length || current.stopped || !current.ctx.work) return;
+			const admission = current.ctx.work.tasks.start(
+				{ key: "ahead-retire", label: "Retire prepared evidence", timeoutMs: 1000 },
+				async (task) => {
+					for (const item of items) {
+						// A newer cycle may have reused the same contribution key.
+						if (current.activePublications.get(item.key) !== item) continue;
+						task.context.remove(item.key);
+						current.activePublications.delete(item.key);
+						current.expired.delete(item);
+						current.offerCounts.delete(item);
+						current.report.retired.push({
+							key: item.key,
+							candidate: item.candidate,
+							at: new Date().toISOString(),
+							reason,
+						});
+					}
+				},
+			);
+			return admission.status === "started" ? admission.task.wait() : undefined;
+		}
+
+		async function afterOutput(at: string): Promise<void> {
+			releaseProjection(at);
+			// Collection diagnostics precede provider dispatch. Removing a contribution there
+			// would revoke its payload lease; wait until actual provider output instead.
+			if (scope) await retire(scope, [...scope.expired], "offer_limit");
 		}
 
 		function start(current: Scope, trigger: AheadCycle["trigger"]): boolean {
@@ -328,6 +382,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			const signature = JSON.stringify([current.ctx.work.snapshot.services, current.ctx.work.snapshot.skills]);
 			if (signature !== current.resourceSignature) {
 				current.resources.invalidate();
+				current.offered = [];
 				current.resourceSignature = signature;
 			}
 			if (
@@ -432,9 +487,12 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 									}
 								}
 								if (task.signal.aborted || scope !== current || current.stopped) return;
+								if (!contributions.length) return;
 								current.publishedCycle = cycle.number;
 								for (let i = 0; i < 6; i++) task.context.remove(`ahead-${i}`);
 								current.activePublications.clear();
+								current.offerCounts.clear();
+								current.expired.clear();
 								for (const publication of publications) {
 									const { contribution } = publication;
 									const reported = cycle.publications.find((item) => item.key === contribution.key);
@@ -505,11 +563,11 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		volt.on("before_agent_start", () => stop("superseded"));
 		volt.on("agent_end", () => stop("agent_end"));
 		volt.on("before_provider_request", () => releaseProjection("before_provider_request"));
-		volt.on("after_provider_response", () => releaseProjection("provider_response"));
+		volt.on("after_provider_response", () => afterOutput("provider_response"));
 		// Some SDK providers have no payload hook. Actual assistant output also proves
 		// collection has finished, without creating or waiting for another model request.
 		volt.on("message_update", (event) => {
-			if (event.message.role === "assistant") releaseProjection("model_output");
+			if (event.message.role === "assistant") return afterOutput("model_output");
 		});
 		volt.on("request_boundary", (event, ctx) => {
 			if (!isEnabled() || !ctx.work) return;
@@ -528,6 +586,9 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 					tools: [],
 					paths: [],
 					reads: [],
+					offered: [],
+					offerCounts: new Map(),
+					expired: new Set(),
 					resources: new AheadResources(),
 					resourceSignature: "",
 					mutatingTools: new Set(),
@@ -579,6 +640,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				!(event.toolName === "lsp" && !["rename", "fix"].includes(String(event.args.action)))
 			) {
 				scope.resources.invalidate();
+				scope.offered = [];
 				scope.mutatingTools.add(event.toolCallId);
 			}
 			const path = typeof event.args.path === "string" ? workspacePath(ctx.cwd, event.args.path) : undefined;
@@ -593,9 +655,17 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				path,
 				searchRoot: searchRoot && !path ? dirname(searchRoot) : searchRoot,
 				offset:
-					typeof event.args.offset === "number" && Number.isSafeInteger(event.args.offset) && event.args.offset > 0
-						? event.args.offset
+					typeof (event.args.offset ?? event.args.line) === "number" &&
+					Number.isSafeInteger(event.args.offset ?? event.args.line) &&
+					Number(event.args.offset ?? event.args.line) > 0
+						? Number(event.args.offset ?? event.args.line)
 						: 1,
+				query:
+					typeof event.args.pattern === "string"
+						? boundedText(event.args.pattern, 256)
+						: typeof event.args.symbol === "string"
+							? boundedText(event.args.symbol, 256)
+							: undefined,
 				limit:
 					typeof event.args.limit === "number" && Number.isSafeInteger(event.args.limit) && event.args.limit > 0
 						? event.args.limit
@@ -603,13 +673,14 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			});
 			if (scope.toolInputs.size > 64) scope.toolInputs.delete(scope.toolInputs.keys().next().value!);
 		});
-		volt.on("tool_execution_end", (event, ctx) => {
+		volt.on("tool_execution_end", async (event, ctx) => {
 			if (!isEnabled() || !scope || scope.stopped || !ctx.work || ctx.work.snapshot.scopeId !== scope.id) return;
 			scope.ctx = ctx;
 			// Mutations may overlap background observations. Clear again after completion so
 			// results captured during a mutation cannot seed the following cycle's cache.
 			if (scope.mutatingTools.delete(event.toolCallId)) {
 				scope.resources.invalidate();
+				scope.offered = [];
 			}
 			const input = scope.toolInputs.get(event.toolCallId);
 			scope.toolInputs.delete(event.toolCallId);
@@ -626,27 +697,14 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			const consumed = [...current.activePublications.values()].filter((item) =>
 				alreadyRead(current.reads, item.candidate, item.startLine, item.endLine),
 			);
-			if (consumed.length)
-				ctx.work.tasks.start(
-					{ key: "ahead-retire", label: "Retire evidence read by the foreground", timeoutMs: 1000 },
-					async (task) => {
-						for (const item of consumed) {
-							if (current.activePublications.get(item.key) !== item) continue;
-							task.context.remove(item.key);
-							current.activePublications.delete(item.key);
-							current.report.retired.push({
-								key: item.key,
-								candidate: item.candidate,
-								at: new Date().toISOString(),
-								reason: "foreground_read",
-							});
-						}
-					},
-				);
+			await retire(current, consumed, "foreground_read");
+			if (scope !== current || current.stopped) return;
 			const observed: AheadPath[] = event.isError
 				? []
 				: [
-						...(input?.path ? [{ path: input.path, line: input.offset, origin: "tool" as const }] : []),
+						...(input?.path && event.toolName !== "grep"
+							? [{ path: input.path, line: input.offset, origin: "tool" as const }]
+							: []),
 						...(event.toolName === "read" && !input?.path
 							? []
 							: observedPaths(
@@ -656,12 +714,20 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 								)
 						).flatMap((item) => {
 							const path = workspacePath(ctx.cwd, resolve(ctx.cwd, input?.searchRoot ?? ".", item.path));
-							return path ? [{ ...item, path }] : [];
+							return path
+								? [{ ...item, path, origin: event.toolName === "grep" ? ("tool" as const) : item.origin }]
+								: [];
 						}),
 					];
 			const paths = new Map<string, AheadPath>();
 			for (const item of [...observed, ...scope.paths])
-				if (!paths.has(item.path) || PATH_PRIORITY[item.origin] > PATH_PRIORITY[paths.get(item.path)!.origin])
+				if (
+					!paths.has(item.path) ||
+					PATH_PRIORITY[item.origin] > PATH_PRIORITY[paths.get(item.path)!.origin] ||
+					(PATH_PRIORITY[item.origin] === PATH_PRIORITY[paths.get(item.path)!.origin] &&
+						paths.get(item.path)!.line === 1 &&
+						item.line > 1)
+				)
 					paths.set(item.path, item);
 			scope.paths = [...paths.values()]
 				.sort((a, b) => PATH_PRIORITY[b.origin] - PATH_PRIORITY[a.origin])
@@ -671,6 +737,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				isError: event.isError,
 				text: boundedText(raw, 2048),
 				...(input?.path ? { path: input.path } : {}),
+				...(input?.query ? { query: input.query } : {}),
 			};
 			const fingerprint = createHash("sha256")
 				.update(JSON.stringify({ observation, input, observed }))

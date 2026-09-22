@@ -337,19 +337,100 @@ describe("Ahead preparation strategy", () => {
 		expect(resources.blockedReason).toBe("validation_reserve");
 	});
 
-	it("discovers implementation files beneath a matching directory", async () => {
+	it.each(["/repo/src/resume", "/repo/src/resume/"])(
+		"discovers implementation files beneath normalized directory %s",
+		async (directory) => {
+			const test = pipeline();
+			vi.mocked(test.task.repository.findPaths).mockImplementation(async ({ path }) => ({
+				status: "ok",
+				paths: path === "src/resume" ? ["/repo/src/resume/index.ts"] : [directory],
+				truncated: false,
+			}));
+			vi.mocked(test.task.repository.searchText).mockResolvedValue({ status: "ok", matches: [], truncated: false });
+			await test.run();
+			expect(test.calls.find((call) => call.stage === "select")?.request.state.candidates).toContainEqual(
+				expect.objectContaining({ path: "src/resume/index.ts" }),
+			);
+			expect(test.task.repository.findPaths).toHaveBeenCalledWith({ path: "src/resume", pattern: "*", limit: 160 });
+		},
+	);
+
+	it("finds deep methods from observed search terms instead of the first declarations", async () => {
 		const test = pipeline();
-		vi.mocked(test.task.repository.findPaths).mockImplementation(async ({ path }) => ({
+		test.task.snapshot.skills = [];
+		vi.mocked(test.task.repository.symbols).mockResolvedValue({
 			status: "ok",
-			paths: path === "src/resume" ? ["/repo/src/resume/index.ts"] : ["/repo/src/resume/"],
+			symbols: [],
+			truncated: true,
+			coverage: "unknown",
+			observedAt: 1,
+		});
+		vi.mocked(test.task.repository.searchText).mockImplementation(async ({ path, pattern }) => ({
+			status: "ok",
 			truncated: false,
+			matches: [
+				...Array.from({ length: 30 }, (_, i) => ({
+					path: "/repo/src/session.ts",
+					line: i + 1,
+					text: `export type Early${i} = string;`,
+				})),
+				{ path: "/repo/src/session.ts", line: 1700, text: "  private _resumeAfterRetry() {" },
+			]
+				.filter((hit) => path === "src/session.ts" && new RegExp(pattern).test(hit.text))
+				.slice(0, 24),
 		}));
-		vi.mocked(test.task.repository.searchText).mockResolvedValue({ status: "ok", matches: [], truncated: false });
-		await test.run();
-		expect(test.calls.find((call) => call.stage === "select")?.request.state.candidates).toContainEqual(
-			expect.objectContaining({ path: "src/resume/index.ts" }),
+		await test.run({
+			request: "Review src/session.ts",
+			recent: [],
+			tools: [
+				{
+					name: "grep",
+					path: "src/session.ts",
+					query: "_resumeAfterRetry",
+					text: "session.ts:1700: private _resumeAfterRetry() {",
+					isError: false,
+				},
+			],
+			truncated: false,
+		});
+		expect(test.task.repository.readText).toHaveBeenCalledWith({ path: "src/session.ts", offset: 1700, limit: 120 });
+		expect(test.task.repository.searchText).toHaveBeenCalledWith(
+			expect.objectContaining({ path: "src/session.ts", pattern: "\\b(?:_resumeAfterRetry)\\b" }),
 		);
-		expect(test.task.repository.findPaths).toHaveBeenCalledWith({ path: "src/resume", pattern: "*", limit: 160 });
+	});
+
+	it("ranks relevant symbols before limiting the region menu", async () => {
+		const test = pipeline();
+		const result = await test.task.repository.symbols({ path: "src/session.ts" });
+		if (result.status !== "ok") throw new Error("Missing fixture symbols");
+		vi.mocked(test.task.repository.symbols).mockResolvedValue({
+			...result,
+			symbols: Array.from({ length: 30 }, (_, i) => ({
+				...result.symbols[0],
+				name: i === 29 ? "resume" : `unrelated${i}`,
+				startLine: i * 100 + 1,
+				endLine: i * 100 + 2,
+			})),
+		});
+		await test.run();
+		const focus = test.calls.find((call) => call.stage === "focus")!.request.questions.focus_file_0;
+		if (focus.type !== "choice") throw new Error("Missing region menu");
+		expect(Object.values(focus.criteria)[0]).toContain("resume: lines 2901-");
+	});
+
+	it("preserves a precise tool location even when the request names the whole file", async () => {
+		const test = pipeline();
+		vi.mocked(test.task.repository.symbols).mockResolvedValue({ status: "unavailable", reason: "fixture" });
+		vi.mocked(test.task.repository.searchText).mockResolvedValue({ status: "ok", matches: [], truncated: false });
+		await test.run({
+			request: "Review src/session.ts",
+			recent: [],
+			tools: [],
+			paths: [{ path: "src/session.ts", line: 1700, origin: "tool" }],
+			reads: [{ path: "src/session.ts", startLine: 1, endLine: 1730 }],
+			truncated: false,
+		});
+		expect(test.task.repository.readText).toHaveBeenCalledWith({ path: "src/session.ts", offset: 1731, limit: 89 });
 	});
 
 	it("offers declaration and test bodies when a truncated symbol list contains imported aliases", async () => {
