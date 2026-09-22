@@ -866,6 +866,8 @@ export class AgentSession {
 	private _toolRegistry: Map<string, AgentTool> = new Map();
 	/** Synchronously staged active-tool projection for SDK reads and prompt construction. */
 	private _effectiveActiveToolNames: string[] = [];
+	/** Registry last staged for Harness publication, including same-name tool replacements. */
+	private _effectiveToolRegistry = this._toolRegistry;
 	private _toolDefinitions: Map<string, ToolDefinitionEntry> = new Map();
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
@@ -3858,6 +3860,7 @@ export class AgentSession {
 		}
 		this._invalidateExtensionWork();
 		this._effectiveActiveToolNames = validToolNames;
+		this._effectiveToolRegistry = this._toolRegistry;
 		this._backgroundJobs.cancelInaccessible();
 		this._applyHarnessMutation(this._harness.setTools([...this._toolRegistry.values()], validToolNames));
 
@@ -3886,6 +3889,7 @@ export class AgentSession {
 		);
 		const active = this.getActiveToolNames();
 		if (
+			this._effectiveToolRegistry !== this._toolRegistry ||
 			active.length !== availableEffective.length ||
 			active.some((name, index) => name !== availableEffective[index])
 		) {

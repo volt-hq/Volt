@@ -30,7 +30,7 @@ Use `volt --lsp` to force-enable LSP for a run when settings disable it.
 - One client runs per canonical `(server, server root)` pair. A failure in one nested root does not disable that server in another root. Servers shut down when the session ends or reloads, and after `idleShutdownMs` without use (they respawn lazily on the next operation).
 - `/lsp` shows an on-demand health snapshot: configured unused/disabled servers and per-root starting, ready, degraded, failed, blocked, or idle records. Details include resolved executable, launch source, observed version, advertised capabilities, activity/latency counters, recent successes/failures, startup stderr, and request errors. An alive process is not necessarily ready; an idle shutdown is not a failure. Unknown capabilities differ from an initialized server advertising none. There is no background status polling. `/lsp restart` stops owned processes and clears failed-start breakers so servers resolve and spawn fresh on next use.
 - `/lsp trace [path]` enables protocol tracing at runtime (`/lsp trace off` disables): JSON-RPC traffic in both directions, server stderr, workspace/server roots, resolved launch context, attempts, and lifecycle events are appended with timestamps. Relative runtime paths and persistent `lsp.traceFile` paths resolve from the canonical project workspace, not the process invocation directory or nested runtime cwd.
-- Reviewed install prompts apply only to missing unchanged built-in bare commands, plus the built-in TypeScript command with a confirmed incompatible pre-7 compiler. Install prompts and concurrent attempts coalesce by reviewed recipe; cancelling one caller stops only its wait, while the shared install continues without affecting that root's startup breaker. After success Volt searches PATH again before retrying. Explicit paths, custom commands, manual-install-only servers, and present-but-broken or unrecognized executables are never auto-installed. Offline and Plan-mode sessions never offer or run installs. After three failed starts only that `(server, root)` record is blocked until `/lsp restart` or `/reload`.
+- Reviewed install prompts apply only to missing unchanged built-in bare commands, plus the built-in TypeScript command with a confirmed incompatible pre-7 compiler. Install prompts and concurrent attempts coalesce by reviewed recipe; cancelling one caller stops only its wait, while the shared install continues without affecting that root's startup breaker. After the installer exits successfully, Volt searches PATH again and verifies the normal LSP initialize handshake for each requesting server root before reporting readiness. A successful installer with an unresolved launcher or failed initialization is reported separately from installation failure. Explicit paths, custom commands, manual-install-only servers, and present-but-broken or unrecognized executables are never auto-installed. Offline and Plan-mode sessions never offer or run installs. After three failed starts only that `(server, root)` record is blocked until `/lsp restart` or `/reload`.
 
 Diagnostics are best-effort: server failures or timeouts never fail a successful edit or write. Automatic results retain structured evidence even when repeated failure text is suppressed. Fix only regressions caused by the current change; unrelated diagnostics do not expand the task.
 
@@ -163,6 +163,22 @@ Example: tuning pyright through `settings`:
 ```
 
 User entries merge field-wise over built-in defaults: overriding only `command` for `typescript` keeps the default extensions and root markers.
+
+### Installed but not ready
+
+An installer can succeed without exposing the launcher on Volt's inherited PATH. For example, Homebrew's `rustup` can install Rust Analyzer while bare `rust-analyzer` remains unresolved. Find the installed executable yourself (for Rust, `rustup which rust-analyzer`), then set an explicit command:
+
+```json
+{
+  "lsp": {
+    "servers": {
+      "rust": { "command": ["/absolute/path/to/rust-analyzer"] }
+    }
+  }
+}
+```
+
+Run `/reload` to load the changed settings and clear failed-start state without losing the conversation. If the existing configured command becomes usable without changing settings, `/lsp restart` clears failures and retries on next use. Neither command imports PATH changes from another shell. Volt does not search unconfigured installation directories or modify shell profiles. An initialization failure after resolution is a separate server/project problem; inspect `/lsp` and startup stderr rather than repeatedly reinstalling.
 
 ## Structured outcomes and freshness
 
