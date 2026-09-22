@@ -368,6 +368,7 @@ describe("Ahead preparation strategy", () => {
 	it("promotes changed paths from foreground output before unrelated repository discovery", async () => {
 		const test = pipeline();
 		const paths = ["packages/agent/jev/index.ts", "packages/agent/jev/client.ts", "packages/agent/jev/pipeline.ts"];
+		vi.mocked(test.task.repository.findPaths).mockResolvedValue({ status: "ok", paths, truncated: false });
 		await test.run({
 			request: "Read the current branch against main",
 			recent: [{ role: "toolResult", text: "unused unknown version capabilities operations failures ".repeat(50) }],
@@ -377,7 +378,12 @@ describe("Ahead preparation strategy", () => {
 		expect(
 			test.calls.find((call) => call.stage === "select")?.request.state.candidates?.map((item) => item.path),
 		).toEqual(expect.arrayContaining(paths));
-		expect(test.task.repository.findPaths).not.toHaveBeenCalled();
+		expect(test.task.repository.findPaths).toHaveBeenCalledOnce();
+		expect(test.task.repository.findPaths).toHaveBeenCalledWith({
+			path: "packages/agent/jev",
+			pattern: "*",
+			limit: 160,
+		});
 		expect(test.task.repository.searchText).not.toHaveBeenCalled();
 		expect(test.task.repository.readText).toHaveBeenCalledWith(expect.objectContaining({ path: paths[0] }));
 	});
@@ -389,10 +395,126 @@ describe("Ahead preparation strategy", () => {
 				"diff --git a/src/session.ts b/src/session.ts\n+++ b/src/session.ts\n/repo/src/client.ts:79\n`src/test.ts:120`\n../secret.ts\nnode_modules/private.ts\n.../truncated.ts\n",
 			),
 		).toEqual([
-			{ path: "src/session.ts", line: 1 },
-			{ path: "src/client.ts", line: 79 },
-			{ path: "src/test.ts", line: 120 },
+			{ path: "src/session.ts", line: 1, origin: "diff" },
+			{ path: "src/client.ts", line: 79, origin: "reference" },
+			{ path: "src/test.ts", line: 120, origin: "reference" },
 		]);
+	});
+
+	it("resolves source imports and documentation links in their containing file without collecting fixture paths", () => {
+		expect(
+			observedPaths(
+				"/repo",
+				'import { evaluate } from "./client.ts";\nimport type { State } from "../types.ts";\nconst fake = "src/session.ts";',
+				"packages/jev/index.ts",
+			),
+		).toEqual([
+			{ path: "packages/jev/client.ts", line: 1, origin: "reference" },
+			{ path: "packages/types.ts", line: 1, origin: "reference" },
+		]);
+		expect(
+			observedPaths(
+				"/repo",
+				"[source](./index.ts#L10)\n[docs](../../docs/sdk.md)\n[web](https://example.com/app.ts)\n```ts\n[fake](src/session.ts)\n```\n[outside](../../../private.ts)",
+				"packages/jev/README.md",
+			),
+		).toEqual([
+			{ path: "packages/jev/index.ts", line: 1, origin: "reference" },
+			{ path: "docs/sdk.md", line: 1, origin: "reference" },
+		]);
+	});
+
+	it("retains the changed hunk location instead of the file prefix", () => {
+		expect(
+			observedPaths(
+				"/repo",
+				"diff --git a/src/session.ts b/src/session.ts\n+++ b/src/session.ts\n@@ -1,2 +90,3 @@\n+changed\n@@ -9,2 +150,3 @@",
+			),
+		).toEqual([{ path: "src/session.ts", line: 90, origin: "diff" }]);
+	});
+
+	it("omits nonexistent mentions before Jev selection and prefers verified changed paths over documentation noise", async () => {
+		const test = pipeline();
+		await test.run({
+			request: "Review the branch",
+			recent: [{ role: "toolResult", text: "examples/missing.ts" }],
+			tools: [],
+			truncated: false,
+			paths: [
+				...Array.from({ length: 24 }, (_, i) => ({
+					path: `docs/fake-${i}.ts`,
+					line: 1,
+					origin: "reference" as const,
+				})),
+				{ path: "src/session.ts", line: 1, origin: "diff" },
+			],
+		});
+		const selected = test.calls.find((call) => call.stage === "select")!.request.state.candidates!;
+		expect(selected.map((item) => item.path)).toEqual(["src/session.ts"]);
+		expect(test.task.repository.readText).not.toHaveBeenCalledWith(
+			expect.objectContaining({ path: expect.stringContaining("fake") }),
+		);
+		expect(test.task.repository.findPaths).toHaveBeenCalledTimes(2);
+	});
+
+	it("does not rank unverified mentions when native discovery is denied", async () => {
+		const test = pipeline();
+		test.task.snapshot.skills = [];
+		vi.mocked(test.task.repository.findPaths).mockResolvedValue({ status: "denied", reason: "policy" });
+		await test.run({ request: "Review src/session.ts", recent: [], tools: [], truncated: false });
+		expect(test.calls.map((item) => item.stage)).toEqual(["orient"]);
+		expect(test.task.repository.readText).not.toHaveBeenCalled();
+	});
+
+	it("expands a single-line symbol into a body window and skips refinement for a self definition", async () => {
+		const test = pipeline();
+		vi.mocked(test.task.repository.symbols).mockResolvedValue({
+			status: "ok",
+			truncated: false,
+			coverage: "unknown",
+			observedAt: 1,
+			symbols: [
+				{
+					path: "/repo/src/session.ts",
+					name: "resume",
+					kind: 12,
+					startLine: 90,
+					endLine: 90,
+					startColumn: 17,
+					endColumn: 23,
+				},
+			],
+		});
+		vi.mocked(test.task.repository.definition).mockResolvedValue({
+			status: "ok",
+			truncated: false,
+			coverage: "unknown",
+			observedAt: 1,
+			locations: [{ path: "/repo/src/session.ts", startLine: 90, endLine: 90, startColumn: 17, endColumn: 23 }],
+		});
+		const lines = [
+			...Array.from({ length: 89 }, () => "// imports"),
+			"export function resume() {",
+			"  return 'IMPLEMENTATION_BODY';",
+			"}",
+		];
+		vi.mocked(test.task.repository.readText).mockImplementation(async ({ path, offset = 1, limit = 120 }) => ({
+			status: "ok",
+			text: lines.slice(offset - 1, offset - 1 + limit).join("\n"),
+			truncated: offset > 1,
+			evidence: {
+				id: "body",
+				path: `/repo/${path}`,
+				startLine: offset,
+				endLine: Math.min(lines.length, offset + limit - 1),
+				observedAt: 1,
+			},
+		}));
+		await test.run();
+		expect(test.task.repository.readText).toHaveBeenCalledWith({ path: "src/session.ts", offset: 90, limit: 120 });
+		expect(test.calls.map((call) => call.stage)).toEqual(["orient", "select", "focus", "assess"]);
+		expect(test.publish.mock.calls[0][0].some((item) => item.text.includes("IMPLEMENTATION_BODY"))).toBe(true);
+		expect(test.publish.mock.calls[0][0].some((item) => item.text.includes("// imports"))).toBe(false);
 	});
 
 	it("lets Jev read a function below the import preamble and publishes the exact assessed excerpt", async () => {

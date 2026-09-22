@@ -16,6 +16,7 @@ export const AHEAD_AUDIT_TYPE = "jev-ahead-audit";
 export interface AheadEvaluationAudit {
 	cycle: number;
 	stage: AheadStage;
+	attempt: number;
 	startedAt: string;
 	questions: number;
 	/** Exact bounded JSON body, captured before credential resolution. Never includes HTTP headers. */

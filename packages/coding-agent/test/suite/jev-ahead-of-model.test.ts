@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { glob, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
@@ -11,6 +12,7 @@ import {
 	createJevAheadOfModel,
 } from "../../examples/extensions/jev-ahead-of-model/index.ts";
 import { MAX_AHEAD_CYCLES } from "../../examples/extensions/jev-ahead-of-model/limits.ts";
+import * as findTools from "../../src/core/tools/find.ts";
 import type { ExtensionAPI, ExtensionFactory, ExtensionUIContext } from "../../src/index.ts";
 import { loadSkillsFromDir, SessionManager } from "../../src/index.ts";
 import { type AheadRequest, aheadAnswers, aheadResponse } from "../fixtures/jev-ahead.ts";
@@ -22,6 +24,24 @@ const directories: string[] = [];
 beforeEach(() => {
 	vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 	vi.stubEnv("AI_GATEWAY_API_KEY", "");
+	// Keep the native find observation/policy path, using fixture files rather than
+	// depending on an installed fd binary or permitting a tool download in this suite.
+	const createFind = findTools.createFindToolDefinition;
+	vi.spyOn(findTools, "createFindToolDefinition").mockImplementation((cwd) =>
+		createFind(cwd, {
+			operations: {
+				exists: existsSync,
+				glob: async (pattern, directory, options) => {
+					const paths: string[] = [];
+					for await (const path of glob(pattern, { cwd: directory })) {
+						paths.push(join(directory, path));
+						if (paths.length >= options.limit) break;
+					}
+					return paths;
+				},
+			},
+		}),
+	);
 	vi.stubGlobal(
 		"fetch",
 		vi.fn(() => {
@@ -109,6 +129,155 @@ function audits(harness: Harness) {
 }
 
 describe("Jev Ahead of Model Work integration", () => {
+	it.each([502, 503, 504])(
+		"retries HTTP %s selection failure within the same cycle and audits each attempt",
+		async (status) => {
+			let calls = 0;
+			const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) =>
+				++calls === 2 ? new Response("PRIVATE_UNAVAILABLE", { status }) : aheadResponse(init),
+			);
+			const test = await setup({ fetch, zeroDataRetention: true });
+			let projection = "";
+			test.harness.setResponses([
+				(context) => {
+					projection = context.messages.map(getMessageText).join("\n");
+					return fauxAssistantMessage("done");
+				},
+			]);
+			await test.harness.session.prompt("Investigate resume");
+			expect(projection).toContain("SESSION_EVIDENCE");
+			expect(test.report()?.cycles).toHaveLength(1);
+			expect(test.harness.faux.state.callCount).toBe(1);
+			const saved = audits(test.harness)[0].data;
+			expect(saved.evaluations.map((item) => [item.stage, item.attempt, item.result?.httpStatus])).toEqual([
+				["orient", 1, 200],
+				["select", 1, status],
+				["select", 2, 200],
+				["assess", 1, 200],
+			]);
+			expect(saved.evaluations[1].requestBody).toBe(saved.evaluations[2].requestBody);
+			expect(JSON.parse(saved.evaluations[2].requestBody!)).toMatchObject({
+				providerOptions: { gateway: { zeroDataRetention: true } },
+			});
+			expect(JSON.stringify(saved)).not.toContain("PRIVATE_UNAVAILABLE");
+		},
+	);
+
+	it("bounds persistent failure to one retry and recovers on the next foreground update", async () => {
+		let calls = 0;
+		const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) =>
+			++calls <= 2 ? new Response(null, { status: 503 }) : aheadResponse(init),
+		);
+		const test = await setup({ fetch });
+		test.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("read", { path: "src/irrelevant.ts" })], { stopReason: "toolUse" }),
+			async () => {
+				await test.completed[1].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(fetch).toHaveBeenCalledTimes(5);
+		expect(test.report()?.cycles.map((item) => item.status)).toEqual(["orient: http", "prepared"]);
+		expect(test.report()?.boundaries.map((item) => item.waitMs)).toEqual([1000, 0]);
+		expect(test.report()?.cycles[1].publications).not.toHaveLength(0);
+	});
+
+	it("shares one retry across stages instead of retrying every failed stage", async () => {
+		let calls = 0;
+		const fetch = vi.fn<typeof globalThis.fetch>(async (_url, init) =>
+			[2, 4].includes(++calls) ? new Response(null, { status: 503 }) : aheadResponse(init),
+		);
+		const test = await setup({ fetch });
+		test.harness.setResponses([fauxAssistantMessage("done")]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(fetch).toHaveBeenCalledTimes(4);
+		expect(test.report()?.cycles[0].status).toBe("assess: http");
+		expect(audits(test.harness)[0].data.publications).toEqual([]);
+	});
+
+	it("cancels a pending retry when the foreground finishes", async () => {
+		const failed = barrier();
+		const fetch = vi.fn<typeof globalThis.fetch>(async () => new Response(null, { status: 503 }));
+		const test = await setup(
+			{
+				fetch,
+				onReport: (report) => {
+					if (report.evaluations.length) failed.resolve();
+				},
+			},
+			undefined,
+			0,
+		);
+		test.harness.setResponses([
+			async () => {
+				await failed.promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		await vi.waitFor(() => expect(test.api.getWorkStatus().tasks[0]?.state).toBe("cancelled"));
+		expect(fetch).toHaveBeenCalledOnce();
+		expect(audits(test.harness)[0].data.evaluations).toHaveLength(1);
+	});
+
+	it("keeps imports relative to the foreground source file and ignores fixture strings", async () => {
+		const test = await setup();
+		await mkdir(join(test.harness.tempDir, "packages/jev"), { recursive: true });
+		await writeFile(
+			join(test.harness.tempDir, "packages/jev/index.ts"),
+			'import { resume } from "./client.ts";\nconst fixture = "src/nonexistent.ts";\n',
+		);
+		await writeFile(
+			join(test.harness.tempDir, "packages/jev/client.ts"),
+			"export const resume = 'CLIENT_IMPLEMENTATION';\n",
+		);
+		test.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("read", { path: "packages/jev/index.ts" })], { stopReason: "toolUse" }),
+			async () => {
+				await test.completed[1].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate packages/jev/index.ts");
+		const saved = audits(test.harness)[0].data;
+		const selection = saved.evaluations.find((item) => item.cycle === 2 && item.stage === "select")!;
+		const candidates = (JSON.parse(selection.requestBody!) as AheadRequest).state.candidates!.map(
+			(item) => item.path,
+		);
+		expect(candidates).toContain("packages/jev/client.ts");
+		expect(candidates).not.toContain("client.ts");
+		expect(candidates).not.toContain("src/nonexistent.ts");
+		expect(candidates.every((path) => existsSync(join(test.harness.tempDir, path)))).toBe(true);
+		expect(saved.publications.some((item) => item.contribution.text.includes("CLIENT_IMPLEMENTATION"))).toBe(true);
+		expect(
+			saved.report.cycles[1].operations.some(
+				(item) => item.candidate === "client.ts" || item.candidate.includes("nonexistent"),
+			),
+		).toBe(false);
+	});
+
+	it("resolves foreground find output relative to its search directory", async () => {
+		const test = await setup();
+		test.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("find", { path: "src", pattern: "*.ts" })], { stopReason: "toolUse" }),
+			async () => {
+				await test.completed[1].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		const selection = audits(test.harness)[0].data.evaluations.find(
+			(item) => item.cycle === 2 && item.stage === "select",
+		)!;
+		const candidates = (JSON.parse(selection.requestBody!) as AheadRequest).state.candidates!.map(
+			(item) => item.path,
+		);
+		expect(candidates).toEqual(expect.arrayContaining(["src/irrelevant.ts", "src/session.ts"]));
+		expect(candidates).not.toContain("session.ts");
+		expect(candidates).not.toContain("irrelevant.ts");
+	});
+
 	it("prepares source and skill evidence before the first main request through native services", async () => {
 		const test = await setup();
 		let projected = "";

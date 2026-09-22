@@ -1,5 +1,7 @@
 /** Opt-in Ahead of Model Work experiment. See README.md for the expanded data export and budgets. */
 import { createHash } from "node:crypto";
+import { dirname, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
@@ -21,6 +23,7 @@ import {
 	alreadyRead,
 	boundedText,
 	observedPaths,
+	PATH_PRIORITY,
 	prepareAhead,
 	workspacePath,
 } from "./pipeline.ts";
@@ -29,7 +32,7 @@ const FLAG = "jev-ahead-of-model";
 
 export interface AheadReport {
 	cycles: AheadCycle[];
-	evaluations: Array<{ cycle: number; stage: AheadStage; questions: number; result: JevResult }>;
+	evaluations: Array<{ cycle: number; stage: AheadStage; attempt: number; questions: number; result: JevResult }>;
 	boundaries: Array<{
 		attemptId: string;
 		cause: string;
@@ -62,7 +65,7 @@ interface Scope {
 	tools: AheadState["tools"];
 	paths: AheadPath[];
 	reads: AheadRead[];
-	toolInputs: Map<string, { path: string; offset: number; limit?: number }>;
+	toolInputs: Map<string, { path?: string; searchRoot?: string; offset: number; limit?: number }>;
 	seenTools: Set<string>;
 	activePublications: Map<string, AheadCycle["publications"][number]>;
 	pending: boolean;
@@ -224,7 +227,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				for (const call of report.evaluations.filter((item) => item.cycle === cycle.number)) {
 					const result = call.result;
 					lines.push(
-						`  ${call.stage}: ${call.questions} questions; ${result.status}${result.status === "ok" ? "" : ` (${result.reason})`}; ${Math.round(result.elapsedMs)} ms; HTTP ${result.httpStatus ?? "unobserved"}; input tokens ${result.inputTokens ?? "unknown"}; cost ${result.cost ?? "unknown"}`,
+						`  ${call.stage}: attempt ${call.attempt}; ${call.questions} questions; ${result.status}${result.status === "ok" ? "" : ` (${result.reason})`}; ${Math.round(result.elapsedMs)} ms; HTTP ${result.httpStatus ?? "unobserved"}; input tokens ${result.inputTokens ?? "unknown"}; cost ${result.cost ?? "unknown"}`,
 					);
 					if (result.status === "ok")
 						for (const [id, answer] of Object.entries(result.answers)) {
@@ -291,9 +294,15 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			)
 				return false;
 			if (current.handle) return false;
-			if (current.report.cycles.length >= MAX_AHEAD_CYCLES) {
+			if (
+				current.report.cycles.length >= MAX_AHEAD_CYCLES ||
+				current.auditEvaluations.length >= MAX_AHEAD_EVALUATIONS
+			) {
 				current.pending = false;
-				current.report.status = "cycle budget reached";
+				current.report.status =
+					current.auditEvaluations.length >= MAX_AHEAD_EVALUATIONS
+						? "evaluation budget reached"
+						: "cycle budget reached";
 				return false;
 			}
 			const cycle: AheadCycle = {
@@ -305,6 +314,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 				publications: [],
 			};
 			const state = taskState(current);
+			let retryAvailable = true;
 			const admission = current.ctx.work.tasks.start(
 				{ key: `ahead-${cycle.number}`, label: "Ahead of Model Work with Jev", timeoutMs: 12_000 },
 				async (task) => {
@@ -314,39 +324,54 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 							state,
 							cycle,
 							async (stage, input, questions) => {
-								const call: AheadEvaluationAudit = {
-									cycle: cycle.number,
-									stage,
-									startedAt: new Date().toISOString(),
-									questions: Object.keys(questions).length,
-								};
-								current.auditEvaluations.push(call);
-								const result = await evaluateAhead(
-									input,
-									questions,
-									() => current.ctx.modelRegistry.getApiKeyForProvider("vercel-ai-gateway"),
-									task.signal,
-									{
-										...options,
-										fetch: (url, init) => {
-											call.dispatchedAt = new Date().toISOString();
-											return (options.fetch ?? globalThis.fetch)(url, init);
+								for (let attempt = 1; ; attempt++) {
+									if (current.auditEvaluations.length >= MAX_AHEAD_EVALUATIONS)
+										return { status: "unavailable", reason: "budget", elapsedMs: 0, requestBytes: 0 };
+									const call: AheadEvaluationAudit = {
+										cycle: cycle.number,
+										stage,
+										attempt,
+										startedAt: new Date().toISOString(),
+										questions: Object.keys(questions).length,
+									};
+									current.auditEvaluations.push(call);
+									const result = await evaluateAhead(
+										input,
+										questions,
+										() => current.ctx.modelRegistry.getApiKeyForProvider("vercel-ai-gateway"),
+										task.signal,
+										{
+											...options,
+											fetch: (url, init) => {
+												call.dispatchedAt = new Date().toISOString();
+												return (options.fetch ?? globalThis.fetch)(url, init);
+											},
 										},
-									},
-									(body) => {
-										call.requestBody = body;
-									},
-								);
-								call.finishedAt = new Date().toISOString();
-								call.result = result;
-								current.report.evaluations.push({
-									cycle: cycle.number,
-									stage,
-									questions: Object.keys(questions).length,
-									result,
-								});
-								observe(current);
-								return result;
+										(body) => {
+											call.requestBody = body;
+										},
+									);
+									call.finishedAt = new Date().toISOString();
+									call.result = result;
+									current.report.evaluations.push({
+										cycle: cycle.number,
+										stage,
+										attempt,
+										questions: Object.keys(questions).length,
+										result,
+									});
+									observe(current);
+									if (
+										!retryAvailable ||
+										result.status !== "unavailable" ||
+										result.reason !== "http" ||
+										![502, 503, 504].includes(result.httpStatus ?? 0) ||
+										current.auditEvaluations.length >= MAX_AHEAD_EVALUATIONS
+									)
+										return result;
+									retryAvailable = false;
+									await delay(500, undefined, { signal: task.signal });
+								}
 							},
 							async (contributions: ExtensionWorkContribution[]) => {
 								const publications: AheadAudit["publications"] = contributions.map((contribution) => ({
@@ -503,9 +528,16 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		volt.on("tool_execution_start", (event, ctx) => {
 			if (!isEnabled() || !scope || scope.stopped) return;
 			const path = typeof event.args.path === "string" ? workspacePath(ctx.cwd, event.args.path) : undefined;
-			if (!path) return;
+			const directory = typeof event.args.path === "string" ? event.args.path : ".";
+			const searchRoot = ["find", "grep"].includes(event.toolName)
+				? path
+					? dirname(path)
+					: workspacePath(ctx.cwd, resolve(ctx.cwd, directory, "__ahead_path__.ts"))
+				: undefined;
+			if (!path && !searchRoot) return;
 			scope.toolInputs.set(event.toolCallId, {
 				path,
+				searchRoot: searchRoot && !path ? dirname(searchRoot) : searchRoot,
 				offset:
 					typeof event.args.offset === "number" && Number.isSafeInteger(event.args.offset) && event.args.offset > 0
 						? event.args.offset
@@ -523,7 +555,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			const input = scope.toolInputs.get(event.toolCallId);
 			scope.toolInputs.delete(event.toolCallId);
 			const raw = textContent(event.result.content);
-			if (input && !event.isError) {
+			if (input?.path && !event.isError) {
 				const details = event.result.details;
 				const truncated = details !== null && typeof details === "object" && "truncation" in details;
 				if (event.toolName === "read" && raw && !truncated) {
@@ -557,18 +589,34 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 						}
 					},
 				);
-			const observed = [
-				...(input ? [{ path: input.path, line: input.offset }] : []),
-				...observedPaths(ctx.cwd, boundedText(raw, 8192)),
-			];
+			const observed: AheadPath[] = event.isError
+				? []
+				: [
+						...(input?.path ? [{ path: input.path, line: input.offset, origin: "tool" as const }] : []),
+						...(event.toolName === "read" && !input?.path
+							? []
+							: observedPaths(
+									input?.searchRoot ? resolve(ctx.cwd, input.searchRoot) : ctx.cwd,
+									boundedText(raw, 8192),
+									event.toolName === "read" ? input?.path : undefined,
+								)
+						).flatMap((item) => {
+							const path = workspacePath(ctx.cwd, resolve(ctx.cwd, input?.searchRoot ?? ".", item.path));
+							return path ? [{ ...item, path }] : [];
+						}),
+					];
 			const paths = new Map<string, AheadPath>();
-			for (const item of [...observed, ...scope.paths]) if (!paths.has(item.path)) paths.set(item.path, item);
-			scope.paths = [...paths.values()].slice(0, 64);
+			for (const item of [...observed, ...scope.paths])
+				if (!paths.has(item.path) || PATH_PRIORITY[item.origin] > PATH_PRIORITY[paths.get(item.path)!.origin])
+					paths.set(item.path, item);
+			scope.paths = [...paths.values()]
+				.sort((a, b) => PATH_PRIORITY[b.origin] - PATH_PRIORITY[a.origin])
+				.slice(0, 64);
 			const observation = {
 				name: boundedText(event.toolName, 80),
 				isError: event.isError,
 				text: boundedText(raw, 2048),
-				...(input ? { path: input.path } : {}),
+				...(input?.path ? { path: input.path } : {}),
 			};
 			const fingerprint = createHash("sha256")
 				.update(JSON.stringify({ observation, input, observed }))

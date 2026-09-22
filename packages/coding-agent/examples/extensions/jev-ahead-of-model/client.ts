@@ -23,7 +23,7 @@ export type JevResult = JevCallMetadata &
 		| { status: "ok"; answers: Record<string, JevAnswer> }
 		| {
 				status: "unavailable" | "cancelled";
-				reason: "credentials" | "size" | "http" | "response" | "transport" | "timeout" | "aborted";
+				reason: "credentials" | "size" | "http" | "response" | "transport" | "timeout" | "aborted" | "budget";
 		  }
 	);
 

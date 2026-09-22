@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type {
 	ExtensionWorkReadResult,
 	ExtensionWorkService,
@@ -13,7 +13,10 @@ import { MAX_AHEAD_EXCERPT_BYTES, MAX_AHEAD_PACKET_BYTES } from "./limits.ts";
 export type AheadPath = {
 	path: string;
 	line: number;
+	origin: "request" | "tool" | "diff" | "reference";
 };
+
+export const PATH_PRIORITY = { request: 40, tool: 30, diff: 30, reference: 20 };
 
 export type AheadRead = {
 	path: string;
@@ -80,21 +83,55 @@ export function boundedText(text: string, bytes: number): string {
 }
 
 /** Preserve observed paths, including diff headers and line references, without accepting escaped/outside paths. */
-export function observedPaths(cwd: string, text: string): AheadPath[] {
+export function observedPaths(cwd: string, text: string, sourcePath?: string): AheadPath[] {
 	const paths = new Map<string, AheadPath>();
-	for (const line of text.split("\n")) {
-		const diffPath = /^(?:\+\+\+ b\/|--- a\/)(\S+)/.exec(line)?.[1] ?? /^diff --git a\/\S+ b\/(\S+)/.exec(line)?.[1];
+	// Source contents are not path listings. Resolve imports and Markdown links relative
+	// to their containing file; ignore example strings and fenced documentation code.
+	if (sourcePath) {
+		const source = workspacePath(cwd, sourcePath);
+		if (!source) return [];
+		const markdown = source.endsWith(".md");
+		const body = markdown
+			? text.replace(/(^|\n)[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:\n[ \t]*\2[^\n]*(?=\n|$)|$)/g, "\n")
+			: text;
+		const matches = markdown
+			? body.matchAll(/\]\(([^\s)]+)\)/g)
+			: body.matchAll(/\b(?:from|import)\s*["'](\.[^"'\s]+)["']/g);
+		for (const match of matches) {
+			const raw = match[1].split("#")[0];
+			if (!raw || /[:?]/.test(raw)) continue;
+			const path = workspacePath(cwd, resolve(cwd, dirname(source), raw));
+			if (path) paths.set(path, { path, line: 1, origin: "reference" });
+			if (paths.size >= 64) break;
+		}
+		return [...paths.values()];
+	}
+	let changedPath: string | undefined;
+	for (const lineText of text.split("\n")) {
+		const diffPath =
+			/^(?:\+\+\+ b\/|--- a\/)(\S+)/.exec(lineText)?.[1] ?? /^diff --git a\/\S+ b\/(\S+)/.exec(lineText)?.[1];
+		if (diffPath) changedPath = workspacePath(cwd, diffPath);
+		const hunk = /^@@ .* \+([1-9][0-9]*)/.exec(lineText);
+		if (changedPath && hunk && paths.get(changedPath)?.line === 1) {
+			const start = Number(hunk[1]);
+			if (Number.isSafeInteger(start)) paths.set(changedPath, { path: changedPath, line: start, origin: "diff" });
+		}
 		const matches = diffPath
 			? [["", diffPath, "1"]]
 			: [
-					...line.matchAll(
+					...lineText.matchAll(
 						/(?:^|[\s`"'([])(\/?(?:[a-zA-Z0-9_.-]+\/)*[a-zA-Z0-9_.-]+\.[a-zA-Z]+)(?::([1-9][0-9]*))?(?=$|[\s`"'),;:\]#])/g,
 					),
 				];
 		for (const match of matches) {
 			const path = workspacePath(cwd, match[1]);
 			const line = Number(match[2] ?? 1);
-			if (path && Number.isSafeInteger(line) && !paths.has(path)) paths.set(path, { path, line });
+			if (path && Number.isSafeInteger(line) && !paths.has(path))
+				paths.set(path, {
+					path,
+					line,
+					origin: diffPath ? "diff" : lineText.trim() === match[1] ? "tool" : "reference",
+				});
 			if (paths.size >= 64) return [...paths.values()];
 		}
 	}
@@ -153,6 +190,11 @@ function chosen(answer: JevAnswer | undefined): string | undefined {
 
 function usefulness(answer: JevAnswer | undefined): number {
 	return answer?.type === "score" ? answer.score : 0;
+}
+
+function symbolPriority(symbol: ExtensionWorkSymbol): number {
+	if (symbol.name.includes("callback") || symbol.name === "<function>") return 0;
+	return [5, 6, 12].includes(symbol.kind) ? 2 : 1;
 }
 
 function evidenceState(items: Evidence[]): JsonValue[] {
@@ -231,13 +273,20 @@ export async function prepareAhead(
 	// Candidate generation supplies literal strings; Jev cannot invent a search, path, or operation.
 	const paths = new Map<string, AheadPath>();
 	for (const item of [
-		...observedPaths(task.snapshot.cwd, state.request),
-		...(state.paths ?? []),
-		...state.tools.flatMap((item) => observedPaths(task.snapshot.cwd, item.text)),
-		...[...state.recent].reverse().flatMap((item) => observedPaths(task.snapshot.cwd, item.text)),
+		...observedPaths(task.snapshot.cwd, state.request).map((item) => ({ ...item, origin: "request" as const })),
+		...(state.paths ??
+			state.tools
+				.filter((item) => !item.isError)
+				.flatMap((item) =>
+					observedPaths(task.snapshot.cwd, item.text, item.name === "read" ? item.path : undefined),
+				)),
+		...[...state.recent]
+			.reverse()
+			.filter((item) => item.role !== "toolResult")
+			.flatMap((item) => observedPaths(task.snapshot.cwd, item.text)),
 	]) {
 		const path = workspacePath(task.snapshot.cwd, item.path);
-		if (path && !paths.has(path) && paths.size < 64) paths.set(path, { path, line: item.line });
+		if (path && !paths.has(path) && paths.size < 64) paths.set(path, { ...item, path });
 	}
 	const terms = [
 		...new Set(
@@ -335,8 +384,36 @@ export async function prepareAhead(
 	const skillEvidence: Evidence[] = [];
 	const discovery: Promise<void>[] = [];
 	if (inspect) {
-		for (const item of paths.values())
-			addCandidate(item.path, item.line, "Observed in request or foreground context", 20);
+		const unread = [...paths.values()]
+			.filter((item) => !alreadyRead(state.reads ?? [], item.path, 1, Number.MAX_SAFE_INTEGER))
+			.sort((a, b) => PATH_PRIORITY[b.origin] - PATH_PRIORITY[a.origin]);
+		if (services.includes("findPaths")) {
+			// Check at most three containing directories before spending Jev questions on
+			// text mentions. Only native-discovered exact paths enter the candidate pool.
+			const directories = [...new Set(unread.map((item) => dirname(item.path)))].slice(0, 3);
+			for (const directory of directories)
+				discovery.push(
+					(async () => {
+						const result = await operation("findPaths", directory, () =>
+							task.repository.findPaths({
+								path: directory,
+								pattern: "*",
+								limit: 160,
+							}),
+						);
+						if (result.status !== "ok") return;
+						const found = new Set(result.paths.map((path) => workspacePath(task.snapshot.cwd, path)));
+						for (const item of unread)
+							if (dirname(item.path) === directory && found.has(item.path))
+								addCandidate(item.path, item.line, `Verified ${item.origin} path`, PATH_PRIORITY[item.origin]);
+					})(),
+				);
+		} else {
+			// An explicit user path or a successful foreground path is usable with read-only tools.
+			for (const item of unread)
+				if (item.origin === "request" || item.origin === "tool")
+					addCandidate(item.path, item.line, `Observed ${item.origin} path`, PATH_PRIORITY[item.origin]);
+		}
 		// Known paths take precedence. Broad scans must not crowd them out or run every cycle.
 		if (services.includes("findPaths") && !paths.size)
 			discovery.push(
@@ -466,14 +543,14 @@ export async function prepareAhead(
 	for (const file of selectedFiles) {
 		const observed = symbols
 			.filter((item) => workspacePath(task.snapshot.cwd, item.path) === file.path)
-			.sort(
-				(a, b) =>
-					Number([5, 6, 12].includes(b.kind)) - Number([5, 6, 12].includes(a.kind)) || a.startLine - b.startLine,
-			)
+			.sort((a, b) => symbolPriority(b) - symbolPriority(a) || a.startLine - b.startLine)
 			.slice(0, 16)
 			.map((item) => ({
 				startLine: item.startLine,
-				endLine: Math.min(item.endLine, item.startLine + 119),
+				// Native symbols can contain only the selection/name range. Such a range
+				// is a starting location, not a complete body; read a bounded window after it.
+				endLine:
+					item.endLine <= item.startLine ? item.startLine + 119 : Math.min(item.endLine, item.startLine + 119),
 				name: item.name,
 			}));
 		regions.set(
@@ -538,8 +615,8 @@ export async function prepareAhead(
 					symbol.startLine <= item.endLine,
 			);
 		return (
+			symbolPriority(b) - symbolPriority(a) ||
 			Number(inExcerpt(b)) - Number(inExcerpt(a)) ||
-			Number([5, 6, 12].includes(b.kind)) - Number([5, 6, 12].includes(a.kind)) ||
 			a.startLine - b.startLine
 		);
 	});
@@ -594,16 +671,18 @@ export async function prepareAhead(
 				if (additional === 2) break;
 			}
 		}
-		// Reassess the combined evidence after the selected lookup; this cannot be batched before the lookup.
-		assessed = await ask(
-			"refine",
-			{
-				...orientedState,
-				evidence: evidenceState(evidence),
-				lookup: { action: nav.action, status: locations.status },
-			},
-			evidenceQuestions(evidence),
-		);
+		// A definition can point straight back to the excerpt we already hold.
+		// Spend a refinement evaluation only when the lookup added evidence.
+		if (evidence.some((item) => item.id.startsWith("related_")))
+			assessed = await ask(
+				"refine",
+				{
+					...orientedState,
+					evidence: evidenceState(evidence),
+					lookup: { action: nav.action, status: locations.status },
+				},
+				evidenceQuestions(evidence),
+			);
 		if (!assessed) return;
 	}
 	const finalAnswers = assessed;
