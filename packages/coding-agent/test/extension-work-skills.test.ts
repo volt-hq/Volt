@@ -1,4 +1,4 @@
-import { mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -58,8 +58,12 @@ describe("managed loaded skill catalog", () => {
 
 	it("does not turn a symlink retarget after loading into a new resource grant", async () => {
 		const { directory, path } = await fixture();
-		const alias = join(directory, "alias.md");
-		await symlink(path, alias);
+		const aliasDirectory = join(directory, "alias");
+		const alias = join(aliasDirectory, "sample.md");
+		// Directory junctions preserve realpath retargeting without Windows symlink privileges.
+		const linkType = process.platform === "win32" ? "junction" : "dir";
+		await symlink(directory, aliasDirectory, linkType);
+		expect(await realpath(alias)).toBe(await realpath(path));
 		// Load only the alias to retain its lexical membership as well as the original descriptor identity.
 		const loader = new DefaultResourceLoader({
 			cwd: directory,
@@ -71,10 +75,13 @@ describe("managed loaded skill catalog", () => {
 		});
 		await loader.reload();
 		const skills = loader.getSkills().skills;
-		const secret = join(directory, "secret.txt");
+		const secretDirectory = join(directory, "secret");
+		await mkdir(secretDirectory);
+		const secret = join(secretDirectory, "sample.md");
 		await writeFile(secret, "private bytes");
-		await unlink(alias);
-		await symlink(secret, alias);
+		await unlink(aliasDirectory);
+		await symlink(secretDirectory, aliasDirectory, linkType);
+		expect(await realpath(alias)).toBe(await realpath(secret));
 		const catalog = new ExtensionSkillCatalog();
 		const snapshot = catalog.snapshot(skills);
 		expect(snapshot.skills).toHaveLength(1);

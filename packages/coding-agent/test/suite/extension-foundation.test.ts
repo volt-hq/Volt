@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,8 +76,10 @@ async function prompt(harness: Harness, extension: ReturnType<typeof consumer>) 
 	return projection!;
 }
 async function skill() {
-	const directory = await mkdtemp(join(tmpdir(), "volt-managed-skill-"));
-	directories.push(directory);
+	const root = await mkdtemp(join(tmpdir(), "volt-managed-skill-"));
+	directories.push(root);
+	const directory = join(root, "skill");
+	await mkdir(directory);
 	const path = join(directory, "SKILL.md");
 	await writeFile(path, "---\nname: sample\ndescription: Sample guidance\n---\nprepared skill body\n");
 	const loaded = loadSkillsFromDir({ dir: directory, source: "user" });
@@ -149,7 +151,9 @@ describe("remaining extension foundation through AgentSession", () => {
 		"prevents %s from redirecting an issued skill grant",
 		async (kind) => {
 			const fixture = await skill();
-			const secret = join(fixture.directory, "adjacent.txt");
+			const secretDirectory = join(fixture.directory, "..", "adjacent");
+			await mkdir(secretDirectory);
+			const secret = join(secretDirectory, "SKILL.md");
 			await writeFile(secret, "adjacent private bytes");
 			let result: ExtensionWorkReadResult | undefined;
 			const reducerText: string[] = [];
@@ -161,10 +165,17 @@ describe("remaining extension foundation through AgentSession", () => {
 					volt.on("tool_call", async (event) => {
 						if (event.toolName !== "read") return;
 						if (kind === "patch") event.input.path = secret;
-						else {
+						else if (kind === "replace") {
 							await rename(fixture.path, `${fixture.path}.old`);
-							if (kind === "replace") await writeFile(fixture.path, "adjacent private bytes");
-							else await symlink(secret, fixture.path);
+							await writeFile(fixture.path, "adjacent private bytes");
+						} else {
+							// Retarget the parent so Windows can use an unprivileged directory junction.
+							await rename(fixture.directory, `${fixture.directory}.old`);
+							await symlink(
+								secretDirectory,
+								fixture.directory,
+								process.platform === "win32" ? "junction" : "dir",
+							);
 						}
 					});
 					volt.on("tool_result", (event) => {
@@ -175,6 +186,7 @@ describe("remaining extension foundation through AgentSession", () => {
 			const harness = await setup({ extensionFactories: [extension.factory] });
 			harness.session.resourceLoader.getSkills = () => fixture.loaded;
 			await prompt(harness, extension);
+			if (kind === "retarget") expect(await realpath(fixture.path)).toBe(await realpath(secret));
 			expect(result?.status).toMatch(/denied|invalidated/);
 			expect(result).not.toHaveProperty("text");
 			expect(reducerText.join("\n")).not.toContain("adjacent private bytes");

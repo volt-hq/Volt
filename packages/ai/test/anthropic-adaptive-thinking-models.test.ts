@@ -5,6 +5,7 @@ import type { Api, Model } from "../src/types.ts";
 const EXPECTED_CURRENT_ADAPTIVE_THINKING_MODELS = [
 	"anthropic/claude-fable-5",
 	"anthropic/claude-opus-4-8",
+	"anthropic/claude-opus-5-5",
 	"opencode/claude-opus-4-8",
 ];
 
@@ -12,6 +13,7 @@ const EXPECTED_CATALOG_ADAPTIVE_THINKING_MODELS = [
 	"cloudflare-ai-gateway/claude-fable-5",
 	"vercel-ai-gateway/anthropic/claude-fable-5",
 	"vercel-ai-gateway/anthropic/claude-opus-4.8",
+	"vercel-ai-gateway/anthropic/claude-opus-5.5",
 ];
 
 function getAllModels(): Model<Api>[] {
@@ -35,7 +37,9 @@ describe("Anthropic adaptive thinking model metadata", () => {
 			expect.arrayContaining([...EXPECTED_CURRENT_ADAPTIVE_THINKING_MODELS, ...expectedCatalogModels].sort()),
 		);
 		expect(flaggedModels).toEqual(
-			flaggedModels.filter((modelId) => /(opus[-.]4[-.][678]|sonnet[-.]4[-.]6|fable[-.]5)/.test(modelId)),
+			flaggedModels.filter((modelId) =>
+				/(opus[-.]4[-.][678]|opus[-.]5[-.]5|sonnet[-.]4[-.]6|fable[-.]5)/.test(modelId),
+			),
 		);
 	});
 });

@@ -136,8 +136,10 @@ afterEach(() => {
 describe("private native LSP observations", () => {
 	it("retains definitions, references, hierarchical and workspace symbols without changing foreground output", async () => {
 		const { root, path, managed, execute } = fixture();
-		const alias = join(root, "alias.foo");
-		symlinkSync(path, alias);
+		const aliasDirectory = join(root, "alias");
+		// Junctions exercise canonicalization without requiring Windows symlink privileges.
+		symlinkSync(root, aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+		const alias = join(aliasDirectory, "test.foo");
 		const symbols = await managed({ action: "symbols", path: alias });
 		expect(symbols.outcome).toBe("success");
 		expect(symbols.observation).toEqual({
@@ -242,8 +244,9 @@ describe("private native LSP observations", () => {
 		roots.push(external);
 		const target = join(external, "target.foo");
 		writeFileSync(target, "symbol\n");
-		const alias = join(root, "external.foo");
-		symlinkSync(target, alias);
+		const aliasDirectory = join(root, "external");
+		symlinkSync(external, aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+		const alias = join(aliasDirectory, "target.foo");
 		vi.spyOn(LspClient.prototype, "sendRequest").mockResolvedValue([
 			{ uri: pathToFileURL(alias).toString(), range },
 			{ uri: "untitled:missing", range },
