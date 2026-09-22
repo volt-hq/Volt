@@ -82,21 +82,30 @@ beforeEach(async () => {
 			// Simulate gh preferring the parent when repository identity is omitted.
 			if (args[2] === "--json") return response({ number: 42, title: "Parent change", url: PARENT_URL });
 			expect(args[2]).toBe(FORK_URL);
-			if (args.at(-1) === "headRefOid") return response({ headRefOid: HEAD });
-			return response({
-				id: "PR_fork_42",
-				number: 42,
-				title: "Fork change",
-				body: "",
-				url: metadataUrl,
-				baseRefName: "main",
-				headRefName: "remote-topic",
-				baseRefOid: "a".repeat(40),
-				headRefOid: HEAD,
-			});
+			return response({ headRefOid: HEAD });
 		}
 		if (args[0] === "api" && args[1] === "graphql") {
 			const request = JSON.parse(options.input!) as { query: string; variables: { id: string } };
+			if (request.query.includes("query VoltReviewPullRequestMetadata(")) {
+				expect(request.variables).toEqual({ owner: "contributor", name: "project", number: 42 });
+				return response({
+					data: {
+						repository: {
+							pullRequest: {
+								id: "PR_fork_42",
+								number: 42,
+								title: "Fork change",
+								body: "",
+								url: metadataUrl,
+								baseRefName: "main",
+								headRefName: "remote-topic",
+								baseRefOid: "a".repeat(40),
+								headRefOid: HEAD,
+							},
+						},
+					},
+				});
+			}
 			expect(request.variables.id).toBe("PR_fork_42");
 			const field = request.query.includes("closingIssuesReferences")
 				? "closingIssuesReferences"
@@ -225,6 +234,6 @@ describe("#411 current-PR picker identity", () => {
 				maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
 			}),
 		).toMatchObject({ ok: false, error: expect.stringContaining("identity could not be verified") });
-		expect(vi.mocked(runGitHubCli).mock.calls.some(([args]) => args[0] === "api")).toBe(false);
+		expect(vi.mocked(runGitHubCli).mock.calls.filter(([args]) => args[0] === "api")).toHaveLength(1);
 	});
 });

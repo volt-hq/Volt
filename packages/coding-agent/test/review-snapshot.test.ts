@@ -109,9 +109,7 @@ function installGitHubShim(directory: string, config: GitHubShimConfig): string 
 		`import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const config = JSON.parse(readFileSync(${JSON.stringify(configPath)}, "utf8"));
 const args = process.argv.slice(2);
-if (args[0] === "pr" && args[1] === "view") {
-  const fields = args[args.indexOf("--json") + 1];
-  const view = {
+const view = {
     author: { login: "review-author" },
     state: "OPEN",
     isDraft: false,
@@ -119,13 +117,19 @@ if (args[0] === "pr" && args[1] === "view") {
     statusCheckRollup: [],
     ...config.view
   };
-  for (const field of config.omitViewFields ?? []) delete view[field];
+for (const field of config.omitViewFields ?? []) delete view[field];
+if (args[0] === "pr" && args[1] === "view") {
+  const fields = args[args.indexOf("--json") + 1];
+  if (fields !== "headRefOid") {
+    process.stderr.write('Unknown JSON field: "baseRefOid"');
+    process.exit(1);
+  }
   const selector = args[2];
   if (selector !== view.url) {
     process.stderr.write("Pull request selector does not identify the fixture repository");
     process.exit(1);
   }
-  process.stdout.write(JSON.stringify(fields === "headRefOid" ? { headRefOid: config.finalHeadOid ?? view.headRefOid } : view));
+  process.stdout.write(JSON.stringify({ headRefOid: config.finalHeadOid ?? view.headRefOid }));
 } else if (args[0] === "api" && args[1] === "graphql") {
   if (args[args.indexOf("--hostname") + 1] !== new URL(config.view.url).host) {
     process.stderr.write("GraphQL hostname does not identify the fixture host");
@@ -136,6 +140,17 @@ if (args[0] === "pr" && args[1] === "view") {
   const request = JSON.parse(input);
   const operation = /query\\s+(Volt\\w+)/.exec(request.query)?.[1];
   const variables = request.variables ?? {};
+  if (operation === "VoltReviewPullRequestMetadata") {
+    const [owner, name] = new URL(view.url).pathname.split('/').slice(1, 3);
+    if (variables.owner !== owner || variables.name !== name || variables.number !== view.number) process.exit(1);
+    const { statusCheckRollup, ...metadata } = view;
+    if (Array.isArray(statusCheckRollup)) metadata.commits = { nodes: [{ commit: {
+      id: 'COMMIT_fixture', oid: view.headRefOid,
+      statusCheckRollup: { contexts: { nodes: statusCheckRollup, pageInfo: { hasNextPage: false, endCursor: null } } }
+    } }] };
+    process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: metadata } } }));
+    process.exit(0);
+  }
   const key = JSON.stringify([operation, variables.id, variables.cursor ?? null, variables.manualOnly ?? null]);
   appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ operation, variables }) + "\\n");
   const initialOperations = new Set(["VoltReviewLinkedIssues", "VoltReviewPullRequestComments", "VoltReviewPullRequestReviews", "VoltReviewThreads"]);
@@ -1673,7 +1688,10 @@ if (!args.includes("--numstat")) {
 					number: "7",
 					maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
 				}),
-			).resolves.toEqual({ ok: false, error: "Could not parse gh pr view output." });
+			).resolves.toMatchObject({
+				ok: false,
+				error: expect.stringContaining("Invalid GitHub API pull request metadata"),
+			});
 		},
 	);
 

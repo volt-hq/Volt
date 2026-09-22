@@ -49,6 +49,52 @@ interface CaptureState {
 	discussionEntries: ReviewCodeHostDiscussionEntry[];
 }
 
+// Query the API schema directly: older gh releases reject baseRefOid in pr view's field allowlist.
+const PULL_REQUEST_METADATA_QUERY = `query VoltReviewPullRequestMetadata($owner: String!, $name: String!, $number: Int!) {
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id number title body url baseRefName headRefName baseRefOid headRefOid
+      author { login }
+      state isDraft mergeable
+      commits(last: 1) {
+        nodes {
+          commit {
+            id oid
+            statusCheckRollup {
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun { status conclusion }
+                  ... on StatusContext { state }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}`;
+
+const COMMIT_CHECKS_QUERY = `query VoltReviewCommitChecks($id: ID!, $cursor: String!) {
+  node(id: $id) {
+    ... on Commit {
+      id oid
+      statusCheckRollup {
+        contexts(first: 100, after: $cursor) {
+          nodes {
+            __typename
+            ... on CheckRun { status conclusion }
+            ... on StatusContext { state }
+          }
+          pageInfo { hasNextPage endCursor }
+        }
+      }
+    }
+  }
+}`;
+
 const LINKED_ISSUES_QUERY = `query VoltReviewLinkedIssues($id: ID!, $cursor: String, $manualOnly: Boolean!) {
   node(id: $id) {
     ... on PullRequest {
@@ -370,7 +416,6 @@ function parsePullRequestView(
 	const headRefName = boundedStructuralString(value.headRefName, 500);
 	const reviewState = pullRequestReviewState(value.state, value.isDraft);
 	const mergeability = pullRequestMergeability(value.mergeable);
-	const checks = pullRequestCheckSummary(value.statusCheckRollup);
 	const author = pullRequestAuthor(value.author, url ?? "");
 	if (
 		number === undefined ||
@@ -406,7 +451,6 @@ function parsePullRequestView(
 		// Health fields are optional display metadata, not required review evidence.
 		...(reviewState ? { reviewState } : {}),
 		...(mergeability ? { mergeability } : {}),
-		...(checks ? { checks } : {}),
 		observedAt,
 	};
 }
@@ -437,6 +481,45 @@ function connectionAt(value: unknown, path: string[]): GraphqlConnection | undef
 	const endCursor = boundedStructuralString(current.pageInfo.endCursor, 2_000);
 	if (hasNextPage && !endCursor) return undefined;
 	return { nodes: current.nodes, hasNextPage, ...(endCursor ? { endCursor } : {}) };
+}
+
+async function capturePullRequestChecks(
+	github: GitHubContextSource,
+	metadata: unknown,
+	headRefOid: string,
+	signal?: AbortSignal,
+): Promise<ReviewPullRequestCheckSummary | undefined> {
+	if (!isObject(metadata) || !isObject(metadata.commits) || !Array.isArray(metadata.commits.nodes)) return undefined;
+	if (metadata.commits.nodes.length !== 1 || !isObject(metadata.commits.nodes[0])) return undefined;
+	let commit: unknown = metadata.commits.nodes[0].commit;
+	const checks: unknown[] = [];
+	const seenCursors = new Set<string>();
+	// Health is optional display metadata. Never label a partial check list as passing.
+	for (let page = 0; page < 100; page++) {
+		if (!isObject(commit) || commit.oid !== headRefOid || typeof commit.id !== "string" || !commit.id)
+			return undefined;
+		if (page === 0 && commit.statusCheckRollup === null) return pullRequestCheckSummary([]);
+		const connection = connectionAt(commit, ["statusCheckRollup", "contexts"]);
+		if (!connection || checks.length + connection.nodes.length > 10_000) return undefined;
+		checks.push(...connection.nodes);
+		if (!connection.hasNextPage) return pullRequestCheckSummary(checks);
+		const cursor = connection.endCursor;
+		if (!cursor || seenCursors.has(cursor) || page === 99) return undefined;
+		seenCursors.add(cursor);
+		const result = await graphql(github, COMMIT_CHECKS_QUERY, { id: commit.id, cursor }, signal);
+		if (!result.ok) return undefined;
+		const value = parseJson(result.stdout);
+		if (
+			!isObject(value) ||
+			(value.errors !== undefined && (!Array.isArray(value.errors) || value.errors.length > 0)) ||
+			!isObject(value.data)
+		)
+			return undefined;
+		const nextCommit = value.data.node;
+		if (!isObject(nextCommit) || nextCommit.id !== commit.id) return undefined;
+		commit = nextCommit;
+	}
+	return undefined;
 }
 
 async function loadConnection(options: {
@@ -985,36 +1068,47 @@ export async function capturePullRequestContextWithGitHubCli(
 			return { ok: false, error, remoteError: error };
 		}
 	}
-	const result = await runGh(
-		[
-			"pr",
-			"view",
-			target.url,
-			"--json",
-			"id,number,title,body,baseRefName,headRefName,url,baseRefOid,headRefOid,author,state,isDraft,mergeable,statusCheckRollup",
-		],
-		options.cwd,
-		undefined,
+	const selected = parseGitHubPullRequestUrl(target.url);
+	if (!selected) return { ok: false, error: "Could not resolve the selected pull request URL." };
+	const [, owner, name] = selected.repository.split("/");
+	const github: GitHubContextSource = { cwd: options.cwd, hostname: selected.hostname };
+	const result = await graphql(
+		github,
+		PULL_REQUEST_METADATA_QUERY,
+		{ owner, name, number: selected.number },
 		options.signal,
 	);
+	const metadataFailure =
+		"Could not load pull request metadata with GitHub CLI. Check gh installation, host authentication, repository access, and connectivity, then retry.";
 	if (!result.ok) {
-		const error = commandError(result);
-		if (/ENOENT|not found|not recognized/i.test(error)) {
-			return { ok: false, error: "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/" };
-		}
 		return {
 			ok: false,
-			error: `gh pr view failed: ${error}`,
-			remoteError: "Could not load pull request metadata with GitHub CLI.",
+			error: `gh api graphql failed while loading pull request metadata: ${commandError(result)} ${metadataFailure}`,
+			remoteError: metadataFailure,
 		};
 	}
-	const pullRequest = parsePullRequestView(
-		parseJson(result.stdout),
-		options.maxPullRequestNumber,
-		initialLimitations,
-		Date.now(),
-	);
-	if (!pullRequest) return { ok: false, error: "Could not parse gh pr view output." };
+	const value = parseJson(result.stdout);
+	// GraphQL can return partial data with errors, even with a successful HTTP status.
+	if (
+		!isObject(value) ||
+		(value.errors !== undefined && (!Array.isArray(value.errors) || value.errors.length > 0)) ||
+		!isObject(value.data) ||
+		!isObject(value.data.repository)
+	) {
+		return {
+			ok: false,
+			error: `Invalid GitHub API metadata response. ${metadataFailure}`,
+			remoteError: metadataFailure,
+		};
+	}
+	const metadata = value.data.repository.pullRequest;
+	const pullRequest = parsePullRequestView(metadata, options.maxPullRequestNumber, initialLimitations, Date.now());
+	if (!pullRequest)
+		return {
+			ok: false,
+			error: `Invalid GitHub API pull request metadata. ${metadataFailure}`,
+			remoteError: metadataFailure,
+		};
 	const locator = parseGitHubPullRequestUrl(pullRequest.url);
 	if (
 		!locator ||
@@ -1028,7 +1122,8 @@ export async function capturePullRequestContextWithGitHubCli(
 		};
 	}
 	pullRequest.url = locator.url;
-	const github: GitHubContextSource = { cwd: options.cwd, hostname: locator.hostname };
+	const checks = await capturePullRequestChecks(github, metadata, pullRequest.headRefOid, options.signal);
+	if (checks) pullRequest.checks = checks;
 
 	options.onProgress?.("Capturing pull request context…");
 	const closingLimitations: ReviewCodeHostContextLimitation[] = [];

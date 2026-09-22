@@ -94,18 +94,18 @@ beforeEach(async () => {
 	vi.mocked(runGitHubCli).mockImplementation(async (args, options) => {
 		if (args[0] === "pr" && args[1] === "view") {
 			expect(args[2]).toBe(URL);
-			return response(
-				args.at(-1) === "headRefOid"
-					? { headRefOid: HEAD }
-					: {
-							...record.target.identity.pullRequest,
-							id: "PR_fork_42",
-							url: URL,
-						},
-			);
+			return response({ headRefOid: HEAD });
 		}
 		if (args[0] === "api" && args[1] === "graphql") {
 			const request = JSON.parse(options.input!) as { query: string; variables: { id: string } };
+			if (request.query.includes("query VoltReviewPullRequestMetadata(")) {
+				expect(request.variables).toEqual({ owner: "contributor", name: "project", number: 42 });
+				return response({
+					data: {
+						repository: { pullRequest: { ...record.target.identity.pullRequest, id: "PR_fork_42", url: URL } },
+					},
+				});
+			}
 			expect(request.variables.id).toBe("PR_fork_42");
 			const field = request.query.includes("closingIssuesReferences")
 				? "closingIssuesReferences"
@@ -187,7 +187,8 @@ describe("#406 PR rerun identity", () => {
 			timedOut: false,
 		});
 		await expect(prepareRerun()).rejects.toMatchObject({
-			message: "Could not load pull request metadata with GitHub CLI.",
+			message:
+				"Could not load pull request metadata with GitHub CLI. Check gh installation, host authentication, repository access, and connectivity, then retry.",
 		});
 		expect(harness.eventsOfType("message_start")).toHaveLength(0);
 	});
