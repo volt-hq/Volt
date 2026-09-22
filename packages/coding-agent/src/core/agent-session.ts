@@ -709,6 +709,7 @@ export class AgentSession {
 	private _activeExtensionCommandHandlers = 0;
 	/** Distinguishes handler-owned prompts that already completed a custom turn. */
 	private _agentSettlementRevision = 0;
+	private _agentSettlementInFlight = false;
 	/** Joins AgentSession post-run continuation work after the Harness lease first becomes idle. */
 	private _agentSettlementBarrier: Promise<void> = Promise.resolve();
 	private _resolveAgentSettlementBarrier: (() => void) | undefined;
@@ -3638,6 +3639,7 @@ export class AgentSession {
 	get isBusy(): boolean {
 		return (
 			this._reloadInProgress ||
+			this._agentSettlementInFlight ||
 			this._harness.getPhase() !== "idle" ||
 			this._activeExtensionCommandHandlers > 0 ||
 			this.isBashRunning
@@ -3646,7 +3648,9 @@ export class AgentSession {
 
 	private get _hasSessionOperationBarrier(): boolean {
 		const phase = this._harness.getPhase();
-		return this._reloadInProgress || phase === "compaction" || phase === "branch_summary";
+		return (
+			this._reloadInProgress || this._agentSettlementInFlight || phase === "compaction" || phase === "branch_summary"
+		);
 	}
 
 	/**
@@ -3658,7 +3662,9 @@ export class AgentSession {
 	 */
 	get hasActiveSessionMutation(): boolean {
 		const phase = this._harness.getPhase();
-		return this._reloadInProgress || phase === "compaction" || phase === "branch_summary";
+		return (
+			this._reloadInProgress || this._agentSettlementInFlight || phase === "compaction" || phase === "branch_summary"
+		);
 	}
 
 	/** Current effective system prompt (includes any per-turn extension modifications) */
@@ -4922,7 +4928,7 @@ export class AgentSession {
 				this._flushPendingBashMessages();
 			}
 		} finally {
-			this._emitAgentSettledIfIdle();
+			await this._emitAgentSettledIfIdle();
 		}
 	}
 
@@ -4966,15 +4972,26 @@ export class AgentSession {
 		}
 	}
 
-	private _emitAgentSettledIfIdle(): void {
+	private async _emitAgentSettledIfIdle(): Promise<void> {
+		if (this._agentSettlementInFlight) return this._agentSettlementBarrier;
 		if (this._harness.getPhase() === "idle") {
+			this._beginAgentSettlement();
+			this._agentSettlementInFlight = true;
 			this._invalidateExtensionWork();
 			this._agentSettlementRevision += 1;
-			this._emit({ type: "agent_settled" });
-			const resolveSettlement = this._resolveAgentSettlementBarrier;
-			this._resolveAgentSettlementBarrier = undefined;
-			resolveSettlement?.();
-			this._scheduleBackgroundContinuation();
+			try {
+				await this._extensionRunner.emit({ type: "agent_settled" });
+			} finally {
+				const resolveSettlement = this._resolveAgentSettlementBarrier;
+				this._resolveAgentSettlementBarrier = undefined;
+				this._agentSettlementInFlight = false;
+				try {
+					this._emit({ type: "agent_settled" });
+				} finally {
+					resolveSettlement?.();
+					this._scheduleBackgroundContinuation();
+				}
+			}
 		}
 	}
 
@@ -5122,6 +5139,9 @@ export class AgentSession {
 	}
 
 	private async _promptAdmitted(text: string, options?: PromptOptions): Promise<void> {
+		// Settlement handlers may persist state. Admit the next prompt only after
+		// they finish, before capturing its branch cursor or reserving a run.
+		if (this._agentSettlementInFlight) await this._agentSettlementBarrier;
 		if (this._disposed) {
 			throw new Error("Cannot prompt a disposed session");
 		}
@@ -5243,7 +5263,7 @@ export class AgentSession {
 					// Emit the same terminal boundary after the handler and any durable
 					// client-input completion have finished, unless the handler already
 					// completed a custom turn and published that boundary itself.
-					this._emitAgentSettledIfIdle();
+					await this._emitAgentSettledIfIdle();
 				}
 			} catch (error) {
 				const normalized = error instanceof Error ? error : new Error(String(error));
@@ -5459,7 +5479,7 @@ export class AgentSession {
 					try {
 						this._flushPendingBashMessages();
 					} finally {
-						this._emitAgentSettledIfIdle();
+						await this._emitAgentSettledIfIdle();
 					}
 				}
 				assertConversationGenerationCurrent();
@@ -5871,6 +5891,7 @@ export class AgentSession {
 		allowDuringPromptTransaction: boolean,
 		appendDuringReservedTurn = false,
 	): Promise<void> {
+		if (this._agentSettlementInFlight) await this._agentSettlementBarrier;
 		this._assertConversationAuthorityAvailable();
 		if (this._hasSessionOperationBarrier) {
 			throw new Error("Cannot append a custom message while a session mutation is active");
@@ -6585,7 +6606,7 @@ export class AgentSession {
 		customInstructions?: string,
 		assertConversationGenerationCurrent?: () => void,
 	): Promise<CompactionResult> {
-		if (this._reloadInProgress || this.isBashRunning) {
+		if (this._reloadInProgress || this._agentSettlementInFlight || this.isBashRunning) {
 			throw new Error("Cannot compact while another session mutation or bash run is active");
 		}
 		const assertConversationCurrent = this._captureConversationGenerationAssertion(
@@ -8276,7 +8297,7 @@ export class AgentSession {
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string } = {},
 	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
-		if (this.isStreaming || this.isBashRunning || this._backgroundJobs.hasActive) {
+		if (this.isStreaming || this._agentSettlementInFlight || this.isBashRunning || this._backgroundJobs.hasActive) {
 			return Promise.reject(
 				new Error(
 					"Cannot navigate the session tree while an agent, bash run, or background job is active; abort or wait for it to finish",

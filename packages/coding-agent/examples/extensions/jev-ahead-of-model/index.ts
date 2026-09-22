@@ -69,6 +69,9 @@ export interface AheadOptions extends JevTransportOptions {
 
 interface Scope {
 	id: string;
+	sessionId: string;
+	branchId: string;
+	runtimeId: string;
 	ctx: ExtensionContext;
 	report: AheadReport;
 	tools: AheadState["tools"];
@@ -87,7 +90,7 @@ interface Scope {
 	turnReady: boolean;
 	stopped: boolean;
 	startedAt: string;
-	auditState: "collecting" | "appended" | "failed";
+	auditState: "collecting" | "sealed" | "appended" | "failed";
 	auditEvaluations: AheadEvaluationAudit[];
 	auditPublications: AheadAudit["publications"];
 	publishedCycle?: number;
@@ -155,6 +158,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		let generation = 0;
 		let commandOpen = false;
 		let scope: Scope | undefined;
+		const pendingAudits: Array<{ current: Scope; data: Record<string, JsonValue> }> = [];
 		const isEnabled = () => options.enabled !== false && (enabled ?? options.enabled ?? volt.getFlag(FLAG) === true);
 
 		function observe(current: Scope): void {
@@ -186,18 +190,17 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		function stop(reason?: AheadAudit["reason"]): void {
 			if (!scope) return;
 			const current = scope;
-			// Custom entries move the canonical cursor. Seal once, only outside request collection.
-			// Never wait for an uncooperative transport or append its late results to another branch.
+			// Freeze superseded scopes without moving the canonical cursor during collection.
+			// Identity is captured at scope creation: ctx.work is revoked before settlement.
 			if (reason && current.auditState === "collecting") {
 				observe(current);
 				current.auditState = "failed";
 				try {
-					const snapshot = current.ctx.work!.snapshot;
 					const audit: AheadAudit = {
 						requestId: current.id,
-						sessionId: current.ctx.sessionManager.getSessionId(),
-						branchId: snapshot.branchId,
-						runtimeId: snapshot.runtimeId,
+						sessionId: current.sessionId,
+						branchId: current.branchId,
+						runtimeId: current.runtimeId,
 						startedAt: current.startedAt,
 						sealedAt: new Date().toISOString(),
 						reason,
@@ -205,21 +208,13 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 						evaluations: current.auditEvaluations,
 						publications: current.auditPublications,
 						report: current.report,
+						finalContributions: current.report.boundaries.at(-1)?.observation?.contributions,
 					};
-					try {
-						audit.finalContributions = volt.getWorkStatus().contributions;
-					} catch {
-						/* Host admission remains unobserved. */
-					}
 					// Drop undefined optional properties and detach the immutable audit from live callbacks.
-					volt.appendEntry(AHEAD_AUDIT_TYPE, JSON.parse(JSON.stringify(audit)) as Record<string, JsonValue>);
-					current.auditState = "appended";
+					pendingAudits.push({ current, data: JSON.parse(JSON.stringify(audit)) as Record<string, JsonValue> });
+					current.auditState = "sealed";
 				} catch {
-					try {
-						current.ctx.ui.notify("Ahead audit could not be appended to the session.", "warning");
-					} catch {
-						/* A failing diagnostic UI must not prevent task cancellation. */
-					}
+					auditFailure(current);
 				}
 			}
 			scope.stopped = true;
@@ -229,8 +224,30 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			scope.handle?.cancel();
 		}
 
+		function auditFailure(current: Scope): void {
+			current.auditState = "failed";
+			try {
+				current.ctx.ui.notify("Ahead audit could not be appended to the session.", "warning");
+			} catch {
+				/* A failing diagnostic UI must not prevent task cancellation. */
+			}
+		}
+
+		function flushAudits(): void {
+			// Only settlement, shutdown, and the idle disable command may append audits.
+			for (const { current, data } of pendingAudits.splice(0)) {
+				try {
+					volt.appendEntry(AHEAD_AUDIT_TYPE, data);
+					current.auditState = "appended";
+				} catch {
+					auditFailure(current);
+				}
+			}
+		}
+
 		function reset(ctx: ExtensionContext): void {
 			stop();
+			pendingAudits.length = 0;
 			generation++;
 			scope = undefined;
 			enabled = undefined;
@@ -556,12 +573,17 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		volt.on("session_tree", (_event, ctx) => reset(ctx));
 		volt.on("session_shutdown", (_event, ctx) => {
 			stop("session_shutdown");
+			flushAudits();
 			generation++;
 			scope = undefined;
 			if (ctx.mode === "tui") ctx.ui.setStatus(FLAG, undefined);
 		});
 		volt.on("before_agent_start", () => stop("superseded"));
-		volt.on("agent_end", () => stop("agent_end"));
+		volt.on("agent_end", () => releaseProjection("agent_end"));
+		volt.on("agent_settled", () => {
+			stop("agent_settled");
+			flushAudits();
+		});
 		volt.on("before_provider_request", () => releaseProjection("before_provider_request"));
 		volt.on("after_provider_response", () => afterOutput("provider_response"));
 		// Some SDK providers have no payload hook. Actual assistant output also proves
@@ -572,9 +594,12 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		volt.on("request_boundary", (event, ctx) => {
 			if (!isEnabled() || !ctx.work) return;
 			if (event.first) {
-				stop();
+				stop("superseded");
 				scope = {
 					id: ctx.work.snapshot.scopeId,
+					sessionId: ctx.sessionManager.getSessionId(),
+					branchId: ctx.work.snapshot.branchId,
+					runtimeId: ctx.work.snapshot.runtimeId,
 					ctx,
 					pending: false,
 					turnReady: false,
@@ -810,7 +835,10 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 						if (opened !== generation) return;
 					}
 					enabled = action === "on";
-					if (!enabled) stop("disabled");
+					if (!enabled) {
+						stop("disabled");
+						flushAudits();
+					}
 					status(ctx);
 					ctx.ui.notify(`Ahead: ${enabled ? "on" : "off"}. Runtime only.`, "info");
 				} finally {

@@ -33,7 +33,7 @@ export interface AheadAudit {
 	runtimeId: string;
 	startedAt: string;
 	sealedAt: string;
-	reason: "agent_end" | "session_shutdown" | "superseded" | "disabled";
+	reason: "agent_settled" | "session_shutdown" | "superseded" | "disabled";
 	/** Work had not drained at sealing. Missing results are unobserved, never assumed successful. */
 	interrupted: boolean;
 	evaluations: AheadEvaluationAudit[];

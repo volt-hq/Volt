@@ -317,7 +317,8 @@ user sends prompt ────────────────────�
   │   │                                            │       │
   │   └─► turn_end                                 │       │
   │                                                        │
-  └─► agent_end                                            │
+  ├─► agent_end (may retry or continue)                     │
+  └─► agent_settled (after recovery and queued work)        │
                                                            │
 user sends another prompt ◄────────────────────────────────┘
 
@@ -555,15 +556,29 @@ Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` bo
 
 #### agent_start / agent_end
 
-Fired once per user prompt.
+Fired for each agent-loop run. Automatic retries, compaction recovery, or messages queued by an `agent_end` handler can cause additional runs before the original prompt settles.
 
 ```typescript
 volt.on("agent_start", async (_event, ctx) => {});
 
 volt.on("agent_end", async (event, ctx) => {
-  // event.messages - messages from this prompt
+  // event.messages - messages from this run
 });
 ```
+
+#### agent_settled
+
+Fired after the foreground operation finishes, including automatic retries, compaction recovery, and delivered steering/follow-up continuations. It also fires after a terminal error, exhausted retries, or cancellation returns the agent to idle, and after locally handled input/commands that finish without starting a run. It does not wait for independent background jobs.
+
+Handlers run in extension load order and are awaited before the public session `agent_settled` event and the corresponding prompt/idle wait complete. Use this boundary to finalize request diagnostics or persist buffered extension state:
+
+```typescript
+volt.on("agent_settled", () => {
+  volt.appendEntry("request-audit", { completedAt: new Date().toISOString() });
+});
+```
+
+Managed work has already been revoked; `ctx.work` is unavailable. Capture request identity and diagnostics while the request scope is active. Keep handlers bounded: new prompts and triggered custom messages wait until settlement handlers finish, and session navigation, reload, and compaction cannot start during settlement. Do not await an idle wait or a new prompt through captured SDK/command objects inside this handler. Handler errors are reported through normal extension error handling without preventing settlement.
 
 #### turn_start / turn_end
 

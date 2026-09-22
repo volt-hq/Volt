@@ -144,6 +144,90 @@ function audits(harness: Harness) {
 }
 
 describe("Jev Ahead of Model Work integration", () => {
+	it.each(["recovered", "exhausted"])("seals once after %s foreground retries", async (outcome) => {
+		vi.useRealTimers();
+		const atEnd: number[] = [];
+		const test = await setup({}, (volt) => {
+			volt.on("agent_end", () => {
+				atEnd.push(audits(test.harness).length);
+			});
+		});
+		test.harness.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } });
+		test.harness.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" }),
+			() => {
+				expect(audits(test.harness)).toEqual([]);
+				return outcome === "recovered"
+					? fauxAssistantMessage([fauxToolCall("read", { path: "src/irrelevant.ts" })], { stopReason: "toolUse" })
+					: fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" });
+			},
+			async () => {
+				await test.completed[1].promise;
+				return fauxAssistantMessage("done after retry and tools");
+			},
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(atEnd).toEqual([0, 0]);
+		const records = audits(test.harness);
+		expect(records).toHaveLength(1);
+		expect(records[0].data.reason).toBe("agent_settled");
+		expect(records[0].data.report.boundaries.map((item) => item.cause)).toEqual(
+			outcome === "recovered" ? ["input", "retry", "tools"] : ["input", "retry"],
+		);
+		if (outcome === "recovered") expect(records[0].data.evaluations.some((call) => call.cycle === 2)).toBe(true);
+		expect(test.harness.eventsOfType("agent_settled")).toHaveLength(1);
+	});
+
+	it.each(["steer", "followUp"] as const)(
+		"buffers superseded %s audits without invalidating collection",
+		async (delivery) => {
+			const test = await setup();
+			const projections: string[] = [];
+			test.harness.setResponses([
+				async (context) => {
+					projections.push(context.messages.map(getMessageText).join("\n"));
+					await test.harness.session.prompt("Investigate resume again", { streamingBehavior: delivery });
+					return fauxAssistantMessage("first answer");
+				},
+				(context) => {
+					expect(audits(test.harness)).toEqual([]);
+					projections.push(context.messages.map(getMessageText).join("\n"));
+					return fauxAssistantMessage("second answer");
+				},
+			]);
+			await test.harness.session.prompt("Investigate resume");
+			const records = audits(test.harness);
+			expect(records.map(({ data }) => data.reason)).toEqual(["superseded", "agent_settled"]);
+			expect(new Set(records.map(({ data }) => data.requestId)).size).toBe(2);
+			for (const projection of projections) {
+				expect(projection).toContain("SESSION_EVIDENCE");
+				expect(projection).not.toContain("requestBody");
+			}
+			for (const { data } of records) {
+				expect(data.report.boundaries).toHaveLength(1);
+				for (const call of data.evaluations) expect(call.requestBody).not.toContain("requestBody");
+			}
+		},
+	);
+
+	it("seals the current audit after aborting foreground retry backoff", async () => {
+		vi.useRealTimers();
+		const test = await setup();
+		test.harness.settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 2, baseDelayMs: 60_000 } });
+		const retry = barrier();
+		test.harness.session.subscribe((event) => {
+			if (event.type === "auto_retry_start") retry.resolve();
+		});
+		test.harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" })]);
+		const prompt = test.harness.session.prompt("Investigate resume");
+		await retry.promise;
+		expect(audits(test.harness)).toEqual([]);
+		await test.harness.session.abort();
+		await prompt;
+		expect(audits(test.harness).map(({ data }) => data.reason)).toEqual(["agent_settled"]);
+		expect(test.harness.faux.state.callCount).toBe(1);
+	});
+
 	it("discovers children through the native find observation after directory normalization", async () => {
 		const test = await setup();
 		await rm(join(test.harness.tempDir, "skills"), { recursive: true });
@@ -883,7 +967,7 @@ describe("Jev Ahead of Model Work integration", () => {
 		expect(test.harness.faux.state.callCount).toBe(1);
 		expect(test.report()?.cycles[0].publications).toEqual([]);
 		const audit = audits(test.harness)[0].data;
-		expect(audit).toMatchObject({ interrupted: true, reason: "agent_end" });
+		expect(audit).toMatchObject({ interrupted: true, reason: "agent_settled" });
 		expect(audit.evaluations).toHaveLength(1);
 		expect(audit.evaluations[0].dispatchedAt).toBeDefined();
 		expect(audit.evaluations[0].requestBody).toContain("Investigate resume");
@@ -929,7 +1013,7 @@ describe("Jev Ahead of Model Work integration", () => {
 		const records = audits(first.harness);
 		expect(records).toHaveLength(1);
 		const { id, data } = records[0];
-		expect(data).toMatchObject({ sessionId: manager.getSessionId(), reason: "agent_end", interrupted: false });
+		expect(data).toMatchObject({ sessionId: manager.getSessionId(), reason: "agent_settled", interrupted: false });
 		expect(data.requestId).toBeTruthy();
 		expect(data.branchId).toBeTruthy();
 		expect(data.runtimeId).toBeTruthy();
