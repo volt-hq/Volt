@@ -95,6 +95,22 @@ const GPT_5_6_MODELS = [
 const GPT_5_6_MODEL_IDS = new Set<string>(["gpt-5.6", ...GPT_5_6_MODELS.map((model) => model.id)]);
 const GPT_6_ASTRA_ID = "gpt-6-astra";
 const GPT_6_ASTRA_COST = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 } as const;
+// Verified against the OpenAI model pages on 2026-09-22:
+// https://developers.openai.com/api/docs/models/gpt-6-sol
+// https://developers.openai.com/api/docs/models/gpt-6-luna
+const GPT_6_SOL_LUNA_MODELS = [
+	{
+		id: "gpt-6-sol",
+		name: "GPT-6 Sol",
+		cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+	},
+	{
+		id: "gpt-6-luna",
+		name: "GPT-6 Luna",
+		cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+	},
+] as const;
+const GPT_6_SOL_LUNA_MODEL_IDS = new Set<string>(GPT_6_SOL_LUNA_MODELS.map((model) => model.id));
 
 const MOONSHOT_CN_MIRRORED_MODEL_IDS = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
 
@@ -358,11 +374,11 @@ const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 	{
 		name: "OpenAI 30-minute prompt caching",
 		sourceUrl: "https://developers.openai.com/api/docs/guides/prompt-caching",
-		verifiedAt: "2026-09-04",
+		verifiedAt: "2026-09-22",
 		matches: (model) =>
 			model.provider === "openai" &&
 			model.api === "openai-responses" &&
-			(GPT_5_6_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
+			(GPT_5_6_MODEL_IDS.has(model.id) || GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
 		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
@@ -391,7 +407,7 @@ const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 		verifiedAt: "2026-09-04",
 		matches: (model) =>
 			model.provider === "azure-openai-responses" &&
-			(GPT_5_6_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
+			(GPT_5_6_MODEL_IDS.has(model.id) || GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
 		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
@@ -525,6 +541,8 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 		modelId.includes("opus-4.7") ||
 		modelId.includes("opus-4-8") ||
 		modelId.includes("opus-4.8") ||
+		modelId.includes("opus-5-5") ||
+		modelId.includes("opus-5.5") ||
 		modelId.includes("sonnet-4-6") ||
 		modelId.includes("sonnet-4.6") ||
 		modelId.includes("fable-5")
@@ -533,7 +551,11 @@ function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
 
 function isAnthropicTemperatureUnsupportedModel(modelId: string): boolean {
 	const id = modelId.toLowerCase();
-	return id.includes("opus-4-7") || id.includes("opus-4.7") || id.includes("opus-4-8") || id.includes("opus-4.8");
+	return (
+		id.includes("opus-4-7") || id.includes("opus-4.7") ||
+		id.includes("opus-4-8") || id.includes("opus-4.8") ||
+		id.includes("opus-5-5") || id.includes("opus-5.5")
+	);
 }
 
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
@@ -554,6 +576,22 @@ function isGemma4Model(modelId: string): boolean {
 }
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
+	if (GPT_6_SOL_LUNA_MODEL_IDS.has(model.id)) {
+		// Codex's authenticated catalog exposes low through max, but not none.
+		mergeThinkingLevelMap(model, {
+			off: model.provider === "openai-codex" ? null : "none",
+			minimal: null,
+			xhigh: "xhigh",
+			max: "max",
+		});
+	}
+	if (model.provider === "openrouter" && /^openai\/gpt-6-(sol|luna)(?:-pro)?(?::batch)?$/.test(model.id)) {
+		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
+	}
+	if (model.id.includes("opus-5-5") || model.id.includes("opus-5.5")) {
+		// https://platform.claude.com/docs/en/models/opus-5-5/overview
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+	}
 	if (
 		model.id === GPT_6_ASTRA_ID &&
 		(model.api === "openai-responses" ||
@@ -1556,9 +1594,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		// Process the models.dev Kimi plan catalog matching our api.kimi.com endpoint.
+		if (data["kimi-code-plan-cn"]?.models) {
+			const kimiModels = data["kimi-code-plan-cn"].models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
@@ -2030,7 +2068,7 @@ async function generateModels() {
 		});
 	}
 
-	for (const model of GPT_5_6_MODELS) {
+	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS]) {
 		if (!allModels.some((m) => m.provider === "openai" && m.id === model.id)) {
 			allModels.push({
 				id: model.id,
@@ -2041,7 +2079,7 @@ async function generateModels() {
 				reasoning: true,
 				input: ["text", "image"],
 				cost: { ...model.cost },
-				contextWindow: 272000,
+				contextWindow: GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) ? 1050000 : 272000,
 				maxTokens: 128000,
 			});
 		}
@@ -2184,7 +2222,8 @@ async function generateModels() {
 
 	// OpenAI Codex (ChatGPT OAuth) models
 	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
-	// Keep the 272k observed server limit by default; GPT-5.6 Sol officially supports 1M.
+	// Keep the 272k default advertised by the Codex catalog, including GPT-6 Sol/Luna
+	// (verified 2026-09-22). GPT-5.6 Sol officially supports 1M.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
 	const CODEX_GPT_5_6_SOL_CONTEXT = 1000000;
@@ -2253,7 +2292,7 @@ async function generateModels() {
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
-	for (const model of GPT_5_6_MODELS) {
+	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS]) {
 		codexModels.push({
 			id: model.id,
 			name: model.name,

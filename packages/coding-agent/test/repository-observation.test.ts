@@ -108,11 +108,18 @@ describe("private repository observations", () => {
 	});
 
 	it("changes revision when unread portions change, and source identity when an equal-content symlink retargets", async () => {
-		const a = join(cwd, "a.txt");
-		const b = join(cwd, "b.txt");
-		const link = join(cwd, "link.txt");
+		const aDirectory = join(cwd, "a");
+		const bDirectory = join(cwd, "b");
+		const linkDirectory = join(cwd, "link");
+		await mkdir(aDirectory);
+		await mkdir(bDirectory);
+		const a = join(aDirectory, "source.txt");
+		const b = join(bDirectory, "source.txt");
+		const link = join(linkDirectory, "source.txt");
+		// Junctions retain realpath identity changes without Windows file-symlink privileges.
+		const linkType = process.platform === "win32" ? "junction" : "dir";
 		await writeFile(a, "same\nbefore");
-		await symlink(a, link);
+		await symlink(aDirectory, linkDirectory, linkType);
 		const tool = createReadTool(cwd);
 		const run = () => withRepositoryObservation(() => tool.execute("read", { path: link, limit: 1 }));
 		const before = (await run()).observation;
@@ -122,8 +129,8 @@ describe("private repository observations", () => {
 		expect(before.text).toBe(after.text);
 		expect(before.revision).not.toBe(after.revision);
 		await writeFile(b, "same\nafter");
-		await unlink(link);
-		await symlink(b, link);
+		await unlink(linkDirectory);
+		await symlink(bDirectory, linkDirectory, linkType);
 		const retargeted = (await run()).observation;
 		if (retargeted?.kind !== "read") throw new Error("Expected read observation");
 		expect(retargeted.revision).toBe(after.revision);
@@ -152,18 +159,24 @@ describe("private repository observations", () => {
 	});
 
 	it("withholds unverifiable source identity when a symlink retargets during the native read", async () => {
-		const a = join(cwd, "a.txt");
-		const b = join(cwd, "b.txt");
-		const link = join(cwd, "link.txt");
+		const aDirectory = join(cwd, "a");
+		const bDirectory = join(cwd, "b");
+		const linkDirectory = join(cwd, "link");
+		await mkdir(aDirectory);
+		await mkdir(bDirectory);
+		const a = join(aDirectory, "source.txt");
+		const b = join(bDirectory, "source.txt");
+		const link = join(linkDirectory, "source.txt");
+		const linkType = process.platform === "win32" ? "junction" : "dir";
 		await writeFile(a, "a");
 		await writeFile(b, "b");
-		await symlink(a, link);
+		await symlink(aDirectory, linkDirectory, linkType);
 		const canonicalA = await realpath(a);
 		const { readFile } = await vi.importActual<typeof readFileOperations>("fs/promises");
 		vi.mocked(readFileOperations.readFile).mockImplementationOnce(async (source) => {
 			expect(source).toBe(canonicalA);
-			await unlink(link);
-			await symlink(b, link);
+			await unlink(linkDirectory);
+			await symlink(bDirectory, linkDirectory, linkType);
 			return readFile(source);
 		});
 		expect(await withRepositoryObservation(() => createReadTool(cwd).execute("read", { path: link }))).toEqual({

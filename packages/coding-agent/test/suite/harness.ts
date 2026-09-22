@@ -2,7 +2,7 @@
  * Local test harness for the new coding-agent test suite.
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,14 +98,9 @@ export interface Harness {
 	cleanupAsync: () => Promise<void>;
 }
 
-function createTempDir(): string {
-	const tempDir = join(tmpdir(), `volt-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	mkdirSync(tempDir, { recursive: true });
-	return tempDir;
-}
-
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
-	const tempDir = createTempDir();
+	// Leave room for nested worktree/quarantine paths within Git for Windows' path limit.
+	const tempDir = mkdtempSync(join(tmpdir(), "volt-"));
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
 		models: options.models,
 		tokensPerSecond: options.tokensPerSecond,
