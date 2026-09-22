@@ -110,11 +110,15 @@ process.exitCode = result.status ?? 1;
 		}
 		if (args[0] === "pr" && args[1] === "view") {
 			expect(args[2]).toBe(PR_URL);
-			return response(args.at(-1) === "headRefOid" ? { headRefOid: view.headRefOid } : view);
+			return response({ headRefOid: view.headRefOid });
 		}
 		if (args[0] === "api" && args[1] === "graphql") {
 			expect(args[args.indexOf("--hostname") + 1]).toBe("github.com");
-			const { query } = JSON.parse(options.input!) as { query: string };
+			const { query, variables } = JSON.parse(options.input!) as { query: string; variables: unknown };
+			if (query.includes("query VoltReviewPullRequestMetadata(")) {
+				expect(variables).toEqual({ owner: "volt-hq", name: "selected", number: 4 });
+				return response({ data: { repository: { pullRequest: view } } });
+			}
 			const field = query.includes("closingIssuesReferences")
 				? "closingIssuesReferences"
 				: query.includes("reviewThreads")

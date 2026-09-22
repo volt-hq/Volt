@@ -79,8 +79,9 @@ beforeEach(async () => {
 	};
 	vi.mocked(runGitHubCli).mockReset();
 	vi.mocked(runGitHubCli).mockImplementation(async (args, options) => {
+		const metadata = options.input?.includes("query VoltReviewPullRequestMetadata(");
 		const phase = args[1] === "list" ? "list" : args.at(-1) === "headRefOid" ? "final" : "metadata";
-		if (args[0] === "pr" && failPhase === phase) {
+		if ((args[0] === "pr" || metadata) && failPhase === phase) {
 			return { ok: false, stdout: Buffer.alloc(0), stderr: SECRET, outputLimited: false, timedOut: false };
 		}
 		if (args[0] === "pr" && args[1] === "list") {
@@ -91,10 +92,14 @@ beforeEach(async () => {
 		if (args[0] === "pr" && args[1] === "view") {
 			// Both numbered and current-PR lookups must ignore gh's implicit repository selection.
 			expect(args[2]).toBe(phase === "final" ? view.url : `https://${host}/volt-hq/iroh-ffi/pull/4`);
-			return response(phase === "final" ? { headRefOid: finalHead } : view);
+			return response({ headRefOid: finalHead });
 		}
 		if (args[0] === "api" && args[1] === "graphql") {
 			expect(args[args.indexOf("--hostname") + 1]).toBe(host);
+			if (metadata) {
+				expect(JSON.parse(options.input!).variables).toEqual({ owner: "volt-hq", name: "iroh-ffi", number: 4 });
+				return response({ data: { repository: { pullRequest: view } } });
+			}
 			const request = JSON.parse(options.input!) as {
 				query: string;
 				variables: { id: string; cursor: string | null };
@@ -154,7 +159,7 @@ describe("#405 current-PR capture", () => {
 			ok: true,
 			context: { manifest: { status: "complete", discussionEntryCount: 2 } },
 		});
-		expect(vi.mocked(runGitHubCli).mock.calls.filter(([args]) => args[0] === "api")).toHaveLength(6);
+		expect(vi.mocked(runGitHubCli).mock.calls.filter(([args]) => args[0] === "api")).toHaveLength(7);
 	});
 
 	it("reports a genuine no-match through remote workflow preparation before inference", async () => {
@@ -301,7 +306,11 @@ describe("#405 current-PR capture", () => {
 	it("allows explicitly numbered capture without tracking and still pins later reads", async () => {
 		git("branch", "--unset-upstream");
 		expect(await capture("4")).toMatchObject({ ok: true });
-		expect(vi.mocked(runGitHubCli).mock.calls[0]![0].slice(0, 3)).toEqual(["pr", "view", view.url]);
+		expect(JSON.parse(vi.mocked(runGitHubCli).mock.calls[0]![1].input!).variables).toEqual({
+			owner: "volt-hq",
+			name: "iroh-ffi",
+			number: 4,
+		});
 		expect(vi.mocked(runGitHubCli).mock.calls.at(-1)![0][2]).toBe(view.url);
 	});
 
@@ -424,7 +433,7 @@ describe("#405 current-PR capture", () => {
 				ok: false,
 				error: expect.stringContaining("identity could not be verified"),
 			});
-			expect(vi.mocked(runGitHubCli).mock.calls.every(([args]) => args[0] === "pr")).toBe(true);
+			expect(vi.mocked(runGitHubCli)).toHaveBeenCalledTimes(2);
 		},
 	);
 
