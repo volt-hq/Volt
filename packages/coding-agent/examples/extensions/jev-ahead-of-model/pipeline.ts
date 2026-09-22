@@ -9,6 +9,7 @@ import type {
 } from "@hansjm10/volt-coding-agent";
 import type { JevAnswer, JevQuestion, JevResult } from "./client.ts";
 import { MAX_AHEAD_EXCERPT_BYTES, MAX_AHEAD_PACKET_BYTES } from "./limits.ts";
+import { AheadResources } from "./resources.ts";
 
 export type AheadPath = {
 	path: string;
@@ -39,7 +40,14 @@ export interface AheadCycle {
 	status: string;
 	phase?: string;
 	selection: Array<{ candidate: string; score: number; selected: boolean }>;
-	operations: Array<{ service: ExtensionWorkService; candidate: string; status: string; truncated?: boolean }>;
+	operations: Array<{
+		service: ExtensionWorkService;
+		candidate: string;
+		status: string;
+		truncated?: boolean;
+		cached?: boolean;
+		reason?: string;
+	}>;
 	publications: Array<{ key: string; candidate: string; status: string; startLine: number; endLine: number }>;
 }
 export type AheadEvaluator = (
@@ -148,6 +156,41 @@ export function alreadyRead(reads: readonly AheadRead[], path: string, startLine
 	return false;
 }
 
+/** Record only complete source lines actually returned by a truncated foreground read. */
+export function foregroundReadRange(
+	path: string,
+	offset: number,
+	limit: number | undefined,
+	text: string,
+	details: unknown,
+): AheadRead | undefined {
+	if (!text) return;
+	if (details && typeof details === "object" && "truncation" in details) {
+		const value = details.truncation;
+		if (
+			!value ||
+			typeof value !== "object" ||
+			!("content" in value) ||
+			typeof value.content !== "string" ||
+			!("outputLines" in value) ||
+			typeof value.outputLines !== "number" ||
+			!Number.isSafeInteger(value.outputLines) ||
+			value.outputLines <= 0 ||
+			!value.content ||
+			!text.startsWith(value.content) ||
+			!("lastLinePartial" in value) ||
+			value.lastLinePartial !== false ||
+			!("firstLineExceedsLimit" in value) ||
+			value.firstLineExceedsLimit !== false
+		)
+			return;
+		const count = value.content.split("\n").length - Number(value.content.endsWith("\n"));
+		if (count !== value.outputLines || (limit !== undefined && count > limit)) return;
+		return { path, startLine: offset, endLine: offset + count - 1 };
+	}
+	return { path, startLine: offset, endLine: limit === undefined ? Number.MAX_SAFE_INTEGER : offset + limit - 1 };
+}
+
 function excerpt(id: string, label: string, result: Extract<ExtensionWorkReadResult, { status: "ok" }>): Evidence {
 	let text = boundedText(result.text, MAX_AHEAD_EXCERPT_BYTES);
 	// Keep complete lines; a single overlong line is omitted rather than publishing a broken token.
@@ -237,20 +280,35 @@ export async function prepareAhead(
 	cycle: AheadCycle,
 	evaluate: AheadEvaluator,
 	publish: (items: Parameters<ExtensionWorkTaskContext["context"]["put"]>[0][]) => Promise<void>,
+	resources = new AheadResources(),
 ): Promise<void> {
 	const services = task.snapshot.services;
+	let nativeOperations = 0;
 	const operation = async <T extends { status: string; reason?: string; truncated?: boolean }>(
 		service: ExtensionWorkService,
 		candidate: string,
 		run: () => Promise<T>,
-	): Promise<T> => {
+		cacheKey?: string,
+	) => {
 		task.signal.throwIfAborted();
 		const observation: AheadCycle["operations"][number] = { service, candidate, status: "pending" };
 		cycle.operations.push(observation);
 		try {
-			const result = await run();
+			const result = await resources.run(
+				cacheKey,
+				async () => {
+					if (nativeOperations >= 16)
+						return { status: "limit_exceeded" as const, reason: "task_operation_budget" };
+					nativeOperations++;
+					return run();
+				},
+				() => {
+					observation.cached = true;
+				},
+			);
 			observation.status = result.status;
-			observation.truncated = result.truncated;
+			observation.truncated = "truncated" in result ? result.truncated : undefined;
+			observation.reason = "reason" in result ? result.reason : undefined;
 			task.signal.throwIfAborted();
 			return result;
 		} catch (error) {
@@ -259,6 +317,10 @@ export async function prepareAhead(
 		}
 	};
 	const ask = async (stage: AheadStage, supplied: JsonValue, questions: Record<string, JevQuestion>) => {
+		if (resources.blockedReason) {
+			cycle.status = "native budget reached";
+			return undefined;
+		}
 		cycle.status = stage;
 		const result = await evaluate(stage, supplied, questions);
 		if (task.signal.aborted || result.status !== "ok") {
@@ -394,12 +456,16 @@ export async function prepareAhead(
 			for (const directory of directories)
 				discovery.push(
 					(async () => {
-						const result = await operation("findPaths", directory, () =>
-							task.repository.findPaths({
-								path: directory,
-								pattern: "*",
-								limit: 160,
-							}),
+						const result = await operation(
+							"findPaths",
+							directory,
+							() =>
+								task.repository.findPaths({
+									path: directory,
+									pattern: "*",
+									limit: 160,
+								}),
+							`findPaths:${directory}:*`,
 						);
 						if (result.status !== "ok") return;
 						const found = new Set(result.paths.map((path) => workspacePath(task.snapshot.cwd, path)));
@@ -418,22 +484,52 @@ export async function prepareAhead(
 		if (services.includes("findPaths") && !paths.size)
 			discovery.push(
 				(async () => {
-					const result = await operation("findPaths", "workspace", () =>
-						task.repository.findPaths({
-							pattern: selectedTerms[0] ? `**/*${selectedTerms[0]}*` : "**/*",
-							path: ".",
-							limit: 160,
-						}),
+					const result = await operation(
+						"findPaths",
+						"workspace",
+						() =>
+							task.repository.findPaths({
+								pattern: selectedTerms[0] ? `**/*${selectedTerms[0]}*` : "**/*",
+								path: ".",
+								limit: 160,
+							}),
+						`findPaths:workspace:${selectedTerms[0] ?? ""}`,
 					);
-					if (result.status === "ok") for (const path of result.paths) addCandidate(path, 1, "");
+					if (result.status === "ok") {
+						for (const path of result.paths) addCandidate(path, 1, "");
+						// Native find matches basenames. Inspect one observed matching directory too,
+						// so a Jev directory can yield index.ts rather than only Jev-named tests.
+						const directory = result.paths.find(
+							(path) =>
+								/[\\/]$/.test(path) &&
+								workspacePath(task.snapshot.cwd, resolve(task.snapshot.cwd, path, "__ahead_path__.ts")),
+						);
+						if (directory) {
+							const path = dirname(
+								workspacePath(task.snapshot.cwd, resolve(task.snapshot.cwd, directory, "__ahead_path__.ts"))!,
+							);
+							const children = await operation(
+								"findPaths",
+								path,
+								() => task.repository.findPaths({ path, pattern: "*", limit: 160 }),
+								`findPaths:${path}:*`,
+							);
+							if (children.status === "ok")
+								for (const child of children.paths)
+									addCandidate(child, 1, "Discovered inside matching directory", 15);
+						}
+					}
 				})(),
 			);
 		if (services.includes("searchText") && paths.size < 3)
 			for (const term of selectedTerms)
 				discovery.push(
 					(async () => {
-						const result = await operation("searchText", term, () =>
-							task.repository.searchText({ pattern: term, literal: true, ignoreCase: true, limit: 24 }),
+						const result = await operation(
+							"searchText",
+							term,
+							() => task.repository.searchText({ pattern: term, literal: true, ignoreCase: true, limit: 24 }),
+							`searchText:${term}`,
 						);
 						if (result.status === "ok")
 							for (const hit of result.matches) addCandidate(hit.path, Math.max(1, hit.line - 3), hit.text, 10);
@@ -443,8 +539,11 @@ export async function prepareAhead(
 	for (const entry of shortlist)
 		discovery.push(
 			(async () => {
-				const result = await operation("readSkill", entry.id, () =>
-					task.repository.readSkill({ resourceId: entry.skill.resourceId, limit: 80 }),
+				const result = await operation(
+					"readSkill",
+					entry.id,
+					() => task.repository.readSkill({ resourceId: entry.skill.resourceId, limit: 80 }),
+					`readSkill:${entry.skill.resourceId}:80`,
 				);
 				if (result.status === "ok" && result.text.trim())
 					skillEvidence.push(excerpt(entry.id, `Skill ${entry.skill.name}`, result));
@@ -524,10 +623,17 @@ export async function prepareAhead(
 		(item) => item.id === chosen(selection.skill) && yes(selection[`fits_${item.id}`]),
 	);
 	const symbols: ExtensionWorkSymbol[] = [];
+	const truncatedSymbols = new Set<string>();
 	if (services.includes("symbols")) {
 		const results = await Promise.allSettled(
 			selectedFiles.map(async (file) => {
-				const result = await operation("symbols", file.path, () => task.repository.symbols({ path: file.path }));
+				const result = await operation(
+					"symbols",
+					file.path,
+					() => task.repository.symbols({ path: file.path }),
+					`symbols:${file.path}`,
+				);
+				if (result.status === "ok" && result.truncated) truncatedSymbols.add(file.path);
 				if (result.status === "ok")
 					symbols.push(
 						...result.symbols.filter((item) => workspacePath(task.snapshot.cwd, item.path) === file.path),
@@ -540,9 +646,13 @@ export async function prepareAhead(
 		}
 	}
 	const regions = new Map<string, Array<{ startLine: number; endLine: number; name: string }>>();
+	let regionSearches = 0;
 	for (const file of selectedFiles) {
 		const observed = symbols
 			.filter((item) => workspacePath(task.snapshot.cwd, item.path) === file.path)
+			// Imported aliases and local variables are not implementation entry points.
+			// Keep declarations and methods; find test/arrow bodies through native text search.
+			.filter((item) => [5, 6, 9, 10, 11, 12, 23].includes(item.kind) && symbolPriority(item) > 0)
 			.sort((a, b) => symbolPriority(b) - symbolPriority(a) || a.startLine - b.startLine)
 			.slice(0, 16)
 			.map((item) => ({
@@ -553,11 +663,44 @@ export async function prepareAhead(
 					item.endLine <= item.startLine ? item.startLine + 119 : Math.min(item.endLine, item.startLine + 119),
 				name: item.name,
 			}));
+		if (
+			services.includes("searchText") &&
+			regionSearches < 2 &&
+			nativeOperations < 10 &&
+			(!observed.length || truncatedSymbols.has(file.path) || /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(file.path)) &&
+			/\.[cm]?[jt]sx?$/.test(file.path)
+		) {
+			regionSearches++;
+			const pattern =
+				"^\\s*(export\\s+)?(default\\s+)?(async\\s+)?(function\\b|class\\b|interface\\b|type\\s+\\w+\\s*=|(?:const|let)\\s+\\w+\\s*=|(?:describe|it|test)(?:\\.[A-Za-z]+)*\\s*\\()";
+			const result = await operation(
+				"searchText",
+				file.path,
+				() => task.repository.searchText({ path: file.path, pattern, limit: 24 }),
+				`regions:${file.path}`,
+			);
+			if (result.status === "ok")
+				for (const hit of result.matches) {
+					if (workspacePath(task.snapshot.cwd, hit.path) !== file.path || !new RegExp(pattern).test(hit.text))
+						continue;
+					observed.push({ startLine: hit.line, endLine: hit.line + 119, name: boundedText(hit.text.trim(), 160) });
+				}
+		}
+		const choices = [
+			...(file.line > 1 || !observed.length
+				? [{ startLine: file.line, endLine: file.line + 119, name: "Observed location" }]
+				: []),
+			...observed,
+		];
 		regions.set(
 			file.id,
-			[{ startLine: file.line, endLine: file.line + 119, name: "Observed location" }, ...observed].filter(
-				(item) => !alreadyRead(state.reads ?? [], file.path, item.startLine, item.endLine),
-			),
+			choices
+				.filter(
+					(item, index) =>
+						choices.findIndex((other) => other.startLine === item.startLine) === index &&
+						!alreadyRead(state.reads ?? [], file.path, item.startLine, item.endLine),
+				)
+				.slice(0, 24),
 		);
 	}
 	const focusQuestions: Record<string, JevQuestion> = {};
@@ -643,7 +786,7 @@ export async function prepareAhead(
 	let assessed = await ask("assess", { ...orientedState, evidence: evidenceState(evidence) }, assessmentQuestions);
 	if (!assessed) return;
 	const nav = navigation.get(chosen(assessed.followup) ?? "");
-	if (nav) {
+	if (nav && nativeOperations <= 13 && resources.remaining >= 3) {
 		const locations = await operation(nav.action, `${nav.path}:${nav.line}`, () =>
 			task.repository[nav.action]({ path: nav.path, symbol: nav.symbol, line: nav.line }),
 		);

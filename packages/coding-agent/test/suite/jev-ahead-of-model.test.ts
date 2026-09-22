@@ -13,7 +13,13 @@ import {
 } from "../../examples/extensions/jev-ahead-of-model/index.ts";
 import { MAX_AHEAD_CYCLES } from "../../examples/extensions/jev-ahead-of-model/limits.ts";
 import * as findTools from "../../src/core/tools/find.ts";
-import type { ExtensionAPI, ExtensionFactory, ExtensionUIContext } from "../../src/index.ts";
+import type {
+	ExtensionAPI,
+	ExtensionFactory,
+	ExtensionOperationEvent,
+	ExtensionUIContext,
+	ExtensionWorkLimits,
+} from "../../src/index.ts";
 import { loadSkillsFromDir, SessionManager } from "../../src/index.ts";
 import { type AheadRequest, aheadAnswers, aheadResponse } from "../fixtures/jev-ahead.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
@@ -73,6 +79,7 @@ async function setup(
 	extra?: ExtensionFactory,
 	wait = 1000,
 	sessionManager?: SessionManager,
+	limits?: Partial<ExtensionWorkLimits>,
 ) {
 	let api!: ExtensionAPI;
 	let report: AheadReport | undefined;
@@ -82,7 +89,7 @@ async function setup(
 		sessionManager,
 		systemPrompt: "SYSTEM_INSTRUCTIONS_MUST_NOT_BE_EXPORTED",
 		settings: { compaction: { enabled: false }, retry: { enabled: false } },
-		extensionWorkLimits: { firstRequestWaitMs: wait },
+		extensionWorkLimits: { firstRequestWaitMs: wait, ...limits },
 		initialActiveToolNames: ["read", "find", "grep"],
 		extensionFactories: [
 			(volt) => {
@@ -94,7 +101,15 @@ async function setup(
 					onReport: (value) => {
 						report = value;
 						for (const cycle of value.cycles)
-							if (["prepared", "abstained", "no readable evidence"].includes(cycle.status))
+							if (
+								[
+									"prepared",
+									"abstained",
+									"no readable evidence",
+									"native budget reached",
+									"no candidates",
+								].includes(cycle.status)
+							)
 								completed[cycle.number - 1]?.resolve();
 						return options.onReport?.(value);
 					},
@@ -129,6 +144,160 @@ function audits(harness: Harness) {
 }
 
 describe("Jev Ahead of Model Work integration", () => {
+	it("caches skill reads and directory checks across read-only foreground turns", async () => {
+		const operations: ExtensionOperationEvent[] = [];
+		const test = await setup({}, (volt) => {
+			volt.on("extension_operation", (event) => {
+				operations.push(event);
+			});
+		});
+		test.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("read", { path: "src/irrelevant.ts", limit: 1 })], {
+				stopReason: "toolUse",
+			}),
+			async () => {
+				await test.completed[1].promise;
+				return fauxAssistantMessage([fauxToolCall("find", { path: "src", pattern: "*.ts" })], {
+					stopReason: "toolUse",
+				});
+			},
+			async () => {
+				await test.completed[2].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate src/session.ts");
+		expect(operations.filter((event) => event.ownerKind === "task" && event.service === "readSkill")).toHaveLength(1);
+		expect(operations.filter((event) => event.ownerKind === "task" && event.service === "findPaths")).toHaveLength(1);
+		expect(operations.some((event) => event.ownerKind === "validation" && event.service === "readSkill")).toBe(true);
+		const saved = audits(test.harness)[0].data;
+		expect(saved.report.native.cacheHits).toBeGreaterThanOrEqual(4);
+		expect(saved.report.native.validationReservations).toBe(
+			operations.filter((event) => event.ownerKind === "validation").length,
+		);
+	});
+
+	it("omits cached skill evidence when the file changes outside foreground tools", async () => {
+		const test = await setup();
+		let projection = "";
+		test.harness.setResponses([
+			async () => {
+				await writeFile(join(test.harness.tempDir, "skills/resume/SKILL.md"), "UPDATED_SKILL_INSTRUCTIONS\n");
+				return fauxAssistantMessage([fauxToolCall("read", { path: "src/irrelevant.ts", limit: 1 })], {
+					stopReason: "toolUse",
+				});
+			},
+			async () => {
+				await test.completed[1].promise;
+				return fauxAssistantMessage([fauxToolCall("find", { path: "src", pattern: "*.ts" })], {
+					stopReason: "toolUse",
+				});
+			},
+			async (context) => {
+				projection = context.messages.map(getMessageText).join("\n");
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate src/session.ts");
+		expect(test.report()?.cycles[1].operations).toContainEqual(
+			expect.objectContaining({ service: "readSkill", status: "ok", cached: true }),
+		);
+		expect(projection).not.toContain("SKILL_INSTRUCTIONS");
+		expect(projection).toContain("SESSION_EVIDENCE");
+		expect(test.report()?.boundaries.at(-1)?.observation?.contributions).toContainEqual(
+			expect.objectContaining({ status: "omitted", reason: "source_unverified" }),
+		);
+	});
+
+	it("leaves native capacity for evidence admission and stops Jev calls before exhausting the host", async () => {
+		let checkpoints = 0;
+		const operations: ExtensionOperationEvent[] = [];
+		const test = await setup({}, (volt) => {
+			volt.on("extension_operation", (event) => {
+				operations.push(event);
+			});
+			volt.registerTool({
+				name: "checkpoint",
+				label: "Checkpoint",
+				description: "Advance the fixture",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [{ type: "text", text: `resume checkpoint ${++checkpoints}` }] }),
+			});
+		});
+		const stoppedCounts: number[] = [];
+		test.harness.setResponses(
+			Array.from({ length: 13 }, (_, i) => async () => {
+				await vi.waitFor(() => expect(test.report()?.status).not.toBe("preparing"));
+				if (test.report()?.status === "native budget reached") stoppedCounts.push(test.fetch.mock.calls.length);
+				return i === 12
+					? fauxAssistantMessage("done")
+					: fauxAssistantMessage([fauxToolCall("checkpoint", {})], { stopReason: "toolUse" });
+			}),
+		);
+		await test.harness.session.prompt("Investigate resume");
+		expect(stoppedCounts.length).toBeGreaterThan(1);
+		expect(new Set(stoppedCounts).size).toBe(1);
+		expect(operations.every((event) => event.status !== "limit_exceeded")).toBe(true);
+		expect(operations.length).toBeLessThanOrEqual(64);
+		expect(test.harness.faux.state.callCount).toBe(13);
+		expect(
+			test
+				.report()
+				?.boundaries.at(-1)
+				?.observation?.contributions.some((item) => item.status === "admitted"),
+		).toBe(true);
+		expect(test.report()?.native.validationReservations).toBeGreaterThan(0);
+	});
+
+	it("stops further evaluations after a lower host limit blocks repository work", async () => {
+		const test = await setup({}, undefined, 1000, undefined, { scopeOperations: 2 });
+		let count = 0;
+		test.harness.setResponses([
+			async () => {
+				await test.completed[0].promise;
+				count = test.fetch.mock.calls.length;
+				return fauxAssistantMessage([fauxToolCall("read", { path: "src/irrelevant.ts" })], {
+					stopReason: "toolUse",
+				});
+			},
+			fauxAssistantMessage("done"),
+		]);
+		await test.harness.session.prompt("Investigate resume");
+		expect(test.report()?.status).toBe("native budget reached");
+		expect(test.fetch).toHaveBeenCalledTimes(count);
+		expect(test.report()?.cycles).toHaveLength(1);
+		expect(test.report()?.cycles[0].operations).toContainEqual(
+			expect.objectContaining({ status: "limit_exceeded", reason: "operation_budget" }),
+		);
+	});
+
+	it("retires an excerpt covered by the visible portion of a truncated foreground read", async () => {
+		const test = await setup();
+		await writeFile(join(test.harness.tempDir, "src/session.ts"), `// resume\n${"// visible source\n".repeat(2100)}`);
+		let projection = "";
+		test.harness.setResponses([
+			fauxAssistantMessage([fauxToolCall("read", { path: "src/session.ts" })], { stopReason: "toolUse" }),
+			async (context) => {
+				projection = context.messages.map(getMessageText).join("\n");
+				await test.completed[1].promise;
+				return fauxAssistantMessage("done");
+			},
+		]);
+		await test.harness.session.prompt("Investigate src/session.ts");
+		expect(projection).not.toContain('Ahead of Model Work: "src/session.ts"');
+		expect(test.report()?.retired).toContainEqual(expect.objectContaining({ candidate: "src/session.ts" }));
+		const saved = audits(test.harness)[0].data;
+		const orient = saved.evaluations.find((item) => item.cycle === 2 && item.stage === "orient")!;
+		expect(JSON.parse(orient.requestBody!).state.reads).toContainEqual({
+			path: "src/session.ts",
+			startLine: 1,
+			endLine: 2000,
+		});
+		expect(
+			saved.publications.filter((item) => item.cycle === 2 && item.contribution.text.includes('"src/session.ts"')),
+		).toEqual([]);
+	});
+
 	it.each([502, 503, 504])(
 		"retries HTTP %s selection failure within the same cycle and audits each attempt",
 		async (status) => {

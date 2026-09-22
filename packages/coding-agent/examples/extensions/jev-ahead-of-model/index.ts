@@ -13,7 +13,7 @@ import type {
 } from "@hansjm10/volt-coding-agent";
 import { AHEAD_AUDIT_TYPE, type AheadAudit, type AheadEvaluationAudit, auditText } from "./audit.ts";
 import { evaluateAhead, type JevResult, type JevTransportOptions } from "./client.ts";
-import { MAX_AHEAD_CYCLES, MAX_AHEAD_EVALUATIONS } from "./limits.ts";
+import { MAX_AHEAD_CYCLES, MAX_AHEAD_EVALUATIONS, MAX_AHEAD_NATIVE_OPERATIONS } from "./limits.ts";
 import {
 	type AheadCycle,
 	type AheadPath,
@@ -22,11 +22,13 @@ import {
 	type AheadState,
 	alreadyRead,
 	boundedText,
+	foregroundReadRange,
 	observedPaths,
 	PATH_PRIORITY,
 	prepareAhead,
 	workspacePath,
 } from "./pipeline.ts";
+import { AheadResources } from "./resources.ts";
 
 const FLAG = "jev-ahead-of-model";
 
@@ -47,6 +49,13 @@ export interface AheadReport {
 	}>;
 	coalescedToolResults: number;
 	duplicateToolResults: number;
+	native: {
+		preparation: number;
+		validationReservations: number;
+		cacheHits: number;
+		remaining: number;
+		blockedReason?: string;
+	};
 	retired: Array<{ key: string; candidate: string; at: string; reason: "foreground_read" }>;
 	status: string;
 }
@@ -65,6 +74,9 @@ interface Scope {
 	tools: AheadState["tools"];
 	paths: AheadPath[];
 	reads: AheadRead[];
+	resources: AheadResources;
+	resourceSignature: string;
+	mutatingTools: Set<string>;
 	toolInputs: Map<string, { path?: string; searchRoot?: string; offset: number; limit?: number }>;
 	seenTools: Set<string>;
 	activePublications: Map<string, AheadCycle["publications"][number]>;
@@ -143,6 +155,13 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 
 		function observe(current: Scope): void {
 			if (scope !== current) return;
+			current.report.native = {
+				preparation: current.resources.operations,
+				validationReservations: current.resources.validationReservations,
+				cacheHits: current.resources.cacheHits,
+				remaining: current.resources.remaining,
+				blockedReason: current.resources.blockedReason,
+			};
 			try {
 				void Promise.resolve(options.onReport?.(structuredClone(current.report))).catch(() => {});
 			} catch {
@@ -166,6 +185,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			// Custom entries move the canonical cursor. Seal once, only outside request collection.
 			// Never wait for an uncooperative transport or append its late results to another branch.
 			if (reason && current.auditState === "collecting") {
+				observe(current);
 				current.auditState = "failed";
 				try {
 					const snapshot = current.ctx.work!.snapshot;
@@ -219,6 +239,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			const lines = [
 				`Ahead of Model Work: ${report.status}`,
 				`${report.cycles.length}/${MAX_AHEAD_CYCLES} preparation cycles; ${report.evaluations.length}/${MAX_AHEAD_EVALUATIONS} Jev evaluations; ${report.coalescedToolResults} tool results coalesced; ${report.duplicateToolResults} duplicates skipped; ${report.retired.length} excerpts retired after foreground reads.`,
+				`Native work: ${report.native.preparation} preparation attempts; ${report.native.validationReservations} validation reservations; ${report.native.cacheHits} cache hits; ${report.native.remaining} preparation operations remaining${report.native.blockedReason ? ` (${report.native.blockedReason})` : ""}.`,
 			];
 			for (const cycle of report.cycles) {
 				lines.push(
@@ -242,7 +263,7 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 					);
 				for (const operation of cycle.operations)
 					lines.push(
-						`  ${operation.service} ${JSON.stringify(operation.candidate)}: ${operation.status}${operation.truncated ? " (partial)" : ""}`,
+						`  ${operation.service} ${JSON.stringify(operation.candidate)}: ${operation.status}${operation.cached ? " (cached)" : ""}${operation.reason ? ` (${operation.reason})` : ""}${operation.truncated ? " (partial)" : ""}`,
 					);
 				for (const publication of cycle.publications)
 					lines.push(
@@ -268,13 +289,18 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			if (!scope?.projection) return;
 			const boundary = scope.report.boundaries.at(-1);
 			try {
+				const contributions = volt.getWorkStatus().contributions;
+				// The host hides an extension's own operation events. Reserve one validation
+				// per offered excerpt at each boundary, including omissions. This is an upper
+				// bound, not a claim that every validation executed.
+				scope.resources.validationReservations += contributions.length;
 				if (boundary)
 					boundary.observation = {
 						at,
 						observedAt: new Date().toISOString(),
 						cycle: scope.publishedCycle,
 						evaluations: scope.report.evaluations.length,
-						contributions: volt.getWorkStatus().contributions,
+						contributions,
 					};
 			} catch {
 				/* Missing diagnostics remain unobserved. */
@@ -294,6 +320,16 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 			)
 				return false;
 			if (current.handle) return false;
+			if (current.resources.blockedReason || current.resources.remaining < 8) {
+				current.pending = false;
+				current.report.status = "native budget reached";
+				return false;
+			}
+			const signature = JSON.stringify([current.ctx.work.snapshot.services, current.ctx.work.snapshot.skills]);
+			if (signature !== current.resourceSignature) {
+				current.resources.invalidate();
+				current.resourceSignature = signature;
+			}
 			if (
 				current.report.cycles.length >= MAX_AHEAD_CYCLES ||
 				current.auditEvaluations.length >= MAX_AHEAD_EVALUATIONS
@@ -418,7 +454,9 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 										current.activePublications.set(reported.key, reported);
 								}
 							},
+							current.resources,
 						);
+						if (current.resources.blockedReason) cycle.status = "native budget reached";
 					} catch {
 						cycle.status = task.signal.aborted ? "cancelled" : "preparation failed";
 					}
@@ -490,6 +528,9 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 					tools: [],
 					paths: [],
 					reads: [],
+					resources: new AheadResources(),
+					resourceSignature: "",
+					mutatingTools: new Set(),
 					toolInputs: new Map(),
 					seenTools: new Set(),
 					activePublications: new Map(),
@@ -499,6 +540,12 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 						boundaries: [],
 						coalescedToolResults: 0,
 						duplicateToolResults: 0,
+						native: {
+							preparation: 0,
+							validationReservations: 0,
+							cacheHits: 0,
+							remaining: MAX_AHEAD_NATIVE_OPERATIONS,
+						},
 						retired: [],
 						status: "starting",
 					},
@@ -527,6 +574,13 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		});
 		volt.on("tool_execution_start", (event, ctx) => {
 			if (!isEnabled() || !scope || scope.stopped) return;
+			if (
+				!["read", "find", "grep"].includes(event.toolName) &&
+				!(event.toolName === "lsp" && !["rename", "fix"].includes(String(event.args.action)))
+			) {
+				scope.resources.invalidate();
+				scope.mutatingTools.add(event.toolCallId);
+			}
 			const path = typeof event.args.path === "string" ? workspacePath(ctx.cwd, event.args.path) : undefined;
 			const directory = typeof event.args.path === "string" ? event.args.path : ".";
 			const searchRoot = ["find", "grep"].includes(event.toolName)
@@ -552,18 +606,18 @@ export function createJevAheadOfModel(options: AheadOptions = {}): ExtensionFact
 		volt.on("tool_execution_end", (event, ctx) => {
 			if (!isEnabled() || !scope || scope.stopped || !ctx.work || ctx.work.snapshot.scopeId !== scope.id) return;
 			scope.ctx = ctx;
+			// Mutations may overlap background observations. Clear again after completion so
+			// results captured during a mutation cannot seed the following cycle's cache.
+			if (scope.mutatingTools.delete(event.toolCallId)) {
+				scope.resources.invalidate();
+			}
 			const input = scope.toolInputs.get(event.toolCallId);
 			scope.toolInputs.delete(event.toolCallId);
 			const raw = textContent(event.result.content);
 			if (input?.path && !event.isError) {
-				const details = event.result.details;
-				const truncated = details !== null && typeof details === "object" && "truncation" in details;
-				if (event.toolName === "read" && raw && !truncated) {
-					scope.reads.push({
-						path: input.path,
-						startLine: input.offset,
-						endLine: input.limit === undefined ? Number.MAX_SAFE_INTEGER : input.offset + input.limit - 1,
-					});
+				if (event.toolName === "read") {
+					const range = foregroundReadRange(input.path, input.offset, input.limit, raw, event.result.details);
+					if (range) scope.reads.push(range);
 					if (scope.reads.length > 64) scope.reads.shift();
 				} else if (["edit", "write"].includes(event.toolName))
 					scope.reads = scope.reads.filter((item) => item.path !== input.path);
