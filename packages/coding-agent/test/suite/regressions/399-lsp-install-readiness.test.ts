@@ -270,6 +270,47 @@ describe("LSP install readiness (#399)", () => {
 		}
 	});
 
+	it.each([
+		{ lifecycle: "restart", timing: "installer-result" },
+		{ lifecycle: "dispose", timing: "installer-result" },
+		{ lifecycle: "restart", timing: "before-readiness" },
+		{ lifecycle: "dispose", timing: "before-readiness" },
+	] as const)("finalizes a successful install cancelled by $lifecycle at $timing", async ({ lifecycle, timing }) => {
+		const item = fixture();
+		const installStarted = Promise.withResolvers<void>();
+		const installResult = Promise.withResolvers<{ exitCode: number; output: string }>();
+		item.installRunner.mockImplementationOnce(() => {
+			installStarted.resolve();
+			return installResult.promise;
+		});
+		const start = vi.spyOn(LspClient.prototype, "start");
+		const pending = item.manager.hover(item.path, "symbol");
+		await installStarted.promise;
+		launcher(item.bin);
+		installResult.resolve({ exitCode: 0, output: "installed" });
+		if (timing === "before-readiness") {
+			// Let the installer-result continuation run, then cancel before the
+			// queued shared-attempt continuation begins readiness verification.
+			await Promise.resolve();
+		}
+		item.manager[lifecycle]();
+		expect(await pending).toMatchObject({ outcome: "cancelled", reason: "aborted" });
+		expect(item.updates.map((update) => update.status)).toEqual(["running", "cancelled"]);
+		expect(item.updates.at(-1)).toMatchObject({
+			id: item.updates[0].id,
+			action: "lsp.install_server",
+			exitCode: 0,
+		});
+		expect(start).not.toHaveBeenCalled();
+		const status = item.manager.getStatus().find((entry) => entry.name === "rust");
+		expect(status).toMatchObject({ state: "unused", attempts: 0, breaker: "closed" });
+		expect(status?.lastError).toBeUndefined();
+		if (lifecycle === "restart") {
+			expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
+			expect(item.installRunner).toHaveBeenCalledTimes(1);
+		}
+	});
+
 	it("still reports prompt rejections when the install attempt has not been cancelled", async () => {
 		const item = fixture();
 		item.requestAction.mockRejectedValueOnce(new Error("Host prompt unavailable"));

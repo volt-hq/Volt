@@ -2148,11 +2148,23 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					// Freeze the participating roots before verification. New requests use normal startup,
 					// not a readiness result already being finalized for this host action.
 					if (this.installAttempts.get(identity)?.promise === promise) this.installAttempts.delete(identity);
-					if (this.disposed || signal.aborted)
+					if (this.disposed || signal.aborted) {
+						// A successful installer leaves its host action open for readiness.
+						// Finalize it even when cancellation wins before verification starts.
+						if (installResult.requestId)
+							await this.emitHostActionUpdate({
+								id: installResult.requestId,
+								action: "lsp.install_server",
+								status: "cancelled",
+								message: "LSP install cancelled.",
+								exitCode: 0,
+							});
 						installResult = { retry: false, cancelled: true, message: "LSP install cancelled." };
+					}
 					if (!installResult.retry || !installResult.requestId)
 						return new Map([...roots.keys()].map((rootKey) => [rootKey, installResult]));
 
+					this.versionProbes.clear();
 					const results = new Map(
 						await Promise.all(
 							[...roots].map(
@@ -2286,8 +2298,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			return { retry: false, message };
 		}
 
-		if (signal?.aborted || this.disposed) return { retry: false, cancelled: true, message: "LSP install cancelled." };
-		this.versionProbes.clear();
+		// The shared attempt owns readiness and cancellation updates after installer success.
 		return { retry: true, requestId };
 	}
 
