@@ -110,7 +110,7 @@ interface ServerFailureState {
 	lastError: string;
 }
 
-type LspClientErrorResult = { retry: true } | { retry: false; message?: string };
+type LspClientErrorResult = { retry: true } | { retry: false; message?: string; failure?: LspResult };
 
 interface ManagedLspStartup {
 	promise: Promise<void>;
@@ -121,6 +121,15 @@ interface LspInstallAttemptResult {
 	retry: boolean;
 	message?: string;
 	cancelled?: boolean;
+	/** Successful installer; readiness is verified separately for each server root. */
+	requestId?: string;
+	failure?: LspResult;
+}
+
+/** Roots admitted while one recipe-scoped installer is pending. */
+interface LspInstallAttempt {
+	roots: Map<string, ResolvedLspServerConfig>;
+	promise: Promise<Map<string, LspInstallAttemptResult>>;
 }
 
 const MAX_START_ATTEMPTS = 3;
@@ -529,7 +538,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private installRunner: LspInstallRunner;
 	private installAllowed: () => boolean;
 	private installPromptsUsed = new Set<string>();
-	private installAttempts = new Map<string, Promise<LspInstallAttemptResult>>();
+	private installAttempts = new Map<string, LspInstallAttempt>();
 	private installAbortController = new AbortController();
 	private disposed = false;
 	private commandQueues = new Map<LspClient, Promise<void>>();
@@ -826,6 +835,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.startAttempts.clear();
 		this.startFailures.clear();
 		this.installPromptsUsed.clear();
+		this.installAbortController.abort();
+		this.installAbortController = new AbortController();
+		this.installAttempts.clear();
 		this.versionProbes.clear();
 		this.versions.clear();
 		this.startupEvidence.clear();
@@ -902,6 +914,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				if (!(error instanceof MissingLspExecutableError)) throw error;
 				const result = await this.handleMissingExecutable(server, error, signal);
 				if (result.retry) continue;
+				if (result.failure) return result.failure;
 				return lspResult(signal?.aborted ? "cancelled" : "unavailable", result.message ?? "", {
 					reason: signal?.aborted ? "aborted" : error.reason,
 				});
@@ -1414,6 +1427,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				if (!(error instanceof MissingLspExecutableError)) throw error;
 				const result = await this.handleMissingExecutable(server, error, signal);
 				if (result.retry) continue;
+				if (result.failure) return { error: result.failure };
 				return {
 					error: lspResult(
 						signal?.aborted ? "cancelled" : "unavailable",
@@ -2008,16 +2022,71 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			recipe.binary === error.launch.requestedExecutable;
 		const installPending = recipe && this.installAttempts.has(installRecipeIdentity(recipe));
 		if (!this.disposed && installEligible && (!failure?.reported || installPending)) {
-			const installResult = await this.tryInstallMissingServer(server, recipe, signal);
-			if (this.disposed) return { retry: false };
-			if (installResult.retry) return { retry: true };
-			if (installResult.cancelled) return { retry: false, message: installResult.message };
+			// Readiness, like installation, must finish even if every operation stops waiting.
+			const installSignal = this.installAbortController.signal;
+			const attempt = this.tryInstallMissingServer(server, recipe, error.key);
+			const result = await this.waitForInstallAttempt(attempt, signal);
+			// Restart/disposal revokes this attempt, including host prompt rejections.
+			// Never let its completion restore failures against the reset manager.
+			if (installSignal.aborted || this.disposed)
+				return {
+					retry: false,
+					failure: lspResult("cancelled", "LSP install cancelled.", { reason: "aborted" }),
+				};
+			if (result.retry) return { retry: true };
+			if (result.failure || result.cancelled)
+				return { retry: false, message: result.message, failure: result.failure };
 			return {
 				retry: false,
-				message: this.recordStartFailure(server, error.key, error.message, installResult.message),
+				message: this.recordStartFailure(server, error.key, error.message, result.message),
 			};
 		}
 		return { retry: false, message: this.recordStartFailure(server, error.key, error.message) };
+	}
+
+	/** Installation is recipe-scoped; initialization and failure accounting remain root-scoped. */
+	private async verifyInstalledServer(
+		server: ResolvedLspServerConfig,
+		key: string,
+		signal: AbortSignal,
+	): Promise<LspInstallAttemptResult> {
+		const root = key.split("\u0000")[1];
+		let client: LspClient | undefined;
+		try {
+			if (signal.aborted || this.disposed) throw new Error("LSP readiness verification cancelled.");
+			client = this.getClient(server, root);
+			await this.ensureStarted(server, key, client, signal);
+			if (signal.aborted || this.disposed || this.clients.get(key) !== client)
+				throw new Error("LSP readiness verification cancelled.");
+		} catch (error) {
+			const cancelled = signal.aborted || this.disposed;
+			const detail = error instanceof Error ? error.message : String(error);
+			const recovery =
+				error instanceof MissingLspExecutableError || error instanceof UnusableLspExecutableError
+					? `Set lsp.servers.${server.name}.command to an explicit compatible executable path and run /reload.${server.name === "rust" ? " Locate the installed component with rustup which rust-analyzer." : ""} If the configured command becomes usable on the existing PATH, run /lsp restart. Reload/restart do not import PATH changes from another shell.`
+					: `The executable resolved but initialization failed. Inspect /lsp for startup details, repair the server or project configuration, then run /lsp restart. If changing lsp.servers.${server.name}.command, run /reload.`;
+			const message = cancelled
+				? "LSP readiness verification cancelled."
+				: `Install command succeeded, but ${server.name} language server is not ready at ${root}: ${detail}. ${recovery}`;
+			if (!cancelled) {
+				// ensureStarted owns handshake failure accounting; resolution failed before it could run.
+				if (!client) this.recordStartFailure(server, key, message);
+				const failure = this.startFailures.get(key);
+				if (failure) failure.lastError = message;
+			}
+			const failure = cancelled
+				? lspResult("cancelled", message, { reason: "aborted" })
+				: error instanceof MissingLspExecutableError
+					? lspResult("unavailable", message, { reason: error.reason })
+					: error instanceof UnusableLspExecutableError
+						? lspResult("unavailable", message, { reason: "unusable-executable" })
+						: { ...lspErrorResult(error), text: message };
+			return { retry: false, message, cancelled, failure };
+		}
+		return {
+			retry: true,
+			message: `${server.name} language server ready at ${root} (initialize succeeded). Retrying LSP request.`,
+		};
 	}
 
 	private removeFailedClient(key: string, client: LspClient): void {
@@ -2062,35 +2131,68 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private async tryInstallMissingServer(
 		server: ResolvedLspServerConfig,
 		recipe: LspInstallRecipe,
-		signal?: AbortSignal,
+		key: string,
 	): Promise<LspInstallAttemptResult> {
 		if (isManagedLspObservation() || !this.installAllowed() || /^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? ""))
 			return { retry: false, message: "Automatic LSP repair is unavailable in offline/restricted contexts." };
 		const interaction = this.hostInteraction;
 		const identity = installRecipeIdentity(recipe);
-		const existing = this.installAttempts.get(identity);
-		if (existing) {
-			return this.waitForInstallAttempt(existing, signal);
-		}
-		if (
-			!interaction ||
-			/^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? "") ||
-			this.installPromptsUsed.has(identity)
-		) {
-			return { retry: false };
-		}
+		let attempt = this.installAttempts.get(identity);
+		if (!attempt) {
+			if (!interaction || this.installPromptsUsed.has(identity)) return { retry: false };
 
-		const attempt = this.runInstallPrompt(
-			server,
-			recipe,
-			identity,
-			interaction,
-			this.installAbortController.signal,
-		).finally(() => {
-			if (this.installAttempts.get(identity) === attempt) this.installAttempts.delete(identity);
-		});
-		this.installAttempts.set(identity, attempt);
-		return this.waitForInstallAttempt(attempt, signal);
+			const signal = this.installAbortController.signal;
+			const roots = new Map<string, ResolvedLspServerConfig>();
+			const promise = this.runInstallPrompt(server, recipe, identity, interaction, signal)
+				.then(async (installResult) => {
+					// Freeze the participating roots before verification. New requests use normal startup,
+					// not a readiness result already being finalized for this host action.
+					if (this.installAttempts.get(identity)?.promise === promise) this.installAttempts.delete(identity);
+					if (this.disposed || signal.aborted) {
+						// A successful installer leaves its host action open for readiness.
+						// Finalize it even when cancellation wins before verification starts.
+						if (installResult.requestId)
+							await this.emitHostActionUpdate({
+								id: installResult.requestId,
+								action: "lsp.install_server",
+								status: "cancelled",
+								message: "LSP install cancelled.",
+								exitCode: 0,
+							});
+						installResult = { retry: false, cancelled: true, message: "LSP install cancelled." };
+					}
+					if (!installResult.retry || !installResult.requestId)
+						return new Map([...roots.keys()].map((rootKey) => [rootKey, installResult]));
+
+					this.versionProbes.clear();
+					const results = new Map(
+						await Promise.all(
+							[...roots].map(
+								async ([rootKey, rootServer]) =>
+									[rootKey, await this.verifyInstalledServer(rootServer, rootKey, signal)] as const,
+							),
+						),
+					);
+					const failures = [...results.values()].filter((result) => !result.retry);
+					await this.emitHostActionUpdate({
+						id: installResult.requestId,
+						action: "lsp.install_server",
+						status: signal.aborted || this.disposed ? "cancelled" : failures.length ? "failed" : "completed",
+						message: (failures.length ? failures : [...results.values()])
+							.map((result) => result.message)
+							.join("\n"),
+						exitCode: 0,
+					});
+					return results;
+				})
+				.finally(() => {
+					if (this.installAttempts.get(identity)?.promise === promise) this.installAttempts.delete(identity);
+				});
+			attempt = { roots, promise };
+			this.installAttempts.set(identity, attempt);
+		}
+		attempt.roots.set(key, server);
+		return (await attempt.promise).get(key)!;
 	}
 
 	private waitForInstallAttempt(
@@ -2168,7 +2270,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			id: requestId,
 			action: "lsp.install_server",
 			status: "running",
-			message: `Running ${recipe.displayCommand}`,
+			message: `Running ${recipe.displayCommand}, then verifying language server readiness.`,
 		});
 		let result: LspInstallCommandResult;
 		try {
@@ -2196,15 +2298,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			return { retry: false, message };
 		}
 
-		await this.emitHostActionUpdate({
-			id: requestId,
-			action: "lsp.install_server",
-			status: "completed",
-			message: `${server.name} language server installed. Retrying diagnostics.`,
-			exitCode: result.exitCode,
-		});
-		this.versionProbes.clear();
-		return { retry: true };
+		// The shared attempt owns readiness and cancellation updates after installer success.
+		return { retry: true, requestId };
 	}
 
 	private formatInstallFailure(recipe: LspInstallRecipe, result: LspInstallCommandResult): string {
