@@ -64,7 +64,9 @@ afterEach(() => {
 	for (const manager of managers.splice(0)) manager.dispose();
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+	// dispose() kills launched servers without waiting; on Windows the exiting
+	// process still holds its cwd, so give the rmdir time to succeed.
+	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 describe("LSP install readiness (#399)", () => {

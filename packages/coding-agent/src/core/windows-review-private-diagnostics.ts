@@ -93,7 +93,8 @@ export async function writeWindowsReviewDiagnostic(filePath: string, content: st
 				"-EncodedCommand",
 				Buffer.from(WRITE_DIAGNOSTIC_SCRIPT, "utf16le").toString("base64"),
 			],
-			{ windowsHide: true, timeout: 10_000, maxBuffer: 8_192 },
+			// Hang guard only: Windows PowerShell cold start under load routinely exceeds 10s.
+			{ windowsHide: true, timeout: 30_000, maxBuffer: 8_192 },
 			(error) => {
 				if (error) reject(new Error("Could not retain private Windows review diagnostics."));
 				else resolve();
