@@ -132,10 +132,12 @@ export const RpcPromptCacheStatusSchema = Type.Union([
 	Type.Object(
 		{
 			kind: Type.Literal("retained"),
-			/** Unix epoch milliseconds when the latest request with the current model started. */
+			/** Unix epoch milliseconds when the latest request or cache refresh with the current model started. */
 			lastRequestAt: Type.Number(),
 			/** Unix epoch milliseconds when the documented retention window lapses; absent when the provider publishes none. */
 			expiresAt: Type.Optional(Type.Number()),
+			/** Unix epoch milliseconds until which the host keeps refreshing the idle cache; absent unless idle keepalive applies. */
+			keepAliveUntil: Type.Optional(Type.Number()),
 		},
 		{ additionalProperties: false },
 	),

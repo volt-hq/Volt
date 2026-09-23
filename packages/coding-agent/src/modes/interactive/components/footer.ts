@@ -3,6 +3,7 @@ import { type Component, createRenderFrame, type RenderFrame, truncateToWidth, v
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import { getPromptCacheRefreshUsage } from "../../../core/prompt-cache-keepalive.ts";
 import type { PromptCacheStatus } from "../../../core/prompt-cache-status.ts";
 import type { SessionUsageProjection } from "../../../core/session-usage.ts";
 import { theme } from "../../../core/theme/runtime.ts";
@@ -41,6 +42,11 @@ function promptCacheCountdownUnit(remainingMs: number): number {
 function formatPromptCacheStatus(status: PromptCacheStatus | undefined, now: number): string | undefined {
 	if (!status) return undefined;
 	if (status.kind === "model_changed") return theme.fg("warning", "cache cold");
+	if (status.keepAliveUntil !== undefined && status.keepAliveUntil > now) {
+		const keepAlive = status.keepAliveUntil - now;
+		const unit = promptCacheCountdownUnit(keepAlive);
+		return theme.fg("dim", `cache warm ${Math.ceil(keepAlive / unit)}${unit === HOUR_MS ? "h" : "m"}`);
+	}
 	if (status.expiresAt === undefined) return undefined;
 	const remaining = status.expiresAt - now;
 	if (remaining <= 0) return theme.fg("warning", "cache expired");
@@ -50,7 +56,13 @@ function formatPromptCacheStatus(status: PromptCacheStatus | undefined, now: num
 
 /** Instant the rendered cache countdown next changes, or undefined when it is static. */
 function nextPromptCacheChangeAt(status: PromptCacheStatus | undefined, now: number): number | undefined {
-	if (status?.kind !== "retained" || status.expiresAt === undefined) return undefined;
+	if (status?.kind !== "retained") return undefined;
+	if (status.keepAliveUntil !== undefined && status.keepAliveUntil > now) {
+		const keepAlive = status.keepAliveUntil - now;
+		const unit = promptCacheCountdownUnit(keepAlive);
+		return status.keepAliveUntil - (Math.ceil(keepAlive / unit) - 1) * unit;
+	}
+	if (status.expiresAt === undefined) return undefined;
 	const remaining = status.expiresAt - now;
 	if (remaining <= 0) return undefined;
 	const unit = promptCacheCountdownUnit(remaining);
@@ -162,7 +174,14 @@ export class FooterComponent implements Component {
 		let totalCost = 0;
 		let latestCacheHitRate: number | undefined;
 		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
+			const refreshUsage = getPromptCacheRefreshUsage(entry);
+			if (refreshUsage) {
+				totalInput += refreshUsage.input;
+				totalOutput += refreshUsage.output;
+				totalCacheRead += refreshUsage.cacheRead;
+				totalCacheWrite += refreshUsage.cacheWrite;
+				totalCost += refreshUsage.cost.total;
+			} else if (entry.type === "message" && entry.message.role === "assistant") {
 				totalInput += entry.message.usage.input;
 				totalOutput += entry.message.usage.output;
 				totalCacheRead += entry.message.usage.cacheRead;

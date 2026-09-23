@@ -16,6 +16,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	PromptCacheRefreshFunction,
 	ProviderEnv,
 	SimpleStreamOptions,
 	StopReason,
@@ -520,41 +521,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 		};
 
 		try {
-			let client: Anthropic;
-			let isOAuth: boolean;
-
-			if (options?.client) {
-				client = options.client;
-				isOAuth = false;
-			} else {
-				const apiKey = options?.apiKey;
-				if (!apiKey) {
-					throw new Error(`No API key for provider: ${model.provider}`);
-				}
-
-				let copilotDynamicHeaders: Record<string, string> | undefined;
-				if (model.provider === "github-copilot") {
-					const hasImages = hasCopilotVisionInput(context.messages);
-					copilotDynamicHeaders = buildCopilotDynamicHeaders({
-						messages: context.messages,
-						hasImages,
-					});
-				}
-
-				const created = createClient(
-					model,
-					apiKey,
-					options?.interleavedThinking ?? true,
-					shouldUseFineGrainedToolStreamingBeta(model, context),
-					options?.headers,
-					copilotDynamicHeaders,
-					options?.sessionId,
-					options?.env,
-					options?.cacheRetention,
-				);
-				client = created.client;
-				isOAuth = created.isOAuthToken;
-			}
+			const { client, isOAuthToken: isOAuth } = createRequestClient(model, context, options);
 			const toolResultPayload = new ToolResultPayloadTracker();
 			let params = buildParams(model, context, isOAuth, options, toolResultPayload);
 			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
@@ -767,11 +734,11 @@ function mapThinkingLevelToEffort(
 	}
 }
 
-export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
+/** Map provider-neutral simple options to the exact AnthropicOptions `streamSimpleAnthropic` sends. */
+function resolveSimpleAnthropicOptions(
 	model: Model<"anthropic-messages">,
-	context: Context,
 	options?: SimpleStreamOptions,
-): AssistantMessageEventStream => {
+): AnthropicOptions {
 	const apiKey = options?.apiKey;
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
@@ -779,18 +746,13 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 
 	const base = buildBaseOptions(model, options, apiKey);
 	if (!options?.reasoning) {
-		return streamAnthropic(model, context, { ...base, thinkingEnabled: false } satisfies AnthropicOptions);
+		return { ...base, thinkingEnabled: false };
 	}
 
 	// For models with adaptive thinking: use an effort level.
 	// For older models: use budget-based thinking.
 	if (model.compat?.forceAdaptiveThinking === true) {
-		const effort = mapThinkingLevelToEffort(model, options.reasoning);
-		return streamAnthropic(model, context, {
-			...base,
-			thinkingEnabled: true,
-			effort,
-		} satisfies AnthropicOptions);
+		return { ...base, thinkingEnabled: true, effort: mapThinkingLevelToEffort(model, options.reasoning) };
 	}
 
 	// Undefined means the caller did not request an output cap; let the helper use the model cap.
@@ -802,16 +764,111 @@ export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleS
 		options.thinkingBudgets,
 	);
 
-	return streamAnthropic(model, context, {
+	return {
 		...base,
 		maxTokens: adjusted.maxTokens,
 		thinkingEnabled: true,
 		thinkingBudgetTokens: adjusted.thinkingBudget,
-	} satisfies AnthropicOptions);
+	};
+}
+
+export const streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions> = (
+	model: Model<"anthropic-messages">,
+	context: Context,
+	options?: SimpleStreamOptions,
+): AssistantMessageEventStream => streamAnthropic(model, context, resolveSimpleAnthropicOptions(model, options));
+
+/**
+ * Replay the `streamSimpleAnthropic` request with `max_tokens: 0`, which reads (and renews) the
+ * cached prefix without generating output. Requests the API would reject that way, or that would
+ * need a different prefix to be accepted, report "unsupported" without being sent.
+ */
+export const refreshPromptCacheAnthropic: PromptCacheRefreshFunction<"anthropic-messages"> = async (
+	model,
+	context,
+	simpleOptions,
+) => {
+	const options = resolveSimpleAnthropicOptions(model, simpleOptions);
+	// max_tokens: 0 is rejected with budget-based thinking, and disabling thinking would change the prefix.
+	if (options.thinkingEnabled && model.compat?.forceAdaptiveThinking !== true) {
+		return { status: "unsupported", reason: "budget-based thinking cannot be refreshed without output" };
+	}
+	if (!getCacheControl(model, options.cacheRetention, options.env).cacheControl) {
+		return { status: "unsupported", reason: "request has no cache breakpoints" };
+	}
+	const { client, isOAuthToken } = createRequestClient(model, context, options);
+	const toolResultPayload = new ToolResultPayloadTracker();
+	let params = buildParams(model, context, isOAuthToken, options, toolResultPayload);
+	const nextParams = await options.onPayload?.(params, model, toolResultPayload.metadata);
+	if (nextParams !== undefined) {
+		params = nextParams as MessageCreateParamsStreaming;
+	}
+	const toolChoice = params.tool_choice?.type;
+	if (toolChoice === "any" || toolChoice === "tool" || params.output_config?.format) {
+		return { status: "unsupported", reason: "forced tool choice or structured output requires output" };
+	}
+	const { data, response } = await client.messages
+		.create(
+			{ ...params, stream: false, max_tokens: 0 },
+			{
+				...(options.signal ? { signal: options.signal } : {}),
+				...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+				maxRetries: options.maxRetries ?? 0,
+			},
+		)
+		.withResponse();
+	await options.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
+	const usage: Usage = {
+		availability: "complete",
+		input: data.usage.input_tokens ?? 0,
+		output: data.usage.output_tokens ?? 0,
+		cacheRead: data.usage.cache_read_input_tokens ?? 0,
+		cacheWrite: data.usage.cache_creation_input_tokens ?? 0,
+		cacheWrite1h: data.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
+	calculateCost(model, usage);
+	return { status: "refreshed", usage };
 };
 
 function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");
+}
+
+/** Client and auth mode for one request; streaming and cache refresh must build the same payload. */
+function createRequestClient(
+	model: Model<"anthropic-messages">,
+	context: Context,
+	options?: AnthropicOptions,
+): { client: Anthropic; isOAuthToken: boolean } {
+	if (options?.client) return { client: options.client, isOAuthToken: false };
+	const apiKey = options?.apiKey;
+	if (!apiKey) {
+		throw new Error(`No API key for provider: ${model.provider}`);
+	}
+
+	let copilotDynamicHeaders: Record<string, string> | undefined;
+	if (model.provider === "github-copilot") {
+		const hasImages = hasCopilotVisionInput(context.messages);
+		copilotDynamicHeaders = buildCopilotDynamicHeaders({
+			messages: context.messages,
+			hasImages,
+		});
+	}
+
+	return createClient(
+		model,
+		apiKey,
+		options?.interleavedThinking ?? true,
+		shouldUseFineGrainedToolStreamingBeta(model, context),
+		options?.headers,
+		copilotDynamicHeaders,
+		options?.sessionId,
+		options?.env,
+		options?.cacheRetention,
+	);
 }
 
 function createClient(

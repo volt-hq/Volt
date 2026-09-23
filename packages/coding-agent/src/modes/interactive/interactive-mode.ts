@@ -563,6 +563,8 @@ export class InteractiveMode {
 	/** Current operation, summarized in the transcript once the session stays idle. */
 	private workSummary: { startedAt: number; aborted: boolean } | undefined = undefined;
 	private workSummaryTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private promptCacheAlertTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private promptCacheAlertAt: number | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
@@ -2476,6 +2478,7 @@ export class InteractiveMode {
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
 		this.clearWorkSummaryTimer();
+		this.clearPromptCacheAlertTimer();
 		this.workSummary = undefined;
 		this.applyRuntimeSettings(session);
 		session.setHostInteraction(this.createHostInteraction());
@@ -2707,6 +2710,43 @@ export class InteractiveMode {
 		this.scheduleTurnDoneAlertTimer(0);
 	}
 
+	private clearPromptCacheAlertTimer(): void {
+		if (this.promptCacheAlertTimer) clearTimeout(this.promptCacheAlertTimer);
+		this.promptCacheAlertTimer = undefined;
+		this.promptCacheAlertAt = undefined;
+	}
+
+	/** When idle keepalive ends, alert through the turn-done channel that the cache will now lapse. */
+	private schedulePromptCacheAlert(): void {
+		const status = this.session.getPromptCacheStatus();
+		const until = status?.kind === "retained" ? status.keepAliveUntil : undefined;
+		if (until === this.promptCacheAlertAt) return;
+		this.clearPromptCacheAlertTimer();
+		if (until === undefined || this.settingsManager.getTurnDoneAlert() === "off") return;
+		this.promptCacheAlertAt = until;
+		this.promptCacheAlertTimer = setTimeout(
+			() => {
+				this.promptCacheAlertTimer = undefined;
+				this.promptCacheAlertAt = undefined;
+				const mode = this.settingsManager.getTurnDoneAlert();
+				if (mode === "off" || this.shutdownRequested || this.isShuttingDown || this.session.isStreaming) return;
+				if (this.ui.terminal.focusState === "focused") return;
+				const current = this.session.getPromptCacheStatus();
+				if (current?.kind !== "retained" || current.expiresAt === undefined) return;
+				const remaining = current.expiresAt - Date.now();
+				if (remaining <= 0) return;
+				if (mode === "notify") {
+					const dir = path.basename(this.sessionManager.getCwd());
+					this.ui.terminal.notify("Volt", `Prompt cache expires in ${Math.ceil(remaining / 60_000)}m · ${dir}`);
+				} else {
+					this.ui.terminal.alert();
+				}
+			},
+			Math.max(0, until - Date.now()),
+		);
+		this.promptCacheAlertTimer.unref?.();
+	}
+
 	private clearWorkSummaryTimer(): void {
 		if (!this.workSummaryTimer) return;
 		clearTimeout(this.workSummaryTimer);
@@ -2840,6 +2880,7 @@ export class InteractiveMode {
 		}
 		this.ui.hideOverlay();
 		this.clearTurnDoneAlertTimer();
+		this.clearPromptCacheAlertTimer();
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
@@ -4203,6 +4244,7 @@ export class InteractiveMode {
 				break;
 
 			case "prompt_cache_changed":
+				this.schedulePromptCacheAlert();
 				this.ui.requestRender();
 				break;
 
@@ -6098,6 +6140,7 @@ export class InteractiveMode {
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
 					turnDoneAlert: this.settingsManager.getTurnDoneAlert(),
+					promptCacheKeepAlive: this.settingsManager.getPromptCacheKeepAlive(),
 					tuiMode: this.ui.mode,
 					fullscreenExitOutput: this.settingsManager.getFullscreenExitOutput(),
 					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
@@ -6237,6 +6280,10 @@ export class InteractiveMode {
 					},
 					onTurnDoneAlertChange: (mode) => {
 						this.settingsManager.setTurnDoneAlert(mode);
+					},
+					onPromptCacheKeepAliveChange: (mode) => {
+						this.settingsManager.setPromptCacheKeepAlive(mode);
+						this.session.promptCacheSettingsChanged();
 					},
 					onTuiModeChange: (mode) => {
 						if (!this.switchTuiMode(mode)) {
@@ -9770,6 +9817,7 @@ export class InteractiveMode {
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
 		this.clearTurnDoneAlertTimer();
+		this.clearPromptCacheAlertTimer();
 		this.clearWorkSummaryTimer();
 		this.stopWorkingElapsedTicker();
 		this.streamingRenderCoalescer?.dispose();

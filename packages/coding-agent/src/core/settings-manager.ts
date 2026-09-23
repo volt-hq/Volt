@@ -14,6 +14,7 @@ import type { LspSettings } from "./lsp/config.ts";
 import { isPersonality, type Personality } from "./personality.ts";
 
 const DEFAULT_CONTEXT_WARNING_TOKENS = 350_000;
+const DEFAULT_PROMPT_CACHE_KEEPALIVE_IDLE_MINUTES = 15;
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -67,6 +68,16 @@ export interface ThinkingBudgetsSettings {
 
 export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
+}
+
+export interface PromptCacheSettings {
+	keepAlive?: boolean; // default: true - refresh renewing prompt caches shortly before expiry
+	keepAliveIdleMinutes?: number; // default: 15 - keep refreshing this long after work settles; 0 = only while work runs
+}
+
+export interface PromptCacheKeepAliveConfig {
+	enabled: boolean;
+	idleWindowMs: number;
 }
 
 export interface WarningSettings {
@@ -163,6 +174,7 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	promptCache?: PromptCacheSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
@@ -1765,6 +1777,31 @@ export class SettingsManager {
 				settings.terminal.showTerminalProgress = enabled;
 			},
 			"showTerminalProgress",
+		);
+	}
+
+	getPromptCacheKeepAlive(): PromptCacheKeepAliveConfig {
+		const settings = this.settings.promptCache;
+		const minutes = settings?.keepAliveIdleMinutes;
+		const idleMinutes =
+			typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 0
+				? minutes
+				: DEFAULT_PROMPT_CACHE_KEEPALIVE_IDLE_MINUTES;
+		return { enabled: settings?.keepAlive !== false, idleWindowMs: Math.round(idleMinutes * 60_000) };
+	}
+
+	/** `"off"` disables keepalive; a number of minutes enables it with that idle window. */
+	setPromptCacheKeepAlive(mode: "off" | number): void {
+		this.updateGlobalSettingsFields(
+			[
+				{ field: "promptCache", nestedKey: "keepAlive" },
+				{ field: "promptCache", nestedKey: "keepAliveIdleMinutes" },
+			],
+			(settings) => {
+				if (!settings.promptCache) settings.promptCache = {};
+				settings.promptCache.keepAlive = mode !== "off";
+				if (mode !== "off") settings.promptCache.keepAliveIdleMinutes = mode;
+			},
 		);
 	}
 

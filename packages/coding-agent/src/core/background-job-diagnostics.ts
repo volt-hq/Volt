@@ -178,7 +178,8 @@ async function removedConcurrently(path: string, error: unknown): Promise<boolea
 	return false;
 }
 
-async function prune(directory: string): Promise<void> {
+/** Keep the newest completed batches (200 files, 50 MiB) whose names match `ownedFile`. */
+export async function pruneDiagnosticFiles(directory: string, ownedFile: RegExp): Promise<void> {
 	try {
 		const directoryStat = await lstat(directory);
 		if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink())
@@ -186,7 +187,7 @@ async function prune(directory: string): Promise<void> {
 		const entries = await readdir(directory, { withFileTypes: true });
 		const files = [];
 		for (const entry of entries) {
-			if (!entry.isFile() || !OWNED_FILE.test(entry.name)) continue;
+			if (!entry.isFile() || !ownedFile.test(entry.name)) continue;
 			const path = join(directory, entry.name);
 			try {
 				const stat = await lstat(path);
@@ -333,7 +334,7 @@ export class BackgroundJobDiagnostics {
 			.then(async () => {
 				if (this.stopped) return;
 				await this.writer(path, content);
-				if (!this.stopped) await prune(this.directory);
+				if (!this.stopped) await pruneDiagnosticFiles(this.directory, OWNED_FILE);
 			})
 			.catch(() => this.fail())
 			.finally(() => {

@@ -1,6 +1,14 @@
 import { join } from "node:path";
 import type { AgentHarnessStreamOptions, AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple, type ToolArgumentLimits } from "@hansjm10/volt-ai";
+import {
+	clampThinkingLevel,
+	type Message,
+	type Model,
+	type PromptCacheRefreshFunction,
+	refreshPromptCache,
+	streamSimple,
+	type ToolArgumentLimits,
+} from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { AgentSession, AgentSessionConstructionCleanupError } from "./agent-session.ts";
@@ -552,7 +560,11 @@ async function createAgentSessionWithTrackedResources(
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
 	const inferenceAccounting = options.inferenceAccounting;
-	const streamFn: StreamFn = async (model, context, options) => {
+	// Stream and prompt-cache refresh requests must resolve identical provider options.
+	const providerRequestOptions = async (
+		model: Parameters<StreamFn>[0],
+		options: Parameters<StreamFn>[2],
+	): Promise<NonNullable<Parameters<StreamFn>[2]>> => {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
 			throw new Error(auth.error);
@@ -563,32 +575,37 @@ async function createAgentSessionWithTrackedResources(
 		// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
 		// Use max int32 to effectively disable the timeout.
 		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
-		const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
-		const websocketConnectTimeoutMs =
-			options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-		const dispatch = (signal: AbortSignal | undefined) =>
-			streamSimple(model, context, {
-				...options,
-				signal,
-				apiKey: auth.apiKey,
-				env,
-				timeoutMs,
-				websocketConnectTimeoutMs,
-				toolArgumentLimits: { ...settingsManager.getToolArgumentLimits(), ...options?.toolArgumentLimits },
-				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				headers: mergeProviderAttributionHeaders(
-					model,
-					settingsManager,
-					options?.sessionId,
-					auth.headers,
-					options?.headers,
-				),
-			});
+		return {
+			...options,
+			apiKey: auth.apiKey,
+			env,
+			timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
+			websocketConnectTimeoutMs:
+				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
+			toolArgumentLimits: { ...settingsManager.getToolArgumentLimits(), ...options?.toolArgumentLimits },
+			maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
+			maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+			headers: mergeProviderAttributionHeaders(
+				model,
+				settingsManager,
+				options?.sessionId,
+				auth.headers,
+				options?.headers,
+			),
+		};
+	};
+	const streamFn: StreamFn = async (model, context, options) => {
+		const requestOptions = await providerRequestOptions(model, options);
+		const dispatch = (signal: AbortSignal | undefined) => streamSimple(model, context, { ...requestOptions, signal });
 		return inferenceAccounting
 			? accountInference(model, dispatch, inferenceAccounting, options?.signal)
 			: dispatch(options?.signal);
 	};
+	// Accounted sessions report every provider request to their sink; refreshes bypass it, so they stay off.
+	const refreshPromptCacheFn: PromptCacheRefreshFunction | undefined = inferenceAccounting
+		? undefined
+		: async (model, context, options) =>
+				await refreshPromptCache(model, context, await providerRequestOptions(model, options));
 	const transport = settingsManager.getTransport();
 	const streamOptions: AgentHarnessStreamOptions = {
 		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
@@ -617,6 +634,7 @@ async function createAgentSessionWithTrackedResources(
 		...(model === undefined ? {} : { model }),
 		thinkingLevel,
 		streamFn,
+		...(refreshPromptCacheFn === undefined ? {} : { refreshPromptCacheFn }),
 		convertToLlm: convertToLlmWithBlockImages,
 		streamOptions,
 		steeringMode: settingsManager.getSteeringMode(),

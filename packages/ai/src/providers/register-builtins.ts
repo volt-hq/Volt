@@ -5,6 +5,7 @@ import type {
 	AssistantMessageEvent,
 	Context,
 	Model,
+	PromptCacheRefreshFunction,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -31,11 +32,13 @@ interface LazyProviderModule<
 		context: Context,
 		options?: TSimpleOptions,
 	) => AsyncIterable<AssistantMessageEvent>;
+	refreshPromptCache?: PromptCacheRefreshFunction<TApi>;
 }
 
 interface AnthropicProviderModule {
 	streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOptions>;
 	streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions>;
+	refreshPromptCacheAnthropic: PromptCacheRefreshFunction<"anthropic-messages">;
 }
 
 interface AzureOpenAIResponsesProviderModule {
@@ -207,6 +210,18 @@ function createLazySimpleStream<
 	};
 }
 
+function createLazyRefreshPromptCache<
+	TApi extends Api,
+	TOptions extends StreamOptions,
+	TSimpleOptions extends SimpleStreamOptions,
+>(loadModule: () => Promise<LazyProviderModule<TApi, TOptions, TSimpleOptions>>): PromptCacheRefreshFunction<TApi> {
+	return async (model, context, options) => {
+		const refresh = (await loadModule()).refreshPromptCache;
+		if (!refresh) return { status: "unsupported", reason: "provider does not implement prompt-cache refresh" };
+		return await refresh(model, context, options);
+	};
+}
+
 function loadAnthropicProviderModule(): Promise<
 	LazyProviderModule<"anthropic-messages", AnthropicOptions, SimpleStreamOptions>
 > {
@@ -215,6 +230,7 @@ function loadAnthropicProviderModule(): Promise<
 		return {
 			stream: provider.streamAnthropic,
 			streamSimple: provider.streamSimpleAnthropic,
+			refreshPromptCache: provider.refreshPromptCacheAnthropic,
 		};
 	});
 	return anthropicProviderModulePromise;
@@ -329,6 +345,7 @@ function loadBedrockProviderModule(): Promise<
 
 export const streamAnthropic = createLazyStream(loadAnthropicProviderModule);
 export const streamSimpleAnthropic = createLazySimpleStream(loadAnthropicProviderModule);
+export const refreshPromptCacheAnthropic = createLazyRefreshPromptCache(loadAnthropicProviderModule);
 export const streamAzureOpenAIResponses = createLazyStream(loadAzureOpenAIResponsesProviderModule);
 export const streamSimpleAzureOpenAIResponses = createLazySimpleStream(loadAzureOpenAIResponsesProviderModule);
 export const streamGoogle = createLazyStream(loadGoogleProviderModule);
@@ -351,6 +368,7 @@ export function registerBuiltInApiProviders(): void {
 		api: "anthropic-messages",
 		stream: streamAnthropic,
 		streamSimple: streamSimpleAnthropic,
+		refreshPromptCache: refreshPromptCacheAnthropic,
 	});
 
 	registerApiProvider({
