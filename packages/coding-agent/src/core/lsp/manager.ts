@@ -126,6 +126,12 @@ interface LspInstallAttemptResult {
 	failure?: LspResult;
 }
 
+/** Roots admitted while one recipe-scoped installer is pending. */
+interface LspInstallAttempt {
+	roots: Map<string, ResolvedLspServerConfig>;
+	promise: Promise<Map<string, LspInstallAttemptResult>>;
+}
+
 const MAX_START_ATTEMPTS = 3;
 const MAX_REFERENCES = 50;
 const MAX_SYMBOL_LINES = 200;
@@ -532,8 +538,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private installRunner: LspInstallRunner;
 	private installAllowed: () => boolean;
 	private installPromptsUsed = new Set<string>();
-	private installAttempts = new Map<string, Promise<LspInstallAttemptResult>>();
-	private installVerifications = new Map<string, Promise<LspInstallAttemptResult>>();
+	private installAttempts = new Map<string, LspInstallAttempt>();
 	private installAbortController = new AbortController();
 	private disposed = false;
 	private commandQueues = new Map<LspClient, Promise<void>>();
@@ -833,7 +838,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.installAbortController.abort();
 		this.installAbortController = new AbortController();
 		this.installAttempts.clear();
-		this.installVerifications.clear();
 		this.versionProbes.clear();
 		this.versions.clear();
 		this.startupEvidence.clear();
@@ -1006,7 +1010,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.disposed = true;
 		this.installAbortController.abort();
 		this.installAttempts.clear();
-		this.installVerifications.clear();
 		if (this.idleTimer) {
 			clearInterval(this.idleTimer);
 			this.idleTimer = undefined;
@@ -2020,23 +2023,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const installPending = recipe && this.installAttempts.has(installRecipeIdentity(recipe));
 		if (!this.disposed && installEligible && (!failure?.reported || installPending)) {
 			// Readiness, like installation, must finish even if every operation stops waiting.
-			const installSignal = this.installAbortController.signal;
-			const attempt = this.tryInstallMissingServer(server, recipe).then(async (installResult) => {
-				if (this.disposed || installSignal.aborted)
-					return { retry: false, cancelled: true, message: "LSP install cancelled." };
-				if (installResult.retry && installResult.requestId) {
-					let verification = this.installVerifications.get(error.key);
-					if (!verification) {
-						verification = this.verifyInstalledServer(server, error.key, installResult.requestId).finally(() => {
-							if (this.installVerifications.get(error.key) === verification)
-								this.installVerifications.delete(error.key);
-						});
-						this.installVerifications.set(error.key, verification);
-					}
-					return verification;
-				}
-				return installResult;
-			});
+			const attempt = this.tryInstallMissingServer(server, recipe, error.key);
 			const result = await this.waitForInstallAttempt(attempt, signal);
 			if (result.retry) return { retry: true };
 			if (result.failure || result.cancelled)
@@ -2053,12 +2040,12 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private async verifyInstalledServer(
 		server: ResolvedLspServerConfig,
 		key: string,
-		requestId: string,
+		signal: AbortSignal,
 	): Promise<LspInstallAttemptResult> {
-		const signal = this.installAbortController.signal;
 		const root = key.split("\u0000")[1];
 		let client: LspClient | undefined;
 		try {
+			if (signal.aborted || this.disposed) throw new Error("LSP readiness verification cancelled.");
 			client = this.getClient(server, root);
 			await this.ensureStarted(server, key, client, signal);
 			if (signal.aborted || this.disposed || this.clients.get(key) !== client)
@@ -2079,13 +2066,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				const failure = this.startFailures.get(key);
 				if (failure) failure.lastError = message;
 			}
-			await this.emitHostActionUpdate({
-				id: requestId,
-				action: "lsp.install_server",
-				status: cancelled ? "cancelled" : "failed",
-				message,
-				exitCode: 0,
-			});
 			const failure = cancelled
 				? lspResult("cancelled", message, { reason: "aborted" })
 				: error instanceof MissingLspExecutableError
@@ -2095,14 +2075,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 						: { ...lspErrorResult(error), text: message };
 			return { retry: false, message, cancelled, failure };
 		}
-		await this.emitHostActionUpdate({
-			id: requestId,
-			action: "lsp.install_server",
-			status: "completed",
+		return {
+			retry: true,
 			message: `${server.name} language server ready at ${root} (initialize succeeded). Retrying LSP request.`,
-			exitCode: 0,
-		});
-		return { retry: true };
+		};
 	}
 
 	private removeFailedClient(key: string, client: LspClient): void {
@@ -2147,32 +2123,56 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private async tryInstallMissingServer(
 		server: ResolvedLspServerConfig,
 		recipe: LspInstallRecipe,
+		key: string,
 	): Promise<LspInstallAttemptResult> {
 		if (isManagedLspObservation() || !this.installAllowed() || /^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? ""))
 			return { retry: false, message: "Automatic LSP repair is unavailable in offline/restricted contexts." };
 		const interaction = this.hostInteraction;
 		const identity = installRecipeIdentity(recipe);
-		const existing = this.installAttempts.get(identity);
-		if (existing) return existing;
-		if (
-			!interaction ||
-			/^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? "") ||
-			this.installPromptsUsed.has(identity)
-		) {
-			return { retry: false };
-		}
+		let attempt = this.installAttempts.get(identity);
+		if (!attempt) {
+			if (!interaction || this.installPromptsUsed.has(identity)) return { retry: false };
 
-		const attempt = this.runInstallPrompt(
-			server,
-			recipe,
-			identity,
-			interaction,
-			this.installAbortController.signal,
-		).finally(() => {
-			if (this.installAttempts.get(identity) === attempt) this.installAttempts.delete(identity);
-		});
-		this.installAttempts.set(identity, attempt);
-		return attempt;
+			const signal = this.installAbortController.signal;
+			const roots = new Map<string, ResolvedLspServerConfig>();
+			const promise = this.runInstallPrompt(server, recipe, identity, interaction, signal)
+				.then(async (installResult) => {
+					// Freeze the participating roots before verification. New requests use normal startup,
+					// not a readiness result already being finalized for this host action.
+					if (this.installAttempts.get(identity)?.promise === promise) this.installAttempts.delete(identity);
+					if (this.disposed || signal.aborted)
+						installResult = { retry: false, cancelled: true, message: "LSP install cancelled." };
+					if (!installResult.retry || !installResult.requestId)
+						return new Map([...roots.keys()].map((rootKey) => [rootKey, installResult]));
+
+					const results = new Map(
+						await Promise.all(
+							[...roots].map(
+								async ([rootKey, rootServer]) =>
+									[rootKey, await this.verifyInstalledServer(rootServer, rootKey, signal)] as const,
+							),
+						),
+					);
+					const failures = [...results.values()].filter((result) => !result.retry);
+					await this.emitHostActionUpdate({
+						id: installResult.requestId,
+						action: "lsp.install_server",
+						status: signal.aborted || this.disposed ? "cancelled" : failures.length ? "failed" : "completed",
+						message: (failures.length ? failures : [...results.values()])
+							.map((result) => result.message)
+							.join("\n"),
+						exitCode: 0,
+					});
+					return results;
+				})
+				.finally(() => {
+					if (this.installAttempts.get(identity)?.promise === promise) this.installAttempts.delete(identity);
+				});
+			attempt = { roots, promise };
+			this.installAttempts.set(identity, attempt);
+		}
+		attempt.roots.set(key, server);
+		return (await attempt.promise).get(key)!;
 	}
 
 	private waitForInstallAttempt(

@@ -125,37 +125,92 @@ describe("LSP install readiness (#399)", () => {
 		expect(item.manager.getStatus().find((entry) => entry.name === "rust")?.breaker).toBe("open");
 	});
 
-	it("shares installation while verifying each root independently", async () => {
-		const item = fixture((bin) => {
-			const executable = launcher(bin);
-			writeFileSync(
-				executable,
-				process.platform === "win32"
-					? `@if /I "%CD%"=="${join(item.root, "broken")}" (\r\n@"${process.execPath}" "${fake}" --init-error\r\n) else (\r\n@"${process.execPath}" "${fake}"\r\n)\r\n`
-					: `#!/bin/sh\ncase "$PWD" in */broken) set -- --init-error ;; esac\nexec '${process.execPath}' '${fake}' "$@"\n`,
-			);
-		});
-		const paths = ["broken", "healthy"].map((name) => {
-			const root = join(item.root, name);
-			mkdirSync(root);
-			writeFileSync(join(root, "Cargo.toml"), "");
-			const path = join(root, "main.rs");
-			writeFileSync(path, "symbol\n");
-			return path;
-		});
-		const results = await Promise.all(paths.map((path) => item.manager.hover(path, "symbol")));
-		expect(results.map((result) => result.outcome)).toEqual(["unavailable", "success"]);
-		expect(item.installRunner).toHaveBeenCalledTimes(1);
-		expect(item.requestAction).toHaveBeenCalledTimes(1);
-		expect(item.manager.getStatus().find((entry) => entry.root.endsWith("broken"))).toMatchObject({
-			state: "failed",
-			breaker: "closed",
-		});
-		expect(item.manager.getStatus().find((entry) => entry.root.endsWith("healthy"))).toMatchObject({
-			state: "ready",
-			breaker: "closed",
-		});
-	});
+	it.each([
+		{ firstRoot: "healthy", failBroken: true },
+		{ firstRoot: "broken", failBroken: true },
+		{ firstRoot: "healthy", failBroken: false },
+	])(
+		"reports one install outcome with $firstRoot finishing first (failure=$failBroken)",
+		async ({ firstRoot, failBroken }) => {
+			const installGate = Promise.withResolvers<void>();
+			const delayedRootGate = Promise.withResolvers<void>();
+			const firstRootSettled = Promise.withResolvers<void>();
+			const item = fixture((bin) => {
+				const executable = launcher(bin);
+				if (!failBroken) return;
+				writeFileSync(
+					executable,
+					process.platform === "win32"
+						? `@if /I "%CD%"=="${join(item.root, "broken")}" (\r\n@"${process.execPath}" "${fake}" --init-error\r\n) else (\r\n@"${process.execPath}" "${fake}"\r\n)\r\n`
+						: `#!/bin/sh\ncase "$PWD" in */broken) set -- --init-error ;; esac\nexec '${process.execPath}' '${fake}' "$@"\n`,
+				);
+			});
+			const paths = ["broken", "healthy"].map((name) => {
+				const root = join(item.root, name);
+				mkdirSync(root);
+				writeFileSync(join(root, "Cargo.toml"), "");
+				const path = join(root, "main.rs");
+				writeFileSync(path, "symbol\n");
+				return path;
+			});
+			const install = item.installRunner.getMockImplementation()!;
+			item.installRunner.mockImplementation(async () => {
+				await installGate.promise;
+				return install();
+			});
+			const start = LspClient.prototype.start;
+			vi.spyOn(LspClient.prototype, "start").mockImplementation(async function (this: LspClient) {
+				const finishesFirst = this.rootDir.endsWith(firstRoot);
+				if (!finishesFirst) await delayedRootGate.promise;
+				try {
+					await start.call(this);
+				} finally {
+					if (finishesFirst) firstRootSettled.resolve();
+				}
+			});
+			const pending = Promise.all(paths.map((path) => item.manager.hover(path, "symbol")));
+			try {
+				// Both operations must join the install before its executable becomes available.
+				await expect
+					.poll(
+						() => item.manager.getStatus().filter((entry) => entry.name === "rust" && entry.attempts > 0).length,
+					)
+					.toBe(2);
+				installGate.resolve();
+				await firstRootSettled.promise;
+				delayedRootGate.resolve();
+				const results = await pending;
+				expect(results.map((result) => result.outcome)).toEqual([
+					failBroken ? "unavailable" : "success",
+					"success",
+				]);
+				expect(item.installRunner).toHaveBeenCalledTimes(1);
+				expect(item.requestAction).toHaveBeenCalledTimes(1);
+				expect(item.updates.map((update) => update.status)).toEqual([
+					"running",
+					failBroken ? "failed" : "completed",
+				]);
+				expect(new Set(item.updates.map((update) => update.id)).size).toBe(1);
+				expect(item.updates.at(-1)).toMatchObject({ exitCode: 0, message: expect.stringContaining("broken") });
+				if (failBroken) {
+					expect(item.updates.at(-1)?.message).toContain("initialize failed");
+					expect(item.updates.at(-1)?.message).toContain("/lsp restart");
+				}
+				expect(item.manager.getStatus().find((entry) => entry.root.endsWith("broken"))).toMatchObject({
+					state: failBroken ? "failed" : "ready",
+					breaker: "closed",
+				});
+				expect(item.manager.getStatus().find((entry) => entry.root.endsWith("healthy"))).toMatchObject({
+					state: "ready",
+					breaker: "closed",
+				});
+			} finally {
+				installGate.resolve();
+				delayedRootGate.resolve();
+				await pending;
+			}
+		},
+	);
 
 	it("finishes verification even after the installing caller cancels", async () => {
 		const item = fixture((bin) => launcher(bin));
