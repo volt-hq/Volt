@@ -241,6 +241,7 @@ export {
 	type LspManagerOptions,
 	type LspOperationMetadata,
 	type LspOutcome,
+	type LspProjectContext,
 	type LspResult,
 	type LspServerSettings,
 	type LspServerStatus,

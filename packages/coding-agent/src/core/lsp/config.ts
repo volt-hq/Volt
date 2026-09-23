@@ -26,13 +26,17 @@ export interface LspServerSettings {
 	 * lookups use dot-separated paths into this object).
 	 */
 	settings?: unknown;
+	/** Automatic edit/write checks; inherits lsp.autoDiagnostics unless explicitly set. */
+	autoDiagnostics?: boolean;
 	/** Set false to disable a built-in or configured server */
 	enabled?: boolean;
 }
 
 export interface LspSettings {
-	/** Enable LSP diagnostics after edit/write. Default: true (set false to disable; --lsp forces enabled per run) */
+	/** Master switch for LSP operations. Default: true; --lsp overrides only this setting. */
 	enabled?: boolean;
+	/** Automatic diagnostics after edit/write, independent of explicit LSP operations. Default: true. */
+	autoDiagnostics?: boolean;
 	/** Server definitions, merged over the built-in defaults by name */
 	servers?: Record<string, LspServerSettings>;
 	/** How long to wait for published diagnostics after a change, in milliseconds. Default: 1500 */
@@ -55,6 +59,8 @@ export interface LspSettings {
 
 export interface ResolvedLspServerConfig {
 	name: string;
+	/** Explicit override; otherwise inherits the global automatic-check setting. */
+	autoDiagnostics?: boolean;
 	usesBuiltInCommand?: boolean;
 	command: string[];
 	fileExtensions: string[];
@@ -76,6 +82,7 @@ export interface LspInstallRecipe {
 
 export interface ResolvedLspConfig {
 	enabled: boolean;
+	autoDiagnostics: boolean;
 	servers: ResolvedLspServerConfig[];
 	disabledServers?: ResolvedLspServerConfig[];
 	settleMs: number;
@@ -240,6 +247,7 @@ export function resolveLspConfig(settings: LspSettings | undefined): ResolvedLsp
 		const installHint = installHintForCommand(command);
 		(overrides?.enabled === false ? disabledServers : servers).push({
 			name,
+			autoDiagnostics: overrides?.autoDiagnostics,
 			usesBuiltInCommand,
 			command: [...command],
 			fileExtensions: fileExtensions.map(normalizeExtension),
@@ -253,6 +261,7 @@ export function resolveLspConfig(settings: LspSettings | undefined): ResolvedLsp
 	}
 	return {
 		enabled: settings?.enabled ?? true,
+		autoDiagnostics: settings?.autoDiagnostics ?? true,
 		servers,
 		disabledServers,
 		settleMs: settings?.settleMs ?? 1500,

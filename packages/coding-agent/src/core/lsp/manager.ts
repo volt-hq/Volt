@@ -29,8 +29,22 @@ import {
 	type ResolvedLspServerConfig,
 	SEVERITY_NAMES,
 } from "./config.ts";
+import {
+	type DiagnosticFeedbackSnapshot,
+	LspDiagnosticFeedback,
+	MAX_AUTOMATIC_REPORT_BYTES,
+} from "./diagnostic-feedback.ts";
 import { isManagedLspObservation, recordManagedLspLocations, recordManagedLspSymbols } from "./managed-observation.ts";
-import { LspOperationError, type LspResult, lspErrorResult, lspResult, lspSucceeded, waitForLsp } from "./outcome.ts";
+import {
+	LspOperationError,
+	type LspProjectContext,
+	type LspResult,
+	lspErrorResult,
+	lspResult,
+	lspSucceeded,
+	waitForLsp,
+} from "./outcome.ts";
+import { swiftContextCaveat, swiftProjectContext } from "./project-context.ts";
 import { LspTracer } from "./trace.ts";
 import { type LspVersionProbe, LspVersionProbes } from "./version-probe.ts";
 import { type LspWorkspaceEdit, normalizeWorkspaceEdit } from "./workspace-edit.ts";
@@ -97,6 +111,7 @@ export interface LspServerStatus {
 	totalDurationMs?: number;
 	lastDurationMs?: number;
 	coverage?: string;
+	projectContext?: LspProjectContext;
 }
 
 /** Internal display evidence; diagnostic reports must survive health-warning suppression. */
@@ -135,7 +150,6 @@ interface LspInstallAttempt {
 const MAX_START_ATTEMPTS = 3;
 const MAX_REFERENCES = 50;
 const MAX_SYMBOL_LINES = 200;
-const MAX_CROSS_FILE_REPORTS = 5;
 const LSP_INSTALL_REQUEST_TIMEOUT_MS = 10 * 60_000;
 const MAX_INSTALL_OUTPUT_CHARS = 12000;
 
@@ -532,7 +546,11 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		}
 	>();
 	private activeOperations = new Map<string, number>();
-	private automaticTransitions = new Map<string, string>();
+	private automaticTransitions = new Map<string, { sequence: number; transition: string }>();
+	private operationSequence = 0;
+	private feedback = new LspDiagnosticFeedback();
+	private feedbackSequence = 0;
+	private contextTransitions = new Map<string, { sequence: number; context: LspProjectContext }>();
 	private startFailures = new Map<string, ServerFailureState>();
 	private hostInteraction: HostInteraction | undefined;
 	private installRunner: LspInstallRunner;
@@ -679,15 +697,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					: {}),
 				...(client?.getStartupStderr() ? { startupStderr: client.getStartupStderr() } : {}),
 				...metrics,
-				...(name === "swift"
-					? {
-							coverage: pathEntryExists(resolve(root, "buildServer.json"))
-								? "Configured build server; module/reference coverage may require a recent build."
-								: pathEntryExists(resolve(root, "Package.swift"))
-									? "SwiftPM; module/reference coverage may require a recent build."
-									: "Limited loose-file semantics: Xcode projects require configured build settings/index support via a build server.",
-						}
-					: {}),
+				...this.projectContextEvidence(name, root),
 				openDocuments: client?.openDocumentCount ?? 0,
 				idleMs: now - (this.lastUsedAt.get(key) ?? now),
 				...(launch?.resolvedExecutable
@@ -713,18 +723,27 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				this.config.disabledServers?.find((entry) => entry.fileExtensions.includes(extname(canonical.path)));
 			if (!server) return lspResult("success", this.noServerMessage(canonical.path), { reason: "no-server" });
 			const root = this.findRoot(canonical.path, server.rootMarkers);
-			statuses = statuses
-				.filter(
-					(entry) =>
-						entry.name === server.name &&
-						(entry.root === root || entry.state === "unused" || entry.state === "disabled"),
-				)
-				.map((entry) => (entry.state === "unused" || entry.state === "disabled" ? { ...entry, root } : entry));
+			statuses = statuses.filter((entry) => entry.name === server.name && entry.root === root);
 			if (!statuses.length)
-				return lspResult(
-					"success",
-					`${server.name}: unused at ${root}; capabilities unknown. Status does not start servers.`,
-				);
+				statuses = [
+					{
+						name: server.name,
+						workspaceRoot: this.projectCwd,
+						root,
+						state:
+							!this.config.enabled || this.config.disabledServers?.some((entry) => entry.name === server.name)
+								? "disabled"
+								: "unused",
+						alive: false,
+						openDocuments: 0,
+						idleMs: 0,
+						attempts: 0,
+						launchSource: "path",
+						breaker: "closed",
+						unresolvedCommand: server.command[0],
+						...this.projectContextEvidence(server.name, root),
+					},
+				];
 		}
 		const text = statuses
 			.map((entry) =>
@@ -736,11 +755,27 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					`  last success: ${entry.lastSuccess ?? "none"}; last failure: ${entry.lastFailure ?? "none"}`,
 					...(entry.lastError ? [`  startup: ${entry.lastError}`] : []),
 					...(entry.requestError ? [`  request: ${entry.requestError}`] : []),
+					...(entry.projectContext ? [`  project context: ${entry.projectContext}`] : []),
 					...(entry.coverage ? [`  ${entry.coverage}`] : []),
 				].join("\n"),
 			)
 			.join("\n");
-		return lspResult("success", text || "No configured language servers.", { resultCount: statuses.length });
+		return lspResult(
+			"success",
+			`${text || "No configured language servers."}\nReady means transport initialized, not verified build settings or complete indexing. Status does not start servers.`,
+			{
+				resultCount: statuses.length,
+				...(absolutePath && statuses.length === 1
+					? { server: statuses[0].name, root: statuses[0].root, projectContext: statuses[0].projectContext }
+					: {}),
+			},
+		);
+	}
+
+	private projectContextEvidence(name: string, root: string): Pick<LspServerStatus, "projectContext" | "coverage"> {
+		if (name !== "swift") return {};
+		const projectContext = swiftProjectContext(root);
+		return { projectContext, coverage: swiftContextCaveat(projectContext) };
 	}
 
 	private async runOperation(
@@ -749,6 +784,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		automatic: boolean,
 	): Promise<LspResult> {
 		const startedAt = performance.now();
+		const sequence = ++this.operationSequence;
 		const canonical = await this.canonicalizeRequestedPath(absolutePath);
 		const path = "path" in canonical ? canonical.path : absolutePath;
 		const server = this.findServer(path);
@@ -771,6 +807,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			...evidence,
 			language: languageIdForExtension(extname(path)),
 			...(server ? { server: server.name, root } : {}),
+			...(server?.name === "swift"
+				? { projectContext: operationResult.projectContext ?? swiftProjectContext(root) }
+				: {}),
 			coldStartMs: Math.min(durationMs, context.coldStartMs),
 		};
 		if (!server) return result;
@@ -789,9 +828,18 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.metrics.set(key, metrics);
 		if (automatic) {
 			const transition = `${result.outcome}:${result.reason}`;
-			if (!lspSucceeded(result) && this.automaticTransitions.get(key) === transition)
+			const previous = this.automaticTransitions.get(key);
+			if (!lspSucceeded(result) && (previous?.transition === transition || (previous?.sequence ?? 0) > sequence))
 				result.text = diagnosticsText ?? "";
-			this.automaticTransitions.set(key, transition);
+			if ((previous?.sequence ?? 0) <= sequence) this.automaticTransitions.set(key, { sequence, transition });
+			if (Buffer.byteLength(result.text) > MAX_AUTOMATIC_REPORT_BYTES) {
+				const suffix = "\n... automatic LSP report truncated; use lsp diagnostics or status.";
+				result.text =
+					Buffer.from(result.text)
+						.subarray(0, MAX_AUTOMATIC_REPORT_BYTES - Buffer.byteLength(suffix))
+						.toString("utf8")
+						.replace(/\uFFFD$/, "") + suffix;
+			}
 		}
 		return result;
 	}
@@ -842,6 +890,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.versions.clear();
 		this.startupEvidence.clear();
 		this.automaticTransitions.clear();
+		this.feedback.clear();
+		this.contextTransitions.clear();
 		return count;
 	}
 
@@ -855,6 +905,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			if (!client.isStarting && !this.activeOperations.get(key) && now - lastUsed >= this.config.idleShutdownMs) {
 				client.dispose();
 				this.clients.delete(key);
+				this.feedback.forget(key);
 				// Keep launch, timing and failure evidence after idle shutdown.
 			}
 		}
@@ -871,12 +922,18 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	 * clean/skipped check or an already reported failure transition.
 	 */
 	async getDiagnostics(absolutePath: string, content: string, signal?: AbortSignal): Promise<LspResult> {
-		return this.runOperation(absolutePath, () => this.getDiagnosticsOperation(absolutePath, content, signal), true);
+		const sequence = ++this.feedbackSequence;
+		return this.runOperation(
+			absolutePath,
+			() => this.getDiagnosticsOperation(absolutePath, content, sequence, signal),
+			true,
+		);
 	}
 
 	private async getDiagnosticsOperation(
 		absolutePath: string,
 		content: string,
+		sequence: number,
 		signal?: AbortSignal,
 	): Promise<LspOperationResult> {
 		if (this.disposed) return lspResult("unavailable", "LSP manager disposed", { reason: "disposed" });
@@ -894,6 +951,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					? "disabled"
 					: "no-server",
 			});
+		if (!(server.autoDiagnostics ?? this.config.autoDiagnostics))
+			return lspResult("skipped", "", { reason: "auto-diagnostics-disabled" });
 		const root = this.findRoot(absolutePath, server.rootMarkers);
 		const key = this.serverKey(server.name, root);
 
@@ -937,21 +996,69 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				}
 				return { ...lspErrorResult(error), text: result.message ?? "" };
 			}
-			if (this.disposed) return lspResult("unavailable", "", { reason: "disposed" });
+			if (this.disposed || this.clients.get(key) !== client)
+				return lspResult("unavailable", "", { reason: "disposed" });
 
-			const ownDiagnostics = this.formatDiagnostics(absolutePath, diagnostics.diagnostics);
-			const crossFile = this.formatNewlyFailing(client, absolutePath, cleanBefore);
-			const diagnosticsText = [
-				ownDiagnostics && diagnostics.freshness === "unverified"
-					? `Best-effort diagnostics (unversioned):\n${ownDiagnostics}`
-					: ownDiagnostics,
-				crossFile,
-			]
-				.filter(Boolean)
-				.join("\n");
-			const { diagnostics: _items, ...evidence } = diagnostics;
+			if (lspSucceeded(diagnostics) && diagnostics.epoch !== client.getDiagnosticEpoch()) {
+				diagnostics = {
+					...lspResult("timeout", "Diagnostics collection superseded", {
+						reason: "superseded-collection",
+						freshness: "stale",
+					}),
+					diagnostics: [],
+				};
+			}
+			const projectContext = server.name === "swift" ? swiftProjectContext(root) : undefined;
+			let contextWarning = "";
+			const previousContext = this.contextTransitions.get(key);
+			if (projectContext && diagnostics.outcome !== "cancelled" && sequence >= (previousContext?.sequence ?? 0)) {
+				if (
+					previousContext?.context !== projectContext &&
+					(projectContext === "not-detected" || projectContext === "unknown")
+				)
+					contextWarning = swiftContextCaveat(projectContext);
+				this.contextTransitions.delete(key);
+				this.contextTransitions.set(key, { sequence, context: projectContext });
+				if (this.contextTransitions.size > 256)
+					this.contextTransitions.delete(this.contextTransitions.keys().next().value!);
+			}
+			const snapshots: DiagnosticFeedbackSnapshot[] = [];
+			if (lspSucceeded(diagnostics) && diagnostics.epoch === client.getDiagnosticEpoch()) {
+				snapshots.push({
+					path: absolutePath,
+					displayPath: this.displayPath(absolutePath),
+					diagnostics: diagnostics.diagnostics,
+					freshness: diagnostics.freshness,
+				});
+			}
+			// Even when the target timed out, independent current publications can
+			// provide useful feedback. Never lend them the target's confidence.
+			if (diagnostics.outcome !== "cancelled") {
+				for (const path of client.getOpenDocumentPaths()) {
+					if (path === absolutePath) continue;
+					const snapshot = client.getPublicationSnapshot(path);
+					if (snapshot)
+						snapshots.push({
+							...snapshot,
+							path,
+							displayPath: this.displayPath(path),
+							otherFile: true,
+							wasClean: cleanBefore.has(path),
+						});
+				}
+			}
+			const diagnosticsText = this.feedback.render(
+				key,
+				sequence,
+				snapshots.map((snapshot) => ({ ...snapshot, projectContext })),
+				this.config.maxSeverity,
+				this.config.maxDiagnostics,
+				contextWarning,
+			);
+			const { diagnostics: _items, epoch: _epoch, ...evidence } = diagnostics;
 			return {
 				...evidence,
+				projectContext,
 				diagnosticsText,
 				text:
 					diagnosticsText ||
@@ -980,32 +1087,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		return clean;
 	}
 
-	/** Report open documents that went from clean to failing since the snapshot. */
-	private formatNewlyFailing(client: LspClient, excludePath: string, cleanBefore: Set<string>): string | undefined {
-		const sections: string[] = [];
-		for (const path of client.getOpenDocumentPaths()) {
-			if (path === excludePath || !cleanBefore.has(path)) {
-				continue;
-			}
-			const published = client.getPublishedDiagnostics(path);
-			if (published === undefined) continue;
-			const formatted = this.formatDiagnostics(path, published);
-			if (formatted) {
-				sections.push(formatted);
-			}
-		}
-		if (sections.length === 0) {
-			return undefined;
-		}
-		const shown = sections.slice(0, MAX_CROSS_FILE_REPORTS);
-		if (sections.length > shown.length) {
-			shown.push(
-				`... and ${sections.length - shown.length} more file${sections.length - shown.length === 1 ? "" : "s"}`,
-			);
-		}
-		return `Newly failing in other open files:\n${shown.join("\n")}`;
-	}
-
 	dispose(): void {
 		this.disposed = true;
 		this.installAbortController.abort();
@@ -1024,6 +1105,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.launches.clear();
 		this.startAttempts.clear();
 		this.startFailures.clear();
+		this.feedback.clear();
+		this.contextTransitions.clear();
+		this.automaticTransitions.clear();
 		void this.tracer?.dispose();
 		this.tracer = undefined;
 	}
@@ -1308,14 +1392,22 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				this.config.firstSettleMs,
 				signal,
 			);
-			const { diagnostics: items, ...evidence } = diagnostics;
+			const { diagnostics: items, epoch: _epoch, ...evidence } = diagnostics;
 			const text = lspSucceeded(evidence)
 				? ((items.length && evidence.freshness === "unverified"
 						? `Best-effort diagnostics (unversioned):\n${this.formatDiagnostics(session.absolutePath, items) ?? "No reportable diagnostics."}`
 						: this.formatDiagnostics(session.absolutePath, items)) ??
 					`No diagnostics in ${this.displayPath(session.absolutePath)}${evidence.freshness === "unverified" ? " (best-effort, unversioned publication)" : ""}.`)
 				: `${evidence.text}; diagnostics are ${evidence.freshness}, not a clean check.`;
-			return { ...evidence, text };
+			const server = this.findServer(session.absolutePath);
+			const projectContext = server?.name === "swift" ? swiftProjectContext(session.client.rootDir) : undefined;
+			return {
+				...evidence,
+				projectContext,
+				text: projectContext
+					? `${text}\nSwift project context: ${projectContext}. ${swiftContextCaveat(projectContext)}`
+					: text,
+			};
 		} catch (error) {
 			return this.describeRequestError(absolutePath, error);
 		}
@@ -1905,6 +1997,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		}
 		existing?.dispose();
 		this.clients.delete(key);
+		this.feedback.forget(key);
 
 		const launch = resolveLspLaunch(server.command, {
 			projectCwd: this.projectCwd,
@@ -1944,6 +2037,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			initializationOptions: server.initializationOptions,
 			settings: server.settings,
 			tracer: this.tracer,
+			onDocumentClosed: (path) => {
+				if (this.clients.get(key) === clientRef) this.feedback.forget(key, path);
+			},
 			resolveTrackedDocumentPath: async (absolutePath) => {
 				const canonical = await this.canonicalizeRequestedPath(absolutePath);
 				return "error" in canonical ? undefined : canonical.path;
@@ -2092,7 +2188,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private removeFailedClient(key: string, client: LspClient): void {
 		// Remove and dispose the failed client (this also kills a process stuck
 		// in the handshake) so the next call attempts a genuinely fresh start.
-		if (this.clients.get(key) === client) this.clients.delete(key);
+		if (this.clients.get(key) === client) {
+			this.clients.delete(key);
+			this.feedback.forget(key);
+		}
 		client.dispose();
 	}
 

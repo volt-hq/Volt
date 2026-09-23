@@ -15,6 +15,8 @@ export type LspOutcome =
 
 export type LspFreshness = "fresh" | "unverified" | "stale" | "unknown";
 export type LspDiagnosticSource = "pull" | "push" | "cache" | "none";
+/** Read-only filesystem evidence, not proof of active build settings or indexing. */
+export type LspProjectContext = "build-server-detected" | "swiftpm-detected" | "not-detected" | "unknown";
 
 /** Human-readable output and machine-readable evidence are independent. */
 export interface LspResult {
@@ -27,6 +29,7 @@ export interface LspResult {
 	resultCount: number;
 	coldStartMs: number;
 	language?: string;
+	projectContext?: LspProjectContext;
 	server?: string;
 	root?: string;
 }
@@ -40,6 +43,7 @@ export interface LspOperationMetadata {
 	outcome: LspOutcome;
 	reason: string;
 	language: string;
+	projectContext?: LspProjectContext;
 	server: string;
 	durationMs: number;
 	coldStartMs: number;
@@ -129,6 +133,7 @@ export function lspOperationMetadata(
 		outcome: result.outcome,
 		reason: result.reason.slice(0, 80),
 		language: (result.language ?? "unknown").slice(0, 80),
+		...(result.projectContext ? { projectContext: result.projectContext } : {}),
 		server: (result.server ?? "none").slice(0, 80),
 		durationMs: Math.max(0, performance.now() - startedAt),
 		coldStartMs: result.coldStartMs,

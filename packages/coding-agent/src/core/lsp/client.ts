@@ -67,6 +67,8 @@ export interface LspClientOptions {
 	tracer?: LspTracer;
 	/** @internal Injectable process spawner for deterministic transport tests. */
 	serverSpawner?: (command: string[], cwd: string, environment: NodeJS.ProcessEnv) => ChildProcess;
+	/** Notify the manager when a tracked document closes, including workspace edits. */
+	onDocumentClosed?: (absolutePath: string) => void;
 	/** @internal Revalidate and resolve a tracked path immediately before disk refresh. */
 	resolveTrackedDocumentPath?: (absolutePath: string) => Promise<string | undefined>;
 }
@@ -85,6 +87,14 @@ interface PendingRequest {
 
 export interface LspDiagnosticResult extends LspResult {
 	diagnostics: LspDiagnostic[];
+	/** Internal synchronization evidence; never persisted in operation metadata. */
+	epoch?: number;
+}
+
+export interface LspPublicationSnapshot {
+	diagnostics: LspDiagnostic[];
+	freshness: "fresh" | "unverified";
+	epoch: number;
 }
 
 interface PublishedDiagnostics {
@@ -593,6 +603,7 @@ export class LspClient {
 		const collected = (diagnostics: LspDiagnostic[], evidence: Partial<LspResult>): LspDiagnosticResult => ({
 			...lspResult(diagnostics.length ? "success" : "empty", "", evidence),
 			diagnostics,
+			epoch: this.diagnosticEpoch,
 			diagnosticCount: diagnostics.length,
 		});
 		if (this.supportsPullDiagnostics) {
@@ -755,6 +766,7 @@ export class LspClient {
 			this.diagnosticEpoch++;
 			this.documents.delete(key);
 			this.published.delete(key);
+			this.options.onDocumentClosed?.(document.absolutePath);
 			this.notify("textDocument/didClose", { textDocument: { uri: document.uri } });
 			refreshed.push({ uri: document.uri, type: FILE_CHANGE_TYPE_DELETED, absolutePath: document.absolutePath });
 		};
@@ -851,8 +863,23 @@ export class LspClient {
 
 	/** Current-epoch publication, or undefined when missing/stale. Only a published [] is known clean. */
 	getPublishedDiagnostics(absolutePath: string): LspDiagnostic[] | undefined {
-		const entry = this.published.get(normalizeUri(pathToFileURL(absolutePath).toString()));
-		return entry?.epoch === this.diagnosticEpoch ? entry.diagnostics : undefined;
+		return this.getPublicationSnapshot(absolutePath)?.diagnostics;
+	}
+
+	/** Each file carries its own confidence; an edited file cannot vouch for its dependents. */
+	getPublicationSnapshot(absolutePath: string): LspPublicationSnapshot | undefined {
+		const key = normalizeUri(pathToFileURL(absolutePath).toString());
+		const entry = this.published.get(key);
+		if (!this.isAlive || !this.documents.has(key) || entry?.epoch !== this.diagnosticEpoch) return undefined;
+		return {
+			diagnostics: entry.diagnostics,
+			freshness: entry.version === undefined ? "unverified" : "fresh",
+			epoch: entry.epoch,
+		};
+	}
+
+	getDiagnosticEpoch(): number {
+		return this.diagnosticEpoch;
 	}
 
 	/** @internal Capture the exact tracked-document state at the start of an LSP request. */
@@ -897,6 +924,7 @@ export class LspClient {
 				for (const [key, document] of destinationDocuments) {
 					this.documents.delete(key);
 					this.published.delete(key);
+					this.options.onDocumentClosed?.(document.absolutePath);
 					this.notify("textDocument/didClose", { textDocument: { uri: document.uri } });
 				}
 
@@ -911,6 +939,7 @@ export class LspClient {
 				for (const [key, document] of sourceDocuments) {
 					this.documents.delete(key);
 					this.published.delete(key);
+					this.options.onDocumentClosed?.(document.absolutePath);
 					this.notify("textDocument/didClose", { textDocument: { uri: document.uri } });
 					const suffix = relative(change.oldPath, document.absolutePath);
 					const absolutePath = suffix ? join(change.newPath, suffix) : change.newPath;
@@ -941,6 +970,7 @@ export class LspClient {
 			for (const [key, document] of deletedDocuments) {
 				this.documents.delete(key);
 				this.published.delete(key);
+				this.options.onDocumentClosed?.(document.absolutePath);
 				this.notify("textDocument/didClose", { textDocument: { uri: document.uri } });
 			}
 		}
