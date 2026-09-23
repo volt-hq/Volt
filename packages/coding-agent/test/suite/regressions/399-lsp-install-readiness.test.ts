@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { HostActionUpdate } from "../../../src/core/host-interaction.ts";
+import type { HostActionUpdate, HostInteraction } from "../../../src/core/host-interaction.ts";
 import { LspClient } from "../../../src/core/lsp/client.ts";
 import { resolveLspConfig } from "../../../src/core/lsp/config.ts";
 import { LspManager } from "../../../src/core/lsp/manager.ts";
@@ -38,7 +38,7 @@ function fixture(install: (bin: string, component: string) => void = () => {}) {
 	vi.stubEnv("VOLT_OFFLINE", "0");
 	const updates: HostActionUpdate[] = [];
 	const completionStates: string[] = [];
-	const requestAction = vi.fn(async () => ({ decision: "approved" as const }));
+	const requestAction = vi.fn<HostInteraction["requestAction"]>(async () => ({ decision: "approved" }));
 	const installRunner = vi.fn(async () => {
 		install(bin, component);
 		return { exitCode: 0, output: "component installed" };
@@ -230,6 +230,58 @@ describe("LSP install readiness (#399)", () => {
 			breaker: "closed",
 		});
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
+	});
+
+	it.each([
+		{ mode: "explicit", lifecycle: "restart" },
+		{ mode: "automatic", lifecycle: "restart" },
+		{ mode: "explicit", lifecycle: "dispose" },
+		{ mode: "automatic", lifecycle: "dispose" },
+	] as const)("does not restore failures when a prompt rejects on $lifecycle ($mode)", async ({ mode, lifecycle }) => {
+		const item = fixture((bin) => launcher(bin));
+		const promptStarted = Promise.withResolvers<void>();
+		item.requestAction.mockImplementationOnce((_request, options) => {
+			promptStarted.resolve();
+			return new Promise((_resolve, reject) => {
+				options?.signal?.addEventListener("abort", () => reject(new Error("Host action aborted")), { once: true });
+			});
+		});
+		const pending =
+			mode === "explicit"
+				? item.manager.hover(item.path, "symbol")
+				: item.manager.getDiagnostics(item.path, "symbol\n");
+		await promptStarted.promise;
+		item.manager[lifecycle]();
+		expect(await pending).toMatchObject({ outcome: "cancelled", reason: "aborted" });
+		const status = item.manager.getStatus().find((entry) => entry.name === "rust");
+		expect(status).toMatchObject({ state: "unused", attempts: 0, breaker: "closed" });
+		expect(status?.lastError).toBeUndefined();
+		expect(item.requestAction).toHaveBeenCalledTimes(1);
+		expect(item.installRunner).not.toHaveBeenCalled();
+
+		if (lifecycle === "restart") {
+			expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
+			expect(item.requestAction).toHaveBeenCalledTimes(2);
+			expect(item.installRunner).toHaveBeenCalledTimes(1);
+			expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
+				state: "ready",
+				breaker: "closed",
+			});
+		}
+	});
+
+	it("still reports prompt rejections when the install attempt has not been cancelled", async () => {
+		const item = fixture();
+		item.requestAction.mockRejectedValueOnce(new Error("Host prompt unavailable"));
+		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({
+			outcome: "unavailable",
+			text: expect.stringContaining("LSP install prompt failed: Host prompt unavailable"),
+		});
+		expect(item.manager.getStatus().find((entry) => entry.name === "rust")).toMatchObject({
+			state: "failed",
+			lastError: expect.stringContaining("Host prompt unavailable"),
+		});
+		expect(item.installRunner).not.toHaveBeenCalled();
 	});
 
 	it("cancels obsolete verification on restart without poisoning the replacement", async () => {

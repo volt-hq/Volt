@@ -2023,8 +2023,16 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const installPending = recipe && this.installAttempts.has(installRecipeIdentity(recipe));
 		if (!this.disposed && installEligible && (!failure?.reported || installPending)) {
 			// Readiness, like installation, must finish even if every operation stops waiting.
+			const installSignal = this.installAbortController.signal;
 			const attempt = this.tryInstallMissingServer(server, recipe, error.key);
 			const result = await this.waitForInstallAttempt(attempt, signal);
+			// Restart/disposal revokes this attempt, including host prompt rejections.
+			// Never let its completion restore failures against the reset manager.
+			if (installSignal.aborted || this.disposed)
+				return {
+					retry: false,
+					failure: lspResult("cancelled", "LSP install cancelled.", { reason: "aborted" }),
+				};
 			if (result.retry) return { retry: true };
 			if (result.failure || result.cancelled)
 				return { retry: false, message: result.message, failure: result.failure };
