@@ -43,6 +43,7 @@ import type {
 	McpServerSummary,
 	McpToolSummary,
 } from "../../mcp/types.ts";
+import type { PromptCacheStatus } from "../../prompt-cache-status.ts";
 import type { ReviewCoverage, ReviewFinding } from "../../review.ts";
 import type { SourceInfo } from "../../source-info.ts";
 import type { SubscriptionUsageReport } from "../../subscription-usage.ts";
@@ -87,6 +88,7 @@ import type {
 import type { RpcImageContentSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import type { RpcReviewCoverageSchema, RpcReviewFindingSchema } from "./projections.ts";
 import type { RpcBashResultSchema, RpcCompactionResultSchema, RpcSessionStatsSchema } from "./responses.ts";
+import type { RpcPromptCacheStatusSchema } from "./session.ts";
 import type { RpcSubscriptionUsageReportSchema } from "./subscription-usage.ts";
 
 // volt-ai content and message shapes
@@ -116,6 +118,7 @@ type _messageEndFrame = Assert<MutualExtends<Static<typeof RpcMessageEndFrameSch
 
 // Host modules that own response-body shapes
 type _sessionStats = Assert<MutualExtends<Static<typeof RpcSessionStatsSchema>, JsonWireShape<SessionStats>>>;
+type _promptCacheStatus = Assert<MutualExtends<Static<typeof RpcPromptCacheStatusSchema>, PromptCacheStatus>>;
 type _subscriptionUsage = Assert<
 	MutualExtends<Static<typeof RpcSubscriptionUsageReportSchema>, JsonWireShape<SubscriptionUsageReport>>
 >;

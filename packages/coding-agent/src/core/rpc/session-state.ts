@@ -624,6 +624,7 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 	if (activeTools.projection) projection.activeTools = activeTools.projection;
 
 	const discussion = session.sessionManager.getReviewDiscussion?.();
+	const promptCache = typeof session.getPromptCacheStatus === "function" ? session.getPromptCacheStatus() : undefined;
 	const state: RpcSessionState = {
 		...(discussion ? { reviewDiscussion: projectReviewDiscussionLink(discussion) } : {}),
 		...(includeModel ? { model: session.model } : {}),
@@ -653,6 +654,7 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 		...(retryAttempt === 0 || retrySettings === undefined
 			? {}
 			: { activeRetry: { attempt: retryAttempt, maxAttempts: retrySettings.maxRetries } }),
+		...(promptCache === undefined ? {} : { promptCache }),
 		...(Object.keys(projection).length === 0 ? {} : { projection }),
 	};
 	const stateBytes = measureRpcJsonBytes(state);

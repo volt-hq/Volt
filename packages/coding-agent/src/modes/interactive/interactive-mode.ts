@@ -355,6 +355,8 @@ function isDeadTerminalError(error: unknown): boolean {
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
 const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
+/** Idle time after settlement before the transcript records when work finished. */
+const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
 
 /** Format an elapsed duration for the working indicator, e.g. "42s", "3m 12s", "1h 4m". */
@@ -365,6 +367,11 @@ function formatElapsedDuration(ms: number): string {
 	const seconds = totalSeconds % 60;
 	if (minutes < 60) return `${minutes}m ${seconds}s`;
 	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/** Local wall-clock time, e.g. "3:42 PM". */
+function formatClockTime(ms: number): string {
+	return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
@@ -553,6 +560,9 @@ export class InteractiveMode {
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private turnStartedAt: number | undefined = undefined;
 	private workingElapsedTimer: ReturnType<typeof setInterval> | undefined = undefined;
+	/** Current operation, summarized in the transcript once the session stays idle. */
+	private workSummary: { startedAt: number; aborted: boolean } | undefined = undefined;
+	private workSummaryTimer: ReturnType<typeof setTimeout> | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
@@ -773,7 +783,7 @@ export class InteractiveMode {
 			requestRender: () => this.ui.requestRender(),
 		});
 		this.footerDataProvider = new FooterDataProvider(this.session.gitContextProvider);
-		this.footer = new FooterComponent(this.session, this.footerDataProvider);
+		this.footer = new FooterComponent(this.session, this.footerDataProvider, () => this.ui.requestRender());
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerContainer.addChild(this.footer);
 		this.fullscreenTranscript = new ScrollView(this.documentContainer, {
@@ -2465,6 +2475,8 @@ export class InteractiveMode {
 		this.dismissBackgroundJobsInspector?.();
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
+		this.clearWorkSummaryTimer();
+		this.workSummary = undefined;
 		this.applyRuntimeSettings(session);
 		session.setHostInteraction(this.createHostInteraction());
 		await this.bindCurrentSessionExtensions(session);
@@ -2693,6 +2705,29 @@ export class InteractiveMode {
 		}
 
 		this.scheduleTurnDoneAlertTimer(0);
+	}
+
+	private clearWorkSummaryTimer(): void {
+		if (!this.workSummaryTimer) return;
+		clearTimeout(this.workSummaryTimer);
+		this.workSummaryTimer = undefined;
+	}
+
+	/** After settlement, record how long the operation ran and when it finished unless new work starts first. */
+	private scheduleWorkSummary(): void {
+		this.clearWorkSummaryTimer();
+		const summary = this.workSummary;
+		this.workSummary = undefined;
+		if (!summary || summary.aborted || this.shutdownRequested) return;
+		const doneAt = Date.now();
+		const text = `Worked for ${formatElapsedDuration(doneAt - summary.startedAt)} · done ${formatClockTime(doneAt)}`;
+		this.workSummaryTimer = setTimeout(() => {
+			this.workSummaryTimer = undefined;
+			if (this.isShuttingDown || this.session.isStreaming || this.session.isCompacting) return;
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("dim", text), 1, 0));
+			this.ui.requestRender();
+		}, WORK_SUMMARY_IDLE_MS);
 	}
 
 	private scheduleTurnDoneAlertTimer(delayMs: number): void {
@@ -4118,6 +4153,8 @@ export class InteractiveMode {
 				this.lastSigintTime = 0;
 				this.disposePendingTools();
 				this.turnStartedAt = event.startedAt;
+				this.clearWorkSummaryTimer();
+				this.workSummary = { startedAt: event.startedAt, aborted: false };
 				this.startWorkingElapsedTicker();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
@@ -4163,6 +4200,10 @@ export class InteractiveMode {
 
 			case "planning_state_changed":
 				this.refreshPlanningUi(event.planning);
+				break;
+
+			case "prompt_cache_changed":
+				this.ui.requestRender();
 				break;
 
 			case "ui_action_state_changed":
@@ -4350,6 +4391,12 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.disposePendingTools();
+				if (this.workSummary && !event.willRetry) {
+					const lastAssistant = event.messages.findLast(
+						(message): message is AssistantMessage => message.role === "assistant",
+					);
+					this.workSummary.aborted = lastAssistant?.stopReason === "aborted";
+				}
 
 				this.scheduleTurnDoneAlert(event);
 				this.updateEditorBorderColor(false);
@@ -4360,12 +4407,14 @@ export class InteractiveMode {
 			case "agent_settled":
 				this.quitConfirmation = undefined;
 				this.lastSigintTime = 0;
+				this.scheduleWorkSummary();
 				await this.checkShutdownRequested();
 				break;
 
 			case "compaction_start": {
 				this.quitConfirmation = undefined;
 				this.lastSigintTime = 0;
+				this.clearWorkSummaryTimer();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -9717,6 +9766,7 @@ export class InteractiveMode {
 		this.unsubscribeBackgroundJobs?.();
 		this.unsubscribeBackgroundJobs = undefined;
 		this.clearTurnDoneAlertTimer();
+		this.clearWorkSummaryTimer();
 		this.stopWorkingElapsedTicker();
 		this.streamingRenderCoalescer?.dispose();
 		this.streamingRenderCoalescer = undefined;

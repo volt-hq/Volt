@@ -51,6 +51,7 @@ import type {
 	RpcHostActionUpdateSchema,
 	RpcModelsChangedEventSchema,
 	RpcPendingHostActionsResponseSchema,
+	RpcPromptCacheChangedEventSchema,
 	RpcSubagentDisposedEventSchema,
 	RpcSubagentEndEventSchema,
 	RpcSubagentEventSchema,
@@ -124,6 +125,7 @@ import type {
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
 	RpcListSubagentsResponseSchema,
+	RpcPromptCacheStatusSchema,
 	RpcPromptResponseSchema,
 	RpcQueuedMessageSchema,
 	RpcQueueUpdateProjectionSchema,
@@ -337,6 +339,7 @@ export type RpcActiveToolExecution = Static<typeof RpcActiveToolExecutionSchema>
 export type RpcActiveAgentRun = Static<typeof RpcActiveAgentRunSchema>;
 export type RpcActiveCompaction = Static<typeof RpcActiveCompactionSchema>;
 export type RpcActiveRetry = Static<typeof RpcActiveRetrySchema>;
+export type RpcPromptCacheStatus = Static<typeof RpcPromptCacheStatusSchema>;
 /** One authoritative queued user message exposed to remote clients. */
 export type RpcQueuedMessage = Static<typeof RpcQueuedMessageSchema>;
 export type RpcQueueUpdateProjection = Static<typeof RpcQueueUpdateProjectionSchema>;
@@ -446,6 +449,8 @@ export type RpcSubagentDisposedEvent = Static<typeof RpcSubagentDisposedEventSch
 export type RpcModelsChangedEvent = Static<typeof RpcModelsChangedEventSchema>;
 /** Full replacement of the active session's path-free Git context. */
 export type RpcGitContextChangedEvent = Static<typeof RpcGitContextChangedEventSchema>;
+/** Full replacement of the current model's prompt-cache status. */
+export type RpcPromptCacheChangedEvent = Static<typeof RpcPromptCacheChangedEventSchema>;
 /** Settled, bounded state of a host UI action. */
 export type RpcUiActionStateChangedEvent = Static<typeof RpcUiActionStateChangedEventSchema>;
 /** Full authoritative planning snapshot emitted after every mutation. */
