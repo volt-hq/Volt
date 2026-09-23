@@ -506,10 +506,14 @@ export function assertLspCliScenario(report: LspCliReport): void {
 	assert.equal(requests[0].disk, null);
 	assert.equal(requests[1].serverStarted, false, "status must not start a language server");
 	// CoreFoundation may add its text-encoding marker after launch on macOS.
+	// libuv copies its required Windows variables into every custom child environment (src/win/process.c).
 	const allowedEnvironment = new Set([
 		...Object.keys(isolatedEnvironment(report.root)),
 		"VOLT_CODING_AGENT",
 		"__CF_USER_TEXT_ENCODING",
+		...(process.platform === "win32"
+			? ["HOMEDRIVE", "HOMEPATH", "LOGONSERVER", "SYSTEMDRIVE", "USERDOMAIN", "USERNAME", "WINDIR"]
+			: []),
 	]);
 	for (const request of requests) {
 		assert.deepEqual([...request.tools].sort(), ["edit", "lsp", "write"]);
