@@ -123,6 +123,25 @@ afterEach(() => {
 });
 
 describe("published diagnostics distinguish unknown from clean", () => {
+	it("exposes independent per-file freshness only for current publications", async () => {
+		const f = await fixture();
+		await f.client.openDocument(f.a, "source\n");
+		await f.client.openDocument(f.b, "dependency\n");
+		f.publish(f.a, [diagnostic], 1);
+		f.publish(f.b, [diagnostic], null);
+		expect(f.client.getPublicationSnapshot(f.a)).toMatchObject({ freshness: "fresh", diagnostics: [diagnostic] });
+		expect(f.client.getPublicationSnapshot(f.b)).toMatchObject({
+			freshness: "unverified",
+			diagnostics: [diagnostic],
+		});
+		await f.client.openDocument(f.a, "new source\n");
+		expect(f.client.getPublicationSnapshot(f.a)).toBeUndefined();
+		expect(f.client.getPublicationSnapshot(f.b)).toBeUndefined();
+		f.publish(f.b, [], null);
+		expect(f.client.getPublicationSnapshot(f.b)).toMatchObject({ freshness: "unverified", diagnostics: [] });
+		f.client.dispose();
+		expect(f.client.getPublicationSnapshot(f.b)).toBeUndefined();
+	});
 	it("requires a publication even for an open document", async () => {
 		const f = await fixture();
 		expect(f.client.getPublishedDiagnostics(f.a)).toBeUndefined();

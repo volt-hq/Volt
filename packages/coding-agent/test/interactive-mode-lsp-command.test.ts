@@ -38,7 +38,7 @@ function server(overrides: Partial<LspServerStatus> = {}): LspServerStatus {
 function context(servers: LspServerStatus[], enabled = true): Context {
 	return {
 		session: {
-			getLspStatus: () => ({ enabled, workspaceRoot: "/workspace", servers }),
+			getLspStatus: vi.fn(() => ({ enabled, workspaceRoot: "/workspace", servers })),
 			restartLspServers: vi.fn(() => 1),
 		},
 		chatContainer: new Container(),
@@ -76,6 +76,8 @@ describe("InteractiveMode /lsp health", () => {
 			const text = stripAnsi(lines.join("\n"));
 			for (const expected of [
 				"LSP Health",
+				"Snapshot only; no server starts or installs.",
+				"Ready means transport initialized; build settings/indexing are not verified.",
 				"degraded",
 				"7.0.2",
 				"hoverProvider",
@@ -98,13 +100,16 @@ describe("InteractiveMode /lsp health", () => {
 			server({ name: "unused", state: "unused" }),
 			server({ name: "idle", state: "idle", capabilities: undefined }),
 			server({ name: "starting", state: "starting", alive: true, capabilities: undefined }),
-			server({ name: "ready", state: "ready", alive: true, capabilities: [] }),
+			server({ name: "swift", state: "ready", alive: true, capabilities: [], projectContext: "swiftpm-detected" }),
 		]);
 		await prototype.handleLspCommand.call(ctx);
 		const text = stripAnsi(ctx.chatContainer.render(120).lines.join("\n"));
 		expect(text).toContain("unused unused");
 		expect(text).toContain("idle idle");
 		expect(text).toContain("starting starting");
+		expect(text).toContain("swift ready");
+		expect(text).toContain("Ready means transport initialized; build settings/indexing are not verified.");
+		expect(text).toContain("Project context: swiftpm-detected");
 		expect(text).toContain("Capabilities: unknown");
 		expect(text).toContain("Capabilities: none advertised");
 		expect(text).not.toContain("failed");
@@ -119,6 +124,28 @@ describe("InteractiveMode /lsp health", () => {
 		expect(text).toContain("capabilities unknown; not started");
 	});
 
+	it.each(["unused", "disabled"] as const)("shows Swift project context and coverage while %s", async (state) => {
+		const projectContexts = ["build-server-detected", "swiftpm-detected", "not-detected", "unknown"] as const;
+		const coverage = "Project markers do not verify build settings or indexing.";
+		const ctx = context(
+			projectContexts.map((projectContext) => server({ name: "swift", state, projectContext, coverage })),
+			state !== "disabled",
+		);
+		await prototype.handleLspCommand.call(ctx);
+		const lines = ctx.chatContainer.render(80).lines;
+		const text = stripAnsi(lines.join("\n"));
+		expect(text).toContain(`swift ${state}`);
+		for (const projectContext of projectContexts) {
+			expect(text).toContain(`Project context: ${projectContext}`);
+		}
+		expect(text).toContain(`Coverage: ${coverage}`);
+		expect(text).toContain("capabilities unknown; not started");
+		expect(text).not.toContain("Activity:");
+		expect(lines.every((line) => visibleWidth(line) <= 80)).toBe(true);
+		expect(ctx.session.getLspStatus).toHaveBeenCalledOnce();
+		expect(ctx.session.restartLspServers).not.toHaveBeenCalled();
+	});
+
 	it("retains startup, stderr, breaker and coverage context", async () => {
 		const ctx = context([
 			server({
@@ -128,6 +155,7 @@ describe("InteractiveMode /lsp health", () => {
 				attempts: 3,
 				lastError: "Initialize failed",
 				startupStderr: "Missing module",
+				projectContext: "not-detected",
 				coverage: "Limited loose-file semantics; configure a build server.",
 			}),
 		]);
@@ -138,6 +166,7 @@ describe("InteractiveMode /lsp health", () => {
 			"breaker open",
 			"Startup: Initialize failed",
 			"Stderr: Missing module",
+			"Project context: not-detected",
 			"Coverage: Limited loose-file semantics",
 		])
 			expect(text).toContain(expected);

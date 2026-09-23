@@ -31,6 +31,7 @@ export {
 	type LspFreshness,
 	type LspOperationMetadata,
 	type LspOutcome,
+	type LspProjectContext,
 	type LspResult,
 	lspResult,
 	lspSucceeded,

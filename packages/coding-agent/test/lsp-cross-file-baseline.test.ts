@@ -103,6 +103,7 @@ function fixture(maxSeverity = 1, pull = false) {
 		cwd: root,
 		config: {
 			enabled: true,
+			autoDiagnostics: true,
 			settleMs: 0,
 			firstSettleMs: 0,
 			idleShutdownMs: 0,
@@ -179,7 +180,8 @@ describe("cross-file diagnostics require a known clean baseline", () => {
 				f.publish(f.a, before, versioned);
 				const result = await f.editB(() => f.publish(f.a, [diagnostic], versioned));
 				if (newlyFailing) {
-					expect(result.text).toBe("Newly failing in other open files:\na.foo(1,1): error: Existing error in A");
+					expect(result.text).toContain("a.foo(1,1): error: Existing error in A");
+					expect(result.text).toContain(versioned ? "Diagnostics (fresh)" : "freshness: unverified");
 				} else {
 					expect(result.text).toBe("");
 				}
@@ -205,16 +207,15 @@ describe("cross-file diagnostics require a known clean baseline", () => {
 				outcome: "timeout",
 				reason: "no-current-publication",
 				diagnosticCount: 0,
-				text: "Newly failing in other open files:\na.foo(1,1): error: Existing error in A",
+				text: expect.stringContaining("a.foo(1,1): error: Existing error in A"),
 			});
 
 			const stillFailing = await f.editB(() => f.publish(f.a, [diagnostic], versioned), "value B fourth\n", false);
 			expect(stillFailing.text).toBe("");
 			// Recovery resets warning suppression, without relabeling earlier timeouts as success.
-			expect(await f.editB(() => f.publish(f.a, [], versioned), "value B recovered\n")).toMatchObject({
-				outcome: "empty",
-				text: "",
-			});
+			const recovered = await f.editB(() => f.publish(f.a, [], versioned), "value B recovered\n");
+			expect(recovered.outcome).toBe("empty");
+			expect(recovered.text).toEqual(versioned ? expect.stringContaining("no longer reported") : "");
 			const nextTimeout = await f.editB(() => f.publish(f.a, [], versioned), "value B timeout\n", false);
 			expect(nextTimeout.outcome).toBe("timeout");
 			expect(nextTimeout.text).toContain("Diagnostics not verified");
@@ -249,7 +250,10 @@ describe("cross-file diagnostics require a known clean baseline", () => {
 		await f.open(f.b);
 		f.publish(f.b, []);
 		const result = await f.editB(() => f.publish(f.b, [{ ...diagnostic, message: "New error in B" }]));
-		expect(result).toMatchObject({ outcome: "success", text: "b.foo(1,1): error: New error in B" });
+		expect(result).toMatchObject({
+			outcome: "success",
+			text: "Diagnostics (fresh):\nb.foo(1,1): error: New error in B",
+		});
 	});
 
 	it("reports only known clean files when the baseline mixes current and stale evidence", async () => {
@@ -265,7 +269,9 @@ describe("cross-file diagnostics require a known clean baseline", () => {
 			f.publish(f.a, [diagnostic]);
 			f.publish(c, [{ ...diagnostic, message: "New error in C" }]);
 		});
-		expect(result.text).toBe("Newly failing in other open files:\nc.foo(1,1): error: New error in C");
+		expect(result.text).toBe(
+			"Newly failing in other open files:\nDiagnostics (fresh):\nc.foo(1,1): error: New error in C",
+		);
 	});
 
 	it.each([false, true])("code actions tolerate unknown diagnostics and collect context (pull=%s)", async (pull) => {

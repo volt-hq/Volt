@@ -634,8 +634,9 @@ describe("LspManager", () => {
 		writeFileSync(filePath, content);
 		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toBeDefined();
-		expect(result?.split("\n")).toHaveLength(3);
+		expect(result?.split("\n").filter((line) => line.includes(": error:"))).toHaveLength(2);
 		expect(result).toContain("... and 2 more");
+		expect(result).toContain("truncated");
 	});
 
 	it("returns undefined for clean files and files with no matching server", async () => {
@@ -656,7 +657,7 @@ describe("LspManager", () => {
 		const second = await manager.getDiagnostics(filePath, "now ERROR\n").then((result) => result.text);
 		expect(second).toContain("error: found ERROR on line 1");
 		const third = await manager.getDiagnostics(filePath, "fixed\n").then((result) => result.text);
-		expect(third).toBe("");
+		expect(third).toContain("1 previously reported diagnostic no longer reported");
 	});
 
 	it("answers navigation queries via the fake server", async () => {

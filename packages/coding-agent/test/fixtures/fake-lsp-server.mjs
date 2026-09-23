@@ -18,11 +18,25 @@
 //   tests can assert sync behavior.
 // - Exits on the exit notification.
 
-import { readFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 
 if (process.argv.includes("--version")) {
 	process.stdout.write(`Version ${process.env.VOLT_FAKE_TS_VERSION ?? "7.0.2"}\n`);
 	process.exit(0);
+}
+
+// Optional CLI-fixture evidence channel. Never mixes acknowledgements into LSP stdout.
+const eventLogIndex = process.argv.indexOf("--event-log");
+const eventLog = eventLogIndex === -1 ? undefined : process.argv[eventLogIndex + 1];
+function record(event) {
+	if (eventLog) appendFileSync(eventLog, `${JSON.stringify(event)}\n`);
+}
+record({ type: "started", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2), envKeys: Object.keys(process.env) });
+if (eventLog) {
+	process.on("exit", (code) => record({ type: "exited", pid: process.pid, code }));
+	process.on("SIGTERM", () => process.exit(0));
+	// An abruptly terminated CLI must not leave the opt-in fixture server alive.
+	process.stdin.on("end", () => process.exit(0));
 }
 
 const navigationUriIndex = process.argv.indexOf("--navigation-uri");
@@ -113,6 +127,7 @@ function buildReplaceEdit(uri, text, find, replace) {
 }
 
 function send(message) {
+	record({ type: "sent", message });
 	const body = JSON.stringify(message);
 	process.stdout.write(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`);
 }
@@ -158,6 +173,7 @@ function scan(text, uri) {
 }
 
 function handle(message) {
+	record({ type: "received", message });
 	const { id, method, params } = message;
 	if (method === undefined) {
 		// Response to a server-initiated request (e.g. workspace/applyEdit).

@@ -6,7 +6,22 @@ The `lsp` tool exposes go-to-definition, references, hover, symbol outlines, dia
 
 ## Default and Disabling
 
-Diagnostics are on by default. To disable them, set `lsp.enabled` to `false` in `~/.volt/agent/settings.json` (or per project in `.volt/settings.json`):
+LSP and automatic diagnostics are on by default. To disable only automatic checks after `edit`/`write`, while retaining explicit diagnostics, navigation, rename, and fixes, set `lsp.autoDiagnostics` to `false` in `~/.volt/agent/settings.json` (or per project in `.volt/settings.json`):
+
+```json
+{
+  "lsp": {
+    "autoDiagnostics": false,
+    "servers": {
+      "typescript": { "autoDiagnostics": true }
+    }
+  }
+}
+```
+
+Each server inherits the global automatic-check setting unless it supplies its own boolean override. The example keeps automatic TypeScript checks enabled. A disabled automatic check is silent, does not start/install a server or synchronize documents, and records `skipped` / `auto-diagnostics-disabled` with freshness `unknown` and source `none`. A later explicit operation synchronizes current disk content.
+
+To disable **all semantic LSP operations**, set the master `lsp.enabled` switch to `false`:
 
 ```json
 {
@@ -16,19 +31,23 @@ Diagnostics are on by default. To disable them, set `lsp.enabled` to `false` in 
 }
 ```
 
-Use `volt --lsp` to force-enable LSP for a run when settings disable it.
+Use `volt --lsp` to force-enable only the master switch for a run. It does not override `autoDiagnostics` or re-enable servers with `servers.<name>.enabled: false`. Status remains available without startup.
 
 ## How It Works
 
-- Servers are spawned lazily: the first `edit`/`write` to a file with a matching extension starts the server for that file's server root.
+- Servers are spawned lazily: the first enabled automatic check or explicit semantic operation on a file with a matching extension starts the server for that file's server root.
 - LSP can access files outside the current workspace, just like Volt's file tools. Absolute paths, relative paths such as `../shared/src/index.ts`, and symlink aliases work for diagnostics, navigation, refactoring, and server-initiated edits. Existing paths (or the nearest existing ancestor for new files) are canonicalized so aliases share document and server state; dangling symlinks still fail resolution. Normal tool grants and Plan mode's read-only action restrictions still apply.
 - The session's canonical project workspace remains the base for configured commands and traces. It is normally the startup directory; remote and managed-worktree runtimes may retain the registered workspace or checkout while tools run from a nested directory. Accessing another repository does not load that repository's Volt settings, extensions, or other project resources: external servers use the current session's LSP configuration.
 - For files inside the project workspace, server-root discovery searches upward only to that workspace and falls back to it. Markers are priority-ordered entry names: for TypeScript, a `tsconfig.json` inside the workspace wins over a closer `package.json`. For external files, the search stops at the nearest `.git` entry (including worktree `.git` files), or before climbing into the home directory or filesystem root. Without a matching marker, it uses that repository root or, for loose files, the file's directory. External projects get separate lazily started clients rather than broadening the current server to index their common parent.
 - After each successful `edit`/`write`, volt syncs the new file content to the server and collects diagnostics, using pull diagnostics (`textDocument/diagnostic`) when the server supports them, otherwise waiting up to `settleMs` for the server to publish. The first collection on a freshly started server waits up to `firstSettleMs` instead, because some servers publish nothing until the project has loaded.
 - Before every diagnostics collection or navigation query, volt re-syncs any previously opened file whose on-disk content changed outside the `edit`/`write` tools (e.g. via `bash`: `git checkout`, codegen). Deleted files are closed on the server, and servers are notified via `workspace/didChangeWatchedFiles`.
-- Diagnostics at or above the configured `severity` are appended to the tool result and shown in the TUI. Other open files that go from clean to failing as a result of the change are reported in a `Newly failing in other open files` section (capped at 5 files; best-effort, depends on the server republishing within the settle window).
+- Automatic diagnostics at or above the configured `severity` are appended as **changes since the last delivered snapshot**, not repeated full reports. The first observation reports findings without claiming that the edit caused them. Later checks report additions/changes or changed freshness/project context; unchanged findings are silent. Comparison includes message, full range, severity, code, and source, before truncation.
+- Other open files are eligible after a known-clean-to-failing transition, reported in a `Newly failing in other open files` section (capped at 5 files). Each file carries its own freshness label; an unversioned dependent never inherits the edited file's `fresh` confidence. Current cross-file findings can still appear when the target file times out.
+- `maxDiagnostics` applies across the entire automatic report, with an additional 8 KiB text budget and an explicit truncation notice. Only emitted findings count as delivered, so omitted findings remain eligible on a later check. Delivery history is bounded to 256 files and 4096 fixed-size fingerprints; eviction, document closure, client replacement, restart, or reload may cause findings to be reported again.
+- Usable snapshots, including empty publications, remove disappeared findings from automatic history so recurrence is reported. Only fresh evidence can produce a concise `no longer reported` notice; this is not proof of a clean build. Unverified disappearance has no recovery claim. Timeouts, cancellation, stale, and unknown results do not clear baselines or imply clean checks.
+- Explicit `lsp` with `action: "diagnostics"` always returns the complete severity-filtered file snapshot within the existing `maxDiagnostics` limit, without consuming automatic delivery history. Use it to inspect suppressed findings.
 - One client runs per canonical `(server, server root)` pair. A failure in one nested root does not disable that server in another root. Servers shut down when the session ends or reloads, and after `idleShutdownMs` without use (they respawn lazily on the next operation).
-- `/lsp` shows an on-demand health snapshot: configured unused/disabled servers and per-root starting, ready, degraded, failed, blocked, or idle records. Details include resolved executable, launch source, observed version, advertised capabilities, activity/latency counters, recent successes/failures, startup stderr, and request errors. An alive process is not necessarily ready; an idle shutdown is not a failure. Unknown capabilities differ from an initialized server advertising none. There is no background status polling. `/lsp restart` stops owned processes and clears failed-start breakers so servers resolve and spawn fresh on next use.
+- `/lsp` shows an on-demand health snapshot: configured unused/disabled servers and per-root starting, ready, degraded, failed, blocked, or idle records. Details include resolved executable, launch source, observed version, advertised capabilities, activity/latency counters, recent successes/failures, startup stderr, and request errors. `ready` means the transport initialized, not that build settings or indexing are verified. An alive process is not necessarily ready; an idle shutdown is not a failure. Unknown capabilities differ from an initialized server advertising none. There is no background status polling. `/lsp restart` stops owned processes and clears failed-start breakers so servers resolve and spawn fresh on next use.
 - `/lsp trace [path]` enables protocol tracing at runtime (`/lsp trace off` disables): JSON-RPC traffic in both directions, server stderr, workspace/server roots, resolved launch context, attempts, and lifecycle events are appended with timestamps. Relative runtime paths and persistent `lsp.traceFile` paths resolve from the canonical project workspace, not the process invocation directory or nested runtime cwd.
 - Reviewed install prompts apply only to missing unchanged built-in bare commands, plus the built-in TypeScript command with a confirmed incompatible pre-7 compiler. Install prompts and concurrent attempts coalesce by reviewed recipe; cancelling one caller stops only its wait, while the shared install continues without affecting that root's startup breaker. After the installer exits successfully, Volt searches PATH again and verifies the normal LSP initialize handshake for each requesting server root before reporting readiness. A successful installer with an unresolved launcher or failed initialization is reported separately from installation failure. Explicit paths, custom commands, manual-install-only servers, and present-but-broken or unrecognized executables are never auto-installed. Offline and Plan-mode sessions never offer or run installs. After three failed starts only that `(server, root)` record is blocked until `/lsp restart` or `/reload`.
 
@@ -81,6 +100,17 @@ The built-in Swift server resolves `sourcekit-lsp` from inherited PATH first. On
 
 SwiftPM (`Package.swift`) and an existing BSP configuration (`buildServer.json`) provide project context. Module/reference coverage may require a recent build. A loose Swift file or an Xcode project without an already configured build server has limited semantics; a running server does not establish full workspace indexing. Volt defaults Swift initialization options to `backgroundIndexing: false`, does not create build-server configuration, select Xcode, run builds, or automatically set up an index. Explicit initialization options and SourceKit's own project configuration remain user-controlled; see [SourceKit configuration](https://github.com/swiftlang/sourcekit-lsp/blob/main/Documentation/Configuration%20File.md).
 
+Volt reports read-only marker evidence at the actual canonical server root, independently of server health:
+
+- `build-server-detected`: `buildServer.json` exists (takes precedence).
+- `swiftpm-detected`: `Package.swift` exists without a detected build-server marker.
+- `not-detected`: neither marker was detected.
+- `unknown`: inspection was unsupported or failed.
+
+These labels do **not** prove that SourceKit loaded the settings, that the marker is valid, or that indexing is complete. Path-routed status inspects its own root, including nested and external projects; it does not borrow evidence from the session root. Missing context produces one actionable automatic warning per server/root/context transition, and diagnostics remain visible with a best-effort label. Volt never hides an error by matching text such as `No such module`. Explicit diagnostics retains the context caveat. Marker changes refresh evidence on the next operation, but do not automatically reconfigure an existing server.
+
+For an Xcode project, manually configure your chosen SourceKit-compatible build server for the intended workspace/project, scheme, and destination, and place its `buildServer.json` at the server root shown by `/lsp`. Follow that build server's setup instructions and run any required build yourself. Then use `/lsp restart` (or `/reload` after changing Volt settings) so the server can load the new configuration. Recheck status and use a real build/test to verify project correctness. Volt does not generate compiler arguments, create BSP files, invoke Xcode, or automatically repair project context.
+
 SourceKit may finish `initialize` before loading the SwiftPM manifest. Early navigation can be empty while project context loads; an on-demand diagnostics collection can wait for publication evidence before navigation. Even a clean unversioned publication remains best-effort. Use a recent build and search fallback when references are incomplete, rather than repeatedly calling an unavailable server.
 
 ### Default definitions
@@ -126,12 +156,13 @@ All settings live under `lsp` in `settings.json`:
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `enabled` | boolean | `true` | Master switch; set `false` to disable (`--lsp` force-enables per run) |
+| `enabled` | boolean | `true` | Master switch; set `false` to disable (`--lsp` force-enables only this setting per run) |
+| `autoDiagnostics` | boolean | `true` | Automatic edit/write checks only; explicit operations remain available |
 | `settleMs` | number | `1500` | How long to wait for published diagnostics after a change (servers without pull diagnostics) |
 | `firstSettleMs` | number | `10000` | Wait window for the first diagnostics from a freshly started server (project load time) |
 | `idleShutdownMs` | number | `600000` | Shut down servers idle for this long (10 minutes); `0` disables idle shutdown |
 | `traceFile` | string | | Append protocol traffic, server stderr, resolved launch context, and lifecycle events to this file; relative paths resolve from the canonical project workspace (also `/lsp trace` at runtime) |
-| `maxDiagnostics` | number | `20` | Maximum diagnostics per tool call; the rest are summarized as `... and N more` |
+| `maxDiagnostics` | number | `20` | Maximum diagnostics across an automatic report, or in an explicit file snapshot; omitted output is summarized |
 | `severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
 | `servers.<name>` | object | | Server definition, merged over the built-in default with the same name |
 
@@ -144,7 +175,8 @@ Per-server fields:
 | `rootMarkers` | string[] | Priority-ordered file/directory entry names marking a server root; searched within the current workspace or the external project discovery range described above |
 | `initializationOptions` | any | Passed to the server in the `initialize` request |
 | `settings` | object | Server configuration: sent via `workspace/didChangeConfiguration` after startup and used to answer `workspace/configuration` section requests (dot-separated section paths look up into this object) |
-| `enabled` | boolean | Set `false` to disable a built-in server |
+| `enabled` | boolean | Set `false` to disable a built-in or configured server; authoritative over automatic-check settings |
+| `autoDiagnostics` | boolean | Override global automatic edit/write checks for this server; otherwise inherits global |
 
 Example: tuning pyright through `settings`:
 
@@ -182,7 +214,7 @@ Run `/reload` to load the changed settings and clear failed-start state without 
 
 ## Structured outcomes and freshness
 
-Explicit LSP calls and automatic diagnostics attach bounded machine-readable `details.lsp` metadata: `operationId`, `trigger` (`explicit`, `edit`, or `write`), `action`, `completedAt`, `outcome`, `reason`, `language`, `server`, `durationMs`, `coldStartMs`, `diagnosticCount`, `resultCount`, `freshness`, and `source`. Metadata contains no diagnostic prose or source snippets. Consumers should use these fields and normal `isError`, not parse display text. RPC/mobile consumers use the existing tool-result error projection; there is no separate LSP wire protocol.
+Explicit LSP calls and automatic diagnostics attach bounded machine-readable `details.lsp` metadata: `operationId`, `trigger` (`explicit`, `edit`, or `write`), `action`, `completedAt`, `outcome`, `reason`, `language`, `server`, `durationMs`, `coldStartMs`, `diagnosticCount`, `resultCount`, `freshness`, `source`, and (for Swift) the bounded `projectContext` enum above. Metadata contains no diagnostic prose, source snippets, or compiler arguments. Collection counts and outcomes remain present when automatic display text is suppressed; silence is not a clean result. Consumers should use these fields and normal `isError`, not parse display text. RPC/mobile consumers use the existing tool-result error projection; there is no separate LSP wire protocol.
 
 Outcomes distinguish `success`, `empty`, `needs-selection`, `skipped`, `unavailable`, `unsupported`, `invalid-input`, `timeout`, `cancelled`, `request-failed`, and `edit-failed`. For automatic diagnostics, these describe diagnostics collection, not whether the file mutation succeeded.
 

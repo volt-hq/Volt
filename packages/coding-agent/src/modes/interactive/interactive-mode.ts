@@ -8571,6 +8571,7 @@ export class InteractiveMode {
 		} else {
 			info = `${theme.bold("LSP Health")}\n${theme.fg("muted", "Workspace:")} ${status.workspaceRoot ?? "unknown"}\n`;
 			info += `${theme.fg("muted", "Snapshot only; no server starts or installs. /lsp restart · /lsp trace [path|off]")}\n`;
+			info += `${theme.fg("muted", "Ready means transport initialized; build settings/indexing are not verified.")}\n`;
 			if (!status.enabled) {
 				info += `${theme.fg("warning", "LSP is disabled. Enable with --lsp or lsp.enabled=true.")}\n`;
 			}
@@ -8586,11 +8587,15 @@ export class InteractiveMode {
 								? "warning"
 								: "muted";
 				info += `\n${theme.bold(server.name)} ${theme.fg(color, state)}`;
-				if (state === "unused" || state === "disabled") {
+				const notStarted = state === "unused" || state === "disabled";
+				if (notStarted) {
 					info += ` ${theme.fg("muted", "· capabilities unknown; not started")}\n`;
-					continue;
+				} else {
+					info += ` ${theme.fg("muted", `· version ${server.version ?? server.serverInfo?.version ?? "unknown"} · breaker ${server.breaker ?? "unknown"}`)}\n`;
 				}
-				info += ` ${theme.fg("muted", `· version ${server.version ?? server.serverInfo?.version ?? "unknown"} · breaker ${server.breaker ?? "unknown"}`)}\n`;
+				if (server.projectContext) info += `${theme.fg("muted", "Project context:")} ${server.projectContext}\n`;
+				if (server.coverage) info += `${theme.fg("warning", `Coverage: ${server.coverage}`)}\n`;
+				if (notStarted) continue;
 				info += `${theme.fg("muted", "Root:")} ${server.root}\n`;
 				info += `${theme.fg("muted", "Executable:")} ${server.resolvedExecutable ?? `unresolved: ${server.unresolvedCommand ?? "unknown"}`} (${server.launchSource})\n`;
 				if (server.serverInfo) info += `${theme.fg("muted", "Server:")} ${server.serverInfo.name}\n`;
@@ -8602,7 +8607,6 @@ export class InteractiveMode {
 				if (server.lastError) info += `${theme.fg("error", `Startup: ${server.lastError}`)}\n`;
 				if (server.startupStderr) info += `${theme.fg("muted", `Stderr: ${server.startupStderr}`)}\n`;
 				if (server.requestError) info += `${theme.fg("warning", `Request: ${server.requestError}`)}\n`;
-				if (server.coverage) info += `${theme.fg("warning", `Coverage: ${server.coverage}`)}\n`;
 			}
 			if (status.traceFile) info += `\n${theme.fg("muted", "Trace:")} ${status.traceFile}\n`;
 		}
