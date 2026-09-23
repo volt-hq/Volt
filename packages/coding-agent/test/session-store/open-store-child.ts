@@ -2,12 +2,19 @@ import { type SessionStoreInfo, SQLiteSessionStoreClient } from "../../src/core/
 
 export type OpenStoreChildRequest =
 	| { readonly kind: "open"; readonly sessionDirectory: string }
+	| {
+			readonly kind: "load";
+			readonly sessionId: string;
+			readonly sessionGeneration: string;
+			readonly durationMs: number;
+	  }
 	| { readonly kind: "close" };
 
 export type OpenStoreChildResponse =
 	| { readonly kind: "ready" }
 	| { readonly kind: "opening" }
 	| { readonly kind: "opened"; readonly info: SessionStoreInfo }
+	| { readonly kind: "loaded"; readonly reads: number; readonly entries: number }
 	| { readonly kind: "error"; readonly code?: string; readonly message: string }
 	| { readonly kind: "closed" };
 
@@ -47,6 +54,22 @@ function parseRequest(message: unknown): OpenStoreChildRequest {
 	if (message.kind === "open" && "sessionDirectory" in message && typeof message.sessionDirectory === "string") {
 		return { kind: "open", sessionDirectory: message.sessionDirectory };
 	}
+	if (
+		message.kind === "load" &&
+		"sessionId" in message &&
+		typeof message.sessionId === "string" &&
+		"sessionGeneration" in message &&
+		typeof message.sessionGeneration === "string" &&
+		"durationMs" in message &&
+		typeof message.durationMs === "number"
+	) {
+		return {
+			kind: "load",
+			sessionId: message.sessionId,
+			sessionGeneration: message.sessionGeneration,
+			durationMs: message.durationMs,
+		};
+	}
 	throw new TypeError("Invalid session store child request");
 }
 
@@ -62,6 +85,24 @@ async function handleRequest(message: unknown): Promise<void> {
 		} finally {
 			opening = false;
 		}
+		return;
+	}
+	if (request.kind === "load") {
+		if (!client) throw new Error("Session store child fixture has no open client");
+		// Repeat until the deadline; every snapshot must match the first one.
+		const deadline = Date.now() + request.durationMs;
+		let reads = 0;
+		let entries: number | undefined;
+		do {
+			const snapshot = await client.loadSession(request.sessionId, request.sessionGeneration);
+			if (!snapshot) throw new Error(`Session ${request.sessionId} disappeared after ${reads} reads`);
+			entries ??= snapshot.entries.length;
+			if (snapshot.entries.length !== entries) {
+				throw new Error(`Read ${reads} returned ${snapshot.entries.length} entries instead of ${entries}`);
+			}
+			reads += 1;
+		} while (Date.now() < deadline);
+		send({ kind: "loaded", reads, entries });
 		return;
 	}
 

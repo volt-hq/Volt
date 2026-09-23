@@ -1,31 +1,27 @@
-import { closeSync, constants, fchmodSync, fstatSync, lstatSync, openSync } from "node:fs";
-import { PRIVATE_FILE_MODE } from "../../utils/private-files.ts";
+import type { Stats } from "node:fs";
+import { hardenPrivateRegularFileSync } from "../../utils/private-files.ts";
 
-/** SQLite may unlink WAL/SHM files while a different connection is opening or closing. */
-export function hardenSessionStoreSidecars(databasePath: string): void {
+/**
+ * Keep the store database and its WAL sidecars owner-only, rejecting symlinks
+ * and hard links. The database must exist; SQLite removes the sidecars when the
+ * last connection closes, so they are optional.
+ *
+ * This must stay path-based. SQLite's WAL and shared-memory locks are POSIX
+ * record locks, and closing *any* descriptor for a file releases every lock
+ * this process holds on it. Opening a sidecar here would silently drop a live
+ * connection's locks, and the next process to open the store would treat it
+ * as abandoned and reinitialize `-shm` underneath it (SIGBUS or torn reads).
+ *
+ * Returns the validated database identity for post-open identity checks.
+ */
+export function hardenSessionStoreFiles(databasePath: string): Stats {
+	const databaseStat = hardenPrivateRegularFileSync(databasePath);
 	for (const path of [`${databasePath}-wal`, `${databasePath}-shm`]) {
-		let fd: number | undefined;
 		try {
-			const noFollow = typeof constants.O_NOFOLLOW === "number" ? constants.O_NOFOLLOW : 0;
-			fd = openSync(path, constants.O_RDONLY | noFollow);
-			const stat = fstatSync(fd);
-			if (!stat.isFile() || stat.nlink > 1) {
-				throw new Error(`Refusing to use non-private session sidecar: ${path}`);
-			}
-			// An unlinked inode no longer exposes a path and must not be confused with a replacement.
-			if (stat.nlink === 0) continue;
-			if (noFollow === 0) {
-				const current = lstatSync(path);
-				if (current.isSymbolicLink() || current.dev !== stat.dev || current.ino !== stat.ino) {
-					throw new Error(`Session sidecar identity changed while opening: ${path}`);
-				}
-			}
-			fchmodSync(fd, PRIVATE_FILE_MODE);
+			hardenPrivateRegularFileSync(path);
 		} catch (error) {
-			// Missing sidecars are normal, including removal between open and identity checks.
 			if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-		} finally {
-			if (fd !== undefined) closeSync(fd);
 		}
 	}
+	return databaseStat;
 }
