@@ -185,6 +185,7 @@ import {
 	type PromptCacheKeepAliveStop,
 	type PromptCacheRefreshEntryData,
 	type PromptCacheRefreshReason,
+	promptCacheRefreshBudget,
 } from "./prompt-cache-keepalive.ts";
 import {
 	applyPromptCacheRefresh,
@@ -953,6 +954,17 @@ export class AgentSession {
 			now: () => Date.now(),
 			settings: () => this.settingsManager.getPromptCacheKeepAlive(),
 			status: () => this._currentPromptCacheStatus(),
+			refreshBudget: () =>
+				this.model === undefined
+					? 0
+					: promptCacheRefreshBudget(
+							this.model,
+							resolvePromptCacheRetention(
+								this.model,
+								this._streamOptions.cacheRetention,
+								this._streamOptions.env,
+							),
+						),
 			canRefresh: () =>
 				this._canRefreshPromptCache && this.model !== undefined && supportsPromptCacheRefresh(this.model),
 			hasInFlightWork: () => this.isBusy || this.hasBackgroundJobs,
@@ -8762,7 +8774,11 @@ export class AgentSession {
 			provider: model.provider,
 			model: model.id,
 			...(ttlSeconds === undefined ? {} : { ttlSeconds }),
-			keepAlive: { enabled: keepAlive.enabled, idleWindowMinutes: keepAlive.idleWindowMs / 60_000 },
+			keepAlive: {
+				enabled: keepAlive.enabled,
+				idleWindowMinutes: keepAlive.idleWindowMs / 60_000,
+				refreshBudget: promptCacheRefreshBudget(model, retention),
+			},
 		};
 	}
 
@@ -8797,7 +8813,7 @@ export class AgentSession {
 		} else {
 			this._promptCacheRequestBasis = { precededBy: "none", previousRecord };
 		}
-		this._promptCacheKeepAlive.update();
+		this._promptCacheKeepAlive.requestStarted();
 	}
 
 	private _recordPromptCacheRequest(message: AssistantMessage): void {

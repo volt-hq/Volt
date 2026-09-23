@@ -23,7 +23,8 @@ interface PromptCacheAuditCommon {
 	model: string;
 	/** Documented TTL of the active retention tier, when published. */
 	ttlSeconds?: number;
-	keepAlive: { enabled: boolean; idleWindowMinutes: number };
+	/** Keepalive settings, and the refreshes allowed per real request at the model's prices. */
+	keepAlive: { enabled: boolean; idleWindowMinutes: number; refreshBudget: number };
 }
 
 export type PromptCacheAuditEvent =

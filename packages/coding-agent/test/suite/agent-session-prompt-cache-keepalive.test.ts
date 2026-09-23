@@ -16,6 +16,8 @@ import type { Settings } from "../../src/core/settings-manager.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 const MINUTE = 60_000;
+/** Opus 5.5 rates: a 24-refresh budget per request on the 5-minute tier. */
+const priced = { input: 4, output: 20, cacheRead: 0.2, cacheWrite: 5 };
 const renewing: PromptCacheMetadata = {
 	modes: ["explicit"],
 	retention: { short: { ttlSeconds: 300 } },
@@ -56,9 +58,10 @@ describe("AgentSession prompt-cache keepalive", () => {
 		settings?: Partial<Settings>;
 		tools?: AgentTool[];
 		agentDir?: string;
+		unpriced?: boolean;
 	}): Promise<Harness> {
 		const harness = await createHarness({
-			models: [{ id: "cached", promptCache: renewing }],
+			models: [{ id: "cached", promptCache: renewing, ...(options.unpriced ? {} : { cost: priced }) }],
 			...(options.refresh === undefined ? {} : { refreshPromptCache: options.refresh }),
 			...(options.settings === undefined ? {} : { settings: options.settings }),
 			...(options.tools === undefined ? {} : { tools: options.tools }),
@@ -93,13 +96,14 @@ describe("AgentSession prompt-cache keepalive", () => {
 		const settled = harness.session.getPromptCacheStatus();
 		expect(settled).toMatchObject({ kind: "retained", keepAliveUntil: expect.any(Number) });
 		const firstExpiry = settled?.kind === "retained" ? settled.expiresAt! : 0;
+		const costBefore = harness.session.getSessionStats().cost;
 
 		await vi.advanceTimersByTimeAsync(4 * MINUTE + 1000);
 		expect(harness.faux.state.refreshCount).toBe(1);
 		const renewed = harness.session.getPromptCacheStatus();
 		expect(renewed?.kind === "retained" && renewed.expiresAt! > firstExpiry).toBe(true);
 		expect(refreshEntries(harness)).toEqual([expect.objectContaining({ reason: "idle" })]);
-		expect(harness.session.getSessionStats().cost).toBeCloseTo(0.25, 10);
+		expect(harness.session.getSessionStats().cost - costBefore).toBeCloseTo(0.25, 10);
 		expect(harness.eventsOfType("prompt_cache_changed").at(-1)?.promptCache).toMatchObject({ kind: "retained" });
 
 		await vi.advanceTimersByTimeAsync(20 * MINUTE);
@@ -117,6 +121,19 @@ describe("AgentSession prompt-cache keepalive", () => {
 		);
 		expect(records.map((record) => record.kind)).toEqual(["request", "refresh", "refresh", "keepalive_stop"]);
 		expect(records.at(-1)).toMatchObject({ reason: "idle_window_elapsed" });
+		expect(records[0]).toMatchObject({ keepAlive: { refreshBudget: 24 } });
+	});
+
+	it("does not refresh when the model has no prices to bound refresh spend", async () => {
+		const harness = await create({ refresh: refreshed, unpriced: true });
+		harness.setResponses([fauxAssistantMessage("hello")]);
+		await harness.session.prompt("hi");
+		await harness.session.waitForIdle();
+
+		await vi.advanceTimersByTimeAsync(10 * MINUTE);
+
+		expect(harness.faux.state.refreshCount).toBe(0);
+		expect(harness.session.getPromptCacheStatus()).not.toHaveProperty("keepAliveUntil");
 	});
 
 	it("refreshes while a long tool call runs", async () => {

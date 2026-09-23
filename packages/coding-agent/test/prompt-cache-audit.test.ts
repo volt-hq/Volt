@@ -8,7 +8,7 @@ const common = {
 	provider: "anthropic",
 	model: "claude-opus-5-5",
 	ttlSeconds: 300,
-	keepAlive: { enabled: true, idleWindowMinutes: 15 },
+	keepAlive: { enabled: true, idleWindowMinutes: 15, refreshBudget: 24 },
 };
 const usage = { input: 4, output: 0, cacheRead: 6000, cacheWrite: 0, cacheWrite1h: 0, costTotal: 0.0012 };
 
