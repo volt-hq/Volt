@@ -37,6 +37,7 @@ import {
 import { SESSION_STORE_SCHEMA_SQL } from "../../src/core/session-store/schema.ts";
 import { matchSession, parseSearchQuery } from "../../src/modes/interactive/components/session-selector-search.ts";
 import type { OpenStoreChildRequest, OpenStoreChildResponse } from "./open-store-child.ts";
+import { foreignOpenPreservesWalIndex } from "./wal-index-probe.ts";
 
 const CREATED_AT = "2026-08-31T12:00:00.000Z";
 const UPDATED_AT = "2026-08-31T12:01:00.000Z";
@@ -333,7 +334,14 @@ function mutateStoreSchema(databasePath: string, sql: string): void {
 function openStoreChildResponseKind(message: unknown): OpenStoreChildResponse["kind"] | undefined {
 	if (!message || typeof message !== "object" || !("kind" in message)) return undefined;
 	const kind = message.kind;
-	if (kind === "ready" || kind === "opening" || kind === "opened" || kind === "error" || kind === "closed") {
+	if (
+		kind === "ready" ||
+		kind === "opening" ||
+		kind === "opened" ||
+		kind === "loaded" ||
+		kind === "error" ||
+		kind === "closed"
+	) {
 		return kind;
 	}
 	return undefined;
@@ -609,6 +617,91 @@ describe("SQLite session store", () => {
 
 		const reopened = await openStore(sessionDirectory);
 		expect(reopened.info.storeId).toBe(storeId);
+	}, 30_000);
+
+	// Regression: store hardening opened and closed -shm, which releases every
+	// POSIX record lock the process holds on it. Another process opening the
+	// store then reinitialized the WAL index under the live reader, which died
+	// with SIGBUS in walFindFrame or read a malformed snapshot. Windows locks are
+	// per handle, so the hazard is POSIX-only.
+	it.skipIf(process.platform === "win32")(
+		"keeps a live store's WAL index while other processes open the same store",
+		async () => {
+			const sessionDirectory = makeSessionDirectory();
+			const databasePath = join(sessionDirectory, SESSION_STORE_DATABASE_FILENAME);
+			const holder = spawnOpenStoreChild();
+			await waitForOpenStoreChildResponse(holder, ["ready"], "Session store holder readiness");
+			const opened = waitForOpenStoreChildResponse(holder, ["opened", "error"], "Session store holder open");
+			sendOpenStoreChildRequest(holder, { kind: "open", sessionDirectory });
+			const openResponse = await opened;
+			if (openResponse.kind === "error") throw errorFromOpenStoreChild(openResponse);
+
+			// Commit through a short-lived client: the live holder prevents the
+			// close-time checkpoint, so the holder's reads must consult WAL frames.
+			const writer = await openStore(sessionDirectory);
+			await writer.createHiddenSession(createInput());
+			const texts = Array.from({ length: 200 }, (_, index) => `message ${index} ${"x".repeat(1_000)}`);
+			const commit = await writer.applyTransaction(
+				transaction("session-1", 0, "commit-1", searchablePayload(texts)),
+			);
+			expect(commit.status).toBe("committed");
+			await writer.close();
+			clients.splice(clients.indexOf(writer), 1);
+			expect(existsSync(`${databasePath}-wal`)).toBe(true);
+
+			expect(foreignOpenPreservesWalIndex(databasePath)).toBe(true);
+
+			const loaded = waitForOpenStoreChildResponse(holder, ["loaded", "error"], "Session store holder reads");
+			let loadSettled = false;
+			void loaded.then(
+				() => {
+					loadSettled = true;
+				},
+				() => {
+					loadSettled = true;
+				},
+			);
+			sendOpenStoreChildRequest(holder, {
+				kind: "load",
+				sessionId: "session-1",
+				sessionGeneration: generationFor("session-1"),
+				durationMs: 1_500,
+			});
+			let foreignOpens = 0;
+			while (!loadSettled) {
+				const foreign = new DatabaseSync(databasePath, { timeout: SESSION_STORE_BUSY_TIMEOUT_MS });
+				try {
+					expect(foreign.prepare("SELECT count(*) AS n FROM entries").get()).toEqual({ n: texts.length });
+				} finally {
+					foreign.close();
+				}
+				foreignOpens += 1;
+				await delay(0);
+			}
+			const loadResponse = await loaded;
+			if (loadResponse.kind === "error") throw errorFromOpenStoreChild(loadResponse);
+			expect(loadResponse).toMatchObject({ kind: "loaded", entries: texts.length });
+			if (loadResponse.kind === "loaded") expect(loadResponse.reads).toBeGreaterThan(0);
+			expect(foreignOpens).toBeGreaterThan(0);
+			expect(foreignOpenPreservesWalIndex(databasePath)).toBe(true);
+			await closeOpenStoreChild(holder);
+		},
+		30_000,
+	);
+
+	it("reports a write blocked past the busy timeout as retryable store_busy", async () => {
+		const client = await openStore();
+		await client.createHiddenSession(createInput());
+		const write = transaction("session-1", 0, "commit-1", namedPayload("blocked"));
+		const blocker = new DatabaseSync(client.info.databasePath, { timeout: 0 });
+		try {
+			blocker.exec("BEGIN IMMEDIATE");
+			await expect(client.applyTransaction(write)).rejects.toMatchObject({ code: "store_busy" });
+		} finally {
+			if (blocker.isTransaction) blocker.exec("ROLLBACK");
+			blocker.close();
+		}
+		expect((await client.applyTransaction(write)).status).toBe("committed");
 	}, 30_000);
 
 	it("starts a store worker when the daemon process has V8 optimization arguments", async () => {

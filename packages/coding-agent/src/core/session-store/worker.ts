@@ -3,15 +3,11 @@ import { resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { parentPort, workerData } from "node:worker_threads";
 import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
-import {
-	ensurePrivateDirectorySync,
-	hardenPrivateRegularFileSync,
-	writePrivateNewFileSync,
-} from "../../utils/private-files.ts";
+import { ensurePrivateDirectorySync, writePrivateNewFileSync } from "../../utils/private-files.ts";
 import { decodeStoredSessionEntry, parsePersistedSessionEntry, sessionEntryEnvelope } from "../session-entry-codec.ts";
 import type { SessionEntry } from "../session-manager.ts";
 import { fuzzyMatchSessionText } from "../session-search.ts";
-import { hardenSessionStoreSidecars } from "./artifacts.ts";
+import { hardenSessionStoreFiles } from "./artifacts.ts";
 import {
 	digestSessionStoreTransactionPayload,
 	parseCanonicalSessionStoreJson,
@@ -31,6 +27,7 @@ import {
 	type SessionStoreWorkerResponseEnvelope,
 } from "./protocol.ts";
 import { initializeSessionStoreSchema } from "./schema-migration.ts";
+import { classifyOperationalStoreError } from "./sqlite-errors.ts";
 import {
 	SESSION_STORE_BUSY_TIMEOUT_MS,
 	SESSION_STORE_DATABASE_FILENAME,
@@ -73,27 +70,6 @@ let database: DatabaseSync | undefined;
 let storeId: string | undefined;
 let closed = false;
 
-function classifyOperationalStoreError(error: unknown): SessionStoreError | undefined {
-	if (!error || typeof error !== "object") return undefined;
-	const code = (error as { code?: unknown }).code;
-	if (code === "SQLITE_BUSY" || code === "SQLITE_LOCKED") {
-		return new SessionStoreError("store_busy", "SQLite session store is busy", { cause: error });
-	}
-	if (code === "SQLITE_FULL" || code === "ENOSPC" || code === "EDQUOT") {
-		return new SessionStoreError("store_full", "SQLite session store is full", { cause: error });
-	}
-	if (
-		(typeof code === "string" &&
-			(code.startsWith("SQLITE_IOERR") || code === "SQLITE_CANTOPEN" || code === "SQLITE_READONLY")) ||
-		code === "EIO" ||
-		code === "EMFILE" ||
-		code === "ENFILE"
-	) {
-		return new SessionStoreError("store_io_error", "SQLite session store I/O failed", { cause: error });
-	}
-	return undefined;
-}
-
 function sqlString(row: Record<string, unknown>, key: string): string {
 	const value = row[key];
 	if (typeof value !== "string") throw new Error(`Invalid SQLite ${key} column`);
@@ -127,8 +103,7 @@ function sqlBoolean(row: Record<string, unknown>, key: string): boolean {
 }
 
 function hardenStoreArtifacts(): void {
-	hardenPrivateRegularFileSync(databasePath);
-	hardenSessionStoreSidecars(databasePath);
+	hardenSessionStoreFiles(databasePath);
 }
 
 function pragmaInteger(db: DatabaseSync, sql: string, key: string): number {
@@ -173,17 +148,12 @@ function openDatabase(): SessionStoreInfo {
 	if (database) return storeInfo();
 
 	ensurePrivateDirectorySync(sessionDirectory);
-	hardenSessionStoreSidecars(databasePath);
 	try {
 		writePrivateNewFileSync(databasePath, new Uint8Array());
 	} catch (error) {
 		if (!(error instanceof Error && "code" in error && error.code === "EEXIST")) throw error;
 	}
-	hardenPrivateRegularFileSync(databasePath);
-	const preOpenStat = lstatSync(databasePath);
-	if (preOpenStat.isSymbolicLink() || !preOpenStat.isFile() || preOpenStat.nlink !== 1) {
-		throw new SessionStoreError("store_initialization_failed", "Session store path is not a private regular file");
-	}
+	const preOpenStat = hardenSessionStoreFiles(databasePath);
 
 	let opened: DatabaseSync | undefined;
 	try {
@@ -1003,10 +973,13 @@ function chunkFromRow(row: Record<string, unknown>): SessionStoreSearchChunk {
 	};
 }
 
+/** Bad projection data is an integrity failure; a busy, full, or failing store is not. */
 function projectionIntegrityError(
 	component: "summary" | "client_inputs" | "search_chunks",
 	cause: unknown,
 ): SessionStoreError {
+	const operationalError = classifyOperationalStoreError(cause);
+	if (operationalError) return operationalError;
 	return new SessionStoreError(
 		"session_store_projection_integrity",
 		`Session store ${component} projection does not match canonical entries`,
@@ -1595,8 +1568,9 @@ function execute(operation: SessionStoreWorkerOperation): unknown {
 }
 
 function errorResponse(requestId: number, error: unknown): SessionStoreWorkerResponseEnvelope {
-	if (error instanceof SessionStoreError) {
-		return { requestId, ok: false, error: { code: error.code, message: error.message } };
+	const storeError = error instanceof SessionStoreError ? error : classifyOperationalStoreError(error);
+	if (storeError) {
+		return { requestId, ok: false, error: { code: storeError.code, message: storeError.message } };
 	}
 	return {
 		requestId,
