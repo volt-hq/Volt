@@ -718,6 +718,7 @@ const CONVERSATION_SOURCE_EVENT_TYPES = new Set([
 	"thinking_level_changed",
 	"planning_state_changed",
 	"git_context_changed",
+	"prompt_cache_changed",
 	"background_jobs_changed",
 	"ui_action_state_changed",
 	"auto_retry_start",

@@ -124,6 +124,25 @@ export const RpcActiveRetrySchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/**
+ * Documented prompt-cache retention for the current model's reusable prefix.
+ * Clients compare `expiresAt` with their clock; no event fires at expiry.
+ */
+export const RpcPromptCacheStatusSchema = Type.Union([
+	Type.Object(
+		{
+			kind: Type.Literal("retained"),
+			/** Unix epoch milliseconds when the latest request with the current model started. */
+			lastRequestAt: Type.Number(),
+			/** Unix epoch milliseconds when the documented retention window lapses; absent when the provider publishes none. */
+			expiresAt: Type.Optional(Type.Number()),
+		},
+		{ additionalProperties: false },
+	),
+	/** Earlier requests used other models, so the next request starts uncached. */
+	Type.Object({ kind: Type.Literal("model_changed") }, { additionalProperties: false }),
+]);
+
 /** One authoritative queued user message exposed to remote clients. */
 export const RpcQueuedMessageSchema = Type.Object(
 	{
@@ -191,6 +210,8 @@ export const RpcSessionStateSchema = Type.Object(
 		activeAgentRun: Type.Optional(RpcActiveAgentRunSchema),
 		activeCompaction: Type.Optional(RpcActiveCompactionSchema),
 		activeRetry: Type.Optional(RpcActiveRetrySchema),
+		/** Absent when the model does not cache or the active prefix has no prior request. */
+		promptCache: Type.Optional(RpcPromptCacheStatusSchema),
 		projection: Type.Optional(RpcSessionStateProjectionSchema),
 	},
 	{ additionalProperties: false },

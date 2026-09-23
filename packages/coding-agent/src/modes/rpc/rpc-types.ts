@@ -53,6 +53,8 @@ export type {
 	RpcPlanState,
 	RpcPlanStep,
 	RpcPlanStepStatus,
+	RpcPromptCacheChangedEvent,
+	RpcPromptCacheStatus,
 	RpcPromptResponse,
 	RpcPushPlatform,
 	RpcPushProvider,

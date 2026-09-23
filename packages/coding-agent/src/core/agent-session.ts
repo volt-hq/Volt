@@ -174,6 +174,7 @@ import {
 	type PlanStepStatus,
 	parsePlanningState,
 } from "./planning.ts";
+import { type PromptCacheStatus, promptCacheStatusEquals, resolvePromptCacheStatus } from "./prompt-cache-status.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import { isTransientProviderError } from "./provider-errors.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
@@ -344,6 +345,7 @@ export type AgentSessionEvent =
 	| { type: "thinking_level_changed"; level: ThinkingLevel }
 	| { type: "planning_state_changed"; planning: PlanningState }
 	| { type: "git_context_changed"; gitContext: RpcGitContext | null }
+	| { type: "prompt_cache_changed"; promptCache: PromptCacheStatus | null }
 	| {
 			type: "ui_action_state_changed";
 			action: string;
@@ -678,6 +680,7 @@ export class AgentSession {
 	private _streamingMessage: AgentMessage | undefined;
 	private readonly _pendingToolExecutions = new Map<string, PendingToolExecution>();
 	private _runtimeErrorMessage: string | undefined;
+	private _publishedPromptCacheStatus: { status: PromptCacheStatus | undefined } | undefined;
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
 	private _steeringMessages: AgentSessionQueuedMessage[] = [];
@@ -2185,6 +2188,11 @@ export class AgentSession {
 			this.gitContextProvider.scheduleRefresh();
 		}
 		if (event.type === "agent_settled") this._backgroundDiagnostics.flush();
+		this._dispatchEvent(event);
+		if (event.type === "agent_settled" || event.type === "compaction_end") this._publishPromptCacheStatus();
+	}
+
+	private _dispatchEvent(event: AgentSessionEvent): void {
 		const listeners = [...this._eventListeners];
 		const description = `AgentSession ${event.type} event`;
 		let canonicalEvent: AgentSessionEvent;
@@ -6150,6 +6158,7 @@ export class AgentSession {
 	): Promise<void> {
 		this._assertConversationAuthorityAvailable();
 		if (modelsAreEqual(previousModel, nextModel)) return;
+		this._publishPromptCacheStatus();
 		this._invalidatePreparationWaitRequests();
 		await this._extensionRunner.emit({
 			type: "model_select",
@@ -8626,6 +8635,31 @@ export class AgentSession {
 			cost: totalCost,
 			contextUsage: this.getContextUsage(),
 		};
+	}
+
+	/** Documented retention of the current model's reusable prompt prefix; undefined when caching does not apply. */
+	getPromptCacheStatus(): PromptCacheStatus | undefined {
+		return resolvePromptCacheStatus({
+			model: this.model,
+			branch: this.sessionManager.getBranch(),
+			cacheRetention: this._streamOptions.cacheRetention,
+			env: this._streamOptions.env,
+		});
+	}
+
+	/** Emit prompt_cache_changed when the status differs from the last published value. */
+	private _publishPromptCacheStatus(): void {
+		let status: PromptCacheStatus | undefined;
+		try {
+			status = this.getPromptCacheStatus();
+		} catch {
+			// Derived presentation state cannot fail the event that triggered it.
+			return;
+		}
+		const published = this._publishedPromptCacheStatus;
+		if (published && promptCacheStatusEquals(published.status, status)) return;
+		this._publishedPromptCacheStatus = { status };
+		this._emit({ type: "prompt_cache_changed", promptCache: status ?? null });
 	}
 
 	getContextUsage(): ContextUsage | undefined {

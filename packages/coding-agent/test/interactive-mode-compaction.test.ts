@@ -255,6 +255,7 @@ describe("InteractiveMode compaction events", () => {
 			disposePendingTools: vi.fn(),
 			stopWorkingElapsedTicker: vi.fn(),
 			scheduleTurnDoneAlert: vi.fn(),
+			scheduleWorkSummary: vi.fn(),
 			updateEditorBorderColor: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => undefined),
 		};

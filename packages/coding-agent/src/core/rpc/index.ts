@@ -106,6 +106,8 @@ export type {
 	RpcMcpToolsResponse,
 	RpcModel,
 	RpcPendingHostActionsResponse,
+	RpcPromptCacheChangedEvent,
+	RpcPromptCacheStatus,
 	RpcPushPlatform,
 	RpcPushProvider,
 	RpcReadJobResponse,

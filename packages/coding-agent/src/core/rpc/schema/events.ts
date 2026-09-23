@@ -21,6 +21,7 @@ import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
 import { RpcConversationDeliveryPositionSchema } from "./conversation.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
+import { RpcPromptCacheStatusSchema } from "./session.ts";
 
 // ============================================================================
 // Host actions
@@ -253,6 +254,16 @@ export const RpcGitContextChangedEventSchema = Type.Object(
 	{
 		type: Type.Literal("git_context_changed"),
 		gitContext: Type.Union([RpcGitContextSchema, Type.Null()]),
+		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
+	},
+	{ additionalProperties: false },
+);
+
+/** Full replacement of the current model's prompt-cache status after a turn settles, compaction, or a model change. */
+export const RpcPromptCacheChangedEventSchema = Type.Object(
+	{
+		type: Type.Literal("prompt_cache_changed"),
+		promptCache: Type.Union([RpcPromptCacheStatusSchema, Type.Null()]),
 		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
 	},
 	{ additionalProperties: false },

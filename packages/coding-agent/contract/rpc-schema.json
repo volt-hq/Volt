@@ -6986,6 +6986,70 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcPromptCacheChangedEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"promptCache"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "prompt_cache_changed"
+				},
+				"promptCache": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcPromptCacheStatus"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcPromptCacheStatus": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"lastRequestAt"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "retained"
+						},
+						"lastRequestAt": {
+							"type": "number"
+						},
+						"expiresAt": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "model_changed"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
 		"RpcPromptResponse": {
 			"type": "object",
 			"required": [
@@ -13107,6 +13171,9 @@
 					"$ref": "#/$defs/RpcGitContextChangedEvent"
 				},
 				{
+					"$ref": "#/$defs/RpcPromptCacheChangedEvent"
+				},
+				{
 					"$ref": "#/$defs/RpcUiActionStateChangedEvent"
 				},
 				{
@@ -13290,6 +13357,9 @@
 				},
 				"activeRetry": {
 					"$ref": "#/$defs/RpcActiveRetry"
+				},
+				"promptCache": {
+					"$ref": "#/$defs/RpcPromptCacheStatus"
 				},
 				"projection": {
 					"$ref": "#/$defs/RpcSessionStateProjection"

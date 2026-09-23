@@ -310,6 +310,7 @@ export type {
 } from "./core/package-manager.ts";
 export { DefaultPackageManager } from "./core/package-manager.ts";
 export type { Personality } from "./core/personality.ts";
+export type { PromptCacheStatus } from "./core/prompt-cache-status.ts";
 export {
 	type AuthorizeIrohRemoteClientOptions,
 	assertIrohRemoteHandshakeHostIdentity,
@@ -955,6 +956,8 @@ export {
 	type RpcMcpToolsResponse,
 	type RpcModeOptions,
 	type RpcPendingHostActionsResponse,
+	type RpcPromptCacheChangedEvent,
+	type RpcPromptCacheStatus,
 	type RpcPushPlatform,
 	type RpcPushProvider,
 	type RpcReadJobResponse,

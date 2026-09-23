@@ -11,9 +11,11 @@ The interface has four main areas:
 - **Startup header** - shortcuts, loaded context files, prompt templates, skills, and extensions
 - **Messages** - user messages, assistant responses, tool calls, tool results, notifications, errors, and extension UI
 - **Editor** - where you type; border color indicates the current thinking level
-- **Footer** - working directory, session name, token/cache usage, cost, context usage, current model, and active Fast mode
+- **Footer** - working directory, session name, token/cache usage, prompt-cache expiry, cost, context usage, current model, and active Fast mode
 
 The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
+
+When the provider documents how long it retains the prompt cache, the footer counts down to expiry (`cache 4m`). `cache expired`, or `cache cold` after a model switch, means your next message resends the whole conversation without cache hits, which costs more tokens than usual. Providers that publish no retention window show no countdown. After a response has sat idle for a minute, the transcript records how long the work took and when it finished, for example `Worked for 3m 12s · done 3:42 PM`.
 
 ### Editor Features
 
