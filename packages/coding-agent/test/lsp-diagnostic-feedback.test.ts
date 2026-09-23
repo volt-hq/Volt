@@ -128,7 +128,9 @@ describe("bounded diagnostic delivery", () => {
 			snapshot(undefined, { path: `/file${i}`, displayPath: `file${i}`, otherFile: true, wasClean: true }),
 		);
 		expect(f.render(snapshots).match(/existing problem/g)).toHaveLength(5);
-		expect(f.render(snapshots).match(/existing problem/g)).toHaveLength(2);
+		// Still failing, so no longer a clean baseline; only the pending findings remain.
+		const stillFailing = snapshots.map((item) => ({ ...item, wasClean: false }));
+		expect(f.render(stillFailing).match(/existing problem/g)).toHaveLength(2);
 	});
 	it("requires clean-to-failing eligibility for other files", () => {
 		const f = fixture();
@@ -136,7 +138,10 @@ describe("bounded diagnostic delivery", () => {
 		expect(f.render([snapshot([{ ...diagnostic, message: "new but not newly failing" }], { otherFile: true })])).toBe(
 			"",
 		);
-		expect(f.render([snapshot(undefined, { otherFile: true, wasClean: true })])).toBe("");
+		// A known-clean baseline resolves earlier deliveries, so recurrence is newly failing.
+		expect(f.render([snapshot(undefined, { otherFile: true, wasClean: true })])).toContain(
+			"Newly failing in other open files",
+		);
 		expect(f.render([snapshot([{ ...diagnostic, message: "new cross error" }], { otherFile: true })])).toContain(
 			"new cross error",
 		);

@@ -234,6 +234,37 @@ describe("cross-file diagnostics require a known clean baseline", () => {
 		expect((await f.editB(() => f.publish(f.a, [diagnostic]), "value B final\n")).text).toContain("Newly failing");
 	});
 
+	it.each([
+		{ label: "the same", recurrence: diagnostic },
+		{ label: "a different", recurrence: { ...diagnostic, message: "Different error in A" } },
+	])("reports $label failure after a clean baseline no automatic report observed", async ({ recurrence }) => {
+		const f = fixture();
+		await f.open(f.a);
+		await f.open(f.b);
+		f.publish(f.a, []);
+		expect((await f.editB(() => f.publish(f.a, [diagnostic]))).text).toContain("Newly failing");
+		// A recovers between automatic checks, so only the next clean baseline observes it.
+		f.publish(f.a, []);
+		const result = await f.editB(() => f.publish(f.a, [recurrence]), "value B again\n");
+		expect(result.text).toBe(
+			`Newly failing in other open files:\nDiagnostics (fresh):\na.foo(1,1): error: ${recurrence.message}`,
+		);
+	});
+
+	it("reports a reapplied cross-file failure after a late clean republish from a revert", async () => {
+		const f = fixture();
+		await f.open(f.a);
+		await f.open(f.b);
+		f.publish(f.a, []);
+		expect((await f.editB(() => f.publish(f.a, [diagnostic]), "value B broken\n")).text).toContain("Newly failing");
+		// Revert B; A's clean republish arrives only after the settle wait.
+		expect((await f.editB(() => {}, "value B\n")).text).toBe("");
+		f.publish(f.a, []);
+		expect((await f.editB(() => f.publish(f.a, [diagnostic]), "value B broken\n")).text).toContain(
+			"a.foo(1,1): error: Existing error in A",
+		);
+	});
+
 	it.each(["missing", "clean", "filtered"])("does not report a %s post-edit publication as failing", async (after) => {
 		const f = fixture();
 		await f.open(f.a);

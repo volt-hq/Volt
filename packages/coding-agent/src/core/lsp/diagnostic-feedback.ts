@@ -94,7 +94,12 @@ export class LspDiagnosticFeedback {
 			if (delivery && delivery.sequence > sequence) continue;
 			if (snapshot.otherFile && !snapshot.wasClean && !delivery?.crossEligible) continue;
 			if (!delivery) delivery = { sequence, crossEligible: false, fingerprints: new Map() };
-			if (snapshot.otherFile && snapshot.wasClean) delivery.crossEligible = true;
+			if (snapshot.otherFile && snapshot.wasClean) {
+				// A known-clean baseline already resolved every earlier delivery.
+				delivery.crossEligible = true;
+				this.fingerprintCount -= delivery.fingerprints.size;
+				delivery.fingerprints.clear();
+			}
 			delivery.sequence = sequence;
 			// Touch LRU before reconciliation, keeping both files and fixed-size hashes bounded.
 			this.files.delete(key);
