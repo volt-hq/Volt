@@ -53,7 +53,7 @@ describe("Windows diagnostic subprocess failure containment", () => {
 			const invocation = processMocks.execFile.mock.calls[0];
 			if (!invocation || !completion) throw new Error("Expected a diagnostic subprocess");
 			expect(invocation[0]).toBe(join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"));
-			expect(invocation[2]).toEqual({ windowsHide: true, timeout: 10_000, maxBuffer: 8_192 });
+			expect(invocation[2]).toEqual({ windowsHide: true, timeout: 30_000, maxBuffer: 8_192 });
 			expect(invocation[1].slice(0, -1)).toEqual(["-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand"]);
 			const executedScript = Buffer.from(invocation[1].at(-1)!, "base64").toString("utf16le");
 			expect(executedScript).not.toContain("private-path-marker");

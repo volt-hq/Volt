@@ -30,6 +30,7 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { parseJsonWithRepair } from "../utils/json-parse.ts";
 import type { JsonObject } from "../utils/json-value.ts";
+import { ANTHROPIC_OAUTH_BETA, ANTHROPIC_OAUTH_USER_AGENT } from "../utils/oauth/anthropic-client.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
@@ -54,9 +55,6 @@ function getCacheControl(
 		cacheControl: { type: "ephemeral", ...(ttl && { ttl }) },
 	};
 }
-
-// Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.75";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -543,9 +541,6 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					});
 				}
 
-				const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
-				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-
 				const created = createClient(
 					model,
 					apiKey,
@@ -553,8 +548,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					shouldUseFineGrainedToolStreamingBeta(model, context),
 					options?.headers,
 					copilotDynamicHeaders,
-					cacheSessionId,
+					options?.sessionId,
 					options?.env,
+					options?.cacheRetention,
 				);
 				client = created.client;
 				isOAuth = created.isOAuthToken;
@@ -827,6 +823,7 @@ function createClient(
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
 	env?: ProviderEnv,
+	cacheRetention?: CacheRetention,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Adaptive thinking models have interleaved thinking built in, so skip the beta header.
 	const needsInterleavedBeta = interleavedThinking && model.compat?.forceAdaptiveThinking !== true;
@@ -883,20 +880,24 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	// OAuth: Bearer auth, Claude Code identity headers
+	// OAuth: match Claude Code's subscription request conventions, not its private
+	// runtime features. Leave SDK/platform headers truthful and opaque headers unset.
 	if (isOAuthToken(apiKey)) {
 		const client = new Anthropic({
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: model.baseUrl,
+			defaultQuery: { beta: "true" },
 			dangerouslyAllowBrowser: true,
 			defaultHeaders: mergeHeaders(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
-					"anthropic-beta": ["claude-code-20250219", "oauth-2025-04-20", ...betaFeatures].join(","),
-					"user-agent": `claude-cli/${claudeCodeVersion}`,
+					"anthropic-beta": ["claude-code-20250219", ANTHROPIC_OAUTH_BETA, ...betaFeatures].join(","),
+					"user-agent": ANTHROPIC_OAUTH_USER_AGENT,
 					"x-app": "cli",
+					...(sessionId ? { "x-claude-code-session-id": sessionId } : {}),
+					"x-client-request-id": globalThis.crypto.randomUUID(),
 				},
 				model.headers,
 				optionsHeaders,
@@ -906,9 +907,12 @@ function createClient(
 		return { client, isOAuthToken: true };
 	}
 
-	// API key auth
+	// API-key cache affinity is disabled with caching; OAuth session identity above is not.
+	const cacheSessionId = resolvePromptCacheRetention(model, cacheRetention, env) === "none" ? undefined : sessionId;
 	const sessionAffinityHeaders: Record<string, string | null> =
-		sessionId && getAnthropicCompat(model).sendSessionAffinityHeaders ? { "x-session-affinity": sessionId } : {};
+		cacheSessionId && getAnthropicCompat(model).sendSessionAffinityHeaders
+			? { "x-session-affinity": cacheSessionId }
+			: {};
 	const client = new Anthropic({
 		apiKey,
 		authToken: null,
