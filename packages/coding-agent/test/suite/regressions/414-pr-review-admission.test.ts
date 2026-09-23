@@ -281,7 +281,9 @@ async function fixture(nested = false, workspaceName = "project") {
 		for (const registry of registries) await registry.stopAll("test_cleanup");
 		await harness.cleanupAsync();
 		await audit.flush();
-		rmSync(root, { recursive: true, force: true });
+		// Stopped runtimes may still be exiting; on Windows that holds the cwd and
+		// fails rmdir with EBUSY.
+		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 	});
 	return {
 		source,

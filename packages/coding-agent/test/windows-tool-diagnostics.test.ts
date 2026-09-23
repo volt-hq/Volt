@@ -19,7 +19,7 @@ describe("Windows private tool capture", () => {
 		const [program, args, options] = call;
 		expect(program).toContain("powershell.exe");
 		expect(JSON.stringify(args)).not.toContain("private sample");
-		expect(options).toMatchObject({ timeout: 10_000 });
+		expect(options).toMatchObject({ timeout: 30_000 });
 		expect(JSON.parse(mocks.input.mock.calls[0]![0])).toMatchObject({ content: "private sample" });
 		const encoded = Array.isArray(args) ? args.at(-1) : undefined;
 		expect(Buffer.from(String(encoded), "base64").toString("utf16le")).toContain(
