@@ -152,7 +152,8 @@ describe("LSP toolchain locators (#459)", () => {
 				environment: { PATH: "/cellar/rustup/bin:/opt/homebrew/bin" },
 				toolchain: { status: "found", detail: "rustup proxy next to /cellar/rustup/bin/rustup" },
 			});
-			expect(host.run).toHaveBeenCalledExactlyOnceWith("/cellar/rustup/bin/rustup", ["which", "rust-analyzer"], {
+			// rustup dispatches on its invoked name, so it is queried through its PATH name, not its canonical target.
+			expect(host.run).toHaveBeenCalledExactlyOnceWith("/opt/homebrew/bin/rustup", ["which", "rust-analyzer"], {
 				cwd: "/project/crate",
 				env: { PATH: "/opt/homebrew/bin", RUSTUP_AUTO_INSTALL: "0" },
 			});
@@ -185,7 +186,7 @@ describe("LSP toolchain locators (#459)", () => {
 			expect(launch.toolchain?.detail).toContain("/cellar/rustup/bin/rust-analyzer");
 			expect(launch.toolchain?.detail).toContain("stable-aarch64-apple-darwin toolchain selected at /project/crate");
 			expect(launch.toolchain?.detail).not.toContain("help:");
-			expect(host.run).toHaveBeenLastCalledWith("/cellar/rustup/bin/rustup", ["show", "active-toolchain"], {
+			expect(host.run).toHaveBeenLastCalledWith("/opt/homebrew/bin/rustup", ["show", "active-toolchain"], {
 				cwd: "/project/crate",
 				env: { PATH: "/opt/homebrew/bin", RUSTUP_AUTO_INSTALL: "0" },
 			});
@@ -405,7 +406,9 @@ describe("LSP toolchain locator integration (#459)", () => {
 	// rustup proxies are hard links or symlinks to rustup that dispatch on their invoked name.
 	// The fake selects a toolchain from a `rust-toolchain` file in its working directory
 	// (default `stable`) and records installed components as files named after the toolchain.
-	function rustFixture(layout: "homebrew" | "rustup-init") {
+	// Invoked as `rustup-init` it is the installer, which rejects rustup subcommands. Homebrew rustup before
+	// May 2026 (`homebrew-init`) links every keg name, rustup included, to its real `rustup-init`.
+	function rustFixture(layout: "homebrew" | "homebrew-init" | "rustup-init") {
 		let components = "";
 		const item = managerFixture("main.rs", {}, (command) => {
 			const index = command.indexOf("--toolchain");
@@ -413,10 +416,10 @@ describe("LSP toolchain locator integration (#459)", () => {
 		});
 		components = join(item.root, "components");
 		mkdirSync(components);
-		const proxyDirectory = layout === "homebrew" ? join(item.root, "cellar") : item.bin;
+		const proxyDirectory = layout === "rustup-init" ? item.bin : join(item.root, "cellar");
 		mkdirSync(proxyDirectory, { recursive: true });
 		const rustup = writeScript(
-			join(proxyDirectory, "rustup"),
+			join(proxyDirectory, layout === "homebrew-init" ? "rustup-init" : "rustup"),
 			[
 				"tc=stable",
 				"[ -f rust-toolchain ] && read -r tc < rust-toolchain",
@@ -425,6 +428,7 @@ describe("LSP toolchain locator integration (#459)", () => {
 				`  case ":$PATH:" in *":${proxyDirectory}:"*) ;; *) echo "cargo is not on PATH" >&2; exit 7 ;; esac`,
 				`  exec '${process.execPath}' '${fake}' "$@"`,
 				"fi",
+				`case "$0" in */rustup-init) echo "error: unexpected argument '$1' found" >&2; exit 1 ;; esac`,
 				`[ "$RUSTUP_AUTO_INSTALL" = 0 ] || exit 3`,
 				`[ "$tc" = uninstalled ] && { echo "error: override toolchain 'uninstalled' is not installed" >&2; exit 1; }`,
 				`case "$1" in`,
@@ -438,8 +442,13 @@ describe("LSP toolchain locator integration (#459)", () => {
 			"exit /b 1\r\n",
 		);
 		const proxy = join(proxyDirectory, "rust-analyzer");
-		linkSync(rustup, proxy);
-		if (layout === "homebrew") symlinkSync(rustup, join(item.bin, "rustup"));
+		if (layout === "homebrew-init") {
+			symlinkSync("rustup-init", join(proxyDirectory, "rustup"));
+			symlinkSync("rustup-init", proxy);
+		} else {
+			linkSync(rustup, proxy);
+		}
+		if (layout !== "rustup-init") symlinkSync(join(proxyDirectory, "rustup"), join(item.bin, "rustup"));
 		/** A nested crate whose root selects `toolchain`, unlike the project workspace. */
 		const crate = (toolchain: string) => {
 			const directory = join(item.root, "crate");
@@ -465,7 +474,7 @@ describe("LSP toolchain locator integration (#459)", () => {
 		});
 	});
 
-	it.skipIf(windows).each(["homebrew", "rustup-init"] as const)(
+	it.skipIf(windows).each(["homebrew", "homebrew-init", "rustup-init"] as const)(
 		"offers the component install for a %s proxy and reuses it after restart",
 		async (layout) => {
 			const item = rustFixture(layout);

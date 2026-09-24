@@ -191,6 +191,9 @@ const goLocator: LspToolchainLocator = {
  * with `rustup which` in the server root, which honors rust-toolchain.toml and
  * directory overrides. A repair must target that same toolchain by name: the
  * installer runs in the project workspace, which may select another toolchain.
+ * rustup is multicall and dispatches on its invoked name, so queries run through
+ * the PATH hit named `rustup`, never its canonical target (Homebrew's keg
+ * `rustup-init` before May 2026); only the proxy directory comes from the target.
  */
 const rustLocator: LspToolchainLocator = {
 	binary: "rust-analyzer",
@@ -198,15 +201,16 @@ const rustLocator: LspToolchainLocator = {
 		const pathApi = pathApiFor(context.platform);
 		let rustup: string | undefined;
 		let proxy: string | undefined;
+		let target: string | undefined;
 		if (context.pathExecutable) {
 			// Only a rustup proxy (a hard link or symlink to rustup) can lack its component.
 			rustup = context.findExecutable(pathApi.join(pathApi.dirname(context.pathExecutable), "rustup"));
 			const identity = rustup ? context.fileIdentity(rustup) : undefined;
 			if (identity && identity === context.fileIdentity(context.pathExecutable)) proxy = context.pathExecutable;
 		} else {
-			const onPath = context.findOnPath("rustup");
-			rustup = onPath ? context.realpath(onPath) : undefined;
-			proxy = rustup ? context.findExecutable(pathApi.join(pathApi.dirname(rustup), "rust-analyzer")) : undefined;
+			rustup = context.findOnPath("rustup");
+			target = rustup ? context.realpath(rustup) : undefined;
+			proxy = target ? context.findExecutable(pathApi.join(pathApi.dirname(target), "rust-analyzer")) : undefined;
 		}
 		if (!rustup || !proxy) return NOT_APPLICABLE;
 		const check = context.run(rustup, ["which", "rust-analyzer"], {
@@ -235,12 +239,12 @@ const rustLocator: LspToolchainLocator = {
 				detail: `rust-analyzer rustup proxy ${proxy} is present, but the toolchain selected at ${context.root} cannot receive the component${reason ? ` (${reason})` : ""}. Install that toolchain with rustup, then run /lsp restart`,
 			};
 		}
-		if (context.pathExecutable) return NOT_APPLICABLE;
+		if (context.pathExecutable || !target) return NOT_APPLICABLE;
 		return {
 			status: "found",
 			executable: proxy,
 			environment: prependPath(context.environment, pathApi.dirname(proxy), context.platform),
-			detail: `rustup proxy next to ${rustup}`,
+			detail: `rustup proxy next to ${target}`,
 		};
 	},
 };
