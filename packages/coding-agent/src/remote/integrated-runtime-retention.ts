@@ -1,5 +1,8 @@
 export const DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS = 30 * 60 * 1000;
 
+/** Delay before re-checking a runtime whose idle wait settled or failed while it stayed active. */
+const ACTIVE_RECHECK_DELAY_MS = 1000;
+
 export interface DetachedRuntimeRetentionHandle {
 	cancel(): void;
 }
@@ -34,12 +37,12 @@ export function scheduleDetachedRuntimeRetention(
 	let cancelled = false;
 	let timer: ReturnType<typeof setTimeout> | undefined;
 
-	const sleep = (): Promise<void> =>
+	const sleep = (delayMs: number): Promise<void> =>
 		new Promise((resolve) => {
 			timer = setTimeoutFn(() => {
 				timer = undefined;
 				resolve();
-			}, options.ttlMs);
+			}, delayMs);
 		});
 
 	const run = async (): Promise<void> => {
@@ -54,10 +57,13 @@ export function scheduleDetachedRuntimeRetention(
 					// Re-check state after failed idle waits; prompt failure should not
 					// turn active detached cleanup into immediate cancellation.
 				}
+				// Re-checking at once after a wait that failed or settled early would spin
+				// in microtasks and starve the event loop the active work needs to finish.
+				if (!cancelled && options.isActive()) await sleep(ACTIVE_RECHECK_DELAY_MS);
 				continue;
 			}
 
-			await sleep();
+			await sleep(options.ttlMs);
 			if (cancelled || !options.isDetached()) {
 				return;
 			}

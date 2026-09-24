@@ -64,6 +64,40 @@ describe("detached integrated runtime retention", () => {
 		expect(onExpire).toHaveBeenCalledOnce();
 	});
 
+	test.each([
+		{ outcome: "settles", wait: async () => {} },
+		{
+			outcome: "fails",
+			wait: async () => {
+				throw new Error("idle wait failed");
+			},
+		},
+	])("backs off instead of spinning when the idle wait $outcome while still active", async ({ wait }) => {
+		vi.useFakeTimers();
+		let active = true;
+		const onExpire = vi.fn(async () => {});
+		// Stop a regressed microtask spin after 100 waits so the test fails instead of hanging.
+		const waitForIdle = vi.fn(async () => {
+			if (waitForIdle.mock.calls.length > 100) handle.cancel();
+			await wait();
+		});
+		const handle = scheduleDetachedRuntimeRetention({
+			ttlMs: 1000,
+			isDetached: () => true,
+			isActive: () => active,
+			waitForIdle,
+			onExpire,
+		});
+
+		await vi.advanceTimersByTimeAsync(10_000);
+		expect(waitForIdle.mock.calls.length).toBeGreaterThan(1);
+		expect(waitForIdle.mock.calls.length).toBeLessThanOrEqual(11);
+
+		active = false;
+		await vi.advanceTimersByTimeAsync(2000);
+		expect(onExpire).toHaveBeenCalledOnce();
+	});
+
 	test("cancel prevents detached runtime expiry after reattach", async () => {
 		vi.useFakeTimers();
 		const onExpire = vi.fn(async () => {});

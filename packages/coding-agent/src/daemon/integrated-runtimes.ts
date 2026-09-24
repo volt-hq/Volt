@@ -2036,8 +2036,9 @@ export class IntegratedRuntimeRegistry {
 			entry.runtime.session.hasBackgroundJobs ||
 			entry.runtime.reviewWorkflows?.hasActiveWorkflows === true ||
 			this.reviewDiscussions.hasPendingWork(entry.runtime);
+		// Each wait must block while its own activity check above is true.
 		const waitForEntryIdle = async () => {
-			await entry.runtime.session.waitForIdle();
+			await entry.runtime.session.waitForNotBusy();
 			await entry.runtime.session.waitForBackgroundJobs();
 			await entry.runtime.reviewWorkflows?.waitForIdle();
 			await this.reviewDiscussions.waitForIdle(entry.runtime);

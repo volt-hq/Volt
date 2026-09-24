@@ -692,8 +692,6 @@ export class AgentSession {
 				renewal?: PromptCacheRefreshRecord;
 		  }
 		| undefined;
-	/** Set while a busy Harness is watched for its next idle transition. */
-	private _promptCacheHarnessIdleWatch = false;
 
 	private _recordBackgroundDiagnostic(event: BackgroundJobDiagnosticEvent): void {
 		try {
@@ -762,6 +760,10 @@ export class AgentSession {
 	/** Prompt/preflight work is detached during replacement to avoid ctx.newSession self-joins. */
 	private readonly _admittedPromptWork = new Set<Promise<unknown>>();
 	private _activityRevision = 0;
+	/** Set while a busy Harness is watched for its next idle transition. */
+	private _harnessIdleWatch = false;
+	/** `waitForNotBusy()` callers waiting for the next activity change. */
+	private readonly _activityWaiters = new Set<() => void>();
 
 	// Agent-run and compaction state
 	/** Per-run identity for background waits and provider-result acknowledgement fences. */
@@ -3256,6 +3258,7 @@ export class AgentSession {
 			this._unsubscribeBackgroundJobs = undefined;
 			this._promptCacheKeepAlive.dispose();
 			this._promptCacheRefreshAbort.abort();
+			this._releaseActivityWaiters();
 			this._cancelBackgroundContinuationSchedule();
 			// Teardown never releases its hold, even if an overlapping abort finishes.
 			this._admissionGate.suspend();
@@ -3753,8 +3756,9 @@ export class AgentSession {
 
 	/**
 	 * An `isBusy` or `hasBackgroundJobs` input changed. Prompt-cache keepalive measures its idle
-	 * window from these transitions. Harness operations can release their lease after their last
-	 * event (compaction and tree navigation do), so a busy Harness re-checks once it goes idle.
+	 * window from these transitions, and `waitForNotBusy()` re-checks on them. Harness operations can
+	 * release their lease after their last event (compaction and tree navigation do), so a busy
+	 * Harness re-checks once it goes idle.
 	 */
 	private _activityChanged(): void {
 		try {
@@ -3762,12 +3766,23 @@ export class AgentSession {
 		} catch {
 			// Keepalive is derived state; it cannot fail the transition that reported it.
 		}
-		if (this._promptCacheHarnessIdleWatch || this._harness.getPhase() === "idle") return;
-		this._promptCacheHarnessIdleWatch = true;
+		this._releaseActivityWaiters();
+		this._watchHarnessIdle();
+	}
+
+	private _watchHarnessIdle(): void {
+		if (this._harnessIdleWatch || this._harness.getPhase() === "idle") return;
+		this._harnessIdleWatch = true;
 		void this._harness.waitForIdle().then(() => {
-			this._promptCacheHarnessIdleWatch = false;
+			this._harnessIdleWatch = false;
 			if (!this._disposed) this._activityChanged();
 		});
+	}
+
+	private _releaseActivityWaiters(): void {
+		const waiters = [...this._activityWaiters];
+		this._activityWaiters.clear();
+		for (const resolve of waiters) resolve();
 	}
 
 	private get _hasSessionOperationBarrier(): boolean {
@@ -5116,6 +5131,18 @@ export class AgentSession {
 	/** Wait for the agent and any session-level prompt work to settle, excluding background jobs. */
 	async waitForIdle(): Promise<void> {
 		await this._waitForIdle();
+	}
+
+	/**
+	 * Wait until `isBusy` is false or the session is disposed. Unlike `waitForIdle()`, this also waits
+	 * for `!` commands, extension commands, and reload, so an extension command must not await it.
+	 */
+	async waitForNotBusy(): Promise<void> {
+		while (!this._disposed && this.isBusy) {
+			const changed = new Promise<void>((resolve) => this._activityWaiters.add(resolve));
+			this._watchHarnessIdle();
+			await changed;
+		}
 	}
 
 	/** Join background job settlement without cancelling work or blocking foreground prompts. */

@@ -1777,7 +1777,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			abort,
 			isBusy: true,
 			isStreaming: true,
-			waitForIdle: vi.fn(() => new Promise<void>(() => {})),
+			waitForNotBusy: vi.fn(() => new Promise<void>(() => {})),
 		});
 		const dispose = vi.fn(async () => {
 			await abort();
@@ -1844,7 +1844,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			await registry.stopEntry(entry, "access_updated");
 		}
 
-		expect(session.waitForIdle).not.toHaveBeenCalled();
+		expect(session.waitForNotBusy).not.toHaveBeenCalled();
 		expect(abort).toHaveBeenCalledOnce();
 		expect(dispose).toHaveBeenCalledOnce();
 		expect(created.entry.subscribers.size).toBe(0);
@@ -1861,7 +1861,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			const session = Object.assign(createTestSession("s-busy", null), {
 				isBusy: true,
 				isStreaming: false,
-				waitForIdle: vi.fn(() => idle),
+				waitForNotBusy: vi.fn(() => idle),
 			});
 			const dispose = vi.fn(async () => {});
 			const runtimeHost = {
@@ -1895,7 +1895,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 			created.attachClaim.release();
 			await registry.detachSubscriber(created.entry, subscriber, "test_detach");
 
-			expect(session.waitForIdle).toHaveBeenCalledOnce();
+			expect(session.waitForNotBusy).toHaveBeenCalledOnce();
 			await vi.advanceTimersByTimeAsync(5000);
 			expect(dispose).not.toHaveBeenCalled();
 
