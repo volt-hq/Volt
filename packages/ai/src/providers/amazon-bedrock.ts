@@ -49,6 +49,11 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import {
+	getAnthropicThinkingMode,
+	supportsAnthropicSamplingParameters,
+	supportsAnthropicXhighEffort,
+} from "./anthropic-capabilities.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.ts";
 import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
@@ -244,7 +249,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
 					...(options.temperature !== undefined &&
-						!getModelMatchCandidates(model.id, model.name).some((id) => id.includes("opus-5-5")) && {
+						supportsAnthropicSamplingParameters(model.id, model.name) !== false && {
 							temperature: options.temperature,
 						}),
 				},
@@ -580,36 +585,15 @@ function resolveBedrockBlock(
 }
 
 /**
- * Check if the model supports adaptive thinking (Opus 4.6+, Sonnet 4.6).
- * Checks both model ID and model name to support application inference profiles
- * whose ARNs don't contain the model name.
+ * Whether a Claude model takes adaptive thinking instead of a token budget. Reads the name too, for
+ * application inference profiles whose ARNs don't contain the model name.
  */
-function getModelMatchCandidates(modelId: string, modelName?: string): string[] {
-	const values = modelName ? [modelId, modelName] : [modelId];
-	return values.flatMap((value) => {
-		const lower = value.toLowerCase();
-		return [lower, lower.replace(/[\s_.:]+/g, "-")];
-	});
-}
-
 function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean {
-	const candidates = getModelMatchCandidates(modelId, modelName);
-	return candidates.some(
-		(s) =>
-			s.includes("opus-4-6") ||
-			s.includes("opus-4-7") ||
-			s.includes("opus-4-8") ||
-			s.includes("opus-5-5") ||
-			s.includes("sonnet-4-6") ||
-			s.includes("fable-5"),
-	);
+	return getAnthropicThinkingMode(modelId, modelName) === "adaptive";
 }
 
 function supportsNativeXhighEffort(model: Model<"bedrock-converse-stream">): boolean {
-	const candidates = getModelMatchCandidates(model.id, model.name);
-	return candidates.some(
-		(s) => s.includes("opus-4-7") || s.includes("opus-4-8") || s.includes("opus-5-5") || s.includes("fable-5"),
-	);
+	return supportsAnthropicXhighEffort(model.id, model.name) === true;
 }
 
 function mapThinkingLevelToEffort(

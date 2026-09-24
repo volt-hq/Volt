@@ -9,6 +9,12 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
+import {
+	getAnthropicThinkingMode,
+	isClaudeAtLeast,
+	supportsAnthropicSamplingParameters,
+	supportsAnthropicXhighEffort,
+} from "../src/providers/anthropic-capabilities.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -44,6 +50,8 @@ interface ModelsDevModel {
 	provider?: {
 		npm?: string;
 	};
+	temperature?: boolean;
+	reasoning_options?: { type: string; values?: string[] }[];
 }
 
 interface NvidiaNimModelListItem {
@@ -533,29 +541,54 @@ function isGoogleThinkingApi(model: Model<any>): boolean {
 	return model.api === "google-generative-ai" || model.api === "google-vertex";
 }
 
-function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
-	return (
-		modelId.includes("opus-4-6") ||
-		modelId.includes("opus-4.6") ||
-		modelId.includes("opus-4-7") ||
-		modelId.includes("opus-4.7") ||
-		modelId.includes("opus-4-8") ||
-		modelId.includes("opus-4.8") ||
-		modelId.includes("opus-5-5") ||
-		modelId.includes("opus-5.5") ||
-		modelId.includes("sonnet-4-6") ||
-		modelId.includes("sonnet-4.6") ||
-		modelId.includes("fable-5")
-	);
-}
+/**
+ * models.dev catalogs whose Claude entries Volt generates and whose metadata describes the Anthropic
+ * request parameters. Aggregator catalogs describe their own reasoning APIs instead.
+ */
+const ANTHROPIC_CAPABILITY_CHECK_PROVIDERS = [
+	"anthropic",
+	"amazon-bedrock",
+	"cloudflare-ai-gateway",
+	"github-copilot",
+	"opencode",
+	"opencode-go",
+];
 
-function isAnthropicTemperatureUnsupportedModel(modelId: string): boolean {
-	const id = modelId.toLowerCase();
-	return (
-		id.includes("opus-4-7") || id.includes("opus-4.7") ||
-		id.includes("opus-4-8") || id.includes("opus-4.8") ||
-		id.includes("opus-5-5") || id.includes("opus-5.5")
-	);
+/** A models.dev contradiction that must stop generation instead of dropping the models.dev catalog. */
+class ModelsDevMetadataConflict extends Error {}
+
+/**
+ * Claude models whose models.dev metadata contradicts src/providers/anthropic-capabilities.ts:
+ * - thinking: a budget-only model that lists no thinking budget, or an adaptive model that lists only a
+ *   budget. Effort next to a budget decides nothing (Claude Opus 4.5 lists both and is budget-only).
+ * - effort: xhigh listed for a model without it, or missing from one with it.
+ * - temperature: listed support that differs from supportsAnthropicSamplingParameters.
+ */
+function findAnthropicCapabilityConflicts(data: Record<string, { models?: Record<string, ModelsDevModel> }>): string[] {
+	const conflicts: string[] = [];
+	for (const providerKey of ANTHROPIC_CAPABILITY_CHECK_PROVIDERS) {
+		for (const [modelId, model] of Object.entries(data[providerKey]?.models ?? {})) {
+			const mode = getAnthropicThinkingMode(modelId);
+			if (mode === undefined) continue;
+			const conflict = (detail: string) => conflicts.push(`${providerKey}/${modelId}: ${detail}`);
+			const sampling = supportsAnthropicSamplingParameters(modelId);
+			if (typeof model.temperature === "boolean" && model.temperature !== sampling) {
+				conflict(`sampling parameters ${sampling ? "accepted" : "rejected"}, models.dev temperature ${model.temperature}`);
+			}
+			const options = model.reasoning_options;
+			if (model.reasoning !== true || !options?.length) continue;
+			const budget = options.some((option) => option.type === "budget_tokens");
+			const effort = options.find((option) => option.type === "effort");
+			if ((mode === "budget" && !budget) || (mode === "adaptive" && budget && !effort)) {
+				conflict(`${mode} thinking, models.dev reasoning_options ${options.map((option) => option.type).join("+")}`);
+			}
+			const xhigh = supportsAnthropicXhighEffort(modelId) === true;
+			if (effort?.values && effort.values.includes("xhigh") !== xhigh) {
+				conflict(`xhigh effort ${xhigh ? "accepted" : "rejected"}, models.dev effort ${effort.values.join(",")}`);
+			}
+		}
+	}
+	return conflicts;
 }
 
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
@@ -645,14 +678,20 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (
 		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
+		supportsAnthropicXhighEffort(model.id)
+	) {
+		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
 		model.id.includes("fable-5")
 	) {
 		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh" });
 	}
-	if (model.api === "anthropic-messages" && isAnthropicAdaptiveThinkingModel(model.id)) {
+	if (model.api === "anthropic-messages" && getAnthropicThinkingMode(model.id) === "adaptive") {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
 	}
-	if (model.api === "anthropic-messages" && isAnthropicTemperatureUnsupportedModel(model.id)) {
+	if (model.api === "anthropic-messages" && supportsAnthropicSamplingParameters(model.id) === false) {
 		mergeAnthropicMessagesCompat(model, { supportsTemperature: false });
 	}
 	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
@@ -880,6 +919,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		console.log("Fetching models from models.dev API...");
 		const response = await fetch("https://models.dev/api.json");
 		const data = await response.json();
+		const capabilityConflicts = findAnthropicCapabilityConflicts(data);
+		if (capabilityConflicts.length > 0) {
+			throw new ModelsDevMetadataConflict(
+				`models.dev contradicts src/providers/anthropic-capabilities.ts:\n${capabilityConflicts.join("\n")}`,
+			);
+		}
 
 		const models: Model<any>[] = [];
 		const nvidiaNimModelIds = data.nvidia?.models ? await fetchNvidiaNimModelIds() : new Map<string, string>();
@@ -1514,8 +1559,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
 
-				// Claude 4.x models route to Anthropic Messages API
-				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
+				// Claude 4 and later route to Anthropic Messages API
+				const isCopilotClaude4 = isClaudeAtLeast(modelId, 4, 0) === true;
 				// gpt-5 models require responses API, others use completions
 				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
 
@@ -1737,6 +1782,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		console.log(`Loaded ${models.length} tool-capable models from models.dev`);
 		return models;
 	} catch (error) {
+		if (error instanceof ModelsDevMetadataConflict) throw error;
 		console.error("Failed to load models.dev data:", error);
 		return [];
 	}
@@ -2513,4 +2559,7 @@ export const MODELS = {
 }
 
 // Run the generator
-generateModels().catch(console.error);
+generateModels().catch((error) => {
+	console.error(error);
+	process.exitCode = 1;
+});
