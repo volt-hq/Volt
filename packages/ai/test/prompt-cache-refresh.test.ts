@@ -45,6 +45,18 @@ describe("refreshPromptCache", () => {
 		expect(noRenewal.state.refreshCount).toBe(0);
 	});
 
+	it("applies the provider's check to the request options", () => {
+		const faux = register({
+			models: [{ id: "c", promptCache: renewing }],
+			refreshPromptCache: true,
+			canRefreshPromptCache: (_model, options) => options?.reasoning === undefined,
+		});
+
+		expect(supportsPromptCacheRefresh(faux.getModel())).toBe(true);
+		expect(supportsPromptCacheRefresh(faux.getModel(), { reasoning: "high" })).toBe(false);
+		expect(supportsPromptCacheRefresh(faux.getModel(), { cacheRetention: "none" })).toBe(false);
+	});
+
 	it("reads the prefix the previous request cached without producing output", async () => {
 		const faux = register({ models: [{ id: "c", promptCache: renewing }], refreshPromptCache: true });
 		faux.setResponses([fauxAssistantMessage("hi")]);

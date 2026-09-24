@@ -13,6 +13,7 @@ import type {
 	FauxProviderRegistration,
 	FauxResponseStep,
 	Model,
+	PromptCacheRefreshCheck,
 } from "@hansjm10/volt-ai";
 import { refreshPromptCache, registerFauxProvider, streamSimple } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
@@ -84,6 +85,8 @@ export interface HarnessOptions {
 	sessionManager?: SessionManager;
 	/** Register a faux prompt-cache refresh and wire the session to it. */
 	refreshPromptCache?: true | FauxPromptCacheRefresh;
+	/** Which request options the faux refresh supports; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 export interface Harness {
@@ -113,6 +116,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		models: options.models,
 		tokensPerSecond: options.tokensPerSecond,
 		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCache: options.refreshPromptCache }),
+		...(options.canRefreshPromptCache === undefined ? {} : { canRefreshPromptCache: options.canRefreshPromptCache }),
 	});
 	fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();

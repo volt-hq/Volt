@@ -34,6 +34,7 @@ import type { JsonObject } from "../utils/json-value.ts";
 import { ANTHROPIC_OAUTH_BETA, ANTHROPIC_OAUTH_USER_AGENT } from "../utils/oauth/anthropic-client.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 
+import { canRefreshAnthropicPromptCache } from "./anthropic-capabilities.ts";
 import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
@@ -788,11 +789,10 @@ export const refreshPromptCacheAnthropic: PromptCacheRefreshFunction<"anthropic-
 	context,
 	simpleOptions,
 ) => {
-	const options = resolveSimpleAnthropicOptions(model, simpleOptions);
-	// max_tokens: 0 is rejected with budget-based thinking, and disabling thinking would change the prefix.
-	if (options.thinkingEnabled && model.compat?.forceAdaptiveThinking !== true) {
+	if (!canRefreshAnthropicPromptCache(model, simpleOptions)) {
 		return { status: "unsupported", reason: "budget-based thinking cannot be refreshed without output" };
 	}
+	const options = resolveSimpleAnthropicOptions(model, simpleOptions);
 	if (!getCacheControl(model, options.cacheRetention, options.env).cacheControl) {
 		return { status: "unsupported", reason: "request has no cache breakpoints" };
 	}

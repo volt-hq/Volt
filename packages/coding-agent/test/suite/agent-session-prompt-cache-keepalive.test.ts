@@ -7,6 +7,7 @@ import {
 	fauxAssistantMessage,
 	fauxToolCall,
 	type PromptCacheMetadata,
+	type PromptCacheRefreshCheck,
 	type Usage,
 } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
@@ -67,6 +68,8 @@ describe("AgentSession prompt-cache keepalive", () => {
 
 	async function create(options: {
 		refresh?: FauxPromptCacheRefresh;
+		canRefresh?: PromptCacheRefreshCheck;
+		reasoning?: boolean;
 		settings?: Partial<Settings>;
 		tools?: AgentTool[];
 		agentDir?: string;
@@ -75,8 +78,16 @@ describe("AgentSession prompt-cache keepalive", () => {
 		extensionFactories?: HarnessOptions["extensionFactories"];
 	}): Promise<Harness> {
 		const harness = await createHarness({
-			models: [{ id: "cached", promptCache: renewing, ...(options.unpriced ? {} : { cost: priced }) }],
+			models: [
+				{
+					id: "cached",
+					promptCache: renewing,
+					...(options.unpriced ? {} : { cost: priced }),
+					...(options.reasoning === undefined ? {} : { reasoning: options.reasoning }),
+				},
+			],
 			...(options.refresh === undefined ? {} : { refreshPromptCache: options.refresh }),
+			...(options.canRefresh === undefined ? {} : { canRefreshPromptCache: options.canRefresh }),
 			...(options.settings === undefined ? {} : { settings: options.settings }),
 			...(options.tools === undefined ? {} : { tools: options.tools }),
 			...(options.agentDir === undefined ? {} : { agentDir: options.agentDir }),
@@ -452,5 +463,42 @@ describe("AgentSession prompt-cache keepalive", () => {
 		expect(harness.faux.state.refreshCount).toBe(0);
 		expect(harness.session.getPromptCacheStatus()).not.toHaveProperty("keepAliveUntil");
 		expect(refreshEntries(harness)).toEqual([]);
+	});
+
+	it("does not advertise or refresh a request whose thinking the provider cannot refresh", async () => {
+		const harness = await create({
+			refresh: refreshed,
+			reasoning: true,
+			canRefresh: (_model, options) => options?.reasoning === undefined,
+			settings: { promptCache: { keepAliveIdleMinutes: 10 } },
+		});
+		await harness.session.setThinkingLevel("high");
+		harness.setResponses([fauxAssistantMessage("hello")]);
+		await harness.session.prompt("hi");
+		await harness.session.waitForIdle();
+
+		expect(retained(harness)).not.toHaveProperty("keepAliveUntil");
+		await vi.advanceTimersByTimeAsync(10 * MINUTE);
+		expect(harness.faux.state.refreshCount).toBe(0);
+		expect(refreshEntries(harness)).toEqual([]);
+	});
+
+	it("stops advertising keepalive when the thinking level changes while idle", async () => {
+		const harness = await create({
+			refresh: refreshed,
+			reasoning: true,
+			settings: { promptCache: { keepAliveIdleMinutes: 10 } },
+		});
+		harness.setResponses([fauxAssistantMessage("hello")]);
+		await harness.session.prompt("hi");
+		await harness.session.waitForIdle();
+		expect(retained(harness).keepAliveUntil).toEqual(expect.any(Number));
+
+		await harness.session.setThinkingLevel("high");
+
+		expect(retained(harness)).not.toHaveProperty("keepAliveUntil");
+		expect(harness.eventsOfType("prompt_cache_changed").at(-1)?.promptCache).not.toHaveProperty("keepAliveUntil");
+		await vi.advanceTimersByTimeAsync(10 * MINUTE);
+		expect(harness.faux.state.refreshCount).toBe(0);
 	});
 });

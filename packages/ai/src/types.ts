@@ -308,6 +308,16 @@ export type PromptCacheRefreshFunction<TApi extends Api = Api> = (
 	options?: SimpleStreamOptions,
 ) => Promise<PromptCacheRefreshResult>;
 
+/**
+ * Whether the provider's `PromptCacheRefreshFunction` can refresh a `streamSimple` request with these
+ * options, decided without sending anything. It may still report "unsupported" when payload hooks
+ * change the request.
+ */
+export type PromptCacheRefreshCheck<TApi extends Api = Api> = (
+	model: Model<TApi>,
+	options?: SimpleStreamOptions,
+) => boolean;
+
 export type ImagesFunction<TApi extends ImagesApi = ImagesApi, TOptions extends ImagesOptions = ImagesOptions> = (
 	model: ImagesModel<TApi>,
 	context: ImagesContext,

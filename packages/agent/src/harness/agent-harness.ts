@@ -13,6 +13,7 @@ import {
 	refreshPromptCache,
 	type SimpleStreamOptions,
 	streamSimple,
+	supportsPromptCacheRefresh,
 	type UserMessage,
 } from "@hansjm10/volt-ai";
 import { runAgentLoop } from "../agent-loop.ts";
@@ -3010,6 +3011,22 @@ export class AgentHarness<
 
 	waitForClosed(): Promise<void> {
 		return this.closePromise ?? this.operations.waitForClosed();
+	}
+
+	/**
+	 * Whether `refreshPromptCache` would replay the latest conversation request now: a refresh function
+	 * is configured, the model, thinking level, tools, and stream options are unchanged since that
+	 * request, and its provider can refresh a request with those options. Sends nothing; the branch and
+	 * payload hooks are checked only when a refresh runs.
+	 */
+	canRefreshPromptCache(): boolean {
+		const target = this.lastTurnProviderRequest;
+		return (
+			this.refreshPromptCacheFn !== undefined &&
+			target !== undefined &&
+			target.configurationEpoch === this.runtimeConfigurationEpoch &&
+			supportsPromptCacheRefresh(target.model, target.options)
+		);
 	}
 
 	/**

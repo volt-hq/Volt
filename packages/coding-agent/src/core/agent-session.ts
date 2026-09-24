@@ -74,7 +74,6 @@ import {
 	modelsAreEqual,
 	resolvePromptCacheRetention,
 	streamSimple,
-	supportsPromptCacheRefresh,
 	validateToolArguments,
 } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
@@ -675,7 +674,6 @@ export class AgentSession {
 	private _diagnosticRequestId?: string;
 	private readonly _promptCacheAudit: PromptCacheAudit;
 	private readonly _promptCacheKeepAlive: PromptCacheKeepAlive;
-	private readonly _canRefreshPromptCache: boolean;
 	private readonly _promptCacheRefreshAbort = new AbortController();
 	/**
 	 * Latest confirmed renewal of the branch request's prefix: a keepalive refresh, or a request the
@@ -952,7 +950,6 @@ export class AgentSession {
 			resolvePath(config.agentDir ?? getAgentDir()),
 			() => this.sessionId,
 		);
-		this._canRefreshPromptCache = config.refreshPromptCacheFn !== undefined;
 		this._promptCacheAudit = new PromptCacheAudit({
 			agentDir: resolvePath(config.agentDir ?? getAgentDir()),
 			sessionId: () => this.sessionId,
@@ -973,8 +970,7 @@ export class AgentSession {
 								this._streamOptions.env,
 							),
 						),
-			canRefresh: () =>
-				this._canRefreshPromptCache && this.model !== undefined && supportsPromptCacheRefresh(this.model),
+			canRefresh: () => this._harness.canRefreshPromptCache(),
 			hasInFlightWork: () => this.isBusy || this.hasBackgroundJobs,
 			refresh: async (reason) => await this._refreshPromptCache(reason),
 			stopped: (reason, status) => this._recordPromptCacheStop(reason, status),
@@ -6468,6 +6464,8 @@ export class AgentSession {
 			level: effectiveLevel,
 			previousLevel,
 		});
+		// The next request uses a different thinking configuration, so keepalive no longer applies.
+		this._publishPromptCacheStatus();
 	}
 
 	/**

@@ -13,6 +13,7 @@ import type {
 import { AssistantMessageEventStream, EventStreamOverflowError } from "../utils/event-stream.ts";
 import type { BedrockOptions } from "./amazon-bedrock.ts";
 import type { AnthropicOptions } from "./anthropic.ts";
+import { canRefreshAnthropicPromptCache } from "./anthropic-capabilities.ts";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.ts";
 import type { GoogleOptions } from "./google.ts";
 import type { GoogleVertexOptions } from "./google-vertex.ts";
@@ -369,6 +370,7 @@ export function registerBuiltInApiProviders(): void {
 		stream: streamAnthropic,
 		streamSimple: streamSimpleAnthropic,
 		refreshPromptCache: refreshPromptCacheAnthropic,
+		canRefreshPromptCache: canRefreshAnthropicPromptCache,
 	});
 
 	registerApiProvider({

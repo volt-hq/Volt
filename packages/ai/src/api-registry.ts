@@ -3,6 +3,7 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Model,
+	PromptCacheRefreshCheck,
 	PromptCacheRefreshFunction,
 	SimpleStreamOptions,
 	StreamFunction,
@@ -27,6 +28,8 @@ export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOpti
 	streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
 	/** Optional no-output replay of a `streamSimple` request that renews the provider's prompt cache. */
 	refreshPromptCache?: PromptCacheRefreshFunction<TApi>;
+	/** Which request options `refreshPromptCache` can refresh; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck<TApi>;
 }
 
 interface ApiProviderInternal {
@@ -34,6 +37,7 @@ interface ApiProviderInternal {
 	stream: ApiStreamFunction;
 	streamSimple: ApiStreamSimpleFunction;
 	refreshPromptCache?: PromptCacheRefreshFunction;
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 type RegisteredApiProvider = {
@@ -79,6 +83,18 @@ function wrapRefreshPromptCache<TApi extends Api>(
 	};
 }
 
+function wrapCanRefreshPromptCache<TApi extends Api>(
+	api: TApi,
+	canRefresh: PromptCacheRefreshCheck<TApi>,
+): PromptCacheRefreshCheck {
+	return (model, options) => {
+		if (model.api !== api) {
+			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
+		}
+		return canRefresh(model as Model<TApi>, options);
+	};
+}
+
 export function registerApiProvider<TApi extends Api, TOptions extends StreamOptions>(
 	provider: ApiProvider<TApi, TOptions>,
 	sourceId?: string,
@@ -90,6 +106,9 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
 			...(provider.refreshPromptCache
 				? { refreshPromptCache: wrapRefreshPromptCache(provider.api, provider.refreshPromptCache) }
+				: {}),
+			...(provider.canRefreshPromptCache
+				? { canRefreshPromptCache: wrapCanRefreshPromptCache(provider.api, provider.canRefreshPromptCache) }
 				: {}),
 		},
 		sourceId,

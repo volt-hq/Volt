@@ -2,6 +2,7 @@ import {
 	type Context,
 	fauxAssistantMessage,
 	type PromptCacheMetadata,
+	type PromptCacheRefreshCheck,
 	registerFauxProvider,
 	type SimpleStreamOptions,
 	streamSimple,
@@ -29,10 +30,14 @@ afterEach(async () => {
 	for (const registration of registrations.splice(0)) registration.unregister();
 });
 
-function createHarness(options: Omit<AgentHarnessOptions, "env" | "session" | "model"> = {}) {
+function createHarness(
+	options: Omit<AgentHarnessOptions, "env" | "session" | "model"> = {},
+	canRefreshPromptCache?: PromptCacheRefreshCheck,
+) {
 	const refreshes: Array<{ context: Context; options: SimpleStreamOptions | undefined }> = [];
 	const registration = registerFauxProvider({
 		models: [{ id: "cache-test", promptCache: renewing, contextWindow: 100_000, maxTokens: 1000 }],
+		...(canRefreshPromptCache === undefined ? {} : { canRefreshPromptCache }),
 		refreshPromptCache: (context, refreshOptions) => {
 			refreshes.push({ context, options: refreshOptions });
 			return {
@@ -145,6 +150,29 @@ describe("AgentHarness.refreshPromptCache", () => {
 		expect(
 			(await session.getEntries()).filter((entry) => entry.type === "custom").map((entry) => entry.customType),
 		).toEqual(["idle-entry", "run-entry"]);
+	});
+
+	it("reports whether the latest request can be refreshed without sending anything", async () => {
+		const { harness, registration } = createHarness();
+		expect(harness.canRefreshPromptCache()).toBe(false);
+
+		await harness.prompt("hello");
+		expect(harness.canRefreshPromptCache()).toBe(true);
+
+		await harness.setThinkingLevel("high");
+		expect(harness.canRefreshPromptCache()).toBe(false);
+		expect(registration.state.refreshCount).toBe(0);
+	});
+
+	it("applies the provider's check to the options of the latest request", async () => {
+		const { harness, registration } = createHarness(
+			{ thinkingLevel: "high" },
+			(_model, options) => options?.reasoning === undefined,
+		);
+		await harness.prompt("hello");
+
+		expect(harness.canRefreshPromptCache()).toBe(false);
+		expect(registration.state.refreshCount).toBe(0);
 	});
 
 	it("stays valid while the branch only grows", async () => {

@@ -68,11 +68,15 @@ export function streamSimple<TApi extends Api>(
 }
 
 /**
- * Whether `refreshPromptCache` can renew this model's prompt cache: its provider implements a
- * no-output refresh and the model documents a cache that renews on hit.
+ * Whether `refreshPromptCache` can renew the prompt cache of `streamSimple(model, context, options)`:
+ * its provider implements a no-output refresh for these options, the model documents a cache that
+ * renews on hit, and caching is enabled. Sends nothing.
  */
-export function supportsPromptCacheRefresh(model: Model<Api>): boolean {
-	return model.promptCache?.refreshesOnHit === true && getApiProvider(model.api)?.refreshPromptCache !== undefined;
+export function supportsPromptCacheRefresh(model: Model<Api>, options?: SimpleStreamOptions): boolean {
+	const provider = getApiProvider(model.api);
+	if (!provider?.refreshPromptCache || model.promptCache?.refreshesOnHit !== true) return false;
+	if (resolvePromptCacheRetention(model, options?.cacheRetention, options?.env) === "none") return false;
+	return provider.canRefreshPromptCache?.(model, options) ?? true;
 }
 
 /**

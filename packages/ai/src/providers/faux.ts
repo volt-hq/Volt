@@ -7,6 +7,7 @@ import type {
 	Message,
 	Model,
 	PromptCacheMetadata,
+	PromptCacheRefreshCheck,
 	PromptCacheRefreshFunction,
 	PromptCacheRefreshResult,
 	SimpleStreamOptions,
@@ -139,6 +140,8 @@ export interface RegisterFauxProviderOptions {
 	 * cached (or a write when it differs); a function supplies the outcome.
 	 */
 	refreshPromptCache?: true | FauxPromptCacheRefresh;
+	/** Which request options the registered refresh supports; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 export interface FauxProviderRegistration {
@@ -662,7 +665,16 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 			}
 		: undefined;
 
-	registerApiProvider({ api, stream, streamSimple, ...(refreshPromptCache ? { refreshPromptCache } : {}) }, sourceId);
+	registerApiProvider(
+		{
+			api,
+			stream,
+			streamSimple,
+			...(refreshPromptCache ? { refreshPromptCache } : {}),
+			...(options.canRefreshPromptCache ? { canRefreshPromptCache: options.canRefreshPromptCache } : {}),
+		},
+		sourceId,
+	);
 
 	function getModel(): Model<string>;
 	function getModel(requestedModelId: string): Model<string> | undefined;

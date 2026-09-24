@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
 import { refreshPromptCacheAnthropic, streamSimpleAnthropic } from "../src/providers/anthropic.ts";
+import { supportsPromptCacheRefresh } from "../src/stream.ts";
 import type { Context } from "../src/types.ts";
 
 const context: Context = {
@@ -105,6 +106,16 @@ describe("Anthropic prompt-cache refresh", () => {
 
 		expect(result.status).toBe("unsupported");
 		expect(requests).toEqual([]);
+	});
+
+	it("reports which request options can be refreshed before any refresh runs", () => {
+		const budget = getModel("anthropic", "claude-sonnet-4-5");
+		const adaptive = getModel("anthropic", "claude-sonnet-5");
+
+		expect(supportsPromptCacheRefresh(budget)).toBe(true);
+		expect(supportsPromptCacheRefresh(budget, { reasoning: "low" })).toBe(false);
+		expect(supportsPromptCacheRefresh(adaptive, { reasoning: "high" })).toBe(true);
+		expect(supportsPromptCacheRefresh(adaptive, { cacheRetention: "none" })).toBe(false);
 	});
 
 	it("reports disabled caching as unsupported without sending a request", async () => {
