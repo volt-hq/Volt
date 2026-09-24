@@ -789,6 +789,10 @@ export class AgentSession {
 		return this._admissionGate.revision;
 	}
 	private _abortPromise: Promise<void> | undefined;
+	/** Whether the in-flight stop starts retained queued input once it settles; joined stops can only decline. */
+	private _abortQueueDelivery: { requested: boolean } | undefined;
+	/** Queue publications a delivering stop joins, so an admission persisting across it is not stranded. */
+	private readonly _queuePublications = new Set<Promise<void>>();
 
 	// Background work outlives individual model turns, but never this session.
 	private readonly _backgroundJobs = new BackgroundJobManager({
@@ -3193,6 +3197,48 @@ export class AgentSession {
 		return operation;
 	}
 
+	private _trackQueuePublication(publication: Promise<void>): Promise<void> {
+		this._queuePublications.add(publication);
+		const settle = () => {
+			this._queuePublications.delete(publication);
+		};
+		void publication.then(settle, settle);
+		return publication;
+	}
+
+	/**
+	 * Starts input queued before a delivering stop as a fresh run once that stop
+	 * has settled. The stop leaves a terminal aborted assistant message, so the
+	 * continuation delivers steering first, then follow-ups, and never resumes the
+	 * interrupted work on its own. Any other run that owns the harness drains the queue itself.
+	 */
+	private _deliverQueuedMessagesAfterStop(): void {
+		if (this._queuePublications.size > 0) {
+			void Promise.allSettled([...this._queuePublications]).then(() => this._deliverQueuedMessagesAfterStop());
+			return;
+		}
+		if (
+			this._disposed ||
+			!this._admissionGate.isOpen ||
+			!this._isConversationAuthorityAvailable() ||
+			this._hasSessionOperationBarrier ||
+			this._harness.isReservedOrRunning() ||
+			this._harness.hasPendingPrompt() ||
+			!this._harness.hasQueuedMessages()
+		)
+			return;
+		const reservedRun = this._harness.reserveRun();
+		const work = this._runAgentPrompt([], this._abortGeneration, true, reservedRun).catch((error: unknown) => {
+			if (this._disposed) return;
+			this._extensionRunner.emitError({
+				extensionPath: "<runtime>",
+				event: "queued_message_delivery",
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		void this._trackAdmittedPromptWork(work);
+	}
+
 	private _trackAdmittedPromptWork<T>(operation: Promise<T>): Promise<T> {
 		this._admittedPromptWork.add(operation);
 		this._activityRevision++;
@@ -5508,23 +5554,23 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
-				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(
-						expandedText,
-						currentImages,
-						options.clientMessageId,
-						operation,
-						options.source === "extension",
-					);
-				} else {
-					await this._queueSteer(
-						expandedText,
-						currentImages,
-						options.clientMessageId,
-						operation,
-						options.source === "extension",
-					);
-				}
+				await this._trackQueuePublication(
+					options.streamingBehavior === "followUp"
+						? this._queueFollowUp(
+								expandedText,
+								currentImages,
+								options.clientMessageId,
+								operation,
+								options.source === "extension",
+							)
+						: this._queueSteer(
+								expandedText,
+								currentImages,
+								options.clientMessageId,
+								operation,
+								options.source === "extension",
+							),
+				);
 				preflightResult?.({ success: true, outcome: "admitted" });
 				if (runReservation) this._harness.cancelReservedRun(runReservation);
 				return "queued";
@@ -5810,7 +5856,7 @@ export class AgentSession {
 			let expandedText = this._expandSkillCommand(text);
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-			await this._queueSteer(expandedText, images, clientMessageId, operation);
+			await this._trackQueuePublication(this._queueSteer(expandedText, images, clientMessageId, operation));
 			operation?.resolveAccepted("admitted");
 		} catch (error) {
 			const normalized = error instanceof Error ? error : new Error(String(error));
@@ -5857,7 +5903,7 @@ export class AgentSession {
 			let expandedText = this._expandSkillCommand(text);
 			expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
-			await this._queueFollowUp(expandedText, images, clientMessageId, operation);
+			await this._trackQueuePublication(this._queueFollowUp(expandedText, images, clientMessageId, operation));
 			operation?.resolveAccepted("admitted");
 		} catch (error) {
 			const normalized = error instanceof Error ? error : new Error(String(error));
@@ -6236,11 +6282,18 @@ export class AgentSession {
 
 	/**
 	 * Abort current operation and wait for agent to become idle.
+	 *
+	 * Queued steering and follow-up input is retained by default. With
+	 * `deliverQueuedMessages`, it starts as a new run once the stop settles; a
+	 * joined stop that does not request delivery keeps it retained.
 	 */
-	abort(source?: AgentAbortSource): Promise<void> {
+	abort(source?: AgentAbortSource, options?: { deliverQueuedMessages?: boolean }): Promise<void> {
 		if (this._abortPromise) {
+			if (!options?.deliverQueuedMessages && this._abortQueueDelivery) this._abortQueueDelivery.requested = false;
 			return this._abortPromise;
 		}
+		const queueDelivery = { requested: options?.deliverQueuedMessages === true };
+		this._abortQueueDelivery = queueDelivery;
 		const releaseAdmission = this._admissionGate.suspend();
 		this._invalidateExtensionWork();
 		this._backgroundJobs.suppressContinuations();
@@ -6255,11 +6308,22 @@ export class AgentSession {
 			if (this._abortPromise === abortPromise) {
 				this._abortPromise = undefined;
 			}
+			if (this._abortQueueDelivery === queueDelivery) {
+				this._abortQueueDelivery = undefined;
+			}
 			releaseAdmission();
 		});
 		// Admission is already fenced. Publish the join before any cancellation
 		// callback can synchronously reenter abort().
 		this._abortPromise = abortPromise;
+		// Registered before any caller continuation, so delivery reserves the idle
+		// harness before later admissions can observe it.
+		void abortPromise.then(
+			() => {
+				if (queueDelivery.requested) this._deliverQueuedMessagesAfterStop();
+			},
+			() => undefined,
+		);
 		const drains: Promise<void>[] = [];
 		for (const cancel of [
 			() => {
