@@ -4,6 +4,7 @@ import { streamSimple } from "../src/stream.ts";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
 
 interface AnthropicThinkingPayload {
+	max_tokens?: number;
 	thinking?: { type: string; budget_tokens?: number; display?: string };
 	output_config?: { effort?: string };
 }
@@ -99,6 +100,28 @@ describe("Anthropic forceAdaptiveThinking compat override", () => {
 
 		expect(payload.thinking?.type).toBe("enabled");
 		expect(payload.output_config).toBeUndefined();
+	});
+
+	it("reserves the thinking budget on top of an explicit output cap for adaptive thinking", async () => {
+		const model = getModel("anthropic", "claude-opus-5-5");
+		const capped = await capturePayload(model, { reasoning: "xhigh", maxTokens: 4096 });
+		const customBudget = await capturePayload(model, {
+			reasoning: "medium",
+			maxTokens: 4096,
+			thinkingBudgets: { medium: 2000 },
+		});
+		const uncapped = await capturePayload(model, { reasoning: "xhigh" });
+		const clamped = await capturePayload(makeCustomModel({ forceAdaptiveThinking: true }), {
+			reasoning: "high",
+			maxTokens: 30000,
+		});
+
+		expect(capped.thinking).toEqual({ type: "adaptive", display: "summarized" });
+		expect(capped.output_config).toEqual({ effort: "xhigh" });
+		expect(capped.max_tokens).toBe(4096 + 16384);
+		expect(customBudget.max_tokens).toBe(4096 + 2000);
+		expect(uncapped.max_tokens).toBe(model.maxTokens);
+		expect(clamped.max_tokens).toBe(32000);
 	});
 
 	it("preserves thinking.type=disabled when reasoning is off regardless of override", async () => {
