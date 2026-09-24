@@ -148,15 +148,23 @@ export class McpOutputStore {
 		} catch {
 			// Cache storage failure must not discard an otherwise successful tool result.
 		}
+		let content = truncation.content;
+		let returnedLines = truncation.outputLines;
+		// Whole-line truncation drops an oversized line, such as compact structured JSON, entirely.
+		// Keep its UTF-8 prefix instead; a 4-byte budget always fits the first character.
+		if (truncation.truncatedBy === "bytes" && this.maxOutputBytes >= 4) {
+			content = sliceByUtf8Bytes(text, 0, this.maxOutputBytes).content;
+			returnedLines = lineCount(content);
+		}
 		return {
-			content: truncation.truncated ? truncation.content : text,
+			content,
 			...(truncation.truncated
 				? {
 						truncation: {
 							truncated: true as const,
-							returnedBytes: truncation.outputBytes,
+							returnedBytes: byteLength(content),
 							totalBytes: truncation.totalBytes,
-							returnedLines: truncation.outputLines,
+							returnedLines,
 							totalLines: truncation.totalLines,
 						},
 					}

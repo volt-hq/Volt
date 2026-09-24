@@ -548,6 +548,27 @@ describe("#469 bounded MCP model output", () => {
 		).toBe(true);
 	});
 
+	it("previews oversized single-line output by UTF-8 bytes instead of dropping the whole line", async () => {
+		const structuredContent = { rows: Array.from({ length: 100 }, (_, id) => ({ id, title: `Row ${id}` })) };
+		const serialized = JSON.stringify(structuredContent);
+		const { execute, connection, store, readAll } = await createFixture({
+			bytes: 1024,
+			output: serialized,
+			structuredContent,
+		});
+		const deduplicated = await execute({ action: "call", server: "fake", tool: "read_note" });
+		expect(deduplicated.data.content).toMatch(/^Structured content:\n\{"rows":\[\{"id":0,"title":"Row 0"\}/);
+		expect(deduplicated.data.truncation?.returnedBytes).toBe(Buffer.byteLength(deduplicated.data.content));
+		expect(await readAll(deduplicated.data.cache!.id)).toBe(`Structured content:\n${serialized}`);
+		vi.spyOn(connection, "callTool").mockResolvedValue({ content: [], structuredContent });
+		const structuredOnly = await execute({ action: "call", server: "fake", tool: "read_note" });
+		expect(structuredOnly.data.content).toMatch(/^Structured content:\n\{"rows":\[\{"id":0,"title":"Row 0"\}/);
+
+		const shaped = store.shapeOutput(`intro\n${"漢".repeat(1000)}`);
+		expect(shaped.content).toBe(`intro\n${"漢".repeat(339)}`);
+		expect(shaped.truncation).toMatchObject({ returnedBytes: 1023, returnedLines: 2, totalLines: 2 });
+	});
+
 	it("retains exact numeric literals and duplicate keys when JSON parsing would lose information", async () => {
 		const original = '{"id":9007199254740993}';
 		const { execute, connection, readAll } = await createFixture({
