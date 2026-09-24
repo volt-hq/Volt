@@ -420,22 +420,25 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 	}
 
 	if (isAnthropicClaudeModel(model)) {
-		if (supportsAdaptiveThinking(model.id, model.name)) {
-			return streamBedrock(model, context, {
-				...base,
-				reasoning: options.reasoning,
-				thinkingBudgets: options.thinkingBudgets,
-			} satisfies BedrockOptions);
-		}
-
-		// Undefined means the caller did not request an output cap; let the helper use the model cap.
-		// Do not coerce to 0 here, or the thinking budget would become the entire maxTokens value.
+		// Thinking counts against maxTokens in both modes, so an explicit output cap gets the level's
+		// thinking budget on top. Undefined means the caller did not request an output cap; let the
+		// helper use the model cap. Do not coerce to 0 here, or the thinking budget would become the
+		// entire maxTokens value.
 		const adjusted = adjustMaxTokensForThinking(
 			base.maxTokens,
 			model.maxTokens,
 			options.reasoning,
 			options.thinkingBudgets,
 		);
+
+		if (supportsAdaptiveThinking(model.id, model.name)) {
+			return streamBedrock(model, context, {
+				...base,
+				maxTokens: adjusted.maxTokens,
+				reasoning: options.reasoning,
+				thinkingBudgets: options.thinkingBudgets,
+			} satisfies BedrockOptions);
+		}
 
 		return streamBedrock(model, context, {
 			...base,
