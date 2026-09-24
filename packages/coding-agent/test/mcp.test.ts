@@ -317,7 +317,7 @@ describe("MCP support", () => {
 			isError: true,
 			content: "server rejected the read",
 		});
-		expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining('"status": "failed"') });
+		expect(result.content[0]).toMatchObject({ type: "text", text: expect.stringContaining('"status":"failed"') });
 
 		const direct = createMcpDirectToolDefinitions(manager);
 		expect(direct).toHaveLength(1);
@@ -422,15 +422,18 @@ describe("MCP support", () => {
 		expect(manager.isTrustedToolRead("fake", "read_note")).toBe(true);
 
 		const gateway = createMcpToolDefinition({ manager, isRestrictedTrustedRead: () => true });
-		await expect(
-			gateway.execute(
-				"mcp-race",
-				{ action: "call", server: "fake", tool: "read_note" },
-				undefined,
-				undefined,
-				undefined as never,
-			),
-		).rejects.toThrow("not an effectively trusted read");
+		const result = await gateway.execute(
+			"mcp-race",
+			{ action: "call", server: "fake", tool: "read_note" },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(result.isError).toBe(true);
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("not an effectively trusted read"),
+		});
 		expect(metadataReads).toBe(2);
 		expect(toolCalls).toBe(0);
 		await manager.dispose();

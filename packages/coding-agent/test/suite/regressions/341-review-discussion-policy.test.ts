@@ -740,13 +740,19 @@ describe("Regression #341: persisted review discussion policy", () => {
 		const gateway = session.state.tools.find((tool) => tool.name === "mcp")!;
 		await gateway.execute("read", { action: "call", server: "trusted", tool: "read_note" });
 		expect(callTool).toHaveBeenCalledTimes(3);
-		await expect(
-			gateway.execute("denied", { action: "call", server: "trusted", tool: "write_note" }),
-		).rejects.toThrow();
+		const denied = await gateway.execute("denied", { action: "call", server: "trusted", tool: "write_note" });
+		expect(denied.isError).toBe(true);
+		expect(denied.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("not an effectively trusted read"),
+		});
 		readOnlyHint = false;
-		await expect(
-			gateway.execute("changed", { action: "call", server: "trusted", tool: "read_note" }),
-		).rejects.toThrow();
+		const changed = await gateway.execute("changed", { action: "call", server: "trusted", tool: "read_note" });
+		expect(changed.isError).toBe(true);
+		expect(changed.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("not an effectively trusted read"),
+		});
 		expect(callTool).toHaveBeenCalledTimes(3);
 		await session.setAgentMode("build");
 		await session.reload();

@@ -2,7 +2,7 @@ import type { TSchema } from "typebox";
 import { Type } from "typebox";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
 import type { McpManager } from "./manager.ts";
-import type { McpDirectToolCandidate, McpGatewayExecutionContext } from "./types.ts";
+import type { McpDirectToolCandidate, McpGatewayCallResult, McpGatewayExecutionContext } from "./types.ts";
 
 export interface McpDirectToolDetails {
 	server: string;
@@ -40,23 +40,46 @@ export function createMcpDirectToolDefinitions(manager: McpManager): ToolDefinit
 		parameters: schemaForCandidate(candidate),
 		executionMode: "sequential",
 		async execute(_toolCallId, params, signal, _onUpdate, ctx) {
-			const result = await manager.callTool(
-				{
+			let result: McpGatewayCallResult;
+			try {
+				result = await manager.callTool(
+					{
+						action: "call",
+						server: candidate.server,
+						tool: candidate.tool.name,
+						arguments: params as Record<string, unknown>,
+					},
+					toGatewayContext(ctx),
+					signal,
+				);
+			} catch (error) {
+				if (signal?.aborted) throw new Error("Operation aborted");
+				const failure = manager.formatGatewayResult("call", {
 					action: "call",
 					server: candidate.server,
 					tool: candidate.tool.name,
-					arguments: params as Record<string, unknown>,
-				},
-				toGatewayContext(ctx),
-				signal,
-			);
+					isError: true,
+					content: error instanceof Error ? error.message : String(error),
+				});
+				return {
+					content: [{ type: "text", text: failure.text }],
+					details: {
+						server: candidate.server,
+						tool: candidate.tool.name,
+						metadataHash: candidate.metadataHash,
+						result: failure.result,
+					},
+					isError: true,
+				};
+			}
+			const formatted = manager.formatGatewayResult("call", result);
 			return {
-				content: [{ type: "text", text: result.content }],
+				content: [{ type: "text", text: formatted.text }],
 				details: {
 					server: candidate.server,
 					tool: candidate.tool.name,
 					metadataHash: candidate.metadataHash,
-					result,
+					result: formatted.result,
 				},
 				...(result.isError || result.status === "failed" ? { isError: true } : {}),
 			};
