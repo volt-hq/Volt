@@ -364,6 +364,8 @@ export interface IrohDaemonServiceDependencies {
 	relayRecoveryDelayMs?: number;
 	relayRecoveryRetryMs?: number;
 	relayRecoveryConfirmationTimeoutMs?: number;
+	/** Override the connection authentication, first-stream accept, and stream handshake deadlines (test-only). */
+	handshakeTimeoutMs?: number;
 }
 
 export interface ResolvedIrohRelayConfig {
@@ -2815,6 +2817,9 @@ class IrohDaemonService {
 		}
 		let acceptedStreamCount = 0;
 		let authenticated = false;
+		const unauthenticatedTimeoutMs =
+			this.dependencies.handshakeTimeoutMs ?? IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS;
+		const handshakeTimeoutMs = this.dependencies.handshakeTimeoutMs ?? DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS;
 		const unauthenticatedTimer = setTimeout(() => {
 			if (authenticated || supervisor.isClosing) return;
 			supervisor.requestClose("handshake_timeout", "immediate");
@@ -2823,9 +2828,9 @@ class IrohDaemonService {
 				clientNodeId: remoteId,
 				success: false,
 				error: "connection did not authenticate before the handshake deadline",
-				details: { connectionId, timeoutMs: IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS },
+				details: { connectionId, timeoutMs: unauthenticatedTimeoutMs },
 			});
-		}, IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS);
+		}, unauthenticatedTimeoutMs);
 		unauthenticatedTimer.unref?.();
 
 		const markAuthenticated = async (): Promise<boolean> => {
@@ -2846,8 +2851,12 @@ class IrohDaemonService {
 
 		try {
 			while (!supervisor.isClosing) {
-				const stream = await (!authenticated
-					? withTimeout(connection.acceptBi(), DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS, "handshake timed out")
+				// Bound only the wait for the first stream. The first stream authenticates
+				// asynchronously, and the unauthenticated timer already closes a connection
+				// that never authenticates; a sibling-accept deadline would tear down a
+				// single authenticated stream still serving a slow request.
+				const stream = await (acceptedStreamCount === 0
+					? withTimeout(connection.acceptBi(), handshakeTimeoutMs, "handshake timed out")
 					: connection.acceptBi());
 				acceptedStreamCount++;
 				if (!this.admission.isOpen) {
@@ -2922,7 +2931,7 @@ class IrohDaemonService {
 					clientNodeId: remoteId,
 					success: false,
 					error: "connection closed or timed out before opening a handshake stream",
-					details: { connectionId, timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS },
+					details: { connectionId, timeoutMs: handshakeTimeoutMs },
 				});
 			}
 		} finally {
@@ -3002,7 +3011,7 @@ class IrohDaemonService {
 				child: "volt",
 				isCancelled: () => owner.signal.aborted,
 				maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
-				timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
+				timeoutMs: this.dependencies.handshakeTimeoutMs ?? DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
 			});
 		} finally {
 			handshakeAdmission.lease.release();
