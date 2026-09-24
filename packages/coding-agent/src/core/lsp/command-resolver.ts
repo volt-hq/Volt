@@ -18,7 +18,7 @@ export interface LspLaunchDescriptor {
 	/** Bare commands are the only launch form eligible for a reviewed automatic install. */
 	bare: boolean;
 	/** Toolchain locator evidence: how the executable was found, or why the server is not installed. */
-	toolchain?: { status: "found" | "missing"; detail: string };
+	toolchain?: { status: "found" | "missing"; detail: string; installArgs?: readonly string[] };
 }
 
 export interface ResolveLspLaunchOptions {
@@ -219,7 +219,11 @@ export function resolveLspLaunch(
 			toolchain = { status: "found", detail: result.detail };
 		} else if (result.status === "missing") {
 			resolvedExecutable = undefined;
-			toolchain = { status: "missing", detail: result.detail };
+			toolchain = {
+				status: "missing",
+				detail: result.detail,
+				...(result.installArgs ? { installArgs: [...result.installArgs] } : {}),
+			};
 		}
 	}
 

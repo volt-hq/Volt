@@ -33,12 +33,12 @@ afterEach(() => {
 type RunResult = ReturnType<LspLocatorHost["run"]>;
 
 function fakeHost(
-	result: RunResult,
+	result: RunResult | ((args: readonly string[]) => RunResult),
 	links: Record<string, string> = {},
 	identities: Record<string, string> = {},
 ): LspLocatorHost & { run: ReturnType<typeof vi.fn<LspLocatorHost["run"]>> } {
 	return {
-		run: vi.fn<LspLocatorHost["run"]>(() => result),
+		run: vi.fn<LspLocatorHost["run"]>((_command, args) => (typeof result === "function" ? result(args) : result)),
 		realpath: (path) => links[path] ?? path,
 		fileIdentity: (path) => identities[path] ?? path,
 	};
@@ -158,24 +158,74 @@ describe("LSP toolchain locators (#459)", () => {
 			});
 		});
 
-		it("reports a proxy without its component as not installed", () => {
+		const componentMissing: RunResult = {
+			status: 1,
+			stdout: "",
+			stderr: "error: 'rust-analyzer' is not installed for the toolchain 'stable'\nhelp: run rustup component add",
+		};
+
+		it("targets the component install at the toolchain selected in the server root", () => {
+			const host = fakeHost(
+				(args) =>
+					args[0] === "show"
+						? {
+								status: 0,
+								stdout: "stable-aarch64-apple-darwin (overridden by '/project/crate/rust-toolchain.toml')\n",
+								stderr: "",
+							}
+						: componentMissing,
+				homebrew.links,
+			);
+			const launch = resolveBuiltIn("rust-analyzer", { ...homebrew, host });
+			expect(launch.resolvedExecutable).toBeUndefined();
+			expect(launch.toolchain).toMatchObject({
+				status: "missing",
+				installArgs: ["--toolchain", "stable-aarch64-apple-darwin"],
+			});
+			expect(launch.toolchain?.detail).toContain("/cellar/rustup/bin/rust-analyzer");
+			expect(launch.toolchain?.detail).toContain("stable-aarch64-apple-darwin toolchain selected at /project/crate");
+			expect(launch.toolchain?.detail).not.toContain("help:");
+			expect(host.run).toHaveBeenLastCalledWith("/cellar/rustup/bin/rustup", ["show", "active-toolchain"], {
+				cwd: "/project/crate",
+				env: { PATH: "/opt/homebrew/bin", RUSTUP_AUTO_INSTALL: "0" },
+			});
+		});
+
+		it.each([
+			{
+				case: "an uninstalled toolchain",
+				show: {
+					status: 1,
+					stdout: "",
+					stderr:
+						"error: override toolchain '1.70.0-aarch64-apple-darwin' is not installed: the toolchain file specifies an uninstalled toolchain",
+				},
+				reason: "override toolchain '1.70.0-aarch64-apple-darwin' is not installed",
+			},
+			{
+				case: "a custom path toolchain",
+				show: {
+					status: 0,
+					stdout: "/opt/custom-toolchain (overridden by '/project/crate/rust-toolchain.toml')\n",
+					stderr: "",
+				},
+				reason: "is not installed for the toolchain 'stable'",
+			},
+			{
+				case: "an option-like toolchain name",
+				show: { status: 0, stdout: "--force (default)\n", stderr: "" },
+				reason: "is not installed for the toolchain 'stable'",
+			},
+		])("offers no component install for $case", ({ show, reason }) => {
 			const launch = resolveBuiltIn("rust-analyzer", {
 				...homebrew,
-				host: fakeHost(
-					{
-						status: 1,
-						stdout: "",
-						stderr:
-							"error: 'rust-analyzer' is not installed for the toolchain 'stable'\nhelp: run rustup component add",
-					},
-					homebrew.links,
-				),
+				host: fakeHost((args) => (args[0] === "show" ? show : componentMissing), homebrew.links),
 			});
 			expect(launch.resolvedExecutable).toBeUndefined();
 			expect(launch.toolchain?.status).toBe("missing");
-			expect(launch.toolchain?.detail).toContain("/cellar/rustup/bin/rust-analyzer");
-			expect(launch.toolchain?.detail).toContain("is not installed for the toolchain 'stable'");
-			expect(launch.toolchain?.detail).not.toContain("help:");
+			expect(launch.toolchain?.installArgs).toBeUndefined();
+			expect(launch.toolchain?.detail).toContain("cannot receive the component");
+			expect(launch.toolchain?.detail).toContain(reason);
 		});
 
 		it("checks a PATH-resolved rustup proxy but not a standalone rust-analyzer", () => {
@@ -280,7 +330,11 @@ function lspLauncher(directory: string, name: string): string {
 	);
 }
 
-function managerFixture(file: string, settings: LspSettings = {}, install: () => void = () => {}) {
+function managerFixture(
+	file: string,
+	settings: LspSettings = {},
+	install: (command: readonly string[]) => void = () => {},
+) {
 	const root = realpathSync(mkdtempSync(join(tmpdir(), "volt-lsp-459-")));
 	roots.push(root);
 	const bin = join(root, "bin");
@@ -291,8 +345,8 @@ function managerFixture(file: string, settings: LspSettings = {}, install: () =>
 	vi.stubEnv("VOLT_OFFLINE", "0");
 	const updates: HostActionUpdate[] = [];
 	const requestAction = vi.fn<HostInteraction["requestAction"]>(async () => ({ decision: "approved" }));
-	const installRunner = vi.fn(async () => {
-		install();
+	const installRunner = vi.fn(async (command: readonly string[]) => {
+		install(command);
 		return { exitCode: 0, output: "installed" };
 	});
 	const manager = new LspManager({
@@ -349,23 +403,36 @@ describe("LSP toolchain locator integration (#459)", () => {
 	});
 
 	// rustup proxies are hard links or symlinks to rustup that dispatch on their invoked name.
+	// The fake selects a toolchain from a `rust-toolchain` file in its working directory
+	// (default `stable`) and records installed components as files named after the toolchain.
 	function rustFixture(layout: "homebrew" | "rustup-init") {
-		let marker = "";
-		const item = managerFixture("main.rs", {}, () => writeFileSync(marker, ""));
-		marker = join(item.root, "component-installed");
+		let components = "";
+		const item = managerFixture("main.rs", {}, (command) => {
+			const index = command.indexOf("--toolchain");
+			writeFileSync(join(components, index === -1 ? "stable" : command[index + 1]), "");
+		});
+		components = join(item.root, "components");
+		mkdirSync(components);
 		const proxyDirectory = layout === "homebrew" ? join(item.root, "cellar") : item.bin;
 		mkdirSync(proxyDirectory, { recursive: true });
 		const rustup = writeScript(
 			join(proxyDirectory, "rustup"),
 			[
+				"tc=stable",
+				"[ -f rust-toolchain ] && read -r tc < rust-toolchain",
 				`if [ "\${0##*/}" = rust-analyzer ]; then`,
-				`  [ -f '${marker}' ] || { echo "error: 'rust-analyzer' is not installed" >&2; exit 1; }`,
+				`  [ -f '${components}/'"$tc" ] || { echo "error: 'rust-analyzer' is not installed" >&2; exit 1; }`,
 				`  case ":$PATH:" in *":${proxyDirectory}:"*) ;; *) echo "cargo is not on PATH" >&2; exit 7 ;; esac`,
 				`  exec '${process.execPath}' '${fake}' "$@"`,
-				`fi`,
-				`[ "$1" = which ] && [ "$RUSTUP_AUTO_INSTALL" = 0 ] || exit 3`,
-				`[ -f '${marker}' ] || { echo "error: 'rust-analyzer' is not installed for the toolchain 'stable'" >&2; exit 1; }`,
-				`echo '${join(item.root, "toolchain", "rust-analyzer")}'`,
+				"fi",
+				`[ "$RUSTUP_AUTO_INSTALL" = 0 ] || exit 3`,
+				`[ "$tc" = uninstalled ] && { echo "error: override toolchain 'uninstalled' is not installed" >&2; exit 1; }`,
+				`case "$1" in`,
+				`  which) [ -f '${components}/'"$tc" ] || { echo "error: 'rust-analyzer' is not installed for the toolchain '$tc'" >&2; exit 1; }`,
+				`    echo '${join(item.root, "toolchain", "rust-analyzer")}' ;;`,
+				`  show) echo "$tc (overridden by '$PWD/rust-toolchain')" ;;`,
+				"  *) exit 3 ;;",
+				"esac",
 				"",
 			].join("\n"),
 			"exit /b 1\r\n",
@@ -373,12 +440,22 @@ describe("LSP toolchain locator integration (#459)", () => {
 		const proxy = join(proxyDirectory, "rust-analyzer");
 		linkSync(rustup, proxy);
 		if (layout === "homebrew") symlinkSync(rustup, join(item.bin, "rustup"));
-		return { ...item, marker, proxy };
+		/** A nested crate whose root selects `toolchain`, unlike the project workspace. */
+		const crate = (toolchain: string) => {
+			const directory = join(item.root, "crate");
+			mkdirSync(directory);
+			writeFileSync(join(directory, "Cargo.toml"), "");
+			writeFileSync(join(directory, "rust-toolchain"), `${toolchain}\n`);
+			const path = join(directory, "main.rs");
+			writeFileSync(path, "symbol\n");
+			return path;
+		};
+		return { ...item, components, proxy, crate };
 	}
 
 	it.skipIf(windows)("launches an installed Homebrew rustup proxy with cargo on its PATH", async () => {
 		const item = rustFixture("homebrew");
-		writeFileSync(item.marker, "");
+		writeFileSync(join(item.components, "stable"), "");
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 		expect(item.requestAction).not.toHaveBeenCalled();
 		expect(item.status("rust")).toMatchObject({
@@ -394,7 +471,9 @@ describe("LSP toolchain locator integration (#459)", () => {
 			const item = rustFixture(layout);
 			expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
 			expect(item.requestAction).toHaveBeenCalledTimes(1);
-			expect(item.requestAction.mock.calls[0][0].commandPreview).toBe("rustup component add rust-analyzer");
+			expect(item.requestAction.mock.calls[0][0].commandPreview).toBe(
+				"rustup component add rust-analyzer --toolchain stable",
+			);
 			expect(item.updates.map((update) => update.status)).toEqual(["running", "completed"]);
 			item.manager.restart();
 			expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
@@ -409,7 +488,38 @@ describe("LSP toolchain locator integration (#459)", () => {
 		const result = await item.manager.hover(item.path, "symbol");
 		expect(result.outcome).toBe("unavailable");
 		expect(result.text).toContain(`rust-analyzer rustup proxy ${item.proxy} is present`);
-		expect(result.text).toContain("is not installed for the toolchain 'stable'");
+		expect(result.text).toContain(`not installed for the stable toolchain selected at ${item.root}`);
+		expect(result.text).toContain("Install with: rustup component add rust-analyzer --toolchain stable");
+		expect(item.installRunner).not.toHaveBeenCalled();
+	});
+
+	it.skipIf(windows)("installs the component for the server root's toolchain, not the workspace's", async () => {
+		const item = rustFixture("homebrew");
+		writeFileSync(join(item.components, "stable"), "");
+		const path = item.crate("pinned");
+		expect(await item.manager.hover(path, "symbol")).toMatchObject({ outcome: "success" });
+		expect(item.requestAction).toHaveBeenCalledTimes(1);
+		expect(item.requestAction.mock.calls[0][0].commandPreview).toBe(
+			"rustup component add rust-analyzer --toolchain pinned",
+		);
+		expect(item.installRunner).toHaveBeenCalledExactlyOnceWith(
+			["rustup", "component", "add", "rust-analyzer", "--toolchain", "pinned"],
+			expect.anything(),
+		);
+		expect(item.updates.map((update) => update.status)).toEqual(["running", "completed"]);
+		// The workspace's own toolchain already had the component; no second prompt.
+		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "success" });
+		expect(item.requestAction).toHaveBeenCalledTimes(1);
+	});
+
+	it.skipIf(windows)("offers no component install when the root's toolchain is not installed", async () => {
+		const item = rustFixture("homebrew");
+		const result = await item.manager.hover(item.crate("uninstalled"), "symbol");
+		expect(result.outcome).toBe("unavailable");
+		expect(result.text).toContain("cannot receive the component");
+		expect(result.text).toContain("override toolchain 'uninstalled' is not installed");
+		expect(result.text).not.toContain("Install with: rustup component add");
+		expect(item.requestAction).not.toHaveBeenCalled();
 		expect(item.installRunner).not.toHaveBeenCalled();
 	});
 

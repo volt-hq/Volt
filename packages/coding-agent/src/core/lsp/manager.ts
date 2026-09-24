@@ -175,6 +175,27 @@ function installRecipeIdentity(recipe: LspInstallRecipe): string {
 	return `${recipe.binary}\u0000${recipe.command.join("\u0000")}`;
 }
 
+/**
+ * The reviewed recipe, targeted at the toolchain a locator checked. Undefined when
+ * the locator found the server missing but no reviewed install can repair it.
+ */
+function effectiveInstallRecipe(
+	server: ResolvedLspServerConfig,
+	launch: LspLaunchDescriptor | undefined,
+): LspInstallRecipe | undefined {
+	const recipe = server.installRecipe;
+	const toolchain = launch?.toolchain;
+	if (!recipe || toolchain?.status !== "missing") return recipe;
+	if (!toolchain.installArgs) return undefined;
+	const displayCommand = [recipe.displayCommand, ...toolchain.installArgs].join(" ");
+	return {
+		...recipe,
+		command: [...recipe.command, ...toolchain.installArgs],
+		displayCommand,
+		installHint: `Install with: ${displayCommand}`,
+	};
+}
+
 function pathEntryExists(path: string): boolean {
 	try {
 		lstatSync(path);
@@ -2133,7 +2154,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		// This policy belongs to the operation, not the shared server startup.
 		if (isManagedLspObservation()) return { retry: false, message: error.message };
 		const failure = this.startFailures.get(error.key);
-		const recipe = server.installRecipe;
+		const recipe = effectiveInstallRecipe(server, error.launch);
 		const installEligible =
 			error.launch.bare &&
 			(error.reason === "missing-executable" || error.reason === "incompatible-version") &&
@@ -2232,7 +2253,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				: `Unresolved command: ${launch?.requestedExecutable ?? server.command[0]}`;
 		const sourceContext = launch ? `Launch source: ${launch.source}` : undefined;
 		const repairContext = `Project workspace: ${this.projectCwd}; ${commandContext}${sourceContext ? `; ${sourceContext}` : ""}`;
-		const hint = server.installHint;
+		const hint =
+			launch?.toolchain?.status === "missing"
+				? effectiveInstallRecipe(server, launch)?.installHint
+				: server.installHint;
 		const explicitRepair =
 			launch && !launch.bare
 				? "Automatic install is unavailable for explicit paths; repair lsp.servers command configuration."

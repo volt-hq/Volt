@@ -14,6 +14,8 @@ import { spawnProcessSync } from "../../utils/child-process.ts";
 
 const LOCATOR_TIMEOUT_MS = 3000;
 const MAX_REASON_CHARS = 300;
+/** Channel, version, or linked toolchain names; excludes paths and option-like values. */
+const RUSTUP_TOOLCHAIN_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 
 export interface LspLocatorCommandOptions {
 	cwd: string;
@@ -69,8 +71,16 @@ export interface LspLocatedExecutable {
 
 export type LspLocatorResult =
 	| LspLocatedExecutable
-	/** The toolchain launcher exists, but the server is not installed for it. Eligible for the reviewed install. */
-	| { status: "missing"; detail: string }
+	/** The toolchain launcher exists, but the server is not installed for the toolchain it selects. */
+	| {
+			status: "missing";
+			detail: string;
+			/**
+			 * Arguments appended to the reviewed install recipe so it targets the toolchain
+			 * that was checked. Absent when the reviewed install cannot repair it.
+			 */
+			installArgs?: readonly string[];
+	  }
 	/** No toolchain evidence; keep the inherited PATH result. */
 	| { status: "not-applicable" };
 
@@ -113,6 +123,10 @@ export const defaultLspLocatorHost: LspLocatorHost = {
 
 function pathApiFor(platform: NodeJS.Platform): typeof posix {
 	return platform === "win32" ? win32 : posix;
+}
+
+function firstLine(text: string): string | undefined {
+	return text.trim().split(/\r?\n/, 1)[0]?.slice(0, MAX_REASON_CHARS) || undefined;
 }
 
 function prependPath(environment: NodeJS.ProcessEnv, directory: string, platform: NodeJS.Platform): NodeJS.ProcessEnv {
@@ -174,7 +188,9 @@ const goLocator: LspToolchainLocator = {
  * its PATH; the toolchain binary from `rustup which` cannot find cargo/rustc
  * when the proxies are not on the inherited PATH (Homebrew rustup). Proxies
  * exist even when the component is not installed, so the component is checked
- * with `rustup which` in the server root, which honors rust-toolchain.toml.
+ * with `rustup which` in the server root, which honors rust-toolchain.toml and
+ * directory overrides. A repair must target that same toolchain by name: the
+ * installer runs in the project workspace, which may select another toolchain.
  */
 const rustLocator: LspToolchainLocator = {
 	binary: "rust-analyzer",
@@ -199,10 +215,24 @@ const rustLocator: LspToolchainLocator = {
 		});
 		if (check.status === null) return NOT_APPLICABLE;
 		if (check.status !== 0) {
-			const reason = check.stderr.trim().split(/\r?\n/, 1)[0]?.slice(0, MAX_REASON_CHARS);
+			// Exits non-zero when the selected toolchain itself is not installed.
+			const active = context.run(rustup, ["show", "active-toolchain"], {
+				cwd: context.root,
+				env: { ...context.environment, RUSTUP_AUTO_INSTALL: "0" },
+			});
+			const toolchain = active.status === 0 ? active.stdout.trim().split(/\s+/, 1)[0] : undefined;
+			if (toolchain && RUSTUP_TOOLCHAIN_NAME.test(toolchain)) {
+				const reason = firstLine(check.stderr);
+				return {
+					status: "missing",
+					detail: `rust-analyzer rustup proxy ${proxy} is present, but the component is not installed for the ${toolchain} toolchain selected at ${context.root}${reason ? ` (${reason})` : ""}`,
+					installArgs: ["--toolchain", toolchain],
+				};
+			}
+			const reason = firstLine(active.stderr) ?? firstLine(check.stderr);
 			return {
 				status: "missing",
-				detail: `rust-analyzer rustup proxy ${proxy} is present, but the component is not installed for the toolchain selected at ${context.root}${reason ? ` (${reason})` : ""}`,
+				detail: `rust-analyzer rustup proxy ${proxy} is present, but the toolchain selected at ${context.root} cannot receive the component${reason ? ` (${reason})` : ""}. Install that toolchain with rustup, then run /lsp restart`,
 			};
 		}
 		if (context.pathExecutable) return NOT_APPLICABLE;
