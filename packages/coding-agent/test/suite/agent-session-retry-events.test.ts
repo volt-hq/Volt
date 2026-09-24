@@ -324,6 +324,8 @@ describe("AgentSession retry and event characterization", () => {
 		await sawRetryStart;
 
 		expect(harness.session.isStreaming).toBe(true);
+		// The backoff holds no Harness lease, but the prompt is still running.
+		expect(harness.session.isBusy).toBe(true);
 		await expect(harness.session.prompt("overlapping prompt")).rejects.toThrow(
 			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 		);

@@ -100,7 +100,10 @@ export interface PromptCacheKeepAliveHost {
 	canRefresh(): boolean;
 	/** Refreshes allowed after each real request (see `promptCacheRefreshBudget`); 0 disables keepalive. */
 	refreshBudget(): number;
-	/** A turn, background job, or user shell command is running. */
+	/**
+	 * Work that keeps the cache warm is running: a turn or other session operation, an extension
+	 * command (including one waiting on the user), a user shell command, or a background job.
+	 */
 	hasInFlightWork(): boolean;
 	/** Refresh once. Resolves true only when the provider renewed the prefix. */
 	refresh(reason: PromptCacheRefreshReason): Promise<boolean>;
@@ -152,7 +155,7 @@ export class PromptCacheKeepAlive {
 		this.timers = timers;
 	}
 
-	/** Re-read activity after a run, background job, or shell command starts or ends. */
+	/** Re-read activity. Call whenever any input to `hasInFlightWork` changes, on both edges. */
 	activityChanged(): void {
 		const idle = !this.host.hasInFlightWork();
 		const idleSince = idle ? (this.idleSince ?? this.host.now()) : undefined;

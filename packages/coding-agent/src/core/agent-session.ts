@@ -677,17 +677,23 @@ export class AgentSession {
 	private readonly _promptCacheKeepAlive: PromptCacheKeepAlive;
 	private readonly _canRefreshPromptCache: boolean;
 	private readonly _promptCacheRefreshAbort = new AbortController();
-	/** Latest renewal of the current request's prefix: a keepalive refresh or a request in flight. */
-	private _promptCacheRefresh: PromptCacheRefreshRecord | undefined;
-	/** Audit basis captured when the current provider request started. */
+	/**
+	 * Latest confirmed renewal of the branch request's prefix: a keepalive refresh, or a request the
+	 * provider read that is not persisted yet.
+	 */
+	private _promptCacheRenewal: PromptCacheRefreshRecord | undefined;
+	/** Audit basis and provisional renewal of the provider request in flight. */
 	private _promptCacheRequestBasis:
 		| {
 				precededBy: "none" | "request" | "refresh";
 				previousAt?: number;
 				prefixTokens?: number;
-				previousRecord: PromptCacheRefreshRecord | undefined;
+				/** Confirmed only once the provider reports reading the prompt. */
+				renewal?: PromptCacheRefreshRecord;
 		  }
 		| undefined;
+	/** Set while a busy Harness is watched for its next idle transition. */
+	private _promptCacheHarnessIdleWatch = false;
 
 	private _recordBackgroundDiagnostic(event: BackgroundJobDiagnosticEvent): void {
 		try {
@@ -1224,7 +1230,7 @@ export class AgentSession {
 			this._syncPlanningRuntime();
 			this._recoverDurableQueuedClientInputs();
 			this._unsubscribeBackgroundJobs = this._backgroundJobs.subscribe(() => {
-				this._promptCacheKeepAlive.activityChanged();
+				this._activityChanged();
 				if (
 					this._backgroundContinuationJobIds &&
 					!this._backgroundContinuationJobIds.some((id) => this._backgroundJobs.canContinue(id))
@@ -2269,7 +2275,7 @@ export class AgentSession {
 			event.type === "compaction_end" ||
 			event.type === "tool_execution_start"
 		) {
-			this._promptCacheKeepAlive.activityChanged();
+			this._activityChanged();
 		}
 		if (event.type === "agent_settled" || event.type === "compaction_end") this._publishPromptCacheStatus();
 	}
@@ -3729,14 +3735,39 @@ export class AgentSession {
 		return this._backgroundJobs.hasActive;
 	}
 
-	/** Whether any tracked foreground prompt or standalone session operation is still active. */
+	/**
+	 * Whether any tracked foreground prompt or standalone session operation is still active. Covers
+	 * `isStreaming`, whose post-run recovery (such as auto-retry backoff) holds no Harness lease.
+	 * Every input must reach `_activityChanged()` on both edges, directly or through the events and
+	 * Harness idle watch that call it; `isStreaming` spans `agent_start` to `agent_settled`.
+	 */
 	get isBusy(): boolean {
 		return (
+			this.isStreaming ||
 			this._reloadInProgress ||
 			this._harness.getPhase() !== "idle" ||
 			this._activeExtensionCommandHandlers > 0 ||
 			this.isBashRunning
 		);
+	}
+
+	/**
+	 * An `isBusy` or `hasBackgroundJobs` input changed. Prompt-cache keepalive measures its idle
+	 * window from these transitions. Harness operations can release their lease after their last
+	 * event (compaction and tree navigation do), so a busy Harness re-checks once it goes idle.
+	 */
+	private _activityChanged(): void {
+		try {
+			this._promptCacheKeepAlive.activityChanged();
+		} catch {
+			// Keepalive is derived state; it cannot fail the transition that reported it.
+		}
+		if (this._promptCacheHarnessIdleWatch || this._harness.getPhase() === "idle") return;
+		this._promptCacheHarnessIdleWatch = true;
+		void this._harness.waitForIdle().then(() => {
+			this._promptCacheHarnessIdleWatch = false;
+			if (!this._disposed) this._activityChanged();
+		});
 	}
 
 	private get _hasSessionOperationBarrier(): boolean {
@@ -5670,6 +5701,7 @@ export class AgentSession {
 
 		try {
 			this._activeExtensionCommandHandlers++;
+			this._activityChanged();
 			await command.handler(args, ctx);
 			await this._waitForHarnessMutations();
 			return true;
@@ -5683,6 +5715,7 @@ export class AgentSession {
 			return true;
 		} finally {
 			this._activeExtensionCommandHandlers--;
+			this._activityChanged();
 		}
 	}
 
@@ -7949,6 +7982,7 @@ export class AgentSession {
 			);
 		}
 		this._reloadInProgress = true;
+		this._activityChanged();
 		this._invalidatePreparationWaitRequests();
 		this._invalidateExtensionWork();
 		try {
@@ -8005,6 +8039,7 @@ export class AgentSession {
 			this._assertConversationAuthorityAvailable();
 		} finally {
 			this._reloadInProgress = false;
+			this._activityChanged();
 		}
 	}
 
@@ -8184,7 +8219,7 @@ export class AgentSession {
 			throw new Error("Cannot execute bash while a session mutation is active");
 		}
 		this._bashAbortController = new AbortController();
-		this._promptCacheKeepAlive.activityChanged();
+		this._activityChanged();
 
 		// Apply command prefix if configured (e.g., "shopt -s expand_aliases" for alias support)
 		const prefix = this.settingsManager.getShellCommandPrefix();
@@ -8206,7 +8241,7 @@ export class AgentSession {
 			return result;
 		} finally {
 			this._bashAbortController = undefined;
-			this._promptCacheKeepAlive.activityChanged();
+			this._activityChanged();
 		}
 	}
 
@@ -8388,7 +8423,10 @@ export class AgentSession {
 		}
 		this._invalidateExtensionWork();
 		return this._harness
-			.requestTreeOperation((operation) => this._navigateTree(operation, targetId, options))
+			.requestTreeOperation((operation) => {
+				this._activityChanged();
+				return this._navigateTree(operation, targetId, options);
+			})
 			.finally(() => this._scheduleBackgroundContinuation());
 	}
 
@@ -8757,9 +8795,22 @@ export class AgentSession {
 		});
 	}
 
-	/** Branch status extended by in-memory renewals (refreshes and requests still in flight). */
+	/** Branch status extended by in-memory renewals (refreshes and requests not yet persisted). */
 	private _currentPromptCacheStatus(): PromptCacheStatus | undefined {
-		return applyPromptCacheRefresh(this._branchPromptCacheStatus(), this._promptCacheRefresh);
+		return this._applyPromptCacheRenewals(this._branchPromptCacheStatus());
+	}
+
+	private _applyPromptCacheRenewals(base: PromptCacheStatus | undefined): PromptCacheStatus | undefined {
+		return applyPromptCacheRefresh(base, this._promptCacheRenewal, this._promptCacheRequestBasis?.renewal);
+	}
+
+	/** Keep the latest confirmed renewal of the request the branch status derives from. */
+	private _confirmPromptCacheRenewal(renewal: PromptCacheRefreshRecord): void {
+		const base = this._branchPromptCacheStatus();
+		if (base?.kind !== "retained" || renewal.basisRequestAt !== base.lastRequestAt) return;
+		const confirmed = this._promptCacheRenewal;
+		if (confirmed?.basisRequestAt === renewal.basisRequestAt && confirmed.at >= renewal.at) return;
+		this._promptCacheRenewal = renewal;
 	}
 
 	private _isCurrentModelMessage(message: AssistantMessage): boolean {
@@ -8798,20 +8849,19 @@ export class AgentSession {
 	private _notePromptCacheRequestStart(message: AssistantMessage): void {
 		if (!this._isCurrentModelMessage(message)) return;
 		const base = this._branchPromptCacheStatus();
-		const previousRecord = this._promptCacheRefresh;
-		const current = applyPromptCacheRefresh(base, previousRecord);
+		const confirmed = this._promptCacheRenewal;
+		const current = applyPromptCacheRefresh(base, confirmed);
 		if (base?.kind === "retained" && current?.kind === "retained") {
-			const renewed = previousRecord !== undefined && current.lastRequestAt !== base.lastRequestAt;
+			const renewed = confirmed !== undefined && current.lastRequestAt !== base.lastRequestAt;
 			const prefixTokens = this._promptTokensOfRequestAt(base.lastRequestAt);
 			this._promptCacheRequestBasis = {
-				precededBy: renewed ? previousRecord.source : "request",
+				precededBy: renewed ? confirmed.source : "request",
 				previousAt: current.lastRequestAt,
 				...(prefixTokens === undefined ? {} : { prefixTokens }),
-				previousRecord,
+				renewal: { basisRequestAt: base.lastRequestAt, at: message.timestamp, source: "request" },
 			};
-			this._promptCacheRefresh = { basisRequestAt: base.lastRequestAt, at: message.timestamp, source: "request" };
 		} else {
-			this._promptCacheRequestBasis = { precededBy: "none", previousRecord };
+			this._promptCacheRequestBasis = { precededBy: "none" };
 		}
 		this._promptCacheKeepAlive.requestStarted();
 	}
@@ -8819,14 +8869,16 @@ export class AgentSession {
 	private _recordPromptCacheRequest(message: AssistantMessage): void {
 		const basis = this._promptCacheRequestBasis;
 		this._promptCacheRequestBasis = undefined;
-		if (!basis || !this._isCurrentModelMessage(message) || !this.model) return;
+		if (!basis) return;
 		const usage = message.usage;
 		if (usage.input + usage.cacheRead + usage.cacheWrite <= 0) {
-			// No evidence the provider read the prompt, so the request did not renew the prefix.
-			this._promptCacheRefresh = basis.previousRecord;
+			// No evidence the provider read the prompt, so the request renewed nothing; renewals confirmed
+			// meanwhile (such as a refresh that overlapped it) stand.
 			this._promptCacheKeepAlive.update();
 			return;
 		}
+		if (basis.renewal) this._confirmPromptCacheRenewal(basis.renewal);
+		if (!this._isCurrentModelMessage(message) || !this.model) return;
 		this._promptCacheAudit.record({
 			kind: "request",
 			...this._promptCacheAuditCommon(this.model),
@@ -8841,7 +8893,7 @@ export class AgentSession {
 	private async _refreshPromptCache(reason: PromptCacheRefreshReason): Promise<boolean> {
 		const model = this.model;
 		const base = this._branchPromptCacheStatus();
-		const current = applyPromptCacheRefresh(base, this._promptCacheRefresh);
+		const current = this._applyPromptCacheRenewals(base);
 		if (!model || base?.kind !== "retained" || current?.kind !== "retained") return false;
 		const common = this._promptCacheAuditCommon(model);
 		const startedAt = Date.now();
@@ -8885,15 +8937,8 @@ export class AgentSession {
 			usage: promptCacheAuditUsage(result.usage),
 		});
 		if (this._disposed) return false;
-		// A request that started meanwhile renewed the prefix later than this refresh did.
-		const latest = this._branchPromptCacheStatus();
-		if (
-			latest?.kind === "retained" &&
-			latest.lastRequestAt === base.lastRequestAt &&
-			(this._promptCacheRefresh?.at ?? 0) < startedAt
-		) {
-			this._promptCacheRefresh = { basisRequestAt: base.lastRequestAt, at: startedAt, source: "refresh" };
-		}
+		// Applies only while the branch still derives from the request this refresh started from.
+		this._confirmPromptCacheRenewal({ basisRequestAt: base.lastRequestAt, at: startedAt, source: "refresh" });
 		const data: PromptCacheRefreshEntryData = {
 			provider: result.model.provider,
 			model: result.model.id,

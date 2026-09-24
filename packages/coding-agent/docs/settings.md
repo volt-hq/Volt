@@ -161,7 +161,7 @@ Both options are available under **Warnings** in `/settings`.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `promptCache.keepAlive` | boolean | `true` | Refresh the prompt cache shortly before it expires, so the next request reuses it instead of resending the conversation uncached |
-| `promptCache.keepAliveIdleMinutes` | number | `15` | How long to keep refreshing after work finishes. `0` refreshes only while a turn, background job, or `!` command runs |
+| `promptCache.keepAliveIdleMinutes` | number | `15` | How long to keep refreshing after work finishes. `0` refreshes only while work runs: a turn, compaction, background job, `!` command, or extension command (including one waiting for your input) |
 
 Keepalive applies only to models whose provider documents a cache lifetime that renews on each hit and supports a refresh that generates no output. Today that is Anthropic's Messages API with adaptive thinking or thinking off (for example Claude Opus 5.5 with its 5-minute cache). A refresh replays the previous request with `max_tokens: 0`, about a minute before expiry. It bills as a cache read (for example $0.20 per million tokens on Opus 5.5), usually a small fraction of resending the whole conversation. On a Claude subscription, refreshes count toward plan usage at the same reduced rate as other cache reads.
 
