@@ -618,6 +618,47 @@ describe("managed relay credential recovery", () => {
 		}
 	});
 
+	it("restores the relay after a mid-run suspension is renewed and logs the suspension once", async () => {
+		const state = createEmptyVoltdState();
+		// Live but inside the refresh lead window: the first refresh runs at startup and
+		// the token expires while the subscription is still inactive.
+		state.settings.relayCredential = credential(1_500);
+		let removals: readonly string[] = [];
+		let deniedRefreshes = 0;
+		vi.mocked(fetch).mockImplementation(async () => {
+			if (removals.length === 0 || deniedRefreshes < 2) {
+				deniedRefreshes++;
+				return jsonResponse({ error: "subscription_inactive" }, 402, { "Retry-After": "1" });
+			}
+			return jsonResponse({
+				accessToken: "renewed.payload.signature",
+				accessTokenExpiresAt: new Date(Date.now() + 600_000).toISOString(),
+				tokenType: "Bearer",
+			});
+		});
+		const fixture = await startFixture({ state });
+		removals = fixture.native.removals;
+		try {
+			await expect
+				.poll(async () => (await status(fixture.control)).relayCredential?.state)
+				.toBe("subscription_inactive");
+			await expect
+				.poll(() => fixture.native.reconnects.map((config) => config.authToken), { timeout: 10_000 })
+				.toContain("renewed.payload.signature");
+			expect((await status(fixture.control)).relayCredential?.state).toBe("active");
+			expect(fixture.native.removals).toEqual([...VOLT_PRODUCTION_RELAY_URLS]);
+			for (const url of VOLT_PRODUCTION_RELAY_URLS) {
+				expect(fixture.native.reconnects).toContainEqual({ url, authToken: "renewed.payload.signature" });
+			}
+			expect(deniedRefreshes).toBeGreaterThanOrEqual(2);
+			const log = readFileSync(getDaemonPaths(fixture.agentDir).logPath, "utf8");
+			expect(log.split("managed Iroh relay credential refresh failed")).toHaveLength(2);
+			expect(log).toContain("refreshed managed Iroh relay credential");
+		} finally {
+			await fixture.close();
+		}
+	}, 20_000);
+
 	it("does not publish a QR when reset supersedes broker claim creation", async () => {
 		const creation = deferred<Response>();
 		let creationStarted = false;

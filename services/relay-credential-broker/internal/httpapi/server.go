@@ -594,6 +594,35 @@ func (s *Server) writeBrokerError(writer http.ResponseWriter, err error, invalid
 	}
 }
 
+const (
+	recentSuspensionWindow     = 24 * time.Hour
+	recentSuspensionRetryAfter = "15"
+	weekSuspensionWindow       = 7 * 24 * time.Hour
+	weekSuspensionRetryAfter   = "300"
+	longSuspensionRetryAfter   = "3600"
+)
+
+// subscriptionRetryAfter paces refreshes denied for an inactive subscription.
+// A renewal notification restores the cached entitlement immediately, but only
+// the suspended daemon can put its host back on the relay, and it learns about
+// the renewal only by retrying. Denied retries read cached state; Apple
+// reconciliation keeps its separate one-hour cooldown. Hosts that recently lost
+// service therefore retry often, and long-lapsed hosts back off.
+func subscriptionRetryAfter(err error, now time.Time) string {
+	var suspended *broker.SubscriptionSuspendedError
+	if !errors.As(err, &suspended) {
+		return longSuspensionRetryAfter
+	}
+	switch suspendedFor := now.Sub(suspended.HostServedAt); {
+	case suspendedFor < recentSuspensionWindow:
+		return recentSuspensionRetryAfter
+	case suspendedFor < weekSuspensionWindow:
+		return weekSuspensionRetryAfter
+	default:
+		return longSuspensionRetryAfter
+	}
+}
+
 func (s *Server) writeAuthenticatedError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, broker.ErrRefreshExpired):
@@ -601,7 +630,7 @@ func (s *Server) writeAuthenticatedError(writer http.ResponseWriter, err error) 
 	case errors.Is(err, broker.ErrRefreshInvalid), errors.Is(err, broker.ErrGrantRevoked):
 		writeError(writer, http.StatusUnauthorized, "refresh_token_invalid")
 	case errors.Is(err, broker.ErrSubscriptionRequired):
-		writer.Header().Set("Retry-After", "3600")
+		writer.Header().Set("Retry-After", subscriptionRetryAfter(err, s.now()))
 		writeError(writer, http.StatusPaymentRequired, "subscription_inactive")
 	case errors.Is(err, broker.ErrSubscriptionConflict):
 		writeError(writer, http.StatusConflict, "subscription_conflict")

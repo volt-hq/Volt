@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/appstore"
+	"github.com/volt-hq/Volt/services/relay-credential-broker/internal/broker"
 )
 
 // Configuration and the fixture clock stay fixed while requests are in flight.
@@ -111,7 +112,7 @@ func TestRefreshReconciliationAttemptsAreBounded(t *testing.T) {
 		first      int
 		firstRetry string
 	}{
-		{name: "inactive success", cached: appstore.StatusInactive, result: appstore.StatusInactive, first: 402, firstRetry: "3600"},
+		{name: "inactive success", cached: appstore.StatusInactive, result: appstore.StatusInactive, first: 402, firstRetry: "15"},
 		{name: "inactive outage", cached: appstore.StatusExpired, err: appstore.ErrSubscriptionUnavailable, first: 503, firstRetry: "3600"},
 		{name: "inactive invalid proof", cached: appstore.StatusRevoked, err: appstore.ErrProofInvalid, first: 401},
 		{name: "inactive apply failure", cached: appstore.StatusBillingRetry, result: "invalid", first: 500},
@@ -128,7 +129,7 @@ func TestRefreshReconciliationAttemptsAreBounded(t *testing.T) {
 			}
 			headers := map[string]string{"Authorization": "Bearer " + f.hostRefresh}
 			assertRefreshResponse(t, service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), test.first, test.firstRetry)
-			cooldownStatus, cooldownRetry := http.StatusPaymentRequired, "3600"
+			cooldownStatus, cooldownRetry := http.StatusPaymentRequired, "15"
 			if before.Active(service.now) {
 				cooldownStatus, cooldownRetry = http.StatusTooManyRequests, "5"
 			}
@@ -242,7 +243,7 @@ func TestRefreshReconciliationIsSharedAcrossReplicasWithoutBlockingHeartbeats(t 
 	for i := 0; i < cap(results); i++ {
 		select {
 		case response := <-results:
-			assertRefreshResponse(t, response, http.StatusPaymentRequired, "3600")
+			assertRefreshResponse(t, response, http.StatusPaymentRequired, "15")
 		case <-time.After(5 * time.Second):
 			t.Fatal("cooldown heartbeat blocked behind Apple I/O")
 		}
@@ -261,7 +262,7 @@ func TestRefreshReconciliationIsSharedAcrossReplicasWithoutBlockingHeartbeats(t 
 	restarted := newTestServiceWithPool(t, f.service.pool)
 	restarted.now = f.service.now
 	restarted.handler.appStore = f.verifier
-	assertRefreshResponse(t, restarted.request(t, http.MethodPost, "/v1/tokens/refresh", "", map[string]string{"Authorization": "Bearer " + f.hostRefresh}), http.StatusPaymentRequired, "3600")
+	assertRefreshResponse(t, restarted.request(t, http.MethodPost, "/v1/tokens/refresh", "", map[string]string{"Authorization": "Bearer " + f.hostRefresh}), http.StatusPaymentRequired, "15")
 	if got := f.verifier.calls.Load(); got != 1 {
 		t.Fatalf("restart discarded attempt: calls=%d", got)
 	}
@@ -286,7 +287,7 @@ func TestRefreshReconciliationAdmissionErrorsDoNotCallApple(t *testing.T) {
 	if _, err := f.service.pool.Exec(context.Background(), "DROP TRIGGER reject_reconcile_attempt ON app_store_entitlements"); err != nil {
 		t.Fatal(err)
 	}
-	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", map[string]string{"Authorization": "Bearer " + f.hostRefresh}), http.StatusPaymentRequired, "3600")
+	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", map[string]string{"Authorization": "Bearer " + f.hostRefresh}), http.StatusPaymentRequired, "15")
 	if got := f.verifier.calls.Load(); got != 1 {
 		t.Fatalf("failed reservation consumed attempt: calls=%d", got)
 	}
@@ -307,6 +308,7 @@ func TestRefreshReconciliationSuspensionHeartbeatsAndNotificationRecovery(t *tes
 				assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusServiceUnavailable, "3600")
 				f.assertHeartbeat(t, token)
 				f.service.now = f.service.now.Add(30 * time.Minute)
+				// The host has been without service for weeks, so it gets the slowest pace.
 				assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusPaymentRequired, "3600")
 				f.assertHeartbeat(t, token)
 			}
@@ -386,6 +388,63 @@ func TestRefreshReconciliationRejectsRevokedAndUnknownCredentials(t *testing.T) 
 	}
 }
 
+func TestSubscriptionRetryAfterPacesByHostSuspension(t *testing.T) {
+	now := time.Date(2026, time.September, 24, 3, 0, 0, 0, time.UTC)
+	for _, test := range []struct {
+		name      string
+		suspended time.Duration
+		want      string
+	}{
+		{name: "just suspended", suspended: 0, want: "15"},
+		{name: "clock skew", suspended: -time.Minute, want: "15"},
+		{name: "end of first day", suspended: 24*time.Hour - time.Nanosecond, want: "15"},
+		{name: "one day", suspended: 24 * time.Hour, want: "300"},
+		{name: "end of first week", suspended: 7*24*time.Hour - time.Nanosecond, want: "300"},
+		{name: "one week", suspended: 7 * 24 * time.Hour, want: "3600"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := &broker.SubscriptionSuspendedError{HostServedAt: now.Add(-test.suspended)}
+			if got := subscriptionRetryAfter(err, now); got != test.want {
+				t.Fatalf("retry after %s suspension = %q, want %q", test.suspended, got, test.want)
+			}
+		})
+	}
+	if got := subscriptionRetryAfter(broker.ErrSubscriptionRequired, now); got != "3600" {
+		t.Fatalf("untimed subscription denial retry = %q, want 3600", got)
+	}
+}
+
+func TestSuspendedRefreshRetryFollowsHostService(t *testing.T) {
+	f := newReconciliationFixture(t, appstore.StatusActive, 0)
+	appHeaders := map[string]string{"Authorization": "Bearer " + f.appRefresh}
+	hostHeaders := map[string]string{"Authorization": "Bearer " + f.hostRefresh}
+	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", appHeaders), http.StatusOK, "")
+	// The host keeps its relay service for two more days while the app stays idle.
+	f.service.now = f.service.now.Add(2 * 24 * time.Hour)
+	f.setEntitlement(t, appstore.StatusActive, 0)
+	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", hostHeaders), http.StatusOK, "")
+	hostServedAt := f.service.now
+
+	f.service.now = f.service.now.Add(time.Minute)
+	f.setEntitlement(t, appstore.StatusInactive, 0)
+	f.verifier.status = appstore.StatusInactive
+	for _, step := range []struct {
+		suspended time.Duration
+		want      string
+	}{
+		{suspended: time.Hour, want: "15"},
+		{suspended: 24 * time.Hour, want: "300"},
+		{suspended: 7 * 24 * time.Hour, want: "3600"},
+	} {
+		f.service.now = hostServedAt.Add(step.suspended)
+		// Both endpoints pace by the host, which only its daemon can reconnect.
+		// Pacing by the app's own older refresh would select a slower tier.
+		for _, headers := range []map[string]string{appHeaders, hostHeaders} {
+			assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusPaymentRequired, step.want)
+		}
+	}
+}
+
 func TestCancelledRefreshDoesNotRefundReconciliationAttempt(t *testing.T) {
 	f := newReconciliationFixture(t, appstore.StatusInactive, 0)
 	f.verifier.started, f.verifier.release = make(chan struct{}, 1), make(chan struct{})
@@ -415,7 +474,7 @@ func TestCancelledRefreshDoesNotRefundReconciliationAttempt(t *testing.T) {
 	// Release the stub so an accidental refund fails the call-count assertion
 	// instead of hanging the test on another Apple attempt.
 	close(f.verifier.release)
-	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", map[string]string{"Authorization": "Bearer " + f.appRefresh}), http.StatusPaymentRequired, "3600")
+	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", map[string]string{"Authorization": "Bearer " + f.appRefresh}), http.StatusPaymentRequired, "15")
 	if got := f.verifier.calls.Load(); got != 1 {
 		t.Fatalf("cancelled attempt was refunded: calls=%d", got)
 	}
