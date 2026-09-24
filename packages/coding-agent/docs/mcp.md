@@ -488,7 +488,9 @@ Defaults:
 
 ### Describe result
 
-`describe` returns full enough schema for the selected tool only:
+`list_tools` returns tool names, descriptions of up to 180 characters, risk, and trusted-read status. Server identity, metadata hash, and stale state appear once for the list. Use `search` to narrow discovery and `describe` to retrieve a selected tool's schemas. CLI and RPC management inspection retain the full tool metadata.
+
+`describe` returns the input schema and optional output schema for the selected tool only:
 
 ```json
 {
@@ -502,7 +504,7 @@ Defaults:
 }
 ```
 
-Schemas are bounded. If a schema is too large, return a compact schema plus an elision warning.
+Large descriptions and schemas produce a bounded preview with a cache reference. Retrieve the complete result with `read_cache`; schema constraints are not simplified or discarded.
 
 ### Call result
 
@@ -534,7 +536,7 @@ Errors from MCP tool execution retain their structured failed call result for re
 - MCP tool schemas are absent from the base system prompt by default.
 - Search results are compact and limited.
 - Describe returns one tool schema at a time.
-- Results are truncated to Volt's existing extension guidance: 50KB / 2000 lines.
+- All model-facing gateway and direct-tool results, including failures and cache pages, are serialized as compact JSON within `maxOutputBytes` (50 KiB by default). The final bound includes JSON escaping and truncation/cache metadata. Compact JSON is one physical line; raw call/resource/prompt previews also use `maxOutputLines` (2000 by default).
 - Full results go to a sidecar and are retrieved by `read_cache`.
 - Direct tools are off by default.
 
@@ -869,6 +871,10 @@ When output exceeds limits:
 - store full output in local sidecar
 - return opaque `cacheId`
 - allow retrieval with `mcp({ "action": "read_cache", "cacheId": "..." })`
+
+The `content` of a truncated discovery result is a preview of serialized JSON, not a complete JSON document. `read_cache` returns chunks of the cached text; concatenate their `content` fields in order to reconstruct it. Use the returned `nextCursor` unchanged for the next request. It advances by the original UTF-8 bytes actually returned, so JSON escaping can reduce a page's content size. `limit` is a positive integer byte ceiling; an invalid cursor or a limit too small for the next complete Unicode character returns an error.
+
+Existing call/resource/prompt cache references are reused when the final JSON envelope needs a smaller preview. Cache reads do not create more cache entries. If output cannot be retained, the model-facing result reports `cacheUnavailable: true` instead of a retrieval reference. Narrow discovery with `search` and `describe`; for calls, request less output from the upstream tool.
 
 Sidecar rules:
 

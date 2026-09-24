@@ -466,10 +466,20 @@ export class McpManager {
 				return this.cancelServerAuth(requireString(input.server, "server"));
 			case "logout":
 				return this.logoutServer(requireString(input.server, "server"));
-			case "list_tools":
-				return this.listTools(requireString(input.server, "server"), signal, {
+			case "list_tools": {
+				const result = await this.listTools(requireString(input.server, "server"), signal, {
 					restrictedTrustedRead: context.restrictedTrustedRead,
 				});
+				return {
+					...result,
+					tools: result.tools.map((tool) => ({
+						name: tool.name,
+						description: compactText(tool.description, 180),
+						risk: tool.risk,
+						trustedRead: tool.trustedRead,
+					})),
+				};
+			}
 			case "call":
 				return this.callTool(input, context, signal);
 			case "list_resources":
@@ -494,6 +504,10 @@ export class McpManager {
 			case "read_cache":
 				return this.readCache(requireString(input.cacheId, "cacheId"), input, context);
 		}
+	}
+
+	formatGatewayResult(action: McpGatewayInput["action"], result: unknown): { text: string; result: unknown } {
+		return this.outputStore.formatResult(action, result);
 	}
 
 	async connectServer(
@@ -772,6 +786,7 @@ export class McpManager {
 			risk: classifyMcpToolRisk(tool),
 			trustedRead: serverTrustsToolRead(supervisor.server, tool.name) && isMcpToolTrustedReadCandidate(tool),
 			inputSchema: tool.inputSchema,
+			...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
 			annotations: tool.annotations ?? {},
 			metadataHash: metadata.metadataHash,
 		};
