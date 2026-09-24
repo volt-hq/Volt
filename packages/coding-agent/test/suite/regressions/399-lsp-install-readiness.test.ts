@@ -1,4 +1,5 @@
-import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
@@ -60,13 +61,16 @@ function fixture(install: (bin: string, component: string) => void = () => {}) {
 	return { manager, root, bin, component, path, updates, completionStates, requestAction, installRunner };
 }
 
-afterEach(() => {
+afterEach(async () => {
 	for (const manager of managers.splice(0)) manager.dispose();
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
 	// dispose() kills launched servers without waiting; on Windows the exiting
-	// process still holds its cwd, so give the rmdir time to succeed.
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	// process still holds its cwd, so give the rmdir time to succeed. Only the
+	// async rm retries EBUSY on a directory; rmSync throws it immediately.
+	await Promise.all(
+		roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })),
+	);
 });
 
 describe("LSP install readiness (#399)", () => {
@@ -329,11 +333,17 @@ describe("LSP install readiness (#399)", () => {
 
 	it("cancels obsolete verification on restart without poisoning the replacement", async () => {
 		const item = fixture((bin) => launcher(bin, ["--hang-initialize"]));
+		// Leave the obsolete launcher untouched: rewriting it here races teardown of
+		// the just-killed Windows process tree, and a failed write would surface only
+		// as the expected cancellation, leaving the replacement to hang.
+		const replacement = join(item.root, "replacement");
+		mkdirSync(replacement);
+		launcher(replacement);
 		const start = LspClient.prototype.start;
 		vi.spyOn(LspClient.prototype, "start").mockImplementationOnce(function (this: LspClient) {
 			const startup = start.call(this);
 			item.manager.restart();
-			launcher(item.bin);
+			vi.stubEnv("PATH", replacement);
 			return startup;
 		});
 		expect(await item.manager.hover(item.path, "symbol")).toMatchObject({ outcome: "cancelled" });

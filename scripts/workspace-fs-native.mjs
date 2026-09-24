@@ -25,6 +25,7 @@ const EXPECTED_EXPORTS = [
 	"tryAcquireFileLock",
 	"workspaceFsApiVersion",
 	"workspaceFsSourceFingerprint",
+	"writeWindowsPrivateFile",
 ];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const crate = join(root, "packages", "coding-agent", "native", "workspace-fs");
