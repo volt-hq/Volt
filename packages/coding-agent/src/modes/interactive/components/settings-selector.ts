@@ -17,6 +17,7 @@ import { PERSONALITIES, type Personality } from "../../../core/personality.ts";
 import type {
 	DefaultProjectTrust,
 	FullscreenExitOutput,
+	PromptCacheKeepAliveConfig,
 	TuiMode,
 	TurnDoneAlert,
 	WarningSettings,
@@ -104,10 +105,33 @@ export interface SettingsConfig {
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
 	turnDoneAlert?: TurnDoneAlert;
+	promptCacheKeepAlive?: PromptCacheKeepAliveConfig;
 	tuiMode: TuiMode;
 	fullscreenExitOutput: FullscreenExitOutput;
 	fullscreenScrollbar: ScrollViewScrollbar;
 	warnings: WarningSettings;
+}
+
+const PROMPT_CACHE_KEEPALIVE_CHOICES = [
+	"off",
+	"while working",
+	"5 min idle",
+	"15 min idle",
+	"30 min idle",
+	"60 min idle",
+];
+
+function formatPromptCacheKeepAlive(config: PromptCacheKeepAliveConfig): string {
+	if (!config.enabled) return "off";
+	const minutes = config.idleWindowMs / 60_000;
+	return minutes === 0 ? "while working" : `${minutes} min idle`;
+}
+
+function parsePromptCacheKeepAlive(value: string): "off" | number | undefined {
+	if (value === "off") return "off";
+	if (value === "while working") return 0;
+	const match = /^(\d+(?:\.\d+)?) min idle$/.exec(value);
+	return match ? Number(match[1]) : undefined;
 }
 
 export interface SettingsCallbacks {
@@ -140,6 +164,8 @@ export interface SettingsCallbacks {
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
 	onTurnDoneAlertChange?: (mode: TurnDoneAlert) => void;
+	/** `"off"`, or the idle window in minutes (0 = only while work runs). */
+	onPromptCacheKeepAliveChange?: (mode: "off" | number) => void;
 	onTuiModeChange: (mode: TuiMode) => void;
 	onFullscreenExitOutputChange: (output: FullscreenExitOutput) => void;
 	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
@@ -629,6 +655,21 @@ export class SettingsSelectorComponent extends Container {
 			});
 		}
 
+		if (callbacks.onPromptCacheKeepAliveChange && config.promptCacheKeepAlive) {
+			const httpIdleTimeoutIndex = items.findIndex((item) => item.id === "http-idle-timeout");
+			const currentValue = formatPromptCacheKeepAlive(config.promptCacheKeepAlive);
+			items.splice(httpIdleTimeoutIndex + 1, 0, {
+				id: "prompt-cache-keepalive",
+				label: "Prompt cache keepalive",
+				description:
+					"Refresh supported prompt caches shortly before expiry while work runs and for this long after it finishes",
+				currentValue,
+				values: PROMPT_CACHE_KEEPALIVE_CHOICES.includes(currentValue)
+					? [...PROMPT_CACHE_KEEPALIVE_CHOICES]
+					: [...PROMPT_CACHE_KEEPALIVE_CHOICES, currentValue],
+			});
+		}
+
 		const sectionById: Record<string, string> = {
 			autocompact: "Agent",
 			"compact-at": "Agent",
@@ -640,6 +681,7 @@ export class SettingsSelectorComponent extends Container {
 			"follow-up-mode": "Messages",
 			transport: "Messages",
 			"http-idle-timeout": "Messages",
+			"prompt-cache-keepalive": "Messages",
 			theme: "Interface",
 			"tui-mode": "Interface",
 			"fullscreen-exit-output": "Interface",
@@ -717,6 +759,11 @@ export class SettingsSelectorComponent extends Container {
 					case "transport":
 						callbacks.onTransportChange(newValue as Transport);
 						break;
+					case "prompt-cache-keepalive": {
+						const mode = parsePromptCacheKeepAlive(newValue);
+						if (mode !== undefined) callbacks.onPromptCacheKeepAliveChange?.(mode);
+						break;
+					}
 					case "http-idle-timeout": {
 						const choice = HTTP_IDLE_TIMEOUT_CHOICES.find((item) => item.label === newValue);
 						if (choice) {

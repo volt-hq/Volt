@@ -355,6 +355,28 @@ describe("FooterComponent width handling", () => {
 			expect(renderStats(footer)).toContain("cache expired");
 		});
 
+		it("shows the idle keepalive window, then the expiry countdown", () => {
+			vi.useFakeTimers({ now });
+			const footer = new FooterComponent(
+				createSession({
+					sessionName: "",
+					promptCache: {
+						kind: "retained",
+						lastRequestAt: now,
+						expiresAt: now + 300_000,
+						keepAliveUntil: now + 720_000,
+					},
+				}),
+				createFooterData(1),
+			);
+
+			expect(renderStats(footer)).toContain("cache warm 12m");
+			vi.setSystemTime(now + 240_000);
+			expect(renderStats(footer)).toContain("cache warm 8m");
+			vi.setSystemTime(now + 720_000);
+			expect(renderStats(footer)).toContain("cache expired");
+		});
+
 		it("shows hours for long retention windows", () => {
 			vi.useFakeTimers({ now });
 			const footer = new FooterComponent(

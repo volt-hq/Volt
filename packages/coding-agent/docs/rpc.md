@@ -233,7 +233,7 @@ Response:
 
 The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). `fastModeEnabled` is the authoritative branch-local Fast state used by initial and replacement conversation bootstraps. `isStreaming` indicates an active provider run or session-level continuation; `isBusy` also includes asynchronous prompt preflight and standalone session operations such as manual compaction and tree navigation. `sessionId` is the stable identity used by session switch and resume commands. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
 
-`promptCache` estimates whether the next request can reuse the provider's prompt cache. It is omitted when the current model does not cache, prompt caching is disabled, or the active conversation has no request since its last compaction. `{"kind":"retained"}` reports the latest request made with the current model: `lastRequestAt` is Unix epoch milliseconds, and `expiresAt` is `lastRequestAt` plus the provider's documented retention window. `expiresAt` is omitted when the provider does not publish one. `{"kind":"model_changed"}` means earlier requests used other models, so the next request starts uncached. Clients compare `expiresAt` with their own clock; no event fires when the window lapses. Provider eviction or request changes can still cause a miss before `expiresAt`.
+`promptCache` estimates whether the next request can reuse the provider's prompt cache. It is omitted when the current model does not cache, prompt caching is disabled, or the active conversation has no request since its last compaction. `{"kind":"retained"}` reports the latest request or keepalive refresh made with the current model: `lastRequestAt` is Unix epoch milliseconds, and `expiresAt` is `lastRequestAt` plus the provider's documented retention window. `expiresAt` is omitted when the provider does not publish one. `keepAliveUntil` is present while the session is idle and the host keeps refreshing the cache; after that instant, refreshes stop and the cache lapses at `expiresAt` (see [prompt-cache keepalive](settings.md#prompt-cache)). `{"kind":"model_changed"}` means earlier requests used other models, so the next request starts uncached. Clients compare `expiresAt` with their own clock; no event fires when the window lapses. Provider eviction or request changes can still cause a miss before `expiresAt`.
 
 `gitContext` is a required nullable field read from a host-owned cache; `get_state` never waits for Git. It is `null` when the session cwd is not a usable Git worktree or before an initial scan has succeeded. A non-null value has these semantics:
 
@@ -1971,7 +1971,7 @@ Emitted after the cached Git context changes semantically, becomes stale, recove
 
 ### prompt_cache_changed
 
-Emitted when the [`promptCache`](#get_state) status changes after a prompt settles, after compaction, or after a model change. The payload is a full replacement:
+Emitted when the [`promptCache`](#get_state) status changes after a prompt settles, after compaction, after a model change, after a keepalive refresh, or when idle keepalive starts or stops. The payload is a full replacement:
 
 ```json
 {"type": "prompt_cache_changed", "promptCache": {"kind": "retained", "lastRequestAt": 1782470100000, "expiresAt": 1782470400000}}

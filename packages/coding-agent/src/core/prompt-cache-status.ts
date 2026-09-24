@@ -9,10 +9,12 @@ import type { SessionEntry } from "./session-manager.ts";
 export type PromptCacheStatus =
 	| {
 			kind: "retained";
-			/** Unix epoch milliseconds when the latest request with the current model started. */
+			/** Unix epoch milliseconds when the latest request or cache refresh with the current model started. */
 			lastRequestAt: number;
 			/** Unix epoch milliseconds when the documented retention window lapses. Absent when the provider publishes none. */
 			expiresAt?: number;
+			/** Unix epoch milliseconds until which Volt keeps refreshing the idle cache. Absent unless idle keepalive applies. */
+			keepAliveUntil?: number;
 	  }
 	| {
 			/** Earlier requests used other models, so the next request cannot reuse their cached prefix. */
@@ -55,6 +57,37 @@ export function resolvePromptCacheStatus(input: PromptCacheStatusInput): PromptC
 	return sawRequest ? { kind: "model_changed" } : undefined;
 }
 
+/** A later read that renewed the prefix of the request that started at `basisRequestAt`. */
+export interface PromptCacheRefreshRecord {
+	basisRequestAt: number;
+	/** Unix epoch milliseconds when the renewing request started. */
+	at: number;
+	/** A keepalive refresh, or a conversation request not yet persisted. */
+	source: "refresh" | "request";
+}
+
+/**
+ * Extend a branch-derived status by the latest renewal of the same request. Renewals of another
+ * request (for example on a different branch) do not apply.
+ */
+export function applyPromptCacheRefresh(
+	status: PromptCacheStatus | undefined,
+	...renewals: readonly (PromptCacheRefreshRecord | undefined)[]
+): PromptCacheStatus | undefined {
+	if (status?.kind !== "retained") return status;
+	let latest: PromptCacheRefreshRecord | undefined;
+	for (const renewal of renewals) {
+		if (!renewal || renewal.basisRequestAt !== status.lastRequestAt || renewal.at <= status.lastRequestAt) continue;
+		if (!latest || renewal.at > latest.at) latest = renewal;
+	}
+	if (!latest) return status;
+	return {
+		kind: "retained",
+		lastRequestAt: latest.at,
+		...(status.expiresAt === undefined ? {} : { expiresAt: latest.at + (status.expiresAt - status.lastRequestAt) }),
+	};
+}
+
 export function promptCacheStatusEquals(
 	left: PromptCacheStatus | undefined,
 	right: PromptCacheStatus | undefined,
@@ -62,5 +95,9 @@ export function promptCacheStatusEquals(
 	if (left === undefined || right === undefined) return left === right;
 	if (left.kind !== right.kind) return false;
 	if (left.kind === "model_changed" || right.kind === "model_changed") return true;
-	return left.lastRequestAt === right.lastRequestAt && left.expiresAt === right.expiresAt;
+	return (
+		left.lastRequestAt === right.lastRequestAt &&
+		left.expiresAt === right.expiresAt &&
+		left.keepAliveUntil === right.keepAliveUntil
+	);
 }

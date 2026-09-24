@@ -156,6 +156,30 @@ Both options are available under **Warnings** in `/settings`.
 }
 ```
 
+### Prompt Cache
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `promptCache.keepAlive` | boolean | `true` | Refresh the prompt cache shortly before it expires, so the next request reuses it instead of resending the conversation uncached |
+| `promptCache.keepAliveIdleMinutes` | number | `15` | How long to keep refreshing after work finishes. `0` refreshes only while work runs: a turn, compaction, background job, `!` command, or extension command (including one waiting for your input) |
+
+Keepalive applies only to models whose provider documents a cache lifetime that renews on each hit and supports a refresh that generates no output. Today that is Anthropic's Messages API with adaptive thinking or thinking off (for example Claude Opus 5.5 with its 5-minute cache). Claude 4.5 and earlier models with thinking on use a thinking budget, which cannot be refreshed; keepalive stays off for those requests, and changing the thinking level ends keepalive until the next request. A refresh replays the previous request with `max_tokens: 0`, about a minute before expiry. It bills as a cache read (for example $0.20 per million tokens on Opus 5.5), usually a small fraction of resending the whole conversation. On a Claude subscription, refreshes count toward plan usage at the same reduced rate as other cache reads.
+
+After each real request, Volt sends at most as many refreshes as cost less together than the cache miss they prevent, even when work keeps running (for example a long background job). On Opus 5.5 that is 24 refreshes, about 96 minutes, on the 5-minute cache. Models without cache prices are never refreshed. A refresh whose timer fires late, for example after the computer sleeps, is skipped instead of being sent so close to expiry that it could pay for a full cache write.
+
+Refresh costs appear in the footer totals and session stats. While the idle window runs, the footer shows `cache warm 12m`. When it ends, the footer counts down to expiry and, if `terminal.turnDoneAlert` is on, Volt sends the same bell or notification as a finished turn while the terminal is unfocused.
+
+Volt records metadata-only prompt-cache audit logs (request token counts and gaps, refresh outcomes and costs, keepalive stops; never prompt or response content) as JSONL batches in `~/.volt/agent/prompt-cache-audit/`, keeping the newest 200 files up to 50 MB. Set `VOLT_PROMPT_CACHE_AUDIT=0` to turn them off.
+
+```json
+{
+  "promptCache": {
+    "keepAlive": true,
+    "keepAliveIdleMinutes": 15
+  }
+}
+```
+
 ### Compaction
 
 | Setting | Type | Default | Description |

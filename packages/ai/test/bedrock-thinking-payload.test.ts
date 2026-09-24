@@ -99,6 +99,19 @@ describe("Bedrock thinking payload", () => {
 		expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
 	});
 
+	it.each(["global.anthropic.claude-sonnet-5", "global.anthropic.claude-opus-5"] as const)(
+		"uses adaptive thinking for %s when reasoning is enabled",
+		async (modelId) => {
+			const model = getModel("amazon-bedrock", modelId);
+
+			const payload = await capturePayload(model);
+
+			expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
+			expect(payload.additionalModelRequestFields?.output_config).toEqual({ effort: "high" });
+			expect(payload.additionalModelRequestFields?.anthropic_beta).toBeUndefined();
+		},
+	);
+
 	it("maps xhigh reasoning to effort=xhigh for Claude Fable 5", async () => {
 		const model = getModel("amazon-bedrock", "global.anthropic.claude-fable-5");
 
@@ -221,6 +234,19 @@ describe("Application inference profile support", () => {
 		const lastMsg = capturedPayload.messages[capturedPayload.messages.length - 1];
 		const lastContent = lastMsg.content[lastMsg.content.length - 1];
 		expect(lastContent).toHaveProperty("cachePoint");
+	});
+
+	it("uses adaptive thinking when model.name names Claude without a version", async () => {
+		const baseModel = getModel("amazon-bedrock", "global.anthropic.claude-opus-4-6-v1");
+		const model: Model<"bedrock-converse-stream"> = {
+			...baseModel,
+			id: "arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/my-profile",
+			name: "Production Claude profile",
+		};
+
+		const payload = await capturePayload(model);
+
+		expect(payload.additionalModelRequestFields?.thinking).toEqual({ type: "adaptive", display: "summarized" });
 	});
 
 	it("falls back to fixed-budget thinking for non-adaptive Claude via model.name", async () => {

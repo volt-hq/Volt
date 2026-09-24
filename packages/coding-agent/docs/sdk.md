@@ -449,7 +449,7 @@ session.setActiveToolsByName(["read", "bash"]);
 await session.waitForIdle();
 ```
 
-`session.waitForIdle()` includes prompt preflight, retries, compaction, and queued continuations. `session.dispose()` installs the close fence synchronously; call `await session.waitForClosed()` outside callbacks when teardown must fully drain.
+`session.waitForIdle()` includes prompt preflight, retries, compaction, and queued continuations. `session.waitForNotBusy()` waits until `session.isBusy` is false, which also covers `!` commands, extension commands, and reload; do not await it from inside an extension command. `session.dispose()` installs the close fence synchronously; call `await session.waitForClosed()` outside callbacks when teardown must fully drain.
 
 ### Events
 

@@ -281,6 +281,43 @@ export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOption
 	options?: TOptions,
 ) => AssistantMessageEventStream;
 
+/**
+ * Outcome of a prompt-cache refresh. A refresh replays the exact request a provider would
+ * build for `streamSimple(model, context, options)` without generating output, so a
+ * provider cache that renews on hit keeps the prefix warm.
+ */
+export type PromptCacheRefreshResult =
+	| {
+			status: "refreshed";
+			/** Provider-reported usage, priced with the model's cost table. */
+			usage: Usage;
+	  }
+	| {
+			/** This request shape cannot be refreshed without output or without changing the cached prefix. */
+			status: "unsupported";
+			reason: string;
+	  };
+
+// Contract:
+// - Build the same payload as `streamSimple` for these arguments, including `onPayload`.
+// - Never fall back to a normal inference request; return "unsupported" instead.
+// - Throw on transport, authentication, or provider errors.
+export type PromptCacheRefreshFunction<TApi extends Api = Api> = (
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+) => Promise<PromptCacheRefreshResult>;
+
+/**
+ * Whether the provider's `PromptCacheRefreshFunction` can refresh a `streamSimple` request with these
+ * options, decided without sending anything. It may still report "unsupported" when payload hooks
+ * change the request.
+ */
+export type PromptCacheRefreshCheck<TApi extends Api = Api> = (
+	model: Model<TApi>,
+	options?: SimpleStreamOptions,
+) => boolean;
+
 export type ImagesFunction<TApi extends ImagesApi = ImagesApi, TOptions extends ImagesOptions = ImagesOptions> = (
 	model: ImagesModel<TApi>,
 	context: ImagesContext,

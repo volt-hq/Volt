@@ -1,6 +1,12 @@
 import type { AssistantMessage, Model, PromptCacheMetadata, Usage } from "@hansjm10/volt-ai";
+import * as fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { promptCacheStatusEquals, resolvePromptCacheStatus } from "../src/core/prompt-cache-status.ts";
+import {
+	applyPromptCacheRefresh,
+	type PromptCacheStatus,
+	promptCacheStatusEquals,
+	resolvePromptCacheStatus,
+} from "../src/core/prompt-cache-status.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 
 const ANTHROPIC_CACHE: PromptCacheMetadata = {
@@ -170,5 +176,73 @@ describe("promptCacheStatusEquals", () => {
 		expect(promptCacheStatusEquals(retained, { kind: "model_changed" })).toBe(false);
 		expect(promptCacheStatusEquals(undefined, undefined)).toBe(true);
 		expect(promptCacheStatusEquals(undefined, retained)).toBe(false);
+		expect(promptCacheStatusEquals(retained, { ...retained, keepAliveUntil: 5 })).toBe(false);
+	});
+});
+
+describe("applyPromptCacheRefresh", () => {
+	const retained = { kind: "retained", lastRequestAt: 1_000, expiresAt: 301_000 } as const;
+
+	it("moves the window to a later renewal of the same request", () => {
+		expect(applyPromptCacheRefresh(retained, { basisRequestAt: 1_000, at: 241_000, source: "refresh" })).toEqual({
+			kind: "retained",
+			lastRequestAt: 241_000,
+			expiresAt: 541_000,
+		});
+	});
+
+	it("ignores renewals of another request and earlier renewals", () => {
+		expect(applyPromptCacheRefresh(retained, { basisRequestAt: 500, at: 241_000, source: "refresh" })).toBe(retained);
+		expect(applyPromptCacheRefresh(retained, { basisRequestAt: 1_000, at: 1_000, source: "request" })).toBe(retained);
+		expect(
+			applyPromptCacheRefresh({ kind: "model_changed" }, { basisRequestAt: 1_000, at: 2_000, source: "refresh" }),
+		).toEqual({
+			kind: "model_changed",
+		});
+		expect(applyPromptCacheRefresh(retained, undefined)).toBe(retained);
+	});
+
+	it("applies the latest of several renewals of the same request", () => {
+		expect(
+			applyPromptCacheRefresh(
+				retained,
+				{ basisRequestAt: 1_000, at: 241_000, source: "request" },
+				undefined,
+				{ basisRequestAt: 1_000, at: 120_000, source: "refresh" },
+				{ basisRequestAt: 500, at: 400_000, source: "refresh" },
+			),
+		).toEqual({ kind: "retained", lastRequestAt: 241_000, expiresAt: 541_000 });
+	});
+
+	it("combines renewals as the latest single renewal, in any order", () => {
+		const renewal = fc.record({
+			basisRequestAt: fc.constantFrom(500, 1_000),
+			at: fc.integer({ min: 0, max: 1_000_000 }),
+			source: fc.constantFrom("refresh" as const, "request" as const),
+		});
+		const lastRequestAt = (status: PromptCacheStatus | undefined) =>
+			status?.kind === "retained" ? status.lastRequestAt : Number.NEGATIVE_INFINITY;
+		fc.assert(
+			fc.property(fc.array(fc.option(renewal, { nil: undefined }), { maxLength: 6 }), (renewals) => {
+				const combined = applyPromptCacheRefresh(retained, ...renewals);
+				const latestSingle = renewals
+					.map((single) => applyPromptCacheRefresh(retained, single))
+					.reduce<PromptCacheStatus | undefined>(
+						(best, status) => (lastRequestAt(status) > lastRequestAt(best) ? status : best),
+						retained,
+					);
+				expect(combined).toEqual(latestSingle);
+				expect(applyPromptCacheRefresh(retained, ...[...renewals].reverse())).toEqual(combined);
+			}),
+		);
+	});
+
+	it("keeps a status without a published window open-ended", () => {
+		expect(
+			applyPromptCacheRefresh(
+				{ kind: "retained", lastRequestAt: 1_000 },
+				{ basisRequestAt: 1_000, at: 5_000, source: "refresh" },
+			),
+		).toEqual({ kind: "retained", lastRequestAt: 5_000 });
 	});
 });

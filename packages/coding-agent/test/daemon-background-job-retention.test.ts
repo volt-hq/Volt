@@ -26,7 +26,7 @@ describe("daemon background job retention", () => {
 				sessionId: "retained-background-session",
 				isBusy: false,
 				hasBackgroundJobs: activeAtDetach,
-				waitForIdle: vi.fn(async () => {}),
+				waitForNotBusy: vi.fn(async () => {}),
 				waitForBackgroundJobs: vi.fn(async () => {
 					await finished;
 					session.hasBackgroundJobs = false;
@@ -98,7 +98,7 @@ describe("daemon background job retention", () => {
 			}
 			await vi.advanceTimersByTimeAsync(5000);
 			expect(session.waitForBackgroundJobs).toHaveBeenCalledTimes(1);
-			expect(session.waitForIdle).toHaveBeenCalledTimes(1);
+			expect(session.waitForNotBusy).toHaveBeenCalledTimes(1);
 			expect(session.abort).not.toHaveBeenCalled();
 			expect(dispose).not.toHaveBeenCalled();
 			expect(registry.findOwner("workspace", session.sessionId)).toBe(entry);

@@ -1,6 +1,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageDiagnostic,
+	type Context,
 	createAssistantMessageDiagnostic,
 	createAssistantMessageEventStream,
 	estimateToolDefinitionTokens,
@@ -8,7 +9,11 @@ import {
 	type JsonValue,
 	type Message,
 	type Model,
+	type PromptCacheRefreshFunction,
+	refreshPromptCache,
+	type SimpleStreamOptions,
 	streamSimple,
+	supportsPromptCacheRefresh,
 	type UserMessage,
 } from "@hansjm10/volt-ai";
 import { runAgentLoop } from "../agent-loop.ts";
@@ -58,6 +63,7 @@ import type {
 	AgentHarnessOptions,
 	AgentHarnessOwnEvent,
 	AgentHarnessPhase,
+	AgentHarnessPromptCacheRefreshResult,
 	AgentHarnessPromptOptions,
 	AgentHarnessRequestBoundary,
 	AgentHarnessRequestContext,
@@ -502,6 +508,17 @@ export class AgentHarness<
 	private providerHookPendingWrites: PendingSessionWrite[] | undefined;
 	private readonly persistActiveToolChanges: boolean;
 	private readonly streamFn: StreamFn;
+	private readonly refreshPromptCacheFn: PromptCacheRefreshFunction | undefined;
+	/** Latest admitted conversation request, replayed verbatim by refreshPromptCache. */
+	private lastTurnProviderRequest:
+		| {
+				model: Model<any>;
+				context: Context;
+				options: SimpleStreamOptions;
+				configurationEpoch: number;
+				cursor: ProjectionCursor;
+		  }
+		| undefined;
 	private readonly convertMessages: NonNullable<AgentHarnessOptions["convertToLlm"]>;
 	private readonly requestBoundary: AgentHarnessOptions["requestBoundary"];
 	private requestBatch: AgentHarnessRequestBoundary["batch"];
@@ -543,6 +560,7 @@ export class AgentHarness<
 		this.systemPrompt = options.systemPrompt;
 		this.getApiKeyAndHeaders = options.getApiKeyAndHeaders;
 		this.streamFn = options.streamFn ?? streamSimple;
+		this.refreshPromptCacheFn = options.refreshPromptCacheFn ?? (options.streamFn ? undefined : refreshPromptCache);
 		this.convertMessages = options.convertToLlm ?? defaultConvertToLlm;
 		this.requestBoundary = options.requestBoundary;
 		this.defaultDeliveryOwner = options.deliveryOwner ?? this.createDefaultDeliveryOwner();
@@ -1264,6 +1282,25 @@ export class AgentHarness<
 						};
 					}
 					settleOptionalContext(includeOptionalContext);
+					if (isTurnProviderRequestState(requestState) && hookCommitBasis) {
+						const {
+							signal: _signal,
+							onPayload: _onPayload,
+							onResponse: _onResponse,
+							...replayOptions
+						} = admittedOptions ?? {};
+						this.lastTurnProviderRequest = {
+							model: admittedModel,
+							context: {
+								...admittedContext,
+								messages: [...admittedContext.messages],
+								...(admittedContext.tools === undefined ? {} : { tools: [...admittedContext.tools] }),
+							},
+							options: replayOptions,
+							configurationEpoch,
+							cursor: hookCommitBasis,
+						};
+					}
 					const response = this.streamFn(admittedModel, admittedContext, admittedOptions);
 					this.endProviderAdmission();
 					return response;
@@ -2974,6 +3011,91 @@ export class AgentHarness<
 
 	waitForClosed(): Promise<void> {
 		return this.closePromise ?? this.operations.waitForClosed();
+	}
+
+	/**
+	 * Whether `refreshPromptCache` would replay the latest conversation request now: a refresh function
+	 * is configured, the model, thinking level, tools, and stream options are unchanged since that
+	 * request, and its provider can refresh a request with those options. Sends nothing; the branch and
+	 * payload hooks are checked only when a refresh runs.
+	 */
+	canRefreshPromptCache(): boolean {
+		const target = this.lastTurnProviderRequest;
+		return (
+			this.refreshPromptCacheFn !== undefined &&
+			target !== undefined &&
+			target.configurationEpoch === this.runtimeConfigurationEpoch &&
+			supportsPromptCacheRefresh(target.model, target.options)
+		);
+	}
+
+	/**
+	 * Replay the latest conversation request as a no-output prompt-cache refresh. The replay reuses
+	 * that request's admitted context and options and passes through before_provider_payload, so the
+	 * provider sees the same prefix. Only the credential is re-resolved. Nothing is sent when the
+	 * branch has been rewritten or the model, thinking level, tools, or stream options changed since.
+	 */
+	async refreshPromptCache(signal?: AbortSignal): Promise<AgentHarnessPromptCacheRefreshResult> {
+		this.assertNotDisposed();
+		if (!this.refreshPromptCacheFn) return { status: "unavailable", reason: "no_refresh_function" };
+		const target = this.lastTurnProviderRequest;
+		if (!target) return { status: "unavailable", reason: "no_request" };
+		if (target.configurationEpoch !== this.runtimeConfigurationEpoch) {
+			return { status: "unavailable", reason: "configuration_changed" };
+		}
+		let advance: ProjectionAdvance;
+		try {
+			advance = await this.session.advanceProjection(target.cursor);
+		} catch {
+			return { status: "unavailable", reason: "branch_changed" };
+		}
+		if (advance.branchRelation === "diverged" || advance.messages.kind === "rewrite") {
+			return { status: "unavailable", reason: "branch_changed" };
+		}
+		const auth = await this.getApiKeyAndHeaders?.(target.model);
+		signal?.throwIfAborted();
+		const result = await this.refreshPromptCacheFn(target.model, target.context, {
+			...target.options,
+			...(auth?.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
+			onPayload: async (payload) => await this.emitBeforeProviderPayload(target.model, payload),
+			...(signal === undefined ? {} : { signal }),
+		});
+		return { ...result, model: target.model };
+	}
+
+	/**
+	 * Append host-owned custom state that never enters model context. While an operation runs, the
+	 * entry waits for the next save point, like `appendMessage`.
+	 */
+	async appendCustomEntry(customType: string, data?: JsonValue): Promise<void> {
+		this.assertNotDisposed();
+		let ownedData: JsonValue | undefined;
+		try {
+			ownedData = data === undefined ? undefined : structuredClone(data);
+		} catch (error) {
+			throw normalizeHarnessError(
+				new SessionError("invalid_entry", "Failed to materialize canonical mutation batch", toError(error)),
+				"session",
+			);
+		}
+		const mutation = (async () => {
+			try {
+				if (!this.operations.current) {
+					const entryId = await this.session.appendCustomEntry(customType, ownedData);
+					await this.advanceContextProjection(entryId, []);
+				} else {
+					// Provider-hook writes must repeat identically across configuration retries; this does not.
+					this.pendingSessionWrites.push({
+						type: "custom",
+						customType,
+						...(ownedData === undefined ? {} : { data: ownedData }),
+					});
+				}
+			} catch (error) {
+				throw normalizeHarnessError(error, "session");
+			}
+		})();
+		await this.trackAdmittedMutation(mutation);
 	}
 
 	async appendMessage(message: AgentMessage): Promise<void> {

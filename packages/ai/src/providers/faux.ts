@@ -6,6 +6,10 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	PromptCacheMetadata,
+	PromptCacheRefreshCheck,
+	PromptCacheRefreshFunction,
+	PromptCacheRefreshResult,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -43,6 +47,8 @@ export interface FauxModelDefinition {
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow?: number;
 	maxTokens?: number;
+	/** Defaults to implicit caching without a documented TTL. */
+	promptCache?: PromptCacheMetadata;
 }
 
 export type FauxContentBlock = TextContent | ThinkingContent | ToolCall;
@@ -100,7 +106,16 @@ export interface FauxProviderState {
 	callCount: number;
 	/** Auxiliary simple completions (no `context.tools`): naming, compaction, summaries. */
 	simpleCallCount: number;
+	/** Prompt-cache refresh requests; only counted when refresh is enabled. */
+	refreshCount: number;
 }
+
+export type FauxPromptCacheRefresh = (
+	context: Context,
+	options: SimpleStreamOptions | undefined,
+	state: FauxProviderState,
+	model: Model<string>,
+) => PromptCacheRefreshResult | Promise<PromptCacheRefreshResult>;
 
 export type FauxResponseFactory = (
 	context: Context,
@@ -120,6 +135,13 @@ export interface RegisterFauxProviderOptions {
 		min?: number;
 		max?: number;
 	};
+	/**
+	 * Register a prompt-cache refresh. `true` reports a read of the prompt this session last
+	 * cached (or a write when it differs); a function supplies the outcome.
+	 */
+	refreshPromptCache?: true | FauxPromptCacheRefresh;
+	/** Which request options the registered refresh supports; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 export interface FauxProviderRegistration {
@@ -259,6 +281,34 @@ function withUsageEstimate(
 			totalTokens: input + outputTokens + cacheRead + cacheWrite,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
+	};
+}
+
+function estimateRefreshUsage(
+	context: Context,
+	model: Model<string>,
+	options: SimpleStreamOptions | undefined,
+	promptCache: Map<string, string>,
+): Usage {
+	const promptText = serializeContext(context);
+	const promptTokens = estimateTokens(promptText);
+	const sessionId = options?.sessionId;
+	const cached = sessionId && resolvePromptCacheRetention(model, options?.cacheRetention, options?.env) !== "none";
+	const previousPrompt = cached ? promptCache.get(sessionId) : undefined;
+	const cacheRead = previousPrompt
+		? estimateTokens(previousPrompt.slice(0, commonPrefixLength(previousPrompt, promptText)))
+		: 0;
+	const cacheWrite = cached ? promptTokens - cacheRead : 0;
+	if (cached) promptCache.set(sessionId, promptText);
+	const input = promptTokens - cacheRead - cacheWrite;
+	return {
+		availability: "complete",
+		input,
+		output: 0,
+		cacheRead,
+		cacheWrite,
+		totalTokens: promptTokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
 
@@ -470,7 +520,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	let pendingResponses: FauxResponseStep[] = [];
 	let pendingSimpleResponses: FauxResponseStep[] = [];
 	const tokensPerSecond = options.tokensPerSecond;
-	const state: FauxProviderState = { callCount: 0, simpleCallCount: 0 };
+	const state: FauxProviderState = { callCount: 0, simpleCallCount: 0, refreshCount: 0 };
 	const promptCache = new Map<string, string>();
 
 	const modelDefinitions = options.models?.length
@@ -494,7 +544,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		baseUrl: DEFAULT_BASE_URL,
 		reasoning: definition.reasoning ?? false,
 		input: definition.input ?? ["text", "image"],
-		promptCache: { modes: ["implicit"], retention: { short: {} } },
+		promptCache: definition.promptCache ?? { modes: ["implicit"], retention: { short: {} } },
 		cost: definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: definition.contextWindow ?? 128000,
 		maxTokens: definition.maxTokens ?? 16384,
@@ -603,7 +653,28 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 			? streamAuxiliary(requestModel, context, streamOptions)
 			: stream(requestModel, context, streamOptions);
 
-	registerApiProvider({ api, stream, streamSimple }, sourceId);
+	const refreshOption = options.refreshPromptCache;
+	const refreshPromptCache: PromptCacheRefreshFunction | undefined = refreshOption
+		? async (requestModel, context, refreshOptions) => {
+				state.refreshCount++;
+				if (refreshOption !== true) return await refreshOption(context, refreshOptions, state, requestModel);
+				return {
+					status: "refreshed",
+					usage: estimateRefreshUsage(context, requestModel, refreshOptions, promptCache),
+				};
+			}
+		: undefined;
+
+	registerApiProvider(
+		{
+			api,
+			stream,
+			streamSimple,
+			...(refreshPromptCache ? { refreshPromptCache } : {}),
+			...(options.canRefreshPromptCache ? { canRefreshPromptCache: options.canRefreshPromptCache } : {}),
+		},
+		sourceId,
+	);
 
 	function getModel(): Model<string>;
 	function getModel(requestedModelId: string): Model<string> | undefined;

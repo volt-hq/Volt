@@ -1126,7 +1126,7 @@ class IrohDaemonService {
 			isRuntimeStreaming: (workspaceName, sessionId) =>
 				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.isBusy ?? false,
 			waitForRuntimeIdle: async (workspaceName, sessionId) => {
-				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.waitForIdle();
+				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.waitForNotBusy();
 			},
 			disposeRuntime: async (workspaceName, sessionId, reason) => {
 				const owner = this.runtimes.findOwner(workspaceName, sessionId);
@@ -6131,7 +6131,7 @@ class IrohDaemonService {
 				.values()
 				.filter((entry) => entry.runtime.session.isBusy)
 				.map((entry) =>
-					withTimeout(entry.runtime.session.waitForIdle(), SHUTDOWN_RUNTIME_IDLE_CAP_MS, "drain cap"),
+					withTimeout(entry.runtime.session.waitForNotBusy(), SHUTDOWN_RUNTIME_IDLE_CAP_MS, "drain cap"),
 				),
 		);
 		const cappedRuntimes = drainResults.filter((result) => result.status === "rejected").length;

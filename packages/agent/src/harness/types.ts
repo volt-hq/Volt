@@ -6,6 +6,8 @@ import type {
 	JsonValue,
 	Message,
 	Model,
+	PromptCacheRefreshFunction,
+	PromptCacheRefreshResult,
 	ProviderEnv,
 	SimpleStreamOptions,
 	TextContent,
@@ -27,6 +29,15 @@ import type {
 } from "../index.ts";
 import type { AgentHarnessAdmissionGate } from "./admission-gate.ts";
 import type { Session } from "./session/session.ts";
+
+/** Outcome of `AgentHarness.refreshPromptCache`. */
+export type AgentHarnessPromptCacheRefreshResult =
+	| (PromptCacheRefreshResult & { model: Model<any> })
+	| {
+			/** Nothing was sent: no refresh function, no retained request, or the retained request is stale. */
+			status: "unavailable";
+			reason: "no_refresh_function" | "no_request" | "configuration_changed" | "branch_changed";
+	  };
 
 /** Result of a fallible operation. Expected failures are returned as `ok: false` instead of thrown. */
 export type Result<TValue, TError> = { ok: true; value: TValue } | { ok: false; error: TError };
@@ -1083,6 +1094,11 @@ export interface AgentHarnessOptions<
 	) => Promise<{ apiKey: string; headers?: Record<string, string>; env?: ProviderEnv } | undefined>;
 	/** Base provider stream implementation wrapped by Harness lifecycle policy. */
 	streamFn?: StreamFn;
+	/**
+	 * No-output replay used by `refreshPromptCache`. Defaults to the provider refresh only when
+	 * `streamFn` is omitted; a custom `streamFn` must supply a matching refresh or refresh is unavailable.
+	 */
+	refreshPromptCacheFn?: PromptCacheRefreshFunction;
 	/** Append optional request-local messages after context reconciliation; never writes canonical history. */
 	requestBoundary?: (
 		boundary: AgentHarnessRequestBoundary,

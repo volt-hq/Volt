@@ -7,8 +7,15 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@hansjm10/volt-ai";
-import { registerFauxProvider, streamSimple } from "@hansjm10/volt-ai";
+import type {
+	FauxModelDefinition,
+	FauxPromptCacheRefresh,
+	FauxProviderRegistration,
+	FauxResponseStep,
+	Model,
+	PromptCacheRefreshCheck,
+} from "@hansjm10/volt-ai";
+import { refreshPromptCache, registerFauxProvider, streamSimple } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
@@ -76,6 +83,10 @@ export interface HarnessOptions {
 	withConfiguredAuth?: boolean;
 	/** Inject a persisted manager when a test needs to exercise session reload behavior. */
 	sessionManager?: SessionManager;
+	/** Register a faux prompt-cache refresh and wire the session to it. */
+	refreshPromptCache?: true | FauxPromptCacheRefresh;
+	/** Which request options the faux refresh supports; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 export interface Harness {
@@ -104,6 +115,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
 		models: options.models,
 		tokensPerSecond: options.tokensPerSecond,
+		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCache: options.refreshPromptCache }),
+		...(options.canRefreshPromptCache === undefined ? {} : { canRefreshPromptCache: options.canRefreshPromptCache }),
 	});
 	fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();
@@ -153,6 +166,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		model,
 		thinkingLevel: "off",
 		streamFn: streamSimple,
+		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCacheFn: refreshPromptCache }),
 		convertToLlm,
 		settingsManager,
 		extensionWorkLimits: options.extensionWorkLimits,

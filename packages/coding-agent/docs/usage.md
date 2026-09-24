@@ -15,7 +15,7 @@ The interface has four main areas:
 
 The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
 
-When the provider documents how long it retains the prompt cache, the footer counts down to expiry (`cache 4m`). `cache expired`, or `cache cold` after a model switch, means your next message resends the whole conversation without cache hits, which costs more tokens than usual. Providers that publish no retention window show no countdown. After a response has sat idle for a minute, the transcript records how long the work took and when it finished, for example `Worked for 3m 12s · done 3:42 PM`.
+When the provider documents how long it retains the prompt cache, the footer counts down to expiry (`cache 4m`). `cache expired`, or `cache cold` after a model switch, means your next message resends the whole conversation without cache hits, which costs more tokens than usual. Providers that publish no retention window show no countdown. Where the provider supports it, Volt keeps the cache warm while work runs and for 15 minutes after it finishes, shown as `cache warm 12m` (see [prompt-cache keepalive](settings.md#prompt-cache)). After a response has sat idle for a minute, the transcript records how long the work took and when it finished, for example `Worked for 3m 12s · done 3:42 PM`.
 
 ### Editor Features
 
@@ -595,6 +595,7 @@ volt --exclude-tools ask_question
 | `VOLT_SHARE_VIEWER_URL` | Base URL for `/share` command viewer links |
 | `VOLT_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
 | `VOLT_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
+| `VOLT_PROMPT_CACHE_AUDIT` | Set to `0` to stop writing prompt-cache audit logs to `~/.volt/agent/prompt-cache-audit/` |
 | `VOLT_TUI_ESC_TIMEOUT` | Milliseconds to wait for bytes following a lone Escape key; defaults to 10 locally and 100 over SSH |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 

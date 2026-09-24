@@ -207,13 +207,13 @@ describe("AgentHarness shared admission", () => {
 			for (const hook of [beforeCompact, beforeTree, beforeProvider]) expect(hook).not.toHaveBeenCalled();
 			expect(getBranchSnapshot).not.toHaveBeenCalled();
 			expect(commitBatch).not.toHaveBeenCalled();
-			expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 0 });
+			expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 0, refreshCount: 0 });
 			expect(await session.getBranchSnapshot()).toEqual(before);
 			await harness.waitForIdle();
 			release();
 			await expect(invoke()).resolves.toBeDefined();
 			expect(beforeProvider).toHaveBeenCalledTimes(1);
-			expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 1 });
+			expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 1, refreshCount: 0 });
 		},
 	);
 
@@ -434,7 +434,7 @@ describe("AgentHarness successor admission and teardown", () => {
 		expect(harness.getPhase()).toBe("idle");
 		expect(harness.cancelReservedRun(reservation)).toBe(false);
 		expect(strategy).not.toHaveBeenCalled();
-		expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 0 });
+		expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 0, refreshCount: 0 });
 		expect(await session.getEntries()).toEqual([]);
 		release();
 		await expect(harness[operation](strategy)).resolves.toBe("fresh structural result");
