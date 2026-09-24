@@ -24,8 +24,8 @@ describe("strict tool argument completion", () => {
 		'{"text":"unfinished',
 		'{"text":"done"',
 		'{"text":"a\\q"}',
-		'{"text":"raw\ttab"}',
 		'{"text":1,}',
+		'{\t"text":"tab outside strings is whitespace",}',
 		"[]",
 		"null",
 		'"text"',
@@ -49,6 +49,49 @@ describe("strict tool argument completion", () => {
 		expect(events.find((event) => event.type === "toolcall_delta")?.snapshot.content[0]).toMatchObject({
 			arguments: parseStreamingJson(raw),
 		});
+	});
+
+	it.each([
+		{ raw: '{"text":"private\tvalue"}', codePoint: 0x09, cause: "an unescaped tab (U+0009)", encoded: "\\t" },
+		{
+			raw: '{"text":"private\\\\\nvalue"}',
+			codePoint: 0x0a,
+			cause: "an unescaped line feed (U+000A)",
+			encoded: "\\n",
+		},
+		{
+			raw: '{"text":"private\u0001value"}',
+			codePoint: 0x01,
+			cause: "an unescaped control character (U+0001)",
+			encoded: "\\u0001",
+		},
+	])("names $cause without echoing the arguments", async ({ raw, codePoint, cause, encoded }) => {
+		const { result } = await normalize([
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: raw },
+			{ type: "toolcall_end", contentIndex: 0 },
+			{ type: "done", reason: "toolUse" },
+		]);
+		expect(result).toMatchObject({
+			stopReason: "error",
+			errorMessage: `Tool arguments contained ${cause} inside a JSON string; encode it as ${encoded}. No tools were executed.`,
+		});
+		expect(result.diagnostics).toContainEqual(
+			expect.objectContaining({
+				type: "invalid_tool_arguments",
+				details: { code: "invalid_json", contentIndex: 0, reason: "unescaped_control_character", codePoint },
+			}),
+		);
+		expect(`${result.errorMessage} ${JSON.stringify(result.diagnostics)}`).not.toContain("private");
+	});
+
+	it("admits escaped tabs inside JSON strings", async () => {
+		const { result } = await normalize([
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"text":"a\\tb"}' },
+			{ type: "toolcall_end", contentIndex: 0 },
+			{ type: "done", reason: "toolUse" },
+		]);
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content[0]).toMatchObject({ arguments: { text: "a\tb" } });
 	});
 
 	it("rejects a valid JSON preview without explicit completion", async () => {

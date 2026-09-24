@@ -11,6 +11,11 @@ import { AssistantMessageEventStream, EventStreamOverflowError } from "../utils/
 import { parseStreamingJson } from "../utils/json-parse.ts";
 import type { JsonObject } from "../utils/json-value.ts";
 import type { AssistantMessageInit, AssistantMessageMetaPatch, AssistantStreamFragment } from "./fragments.ts";
+import {
+	describeUnescapedControlCharacter,
+	findUnescapedControlCharacter,
+	type UnescapedControlCharacter,
+} from "./invalid-tool-arguments.ts";
 import { ToolArgumentCoalescer } from "./tool-argument-coalescer.ts";
 import { ToolArgumentGuard, type ToolArgumentLimitFailure } from "./tool-argument-guard.ts";
 
@@ -505,12 +510,15 @@ export class AssistantStreamNormalizer {
 			return;
 		if (!this.guard.complete(contentIndex)) return;
 		let finalToolCall = block;
+		let raw = "";
 		try {
 			// Tolerant parsing is only a preview. Only an explicit end may admit
 			// the complete provider payload, never the last repaired object.
-			const raw =
-				argumentsText ?? (toolCall ? JSON.stringify(toolCall.arguments) : this.toolArgsText.get(contentIndex));
-			const argumentsValue: unknown = JSON.parse(raw ?? "");
+			raw =
+				argumentsText ??
+				(toolCall ? JSON.stringify(toolCall.arguments) : this.toolArgsText.get(contentIndex)) ??
+				"";
+			const argumentsValue: unknown = JSON.parse(raw);
 			if (argumentsValue === null || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) {
 				throw new Error("Expected a JSON object");
 			}
@@ -520,7 +528,8 @@ export class AssistantStreamNormalizer {
 				...(thoughtSignature === undefined ? {} : { thoughtSignature }),
 			});
 		} catch {
-			this.rejectToolArguments("invalid_json", contentIndex);
+			// Report a content-free cause; never echo the parser message, which may quote arguments.
+			this.rejectToolArguments("invalid_json", contentIndex, findUnescapedControlCharacter(raw));
 		}
 		this.closeToolCall(contentIndex, finalToolCall);
 	}
@@ -653,16 +662,20 @@ export class AssistantStreamNormalizer {
 	private rejectToolArguments(
 		code: "invalid_json" | "missing_completion" | "length_limit",
 		contentIndex: number,
+		cause?: UnescapedControlCharacter,
 	): void {
 		if (this.toolArgumentFailure) return;
-		this.toolArgumentFailure =
-			code === "invalid_json"
+		this.toolArgumentFailure = cause
+			? `Tool arguments contained ${describeUnescapedControlCharacter(cause.codePoint)}. No tools were executed.`
+			: code === "invalid_json"
 				? "Tool arguments must be a complete, valid JSON object. No tools were executed."
 				: code === "length_limit"
 					? "The response reached its length limit while generating tool calls. No tools were executed."
 					: "The provider did not complete its tool-call response. No tools were executed.";
 		this.applyMeta({
-			diagnostics: [{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code, contentIndex } }],
+			diagnostics: [
+				{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code, contentIndex, ...cause } },
+			],
 		});
 	}
 
