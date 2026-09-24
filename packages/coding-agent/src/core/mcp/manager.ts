@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { CallToolResult, GetPromptResult, ReadResourceResult } from "@modelcontextprotocol/sdk/types.js";
 import type { McpAuditLogger } from "./audit.ts";
 import {
@@ -12,7 +12,7 @@ import {
 	serverTrustsToolRead,
 } from "./config.ts";
 import type { McpConfigWriter } from "./config-writer.ts";
-import type { McpMetadataCache } from "./metadata-cache.ts";
+import { type McpDiscoveryMetadata, type McpMetadataCache, toMcpDiscoveryMetadata } from "./metadata-cache.ts";
 import {
 	completeMcpOAuthBrowserAuth,
 	type McpOAuthPendingDeviceFlow,
@@ -23,7 +23,7 @@ import {
 import type { McpOAuthStore } from "./oauth-store.ts";
 import type { McpOutputStore } from "./output-store.ts";
 import { classifyMcpToolRisk, isMcpToolTrustedReadCandidate } from "./safety.ts";
-import { searchMcpMetadata } from "./search.ts";
+import { McpSearchIndex } from "./search.ts";
 import { type McpMetadataRefreshOptions, McpServerSupervisor } from "./server-supervisor.ts";
 import type {
 	McpCallerSurface,
@@ -110,7 +110,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isMetadataStale(
-	metadata: McpServerMetadata | undefined,
+	metadata: Pick<McpServerMetadata, "toolsLastSeenAt" | "resourcesLastSeenAt" | "promptsLastSeenAt"> | undefined,
 	maxAgeMs: number,
 	categories: readonly McpMetadataCategory[],
 ): boolean {
@@ -219,9 +219,26 @@ function contentPartToText(part: unknown): string | undefined {
 }
 
 function callToolResultToText(result: CallToolResult): string {
-	const parts = result.content.map(contentPartToText).filter((part): part is string => part !== undefined);
-	if (result.structuredContent !== undefined) {
-		parts.push(`Structured content:\n${JSON.stringify(result.structuredContent, null, 2)}`);
+	const structuredText = result.structuredContent === undefined ? undefined : JSON.stringify(result.structuredContent);
+	const parts = result.content
+		.filter((part) => {
+			if (part.type !== "text" || structuredText === undefined) return true;
+			try {
+				JSON.parse(part.text);
+				// Parsed equality can lose large integer literals or duplicate object keys.
+				// Remove only insignificant whitespace, keeping strings and number spelling.
+				const compact = part.text.replace(/"(?:\\.|[^"\\])*"|\s+/g, (token) =>
+					token.startsWith('"') ? token : "",
+				);
+				return compact !== structuredText;
+			} catch {
+				return true;
+			}
+		})
+		.map(contentPartToText)
+		.filter((part): part is string => part !== undefined);
+	if (structuredText !== undefined) {
+		parts.push(`Structured content:\n${structuredText}`);
 	}
 	return parts.join("\n\n").trim() || "(no MCP tool output)";
 }
@@ -255,6 +272,7 @@ export class McpManager {
 	private config: McpResolvedConfig;
 	private supervisors: Map<string, McpServerSupervisor>;
 	private metadataCache: McpMetadataCache;
+	private searchIndex = new McpSearchIndex();
 	private outputStore: McpOutputStore;
 	private auditLogger: McpAuditLogger | undefined;
 	private configWriter: McpConfigWriter | undefined;
@@ -432,7 +450,7 @@ export class McpManager {
 			case "list_servers":
 				return { action: "list_servers", servers: this.listServers() };
 			case "search":
-				return this.search(input.query ?? "", input.limit);
+				return this.searchForModel(input);
 			case "describe":
 				return this.describe(requireString(input.server, "server"), requireString(input.tool, "tool"), signal, {
 					restrictedTrustedRead: context.restrictedTrustedRead,
@@ -466,20 +484,8 @@ export class McpManager {
 				return this.cancelServerAuth(requireString(input.server, "server"));
 			case "logout":
 				return this.logoutServer(requireString(input.server, "server"));
-			case "list_tools": {
-				const result = await this.listTools(requireString(input.server, "server"), signal, {
-					restrictedTrustedRead: context.restrictedTrustedRead,
-				});
-				return {
-					...result,
-					tools: result.tools.map((tool) => ({
-						name: tool.name,
-						description: compactText(tool.description, 180),
-						risk: tool.risk,
-						trustedRead: tool.trustedRead,
-					})),
-				};
-			}
+			case "list_tools":
+				return this.listToolPage(input, context, signal);
 			case "call":
 				return this.callTool(input, context, signal);
 			case "list_resources":
@@ -722,27 +728,48 @@ export class McpManager {
 	search(
 		query: string,
 		limit?: number,
-	): { action: "search"; query: string; matches: McpSearchMatch[]; notices?: string[] } {
-		const freshMetadata: McpServerMetadata[] = [];
-		const missingOrStale: string[] = [];
+		serverId?: string,
+	): {
+		action: "search";
+		query: string;
+		matches: McpSearchMatch[];
+		coverage: { searchedServers: string[]; missingServers: string[]; staleServers: string[] };
+		notices?: string[];
+	} {
+		const selected = serverId === undefined ? undefined : this.getSupervisor(serverId).server.id;
+		const freshMetadata: McpDiscoveryMetadata[] = [];
+		const coverage = {
+			searchedServers: [] as string[],
+			missingServers: [] as string[],
+			staleServers: [] as string[],
+		};
 		for (const supervisor of this.supervisors.values()) {
-			const metadata = supervisor.cachedMetadata;
-			if (!metadata || this.isSupervisorMetadataStale(supervisor, metadata, TOOL_METADATA_CATEGORIES)) {
-				missingOrStale.push(supervisor.server.id);
+			if (!supervisor.server.enabled || (selected !== undefined && supervisor.server.id !== selected)) continue;
+			const metadata = this.metadataCache.getDiscovery(supervisor.server.id);
+			if (!metadata) {
+				coverage.missingServers.push(supervisor.server.id);
 				continue;
 			}
+			if (this.isSupervisorMetadataStale(supervisor, metadata, TOOL_METADATA_CATEGORIES)) {
+				coverage.staleServers.push(supervisor.server.id);
+				continue;
+			}
+			coverage.searchedServers.push(supervisor.server.id);
 			freshMetadata.push(metadata);
 		}
-		const matches = searchMcpMetadata({
+		const matches = this.searchIndex.search({
 			query,
 			limit,
 			servers: this.config.servers,
 			metadata: freshMetadata,
+			server: selected,
 		});
+		const missingOrStale = [...coverage.missingServers, ...coverage.staleServers];
 		return {
 			action: "search",
 			query,
 			matches,
+			coverage,
 			...(missingOrStale.length > 0
 				? {
 						notices: [
@@ -751,6 +778,150 @@ export class McpManager {
 					}
 				: {}),
 		};
+	}
+
+	private discoveryBudget(maxBytes: number | undefined): number {
+		if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 512)) {
+			throw new Error("MCP discovery maxBytes must be an integer of at least 512");
+		}
+		return Math.min(maxBytes ?? 8192, this.outputStore.getMaxOutputBytes());
+	}
+
+	private searchForModel(input: McpGatewayInput): unknown {
+		const budget = this.discoveryBudget(input.maxBytes);
+		const found = this.search(input.query ?? "", input.limit, input.server);
+		const result: Record<string, unknown> = { ...found, returnedMatches: found.matches.length };
+		while (found.matches.length > 0 && byteLength(JSON.stringify(result)) > budget) {
+			found.matches.pop();
+			result.returnedMatches = found.matches.length;
+			result.moreMatches = true;
+		}
+		const best = found.matches[0];
+		if (input.includeSchema && best) {
+			// Search is discovery-only: schema loading must not connect or refresh a server.
+			const tool = this.metadataCache.getTool(best.server, best.tool);
+			if (tool) {
+				const selectedTool = {
+					server: best.server,
+					tool: tool.name,
+					description: tool.description ?? "",
+					inputSchema: tool.inputSchema,
+					...(tool.outputSchema ? { outputSchema: tool.outputSchema } : {}),
+					annotations: tool.annotations ?? {},
+					metadataHash: best.metadataHash,
+				};
+				if (byteLength(JSON.stringify({ ...result, selectedTool })) <= budget) {
+					result.selectedTool = selectedTool;
+				} else {
+					result.schemaOmitted = "Use describe: the complete schema exceeds the discovery budget.";
+				}
+			} else {
+				result.schemaOmitted = "Metadata changed during discovery; search again before selecting a tool.";
+			}
+		}
+		while (found.matches.length > 0 && byteLength(JSON.stringify(result)) > budget) {
+			found.matches.pop();
+			result.returnedMatches = found.matches.length;
+			result.moreMatches = true;
+		}
+		if (byteLength(JSON.stringify(result)) > budget) {
+			throw new Error("MCP search metadata exceeds maxBytes; narrow the query/server scope or increase maxBytes");
+		}
+		return result;
+	}
+
+	private async listToolPage(
+		input: McpGatewayInput,
+		context: McpGatewayExecutionContext,
+		signal?: AbortSignal,
+	): Promise<unknown> {
+		const supervisor = this.getSupervisor(requireString(input.server, "server"));
+		const server = supervisor.server;
+		if (!server.enabled) throw new Error(`MCP server is disabled: ${server.id}`);
+		if (context.restrictedTrustedRead && !serverHasTrustedToolReads(server)) {
+			throw new Error(`MCP server has no configured trusted tool reads: ${server.id}`);
+		}
+		if (input.limit !== undefined && (!Number.isSafeInteger(input.limit) || input.limit <= 0)) {
+			throw new Error("MCP list_tools limit must be a positive integer");
+		}
+		const limit = Math.min(input.limit ?? 20, 100);
+		const budget = this.discoveryBudget(input.maxBytes);
+		let metadata = this.metadataCache.getDiscovery(server.id);
+		if (
+			context.restrictedTrustedRead ||
+			this.isSupervisorMetadataStale(supervisor, metadata, TOOL_METADATA_CATEGORIES)
+		) {
+			try {
+				metadata = toMcpDiscoveryMetadata(await supervisor.refreshMetadata(signal, TOOLS_ONLY_METADATA_REFRESH));
+			} catch (error) {
+				if (context.restrictedTrustedRead || signal?.aborted) throw error;
+				if (metadata?.configHash !== hashMcpServerConfig(server)) metadata = undefined;
+			}
+		}
+		const tools = (metadata?.tools ?? [])
+			.filter((tool) => serverMatchesToolFilters(server, tool.name))
+			.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0));
+		const snapshot = createHash("sha256")
+			.update(JSON.stringify([server.id, metadata?.metadataHash]))
+			.digest("base64url");
+		let offset = 0;
+		if (input.cursor !== undefined) {
+			const parsed = /^([A-Za-z0-9_-]{43})\.(0|[1-9]\d{0,15})$/.exec(input.cursor);
+			if (!parsed) throw new Error("Invalid MCP tool listing cursor");
+			if (parsed[1] !== snapshot) {
+				throw new Error(
+					"MCP tool catalog changed or cursor belongs to another server; restart list_tools without cursor",
+				);
+			}
+			offset = Number(parsed[2]);
+			if (!Number.isSafeInteger(offset) || offset > tools.length) {
+				throw new Error("Invalid MCP tool listing cursor offset");
+			}
+		}
+		const page: Array<{ name: string; description: string; risk: McpRisk; trustedRead: boolean }> = [];
+		const envelope = (next: number) => ({
+			action: "list_tools",
+			server: server.id,
+			tools: page,
+			metadataHash: metadata?.metadataHash,
+			stale: this.isSupervisorMetadataStale(supervisor, metadata, TOOL_METADATA_CATEGORIES),
+			total: tools.length,
+			...(next < tools.length ? { nextCursor: `${snapshot}.${next}` } : {}),
+		});
+		let next = offset;
+		if (byteLength(JSON.stringify(envelope(next))) > budget) {
+			throw new Error("MCP tool page metadata exceeds maxBytes; increase maxBytes");
+		}
+		for (; next < tools.length && page.length < limit; next++) {
+			const tool = tools[next];
+			page.push({
+				name: tool.name,
+				description: compactText(tool.description, 180),
+				risk: classifyMcpToolRisk(tool),
+				trustedRead: serverTrustsToolRead(server, tool.name) && isMcpToolTrustedReadCandidate(tool),
+			});
+			if (byteLength(JSON.stringify(envelope(next + 1))) <= budget) continue;
+			const oversized = page.pop();
+			if (page.length > 0) break;
+			let cacheId: string | undefined;
+			try {
+				cacheId = this.outputStore.write(JSON.stringify({ ...envelope(next + 1), tools: [oversized] }));
+			} catch {
+				// Preserve the output budget even if storage cannot retain this entry.
+			}
+			const oversizedResult = {
+				...envelope(next + 1),
+				oversizedEntry: true,
+				...(cacheId
+					? { cache: { id: cacheId, read: `mcp({"action":"read_cache","cacheId":"${cacheId}"})` } }
+					: { cacheUnavailable: true }),
+			};
+			if (byteLength(JSON.stringify(oversizedResult)) > budget) {
+				throw new Error("MCP oversized tool retrieval metadata exceeds maxBytes; increase maxBytes");
+			}
+			return oversizedResult;
+		}
+		return envelope(next);
 	}
 
 	async describe(
@@ -930,12 +1101,21 @@ export class McpManager {
 
 	async readCache(
 		cacheId: string,
-		input: Pick<McpGatewayInput, "cursor" | "limit">,
+		input: Pick<McpGatewayInput, "cursor" | "limit" | "pointer" | "offset">,
 		context: McpGatewayExecutionContext,
 	): Promise<unknown> {
 		const startedAt = Date.now();
 		try {
-			const chunk = this.outputStore.read(cacheId, input);
+			if (input.pointer !== undefined && input.cursor !== undefined) {
+				throw new Error("Use offset for structured MCP cache rows, not cursor");
+			}
+			if (input.pointer === undefined && input.offset !== undefined) {
+				throw new Error("MCP cache offset requires a JSON Pointer");
+			}
+			const chunk =
+				input.pointer === undefined
+					? this.outputStore.read(cacheId, input)
+					: this.outputStore.readStructured(cacheId, input);
 			await this.writeAudit({
 				callerSurface: getCallerSurface(context),
 				server: "cache",
@@ -944,7 +1124,7 @@ export class McpManager {
 				risk: "read",
 				status: "completed",
 				durationMs: Date.now() - startedAt,
-				resultSize: byteLength(chunk.content),
+				resultSize: byteLength(JSON.stringify(chunk)),
 				cacheId,
 			});
 			return { action: "read_cache", ...chunk };
@@ -1013,7 +1193,7 @@ export class McpManager {
 				}),
 			);
 			const text = callToolResultToText(result);
-			const shaped = this.outputStore.shapeOutput(text);
+			const shaped = this.outputStore.shapeOutput(text, result.structuredContent);
 			status = result.isError ? "failed" : "completed";
 			const outputBytes = byteLength(text);
 			const recent = {
@@ -1055,6 +1235,7 @@ export class McpManager {
 				...(result.isError ? { isError: true } : {}),
 				...(shaped.truncation ? { truncation: shaped.truncation } : {}),
 				...(shaped.cache ? { cache: shaped.cache } : {}),
+				...(shaped.cacheUnavailable ? { cacheUnavailable: true } : {}),
 			};
 		} catch (error) {
 			status = signal?.aborted ? "cancelled" : "failed";
@@ -1087,7 +1268,9 @@ export class McpManager {
 
 	private isSupervisorMetadataStale(
 		supervisor: McpServerSupervisor,
-		metadata: McpServerMetadata | undefined,
+		metadata:
+			| Pick<McpServerMetadata, "configHash" | "toolsLastSeenAt" | "resourcesLastSeenAt" | "promptsLastSeenAt">
+			| undefined,
 		categories: readonly McpMetadataCategory[] = ALL_METADATA_CATEGORIES,
 	): boolean {
 		if (metadata && metadata.configHash !== hashMcpServerConfig(supervisor.server)) {

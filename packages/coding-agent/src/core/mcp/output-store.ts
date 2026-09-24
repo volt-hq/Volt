@@ -36,6 +36,7 @@ export interface McpStoredOutput {
 	text: string;
 	bytes: number;
 	lines: number;
+	structuredContent?: Record<string, unknown>;
 }
 
 export interface McpStoredOutputChunk {
@@ -50,6 +51,18 @@ export interface McpStoredOutputResult {
 	content: string;
 	truncation?: McpOutputTruncation;
 	cache?: McpCacheReference;
+	cacheUnavailable?: boolean;
+}
+
+export interface McpStoredStructuredOutput {
+	cacheId: string;
+	pointer: string;
+	value?: unknown;
+	startOffset?: number;
+	nextOffset?: number;
+	totalItems?: number;
+	selectionRequired?: boolean;
+	message?: string;
 }
 
 function byteLength(value: string): number {
@@ -120,21 +133,34 @@ export class McpOutputStore {
 		this.workspaceId = options.workspaceId;
 	}
 
-	shapeOutput(text: string): McpStoredOutputResult {
+	getMaxOutputBytes(): number {
+		return this.maxOutputBytes;
+	}
+
+	shapeOutput(text: string, structuredContent?: Record<string, unknown>): McpStoredOutputResult {
 		const truncation = truncateHead(text, { maxBytes: this.maxOutputBytes, maxLines: this.maxOutputLines });
-		if (!truncation.truncated) {
+		if (!truncation.truncated && structuredContent === undefined) {
 			return { content: text };
 		}
-		const cacheId = this.write(text);
+		let cacheId: string | undefined;
+		try {
+			cacheId = this.write(text, structuredContent);
+		} catch {
+			// Cache storage failure must not discard an otherwise successful tool result.
+		}
 		return {
-			content: truncation.content,
-			truncation: {
-				truncated: true,
-				returnedBytes: truncation.outputBytes,
-				totalBytes: truncation.totalBytes,
-				returnedLines: truncation.outputLines,
-				totalLines: truncation.totalLines,
-			},
+			content: truncation.truncated ? truncation.content : text,
+			...(truncation.truncated
+				? {
+						truncation: {
+							truncated: true as const,
+							returnedBytes: truncation.outputBytes,
+							totalBytes: truncation.totalBytes,
+							returnedLines: truncation.outputLines,
+							totalLines: truncation.totalLines,
+						},
+					}
+				: {}),
 			...(cacheId
 				? {
 						cache: {
@@ -142,7 +168,7 @@ export class McpOutputStore {
 							read: `mcp({"action":"read_cache","cacheId":"${cacheId}"})`,
 						},
 					}
-				: {}),
+				: { cacheUnavailable: true }),
 		};
 	}
 
@@ -185,7 +211,7 @@ export class McpOutputStore {
 		let cache: McpCacheReference | undefined;
 		if (hasContent && typeof previousCache?.id === "string" && typeof previousCache.read === "string") {
 			cache = { id: previousCache.id, read: previousCache.read };
-		} else if (!previousTruncation?.truncated) {
+		} else if (!previousTruncation?.truncated && record.cacheUnavailable !== true) {
 			try {
 				const id = this.write(content);
 				if (id) cache = { id, read: `mcp({"action":"read_cache","cacheId":"${id}"})` };
@@ -254,7 +280,7 @@ export class McpOutputStore {
 		return { text, result: fitted };
 	}
 
-	write(text: string): string | undefined {
+	write(text: string, structuredContent?: Record<string, unknown>): string | undefined {
 		const id = createCacheId();
 		const record: McpStoredOutput = {
 			id,
@@ -264,6 +290,7 @@ export class McpOutputStore {
 			text,
 			bytes: byteLength(text),
 			lines: lineCount(text),
+			...(structuredContent !== undefined ? { structuredContent } : {}),
 		};
 		const serialized = `${JSON.stringify(record)}\n`;
 		const serializedBytes = byteLength(serialized);
@@ -282,35 +309,7 @@ export class McpOutputStore {
 	}
 
 	read(cacheId: string, options?: { cursor?: string; limit?: number }): McpStoredOutputChunk {
-		const id = safeCacheId(cacheId);
-		const filePath = join(this.dir, `${id}.json`);
-		if (!existsSync(filePath)) {
-			throw new Error(`MCP cache entry not found: ${cacheId}`);
-		}
-		hardenPrivateRegularFileSync(filePath);
-		const stat = lstatSync(filePath);
-		if (stat.size > this.maxCacheEntryBytes || stat.mtimeMs < this.now() - this.maxCacheAgeMs) {
-			throw new Error(`MCP cache entry is expired or exceeds the configured size limit: ${cacheId}`);
-		}
-		const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as unknown;
-		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-			throw new Error(`Invalid MCP cache entry: ${cacheId}`);
-		}
-		const record = parsed as Partial<McpStoredOutput>;
-		if (
-			record.id !== id ||
-			typeof record.text !== "string" ||
-			typeof record.bytes !== "number" ||
-			record.bytes !== byteLength(record.text)
-		) {
-			throw new Error(`Invalid MCP cache entry: ${cacheId}`);
-		}
-		if (record.sessionId !== this.sessionId) {
-			throw new Error(`MCP cache entry is not available in this session: ${cacheId}`);
-		}
-		if (record.workspaceId !== this.workspaceId) {
-			throw new Error(`MCP cache entry is not available in this workspace: ${cacheId}`);
-		}
+		const record = this.readRecord(cacheId);
 		if (options?.cursor !== undefined && !/^\d+$/.test(options.cursor)) {
 			throw new Error("Invalid MCP cache cursor");
 		}
@@ -330,6 +329,120 @@ export class McpOutputStore {
 			...(chunk.nextCursor ? { nextCursor: chunk.nextCursor } : {}),
 			totalBytes: record.bytes,
 		};
+	}
+
+	readStructured(
+		cacheId: string,
+		options: { pointer?: string; offset?: number; limit?: number } = {},
+	): McpStoredStructuredOutput {
+		const record = this.readRecord(cacheId);
+		if (record.structuredContent === undefined) {
+			throw new Error("MCP cache entry has no structured content; omit pointer to read its text");
+		}
+		const pointer = options.pointer ?? "";
+		if ((pointer !== "" && !pointer.startsWith("/")) || /~(?:[^01]|$)/.test(pointer)) {
+			throw new Error("Invalid MCP JSON Pointer; use an empty string or slash-separated fields with ~0/~1 escapes");
+		}
+		let value: unknown = record.structuredContent;
+		for (const token of pointer === "" ? [] : pointer.slice(1).split("/")) {
+			const key = token.replace(/~1/g, "/").replace(/~0/g, "~");
+			if (
+				typeof value !== "object" ||
+				value === null ||
+				(Array.isArray(value) && !/^(0|[1-9]\d*)$/.test(key)) ||
+				!Object.hasOwn(value, key)
+			) {
+				throw new Error("MCP JSON Pointer does not identify a stored value");
+			}
+			value = (value as Record<string, unknown>)[key];
+		}
+		const fits = (result: McpStoredStructuredOutput): boolean =>
+			byteLength(JSON.stringify({ action: "read_cache", ...result })) <= this.maxOutputBytes;
+		const result: McpStoredStructuredOutput = { cacheId, pointer };
+		if (Array.isArray(value)) {
+			const offset = options.offset ?? 0;
+			const limit = options.limit ?? 20;
+			if (!Number.isSafeInteger(offset) || offset < 0 || offset > value.length) {
+				throw new Error("MCP structured cache offset must be a safe integer within the selected array");
+			}
+			if (!Number.isSafeInteger(limit) || limit <= 0) {
+				throw new Error("MCP structured cache limit must be a positive safe integer");
+			}
+			result.startOffset = offset;
+			result.totalItems = value.length;
+			const rows: unknown[] = [];
+			const end = Math.min(value.length, offset + Math.min(limit, 100));
+			for (let index = offset; index < end; index++) {
+				const candidate = {
+					...result,
+					value: [...rows, value[index]],
+					...(index + 1 < value.length ? { nextOffset: index + 1 } : {}),
+				};
+				if (!fits(candidate)) break;
+				rows.push(value[index]);
+			}
+			if (rows.length > 0 || offset === value.length) {
+				const page = {
+					...result,
+					value: rows,
+					...(offset + rows.length < value.length ? { nextOffset: offset + rows.length } : {}),
+				};
+				if (fits(page)) return page;
+			}
+		} else {
+			if (options.offset !== undefined || options.limit !== undefined) {
+				throw new Error("MCP structured cache offset and limit require an array selection");
+			}
+			const selected = { ...result, value };
+			if (fits(selected)) return selected;
+		}
+		const selection = {
+			...result,
+			selectionRequired: true,
+			message:
+				"Selection exceeds the output limit. Choose a more specific JSON Pointer, or omit pointer to read the original text.",
+		};
+		if (!fits(selection)) throw new Error("MCP JSON Pointer is too large for the output limit");
+		return selection;
+	}
+
+	private readRecord(cacheId: string): McpStoredOutput {
+		const id = safeCacheId(cacheId);
+		const filePath = join(this.dir, `${id}.json`);
+		if (!existsSync(filePath)) {
+			throw new Error(`MCP cache entry not found: ${cacheId}`);
+		}
+		hardenPrivateRegularFileSync(filePath);
+		const stat = lstatSync(filePath);
+		if (stat.size > this.maxCacheEntryBytes || stat.mtimeMs < this.now() - this.maxCacheAgeMs) {
+			throw new Error(`MCP cache entry is expired or exceeds the configured size limit: ${cacheId}`);
+		}
+		const parsed = JSON.parse(readFileSync(filePath, "utf-8")) as unknown;
+		if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+			throw new Error(`Invalid MCP cache entry: ${cacheId}`);
+		}
+		const record = parsed as Partial<McpStoredOutput>;
+		if (
+			record.id !== id ||
+			typeof record.text !== "string" ||
+			typeof record.bytes !== "number" ||
+			record.bytes !== byteLength(record.text) ||
+			typeof record.lines !== "number" ||
+			typeof record.createdAt !== "string" ||
+			(record.structuredContent !== undefined &&
+				(typeof record.structuredContent !== "object" ||
+					record.structuredContent === null ||
+					Array.isArray(record.structuredContent)))
+		) {
+			throw new Error(`Invalid MCP cache entry: ${cacheId}`);
+		}
+		if (record.sessionId !== this.sessionId) {
+			throw new Error(`MCP cache entry is not available in this session: ${cacheId}`);
+		}
+		if (record.workspaceId !== this.workspaceId) {
+			throw new Error(`MCP cache entry is not available in this workspace: ${cacheId}`);
+		}
+		return record as McpStoredOutput;
 	}
 
 	private prune(reservedBytes = 0, reservedEntries = 0): boolean {

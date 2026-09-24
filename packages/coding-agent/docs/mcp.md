@@ -6,6 +6,7 @@ Implemented today:
 
 - config loading from `~/.config/mcp/mcp.json`, `~/.volt/agent/mcp.json`, trusted project `.mcp.json`, and trusted project `.volt/mcp.json`
 - one model-visible `mcp` gateway tool for status, server listing, cached search/describe, tool calls, resources, prompts (when enabled), and large-output cache reads
+- server-scoped search with optional selected-tool schemas, paged tool listings, and JSON Pointer/row retrieval from cached structured tool results
 - stdio, Streamable HTTP, and legacy SSE transports through the official TypeScript MCP SDK
 - project trust gating, restricted stdio env inheritance, include/exclude tool filters, output truncation/cache, metadata cache with stale refresh on detail/call paths, recent calls, audit logs, and local/RPC server status management
 - `volt mcp` CLI inspection/management commands and lightweight `/mcp` interactive status/actions
@@ -418,6 +419,7 @@ describe
 call
 connect
 disconnect
+list_tools
 list_resources
 read_resource
 list_prompts
@@ -437,6 +439,7 @@ interface McpGatewayInput {
     | "call"
     | "connect"
     | "disconnect"
+    | "list_tools"
     | "list_resources"
     | "read_resource"
     | "list_prompts"
@@ -452,6 +455,10 @@ interface McpGatewayInput {
   cacheId?: string;
   limit?: number;
   cursor?: string;
+  maxBytes?: number;
+  includeSchema?: boolean;
+  pointer?: string;
+  offset?: number;
 }
 ```
 
@@ -459,7 +466,13 @@ interface McpGatewayInput {
 
 ### Search result
 
-Search returns compact routing information, not full schemas.
+Search returns compact routing information. Scope a query to a known server and request the top match's complete schemas in the same call when useful:
+
+```json
+{ "action": "search", "server": "github", "query": "search issues", "limit": 3, "includeSchema": true, "maxBytes": 8192 }
+```
+
+`includeSchema` adds `selectedTool` only when its complete cached input schema and optional output schema fit the discovery budget. It does not connect to a server or refresh metadata. Otherwise `schemaOmitted` explains why a separate `describe` is needed. Constraints are never silently removed from schemas. Search reports `coverage` with searched, missing, and stale server ids; missing or stale metadata requires `connect` before it can contribute results.
 
 ```json
 {
@@ -485,10 +498,29 @@ Defaults:
 - cap at 20 matches
 - each match summary is bounded
 - include risk and exact call target
+- limit discovery output to 8192 bytes; set `maxBytes` to an integer of at least 512 to change that budget, up to the configured hard output limit
+
+Ranking recognizes camelCase, acronym boundaries, and Unicode words. Queries that match more of the requested concepts rank above broad partial matches. `server` restricts the search instead of letting a shared server name dominate tool relevance. A budget may reduce the number of returned matches; `moreMatches` reports when matches were removed to fit.
+
+The discovery budget includes schema-omission messages and other response metadata. If even the metadata cannot fit, the gateway returns a bounded error asking you to narrow the query/server scope or increase `maxBytes`.
+
+### Tool listing pages
+
+`list_tools` returns tool names, descriptions of up to 180 characters, risk, and trusted-read status. Server identity, metadata hash, stale state, and total tool count appear once per page. CLI and RPC management inspection retain the full tool metadata.
+
+```json
+{ "action": "list_tools", "server": "github", "limit": 20, "maxBytes": 8192 }
+```
+
+Tool pages default to 20 entries and accept a positive integer `limit`, capped at 100. Complete records are returned in name order within the discovery byte budget. Pass the returned opaque `nextCursor` unchanged to continue:
+
+```json
+{ "action": "list_tools", "server": "github", "cursor": "<nextCursor>", "limit": 20 }
+```
+
+A cursor belongs to one server and metadata snapshot. If the catalog changes, restart without `cursor`. An individual summary that cannot fit produces `oversizedEntry: true` with a cache reference when storage is available; its `nextCursor` continues after that entry. Retrieve that entry from the cache or retry the original page with a larger `maxBytes`. `cacheUnavailable: true` explicitly reports when it could not be retained. If the page metadata or cache reference cannot fit, a bounded error asks you to increase `maxBytes`.
 
 ### Describe result
-
-`list_tools` returns tool names, descriptions of up to 180 characters, risk, and trusted-read status. Server identity, metadata hash, and stale state appear once for the list. Use `search` to narrow discovery and `describe` to retrieve a selected tool's schemas. CLI and RPC management inspection retain the full tool metadata.
 
 `describe` returns the input schema and optional output schema for the selected tool only:
 
@@ -530,14 +562,16 @@ Large descriptions and schemas produce a bounded preview with a cache reference.
 
 Errors from MCP tool execution retain their structured failed call result for rendering and audit and are also marked as top-level agent tool failures when the protocol reports `isError: true` or `status: "failed"`. Transport/protocol/permission failures are reported as gateway errors.
 
+When a tool returns `structuredContent`, Volt keeps that JSON alongside the cached text and returns a cache reference even when the text fits inline. A text block is presented once only when its JSON spelling matches the structured serialization after removing insignificant whitespace outside strings. Different key order, number spellings, duplicate keys, explanatory text, and failure status are retained. Structured cache retrieval is described below.
+
 ## Token budget strategy
 
 - One native tool is always visible.
 - MCP tool schemas are absent from the base system prompt by default.
-- Search results are compact and limited.
+- Search results and tool listing pages enforce an 8 KiB discovery budget by default, including response metadata. `maxBytes` can tune that budget without increasing the configured hard cap. If the minimum response metadata cannot fit, the gateway returns a bounded error with guidance to increase the budget.
 - Describe returns one tool schema at a time.
 - All model-facing gateway and direct-tool results, including failures and cache pages, are serialized as compact JSON within `maxOutputBytes` (50 KiB by default). The final bound includes JSON escaping and truncation/cache metadata. Compact JSON is one physical line; raw call/resource/prompt previews also use `maxOutputLines` (2000 by default).
-- Full results go to a sidecar and are retrieved by `read_cache`.
+- Full retained results go to a sidecar. Prefer selected fields or rows from structured results over reading every raw cache page.
 - Direct tools are off by default.
 
 Optional direct tools:
@@ -874,7 +908,27 @@ When output exceeds limits:
 
 The `content` of a truncated discovery result is a preview of serialized JSON, not a complete JSON document. `read_cache` returns chunks of the cached text; concatenate their `content` fields in order to reconstruct it. Use the returned `nextCursor` unchanged for the next request. It advances by the original UTF-8 bytes actually returned, so JSON escaping can reduce a page's content size. `limit` is a positive integer byte ceiling; an invalid cursor or a limit too small for the next complete Unicode character returns an error.
 
+For a cached tool result with `structuredContent`, supply a JSON Pointer to retrieve a selected value:
+
+```json
+{ "action": "read_cache", "cacheId": "<cache.id>", "pointer": "/summary" }
+```
+
+An empty pointer selects the root object. Pointer segments use `~1` for `/` and `~0` for `~`; array indexes are zero-based. A stored `null` is returned as `value: null`, while an absent path returns an error. Pointer expressions are deterministic paths, not executable queries.
+
+When the selected value is an array, `offset` is a zero-based row index and `limit` counts rows:
+
+```json
+{ "action": "read_cache", "cacheId": "<cache.id>", "pointer": "/rows", "offset": 0, "limit": 20 }
+```
+
+Array reads default to 20 rows and cap the requested count at 100. The result includes `value`, `startOffset`, `totalItems`, and `nextOffset` when rows remain. Follow `nextOffset` with the same pointer. The final byte cap may shorten a page, but every delivered row remains complete. If even one row or a selected object/scalar cannot fit, `selectionRequired: true` asks for a more specific pointer without returning partial JSON or a nonadvancing offset. The original cache remains available for raw byte reads by omitting `pointer`.
+
+Use `cursor` only for raw text reads and `offset` only with an array pointer. A text-only cache rejects pointer reads. Both forms enforce the same workspace/session ownership, retention, and size limits.
+
 Existing call/resource/prompt cache references are reused when the final JSON envelope needs a smaller preview. Cache reads do not create more cache entries. If output cannot be retained, the model-facing result reports `cacheUnavailable: true` instead of a retrieval reference. Narrow discovery with `search` and `describe`; for calls, request less output from the upstream tool.
+
+The hard cap applies to each response. Reading all pages still adds the complete retained output to the conversation; use targeted discovery and retrieval when only one tool or field is needed.
 
 Sidecar rules:
 

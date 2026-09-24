@@ -25,6 +25,54 @@ export interface McpMetadataCacheOptions {
 	now?: () => number;
 }
 
+export type McpDiscoveryTool = Pick<SdkTool, "name" | "title" | "description"> & {
+	annotations?: Pick<NonNullable<SdkTool["annotations"]>, "readOnlyHint" | "destructiveHint">;
+};
+
+/** Searchable metadata without schemas, resource bodies, or arbitrary server extensions. */
+export interface McpDiscoveryMetadata
+	extends Pick<
+		McpServerMetadata,
+		| "server"
+		| "metadataHash"
+		| "serverVersion"
+		| "configHash"
+		| "toolsLastSeenAt"
+		| "resourcesLastSeenAt"
+		| "promptsLastSeenAt"
+	> {
+	tools: McpDiscoveryTool[];
+}
+
+export function toMcpDiscoveryMetadata(metadata: McpServerMetadata): McpDiscoveryMetadata {
+	return {
+		server: metadata.server,
+		metadataHash: metadata.metadataHash,
+		serverVersion: metadata.serverVersion,
+		configHash: metadata.configHash,
+		toolsLastSeenAt: metadata.toolsLastSeenAt,
+		resourcesLastSeenAt: metadata.resourcesLastSeenAt,
+		promptsLastSeenAt: metadata.promptsLastSeenAt,
+		tools: metadata.tools.map((tool) => ({
+			name: tool.name,
+			...(tool.title !== undefined ? { title: tool.title } : {}),
+			...(tool.description !== undefined ? { description: tool.description } : {}),
+			...(tool.annotations
+				? {
+						annotations: {
+							...(tool.annotations.readOnlyHint !== undefined
+								? { readOnlyHint: tool.annotations.readOnlyHint }
+								: {}),
+							...(tool.annotations.destructiveHint !== undefined
+								? { destructiveHint: tool.annotations.destructiveHint }
+								: {}),
+						},
+					}
+				: {}),
+		})),
+	};
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -84,6 +132,7 @@ function latestSeenAt(metadata: McpServerMetadata): number {
 export class McpMetadataCache {
 	private path: string;
 	private servers: Map<string, McpServerMetadata>;
+	private discovery = new Map<string, McpDiscoveryMetadata>();
 	private maxBytes: number;
 	private maxServers: number;
 	private maxAgeMs: number;
@@ -106,6 +155,22 @@ export class McpMetadataCache {
 
 	getAll(): McpServerMetadata[] {
 		return Array.from(this.servers.values(), (metadata) => structuredClone(metadata));
+	}
+
+	getTool(server: string, toolName: string): SdkTool | undefined {
+		const tool = this.servers.get(server)?.tools.find((candidate) => candidate.name === toolName);
+		return tool ? structuredClone(tool) : undefined;
+	}
+
+	getDiscovery(server: string): McpDiscoveryMetadata | undefined {
+		const metadata = this.servers.get(server);
+		if (!metadata) return undefined;
+		let discovery = this.discovery.get(server);
+		if (!discovery) {
+			discovery = toMcpDiscoveryMetadata(metadata);
+			this.discovery.set(server, discovery);
+		}
+		return structuredClone(discovery);
 	}
 
 	set(
@@ -153,12 +218,14 @@ export class McpMetadataCache {
 					: RESET_METADATA_FRESHNESS,
 		};
 		this.servers.set(server, next);
+		this.discovery.delete(server);
 		this.save();
 		return structuredClone(next);
 	}
 
 	delete(server: string): void {
 		this.servers.delete(server);
+		this.discovery.delete(server);
 		this.save();
 	}
 
@@ -202,17 +269,20 @@ export class McpMetadataCache {
 			const seenAt = latestSeenAt(metadata);
 			if (!Number.isFinite(seenAt) || seenAt < cutoff) {
 				this.servers.delete(server);
+				this.discovery.delete(server);
 			}
 		}
 		while (this.servers.size > this.maxServers) {
 			const oldest = sorted()[0];
 			if (!oldest) break;
 			this.servers.delete(oldest[0]);
+			this.discovery.delete(oldest[0]);
 		}
 		while (this.serializedBytes() > this.maxBytes) {
 			const oldest = sorted()[0];
 			if (!oldest) break;
 			this.servers.delete(oldest[0]);
+			this.discovery.delete(oldest[0]);
 		}
 	}
 

@@ -29,6 +29,13 @@ interface Output {
 	cacheUnavailable?: boolean;
 	startByte?: number;
 	nextCursor?: string;
+	total?: number;
+	selectedTool?: { inputSchema: unknown; outputSchema?: unknown };
+	schemaOmitted?: string;
+	coverage?: { searchedServers: string[]; missingServers: string[]; staleServers: string[] };
+	matches?: Array<{ tool: string; server: string }>;
+	value?: unknown;
+	nextOffset?: number;
 	truncation?: { truncated: boolean; returnedBytes: number; totalBytes: number };
 	tools?: Array<{ name: string; description: string; risk: string; trustedRead: boolean }>;
 }
@@ -48,9 +55,12 @@ async function createFixture(
 		tools?: Tool[];
 		bytes?: number;
 		cacheBytes?: number;
+		metadataBytes?: number;
 		lines?: number;
 		output?: string;
 		trustedTools?: string[];
+		structuredContent?: Record<string, unknown>;
+		excludeTools?: string[];
 	} = {},
 ) {
 	const directory = mkdtempSync(join(tmpdir(), "volt-469-"));
@@ -69,6 +79,7 @@ async function createFixture(
 					command: "unused-fake-server",
 					lifecycle: "keep-alive",
 					directTools: true,
+					excludeTools: options.excludeTools ?? [],
 					trustedReads: { tools: options.trustedTools ?? ["read_note"] },
 				},
 			},
@@ -88,7 +99,10 @@ async function createFixture(
 		listPrompts: async () => ({ prompts: [{ name: "note" }] }),
 		readResource: async () => ({ contents: [{ uri: "file:///note", text: output }] }),
 		getPrompt: async () => ({ messages: [{ role: "user", content: { type: "text", text: output } }] }),
-		callTool: async () => ({ content: [{ type: "text", text: output }] }),
+		callTool: async () => ({
+			content: [{ type: "text", text: output }],
+			structuredContent: options.structuredContent,
+		}),
 		close: async () => undefined,
 	};
 	const store = new McpOutputStore({
@@ -99,10 +113,11 @@ async function createFixture(
 		sessionId: "469",
 		workspaceId: "fixture",
 	});
+	const metadataCache = new McpMetadataCache({ agentDir: directory, maxBytes: options.metadataBytes });
 	const manager = new McpManager({
 		config,
 		clientFactory: { connect: async () => connection },
-		metadataCache: new McpMetadataCache({ agentDir: directory }),
+		metadataCache,
 		outputStore: store,
 	});
 	const gateway = createMcpToolDefinition({ manager });
@@ -136,7 +151,7 @@ async function createFixture(
 		} while (cursor);
 		return restored;
 	};
-	return { manager, gateway, connection, harness, store, directory, execute, readAll };
+	return { manager, gateway, connection, harness, store, directory, metadataCache, execute, readAll };
 }
 
 describe("#469 bounded MCP model output", () => {
@@ -172,7 +187,9 @@ describe("#469 bounded MCP model output", () => {
 				expect(text).not.toContain("SCHEMA_ONLY_MARKER");
 				expect(text).not.toContain("inputSchema");
 				expect(text).not.toContain("outputSchema");
-				expect((JSON.parse(text) as Output).tools).toHaveLength(200);
+				expect((JSON.parse(text) as Output).tools).toHaveLength(20);
+				expect((JSON.parse(text) as Output).total).toBe(200);
+				expect((JSON.parse(text) as Output).nextCursor).toBeDefined();
 				checked = true;
 				return fauxAssistantMessage("done");
 			},
@@ -181,23 +198,33 @@ describe("#469 bounded MCP model output", () => {
 		expect(checked).toBe(true);
 	});
 
-	it("caches large summary lists and reconstructs escaped Unicode pages without duplicating cache entries", async () => {
+	it("pages complete escaped Unicode summaries without caching or splitting records", async () => {
 		const tools: Tool[] = Array.from({ length: 200 }, (_, index) => ({
 			name: `read_${index}`,
 			description: '"\\\n漢字𝄞 '.repeat(100),
 			inputSchema: { type: "object" },
 		}));
-		const { execute, readAll, directory } = await createFixture({ tools, bytes: 1024, lines: 1 });
-		const { data, text } = await execute({ action: "list_tools", server: "fake" });
-		expect(data.truncation?.truncated).toBe(true);
-		expect(data.content.length).toBeGreaterThan(0);
-		expect(text).not.toContain("inputSchema");
-		expect(data.cache).toBeDefined();
-		const restored = JSON.parse(await readAll(data.cache!.id)) as Output;
-		expect(restored.tools).toHaveLength(200);
-		expect(restored.tools?.at(-1)?.name).toBe("read_199");
-		for (const tool of restored.tools ?? []) expect(tool.description.length).toBeLessThanOrEqual(180);
-		expect(readdirSync(join(directory, "mcp", "output"))).toHaveLength(1);
+		const { execute, store } = await createFixture({ tools, bytes: 1024, lines: 1 });
+		const cacheWrite = vi.spyOn(store, "write");
+		const names: string[] = [];
+		let cursor: string | undefined;
+		do {
+			const { data, text, result } = await execute({ action: "list_tools", server: "fake", cursor });
+			expect(result.isError).not.toBe(true);
+			expect(data.truncation).toBeUndefined();
+			expect(data.cache).toBeUndefined();
+			expect(text).not.toContain("inputSchema");
+			expect(data.tools?.length).toBeGreaterThan(0);
+			for (const tool of data.tools ?? []) {
+				expect(tool.description.length).toBeLessThanOrEqual(180);
+				names.push(tool.name);
+			}
+			expect(data.nextCursor).not.toBe(cursor);
+			cursor = data.nextCursor;
+			expect(names.length).toBeLessThanOrEqual(tools.length);
+		} while (cursor);
+		expect(names).toEqual(tools.map((tool) => tool.name).sort());
+		expect(cacheWrite).not.toHaveBeenCalled();
 	});
 
 	it("retrieves complete selected input and output schemas", async () => {
@@ -381,5 +408,160 @@ describe("#469 bounded MCP model output", () => {
 		);
 		expect(deniedResult.isError).toBe(true);
 		expect(getMessageText(deniedResult)).toContain("no configured trusted tool reads");
+	});
+
+	it("honors page sizes and tool filters, and rejects changed catalog cursors", async () => {
+		const tools: Tool[] = Array.from({ length: 7 }, (_, index) => ({
+			name: `read_${index}`,
+			inputSchema: { type: "object" },
+		}));
+		const { execute, manager } = await createFixture({ tools, excludeTools: ["read_2"] });
+		const first = await execute({ action: "list_tools", server: "fake", limit: 3 });
+		expect(first.data.tools?.map((tool) => tool.name)).toEqual(["read_0", "read_1", "read_3"]);
+		expect(first.data.total).toBe(6);
+		const next = await execute({ action: "list_tools", server: "fake", limit: 3, cursor: first.data.nextCursor });
+		expect(next.data.tools?.map((tool) => tool.name)).toEqual(["read_4", "read_5", "read_6"]);
+		expect(next.data.nextCursor).toBeUndefined();
+		tools.push({ name: "read_7", inputSchema: { type: "object" } });
+		await manager.connectServer("fake");
+		const changed = await execute({ action: "list_tools", server: "fake", cursor: first.data.nextCursor });
+		expect(changed.result.isError).toBe(true);
+		expect(changed.text).toContain("catalog changed");
+		for (const limit of [0, -1, 1.5, Number.POSITIVE_INFINITY]) {
+			expect((await execute({ action: "list_tools", server: "fake", limit })).result.isError).toBe(true);
+		}
+		expect((await execute({ action: "list_tools", server: "fake", cursor: "not-a-cursor" })).result.isError).toBe(
+			true,
+		);
+	});
+
+	it("reports search coverage without starting cold servers or cloning schemas", async () => {
+		const { execute, manager, connection, metadataCache } = await createFixture();
+		const list = vi.spyOn(connection, "listTools");
+		const cold = await execute({ action: "search", query: "read note", server: "FAKE" });
+		expect(cold.data.coverage).toEqual({ searchedServers: [], missingServers: ["fake"], staleServers: [] });
+		expect(list).not.toHaveBeenCalled();
+		await manager.connectServer("fake");
+		const clone = vi.spyOn(metadataCache, "get");
+		const warm = await execute({ action: "search", query: "read note", server: "fake" });
+		expect(warm.data.matches?.[0].tool).toBe("read_note");
+		expect(warm.data.coverage?.searchedServers).toEqual(["fake"]);
+		expect(clone).not.toHaveBeenCalled();
+		vi.spyOn(Date, "now").mockReturnValue(Date.now() + 86_400_000);
+		const stale = await execute({ action: "search", query: "read note", server: "fake" });
+		expect(stale.data.matches).toEqual([]);
+		expect(stale.data.coverage?.staleServers).toEqual(["fake"]);
+		expect(list).toHaveBeenCalledTimes(1);
+	});
+
+	it("continues a transient catalog when full metadata cannot be retained", async () => {
+		const tools: Tool[] = Array.from({ length: 4 }, (_, index) => ({
+			name: `read_${index}`,
+			inputSchema: { type: "object" },
+		}));
+		const { execute, metadataCache } = await createFixture({ tools, metadataBytes: 128 });
+		const first = await execute({ action: "list_tools", server: "fake", limit: 2 });
+		expect(first.data.tools?.map((tool) => tool.name)).toEqual(["read_0", "read_1"]);
+		expect(metadataCache.getDiscovery("fake")).toBeUndefined();
+		const second = await execute({ action: "list_tools", server: "fake", cursor: first.data.nextCursor, limit: 2 });
+		expect(second.result.isError).not.toBe(true);
+		expect(second.data.tools?.map((tool) => tool.name)).toEqual(["read_2", "read_3"]);
+		expect(second.data.nextCursor).toBeUndefined();
+	});
+
+	it("optionally returns complete selected schemas within the discovery budget", async () => {
+		const inputSchema = { type: "object" as const, properties: { id: { type: "string" } }, required: ["id"] };
+		const outputSchema = { type: "object" as const, properties: { text: { type: "string" } } };
+		const tools: Tool[] = [{ name: "read_note", inputSchema, outputSchema }];
+		const { execute, manager, connection } = await createFixture({ tools, bytes: 51200 });
+		await manager.connectServer("fake");
+		const upstream = vi.spyOn(connection, "listTools");
+		const { data, text } = await execute({
+			action: "search",
+			query: "read note",
+			includeSchema: true,
+			maxBytes: 4096,
+		});
+		expect(data.selectedTool).toMatchObject({ inputSchema, outputSchema });
+		expect(upstream).not.toHaveBeenCalled();
+		expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4096);
+		tools[0] = { ...tools[0], inputSchema: { type: "object", description: "schema detail ".repeat(5000) } };
+		await manager.connectServer("fake");
+		const large = await execute({ action: "search", query: "read note", includeSchema: true, maxBytes: 4096 });
+		expect(large.data.selectedTool).toBeUndefined();
+		expect(large.data.schemaOmitted).toContain("budget");
+		expect(large.data.matches?.[0].tool).toBe("read_note");
+		expect(Buffer.byteLength(large.text)).toBeLessThanOrEqual(4096);
+		upstream.mockClear();
+		const restricted = createMcpToolDefinition({ manager, isRestrictedTrustedRead: () => true });
+		const cached = await restricted.execute(
+			"469-discovery",
+			{ action: "search", query: "read note", includeSchema: true },
+			undefined,
+			undefined,
+			undefined as never,
+		);
+		expect(cached.isError).not.toBe(true);
+		expect(upstream).not.toHaveBeenCalled();
+	});
+
+	it("fits discovery envelopes after schema omission and reports oversized summary retrieval", async () => {
+		const tools: Tool[] = Array.from({ length: 10 }, (_, index) => ({
+			name: `read_note_${index}`,
+			description: "Read a note with labels and timestamps".repeat(6),
+			inputSchema: { type: "object", description: "large schema ".repeat(400) },
+		}));
+		const { execute, manager } = await createFixture({ tools, bytes: 51200 });
+		await manager.connectServer("fake");
+		for (const maxBytes of [512, 900, 1200, 4096]) {
+			const result = await execute({ action: "search", query: "read note", maxBytes, includeSchema: true });
+			expect(result.result.isError).not.toBe(true);
+			expect(Buffer.byteLength(result.text)).toBeLessThanOrEqual(maxBytes);
+			const page = await execute({ action: "list_tools", server: "fake", maxBytes, limit: 100 });
+			expect(page.result.isError).not.toBe(true);
+			expect(Buffer.byteLength(page.text)).toBeLessThanOrEqual(maxBytes);
+		}
+	});
+
+	it("removes only exact JSON duplicates while keeping prose and distinct tool content", async () => {
+		const structuredContent = { a: 1, b: 2 };
+		const { execute, connection } = await createFixture({ output: '{ "a": 1, "b": 2 }', structuredContent });
+		const first = await execute({ action: "call", server: "fake", tool: "read_note" });
+		expect(first.data.content).toBe('Structured content:\n{"a":1,"b":2}');
+		expect(first.data.cache).toBeDefined();
+		vi.spyOn(connection, "callTool").mockResolvedValue({
+			structuredContent,
+			content: [
+				{ type: "text", text: "Warning: partial result" },
+				{ type: "text", text: '{"a":3}' },
+			],
+			isError: true,
+		});
+		const distinct = await execute({ action: "call", server: "fake", tool: "read_note" });
+		expect(distinct.result.isError).toBe(true);
+		expect(distinct.data.content).toContain("Warning: partial result");
+		expect(distinct.data.content).toContain('{"a":3}');
+		const selected = await execute({ action: "read_cache", cacheId: distinct.data.cache?.id, pointer: "/b" });
+		expect(selected.data.value).toBe(2);
+		expect(
+			(await execute({ action: "read_cache", cacheId: distinct.data.cache?.id, offset: 1 })).result.isError,
+		).toBe(true);
+	});
+
+	it("retains exact numeric literals and duplicate keys when JSON parsing would lose information", async () => {
+		const original = '{"id":9007199254740993}';
+		const { execute, connection, readAll } = await createFixture({
+			output: original,
+			structuredContent: { id: 9007199254740992 },
+		});
+		const largeInteger = await execute({ action: "call", server: "fake", tool: "read_note" });
+		expect(largeInteger.data.content).toContain(original);
+		expect(await readAll(largeInteger.data.cache!.id)).toContain(original);
+		vi.spyOn(connection, "callTool").mockResolvedValue({
+			content: [{ type: "text", text: '{"id":1,"id":2}' }],
+			structuredContent: { id: 2 },
+		});
+		const duplicate = await execute({ action: "call", server: "fake", tool: "read_note" });
+		expect(duplicate.data.content).toContain('{"id":1,"id":2}');
 	});
 });

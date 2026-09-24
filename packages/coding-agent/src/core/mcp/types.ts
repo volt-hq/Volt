@@ -302,6 +302,10 @@ export interface McpGatewayInput {
 	cacheId?: string;
 	limit?: number;
 	cursor?: string;
+	maxBytes?: number;
+	includeSchema?: boolean;
+	pointer?: string;
+	offset?: number;
 }
 
 export interface McpSearchMatch {
@@ -340,6 +344,7 @@ export interface McpGatewayCallResult {
 	isError?: boolean;
 	truncation?: McpOutputTruncation;
 	cache?: McpCacheReference;
+	cacheUnavailable?: boolean;
 }
 
 export interface McpClientConnection {
