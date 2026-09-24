@@ -1,10 +1,8 @@
-import { basename, dirname } from "node:path";
 import type { AgentToolResult } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { type TUI, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BackgroundJobManager, type BackgroundJobSnapshot } from "../../../src/core/background-jobs.ts";
-import { PROMPT_CACHE_AUDIT_DIRECTORY } from "../../../src/core/prompt-cache-audit.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import * as toolProgressCapture from "../../../src/core/tool-progress-capture.ts";
 import { backgroundWaitResult, getBackgroundJobWait } from "../../../src/core/tools/background-wait.ts";
@@ -375,9 +373,8 @@ describe("active-run waiting", () => {
 		// Keep wait/metadata assertions independent of Windows PowerShell startup.
 		// The real private sink is covered in background-job-diagnostics.test.ts.
 		const batches: string[] = [];
-		vi.spyOn(toolProgressCapture, "writeToolProgressCapture").mockImplementation(async (path, content) => {
-			// The prompt-cache audit shares this writer but is not a background-job diagnostic.
-			if (basename(dirname(path)) !== PROMPT_CACHE_AUDIT_DIRECTORY) batches.push(content);
+		vi.spyOn(toolProgressCapture, "writeToolProgressCapture").mockImplementation(async (_path, content) => {
+			batches.push(content);
 		});
 		const { harness, finish, started, unsubscribe } = await setup(diagnostics);
 		const prompting = harness.session.prompt("Wait for the worker");

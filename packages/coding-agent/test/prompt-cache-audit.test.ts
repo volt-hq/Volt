@@ -1,8 +1,28 @@
+import type * as ChildProcess from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PROMPT_CACHE_AUDIT_DIRECTORY, PromptCacheAudit } from "../src/core/prompt-cache-audit.ts";
+
+vi.mock("node:child_process", async (importOriginal) => ({
+	...(await importOriginal<typeof ChildProcess>()),
+	execFile: vi.fn(() => {
+		throw new Error("The prompt-cache audit must not start a process");
+	}),
+	spawn: vi.fn(() => {
+		throw new Error("The prompt-cache audit must not start a process");
+	}),
+}));
+
+function replaceProcessPlatform(value: NodeJS.Platform): () => void {
+	const descriptor = Object.getOwnPropertyDescriptor(process, "platform");
+	Object.defineProperty(process, "platform", { configurable: true, value });
+	return () => {
+		if (descriptor) Object.defineProperty(process, "platform", descriptor);
+	};
+}
 
 const common = {
 	provider: "anthropic",
@@ -86,6 +106,23 @@ describe("PromptCacheAudit", () => {
 
 		expect(audit.enabled).toBe(false);
 		expect(existsSync(join(directory, PROMPT_CACHE_AUDIT_DIRECTORY))).toBe(false);
+	});
+
+	it("writes Windows batches without starting a helper process", async () => {
+		vi.stubEnv("SystemRoot", "C:\\Windows");
+		const restorePlatform = replaceProcessPlatform("win32");
+		const directory = agentDir();
+		try {
+			const audit = new PromptCacheAudit({ agentDir: directory, sessionId: () => "session-1", enabled: true });
+			audit.record({ kind: "keepalive_stop", ...common, reason: "idle_window_elapsed" });
+			await audit.close();
+		} finally {
+			restorePlatform();
+		}
+
+		expect(execFile).not.toHaveBeenCalled();
+		expect(spawn).not.toHaveBeenCalled();
+		expect(readRecords(directory)).toEqual([expect.objectContaining({ kind: "keepalive_stop" })]);
 	});
 
 	it("never creates a missing agent directory", async () => {

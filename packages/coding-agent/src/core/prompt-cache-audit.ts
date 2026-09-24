@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import type { Usage } from "@hansjm10/volt-ai";
+import { writeDurableAtomicFile } from "../utils/durable-atomic-write.ts";
+import { ensurePrivateDirectorySync } from "../utils/private-files.ts";
 import { pruneDiagnosticFiles } from "./background-job-diagnostics.ts";
 import type { PromptCacheKeepAliveStop, PromptCacheRefreshReason } from "./prompt-cache-keepalive.ts";
-import { writeToolProgressCapture } from "./tool-progress-capture.ts";
 
 export const PROMPT_CACHE_AUDIT_DIRECTORY = "prompt-cache-audit";
 
@@ -84,6 +85,16 @@ const OWNED_FILE = new RegExp(
 	`^prompt-cache-v1_\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z_${UUID}_\\d{8,16}\\.jsonl$`,
 );
 
+/**
+ * Batches hold metadata only, so they are written like settings and auth files. The private
+ * diagnostic capture writer starts PowerShell per file on Windows, which would delay every
+ * session disposal and CLI exit by seconds.
+ */
+async function writeAuditBatch(path: string, content: string): Promise<void> {
+	ensurePrivateDirectorySync(dirname(path));
+	await writeDurableAtomicFile(path, content);
+}
+
 function auditEnabledByEnvironment(): boolean {
 	const setting = process.env.VOLT_PROMPT_CACHE_AUDIT?.toLowerCase();
 	return setting !== "0" && setting !== "false";
@@ -110,7 +121,7 @@ export class PromptCacheAudit {
 	constructor(options: PromptCacheAuditOptions) {
 		this.options = options;
 		this.directory = join(options.agentDir, PROMPT_CACHE_AUDIT_DIRECTORY);
-		this.writer = options.writer ?? writeToolProgressCapture;
+		this.writer = options.writer ?? writeAuditBatch;
 		this.accepting = options.enabled ?? auditEnabledByEnvironment();
 	}
 
