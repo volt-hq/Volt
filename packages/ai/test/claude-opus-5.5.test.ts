@@ -7,13 +7,15 @@ interface ThinkingPayload {
 	thinking?: { type: string; display?: string; budget_tokens?: number };
 	output_config?: { effort: string };
 	temperature?: number;
-	inferenceConfig?: { temperature?: number };
+	max_tokens?: number;
+	inferenceConfig?: { temperature?: number; maxTokens?: number };
 	additionalModelRequestFields?: ThinkingPayload;
 }
 
 async function capturePayload(
 	model: Model<Api>,
 	reasoning?: SimpleStreamOptions["reasoning"],
+	maxTokens?: number,
 ): Promise<ThinkingPayload> {
 	let captured: ThinkingPayload | undefined;
 	await streamSimple(
@@ -23,6 +25,7 @@ async function capturePayload(
 			apiKey: "fake-key",
 			env: {},
 			reasoning,
+			maxTokens,
 			temperature: 0.5,
 			onPayload: (payload) => {
 				captured = payload as ThinkingPayload;
@@ -88,6 +91,22 @@ describe("Claude Opus 5.5", () => {
 			expect(bedrock.inferenceConfig?.temperature).toBeUndefined();
 		},
 	);
+
+	it("reserves the thinking budget on top of an explicit output cap on Anthropic and Bedrock", async () => {
+		const anthropicModel = getModel("anthropic", "claude-opus-5-5");
+		const bedrockModel = getModel("amazon-bedrock", "global.anthropic.claude-opus-5-5");
+
+		const anthropic = await capturePayload(anthropicModel, "xhigh", 4096);
+		const bedrock = await capturePayload(bedrockModel, "xhigh", 4096);
+		expect(anthropic.max_tokens).toBe(4096 + 16384);
+		expect(bedrock.inferenceConfig?.maxTokens).toBe(4096 + 16384);
+		expect(bedrock.additionalModelRequestFields?.output_config).toEqual({ effort: "xhigh" });
+
+		const anthropicUncapped = await capturePayload(anthropicModel, "xhigh");
+		const bedrockUncapped = await capturePayload(bedrockModel, "xhigh");
+		expect(anthropicUncapped.max_tokens).toBe(anthropicModel.maxTokens);
+		expect(bedrockUncapped.inferenceConfig?.maxTokens).toBe(bedrockModel.maxTokens);
+	});
 
 	it("does not send disabled thinking or temperature when no effort is requested", async () => {
 		for (const model of [

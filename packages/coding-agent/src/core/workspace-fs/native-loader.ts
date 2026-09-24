@@ -46,6 +46,7 @@ export type NativeFileLock = {
 type NativeWorkspaceFsAddon = {
 	WorkspaceRoot: NativeWorkspaceRootConstructor;
 	tryAcquireFileLock(path: string, shared: boolean): NativeFileLock | null;
+	writeWindowsPrivateFile(path: string, data: Buffer): Promise<void>;
 	workspaceFsApiVersion(): string;
 	workspaceFsSourceFingerprint(): string;
 };
@@ -223,6 +224,7 @@ function isNativeAddon(value: unknown): value is NativeWorkspaceFsAddon {
 	return (
 		typeof value.WorkspaceRoot === "function" &&
 		typeof value.tryAcquireFileLock === "function" &&
+		typeof value.writeWindowsPrivateFile === "function" &&
 		typeof value.workspaceFsApiVersion === "function" &&
 		typeof value.workspaceFsSourceFingerprint === "function"
 	);

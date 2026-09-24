@@ -750,20 +750,27 @@ function resolveSimpleAnthropicOptions(
 		return { ...base, thinkingEnabled: false };
 	}
 
-	// For models with adaptive thinking: use an effort level.
-	// For older models: use budget-based thinking.
-	if (model.compat?.forceAdaptiveThinking === true) {
-		return { ...base, thinkingEnabled: true, effort: mapThinkingLevelToEffort(model, options.reasoning) };
-	}
-
-	// Undefined means the caller did not request an output cap; let the helper use the model cap.
-	// Do not coerce to 0 here, or the thinking budget would become the entire max_tokens value.
+	// Thinking counts against max_tokens in both modes, so an explicit output cap gets the level's
+	// thinking budget on top. Undefined means the caller did not request an output cap; let the helper
+	// use the model cap. Do not coerce to 0 here, or the thinking budget would become the entire
+	// max_tokens value.
 	const adjusted = adjustMaxTokensForThinking(
 		base.maxTokens,
 		model.maxTokens,
 		options.reasoning,
 		options.thinkingBudgets,
 	);
+
+	// For models with adaptive thinking: use an effort level.
+	// For older models: use budget-based thinking.
+	if (model.compat?.forceAdaptiveThinking === true) {
+		return {
+			...base,
+			maxTokens: adjusted.maxTokens,
+			thinkingEnabled: true,
+			effort: mapThinkingLevelToEffort(model, options.reasoning),
+		};
+	}
 
 	return {
 		...base,

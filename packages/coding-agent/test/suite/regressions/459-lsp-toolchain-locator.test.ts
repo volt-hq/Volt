@@ -5,10 +5,10 @@ import {
 	mkdirSync,
 	mkdtempSync,
 	realpathSync,
-	rmSync,
 	symlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -23,11 +23,15 @@ const windows = process.platform === "win32";
 const roots: string[] = [];
 const managers: LspManager[] = [];
 
-afterEach(() => {
+afterEach(async () => {
 	for (const manager of managers.splice(0)) manager.dispose();
 	vi.restoreAllMocks();
 	vi.unstubAllEnvs();
-	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	// On Windows a just-killed server still holds its cwd briefly. Only the async
+	// rm retries EBUSY on a directory; rmSync throws it immediately.
+	await Promise.all(
+		roots.splice(0).map((root) => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })),
+	);
 });
 
 type RunResult = ReturnType<LspLocatorHost["run"]>;

@@ -146,20 +146,30 @@ $directory.SetAccessControl($acl)
 		else expect(existsSync(target)).toBe(false);
 	});
 
-	it("fails closed when PowerShell cannot start, without leaking its error or using chmod-only storage", async () => {
+	it("writes private diagnostics without a PowerShell installation", async () => {
 		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
 		const agentDir = createRoot();
 		vi.stubEnv("SystemRoot", join(agentDir, "private-path-marker"));
 		const diagnostics = createReviewPrivateDiagnostics({
 			agentDir,
-			workflowId: "review:missing-powershell",
+			workflowId: "review:native-writer",
 			workflowAction: "review.pr",
 		});
 		diagnostics.recordVerificationAssessment({ assessment: "incomplete", challenge: "private-content-marker" });
 
-		const flush = diagnostics.flush();
-		await expect(flush).rejects.toThrow(/^Could not retain private Windows review diagnostics\.$/);
-		expect(diagnostics.flush()).toBe(flush);
-		expect(existsSync(getReviewPrivateDiagnosticsDirectory(agentDir))).toBe(false);
+		const file = await diagnostics.flush();
+		expect(file).toBeDefined();
+		expect(readFileSync(file!, "utf8")).toContain("private-content-marker");
+		vi.unstubAllEnvs();
+		expectOwnerOnly(file!);
+	});
+
+	it("secures concurrent writes into one newly created directory", async () => {
+		const directory = join(createRoot(), "concurrent");
+		const paths = Array.from({ length: 16 }, (_, index) => join(directory, `record-${index}.jsonl`));
+		await Promise.all(paths.map((path, index) => writeWindowsReviewDiagnostic(path, `record ${index}\n`)));
+		for (const [index, path] of paths.entries()) expect(readFileSync(path, "utf8")).toBe(`record ${index}\n`);
+		expectOwnerOnly(directory);
+		expectOwnerOnly(paths[0]!);
 	});
 });
