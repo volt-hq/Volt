@@ -69,6 +69,18 @@ const (
 
 const entitlementReconcileAttemptMinInterval = time.Hour
 
+// SubscriptionSuspendedError denies a refresh because the grant's subscription
+// is inactive. HostServedAt is when the grant's host last received an access
+// JWT from refresh, or its creation time if it never refreshed; it marks how
+// long the host has been off the relay so callers can pace retries.
+type SubscriptionSuspendedError struct {
+	HostServedAt time.Time
+}
+
+func (e *SubscriptionSuspendedError) Error() string { return ErrSubscriptionRequired.Error() }
+
+func (e *SubscriptionSuspendedError) Unwrap() error { return ErrSubscriptionRequired }
+
 type SecretHash [sha256.Size]byte
 
 type Config struct {
@@ -136,6 +148,7 @@ type endpointRecord struct {
 	RefreshHash              SecretHash
 	RefreshInactiveExpiresAt time.Time
 	LastRefreshedAt          pgtype.Timestamptz
+	CreatedAt                time.Time
 	RevokedAt                pgtype.Timestamptz
 }
 
@@ -786,6 +799,11 @@ func (b *Broker) RefreshAccessToken(ctx context.Context, refreshToken string) (A
 			if commitErr := transaction.Commit(ctx); commitErr != nil {
 				return AccessToken{}, fmt.Errorf("commit subscription suspension heartbeat: %w", commitErr)
 			}
+			hostServedAt := host.CreatedAt
+			if host.LastRefreshedAt.Valid {
+				hostServedAt = host.LastRefreshedAt.Time
+			}
+			return AccessToken{}, &SubscriptionSuspendedError{HostServedAt: hostServedAt}
 		case errors.Is(err, ErrRefreshExpired):
 			if commitErr := transaction.Commit(ctx); commitErr != nil {
 				return AccessToken{}, fmt.Errorf("commit credential expiry: %w", commitErr)
@@ -1426,7 +1444,7 @@ func lockGrant(ctx context.Context, transaction pgx.Tx, grantID string) (grantRe
 func lockHostEndpoint(ctx context.Context, transaction pgx.Tx, grantID string) (endpointRecord, error) {
 	return scanEndpoint(transaction.QueryRow(ctx, `
 		SELECT id::text, node_id, kind, grant_id::text, refresh_token_hash,
-		       refresh_inactive_expires_at, last_refreshed_at, revoked_at
+		       refresh_inactive_expires_at, last_refreshed_at, created_at, revoked_at
 		FROM endpoints
 		WHERE grant_id = $1 AND kind = 'host'
 		FOR UPDATE
@@ -1436,7 +1454,7 @@ func lockHostEndpoint(ctx context.Context, transaction pgx.Tx, grantID string) (
 func lockEndpoint(ctx context.Context, transaction pgx.Tx, endpointID string) (endpointRecord, error) {
 	return scanEndpoint(transaction.QueryRow(ctx, `
 		SELECT id::text, node_id, kind, grant_id::text, refresh_token_hash,
-		       refresh_inactive_expires_at, last_refreshed_at, revoked_at
+		       refresh_inactive_expires_at, last_refreshed_at, created_at, revoked_at
 		FROM endpoints
 		WHERE id = $1
 		FOR UPDATE
@@ -1454,6 +1472,7 @@ func scanEndpoint(row pgx.Row) (endpointRecord, error) {
 		&refreshHash,
 		&endpoint.RefreshInactiveExpiresAt,
 		&endpoint.LastRefreshedAt,
+		&endpoint.CreatedAt,
 		&endpoint.RevokedAt,
 	)
 	if errors.Is(err, pgx.ErrNoRows) {

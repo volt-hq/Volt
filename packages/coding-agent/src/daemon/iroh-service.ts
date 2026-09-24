@@ -2325,11 +2325,15 @@ class IrohDaemonService {
 						return;
 					}
 					const subscriptionInactive = error instanceof IrohRelayCredentialSubscriptionInactiveError;
+					// The broker paces suspended hosts with short retries; log the suspension once.
+					const repeatedSuspension = subscriptionInactive && this.relayCredentialSubscriptionInactive;
 					if (subscriptionInactive) this.relayCredentialSubscriptionInactive = true;
 					const nextFailureCount = subscriptionInactive ? 0 : Math.min(consecutiveFailureCount + 1, 6);
-					this.log("warn", "managed Iroh relay credential refresh failed", {
-						error: error instanceof Error ? error.message : String(error),
-					});
+					if (!repeatedSuspension) {
+						this.log("warn", "managed Iroh relay credential refresh failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 					this.scheduleManagedRelayCredentialRefresh(
 						subscriptionInactive ? error.retryAfterMs : managedRelayCredentialFailureRetryMs(nextFailureCount),
 						nextFailureCount,
