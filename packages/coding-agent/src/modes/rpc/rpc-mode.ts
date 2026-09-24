@@ -1163,7 +1163,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		session: commandSession,
 		assertCurrent: assertConversationGenerationCurrent,
 		detachedReviews: true,
-		abortRun: () => commandSession.abort("remote_request"),
+		// A remote stop sends what the user queued instead of stranding it behind an idle run.
+		abortRun: () => commandSession.abort("remote_request", { deliverQueuedMessages: true }),
 		compactContext: (customInstructions) =>
 			commandSession.compact(customInstructions, assertConversationGenerationCurrent),
 		newSession: (newSessionOptions) =>

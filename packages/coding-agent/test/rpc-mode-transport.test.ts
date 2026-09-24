@@ -450,6 +450,8 @@ describe("RPC mode caller-provided transports", () => {
 				expect(currentSession.abortRetry).toHaveBeenCalledOnce();
 				expect(currentSession.abortBash).toHaveBeenCalledOnce();
 			});
+			// A remote stop delivers input the client already queued instead of stranding it.
+			expect(currentSession.abort).toHaveBeenCalledWith("remote_request", { deliverQueuedMessages: true });
 			expect(runWithStableSession).toHaveBeenCalledOnce();
 			expect(runSessionInterruption).toHaveBeenCalledTimes(3);
 

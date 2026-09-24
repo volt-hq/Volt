@@ -2,4 +2,4 @@
 "@hansjm10/volt-coding-agent": patch
 ---
 
-fix(remote): Queued messages now run after stopping an active conversation from a remote client.
+fix(remote): Stopping a conversation from a remote client now sends its queued steering and follow-up messages instead of leaving them stuck in the queue.

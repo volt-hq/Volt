@@ -122,8 +122,8 @@ interface AgentSession {
   compact(customInstructions?: string): Promise<CompactionResult>;
   abortCompaction(): void;
 
-  // Abort current operation
-  abort(): Promise<void>;
+  // Abort current operation; queued input is retained unless deliverQueuedMessages is set
+  abort(source?: AgentAbortSource, options?: { deliverQueuedMessages?: boolean }): Promise<void>;
 
   // Cleanup
   dispose(): void;

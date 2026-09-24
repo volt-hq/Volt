@@ -146,6 +146,8 @@ Response:
 
 `abort` is the semantic cancellation command. Closing the RPC transport without sending `abort` requests transport shutdown or remote detach according to the transport, but it does not ask Volt to cancel the active run.
 
+Messages queued with `steer`, `follow_up`, or `prompt` with `streamingBehavior` before the abort are not discarded. Once cleanup settles, Volt starts them as a new run: steering messages first, then follow-ups. The interrupted work is not resumed on its own.
+
 `abort` also cancels all session-owned background jobs and waits for their cleanup. Use `cancel_job` to cancel only one job. `agent_settled` and `get_state.isBusy` describe foreground work; jobs may still be running afterward.
 
 #### new_session
