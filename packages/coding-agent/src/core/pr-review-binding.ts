@@ -1,0 +1,158 @@
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { realpath } from "node:fs/promises";
+import { resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
+import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
+import {
+	getPrReviewGitArgs,
+	getPrReviewGitEnvironment,
+	PR_REVIEW_GIT_CONFIG_ARGS,
+} from "../utils/pr-review-git-policy.ts";
+import type { ReviewPullRequestIdentity } from "./code-host/types.ts";
+import type { PrReviewPlacement } from "./pr-review-placement.ts";
+import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-anchors.ts";
+import { listReviewRuns } from "./review-state.ts";
+import { SessionManager } from "./session-manager.ts";
+
+export const PR_CHECKOUT_CHANGED = "PR checkout changed; prepare a new review.";
+export const PR_CHECKOUT_UNAVAILABLE =
+	"Unable to validate PR checkout; check Git configuration and repository access, then retry.";
+
+class PrReviewGitReadError extends Error {}
+
+/** Display run ids are lookup hints only. Only the exact host-owned anchor grants linkage. */
+export async function readPrReviewBinding(
+	manager: SessionManager | undefined,
+	parentRunId?: string,
+): Promise<PrReviewPlacement | undefined> {
+	if (!manager) return undefined;
+	const direct = manager.getPrReviewBinding();
+	if (direct) {
+		if (resolve(manager.getCwd()) !== resolve(direct.cwd)) throw new Error(PR_CHECKOUT_CHANGED);
+		return direct;
+	}
+	const ref = manager.getSessionRef();
+	if (!ref) return undefined;
+	const cwd = manager.getCwd();
+	const assertCurrent = (): void => {
+		manager.assertConversationAuthorityAvailable();
+		if (!isDeepStrictEqual(ref, manager.getSessionRef()) || cwd !== manager.getCwd()) {
+			throw new ReviewSourceUnavailableError("The review conversation changed during lookup.");
+		}
+	};
+	let cursor: string | undefined;
+	do {
+		const page = parentRunId
+			? { runs: [{ runId: parentRunId }], nextCursor: undefined }
+			: listReviewRuns(manager, { cursor, limit: 50 });
+		for (const { runId } of page.runs) {
+			const sourceRef = await resolveCanonicalReviewSource(manager, runId);
+			assertCurrent();
+			if (!sourceRef) continue;
+			let source: SessionManager;
+			try {
+				source = await SessionManager.open(sourceRef);
+			} catch (cause) {
+				throw new ReviewSourceUnavailableError(undefined, { cause });
+			}
+			try {
+				const binding = source.getPrReviewBinding();
+				const current = await resolveCanonicalReviewSource(manager, runId);
+				assertCurrent();
+				if (!isDeepStrictEqual(current, sourceRef)) throw new ReviewSourceUnavailableError();
+				if (binding) return binding;
+			} finally {
+				await source.closePersistence();
+				assertCurrent();
+			}
+		}
+		cursor = page.nextCursor;
+	} while (cursor);
+	return undefined;
+}
+
+/** Fixed argv-only local reads. No transport, shell, hooks, fsmonitor, or injected Git environment. */
+async function readGit(cwd: string, args: readonly string[], signal?: AbortSignal): Promise<string> {
+	try {
+		const configKeys = args[0] === "config" ? "" : await readGit(cwd, PR_REVIEW_GIT_CONFIG_ARGS, signal);
+		const argv = getPrReviewGitArgs(args, configKeys);
+		return await new Promise<string>((resolveResult, reject) => {
+			execFile(
+				"git",
+				argv,
+				{
+					cwd,
+					env: getPrReviewGitEnvironment("local"),
+					signal,
+					encoding: "utf8",
+					timeout: 5_000,
+					maxBuffer: 1024 * 1024,
+					windowsHide: true,
+				},
+				(error, stdout) => {
+					if (error) reject(error);
+					else resolveResult(stdout);
+				},
+			);
+		});
+	} catch (cause) {
+		throw new PrReviewGitReadError(PR_CHECKOUT_UNAVAILABLE, { cause });
+	}
+}
+
+/** A prepared checkout is never switched/reset to follow a moved PR head. */
+export async function assertPrReviewCheckout(
+	binding: PrReviewPlacement,
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<void> {
+	try {
+		// sourceRootRelativePath is a workspace display/placement prefix, not a
+		// subdirectory inside either Git checkout. Both bound cwds are repo roots.
+		const expectedRoot = await realpath(binding.cwd);
+		const sourceRoot = await realpath(binding.sourceCwd);
+		const common = await realpath(binding.commonDirectory);
+		if ((await realpath(cwd)) !== (await realpath(binding.cwd))) throw new Error("cwd changed");
+		const reads = [
+			readPrReviewRepositoryPaths((args) => readGit(cwd, args, signal)),
+			readGit(cwd, ["rev-parse", "--verify", "HEAD"], signal),
+			isPrReviewCheckoutClean(cwd, (path, args) => readGit(path, args, signal), signal),
+			readPrReviewRepositoryPaths((args) => readGit(binding.sourceCwd, args, signal)),
+		] as const;
+		const [paths, head, clean, originalPaths] = await Promise.all(reads).catch(async (cause: unknown) => {
+			// A malformed batch can fail before sibling Git reads finish. Drain them
+			// before the caller disposes the checkout, preserving the original error.
+			await Promise.allSettled(reads);
+			throw cause;
+		});
+		if (
+			(await realpath(paths.root)) !== expectedRoot ||
+			(await realpath(paths.commonDirectory)) !== common ||
+			(await realpath(originalPaths.root)) !== sourceRoot ||
+			(await realpath(originalPaths.commonDirectory)) !== common ||
+			head.trim() !== binding.pullRequest.headRefOid ||
+			!clean
+		)
+			throw new Error("checkout identity or status changed");
+		const operationPaths = await readPrReviewOperationPaths((args) => readGit(cwd, args, signal));
+		if (operationPaths.some((path) => existsSync(path))) throw new Error("Git operation in progress");
+	} catch (cause) {
+		throw new Error(cause instanceof PrReviewGitReadError ? PR_CHECKOUT_UNAVAILABLE : PR_CHECKOUT_CHANGED, {
+			cause,
+		});
+	}
+}
+
+/** The provider must still identify the original authorized repository and exact head. */
+export function assertBoundPullRequest(binding: PrReviewPlacement, pullRequest: ReviewPullRequestIdentity): void {
+	const expected = binding.pullRequest;
+	if (
+		pullRequest.providerId !== expected.provider ||
+		pullRequest.number !== expected.number ||
+		pullRequest.url.toLowerCase() !== expected.url.toLowerCase() ||
+		pullRequest.headRefOid !== expected.headRefOid
+	)
+		throw new Error(PR_CHECKOUT_CHANGED);
+}

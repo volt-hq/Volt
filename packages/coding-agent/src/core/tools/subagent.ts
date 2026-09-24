@@ -37,6 +37,7 @@ import type {
 } from "../subagents/index.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { getMarkdownTheme, type Theme } from "../theme/runtime.ts";
+import { createBackgroundCleanupReceipt } from "./background-cleanup.ts";
 import { formatDuration } from "./render-utils.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
@@ -2429,8 +2430,11 @@ export function createSubagentToolDefinition(
 				spawnBatchLease?.release();
 				throw error;
 			}
+			const backgroundCleanup = createBackgroundCleanupReceipt();
+			const trackCleanup = <T>(work: Promise<T>): Promise<T> => backgroundCleanup?.track(work) ?? work;
 			const activeHandles = new Set<SubagentHandle>();
-			const disposedHandles = new Set<SubagentHandle>();
+			const disposedHandles = new Map<SubagentHandle, Promise<void>>();
+			const abortedHandles = new Map<SubagentHandle, Promise<void>>();
 			let acceptingUpdates = true;
 			// Set on any internal abort (timeout, scope abort), not just the tool
 			// signal: a startByName still in flight when the race is lost must be
@@ -2504,22 +2508,52 @@ export function createSubagentToolDefinition(
 				emitToolUpdate(result.details, getTextContent(result) || "(no output)");
 			};
 
-			const disposeHandle = async (handle: SubagentHandle): Promise<void> => {
-				if (disposedHandles.has(handle)) {
-					return;
+			const abortHandleWork = (handle: SubagentHandle): Promise<void> => {
+				let cleanup = abortedHandles.get(handle);
+				if (!cleanup) {
+					let finishAbort: () => void = () => undefined;
+					cleanup = trackCleanup(
+						new Promise<void>((resolve) => {
+							finishAbort = resolve;
+						}),
+					);
+					// Cache the raw abort receipt before signalling: child observers may
+					// re-enter cancellation, and disposal must not wait on itself.
+					abortedHandles.set(handle, cleanup);
+					void (async () => handle.abort())().then(finishAbort, finishAbort);
 				}
-				disposedHandles.add(handle);
-				await handle.dispose().catch(() => undefined);
+				return cleanup;
 			};
-			const abortHandle = async (handle: SubagentHandle): Promise<void> => {
-				await Promise.all([handle.abort().catch(() => undefined), disposeHandle(handle)]);
+			const disposeHandle = (handle: SubagentHandle): Promise<void> => {
+				let cleanup = disposedHandles.get(handle);
+				if (!cleanup) {
+					cleanup = trackCleanup(
+						(async () => {
+							if (backgroundCleanup) {
+								// Install the disposal receipt before a reentrant abort. Check
+								// cancellation at the ownership-release boundary, not at entry.
+								await Promise.resolve();
+								if (abortRequested || signal?.aborted) await abortHandleWork(handle);
+							}
+							await handle.dispose();
+						})()
+							.catch(() => undefined)
+							.finally(() => activeHandles.delete(handle)),
+					);
+					disposedHandles.set(handle, cleanup);
+				}
+				return cleanup;
+			};
+			const abortHandle = (handle: SubagentHandle): Promise<void> => {
+				const abort = abortHandleWork(handle);
+				return trackCleanup(Promise.all([abort, disposeHandle(handle)]).then(() => {}));
 			};
 			const abortActiveHandles = async (): Promise<void> => {
 				await Promise.all(Array.from(activeHandles, (handle) => abortHandle(handle)));
 			};
 			const requestAbort = (error: Error): void => {
-				// Parent cancellation wins immediately; child transport cleanup is
-				// best-effort and must not delay or hang the parent tool call.
+				// Foreground cancellation wins immediately. Background execution keeps
+				// its cleanup receipt and admission lease until child work settles.
 				abortRequested = true;
 				abortReject(error);
 				void abortActiveHandles();
@@ -2565,13 +2599,15 @@ export function createSubagentToolDefinition(
 									: {}),
 							spawnRecord: { toolCallId, requestKey },
 						});
-						void startPromise
-							.then((startedHandle) => {
-								if ((signal?.aborted || abortRequested) && handle !== startedHandle) {
-									void abortHandle(startedHandle);
-								}
-							})
-							.catch(() => undefined);
+						void trackCleanup(
+							startPromise
+								.then((startedHandle) => {
+									if ((signal?.aborted || abortRequested) && handle !== startedHandle) {
+										return abortHandle(startedHandle);
+									}
+								})
+								.catch(() => undefined),
+						);
 						handle = await Promise.race([startPromise, abortPromise]);
 						activeHandles.add(handle);
 						if (signal?.aborted) {
@@ -2595,8 +2631,8 @@ export function createSubagentToolDefinition(
 							}
 						});
 						onProgress?.(runningDetails, "started");
-						const completion = handle.waitForEnd();
-						await Promise.race([handle.prompt(task.task), abortPromise]);
+						const completion = trackCleanup(handle.waitForEnd());
+						await Promise.race([trackCleanup(handle.prompt(task.task)), abortPromise]);
 						const result = await Promise.race([completion, abortPromise]);
 						if (signal?.aborted) {
 							throw new Error("Operation aborted");
@@ -2607,7 +2643,7 @@ export function createSubagentToolDefinition(
 						// The child already completed: an internal abort landing here must
 						// not discard its result, so stats become best-effort.
 						const stats = await Promise.race([
-							handle.getSessionStats().catch(() => undefined),
+							trackCleanup(handle.getSessionStats().catch(() => undefined)),
 							abortPromise,
 						]).catch(() => undefined);
 						if (signal?.aborted) {
@@ -2657,7 +2693,8 @@ export function createSubagentToolDefinition(
 					} finally {
 						unsubscribeEvents?.();
 						if (handle) {
-							activeHandles.delete(handle);
+							// Background disposal remains cancellable until its receipt settles.
+							if (!backgroundCleanup) activeHandles.delete(handle);
 							if (signal?.aborted) {
 								void disposeHandle(handle);
 							} else {
@@ -2677,9 +2714,11 @@ export function createSubagentToolDefinition(
 				};
 
 				if (normalized.mode === "single") {
-					const result = await runTask(normalized.tasks[0], false, (buildDetails, message) => {
-						emitProgressUpdate(() => createSingleDetails(buildDetails()), message);
-					});
+					const result = await trackCleanup(
+						runTask(normalized.tasks[0], false, (buildDetails, message) => {
+							emitProgressUpdate(() => createSingleDetails(buildDetails()), message);
+						}),
+					);
 					const finalResult: AgentToolResult<SubagentToolDetails> = {
 						content: [{ type: "text", text: result.outputText }],
 						details: withDelegation(createSingleDetails(result.details)),
@@ -2692,20 +2731,22 @@ export function createSubagentToolDefinition(
 					const results: SubagentTaskExecutionResult[] = [];
 					let previousOutput = "";
 					for (const step of normalized.tasks) {
-						const result = await runTask(
-							{ ...step, task: step.task.replace(/\{previous\}/g, () => previousOutput) },
-							true,
-							(buildDetails, message) => {
-								emitProgressUpdate(
-									() =>
-										createChainProgressDetails(
-											[...results.map((completed) => completed.details), buildDetails()],
-											normalized.tasks.length,
-											{ startedAt: executionStartedAt },
-										),
-									message,
-								);
-							},
+						const result = await trackCleanup(
+							runTask(
+								{ ...step, task: step.task.replace(/\{previous\}/g, () => previousOutput) },
+								true,
+								(buildDetails, message) => {
+									emitProgressUpdate(
+										() =>
+											createChainProgressDetails(
+												[...results.map((completed) => completed.details), buildDetails()],
+												normalized.tasks.length,
+												{ startedAt: executionStartedAt },
+											),
+										message,
+									);
+								},
+							),
 						);
 						results.push(result);
 						emitProgressUpdate(() => createChainDetails(results, { startedAt: executionStartedAt }), undefined);
@@ -2765,8 +2806,10 @@ export function createSubagentToolDefinition(
 					normalized.tasks,
 					DEFAULT_SUBAGENT_PARALLEL_MAX_CONCURRENCY,
 					async (task) => {
-						const result = await runTask(task, true, (buildDetails, message) =>
-							emitParallelTaskUpdate(task.index, buildDetails, message),
+						const result = await trackCleanup(
+							runTask(task, true, (buildDetails, message) =>
+								emitParallelTaskUpdate(task.index, buildDetails, message),
+							),
 						);
 						emitParallelTaskUpdate(task.index, () => result.details, undefined);
 						return result;
@@ -2819,6 +2862,10 @@ export function createSubagentToolDefinition(
 						});
 					}
 				} finally {
+					// Unlike the foreground abort race, background settlement is a lifecycle
+					// barrier. Include late factories, prompt work, and disposal already
+					// started by runTask finally before releasing capacity or finalizing.
+					if (backgroundCleanup) await backgroundCleanup.join();
 					try {
 						if (delegationLease?.owned) delegationLease.scope.dispose();
 					} finally {

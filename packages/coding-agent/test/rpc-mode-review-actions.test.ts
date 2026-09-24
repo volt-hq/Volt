@@ -1,7 +1,10 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
+import type { createReviewSeedMessage } from "../src/core/review-presentation.ts";
 import type { ParsedReview } from "../src/core/review-report.ts";
 import {
 	acknowledgeReviewRun,
@@ -13,6 +16,10 @@ import {
 import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
+import { initTheme } from "../src/core/theme/runtime.ts";
+import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
 
 function parsedReview(): ParsedReview {
 	return {
@@ -69,12 +76,88 @@ function durableRecord(runId = "review:test"): ReviewRunRecord {
 			description: "uncommitted changes",
 			diffCommand: "git diff exact-base..exact-head",
 			identity: { kind: "uncommitted", baseTree: "base-tree", headTree: "head-tree" },
+			fileSummary: { totalCount: 1, additions: 3, deletions: 1, inventoryComplete: true },
 			files: [
-				{ path: "src/value.ts", baseOid: "base-blob", headOid: "head-blob", hunkIds: ["hunk-1"], reviewable: true },
+				{
+					path: "src/value.ts",
+					status: "modified",
+					baseOid: "base-blob",
+					headOid: "head-blob",
+					hunkIds: ["hunk-1"],
+					reviewable: true,
+					additions: 3,
+					deletions: 1,
+				},
 			],
 		},
 		options: { scope: [], effort: "standard", includeOptional: false, scopeMode: "incremental" },
 		result: parsedReview(),
+	};
+}
+
+function durablePullRequestRecord(runId = "review:test"): ReviewRunRecord {
+	const record = durableRecord(runId);
+	return {
+		...record,
+		workflowAction: "review.pr",
+		target: {
+			...record.target,
+			description: "PR #243",
+			diffCommand: "gh pr diff 243",
+			identity: {
+				kind: "pr",
+				baseTree: "base-tree",
+				headTree: "head-tree",
+				pullRequest: {
+					providerId: "github",
+					number: 243,
+					title: "Compact width UI",
+					body: "PRIVATE_PULL_REQUEST_BODY",
+					url: "https://example.test/pull/243",
+					baseRefName: "main",
+					headRefName: "fix/compact-width-ui",
+					baseRefOid: "a".repeat(40),
+					headRefOid: "b".repeat(40),
+					author: {
+						login: "review-author",
+						avatarUrl: "https://example.test/review-author.png",
+					},
+					reviewState: "ready",
+					mergeability: "mergeable",
+					checks: {
+						state: "passing",
+						totalCount: 2,
+						passedCount: 2,
+						pendingCount: 0,
+						failedCount: 0,
+						neutralCount: 0,
+						unknownCount: 0,
+					},
+					observedAt: 1_782_470_400_000,
+				},
+			},
+		},
+	};
+}
+
+function durableBranchRecord(runId = "review:test"): ReviewRunRecord {
+	const record = durableRecord(runId);
+	return {
+		...record,
+		workflowAction: "review.branch",
+		target: {
+			...record.target,
+			description: "branch changes vs origin/main",
+			diffCommand: "git diff origin/main...HEAD",
+			identity: {
+				kind: "branch",
+				baseTree: "base-tree",
+				headTree: "head-tree",
+				baseCommit: "base-commit",
+				headCommit: "head-commit",
+			},
+			branchBase: { kind: "remote", remote: "origin", remoteRef: "refs/heads/main" },
+		},
 	};
 }
 
@@ -234,6 +317,7 @@ function createCollectingTransport(): CollectingTransport {
 function makeSession(sessionId: string, sessionManager = SessionManager.inMemory("/workspace")) {
 	let fastModeEnabled = false;
 	return {
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		bindExtensions: vi.fn(async () => {}),
 		subscribe: vi.fn(() => vi.fn()),
 		activeToolExecutions: new Map(),
@@ -255,7 +339,7 @@ function makeSession(sessionId: string, sessionManager = SessionManager.inMemory
 		messages: [],
 		pendingMessageCount: 0,
 		modelRegistry: { authStorage: {} },
-		settingsManager: {},
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
 		resourceLoader: {},
 		sessionFile: `/sessions/${sessionId}.jsonl`,
 		sessionId,
@@ -398,7 +482,7 @@ describe("RPC durable review actions", () => {
 	test("hydrates durable paginated results and exposes structured context coverage without raw GitHub text", async () => {
 		const manager = SessionManager.inMemory("/workspace");
 		appendReviewRun(manager, durableRecord("review:older"));
-		const newer = { ...durableRecord("review:newer"), endedAt: 3 };
+		const newer = { ...durablePullRequestRecord("review:newer"), endedAt: 3 };
 		newer.target.context = {
 			captureStatus: "complete",
 			linkedIssueCount: 2,
@@ -427,10 +511,37 @@ describe("RPC durable review actions", () => {
 		line(JSON.stringify({ id: "get", type: "get_review_result", runId: "review:newer" }));
 		await vi.waitFor(() => expect(response(collecting.writes, "get")).toBeDefined());
 		const listData = response(collecting.writes, "list")?.data as {
-			runs: Array<{ runId: string }>;
+			runs: Array<{
+				runId: string;
+				target: {
+					pullRequest?: { provider: string; number: number; title: string };
+					files: { totalCount: number; projectedCount: number; isComplete: boolean };
+				};
+			}>;
 			nextCursor?: string;
 		};
 		expect(listData.runs).toHaveLength(1);
+		expect(listData.runs[0]?.target).toMatchObject({
+			pullRequest: {
+				provider: "github",
+				number: 243,
+				title: "Compact width UI",
+				author: { login: "review-author", avatarUrl: "https://example.test/review-author.png" },
+				reviewState: "ready",
+				mergeability: "mergeable",
+				checks: { state: "passing", totalCount: 2 },
+			},
+			files: {
+				totalCount: 1,
+				projectedCount: 0,
+				omittedCount: 1,
+				additions: 3,
+				deletions: 1,
+				isComplete: false,
+				items: [],
+			},
+		});
+		expect(JSON.stringify(listData)).not.toContain("PRIVATE_PULL_REQUEST_BODY");
 		expect(listData.nextCursor).toBeTruthy();
 		line(JSON.stringify({ id: "next", type: "list_review_workflows", cursor: listData.nextCursor, limit: 1 }));
 		line(JSON.stringify({ id: "oversized", type: "list_review_workflows", limit: 101 }));
@@ -448,7 +559,16 @@ describe("RPC durable review actions", () => {
 			runId: "review:newer",
 			completionStatus: "complete",
 			overallCorrectness: "incorrect",
-			target: { context: { linkedIssueCount: 2, discussionEntryCount: 5, fingerprint: "c".repeat(64) } },
+			target: {
+				pullRequest: { provider: "github", number: 243, title: "Compact width UI" },
+				files: {
+					totalCount: 1,
+					projectedCount: 1,
+					isComplete: true,
+					items: [{ path: "src/value.ts", status: "modified", additions: 3, deletions: 1 }],
+				},
+				context: { linkedIssueCount: 2, discussionEntryCount: 5, fingerprint: "c".repeat(64) },
+			},
 			coverage: {
 				context: {
 					discoveryInspectionComplete: true,
@@ -457,6 +577,7 @@ describe("RPC durable review actions", () => {
 			},
 		});
 		expect(JSON.stringify(getData)).toContain("changeLocation");
+		expect(JSON.stringify(getData)).toContain("PRIVATE_PULL_REQUEST_BODY");
 		expect(JSON.stringify(getData)).not.toContain('"file"');
 		expect(JSON.stringify(getData)).not.toContain("filesReviewed");
 		expect(JSON.stringify(getData)).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
@@ -542,6 +663,93 @@ describe("RPC durable review actions", () => {
 		expect(getReviewRun(replacementManagers[1]!, "review:test")?.acknowledgedAt).toBe(openedAcknowledgedAt);
 		await closeMode(collecting, modePromise);
 	});
+
+	test("opens an explicit empty selection without claiming the full run is clean", async () => {
+		const manager = SessionManager.inMemory("/workspace");
+		appendReviewRun(manager, durableRecord());
+		const seedMessages: object[] = [];
+		const replacementManagers: SessionManager[] = [];
+		const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
+		const collecting = createCollectingTransport();
+		const started = await startMode(runtimeHost, collecting.transport);
+		try {
+			collecting.getLineHandler()(
+				JSON.stringify({ id: "empty", type: "open_review_session", runId: "review:test", findingIds: [] }),
+			);
+			await vi.waitFor(() =>
+				expect(response(collecting.writes, "empty")).toMatchObject({ success: true, data: { cancelled: false } }),
+			);
+			const seed = seedMessages[0] as ReturnType<typeof createReviewSeedMessage>;
+			expect(seed.details.findings).toEqual([]);
+			expect(seed.details.summary).toContain("Selected findings: 0 of 1 retained entries");
+			expect(seed.details.summary).toContain("1 active P0-P2 finding is outside this selection");
+			expect(seed.content).toContain("No findings were selected for this session");
+			expect(seed.content).not.toContain("no verified issues worth flagging");
+			expect(getReviewRun(replacementManagers[0]!, "review:test")?.result?.findings).toHaveLength(1);
+		} finally {
+			await closeMode(collecting, started);
+		}
+	});
+
+	test.each(["fixed", "dismissed"] as const)(
+		"reopens the sole %s finding with historical verdicts and current status",
+		async (status) => {
+			const manager = SessionManager.inMemory("/workspace");
+			appendReviewRun(manager, durableRecord());
+			const seedMessages: object[] = [];
+			const replacementManagers: SessionManager[] = [];
+			const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
+			const collecting = createCollectingTransport();
+			const started = await startMode(runtimeHost, collecting.transport);
+			const line = collecting.getLineHandler();
+			try {
+				line(
+					JSON.stringify({
+						id: "outcome",
+						type: "record_review_finding_outcome",
+						runId: "review:test",
+						findingId: "finding-1",
+						status,
+						...(status === "dismissed" ? { reason: "false_positive" } : {}),
+					}),
+				);
+				await vi.waitFor(() => expect(response(collecting.writes, "outcome")).toMatchObject({ success: true }));
+				line(JSON.stringify({ id: "open-current", type: "open_review_session", runId: "review:test" }));
+				await vi.waitFor(() =>
+					expect(response(collecting.writes, "open-current")).toMatchObject({
+						success: true,
+						data: { cancelled: false },
+					}),
+				);
+				const seed = seedMessages[0] as ReturnType<typeof createReviewSeedMessage>;
+				expect(seed.details.summary).toContain("0 active P0-P2 findings; 1 fixed/dismissed");
+				expect(seed.details.summary).not.toContain("No verified P0-P2 findings in the selected change");
+				expect(seed.details.findings[0]?.status).toBe(status);
+				initTheme("dark");
+				const message = createCustomMessage(
+					seed.customType,
+					seed.content,
+					true,
+					{ summary: seed.details.summary },
+					new Date(0).toISOString(),
+				);
+				const view = new CustomMessageComponent(message);
+				expect(view.render(100).lines.map(stripAnsi).join("\n")).toContain("0 active P0-P2 findings");
+				view.setExpanded(true);
+				const expanded = view.render(100).lines.map(stripAnsi).join("\n");
+				expect(expanded).toContain("Original review conclusion");
+				expect(expanded).toContain("Overall: incorrect");
+				expect(expanded).toContain(`Status: ${status}`);
+				expect(JSON.stringify(convertToLlm([message]))).toContain("Original review conclusion");
+				expect(getReviewRun(replacementManagers[0]!, "review:test")?.result).toMatchObject({
+					overallCorrectness: "incorrect",
+					findings: [{ status }],
+				});
+			} finally {
+				await closeMode(collecting, started);
+			}
+		},
+	);
 
 	test("acknowledges full opens in source and target while retaining durable results", async () => {
 		const manager = SessionManager.inMemory("/workspace");
@@ -699,6 +907,9 @@ describe("RPC durable review actions", () => {
 				data: { cancelled: false },
 			}),
 		);
+		expect(runtimeHost.newSession).toHaveBeenCalledWith(
+			expect.objectContaining({ rebindRequestId: "new-discussion" }),
+		);
 		expect(getReviewRun(replacementManagers[0]!, "review:test")).toMatchObject({
 			runId: "review:test",
 			acknowledgedAt,
@@ -730,15 +941,18 @@ describe("RPC durable review actions", () => {
 		await closeMode(collecting, modePromise);
 	});
 
-	test("accepts an incremental durable rerun and launches it after the response", async () => {
+	test("accepts an incremental durable branch rerun through its host-only locator", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		appendReviewRun(manager, durableRecord());
+		appendReviewRun(manager, durableBranchRecord());
 		const runtimeHost = makeRuntimeHost({ manager });
 		const collecting = createCollectingTransport();
 		const modePromise = await startMode(runtimeHost, collecting.transport);
-		collecting.getLineHandler()(
-			JSON.stringify({ id: "rerun", type: "rerun_review", runId: "review:test", mode: "incremental" }),
-		);
+		const line = collecting.getLineHandler();
+		line(JSON.stringify({ id: "list-branch", type: "list_review_workflows" }));
+		await vi.waitFor(() => expect(response(collecting.writes, "list-branch")).toBeDefined());
+		expect(JSON.stringify(response(collecting.writes, "list-branch"))).not.toContain("branchBase");
+
+		line(JSON.stringify({ id: "rerun", type: "rerun_review", runId: "review:test", mode: "incremental" }));
 		await vi.waitFor(() =>
 			expect(response(collecting.writes, "rerun")).toMatchObject({
 				success: true,
@@ -748,10 +962,32 @@ describe("RPC durable review actions", () => {
 		await vi.waitFor(() => expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalled());
 		expect(reviewMocks.prepareReviewWorkflow).toHaveBeenCalledWith(
 			expect.objectContaining({
+				target: {
+					kind: "branch",
+					branchBase: { kind: "remote", remote: "origin", remoteRef: "refs/heads/main" },
+				},
 				parentRunId: "review:test",
 				controls: expect.objectContaining({ scopeMode: "incremental" }),
 			}),
 		);
+		await closeMode(collecting, modePromise);
+	});
+
+	test("rejects a durable branch rerun without a stored locator", async () => {
+		const manager = SessionManager.inMemory("/workspace");
+		const record = durableBranchRecord("review:missing-locator");
+		delete record.target.branchBase;
+		appendReviewRun(manager, record);
+		const runtimeHost = makeRuntimeHost({ manager });
+		const collecting = createCollectingTransport();
+		const modePromise = await startMode(runtimeHost, collecting.transport);
+		collecting.getLineHandler()(JSON.stringify({ id: "rerun-missing", type: "rerun_review", runId: record.runId }));
+		await vi.waitFor(() => expect(response(collecting.writes, "rerun-missing")).toBeDefined());
+		expect(response(collecting.writes, "rerun-missing")).toMatchObject({
+			success: false,
+			error: "Durable branch review run does not retain a base locator.",
+		});
+		expect(reviewMocks.prepareReviewWorkflow).not.toHaveBeenCalled();
 		await closeMode(collecting, modePromise);
 	});
 

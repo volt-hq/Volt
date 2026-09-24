@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { chmodSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -34,6 +35,25 @@ describe("InteractiveMode review target selection", () => {
 		const directory = join(tmpdir(), `volt-review-target-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(directory, { recursive: true });
 		directories.push(directory);
+		for (const args of [
+			["init", "--initial-branch=topic"],
+			[
+				"-c",
+				"user.name=Review Test",
+				"-c",
+				"user.email=review@example.test",
+				"-c",
+				"commit.gpgsign=false",
+				"commit",
+				"--allow-empty",
+				"-m",
+				"fixture",
+			],
+			["remote", "add", "origin", "https://github.com/contributor/project.git"],
+			["update-ref", "refs/remotes/origin/topic", "HEAD"],
+			["branch", "--set-upstream-to=origin/topic"],
+		])
+			execFileSync("git", args, { cwd: directory, stdio: "pipe" });
 		return {
 			directory,
 			context: {
@@ -49,17 +69,28 @@ describe("InteractiveMode review target selection", () => {
 		this: ReturnType<typeof createContext>["context"],
 	) => Promise<ReviewTarget | undefined>;
 
-	it("puts an unambiguous current PR first and returns its explicit number", async () => {
+	it("puts an unambiguous current PR first and retains its repository-qualified identity", async () => {
 		const { directory, context } = createContext((options) => options[0]);
-		installGh(directory, `process.stdout.write(JSON.stringify({ number: 42, title: "Fix   selector behavior" }));\n`);
+		installGh(
+			directory,
+			`process.stdout.write(JSON.stringify([{
+			id: "PR_42", number: 42, title: "Fix   selector behavior",
+			url: "https://github.com/contributor/project/pull/42", state: "OPEN", headRefName: "topic",
+			headRepository: { name: "project" }, headRepositoryOwner: { login: "contributor" }
+		}]));\n`,
+		);
 		process.env.PATH = `${directory}${delimiter}${initialPath ?? ""}`;
 
-		await expect(promptForReviewTarget.call(context)).resolves.toEqual({ kind: "pr", number: "42" });
+		await expect(promptForReviewTarget.call(context)).resolves.toEqual({
+			kind: "pr",
+			number: "42",
+			expectedUrl: "https://github.com/contributor/project/pull/42",
+		});
 		expect(context.showExtensionSelector).toHaveBeenCalledWith("Review what?", [
 			"Current PR #42 — Fix selector behavior",
 			"Against base branch",
 			"Uncommitted changes",
-			"GitHub pull request",
+			"Pull request",
 			"Specific commit",
 		]);
 	});
@@ -75,7 +106,7 @@ describe("InteractiveMode review target selection", () => {
 		expect(context.showExtensionSelector).toHaveBeenCalledWith("Review what?", [
 			"Against base branch",
 			"Uncommitted changes",
-			"GitHub pull request",
+			"Pull request",
 			"Specific commit",
 		]);
 	});

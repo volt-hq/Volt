@@ -1,8 +1,10 @@
 import { Buffer } from "node:buffer";
 import type { AgentSession, AgentSessionQueuedMessage } from "../agent-session.ts";
 import { DEFAULT_PLANNING_STATE } from "../planning.ts";
+import { projectReviewDiscussionLink } from "../review-discussions.ts";
 import { isRuntimeQueueEntryId, isValidClientMessageId } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
+import { listRpcBackgroundJobs } from "./background-jobs.ts";
 import { projectSubagentDetails } from "./transcript.ts";
 import type {
 	RpcActiveToolExecution,
@@ -585,6 +587,7 @@ function projectOptionalStateString(value: string | undefined): {
  * snapshot-and-subscribe cut.
  */
 export function buildRpcSessionState(session: AgentSession): RpcSessionState {
+	const activeAgentRun = session.activeAgentRun;
 	const activeCompaction = session.activeCompaction;
 	const activeToolExecutions = session.activeToolExecutions;
 	const activeTools = projectRpcActiveTools(activeToolExecutions.values(), activeToolExecutions.size);
@@ -594,8 +597,8 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 	const followUpQueue = projectRpcQueuedMessages(
 		typeof session.getFollowUpMessages === "function" ? session.getFollowUpMessages() : [],
 	);
-	const sessionFile = projectOptionalStateString(session.sessionFile);
 	const sessionName = projectOptionalStateString(session.sessionName);
+	const startingGitContext = session.sessionManager.getStartingGitContext();
 	const modelBytes =
 		session.model === undefined
 			? null
@@ -615,13 +618,15 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 			projectedBytes: 0,
 		};
 	}
-	if (sessionFile.projection) projection.sessionFile = sessionFile.projection;
 	if (sessionName.projection) projection.sessionName = sessionName.projection;
 	if (steeringQueue.projection) projection.steeringQueue = steeringQueue.projection;
 	if (followUpQueue.projection) projection.followUpQueue = followUpQueue.projection;
 	if (activeTools.projection) projection.activeTools = activeTools.projection;
 
+	const discussion = session.sessionManager.getReviewDiscussion?.();
+	const promptCache = typeof session.getPromptCacheStatus === "function" ? session.getPromptCacheStatus() : undefined;
 	const state: RpcSessionState = {
+		...(discussion ? { reviewDiscussion: projectReviewDiscussionLink(discussion) } : {}),
 		...(includeModel ? { model: session.model } : {}),
 		thinkingLevel: session.thinkingLevel,
 		availableThinkingLevels: session.getAvailableThinkingLevels(),
@@ -629,12 +634,12 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 		planning:
 			typeof session.getPlanningState === "function" ? session.getPlanningState() : { ...DEFAULT_PLANNING_STATE },
 		gitContext: session.gitContextProvider.getSnapshot(),
+		...(startingGitContext === undefined ? {} : { startingGitContext }),
 		isStreaming: session.isStreaming,
 		isBusy: session.isBusy,
 		isCompacting: session.isCompacting,
 		steeringMode: session.steeringMode,
 		followUpMode: session.followUpMode,
-		...(sessionFile.value === undefined ? {} : { sessionFile: sessionFile.value }),
 		sessionId: session.sessionId,
 		...(sessionName.value === undefined ? {} : { sessionName: sessionName.value }),
 		autoCompactionEnabled: session.autoCompactionEnabled,
@@ -642,11 +647,14 @@ export function buildRpcSessionState(session: AgentSession): RpcSessionState {
 		pendingMessageCount: session.pendingMessageCount,
 		steeringQueue: steeringQueue.value,
 		followUpQueue: followUpQueue.value,
+		backgroundJobs: listRpcBackgroundJobs(session.backgroundJobs),
 		...(activeTools.value.length === 0 ? {} : { activeTools: activeTools.value }),
+		...(activeAgentRun ? { activeAgentRun } : {}),
 		...(activeCompaction ? { activeCompaction } : {}),
 		...(retryAttempt === 0 || retrySettings === undefined
 			? {}
 			: { activeRetry: { attempt: retryAttempt, maxAttempts: retrySettings.maxRetries } }),
+		...(promptCache === undefined ? {} : { promptCache }),
 		...(Object.keys(projection).length === 0 ? {} : { projection }),
 	};
 	const stateBytes = measureRpcJsonBytes(state);

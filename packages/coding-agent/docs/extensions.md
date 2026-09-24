@@ -278,7 +278,7 @@ Persisted values and public `AgentSession` events use one lossless JSON data gra
 
 Volt rejects explicit `undefined`, non-finite numbers, negative zero, bigint, symbols, functions, cycles, sparse arrays, accessors, symbol-keyed or non-enumerable properties, custom or null prototypes, and rich objects such as `Map`, `Set`, `Date`, `Error`, `RegExp`, `Buffer`, typed arrays, `ArrayBuffer`, `SharedArrayBuffer`, and platform objects. Convert rich values to plain JSON representations, such as an ISO string for a date or an array of entries for a map.
 
-Admission errors are path-specific `TypeError`s. Volt validates and owns accepted data before it mutates session state, writes JSONL, or publishes an event. The on-disk session version is unchanged because every accepted value already round-trips through JSON exactly.
+Admission errors are path-specific `TypeError`s. Volt validates and owns accepted data before it mutates session state, commits to SQLite, or publishes an event. The session format version is unchanged because every accepted value already round-trips through JSON exactly.
 
 ## Events
 
@@ -324,13 +324,13 @@ user sends another prompt ◄─────────────────
 /clear (new session) or /resume (switch session)
   ├─► session_before_switch (can cancel)
   ├─► session_shutdown
-  ├─► session_start { reason: "new" | "resume", previousSessionFile? }
+  ├─► session_start { reason: "new" | "resume", previousSessionRef? }
   └─► resources_discover { reason: "startup" }
 
 /fork or /clone
   ├─► session_before_fork (can cancel)
   ├─► session_shutdown
-  ├─► session_start { reason: "fork", previousSessionFile }
+  ├─► session_start { reason: "fork", previousSessionRef? }
   └─► resources_discover { reason: "startup" }
 
 /compact or auto-compaction
@@ -392,7 +392,18 @@ volt.on("resources_discover", async (event, _ctx) => {
 
 ### Session Events
 
-See [Session Format](session-format.md) for session storage internals and the SessionManager API.
+Persisted sessions live in `sessions.sqlite` and are identified by stable references:
+
+```typescript
+interface SessionReference {
+  readonly sessionDirectory: string;
+  readonly storeId: string;
+  readonly sessionId: string;
+  readonly sessionGeneration: string;
+}
+```
+
+Obtain references from `ctx.sessionManager.getSessionRef()` or indexed `SessionManager.list()` results; do not reconstruct them from a session ID. See [Session Format](session-format.md) for storage and the `SessionManager` API.
 
 #### session_start
 
@@ -401,8 +412,9 @@ Fired when a session is started, loaded, or reloaded.
 ```typescript
 volt.on("session_start", async (event, ctx) => {
   // event.reason - "startup" | "reload" | "new" | "resume" | "fork"
-  // event.previousSessionFile - present for "new", "resume", and "fork"
-  ctx.ui.notify(`Session: ${ctx.sessionManager.getSessionFile() ?? "ephemeral"}`, "info");
+  // event.previousSessionRef - previous persisted session, when one exists
+  const ref = ctx.sessionManager.getSessionRef();
+  ctx.ui.notify(ref ? `Session: ${ref.sessionId}` : "Ephemeral session", "info");
 });
 ```
 
@@ -413,7 +425,7 @@ Fired before starting a new session (`/clear`) or switching sessions (`/resume`)
 ```typescript
 volt.on("session_before_switch", async (event, ctx) => {
   // event.reason - "new" or "resume"
-  // event.targetSessionFile - session we're switching to (only for "resume")
+  // event.targetSessionRef - destination reference (only for "resume")
 
   if (event.reason === "new") {
     const ok = await ctx.ui.confirm("Clear?", "Delete all messages?");
@@ -422,10 +434,10 @@ volt.on("session_before_switch", async (event, ctx) => {
 });
 ```
 
-After a successful switch or new-session action, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and `previousSessionFile`.
+After a successful switch or new-session action, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
-A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner loads the session from file and emits `session_start` (reason `"resume"`). Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
+A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner opens the same session ID from the authoritative store and emits `session_start` (reason `"resume"`). Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
 
 #### session_before_fork
 
@@ -441,7 +453,7 @@ volt.on("session_before_fork", async (event, ctx) => {
 });
 ```
 
-After a successful fork or clone, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
+After a successful fork or clone, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and optional `previousSessionRef`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
 #### session_before_compact / session_compact
@@ -497,7 +509,7 @@ Fired before a started session runtime is torn down. Use this to clean up resour
 ```typescript
 volt.on("session_shutdown", async (event, ctx) => {
   // event.reason - "quit" | "reload" | "new" | "resume" | "fork"
-  // event.targetSessionFile - destination session for session replacement flows
+  // event.targetSessionRef - destination reference for session replacement flows
   // Cleanup, save state, etc.
 });
 ```
@@ -752,6 +764,26 @@ volt.on("tool_call", async (event, ctx) => {
   }
 });
 ```
+
+#### Updating tool policies
+
+`volt.on("tool_call", handler)` and `volt.on("tool_result", handler)` return a host-owned `PolicyRegistration` handle. Call the handle to remove that registration, `handle.update(nextHandler)` to replace its callback without changing order, or `handle.invalidate()` after changing state captured by its callback:
+
+```typescript
+let denyReads = false;
+const policy = volt.on("tool_call", (event) => {
+  if (denyReads && event.toolName === "read") return { block: true };
+});
+
+// Change closure state and invalidate synchronously, with no await between them.
+denyReads = true;
+policy.invalidate();
+// policy.update(nextHandler) replaces this registration; policy() removes it.
+```
+
+Every registration, update, removal, and explicit invalidation advances host-owned authorization revisions. Replacing a callback and restoring the original still revokes older managed authorization. Closure changes cannot be detected automatically: always invalidate when captured state changes policy behavior. Removed handles cannot update or invalidate, and old runtime handles cannot be used after reload/replacement.
+
+These revisions protect managed reads and optional context, not arbitrary Node access by trusted extensions. Loaded handler lists are host-owned; use registration handles rather than modifying `Extension.handlers`.
 
 #### Typing custom tool input
 
@@ -1057,16 +1089,36 @@ volt.registerCommand("my-cmd", {
 });
 ```
 
+### ctx.getPreparationWait() / ctx.requestPreparationWait(milliseconds)
+
+Command handlers can inspect and request a change to the runtime's **shared** first-request preparation allowance:
+
+```typescript
+volt.registerCommand("preparation-wait", {
+  description: "Configure the shared preparation allowance",
+  handler: async (_args, ctx) => {
+    const { waitMs, maxWaitMs } = ctx.getPreparationWait();
+    ctx.ui.notify(`Current allowance: ${waitMs} ms; host ceiling: ${maxWaitMs} ms`, "info");
+    const applied = await ctx.requestPreparationWait(800);
+    if (applied !== undefined) ctx.ui.notify(`Allowance: ${applied} ms`, "info");
+  },
+});
+```
+
+`requestPreparationWait()` requires local TUI mode and uses a **host-owned confirmation**, not extension-supplied approval. It waits for foreground settlement and applies only to future request scopes. The input must be a safe integer from 0 through 1,000; invalid inputs throw. Requests are clamped to the host ceiling. The result is the applied allowance, including zero, or `undefined` when declined, unavailable, or invalidated before application. Requesting the current value needs no confirmation. Stale command contexts remain invalid; do not retain them across reload or session replacement.
+
+With no explicit SDK `extensionWorkLimits.firstRequestWaitMs`, the initial allowance is zero and the interactive ceiling is 1,000 ms. An explicit value sets both the initial allowance and the hard ceiling, including explicit zero; CLI `--preparation-wait-ms` uses the same rule. Extensions cannot raise that ceiling. The allowance is shared across extensions, survives resource `/reload` in the same runtime, and is not persisted across runtime replacement or restart. It does not enable an extension, authorize network export, or add a delay unless an extension synchronously requests a wait at the first boundary. Later turns/retries receive no renewed allowance. Allowance changes are unavailable from managed-task or policy/diagnostic lineage, even through a captured command context.
+
 ### ctx.newSession(options?)
 
 Create a new session:
 
 ```typescript
-const parentSession = ctx.sessionManager.getSessionFile();
+const parentSessionRef = ctx.sessionManager.getSessionRef();
 const kickoff = "Continue in the replacement session";
 
 const result = await ctx.newSession({
-  parentSession,
+  ...(parentSessionRef ? { parentSessionRef } : {}),
   setup: async (sm) => {
     sm.appendMessage({
       role: "user",
@@ -1090,7 +1142,7 @@ if (result.cancelled) {
 ```
 
 Options:
-- `parentSession`: parent session file to record in the new session header
+- `parentSessionRef`: persisted parent identity to record for the new session
 - `setup`: mutate the new session's `SessionManager` before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
@@ -1100,7 +1152,7 @@ Result:
 
 ### ctx.fork(entryId, options?)
 
-Fork from a specific entry, creating a new session file:
+Fork from a specific entry, creating a new persisted session:
 
 ```typescript
 const result = await ctx.fork("entry-id-123", {
@@ -1143,12 +1195,13 @@ Options:
 - `replaceInstructions`: If true, `customInstructions` replaces the default prompt instead of being appended
 - `label`: Label to attach to the branch summary entry (or target entry if not summarizing)
 
-### ctx.switchSession(sessionPath, options?)
+### ctx.switchSession(sessionRef, options?)
 
-Switch to a different session file:
+Switch to a persisted session by `SessionReference`:
 
 ```typescript
-const result = await ctx.switchSession("/path/to/session.jsonl", {
+// Obtain sessionRef from SessionManager.list(), search(), or getSessionRef().
+const result = await ctx.switchSession(sessionRef, {
   withSession: async (ctx) => {
     await ctx.sendUserMessage("Resume work in the replacement session");
   },
@@ -1161,22 +1214,24 @@ if (result.cancelled) {
 Options:
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
-To discover available sessions, use the static `SessionManager.list()` or `SessionManager.listAll()` methods:
+`SessionManager.list()` and `listAll()` read materialized SQLite summaries; `search()` scans extracted searchable text one session at a time. All return `SessionInfo` objects whose `ref` field can be passed directly to `ctx.switchSession()`:
 
 ```typescript
 import { SessionManager } from "@hansjm10/volt-coding-agent";
 
 volt.registerCommand("switch", {
   description: "Switch to another session",
-  handler: async (args, ctx) => {
+  handler: async (_args, ctx) => {
     const sessions = await SessionManager.list(ctx.cwd);
     if (sessions.length === 0) return;
-    const choice = await ctx.ui.select(
-      "Pick session:",
-      sessions.map(s => s.file),
+
+    const labels = sessions.map((session) =>
+      `${session.name ?? session.firstMessage} — ${session.id}`
     );
-    if (choice) {
-      await ctx.switchSession(choice, {
+    const choice = await ctx.ui.select("Pick session:", labels);
+    const selected = choice ? sessions[labels.indexOf(choice)] : undefined;
+    if (selected) {
+      await ctx.switchSession(selected.ref, {
         withSession: async (ctx) => {
           ctx.ui.notify("Switched session", "info");
         },
@@ -1222,7 +1277,7 @@ volt.registerCommand("handoff", {
     await ctx.newSession({
       withSession: async (_ctx) => {
         // stale old objects: do not do this
-        oldSessionManager.getSessionFile();
+        oldSessionManager.getSessionRef();
         volt.sendUserMessage("wrong");
       },
     });
@@ -1730,6 +1785,92 @@ volt.registerCommand("my-setup-teardown", {
   },
 });
 ```
+
+## Managed context preparation
+
+Extensions can prepare optional repository context without running another agent or changing the selected model. Nothing runs automatically: an extension must subscribe and start work. This API ships no classifier or preparation extension.
+
+### Request boundaries and ownership
+
+`request_boundary` is a notification-only event before conversational model requests, after committed user delivery and normal context processing. It provides `attemptId`, `cause` (`input`, `tools`, `continuation`, or `retry`), `first` for the request scope, and `waitAvailableMs` for the host's first-boundary allowance. Returned promises do not delay the model; exceptions are contained.
+
+`ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, conversation revision, cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
+
+Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload/replacement, and authority loss. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
+
+```typescript
+// Illustrative API use, not a built-in extension or default behavior.
+volt.on("request_boundary", (event, ctx) => {
+  if (!event.first || !ctx.work) return;
+  ctx.work.tasks.start({ key: "readme", label: "Read project overview" }, async (task) => {
+    const result = await task.repository.readText({ path: "README.md", limit: 40 });
+    if (result.status !== "ok") return;
+    task.context.put({
+      key: "overview",
+      text: result.text,
+      dependency: "sources",
+      evidenceIds: [result.evidence.id],
+    });
+  });
+});
+```
+
+### Tasks and repository services
+
+`tasks.start({ key, label, timeoutMs? }, callback)` returns `{ status: "started" | "already_running", task }` or a typed failure. A live key deduplicates only this extension's task in this scope. It is not a cache of equivalent tool calls.
+
+The handle has `id`, `status()`, `cancel()`, and `wait({ signal? })`. Cancelling a wait does not cancel its task. The callback receives a fixed `snapshot`, `signal`, absolute `deadline`, `repository`, and `context`. Pass its signal to nested async operations. Nested managed task starts and managed execution from policy/diagnostic callbacks are prohibited, including asynchronous continuations through captured facades.
+
+| Service | Arguments | Successful result |
+| --- | --- | --- |
+| `readText` | `path`, optional `offset`/`limit` | `text`, `truncated`, and an `evidence` handle with path/range/observation time |
+| `findPaths` | `pattern`, optional `path`/`limit` | `paths`, `truncated` |
+| `searchText` | `pattern`, optional `path`, `glob`, `literal`, `ignoreCase`, `context`, `limit` | `matches` with path/line/text, `truncated` |
+| `symbols` | `path`, optional `symbol` for a workspace query | Flattened `symbols` with name, LSP kind and source range; `truncated`, `coverage`, `observedAt` |
+| `definition` / `references` | `path`, `symbol`, optional `line` | `locations` with source ranges; `truncated`, `coverage`, `observedAt` |
+| `readSkill` | `resourceId`, optional `offset`/`limit` | Text-read result with the resource ID also attached to its evidence |
+
+Results discriminate on `status`: `ok`, `denied`, `unavailable`, `unsupported`, `invalidated`, `cancelled`, `deadline_exceeded`, `limit_exceeded`, or `failed`. Failures include a bounded host reason code. An empty successful search is not an execution failure. Discovery paths are absolute and can be passed directly to `readText`, including searches below a nested directory. Discovery matches are hints, not freshness-verified source evidence; use `readText` before citing their contents.
+
+Workspace services require the corresponding active, trusted native `read`, `find`, `grep`, or `lsp` tool. They do not enable tools, fall back through Bash/local files around an override, or download missing search executables. SDK/custom/extension overrides without a trusted structured implementation are unavailable. Text reads do not convert or return images.
+
+Managed calls honor applicable tool-call and host policy gates. Arguments are revalidated after hooks. `tool_call` and `tool_result` receive host `origin` attribution for managed operations; absent origin on an ordinary call means agent work. Result reducers run before structured data is exposed: if they change the result, the service withholds the raw observations (`transformed_result`); managed reducer errors fail closed. No-op reducers can coexist. Managed reads do not count as the main agent's Plan-mode research or create synthetic assistant tool calls.
+
+Semantic locations have canonical absolute paths and 1-based `startLine`, `startColumn`, `endLine`, and `endColumn`; columns use LSP UTF-16 units. Coverage is `unknown`, even for a successful query: the server may not have indexed everything. Managed queries reuse the configured LSP manager, may start configured servers, and never offer or run an installation. On the shared transport, server-initiated edits are rejected while managed reads remain outstanding, including unresolved timed-out requests. An overlapping command-based foreground fix can therefore fail explicitly; acknowledged completion or server restart restores ordinary edit handling.
+
+### Loaded skill resources
+
+`task.snapshot.skills` contains opaque `resourceId`, name, description, scope, and origin for native-loaded, model-invocable skills. User-only (`disable-model-invocation`) skills and metadata-only SDK overrides receive no managed read handles. The catalog holds at most 128 descriptors within 64 KiB; `skillsTruncated` reports omissions. It does not expose paths or bodies automatically.
+
+`readSkill` authorizes only the issued file, not adjacent files or referenced scripts. It requires current catalog membership and a registered trusted native read implementation, but does not require general `read` to be active. Excluded or overridden read implementations are not bypassed. Existing read-shaped call/result policies still run; a hook cannot redirect the target. The host checks the opened descriptor against the file identity captured during skill loading. Replaced or retargeted files require a resource reload; removal and reload revoke old handles. Source validation also rechecks current membership and bytes. Skill contributions remain untrusted data and cannot suppress explicitly invoked skills or project instructions.
+
+### Optional first-request waiting
+
+Ready-only remains the default. A host may configure SDK `extensionWorkLimits.firstRequestWaitMs` from 0 to 1,000 ms, or use CLI `--preparation-wait-ms <0-1000>` for locally created runtimes. An explicit value is both the initial allowance and the interactive hard ceiling; if omitted, the initial allowance is zero and the ceiling is 1,000 ms. A local command can use [host-confirmed allowance controls](#ctxgetpreparationwait--ctxrequestpreparationwaitmilliseconds) to change the allowance within that ceiling for future requests. The CLI flag does not reconfigure already-running remote runtimes. Configuration alone neither enables an extension nor adds a delay. During the synchronous first `request_boundary` callback, an extension may call `ctx.work.context.requestWait(milliseconds)`, which returns the shared effective allowance. Requests combine by maximum, not sum, and cannot exceed the host ceiling. Requests after an await, from policy/task lineage, or at later/final-response boundaries return zero.
+
+The first collection waits for the tasks admitted at that boundary, only until they settle, the allowance expires, or the scope is revoked. Timeout does not cancel useful ongoing preparation. Retries and later turns receive no renewed wait; late contributions cannot enter an already collected request. CPU-bound trusted extension code is not preempted, but results beyond the deadline are excluded from that attempt.
+
+### Context admission
+
+`task.context.put({ key, text, evidenceIds?, dependency? })` proposes context; `remove(key)` retracts it. Keys are extension-local. The default dependency is `snapshot`: conversation changes make it ineligible until refreshed. `sources` permits direct source evidence to survive ordinary appends, but requires valid evidence handles and never survives a new request scope. Suggestions without source handles are labeled unverified.
+
+Volt collects already-ready contributions at eligible conversational boundaries, validates source identity/content and current authorization, and appends a bounded untrusted suffix to the request-local projection. One captured authorization revision set covers the entire collection and remains attached through the final Harness admission await. A mismatch omits the whole optional suffix with `authority_changed`, continues mandatory context, and does not retry validation or extend preparation/collection deadlines. Contributions remain `ready` until final admission; rejected contributions report `omitted`. It does not modify canonical history or mandatory instructions. Late, stale, unauthorized, oversized, or uncheckable contributions are omitted. No compaction is triggered to fit optional context.
+
+Even with an opted-in wait, first-call improvement is not guaranteed. Source validation has a separate bounded collection deadline; ready-only is not a zero-latency promise. A validated file is a checked-at observation, not an atomic repository snapshot or proof that tests passed. `admitted` means included by this API, not that later trusted payload hooks preserved it or the model used it.
+
+### Limits, diagnostics, and disable behavior
+
+Defaults allow two unsettled tasks per extension, four per runtime, and eight process-wide. Task deadlines default to 10 seconds with a 30-second ceiling. Each task can make 16 managed calls and return 256 KiB of source data; the scope shares 64 calls and 1 MiB including validation. Contributions are capped at 4 KiB each, 8 KiB per extension, and a 16 KiB request suffix. Source collection is bounded to 25 ms. A host can tighten limits through SDK `extensionWorkLimits`.
+
+Task completion includes draining owned operations. Return, throw, or cancellation does not release capacity while an unawaited host operation remains active. Non-cooperative callbacks remain fenced and charged; arbitrary in-process code is not forcibly terminated.
+
+`volt.getWorkStatus()` returns this extension's bounded task summaries and contribution states/reasons, including while idle. `extension_operation` provides content-free operation metadata. It is diagnostic-only, suppresses the initiating extension's own observations, and grants no reactive execution. Use foreground `tool_execution_end` for triage instead of scheduling managed work from a result reducer.
+
+Use the existing extension resource configuration and reload/restart to disable an extension. Excluded modules do not run their factories; reload revokes old managed work. Explicit CLI `-e` and SDK-injected factories remain explicit loads.
+
+**Trust boundary:** extensions remain trusted code with full process permissions. These services do not sandbox Node filesystem/HTTP access, existing `volt.exec`, or captured messaging APIs. Auxiliary-provider data export must be explicitly configured by that extension. There is no auxiliary inference, network upload, or transparent tool-result cache built into this API.
+
+Maintainer contracts: [foundation design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-design.md), [first-PR scope](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-implementation-plan-design.md), and [completion scope](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/extension-services-completion-design.md).
 
 ## State Management
 

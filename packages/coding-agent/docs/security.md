@@ -38,6 +38,23 @@ This is intentional. Volt is designed to operate on local source trees, invoke p
 
 Project trust is only an input-loading guard. It prevents a repository from silently changing volt's settings, MCP servers, or extensions before you approve it. It does not make untrusted code, untrusted prompts, or untrusted model output safe. Prompt injection from repository files, comments, documentation, context files, or build output is expected local-agent risk and cannot be reliably prevented by volt.
 
+## Session Storage
+
+Each workspace or custom session directory contains the authoritative
+`sessions.sqlite` database. Volt creates the directory with owner-only `0700`
+permissions and hardens `sessions.sqlite`, `sessions.sqlite-wal`, and
+`sessions.sqlite-shm` to `0600`. Explicit JSONL snapshot exports use `0600`.
+
+Treat the database and its WAL/SHM sidecars as one sensitive live store. Do not
+copy only `sessions.sqlite` while Volt is running. Session content can include
+prompts, model responses, tool arguments/results, workspace paths, and
+extension state.
+
+JSONL snapshot exports are equally sensitive. Every snapshot header includes the
+session cwd, and a child-session snapshot may include the parent session's live
+SQLite store directory so local import can restore the relationship. Those
+host-local locators never cross remote RPC, but sharing the snapshot shares them.
+
 ## Standalone Release Integrity
 
 Prebuilt Volt executables are Node.js 22.23.1 Single Executable Applications.
@@ -100,7 +117,7 @@ Supported preview safety model:
 - Paired clients are persisted until revoked with `volt remote revoke <node-id>`.
 - After pairing, saved-host reconnect uses the persisted client node ID and a secret-free client saved-host record. Ordinary app reconnect, temporary network loss, or daemon restart should not require scanning another QR (the daemon owns a persistent Iroh identity).
 - Pairing is workstation-scoped for the daemon's state file. A paired phone can reconnect to any registered workspace name, including workspaces registered after pairing, without another QR scan. The app receives and selects names and host feature strings only, never host-local paths.
-- Integrated hosts advertise `multi_streams.v1` and `conversation_streams.v1`. Mobile conversation streams bind at handshake time to one authorized workspace/session target, and the host-observed Iroh client node ID is authoritative for authorization, runtime ownership, revocation, and audit.
+- Integrated hosts advertise `multi_streams.v1` and `conversation_streams.v1`. Mobile conversation streams bind at handshake time to one authorized workspace/session target, and the host-observed Iroh client node ID is authoritative for authorization, runtime ownership, revocation, and audit. Session lists, state, and switch requests use stable IDs; session directories, SQLite paths, WAL/SHM paths, and host-side `SessionReference` values never cross the remote wire.
 - Same-client duplicates for one workspace/session on one live Iroh connection are rejected with `duplicate_conversation_connection`. The first conversation stream on a new same-client connection can replace a stale active stream for the same workspace/session and reattach to the retained runtime. Different sessions in the same registered workspace may run concurrently.
 - Distinct paired devices normally co-attach to one shared conversation runtime (or to a TUI-owned conversation over the daemon's byte relay). `conversation_in_use` is reserved for the narrow case where that existing daemon runtime permits tools outside the attaching client's persisted grant; the client cannot safely drive the broader runtime. Audit records (`~/.volt/agent/daemon/audit.jsonl`) cover pairing, lease transfers, and relay lifecycle so "what did the phone do while I was away" is reviewable after the fact.
 - Mobile conversation streams cannot be retargeted after handshake. Command-level workspace/session fields are assertions only and mismatches fail with `session_mismatch`. Direct `new_session`, `switch_session_by_id`, and raw `get_messages` are rejected on mobile conversation streams.
@@ -112,14 +129,14 @@ Supported preview safety model:
 - A revoked phone node ID cannot reconnect or re-pair with only a generic new QR. The desktop host must approve that node with `volt remote approve-repair <node-id>`, then issue a fresh active pairing ticket.
 - In the default integrated runtime, Iroh stream close is detach, not cancellation. Closing one conversation stream does not close or abort other active conversation streams for the same phone. Active work can continue on the host until it finishes or an authorized client sends `abort` on the selected bound stream.
 - Detached integrated runtimes can be reattached only by the same authoritative Iroh client node ID, workspace, and session, and idle detached runtimes expire by the host retention policy.
-- `volt remote status` and `volt remote clients` report the daemon's workspaces, clients, leases, and redacted metadata without printing secrets or secret hashes.
+- `volt daemon status` and `volt remote status` include required structured `remoteTransport` health and exit nonzero unless it is `ready`. Safe reason codes expose missing bindings, endpoint startup failure, or observed storage exhaustion without leaking raw exception details. Local management remains available while phone transport is unavailable.
 - State and audit JSONL are stored under `~/.volt/agent/daemon/` (`state.json` mode `0600` — it contains the Iroh secret key — and `audit.jsonl`).
 
 Unsafe remote tools are powerful. Granting `bash`, `edit`, or `write` lets the remote session modify files or run shell commands on the host. Granting `image_gen` lets it read and upload local reference images and write generated PNG files. Extension tools run code installed on the host and may do the same; expose them only when those extensions, the client device, and the network path are trusted.
 
 Remote sessions do not bypass project trust. Project-local settings, extensions, skills, prompt templates, themes, system prompts, and package-managed resources follow the same project trust rules as local Volt. A saved trust decision for the workspace is honored; otherwise the daemon runs those resources untrusted. Save trust from a desktop Volt session in that workspace.
 
-The daemon requires a Node.js npm package install or source checkout with optional `@hansjm10/volt-iroh` available for the platform. Standalone Node SEA builds reject `volt daemon` because the native Iroh adapter is intentionally not bundled. If startup reports that the optional native adapter is unavailable, reinstall with optional dependencies enabled for the current platform.
+The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected native binding. `--omit=optional` installs retain the wrapper but cannot provide phone transport. Darwin x64 has no binding and is local CLI/TUI only. Standalone Node SEA builds reject `volt daemon` because Iroh is intentionally not bundled. If status reports `native_binding_missing`, reinstall with optional dependencies enabled on a supported platform.
 
 Daemon exit, crash, or explicit shutdown stops in-memory work; remote access does not provide durable job recovery beyond persisted session state.
 
@@ -127,7 +144,7 @@ Push notification delivery is mediated by the managed Volt relay by default. The
 
 The daemon defaults to Iroh relay mode `production`, using the Volt-operated relay fleet so saved-host reconnects can survive restarts. Set `VOLT_IROH_RELAY_MODE` to `disabled` for LAN-only connections, `development` for the public n0 development relays, or `production`. Use `volt remote pair` to create pairing tickets.
 
-Client UX should treat offline, authorization, workspace, and conversation failures differently. `host_unreachable` keeps the saved host and retries later. `host_identity_mismatch`, `saved_host_invalid`, `client_unknown`, and `client_revoked` require explicit user action such as Pair Again or Forget Host. `workspace_unavailable`, `workspace_missing`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `workspace_forbidden`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_streams_unsupported` are host capability, workspace, or conversation-selection problems, not reasons to discard the saved host by default. `workspace_unavailable` is transient and paced by `retryAfterMs`; `workspace_missing` means the registered path is gone and automatic redialing should stop. `workspace_has_worktrees` requires explicit worktree review/removal before retrying unregister. `lease_transferred` and `session_rekeyed_reconnect` closures are expected handoffs the app reconnects through silently.
+Client UX should treat offline, capacity, authorization, workspace, and conversation failures differently. `host_unreachable` keeps the saved host, uses a bounded five-attempt automatic cycle, and points operators to `volt daemon status`. `host_storage_full` also keeps pairing, selected-agent, transcript, and authority state, but is Retry-only and never auto-redials until the user frees computer capacity and retries. `host_identity_mismatch`, `saved_host_invalid`, `client_unknown`, and `client_revoked` require explicit user action such as Pair Again or Forget Host. `workspace_unavailable`, `workspace_missing`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `workspace_forbidden`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_streams_unsupported` are host capability, workspace, or conversation-selection problems, not reasons to discard the saved host by default. `workspace_unavailable` is transient and paced by `retryAfterMs`; `workspace_missing` means the registered path is gone and automatic redialing should stop. `workspace_has_worktrees` requires explicit worktree review/removal before retrying unregister. `lease_transferred` and `session_rekeyed_reconnect` closures are expected handoffs the app reconnects through silently.
 
 See [Using Volt](usage.md#remote-access-over-iroh-preview) for copy-pastable commands and [Iroh remote protocol v1](iroh-remote-protocol.md) for the external client contract.
 

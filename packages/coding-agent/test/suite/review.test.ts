@@ -1,24 +1,35 @@
+import * as childProcess from "node:child_process";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { Type } from "typebox";
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
+import { AgentSession } from "../../src/core/agent-session.ts";
+import { convertToLlm } from "../../src/core/messages.ts";
 import {
 	buildReviewPrompt,
 	createReviewSeedMessage,
+	DEFAULT_REVIEW_RUN_CONTROLS,
 	executeReviewWorkflow,
-	formatReviewForNewSession,
 	listBaseBranches,
 	listRecentCommits,
-	MAX_GITHUB_PR_NUMBER,
+	MAX_PULL_REQUEST_NUMBER,
 	normalizeReviewPullRequestNumber,
 	parseReviewCommandArgs,
 	prepareReviewWorkflow,
-	REMOTE_REVIEW_FAILURE_MESSAGE,
 	type ReviewUsageSnapshot,
 	resolveReviewModel,
 	runReview,
+	runReviewWorkflow,
 } from "../../src/core/review.ts";
+import { STATIC_REVIEW_LIMITATION } from "../../src/core/review-presentation.ts";
+import {
+	getReviewPrivateDiagnosticsDirectory,
+	REVIEW_PRIVATE_DIAGNOSTICS_ENV,
+} from "../../src/core/review-private-diagnostics.ts";
 import type {
 	ReviewCandidateReport,
 	ReviewFinding,
@@ -26,15 +37,34 @@ import type {
 	ReviewVerificationReport,
 } from "../../src/core/review-report.ts";
 import { type ReviewSnapshot, resolveReviewSnapshot } from "../../src/core/review-snapshot.ts";
-import { getReviewRun } from "../../src/core/review-state.ts";
-import { ReviewWorkflowManager } from "../../src/core/review-workflows.ts";
+import {
+	createReviewRunRecord,
+	getReviewRun,
+	listReviewRuns,
+	type ReviewRunRecord,
+} from "../../src/core/review-state.ts";
+import { MAX_ACTIVE_REVIEW_WORKFLOWS, ReviewWorkflowManager } from "../../src/core/review-workflows.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
+import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
+import { createTestBodyOwner } from "../test-body-owner.ts";
 import { createHarness, type Harness } from "./harness.ts";
+
+vi.mock("node:child_process", async (importOriginal) => ({ ...(await importOriginal()) }));
 
 function git(cwd: string, ...args: string[]): string {
 	const result = spawnSync("git", args, { cwd, encoding: "utf8" });
 	if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
 	return result.stdout.trim();
+}
+
+function initializeUncommittedReviewRepository(cwd: string): void {
+	git(cwd, "init", "--initial-branch=main");
+	git(cwd, "config", "user.email", "review@example.com");
+	git(cwd, "config", "user.name", "Review Test");
+	writeFileSync(join(cwd, "file.txt"), "before\n");
+	git(cwd, "add", "file.txt");
+	git(cwd, "commit", "-m", "initial");
+	writeFileSync(join(cwd, "file.txt"), "after\n");
 }
 
 function candidateReport(path = "src/value.ts"): ReviewCandidateReport {
@@ -103,8 +133,9 @@ function presentationReport(presentationId: string): ReviewPresentationReport {
 
 async function createSnapshotRepository(
 	harness: Harness,
-	options: { agentsPolicy?: string; maxBlobBytes?: number } = {},
+	options: { agentsPolicy?: string; maxBlobBytes?: number; signal?: AbortSignal } = {},
 ): Promise<ReviewSnapshot> {
+	options.signal?.throwIfAborted();
 	mkdirSync(join(harness.tempDir, "src"), { recursive: true });
 	git(harness.tempDir, "init", "--initial-branch=main");
 	git(harness.tempDir, "config", "user.email", "review@example.com");
@@ -124,7 +155,8 @@ async function createSnapshotRepository(
 	);
 	const snapshot = await resolveReviewSnapshot({ kind: "uncommitted" }, harness.tempDir, {
 		maxCommitRefBytes: 1_024,
-		maxPullRequestNumber: MAX_GITHUB_PR_NUMBER,
+		maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
+		signal: options.signal,
 		...(options.maxBlobBytes === undefined ? {} : { limits: { maxBlobBytes: options.maxBlobBytes } }),
 	});
 	if ("error" in snapshot) throw new Error(snapshot.error);
@@ -132,7 +164,7 @@ async function createSnapshotRepository(
 }
 
 function attachGitHubContext(snapshot: ReviewSnapshot, marker: string): void {
-	snapshot.githubContext = {
+	snapshot.codeHostContext = {
 		manifest: {
 			status: "complete",
 			capturedAt: "2026-01-01T00:00:00Z",
@@ -148,6 +180,39 @@ function attachGitHubContext(snapshot: ReviewSnapshot, marker: string): void {
 		discussionEntries: [{ id: "comment-1", kind: "pr-comment", body: marker }],
 		rendered: marker,
 	};
+}
+
+const DIAGNOSTIC_RETENTION_WARNING = "Could not retain optional private review diagnostics.";
+
+function privateReviewResponses(marker: string, assessment: "complete" | "incomplete" = "complete") {
+	const responses = [
+		fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(
+			fauxToolCall("report_review_candidates", {
+				summary: marker,
+				candidates: [],
+				limitations: [marker, marker],
+			}),
+			{ stopReason: "toolUse" },
+		),
+		fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+		fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+		fauxAssistantMessage(
+			fauxToolCall("report_review_verification", {
+				summary: marker,
+				assessment,
+				...(assessment === "incomplete" ? { challenge: marker } : {}),
+				decisions: [],
+				priorFindingDecisions: [],
+				limitations: [marker],
+			}),
+			{ stopReason: "toolUse" },
+		),
+	];
+	return assessment === "incomplete" ? [...responses, ...responses] : responses;
 }
 
 describe("review command controls", () => {
@@ -176,7 +241,9 @@ describe("review command controls", () => {
 		expect(normalizeReviewPullRequestNumber(undefined)).toEqual({});
 		expect(normalizeReviewPullRequestNumber("42")).toEqual({ number: "42" });
 		expect(normalizeReviewPullRequestNumber("01")).toEqual({ error: expect.stringContaining("canonical") });
-		expect(normalizeReviewPullRequestNumber(String(MAX_GITHUB_PR_NUMBER + 1))).toEqual({ error: expect.any(String) });
+		expect(normalizeReviewPullRequestNumber(String(MAX_PULL_REQUEST_NUMBER + 1))).toEqual({
+			error: expect.any(String),
+		});
 	});
 
 	it("rejects controls that cannot be persisted losslessly before resolving the target", async () => {
@@ -203,6 +270,428 @@ describe("review command controls", () => {
 		}
 	});
 
+	it("cancels preparation without inference or a durable failed outcome", async () => {
+		const harness = await createHarness();
+		git(harness.tempDir, "init", "--initial-branch=main");
+		git(harness.tempDir, "config", "user.email", "review@example.com");
+		git(harness.tempDir, "config", "user.name", "Review Test");
+		writeFileSync(join(harness.tempDir, "file.txt"), "before\n");
+		git(harness.tempDir, "add", "file.txt");
+		git(harness.tempDir, "commit", "-m", "initial");
+		writeFileSync(join(harness.tempDir, "file.txt"), "after\n");
+		const controller = new AbortController();
+		const cleanup = vi.fn();
+		const onPrepared = vi.fn();
+		try {
+			const result = await runReviewWorkflow({
+				target: { kind: "uncommitted" },
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				session: harness.session,
+				newSession: vi.fn(),
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				createHooks: () => ({
+					signal: controller.signal,
+					onProgress: (message) => {
+						if (message === "Capturing uncommitted changes…") controller.abort();
+					},
+					onPrepared,
+					cleanup,
+				}),
+			});
+			expect(result).toEqual({ status: "cancelled" });
+			expect(onPrepared).not.toHaveBeenCalled();
+			expect(cleanup).toHaveBeenCalledOnce();
+			expect(harness.faux.state.callCount).toBe(0);
+			expect(listReviewRuns(harness.session.sessionManager!).runs).toEqual([]);
+		} finally {
+			await harness.cleanupAsync();
+		}
+	});
+
+	it("exposes and cancels a shared TUI review during snapshot preparation", async () => {
+		const harness = await createHarness();
+		initializeUncommittedReviewRepository(harness.tempDir);
+		const localController = new AbortController();
+		const events: Array<Record<string, unknown>> = [];
+		const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+		const newSession = vi.fn();
+		const onPrepared = vi.fn();
+		let workflowId: string | undefined;
+		let startPublishedDuringPreparation = false;
+		let remainedActiveAfterCancellation = false;
+		try {
+			const result = await runReviewWorkflow({
+				target: { kind: "uncommitted" },
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				session: harness.session,
+				newSession,
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				workflowManager,
+				createHooks: () => ({
+					signal: localController.signal,
+					onProgress: (message) => {
+						if (message !== "Capturing uncommitted changes…") return;
+						const active = workflowManager.list().find((workflow) => workflow.status === "running");
+						workflowId = active?.workflowId;
+						if (active) {
+							startPublishedDuringPreparation = events.some(
+								(event) => event.type === "workflow_start" && event.workflowId === active.workflowId,
+							);
+							workflowManager.cancel(active.workflowId);
+							remainedActiveAfterCancellation = workflowManager.hasActiveWorkflows;
+						} else localController.abort();
+					},
+					onPrepared,
+				}),
+			});
+			expect(result.status).toBe("cancelled");
+			if (!workflowId) throw new Error("Expected the shared review to be listed during preparation");
+			expect(startPublishedDuringPreparation).toBe(true);
+			expect(remainedActiveAfterCancellation).toBe(true);
+			expect(events.map((event) => event.type)).toEqual(["workflow_start", "workflow_end"]);
+			expect(events[0]).toMatchObject({
+				type: "workflow_start",
+				workflowId,
+				message: "Preparing uncommitted review.",
+			});
+			expect(workflowManager.get(workflowId)).toMatchObject({
+				workflowId,
+				action: "review.uncommitted",
+				status: "cancelled",
+			});
+			expect(events).toContainEqual(
+				expect.objectContaining({ type: "workflow_end", workflowId, status: "cancelled" }),
+			);
+			expect(onPrepared).not.toHaveBeenCalled();
+			expect(newSession).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			await workflowManager.abortAll();
+			await harness.cleanupAsync();
+		}
+	});
+
+	it("publishes local TUI cancellation during snapshot preparation", async () => {
+		const harness = await createHarness();
+		initializeUncommittedReviewRepository(harness.tempDir);
+		const localController = new AbortController();
+		const events: Array<Record<string, unknown>> = [];
+		const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+		let workflowId: string | undefined;
+		try {
+			const result = await runReviewWorkflow({
+				target: { kind: "uncommitted" },
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				session: harness.session,
+				newSession: vi.fn(),
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				workflowManager,
+				createHooks: () => ({
+					signal: localController.signal,
+					onProgress: (message) => {
+						if (message !== "Capturing uncommitted changes…") return;
+						workflowId = workflowManager.list().find((workflow) => workflow.status === "running")?.workflowId;
+						localController.abort();
+					},
+				}),
+			});
+			expect(result.status).toBe("cancelled");
+			if (!workflowId) throw new Error("Expected local cancellation to find the preparing workflow");
+			expect(workflowManager.get(workflowId)?.status).toBe("cancelled");
+			expect(events).toContainEqual(
+				expect.objectContaining({ type: "workflow_end", workflowId, status: "cancelled" }),
+			);
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			await workflowManager.abortAll();
+			await harness.cleanupAsync();
+		}
+	});
+
+	it("settles manager cancellation while review confirmation remains pending", async () => {
+		const harness = await createHarness();
+		initializeUncommittedReviewRepository(harness.tempDir);
+		const events: Array<Record<string, unknown>> = [];
+		const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+		const newSession = vi.fn();
+		let markConfirmationStarted!: () => void;
+		const confirmationStarted = new Promise<void>((resolve) => {
+			markConfirmationStarted = resolve;
+		});
+		const pendingConfirmation = new Promise<boolean>(() => {});
+		let confirmationSignal: AbortSignal | undefined;
+		let workflowId: string | undefined;
+		try {
+			const workflow = runReviewWorkflow({
+				target: { kind: "uncommitted" },
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				session: harness.session,
+				newSession,
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				workflowManager,
+				requireConfirmation: true,
+				confirm: (request) => {
+					confirmationSignal = request.signal;
+					markConfirmationStarted();
+					return pendingConfirmation;
+				},
+			});
+			await confirmationStarted;
+			workflowId = workflowManager.list().find((candidate) => candidate.status === "running")?.workflowId;
+			if (!workflowId) throw new Error("Expected the shared review to be listed during confirmation");
+			expect(events.map((event) => event.type)).toEqual(["workflow_start", "workflow_update"]);
+			expect(events[1]).toMatchObject({
+				type: "workflow_update",
+				workflowId,
+				message: "Reviewing uncommitted changes.",
+			});
+			workflowManager.cancel(workflowId);
+
+			await expect(workflow).resolves.toMatchObject({ status: "cancelled" });
+			expect(confirmationSignal?.aborted).toBe(true);
+			expect(workflowManager.get(workflowId)?.status).toBe("cancelled");
+			expect(workflowManager.hasActiveWorkflows).toBe(false);
+			expect(events).toContainEqual(
+				expect.objectContaining({ type: "workflow_end", workflowId, status: "cancelled" }),
+			);
+			expect(newSession).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			await workflowManager.abortAll();
+			harness.cleanup();
+		}
+	});
+
+	it("exposes and cancels a shared TUI review while onPrepared is pending", async () => {
+		const harness = await createHarness();
+		initializeUncommittedReviewRepository(harness.tempDir);
+		const events: Array<Record<string, unknown>> = [];
+		const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+		const newSession = vi.fn();
+		let markPreparedStarted!: () => void;
+		const preparedStarted = new Promise<void>((resolve) => {
+			markPreparedStarted = resolve;
+		});
+		let releasePrepared!: () => void;
+		const preparedGate = new Promise<void>((resolve) => {
+			releasePrepared = resolve;
+		});
+		let workflowId: string | undefined;
+		let eventsBeforeCancellation: unknown[] = [];
+		try {
+			const workflow = runReviewWorkflow({
+				target: { kind: "uncommitted" },
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				session: harness.session,
+				newSession,
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				workflowManager,
+				createHooks: () => ({
+					onPrepared: async () => {
+						workflowId = workflowManager.list().find((candidate) => candidate.status === "running")?.workflowId;
+						eventsBeforeCancellation = events.map((event) => event.type);
+						markPreparedStarted();
+						await preparedGate;
+					},
+				}),
+			});
+			await preparedStarted;
+			if (!workflowId) throw new Error("Expected the shared review to be listed during onPrepared");
+			expect(eventsBeforeCancellation).toEqual(["workflow_start", "workflow_update"]);
+			expect(events[0]).toMatchObject({
+				type: "workflow_start",
+				workflowId,
+				message: "Preparing uncommitted review.",
+			});
+			expect(events[1]).toMatchObject({
+				type: "workflow_update",
+				workflowId,
+				message: "Reviewing uncommitted changes.",
+			});
+			workflowManager.cancel(workflowId);
+
+			await expect(workflow).resolves.toMatchObject({ status: "cancelled" });
+			expect(workflowManager.get(workflowId)?.status).toBe("cancelled");
+			expect(events.filter((event) => event.type === "workflow_start")).toHaveLength(1);
+			expect(events).toContainEqual(
+				expect.objectContaining({ type: "workflow_end", workflowId, status: "cancelled" }),
+			);
+			expect(listReviewRuns(harness.session.sessionManager!).runs).toMatchObject([
+				{ runId: workflowId, status: "cancelled" },
+			]);
+			expect(newSession).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			releasePrepared();
+			await workflowManager.abortAll();
+			harness.cleanup();
+		}
+	});
+
+	it("settles an early shared TUI preparation failure in the workflow manager", async () => {
+		const harness = await createHarness();
+		initializeUncommittedReviewRepository(harness.tempDir);
+		const events: Array<Record<string, unknown>> = [];
+		const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+		try {
+			await expect(
+				runReviewWorkflow({
+					target: { kind: "commit" },
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					session: harness.session,
+					newSession: vi.fn(),
+					authStorage: harness.authStorage,
+					settingsManager: harness.settingsManager,
+					workflowManager,
+				}),
+			).rejects.toThrow("Missing commit ref");
+			const failed = workflowManager.list().find((workflow) => workflow.status === "failed");
+			expect(failed).toMatchObject({ action: "review.commit", status: "failed" });
+			expect(events).toContainEqual(
+				expect.objectContaining({
+					type: "workflow_end",
+					workflowId: failed?.workflowId,
+					status: "failed",
+				}),
+			);
+			expect(workflowManager.hasActiveWorkflows).toBe(false);
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			await workflowManager.abortAll();
+			await harness.cleanupAsync();
+		}
+	});
+
+	it("uses a safe provisional descriptor while resolving an untrusted commit ref", async () => {
+		const harness = await createHarness();
+		initializeUncommittedReviewRepository(harness.tempDir);
+		const privateRef = "PRIVATE_UNRESOLVED_COMMIT_REF";
+		const localController = new AbortController();
+		const workflowManager = new ReviewWorkflowManager();
+		let descriptorText: string | undefined;
+		try {
+			const result = await runReviewWorkflow({
+				target: { kind: "commit", sha: privateRef },
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				session: harness.session,
+				newSession: vi.fn(),
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				workflowManager,
+				createHooks: () => ({
+					signal: localController.signal,
+					onProgress: (message) => {
+						if (message !== "Resolving commit…") return;
+						const active = workflowManager.list().find((workflow) => workflow.status === "running");
+						descriptorText = active ? JSON.stringify(active) : undefined;
+						if (active) workflowManager.cancel(active.workflowId);
+						else localController.abort();
+					},
+				}),
+			});
+			expect(result.status).toBe("cancelled");
+			expect(descriptorText).toEqual(expect.any(String));
+			expect(descriptorText).not.toContain(privateRef);
+			expect(descriptorText).not.toContain(harness.tempDir);
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			await workflowManager.abortAll();
+			await harness.cleanupAsync();
+		}
+	});
+
+	it("applies the shared workflow concurrency cap before snapshot preparation", async () => {
+		const harness = await createHarness();
+		initializeUncommittedReviewRepository(harness.tempDir);
+		const workflowManager = new ReviewWorkflowManager();
+		for (let index = 0; index < MAX_ACTIVE_REVIEW_WORKFLOWS; index++) {
+			workflowManager.start({
+				prepared: {
+					workflowId: `review:blocking-${index}`,
+					action: "review.uncommitted",
+					startedAt: index,
+					resolution: {
+						description: "blocking review",
+						diffCommand: "git diff",
+						dispose: async () => {},
+					},
+				},
+				execute: async () => ({ status: "cancelled" }),
+			});
+		}
+		const onProgress = vi.fn();
+		try {
+			await expect(
+				runReviewWorkflow({
+					target: { kind: "uncommitted" },
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					session: harness.session,
+					newSession: vi.fn(),
+					authStorage: harness.authStorage,
+					settingsManager: harness.settingsManager,
+					workflowManager,
+					createHooks: () => ({ onProgress }),
+				}),
+			).rejects.toThrow(`Too many running reviews (max ${MAX_ACTIVE_REVIEW_WORKFLOWS})`);
+			expect(onProgress).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			await workflowManager.abortAll();
+			harness.cleanup();
+		}
+	});
+
+	it("registers a TUI review so an attached client can cancel it", async () => {
+		const harness = await createHarness();
+		git(harness.tempDir, "init", "--initial-branch=main");
+		git(harness.tempDir, "config", "user.email", "review@example.com");
+		git(harness.tempDir, "config", "user.name", "Review Test");
+		writeFileSync(join(harness.tempDir, "file.txt"), "before\n");
+		git(harness.tempDir, "add", "file.txt");
+		git(harness.tempDir, "commit", "-m", "initial");
+		writeFileSync(join(harness.tempDir, "file.txt"), "after\n");
+		const workflowManager = new ReviewWorkflowManager();
+		const newSession = vi.fn();
+		let workflowId: string | undefined;
+		workflowManager.attachSink((event) => {
+			if (event.type !== "workflow_start") return;
+			workflowId = event.workflowId;
+			workflowManager.cancel(event.workflowId);
+		});
+		try {
+			const result = await runReviewWorkflow({
+				target: { kind: "uncommitted" },
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				session: harness.session,
+				newSession,
+				authStorage: harness.authStorage,
+				settingsManager: harness.settingsManager,
+				workflowManager,
+			});
+			expect(result.status).toBe("cancelled");
+			if (!workflowId) throw new Error("Expected the managed review to emit workflow_start");
+			expect(workflowManager.get(workflowId)?.status).toBe("cancelled");
+			expect(newSession).not.toHaveBeenCalled();
+			expect(harness.faux.state.callCount).toBe(0);
+		} finally {
+			harness.cleanup();
+		}
+	});
+
 	it("emits capability-aware immutable-tool instructions", async () => {
 		const harness = await createHarness();
 		const snapshot = await createSnapshotRepository(harness);
@@ -223,13 +712,438 @@ describe("review command controls", () => {
 describe("review pipeline", () => {
 	const harnesses: Harness[] = [];
 	const snapshots: ReviewSnapshot[] = [];
+	const managerOwner = createSessionManagerTestOwner();
+	const bodyOwner = createTestBodyOwner();
 
-	afterEach(async () => {
-		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
-		for (const harness of harnesses.splice(0)) harness.cleanup();
+	beforeEach(() => {
+		bodyOwner.start();
+		managerOwner.start();
+		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "0");
 	});
 
+	afterEach(() =>
+		bodyOwner.finish(async () => {
+			vi.unstubAllEnvs();
+			for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
+			await managerOwner.drain();
+			vi.restoreAllMocks();
+			for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
+		}),
+	);
+
+	it.each([
+		"disabled",
+		"retained",
+		"stderr",
+		"observer",
+		"throwing observer",
+		"rejecting observer",
+		"pending observer",
+		"throwing stderr",
+	] as const)("keeps optional diagnostic warnings local and passive (%s)", async (delivery) => {
+		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, delivery === "disabled" ? "0" : "1");
+		const privateMarker = "private-retention-model-prose";
+		const observerError = "private-warning-observer-error";
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const snapshot = await createSnapshotRepository(harness);
+		attachGitHubContext(snapshot, privateMarker);
+		snapshots.push(snapshot);
+		const checkout = await snapshot.materializeHead();
+		expect(existsSync(checkout)).toBe(true);
+		const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+		if (delivery !== "retained") writeFileSync(diagnosticsDirectory, "Not a directory");
+		harness.setResponses(privateReviewResponses(privateMarker));
+		const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {
+			if (delivery === "throwing stderr") throw new Error(observerError);
+		});
+		const onDiagnosticRetentionWarning = vi.fn((_message: string): void | Promise<void> => {
+			if (delivery === "throwing observer") throw new Error(observerError);
+			if (delivery === "rejecting observer") return Promise.reject(new Error(observerError));
+			if (delivery === "pending observer") return new Promise<void>(() => {});
+		});
+		const useObserver = delivery.includes("observer") || delivery === "disabled" || delivery === "retained";
+		const processTrace: Array<Record<string, string | number | boolean | null | undefined>> = [];
+		if (delivery === "retained") {
+			const original = childProcess.execFile;
+			vi.spyOn(childProcess, "execFile").mockImplementation((...invocation) => {
+				const [file, args, options, callback] = invocation;
+				if (!Array.isArray(args) || !args.includes("-EncodedCommand") || !callback) return original(...invocation);
+				const startedAt = performance.now();
+				const record = (
+					event: string,
+					details: Record<string, string | number | boolean | null | undefined> = {},
+				) => {
+					processTrace.push({ event, elapsedMs: Math.round(performance.now() - startedAt), ...details });
+				};
+				record("invoked");
+				const child = original(file, args, options, (error, stdout, stderr) => {
+					const code = error?.code;
+					record(error ? "callback_error" : "callback_success", {
+						code:
+							typeof code !== "string" || ["ENOENT", "ETIMEDOUT", "EPIPE", "EACCES", "EPERM"].includes(code)
+								? code
+								: "other",
+						killed: error?.killed,
+						signal: error?.signal,
+					});
+					callback(error, stdout, stderr);
+				});
+				child.once("spawn", () => record("spawn"));
+				child.stdin?.once("finish", () => record("stdin_finished"));
+				child.once("exit", (code, signal) => record("exit", { code, signal }));
+				child.once("close", (code, signal) => record("close", { code, signal }));
+				return child;
+			});
+		}
+		const events: Array<Record<string, unknown>> = [];
+		const result = await runReview({
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			model: harness.getModel(),
+			authStorage: harness.authStorage,
+			modelRegistry: harness.session.modelRegistry,
+			settingsManager: harness.settingsManager,
+			resolved: snapshot,
+			controls: { scopeMode: "full", scope: ["src/**"] },
+			workflowId: "review:local-retention-warning",
+			workflowAction: "review.pr",
+			onEvent: (event) => events.push(event),
+			...(useObserver ? { onDiagnosticRetentionWarning } : {}),
+		});
+		expect(result).toMatchObject({
+			aborted: false,
+			parsed: { completionStatus: "complete", overallCorrectness: "correct", findings: [] },
+		});
+		expect(result.errorMessage).toBeUndefined();
+		expect(existsSync(checkout)).toBe(false);
+		expect(harness.faux.state.callCount).toBe(8);
+		const failedRetention = delivery !== "disabled" && delivery !== "retained";
+		expect(
+			onDiagnosticRetentionWarning.mock.calls,
+			JSON.stringify({
+				processTrace,
+				directoryExists: existsSync(diagnosticsDirectory),
+				fileCount:
+					delivery === "retained" && existsSync(diagnosticsDirectory)
+						? readdirSync(diagnosticsDirectory).length
+						: undefined,
+			}),
+		).toEqual(failedRetention && useObserver ? [[DIAGNOSTIC_RETENTION_WARNING]] : []);
+		expect(stderrWarning.mock.calls).toEqual(
+			failedRetention && delivery !== "observer" && delivery !== "pending observer"
+				? [[`Warning: ${DIAGNOSTIC_RETENTION_WARNING}`]]
+				: [],
+		);
+		const publicData = JSON.stringify({ result, events, entries: harness.sessionManager.getEntries() });
+		for (const forbidden of [privateMarker, observerError, diagnosticsDirectory, DIAGNOSTIC_RETENTION_WARNING]) {
+			expect(publicData).not.toContain(forbidden);
+		}
+		if (delivery === "retained") {
+			const files = readdirSync(diagnosticsDirectory);
+			expect(files).toHaveLength(1);
+			expect(readFileSync(join(diagnosticsDirectory, files[0]!), "utf8").trim().split("\n")).toHaveLength(4);
+		}
+	});
+
+	it.for(["complete", "incomplete", "failed", "cancelled"] as const)(
+		"preserves the durable %s outcome when diagnostics and the warning observer fail",
+		(status, context) =>
+			bodyOwner.run(context.signal, async (signal) => {
+				vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
+				const privateMarker = "private-durable-retention-prose";
+				const observerError = "private-retention-observer-failure";
+				const harness = await createHarness({ settings: { retry: { enabled: false } } });
+				harnesses.push(harness);
+				signal.throwIfAborted();
+				const snapshot = await createSnapshotRepository(harness, { signal });
+				attachGitHubContext(snapshot, privateMarker);
+				snapshots.push(snapshot);
+				signal.throwIfAborted();
+				const checkout = await snapshot.materializeHead();
+				signal.throwIfAborted();
+				const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+				writeFileSync(diagnosticsDirectory, "Not a directory");
+				const controller = new AbortController();
+				const responses = privateReviewResponses(
+					privateMarker,
+					status === "incomplete" ? "incomplete" : "complete",
+				);
+				harness.setResponses(
+					status === "failed" || status === "cancelled"
+						? [
+								...responses.slice(0, 4),
+								() => {
+									if (status === "cancelled") controller.abort();
+									return fauxAssistantMessage("", {
+										stopReason: "error",
+										errorMessage: "Review provider failed.",
+									});
+								},
+							]
+						: responses,
+				);
+				const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
+				signal.throwIfAborted();
+				const workflowId = `review:retention-${status}`;
+				const events: Array<Record<string, unknown>> = [];
+				const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
+				const onDiagnosticRetentionWarning = vi.fn((_message: string) => {
+					throw new Error(observerError);
+				});
+				const result = await executeReviewWorkflow({
+					prepared: {
+						workflowId,
+						action: "review.pr",
+						target: { kind: "pr", number: "348" },
+						controls: { scope: ["src/**"], effort: "standard", includeOptional: false, scopeMode: "full" },
+						resolution: snapshot,
+						model: harness.getModel(),
+						verifierModel: harness.getModel(),
+						startedAt: 1,
+						incrementalPlan: {
+							mode: "full",
+							changedPaths: ["src/value.ts"],
+							priorOpenFindings: [],
+							suppressedDismissedFingerprints: [],
+						},
+					},
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					authStorage: harness.authStorage,
+					modelRegistry: harness.session.modelRegistry,
+					settingsManager: harness.settingsManager,
+					sessionManager,
+					signal: AbortSignal.any([signal, controller.signal]),
+					onDiagnosticRetentionWarning,
+					onEvent: (event) => events.push(event),
+				});
+				signal.throwIfAborted();
+				expect(existsSync(checkout)).toBe(false);
+				expect(onDiagnosticRetentionWarning.mock.calls).toEqual([[DIAGNOSTIC_RETENTION_WARNING]]);
+				expect(stderrWarning.mock.calls).toEqual([[`Warning: ${DIAGNOSTIC_RETENTION_WARNING}`]]);
+				if (status === "complete" || status === "incomplete") {
+					expect(result).toMatchObject({
+						status: "completed",
+						completionStatus: status,
+						durableRecordCommitted: true,
+					});
+					if (result.status !== "completed") throw new Error("Expected a completed review");
+					expect(result.parsed.overallCorrectness).toBe(status === "complete" ? "correct" : undefined);
+				} else {
+					expect(result.status).toBe(status);
+					if (status === "failed")
+						expect(result).toMatchObject({
+							errorMessage: expect.stringContaining("Review verification model request failed"),
+						});
+				}
+				const ref = sessionManager.getSessionRef()!;
+				await sessionManager.closePersistence();
+				signal.throwIfAborted();
+				const reopened = await SessionManager.open(ref);
+				signal.throwIfAborted();
+				expect(getReviewRun(reopened, workflowId)?.status).toBe(status === "complete" ? "completed" : status);
+				const exportPath = join(harness.tempDir, "retention-review.jsonl");
+				await SessionManager.exportJsonlSnapshot(ref, exportPath);
+				signal.throwIfAborted();
+				const publicData = JSON.stringify({ result, events, entries: reopened.getEntries() });
+				const exported = readFileSync(exportPath, "utf8");
+				for (const forbidden of [
+					privateMarker,
+					observerError,
+					diagnosticsDirectory,
+					DIAGNOSTIC_RETENTION_WARNING,
+				]) {
+					expect(publicData).not.toContain(forbidden);
+					expect(exported).not.toContain(forbidden);
+				}
+			}),
+	);
+
+	it.each([false, true])(
+		"threads the warning outside workflow events and handoff data (managed=%s)",
+		async (managed) => {
+			vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
+			const privateMarker = "private-workflow-retention-prose";
+			const harness = await createHarness();
+			harnesses.push(harness);
+			const initialSnapshot = await createSnapshotRepository(harness);
+			await initialSnapshot.dispose();
+			const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+			writeFileSync(diagnosticsDirectory, "Not a directory");
+			harness.setResponses(privateReviewResponses(privateMarker));
+			const events: Array<Record<string, unknown>> = [];
+			const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
+			const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
+			const onDiagnosticRetentionWarning = vi.fn((_message: string) => {});
+			const newSession = vi.fn(async () => ({ cancelled: true, seeded: false }));
+			const cleanup = vi.fn();
+			try {
+				const result = await runReviewWorkflow({
+					target: { kind: "uncommitted" },
+					controls: { scope: ["src/**"], scopeMode: "full" },
+					cwd: harness.tempDir,
+					agentDir: harness.tempDir,
+					session: harness.session,
+					newSession,
+					authStorage: harness.authStorage,
+					settingsManager: harness.settingsManager,
+					onDiagnosticRetentionWarning,
+					...(managed ? { workflowManager } : { onEvent: (event) => events.push(event) }),
+					createHooks: () => ({
+						onPrepared: (snapshot) => {
+							attachGitHubContext(snapshot, privateMarker);
+							snapshots.push(snapshot);
+						},
+						cleanup,
+					}),
+				});
+				expect(result).toMatchObject({
+					status: "completed",
+					completionStatus: "complete",
+					sessionSwitchCancelled: true,
+				});
+				expect(cleanup).toHaveBeenCalledOnce();
+				expect(newSession).toHaveBeenCalledOnce();
+				expect(onDiagnosticRetentionWarning.mock.calls).toEqual([[DIAGNOSTIC_RETENTION_WARNING]]);
+				expect(stderrWarning).not.toHaveBeenCalled();
+				expect(events.at(-1)).toMatchObject({ type: "workflow_end", status: "completed" });
+				const publicData = JSON.stringify({
+					events,
+					entries: harness.sessionManager.getEntries(),
+					messages: harness.session.messages,
+					workflows: workflowManager.list().map((workflow) => workflowManager.get(workflow.workflowId)),
+				});
+				expect(harness.session.messages).toHaveLength(1);
+				for (const forbidden of [privateMarker, diagnosticsDirectory, DIAGNOSTIC_RETENTION_WARNING]) {
+					expect(publicData).not.toContain(forbidden);
+				}
+			} finally {
+				await workflowManager.abortAll();
+			}
+		},
+	);
+
+	it("preserves complete initial handoff evidence beyond durable record bounds", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		await (await createSnapshotRepository(harness)).dispose();
+		const candidates = candidateReport();
+		candidates.candidates[0]!.body = `${"Evidence ".repeat(320)}FULL_BODY_END`;
+		candidates.candidates[0]!.trigger = `${"Input ".repeat(120)}FULL_TRIGGER_END`;
+		candidates.candidates[0]!.impact = `${"Failure ".repeat(90)}FULL_IMPACT_END`;
+		const verification = verificationReport();
+		verification.decisions[0]!.rationale = `${"Verified ".repeat(170)}FULL_RATIONALE_END`;
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("report_review_candidates", candidates as never), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+			fauxAssistantMessage(fauxToolCall("report_review_verification", verification as never), {
+				stopReason: "toolUse",
+			}),
+		]);
+		const outcome = await runReviewWorkflow({
+			target: { kind: "uncommitted" },
+			controls: { scope: ["src/**"], scopeMode: "full" },
+			cwd: harness.tempDir,
+			agentDir: harness.tempDir,
+			session: harness.session,
+			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			authStorage: harness.authStorage,
+			settingsManager: harness.settingsManager,
+		});
+		expect(outcome.status).toBe("completed");
+		const modelContent = JSON.stringify(convertToLlm(harness.session.messages));
+		const durable = listReviewRuns(harness.sessionManager).runs[0]!;
+		for (const marker of ["FULL_BODY_END", "FULL_TRIGGER_END", "FULL_IMPACT_END", "FULL_RATIONALE_END"]) {
+			expect(modelContent).toContain(marker);
+			expect(JSON.stringify(durable.result)).not.toContain(marker);
+		}
+		expect(harness.session.messages).toContainEqual(
+			expect.objectContaining({
+				role: "custom",
+				customType: "review",
+				details: expect.objectContaining({
+					findings: expect.arrayContaining([
+						expect.objectContaining({ trigger: candidates.candidates[0]!.trigger }),
+					]),
+				}),
+			}),
+		);
+		expect(harness.faux.state.callCount).toBe(4);
+	});
+
+	it.each(["snapshot", "bash", "auxiliary", "replaced definition"] as const)(
+		"reports static-only validation only for the effective host-owned surface (%s)",
+		async (surface) => {
+			const toolName = surface === "bash" ? "bash" : "auxiliary";
+			const harness = await createHarness({
+				extensionFactories: [
+					async (volt) => {
+						volt.registerTool({
+							name: toolName,
+							label: toolName,
+							description: "Synthetic auxiliary tool",
+							parameters: Type.Object({}),
+							async execute() {
+								return { content: [{ type: "text", text: "Synthetic result" }] };
+							},
+						});
+					},
+				],
+			});
+			harnesses.push(harness);
+			const snapshot = await createSnapshotRepository(harness);
+			snapshots.push(snapshot);
+			if (surface === "replaced definition") {
+				const original = AgentSession.prototype.getToolDefinition;
+				vi.spyOn(AgentSession.prototype, "getToolDefinition").mockImplementation(function (
+					this: AgentSession,
+					name,
+				) {
+					const definition = original.call(this, name);
+					return name === "review_file" && definition ? { ...definition } : definition;
+				});
+			}
+			harness.setResponses([
+				fauxAssistantMessage(
+					fauxToolCall("report_review_candidates", { summary: "No candidates.", candidates: [], limitations: [] }),
+					{ stopReason: "toolUse" },
+				),
+				fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("review_diff", { path: "src/value.ts" }), { stopReason: "toolUse" }),
+				fauxAssistantMessage(
+					fauxToolCall("report_review_verification", {
+						summary: "Complete.",
+						assessment: "complete",
+						decisions: [],
+						priorFindingDecisions: [],
+						limitations: [],
+					}),
+					{ stopReason: "toolUse" },
+				),
+			]);
+			const run = await runReview({
+				cwd: harness.tempDir,
+				agentDir: harness.tempDir,
+				model: harness.getModel(),
+				authStorage: harness.authStorage,
+				modelRegistry: harness.session.modelRegistry,
+				settingsManager: harness.settingsManager,
+				resolved: snapshot,
+				controls: { scope: ["src/**"], scopeMode: "full" },
+				parentResourceLoader: harness.session.resourceLoader,
+				tools: surface === "bash" || surface === "auxiliary" ? [toolName] : [],
+			});
+			expect(run.errorMessage).toBeUndefined();
+			expect(run.parsed?.completionStatus).toBe("complete");
+			expect(run.parsed?.coverage.residualRisk.includes(STATIC_REVIEW_LIMITATION)).toBe(surface === "snapshot");
+			expect(harness.faux.state.callCount).toBe(4);
+		},
+	);
+
 	it("keeps context-exposed prose private and presents findings from code in a fresh context", async () => {
+		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
 		const privateMarker = "private-github-discussion-marker";
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -237,7 +1151,7 @@ describe("review pipeline", () => {
 		mkdirSync(agentDir, { recursive: true });
 		writeFileSync(join(agentDir, "REVIEW.md"), "USER REVIEW POLICY\n");
 		const snapshot = await createSnapshotRepository(harness);
-		snapshot.githubContext = {
+		snapshot.codeHostContext = {
 			manifest: {
 				status: "complete",
 				capturedAt: "2026-01-01T00:00:00Z",
@@ -349,7 +1263,17 @@ describe("review pipeline", () => {
 		expect(run.parsed?.findings).toHaveLength(1);
 		expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
 		if (!run.parsed) throw new Error("Expected a public review result");
-		expect(JSON.stringify(createReviewSeedMessage(snapshot, { parsed: run.parsed }))).not.toContain(privateMarker);
+		expect(run.parsed.coverage.residualRisk).toContain(STATIC_REVIEW_LIMITATION);
+		const record = createReviewRunRecord({
+			workflowId: "review:pr-context",
+			workflowAction: "review.pr",
+			startedAt: 1,
+			snapshot,
+			controls: DEFAULT_REVIEW_RUN_CONTROLS,
+			status: "completed",
+			result: run.parsed,
+		});
+		expect(JSON.stringify(createReviewSeedMessage(record))).not.toContain(privateMarker);
 		expect(requestSnapshots).toHaveLength(3);
 		expect(requestSnapshots[0]?.systemPrompt).toContain("BASE REVIEW POLICY");
 		expect(requestSnapshots[0]?.systemPrompt).toContain("BASE AGENT POLICY");
@@ -367,9 +1291,9 @@ describe("review pipeline", () => {
 		expect(requestSnapshots[2]?.tools).not.toContain("bash");
 		expect(requestSnapshots[2]?.messages).not.toContain(privateMarker);
 		expect(requestSnapshots[2]?.systemPrompt).not.toContain(privateMarker);
-		expect(requestSnapshots[0]?.messages).toContain("github_context_manifest");
-		expect(requestSnapshots[1]?.messages).toContain("github_context_manifest");
-		expect(requestSnapshots[2]?.messages).not.toContain("github_context_manifest");
+		expect(requestSnapshots[0]?.messages).toContain("code_host_context_manifest");
+		expect(requestSnapshots[1]?.messages).toContain("code_host_context_manifest");
+		expect(requestSnapshots[2]?.messages).not.toContain("code_host_context_manifest");
 		const discoveryFinal = usageSnapshots.filter((usage) => usage.pass === "discovery").at(-1);
 		const verificationSnapshots = usageSnapshots.filter((usage) => usage.pass === "verification");
 		const verificationFinal = verificationSnapshots.at(-1);
@@ -398,10 +1322,25 @@ describe("review pipeline", () => {
 		expect(JSON.stringify(workflowEvents)).not.toContain("src/value.ts");
 		expect(JSON.stringify(workflowEvents)).not.toContain(privateMarker);
 		expect(harness.session.messages).toHaveLength(0);
+		const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(agentDir);
+		const diagnosticFiles = readdirSync(diagnosticsDirectory);
+		expect(diagnosticFiles).toHaveLength(1);
+		const privateRecords = readFileSync(join(diagnosticsDirectory, diagnosticFiles[0]!), "utf8")
+			.trim()
+			.split("\n")
+			.map((line): unknown => JSON.parse(line));
+		expect(privateRecords).toEqual([
+			expect.objectContaining({ kind: "model_limitation", phase: "discovery", message: privateMarker }),
+			expect.objectContaining({ kind: "model_limitation", phase: "verification", message: privateMarker }),
+			expect.objectContaining({ kind: "verification_assessment", phase: "verification", assessment: "complete" }),
+		]);
 	});
 
-	it("skips presentation for a no-finding PR and replaces private incomplete prose", async () => {
+	it.each([false, true])("keeps PR challenges private (limitations=%s)", async (withLimitations) => {
+		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
 		const privateMarker = "private-incomplete-challenge-marker";
+		const limitations = withLimitations ? [privateMarker] : [];
+		const workflowEvents: Array<Record<string, unknown>> = [];
 		const harness = await createHarness();
 		harnesses.push(harness);
 		const snapshot = await createSnapshotRepository(harness);
@@ -412,7 +1351,7 @@ describe("review pipeline", () => {
 			modelRequests++;
 			return message;
 		};
-		harness.setResponses([
+		const responses = [
 			count(fauxAssistantMessage(fauxToolCall("review_context", {}), { stopReason: "toolUse" })),
 			count(fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" })),
 			count(
@@ -425,7 +1364,7 @@ describe("review pipeline", () => {
 					fauxToolCall("report_review_candidates", {
 						summary: privateMarker,
 						candidates: [],
-						limitations: [privateMarker],
+						limitations,
 					}),
 					{ stopReason: "toolUse" },
 				),
@@ -445,38 +1384,93 @@ describe("review pipeline", () => {
 						challenge: privateMarker,
 						decisions: [],
 						priorFindingDecisions: [],
-						limitations: [privateMarker],
+						limitations,
 					}),
 					{ stopReason: "toolUse" },
 				),
 			),
-		]);
+		];
+		harness.setResponses([...responses, ...responses]);
 
-		const run = await runReview({
+		const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "sessions"));
+		const workflowId = "review:private-incomplete-challenge";
+		const run = await executeReviewWorkflow({
+			prepared: {
+				workflowId,
+				action: "review.pr",
+				target: { kind: "pr", number: "1" },
+				controls: { scopeMode: "full", scope: ["src/**"], effort: "standard", includeOptional: false },
+				resolution: snapshot,
+				model: harness.getModel(),
+				verifierModel: harness.getModel(),
+				startedAt: Date.now(),
+				incrementalPlan: {
+					mode: "full",
+					changedPaths: ["src/value.ts"],
+					priorOpenFindings: [],
+					suppressedDismissedFingerprints: [],
+				},
+			},
 			cwd: harness.tempDir,
 			agentDir: harness.tempDir,
-			model: harness.getModel(),
-			verifierModel: harness.getModel(),
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
-			resolved: snapshot,
-			controls: { scopeMode: "full" },
+			sessionManager,
+			onEvent: (event) => workflowEvents.push(event),
 		});
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
-		expect(run.errorMessage).toBeUndefined();
-		expect(modelRequests).toBe(8);
+		expect(run.status).toBe("completed");
+		if (run.status !== "completed") throw new Error(`Review ended with ${run.status}`);
+		expect(modelRequests).toBe(16);
 		expect(JSON.stringify(run.parsed)).not.toContain(privateMarker);
 		expect(run.parsed).toMatchObject({
 			completionStatus: "incomplete",
 			summary: "Review incomplete with 0 verified findings.",
-			verificationChallenge: "Independent verification reported a completeness challenge.",
+			verificationChallenge: expect.stringContaining("did not supply a validated changed-code location"),
 			coverage: {
-				modelReportedLimitations: [
-					"Discovery reported 1 model limitation(s).",
-					"Verification reported 1 model limitation(s).",
-				],
+				uncheckedAreas: [],
+				modelReportedLimitations: withLimitations
+					? ["Discovery reported 1 model limitation(s).", "Verification reported 1 model limitation(s)."]
+					: [],
 			},
+		});
+		expect(run.parsed.overallCorrectness).toBeUndefined();
+		expect(JSON.stringify(createReviewSeedMessage(run.record!))).not.toContain(privateMarker);
+		expect(JSON.stringify(run.record)).not.toContain(privateMarker);
+		const ref = sessionManager.getSessionRef()!;
+		await sessionManager.closePersistence();
+		const reopened = await SessionManager.open(ref);
+		expect(getReviewRun(reopened, workflowId)).toMatchObject({
+			status: "incomplete",
+			result: {
+				findings: [],
+				verificationChallenge: expect.stringContaining("did not supply a validated changed-code location"),
+			},
+		});
+		expect(JSON.stringify(reopened.getEntries())).not.toContain(privateMarker);
+		const exportPath = join(harness.tempDir, "review-session.jsonl");
+		await SessionManager.exportJsonlSnapshot(ref, exportPath);
+		expect(readFileSync(exportPath, "utf8")).not.toContain(privateMarker);
+		expect(JSON.stringify(workflowEvents)).not.toContain(privateMarker);
+		expect(harness.session.messages).toHaveLength(0);
+		const diagnosticsDirectory = getReviewPrivateDiagnosticsDirectory(harness.tempDir);
+		const diagnosticFiles = readdirSync(diagnosticsDirectory);
+		expect(diagnosticFiles).toHaveLength(1);
+		const privateRecords = readFileSync(join(diagnosticsDirectory, diagnosticFiles[0]!), "utf8")
+			.trim()
+			.split("\n")
+			.map((line): unknown => JSON.parse(line));
+		expect(privateRecords).toHaveLength(withLimitations ? 6 : 2);
+		expect(privateRecords.at(-1)).toEqual({
+			schemaVersion: 1,
+			timestamp: expect.any(String),
+			runId: "review:private-incomplete-challenge",
+			workflowAction: "review.pr",
+			phase: "verification",
+			kind: "verification_assessment",
+			assessment: "incomplete",
+			challenge: privateMarker,
 		});
 	});
 
@@ -704,7 +1698,7 @@ describe("review pipeline", () => {
 		expect(harness.faux.state.callCount).toBe(0);
 	});
 
-	it("persists only a generic PR error when context-blind presentation fails", async () => {
+	it("persists a safe stage diagnosis when context-blind presentation fails", async () => {
 		const privateMarker = "private-presentation-failure-marker";
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -767,7 +1761,10 @@ describe("review pipeline", () => {
 					{ stopReason: "toolUse" },
 				),
 		]);
-		const sessionManager = SessionManager.create(harness.tempDir, join(harness.tempDir, "presentation-sessions"));
+		const sessionManager = await SessionManager.create(
+			harness.tempDir,
+			join(harness.tempDir, "presentation-sessions"),
+		);
 		const outcome = await executeReviewWorkflow({
 			prepared: {
 				workflowId: "review:private-presentation-failure",
@@ -795,14 +1792,14 @@ describe("review pipeline", () => {
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
 		expect(outcome).toMatchObject({
 			status: "failed",
-			errorMessage: expect.stringContaining("did not inspect changed hunk"),
-			record: { errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE },
+			errorMessage: expect.stringContaining("Review presentation report validation failed"),
+			record: { errorMessage: expect.stringContaining("Review presentation report validation failed") },
 		});
 		expect(JSON.stringify(outcome.record)).not.toContain(privateMarker);
-		const reopened = SessionManager.open(sessionManager.getSessionFile()!);
+		const reopened = await SessionManager.open(sessionManager.getSessionRef()!);
 		expect(getReviewRun(reopened, "review:private-presentation-failure")).toMatchObject({
 			status: "failed",
-			errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE,
+			errorMessage: expect.stringContaining("Review presentation report validation failed"),
 		});
 		expect(JSON.stringify(getReviewRun(reopened, "review:private-presentation-failure"))).not.toContain(
 			privateMarker,
@@ -816,7 +1813,7 @@ describe("review pipeline", () => {
 		snapshots.push(remoteSnapshot);
 		const localSnapshot = await resolveReviewSnapshot({ kind: "uncommitted" }, harness.tempDir, {
 			maxCommitRefBytes: 1_024,
-			maxPullRequestNumber: MAX_GITHUB_PR_NUMBER,
+			maxPullRequestNumber: MAX_PULL_REQUEST_NUMBER,
 		});
 		if ("error" in localSnapshot) throw new Error(localSnapshot.error);
 		snapshots.push(localSnapshot);
@@ -826,7 +1823,7 @@ describe("review pipeline", () => {
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: privateDiagnostic }),
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: privateDiagnostic }),
 		]);
-		const sessionManager = SessionManager.create(harness.tempDir, join(harness.tempDir, "remote-sessions"));
+		const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "remote-sessions"));
 		const remoteOutcome = await executeReviewWorkflow({
 			prepared: {
 				workflowId: "review:remote-provider-failure",
@@ -855,14 +1852,14 @@ describe("review pipeline", () => {
 		snapshots.splice(snapshots.indexOf(remoteSnapshot), 1);
 		expect(remoteOutcome).toMatchObject({
 			status: "failed",
-			errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE,
-			record: { errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE },
+			errorMessage: expect.stringContaining("Review discovery model request failed"),
+			record: { errorMessage: expect.stringContaining("Review discovery model request failed") },
 		});
 		expect(JSON.stringify(remoteOutcome)).not.toContain(privateDiagnostic);
-		const reopened = SessionManager.open(sessionManager.getSessionFile()!);
+		const reopened = await SessionManager.open(sessionManager.getSessionRef()!);
 		expect(getReviewRun(reopened, "review:remote-provider-failure")).toMatchObject({
 			status: "failed",
-			errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE,
+			errorMessage: expect.stringContaining("Review discovery model request failed"),
 		});
 		expect(JSON.stringify(getReviewRun(reopened, "review:remote-provider-failure"))).not.toContain(privateDiagnostic);
 
@@ -890,7 +1887,10 @@ describe("review pipeline", () => {
 			settingsManager: harness.settingsManager,
 		});
 		snapshots.splice(snapshots.indexOf(localSnapshot), 1);
-		expect(localOutcome).toMatchObject({ status: "failed", errorMessage: privateDiagnostic });
+		expect(localOutcome).toMatchObject({
+			status: "failed",
+			errorMessage: expect.stringContaining("Review discovery model request failed"),
+		});
 	});
 
 	it("does not credit complete discovery coverage to a verifier that inspects nothing", async () => {
@@ -1045,7 +2045,11 @@ describe("review pipeline", () => {
 	});
 
 	it("does not retain stale prior anchors for files re-reviewed incrementally", async () => {
-		const harness = await createHarness();
+		vi.stubEnv("VOLT_BACKGROUND_JOB_DIAGNOSTICS", "1");
+		// Runtime diagnostics belong to host state, not the repository being reviewed.
+		const agentDir = mkdtempSync(join(tmpdir(), "volt-review-agent-"));
+		onTestFinished(() => rm(agentDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+		const harness = await createHarness({ agentDir });
 		harnesses.push(harness);
 		const sessionManager = harness.session.sessionManager;
 		if (!sessionManager) throw new Error("Expected the harness session to have durable state");
@@ -1082,7 +2086,7 @@ describe("review pipeline", () => {
 				},
 			},
 			cwd: harness.tempDir,
-			agentDir: harness.tempDir,
+			agentDir,
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
@@ -1092,6 +2096,8 @@ describe("review pipeline", () => {
 		expect(priorOutcome.status).toBe("completed");
 		if (priorOutcome.status !== "completed") throw new Error(`Prior review ended with ${priorOutcome.status}`);
 		const priorFinding = priorOutcome.parsed.findings[0]!;
+		expect(readdirSync(join(agentDir, "background-job-diagnostics")).length).toBeGreaterThan(0);
+		expect(existsSync(join(harness.tempDir, "background-job-diagnostics"))).toBe(false);
 
 		writeFileSync(
 			join(harness.tempDir, "src", "value.ts"),
@@ -1132,7 +2138,7 @@ describe("review pipeline", () => {
 		const currentOutcome = await executeReviewWorkflow({
 			prepared,
 			cwd: harness.tempDir,
-			agentDir: harness.tempDir,
+			agentDir,
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
@@ -1155,8 +2161,8 @@ describe("review pipeline", () => {
 		harnesses.push(harness);
 		const snapshot = await createSnapshotRepository(harness);
 		snapshots.push(snapshot);
-		const originManager = SessionManager.create(harness.tempDir, join(harness.tempDir, "origin-sessions"));
-		const originFile = originManager.getSessionFile()!;
+		const originManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "origin-sessions"));
+		const originRef = originManager.getSessionRef()!;
 		const originalMaterialize = originManager.materialize.bind(originManager);
 		let markMaterializeStarted!: () => void;
 		const materializeStarted = new Promise<void>((resolve) => {
@@ -1167,6 +2173,11 @@ describe("review pipeline", () => {
 			releaseMaterialize = resolve;
 		});
 		vi.spyOn(originManager, "materialize").mockImplementation(async () => {
+			// Initial accounting is durable before inference; race only the terminal commit.
+			if (getReviewRun(originManager, "review:durable-origin")?.status === "unfinished") {
+				await originalMaterialize();
+				return;
+			}
 			markMaterializeStarted();
 			await materializeGate;
 			await originalMaterialize();
@@ -1226,7 +2237,7 @@ describe("review pipeline", () => {
 		await materializeStarted;
 		try {
 			expect(settled).toBe(false);
-			expect(existsSync(originFile)).toBe(false);
+			expect(originManager.getSessionRef()).toEqual(originRef);
 			manager.cancel(workflowId);
 		} finally {
 			releaseMaterialize();
@@ -1243,7 +2254,7 @@ describe("review pipeline", () => {
 			status: "completed",
 			message: expect.stringContaining("Review incomplete"),
 		});
-		const reopened = SessionManager.open(originFile);
+		const reopened = await SessionManager.open(originRef);
 		expect(getReviewRun(reopened, workflowId)).toMatchObject({
 			runId: workflowId,
 			status: "incomplete",
@@ -1349,9 +2360,25 @@ describe("review presentation and repository helpers", () => {
 			overallCorrectness: "incorrect" as const,
 			overallExplanation: "A verified issue remains.",
 		};
-		const text = formatReviewForNewSession({ description: "the change", diffCommand: "git diff base..head" }, parsed);
+		const record: ReviewRunRecord = {
+			schemaVersion: 1,
+			runId: "review:format",
+			workflowAction: "review.branch",
+			status: "completed",
+			startedAt: 1,
+			endedAt: 2,
+			target: {
+				description: "the change",
+				diffCommand: "git diff base..head",
+				identity: { kind: "branch", baseTree: "b".repeat(40), headTree: "h".repeat(40) },
+				files: [],
+			},
+			options: DEFAULT_REVIEW_RUN_CONTROLS,
+			result: parsed,
+		};
+		const text = createReviewSeedMessage(record).content;
 		expect(text).toContain("finding-1");
-		expect(text).toContain("src/value.ts:2-2, head");
+		expect(text).toContain("src/value\\.ts:2-2, head");
 	});
 
 	it("lists likely base branches and recent commits", async () => {
@@ -1365,9 +2392,20 @@ describe("review presentation and repository helpers", () => {
 			git(harness.tempDir, "commit", "-m", "initial value");
 			git(harness.tempDir, "branch", "develop");
 			expect(await listBaseBranches(harness.tempDir)).toEqual(["main", "develop"]);
+
+			const remote = join(harness.tempDir, "remote.git");
+			mkdirSync(remote);
+			git(remote, "init", "--bare", "--initial-branch=main");
+			git(harness.tempDir, "remote", "add", "origin", remote);
+			git(harness.tempDir, "branch", "remote-only");
+			git(harness.tempDir, "push", "-u", "origin", "main");
+			git(harness.tempDir, "push", "origin", "develop", "remote-only");
+			git(harness.tempDir, "branch", "-D", "remote-only");
+			expect(await listBaseBranches(harness.tempDir)).toEqual(["main", "develop", "origin/remote-only"]);
 			expect(await listRecentCommits(harness.tempDir, 1)).toMatchObject([{ subject: "initial value" }]);
 		} finally {
-			harness.cleanup();
+			// Drain background Git/session shutdown before removing the Windows fixture.
+			await harness.cleanupAsync();
 		}
 	});
 

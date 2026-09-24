@@ -47,11 +47,11 @@ export interface IrohRemoteConversationHandshakeMetadata {
 }
 
 export interface IrohRemoteWorkspaceDiscoveryTarget {
-	purpose: "list_sessions" | "agent_options";
+	purpose: "list_sessions" | "agent_options" | "session_contexts" | "review";
 }
 
 export interface IrohRemoteWorkspaceManagementTarget {
-	purpose: "unregister_workspace" | "manage_worktrees";
+	purpose: "unregister_workspace" | "manage_worktrees" | "list_workspace_directories";
 }
 
 export interface IrohRemoteHostHandshakeMetadata {
@@ -512,7 +512,12 @@ function parseWorkspaceDiscoveryTarget(value: unknown): IrohRemoteWorkspaceDisco
 		"handshake workspaceDiscovery purpose",
 		"invalid_conversation_target",
 	);
-	if (purpose !== "list_sessions" && purpose !== "agent_options") {
+	if (
+		purpose !== "list_sessions" &&
+		purpose !== "agent_options" &&
+		purpose !== "session_contexts" &&
+		purpose !== "review"
+	) {
 		throw new IrohRemoteHandshakeError("invalid_conversation_target", "unsupported workspaceDiscovery purpose");
 	}
 	return { purpose };
@@ -526,7 +531,11 @@ function parseWorkspaceManagementTarget(value: unknown): IrohRemoteWorkspaceMana
 		"handshake workspaceManagement purpose",
 		"invalid_conversation_target",
 	);
-	if (purpose !== "unregister_workspace" && purpose !== "manage_worktrees") {
+	if (
+		purpose !== "unregister_workspace" &&
+		purpose !== "manage_worktrees" &&
+		purpose !== "list_workspace_directories"
+	) {
 		throw new IrohRemoteHandshakeError("invalid_conversation_target", "unsupported workspaceManagement purpose");
 	}
 	return { purpose };
@@ -886,7 +895,12 @@ function expectOptionalWorktreeIdForResponse(value: unknown, label: string): str
 function parseWorkspaceDiscoveryResponseMetadata(value: unknown): IrohRemoteWorkspaceDiscoveryTarget {
 	const metadata = expectRecord(value, "handshake response workspaceDiscovery");
 	expectKnownResponseFields(metadata, "handshake response workspaceDiscovery", ["purpose"]);
-	if (metadata.purpose !== "list_sessions" && metadata.purpose !== "agent_options") {
+	if (
+		metadata.purpose !== "list_sessions" &&
+		metadata.purpose !== "agent_options" &&
+		metadata.purpose !== "session_contexts" &&
+		metadata.purpose !== "review"
+	) {
 		throw new Error("handshake response workspaceDiscovery purpose must be supported");
 	}
 	return { purpose: metadata.purpose };
@@ -895,7 +909,11 @@ function parseWorkspaceDiscoveryResponseMetadata(value: unknown): IrohRemoteWork
 function parseWorkspaceManagementResponseMetadata(value: unknown): IrohRemoteWorkspaceManagementTarget {
 	const metadata = expectRecord(value, "handshake response workspaceManagement");
 	expectKnownResponseFields(metadata, "handshake response workspaceManagement", ["purpose"]);
-	if (metadata.purpose !== "unregister_workspace" && metadata.purpose !== "manage_worktrees") {
+	if (
+		metadata.purpose !== "unregister_workspace" &&
+		metadata.purpose !== "manage_worktrees" &&
+		metadata.purpose !== "list_workspace_directories"
+	) {
 		throw new Error("handshake response workspaceManagement purpose must be a supported management purpose");
 	}
 	return { purpose: metadata.purpose };

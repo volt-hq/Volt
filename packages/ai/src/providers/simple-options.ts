@@ -5,6 +5,7 @@ export function buildBaseOptions(_model: Model<Api>, options?: SimpleStreamOptio
 		temperature: options?.temperature,
 		maxTokens: options?.maxTokens,
 		signal: options?.signal,
+		toolArgumentLimits: options?.toolArgumentLimits,
 		apiKey: apiKey || options?.apiKey,
 		transport: options?.transport,
 		cacheRetention: options?.cacheRetention,

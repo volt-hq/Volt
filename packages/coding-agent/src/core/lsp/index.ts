@@ -1,4 +1,10 @@
-export { LspClient, type LspClientOptions, type LspDiagnostic } from "./client.ts";
+export { LspClient, type LspClientOptions, type LspDiagnostic, type LspDiagnosticResult } from "./client.ts";
+export {
+	type LspLaunchDescriptor,
+	type LspLaunchSource,
+	type ResolveLspLaunchOptions,
+	resolveLspLaunch,
+} from "./command-resolver.ts";
 export {
 	installHintForCommand,
 	installRecipeForCommand,
@@ -20,6 +26,16 @@ export {
 	type LspServerStatus,
 	runDefaultLspInstallCommand,
 } from "./manager.ts";
+export {
+	type LspDiagnosticSource,
+	type LspFreshness,
+	type LspOperationMetadata,
+	type LspOutcome,
+	type LspProjectContext,
+	type LspResult,
+	lspResult,
+	lspSucceeded,
+} from "./outcome.ts";
 export { type LspTraceDirection, LspTracer } from "./trace.ts";
 export {
 	applyTextEdits,

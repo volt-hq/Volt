@@ -17,9 +17,11 @@ import {
 	RPC_UI_ACTION_STATE_TYPE_MAX_CHARS,
 	RPC_UI_ACTION_STATE_VALUE_MAX_CHARS,
 } from "../wire-limits.ts";
+import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
 import { RpcConversationDeliveryPositionSchema } from "./conversation.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
+import { RpcPromptCacheStatusSchema } from "./session.ts";
 
 // ============================================================================
 // Host actions
@@ -231,6 +233,16 @@ export const RpcSubagentDisposedEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** Agent provider run started with a host-authoritative presentation timestamp. */
+export const RpcAgentStartEventSchema = Type.Object(
+	{
+		type: Type.Literal("agent_start"),
+		startedAt: Type.Number(),
+		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
+	},
+	{ additionalProperties: false },
+);
+
 /** Model catalog changed; clients re-fetch get_available_models. */
 export const RpcModelsChangedEventSchema = Type.Object(
 	{ type: Type.Literal("models_changed") },
@@ -242,6 +254,26 @@ export const RpcGitContextChangedEventSchema = Type.Object(
 	{
 		type: Type.Literal("git_context_changed"),
 		gitContext: Type.Union([RpcGitContextSchema, Type.Null()]),
+		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
+	},
+	{ additionalProperties: false },
+);
+
+/** Full replacement of the current model's prompt-cache status after a turn settles, compaction, or a model change. */
+export const RpcPromptCacheChangedEventSchema = Type.Object(
+	{
+		type: Type.Literal("prompt_cache_changed"),
+		promptCache: Type.Union([RpcPromptCacheStatusSchema, Type.Null()]),
+		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
+	},
+	{ additionalProperties: false },
+);
+
+/** Full metadata replacement and invalidation of cached job output, including while the agent is idle. */
+export const RpcBackgroundJobsChangedEventSchema = Type.Object(
+	{
+		type: Type.Literal("background_jobs_changed"),
+		jobs: RpcBackgroundJobsSchema,
 		delivery: Type.Optional(RpcConversationDeliveryPositionSchema),
 	},
 	{ additionalProperties: false },

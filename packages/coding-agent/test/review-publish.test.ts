@@ -2,6 +2,7 @@ import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import type { CodeHostProvider, ReviewCodeHostPublishRequest } from "../src/core/code-host/index.ts";
 import { publishReviewRun } from "../src/core/review-publish.ts";
 import type { ReviewRunRecord } from "../src/core/review-state.ts";
 
@@ -21,10 +22,11 @@ function reviewRun(headRefOid = "head-oid"): ReviewRunRecord {
 				baseTree: "base-tree",
 				headTree: "head-tree",
 				pullRequest: {
+					providerId: "github",
 					number: 7,
 					title: "Fix values",
 					body: "Body",
-					url: "https://example.test/pr/7",
+					url: "https://github.com/volt-hq/Volt/pull/7",
 					baseRefName: "main",
 					headRefName: "feature",
 					baseRefOid: "base-oid",
@@ -216,5 +218,49 @@ switch (args.slice(0, 2).join(" ")) {
 		const branch = reviewRun();
 		branch.target.identity = { kind: "branch", baseTree: "base", headTree: "head" };
 		await expect(publishReviewRun(fixture.cwd, branch)).rejects.toThrow(/Only pull request/);
+	});
+
+	it("publishes normalized review data through an injected code-host provider", async () => {
+		const run = reviewRun();
+		if (!run.target.identity.pullRequest) throw new Error("Expected a PR review fixture");
+		run.target.identity.pullRequest.providerId = "test-host";
+		let verifiedHead: string | undefined;
+		let publishRequest: ReviewCodeHostPublishRequest | undefined;
+		const provider: CodeHostProvider = {
+			id: "test-host",
+			displayName: "Test Host",
+			probeCurrentPullRequest: async () => undefined,
+			resolvePullRequestCheckout: async () => ({ ok: false, error: "unused" }),
+			capturePullRequestContext: async () => ({ ok: false, error: "unused" }),
+			verifyPullRequestHead: async (_cwd, pullRequest) => {
+				verifiedHead = pullRequest.headRefOid;
+			},
+			publishPullRequestReview: async (request) => {
+				publishRequest = request;
+				return { reviewId: 101, url: "https://example.test/reviews/101" };
+			},
+		};
+
+		const published = await publishReviewRun("/workspace", run, provider);
+
+		expect(verifiedHead).toBe("head-oid");
+		expect(publishRequest).toMatchObject({
+			cwd: "/workspace",
+			pullRequest: { providerId: "test-host", number: 7 },
+			comments: [
+				{
+					path: "src/value.ts",
+					side: "head",
+					startLine: 2,
+					endLine: 2,
+				},
+			],
+		});
+		expect(published).toEqual({
+			reviewId: 101,
+			url: "https://example.test/reviews/101",
+			inlineFindingIds: ["finding-inline"],
+			summaryOnlyFindingIds: ["finding-summary"],
+		});
 	});
 });

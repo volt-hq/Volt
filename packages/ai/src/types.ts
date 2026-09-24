@@ -108,10 +108,34 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
+/** Provider-owned evidence for the payload supplied to onPayload, before caller replacements. */
+export interface ProviderPayloadMetadata {
+	/**
+	 * Zero-based indices in the original Context.messages of tool results represented
+	 * in this request. Record these when serializing results, after replay filtering.
+	 * Preserve source indices through ID normalization; never include synthetic results.
+	 * This metadata stays local and does not prove request success or survive payload changes.
+	 */
+	readonly toolResultMessageIndices: readonly number[];
+}
+
+/** Limits apply only while the model prepares tool arguments, before execution. */
+export interface ToolArgumentLimits {
+	/** Maximum UTF-8 argument bytes per call. Default: 1 MiB. */
+	maxBytes?: number;
+	/** Maximum aggregate argument bytes across a response. Default: 8 MiB. */
+	maxTotalBytes?: number;
+	/** Maximum time without new argument bytes per call. Default: 5 minutes. */
+	maxIdleMs?: number;
+	/** Optional absolute preparation deadline per call, unaffected by incoming bytes. No default. */
+	maxDurationMs?: number;
+}
+
 export interface StreamOptions {
 	temperature?: number;
 	maxTokens?: number;
 	signal?: AbortSignal;
+	toolArgumentLimits?: ToolArgumentLimits;
 	apiKey?: string;
 	/**
 	 * Preferred transport for providers that support multiple transports.
@@ -131,9 +155,14 @@ export interface StreamOptions {
 	sessionId?: string;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
-	 * Return undefined to keep the payload unchanged.
+	 * Return undefined to keep the payload unchanged. Metadata identifies tool results
+	 * included by the serializer; absent metadata provides no delivery evidence.
 	 */
-	onPayload?: (payload: unknown, model: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
+	onPayload?: (
+		payload: unknown,
+		model: Model<Api>,
+		metadata?: ProviderPayloadMetadata,
+	) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback invoked after an HTTP response is received and before
 	 * its body stream is consumed.
@@ -252,6 +281,43 @@ export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOption
 	options?: TOptions,
 ) => AssistantMessageEventStream;
 
+/**
+ * Outcome of a prompt-cache refresh. A refresh replays the exact request a provider would
+ * build for `streamSimple(model, context, options)` without generating output, so a
+ * provider cache that renews on hit keeps the prefix warm.
+ */
+export type PromptCacheRefreshResult =
+	| {
+			status: "refreshed";
+			/** Provider-reported usage, priced with the model's cost table. */
+			usage: Usage;
+	  }
+	| {
+			/** This request shape cannot be refreshed without output or without changing the cached prefix. */
+			status: "unsupported";
+			reason: string;
+	  };
+
+// Contract:
+// - Build the same payload as `streamSimple` for these arguments, including `onPayload`.
+// - Never fall back to a normal inference request; return "unsupported" instead.
+// - Throw on transport, authentication, or provider errors.
+export type PromptCacheRefreshFunction<TApi extends Api = Api> = (
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+) => Promise<PromptCacheRefreshResult>;
+
+/**
+ * Whether the provider's `PromptCacheRefreshFunction` can refresh a `streamSimple` request with these
+ * options, decided without sending anything. It may still report "unsupported" when payload hooks
+ * change the request.
+ */
+export type PromptCacheRefreshCheck<TApi extends Api = Api> = (
+	model: Model<TApi>,
+	options?: SimpleStreamOptions,
+) => boolean;
+
 export type ImagesFunction<TApi extends ImagesApi = ImagesApi, TOptions extends ImagesOptions = ImagesOptions> = (
 	model: ImagesModel<TApi>,
 	context: ImagesContext,
@@ -295,6 +361,11 @@ export interface ToolCall {
 }
 
 export interface Usage {
+	/**
+	 * Provider usage evidence: final reported counts, interim counts, or no reported counts.
+	 * Omitted for custom or historical usage of unknown availability; never infer from zeroes.
+	 */
+	availability?: "complete" | "partial" | "unavailable";
 	input: number;
 	output: number;
 	cacheRead: number;

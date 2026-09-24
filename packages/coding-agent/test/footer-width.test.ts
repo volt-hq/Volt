@@ -1,7 +1,8 @@
 import { visibleWidth } from "@hansjm10/volt-tui";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
+import type { PromptCacheStatus } from "../src/core/prompt-cache-status.ts";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -27,6 +28,7 @@ function createSession(options: {
 	contextWindow?: number;
 	contextPercent?: number | null;
 	contextWarningTokens?: number;
+	promptCache?: PromptCacheStatus;
 }): AgentSession {
 	const usage = options.usage;
 	const entries =
@@ -65,6 +67,7 @@ function createSession(options: {
 			contextWindow,
 			percent: options.contextPercent === undefined ? 12.3 : options.contextPercent,
 		}),
+		getPromptCacheStatus: () => options.promptCache,
 		modelRegistry: {
 			isUsingOAuth: () => options.usingSubscription ?? false,
 		},
@@ -322,6 +325,132 @@ describe("FooterComponent width handling", () => {
 		expect(restoredLines[0]).toContain("parent-model · low");
 		expect(restoredLines[1]).toContain("context 12.3%/200k auto");
 		expect(restoredLines[1]).toContain("$0.100");
+	});
+
+	describe("prompt cache status", () => {
+		const now = Date.UTC(2026, 8, 23, 15, 0, 0);
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		function renderStats(footer: FooterComponent): string {
+			return stripAnsi(footer.render(160).lines[1]);
+		}
+
+		it("counts down the documented retention window", () => {
+			vi.useFakeTimers({ now });
+			const footer = new FooterComponent(
+				createSession({
+					sessionName: "",
+					promptCache: { kind: "retained", lastRequestAt: now - 1_000, expiresAt: now + 299_000 },
+				}),
+				createFooterData(1),
+			);
+
+			expect(renderStats(footer)).toContain("cache 5m");
+			vi.setSystemTime(now + 60_000);
+			expect(renderStats(footer)).toContain("cache 4m");
+			vi.setSystemTime(now + 299_000);
+			expect(renderStats(footer)).toContain("cache expired");
+		});
+
+		it("shows the idle keepalive window, then the expiry countdown", () => {
+			vi.useFakeTimers({ now });
+			const footer = new FooterComponent(
+				createSession({
+					sessionName: "",
+					promptCache: {
+						kind: "retained",
+						lastRequestAt: now,
+						expiresAt: now + 300_000,
+						keepAliveUntil: now + 720_000,
+					},
+				}),
+				createFooterData(1),
+			);
+
+			expect(renderStats(footer)).toContain("cache warm 12m");
+			vi.setSystemTime(now + 240_000);
+			expect(renderStats(footer)).toContain("cache warm 8m");
+			vi.setSystemTime(now + 720_000);
+			expect(renderStats(footer)).toContain("cache expired");
+		});
+
+		it("shows hours for long retention windows", () => {
+			vi.useFakeTimers({ now });
+			const footer = new FooterComponent(
+				createSession({
+					sessionName: "",
+					promptCache: { kind: "retained", lastRequestAt: now, expiresAt: now + 86_400_000 },
+				}),
+				createFooterData(1),
+			);
+
+			expect(renderStats(footer)).toContain("cache 24h");
+		});
+
+		it("marks a cold cache after a model change", () => {
+			const footer = new FooterComponent(
+				createSession({ sessionName: "", promptCache: { kind: "model_changed" } }),
+				createFooterData(1),
+			);
+
+			expect(footer.render(160).lines[1]).toContain(theme.fg("warning", "cache cold"));
+		});
+
+		it("omits the status without a published window or while showing workflow usage", () => {
+			vi.useFakeTimers({ now });
+			const unknown = new FooterComponent(
+				createSession({ sessionName: "", promptCache: { kind: "retained", lastRequestAt: now } }),
+				createFooterData(1),
+			);
+			expect(renderStats(unknown)).not.toContain("cache");
+
+			const session = createSession({
+				sessionName: "",
+				promptCache: { kind: "retained", lastRequestAt: now, expiresAt: now + 300_000 },
+			});
+			const transient = new FooterComponent(session, createFooterData(1));
+			transient.setTransientUsage({
+				model: session.state.model!,
+				thinkingLevel: "off",
+				fastModeEnabled: false,
+				contextUsage: { tokens: 1_000, contextWindow: 200_000, percent: 0.5 },
+				totals: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: 0 },
+				latestCacheHitRate: undefined,
+			});
+			expect(renderStats(transient)).not.toContain("cache");
+		});
+
+		it("requests a render when the countdown changes while idle", () => {
+			vi.useFakeTimers({ now });
+			const requestRender = vi.fn();
+			const footer = new FooterComponent(
+				createSession({
+					sessionName: "",
+					promptCache: { kind: "retained", lastRequestAt: now - 1_000, expiresAt: now + 61_000 },
+				}),
+				createFooterData(1),
+				requestRender,
+			);
+
+			expect(renderStats(footer)).toContain("cache 2m");
+			footer.render(160);
+			vi.advanceTimersByTime(999);
+			expect(requestRender).not.toHaveBeenCalled();
+			vi.advanceTimersByTime(1);
+			expect(requestRender).toHaveBeenCalledTimes(1);
+
+			expect(renderStats(footer)).toContain("cache 1m");
+			vi.advanceTimersByTime(60_000);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+			expect(renderStats(footer)).toContain("cache expired");
+			vi.advanceTimersByTime(600_000);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+
+			footer.dispose();
+		});
 	});
 
 	it("warns at the configured absolute context threshold", () => {

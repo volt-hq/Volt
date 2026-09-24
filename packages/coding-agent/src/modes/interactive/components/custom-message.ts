@@ -1,9 +1,22 @@
 import type { JsonValue, TextContent } from "@hansjm10/volt-ai";
 import type { Component } from "@hansjm10/volt-tui";
-import { Container, Markdown, type MarkdownTheme, Spacer, Text } from "@hansjm10/volt-tui";
+import {
+	Container,
+	concatRenderFrames,
+	createRenderFrame,
+	Markdown,
+	type MarkdownTheme,
+	type RenderFrame,
+	Spacer,
+	Text,
+} from "@hansjm10/volt-tui";
+import { BACKGROUND_JOB_NOTIFICATION_TYPE } from "../../../core/background-jobs.ts";
 import type { MessageRenderer } from "../../../core/extensions/types.ts";
 import type { CustomMessage } from "../../../core/messages.ts";
+import { formatReviewUsage } from "../../../core/review-presentation.ts";
 import { getMarkdownTheme, theme } from "../../../core/theme/runtime.ts";
+import { renderBackgroundJobNotification } from "./background-job-notification.ts";
+import { keyDisplayText } from "./keybinding-hints.ts";
 
 /**
  * Component that renders a custom message entry from extensions.
@@ -16,16 +29,20 @@ export class CustomMessageComponent extends Container {
 	private customComponent?: Component;
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
+	private readonly hasBackgroundJobCard?: (id: string) => boolean;
+	private backgroundJobNotification?: Component;
 
 	constructor(
 		message: CustomMessage<JsonValue>,
 		customRenderer?: MessageRenderer,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
+		hasBackgroundJobCard?: (id: string) => boolean,
 	) {
 		super();
 		this.message = message;
 		this.customRenderer = customRenderer;
 		this.markdownTheme = markdownTheme;
+		this.hasBackgroundJobCard = hasBackgroundJobCard;
 
 		this.addChild(new Spacer(1));
 
@@ -46,7 +63,16 @@ export class CustomMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	override render(width: number): RenderFrame {
+		if (this.backgroundJobNotification) {
+			const frame = this.backgroundJobNotification.render(width);
+			return frame.lines.length ? concatRenderFrames([createRenderFrame([""]), frame]) : frame;
+		}
+		return super.render(width);
+	}
+
 	private rebuild(): void {
+		this.backgroundJobNotification = undefined;
 		// Remove previous content component
 		if (this.customComponent) {
 			this.removeChild(this.customComponent);
@@ -69,15 +95,40 @@ export class CustomMessageComponent extends Container {
 			}
 		}
 
-		// Default rendering uses a compact label and unboxed prose.
 		this.addChild(this.defaultContainer);
 		this.defaultContainer.clear();
 
-		const label = theme.bg(
-			"customMessageBg",
-			theme.fg("customMessageLabel", theme.bold(` ${this.message.customType} `)),
-		);
-		this.defaultContainer.addChild(new Text(label, 1, 0));
+		const details = this.message.details;
+		if (this.message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE) {
+			const notification = renderBackgroundJobNotification(
+				details,
+				this._expanded,
+				theme,
+				this.hasBackgroundJobCard,
+			);
+			if (notification) {
+				this.backgroundJobNotification = notification;
+				this.defaultContainer.addChild(notification);
+				return;
+			}
+		}
+		const reviewSummary =
+			this.message.customType === "review" &&
+			typeof details === "object" &&
+			details !== null &&
+			!Array.isArray(details) &&
+			typeof details.summary === "string"
+				? details.summary
+				: undefined;
+
+		// Generic messages keep their compact label and unboxed prose.
+		if (reviewSummary === undefined) {
+			const label = theme.bg(
+				"customMessageBg",
+				theme.fg("customMessageLabel", theme.bold(` ${this.message.customType} `)),
+			);
+			this.defaultContainer.addChild(new Text(label, 1, 0));
+		}
 
 		// Extract text content
 		let text: string;
@@ -91,9 +142,37 @@ export class CustomMessageComponent extends Container {
 		}
 
 		this.defaultContainer.addChild(
-			new Markdown(text, 1, 0, this.markdownTheme, {
+			new Markdown(reviewSummary !== undefined && !this._expanded ? reviewSummary : text, 1, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);
+
+		if (reviewSummary !== undefined) {
+			this.defaultContainer.addChild(new Spacer(1));
+			this.defaultContainer.addChild(
+				new Markdown(
+					formatReviewUsage(
+						typeof details === "object" && details !== null && !Array.isArray(details)
+							? details.usage
+							: undefined,
+						this._expanded,
+					),
+					1,
+					0,
+					this.markdownTheme,
+				),
+			);
+			const expandKey = keyDisplayText("app.tools.expand");
+			if (expandKey) {
+				this.defaultContainer.addChild(new Spacer(1));
+				this.defaultContainer.addChild(
+					new Text(
+						theme.fg("dim", `${expandKey} to ${this._expanded ? "collapse" : "expand"} review details`),
+						1,
+						0,
+					),
+				);
+			}
+		}
 	}
 }

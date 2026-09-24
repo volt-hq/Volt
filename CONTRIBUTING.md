@@ -47,6 +47,26 @@ npm run check
 
 Both must pass.
 
+The AI, agent, and coding-agent Vitest configs default to two workers locally to
+reduce contention with the editor, daemon, and other worktrees. Override a
+workspace run with the standard Vitest option:
+
+```bash
+./test.sh test --workspace packages/coding-agent -- --maxWorkers=1
+```
+
+For a full run, set both Vitest pool limits:
+
+```bash
+VITEST_MAX_FORKS=1 VITEST_MAX_THREADS=1 ./test.sh
+```
+
+Explicit CLI and pool limits are preserved. Vitest's pool-specific environment
+variables take precedence over `--maxWorkers` when both are set. CI retains its
+existing worker limits and shards, and Node's built-in test runner (including
+the TUI suite) keeps its existing concurrency. Limits are per invocation, so
+avoid running several full suites simultaneously on the same host.
+
 Do not edit `packages/coding-agent/CHANGELOG.md` directly. User-visible changes add a changeset fragment in `.changeset/` instead (see `.changeset/README.md`); release tooling generates the changelog from those fragments.
 
 If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required tests.

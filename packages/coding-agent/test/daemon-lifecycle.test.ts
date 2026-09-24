@@ -251,7 +251,7 @@ describe("voltd lifecycle", () => {
 			},
 		];
 		const probe = vi.fn(async () => probes.shift()!);
-		const spawn = vi.fn(async () => ({ ok: true, pid: 123, socketPath: freshSocketPath }));
+		const spawn = vi.fn(async () => ({ ok: true as const, pid: 123, socketPath: freshSocketPath }));
 
 		const result = await ensureDaemonRunning(agentDir, {
 			probeDaemon: probe,
@@ -286,6 +286,13 @@ describe("voltd lifecycle", () => {
 			client.request({ type: "viewer_subscribe", viewerFeedId: "vf-nope" }),
 		]);
 		expect(statusResponse.type).toBe("status_result");
+		if (statusResponse.type === "status_result") {
+			expect(statusResponse.remoteTransport).toEqual({
+				state: "unavailable",
+				reasonCode: "extension_missing",
+				message: "Phone transport is not enabled in this daemon.",
+			});
+		}
 		expect(clientsResponse.type).toBe("clients_result");
 		expect(unsupported.type).toBe("error");
 		await client.request({ type: "shutdown" });
@@ -359,8 +366,11 @@ describe("voltd lifecycle", () => {
 		});
 		let extensionQuiesceStarted = false;
 		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
-			() => ({
+			(services) => ({
 				async quiesce() {
+					// Socket readiness does not imply the startup audit write is durable.
+					// Settle queued writes before the test inspects the on-disk audit.
+					await services.auditLogger.flush();
 					extensionQuiesceStarted = true;
 					await extensionGate;
 				},
@@ -401,6 +411,7 @@ describe("voltd lifecycle", () => {
 				1,
 			);
 			const auditDuringQuiesce = readFileSync(paths.auditPath, "utf8");
+			expect(auditDuringQuiesce).toContain('"type":"daemon_started"');
 			expect(auditDuringQuiesce).not.toContain('"type":"workspace_registered"');
 			expect(auditDuringQuiesce).not.toContain('"type":"client_access_updated"');
 
@@ -592,6 +603,8 @@ describe("voltd lifecycle", () => {
 							clientNodeId: "n-phone",
 							workspaceName: "ws",
 							workspacePath: "/tmp/ws",
+							workspaceNames: ["ws"],
+							workspaces: [{ name: "ws", status: "available" }],
 							allowedTools: "",
 							rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 						},

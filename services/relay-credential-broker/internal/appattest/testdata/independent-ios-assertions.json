@@ -1,0 +1,34 @@
+[
+  {
+    "name": "iOS14_3",
+    "appID": "6MURL8TA57.de.vincent-haupert.apple-appattest-poc",
+    "publicKey": "BP6ldVTAgdcWWiLKLFL3RpFhQd2rZgvnBTojHh/YPSALSV6zuFvH/Q5WNe6eo7HE0sx5apu+jz2+OQm8RL3AB54=",
+    "clientData": "d3VyemVscGZyb3Bm",
+    "assertion": "omlzaWduYXR1cmVYSDBGAiEAq+6JbxdXqVkZjW2QD3L6/GKxiUcq12AG3AWa6hgfi30CIQCFS+hPRqaXrwst0r8C4wZk8q3wZihDgms062UU22ZSzXFhdXRoZW50aWNhdG9yRGF0YVglRWUS6n4mlHark+G3lxaFWS/3P4lKwOwv1UgIoIv7bI9AAAAAAQ==",
+    "counter": 1
+  },
+  {
+    "name": "iOS14_2",
+    "appID": "6MURL8TA57.de.vincent-haupert.apple-appattest-poc",
+    "publicKey": "BLqK+9/4UD0ZwmKwKtnRtFQjVrmTPv8Upbby6NIFm1X/jm7mnsOI/OTgfugeMAs3EhSb0ErTVjLUZGxXn5pADQs=",
+    "clientData": "d3VyemVscGZyb3Bm",
+    "assertion": "omlzaWduYXR1cmVYRzBFAiAdvdCWW+rOQZ/eQcADpCr+C3we+CBM86HSetOIhDyaeQIhAJGsDKsAVbdnuirOSImzWRh9x6cpCkeAMfXtfnEfVD+RcWF1dGhlbnRpY2F0b3JEYXRhWCVFZRLqfiaUdquT4beXFoVZL/c/iUrA7C/VSAigi/tsj0AAAAAB",
+    "counter": 1
+  },
+  {
+    "name": "iOS14_2Beta2",
+    "appID": "6MURL8TA57.de.vincent-haupert.apple-appattest-poc",
+    "publicKey": "BGR4sZdcDYd1d1gI+eWJ5WvjRpI693MLELBVNM2P6w3j3y5m38Fxa6UUxnReNV1AASPCCHv3wJRtxYWCZTQE49c=",
+    "clientData": "d3VyemVscGZyb3Bm",
+    "assertion": "omlzaWduYXR1cmVYRzBFAiEAhQtHDG1oPHjYrozSUHw6t0ziip+GbeshA4ZHtOvtKhcCIDzpmh/alhC8u7tktid8O3yDGNwahzZDzcgsEh0o8Y3BcWF1dGhlbnRpY2F0b3JEYXRhWCVFZRLqfiaUdquT4beXFoVZL/c/iUrA7C/VSAigi/tsj0AAAAAB",
+    "counter": 1
+  },
+  {
+    "name": "iOS14_2Beta3",
+    "appID": "6MURL8TA57.de.vincent-haupert.apple-appattest-poc",
+    "publicKey": "BDYgb5BKRq7FC/GXp4e5zkNheh7XaZd88mZQQVNGsody8cLL8yhM6YgXLaFeUx2NgVkKZXRLhrh4UhrjMopPL6c=",
+    "clientData": "d3VyemVscGZyb3Bm",
+    "assertion": "omlzaWduYXR1cmVYRjBEAiBQVR7bEP0ZhcSuwoLPiJgxu2FgxV0Zytfh1NzoHV1tZgIgNJ8Plom3Wy4m2EoV7JMFgVm+Iao4KI2n6mpFHtVKBNNxYXV0aGVudGljYXRvckRhdGFYJUVlEup+JpR2q5Pht5cWhVkv9z+JSsDsL9VICKCL+2yPQAAAAAE=",
+    "counter": 1
+  }
+]

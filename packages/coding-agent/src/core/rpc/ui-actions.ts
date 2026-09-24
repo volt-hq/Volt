@@ -6,6 +6,7 @@ import { BUILTIN_HOST_ACTION_REGISTRY, type HostActionDescriptorContext } from "
 import type { PromptTemplate } from "../prompt-templates.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import { listBaseBranches } from "../review.ts";
+import type { SettingsManager } from "../settings-manager.ts";
 import type { Skill } from "../skills.ts";
 import type { SourceInfo } from "../source-info.ts";
 import type {
@@ -32,11 +33,13 @@ export interface UiActionDiscoverySession {
 		getRegisteredCommands(): ResolvedCommand[];
 	};
 	isBusy?: boolean;
+	hasBackgroundJobs?: boolean;
 	isCompacting?: boolean;
 	isStreaming?: boolean;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled?: boolean;
+	settingsManager?: SettingsManager;
 	promptTemplates: ReadonlyArray<PromptTemplate>;
 	resourceLoader: Pick<ResourceLoader, "getSkills">;
 	sessionManager: { getCwd(): string };
@@ -95,11 +98,13 @@ function createHostActionDescriptorContext(
 	return {
 		session: {
 			isBusy: session.isBusy ?? session.isStreaming ?? false,
+			hasBackgroundJobs: session.hasBackgroundJobs,
 			isCompacting: session.isCompacting ?? false,
 			isStreaming: session.isStreaming ?? false,
 			model: session.model,
 			thinkingLevel: session.thinkingLevel,
 			fastModeEnabled: session.fastModeEnabled,
+			settingsManager: session.settingsManager,
 		},
 		detachedReviews: options.detachedReviews,
 	};
@@ -248,8 +253,8 @@ export async function getUiActionCompletions(
 }
 
 /**
- * Serves the `gitBranches` completion source: candidate base branches from the
- * workspace (the same local + remote-tracking set as the TUI /review picker),
+ * Serves the `gitBranches` completion source: logical base branches from the
+ * workspace (the same collapsed local/upstream set as the TUI /review picker),
  * case-insensitively prefix-filtered and bounded.
  */
 async function getGitBranchCompletions(cwd: string, prefix: string): Promise<UiActionOptionDescriptor[]> {

@@ -228,6 +228,46 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--preparation-wait-ms flag", () => {
+		test("leaves the allowance unset by default", () => {
+			expect(parseArgs([]).preparationWaitMs).toBeUndefined();
+		});
+
+		test.each([0, 100, 800, 1000])("accepts %i ms in separate and equals forms", (wait) => {
+			for (const args of [["--preparation-wait-ms", String(wait)], [`--preparation-wait-ms=${wait}`]]) {
+				const result = parseArgs([...args, "--print", "hello"]);
+				expect(result.preparationWaitMs).toBe(wait);
+				expect(result.diagnostics).toEqual([]);
+				expect(result.unknownFlags.size).toBe(0);
+				expect(result.messages).toEqual(["hello"]);
+			}
+		});
+
+		test.each(["-1", "1001", "800.5", "1e3", "Infinity", "NaN", "", "hello", "9007199254740992"])(
+			"rejects invalid allowance %j",
+			(value) => {
+				for (const args of [["--preparation-wait-ms", value], [`--preparation-wait-ms=${value}`]]) {
+					const result = parseArgs(args);
+					expect(result.preparationWaitMs).toBeUndefined();
+					expect(result.diagnostics).toEqual([
+						{ type: "error", message: "--preparation-wait-ms must be an integer from 0 to 1000" },
+					]);
+				}
+			},
+		);
+
+		test.each([{ remaining: [] }, { remaining: ["--help"] }, { remaining: ["@prompt.txt"] }])(
+			"rejects a missing value without consuming $remaining",
+			({ remaining }) => {
+				const result = parseArgs(["--preparation-wait-ms", ...remaining]);
+				expect(result.diagnostics).toEqual([{ type: "error", message: "--preparation-wait-ms requires a value" }]);
+				expect(result.preparationWaitMs).toBeUndefined();
+				if (remaining[0] === "--help") expect(result.help).toBe(true);
+				if (remaining[0] === "@prompt.txt") expect(result.fileArgs).toEqual(["prompt.txt"]);
+			},
+		);
+	});
+
 	describe("--no-extensions flag", () => {
 		test("parses --no-extensions flag", () => {
 			const result = parseArgs(["--no-extensions"]);

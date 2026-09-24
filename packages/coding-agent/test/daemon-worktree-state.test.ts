@@ -59,11 +59,31 @@ describe("worktree state round-trips (all five enumeration sites)", () => {
 		expect(parsed.workspaceGenerationCounter).toBe(4);
 		expect(parsed.workspaceGenerations).toEqual([{ workspaceName: "ws", generation: 4 }]);
 
-		// Old state files never carried these keys: they must load cleanly with empty metadata.
+		// Old state files never carried these keys: empty state stays empty, while
+		// registered workspaces receive fresh authority generations on load.
 		const legacy = parseIrohRemoteHostState({ workspaces: [], clients: [] });
 		expect(legacy.worktrees).toEqual([]);
 		expect(legacy.workspaceGenerationCounter).toBe(0);
 		expect(legacy.workspaceGenerations).toEqual([]);
+
+		const repaired = parseIrohRemoteHostState({
+			workspaceGenerationCounter: 4,
+			workspaceGenerations: [
+				{ workspaceName: "retired", generation: 2 },
+				{ workspaceName: "current", generation: 4 },
+			],
+			workspaces: [
+				{ name: "current", path: "/tmp/current" },
+				{ name: "legacy", path: "/tmp/legacy" },
+			],
+			clients: [],
+		});
+		expect(repaired.workspaceGenerationCounter).toBe(5);
+		expect(repaired.workspaceGenerations).toEqual([
+			{ workspaceName: "retired", generation: 2 },
+			{ workspaceName: "current", generation: 4 },
+			{ workspaceName: "legacy", generation: 5 },
+		]);
 	});
 
 	it("rejects malformed worktree entries with the standard error shape", () => {
@@ -170,8 +190,8 @@ describe("worktree state round-trips (all five enumeration sites)", () => {
 		delete oldFile.workspaceGenerations;
 		expect(parseVoltdState(oldFile)).toMatchObject({
 			worktrees: [],
-			workspaceGenerationCounter: 0,
-			workspaceGenerations: [],
+			workspaceGenerationCounter: 1,
+			workspaceGenerations: [{ workspaceName: "ws", generation: 1 }],
 		});
 	});
 });
@@ -209,14 +229,17 @@ describe("worktreeCleanup settings (§5.3)", () => {
 		}
 	});
 
-	it("resolveWorktreeCleanupPolicy applies defaults: retention off, pruneOnStart on", () => {
-		expect(resolveWorktreeCleanupPolicy({})).toEqual({ retention: undefined, pruneOnStart: true });
+	it("resolveWorktreeCleanupPolicy defaults to one-hour retention and startup reconciliation", () => {
+		expect(resolveWorktreeCleanupPolicy({})).toEqual({
+			retention: { enabled: true, ttlMs: 3_600_000 },
+			pruneOnStart: true,
+		});
 		expect(resolveWorktreeCleanupPolicy({ worktreeCleanup: {} })).toEqual({
-			retention: undefined,
+			retention: { enabled: true, ttlMs: 3_600_000 },
 			pruneOnStart: true,
 		});
 		expect(resolveWorktreeCleanupPolicy({ worktreeCleanup: { pruneOnStart: false } })).toEqual({
-			retention: undefined,
+			retention: { enabled: true, ttlMs: 3_600_000 },
 			pruneOnStart: false,
 		});
 		expect(resolveWorktreeCleanupPolicy({ worktreeCleanup: { retention: { enabled: true, ttlMs: 1000 } } })).toEqual({
@@ -379,7 +402,7 @@ describe("workspace unregister RPC safety", () => {
 
 		const result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(
 			{ id: "remove-ws", type: "unregister_workspace", workspaceName: "ws" },
-			{ stateManager: manager },
+			{ client: { allowedWorkspaces: [] }, stateManager: manager },
 		);
 
 		expect(result).toEqual({

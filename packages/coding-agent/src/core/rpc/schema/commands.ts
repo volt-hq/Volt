@@ -10,6 +10,7 @@
 import { type TLiteral, type TObject, type TOptional, type TProperties, type TString, Type } from "typebox";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
+import { RpcPreparePrReviewCommandSchema, RpcResolvePrReviewCommandSchema } from "./pr-review.ts";
 import {
 	RPC_TRIMMED_NON_EMPTY_PATTERN,
 	RpcAssistantStreamPositionSchema,
@@ -96,10 +97,17 @@ export const RPC_COMMAND_SCHEMAS = {
 		images: Type.Optional(RpcConversationInputImagesSchema),
 	}),
 	abort: commandSchema("abort", {}),
-	new_session: commandSchema("new_session", {
-		parentSession: Type.Optional(Type.String()),
-		preserveReviewRunId: Type.Optional(RpcConversationIdentifierSchema),
-	}),
+	new_session: Type.Object(
+		commandSchema("new_session", {
+			parentSessionId: Type.Optional(RpcConversationIdentifierSchema),
+			preserveReviewRunId: Type.Optional(RpcConversationIdentifierSchema),
+			replaceReviewGeneral: Type.Optional(Type.Boolean()),
+		}).properties,
+		{
+			additionalProperties: false,
+			anyOf: [{ properties: { replaceReviewGeneral: { const: false } } }, { required: ["preserveReviewRunId"] }],
+		},
+	),
 	set_agent_mode: commandSchema("set_agent_mode", {
 		mode: RpcAgentModeSchema,
 	}),
@@ -161,7 +169,39 @@ export const RPC_COMMAND_SCHEMAS = {
 		{ additionalProperties: false },
 	),
 
+	// Workspace utility streams only; never conversation commands.
+	resolve_pr_review: RpcResolvePrReviewCommandSchema,
+	prepare_pr_review: RpcPreparePrReviewCommandSchema,
+
 	// Detached review workflows
+	start_review_discussions: commandSchema("start_review_discussions", {
+		runId: RpcConversationIdentifierSchema,
+		findingIds: Type.Array(RpcConversationIdentifierSchema, { minItems: 1, maxItems: 50, uniqueItems: true }),
+		requestId: RpcConversationIdentifierSchema,
+		discussionConfiguration: Type.Optional(
+			Type.Object(
+				{
+					model: Type.Optional(
+						Type.Object({ provider: Type.String(), modelId: Type.String() }, { additionalProperties: false }),
+					),
+					thinkingLevel: Type.Optional(Type.String()),
+				},
+				{ additionalProperties: false },
+			),
+		),
+	}),
+	list_review_discussions: commandSchema("list_review_discussions", {
+		runId: RpcConversationIdentifierSchema,
+		cursor: Type.Optional(Type.String({ maxLength: 32, pattern: "^[0-9]+$" })),
+		limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 50 })),
+	}),
+	reset_review_discussion: commandSchema("reset_review_discussion", {
+		discussionId: RpcConversationIdentifierSchema,
+		expectedSessionId: RpcConversationIdentifierSchema,
+		requestId: RpcConversationIdentifierSchema,
+	}),
+	get_review_discussion_source: commandSchema("get_review_discussion_source", {}),
+	get_review_general: commandSchema("get_review_general", { runId: RpcConversationIdentifierSchema }),
 	cancel_workflow: commandSchema("cancel_workflow", { workflowId: RpcConversationIdentifierSchema }),
 	get_review_result: commandSchema("get_review_result", { runId: RpcConversationIdentifierSchema }),
 	list_review_workflows: commandSchema("list_review_workflows", {
@@ -207,6 +247,14 @@ export const RPC_COMMAND_SCHEMAS = {
 	get_web_search_status: commandSchema("get_web_search_status", {}),
 	get_agent_options: commandSchema("get_agent_options", {
 		workspaceName: workspaceNameSchema,
+	}),
+	get_session_contexts: commandSchema("get_session_contexts", {
+		workspaceName: workspaceNameSchema,
+		sessionIds: Type.Array(Type.String({ minLength: 1, maxLength: 128 }), {
+			minItems: 1,
+			maxItems: 64,
+			uniqueItems: true,
+		}),
 	}),
 
 	// Device diagnostics
@@ -291,6 +339,11 @@ export const RPC_COMMAND_SCHEMAS = {
 		offset: Type.Optional(Type.Number()),
 	}),
 
+	// Session-owned background jobs
+	list_jobs: commandSchema("list_jobs", {}),
+	read_job: commandSchema("read_job", { jobId: RpcConversationIdentifierSchema }),
+	cancel_job: commandSchema("cancel_job", { jobId: RpcConversationIdentifierSchema }),
+
 	// Subagents (local RPC only)
 	list_subagents: commandSchema("list_subagents", {}),
 	subagent_start: commandSchema("subagent_start", { agent: Type.String(), prompt: Type.String() }),
@@ -346,7 +399,7 @@ export const RPC_COMMAND_SCHEMAS = {
 		cursor: Type.Optional(Type.String({ minLength: 1, "x-volt-expected": "be a non-empty string" })),
 	}),
 	export_html: commandSchema("export_html", { outputPath: Type.Optional(Type.String()) }),
-	switch_session: commandSchema("switch_session", { sessionPath: Type.String() }),
+	switch_session: commandSchema("switch_session", { sessionId: Type.String() }),
 	switch_session_by_id: commandSchema("switch_session_by_id", { sessionId: Type.String() }),
 	fork: commandSchema("fork", { entryId: Type.String() }),
 	clone: commandSchema("clone", {}),

@@ -60,6 +60,7 @@ import type {
 	ReadonlySessionManager,
 	SessionEntry,
 	SessionManager,
+	SessionReference,
 } from "../session-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
 import type { SourceInfo } from "../source-info.ts";
@@ -86,6 +87,18 @@ import type {
 	WriteToolDetails,
 	WriteToolInput,
 } from "../tools/index.ts";
+
+import type { ExtensionHandlerRegistry, PolicyRegistration } from "./policy-registration.ts";
+
+export type { PolicyRegistration } from "./policy-registration.ts";
+
+import type {
+	ExtensionOperationEvent,
+	ExtensionOperationOrigin,
+	ExtensionWorkContext,
+	ExtensionWorkStatus,
+	RequestBoundaryEvent,
+} from "./work-types.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions } from "../system-prompt.ts";
@@ -309,6 +322,8 @@ export interface CompactOptions {
 export type ExtensionMode = "tui" | "rpc" | "json" | "print";
 
 export interface ExtensionContext {
+	/** Optional managed work for this captured conversational scope; absent in policy/idle contexts. */
+	readonly work?: ExtensionWorkContext;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
 	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
@@ -351,6 +366,17 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Get the current base system-prompt construction options. */
 	getSystemPromptOptions(): BuildSystemPromptOptions;
 
+	/** Current shared first-request preparation allowance and its host-configured ceiling, in milliseconds. */
+	getPreparationWait(): { waitMs: number; maxWaitMs: number };
+
+	/**
+	 * Request an allowance of 0–1000 ms, clamped to the host ceiling. Changes require
+	 * host-owned local TUI confirmation and an idle agent. Returns the applied value,
+	 * including zero, or undefined when cancelled, unavailable, or invalidated.
+	 * Does not enable extensions or exports, and adds no wait unless extensions request it.
+	 */
+	requestPreparationWait(milliseconds: number): Promise<number | undefined>;
+
 	/** Wait for the agent to finish streaming */
 	waitForIdle(): Promise<void>;
 
@@ -363,12 +389,12 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	 * recovered durable client input failed to replay.
 	 */
 	newSession(options?: {
-		parentSession?: string;
+		parentSessionRef?: SessionReference;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean; seeded: boolean }>;
 
-	/** Fork from a specific entry, creating a new session file. See `newSession` for `seeded`. */
+	/** Fork from a specific entry, creating a new persisted session. See `newSession` for `seeded`. */
 	fork(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
@@ -380,9 +406,9 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Switch to a different session file. See `newSession` for `seeded`. */
+	/** Switch to a different persisted session. See `newSession` for `seeded`. */
 	switchSession(
-		sessionPath: string,
+		sessionRef: SessionReference,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	): Promise<{ cancelled: boolean; seeded: boolean }>;
 
@@ -574,15 +600,15 @@ export interface SessionStartEvent {
 	type: "session_start";
 	/** Why this session start happened. */
 	reason: "startup" | "reload" | "new" | "resume" | "fork";
-	/** Previously active session file. Present for "new", "resume", and "fork". */
-	previousSessionFile?: string;
+	/** Previously active persisted session. Present for "new", "resume", and "fork". */
+	previousSessionRef?: SessionReference;
 }
 
 /** Fired before switching to another session (can be cancelled) */
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
 	reason: "new" | "resume";
-	targetSessionFile?: string;
+	targetSessionRef?: SessionReference;
 }
 
 /** Fired before forking a session (can be cancelled) */
@@ -612,8 +638,8 @@ export interface SessionCompactEvent {
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
 	reason: "quit" | "reload" | "new" | "resume" | "fork";
-	/** Destination session file when shutting down due to session replacement. */
-	targetSessionFile?: string;
+	/** Destination persisted session when shutting down due to session replacement. */
+	targetSessionRef?: SessionReference;
 }
 
 /** Preparation data for tree navigation */
@@ -833,6 +859,8 @@ export type InputEventResult =
 interface ToolCallEventBase {
 	type: "tool_call";
 	toolCallId: string;
+	/** Host-owned attribution; absent on ordinary foreground calls is equivalent to agent. */
+	origin?: ExtensionOperationOrigin;
 }
 
 export interface BashToolCallEvent extends ToolCallEventBase {
@@ -906,6 +934,8 @@ export type ToolCallEvent =
 interface ToolResultEventBase {
 	type: "tool_result";
 	toolCallId: string;
+	/** Host-owned attribution, never supplied by a tool result. */
+	origin?: ExtensionOperationOrigin;
 	input: JsonObject;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
@@ -1042,6 +1072,8 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 
 /** Union of all event types */
 export type ExtensionEvent =
+	| RequestBoundaryEvent
+	| ExtensionOperationEvent
 	| ProjectTrustEvent
 	| ResourcesDiscoverEvent
 	| SessionEvent
@@ -1184,6 +1216,10 @@ export interface ExtensionAPI {
 	// Event Subscription
 	// =========================================================================
 
+	/** Notification-only; promises are observed for errors but do not delay provider admission. */
+	on(event: "request_boundary", handler: (event: RequestBoundaryEvent, ctx: ExtensionContext) => void): void;
+	/** Diagnostic-only; managed execution is prohibited throughout the handler's async lineage. */
+	on(event: "extension_operation", handler: (event: ExtensionOperationEvent, ctx: ExtensionContext) => void): void;
 	on(event: "project_trust", handler: ProjectTrustHandler): void;
 	on(event: "resources_discover", handler: ExtensionHandler<ResourcesDiscoverEvent, ResourcesDiscoverResult>): void;
 	on(event: "session_start", handler: ExtensionHandler<SessionStartEvent>): void;
@@ -1219,8 +1255,15 @@ export interface ExtensionAPI {
 	on(event: "tool_execution_end", handler: ExtensionHandler<ToolExecutionEndEvent>): void;
 	on(event: "model_select", handler: ExtensionHandler<ModelSelectEvent>): void;
 	on(event: "thinking_level_select", handler: ExtensionHandler<ThinkingLevelSelectEvent>): void;
-	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
-	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
+	/** Owns the callback; use the returned handle to update, remove, or invalidate closure-state changes. */
+	on(
+		event: "tool_call",
+		handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>,
+	): PolicyRegistration<ExtensionHandler<ToolCallEvent, ToolCallEventResult>>;
+	on(
+		event: "tool_result",
+		handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>,
+	): PolicyRegistration<ExtensionHandler<ToolResultEvent, ToolResultEventResult>>;
 	on(event: "user_bash", handler: ExtensionHandler<UserBashEvent, UserBashEventResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 
@@ -1303,6 +1346,9 @@ export interface ExtensionAPI {
 
 	/** Set or clear a label on an entry. Labels are user-defined markers for bookmarking/navigation. */
 	setLabel(entryId: string, label: string | undefined): void;
+
+	/** Bounded metadata for this extension's managed work; does not grant execution authority. */
+	getWorkStatus(): ExtensionWorkStatus;
 
 	/** Execute a shell command. */
 	exec(command: string, args: string[], options?: ExecOptions): Promise<ExecResult>;
@@ -1510,8 +1556,6 @@ export interface ExtensionShortcut {
 	extensionPath: string;
 }
 
-type HandlerFn = (...args: unknown[]) => Promise<unknown>;
-
 export type SendMessageHandler = <T>(
 	message: CustomMessageInput<T>,
 	options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
@@ -1556,6 +1600,7 @@ export type SetLabelHandler = (entryId: string, label: string | undefined) => vo
  * Contains flag values (defaults set during registration, CLI values set after).
  */
 export interface ExtensionRuntimeState {
+	getWorkStatus(owner: string): ExtensionWorkStatus;
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed when runner binds */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
@@ -1610,6 +1655,9 @@ export interface ExtensionContextActions {
 	compact: (options?: CompactOptions) => void;
 	getSystemPrompt: () => string;
 	getSystemPromptOptions?: () => BuildSystemPromptOptions;
+	/** Host-owned command controls, deliberately absent from ordinary event contexts. */
+	getPreparationWait?: ExtensionCommandContext["getPreparationWait"];
+	requestPreparationWait?: ExtensionCommandContext["requestPreparationWait"];
 }
 
 /**
@@ -1619,7 +1667,7 @@ export interface ExtensionContextActions {
 export interface ExtensionCommandContextActions {
 	waitForIdle: () => Promise<void>;
 	newSession: (options?: {
-		parentSession?: string;
+		parentSessionRef?: SessionReference;
 		setup?: (sessionManager: SessionManager) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}) => Promise<{ cancelled: boolean; seeded: boolean }>;
@@ -1632,7 +1680,7 @@ export interface ExtensionCommandContextActions {
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 	) => Promise<{ cancelled: boolean }>;
 	switchSession: (
-		sessionPath: string,
+		sessionRef: SessionReference,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
 	) => Promise<{ cancelled: boolean; seeded: boolean }>;
 	reload: () => Promise<void>;
@@ -1649,7 +1697,7 @@ export interface Extension {
 	path: string;
 	resolvedPath: string;
 	sourceInfo: SourceInfo;
-	handlers: Map<string, HandlerFn[]>;
+	readonly handlers: ExtensionHandlerRegistry;
 	tools: Map<string, RegisteredTool>;
 	messageRenderers: Map<string, MessageRenderer>;
 	commands: Map<string, RegisteredCommand>;

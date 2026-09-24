@@ -1,13 +1,19 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageDiagnostic,
+	type Context,
 	createAssistantMessageDiagnostic,
 	createAssistantMessageEventStream,
 	estimateToolDefinitionTokens,
 	type ImageContent,
 	type JsonValue,
+	type Message,
 	type Model,
+	type PromptCacheRefreshFunction,
+	refreshPromptCache,
+	type SimpleStreamOptions,
 	streamSimple,
+	supportsPromptCacheRefresh,
 	type UserMessage,
 } from "@hansjm10/volt-ai";
 import { runAgentLoop } from "../agent-loop.ts";
@@ -57,7 +63,10 @@ import type {
 	AgentHarnessOptions,
 	AgentHarnessOwnEvent,
 	AgentHarnessPhase,
+	AgentHarnessPromptCacheRefreshResult,
 	AgentHarnessPromptOptions,
+	AgentHarnessRequestBoundary,
+	AgentHarnessRequestContext,
 	AgentHarnessResources,
 	AgentHarnessRunOptions,
 	AgentHarnessStreamOptions,
@@ -216,6 +225,7 @@ function cloneStreamOptions(streamOptions?: AgentHarnessStreamOptions): AgentHar
 		...(streamOptions?.metadata ? { metadata: { ...streamOptions.metadata } } : {}),
 		...(streamOptions?.env ? { env: { ...streamOptions.env } } : {}),
 		...(streamOptions?.thinkingBudgets ? { thinkingBudgets: { ...streamOptions.thinkingBudgets } } : {}),
+		...(streamOptions?.toolArgumentLimits ? { toolArgumentLimits: { ...streamOptions.toolArgumentLimits } } : {}),
 	};
 }
 
@@ -274,6 +284,10 @@ function applyStreamOptionsPatch(
 	if (Object.hasOwn(patch, "thinkingBudgets")) {
 		if (patch.thinkingBudgets === undefined) delete result.thinkingBudgets;
 		else result.thinkingBudgets = { ...patch.thinkingBudgets };
+	}
+	if (Object.hasOwn(patch, "toolArgumentLimits")) {
+		if (patch.toolArgumentLimits === undefined) delete result.toolArgumentLimits;
+		else result.toolArgumentLimits = { ...patch.toolArgumentLimits };
 	}
 	if (Object.hasOwn(patch, "cacheRetention")) {
 		if (patch.cacheRetention === undefined) delete result.cacheRetention;
@@ -455,6 +469,7 @@ interface AgentHarnessTurnState<
 	thinkingLevel: ThinkingLevel;
 	tools: TTool[];
 	activeTools: TTool[];
+	boundary?: Omit<AgentHarnessRequestBoundary, "attemptId" | "cursor">;
 }
 
 function isTurnProviderRequestState(
@@ -476,7 +491,7 @@ export class AgentHarness<
 > {
 	readonly env: ExecutionEnv;
 	private session: Session;
-	private readonly operations = new HarnessOperationCoordinator();
+	private readonly operations: HarnessOperationCoordinator;
 	private readonly closeDrains = new Set<Promise<void>>();
 	private readonly closeDrainErrors: Error[] = [];
 	private closePromise: Promise<void> | undefined;
@@ -493,7 +508,21 @@ export class AgentHarness<
 	private providerHookPendingWrites: PendingSessionWrite[] | undefined;
 	private readonly persistActiveToolChanges: boolean;
 	private readonly streamFn: StreamFn;
+	private readonly refreshPromptCacheFn: PromptCacheRefreshFunction | undefined;
+	/** Latest admitted conversation request, replayed verbatim by refreshPromptCache. */
+	private lastTurnProviderRequest:
+		| {
+				model: Model<any>;
+				context: Context;
+				options: SimpleStreamOptions;
+				configurationEpoch: number;
+				cursor: ProjectionCursor;
+		  }
+		| undefined;
 	private readonly convertMessages: NonNullable<AgentHarnessOptions["convertToLlm"]>;
+	private readonly requestBoundary: AgentHarnessOptions["requestBoundary"];
+	private requestBatch: AgentHarnessRequestBoundary["batch"];
+	private pendingRequestDeliveries: NonNullable<AgentHarnessRequestBoundary["batch"]>["deliveries"][number][] = [];
 	private systemPrompt: AgentHarnessOptions<TSkill, TPromptTemplate, TTool>["systemPrompt"];
 	private streamOptions: AgentHarnessStreamOptions;
 	private getApiKeyAndHeaders?: AgentHarnessOptions["getApiKeyAndHeaders"];
@@ -525,12 +554,15 @@ export class AgentHarness<
 	constructor(options: AgentHarnessOptions<TSkill, TPromptTemplate, TTool>) {
 		this.env = options.env;
 		this.session = options.session;
+		this.operations = new HarnessOperationCoordinator(options.admissionGate);
 		this.resources = options.resources ?? {};
 		this.streamOptions = cloneStreamOptions(options.streamOptions);
 		this.systemPrompt = options.systemPrompt;
 		this.getApiKeyAndHeaders = options.getApiKeyAndHeaders;
 		this.streamFn = options.streamFn ?? streamSimple;
+		this.refreshPromptCacheFn = options.refreshPromptCacheFn ?? (options.streamFn ? undefined : refreshPromptCache);
 		this.convertMessages = options.convertToLlm ?? defaultConvertToLlm;
+		this.requestBoundary = options.requestBoundary;
 		this.defaultDeliveryOwner = options.deliveryOwner ?? this.createDefaultDeliveryOwner();
 		this.validateUniqueNames(
 			(options.tools ?? []).map((tool) => tool.name),
@@ -815,10 +847,11 @@ export class AgentHarness<
 	private async reduceNextAction(
 		context: AgentLoopNextActionContext,
 		initialAction: AgentLoopNextAction,
-	): Promise<AgentLoopNextAction> {
+	): Promise<{ action: AgentLoopNextAction; policyOverride: boolean }> {
 		const signal = this.activeRun?.operation.abortGate.signal;
-		if (!signal) return cloneNextAction(initialAction);
+		if (!signal) return { action: cloneNextAction(initialAction), policyOverride: false };
 		let current = cloneNextAction(initialAction);
+		let policyOverride = false;
 		for (const handler of this.getHandlers("next_action") ?? []) {
 			try {
 				const pendingResult = handler({
@@ -827,7 +860,10 @@ export class AgentHarness<
 					signal,
 				});
 				const result = pendingResult instanceof Promise ? await pendingResult : pendingResult;
-				if (result !== undefined) current = cloneNextAction(result);
+				if (result !== undefined) {
+					current = cloneNextAction(result);
+					policyOverride = true;
+				}
 			} catch (error) {
 				throw normalizeHookError(error);
 			}
@@ -836,12 +872,15 @@ export class AgentHarness<
 			try {
 				const pendingResult = registration.policy(cloneNextActionContext(context, current), signal);
 				const result = pendingResult instanceof Promise ? await pendingResult : pendingResult;
-				if (result !== undefined) current = cloneNextAction(result);
+				if (result !== undefined) {
+					current = cloneNextAction(result);
+					policyOverride = true;
+				}
 			} catch (error) {
 				throw normalizeHookError(error);
 			}
 		}
-		return current;
+		return { action: current, policyOverride };
 	}
 
 	private async emitBeforeProviderRequest(
@@ -1023,6 +1062,14 @@ export class AgentHarness<
 				const configurationEpoch = this.runtimeConfigurationEpoch;
 				const admittedModel = this.model ?? model;
 				let admittedContext = context;
+				let optionalMessages: readonly Message[] | undefined;
+				let optionalAuthorization: AgentHarnessRequestContext["authorization"] | undefined;
+				const settleOptionalContext = (admitted: boolean): void => {
+					const authorization = optionalAuthorization;
+					optionalAuthorization = undefined;
+					authorization?.settle(admitted);
+				};
+				const optionalBatch = this.requestBatch;
 				let admittedReasoning = isTurnProviderRequestState(requestState)
 					? this.thinkingLevel === "off"
 						? undefined
@@ -1131,12 +1178,40 @@ export class AgentHarness<
 				) {
 					continue;
 				}
-				this.beginProviderAdmission();
-				if (configurationEpoch !== this.runtimeConfigurationEpoch) {
-					this.endProviderAdmission();
-					continue;
-				}
 				try {
+					if (isTurnProviderRequestState(requestState) && requestState.boundary && this.requestBoundary) {
+						const basis = hookCommitBasis!;
+						const { batch, ...boundary } = requestState.boundary;
+						const suffix = await this.requestBoundary(
+							{
+								...boundary,
+								newInput: boundary.newInput && batch === this.requestBatch,
+								...(batch && batch === this.requestBatch ? { batch: structuredClone(batch) } : {}),
+								attemptId: `harness-request:${globalThis.crypto.randomUUID()}`,
+								cursor: basis,
+							},
+							{ ...admittedContext, messages: structuredClone(admittedContext.messages) },
+							signal,
+						);
+						optionalAuthorization = suffix?.authorization;
+						if (signal?.aborted) return createAbortedAssistantStream(admittedModel);
+						optionalMessages = suffix === undefined ? undefined : structuredClone(suffix.messages);
+						const current = (await this.session.getBranchSnapshot()).cursor;
+						if (
+							current.authorityGeneration !== basis.authorityGeneration ||
+							current.revision !== basis.revision ||
+							current.branchIdentity !== basis.branchIdentity ||
+							this.pendingSessionWrites.length > 0 ||
+							configurationEpoch !== this.runtimeConfigurationEpoch ||
+							configurationBarrier !== this.runtimeConfigurationBarrier
+						)
+							continue;
+					}
+					this.beginProviderAdmission();
+					if (configurationEpoch !== this.runtimeConfigurationEpoch) {
+						this.endProviderAdmission();
+						continue;
+					}
 					if (logicalHookWrites.length > 0) {
 						if (!hookCommitBasis) {
 							throw new AgentHarnessError("invalid_state", "Provider hook mutation basis is unavailable");
@@ -1157,7 +1232,7 @@ export class AgentHarness<
 						this.applyVerifiedProjectionAdvance(commit.advance);
 					}
 					if (signal?.aborted) return createAbortedAssistantStream(admittedModel);
-					const response = this.streamFn(admittedModel, admittedContext, {
+					const admittedOptions: Parameters<StreamFn>[2] = {
 						...(requestOptions.cacheRetention === undefined
 							? {}
 							: { cacheRetention: requestOptions.cacheRetention }),
@@ -1174,6 +1249,9 @@ export class AgentHarness<
 						...(requestOptions.thinkingBudgets === undefined
 							? {}
 							: { thinkingBudgets: requestOptions.thinkingBudgets }),
+						...(requestOptions.toolArgumentLimits === undefined
+							? {}
+							: { toolArgumentLimits: { ...requestOptions.toolArgumentLimits } }),
 						onPayload: async (payload) => await this.emitBeforeProviderPayload(admittedModel, payload),
 						onResponse: async (response) => {
 							const headers = { ...(response.headers as Record<string, string>) };
@@ -1190,11 +1268,45 @@ export class AgentHarness<
 							? {}
 							: { websocketConnectTimeoutMs: requestOptions.websocketConnectTimeoutMs }),
 						...(admittedAuth?.apiKey === undefined ? {} : { apiKey: admittedAuth.apiKey }),
-					});
+					};
+					// Admission is the handoff, not provider success. Seal diagnostics before
+					// synchronous provider/payload code can revoke an already-delivered suffix.
+					const includeOptionalContext =
+						!!optionalMessages?.length &&
+						this.requestBatch === optionalBatch &&
+						optionalAuthorization?.isCurrent() === true;
+					if (includeOptionalContext) {
+						admittedContext = {
+							...admittedContext,
+							messages: [...admittedContext.messages, ...optionalMessages!],
+						};
+					}
+					settleOptionalContext(includeOptionalContext);
+					if (isTurnProviderRequestState(requestState) && hookCommitBasis) {
+						const {
+							signal: _signal,
+							onPayload: _onPayload,
+							onResponse: _onResponse,
+							...replayOptions
+						} = admittedOptions ?? {};
+						this.lastTurnProviderRequest = {
+							model: admittedModel,
+							context: {
+								...admittedContext,
+								messages: [...admittedContext.messages],
+								...(admittedContext.tools === undefined ? {} : { tools: [...admittedContext.tools] }),
+							},
+							options: replayOptions,
+							configurationEpoch,
+							cursor: hookCommitBasis,
+						};
+					}
+					const response = this.streamFn(admittedModel, admittedContext, admittedOptions);
 					this.endProviderAdmission();
 					return response;
 				} finally {
 					if (this.releaseProviderAdmission) this.endProviderAdmission();
+					settleOptionalContext(false);
 				}
 			}
 		};
@@ -1341,15 +1453,16 @@ export class AgentHarness<
 		if (requestAuthority === "final_response") {
 			const finalResponseAction: AgentLoopNextAction =
 				runtimeAction.type === "request" ? { type: "request", reason: "final_response" } : runtimeAction;
-			const action = await this.reduceNextAction({ ...context, requestAuthority }, finalResponseAction);
+			const { action } = await this.reduceNextAction({ ...context, requestAuthority }, finalResponseAction);
+			const resolvedAction: AgentLoopNextAction =
+				action.type === "pause" ? { ...action, requestAuthority } : { type: "request", reason: "final_response" };
+			await this.emitOwn({ type: "next_action_resolved", action: resolvedAction, requestAuthority });
 			this.continuationState = {
 				requestAuthority,
 				providerRequestPending: action.type === "pause" ? providerRequestPending : true,
 				systemPrompt,
 			};
-			return action.type === "pause"
-				? { ...action, requestAuthority }
-				: { type: "request", reason: "final_response" };
+			return resolvedAction;
 		}
 
 		let selected: PendingDelivery[] = [];
@@ -1369,10 +1482,24 @@ export class AgentHarness<
 				: hasIndependentRequest
 					? runtimeAction
 					: { type: "stop" };
-		const action = await this.reduceNextAction(
+		const { action, policyOverride } = await this.reduceNextAction(
 			{ ...context, requestAuthority, defaultAction: suggestedAction },
 			suggestedAction,
 		);
+		await this.emitOwn({
+			type: "next_action_resolved",
+			action,
+			requestAuthority,
+			...(action.type === "stop"
+				? {
+						stopReason: policyOverride
+							? "policy"
+							: context.completedTurn?.disposition === "stop"
+								? "tool"
+								: "completion",
+					}
+				: {}),
+		});
 		if (action.type === "pause") {
 			this.continuationState = {
 				requestAuthority: action.requestAuthority ?? requestAuthority,
@@ -1605,6 +1732,14 @@ export class AgentHarness<
 				run.requestAccepted = false;
 			}
 			if (outcome.outcome === "committed") {
+				const users = delivery.messages.filter((message): message is UserMessage => message.role === "user");
+				if (users.length > 0 && owner.requestInput !== false) {
+					this.pendingRequestDeliveries.push({
+						deliveryId: delivery.deliveryId,
+						kind,
+						messages: structuredClone(users),
+					});
+				}
 				run?.observationalDeliveryIds.add(delivery.deliveryId);
 				if (verified.advance) this.applyVerifiedProjectionAdvance(verified.advance);
 			}
@@ -1867,7 +2002,7 @@ export class AgentHarness<
 			nextAction: async (context) =>
 				await this.resolveNextAction(context, startState, systemPromptOverride ?? getTurnState().systemPrompt),
 			beginDelivery: async (delivery) => await this.beginActiveDelivery(delivery),
-			prepareRequest: async () => {
+			prepareRequest: async (request) => {
 				await this.flushPendingSessionWrites();
 				await this.runtimeConfigurationBarrier;
 				const projection = await this.requireValidContextProjection();
@@ -1879,6 +2014,25 @@ export class AgentHarness<
 					contextMessages,
 					systemPromptOverride,
 				);
+				const newInput = this.pendingRequestDeliveries.length > 0;
+				if (newInput) {
+					this.requestBatch = {
+						id: `harness-input:${globalThis.crypto.randomUUID()}`,
+						deliveries: this.pendingRequestDeliveries.splice(0),
+					};
+				}
+				nextTurnState.boundary = {
+					...(this.requestBatch ? { batch: this.requestBatch } : {}),
+					newInput,
+					requestAuthority: request.reason === "final_response" ? "final_response" : request.requestAuthority,
+					cause: newInput
+						? "input"
+						: request.completedTurn?.toolResults.length
+							? "tools"
+							: !request.completedTurn && projection?.token.source === "retry"
+								? "retry"
+								: "continuation",
+				};
 				setTurnState(nextTurnState);
 				return {
 					context: this.createContext(nextTurnState, systemPromptOverride),
@@ -2380,9 +2534,9 @@ export class AgentHarness<
 				"AgentHarness has a retained prompt; call continue() or discardPendingPrompt() before starting another",
 			);
 		}
+		const run = this.admitBoundedRun(operation);
 		this.continuationState = undefined;
 		this.invalidateContinuationContext();
-		const run = this.admitBoundedRun(operation);
 		try {
 			const baseTurnState = await this.createTurnState(
 				run.state.operation.abortGate.signal,
@@ -2485,8 +2639,14 @@ export class AgentHarness<
 		if (!this.operations.reclassify(operation, "compaction")) {
 			throw new AgentHarnessError("invalid_state", "Harness reservation could not enter compaction");
 		}
-		const successor = this.operations.reserveSuccessor("turn");
-		if (!successor) throw new AgentHarnessError("busy", "A successor operation is already reserved");
+		let successor: ReturnType<HarnessOperationCoordinator["reserveSuccessor"]>;
+		try {
+			successor = this.operations.reserveSuccessor("turn");
+			if (!successor) throw new AgentHarnessError("busy", "A successor operation is already reserved");
+		} catch (error) {
+			this.operations.finish(operation);
+			throw error;
+		}
 		let result: TResult;
 		try {
 			result = await this.executeStructuralOperation(operation, strategy);
@@ -2853,6 +3013,91 @@ export class AgentHarness<
 		return this.closePromise ?? this.operations.waitForClosed();
 	}
 
+	/**
+	 * Whether `refreshPromptCache` would replay the latest conversation request now: a refresh function
+	 * is configured, the model, thinking level, tools, and stream options are unchanged since that
+	 * request, and its provider can refresh a request with those options. Sends nothing; the branch and
+	 * payload hooks are checked only when a refresh runs.
+	 */
+	canRefreshPromptCache(): boolean {
+		const target = this.lastTurnProviderRequest;
+		return (
+			this.refreshPromptCacheFn !== undefined &&
+			target !== undefined &&
+			target.configurationEpoch === this.runtimeConfigurationEpoch &&
+			supportsPromptCacheRefresh(target.model, target.options)
+		);
+	}
+
+	/**
+	 * Replay the latest conversation request as a no-output prompt-cache refresh. The replay reuses
+	 * that request's admitted context and options and passes through before_provider_payload, so the
+	 * provider sees the same prefix. Only the credential is re-resolved. Nothing is sent when the
+	 * branch has been rewritten or the model, thinking level, tools, or stream options changed since.
+	 */
+	async refreshPromptCache(signal?: AbortSignal): Promise<AgentHarnessPromptCacheRefreshResult> {
+		this.assertNotDisposed();
+		if (!this.refreshPromptCacheFn) return { status: "unavailable", reason: "no_refresh_function" };
+		const target = this.lastTurnProviderRequest;
+		if (!target) return { status: "unavailable", reason: "no_request" };
+		if (target.configurationEpoch !== this.runtimeConfigurationEpoch) {
+			return { status: "unavailable", reason: "configuration_changed" };
+		}
+		let advance: ProjectionAdvance;
+		try {
+			advance = await this.session.advanceProjection(target.cursor);
+		} catch {
+			return { status: "unavailable", reason: "branch_changed" };
+		}
+		if (advance.branchRelation === "diverged" || advance.messages.kind === "rewrite") {
+			return { status: "unavailable", reason: "branch_changed" };
+		}
+		const auth = await this.getApiKeyAndHeaders?.(target.model);
+		signal?.throwIfAborted();
+		const result = await this.refreshPromptCacheFn(target.model, target.context, {
+			...target.options,
+			...(auth?.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
+			onPayload: async (payload) => await this.emitBeforeProviderPayload(target.model, payload),
+			...(signal === undefined ? {} : { signal }),
+		});
+		return { ...result, model: target.model };
+	}
+
+	/**
+	 * Append host-owned custom state that never enters model context. While an operation runs, the
+	 * entry waits for the next save point, like `appendMessage`.
+	 */
+	async appendCustomEntry(customType: string, data?: JsonValue): Promise<void> {
+		this.assertNotDisposed();
+		let ownedData: JsonValue | undefined;
+		try {
+			ownedData = data === undefined ? undefined : structuredClone(data);
+		} catch (error) {
+			throw normalizeHarnessError(
+				new SessionError("invalid_entry", "Failed to materialize canonical mutation batch", toError(error)),
+				"session",
+			);
+		}
+		const mutation = (async () => {
+			try {
+				if (!this.operations.current) {
+					const entryId = await this.session.appendCustomEntry(customType, ownedData);
+					await this.advanceContextProjection(entryId, []);
+				} else {
+					// Provider-hook writes must repeat identically across configuration retries; this does not.
+					this.pendingSessionWrites.push({
+						type: "custom",
+						customType,
+						...(ownedData === undefined ? {} : { data: ownedData }),
+					});
+				}
+			} catch (error) {
+				throw normalizeHarnessError(error, "session");
+			}
+		})();
+		await this.trackAdmittedMutation(mutation);
+	}
+
 	async appendMessage(message: AgentMessage): Promise<void> {
 		this.assertNotDisposed();
 		let ownedMessage: AgentMessage;
@@ -3209,6 +3454,12 @@ export class AgentHarness<
 		} finally {
 			this.operations.finish(operation);
 		}
+	}
+
+	/** Revoke observational input identity without changing delivery or continuation ownership. */
+	invalidateRequestBoundary(): void {
+		this.requestBatch = undefined;
+		this.pendingRequestDeliveries = [];
 	}
 
 	getModel(): Model<any> | undefined {

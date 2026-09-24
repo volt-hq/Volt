@@ -14,6 +14,7 @@ export function getRemoteVisibleCustomMessageRole(
 	switch (customType) {
 		case "review":
 			return "assistant";
+		case "background_job_notification":
 		case "subagent_recovery":
 			return "system";
 		default:

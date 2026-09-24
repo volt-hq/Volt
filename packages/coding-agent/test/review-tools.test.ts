@@ -51,7 +51,7 @@ describe("review snapshot tools", () => {
 		});
 		if ("error" in resolved) throw new Error(resolved.error);
 		if (withContext) {
-			resolved.githubContext = {
+			resolved.codeHostContext = {
 				manifest: {
 					status: "complete",
 					capturedAt: "2026-01-01T00:00:00Z",
@@ -200,7 +200,7 @@ describe("review snapshot tools", () => {
 		const cursor = (page.details as { nextCursor?: string }).nextCursor;
 		await expect(execute(tool(tools, "review_tree"), { cursor })).rejects.toThrow(/another operation/);
 		if (!cursor) throw new Error("Expected a cursor");
-		const tampered = `${cursor.slice(0, -1)}x`;
+		const tampered = `${cursor.slice(0, -1)}${cursor.endsWith("x") ? "y" : "x"}`;
 		await expect(execute(tool(tools, "review_changed_files"), { cursor: tampered })).rejects.toThrow(/invalid/);
 
 		const search = await execute(tool(tools, "review_search"), {

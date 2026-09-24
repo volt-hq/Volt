@@ -5,13 +5,15 @@ import type {
 	AssistantMessageEvent,
 	Context,
 	Model,
+	PromptCacheRefreshFunction,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
 } from "../types.ts";
-import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { AssistantMessageEventStream, EventStreamOverflowError } from "../utils/event-stream.ts";
 import type { BedrockOptions } from "./amazon-bedrock.ts";
 import type { AnthropicOptions } from "./anthropic.ts";
+import { canRefreshAnthropicPromptCache } from "./anthropic-capabilities.ts";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.ts";
 import type { GoogleOptions } from "./google.ts";
 import type { GoogleVertexOptions } from "./google-vertex.ts";
@@ -31,11 +33,13 @@ interface LazyProviderModule<
 		context: Context,
 		options?: TSimpleOptions,
 	) => AsyncIterable<AssistantMessageEvent>;
+	refreshPromptCache?: PromptCacheRefreshFunction<TApi>;
 }
 
 interface AnthropicProviderModule {
 	streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOptions>;
 	streamSimpleAnthropic: StreamFunction<"anthropic-messages", SimpleStreamOptions>;
+	refreshPromptCacheAnthropic: PromptCacheRefreshFunction<"anthropic-messages">;
 }
 
 interface AzureOpenAIResponsesProviderModule {
@@ -129,13 +133,14 @@ export function setBedrockProviderModule(module: BedrockProviderModule): void {
 	};
 }
 
-function forwardStream(target: AssistantMessageEventStream, source: AsyncIterable<AssistantMessageEvent>): void {
-	(async () => {
-		for await (const event of source) {
-			target.push(event);
-		}
-		target.end();
-	})();
+async function forwardStream(
+	target: AssistantMessageEventStream,
+	source: AsyncIterable<AssistantMessageEvent>,
+): Promise<void> {
+	for await (const event of source) {
+		target.push(event);
+	}
+	target.end();
 }
 
 function createLazyLoadErrorStream<TApi extends Api>(model: Model<TApi>, error: unknown): AssistantMessageEventStream {
@@ -157,14 +162,21 @@ function createLazyStream<TApi extends Api, TOptions extends StreamOptions, TSim
 ): StreamFunction<TApi, TOptions> {
 	return (model, context, options) => {
 		const outer = new AssistantMessageEventStream();
+		const controller = new AbortController();
+		const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
 
 		loadModule()
 			.then((module) => {
-				const inner = module.stream(model, context, options);
-				forwardStream(outer, inner);
+				const inner = module.stream(model, context, { ...options, signal } as TOptions);
+				return forwardStream(outer, inner);
 			})
-			.catch((error) => {
-				forwardStream(outer, createLazyLoadErrorStream(model, error));
+			.catch(async (error) => {
+				controller.abort(error);
+				try {
+					await forwardStream(outer, createLazyLoadErrorStream(model, error));
+				} catch (overflow) {
+					if (!(overflow instanceof EventStreamOverflowError)) throw overflow;
+				}
 			});
 
 		return outer;
@@ -178,17 +190,36 @@ function createLazySimpleStream<
 >(loadModule: () => Promise<LazyProviderModule<TApi, TOptions, TSimpleOptions>>): StreamFunction<TApi, TSimpleOptions> {
 	return (model, context, options) => {
 		const outer = new AssistantMessageEventStream();
+		const controller = new AbortController();
+		const signal = options?.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
 
 		loadModule()
 			.then((module) => {
-				const inner = module.streamSimple(model, context, options);
-				forwardStream(outer, inner);
+				const inner = module.streamSimple(model, context, { ...options, signal } as TSimpleOptions);
+				return forwardStream(outer, inner);
 			})
-			.catch((error) => {
-				forwardStream(outer, createLazyLoadErrorStream(model, error));
+			.catch(async (error) => {
+				controller.abort(error);
+				try {
+					await forwardStream(outer, createLazyLoadErrorStream(model, error));
+				} catch (overflow) {
+					if (!(overflow instanceof EventStreamOverflowError)) throw overflow;
+				}
 			});
 
 		return outer;
+	};
+}
+
+function createLazyRefreshPromptCache<
+	TApi extends Api,
+	TOptions extends StreamOptions,
+	TSimpleOptions extends SimpleStreamOptions,
+>(loadModule: () => Promise<LazyProviderModule<TApi, TOptions, TSimpleOptions>>): PromptCacheRefreshFunction<TApi> {
+	return async (model, context, options) => {
+		const refresh = (await loadModule()).refreshPromptCache;
+		if (!refresh) return { status: "unsupported", reason: "provider does not implement prompt-cache refresh" };
+		return await refresh(model, context, options);
 	};
 }
 
@@ -200,6 +231,7 @@ function loadAnthropicProviderModule(): Promise<
 		return {
 			stream: provider.streamAnthropic,
 			streamSimple: provider.streamSimpleAnthropic,
+			refreshPromptCache: provider.refreshPromptCacheAnthropic,
 		};
 	});
 	return anthropicProviderModulePromise;
@@ -314,6 +346,7 @@ function loadBedrockProviderModule(): Promise<
 
 export const streamAnthropic = createLazyStream(loadAnthropicProviderModule);
 export const streamSimpleAnthropic = createLazySimpleStream(loadAnthropicProviderModule);
+export const refreshPromptCacheAnthropic = createLazyRefreshPromptCache(loadAnthropicProviderModule);
 export const streamAzureOpenAIResponses = createLazyStream(loadAzureOpenAIResponsesProviderModule);
 export const streamSimpleAzureOpenAIResponses = createLazySimpleStream(loadAzureOpenAIResponsesProviderModule);
 export const streamGoogle = createLazyStream(loadGoogleProviderModule);
@@ -336,6 +369,8 @@ export function registerBuiltInApiProviders(): void {
 		api: "anthropic-messages",
 		stream: streamAnthropic,
 		streamSimple: streamSimpleAnthropic,
+		refreshPromptCache: refreshPromptCacheAnthropic,
+		canRefreshPromptCache: canRefreshAnthropicPromptCache,
 	});
 
 	registerApiProvider({

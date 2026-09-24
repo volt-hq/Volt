@@ -189,6 +189,8 @@ export interface AgentDeliveryFinishContext {
 
 /** Stable owner installed before a delivery is admitted into the Harness inbox. */
 export interface AgentDeliveryOwner {
+	/** False for host/extension-generated input that must not establish an observational user-request scope. */
+	requestInput?: boolean;
 	prepareLogical(
 		context: AgentDeliveryPreparationContext,
 	): AgentDeliveryPreparationOutcome | Promise<AgentDeliveryPreparationOutcome>;

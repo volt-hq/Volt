@@ -13,10 +13,11 @@ import {
 	Text,
 } from "@hansjm10/volt-tui";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
-import type { Personality } from "../../../core/personality.ts";
+import { PERSONALITIES, type Personality } from "../../../core/personality.ts";
 import type {
 	DefaultProjectTrust,
 	FullscreenExitOutput,
+	PromptCacheKeepAliveConfig,
 	TuiMode,
 	TurnDoneAlert,
 	WarningSettings,
@@ -65,8 +66,15 @@ function parseContextWarningTokens(value: string): number {
 	return Math.floor(Number(value));
 }
 
+function formatCompactionThreshold(tokens: number): string {
+	return tokens === 0 ? "default" : formatContextWarningTokens(tokens);
+}
+
 export interface SettingsConfig {
 	autoCompact: boolean;
+	/** Exact provider/model ID being configured; absent when no model is selected. */
+	currentModel?: string;
+	compactionThresholdTokens: number;
 	personality: Personality;
 	showImages: boolean;
 	imageWidthCells: number;
@@ -97,14 +105,38 @@ export interface SettingsConfig {
 	clearOnShrink: boolean;
 	showTerminalProgress: boolean;
 	turnDoneAlert?: TurnDoneAlert;
+	promptCacheKeepAlive?: PromptCacheKeepAliveConfig;
 	tuiMode: TuiMode;
 	fullscreenExitOutput: FullscreenExitOutput;
 	fullscreenScrollbar: ScrollViewScrollbar;
 	warnings: WarningSettings;
 }
 
+const PROMPT_CACHE_KEEPALIVE_CHOICES = [
+	"off",
+	"while working",
+	"5 min idle",
+	"15 min idle",
+	"30 min idle",
+	"60 min idle",
+];
+
+function formatPromptCacheKeepAlive(config: PromptCacheKeepAliveConfig): string {
+	if (!config.enabled) return "off";
+	const minutes = config.idleWindowMs / 60_000;
+	return minutes === 0 ? "while working" : `${minutes} min idle`;
+}
+
+function parsePromptCacheKeepAlive(value: string): "off" | number | undefined {
+	if (value === "off") return "off";
+	if (value === "while working") return 0;
+	const match = /^(\d+(?:\.\d+)?) min idle$/.exec(value);
+	return match ? Number(match[1]) : undefined;
+}
+
 export interface SettingsCallbacks {
 	onAutoCompactChange: (enabled: boolean) => void;
+	onCompactionThresholdChange: (tokens: number) => void;
 	onPersonalityChange: (personality: Personality) => void;
 	onShowImagesChange: (enabled: boolean) => void;
 	onImageWidthCellsChange: (width: number) => void;
@@ -132,6 +164,8 @@ export interface SettingsCallbacks {
 	onClearOnShrinkChange: (enabled: boolean) => void;
 	onShowTerminalProgressChange: (enabled: boolean) => void;
 	onTurnDoneAlertChange?: (mode: TurnDoneAlert) => void;
+	/** `"off"`, or the idle window in minutes (0 = only while work runs). */
+	onPromptCacheKeepAliveChange?: (mode: "off" | number) => void;
 	onTuiModeChange: (mode: TuiMode) => void;
 	onFullscreenExitOutputChange: (output: FullscreenExitOutput) => void;
 	onFullscreenScrollbarChange: (mode: ScrollViewScrollbar) => void;
@@ -289,7 +323,7 @@ export class SettingsSelectorComponent extends Container {
 				label: "Personality",
 				description: "Communication style for Volt's built-in system prompt",
 				currentValue: config.personality,
-				values: ["default", "pragmatic"],
+				values: [...PERSONALITIES],
 			},
 			{
 				id: "steering-mode",
@@ -487,6 +521,29 @@ export class SettingsSelectorComponent extends Container {
 			},
 		];
 
+		if (config.currentModel) {
+			const thresholds = [
+				...new Set([
+					0,
+					100_000,
+					150_000,
+					200_000,
+					250_000,
+					350_000,
+					500_000,
+					750_000,
+					config.compactionThresholdTokens,
+				]),
+			].sort((a, b) => a - b);
+			items.splice(1, 0, {
+				id: "compact-at",
+				label: "Compact at",
+				description: `Auto-compact ${config.currentModel} at this token count. Default uses the context limit; requires Auto-compact. Custom counts can be set in settings.json.`,
+				currentValue: formatCompactionThreshold(config.compactionThresholdTokens),
+				values: thresholds.map(formatCompactionThreshold),
+			});
+		}
+
 		// Only show image toggle if terminal supports it
 		if (supportsImages) {
 			// Insert after autocompact
@@ -598,8 +655,24 @@ export class SettingsSelectorComponent extends Container {
 			});
 		}
 
+		if (callbacks.onPromptCacheKeepAliveChange && config.promptCacheKeepAlive) {
+			const httpIdleTimeoutIndex = items.findIndex((item) => item.id === "http-idle-timeout");
+			const currentValue = formatPromptCacheKeepAlive(config.promptCacheKeepAlive);
+			items.splice(httpIdleTimeoutIndex + 1, 0, {
+				id: "prompt-cache-keepalive",
+				label: "Prompt cache keepalive",
+				description:
+					"Refresh supported prompt caches shortly before expiry while work runs and for this long after it finishes",
+				currentValue,
+				values: PROMPT_CACHE_KEEPALIVE_CHOICES.includes(currentValue)
+					? [...PROMPT_CACHE_KEEPALIVE_CHOICES]
+					: [...PROMPT_CACHE_KEEPALIVE_CHOICES, currentValue],
+			});
+		}
+
 		const sectionById: Record<string, string> = {
 			autocompact: "Agent",
+			"compact-at": "Agent",
 			personality: "Agent",
 			thinking: "Agent",
 			"review-model": "Agent",
@@ -608,6 +681,7 @@ export class SettingsSelectorComponent extends Container {
 			"follow-up-mode": "Messages",
 			transport: "Messages",
 			"http-idle-timeout": "Messages",
+			"prompt-cache-keepalive": "Messages",
 			theme: "Interface",
 			"tui-mode": "Interface",
 			"fullscreen-exit-output": "Interface",
@@ -653,6 +727,11 @@ export class SettingsSelectorComponent extends Container {
 					case "autocompact":
 						callbacks.onAutoCompactChange(newValue === "true");
 						break;
+					case "compact-at":
+						callbacks.onCompactionThresholdChange(
+							newValue === "default" ? 0 : parseContextWarningTokens(newValue),
+						);
+						break;
 					case "personality":
 						callbacks.onPersonalityChange(newValue as Personality);
 						break;
@@ -680,6 +759,11 @@ export class SettingsSelectorComponent extends Container {
 					case "transport":
 						callbacks.onTransportChange(newValue as Transport);
 						break;
+					case "prompt-cache-keepalive": {
+						const mode = parsePromptCacheKeepAlive(newValue);
+						if (mode !== undefined) callbacks.onPromptCacheKeepAliveChange?.(mode);
+						break;
+					}
 					case "http-idle-timeout": {
 						const choice = HTTP_IDLE_TIMEOUT_CHOICES.find((item) => item.label === newValue);
 						if (choice) {

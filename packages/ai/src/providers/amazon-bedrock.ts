@@ -49,8 +49,14 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import {
+	getAnthropicThinkingMode,
+	supportsAnthropicSamplingParameters,
+	supportsAnthropicXhighEffort,
+} from "./anthropic-capabilities.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
@@ -108,7 +114,17 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 	context: Context,
 	options: BedrockOptions = {},
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: {
@@ -121,6 +137,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 	(async () => {
 		let usage: Usage = {
+			availability: "unavailable",
 			input: 0,
 			output: 0,
 			cacheRead: 0,
@@ -129,6 +146,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 		let stopReason: StopReason = "stop";
+		let hasMessageStop = false;
 		const streamState: BedrockStreamState = { blocksByRawIndex: new Map(), nextContentIndex: 0 };
 
 		try {
@@ -223,19 +241,23 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 						})
 					: "none";
 			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
+			const toolResultPayload = new ToolResultPayloadTracker();
 			let commandInput = {
 				modelId: model.id,
-				messages: convertMessages(context, model, cacheRetention),
+				messages: convertMessages(context, model, cacheRetention, toolResultPayload),
 				system: buildSystemPrompt(context.systemPrompt, cacheRetention),
 				inferenceConfig: {
 					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
-					...(options.temperature !== undefined && { temperature: options.temperature }),
+					...(options.temperature !== undefined &&
+						supportsAnthropicSamplingParameters(model.id, model.name) !== false && {
+							temperature: options.temperature,
+						}),
 				},
 				toolConfig: convertToolConfig(context.tools, options.toolChoice),
 				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
 				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
 			};
-			const nextCommandInput = await options?.onPayload?.(commandInput, model);
+			const nextCommandInput = await options?.onPayload?.(commandInput, model, toolResultPayload.metadata);
 			if (nextCommandInput !== undefined) {
 				commandInput = nextCommandInput as typeof commandInput;
 			}
@@ -262,6 +284,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 				} else if (item.contentBlockStop) {
 					handleContentBlockStop(item.contentBlockStop, streamState, normalizer);
 				} else if (item.messageStop) {
+					hasMessageStop = true;
 					stopReason = mapStopReason(item.messageStop.stopReason);
 				} else if (item.metadata) {
 					const metadataUsage = parseMetadataUsage(item.metadata, model);
@@ -284,6 +307,10 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 
 			if (options.signal?.aborted) {
 				throw new Error("Request was aborted");
+			}
+
+			if (!hasMessageStop && [...streamState.blocksByRawIndex.values()].some((block) => block.kind === "toolCall")) {
+				throw new Error("Bedrock stream ended before messageStop");
 			}
 
 			if (stopReason === "error" || stopReason === "aborted") {
@@ -490,8 +517,22 @@ function parseMetadataUsage(
 	event: ConverseStreamMetadataEvent,
 	model: Model<"bedrock-converse-stream">,
 ): Usage | undefined {
-	if (!event.usage) return undefined;
+	if (
+		!event.usage ||
+		![
+			event.usage.inputTokens,
+			event.usage.outputTokens,
+			event.usage.totalTokens,
+			event.usage.cacheReadInputTokens,
+			event.usage.cacheWriteInputTokens,
+		].some((value) => typeof value === "number")
+	)
+		return undefined;
 	const usage: Usage = {
+		availability:
+			typeof event.usage.inputTokens === "number" && typeof event.usage.outputTokens === "number"
+				? "complete"
+				: "partial",
 		input: event.usage.inputTokens || 0,
 		output: event.usage.outputTokens || 0,
 		cacheRead: event.usage.cacheReadInputTokens || 0,
@@ -544,33 +585,15 @@ function resolveBedrockBlock(
 }
 
 /**
- * Check if the model supports adaptive thinking (Opus 4.6+, Sonnet 4.6).
- * Checks both model ID and model name to support application inference profiles
- * whose ARNs don't contain the model name.
+ * Whether a Claude model takes adaptive thinking instead of a token budget. Reads the name too, for
+ * application inference profiles whose ARNs don't contain the model name.
  */
-function getModelMatchCandidates(modelId: string, modelName?: string): string[] {
-	const values = modelName ? [modelId, modelName] : [modelId];
-	return values.flatMap((value) => {
-		const lower = value.toLowerCase();
-		return [lower, lower.replace(/[\s_.:]+/g, "-")];
-	});
-}
-
 function supportsAdaptiveThinking(modelId: string, modelName?: string): boolean {
-	const candidates = getModelMatchCandidates(modelId, modelName);
-	return candidates.some(
-		(s) =>
-			s.includes("opus-4-6") ||
-			s.includes("opus-4-7") ||
-			s.includes("opus-4-8") ||
-			s.includes("sonnet-4-6") ||
-			s.includes("fable-5"),
-	);
+	return getAnthropicThinkingMode(modelId, modelName) === "adaptive";
 }
 
 function supportsNativeXhighEffort(model: Model<"bedrock-converse-stream">): boolean {
-	const candidates = getModelMatchCandidates(model.id, model.name);
-	return candidates.some((s) => s.includes("opus-4-7") || s.includes("opus-4-8") || s.includes("fable-5"));
+	return supportsAnthropicXhighEffort(model.id, model.name) === true;
 }
 
 function mapThinkingLevelToEffort(
@@ -674,9 +697,10 @@ function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
 	cacheRetention: CacheRetention,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): Message[] {
 	const result: Message[] = [];
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId, toolResultPayload);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -789,6 +813,7 @@ function convertMessages(
 						status: m.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 					},
 				});
+				toolResultPayload?.include(m);
 
 				// Look ahead for consecutive toolResult messages
 				let j = i + 1;
@@ -801,6 +826,7 @@ function convertMessages(
 							status: nextMsg.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 						},
 					});
+					toolResultPayload?.include(nextMsg);
 					j++;
 				}
 

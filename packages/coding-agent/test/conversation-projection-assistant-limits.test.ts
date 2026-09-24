@@ -74,6 +74,7 @@ const snapshotBuilder: ConversationProjectionSnapshotBuilder = (context) => ({
 		pendingMessageCount: 0,
 		steeringQueue: [],
 		followUpQueue: [],
+		backgroundJobs: [],
 	},
 	transcript: {
 		sessionId: "assistant-limits",

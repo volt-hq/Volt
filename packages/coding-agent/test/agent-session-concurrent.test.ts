@@ -20,7 +20,6 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import type { BuildSystemPromptOptions } from "../src/core/system-prompt.ts";
 import {
 	createTestAgentSessionRuntimeConfig,
 	createTestExtensionsResult,
@@ -212,11 +211,14 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		const prompt = session.prompt("active user");
 		await streamStarted;
-		await expect(session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
-			"Cannot navigate the session tree while an agent or bash run is active",
-		);
-		finishAssistant();
-		await prompt;
+		try {
+			await expect(session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
+				"Cannot navigate the session tree while an agent, bash run, or background job is active",
+			);
+		} finally {
+			finishAssistant();
+			await prompt;
+		}
 
 		const completedBranch = sessionManager.getBranch().filter((entry) => entry.type === "message");
 		expect(completedBranch.map((entry) => entry.message.role)).toEqual([
@@ -277,12 +279,11 @@ describe("AgentSession concurrent prompt guard", () => {
 		await firstPrompt.catch(() => {});
 	});
 
-	it("delivers retained steer and follow-up queues after a remote abort", async () => {
+	it("should preserve extension-origin steering messages when the active run aborts", async () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 		let sawSteeringMessage = false;
-		let sawFollowUpMessage = false;
-		const inputSources: string[] = [];
+		let lastInputSource: string | undefined;
 		const queueEvents: Array<{
 			steering: readonly AgentSessionQueuedMessage[];
 			followUp: readonly AgentSessionQueuedMessage[];
@@ -308,18 +309,10 @@ describe("AgentSession concurrent prompt guard", () => {
 								.join("\n");
 						});
 
-					const hasSteeringMessage = userTexts.includes("Steer from extension");
-					const hasFollowUpMessage = userTexts.includes("Follow-up from remote");
-					if (hasSteeringMessage || hasFollowUpMessage) {
-						sawSteeringMessage ||= hasSteeringMessage;
-						sawFollowUpMessage ||= hasFollowUpMessage;
+					if (userTexts.includes("Steer from extension")) {
+						sawSteeringMessage = true;
 						stream.push({ type: "start", seq: 0, snapshot: createAssistantMessage(""), toolState: [] });
-						stream.push({
-							type: "done",
-							seq: 1,
-							reason: "stop",
-							message: createAssistantMessage("Queued message handled"),
-						});
+						stream.push({ type: "done", seq: 1, reason: "stop", message: createAssistantMessage("Steered") });
 						return;
 					}
 
@@ -354,7 +347,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 			(volt) => {
 				volt.on("input", async (event) => {
-					inputSources.push(event.source);
+					lastInputSource = event.source;
 				});
 			},
 		]);
@@ -388,35 +381,19 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		volt!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
 		await new Promise((resolve) => setTimeout(resolve, 25));
-		const followUpClientMessageId = "remote-follow-up-after-abort";
-		const followUpPrompt = session.prompt("Follow-up from remote", {
-			streamingBehavior: "followUp",
-			clientMessageId: followUpClientMessageId,
-			source: "rpc",
-		});
-		const abort = session.abort("remote_request");
 
-		await followUpPrompt;
-		expect(inputSources).toContain("extension");
-		expect(inputSources).toContain("rpc");
+		expect(session.pendingMessageCount).toBe(1);
+		expect(session.getSteeringMessages().map((message) => message.text)).toContain("Steer from extension");
+		expect(lastInputSource).toBe("extension");
 		expect(
-			queueEvents.some(
-				(event) =>
-					event.steering.some((message) => message.text === "Steer from extension") &&
-					event.followUp.some((message) => message.text === "Follow-up from remote"),
-			),
+			queueEvents.some((event) => event.steering.some((message) => message.text === "Steer from extension")),
 		).toBe(true);
 
-		await abort;
+		await session.abort();
 		await firstPrompt.catch(() => {});
-		await session.waitForIdle();
 
-		expect(sawSteeringMessage).toBe(true);
-		expect(sawFollowUpMessage).toBe(true);
-		expect(session.pendingMessageCount).toBe(0);
-		expect(session.getSteeringMessages()).toEqual([]);
-		expect(session.getFollowUpMessages()).toEqual([]);
-		expect(sessionManager.getClientInput(followUpClientMessageId)).toMatchObject({ state: "completed" });
+		expect(sawSteeringMessage).toBe(false);
+		expect(session.getSteeringMessages().map((message) => message.text)).toContain("Steer from extension");
 	});
 
 	it("should allow prompt() after previous completes", async () => {
@@ -543,57 +520,29 @@ describe("AgentSession concurrent prompt guard", () => {
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
+		const snapshots: string[][] = [];
+		const extensionsResult = await createTestExtensionsResult([
+			(volt) => {
+				volt.on("tool_call", (_event, ctx) => {
+					snapshots.push(
+						ctx.sessionManager
+							.getEntries()
+							.filter((entry) => entry.type === "message")
+							.map((entry) => entry.message.role),
+					);
+				});
+			},
+		]);
+
 		session = new AgentSession({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
-			resourceLoader: createTestResourceLoader(),
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
 			baseToolsOverride: { dummy: tool },
 		});
-
-		const snapshots: string[][] = [];
-		const sessionWithRunner = session as unknown as {
-			_extensionRunner?: {
-				hasHandlers: (eventType: string) => boolean;
-				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
-				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
-				emitContext: (messages: unknown[]) => Promise<undefined>;
-				emitToolCall: (event: { type: string; toolCallId: string }) => Promise<undefined>;
-				emitInput: (
-					text: string,
-					images: unknown,
-					source: "interactive" | "rpc" | "extension",
-					streamingBehavior?: "steer" | "followUp",
-				) => Promise<{ action: "continue" }>;
-				emitBeforeAgentStart: (
-					prompt: string,
-					images: unknown,
-					systemPrompt: string,
-					systemPromptOptions: BuildSystemPromptOptions,
-				) => Promise<undefined>;
-				invalidate: (message?: string) => void;
-			};
-		};
-		sessionWithRunner._extensionRunner = {
-			hasHandlers: (eventType) => eventType === "tool_call",
-			emit: async () => {},
-			emitMessageEnd: async () => undefined,
-			emitContext: async () => undefined,
-			emitToolCall: async () => {
-				snapshots.push(
-					sessionManager
-						.getEntries()
-						.filter((entry) => entry.type === "message")
-						.map((entry) => entry.message.role),
-				);
-				return undefined;
-			},
-			emitInput: async () => ({ action: "continue" }),
-			emitBeforeAgentStart: async () => undefined,
-			invalidate: () => {},
-		};
 
 		await session.prompt("hi");
 		await session.waitForIdle();
@@ -687,51 +636,25 @@ describe("AgentSession concurrent prompt guard", () => {
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
+		const extensionsResult = await createTestExtensionsResult([
+			(volt) => {
+				volt.on("message_end", async (event) => {
+					if (event.message.role === "assistant") {
+						await new Promise((resolve) => setTimeout(resolve, 40));
+					}
+				});
+			},
+		]);
+
 		session = new AgentSession({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
 			modelRegistry,
-			resourceLoader: createTestResourceLoader(),
+			resourceLoader: createTestResourceLoader({ extensionsResult }),
 			baseToolsOverride: { dummy: tool },
 		});
-
-		const sessionWithRunner = session as unknown as {
-			_extensionRunner?: {
-				hasHandlers: (eventType: string) => boolean;
-				emit: (event: { type: string; message?: { role?: string } }) => Promise<void>;
-				emitMessageEnd: (event: { type: string; message?: { role?: string } }) => Promise<undefined>;
-				emitContext: (messages: unknown[]) => Promise<undefined>;
-				emitInput: (
-					text: string,
-					images: unknown,
-					source: "interactive" | "rpc" | "extension",
-					streamingBehavior?: "steer" | "followUp",
-				) => Promise<{ action: "continue" }>;
-				emitBeforeAgentStart: (
-					prompt: string,
-					images: unknown,
-					systemPrompt: string,
-					systemPromptOptions: BuildSystemPromptOptions,
-				) => Promise<undefined>;
-				invalidate: (message?: string) => void;
-			};
-		};
-		sessionWithRunner._extensionRunner = {
-			hasHandlers: () => false,
-			emit: async () => {},
-			emitMessageEnd: async (event) => {
-				if (event.type === "message_end" && event.message?.role === "assistant") {
-					await new Promise((resolve) => setTimeout(resolve, 40));
-				}
-				return undefined;
-			},
-			emitContext: async () => undefined,
-			emitInput: async () => ({ action: "continue" }),
-			emitBeforeAgentStart: async () => undefined,
-			invalidate: () => {},
-		};
 
 		await session.prompt("hi");
 		await session.waitForIdle();

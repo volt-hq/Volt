@@ -59,6 +59,19 @@ describe("control protocol framing", () => {
 			{ type: "lease_rekey_commit", id: "5a", transactionId: "tx-1" },
 			{ type: "lease_rekey_rollback", id: "5b", transactionId: "tx-1" },
 			{ type: "lease_rekey_dispose", id: "5c", transactionId: "tx-1" },
+			{
+				type: "work_observe",
+				id: "5d",
+				workspaceName: "volt",
+				sessionId: "s-1",
+				gitContext: {
+					repository: "Volt",
+					branch: "feature/work",
+					headOid: "0123456789abcdef0123456789abcdef01234567",
+					baseRef: "main",
+				},
+			},
+			{ type: "work_observe", id: "5e", workspaceName: "volt", sessionId: "s-1", gitContext: null },
 			{ type: "pair_request", id: "6", access: "coding" },
 			{
 				type: "client_access_update",
@@ -132,6 +145,7 @@ describe("control protocol framing", () => {
 				capabilities: ["pair_cancel"],
 				leases: [{ workspaceName: "volt", sessionId: "s-1", state: "tui-owned", relayCount: 1, streamCount: 0 }],
 				phoneConnections: 1,
+				remoteTransport: { state: "ready", wrapperVersion: "1.1.1-volt.2" },
 				workspaces: [{ name: "volt", path: "/tmp/volt", allowedTools: ["read", "bash"] }],
 				clients: [
 					{
@@ -186,6 +200,35 @@ describe("control protocol framing", () => {
 			expect(decoded).toEqual(response);
 			expect(isControlResponse(decoded), `response ${response.type}`).toBe(true);
 		}
+		expect(
+			isControlResponse({
+				type: "relay_rpc_result",
+				id: "invalid-catalog",
+				response: {},
+				workspaceMetadata: { workspaceNames: ["volt"], workspaces: [{ name: "volt", status: "unknown" }] },
+			}),
+		).toBe(false);
+	});
+
+	it("requires structured remote transport health on status responses", () => {
+		const base = { type: "status_result", id: "status" };
+		expect(isControlResponse(base)).toBe(false);
+		expect(isControlResponse({ ...base, remoteTransport: { state: "ready" } })).toBe(true);
+		expect(
+			isControlResponse({
+				...base,
+				remoteTransport: {
+					state: "unavailable",
+					reasonCode: "native_binding_missing",
+					message: "Phone transport is unavailable on this platform.",
+					wrapperVersion: "1.1.1-volt.2",
+				},
+			}),
+		).toBe(true);
+		expect(isControlResponse({ ...base, remoteTransport: { state: "healthy" } })).toBe(false);
+		expect(isControlResponse({ ...base, remoteTransport: { state: "unavailable", reasonCode: "secret" } })).toBe(
+			false,
+		);
 	});
 
 	it("rejects a prepared-rekey response without its transaction id", () => {
@@ -196,6 +239,31 @@ describe("control protocol framing", () => {
 		const request = { type: "lease_release", id: "4", workspaceName: "volt", sessionId: "s-1" };
 		expect(isControlRequest(request)).toBe(false);
 		expect(isControlRequest({ ...request, reason: "workspace_removed" })).toBe(false);
+	});
+
+	it("strictly bounds path-free Work observations", () => {
+		expect(
+			isControlRequest({
+				type: "work_observe",
+				id: "1",
+				workspaceName: "w",
+				sessionId: "s",
+				gitContext: { repository: "repo", branch: "feature/work", headOid: "not-an-oid" },
+			}),
+		).toBe(false);
+		expect(
+			isControlRequest({
+				type: "work_observe",
+				id: "1",
+				workspaceName: "w",
+				sessionId: "s",
+				gitContext: {
+					repository: "repo",
+					branch: "feature/work\npoison",
+					headOid: "0123456789abcdef0123456789abcdef01234567",
+				},
+			}),
+		).toBe(false);
 	});
 
 	it("rejects pair_request with a malformed workspace", () => {
@@ -323,6 +391,11 @@ describe("control protocol framing", () => {
 				clientNodeId: "n-1",
 				workspaceName: "volt",
 				workspacePath: "/tmp/volt",
+				workspaceNames: ["volt"],
+				workspaces: [
+					{ name: "volt", status: "available" },
+					{ name: "offline", status: "missing" },
+				],
 				allowedTools: "read",
 				rpcGrant: RPC_GRANT,
 			},
@@ -351,6 +424,21 @@ describe("control protocol framing", () => {
 			isRelayPreamble({
 				...preamble,
 				authorization: { ...preamble.authorization, rpcGrant: undefined },
+			}),
+		).toBe(false);
+		expect(
+			isRelayPreamble({
+				...preamble,
+				authorization: { ...preamble.authorization, workspaceNames: undefined },
+			}),
+		).toBe(false);
+		expect(
+			isRelayPreamble({
+				...preamble,
+				authorization: {
+					...preamble.authorization,
+					workspaces: [{ name: "volt", status: "unknown" }],
+				},
 			}),
 		).toBe(false);
 	});

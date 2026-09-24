@@ -16,7 +16,30 @@ Run from source:
 /path/to/volt/volt-test.sh
 ```
 
-The script can be run from any directory. Volt keeps the caller's current working directory.
+The script can be run from any directory. Volt keeps the caller's current working directory. `volt-test.sh` and `volt-test.ps1` enable private review diagnostics for source-development runs. Model-reported limitations, verifier assessments and bounded completeness challenges, and bounded failed-tool output are written as one owner-only JSONL file per review with diagnostics under `~/.volt/agent/review-diagnostics/` (or the configured agent directory). The `verification_assessment` record retains the verifier's `assessment` and optional `challenge` even when no limitations or findings were reported; the public PR result never copies the private challenge. An unresolved concern can instead receive a code-grounded explanation from a separate context-blind pass that sees only host-validated changed-code locations. A completeness challenge triggers at most one follow-up discovery/verification cycle; diagnostics retain each cycle's verifier assessment. These records are untrusted and may contain sensitive GitHub context. They are not added to sessions, RPC responses, exports, or model context, and only the 20 newest files are retained.
+
+On Windows, Volt uses the system Windows PowerShell and [.NET ACL-aware creation](https://learn.microsoft.com/en-us/dotnet/api/system.security.accesscontrol.directorysecurity?view=netframework-4.8.1) to restrict the diagnostic directory and newly created files to the current account. New files have a protected DACL installed at creation, before any diagnostic text is written. An existing diagnostic directory must belong to the current account and must not be a junction or symbolic link. The existing agent-directory ACL is not changed. Administrators with ownership/backup privileges remain outside this privacy boundary.
+
+If Windows PowerShell is unavailable, times out, or cannot establish these ACLs, Volt does not fall back to chmod-only storage. Any diagnostic retention failure produces the local warning `Could not retain optional private review diagnostics.` after the TUI handoff, or on host stderr for headless execution. Raw errors, paths, and model prose are not included. The warning is transient and never added to review results, sessions, RPC events, or exports; diagnostic failures do not change the review verdict.
+
+Set `VOLT_REVIEW_PRIVATE_DIAGNOSTICS=0` before launching either script to disable these records.
+
+## Background-job performance diagnostics
+
+`volt-test.sh` and `volt-test.ps1` enable `VOLT_BACKGROUND_JOB_DIAGNOSTICS=1` only when the variable is unset. `volt-test.bat` delegates to PowerShell. Set it to `0` to opt out; only `1` and `true` enable collection. Normal installed and SDK runs are off unless explicitly enabled. Newly created child runtimes inherit the setting. An already-running daemon does not acquire the launcher's environment; restart it with the intended setting when measuring daemon-owned work.
+
+Versioned, metadata-only JSONL batches go to `<agentDir>/background-job-diagnostics` (normally `~/.volt/agent/background-job-diagnostics`). Records correlate runtime, session, parent session when available, run, request, tool, job, and wait identities. They include UTC timestamps, monotonic durations, job lifecycle, wait wake reasons, native read byte counts/output revisions, collection acknowledgement, tool activity, and logical conversation request token/cache usage. Opaque Responses tool IDs containing provider item payloads are represented by stable SHA-256 digests so related records still join without retaining those payloads. They do not contain prompts, commands, arguments, reasoning, worker output, credentials, host paths, or provider payloads. They are never added to session SQLite, model context, RPC, or exports.
+
+Dirty batches flush every 30 seconds, at 64 records, before 256 KiB, and at run settlement/disposal. Records are capped at 4 KiB. The collector keeps one active and one pending write, counts dropped records under pressure, and retains the newest 200 completed files (up to 50 MiB). Writes use the existing private atomic file protections, including ACL-aware creation on Windows. An I/O/privacy failure disables optional logging for that runtime and reports one sanitized local warning. Close drains are best-effort and bounded to ten seconds; incomplete logs must not be treated as complete measurements.
+
+Analyze a directory with the repository-only script:
+
+```bash
+node scripts/summarize-background-job-performance.mjs --dir /path/to/background-job-diagnostics
+node scripts/summarize-background-job-performance.mjs --dir /path/to/background-job-diagnostics --since 2026-09-10T00:00:00Z --until 2026-09-11T00:00:00Z
+```
+
+Use `--session <id>` to narrow the report and `--help` for output details. Reports distinguish root and child usage, requests started during waits, wait durations/reasons, active/unchanged reads, observable job/model/tool overlap, and completion-to-read/acknowledgement latency. Missing ends, sequence gaps, duplicates, dropped events, and partially retained windows are reported. Logical conversation stream invocations are not HTTP retry counts or a complete ledger of review, compaction, and session-name inference. Token counts are not billed cost, and overlapping tool activity is not proof of useful work.
 
 ## Forking / Rebranding
 
@@ -47,9 +70,13 @@ Never use `__dirname` directly for package assets.
 
 ## Debug Command
 
-`/debug` (hidden) writes to `~/.volt/agent/volt-debug.log`:
-- Rendered TUI lines with ANSI codes
-- Last messages sent to the LLM
+`/debug` captures live tool preparation and execution without submitting a prompt or cancelling the run. It atomically replaces `~/.volt/agent/debug/tool-progress-latest.json` (or the configured agent directory). Generation safeguards also save this record automatically; capture failures cannot change the run outcome. Capture I/O runs asynchronously, with one active snapshot and at most one queued snapshot. Repeated requests replace the queued snapshot with the latest request. Closing the session drains those already captured snapshots; new requests after disposal are rejected.
+
+The record contains up to 16 recent calls, their provider/model and call IDs, phase and elapsed times, last event time, normalized argument byte/event counts, current and peak stream queue event counts and estimated retained bytes, and allowlisted safeguard/abort metadata. Unknown queue measurements are explicitly unavailable. Counts describe the normalized argument stream, not HTTP packet sizes. A new run resets the in-memory records; disposal releases them.
+
+Each call retains at most a 4 KiB UTF-8 argument prefix. Recognizable credential fields, shell assignments, authorization markers, token prefixes, and PEM private-key markers are redacted conservatively before disk. Detection uses a bounded JSON-decoded view of the prefix, including markers split across provider chunks; it does not require a complete JSON value or PEM envelope. This is a diagnostic sample, not a complete JSON object: it may be truncated or redacted and must never be executed. Arbitrary source content can still be sensitive; inspect the file before sharing. Assistant prose, hidden reasoning, transport headers, tool output, and full conversation history are never copied into this capture.
+
+Files and their directory are owner-only on Unix. On Windows the existing ACL-aware diagnostic writer installs a protected current-account DACL before writing; capture fails closed if those permissions cannot be established. Only the latest capture is retained.
 
 ## Testing
 
@@ -58,6 +85,18 @@ Never use `__dirname` directly for package assets.
 npm test                          # Run all tests
 npm test -- test/specific.test.ts # Run specific test
 ```
+
+## Session discovery benchmark
+
+Run the observational SQLite listing/open/search benchmark from the repository root:
+
+```bash
+npm --prefix packages/coding-agent run benchmark:sessions
+```
+
+It reports elapsed time, main-thread heap delta, and sampled process-wide peak RSS delta for cold/warm cross-store listing, cold/warm exact open, and token/phrase/regex deep search. Scale dimensions independently with `VOLT_BENCH_SESSION_COUNT` (total), `VOLT_BENCH_STORE_COUNT`, `VOLT_BENCH_SESSION_SUMMARY_BYTES`, `VOLT_BENCH_SESSION_NON_SEARCHABLE_BYTES`, `VOLT_BENCH_SESSION_SEARCHABLE_BYTES`, `VOLT_BENCH_QUERY_TOKEN_COUNT`, `VOLT_BENCH_QUERY_TOKEN_BYTES`, `VOLT_BENCH_QUERY_PHRASE_COUNT`, `VOLT_BENCH_QUERY_PHRASE_BYTES`, and `VOLT_BENCH_QUERY_REGEX_BYTES`. The command rejects query terms that do not fit the requested per-session searchable payload instead of silently increasing it.
+
+Listing and exact lookup should remain independent of non-searchable transcript payload. Deep-search time still depends on total searchable text and query shape; stores are searched sequentially, and each worker accumulates at most its largest one-session document rather than all searchable text in that store. Process RSS sampling includes worker threads but is host-dependent, observational, and has no pass/fail threshold.
 
 ## Lifecycle memory benchmark
 

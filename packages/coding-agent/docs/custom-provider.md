@@ -450,6 +450,14 @@ function streamMyProvider(
 
 `normalizer.end()` is deliberately called in `finally`. It is a no-op after `done` or `error`; if neither terminal fragment was emitted, it synthesizes an error so callers do not hang waiting for `stream.result()`.
 
+### Payload delivery evidence
+
+Call `options.onPayload(payload, model, metadata)` after serialization and before sending a request. `ProviderPayloadMetadata.toolResultMessageIndices` contains the zero-based indices of original `context.messages` tool results represented in that payload. Record these indices when emitting each tool result, after replay filtering. Preserve the source index through tool-call ID normalization and grouped result messages. Do not include omitted messages or synthesized missing-result placeholders.
+
+The metadata is host-only and must not enter the wire payload. It describes the payload before the callback runs, not a replacement returned by the callback. Do not infer it from tool-call IDs or scan output text for matches. Providers that cannot establish this mapping must omit the metadata rather than claim delivery.
+
+Volt uses this evidence to clear background-job notices only after an unchanged payload hook and a successful, non-aborted response. Missing evidence leaves notices visible; it does not fail inference. See [Background jobs](usage.md#background-jobs).
+
 ### Fragment Types
 
 Push fragments via `normalizer.push()` in this order:

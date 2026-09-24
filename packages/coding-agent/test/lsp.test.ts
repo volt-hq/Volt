@@ -1,18 +1,38 @@
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import {
+	chmodSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import type { HostActionRequest, HostActionUpdate, HostInteraction } from "../src/core/host-interaction.ts";
+import type {
+	HostActionDecision,
+	HostActionRequest,
+	HostActionUpdate,
+	HostInteraction,
+} from "../src/core/host-interaction.ts";
 import { LspClient } from "../src/core/lsp/client.ts";
+import { resolveLspLaunch } from "../src/core/lsp/command-resolver.ts";
 import { installHintForCommand, installRecipeForCommand, resolveLspConfig } from "../src/core/lsp/config.ts";
 import { LspManager } from "../src/core/lsp/manager.ts";
+import { lspResult } from "../src/core/lsp/outcome.ts";
 import { LspTracer } from "../src/core/lsp/trace.ts";
 import { applyTextEdits, normalizeWorkspaceEdit } from "../src/core/lsp/workspace-edit.ts";
 import type { ToolDiagnosticsProvider } from "../src/core/tools/diagnostics-provider.ts";
 import { createEditToolDefinition } from "../src/core/tools/edit.ts";
 import { createLspToolDefinition, type LspNavigationProvider } from "../src/core/tools/lsp.ts";
 import { createWriteToolDefinition } from "../src/core/tools/write.ts";
+import { directorySymlinkType } from "./symlink-utils.ts";
 
 const FAKE_SERVER = join(__dirname, "fixtures", "fake-lsp-server.mjs");
 
@@ -43,6 +63,19 @@ function writeFakeServerExecutable(binDir: string, binary: string): void {
 	chmodSync(path, 0o755);
 }
 
+interface Deferred<T> {
+	promise: Promise<T>;
+	resolve(value: T): void;
+}
+
+function createDeferred<T>(): Deferred<T> {
+	let resolve!: (value: T) => void;
+	const promise = new Promise<T>((resolvePromise) => {
+		resolve = resolvePromise;
+	});
+	return { promise, resolve };
+}
+
 function fakeServerConfig(options?: {
 	pull?: boolean;
 	severity?: "error" | "warning";
@@ -55,6 +88,9 @@ function fakeServerConfig(options?: {
 	hang?: boolean;
 	initError?: boolean;
 	traceFile?: string;
+	rootMarkers?: string[];
+	navigationUri?: string;
+	workspaceEditFile?: string;
 }) {
 	return resolveLspConfig({
 		enabled: true,
@@ -79,9 +115,26 @@ function fakeServerConfig(options?: {
 					...(options?.hang ? ["--hang"] : []),
 					...(options?.initError ? ["--init-error"] : []),
 					...(options?.publishDelayMs !== undefined ? ["--delay", String(options.publishDelayMs)] : []),
+					...(options?.navigationUri ? ["--navigation-uri", options.navigationUri] : []),
+					...(options?.workspaceEditFile ? ["--workspace-edit", options.workspaceEditFile] : []),
 				],
 				fileExtensions: [".foo"],
-				rootMarkers: [],
+				rootMarkers: options?.rootMarkers ?? [],
+			},
+		},
+	});
+}
+
+function builtInTypescriptInstallConfig(rootMarkers: string[] = []) {
+	return resolveLspConfig({
+		enabled: true,
+		servers: {
+			python: { enabled: false },
+			go: { enabled: false },
+			rust: { enabled: false },
+			typescript: {
+				fileExtensions: [".foo"],
+				rootMarkers,
 			},
 		},
 	});
@@ -126,6 +179,26 @@ describe("resolveLspConfig", () => {
 		expect(config.servers.find((s) => s.name === "custom")?.settings).toEqual({ custom: { level: 3 } });
 	});
 
+	it("attaches automatic install recipes only to the complete built-in command", () => {
+		const resolveTypescript = (command?: string[]) =>
+			resolveLspConfig({
+				servers: {
+					typescript: {
+						...(command ? { command } : {}),
+						fileExtensions: [".foo"],
+					},
+				},
+			}).servers.find((server) => server.name === "typescript");
+
+		expect(resolveTypescript()?.installRecipe).toBeDefined();
+		expect(resolveTypescript(["tsc", "--lsp", "--stdio"])?.installRecipe).toBeDefined();
+		for (const command of [["tsc"], ["tsc", "--custom-mode"], ["tsc", "--lsp", "--stdio", "--extra"]]) {
+			const server = resolveTypescript(command);
+			expect(server?.installRecipe, command.join(" ")).toBeUndefined();
+			expect(server?.installHint, command.join(" ")).toContain("npm install -g typescript@7.0.2");
+		}
+	});
+
 	it("skips user servers without a command or file extensions", () => {
 		const config = resolveLspConfig({ servers: { broken: { command: ["x"] } } });
 		expect(config.servers.find((s) => s.name === "broken")).toBeUndefined();
@@ -134,19 +207,18 @@ describe("resolveLspConfig", () => {
 
 describe("installHintForCommand", () => {
 	it("returns install hints for built-in server binaries", () => {
-		expect(installHintForCommand(["typescript-language-server", "--stdio"])).toContain(
-			"npm install -g typescript-language-server",
-		);
+		expect(installHintForCommand(["tsc", "--lsp", "--stdio"])).toContain("npm install -g typescript@7.0.2");
 		expect(installHintForCommand(["gopls"])).toContain("go install");
 	});
 
 	it("returns trusted recipes only for reviewed install commands", () => {
-		expect(installRecipeForCommand(["typescript-language-server", "--stdio"])?.command).toEqual([
+		expect(installRecipeForCommand(["tsc", "--lsp", "--stdio"])?.command).toEqual([
 			"npm",
 			"install",
 			"-g",
-			"typescript-language-server",
-			"typescript",
+			"typescript@7.0.2",
+			"--ignore-scripts",
+			"--include=optional",
 		]);
 		expect(installRecipeForCommand([join("/tmp", "gopls")])?.displayCommand).toBe(
 			"go install golang.org/x/tools/gopls@latest",
@@ -158,6 +230,323 @@ describe("installHintForCommand", () => {
 	it("returns undefined for unknown binaries and empty commands", () => {
 		expect(installHintForCommand(["my-custom-lsp", "--stdio"])).toBeUndefined();
 		expect(installHintForCommand([])).toBeUndefined();
+	});
+});
+
+describe("resolveLspLaunch", () => {
+	it("resolves absolute and explicit project-relative executables without process cwd input", () => {
+		const environment = { PATH: "/ignored" };
+		const executablePaths = new Set(["/opt/lsp/server", "/workspace/project/tools/server"]);
+		const probeExecutable = (path: string): "executable" | "missing" =>
+			executablePaths.has(path) ? "executable" : "missing";
+
+		const absolute = resolveLspLaunch(["/opt/lsp/server", "--stdio"], {
+			projectCwd: "/workspace/project",
+			environment,
+			platform: "linux",
+			probeExecutable,
+		});
+		expect(absolute).toMatchObject({
+			command: ["/opt/lsp/server", "--stdio"],
+			resolvedExecutable: "/opt/lsp/server",
+			source: "absolute",
+			bare: false,
+		});
+		expect(absolute.environment).toBe(environment);
+
+		const relative = resolveLspLaunch(["./tools/server", "space value", "a&b"], {
+			projectCwd: "/workspace/project",
+			environment,
+			platform: "linux",
+			probeExecutable,
+		});
+		expect(relative).toMatchObject({
+			command: ["/workspace/project/tools/server", "space value", "a&b"],
+			resolvedExecutable: "/workspace/project/tools/server",
+			source: "project-relative",
+			bare: false,
+		});
+	});
+
+	it("searches inherited PATH in order and bases relative entries at projectCwd", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["server", "--stdio"], {
+			projectCwd: "/workspace/project",
+			environment: { PATH: "/first:relative-bin:/last" },
+			platform: "linux",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path === "/workspace/project/relative-bin/server" ? "executable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual(["/first/server", "/workspace/project/relative-bin/server"]);
+		expect(launch).toMatchObject({
+			command: ["/workspace/project/relative-bin/server", "--stdio"],
+			resolvedExecutable: "/workspace/project/relative-bin/server",
+			source: "path",
+			bare: true,
+		});
+	});
+
+	it("distinguishes unusable PATH candidates from missing executables", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["server", "--stdio"], {
+			projectCwd: "/workspace/project",
+			environment: { PATH: "/first:/second" },
+			platform: "linux",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path === "/first/server" ? "unusable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual(["/first/server", "/second/server"]);
+		expect(launch.resolvedExecutable).toBeUndefined();
+		expect(launch.unusableExecutable).toBe("/first/server");
+		expect(launch.command).toEqual(["server", "--stdio"]);
+	});
+
+	it("continues PATH search after an unusable candidate", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["server"], {
+			projectCwd: "/workspace/project",
+			environment: { PATH: "/first:/second:/third" },
+			platform: "linux",
+			probeExecutable: (path) => {
+				probes.push(path);
+				if (path === "/first/server") return "unusable";
+				if (path === "/second/server") return "executable";
+				return "missing";
+			},
+		});
+
+		expect(probes).toEqual(["/first/server", "/second/server"]);
+		expect(launch.resolvedExecutable).toBe("/second/server");
+		expect(launch.unusableExecutable).toBeUndefined();
+	});
+
+	it("preserves literal quotes in POSIX PATH entries", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["server"], {
+			projectCwd: "/workspace/project",
+			environment: { PATH: '"/opt/lsp"' },
+			platform: "linux",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path === "/opt/lsp/server" ? "executable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual(['/workspace/project/"/opt/lsp"/server']);
+		expect(launch.resolvedExecutable).toBeUndefined();
+		expect(launch.command).toEqual(["server"]);
+	});
+
+	it("does not discover project-local node_modules binaries unless PATH names them", () => {
+		const projectBinary = "/workspace/project/node_modules/.bin/server";
+		const unresolved = resolveLspLaunch(["server"], {
+			projectCwd: "/workspace/project",
+			environment: { PATH: "" },
+			platform: "linux",
+			probeExecutable: (path) => (path === projectBinary ? "executable" : "missing"),
+		});
+		expect(unresolved.resolvedExecutable).toBeUndefined();
+
+		const explicitPath = resolveLspLaunch(["server"], {
+			projectCwd: "/workspace/project",
+			environment: { PATH: "node_modules/.bin" },
+			platform: "linux",
+			probeExecutable: (path) => (path === projectBinary ? "executable" : "missing"),
+		});
+		expect(explicitPath.resolvedExecutable).toBe(projectBinary);
+	});
+
+	it("uses case-insensitive PATH, quoted entries, and PATHEXT ordering on Windows", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["server", "--stdio"], {
+			projectCwd: "C:\\workspace\\project",
+			environment: { Path: '"tools";C:\\global', PATHEXT: ".CMD;.EXE" },
+			platform: "win32",
+			probeExecutable: (path) => {
+				probes.push(path);
+				if (path === "C:\\workspace\\project\\tools\\server") return "executable";
+				return path === "C:\\workspace\\project\\tools\\server.CMD" ? "executable" : "missing";
+			},
+		});
+		expect(probes).toEqual(["C:\\workspace\\project\\tools\\server.CMD"]);
+		expect(launch.resolvedExecutable).toBe("C:\\workspace\\project\\tools\\server.CMD");
+		expect(launch.command).toEqual(["C:\\workspace\\project\\tools\\server.CMD", "--stdio"]);
+	});
+
+	it("applies PATHEXT rules to extensionless absolute and project-relative Windows commands", () => {
+		const executablePaths = new Set([
+			"C:\\tools\\server",
+			"C:\\tools\\server.EXE",
+			"C:\\workspace\\project\\tools\\server",
+			"C:\\workspace\\project\\tools\\server.EXE",
+		]);
+		const probeExecutable = (path: string): "executable" | "missing" =>
+			executablePaths.has(path) ? "executable" : "missing";
+		const options = {
+			projectCwd: "C:\\workspace\\project",
+			environment: { PATH: "", PATHEXT: ".CMD;.EXE" },
+			platform: "win32" as const,
+			probeExecutable,
+		};
+
+		const absolute = resolveLspLaunch(["C:\\tools\\server"], options);
+		expect(absolute.resolvedExecutable).toBe("C:\\tools\\server.EXE");
+
+		const relative = resolveLspLaunch([".\\tools\\server"], options);
+		expect(relative.resolvedExecutable).toBe("C:\\workspace\\project\\tools\\server.EXE");
+	});
+
+	it("does not treat dots in Windows directory names as executable extensions", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["C:\\tools.v1\\server"], {
+			projectCwd: "C:\\workspace\\project",
+			environment: { PATH: "", PATHEXT: ".CMD;.EXE" },
+			platform: "win32",
+			probeExecutable: (path) => {
+				probes.push(path);
+				if (path === "C:\\tools.v1\\server") return "executable";
+				return path === "C:\\tools.v1\\server.EXE" ? "executable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual(["C:\\tools.v1\\server.CMD", "C:\\tools.v1\\server.EXE"]);
+		expect(launch.resolvedExecutable).toBe("C:\\tools.v1\\server.EXE");
+	});
+
+	it("probes an explicitly suffixed Windows command directly without appending PATHEXT", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["server.cmd"], {
+			projectCwd: "C:\\workspace\\project",
+			environment: { PATH: "C:\\tools", PATHEXT: ".CMD;.EXE" },
+			platform: "win32",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path.toLowerCase() === "c:\\tools\\server.cmd" ? "executable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual(["C:\\tools\\server.cmd"]);
+		expect(launch.resolvedExecutable).toBe("C:\\tools\\server.cmd");
+	});
+
+	it.each([
+		{
+			label: "absolute",
+			command: "C:\\tools\\server.exe",
+			expected: "C:\\tools\\server.exe",
+			source: "absolute" as const,
+		},
+		{
+			label: "project-relative",
+			command: ".\\tools\\server.exe",
+			expected: "C:\\workspace\\project\\tools\\server.exe",
+			source: "project-relative" as const,
+		},
+		{
+			label: "bare PATH",
+			command: "server.exe",
+			expected: "C:\\bin\\server.exe",
+			source: "path" as const,
+		},
+		{
+			label: "UNC absolute",
+			command: "\\\\host\\share\\server.exe",
+			expected: "\\\\host\\share\\server.exe",
+			source: "absolute" as const,
+		},
+	])("probes an explicitly named $label Windows executable before PATHEXT", ({ command, expected, source }) => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch([command, "--stdio"], {
+			projectCwd: "C:\\workspace\\project",
+			environment: { PATH: "C:\\bin", PATHEXT: ".CMD" },
+			platform: "win32",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path.toLowerCase() === expected.toLowerCase() ? "executable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual([expected]);
+		expect(launch).toMatchObject({
+			command: [expected, "--stdio"],
+			resolvedExecutable: expected,
+			source,
+		});
+	});
+
+	it("falls back through PATHEXT without reprobing a missing explicitly named Windows executable", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["C:\\tools\\server.exe"], {
+			projectCwd: "C:\\workspace\\project",
+			environment: { PATH: "", PATHEXT: ".CMD;;.BAT" },
+			platform: "win32",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path === "C:\\tools\\server.exe.BAT" ? "executable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual(["C:\\tools\\server.exe", "C:\\tools\\server.exe.CMD", "C:\\tools\\server.exe.BAT"]);
+		expect(launch.resolvedExecutable).toBe("C:\\tools\\server.exe.BAT");
+	});
+
+	it("retains an unusable explicitly named Windows executable after PATHEXT fallbacks are missing", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch([".\\tools\\server.exe"], {
+			projectCwd: "C:\\workspace\\project",
+			environment: { PATH: "", PATHEXT: ".CMD;.BAT" },
+			platform: "win32",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path === "C:\\workspace\\project\\tools\\server.exe" ? "unusable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual([
+			"C:\\workspace\\project\\tools\\server.exe",
+			"C:\\workspace\\project\\tools\\server.exe.CMD",
+			"C:\\workspace\\project\\tools\\server.exe.BAT",
+		]);
+		expect(launch.resolvedExecutable).toBeUndefined();
+		expect(launch.unusableExecutable).toBe("C:\\workspace\\project\\tools\\server.exe");
+	});
+
+	it("honors an explicit extensionless entry within PATHEXT order", () => {
+		const probes: string[] = [];
+		const launch = resolveLspLaunch(["server"], {
+			projectCwd: "C:\\workspace\\project",
+			environment: { PATH: "C:\\tools", PATHEXT: ".CMD;;.EXE" },
+			platform: "win32",
+			probeExecutable: (path) => {
+				probes.push(path);
+				return path === "C:\\tools\\server" ? "executable" : "missing";
+			},
+		});
+
+		expect(probes).toEqual(["C:\\tools\\server.CMD", "C:\\tools\\server"]);
+		expect(launch.resolvedExecutable).toBe("C:\\tools\\server");
+	});
+
+	it("retains unresolved launch identity for missing commands", () => {
+		const launch = resolveLspLaunch(["missing-server"], {
+			projectCwd: "/workspace/project",
+			environment: { PATH: "/bin" },
+			platform: "linux",
+			probeExecutable: () => "missing",
+		});
+		expect(launch).toMatchObject({
+			command: ["missing-server"],
+			requestedExecutable: "missing-server",
+			source: "path",
+			bare: true,
+		});
+		expect(launch.resolvedExecutable).toBeUndefined();
 	});
 });
 
@@ -179,12 +568,34 @@ describe("LspManager", () => {
 		}
 	});
 
+	it("starts an explicitly named Windows executable whose extension is absent from PATHEXT", async () => {
+		if (process.platform !== "win32") return;
+		const previousPathExt = process.env.PATHEXT;
+		process.env.PATHEXT = ".CMD";
+		try {
+			const manager = setup();
+			const filePath = join(tempDir, "test.foo");
+			writeFileSync(filePath, "class FakeClass\n");
+
+			expect(await manager.documentSymbols(filePath).then((result) => result.text)).toContain("FakeClass");
+			expect(
+				manager
+					.getStatus()
+					.filter((entry) => entry.attempts > 0)[0]
+					.resolvedExecutable?.toLowerCase(),
+			).toBe(process.execPath.toLowerCase());
+		} finally {
+			if (previousPathExt === undefined) delete process.env.PATHEXT;
+			else process.env.PATHEXT = previousPathExt;
+		}
+	});
+
 	it("returns formatted diagnostics from published diagnostics", async () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		const content = "ok line\nthis has ERROR here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toBeDefined();
 		expect(result).toContain("test.foo(2,10): error: found ERROR on line 2 [fake 1234]");
 	});
@@ -194,7 +605,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "ERROR at start\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toContain("error: found ERROR on line 1");
 	});
 
@@ -203,8 +614,8 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "only a WARN here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
-		expect(result).toBeUndefined();
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
+		expect(result).toBe("");
 	});
 
 	it("includes warnings when severity is set to warning", async () => {
@@ -212,7 +623,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "only a WARN here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toContain("warning: found WARN on line 1");
 	});
 
@@ -221,29 +632,32 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "ERROR one\nERROR two\nERROR three\nERROR four\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toBeDefined();
-		expect(result?.split("\n")).toHaveLength(3);
+		expect(result?.split("\n").filter((line) => line.includes(": error:"))).toHaveLength(2);
 		expect(result).toContain("... and 2 more");
+		expect(result).toContain("truncated");
 	});
 
 	it("returns undefined for clean files and files with no matching server", async () => {
 		const manager = setup();
 		const fooPath = join(tempDir, "clean.foo");
 		writeFileSync(fooPath, "all good\n");
-		expect(await manager.getDiagnostics(fooPath, "all good\n")).toBeUndefined();
-		expect(await manager.getDiagnostics(join(tempDir, "other.bar"), "ERROR\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fooPath, "all good\n").then((result) => result.text)).toBe("");
+		expect(await manager.getDiagnostics(join(tempDir, "other.bar"), "ERROR\n").then((result) => result.text)).toBe(
+			"",
+		);
 	});
 
 	it("tracks document versions across repeated checks of the same file", async () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "ok\n");
-		expect(await manager.getDiagnostics(filePath, "ok\n")).toBeUndefined();
-		const second = await manager.getDiagnostics(filePath, "now ERROR\n");
+		expect(await manager.getDiagnostics(filePath, "ok\n").then((result) => result.text)).toBe("");
+		const second = await manager.getDiagnostics(filePath, "now ERROR\n").then((result) => result.text);
 		expect(second).toContain("error: found ERROR on line 1");
-		const third = await manager.getDiagnostics(filePath, "fixed\n");
-		expect(third).toBeUndefined();
+		const third = await manager.getDiagnostics(filePath, "fixed\n").then((result) => result.text);
+		expect(third).toContain("1 previously reported diagnostic no longer reported");
 	});
 
 	it("answers navigation queries via the fake server", async () => {
@@ -252,32 +666,155 @@ describe("LspManager", () => {
 		const content = "class FakeClass\n  fakeMethod here\n";
 		writeFileSync(filePath, content);
 
-		const definition = await manager.definition(filePath, "FakeClass");
+		const definition = await manager.definition(filePath, "FakeClass").then((result) => result.text);
 		expect(definition).toContain("test.foo:1:1");
 		expect(definition).toContain("class FakeClass");
 
-		const references = await manager.references(filePath, "fakeMethod", 2);
+		const references = await manager.references(filePath, "fakeMethod", 2).then((result) => result.text);
 		const referenceLines = references.split("\n");
 		expect(referenceLines).toHaveLength(2);
 		expect(referenceLines[0]).toContain("test.foo:1:1");
 		expect(referenceLines[1]).toContain("test.foo:2:3");
 
-		const hover = await manager.hover(filePath, "fakeMethod");
+		const hover = await manager.hover(filePath, "fakeMethod").then((result) => result.text);
 		expect(hover).toBe("fake hover text");
 
-		const symbols = await manager.documentSymbols(filePath);
+		const symbols = await manager.documentSymbols(filePath).then((result) => result.text);
 		expect(symbols).toBe("FakeClass (class):1\n  fakeMethod (method):2");
 
-		const diagnostics = await manager.fileDiagnostics(filePath);
+		const diagnostics = await manager.fileDiagnostics(filePath).then((result) => result.text);
 		expect(diagnostics).toContain("No diagnostics in");
+	});
+
+	it("routes external projects independently and falls back to the file directory for loose files", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const project = join(tempDir, "project");
+		const external = join(tempDir, "external");
+		const nested = join(external, "packages", "app");
+		const markerlessRepo = join(tempDir, "markerless-repo");
+		const loose = join(tempDir, "loose");
+		for (const directory of [project, nested, join(markerlessRepo, "src"), loose])
+			mkdirSync(directory, { recursive: true });
+		writeFileSync(join(external, ".git"), "gitdir: elsewhere\n");
+		writeFileSync(join(external, "priority.marker"), "");
+		writeFileSync(join(nested, "closer.marker"), "");
+		mkdirSync(join(markerlessRepo, ".git"));
+		// An external repository's Git boundary must stop higher-priority parent markers.
+		writeFileSync(join(tempDir, "above.marker"), "");
+		manager = new LspManager({
+			cwd: project,
+			config: fakeServerConfig({ rootMarkers: ["above.marker", "priority.marker", "closer.marker"] }),
+		});
+		const localFile = join(project, "local.foo");
+		const externalFile = join(nested, "external.foo");
+		const repoFile = join(markerlessRepo, "src", "repo.foo");
+		for (const file of [localFile, externalFile, repoFile]) writeFileSync(file, "class FakeClass\n");
+		await manager.documentSymbols(localFile).then((result) => result.text);
+		await manager.documentSymbols(externalFile).then((result) => result.text);
+		await manager.documentSymbols(repoFile).then((result) => result.text);
+		// No marker should turn an unrelated loose file into the current project.
+		rmSync(join(tempDir, "above.marker"));
+		const looseFile = join(loose, "loose.foo");
+		writeFileSync(looseFile, "class FakeClass\n");
+		await manager.documentSymbols(looseFile).then((result) => result.text);
+		expect(
+			manager
+				.getStatus()
+				.filter((entry) => entry.attempts > 0)
+				.map((status) => status.root),
+		).toEqual([project, external, markerlessRepo, loose].map((directory) => realpathSync.native(directory)));
+	});
+
+	it("includes diagnostics after cross-workspace write and edit tool calls", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const project = join(tempDir, "project");
+		const external = join(tempDir, "external");
+		mkdirSync(project);
+		mkdirSync(external);
+		manager = new LspManager({ cwd: project, config: fakeServerConfig({ pull: true }) });
+		const write = createWriteToolDefinition(project, { diagnosticsProvider: manager });
+		const edit = createEditToolDefinition(project, { diagnosticsProvider: manager });
+		const written = await write.execute(
+			"external-write",
+			{ path: "../external/file.foo", content: "ERROR first\n" },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(written.details?.diagnostics).toContain("error: found ERROR on line 1");
+		const edited = await edit.execute(
+			"external-edit",
+			{ path: join(external, "file.foo"), edits: [{ oldText: "ERROR first", newText: "second ERROR" }] },
+			undefined,
+			undefined,
+			{} as never,
+		);
+		expect(edited.details?.diagnostics).toContain("file.foo(1,8): error: found ERROR on line 1");
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(external));
+	});
+
+	it("shows external navigation locations and snippets without starting another server", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const project = join(tempDir, "project");
+		const external = join(tempDir, "external.foo");
+		mkdirSync(project);
+		writeFileSync(external, "external definition\nexternal implementation\n");
+		manager = new LspManager({
+			cwd: project,
+			config: fakeServerConfig({ navigationUri: pathToFileURL(external).toString() }),
+		});
+		const source = join(project, "source.foo");
+		writeFileSync(source, "target\n");
+		const externalPath = realpathSync.native(external);
+		expect(await manager.definition(source, "target").then((result) => result.text)).toBe(
+			`${externalPath}:1:1  external definition`,
+		);
+		expect(await manager.references(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:2:3  external implementation`,
+		);
+		expect(await manager.implementations(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:2:1  external implementation`,
+		);
+		expect(await manager.typeDefinition(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:1:1  external definition`,
+		);
+		expect(await manager.callHierarchy(source, "target", "incoming").then((result) => result.text)).toContain(
+			`${externalPath}:1`,
+		);
+		expect(await manager.callHierarchy(source, "target", "outgoing").then((result) => result.text)).toContain(
+			`${externalPath}:2`,
+		);
+		expect(await manager.workspaceSymbols(source, "target").then((result) => result.text)).toContain(
+			`${externalPath}:1`,
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(project));
+		// Direct queries to the external file use its own server.
+		expect(await manager.hover(external, "definition").then((result) => result.text)).toBe("fake hover text");
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(2);
+	});
+
+	it("preserves non-file navigation URIs without interpreting them as local paths", async () => {
+		const manager = setup({ navigationUri: "untitled:external.foo" });
+		const source = join(tempDir, "source.foo");
+		writeFileSync(source, "target\n");
+		if (process.platform !== "win32")
+			writeFileSync(join(tempDir, "untitled:external.foo"), "not a navigation snippet\n");
+		expect(await manager.definition(source, "target").then((result) => result.text)).toBe(
+			"untitled:external.foo:1:1",
+		);
 	});
 
 	it("reports symbol-not-found and no-server errors as text", async () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "nothing here\n");
-		expect(await manager.definition(filePath, "missingSymbol")).toContain('Symbol "missingSymbol" not found');
-		expect(await manager.hover(join(tempDir, "test.bar"), "x")).toContain("No language server configured for .bar");
+		expect(await manager.definition(filePath, "missingSymbol").then((result) => result.text)).toContain(
+			'Symbol "missingSymbol" not found',
+		);
+		expect(await manager.hover(join(tempDir, "test.bar"), "x").then((result) => result.text)).toContain(
+			"No language server configured for .bar",
+		);
 	});
 
 	it("re-waits for diagnostics when a dependency changed on disk", async () => {
@@ -289,12 +826,12 @@ describe("LspManager", () => {
 		const contentA = "watch CROSS here\n";
 		writeFileSync(fileA, contentA);
 		writeFileSync(fileB, "fine\n");
-		expect(await manager.getDiagnostics(fileA, contentA)).toBeUndefined();
-		expect(await manager.getDiagnostics(fileB, "fine\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fileA, contentA).then((result) => result.text)).toBe("");
+		expect(await manager.getDiagnostics(fileB, "fine\n").then((result) => result.text)).toBe("");
 
 		// Break the dependency outside the edit/write tools.
 		writeFileSync(fileB, "now has ERROR\n");
-		const result = await manager.getDiagnostics(fileA, contentA);
+		const result = await manager.getDiagnostics(fileA, contentA).then((result) => result.text);
 		expect(result).toContain("cross-file ERROR detected");
 	});
 
@@ -305,7 +842,7 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "has ERROR here\n";
 		writeFileSync(filePath, content);
-		const result = await manager.getDiagnostics(filePath, content);
+		const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(result).toContain("error: found ERROR on line 1");
 	});
 
@@ -316,13 +853,13 @@ describe("LspManager", () => {
 		const contentA = "watch CROSS here\n";
 		writeFileSync(fileA, contentA);
 		writeFileSync(fileB, "fine\n");
-		expect(await manager.getDiagnostics(fileA, contentA)).toBeUndefined();
-		expect(await manager.getDiagnostics(fileB, "fine\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(fileA, contentA).then((result) => result.text)).toBe("");
+		expect(await manager.getDiagnostics(fileB, "fine\n").then((result) => result.text)).toBe("");
 
 		// Editing B introduces an error in B and breaks A via the cross-file rule.
 		const brokenB = "now has ERROR\n";
 		writeFileSync(fileB, brokenB);
-		const result = await manager.getDiagnostics(fileB, brokenB);
+		const result = await manager.getDiagnostics(fileB, brokenB).then((result) => result.text);
 		expect(result).toContain("b.foo(1,9): error: found ERROR on line 1");
 		expect(result).toContain("Newly failing in other open files:");
 		expect(result).toContain("a.foo(1,1): error: cross-file ERROR detected");
@@ -330,7 +867,7 @@ describe("LspManager", () => {
 		// Already-failing files are not reported again on the next edit.
 		const stillBrokenB = "still has ERROR\n";
 		writeFileSync(fileB, stillBrokenB);
-		const second = await manager.getDiagnostics(fileB, stillBrokenB);
+		const second = await manager.getDiagnostics(fileB, stillBrokenB).then((result) => result.text);
 		expect(second).toContain("error: found ERROR on line 1");
 		expect(second).not.toContain("Newly failing");
 	});
@@ -339,11 +876,11 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "interface Target\nclass Impl\n");
-		const implementations = await manager.implementations(filePath, "Target");
+		const implementations = await manager.implementations(filePath, "Target").then((result) => result.text);
 		expect(implementations).toContain("test.foo:2:1");
 		expect(implementations).toContain("class Impl");
 
-		const typeDefinition = await manager.typeDefinition(filePath, "Impl", 2);
+		const typeDefinition = await manager.typeDefinition(filePath, "Impl", 2).then((result) => result.text);
 		expect(typeDefinition).toContain("test.foo:1:1");
 		expect(typeDefinition).toContain("interface Target");
 	});
@@ -352,11 +889,11 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "UNSORTED imports here\n");
-		const result = await manager.codeFix(filePath, { kind: "source.organizeImports" });
+		const result = await manager.codeFix(filePath, { kind: "source.organizeImports" }).then((result) => result.text);
 		expect(result).toContain('Applied "Organize imports"');
 		expect(readFileSync(filePath, "utf-8")).toBe("SORTED imports here\n");
 
-		const clean = await manager.codeFix(filePath, { kind: "source.organizeImports" });
+		const clean = await manager.codeFix(filePath, { kind: "source.organizeImports" }).then((result) => result.text);
 		expect(clean).toContain("No code actions available");
 	});
 
@@ -364,16 +901,68 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "function target() {}\n");
-		const incoming = await manager.callHierarchy(filePath, "target", "incoming");
+		const incoming = await manager.callHierarchy(filePath, "target", "incoming").then((result) => result.text);
 		expect(incoming).toContain('Callers of "target":');
 		expect(incoming).toContain("callerOne (function) test.foo:1");
 
-		const outgoing = await manager.callHierarchy(filePath, "target", "outgoing");
+		const outgoing = await manager.callHierarchy(filePath, "target", "outgoing").then((result) => result.text);
 		expect(outgoing).toContain('Calls made by "target":');
 		expect(outgoing).toContain("calleeOne (method) test.foo:2");
 
-		expect(await manager.callHierarchy(filePath, "missing", "incoming")).toContain('Symbol "missing" not found');
+		expect(await manager.callHierarchy(filePath, "missing", "incoming").then((result) => result.text)).toContain(
+			'Symbol "missing" not found',
+		);
 	});
+
+	it.each(["rename", "fix", "command"] as const)(
+		"applies cross-project %s edits and refreshes the external server",
+		async (action) => {
+			tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+			const project = join(tempDir, "project");
+			const external = join(tempDir, "external");
+			mkdirSync(project);
+			mkdirSync(external);
+			const source = join(project, "source.foo");
+			const target = join(external, "target.foo");
+			writeFileSync(source, `renameme${action === "command" ? " CMDFIX" : ""}\n`);
+			writeFileSync(target, "renameme\n");
+			const workspaceEditFile = join(tempDir, "edit.json");
+			writeFileSync(
+				workspaceEditFile,
+				JSON.stringify({
+					changes: Object.fromEntries(
+						[source, target].map((path) => [
+							pathToFileURL(path).toString(),
+							[
+								{
+									range: { start: { line: 0, character: 0 }, end: { line: 0, character: 8 } },
+									newText: "renamed",
+								},
+							],
+						]),
+					),
+				}),
+			);
+			manager = new LspManager({ cwd: project, config: fakeServerConfig({ workspaceEditFile, pull: true }) });
+			await manager.documentSymbols(target).then((result) => result.text);
+			const result =
+				action === "rename"
+					? await manager.rename(source, "renameme", "renamed").then((result) => result.text)
+					: await manager.codeFix(source, { line: 1 }).then((result) => result.text);
+			expect(result).toContain(action === "rename" ? 'Renamed "renameme"' : 'Applied "Apply workspace edit"');
+			expect(result).toContain("source.foo (1 edit)");
+			expect(result).toContain("target.foo (1 edit)");
+			expect(readFileSync(source, "utf-8")).toBe(`renamed${action === "command" ? " CMDFIX" : ""}\n`);
+			expect(readFileSync(target, "utf-8")).toBe("renamed\n");
+			expect(await manager.workspaceSymbols(target, "renamed").then((result) => result.text)).toContain(
+				"renamed (variable)",
+			);
+			expect(await manager.workspaceSymbols(target, "renameme").then((result) => result.text)).toContain(
+				"No workspace symbols",
+			);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(2);
+		},
+	);
 
 	it("renames a symbol across open files", async () => {
 		const manager = setup();
@@ -382,9 +971,9 @@ describe("LspManager", () => {
 		writeFileSync(fileA, "function renameme() {}\nrenameme();\n");
 		writeFileSync(fileB, "call renameme() twice renameme\n");
 		// Open both documents on the server.
-		await manager.documentSymbols(fileB);
+		await manager.documentSymbols(fileB).then((result) => result.text);
 
-		const result = await manager.rename(fileA, "renameme", "renamed");
+		const result = await manager.rename(fileA, "renameme", "renamed").then((result) => result.text);
 		expect(result).toContain('Renamed "renameme" to "renamed"');
 		expect(result).toContain("a.foo (2 edits)");
 		expect(result).toContain("b.foo (2 edits)");
@@ -396,13 +985,13 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "this line has ERROR in it\n");
-		const result = await manager.codeFix(filePath, { line: 1 });
+		const result = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 		expect(result).toContain('Applied "Replace ERROR with FIXED"');
 		expect(result).toContain("test.foo (1 edit)");
 		expect(readFileSync(filePath, "utf-8")).toBe("this line has FIXED in it\n");
 	});
 
-	it("rejects code action workspace edits outside the server root", async () => {
+	it("applies code action workspace edits outside the server root", async () => {
 		const manager = setup();
 		const outsideDir = mkdtempSync(join(tmpdir(), "volt-lsp-outside-test-"));
 		try {
@@ -411,10 +1000,10 @@ describe("LspManager", () => {
 			writeFileSync(outsideFile, "SECRET\n");
 			writeFileSync(filePath, `needs OUTSIDE_EDIT ${pathToFileURL(outsideFile).toString()}\n`);
 
-			const result = await manager.codeFix(filePath, { line: 1 });
+			const result = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 
-			expect(result).toContain("Refusing to apply LSP workspace edit outside workspace root");
-			expect(readFileSync(outsideFile, "utf-8")).toBe("SECRET\n");
+			expect(result).toContain('Applied "Edit outside workspace"');
+			expect(readFileSync(outsideFile, "utf-8")).toBe("PWNED\n");
 		} finally {
 			rmSync(outsideDir, { recursive: true, force: true });
 		}
@@ -426,13 +1015,13 @@ describe("LspManager", () => {
 		const content = "has ERROR and MULTI here\n";
 		writeFileSync(filePath, content);
 
-		const listed = await manager.codeFix(filePath, { line: 1 });
+		const listed = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 		expect(listed).toContain("Multiple code actions available");
 		expect(listed).toContain("- Replace ERROR with FIXED (quickfix)");
 		expect(listed).toContain("- Replace MULTI with CHOSEN (refactor)");
 		expect(readFileSync(filePath, "utf-8")).toBe(content);
 
-		const applied = await manager.codeFix(filePath, { line: 1, title: "MULTI" });
+		const applied = await manager.codeFix(filePath, { line: 1, title: "MULTI" }).then((result) => result.text);
 		expect(applied).toContain('Applied "Replace MULTI with CHOSEN"');
 		expect(readFileSync(filePath, "utf-8")).toBe("has ERROR and CHOSEN here\n");
 	});
@@ -441,7 +1030,7 @@ describe("LspManager", () => {
 		const manager = setup();
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "needs CMDFIX here\n");
-		const result = await manager.codeFix(filePath, { line: 1 });
+		const result = await manager.codeFix(filePath, { line: 1 }).then((result) => result.text);
 		expect(result).toContain('Applied "Fix via command"');
 		expect(result).toContain("test.foo (1 edit)");
 		expect(readFileSync(filePath, "utf-8")).toBe("needs FIXED here\n");
@@ -454,28 +1043,30 @@ describe("LspManager", () => {
 		writeFileSync(fileA, "has findme here\n");
 		writeFileSync(fileB, "\nalso findme there\n");
 		// Open both documents so the fake server can search them.
-		await manager.documentSymbols(fileA);
-		await manager.documentSymbols(fileB);
+		await manager.documentSymbols(fileA).then((result) => result.text);
+		await manager.documentSymbols(fileB).then((result) => result.text);
 
-		const result = await manager.workspaceSymbols(fileA, "findme");
+		const result = await manager.workspaceSymbols(fileA, "findme").then((result) => result.text);
 		const lines = result.split("\n");
 		expect(lines).toHaveLength(2);
 		expect(lines[0]).toBe("findme (variable) in fakeContainer a.foo:1");
 		expect(lines[1]).toBe("findme (variable) in fakeContainer b.foo:2");
 
-		expect(await manager.workspaceSymbols(fileA, "nomatch")).toContain('No workspace symbols matching "nomatch"');
+		expect(await manager.workspaceSymbols(fileA, "nomatch").then((result) => result.text)).toContain(
+			'No workspace symbols matching "nomatch"',
+		);
 	});
 
 	it("ignores diagnostics published for an older document version", async () => {
 		const manager = setup({ stale: true });
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "clean\n");
-		expect(await manager.getDiagnostics(filePath, "clean\n")).toBeUndefined();
+		expect(await manager.getDiagnostics(filePath, "clean\n").then((result) => result.text)).toBe("");
 
 		// The stale-mode server immediately publishes a bogus result tagged with
 		// the previous version before the real one arrives.
-		const result = await manager.getDiagnostics(filePath, "still clean\n");
-		expect(result).toBeUndefined();
+		const result = await manager.getDiagnostics(filePath, "still clean\n").then((result) => result.text);
+		expect(result).toBe("");
 	});
 
 	it("writes protocol traffic to the trace file", async () => {
@@ -485,7 +1076,7 @@ describe("LspManager", () => {
 			expect(manager.getTraceFile()).toBe(traceFile);
 			const filePath = join(tempDir, "test.foo");
 			writeFileSync(filePath, "ok\n");
-			await manager.documentSymbols(filePath);
+			await manager.documentSymbols(filePath).then((result) => result.text);
 
 			let content = "";
 			for (let attempt = 0; attempt < 20; attempt++) {
@@ -493,6 +1084,10 @@ describe("LspManager", () => {
 				if (content.includes("textDocument/documentSymbol")) break;
 				await new Promise((resolve) => setTimeout(resolve, 100));
 			}
+			expect(content).toContain("info: workspace:");
+			expect(content).toContain("server root:");
+			expect(content).toContain("configured argv:");
+			expect(content).toContain("source: absolute; attempt: 1");
 			expect(content).toContain("info: spawning:");
 			expect(content).toContain('send: {"jsonrpc":"2.0","id":1,"method":"initialize"');
 			expect(content).toContain("recv: ");
@@ -514,11 +1109,11 @@ describe("LspManager", () => {
 			expect(manager.getTraceFile()).toBeUndefined();
 			const filePath = join(tempDir, "test.foo");
 			writeFileSync(filePath, "ok\n");
-			await manager.documentSymbols(filePath);
+			await manager.documentSymbols(filePath).then((result) => result.text);
 
 			manager.setTraceFile(traceFile);
 			expect(manager.getTraceFile()).toBe(traceFile);
-			await manager.hover(filePath, "ok");
+			await manager.hover(filePath, "ok").then((result) => result.text);
 
 			let content = "";
 			for (let attempt = 0; attempt < 20; attempt++) {
@@ -546,41 +1141,381 @@ describe("LspManager", () => {
 
 	it("reports server status and restarts servers", async () => {
 		const manager = setup();
-		expect(manager.getStatus()).toEqual([]);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "ok\n");
-		await manager.documentSymbols(filePath);
+		await manager.documentSymbols(filePath).then((result) => result.text);
 
-		const status = manager.getStatus();
+		const status = manager.getStatus().filter((entry) => entry.attempts > 0);
 		expect(status).toHaveLength(1);
 		expect(status[0].name).toBe("fake");
-		expect(status[0].root).toBe(tempDir);
+		expect(status[0].root).toBe(realpathSync.native(tempDir));
 		expect(status[0].alive).toBe(true);
 		expect(status[0].openDocuments).toBe(1);
 		expect(status[0].idleMs).toBeGreaterThanOrEqual(0);
 
 		expect(manager.restart()).toBe(1);
-		expect(manager.getStatus()).toEqual([]);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 
 		// Servers respawn lazily after restart.
-		await manager.documentSymbols(filePath);
-		expect(manager.getStatus()).toHaveLength(1);
+		await manager.documentSymbols(filePath).then((result) => result.text);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
 	});
 
 	it("shuts down idle servers and respawns on next use", async () => {
 		const manager = setup({ idleShutdownMs: 400 });
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "ok\n");
-		await manager.documentSymbols(filePath);
-		expect(manager.getStatus()).toHaveLength(1);
+		await manager.documentSymbols(filePath).then((result) => result.text);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
 
 		await new Promise((resolve) => setTimeout(resolve, 1000));
-		expect(manager.getStatus()).toEqual([]);
+		expect(manager.getStatus().find((entry) => entry.name === "fake")?.state).toBe("idle");
 
-		const result = await manager.documentSymbols(filePath);
+		const result = await manager.documentSymbols(filePath).then((result) => result.text);
 		expect(result).toContain("FakeClass");
-		expect(manager.getStatus()).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
+	});
+
+	it("uses projectCwd for relative commands, marker ceilings, priority, and trace paths", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const projectDir = join(tempDir, "project");
+		const runtimeDir = join(projectDir, "packages", "app", "src");
+		const serverDir = join(projectDir, "server");
+		mkdirSync(runtimeDir, { recursive: true });
+		mkdirSync(serverDir);
+		writeFileSync(join(projectDir, "priority.marker"), "");
+		writeFileSync(join(runtimeDir, "closer.marker"), "");
+		writeFakeServerExecutable(serverDir, "fake-server");
+		mkdirSync(join(projectDir, "logs"));
+		manager = new LspManager({
+			cwd: runtimeDir,
+			projectCwd: projectDir,
+			config: resolveLspConfig({
+				traceFile: "logs/lsp.log",
+				servers: {
+					typescript: { enabled: false },
+					python: { enabled: false },
+					go: { enabled: false },
+					rust: { enabled: false },
+					fake: {
+						command: ["./server/fake-server", "space value", "a&b"],
+						fileExtensions: [".foo"],
+						rootMarkers: ["priority.marker", "closer.marker"],
+					},
+				},
+			}),
+		});
+		const filePath = join(runtimeDir, "test.foo");
+		writeFileSync(filePath, "class FakeClass\n");
+		expect(await manager.documentSymbols(filePath).then((result) => result.text)).toContain("FakeClass");
+		const status = manager.getStatus().filter((entry) => entry.attempts > 0)[0];
+		expect(status.workspaceRoot).toBe(realpathSync.native(projectDir));
+		expect(status.root).toBe(realpathSync.native(projectDir));
+		const expectedExecutable =
+			process.platform === "win32"
+				? join(realpathSync.native(projectDir), "server", "fake-server.cmd")
+				: join(realpathSync.native(projectDir), "server", "fake-server");
+		expect(process.platform === "win32" ? status.resolvedExecutable?.toLowerCase() : status.resolvedExecutable).toBe(
+			process.platform === "win32" ? expectedExecutable.toLowerCase() : expectedExecutable,
+		);
+		expect(status.launchSource).toBe("project-relative");
+		expect(manager.getTraceFile()).toBe(join(realpathSync.native(projectDir), "logs", "lsp.log"));
+
+		const externalDir = join(tempDir, "external");
+		mkdirSync(externalDir);
+		mkdirSync(join(externalDir, ".git"));
+		mkdirSync(join(externalDir, ".volt"));
+		writeFileSync(
+			join(externalDir, ".volt", "settings.json"),
+			JSON.stringify({ lsp: { servers: { fake: { command: ["must-not-run"] } } } }),
+		);
+		const externalFile = join(externalDir, "external.foo");
+		writeFileSync(externalFile, "class FakeClass\n");
+		expect(await manager.documentSymbols(externalFile).then((result) => result.text)).toContain("FakeClass");
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[1]).toMatchObject({
+			root: realpathSync.native(externalDir),
+			resolvedExecutable: status.resolvedExecutable,
+			launchSource: "project-relative",
+		});
+		await manager.setTraceFile("runtime-trace.log");
+		expect(manager.getTraceFile()).toBe(join(realpathSync.native(projectDir), "runtime-trace.log"));
+	});
+
+	it("accepts sibling workspace paths through the supplied lexical project-root alias", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const realProjectDir = join(tempDir, "real-project");
+		const projectAlias = join(tempDir, "project-alias");
+		const realRuntimeDir = join(realProjectDir, "packages", "app");
+		const runtimeDir = join(projectAlias, "packages", "app");
+		const siblingFile = join(projectAlias, "packages", "shared", "test.foo");
+		mkdirSync(realRuntimeDir, { recursive: true });
+		mkdirSync(join(realProjectDir, "packages", "shared"), { recursive: true });
+		writeFileSync(join(realRuntimeDir, "runtime.foo"), "has ERROR\n");
+		writeFileSync(join(realProjectDir, "packages", "shared", "test.foo"), "has ERROR\n");
+		try {
+			symlinkSync(realProjectDir, projectAlias, directorySymlinkType());
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+			throw error;
+		}
+		manager = new LspManager({
+			cwd: runtimeDir,
+			projectCwd: projectAlias,
+			config: fakeServerConfig(),
+		});
+
+		expect(await manager.fileDiagnostics(siblingFile).then((result) => result.text)).toContain(
+			"error: found ERROR on line 1",
+		);
+		expect(await manager.fileDiagnostics(join(runtimeDir, "runtime.foo")).then((result) => result.text)).toContain(
+			"runtime.foo(1,5): error: found ERROR on line 1",
+		);
+		expect(manager.getWorkspaceRoot()).toBe(realpathSync.native(realProjectDir));
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0]).toMatchObject({
+			workspaceRoot: realpathSync.native(realProjectDir),
+			root: realpathSync.native(realProjectDir),
+		});
+	});
+
+	it("accepts external aliases and reuses the canonical project server", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const projectDir = join(tempDir, "project");
+		const externalAlias = join(tempDir, "external-alias");
+		mkdirSync(projectDir);
+		writeFileSync(join(projectDir, "test.foo"), "has ERROR\n");
+		try {
+			symlinkSync(projectDir, externalAlias, directorySymlinkType());
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+			throw error;
+		}
+		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
+
+		expect(await manager.fileDiagnostics(join(externalAlias, "test.foo")).then((result) => result.text)).toContain(
+			"error: found ERROR on line 1",
+		);
+		expect(await manager.fileDiagnostics(join(projectDir, "test.foo")).then((result) => result.text)).toContain(
+			"error: found ERROR on line 1",
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(1);
+	});
+
+	it("accepts case-variant existing and missing paths on case-insensitive macOS filesystems", async () => {
+		if (process.platform !== "darwin") return;
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const projectDir = join(tempDir, "CaseSensitiveSpelling");
+		const caseVariantDir = join(tempDir, "casesensitivespelling");
+		mkdirSync(projectDir);
+		const existingFile = join(projectDir, "existing.foo");
+		writeFileSync(existingFile, "has ERROR\n");
+		try {
+			realpathSync(join(caseVariantDir, "existing.foo"));
+		} catch {
+			// A case-sensitive macOS volume cannot reproduce this platform-specific path spelling.
+			return;
+		}
+		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
+
+		expect(
+			await manager.fileDiagnostics(join(caseVariantDir, "existing.foo")).then((result) => result.text),
+		).toContain("error: found ERROR on line 1");
+		expect(
+			await manager.getDiagnostics(join(caseVariantDir, "missing.foo"), "has ERROR\n").then((result) => result.text),
+		).toContain("error: found ERROR on line 1");
+	});
+
+	it("refreshes tracked documents redirected through symlinks outside projectCwd", async () => {
+		const manager = setup();
+		const outsideDir = mkdtempSync(join(tmpdir(), "volt-lsp-outside-test-"));
+		try {
+			const dependencyDir = join(tempDir, "dependency");
+			const dependencyPath = join(dependencyDir, "dependency.foo");
+			const checkedPath = join(tempDir, "checked.foo");
+			const checkedContent = "watch CROSS here\n";
+			const outsidePath = join(outsideDir, "dependency.foo");
+			mkdirSync(dependencyDir);
+			writeFileSync(dependencyPath, "clean dependency\n");
+			writeFileSync(checkedPath, checkedContent);
+			writeFileSync(outsidePath, "outside ERROR dependency\n");
+			expect(await manager.getDiagnostics(dependencyPath, "clean dependency\n").then((result) => result.text)).toBe(
+				"",
+			);
+			expect(await manager.getDiagnostics(checkedPath, checkedContent).then((result) => result.text)).toBe("");
+
+			rmSync(dependencyDir, { recursive: true });
+			symlinkSync(outsideDir, dependencyDir, directorySymlinkType());
+
+			expect(await manager.getDiagnostics(checkedPath, checkedContent).then((result) => result.text)).toContain(
+				"cross-file ERROR detected",
+			);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(2);
+		} finally {
+			rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("refreshes externally redirected tracked documents before navigation", async () => {
+		const manager = setup();
+		const outsideDir = mkdtempSync(join(tmpdir(), "volt-lsp-outside-test-"));
+		try {
+			const dependencyDir = join(tempDir, "dependency");
+			const dependencyPath = join(dependencyDir, "dependency.foo");
+			const checkedPath = join(tempDir, "checked.foo");
+			mkdirSync(dependencyDir);
+			writeFileSync(dependencyPath, "original dependency\n");
+			writeFileSync(checkedPath, "checked symbol\n");
+			writeFileSync(join(outsideDir, "dependency.foo"), "outsideSecretSymbol with different content length\n");
+			await manager.documentSymbols(dependencyPath).then((result) => result.text);
+
+			rmSync(dependencyDir, { recursive: true });
+			symlinkSync(outsideDir, dependencyDir, directorySymlinkType());
+
+			expect(
+				await manager.workspaceSymbols(checkedPath, "outsideSecretSymbol").then((result) => result.text),
+			).toContain(`${realpathSync.native(join(outsideDir, "dependency.foo"))}:1`);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(2);
+		} finally {
+			rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("continues refreshing tracked documents redirected within projectCwd", async () => {
+		const manager = setup();
+		const dependencyDir = join(tempDir, "dependency");
+		const redirectedDir = join(tempDir, "redirected");
+		const dependencyPath = join(dependencyDir, "dependency.foo");
+		const checkedPath = join(tempDir, "checked.foo");
+		mkdirSync(dependencyDir);
+		mkdirSync(redirectedDir);
+		writeFileSync(dependencyPath, "original dependency\n");
+		writeFileSync(join(redirectedDir, "dependency.foo"), "redirectedSymbol\n");
+		writeFileSync(checkedPath, "checked symbol\n");
+		await manager.documentSymbols(dependencyPath).then((result) => result.text);
+
+		rmSync(dependencyDir, { recursive: true });
+		symlinkSync(redirectedDir, dependencyDir, directorySymlinkType());
+
+		expect(await manager.workspaceSymbols(checkedPath, "redirectedSymbol").then((result) => result.text)).toContain(
+			"redirectedSymbol",
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(2);
+	});
+
+	it("does not inherit root markers above projectCwd", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const projectDir = join(tempDir, "project");
+		const nestedDir = join(projectDir, "nested");
+		mkdirSync(nestedDir, { recursive: true });
+		writeFileSync(join(tempDir, "above.marker"), "");
+		manager = new LspManager({
+			cwd: nestedDir,
+			projectCwd: projectDir,
+			config: resolveLspConfig({
+				servers: {
+					typescript: { enabled: false },
+					python: { enabled: false },
+					go: { enabled: false },
+					rust: { enabled: false },
+					fake: {
+						command: [process.execPath, FAKE_SERVER],
+						fileExtensions: [".foo"],
+						rootMarkers: ["above.marker"],
+					},
+				},
+			}),
+		});
+		const filePath = join(nestedDir, "test.foo");
+		writeFileSync(filePath, "class FakeClass\n");
+		await manager.documentSymbols(filePath).then((result) => result.text);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(projectDir));
+	});
+
+	it("accepts external paths and symlinks but still rejects dangling symlinks", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const projectDir = join(tempDir, "project");
+		const outsideDir = join(tempDir, "outside");
+		mkdirSync(projectDir);
+		mkdirSync(outsideDir);
+		const outsideFile = join(outsideDir, "outside.foo");
+		writeFileSync(outsideFile, "class FakeClass\n");
+		manager = new LspManager({ cwd: projectDir, projectCwd: projectDir, config: fakeServerConfig() });
+
+		expect(await manager.fileDiagnostics(outsideFile).then((result) => result.text)).toContain("No diagnostics in");
+		const alias = join(projectDir, "alias");
+		try {
+			symlinkSync(outsideDir, alias, directorySymlinkType());
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+			throw error;
+		}
+		expect(await manager.fileDiagnostics(join(alias, "outside.foo")).then((result) => result.text)).toContain(
+			"No diagnostics in",
+		);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toHaveLength(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].root).toBe(realpathSync.native(outsideDir));
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].openDocuments).toBe(1);
+		manager.restart();
+		await removeTempDir(outsideDir);
+		expect(
+			await manager.getDiagnostics(join(alias, "outside.foo"), "ERROR\n").then((result) => result.text),
+		).toContain("through a dangling symlink");
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
+	});
+
+	it("isolates start breakers by canonical server root and retains failed status", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const badRoot = join(tempDir, "bad");
+		const goodRoot = join(tempDir, "good");
+		mkdirSync(badRoot);
+		mkdirSync(goodRoot);
+		writeFileSync(join(badRoot, ".root"), "");
+		writeFileSync(join(goodRoot, ".root"), "");
+		const wrapper = join(tempDir, "root-aware-server.mjs");
+		writeFileSync(
+			wrapper,
+			`import path from "node:path";\nif (path.basename(process.cwd()) === "bad") { process.stderr.write("bad root startup\\n"); process.exit(2); }\nawait import(${JSON.stringify(pathToFileURL(FAKE_SERVER).toString())});\n`,
+		);
+		manager = new LspManager({
+			cwd: goodRoot,
+			projectCwd: tempDir,
+			config: resolveLspConfig({
+				servers: {
+					typescript: { enabled: false },
+					python: { enabled: false },
+					go: { enabled: false },
+					rust: { enabled: false },
+					fake: {
+						command: [process.execPath, wrapper],
+						fileExtensions: [".foo"],
+						rootMarkers: [".root"],
+					},
+				},
+			}),
+		});
+		const badFile = join(badRoot, "bad.foo");
+		const goodFile = join(goodRoot, "good.foo");
+		writeFileSync(badFile, "bad\n");
+		writeFileSync(goodFile, "class FakeClass\n");
+		for (let attempt = 0; attempt < 3; attempt++) {
+			expect(await manager.fileDiagnostics(badFile).then((result) => result.text)).toContain("lsp(fake)");
+		}
+		expect(await manager.fileDiagnostics(badFile).then((result) => result.text)).toContain(
+			"server unavailable after 3",
+		);
+		expect(await manager.documentSymbols(goodFile).then((result) => result.text)).toContain("FakeClass");
+
+		const statuses = manager.getStatus().filter((entry) => entry.attempts > 0);
+		const badStatus = statuses.find((status) => status.root === realpathSync.native(badRoot));
+		const goodStatus = statuses.find((status) => status.root === realpathSync.native(goodRoot));
+		expect(badStatus).toMatchObject({ alive: false, attempts: 3 });
+		expect(badStatus?.lastError).toContain("bad root startup");
+		expect(goodStatus).toMatchObject({ alive: true, attempts: 1 });
+
+		expect(manager.restart()).toBe(1);
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
 	});
 
 	it("reports a failed server start once, then stays silent", async () => {
@@ -599,12 +1534,12 @@ describe("LspManager", () => {
 			}),
 		});
 		const filePath = join(tempDir, "test.foo");
-		const first = await manager.getDiagnostics(filePath, "ERROR\n");
+		const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 		expect(first).toContain("lsp(missing):");
 		// Unknown binaries must not get an install hint
 		expect(first).not.toContain("Install");
-		const second = await manager.getDiagnostics(filePath, "ERROR\n");
-		expect(second).toBeUndefined();
+		const second = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
+		expect(second).toBe("");
 	});
 
 	it("applies the start-failure breaker to fileDiagnostics", async () => {
@@ -625,13 +1560,20 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		writeFileSync(filePath, "x\n");
 		for (let attempt = 0; attempt < 3; attempt++) {
-			expect(await manager.fileDiagnostics(filePath)).toContain("lsp(missing)");
+			expect(await manager.fileDiagnostics(filePath).then((result) => result.text)).toContain("lsp(missing)");
 		}
 		// After three failed starts the breaker must stop spawn attempts.
-		const fourth = await manager.fileDiagnostics(filePath);
+		const fourth = await manager.fileDiagnostics(filePath).then((result) => result.text);
 		expect(fourth).toContain("server unavailable after 3");
-		// Failed clients must not linger in the status list.
-		expect(manager.getStatus()).toEqual([]);
+		// The failed process is gone, but actionable status remains until restart.
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([
+			expect.objectContaining({
+				name: "missing",
+				alive: false,
+				attempts: 3,
+				unresolvedCommand: "volt-test-nonexistent-lsp-server",
+			}),
+		]);
 	});
 
 	it("aborts a hanging navigation request when the signal fires", async () => {
@@ -641,7 +1583,9 @@ describe("LspManager", () => {
 		const controller = new AbortController();
 		const abortTimer = setTimeout(() => controller.abort(), 250);
 		const startedAt = Date.now();
-		const result = await manager.hover(filePath, "symbol", undefined, controller.signal);
+		const result = await manager
+			.hover(filePath, "symbol", undefined, controller.signal)
+			.then((result) => result.text);
 		clearTimeout(abortTimer);
 		expect(Date.now() - startedAt).toBeLessThan(5000);
 		expect(result).toContain("aborted");
@@ -652,16 +1596,23 @@ describe("LspManager", () => {
 		const filePath = join(tempDir, "test.foo");
 		const content = "has ERROR\n";
 		writeFileSync(filePath, content);
-		const first = await manager.getDiagnostics(filePath, content);
+		const first = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 		expect(first).toContain("lsp(fake)");
 		expect(first).toContain("initialize failed");
-		// The failed client must not linger as a zombie in the status list (its
-		// process would also keep running).
-		expect(manager.getStatus()).toEqual([]);
+		// The failed process must not linger, while status retains startup context.
+		expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([
+			expect.objectContaining({
+				name: "fake",
+				alive: false,
+				attempts: 1,
+				lastError: expect.stringContaining("initialize failed"),
+			}),
+		]);
 	});
 
-	it("includes an install hint when a built-in server binary is missing", async () => {
+	it("includes manual repair context without prompting for a missing explicit path", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const requests: HostActionRequest[] = [];
 		manager = new LspManager({
 			cwd: tempDir,
 			config: resolveLspConfig({
@@ -679,12 +1630,139 @@ describe("LspManager", () => {
 					rust: { enabled: false },
 				},
 			}),
+			hostInteraction: {
+				requestAction: async (request) => {
+					requests.push(request);
+					return { decision: "approved" };
+				},
+			},
 		});
 		const filePath = join(tempDir, "test.foo");
-		const first = await manager.getDiagnostics(filePath, "ERROR\n");
+		const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 		expect(first).toContain("lsp(go):");
 		expect(first).toContain("ENOENT");
+		expect(first).toContain("Launch source: absolute");
+		expect(first).toContain("Automatic install is unavailable for explicit paths");
 		expect(first).toContain("Install with: go install golang.org/x/tools/gopls@latest");
+		expect(requests).toEqual([]);
+	});
+
+	it("retains bounded startup stderr for a present but broken server", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const brokenServer = join(tempDir, "broken-server.cjs");
+		writeFileSync(brokenServer, `process.stderr.write("HEAD" + "x".repeat(9000) + "TAIL\\n"); process.exit(2);\n`);
+		manager = new LspManager({
+			cwd: tempDir,
+			config: resolveLspConfig({
+				servers: {
+					typescript: { enabled: false },
+					python: { enabled: false },
+					go: { enabled: false },
+					rust: { enabled: false },
+					broken: {
+						command: [process.execPath, brokenServer],
+						fileExtensions: [".foo"],
+						rootMarkers: [],
+					},
+				},
+			}),
+		});
+		const filePath = join(tempDir, "test.foo");
+		writeFileSync(filePath, "x\n");
+		const first = await manager.fileDiagnostics(filePath).then((result) => result.text);
+		expect(first).toContain("Startup stderr:");
+		expect(first).toContain("TAIL");
+		expect(first).not.toContain("HEAD");
+		const status = manager.getStatus().filter((entry) => entry.attempts > 0)[0];
+		expect(status.lastError).toContain("Resolved executable:");
+		expect(status.lastError!.length).toBeLessThan(9500);
+	});
+
+	it("does not prompt for a built-in server whose launch arguments were overridden", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const previousPath = process.env.PATH;
+		process.env.PATH = tempDir;
+		const requests: HostActionRequest[] = [];
+		try {
+			manager = new LspManager({
+				cwd: tempDir,
+				config: resolveLspConfig({
+					servers: {
+						typescript: {
+							command: ["tsc", "--custom-mode"],
+							fileExtensions: [".foo"],
+							rootMarkers: [],
+						},
+					},
+				}),
+				hostInteraction: {
+					requestAction: async (request) => {
+						requests.push(request);
+						return { decision: "denied" };
+					},
+				},
+			});
+			const filePath = join(tempDir, "test.foo");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
+
+			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
+			expect(requests).toEqual([]);
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+	});
+
+	it("does not prompt for a present but unusable built-in server", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const binDir = join(tempDir, "bin");
+		mkdirSync(binDir);
+		const unusablePath = join(binDir, process.platform === "win32" ? "tsc.CMD" : "tsc");
+		if (process.platform === "win32") {
+			mkdirSync(unusablePath);
+		} else {
+			writeFileSync(unusablePath, "#!/bin/sh\nexit 0\n");
+			chmodSync(unusablePath, 0o644);
+		}
+		const previousPath = process.env.PATH;
+		const previousPathExt = process.env.PATHEXT;
+		process.env.PATH = binDir;
+		if (process.platform === "win32") process.env.PATHEXT = ".CMD";
+		const requests: HostActionRequest[] = [];
+		try {
+			manager = new LspManager({
+				cwd: tempDir,
+				config: resolveLspConfig({
+					servers: {
+						typescript: {
+							fileExtensions: [".foo"],
+							rootMarkers: [],
+						},
+					},
+				}),
+				hostInteraction: {
+					requestAction: async (request) => {
+						requests.push(request);
+						return { decision: "denied" };
+					},
+				},
+			});
+			const filePath = join(tempDir, "test.foo");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
+
+			expect(first).toContain("is present but not executable");
+			expect(first).toContain("EACCES");
+			expect(first).not.toContain("ENOENT");
+			expect(requests).toEqual([]);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].lastError).toContain(
+				`Unusable executable: ${unusablePath}`,
+			);
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+			if (previousPathExt === undefined) delete process.env.PATHEXT;
+			else process.env.PATHEXT = previousPathExt;
+		}
 	});
 
 	it("does not prompt for custom servers that use a known built-in binary", async () => {
@@ -704,7 +1782,7 @@ describe("LspManager", () => {
 						go: { enabled: false },
 						rust: { enabled: false },
 						custom: {
-							command: ["typescript-language-server", "--stdio"],
+							command: ["tsc", "--lsp", "--stdio"],
 							fileExtensions: [".foo"],
 							rootMarkers: [],
 						},
@@ -722,10 +1800,10 @@ describe("LspManager", () => {
 				},
 			});
 			const filePath = join(tempDir, "test.foo");
-			const first = await manager.getDiagnostics(filePath, "ERROR\n");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 
 			expect(first).toContain("lsp(custom):");
-			expect(first).toContain("Install with: npm install -g typescript-language-server typescript");
+			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
 			expect(requests).toEqual([]);
 			expect(installCommands).toEqual([]);
 		} finally {
@@ -762,7 +1840,7 @@ describe("LspManager", () => {
 					enabled: true,
 					servers: {
 						typescript: {
-							command: ["typescript-language-server", "--stdio"],
+							command: ["tsc", "--lsp", "--stdio"],
 							fileExtensions: [".foo"],
 							rootMarkers: [],
 						},
@@ -771,7 +1849,7 @@ describe("LspManager", () => {
 				hostInteraction,
 				installRunner: async (command) => {
 					installCommands.push([...command]);
-					writeFakeServerExecutable(binDir, "typescript-language-server");
+					writeFakeServerExecutable(binDir, "tsc");
 					return { exitCode: 0, output: "installed\n" };
 				},
 			});
@@ -779,16 +1857,18 @@ describe("LspManager", () => {
 			const content = "has ERROR\n";
 			writeFileSync(filePath, content);
 
-			const result = await manager.getDiagnostics(filePath, content);
+			const result = await manager.getDiagnostics(filePath, content).then((result) => result.text);
 
 			expect(result).toContain("test.foo(1,5): error: found ERROR on line 1");
 			expect(requests).toHaveLength(1);
 			expect(requests[0]).toMatchObject({
 				action: "lsp.install_server",
-				commandPreview: "npm install -g typescript-language-server typescript",
-				metadata: { server: "typescript", binary: "typescript-language-server" },
+				commandPreview: "npm install -g typescript@7.0.2 --ignore-scripts --include=optional",
+				metadata: { server: "typescript", binary: "tsc" },
 			});
-			expect(installCommands).toEqual([["npm", "install", "-g", "typescript-language-server", "typescript"]]);
+			expect(installCommands).toEqual([
+				["npm", "install", "-g", "typescript@7.0.2", "--ignore-scripts", "--include=optional"],
+			]);
 			expect(updates.map((update) => update.status)).toEqual(["running", "completed"]);
 		} finally {
 			if (previousPath === undefined) {
@@ -796,6 +1876,324 @@ describe("LspManager", () => {
 			} else {
 				process.env.PATH = previousPath;
 			}
+		}
+	});
+
+	it("coalesces concurrent built-in install attempts by recipe across server roots", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const binDir = join(tempDir, "bin");
+		const firstRoot = join(tempDir, "first");
+		const secondRoot = join(tempDir, "second");
+		mkdirSync(binDir);
+		mkdirSync(firstRoot);
+		mkdirSync(secondRoot);
+		writeFileSync(join(firstRoot, ".root"), "");
+		writeFileSync(join(secondRoot, ".root"), "");
+		const previousPath = process.env.PATH;
+		process.env.PATH = binDir;
+		const requests: HostActionRequest[] = [];
+		let installs = 0;
+		try {
+			manager = new LspManager({
+				cwd: firstRoot,
+				projectCwd: tempDir,
+				config: resolveLspConfig({
+					servers: {
+						typescript: {
+							command: ["tsc", "--lsp", "--stdio"],
+							fileExtensions: [".foo"],
+							rootMarkers: [".root"],
+						},
+					},
+				}),
+				hostInteraction: {
+					requestAction: async (request) => {
+						requests.push(request);
+						return { decision: "approved" };
+					},
+				},
+				installRunner: async () => {
+					installs++;
+					await new Promise((resolve) => setTimeout(resolve, 50));
+					writeFakeServerExecutable(binDir, "tsc");
+					return { exitCode: 0, output: "installed\n" };
+				},
+			});
+			const firstFile = join(firstRoot, "first.foo");
+			const secondFile = join(secondRoot, "second.foo");
+			writeFileSync(firstFile, "ERROR first\n");
+			writeFileSync(secondFile, "ERROR second\n");
+			const [first, second] = await Promise.all([
+				manager.getDiagnostics(firstFile, "ERROR first\n").then((result) => result.text),
+				manager.getDiagnostics(secondFile, "ERROR second\n").then((result) => result.text),
+			]);
+			expect(first).toContain("error: found ERROR");
+			expect(second).toContain("error: found ERROR");
+			expect(requests).toHaveLength(1);
+			expect(installs).toBe(1);
+		} finally {
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+	});
+
+	it("keeps missing-server authorization isolated between manager host interactions", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const binDir = join(tempDir, "bin");
+		const firstRoot = join(tempDir, "first");
+		const secondRoot = join(tempDir, "second");
+		mkdirSync(binDir);
+		mkdirSync(firstRoot);
+		mkdirSync(secondRoot);
+		const previousPath = process.env.PATH;
+		process.env.PATH = binDir;
+		const firstPromptStarted = createDeferred<void>();
+		const secondPromptStarted = createDeferred<void>();
+		const firstDecision = createDeferred<HostActionDecision>();
+		let firstRequests = 0;
+		let secondRequests = 0;
+		let secondInstalls = 0;
+		let secondManager: LspManager | undefined;
+		try {
+			manager = new LspManager({
+				cwd: firstRoot,
+				config: builtInTypescriptInstallConfig(),
+				hostInteraction: {
+					requestAction: async () => {
+						firstRequests++;
+						firstPromptStarted.resolve();
+						return firstDecision.promise;
+					},
+				},
+			});
+			secondManager = new LspManager({
+				cwd: secondRoot,
+				config: builtInTypescriptInstallConfig(),
+				hostInteraction: {
+					requestAction: async () => {
+						secondRequests++;
+						secondPromptStarted.resolve();
+						return { decision: "approved" };
+					},
+				},
+				installRunner: async () => {
+					secondInstalls++;
+					writeFakeServerExecutable(binDir, "tsc");
+					return { exitCode: 0, output: "installed\n" };
+				},
+			});
+			const firstFile = join(firstRoot, "first.foo");
+			const secondFile = join(secondRoot, "second.foo");
+			writeFileSync(firstFile, "ERROR first\n");
+			writeFileSync(secondFile, "ERROR second\n");
+
+			const firstOperation = manager.getDiagnostics(firstFile, "ERROR first\n").then((result) => result.text);
+			await firstPromptStarted.promise;
+			const secondOperation = secondManager
+				.getDiagnostics(secondFile, "ERROR second\n")
+				.then((result) => result.text);
+			const secondPromptedBeforeFirstSettled = await Promise.race([
+				secondPromptStarted.promise.then(() => true),
+				new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+			]);
+			firstDecision.resolve({ decision: "denied", message: "first host denied installation" });
+			const [firstResult, secondResult] = await Promise.all([firstOperation, secondOperation]);
+
+			expect(secondPromptedBeforeFirstSettled).toBe(true);
+			expect(firstResult).toContain("first host denied installation");
+			expect(secondResult).toContain("error: found ERROR on line 1");
+			expect(firstRequests).toBe(1);
+			expect(secondRequests).toBe(1);
+			expect(secondInstalls).toBe(1);
+		} finally {
+			firstDecision.resolve({ decision: "denied" });
+			secondManager?.dispose();
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+	});
+
+	it("keeps a coalesced install attempt independent of each caller's cancellation", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const binDir = join(tempDir, "bin");
+		const firstRoot = join(tempDir, "first");
+		const secondRoot = join(tempDir, "second");
+		mkdirSync(binDir);
+		mkdirSync(firstRoot);
+		mkdirSync(secondRoot);
+		writeFileSync(join(firstRoot, ".root"), "");
+		writeFileSync(join(secondRoot, ".root"), "");
+		const previousPath = process.env.PATH;
+		process.env.PATH = binDir;
+		const promptStarted = createDeferred<void>();
+		const promptDecision = createDeferred<HostActionDecision>();
+		let requests = 0;
+		let installs = 0;
+		try {
+			manager = new LspManager({
+				cwd: firstRoot,
+				projectCwd: tempDir,
+				config: builtInTypescriptInstallConfig([".root"]),
+				hostInteraction: {
+					requestAction: async (_request, options) => {
+						requests++;
+						promptStarted.resolve();
+						return Promise.race([
+							promptDecision.promise,
+							new Promise<HostActionDecision>((resolve) => {
+								options?.signal?.addEventListener(
+									"abort",
+									() =>
+										resolve({
+											decision: "dismissed",
+											message: "host prompt aborted with initiating request",
+										}),
+									{ once: true },
+								);
+							}),
+						]);
+					},
+				},
+				installRunner: async () => {
+					installs++;
+					writeFakeServerExecutable(binDir, "tsc");
+					return { exitCode: 0, output: "installed\n" };
+				},
+			});
+			const firstFile = join(firstRoot, "first.foo");
+			const secondFile = join(secondRoot, "second.foo");
+			writeFileSync(firstFile, "ERROR first\n");
+			writeFileSync(secondFile, "ERROR second\n");
+			const firstController = new AbortController();
+
+			const firstOperation = manager
+				.getDiagnostics(firstFile, "ERROR first\n", firstController.signal)
+				.then((result) => result.text);
+			await promptStarted.promise;
+			const secondOperation = manager.getDiagnostics(secondFile, "ERROR second\n").then((result) => result.text);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			firstController.abort();
+			const firstResult = await firstOperation;
+			promptDecision.resolve({ decision: "approved" });
+			const secondResult = await secondOperation;
+
+			expect(firstResult).toContain("LSP install cancelled");
+			expect(secondResult).toContain("error: found ERROR on line 1");
+			expect(requests).toBe(1);
+			expect(installs).toBe(1);
+		} finally {
+			promptDecision.resolve({ decision: "dismissed" });
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+	});
+
+	it("does not let repeated same-root caller cancellation trip the shared install breaker", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const binDir = join(tempDir, "bin");
+		mkdirSync(binDir);
+		const previousPath = process.env.PATH;
+		process.env.PATH = binDir;
+		const promptStarted = createDeferred<void>();
+		const promptDecision = createDeferred<HostActionDecision>();
+		const installFinished = createDeferred<void>();
+		let requests = 0;
+		let installs = 0;
+		try {
+			manager = new LspManager({
+				cwd: tempDir,
+				config: builtInTypescriptInstallConfig(),
+				hostInteraction: {
+					requestAction: async () => {
+						requests++;
+						promptStarted.resolve();
+						return promptDecision.promise;
+					},
+				},
+				installRunner: async () => {
+					installs++;
+					writeFakeServerExecutable(binDir, "tsc");
+					installFinished.resolve();
+					return { exitCode: 0, output: "installed\n" };
+				},
+			});
+			const filePath = join(tempDir, "test.foo");
+			const content = "ERROR\n";
+			writeFileSync(filePath, content);
+
+			const cancelledResults: Array<string | undefined> = [];
+			for (let attempt = 0; attempt < 3; attempt++) {
+				const controller = new AbortController();
+				const operation = manager
+					.getDiagnostics(filePath, content, controller.signal)
+					.then((result) => result.text);
+				if (attempt === 0) await promptStarted.promise;
+				controller.abort();
+				cancelledResults.push(await operation);
+			}
+			expect(cancelledResults).toEqual(["LSP install cancelled.", "", ""]);
+			expect(manager.getStatus().find((entry) => entry.name === "typescript")?.lastError).toBeUndefined();
+
+			const successfulOperation = manager.getDiagnostics(filePath, content).then((result) => result.text);
+			promptDecision.resolve({ decision: "approved" });
+			await installFinished.promise;
+			expect(await successfulOperation).toContain("error: found ERROR on line 1");
+			expect(requests).toBe(1);
+			expect(installs).toBe(1);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)[0].lastError).toBeUndefined();
+		} finally {
+			promptDecision.resolve({ decision: "dismissed" });
+			installFinished.resolve();
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
+		}
+	});
+
+	it("cancels a pending install interaction when its manager is disposed", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-test-"));
+		const previousPath = process.env.PATH;
+		process.env.PATH = tempDir;
+		const promptStarted = createDeferred<void>();
+		const manualDecision = createDeferred<HostActionDecision>();
+		try {
+			manager = new LspManager({
+				cwd: tempDir,
+				config: builtInTypescriptInstallConfig(),
+				hostInteraction: {
+					requestAction: async (_request, options) => {
+						promptStarted.resolve();
+						return Promise.race([
+							manualDecision.promise,
+							new Promise<HostActionDecision>((resolve) => {
+								options?.signal?.addEventListener(
+									"abort",
+									() => resolve({ decision: "dismissed", message: "manager disposed" }),
+									{ once: true },
+								);
+							}),
+						]);
+					},
+				},
+			});
+			const filePath = join(tempDir, "test.foo");
+			writeFileSync(filePath, "ERROR\n");
+			const operation = manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
+			await promptStarted.promise;
+
+			manager.dispose();
+			const settledBeforeFallback = await Promise.race([
+				operation.then(() => true),
+				new Promise<false>((resolve) => setTimeout(() => resolve(false), 250)),
+			]);
+			manualDecision.resolve({ decision: "dismissed", message: "manual test cleanup" });
+			await operation;
+
+			expect(settledBeforeFallback).toBe(true);
+			expect(manager.getStatus().filter((entry) => entry.attempts > 0)).toEqual([]);
+		} finally {
+			manualDecision.resolve({ decision: "dismissed" });
+			if (previousPath === undefined) delete process.env.PATH;
+			else process.env.PATH = previousPath;
 		}
 	});
 
@@ -811,7 +2209,7 @@ describe("LspManager", () => {
 					enabled: true,
 					servers: {
 						typescript: {
-							command: ["typescript-language-server", "--stdio"],
+							command: ["tsc", "--lsp", "--stdio"],
 							fileExtensions: [".foo"],
 							rootMarkers: [],
 						},
@@ -825,11 +2223,11 @@ describe("LspManager", () => {
 				},
 			});
 			const filePath = join(tempDir, "test.foo");
-			const first = await manager.getDiagnostics(filePath, "ERROR\n");
-			const second = await manager.getDiagnostics(filePath, "ERROR\n");
+			const first = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
+			const second = await manager.getDiagnostics(filePath, "ERROR\n").then((result) => result.text);
 
-			expect(first).toContain("Install with: npm install -g typescript-language-server typescript");
-			expect(second).toBeUndefined();
+			expect(first).toContain("Install with: npm install -g typescript@7.0.2");
+			expect(second).toBe("");
 			expect(requests).toHaveLength(1);
 		} finally {
 			if (previousPath === undefined) {
@@ -961,6 +2359,216 @@ describe("LspClient disk sync", () => {
 		configResponses?: unknown[];
 	}
 
+	it("retains startup stderr delivered after the process exit event", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
+		const stdin = new PassThrough();
+		const stdout = new PassThrough();
+		const stderr = new PassThrough();
+		const processEvents = new EventEmitter();
+		let exitCode: number | null = null;
+		Object.assign(processEvents, { stdin, stdout, stderr, pid: undefined, kill: () => true });
+		Object.defineProperties(processEvents, {
+			exitCode: { get: () => exitCode },
+			signalCode: { get: () => null },
+		});
+		const child = processEvents as unknown as ChildProcess;
+		client = new LspClient({
+			serverName: "ordered-exit",
+			command: ["fake-server"],
+			rootDir: tempDir,
+			serverSpawner: () => {
+				setTimeout(() => {
+					stderr.write("early startup detail\n");
+					exitCode = 2;
+					processEvents.emit("exit", 2, null);
+					setTimeout(() => {
+						stderr.end("late startup detail\n");
+						processEvents.emit("close", 2, null);
+					}, 25);
+				}, 0);
+				return child;
+			},
+		});
+
+		await expect(client.start()).rejects.toThrow(
+			/LSP server "ordered-exit" exited.*early startup detail.*late startup detail/s,
+		);
+	});
+
+	it("bounds startup stderr drainage when the stream remains open after exit", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
+		const stdin = new PassThrough();
+		const stdout = new PassThrough();
+		const stderr = new PassThrough();
+		const processEvents = new EventEmitter();
+		let exitCode: number | null = null;
+		Object.assign(processEvents, { stdin, stdout, stderr, pid: undefined, kill: () => true });
+		Object.defineProperties(processEvents, {
+			exitCode: { get: () => exitCode },
+			signalCode: { get: () => null },
+		});
+		const child = processEvents as unknown as ChildProcess;
+		client = new LspClient({
+			serverName: "held-stderr",
+			command: ["fake-server"],
+			rootDir: tempDir,
+			serverSpawner: () => {
+				setTimeout(() => {
+					stderr.write("available startup detail\n");
+					exitCode = 2;
+					processEvents.emit("exit", 2, null);
+				}, 0);
+				return child;
+			},
+		});
+		const startedAt = Date.now();
+
+		await expect(client.start()).rejects.toThrow(/available startup detail/);
+		expect(Date.now() - startedAt).toBeLessThan(1000);
+	});
+
+	it("stops draining startup stderr at an absolute deadline", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
+		const stdin = new PassThrough();
+		const stdout = new PassThrough();
+		const stderr = new PassThrough();
+		const processEvents = new EventEmitter();
+		let exitCode: number | null = null;
+		let stderrWriter: NodeJS.Timeout | undefined;
+		Object.assign(processEvents, { stdin, stdout, stderr, pid: undefined, kill: () => true });
+		Object.defineProperties(processEvents, {
+			exitCode: { get: () => exitCode },
+			signalCode: { get: () => null },
+		});
+		const child = processEvents as unknown as ChildProcess;
+		client = new LspClient({
+			serverName: "continuous-stderr",
+			command: ["fake-server"],
+			rootDir: tempDir,
+			serverSpawner: () => {
+				setTimeout(() => {
+					exitCode = 2;
+					processEvents.emit("exit", 2, null);
+					stderrWriter = setInterval(() => stderr.write("continuous startup detail\n"), 25);
+				}, 0);
+				return child;
+			},
+		});
+		const startResult = client.start().then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		const completedBeforeDeadline = await Promise.race([
+			startResult.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), 1500)),
+		]);
+		if (stderrWriter) clearInterval(stderrWriter);
+		stderr.end();
+		processEvents.emit("close", 2, null);
+		const error = await startResult;
+
+		expect(completedBeforeDeadline).toBe(true);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("continuous startup detail");
+	}, 5000);
+
+	it("applies the startup stderr deadline after a process error", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
+		const stdin = new PassThrough();
+		const stdout = new PassThrough();
+		const stderr = new PassThrough();
+		const processEvents = new EventEmitter();
+		let stderrWriter: NodeJS.Timeout | undefined;
+		Object.assign(processEvents, { stdin, stdout, stderr, pid: undefined, kill: () => true });
+		Object.defineProperties(processEvents, {
+			exitCode: { get: () => null },
+			signalCode: { get: () => null },
+		});
+		const child = processEvents as unknown as ChildProcess;
+		client = new LspClient({
+			serverName: "errored-continuous-stderr",
+			command: ["fake-server"],
+			rootDir: tempDir,
+			serverSpawner: () => {
+				setTimeout(() => {
+					processEvents.emit("error", new Error("synthetic spawn failure"));
+					stderrWriter = setInterval(() => stderr.write("x".repeat(5000)), 25);
+				}, 0);
+				return child;
+			},
+		});
+		const startResult = client.start().then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		const completedBeforeDeadline = await Promise.race([
+			startResult.then(() => true),
+			new Promise<false>((resolve) => setTimeout(() => resolve(false), 1500)),
+		]);
+		if (stderrWriter) clearInterval(stderrWriter);
+		stderr.end();
+		processEvents.emit("close", null, null);
+		const error = await startResult;
+
+		expect(completedBeforeDeadline).toBe(true);
+		expect(error).toBeInstanceOf(Error);
+		expect((error as Error).message).toContain("synthetic spawn failure");
+		expect((error as Error).message).toContain("Startup stderr:");
+		expect((error as Error).message.length).toBeLessThan(9000);
+	}, 5000);
+
+	it("starts the startup stderr deadline when the process terminates", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
+		const stdin = new PassThrough();
+		const stdout = new PassThrough();
+		const stderr = new PassThrough();
+		const processEvents = new EventEmitter();
+		let exitCode: number | null = null;
+		Object.assign(processEvents, { stdin, stdout, stderr, pid: undefined, kill: () => true });
+		Object.defineProperties(processEvents, {
+			exitCode: { get: () => exitCode },
+			signalCode: { get: () => null },
+		});
+		const child = processEvents as unknown as ChildProcess;
+		client = new LspClient({
+			serverName: "delayed-exit",
+			command: ["fake-server"],
+			rootDir: tempDir,
+			serverSpawner: () => {
+				setTimeout(() => {
+					exitCode = 2;
+					processEvents.emit("exit", 2, null);
+					setTimeout(() => {
+						stderr.end("late startup detail after delayed exit\n");
+						processEvents.emit("close", 2, null);
+					}, 25);
+				}, 1250);
+				return child;
+			},
+		});
+
+		await expect(client.start()).rejects.toThrow(/late startup detail after delayed exit/);
+	}, 5000);
+
+	it("passes exact launch environment and argv metacharacters without shell interpretation", async () => {
+		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
+		const environment = { ...process.env, VOLT_LSP_TEST_ENV: "exact-environment" };
+		const launchArgs = ["space value", "a&b", "semi;colon", 'quote"value'];
+		client = new LspClient({
+			serverName: "fake",
+			command: [process.execPath, FAKE_SERVER, ...launchArgs],
+			rootDir: tempDir,
+			environment,
+		});
+		await client.start();
+		const state = (await client.sendRequest("fake/state", {})) as FakeState & {
+			launchArgv: string[];
+			launchEnvironment?: string;
+		};
+		expect(state.launchArgv).toEqual(launchArgs);
+		expect(state.launchEnvironment).toBe("exact-environment");
+	});
+
 	it("sends configuration and answers workspace/configuration section requests", async () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-client-test-"));
 		const settings = { foo: { bar: 42 }, top: "x" };
@@ -1018,11 +2626,12 @@ describe("LspClient disk sync", () => {
 		writeFileSync(fileA, content);
 
 		const first = await client.getDiagnostics(fileA, content, 3000);
-		expect(first).toHaveLength(1);
+		expect(first.diagnostics).toHaveLength(1);
 
 		// Same content again: no didChange, reuses the existing publish.
 		const second = await client.getDiagnostics(fileA, content, 3000);
-		expect(second).toEqual(first);
+		expect(second.diagnostics).toEqual(first.diagnostics);
+		expect(second.source).toBe("cache");
 
 		// Excluded path is not refreshed even if it changed on disk.
 		writeFileSync(fileA, "different\n");
@@ -1045,7 +2654,10 @@ describe("tool diagnostics integration", () => {
 
 	const stubProvider: ToolDiagnosticsProvider = {
 		getDiagnostics: async (_absolutePath, content) =>
-			content.includes("ERROR") ? "stub.ts(1,1): error: stub diagnostic" : undefined,
+			lspResult(
+				content.includes("ERROR") ? "success" : "empty",
+				content.includes("ERROR") ? "stub.ts(1,1): error: stub diagnostic" : "",
+			),
 	};
 
 	it("write tool appends diagnostics to result content and details", async () => {
@@ -1070,7 +2682,7 @@ describe("tool diagnostics integration", () => {
 			{} as never,
 		);
 		expect(clean.content).toHaveLength(1);
-		expect(clean.details).toBeUndefined();
+		expect(clean.details?.lsp?.outcome).toBe("empty");
 	});
 
 	it("edit tool appends diagnostics to result content and details", async () => {
@@ -1094,37 +2706,38 @@ describe("tool diagnostics integration", () => {
 		tempDir = mkdtempSync(join(tmpdir(), "volt-lsp-tool-test-"));
 		const calls: string[] = [];
 		const navProvider: LspNavigationProvider = {
+			status: async () => lspResult("success", "unused"),
 			definition: async (path, symbol, line) => {
 				calls.push(`definition ${path} ${symbol} ${line}`);
-				return "def-result";
+				return lspResult("success", "def-result");
 			},
-			references: async () => "ref-result",
-			hover: async () => "hover-result",
-			documentSymbols: async () => "symbols-result",
+			references: async () => lspResult("success", "ref-result"),
+			hover: async () => lspResult("success", "hover-result"),
+			documentSymbols: async () => lspResult("success", "symbols-result"),
 			workspaceSymbols: async (path, query) => {
 				calls.push(`workspaceSymbols ${path} ${query}`);
-				return "workspace-symbols-result";
+				return lspResult("success", "workspace-symbols-result");
 			},
 			callHierarchy: async (path, symbol, direction) => {
 				calls.push(`callHierarchy ${path} ${symbol} ${direction}`);
-				return "calls-result";
+				return lspResult("success", "calls-result");
 			},
 			implementations: async (path, symbol) => {
 				calls.push(`implementations ${path} ${symbol}`);
-				return "impl-result";
+				return lspResult("success", "impl-result");
 			},
 			typeDefinition: async (path, symbol) => {
 				calls.push(`typeDefinition ${path} ${symbol}`);
-				return "typedef-result";
+				return lspResult("success", "typedef-result");
 			},
-			fileDiagnostics: async () => "diag-result",
+			fileDiagnostics: async () => lspResult("success", "diag-result"),
 			rename: async (path, symbol, newName) => {
 				calls.push(`rename ${path} ${symbol} ${newName}`);
-				return "rename-result";
+				return lspResult("success", "rename-result");
 			},
 			codeFix: async (path, options) => {
 				calls.push(`fix ${path} ${options.line} ${options.title}`);
-				return "fix-result";
+				return lspResult("success", "fix-result");
 			},
 		};
 		const tool = createLspToolDefinition(tempDir, { provider: navProvider });
@@ -1137,7 +2750,7 @@ describe("tool diagnostics integration", () => {
 			{} as never,
 		);
 		expect(result.content[0]).toEqual({ type: "text", text: "def-result" });
-		expect(result.details).toEqual({ action: "definition" });
+		expect(result.details).toMatchObject({ action: "definition", lsp: { outcome: "success", trigger: "explicit" } });
 		expect(calls[0]).toBe(`definition ${join(tempDir, "a.ts")} foo 12`);
 
 		const symbols = await tool.execute("t2", { action: "symbols", path: "a.ts" }, undefined, undefined, {} as never);
@@ -1155,7 +2768,7 @@ describe("tool diagnostics integration", () => {
 
 		await expect(
 			tool.execute("t3", { action: "references", path: "a.ts" }, undefined, undefined, {} as never),
-		).rejects.toThrow("lsp references requires a symbol name");
+		).resolves.toMatchObject({ isError: true, details: { lsp: { outcome: "invalid-input" } } });
 
 		const callers = await tool.execute(
 			"t3b",
@@ -1219,7 +2832,7 @@ describe("tool diagnostics integration", () => {
 
 		await expect(
 			tool.execute("t6", { action: "rename", path: "a.ts", symbol: "foo" }, undefined, undefined, {} as never),
-		).rejects.toThrow("lsp rename requires newName");
+		).resolves.toMatchObject({ isError: true, details: { lsp: { outcome: "invalid-input" } } });
 	});
 
 	it("lsp tool reports when LSP is disabled", async () => {
@@ -1227,7 +2840,7 @@ describe("tool diagnostics integration", () => {
 		const tool = createLspToolDefinition(tempDir);
 		await expect(
 			tool.execute("t1", { action: "symbols", path: "a.ts" }, undefined, undefined, {} as never),
-		).rejects.toThrow("LSP is disabled");
+		).resolves.toMatchObject({ isError: true, details: { lsp: { reason: "disabled" } } });
 	});
 
 	it("diagnostics provider failures do not fail the write", async () => {
@@ -1240,6 +2853,6 @@ describe("tool diagnostics integration", () => {
 		const writeTool = createWriteToolDefinition(tempDir, { diagnosticsProvider: throwingProvider });
 		const result = await writeTool.execute("t1", { path: "a.ts", content: "x\n" }, undefined, undefined, {} as never);
 		expect(result.content[0].type).toBe("text");
-		expect(result.details).toBeUndefined();
+		expect(result.details?.lsp?.outcome).toBe("request-failed");
 	});
 });

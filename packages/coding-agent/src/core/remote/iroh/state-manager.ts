@@ -410,6 +410,7 @@ export class IrohRemoteHostStateManager {
 	): Promise<IrohRemoteClientAuthorizationResult> {
 		return this.runExclusive(async () => {
 			const state = await this.loadUnlocked();
+			const previousState = cloneHostState(state);
 			const workspaceStatuses = await this.getWorkspaceStatuses(state, options);
 			const workspace = findIrohRemoteWorkspace(state, hello.workspace);
 			const workspaceStatus = workspaceStatuses.find((entry) => entry.name === hello.workspace)?.status;
@@ -424,7 +425,12 @@ export class IrohRemoteHostStateManager {
 				workspace: workspaceAvailable ? workspace : undefined,
 				workspaceStatuses,
 			});
-			await this.saveUnlocked(state);
+			try {
+				await this.saveUnlocked(state);
+			} catch (error) {
+				await this.restoreAfterFailedPersistence(previousState);
+				throw error;
+			}
 			return cloneAuthorizationResult(result);
 		});
 	}
@@ -949,7 +955,7 @@ function cloneWorkspace(workspace: IrohRemoteWorkspace): IrohRemoteWorkspace {
 }
 
 function cloneWorktree(worktree: IrohRemoteWorkspaceWorktree): IrohRemoteWorkspaceWorktree {
-	return { ...worktree, sessionIds: [...worktree.sessionIds] };
+	return structuredClone(worktree);
 }
 
 function getRevokedClients(state: IrohRemoteHostState): IrohRemoteRevokedClient[] {

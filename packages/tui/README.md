@@ -80,8 +80,9 @@ tui.start();
 tui.stop();
 tui.requestRender(); // Request a re-render
 
-// Global debug key handler (Shift+Ctrl+D)
-tui.onDebug = () => console.log("Debug triggered");
+// Register application shortcuts globally, regardless of component focus.
+// Return { consume: true } when handled to keep input out of the focused component.
+tui.addInputListener(handleApplicationShortcut);
 ```
 
 ### Alternate-screen viewport layouts
@@ -386,7 +387,10 @@ interface EditorOptions {
 
 const editor = new Editor(tui, theme, options?);  // tui is required for height-aware scrolling
 editor.onSubmit = (text) => console.log(text);
-editor.onChange = (text) => console.log("Changed:", text);
+editor.onChange = (text, change) => {
+  // Submission clears the editor before onSubmit; distinguish it from deletion.
+  console.log("Changed:", text, "Submitted:", change?.submittedText);
+};
 editor.disableSubmit = true; // Disable submit temporarily
 editor.setAutocompleteProvider(provider);
 editor.borderColor = (s) => chalk.blue(s); // Change border dynamically

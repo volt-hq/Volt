@@ -18,7 +18,46 @@
 //   tests can assert sync behavior.
 // - Exits on the exit notification.
 
+import { appendFileSync, readFileSync } from "node:fs";
+
+if (process.argv.includes("--version")) {
+	process.stdout.write(`Version ${process.env.VOLT_FAKE_TS_VERSION ?? "7.0.2"}\n`);
+	process.exit(0);
+}
+
+// Optional CLI-fixture evidence channel. Never mixes acknowledgements into LSP stdout.
+const eventLogIndex = process.argv.indexOf("--event-log");
+const eventLog = eventLogIndex === -1 ? undefined : process.argv[eventLogIndex + 1];
+function record(event) {
+	if (eventLog) appendFileSync(eventLog, `${JSON.stringify(event)}\n`);
+}
+record({ type: "started", pid: process.pid, cwd: process.cwd(), argv: process.argv.slice(2), envKeys: Object.keys(process.env) });
+if (eventLog) {
+	process.on("exit", (code) => record({ type: "exited", pid: process.pid, code }));
+	process.on("SIGTERM", () => process.exit(0));
+	// An abruptly terminated CLI must not leave the opt-in fixture server alive.
+	process.stdin.on("end", () => process.exit(0));
+}
+
+const navigationUriIndex = process.argv.indexOf("--navigation-uri");
+const navigationUri = navigationUriIndex === -1 ? undefined : process.argv[navigationUriIndex + 1];
+const workspaceEditIndex = process.argv.indexOf("--workspace-edit");
+const workspaceEditFile = workspaceEditIndex === -1 ? undefined : process.argv[workspaceEditIndex + 1];
+
+function configuredWorkspaceEdit() {
+	return JSON.parse(readFileSync(workspaceEditFile, "utf-8"));
+}
+
 const pullMode = process.argv.includes("--pull");
+const noPublish = process.argv.includes("--no-publish");
+const malformedPull = process.argv.includes("--malformed-pull");
+const rejectedPull = process.argv.includes("--rejected-pull");
+const hangPull = process.argv.includes("--hang-pull");
+const hangInitialize = process.argv.includes("--hang-initialize");
+const emptyCapabilities = process.argv.includes("--empty-capabilities");
+const absentCapabilities = process.argv.includes("--absent-capabilities");
+const staleOnly = process.argv.includes("--stale-only");
+const exitOnChange = process.argv.includes("--exit-on-change");
 const pullFlakyMode = process.argv.includes("--pull-flaky");
 const configMode = process.argv.includes("--config");
 const staleMode = process.argv.includes("--stale");
@@ -44,6 +83,8 @@ const state = {
 	configResponses: undefined,
 	initializeCapabilities: undefined,
 	applyEditResponses: [],
+	launchArgv: process.argv.slice(2),
+	launchEnvironment: process.env.VOLT_LSP_TEST_ENV,
 };
 
 process.stderr.write("fake-lsp-server ready\n");
@@ -86,6 +127,7 @@ function buildReplaceEdit(uri, text, find, replace) {
 }
 
 function send(message) {
+	record({ type: "sent", message });
 	const body = JSON.stringify(message);
 	process.stdout.write(`Content-Length: ${Buffer.byteLength(body, "utf-8")}\r\n\r\n${body}`);
 }
@@ -131,6 +173,7 @@ function scan(text, uri) {
 }
 
 function handle(message) {
+	record({ type: "received", message });
 	const { id, method, params } = message;
 	if (method === undefined) {
 		// Response to a server-initiated request (e.g. workspace/applyEdit).
@@ -142,6 +185,11 @@ function handle(message) {
 		return;
 	}
 	if (method === "initialize") {
+		if (hangInitialize) return;
+		if (absentCapabilities || emptyCapabilities) {
+			send({ jsonrpc: "2.0", id, result: emptyCapabilities ? { capabilities: {} } : {} });
+			return;
+		}
 		state.initializeCapabilities = params.capabilities;
 		if (initErrorMode) {
 			// Respond with a JSON-RPC error but keep the process running, like a
@@ -153,6 +201,7 @@ function handle(message) {
 			jsonrpc: "2.0",
 			id,
 			result: {
+				serverInfo: { name: "fake-lsp", version: "1.0" },
 				capabilities: {
 					textDocumentSync: 1,
 					definitionProvider: true,
@@ -163,7 +212,8 @@ function handle(message) {
 					documentSymbolProvider: true,
 					renameProvider: true,
 					callHierarchyProvider: true,
-					codeActionProvider: true,
+					codeActionProvider: { resolveProvider: true },
+					workspaceSymbolProvider: true,
 					executeCommandProvider: { commands: ["fake.fix"] },
 					...(pullMode || pullFlakyMode
 						? { diagnosticProvider: { interFileDependencies: false, workspaceDiagnostics: false } }
@@ -207,7 +257,7 @@ function handle(message) {
 							kind: 13,
 							containerName: "fakeContainer",
 							location: {
-								uri,
+								uri: navigationUri ?? uri,
 								range: {
 									start: { line: i, character: index },
 									end: { line: i, character: index + query.length },
@@ -233,10 +283,11 @@ function handle(message) {
 		return;
 	}
 	if (method === "textDocument/didChange") {
+		if (exitOnChange) process.exit(2);
 		documents.set(params.textDocument.uri, params.contentChanges[0].text);
 		versions.set(params.textDocument.uri, params.textDocument.version);
 		state.changes.push({ uri: params.textDocument.uri, version: params.textDocument.version });
-		if (staleMode || staleUnversionedMode || staleOobMode) {
+		if (staleMode || staleOnly || staleUnversionedMode || staleOobMode) {
 			// Immediately publish a bogus result computed against the previous
 			// content, like a server racing syntactic/semantic passes. --stale
 			// tags it with the previous version; the other variants omit the
@@ -248,7 +299,7 @@ function handle(message) {
 				method: "textDocument/publishDiagnostics",
 				params: {
 					uri: params.textDocument.uri,
-					...(staleMode ? { version: params.textDocument.version - 1 } : {}),
+					...(staleMode || staleOnly ? { version: params.textDocument.version - 1 } : {}),
 					diagnostics: [
 						{
 							range: { start: { line: staleLine, character: 0 }, end: { line: staleLine, character: 1 } },
@@ -260,6 +311,7 @@ function handle(message) {
 				},
 			});
 		}
+		if (staleOnly) return;
 		if (staleCrossMode) {
 			// Shortly after the change, publish bogus unversioned out-of-bounds
 			// results for every *other* open document, like a server recomputing
@@ -344,7 +396,7 @@ function handle(message) {
 			id,
 			result: [
 				{
-					targetUri: params.textDocument.uri,
+					targetUri: navigationUri ?? params.textDocument.uri,
 					targetRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 10 } },
 					targetSelectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } },
 				},
@@ -358,7 +410,7 @@ function handle(message) {
 			jsonrpc: "2.0",
 			id,
 			result: [
-				{ uri: params.textDocument.uri, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } },
+				{ uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 1, character: 0 }, end: { line: 1, character: 5 } } },
 			],
 		});
 		return;
@@ -368,7 +420,7 @@ function handle(message) {
 		send({
 			jsonrpc: "2.0",
 			id,
-			result: { uri: params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
+			result: { uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
 		});
 		return;
 	}
@@ -377,8 +429,8 @@ function handle(message) {
 			jsonrpc: "2.0",
 			id,
 			result: [
-				{ uri: params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
-				{ uri: params.textDocument.uri, range: { start: { line: 1, character: 2 }, end: { line: 1, character: 7 } } },
+				{ uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } } },
+				{ uri: navigationUri ?? params.textDocument.uri, range: { start: { line: 1, character: 2 }, end: { line: 1, character: 7 } } },
 			],
 		});
 		return;
@@ -453,7 +505,7 @@ function handle(message) {
 					from: {
 						name: "callerOne",
 						kind: 12,
-						uri: params.item.uri,
+						uri: navigationUri ?? params.item.uri,
 						range: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
 						selectionRange: { start: { line: 0, character: 0 }, end: { line: 0, character: 9 } },
 					},
@@ -472,7 +524,7 @@ function handle(message) {
 					to: {
 						name: "calleeOne",
 						kind: 6,
-						uri: params.item.uri,
+						uri: navigationUri ?? params.item.uri,
 						range: { start: { line: 1, character: 0 }, end: { line: 1, character: 9 } },
 						selectionRange: { start: { line: 1, character: 2 }, end: { line: 1, character: 11 } },
 					},
@@ -483,6 +535,10 @@ function handle(message) {
 		return;
 	}
 	if (method === "textDocument/rename") {
+		if (workspaceEditFile) {
+			send({ jsonrpc: "2.0", id, result: configuredWorkspaceEdit() });
+			return;
+		}
 		const text = documents.get(params.textDocument.uri) ?? "";
 		const lines = text.split("\n");
 		const word = wordAt(lines[params.position.line] ?? "", params.position.character);
@@ -515,6 +571,17 @@ function handle(message) {
 	if (method === "textDocument/codeAction") {
 		const uri = params.textDocument.uri;
 		const text = documents.get(uri) ?? "";
+		if (workspaceEditFile) {
+			send({
+				jsonrpc: "2.0", id, result: [{
+					title: "Apply workspace edit", kind: "quickfix",
+					...(text.includes("CMDFIX")
+						? { command: { title: "Apply workspace edit", command: "fake.workspaceEdit" } }
+						: { edit: configuredWorkspaceEdit() }),
+				}],
+			});
+			return;
+		}
 		const only = params.context?.only;
 		if (Array.isArray(only) && only.includes("source.organizeImports")) {
 			const actions = text.includes("UNSORTED")
@@ -584,6 +651,12 @@ function handle(message) {
 		return;
 	}
 	if (method === "workspace/executeCommand") {
+		if (params.command === "fake.workspaceEdit") {
+			serverRequest("workspace/applyEdit", { edit: configuredWorkspaceEdit() }, () => {
+				send({ jsonrpc: "2.0", id, result: null });
+			});
+			return;
+		}
 		if (params.command === "fake.fix") {
 			const uri = params.arguments[0];
 			const edit = buildReplaceEdit(uri, documents.get(uri) ?? "", "CMDFIX", "FIXED");
@@ -621,6 +694,9 @@ function handle(message) {
 		return;
 	}
 	if (method === "textDocument/diagnostic") {
+		if (hangPull) return;
+		if (malformedPull) { send({ jsonrpc: "2.0", id, result: { kind: "full", items: [{}] } }); return; }
+		if (rejectedPull) { send({ jsonrpc: "2.0", id, error: { code: -32603, message: "pull rejected" } }); return; }
 		pullRequests++;
 		if (pullFlakyMode && pullRequests === 1) {
 			// Reject the first pull like a server that cancels with
@@ -644,7 +720,7 @@ function handle(message) {
 }
 
 function publishLater(onlyUri) {
-	if (pullMode || pullFlakyMode) return;
+	if (noPublish || ((pullMode || pullFlakyMode) && !rejectedPull)) return;
 	setTimeout(() => {
 		for (const [uri, text] of documents) {
 			if (onlyUri !== undefined && uri !== onlyUri) continue;

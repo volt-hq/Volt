@@ -54,6 +54,7 @@ describe("regression #5109: exclude tools", () => {
 				"bash",
 				"dynamic_tool",
 				"edit",
+				"jobs",
 				"lsp",
 				"web_fetch",
 				"web_search",

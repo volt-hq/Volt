@@ -211,7 +211,7 @@ describe("Coding Agent Tools", () => {
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
 			expect(getTextOutput(result)).toContain(testFile);
-			expect(result.details).toBeUndefined();
+			expect(result.details?.lsp).toMatchObject({ trigger: "write", outcome: "skipped", reason: "disabled" });
 		});
 
 		it("should create parent directories", async () => {

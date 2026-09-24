@@ -1,3 +1,4 @@
+import { stripVTControlCharacters } from "node:util";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import {
@@ -13,17 +14,23 @@ import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts"
 import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../core/remote/iroh/agent-options.ts";
 import { createReviewSeedMessage } from "../../core/review.ts";
+import { assertReviewDiscussionRpcAllowed } from "../../core/review-discussion-policy.ts";
+import { ReviewDiscussionConfigurationError } from "../../core/review-discussions.ts";
+import { getReviewGeneral } from "../../core/review-general.ts";
 import { publishReviewRun } from "../../core/review-publish.ts";
 import {
 	acknowledgeReviewRun,
-	appendReviewFindingTransition,
 	appendReviewPublication,
 	appendReviewRun,
-	exportReviewFeedback,
-	getReviewRun,
+	exportCanonicalReviewFeedback,
+	getCanonicalReviewRun,
 	type HydratedReviewRunRecord,
-	listReviewRuns,
+	listCanonicalReviewRuns,
+	recordReviewFindingOutcome,
 } from "../../core/review-state.ts";
+import { UNAVAILABLE_REVIEW_USAGE } from "../../core/review-usage.ts";
+import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../core/review-workflows.ts";
+import { listRpcBackgroundJobs, projectRpcBackgroundJob } from "../../core/rpc/background-jobs.ts";
 import { getRpcErrorResponseTarget, isUsableRpcConversationIdentifier } from "../../core/rpc/correlation.ts";
 import { buildRpcSessionState } from "../../core/rpc/session-state.ts";
 import { projectSessionTreePage } from "../../core/rpc/session-tree.ts";
@@ -97,6 +104,8 @@ export interface RpcCommandDispatcherContext {
 	): Promise<{ subscriptionId: string; requestId: string; checkpointCursor: number }>;
 	getPendingHostActionRequests(): RpcHostActionRequest[];
 	cancelPendingHostActionRequests(message?: string): void;
+	/** Captured at dispatch for generation-scoped Jobs responses on ordered transports. */
+	conversationBranchEpoch?: string;
 	/** Revalidate the mutation lease after an awaited dispatcher/session preflight boundary. */
 	assertConversationGenerationCurrent(): void;
 	subscriptionUsageService: SubscriptionUsageService;
@@ -226,19 +235,59 @@ export function createRpcErrorResponse(
 
 export { getRpcErrorResponseTarget };
 
+function projectReviewTargetIdentity(
+	identity: HydratedReviewRunRecord["target"]["identity"],
+	includePullRequestBody: boolean,
+): Record<string, unknown> {
+	const pullRequest = identity.pullRequest;
+	return {
+		kind: identity.kind,
+		baseTree: identity.baseTree,
+		headTree: identity.headTree,
+		...(identity.baseCommit ? { baseCommit: identity.baseCommit } : {}),
+		...(identity.mergeBaseCommit ? { mergeBaseCommit: identity.mergeBaseCommit } : {}),
+		...(identity.headCommit ? { headCommit: identity.headCommit } : {}),
+		...(pullRequest
+			? {
+					pullRequest: {
+						number: pullRequest.number,
+						title: pullRequest.title,
+						...(includePullRequestBody ? { body: pullRequest.body } : {}),
+						url: pullRequest.url,
+						baseRefName: pullRequest.baseRefName,
+						headRefName: pullRequest.headRefName,
+						baseRefOid: pullRequest.baseRefOid,
+						headRefOid: pullRequest.headRefOid,
+					},
+				}
+			: {}),
+	};
+}
+
 function projectReviewRun(record: HydratedReviewRunRecord, includeResult: boolean): Record<string, unknown> {
 	const result = record.result;
+	const pullRequest = createReviewPullRequestMetadata(record.target.identity);
+	const files = createReviewFileMetadata(record.target.files, record.target.fileSummary, includeResult);
 	return {
 		runId: record.runId,
 		workflowAction: record.workflowAction,
 		status: record.status,
 		startedAt: record.startedAt,
-		endedAt: record.endedAt,
+		...(record.endedAt === undefined ? {} : { endedAt: record.endedAt }),
+		usage: record.usage?.summary ?? UNAVAILABLE_REVIEW_USAGE,
+		...(record.usage
+			? {
+					usageUpdatedAt: record.usage.updatedAt,
+					...(includeResult ? { usageBreakdown: record.usage.attempts } : {}),
+				}
+			: {}),
 		...(record.acknowledgedAt === undefined ? {} : { acknowledgedAt: record.acknowledgedAt }),
 		target: {
 			description: record.target.description,
 			diffCommand: record.target.diffCommand,
-			identity: record.target.identity,
+			identity: projectReviewTargetIdentity(record.target.identity, includeResult),
+			...(pullRequest ? { pullRequest } : {}),
+			files,
 			...(record.target.context ? { context: record.target.context } : {}),
 		},
 		options: record.options,
@@ -267,6 +316,7 @@ export async function handleRpcCommand(
 ): Promise<RpcResponse | undefined> {
 	const { options, runtimeHost, session } = context;
 	const id = typeof command.id === "string" ? command.id : undefined;
+	assertReviewDiscussionRpcAllowed(session, command);
 
 	switch (command.type) {
 		// =================================================================
@@ -343,30 +393,54 @@ export async function handleRpcCommand(
 		}
 
 		case "new_session": {
+			if (command.replaceReviewGeneral && !command.preserveReviewRunId)
+				return createRpcErrorResponse(id, "new_session", "replaceReviewGeneral requires preserveReviewRunId");
 			const preservedReviewRun = command.preserveReviewRunId
-				? getReviewRun(session.sessionManager, command.preserveReviewRunId)
+				? await getCanonicalReviewRun(session.sessionManager, command.preserveReviewRunId)
 				: undefined;
 			if (command.preserveReviewRunId && !preservedReviewRun) {
 				return createRpcErrorResponse(id, "new_session", `Unknown review run: ${command.preserveReviewRunId}`);
 			}
-			const newSessionOptions = preservedReviewRun
-				? {
-						...(command.parentSession ? { parentSession: command.parentSession } : {}),
-						setup: async (sessionManager: SessionManager) => {
-							appendReviewRun(sessionManager, preservedReviewRun);
-							if (preservedReviewRun.acknowledgedAt !== undefined) {
-								acknowledgeReviewRun(
-									sessionManager,
-									preservedReviewRun.runId,
-									preservedReviewRun.acknowledgedAt,
-								);
-							}
-						},
-					}
-				: command.parentSession
-					? { parentSession: command.parentSession }
-					: undefined;
-			const result = await runSessionNewHostAction(context.createHostActionContext(), newSessionOptions);
+			let parentSessionRef =
+				command.parentSessionId === session.sessionId ? session.sessionManager.getSessionRef() : undefined;
+			if (command.parentSessionId && !parentSessionRef) {
+				const candidates = await SessionManager.listAll(session.sessionManager.getSessionDir(), undefined, {
+					includeMessageFreeDurable: true,
+				});
+				parentSessionRef = candidates.find((candidate) => candidate.id === command.parentSessionId)?.ref;
+				if (!parentSessionRef) {
+					return createRpcErrorResponse(id, "new_session", `Unknown parent session: ${command.parentSessionId}`);
+				}
+			}
+			const newSessionOptions = {
+				rebindRequestId: id,
+				...(command.preserveReviewRunId ? { preserveReviewRunId: command.preserveReviewRunId } : {}),
+				...(command.replaceReviewGeneral ? { replaceReviewGeneral: true } : {}),
+				...(parentSessionRef ? { parentSessionRef } : {}),
+				...(preservedReviewRun
+					? {
+							setup: async (sessionManager: SessionManager) => {
+								appendReviewRun(sessionManager, preservedReviewRun);
+								if (preservedReviewRun.acknowledgedAt !== undefined) {
+									acknowledgeReviewRun(
+										sessionManager,
+										preservedReviewRun.runId,
+										preservedReviewRun.acknowledgedAt,
+									);
+								}
+							},
+						}
+					: {}),
+			};
+			// General publication is the final durable runtime step. The runtime's
+			// replacement listeners already rebind RPC; do not run a second fallible
+			// afterSessionSwitch callback after that irreversible commit.
+			const result = command.replaceReviewGeneral
+				? await runtimeHost.newSession({
+						...newSessionOptions,
+						assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
+					})
+				: await runSessionNewHostAction(context.createHostActionContext(), newSessionOptions);
 			return createRpcSuccessResponse(id, "new_session", { cancelled: result.cancelled });
 		}
 
@@ -532,13 +606,53 @@ export async function handleRpcCommand(
 		// Detached review workflows
 		// =================================================================
 
+		case "start_review_discussions":
+		case "list_review_discussions":
+		case "reset_review_discussion":
+		case "get_review_discussion_source": {
+			const service = runtimeHost.reviewDiscussions;
+			if (!service)
+				return createRpcErrorResponse(id, command.type, "This backend has no daemon sibling service", {
+					code: "review_discussions_unavailable",
+				});
+			try {
+				context.assertConversationGenerationCurrent();
+				const data =
+					command.type === "start_review_discussions"
+						? await service.start(
+								command.runId,
+								command.findingIds,
+								command.requestId,
+								command.discussionConfiguration,
+							)
+						: command.type === "list_review_discussions"
+							? await service.list(command.runId, command.cursor, command.limit)
+							: command.type === "reset_review_discussion"
+								? await service.reset(command.discussionId, command.expectedSessionId, command.requestId)
+								: await service.source();
+				return createRpcSuccessResponse(id, command.type, data);
+			} catch (error) {
+				if (error instanceof ReviewDiscussionConfigurationError)
+					return createRpcErrorResponse(id, command.type, error.message);
+				return createRpcErrorResponse(
+					id,
+					command.type,
+					"Review source identity, placement, or runtime admission changed",
+					{ code: "review_source_unavailable" },
+				);
+			}
+		}
+
 		case "cancel_workflow": {
 			runtimeHost.reviewWorkflows.cancel(command.workflowId);
 			return createRpcSuccessResponse(id, "cancel_workflow");
 		}
 
 		case "list_review_workflows": {
-			const page = listReviewRuns(session.sessionManager, { cursor: command.cursor, limit: command.limit });
+			const page = await listCanonicalReviewRuns(session.sessionManager, {
+				cursor: command.cursor,
+				limit: command.limit,
+			});
 			return createRpcSuccessResponse(id, "list_review_workflows", {
 				runs: page.runs.map((run) => projectReviewRun(run, false)),
 				activeWorkflows: runtimeHost.reviewWorkflows.list().filter((workflow) => workflow.status === "running"),
@@ -546,8 +660,16 @@ export async function handleRpcCommand(
 			});
 		}
 
+		case "get_review_general": {
+			return createRpcSuccessResponse(
+				id,
+				"get_review_general",
+				await getReviewGeneral(session.sessionManager, command.runId),
+			);
+		}
+
 		case "get_review_result": {
-			const record = getReviewRun(session.sessionManager, command.runId);
+			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
 			if (!record)
 				return createRpcErrorResponse(id, "get_review_result", `Unknown durable review run: ${command.runId}`);
 			return createRpcSuccessResponse(id, "get_review_result", projectReviewRun(record, true));
@@ -555,7 +677,7 @@ export async function handleRpcCommand(
 
 		case "open_review_session": {
 			const sourceSessionManager = session.sessionManager;
-			const record = getReviewRun(sourceSessionManager, command.runId);
+			const record = await getCanonicalReviewRun(sourceSessionManager, command.runId);
 			if (!record?.result)
 				return createRpcErrorResponse(
 					id,
@@ -568,11 +690,7 @@ export async function handleRpcCommand(
 			);
 			if (unknownIds.length > 0)
 				return createRpcErrorResponse(id, "open_review_session", `Unknown finding ids: ${unknownIds.join(", ")}`);
-			const selectedResult = {
-				...record.result,
-				findings: record.result.findings.filter((finding) => selectedIds.has(finding.id)),
-			};
-			const seedMessage = createReviewSeedMessage(record.target, { parsed: selectedResult });
+			const seedMessage = createReviewSeedMessage(record, command.findingIds);
 			let targetSessionManager: SessionManager | undefined;
 			let acknowledgedAt: number | undefined;
 			const result = await runSessionNewHostAction(context.createHostActionContext(), {
@@ -599,13 +717,27 @@ export async function handleRpcCommand(
 			}
 			if (result.seeded && command.findingIds === undefined) {
 				if (acknowledgedAt === undefined) throw new Error("Review session was seeded without acknowledgment");
-				const sourceSessionFile = sourceSessionManager.getSessionFile();
-				const acknowledgmentManager = sourceSessionFile
-					? SessionManager.open(sourceSessionFile, sourceSessionManager.getSessionDir())
+				const sourceSessionRef = sourceSessionManager.getSessionRef();
+				const acknowledgmentManager = sourceSessionRef
+					? await SessionManager.open(sourceSessionRef)
 					: sourceSessionManager;
-				acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
-				await acknowledgmentManager.flush();
-				if (sourceSessionFile) sourceSessionManager.setSessionFile(sourceSessionFile);
+				try {
+					acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
+					await acknowledgmentManager.flush();
+				} catch (error) {
+					if (sourceSessionRef) {
+						try {
+							await acknowledgmentManager.closePersistence();
+						} catch (closeError) {
+							throw new AggregateError(
+								[error, closeError],
+								"Review acknowledgment failed and its source manager could not be closed",
+							);
+						}
+					}
+					throw error;
+				}
+				if (sourceSessionRef) await acknowledgmentManager.closePersistence();
 			}
 			return createRpcSuccessResponse(id, "open_review_session", { cancelled: result.cancelled });
 		}
@@ -620,7 +752,7 @@ export async function handleRpcCommand(
 		}
 
 		case "record_review_finding_outcome": {
-			const record = getReviewRun(session.sessionManager, command.runId);
+			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
 			if (!record?.result?.findings.some((finding) => finding.id === command.findingId)) {
 				return createRpcErrorResponse(
 					id,
@@ -635,19 +767,24 @@ export async function handleRpcCommand(
 					"Dismissed findings require an explicit reason.",
 				);
 			}
-			const transition = appendReviewFindingTransition(session.sessionManager, {
+			const outcome = {
 				runId: command.runId,
 				findingId: command.findingId,
 				status: command.status,
 				...(command.reason ? { reason: command.reason } : {}),
 				...(command.note ? { note: command.note } : {}),
+			};
+			const transition = await recordReviewFindingOutcome(session.sessionManager, outcome, {
+				recordCanonicalOutcome: runtimeHost.reviewDiscussions?.recordOutcome,
+				assertCurrent: context.assertConversationGenerationCurrent,
 			});
 			await session.sessionManager.flush();
-			return createRpcSuccessResponse(id, "record_review_finding_outcome", transition);
+			const { schemaVersion: _schemaVersion, ...data } = transition;
+			return createRpcSuccessResponse(id, "record_review_finding_outcome", data);
 		}
 
 		case "rerun_review": {
-			const record = getReviewRun(session.sessionManager, command.runId);
+			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
 			if (!record) return createRpcErrorResponse(id, "rerun_review", `Unknown review run: ${command.runId}`);
 			const response = await BUILTIN_HOST_ACTION_REGISTRY.invoke(
 				REVIEW_RERUN_ACTION_ID,
@@ -676,7 +813,7 @@ export async function handleRpcCommand(
 		}
 
 		case "publish_review": {
-			const record = getReviewRun(session.sessionManager, command.runId);
+			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
 			if (!record) return createRpcErrorResponse(id, "publish_review", `Unknown review run: ${command.runId}`);
 			const published = await publishReviewRun(session.sessionManager.getCwd(), record);
 			appendReviewPublication(session.sessionManager, { runId: record.runId, ...published });
@@ -685,7 +822,11 @@ export async function handleRpcCommand(
 		}
 
 		case "export_review_feedback":
-			return createRpcSuccessResponse(id, "export_review_feedback", exportReviewFeedback(session.sessionManager));
+			return createRpcSuccessResponse(
+				id,
+				"export_review_feedback",
+				await exportCanonicalReviewFeedback(session.sessionManager),
+			);
 
 		// =================================================================
 		// Push notifications
@@ -933,6 +1074,43 @@ export async function handleRpcCommand(
 		}
 
 		// =================================================================
+		// Session-owned background jobs
+		// =================================================================
+
+		case "list_jobs":
+		case "read_job":
+		case "cancel_job": {
+			const scope = {
+				sessionId: session.sessionId,
+				...(context.conversationBranchEpoch === undefined ? {} : { branchEpoch: context.conversationBranchEpoch }),
+			};
+			if (command.type === "list_jobs") {
+				return createRpcSuccessResponse(id, "list_jobs", {
+					...scope,
+					jobs: listRpcBackgroundJobs(session.backgroundJobs),
+				});
+			}
+			context.assertConversationGenerationCurrent();
+			const job =
+				command.type === "cancel_job"
+					? session.backgroundJobs.cancel(command.jobId)
+					: session.backgroundJobs.get(command.jobId);
+			const metadata = projectRpcBackgroundJob(job);
+			return createRpcSuccessResponse(id, command.type, {
+				...scope,
+				job:
+					command.type === "read_job"
+						? {
+								...metadata,
+								output: stripVTControlCharacters(job.output)
+									.replace(/\r\n?/g, "\n")
+									.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
+							}
+						: metadata,
+			});
+		}
+
+		// =================================================================
 		// Subagents (local RPC only)
 		// =================================================================
 
@@ -1094,7 +1272,7 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "get_session_stats": {
-			const stats = session.getSessionStats();
+			const { sessionRef: _sessionRef, ...stats } = session.getSessionStats();
 			return createRpcSuccessResponse(id, "get_session_stats", stats);
 		}
 
@@ -1117,7 +1295,9 @@ export async function handleRpcCommand(
 		}
 
 		case "switch_session": {
-			const result = await runtimeHost.switchSession(command.sessionPath);
+			const result = await runtimeHost.switchSessionById(command.sessionId, {
+				assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
+			});
 			if (!result.cancelled) {
 				await context.rebindSession();
 			}

@@ -173,6 +173,7 @@ function snapshotBuilder(source: TestSource, label = "test"): ConversationProjec
 			pendingMessageCount: 0,
 			steeringQueue: [],
 			followUpQueue: [],
+			backgroundJobs: [],
 			revision: source.revision,
 			branchEpoch,
 		} as RpcSessionState & { revision: number; branchEpoch: string },
@@ -515,6 +516,7 @@ function oracleSnapshotBuilder(
 				pendingMessageCount: 0,
 				steeringQueue: [],
 				followUpQueue: [],
+				backgroundJobs: [],
 				revision: source.revision,
 				oracleFinalAssistant: sanitizedFinal,
 			} as RpcSessionState & { revision: number; oracleFinalAssistant: AssistantMessage | null },
@@ -1483,6 +1485,40 @@ describe("ConversationProjectionFeed", () => {
 			state: { revision: 0 },
 		});
 		expect(secondSource.observationCount).toBe(1);
+		feed.dispose();
+	});
+
+	it("scopes a replacement request ID to its exact session rebind bootstrap", async () => {
+		const firstSource = new TestSource();
+		const secondSource = new TestSource();
+		const thirdSource = new TestSource();
+		const feed = new ConversationProjectionFeed(firstSource, { createId: makeIds("request-rebind") });
+		const writes: object[] = [];
+		const subscription = feed.attach({
+			write: (value) => {
+				writes.push(value);
+			},
+			buildSnapshot: (context) => snapshotBuilder(context.source as TestSource)(context),
+		});
+		await subscription.ready;
+
+		feed.beginSourceRebind(secondSource);
+		feed.commitSourceRebind("new-session-request");
+		await subscription.flush();
+		expect(writes.at(-1)).toMatchObject({
+			type: "conversation_bootstrap",
+			reason: "session_rebind",
+			requestId: "new-session-request",
+		});
+
+		feed.beginSourceRebind(thirdSource);
+		feed.commitSourceRebind();
+		await subscription.flush();
+		expect(writes.at(-1)).toMatchObject({
+			type: "conversation_bootstrap",
+			reason: "session_rebind",
+		});
+		expect(writes.at(-1)).not.toHaveProperty("requestId");
 		feed.dispose();
 	});
 

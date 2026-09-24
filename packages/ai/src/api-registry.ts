@@ -3,6 +3,8 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Model,
+	PromptCacheRefreshCheck,
+	PromptCacheRefreshFunction,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -24,12 +26,18 @@ export interface ApiProvider<TApi extends Api = Api, TOptions extends StreamOpti
 	api: TApi;
 	stream: StreamFunction<TApi, TOptions>;
 	streamSimple: StreamFunction<TApi, SimpleStreamOptions>;
+	/** Optional no-output replay of a `streamSimple` request that renews the provider's prompt cache. */
+	refreshPromptCache?: PromptCacheRefreshFunction<TApi>;
+	/** Which request options `refreshPromptCache` can refresh; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck<TApi>;
 }
 
 interface ApiProviderInternal {
 	api: Api;
 	stream: ApiStreamFunction;
 	streamSimple: ApiStreamSimpleFunction;
+	refreshPromptCache?: PromptCacheRefreshFunction;
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 type RegisteredApiProvider = {
@@ -63,6 +71,30 @@ function wrapStreamSimple<TApi extends Api>(
 	};
 }
 
+function wrapRefreshPromptCache<TApi extends Api>(
+	api: TApi,
+	refresh: PromptCacheRefreshFunction<TApi>,
+): PromptCacheRefreshFunction {
+	return async (model, context, options) => {
+		if (model.api !== api) {
+			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
+		}
+		return await refresh(model as Model<TApi>, context, options);
+	};
+}
+
+function wrapCanRefreshPromptCache<TApi extends Api>(
+	api: TApi,
+	canRefresh: PromptCacheRefreshCheck<TApi>,
+): PromptCacheRefreshCheck {
+	return (model, options) => {
+		if (model.api !== api) {
+			throw new Error(`Mismatched api: ${model.api} expected ${api}`);
+		}
+		return canRefresh(model as Model<TApi>, options);
+	};
+}
+
 export function registerApiProvider<TApi extends Api, TOptions extends StreamOptions>(
 	provider: ApiProvider<TApi, TOptions>,
 	sourceId?: string,
@@ -72,6 +104,12 @@ export function registerApiProvider<TApi extends Api, TOptions extends StreamOpt
 			api: provider.api,
 			stream: wrapStream(provider.api, provider.stream),
 			streamSimple: wrapStreamSimple(provider.api, provider.streamSimple),
+			...(provider.refreshPromptCache
+				? { refreshPromptCache: wrapRefreshPromptCache(provider.api, provider.refreshPromptCache) }
+				: {}),
+			...(provider.canRefreshPromptCache
+				? { canRefreshPromptCache: wrapCanRefreshPromptCache(provider.api, provider.canRefreshPromptCache) }
+				: {}),
 		},
 		sourceId,
 	});

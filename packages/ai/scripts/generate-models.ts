@@ -9,6 +9,12 @@ import {
 	CLOUDFLARE_AI_GATEWAY_OPENAI_BASE_URL,
 	CLOUDFLARE_WORKERS_AI_BASE_URL,
 } from "../src/providers/cloudflare.ts";
+import {
+	getAnthropicThinkingMode,
+	isClaudeAtLeast,
+	supportsAnthropicSamplingParameters,
+	supportsAnthropicXhighEffort,
+} from "../src/providers/anthropic-capabilities.ts";
 import type {
 	AnthropicMessagesCompat,
 	Api,
@@ -44,6 +50,8 @@ interface ModelsDevModel {
 	provider?: {
 		npm?: string;
 	};
+	temperature?: boolean;
+	reasoning_options?: { type: string; values?: string[] }[];
 }
 
 interface NvidiaNimModelListItem {
@@ -93,6 +101,24 @@ const GPT_5_6_MODELS = [
 	},
 ] as const;
 const GPT_5_6_MODEL_IDS = new Set<string>(["gpt-5.6", ...GPT_5_6_MODELS.map((model) => model.id)]);
+const GPT_6_ASTRA_ID = "gpt-6-astra";
+const GPT_6_ASTRA_COST = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 } as const;
+// Verified against the OpenAI model pages on 2026-09-22:
+// https://developers.openai.com/api/docs/models/gpt-6-sol
+// https://developers.openai.com/api/docs/models/gpt-6-luna
+const GPT_6_SOL_LUNA_MODELS = [
+	{
+		id: "gpt-6-sol",
+		name: "GPT-6 Sol",
+		cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+	},
+	{
+		id: "gpt-6-luna",
+		name: "GPT-6 Luna",
+		cost: { input: 0.1, output: 0.5, cacheRead: 0.01, cacheWrite: 0.125 },
+	},
+] as const;
+const GPT_6_SOL_LUNA_MODEL_IDS = new Set<string>(GPT_6_SOL_LUNA_MODELS.map((model) => model.id));
 
 const MOONSHOT_CN_MIRRORED_MODEL_IDS = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
 
@@ -316,7 +342,7 @@ const IMPLICIT_EXTENDED_PROMPT_CACHE = {
 	refreshesOnHit: true,
 } as const satisfies PromptCacheMetadata;
 
-const OPENAI_GPT_5_6_PROMPT_CACHE = {
+const OPENAI_30_MINUTE_PROMPT_CACHE = {
 	modes: ["implicit", "explicit"],
 	retention: { short: { ttlSeconds: 1_800 } },
 	refreshesOnHit: true,
@@ -354,12 +380,14 @@ function canonicalBedrockModelId(modelId: string): string {
 
 const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 	{
-		name: "OpenAI GPT-5.6",
+		name: "OpenAI 30-minute prompt caching",
 		sourceUrl: "https://developers.openai.com/api/docs/guides/prompt-caching",
-		verifiedAt: "2026-08-18",
+		verifiedAt: "2026-09-22",
 		matches: (model) =>
-			model.provider === "openai" && model.api === "openai-responses" && GPT_5_6_MODEL_IDS.has(model.id),
-		metadata: OPENAI_GPT_5_6_PROMPT_CACHE,
+			model.provider === "openai" &&
+			model.api === "openai-responses" &&
+			(GPT_5_6_MODEL_IDS.has(model.id) || GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
+		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
 		name: "OpenAI extended retention",
@@ -382,11 +410,13 @@ const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 		metadata: IMPLICIT_SHORT_PROMPT_CACHE,
 	},
 	{
-		name: "Azure OpenAI GPT-5.6",
+		name: "Azure OpenAI 30-minute prompt caching",
 		sourceUrl: "https://learn.microsoft.com/azure/foundry/openai/how-to/prompt-caching",
-		verifiedAt: "2026-08-18",
-		matches: (model) => model.provider === "azure-openai-responses" && GPT_5_6_MODEL_IDS.has(model.id),
-		metadata: OPENAI_GPT_5_6_PROMPT_CACHE,
+		verifiedAt: "2026-09-04",
+		matches: (model) =>
+			model.provider === "azure-openai-responses" &&
+			(GPT_5_6_MODEL_IDS.has(model.id) || GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
+		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
 		name: "Azure OpenAI extended retention",
@@ -511,23 +541,54 @@ function isGoogleThinkingApi(model: Model<any>): boolean {
 	return model.api === "google-generative-ai" || model.api === "google-vertex";
 }
 
-function isAnthropicAdaptiveThinkingModel(modelId: string): boolean {
-	return (
-		modelId.includes("opus-4-6") ||
-		modelId.includes("opus-4.6") ||
-		modelId.includes("opus-4-7") ||
-		modelId.includes("opus-4.7") ||
-		modelId.includes("opus-4-8") ||
-		modelId.includes("opus-4.8") ||
-		modelId.includes("sonnet-4-6") ||
-		modelId.includes("sonnet-4.6") ||
-		modelId.includes("fable-5")
-	);
-}
+/**
+ * models.dev catalogs whose Claude entries Volt generates and whose metadata describes the Anthropic
+ * request parameters. Aggregator catalogs describe their own reasoning APIs instead.
+ */
+const ANTHROPIC_CAPABILITY_CHECK_PROVIDERS = [
+	"anthropic",
+	"amazon-bedrock",
+	"cloudflare-ai-gateway",
+	"github-copilot",
+	"opencode",
+	"opencode-go",
+];
 
-function isAnthropicTemperatureUnsupportedModel(modelId: string): boolean {
-	const id = modelId.toLowerCase();
-	return id.includes("opus-4-7") || id.includes("opus-4.7") || id.includes("opus-4-8") || id.includes("opus-4.8");
+/** A models.dev contradiction that must stop generation instead of dropping the models.dev catalog. */
+class ModelsDevMetadataConflict extends Error {}
+
+/**
+ * Claude models whose models.dev metadata contradicts src/providers/anthropic-capabilities.ts:
+ * - thinking: a budget-only model that lists no thinking budget, or an adaptive model that lists only a
+ *   budget. Effort next to a budget decides nothing (Claude Opus 4.5 lists both and is budget-only).
+ * - effort: xhigh listed for a model without it, or missing from one with it.
+ * - temperature: listed support that differs from supportsAnthropicSamplingParameters.
+ */
+function findAnthropicCapabilityConflicts(data: Record<string, { models?: Record<string, ModelsDevModel> }>): string[] {
+	const conflicts: string[] = [];
+	for (const providerKey of ANTHROPIC_CAPABILITY_CHECK_PROVIDERS) {
+		for (const [modelId, model] of Object.entries(data[providerKey]?.models ?? {})) {
+			const mode = getAnthropicThinkingMode(modelId);
+			if (mode === undefined) continue;
+			const conflict = (detail: string) => conflicts.push(`${providerKey}/${modelId}: ${detail}`);
+			const sampling = supportsAnthropicSamplingParameters(modelId);
+			if (typeof model.temperature === "boolean" && model.temperature !== sampling) {
+				conflict(`sampling parameters ${sampling ? "accepted" : "rejected"}, models.dev temperature ${model.temperature}`);
+			}
+			const options = model.reasoning_options;
+			if (model.reasoning !== true || !options?.length) continue;
+			const budget = options.some((option) => option.type === "budget_tokens");
+			const effort = options.find((option) => option.type === "effort");
+			if ((mode === "budget" && !budget) || (mode === "adaptive" && budget && !effort)) {
+				conflict(`${mode} thinking, models.dev reasoning_options ${options.map((option) => option.type).join("+")}`);
+			}
+			const xhigh = supportsAnthropicXhighEffort(modelId) === true;
+			if (effort?.values && effort.values.includes("xhigh") !== xhigh) {
+				conflict(`xhigh effort ${xhigh ? "accepted" : "rejected"}, models.dev effort ${effort.values.join(",")}`);
+			}
+		}
+	}
+	return conflicts;
 }
 
 function mergeAnthropicMessagesCompat(model: Model<Api>, compat: AnthropicMessagesCompat): void {
@@ -548,6 +609,30 @@ function isGemma4Model(modelId: string): boolean {
 }
 
 function applyThinkingLevelMetadata(model: Model<any>): void {
+	if (GPT_6_SOL_LUNA_MODEL_IDS.has(model.id)) {
+		// Codex's authenticated catalog exposes low through max, but not none.
+		mergeThinkingLevelMap(model, {
+			off: model.provider === "openai-codex" ? null : "none",
+			minimal: null,
+			xhigh: "xhigh",
+			max: "max",
+		});
+	}
+	if (model.provider === "openrouter" && /^openai\/gpt-6-(sol|luna)(?:-pro)?(?::batch)?$/.test(model.id)) {
+		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
+	}
+	if (model.id.includes("opus-5-5") || model.id.includes("opus-5.5")) {
+		// https://platform.claude.com/docs/en/models/opus-5-5/overview
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+	}
+	if (
+		model.id === GPT_6_ASTRA_ID &&
+		(model.api === "openai-responses" ||
+			model.api === "azure-openai-responses" ||
+			model.api === "openai-codex-responses")
+	) {
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+	}
 	if (
 		(model.api === "openai-responses" || model.api === "azure-openai-responses") &&
 		model.id.startsWith("gpt-5")
@@ -593,14 +678,20 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (
 		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
+		supportsAnthropicXhighEffort(model.id)
+	) {
+		mergeThinkingLevelMap(model, { xhigh: "xhigh", max: "max" });
+	}
+	if (
+		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
 		model.id.includes("fable-5")
 	) {
 		mergeThinkingLevelMap(model, { off: null, xhigh: "xhigh" });
 	}
-	if (model.api === "anthropic-messages" && isAnthropicAdaptiveThinkingModel(model.id)) {
+	if (model.api === "anthropic-messages" && getAnthropicThinkingMode(model.id) === "adaptive") {
 		mergeAnthropicMessagesCompat(model, { forceAdaptiveThinking: true });
 	}
-	if (model.api === "anthropic-messages" && isAnthropicTemperatureUnsupportedModel(model.id)) {
+	if (model.api === "anthropic-messages" && supportsAnthropicSamplingParameters(model.id) === false) {
 		mergeAnthropicMessagesCompat(model, { supportsTemperature: false });
 	}
 	if (model.api === "openai-completions" && model.id.includes("deepseek-v4")) {
@@ -828,6 +919,12 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		console.log("Fetching models from models.dev API...");
 		const response = await fetch("https://models.dev/api.json");
 		const data = await response.json();
+		const capabilityConflicts = findAnthropicCapabilityConflicts(data);
+		if (capabilityConflicts.length > 0) {
+			throw new ModelsDevMetadataConflict(
+				`models.dev contradicts src/providers/anthropic-capabilities.ts:\n${capabilityConflicts.join("\n")}`,
+			);
+		}
 
 		const models: Model<any>[] = [];
 		const nvidiaNimModelIds = data.nvidia?.models ? await fetchNvidiaNimModelIds() : new Map<string, string>();
@@ -1462,8 +1559,8 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 				if (m.tool_call !== true) continue;
 				if (m.status === "deprecated") continue;
 
-				// Claude 4.x models route to Anthropic Messages API
-				const isCopilotClaude4 = /^claude-(haiku|sonnet|opus)-4([.\-]|$)/.test(modelId);
+				// Claude 4 and later route to Anthropic Messages API
+				const isCopilotClaude4 = isClaudeAtLeast(modelId, 4, 0) === true;
 				// gpt-5 models require responses API, others use completions
 				const needsResponsesApi = modelId.startsWith("gpt-5") || modelId.startsWith("oswe");
 
@@ -1542,9 +1639,9 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 			}
 		}
 
-		// Process Kimi For Coding models
-		if (data["kimi-for-coding"]?.models) {
-			const kimiModels = data["kimi-for-coding"].models as Record<string, ModelsDevModel>;
+		// Process the models.dev Kimi plan catalog matching our api.kimi.com endpoint.
+		if (data["kimi-code-plan-cn"]?.models) {
+			const kimiModels = data["kimi-code-plan-cn"].models as Record<string, ModelsDevModel>;
 			const hasCanonicalModel = Object.prototype.hasOwnProperty.call(kimiModels, "kimi-for-coding");
 
 			const kimiAliases = new Set(["k2p5", "k2p6"]);
@@ -1685,6 +1782,7 @@ async function loadModelsDevData(): Promise<Model<any>[]> {
 		console.log(`Loaded ${models.length} tool-capable models from models.dev`);
 		return models;
 	} catch (error) {
+		if (error instanceof ModelsDevMetadataConflict) throw error;
 		console.error("Failed to load models.dev data:", error);
 		return [];
 	}
@@ -2016,7 +2114,7 @@ async function generateModels() {
 		});
 	}
 
-	for (const model of GPT_5_6_MODELS) {
+	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS]) {
 		if (!allModels.some((m) => m.provider === "openai" && m.id === model.id)) {
 			allModels.push({
 				id: model.id,
@@ -2027,10 +2125,25 @@ async function generateModels() {
 				reasoning: true,
 				input: ["text", "image"],
 				cost: { ...model.cost },
-				contextWindow: 272000,
+				contextWindow: GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) ? 1050000 : 272000,
 				maxTokens: 128000,
 			});
 		}
+	}
+
+	if (!allModels.some((m) => m.provider === "openai" && m.id === GPT_6_ASTRA_ID)) {
+		allModels.push({
+			id: GPT_6_ASTRA_ID,
+			name: "GPT-6 Astra",
+			api: "openai-responses",
+			baseUrl: "https://api.openai.com/v1",
+			provider: "openai",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { ...GPT_6_ASTRA_COST },
+			contextWindow: 1050000,
+			maxTokens: 128000,
+		});
 	}
 
 	const deepseekCompat: OpenAICompletionsCompat = {
@@ -2155,13 +2268,27 @@ async function generateModels() {
 
 	// OpenAI Codex (ChatGPT OAuth) models
 	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
-	// Keep the 272k observed server limit by default; GPT-5.6 Sol officially supports 1M.
+	// Keep the 272k default advertised by the Codex catalog, including GPT-6 Sol/Luna
+	// (verified 2026-09-22). GPT-5.6 Sol officially supports 1M.
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
 	const CODEX_GPT_5_6_SOL_CONTEXT = 1000000;
+	const CODEX_GPT_6_ASTRA_CONTEXT = 1050000;
 	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
+		{
+			id: GPT_6_ASTRA_ID,
+			name: "GPT-6 Astra",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: CODEX_BASE_URL,
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { ...GPT_6_ASTRA_COST },
+			contextWindow: CODEX_GPT_6_ASTRA_CONTEXT,
+			maxTokens: CODEX_MAX_TOKENS,
+		},
 		{
 			id: "gpt-5.3-codex-spark",
 			name: "GPT-5.3 Codex Spark",
@@ -2211,7 +2338,7 @@ async function generateModels() {
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
-	for (const model of GPT_5_6_MODELS) {
+	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS]) {
 		codexModels.push({
 			id: model.id,
 			name: model.name,
@@ -2432,4 +2559,7 @@ export const MODELS = {
 }
 
 // Run the generator
-generateModels().catch(console.error);
+generateModels().catch((error) => {
+	console.error(error);
+	process.exitCode = 1;
+});

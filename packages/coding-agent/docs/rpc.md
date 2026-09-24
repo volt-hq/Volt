@@ -15,7 +15,9 @@ Common options:
 - `--model <pattern>`: Model pattern or ID (supports `provider/id` and optional `:<thinking>`)
 - `--name <name>` / `-n <name>`: Set the session display name at startup
 - `--no-session`: Disable session persistence
-- `--session-dir <path>`: Custom session storage directory
+- `--session-dir <path>`: Directory containing the authoritative `sessions.sqlite` store
+
+RPC session state, lists, and mutation commands use stable session IDs. They do not expose or accept live store paths.
 
 ## Protocol Overview
 
@@ -144,6 +146,8 @@ Response:
 
 `abort` is the semantic cancellation command. Closing the RPC transport without sending `abort` requests transport shutdown or remote detach according to the transport, but it does not ask Volt to cancel the active run.
 
+`abort` also cancels all session-owned background jobs and waits for their cleanup. Use `cancel_job` to cancel only one job. `agent_settled` and `get_state.isBusy` describe foreground work; jobs may still be running afterward.
+
 #### new_session
 
 Start a fresh session. Can be cancelled by a `session_before_switch` extension event handler.
@@ -152,10 +156,14 @@ Start a fresh session. Can be cancelled by a `session_before_switch` extension e
 {"type": "new_session"}
 ```
 
-With optional parent session tracking:
+With optional stable parent identity:
 ```json
-{"type": "new_session", "parentSession": "/path/to/parent-session.jsonl"}
+{"type": "new_session", "parentSessionId": "parent-session-id"}
 ```
+
+`parentSessionId` must identify a session in the active store. The new session receives its own stable ID; refresh with `get_state` after a successful replacement.
+
+`preserveReviewRunId` copies the selected canonical review into the new session. Optional `replaceReviewGeneral: true` additionally replaces that run's current General destination, and is legal only with `preserveReviewRunId`. The initiating exact session generation must still be the current General. Successful publication atomically advances its durable revision and registers the replacement alias; cancelled, failed or stale competing replacements do not advance it. Ordinary new sessions and history opens never promote General.
 
 Response:
 ```json
@@ -212,18 +220,20 @@ Response:
     "isCompacting": true,
     "steeringMode": "all",
     "followUpMode": "one-at-a-time",
-    "sessionFile": "/path/to/session.jsonl",
     "sessionId": "abc123",
     "sessionName": "my-feature-work",
     "autoCompactionEnabled": true,
     "messageCount": 5,
     "pendingMessageCount": 0,
-    "activeCompaction": {"reason": "threshold", "startedAt": 1782470400000}
+    "activeCompaction": {"reason": "threshold", "startedAt": 1782470400000},
+    "promptCache": {"kind": "retained", "lastRequestAt": 1782470100000, "expiresAt": 1782470400000}
   }
 }
 ```
 
-The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). `fastModeEnabled` is the authoritative branch-local Fast state used by initial and replacement conversation bootstraps. `isStreaming` indicates an active provider run or session-level continuation; `isBusy` also includes asynchronous prompt preflight and standalone session operations such as manual compaction and tree navigation. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
+The `model` field is a full [Model](#model) object or `null`. `availableThinkingLevels` lists the thinking levels the current model supports (`["off"]` for non-reasoning models). `fastModeEnabled` is the authoritative branch-local Fast state used by initial and replacement conversation bootstraps. `isStreaming` indicates an active provider run or session-level continuation; `isBusy` also includes asynchronous prompt preflight and standalone session operations such as manual compaction and tree navigation. `sessionId` is the stable identity used by session switch and resume commands. The `sessionName` field is the display name set via `set_session_name`, or omitted if not set. `activeCompaction` is present only while context compaction is currently running; `startedAt` is Unix epoch milliseconds.
+
+`promptCache` estimates whether the next request can reuse the provider's prompt cache. It is omitted when the current model does not cache, prompt caching is disabled, or the active conversation has no request since its last compaction. `{"kind":"retained"}` reports the latest request or keepalive refresh made with the current model: `lastRequestAt` is Unix epoch milliseconds, and `expiresAt` is `lastRequestAt` plus the provider's documented retention window. `expiresAt` is omitted when the provider does not publish one. `keepAliveUntil` is present while the session is idle and the host keeps refreshing the cache; after that instant, refreshes stop and the cache lapses at `expiresAt` (see [prompt-cache keepalive](settings.md#prompt-cache)). `{"kind":"model_changed"}` means earlier requests used other models, so the next request starts uncached. Clients compare `expiresAt` with their own clock; no event fires when the window lapses. Provider eviction or request changes can still cause a miss before `expiresAt`.
 
 `gitContext` is a required nullable field read from a host-owned cache; `get_state` never waits for Git. It is `null` when the session cwd is not a usable Git worktree or before an initial scan has succeeded. A non-null value has these semantics:
 
@@ -234,11 +244,11 @@ The `model` field is a full [Model](#model) object or `null`. `availableThinking
 - `operation` is `null` or a host-detected merge, rebase, cherry-pick, revert, bisect, or sequencer operation. Rebase metadata may include `step` and `total`.
 - `revision` is monotonic only for one provider lifetime. `observedAt` advances only after a complete successful scan. On a later scan failure, Volt retains the last good value, increments its revision once, and sets `stale:true`; recovery emits another replacement with `stale:false`.
 
-Collection is local-only and performs no fetch. It uses bounded, fixed-argument Git reads and never includes changed path names, absolute checkout paths, remote URLs, credentials, or diff content. Git context is not persisted in session JSONL and is not added to model context, extension prompts, handshake `remoteHost`, or host-global metadata.
+Collection is local-only and performs no fetch. It uses bounded, fixed-argument Git reads and never includes changed path names, absolute checkout paths, remote URLs, credentials, or diff content. Live `gitContext` is not persisted. A newly created session may additionally expose optional `startingGitContext`, which is the first definitive path-free observation (`null` for a definitive non-Git cwd) stored as one strictly validated host-only `session_start_git_context` entry in SQLite. That entry never enters model context, transcript projection, extension prompts, handshake `remoteHost`, or host-global metadata.
 
 #### get_transcript
 
-Get a UI-ready projected transcript for the active session. The response is ordered oldest-to-newest and omits raw provider payloads, thinking blocks, image data, raw tool output, full file contents, and session file paths. Text, summaries, and mutation previews are bounded.
+Get a UI-ready projected transcript for the active session. The response is ordered oldest-to-newest and omits raw provider payloads, thinking blocks, image data, raw tool output, full file contents, and host store paths. Text, summaries, and mutation previews are bounded.
 
 ```json
 {"type": "get_transcript", "limit": 100}
@@ -300,6 +310,52 @@ Response:
 ```
 
 Messages are `AgentMessage` objects (see [Message Types](#message-types)).
+
+### Background jobs
+
+Local RPC and Iroh conversation clients can inspect and cancel the bound runtime's background Bash and subagent jobs without prompting the model. These commands do not start jobs; the model starts them through native tools with `background: true`.
+
+#### list_jobs
+
+```json
+{"id":"jobs-1","type":"list_jobs"}
+```
+
+Returns `data: {sessionId, jobs}`. `jobs` is a newest-first array of at most 64 accessible job summaries. Each summary contains `id`, `toolName` (`bash` or `subagent`), `label`, `status`, `startedAt`, `outputTruncated`, and optional `toolCallId`, `endedAt`, and `lastOutputAt`. Timestamps are Unix epoch milliseconds. An oversized originating provider tool-call identity is omitted rather than truncated.
+
+Statuses are `running`, `cancelling`, `completed`, `failed`, and `cancelled`. Lists include retained terminal jobs but never contain output. The same array is always present as `get_state.backgroundJobs` and `conversation_bootstrap.state.backgroundJobs`, including `[]` on fresh or restarted runtimes.
+
+#### read_job
+
+```json
+{"id":"jobs-2","type":"read_job","jobId":"job_..."}
+```
+
+Returns `data: {sessionId, job}`, where `job` contains the summary fields plus `output`: the latest non-destructive output tail, bounded to 50 KiB UTF-8 or 2000 lines before remote path sanitization. Terminal control sequences are removed. `outputTruncated` indicates omitted output. Reads neither consume output nor acknowledge that the model received it, and do not start inference or append transcript entries.
+
+#### cancel_job
+
+```json
+{"id":"jobs-3","type":"cancel_job","jobId":"job_...","conversationAuthority":{"sessionId":"session-1","subscriptionId":"sub-1","branchEpoch":"branch-1"}}
+```
+
+Returns `data: {sessionId, job}` with metadata only. A successful request normally returns `status: "cancelling"`; cancellation is complete only after the worker's cleanup settles and its status becomes `cancelled`. Repeating cancellation on a retained terminal job returns its existing terminal state. Foreground work, sibling jobs, and the connection remain active.
+
+Ordered remote cancellation requires the current bootstrap's `conversationAuthority`; plain local RPC does not. Ordered Jobs responses additionally carry `data.branchEpoch`. Buffered responses from an obsolete branch are discarded, and clients must discard results belonging to an obsolete session/epoch.
+
+Over Iroh, list/read require `conversation.observe.v1` and cancellation requires `conversation.control.v1`. The session's `jobs` tool and the originating `bash`/`subagent` tool must still be active. Unknown, revoked, foreign-runtime, and obsolete branch handles fail with the normal RPC error shape. Discovery and management streams do not expose these commands.
+
+#### background_jobs_changed
+
+```json
+{"type":"background_jobs_changed","jobs":[{"id":"job_...","toolName":"bash","label":"run checks","status":"running","startedAt":1800000000000,"outputTruncated":false}],"delivery":{"subscriptionId":"sub-1","cursor":12}}
+```
+
+This metadata-only event replaces the Jobs list and invalidates cached output. Re-read only the job being inspected; output may have changed even when the summary fields are unchanged. Updates are coalesced to at most ten per second and continue after foreground settlement. Ordered streams carry the normal `delivery` cursor; plain RPC does not. Reconnect/resync uses the authoritative bootstrap snapshot rather than reconstructing jobs from transcript acknowledgements.
+
+Jobs remain runtime- and branch-scoped. Detaching a retained remote runtime does not cancel them; runtime shutdown/replacement or process restart invalidates their handles. Historical tool details and completion notices remain snapshots, not live control authority. The native `run.cancel` action stays enabled while background work remains.
+
+Typed clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, {conversationAuthority})`, with `RpcListJobsResponse`, `RpcReadJobResponse`, and `RpcCancelJobResponse` return types.
 
 ### Subagents (local RPC only)
 
@@ -631,10 +687,12 @@ Built-in v1 actions currently include:
 | `session.new` | `/clear` | yes | Starts a fresh session through the same host path as `new_session`. |
 | `run.cancel` | none | yes | Aborts the current agent operation through the same host path as `abort`; descriptors may be disabled when no run is active. |
 | `context.compact` | `/compact` | no | Runs host compaction through the same handler as the local `compact` RPC command. |
+| `context.auto_compaction` | none | yes | Boolean `enabled`; saves the host's global or active-global-profile auto-compaction preference. |
+| `context.compaction_threshold` | none | yes | Integer `tokens` for the exact current provider/model; `0` restores the context-limit default. Saves in the same host scope. |
 | `session.rename` | `/name <name>` | no | Sets the current session display name through the same handler as `set_session_name`. |
 | `thinking.fast_mode` | none | yes | Durable branch-local inference-speed toggle for eligible canonical OpenAI Responses and OpenAI Codex models. Enabled sends Priority processing; disabled sends the default service tier. |
 | `review.uncommitted` | `/review uncommitted` | yes | Starts a detached review of uncommitted changes against `HEAD` using host-owned git/model policy; the response reports `accepted` with a `workflowId` and progress streams as workflow events. |
-| `review.branch` | `/review branch [base]` | yes | Starts a detached review of `HEAD` against a base branch; optional `base` is validated by the host and omitted values use host auto-detection. The `base` argument advertises `"completion": "gitBranches"`. |
+| `review.branch` | `/review branch [base]` | yes | Captures `HEAD`, refreshes a plain or short remote base branch with the host's Git credentials/network, and reviews from their merge base. Full `refs/heads/*` and `refs/remotes/*` inputs intentionally use local cached state; omitted values use host auto-detection. The `base` argument advertises `"completion": "gitBranches"`. |
 | `review.pr` | `/review pr [number]` | yes | Starts a detached GitHub pull request review using the host's GitHub credentials and network. Pull request metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and independent verification; retained finding prose is rendered separately without GitHub context. The optional string `number` must be a canonical positive decimal no greater than `2147483647`; omission selects the current branch's pull request. |
 | `review.commit` | `/review commit <ref>` | yes | Starts a detached review of a commit from workspace history. The required string `ref` is bounded to 1024 UTF-8 bytes and resolved to a commit object before the diff is inspected with textconv and external diff drivers disabled. |
 
@@ -647,9 +705,23 @@ Unsupported or deferred native surfaces in v1:
 - Model selection is not a native action; remote clients use the direct `get_available_models`/`set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams. Profile switching, scoped-model editing, login/logout, package management, and local settings screens remain unexposed over Iroh.
 - Local-only built-ins such as `context.compact` and `session.rename` may appear in local RPC descriptors but are blocked over Iroh until separate remote policy exists.
 
+#### Compaction preference actions
+
+`context.auto_compaction` exposes boolean scalar `state.value` and takes required boolean `enabled`. `context.compaction_threshold` exposes integer scalar `state.value` and takes required integer `tokens`: `0` means the context-limit default; positive safe integers configure an absolute earlier trigger. Fractions, negatives, strings, and integers above `Number.MAX_SAFE_INTEGER` are rejected. Threshold `state.options` contains string-valued CLI presets (`0`, `100000`, `150000`, `200000`, `250000`, `350000`, `500000`, `750000`) plus the configured count. Options are suggestions, not a limit on valid counts.
+
+Both descriptors carry three additional **required string arguments**: `provider`, `modelId`, and `expectedProfile`. Their `defaultValue` fields bind the current provider, exact model ID, and active profile (`""` for no profile). Capture and send these exact defaults from the descriptor the user edited—do not replace them with a newer selection at save time. The host checks all three immediately before mutation. Existing conversation authority still binds workspace/session/branch; these settings arguments do not replace it.
+
+```json
+{"id":"compact-at-1","type":"invoke_ui_action","action":"context.compaction_threshold","args":{"tokens":350000,"provider":"openai-codex","modelId":"gpt-6-astra","expectedProfile":"work"}}
+```
+
+On ordered remote streams, also include the current bootstrap's `conversationAuthority`. Fetch `scope: "all"` for both controls; the threshold uses `presentation.kind: "picker"`. Descriptions name the connected-host global/global-profile save scope, threshold model, and override precedence. Effective values remain visible when a trusted project/project-profile or runtime override disables the affected action. Both controls are disabled during streaming, busy operations, or compaction, and without a model. The host allows configuring a retained threshold while auto-compaction is off; clients may present it as inactive.
+
+Saves reuse host settings persistence, preserve other-model entries, and return `completed` only after persistence succeeds, with scalar `state`, `stateChanged: true`, and `actionsChanged: true`. Write failures return the normal RPC error. Shared `ui_action_state_changed` events invalidate both controls after saved preference changes, profile changes, and settings reloads in headless and desktop-owned runtimes. Refresh descriptors (including captured targets and disabled reasons) on these events and model/session changes. This does not expose manual `context.compact` remotely. See [Compaction settings](settings.md#compaction) for trigger semantics.
+
 #### get_ui_action_completions
 
-Get completion options for one action argument. Clients should only call this when the descriptor argument includes a supported `completion` value. V1 currently supports extension command argument completions via `"completion": "commandArguments"` and git branch-name completions via `"completion": "gitBranches"` (advertised by `review.branch`'s `base` argument). `gitBranches` serves the workspace's local and remote-tracking branch names with `main`/`master`-style defaults first, case-insensitively filtered by `prefix` and bounded; values are branch names only.
+Get completion options for one action argument. Clients should only call this when the descriptor argument includes a supported `completion` value. V1 currently supports extension command argument completions via `"completion": "commandArguments"` and git branch-name completions via `"completion": "gitBranches"` (advertised by `review.branch`'s `base` argument). `gitBranches` serves logical branch names with local/upstream duplicates collapsed, keeps unmatched local and remote-tracking branches, orders `main`/`master`-style defaults first, and filters case-insensitively by `prefix` within the response bound; values are branch names only.
 
 ```json
 {"type": "get_ui_action_completions", "action": "extension.command.ec_a1b2c3d4e5f6_1", "argument": "arguments", "prefix": "pr"}
@@ -739,8 +811,8 @@ For projected dynamic actions, invocation uses the host's existing prompt semant
 - Prompt template and skill actions send their slash alias through host prompt expansion. While idle they return `accepted`; while the agent is streaming they require `streamingBehavior: "steer"` or `"followUp"` and return `queued`.
 - Dynamic action ids are opaque and tied to the current action catalog. After a reload, session replacement, or catalog change, clients must refresh descriptors; stale ids are rejected instead of being remapped to another action.
 - `thinking.fast_mode` uses a required boolean `enabled` argument. The independent boolean policy is durable on the active session branch and does not change the selected model, thinking level, model/thinking defaults, profiles, or project/global settings. Reconnects and tree navigation restore the branch's latest Fast state. The action is enabled only for supported models on the canonical OpenAI Responses and OpenAI Codex endpoints. Enabled maps normal conversation turns to `service_tier: "priority"`; disabled maps them to `service_tier: "default"`. Auxiliary calls such as compaction and session naming do not inherit the toggle.
-- Review actions start a detached host workflow: the host resolves git targets and review-model settings inline (target errors fail the invocation synchronously), then returns `accepted` with a `workflowId` while isolated review sessions run with the approved tool policy. All Git-backed review diffs disable textconv and external diff drivers; `review.commit` additionally resolves the bounded input ref to a canonical commit object id before invoking `git show`. `review.pr` validates the optional number before using the host's GitHub credentials and network. For PR targets, pull request metadata/diff plus authoritative closing/manual-linked issues, PR comments, submitted review summaries, inline review threads/replies, and linked-issue comments are submitted to discovery and independent verification. GitHub text is untrusted evidence and is bounded to 32 KiB per field, 20 linked issues, 200 total discussion entries, and 256 KiB of rendered context; links are not inferred from arbitrary text or followed recursively. Both analysis passes must inspect the same complete captured context. Capture limitations or incomplete inspection make the result incomplete and withhold its correctness verdict, while a final head-OID check rejects a PR that moved during capture. When they accept a new finding, the verifier model runs once more in a fresh context-blind presentation session that receives one-time host ids, validated code anchors/evidence, severity, and immutable code tools, but no GitHub context, target title/body, private model prose, extension tools, or auxiliary commands. It must inspect every accepted hunk and cannot change finding identity, anchor, severity, or status; no-new-finding and prior-only incremental runs skip this pass. The runtime keeps serving other RPC commands, and the client's session is never force-switched. Progress streams as sanitized `workflow_*` and `tool_execution_*` events; completion is reported by `workflow_end`. Findings are fetched with `get_review_result`, running or retained reviews are listed with `list_review_workflows`, a running review is aborted with `cancel_workflow`, and `open_review_session` seeds a fresh session with the findings when the client asks for one. Responses, events, durable records, opened review sessions, and publication payloads do not include raw diffs, review prompts, pull request titles or bodies, linked-issue/discussion text, free-form discovery/verifier prose, configured model names, auth state, or raw tool output. They may include bounded context status/count/limitation/fingerprint metadata plus explicitly declassified finding structure; finding prose is code-derived by the context-blind pass, and other PR summaries, diagnostics, limitation counts, and command-attempt counts are host-generated. Pull request workflow tool events omit all model-controlled string arguments; configured-model fallback warnings are suppressed remotely, and subprocess/provider failures use stable remote messages while detailed diagnostics remain host-local. Reviews use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`) without inheriting extension tools; descriptors advertise `requiresConfirmation`, and clients confirm before invoking (there is no host-side confirmation round trip). Hosts cap concurrent reviews and retain a bounded window of terminal results.
-- Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, `review.branch`, `review.pr`, `review.commit`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact` and `session.rename`, deferred `review.tools`, and unreviewed prefixes are rejected with a normal RPC error. Model and thinking changes use the direct `set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams.
+- Review actions start a detached host workflow: the host resolves git targets and review-model settings inline (target errors fail the invocation synchronously), then returns `accepted` with a `workflowId` while isolated review sessions run with the approved tool policy. All Git-backed review diffs disable textconv and external diff drivers; `review.commit` additionally resolves the bounded input ref to a canonical commit object id before invoking `git show`. `review.branch` captures local `HEAD` before refreshing a plain branch through its configured/matching upstream, or a short remote branch directly, into an isolated temporary Git source using host credentials and network. It never moves workspace refs or `FETCH_HEAD`, fails instead of silently using stale state, and treats explicit full refs as local cached targets. Durable branch reruns recapture the same resolved remote branch or explicit local/cached full ref instead of depending on disposed snapshot objects. `review.pr` validates the optional number before using the host's GitHub credentials and network. For PR targets, pull request metadata/diff plus authoritative closing/manual-linked issues, PR comments, submitted review summaries, inline review threads/replies, and linked-issue comments are submitted to discovery and independent verification. GitHub text is untrusted evidence and is bounded to 32 KiB per field, 20 linked issues, 200 total discussion entries, and 256 KiB of rendered context; links are not inferred from arbitrary text or followed recursively. Both analysis passes must inspect the same complete captured context. Capture limitations or incomplete inspection make the result incomplete and withhold its correctness verdict, while a final head-OID check rejects a PR that moved during capture. When they accept a new finding, the verifier model runs once more in a fresh context-blind presentation session that receives one-time host ids, validated code anchors/evidence, severity, and immutable code tools, but no GitHub context, target title/body, private model prose, extension tools, or auxiliary commands. It must inspect every accepted hunk and cannot change finding identity, anchor, severity, or status; no-new-finding and prior-only incremental runs skip this pass. The runtime keeps serving other RPC commands, and the client's session is never force-switched. Progress streams as sanitized `workflow_*` and `tool_execution_*` events; completion is reported by `workflow_end`. Findings are fetched with `get_review_result`, running or retained reviews are listed with `list_review_workflows`, a running review is aborted with `cancel_workflow`, and `open_review_session` seeds a fresh session with the findings when the client asks for one. Responses, events, durable records, opened review sessions, and publication payloads do not include raw diffs, review prompts, linked-issue/discussion text, free-form discovery/verifier prose, full model configuration, auth state, or raw tool output. Accounting details are a narrow exception: they expose bounded provider/model identifiers and numeric usage metadata, never model endpoints or credentials. Active and durable target descriptors may include bounded pull request display metadata; the pull request body appears only in a full `get_review_result` response. They may include bounded context status/count/limitation/fingerprint metadata plus explicitly declassified finding structure; finding prose is code-derived by the context-blind pass, and other PR summaries, diagnostics, limitation counts, and command-attempt counts are host-generated. Pull request workflow tool events omit all model-controlled string arguments; configured-model fallback warnings are suppressed remotely, and subprocess/provider failures use stable remote messages while detailed diagnostics remain host-local. Reviews use the host-owned read-only tool set (`read`, `grep`, `find`, `ls`) without inheriting extension tools; descriptors advertise `requiresConfirmation`, and clients confirm before invoking (there is no host-side confirmation round trip). Hosts cap concurrent reviews and retain a bounded window of terminal results.
+- Over Iroh, v1 invocation is allowlist-based and forwards only exact reviewed built-in ids (`session.new`, `run.cancel`, `thinking.fast_mode`, `context.auto_compaction`, `context.compaction_threshold`, `review.uncommitted`, `review.branch`, `review.pr`, `review.commit`) plus projected dynamic ids under `extension.command.*`, `prompt.template.*`, and `skill.*`. Local-only built-ins such as `context.compact` and `session.rename`, deferred `review.tools`, and unreviewed prefixes are rejected with a normal RPC error. Model and thinking changes use the direct `set_model`/`set_thinking_level` RPC commands, which are forwarded over Iroh conversation streams.
 
 #### Detached review workflows
 
@@ -748,19 +820,52 @@ Review invocations return `accepted` with a `workflowId` and run detached from t
 
 ```json
 {"type": "list_review_workflows"}
-{"type": "get_review_result", "workflowId": "review:2f4c…"}
+{"type": "get_review_result", "runId": "review:2f4c…"}
 {"type": "cancel_workflow", "workflowId": "review:2f4c…"}
-{"type": "open_review_session", "workflowId": "review:2f4c…"}
+{"type": "open_review_session", "runId": "review:2f4c…"}
 ```
 
-- `list_review_workflows` returns `{ "workflows": […] }` with active workflows followed by a bounded window of retained terminal results. Each entry carries `workflowId`, `action`, `status` (`running`, `completed`, `cancelled`, or `failed`), a bounded `target` (`description`, `diffCommand`), optional `findingsCount`/`errorMessage`, and `startedAt`/`endedAt` timestamps. PR targets may also include `target.context` metadata: `captureStatus`, captured and rendered issue/discussion counts, `renderedBytes`, `limitationCodes`, and `fingerprint`. It never includes linked-issue or discussion text. Commit targets use the canonical object id; pull request targets use `PR #N` without the title or body. Clients reconnecting after missing `workflow_end` should list to discover finished reviews.
-- `get_review_result` returns the same descriptor plus structured findings for completed reviews: `findings` (title, body, priority, confidence, file, line), optional `coverage`, `overallCorrectness`, and `overallExplanation`. PR results may include `coverage.context` with capture status/counts/limitation codes/fingerprint and booleans reporting whether discovery and verification each inspected all context pages. This is metadata plus context-blind code-derived finding prose only; no newly captured GitHub text or free-form context-aware model prose is returned. A report or presentation that cannot be validated fails the workflow with a bounded host-generated error. Unknown workflow ids fail with a normal RPC error.
+- `list_review_workflows` returns paginated durable `runs` plus all `activeWorkflows`. Targets carry `description` and `diffCommand`. Prepared PR targets additionally carry bounded provider/number/title/URL, author/avatar, head/base refs, reviewed head OID, and optional captured review state, mergeability, check counts, and observation time. `target.files` always reports total changed files and line additions/deletions; its bounded `items`, `projectedCount`, `omittedCount`, and `isComplete` make projection or persistence limits explicit. Active descriptors include the bounded inventory, while durable list rows omit items and retain truthful totals. Durable PR targets may also include context capture counts, limitations, and fingerprint. PR bodies, linked-issue text, and discussion text are excluded from list responses. Clients reconnecting after missing `workflow_end` should list to discover finished reviews.
+- `get_review_result` returns the same descriptor plus the bounded changed-file inventory and structured findings for completed reviews: `findings` (title, body, priority, confidence, file, line), optional `coverage`, `overallCorrectness`, and `overallExplanation`. PR results may include the bounded PR body in `target.identity.pullRequest.body` and context capture status/counts/limitation codes/fingerprint; linked issues and discussion text remain excluded. Finding prose remains code-derived by the context-blind presentation pass. A report or presentation that cannot be validated fails the workflow with a bounded host-generated error. Unknown run ids fail with a normal RPC error.
 - `cancel_workflow` aborts a running review; the workflow ends with `workflow_end` status `cancelled`. Cancelling an unknown or finished workflow fails with a normal RPC error.
 - `open_review_session` starts a fresh session seeded with a completed review's findings (the client-driven replacement for the old forced session switch) and responds with `{ "cancelled": boolean }`. It fails for unknown or non-completed workflows. It also fails when the replacement session was created but the seed was skipped because recovered durable client input failed to replay; in that case the review stays retained (still listed and fetchable) so the open can be retried.
 
+#### Initial-review accounting
+
+`list_review_workflows` includes `usage` summaries; `get_review_result` additionally includes `usageBreakdown` rows. Each row identifies the pass occurrence (`passId`), phase, findings/challenge purpose, round, repair attempt, inference kind (`turn` or `compaction`), provider/model, and available requested/effective service tier. `usageUpdatedAt` is the last accounting observation time, not a completion time.
+
+A summary has `status: "complete" | "partial" | "unavailable"`, `costBasis: "model-priced-usd"`, host request attempts, terminal non-compaction assistant turns, pending/unavailable/partial request counts, and optional token and `estimatedCost` subtotals. Tokens distinguish input, output, cache read, and cache write. Cost contains those components and `total` in USD. Estimates use the model prices at inference time; reopening does not reprice them. They are **not invoices or subscription charges**, including when configured prices are zero. Partial subtotals are not full-run estimates; missing values are unavailable, not zero.
+
+Requests count host inference admissions, including host retries and native/chunked compaction, not hidden transport retries inside provider SDKs. Admission is checkpointed before dispatch, so an interrupted pending request may not have reached the provider. A known terminal run with no requests has complete zero usage. Historical records without accounting return only `usage: {"status":"unavailable"}`; no historical counts or costs are fabricated. Later discussion usage is separate, and source/General aliases reference the same canonical run rather than additional spend.
+
+Durable runs now include `status: "unfinished"` with no `endedAt` or findings result. This means no terminal result was committed: it can describe a live or interrupted review. `activeWorkflows` remains the runtime's live-work authority. After process restart, saved unfinished accounting remains partial/unavailable and inference is **not automatically replayed**. Clients must accept the new status and optional completion timestamp, and must not enable findings actions without a result.
+
+Checkpoint writes use the existing session store and retention limits. Failed accounting persistence stops further review inference and surfaces a failure; optional diagnostic logs are never the accounting source. `--no-session` retains accounting only for that in-memory session. Accounting identifiers/details are not added to model prompts or published GitHub review bodies.
+
+#### get_review_general
+
+Read the durable current General destination for a review run:
+
+```json
+{"type":"get_review_general","runId":"review:abc"}
+{"type":"response","command":"get_review_general","success":true,"data":{"runId":"review:abc","sourceSessionId":"source","generalSessionId":"general","generalSessionGeneration":"generation","generalRevision":1,"generalAvailable":true}}
+```
+
+All response data fields are required. Revision is a non-negative integer. Lookup is authorized from the exact source/alias or a historical/current finding child of the same run, never from copied transcript metadata or foreign stores/generations. If the exact General generation is missing, `generalAvailable` is false and its saved identity remains in the response; clients must not substitute `sourceSessionId`. This command grants no canonical outcome-writing authority and requires only conversation observation over Iroh.
+
+#### Review finding discussions
+
+Daemon-backed hosts expose `start_review_discussions` (`runId`, 1–50 unique `findingIds`, semantic `requestId`), `list_review_discussions` (`runId`, optional `cursor`/`limit` up to 50), `reset_review_discussion` (`discussionId`, `expectedSessionId`, `requestId`) and `get_review_discussion_source`. Start/list/reset are source-owned; source lookup is available from a child. A host without the sibling service returns `review_discussions_unavailable`.
+
+State, bootstrap and session-list metadata may contain `reviewDiscussion` with `discussionId`, `runId`, `findingId`, `sourceSessionId` and `sessionId`. This link describes identity, not permissions; it has no `readOnly` field. Discussion descriptors additionally include `currentSessionId`, `sourceAvailable`, `available` and `status`.
+
+Discussions have normal Build permissions under existing workspace/client/tool grants, including requested code fixes, shell, LSP mutations, MCP and delegation. Normal Plan research restrictions and approval rules still apply; Plan authoring, change/discard and `plan_execute` with `retain_context` work in the discussion. Source-owned identity replacement, fork/clone, clear-context plan execution and canonical outcome/lifecycle actions remain unavailable there; use the source review for those actions. Direct RPC and host actions add no discussion-specific tool restrictions.
+
+Starting discussions requests analysis, not automatic edits. Subsequent fix requests are actionable. Resumed sessions receive current trusted policy that supersedes older read-only context without rewriting transcripts. Reset retains history and creates idle context without inference; interrupted inputs require a fresh explicit retry rather than automatic replay.
+
 #### Native UI Action Security
 
-Descriptors must not expose host-local paths, extension source paths, prompt template bodies, skill content, provider secrets, environment values, auth internals, raw model/provider metadata, raw transcript payloads, or host session file paths. Iroh remote discovery responses pass through the remote outbound redaction layer in addition to descriptor-level sanitization. Remote invocation is allowlist-based and re-checks action availability, remote safety, authorization, streaming policy, and argument validity at invocation time.
+Descriptors must not expose host-local paths, extension source paths, prompt template bodies, skill content, provider secrets, environment values, auth internals, raw model/provider metadata, raw transcript payloads, or host session store paths. Iroh remote discovery responses pass through the remote outbound redaction layer in addition to descriptor-level sanitization. Remote invocation is allowlist-based and re-checks action availability, remote safety, authorization, streaming policy, and argument validity at invocation time.
 
 `get_commands` remains the legacy local command-discovery surface for raw slash invocation and may include source metadata useful to local clients. Remote clients and native mobile clients should use sanitized `get_ui_actions`; raw `get_commands` remains blocked over Iroh.
 
@@ -788,13 +893,13 @@ When a host action is needed, Volt emits:
   "id": "ha_123",
   "action": "lsp.install_server",
   "title": "Install typescript language server?",
-  "message": "Volt tried to use LSP for typescript, but typescript-language-server is not installed. Install it now and retry diagnostics?",
+  "message": "Volt tried to use LSP for typescript, but tsc is not installed. Install it now and retry diagnostics?",
   "confirmLabel": "Install",
   "cancelLabel": "Skip",
-  "commandPreview": "npm install -g typescript-language-server typescript",
+  "commandPreview": "npm install -g typescript@7.0.2",
   "blocking": true,
   "destructive": false,
-  "metadata": {"server": "typescript", "binary": "typescript-language-server"}
+  "metadata": {"server": "typescript", "binary": "tsc"}
 }
 ```
 
@@ -807,7 +912,7 @@ The client responds with one of `"approved"`, `"denied"`, or `"dismissed"`:
 Volt may emit progress updates for approved actions:
 
 ```json
-{"type": "host_action_update", "id": "ha_123", "action": "lsp.install_server", "status": "running", "message": "Running npm install -g typescript-language-server typescript"}
+{"type": "host_action_update", "id": "ha_123", "action": "lsp.install_server", "status": "running", "message": "Running npm install -g typescript@7.0.2"}
 {"type": "host_action_update", "id": "ha_123", "action": "lsp.install_server", "status": "completed", "message": "typescript language server installed. Retrying diagnostics.", "exitCode": 0}
 ```
 
@@ -1119,7 +1224,6 @@ Response:
   "command": "get_session_stats",
   "success": true,
   "data": {
-    "sessionFile": "/path/to/session.jsonl",
     "sessionId": "abc123",
     "userMessages": 5,
     "assistantMessages": 5,
@@ -1196,7 +1300,7 @@ Iroh conversation streams also allow this command for paired clients with `host.
 
 #### list_sessions
 
-List sessions for the current workspace. The response omits host file paths so remote clients can present workspace-scoped session choices safely.
+List sessions for the current workspace through the SQLite summary index. The response uses stable IDs and omits the store directory, database path, and `SessionReference` internals so local and remote clients can present workspace-scoped choices safely.
 
 ```json
 {"type": "list_sessions"}
@@ -1217,12 +1321,35 @@ Response:
         "modifiedAt": "2026-06-22T15:10:00.000Z",
         "messageCount": 12,
         "firstMessage": "Implement the feature",
-        "current": true
+        "current": true,
+        "workContext": {
+          "changeId": "c56d55ca-3937-4fc8-b13a-a7525577864b",
+          "repository": "Volt",
+          "branch": "feature/work-association",
+          "resolutionState": "resolved",
+          "pullRequest": {
+            "provider": "github",
+            "number": 42,
+            "title": "Add Work association",
+            "status": "open",
+            "stale": false
+          }
+        }
       }
     ]
   }
 }
 ```
+
+Daemon-backed remote lists may add optional `workContext`. It is either a
+resolved context with bounded `pullRequest`, or an unresolved context whose
+`resolutionState` is `none`, `ambiguous`, or `unavailable` and has no
+`pullRequest`. The daemon joins this from its synchronous private store; a
+`list_sessions` request never starts Git or provider work. Only opaque
+`changeId`, repository display name, effective branch, resolution state, and
+the bounded PR provider/number/title/status/staleness cross the wire. Checkout
+paths, remotes, canonical repository IDs, matched object IDs, credentials, raw
+provider output, and diagnostics are excluded.
 
 #### export_html
 
@@ -1249,10 +1376,10 @@ Response:
 
 #### switch_session
 
-Load a different session file. Can be cancelled by a `session_before_switch` extension event handler.
+Load another session from the active workspace store by stable ID. Can be cancelled by a `session_before_switch` extension event handler.
 
 ```json
-{"type": "switch_session", "sessionPath": "/path/to/session.jsonl"}
+{"type": "switch_session", "sessionId": "abc123"}
 ```
 
 Response:
@@ -1267,7 +1394,7 @@ If an extension cancelled the switch:
 
 #### switch_session_by_id
 
-Load another session from the current workspace by session ID. This is the remote-safe form of session switching; clients do not need to know host session file paths.
+Load another session from the current workspace by stable ID. It has the same path-free request semantics as `switch_session`. Conversation-bound mobile streams reject direct retargeting; select the session when opening the stream instead.
 
 ```json
 {"type": "switch_session_by_id", "sessionId": "abc123"}
@@ -1475,6 +1602,8 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `extension_error` | Extension threw an error |
 | `models_changed` | Available model catalog changed on disk (login, logout, or API key save) |
 | `git_context_changed` | Full replacement of the active session's nullable cached Git context |
+| `prompt_cache_changed` | Full replacement of the current model's nullable prompt-cache status |
+| `background_jobs_changed` | Metadata-only Jobs replacement and output invalidation, including while foreground work is idle |
 | `mcp_servers_changed` | MCP server list or enablement changed (`servers`: full summary list) |
 | `mcp_server_status_changed` | An MCP server's status or auth state changed (`server`: full summary) |
 | `mcp_auth_request` | An MCP OAuth flow needs user action (`serverId`, `auth`: flow, URL/device-code details) |
@@ -1715,12 +1844,12 @@ Host-owned workflows can also emit sanitized tool lifecycle events with workflow
 Emitted for host-owned workflows that are not ordinary assistant chat turns, such as a review action. The invocation response arrives before `workflow_start`; clients can render these as a live timeline and, for reviews, fetch results with `get_review_result` after `workflow_end`.
 
 ```json
-{"type":"workflow_start","workflowId":"review:abc","kind":"review","action":"review.uncommitted","title":"Review","message":"Reviewing uncommitted changes.","status":"running"}
-{"type":"workflow_update","workflowId":"review:abc","kind":"review","action":"review.uncommitted","title":"Review","message":"Finalizing findings.","status":"finalizing"}
-{"type":"workflow_end","workflowId":"review:abc","kind":"review","action":"review.uncommitted","title":"Review","message":"Review complete: 2 findings. Fetch the findings or open them in a review session.","status":"completed"}
+{"type":"workflow_start","workflowId":"review:abc","kind":"review","action":"review.pr","title":"Review","message":"Reviewing PR #243.","status":"running","pullRequest":{"provider":"github","number":243}}
+{"type":"workflow_update","workflowId":"review:abc","kind":"review","action":"review.pr","title":"Review","message":"Finalizing findings.","status":"finalizing","pullRequest":{"provider":"github","number":243}}
+{"type":"workflow_end","workflowId":"review:abc","kind":"review","action":"review.pr","title":"Review","message":"Review complete: 2 findings. Fetch the findings or open them in a review session.","status":"completed","pullRequest":{"provider":"github","number":243}}
 ```
 
-`status` is advisory. Known review statuses are `running`, `finalizing`, `completed`, `cancelled`, and `failed`. Unknown workflow kinds, statuses, and extra fields should be ignored or rendered generically.
+`status` is advisory. Known review statuses are `running`, `finalizing`, `completed`, `cancelled`, and `failed`. PR review lifecycle events carry an optional strict `pullRequest` reference containing only the bounded provider id and canonical positive PR number; titles, bodies, URLs, refs, object ids, and captured context are excluded. A provisional workflow may first publish without the reference and add it in `workflow_update` once target preparation succeeds. Unknown workflow kinds, statuses, and extra fields should be ignored or rendered generically.
 
 ### queue_update
 
@@ -1839,6 +1968,16 @@ Emitted after the cached Git context changes semantically, becomes stale, recove
 ```
 
 `gitContext` may be `null`. A fresh `get_state` or conversation bootstrap is authoritative and resets any client-side provider-revision baseline; apply later events in stream order. Ordered remote events also carry the normal top-level `delivery` position.
+
+### prompt_cache_changed
+
+Emitted when the [`promptCache`](#get_state) status changes after a prompt settles, after compaction, after a model change, after a keepalive refresh, or when idle keepalive starts or stops. The payload is a full replacement:
+
+```json
+{"type": "prompt_cache_changed", "promptCache": {"kind": "retained", "lastRequestAt": 1782470100000, "expiresAt": 1782470400000}}
+```
+
+`promptCache` is `null` when the status would be omitted from `get_state`. The event is not repeated when the retention window lapses. Ordered remote events also carry the normal top-level `delivery` position.
 
 ### models_changed
 
@@ -2151,6 +2290,8 @@ The `content` field can be a string or an array of `TextContent`/`ImageContent` 
 ```
 
 Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"error"`, `"aborted"`
+
+Optional `usage.availability` identifies complete provider-reported counts, partial/interim counts, or unavailable reporting. Omission means unknown availability (for example, historical/custom-provider data), not a zero-cost response. Built-in adapters retain observed partial counts on interruption.
 
 For OpenAI Responses and OpenAI Codex responses, optional `usage.serviceTier` records the requested and effective upstream service tier. The effective value can be `"default"` when a Priority request is downgraded.
 

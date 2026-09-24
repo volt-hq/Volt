@@ -13,6 +13,7 @@ import {
 	type ReviewPresentationReport,
 	type ReviewVerificationReport,
 	validateReviewCandidates,
+	validateReviewChallenge,
 	validateReviewPresentations,
 	validateReviewVerification,
 } from "../src/core/review-report.ts";
@@ -191,7 +192,7 @@ describe("structured review reports", () => {
 			}).join(" "),
 		).toContain("did not inspect changed hunk");
 
-		snapshot.githubContext = {
+		snapshot.codeHostContext = {
 			manifest: {
 				status: "complete",
 				capturedAt: "2026-01-01T00:00:00Z",
@@ -283,6 +284,65 @@ describe("structured review reports", () => {
 		expect(traversal.errors.join(" ")).toMatch(/relative|traverse/);
 		const optional = await validateReviewCandidates(snapshot, report({ priority: 3 }), validationOptions(snapshot));
 		expect(optional.errors.join(" ")).toContain("P3");
+	});
+
+	it("declassifies only bounded, existing, in-scope changed-code challenge anchors", async () => {
+		const snapshot = await setup();
+		const verification: ReviewVerificationReport = {
+			summary: "Private analysis",
+			assessment: "incomplete",
+			challenge: "Private suspected defect",
+			challengeLocations: [report().candidates[0]!.changeLocation],
+			decisions: [],
+			priorFindingDecisions: [],
+			limitations: [],
+		};
+		const scope = validationOptions(snapshot).inScopeHunkIds;
+		const valid = await validateReviewChallenge(snapshot, verification, scope);
+		expect(valid.errors).toEqual([]);
+		expect(valid.challenge?.locations).toEqual(verification.challengeLocations);
+		expect(JSON.stringify(valid.challenge)).not.toContain("Private");
+		for (const location of [
+			{ path: "../private", side: "head" as const, startLine: 1, endLine: 1 },
+			{ path: "src/divide.ts", side: "head" as const, startLine: 1, endLine: 1 },
+			{ path: "src/divide.ts", side: "head" as const, startLine: 2, endLine: 20 },
+		]) {
+			const invalid = await validateReviewChallenge(
+				snapshot,
+				{ ...verification, challengeLocations: [location] },
+				scope,
+			);
+			expect(invalid.errors.length).toBeGreaterThan(0);
+			expect(invalid.challenge).toBeUndefined();
+		}
+		expect((await validateReviewChallenge(snapshot, verification, new Set())).challenge).toBeUndefined();
+		expect(validateReviewVerification([], { ...verification, assessment: "complete" })).toContain(
+			"Complete verification must not include a challenge",
+		);
+		const presentation = {
+			findings: [],
+			challenge: { explanation: "Inspect the zero guard.", nextStep: "Check division by zero." },
+		};
+		expect(validateReviewPresentations([], presentation)).toContain(
+			"No unresolved challenge was supplied for presentation",
+		);
+		expect(
+			validateReviewPresentations(
+				[],
+				presentation,
+				{
+					changedFileInventoryComplete: true,
+					contextInspectionComplete: false,
+					contextPagesRead: 0,
+					filesRead: [],
+					hunksInspected: [],
+					searchesRun: 0,
+					treePagesRead: 0,
+					diffFilesFullyRead: [],
+				},
+				valid.challenge,
+			).join(" "),
+		).toContain("Challenge did not inspect changed hunk");
 	});
 
 	it("rejects unavailable evidence locations", async () => {
@@ -429,7 +489,7 @@ describe("structured review reports", () => {
 
 	it("withholds correctness when PR context capture or either pass inspection is incomplete", async () => {
 		const snapshot = await setup();
-		snapshot.githubContext = {
+		snapshot.codeHostContext = {
 			manifest: {
 				status: "incomplete",
 				capturedAt: "2026-01-01T00:00:00Z",
@@ -485,8 +545,8 @@ describe("structured review reports", () => {
 		});
 		expect(parsed.coverage.uncheckedAreas).toEqual(
 			expect.arrayContaining([
-				"GitHub pull request context capture was incomplete.",
-				"Discovery did not page GitHub pull request context to completion.",
+				"Code-host pull request context capture was incomplete.",
+				"Discovery did not page code-host pull request context to completion.",
 			]),
 		);
 	});

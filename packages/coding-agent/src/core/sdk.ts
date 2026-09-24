@@ -1,16 +1,25 @@
 import { join } from "node:path";
 import type { AgentHarnessStreamOptions, AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { clampThinkingLevel, type Message, type Model, streamSimple } from "@hansjm10/volt-ai";
+import {
+	clampThinkingLevel,
+	type Message,
+	type Model,
+	type PromptCacheRefreshFunction,
+	refreshPromptCache,
+	streamSimple,
+	type ToolArgumentLimits,
+} from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
-import { resolvePath } from "../utils/paths.ts";
-import { AgentSession } from "./agent-session.ts";
+import { canonicalizePath, resolvePath } from "../utils/paths.ts";
+import { AgentSession, AgentSessionConstructionCleanupError } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
+import type { ExtensionWorkLimits } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import type { HostInteraction } from "./host-interaction.ts";
-import { resolveLspConfig } from "./lsp/config.ts";
+import { accountInference, type InferenceAccounting } from "./inference-accounting.ts";
 import { McpAuditLogger } from "./mcp/audit.ts";
 import { DefaultMcpClientFactory } from "./mcp/client-factory.ts";
 import { loadMcpConfig } from "./mcp/config-loader.ts";
@@ -32,6 +41,7 @@ import {
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
+import { seedReviewDiscussionSession } from "./review-discussions.ts";
 import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
@@ -94,6 +104,8 @@ export interface CreateAgentSessionOptions {
 	model?: Model<any>;
 	/** Thinking level. Default: from settings, else 'medium' (clamped to model capabilities) */
 	thinkingLevel?: ThinkingLevel;
+	/** Tool-argument generation limits; supplied values override matching settings fields. */
+	toolArgumentLimits?: ToolArgumentLimits;
 	/** Initial agent workflow mode. Defaults to Build; an existing branch restores its persisted mode. */
 	agentMode?: AgentMode;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
@@ -122,11 +134,16 @@ export interface CreateAgentSessionOptions {
 	excludeTools?: string[];
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
+	/** Managed extension-work ceilings; supplied limits may only tighten defaults. */
+	extensionWorkLimits?: Partial<ExtensionWorkLimits>;
 
 	/** Resource loader. When omitted, DefaultResourceLoader is used. */
 	resourceLoader?: ResourceLoader;
 
-	/** Session manager. Default: SessionManager.create(cwd) */
+	/**
+	 * Session manager. Default: SessionManager.create(cwd).
+	 * Ownership transfers to createAgentSession when the call begins.
+	 */
 	sessionManager?: SessionManager;
 	/** Shared cwd-bound Git context provider. A bounded provider is created when omitted. */
 	gitContextProvider?: GitContextProvider;
@@ -157,6 +174,8 @@ export interface CreateAgentSessionOptions {
 	 * servers.
 	 */
 	disableMcp?: boolean;
+	/** Awaited host accounting sink for inference metadata, including compaction. */
+	inferenceAccounting?: InferenceAccounting;
 }
 
 /** Result from createAgentSession */
@@ -182,6 +201,7 @@ export type {
 	ToolDefinition,
 } from "./extensions/index.ts";
 export type { PromptTemplate } from "./prompt-templates.ts";
+export type { SessionReference } from "./session-manager.ts";
 export type { Skill } from "./skills.ts";
 export type { Tool } from "./tools/index.ts";
 
@@ -247,8 +267,80 @@ function getDefaultAgentDir(): string {
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	let ownedSessionManager = options.sessionManager;
+	try {
+		return await createAgentSessionUnchecked(options, (sessionManager) => {
+			ownedSessionManager = sessionManager;
+		});
+	} catch (error) {
+		if (!ownedSessionManager) throw error;
+		try {
+			await ownedSessionManager.closePersistence();
+		} catch (cleanupError) {
+			throw new AggregateError(
+				[...getSessionSetupErrors(error), cleanupError],
+				"Agent session setup failed and its manager could not be closed",
+			);
+		}
+		throw error;
+	}
+}
+
+/** @internal The enclosing AgentSessionRuntime factory owns manager cleanup until this returns. */
+export async function createAgentSessionForRuntime(
+	options: CreateAgentSessionOptions & { sessionManager: SessionManager },
+): Promise<CreateAgentSessionResult> {
+	return createAgentSessionUnchecked(options, () => {});
+}
+
+type SessionSetupFinalizer = () => void | Promise<void>;
+
+class AgentSessionSetupCleanupError extends AggregateError {}
+
+function getSessionSetupErrors(error: unknown): unknown[] {
+	return error instanceof AgentSessionSetupCleanupError || error instanceof AgentSessionConstructionCleanupError
+		? [...error.errors]
+		: [error];
+}
+
+async function createAgentSessionUnchecked(
+	options: CreateAgentSessionOptions,
+	onDefaultSessionManagerCreated: (sessionManager: SessionManager) => void,
+): Promise<CreateAgentSessionResult> {
+	const untransferredFinalizers: SessionSetupFinalizer[] = [];
+	try {
+		return await createAgentSessionWithTrackedResources(
+			options,
+			onDefaultSessionManagerCreated,
+			untransferredFinalizers,
+		);
+	} catch (error) {
+		const cleanupErrors: unknown[] = [];
+		for (const finalize of untransferredFinalizers.splice(0).reverse()) {
+			try {
+				await finalize();
+			} catch (cleanupError) {
+				cleanupErrors.push(cleanupError);
+			}
+		}
+		if (cleanupErrors.length > 0) {
+			throw new AgentSessionSetupCleanupError(
+				[...getSessionSetupErrors(error), ...cleanupErrors],
+				"Agent session setup cleanup did not complete",
+			);
+		}
+		throw error;
+	}
+}
+
+async function createAgentSessionWithTrackedResources(
+	options: CreateAgentSessionOptions,
+	onDefaultSessionManagerCreated: (sessionManager: SessionManager) => void,
+	untransferredFinalizers: SessionSetupFinalizer[],
+): Promise<CreateAgentSessionResult> {
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
-	const projectCwd = resolvePath(options.projectCwd ?? cwd);
+	const lexicalProjectCwd = resolvePath(options.projectCwd ?? cwd);
+	const projectCwd = canonicalizePath(lexicalProjectCwd);
 	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
 	let resourceLoader = options.resourceLoader;
 
@@ -264,13 +356,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			profile: options.profile,
 			...(options.projectTrusted !== undefined ? { projectTrusted: options.projectTrusted } : {}),
 		});
-	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	let sessionManager = options.sessionManager;
+	if (!sessionManager) {
+		sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+		onDefaultSessionManagerCreated(sessionManager);
+	}
+	seedReviewDiscussionSession(sessionManager);
 	await sessionManager.flush();
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, settingsManager });
 		await resourceLoader.reload();
 		time("resourceLoader.reload");
+	}
+	const extensionsResult = resourceLoader.getExtensions();
+	const pendingProviderRegistrations = extensionsResult.runtime.pendingProviderRegistrations;
+	extensionsResult.runtime.pendingProviderRegistrations = [];
+	for (const { name, config, extensionPath } of pendingProviderRegistrations) {
+		try {
+			modelRegistry.registerProvider(name, config);
+		} catch (error) {
+			extensionsResult.errors.push({
+				path: extensionPath,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	// Check if session has existing branch state to restore, including message-free durable policy.
@@ -381,7 +491,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			.catch(() => undefined);
 		return manager;
 	};
-	const mcpManager = options.disableMcp ? undefined : (options.mcpManager ?? (await createDefaultMcpManager()));
+	const suppliedMcpManager = options.mcpManager;
+	const mcpManager = options.disableMcp ? undefined : (suppliedMcpManager ?? (await createDefaultMcpManager()));
+	if (!options.disableMcp && suppliedMcpManager === undefined && mcpManager !== undefined) {
+		untransferredFinalizers.push(() => mcpManager.dispose());
+	}
 
 	const defaultActiveToolNames: string[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
 	const isSubagentRuntime = options.subagentToolManager?.isSubagentRuntime?.() === true;
@@ -395,15 +509,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		defaultActiveToolNames.push("mcp");
 		defaultActiveToolNames.push(...mcpManager.getDirectToolCandidates().map((candidate) => candidate.directToolName));
 	}
-	if (resolveLspConfig(settingsManager.getLspSettings()).enabled) {
-		defaultActiveToolNames.push("lsp");
-	}
+	// Status remains available even when language-server execution is disabled.
+	defaultActiveToolNames.push("lsp");
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
 	const initialActiveToolNames: string[] = (
 		options.tools ? [...options.tools] : options.noTools ? [] : defaultActiveToolNames
-	).filter((name) => !excludedToolNameSet?.has(name));
+	).filter(
+		(name) => !excludedToolNameSet?.has(name) && (allowedToolNames === undefined || allowedToolNames.includes(name)),
+	);
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
@@ -444,7 +559,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const streamFn: StreamFn = async (model, context, options) => {
+	const inferenceAccounting = options.inferenceAccounting;
+	// Stream and prompt-cache refresh requests must resolve identical provider options.
+	const providerRequestOptions = async (
+		model: Parameters<StreamFn>[0],
+		options: Parameters<StreamFn>[2],
+	): Promise<NonNullable<Parameters<StreamFn>[2]>> => {
 		const auth = await modelRegistry.getApiKeyAndHeaders(model);
 		if (!auth.ok) {
 			throw new Error(auth.error);
@@ -455,15 +575,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
 		// Use max int32 to effectively disable the timeout.
 		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
-		const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
-		const websocketConnectTimeoutMs =
-			options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-		return streamSimple(model, context, {
+		return {
 			...options,
 			apiKey: auth.apiKey,
 			env,
-			timeoutMs,
-			websocketConnectTimeoutMs,
+			timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
+			websocketConnectTimeoutMs:
+				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
+			toolArgumentLimits: { ...settingsManager.getToolArgumentLimits(), ...options?.toolArgumentLimits },
 			maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 			headers: mergeProviderAttributionHeaders(
@@ -473,13 +592,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				auth.headers,
 				options?.headers,
 			),
-		});
+		};
 	};
+	const streamFn: StreamFn = async (model, context, options) => {
+		const requestOptions = await providerRequestOptions(model, options);
+		const dispatch = (signal: AbortSignal | undefined) => streamSimple(model, context, { ...requestOptions, signal });
+		return inferenceAccounting
+			? accountInference(model, dispatch, inferenceAccounting, options?.signal)
+			: dispatch(options?.signal);
+	};
+	// Accounted sessions report every provider request to their sink; refreshes bypass it, so they stay off.
+	const refreshPromptCacheFn: PromptCacheRefreshFunction | undefined = inferenceAccounting
+		? undefined
+		: async (model, context, options) =>
+				await refreshPromptCache(model, context, await providerRequestOptions(model, options));
 	const transport = settingsManager.getTransport();
 	const streamOptions: AgentHarnessStreamOptions = {
 		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
 		...(transport === undefined ? {} : { transport }),
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
+		...(options.toolArgumentLimits === undefined ? {} : { toolArgumentLimits: { ...options.toolArgumentLimits } }),
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	};
 	// Persist explicit startup overrides and fill any policy dimensions that were
@@ -493,12 +625,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	await sessionManager.flush();
 
 	const gitContextProvider = options.gitContextProvider ?? new GitContextProvider(cwd);
-	if (!options.gitContextProvider) void gitContextProvider.refresh();
+	if (options.gitContextProvider === undefined) {
+		untransferredFinalizers.push(() => gitContextProvider.dispose());
+		void gitContextProvider.refresh();
+	}
 	const session = new AgentSession({
 		sessionManager,
 		...(model === undefined ? {} : { model }),
 		thinkingLevel,
 		streamFn,
+		...(refreshPromptCacheFn === undefined ? {} : { refreshPromptCacheFn }),
 		convertToLlm: convertToLlmWithBlockImages,
 		streamOptions,
 		steeringMode: settingsManager.getSteeringMode(),
@@ -506,10 +642,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		settingsManager,
 		gitContextProvider,
 		cwd,
+		projectCwd: lexicalProjectCwd,
 		agentDir,
 		scopedModels: options.scopedModels,
 		resourceLoader,
 		customTools: options.customTools,
+		extensionWorkLimits: options.extensionWorkLimits,
 		modelRegistry,
 		initialActiveToolNames,
 		allowedToolNames,
@@ -520,14 +658,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		hostInteraction: options.hostInteraction,
 		subagentToolManager: options.subagentToolManager,
 		mcpManager,
-		mcpManagerFactory: options.disableMcp || options.mcpManager ? undefined : createDefaultMcpManager,
+		mcpManagerFactory: options.disableMcp || suppliedMcpManager ? undefined : createDefaultMcpManager,
 	});
-	const registeredModel = model ? modelRegistry.find(model.provider, model.id) : undefined;
-	if (registeredModel && registeredModel !== session.model) {
-		await session.setModel(registeredModel, { persistDefault: false });
-	}
-	const extensionsResult = resourceLoader.getExtensions();
-
+	untransferredFinalizers.length = 0;
 	return {
 		session,
 		extensionsResult,

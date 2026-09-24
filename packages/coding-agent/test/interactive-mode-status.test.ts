@@ -313,6 +313,77 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 	});
 });
 
+describe("InteractiveMode.scheduleWorkSummary", () => {
+	const now = Date.UTC(2026, 8, 23, 20, 30, 0);
+
+	beforeAll(() => {
+		initTheme("dark");
+	});
+
+	function createFakeThis(summary: { startedAt: number; aborted: boolean } | undefined) {
+		return {
+			workSummary: summary,
+			workSummaryTimer: undefined,
+			shutdownRequested: false,
+			isShuttingDown: false,
+			session: { isStreaming: false, isCompacting: false },
+			chatContainer: new Container(),
+			ui: { requestRender: vi.fn() },
+			clearWorkSummaryTimer: (InteractiveMode as any).prototype.clearWorkSummaryTimer,
+		};
+	}
+
+	function schedule(fakeThis: ReturnType<typeof createFakeThis>): void {
+		(InteractiveMode as any).prototype.scheduleWorkSummary.call(fakeThis);
+	}
+
+	test("records work duration and finish time after a minute idle", () => {
+		vi.useFakeTimers({ now });
+		try {
+			const fakeThis = createFakeThis({ startedAt: now - 192_000, aborted: false });
+			schedule(fakeThis);
+			expect(fakeThis.workSummary).toBeUndefined();
+
+			vi.advanceTimersByTime(59_999);
+			expect(fakeThis.chatContainer.children).toHaveLength(0);
+			vi.advanceTimersByTime(1);
+
+			const doneAt = new Date(now).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+			expect(normalizeRenderedOutput(fakeThis.chatContainer)).toBe(`Worked for 3m 12s · done ${doneAt}`);
+			expect(fakeThis.ui.requestRender).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	test("skips aborted operations and operations superseded by new work", () => {
+		vi.useFakeTimers({ now });
+		try {
+			const aborted = createFakeThis({ startedAt: now - 5_000, aborted: true });
+			schedule(aborted);
+
+			const superseded = createFakeThis({ startedAt: now - 5_000, aborted: false });
+			schedule(superseded);
+			vi.advanceTimersByTime(30_000);
+			superseded.clearWorkSummaryTimer();
+
+			const busy = createFakeThis({ startedAt: now - 5_000, aborted: false });
+			schedule(busy);
+			busy.session.isCompacting = true;
+
+			const empty = createFakeThis(undefined);
+			schedule(empty);
+
+			vi.advanceTimersByTime(120_000);
+			for (const fakeThis of [aborted, superseded, busy, empty]) {
+				expect(fakeThis.chatContainer.children).toHaveLength(0);
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+});
+
 describe("InteractiveMode.setToolsExpanded", () => {
 	test("applies expansion state to the active header and chat entries", () => {
 		const header = { setExpanded: vi.fn() };

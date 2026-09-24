@@ -38,6 +38,7 @@ import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copi
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 /**
@@ -108,7 +109,17 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 	context: Context,
 	options?: OpenAICompletionsOptions,
 ) => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	const timestamp = Date.now();
 	let started = false;
 	const start = () => {
@@ -135,8 +146,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
 			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat, options?.env);
-			let params = buildParams(model, context, options, compat, cacheRetention);
-			const nextParams = await options?.onPayload?.(params, model);
+			const toolResultPayload = new ToolResultPayloadTracker();
+			let params = buildParams(model, context, options, compat, cacheRetention, toolResultPayload);
+			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
 			if (nextParams !== undefined) {
 				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
 			}
@@ -250,18 +262,26 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					responseModel = chunk.model;
 					normalizer.push({ type: "meta", patch: { responseModel } });
 				}
+				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
+				const usageAvailability =
+					hasFinishReason || choice?.finish_reason || chunk.choices?.length === 0 ? "complete" : "partial";
 				if (chunk.usage) {
-					normalizer.push({ type: "meta", patch: { usage: parseChunkUsage(chunk.usage, model) } });
+					normalizer.push({
+						type: "meta",
+						patch: { usage: parseChunkUsage(chunk.usage, model, usageAvailability) },
+					});
 				}
 
-				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
 				if (!choice) continue;
 
 				// Fallback: some providers (e.g., Moonshot) return usage
 				// in choice.usage instead of the standard chunk.usage
 				const choiceUsage = (choice as ChatCompletionChoiceWithUsage).usage;
 				if (!chunk.usage && choiceUsage) {
-					normalizer.push({ type: "meta", patch: { usage: parseChunkUsage(choiceUsage, model) } });
+					normalizer.push({
+						type: "meta",
+						patch: { usage: parseChunkUsage(choiceUsage, model, usageAvailability) },
+					});
 				}
 
 				if (choice.finish_reason) {
@@ -364,7 +384,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					normalizer.push({ type: "text_end", contentIndex: ending.contentIndex });
 				} else if (ending.kind === "thinking") {
 					normalizer.push({ type: "thinking_end", contentIndex: ending.contentIndex });
-				} else {
+				} else if (hasFinishReason && (stopReason === "stop" || stopReason === "toolUse")) {
 					normalizer.push({
 						type: "toolcall_end",
 						contentIndex: ending.state.contentIndex,
@@ -478,11 +498,12 @@ function createClient(
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
-	options?: OpenAICompletionsOptions,
+	options: OpenAICompletionsOptions | undefined,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 	cacheRetention: CacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env),
+	toolResultPayload: ToolResultPayloadTracker,
 ) {
-	const messages = convertMessages(model, context, compat);
+	const messages = convertMessages(model, context, compat, toolResultPayload);
 	const cacheControl = getCompatCacheControl(model, compat, cacheRetention);
 	const usesAnthropicCacheControl = compat.cacheControlFormat === "anthropic";
 
@@ -750,6 +771,7 @@ export function convertMessages(
 	model: Model<"openai-completions">,
 	context: Context,
 	compat: ResolvedOpenAICompletionsCompat,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): ChatCompletionMessageParam[] {
 	const params: ChatCompletionMessageParam[] = [];
 
@@ -768,7 +790,12 @@ export function convertMessages(
 		return id;
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, (id) => normalizeToolCallId(id));
+	const transformedMessages = transformMessages(
+		context.messages,
+		model,
+		(id) => normalizeToolCallId(id),
+		toolResultPayload,
+	);
 
 	if (context.systemPrompt) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
@@ -944,6 +971,7 @@ export function convertMessages(
 					(toolResultMsg as any).name = toolMsg.toolName;
 				}
 				params.push(toolResultMsg);
+				toolResultPayload?.include(toolMsg);
 
 				if (hasImages && model.input.includes("image")) {
 					for (const block of toolMsg.content) {
@@ -1012,11 +1040,24 @@ function parseChunkUsage(
 	rawUsage: {
 		prompt_tokens?: number;
 		completion_tokens?: number;
+		total_tokens?: number;
 		prompt_cache_hit_tokens?: number;
 		prompt_tokens_details?: { cached_tokens?: number; cache_write_tokens?: number };
 	},
 	model: Model<"openai-completions">,
-): Usage {
+	availability: "partial" | "complete",
+): Usage | undefined {
+	if (
+		![
+			rawUsage.prompt_tokens,
+			rawUsage.completion_tokens,
+			rawUsage.total_tokens,
+			rawUsage.prompt_cache_hit_tokens,
+			rawUsage.prompt_tokens_details?.cached_tokens,
+			rawUsage.prompt_tokens_details?.cache_write_tokens,
+		].some((value) => typeof value === "number")
+	)
+		return undefined;
 	const promptTokens = rawUsage.prompt_tokens || 0;
 	const cacheReadTokens = rawUsage.prompt_tokens_details?.cached_tokens ?? rawUsage.prompt_cache_hit_tokens ?? 0;
 	const cacheWriteTokens = rawUsage.prompt_tokens_details?.cache_write_tokens || 0;
@@ -1033,6 +1074,10 @@ function parseChunkUsage(
 	// OpenAI completion_tokens already includes reasoning_tokens.
 	const outputTokens = rawUsage.completion_tokens || 0;
 	const usage: Usage = {
+		availability:
+			typeof rawUsage.prompt_tokens === "number" && typeof rawUsage.completion_tokens === "number"
+				? availability
+				: "partial",
 		input,
 		output: outputTokens,
 		cacheRead: cacheReadTokens,

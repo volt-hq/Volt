@@ -1,4 +1,5 @@
-import { isAbsolute, posix, relative, resolve, sep } from "node:path";
+import { stat } from "node:fs/promises";
+import { dirname, isAbsolute, parse, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withFileMutationQueues } from "../tools/file-mutation-queue.ts";
 import { validateWorkspaceRelativePath, type WorkspaceEntryType, WorkspaceRoot } from "../workspace-fs/index.ts";
@@ -32,14 +33,24 @@ export interface WorkspaceEditApplyResult {
 }
 
 interface ApplyWorkspaceEditOptions {
+	/** Preferred filesystem handle root, expanded as needed to cover edit targets. Not an access boundary. */
 	rootDir: string;
 	edit: LspWorkspaceEdit;
 	snapshots: readonly WorkspaceEditDocumentSnapshot[];
+	canonicalizePath?: (absolutePath: string) => Promise<string>;
 }
 
 interface OperationPath {
 	absolutePath: string;
 	relativePath: string;
+}
+
+interface OperationGroup {
+	rootDir: string;
+	indices: number[];
+	operations: NormalizedWorkspaceOperation[];
+	paths: OperationPath[][];
+	root?: WorkspaceRoot;
 }
 
 interface VirtualEntry {
@@ -93,7 +104,11 @@ function operationUris(operation: NormalizedWorkspaceOperation): string[] {
 	return [operation.uri];
 }
 
-function operationPath(rootDir: string, uri: string, operationIndex: number): OperationPath {
+async function resolveOperationPath(
+	uri: string,
+	operationIndex: number,
+	canonicalizePath?: (absolutePath: string) => Promise<string>,
+): Promise<string> {
 	let absolutePath: string;
 	try {
 		absolutePath = resolve(fileURLToPath(uri));
@@ -103,23 +118,71 @@ function operationPath(rootDir: string, uri: string, operationIndex: number): Op
 			`Invalid LSP workspace edit URI ${uri}: ${error instanceof Error ? error.message : String(error)}`,
 		);
 	}
-	if (!isPathWithinRoot(rootDir, absolutePath)) {
-		throw new WorkspaceEditValidationError(
-			operationIndex,
-			`Refusing to apply LSP workspace edit outside workspace root: ${absolutePath}`,
-		);
+	if (canonicalizePath) {
+		try {
+			absolutePath = resolve(await canonicalizePath(absolutePath));
+		} catch (error) {
+			throw new WorkspaceEditValidationError(operationIndex, error instanceof Error ? error.message : String(error));
+		}
 	}
-	try {
-		const relativePath = validateWorkspaceRelativePath(portableRelativePath(relative(rootDir, absolutePath)), {
-			operation: "applyWorkspaceEdit",
+	return absolutePath;
+}
+
+/** Select one common handle root per volume, without widening any language server's project root. */
+function groupOperations(
+	preferredRoot: string,
+	operations: NormalizedWorkspaceOperation[],
+	absolutePaths: string[][],
+): { groups: OperationGroup[]; groupsByOperation: OperationGroup[]; pathsByOperation: OperationPath[][] } {
+	const roots = new Map([[parse(preferredRoot).root, preferredRoot]]);
+	for (let index = 0; index < absolutePaths.length; index++) {
+		const paths = absolutePaths[index];
+		const volume = parse(paths[0]).root;
+		for (const path of paths) {
+			if (parse(path).root !== volume) {
+				throw new WorkspaceEditValidationError(
+					index,
+					`Cannot rename resources across filesystem volumes: ${paths.join(" -> ")}`,
+				);
+			}
+			if (path === volume) {
+				throw new WorkspaceEditValidationError(index, `A filesystem root is not a valid LSP edit target: ${path}`);
+			}
+			let root = roots.get(volume) ?? dirname(path);
+			while (!isPathWithinRoot(root, dirname(path))) root = dirname(root);
+			roots.set(volume, root);
+		}
+	}
+	const groupsByVolume = new Map<string, OperationGroup>();
+	const pathsByOperation: OperationPath[][] = [];
+	const groupsByOperation = operations.map((operation, index) => {
+		const volume = parse(absolutePaths[index][0]).root;
+		let group = groupsByVolume.get(volume);
+		if (!group) {
+			group = { rootDir: roots.get(volume)!, indices: [], operations: [], paths: [] };
+			groupsByVolume.set(volume, group);
+		}
+		const rootDir = group.rootDir;
+		const paths = absolutePaths[index].map((absolutePath) => {
+			try {
+				const relativePath = validateWorkspaceRelativePath(portableRelativePath(relative(rootDir, absolutePath)), {
+					operation: "applyWorkspaceEdit",
+				});
+				return { absolutePath, relativePath };
+			} catch (error) {
+				throw new WorkspaceEditValidationError(
+					index,
+					`Invalid LSP workspace edit path ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
 		});
-		return { absolutePath, relativePath };
-	} catch (error) {
-		throw new WorkspaceEditValidationError(
-			operationIndex,
-			`Invalid LSP workspace edit path ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`,
-		);
-	}
+		group.indices.push(index);
+		group.operations.push(operation);
+		group.paths.push(paths);
+		pathsByOperation.push(paths);
+		return group;
+	});
+	return { groups: [...groupsByVolume.values()], groupsByOperation, pathsByOperation };
 }
 
 function relativeSnapshotPath(rootDir: string, absolutePath: string): string | undefined {
@@ -433,6 +496,22 @@ async function preflightOperations(
 				);
 			}
 			await assertParentDirectory(newPath, index);
+			try {
+				// POSIX mount points share the same path root. Resolve virtual
+				// directory moves back to disk before comparing the parent devices.
+				const [sourceParent, destinationParent] = await Promise.all(
+					[oldPath, newPath].map((path) =>
+						stat(resolve(root.rootPath, resolveBackingPath(posix.dirname(path.relativePath), directoryMoves))),
+					),
+				);
+				if (sourceParent.dev !== destinationParent.dev) {
+					throw new Error(
+						`Cannot rename resources across filesystems: ${oldPath.absolutePath} -> ${newPath.absolutePath}`,
+					);
+				}
+			} catch (error) {
+				throw new WorkspaceEditValidationError(index, error instanceof Error ? error.message : String(error));
+			}
 			if (source.kind === "directory") {
 				if (
 					isSameOrDescendant(oldPath.relativePath, newPath.relativePath) ||
@@ -583,34 +662,42 @@ function failedResult(error: unknown, failedChange: number): WorkspaceEditApplyR
 export async function applyWorkspaceEdit(options: ApplyWorkspaceEditOptions): Promise<WorkspaceEditApplyResult> {
 	const rootDir = resolve(options.rootDir);
 	let operations: NormalizedWorkspaceOperation[];
-	let pathsByOperation: OperationPath[][];
+	let planned: ReturnType<typeof groupOperations>;
 	try {
 		operations = normalizeWorkspaceEdit(options.edit);
-		pathsByOperation = operations.map((operation, index) =>
-			operationUris(operation).map((uri) => operationPath(rootDir, uri, index)),
+		const absolutePaths = await Promise.all(
+			operations.map((operation, index) =>
+				Promise.all(
+					operationUris(operation).map((uri) => resolveOperationPath(uri, index, options.canonicalizePath)),
+				),
+			),
 		);
+		planned = groupOperations(rootDir, operations, absolutePaths);
 	} catch (error) {
 		return failedResult(error, error instanceof WorkspaceEditValidationError ? error.operationIndex : 0);
 	}
+	const { groups, groupsByOperation, pathsByOperation } = planned;
 	const allPaths = pathsByOperation.flat().map((path) => path.absolutePath);
 
 	return withFileMutationQueues(allPaths, async () => {
-		let root: WorkspaceRoot;
 		try {
-			root = new WorkspaceRoot(rootDir);
-		} catch (error) {
-			return failedResult(error, 0);
-		}
-		try {
-			try {
-				await preflightOperations(
-					root,
-					operations,
-					pathsByOperation,
-					snapshotsByRelativePath(rootDir, options.snapshots),
-				);
-			} catch (error) {
-				return failedResult(error, error instanceof WorkspaceEditValidationError ? error.operationIndex : 0);
+			// Preflight every volume before executing any operation; unrelated
+			// file edits on different Windows drives need no cross-volume rename.
+			for (const group of groups) {
+				try {
+					group.root = new WorkspaceRoot(group.rootDir);
+					await preflightOperations(
+						group.root,
+						group.operations,
+						group.paths,
+						snapshotsByRelativePath(group.rootDir, options.snapshots),
+					);
+				} catch (error) {
+					return failedResult(
+						error,
+						group.indices[error instanceof WorkspaceEditValidationError ? error.operationIndex : 0],
+					);
+				}
 			}
 
 			const lines: string[] = [];
@@ -618,7 +705,11 @@ export async function applyWorkspaceEdit(options: ApplyWorkspaceEditOptions): Pr
 			const changes: AppliedWorkspaceChange[] = [];
 			for (let index = 0; index < operations.length; index++) {
 				try {
-					const result = await executeOperation(root, operations[index], pathsByOperation[index]);
+					const result = await executeOperation(
+						groupsByOperation[index].root!,
+						operations[index],
+						pathsByOperation[index],
+					);
 					lines.push(summarize(operations[index], pathsByOperation[index], result.ignored));
 					if (result.change) {
 						changes.push(result.change);
@@ -641,7 +732,7 @@ export async function applyWorkspaceEdit(options: ApplyWorkspaceEditOptions): Pr
 			}
 			return { applied: true, summary: lines.join("\n"), changedPaths, changes };
 		} finally {
-			root.close();
+			for (const group of groups) group.root?.close();
 		}
 	});
 }

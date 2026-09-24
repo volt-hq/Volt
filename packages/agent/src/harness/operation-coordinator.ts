@@ -1,4 +1,6 @@
 import type { AgentAbortAcceptance, AgentAbortSource } from "../types.ts";
+import { AgentHarnessAdmissionGate } from "./admission-gate.ts";
+import { AgentHarnessError } from "./types.ts";
 
 export type HarnessOperationKind = "turn" | "compaction" | "branch_summary";
 export type HarnessOperationPhase = "admitted" | "executing" | "terminalizing" | "notifying" | "settled";
@@ -30,6 +32,7 @@ export class HarnessAbortGate {
 
 export interface HarnessOperationLease {
 	readonly id: string;
+	readonly admissionRevision: number;
 	kind: HarnessOperationKind;
 	readonly abortGate: HarnessAbortGate;
 	phase: HarnessOperationPhase;
@@ -46,6 +49,7 @@ export interface HarnessSuccessorReservation {
 
 /** Owns admission and abort authority for every exclusive Harness operation. */
 export class HarnessOperationCoordinator {
+	private readonly admissionGate: AgentHarnessAdmissionGate;
 	private active: HarnessOperationLease | undefined;
 	private successor:
 		| { lease: HarnessOperationLease; ready: Promise<void>; resolveReady(): void; cancelled: boolean }
@@ -58,6 +62,10 @@ export class HarnessOperationCoordinator {
 	private readonly closedPromise = new Promise<void>((resolve) => {
 		this.resolveClosed = resolve;
 	});
+
+	constructor(admissionGate = new AgentHarnessAdmissionGate()) {
+		this.admissionGate = admissionGate;
+	}
 
 	get current(): HarnessOperationLease | undefined {
 		return this.active;
@@ -72,6 +80,7 @@ export class HarnessOperationCoordinator {
 	}
 
 	reserve(kind: HarnessOperationKind): HarnessOperationLease | undefined {
+		this.admissionGate.assertOpen();
 		if (this.lifecycle !== "open" || this.active || this.successor) return undefined;
 		const lease = this.createLease(kind);
 		this.active = lease;
@@ -80,6 +89,7 @@ export class HarnessOperationCoordinator {
 	}
 
 	reserveSuccessor(kind: HarnessOperationKind): HarnessSuccessorReservation | undefined {
+		this.admissionGate.assertOpen();
 		if (this.lifecycle !== "open" || !this.active || this.successor) return undefined;
 		return this.createSuccessor(kind);
 	}
@@ -89,6 +99,7 @@ export class HarnessOperationCoordinator {
 		replacedKind: HarnessOperationKind,
 		kind: HarnessOperationKind,
 	): HarnessSuccessorReservation | undefined {
+		this.admissionGate.assertOpen();
 		if (this.lifecycle !== "open" || !this.active || this.successor?.lease.kind !== replacedKind) return undefined;
 		const replaced = this.successor;
 		replaced.cancelled = true;
@@ -132,6 +143,7 @@ export class HarnessOperationCoordinator {
 	private createLease(kind: HarnessOperationKind): HarnessOperationLease {
 		return {
 			id: `harness-operation:${globalThis.crypto.randomUUID()}`,
+			admissionRevision: this.admissionGate.revision,
 			kind,
 			abortGate: new HarnessAbortGate(),
 			phase: "admitted",
@@ -149,11 +161,19 @@ export class HarnessOperationCoordinator {
 		if (this.active !== lease || lease.phase !== "admitted") {
 			throw new Error("Harness operation lease cannot start");
 		}
+		if (!this.admissionGate.isCurrent(lease.admissionRevision)) {
+			this.finish(lease);
+			throw new AgentHarnessError("busy", "Operation admission was revoked");
+		}
 		lease.phase = "executing";
 	}
 
 	reclassify(lease: HarnessOperationLease, kind: HarnessOperationKind): boolean {
 		if (this.active !== lease || lease.phase !== "admitted") return false;
+		if (!this.admissionGate.isCurrent(lease.admissionRevision)) {
+			this.finish(lease);
+			return false;
+		}
 		lease.kind = kind;
 		return true;
 	}
@@ -176,10 +196,21 @@ export class HarnessOperationCoordinator {
 		this.resolveSuccessorSettlementWaiters(lease);
 		const successor = this.successor;
 		this.successor = undefined;
-		if (successor && !successor.cancelled && this.lifecycle === "open") {
+		if (
+			successor &&
+			!successor.cancelled &&
+			this.lifecycle === "open" &&
+			this.admissionGate.isCurrent(successor.lease.admissionRevision)
+		) {
 			this.active = successor.lease;
 			successor.resolveReady();
 			return;
+		}
+		if (successor) {
+			successor.cancelled = true;
+			successor.lease.phase = "settled";
+			successor.resolveReady();
+			this.resolveSuccessorSettlementWaiters(successor.lease);
 		}
 		this.active = undefined;
 		const resolveIdle = this.resolveIdle;

@@ -3,6 +3,8 @@ import { type Component, createRenderFrame, type RenderFrame, truncateToWidth, v
 import type { AgentSession } from "../../../core/agent-session.ts";
 import { areExperimentalFeaturesEnabled } from "../../../core/experimental.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-provider.ts";
+import { getPromptCacheRefreshUsage } from "../../../core/prompt-cache-keepalive.ts";
+import type { PromptCacheStatus } from "../../../core/prompt-cache-status.ts";
 import type { SessionUsageProjection } from "../../../core/session-usage.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 
@@ -29,6 +31,44 @@ function formatTokens(count: number): string {
 	return `${Math.round(count / 1000000)}M`;
 }
 
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+
+/** Countdown unit: hours above one hour remaining, then minutes. */
+function promptCacheCountdownUnit(remainingMs: number): number {
+	return remainingMs > HOUR_MS ? HOUR_MS : MINUTE_MS;
+}
+
+function formatPromptCacheStatus(status: PromptCacheStatus | undefined, now: number): string | undefined {
+	if (!status) return undefined;
+	if (status.kind === "model_changed") return theme.fg("warning", "cache cold");
+	if (status.keepAliveUntil !== undefined && status.keepAliveUntil > now) {
+		const keepAlive = status.keepAliveUntil - now;
+		const unit = promptCacheCountdownUnit(keepAlive);
+		return theme.fg("dim", `cache warm ${Math.ceil(keepAlive / unit)}${unit === HOUR_MS ? "h" : "m"}`);
+	}
+	if (status.expiresAt === undefined) return undefined;
+	const remaining = status.expiresAt - now;
+	if (remaining <= 0) return theme.fg("warning", "cache expired");
+	const unit = promptCacheCountdownUnit(remaining);
+	return theme.fg("dim", `cache ${Math.ceil(remaining / unit)}${unit === HOUR_MS ? "h" : "m"}`);
+}
+
+/** Instant the rendered cache countdown next changes, or undefined when it is static. */
+function nextPromptCacheChangeAt(status: PromptCacheStatus | undefined, now: number): number | undefined {
+	if (status?.kind !== "retained") return undefined;
+	if (status.keepAliveUntil !== undefined && status.keepAliveUntil > now) {
+		const keepAlive = status.keepAliveUntil - now;
+		const unit = promptCacheCountdownUnit(keepAlive);
+		return status.keepAliveUntil - (Math.ceil(keepAlive / unit) - 1) * unit;
+	}
+	if (status.expiresAt === undefined) return undefined;
+	const remaining = status.expiresAt - now;
+	if (remaining <= 0) return undefined;
+	const unit = promptCacheCountdownUnit(remaining);
+	return status.expiresAt - (Math.ceil(remaining / unit) - 1) * unit;
+}
+
 type FooterSnapshot = {
 	totalInput: number;
 	totalOutput: number;
@@ -37,6 +77,7 @@ type FooterSnapshot = {
 	totalCost: number;
 	latestCacheHitRate: number | undefined;
 	contextUsage: ReturnType<AgentSession["getContextUsage"]>;
+	promptCache: PromptCacheStatus | undefined;
 };
 
 export function formatCwdForFooter(cwd: string, home: string | undefined): string {
@@ -63,16 +104,22 @@ export class FooterComponent implements Component {
 	private footerData: ReadonlyFooterDataProvider;
 	private snapshot?: FooterSnapshot;
 	private transientUsage?: SessionUsageProjection;
+	private readonly requestRender: (() => void) | undefined;
+	private cacheRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+	private cacheRefreshAt: number | undefined;
 
-	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider) {
+	/** `requestRender` lets the prompt-cache countdown refresh while the session is idle. */
+	constructor(session: AgentSession, footerData: ReadonlyFooterDataProvider, requestRender?: () => void) {
 		this.session = session;
 		this.footerData = footerData;
+		this.requestRender = requestRender;
 	}
 
 	setSession(session: AgentSession): void {
 		this.session = session;
 		this.snapshot = undefined;
 		this.transientUsage = undefined;
+		this.clearCacheRefresh();
 	}
 
 	setAutoCompactEnabled(enabled: boolean): void {
@@ -94,6 +141,27 @@ export class FooterComponent implements Component {
 	 */
 	dispose(): void {
 		// Git watcher cleanup handled by provider
+		this.clearCacheRefresh();
+	}
+
+	private clearCacheRefresh(): void {
+		if (this.cacheRefreshTimer) clearTimeout(this.cacheRefreshTimer);
+		this.cacheRefreshTimer = undefined;
+		this.cacheRefreshAt = undefined;
+	}
+
+	private scheduleCacheRefresh(at: number | undefined, now: number): void {
+		if (at === this.cacheRefreshAt) return;
+		this.clearCacheRefresh();
+		const requestRender = this.requestRender;
+		if (at === undefined || !requestRender) return;
+		this.cacheRefreshAt = at;
+		this.cacheRefreshTimer = setTimeout(() => {
+			this.cacheRefreshTimer = undefined;
+			this.cacheRefreshAt = undefined;
+			requestRender();
+		}, at - now);
+		this.cacheRefreshTimer.unref?.();
 	}
 
 	private getSnapshot(): FooterSnapshot {
@@ -106,7 +174,14 @@ export class FooterComponent implements Component {
 		let totalCost = 0;
 		let latestCacheHitRate: number | undefined;
 		for (const entry of this.session.sessionManager.getEntries()) {
-			if (entry.type === "message" && entry.message.role === "assistant") {
+			const refreshUsage = getPromptCacheRefreshUsage(entry);
+			if (refreshUsage) {
+				totalInput += refreshUsage.input;
+				totalOutput += refreshUsage.output;
+				totalCacheRead += refreshUsage.cacheRead;
+				totalCacheWrite += refreshUsage.cacheWrite;
+				totalCost += refreshUsage.cost.total;
+			} else if (entry.type === "message" && entry.message.role === "assistant") {
 				totalInput += entry.message.usage.input;
 				totalOutput += entry.message.usage.output;
 				totalCacheRead += entry.message.usage.cacheRead;
@@ -126,6 +201,7 @@ export class FooterComponent implements Component {
 			totalCost,
 			latestCacheHitRate,
 			contextUsage: this.session.getContextUsage(),
+			promptCache: this.session.getPromptCacheStatus(),
 		};
 		return this.snapshot;
 	}
@@ -229,6 +305,12 @@ export class FooterComponent implements Component {
 		if ((totalCacheRead > 0 || totalCacheWrite > 0) && latestCacheHitRate !== undefined) {
 			detailParts.push(theme.fg("dim", `CH${latestCacheHitRate.toFixed(1)}%`));
 		}
+		// Isolated workflows show another model's usage; the session's cache status does not apply.
+		const promptCache = transientUsage ? undefined : snapshot.promptCache;
+		const now = Date.now();
+		const promptCacheLabel = formatPromptCacheStatus(promptCache, now);
+		if (promptCacheLabel) detailParts.push(promptCacheLabel);
+		this.scheduleCacheRefresh(nextPromptCacheChangeAt(promptCache, now), now);
 		if (areExperimentalFeaturesEnabled()) {
 			detailParts.push(theme.bold(theme.fg("warning", "xp")));
 		}

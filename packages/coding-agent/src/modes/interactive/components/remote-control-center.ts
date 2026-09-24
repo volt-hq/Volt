@@ -1,4 +1,5 @@
-import { isAbsolute, relative, resolve } from "node:path";
+import { realpath, stat } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve } from "node:path";
 import {
 	type Component,
 	createRenderFrame,
@@ -14,16 +15,20 @@ import {
 	type IrohRemoteAccessPresetName,
 	isIrohRemoteAccessPresetName,
 } from "../../../core/remote/iroh/access-grant.ts";
+import { isIrohRemoteWorkspaceName } from "../../../core/remote/iroh/handshake.ts";
 import { formatIrohRemoteTicketQrCode } from "../../../core/remote/iroh/qr.ts";
 import { getIrohRemotePairingVerificationDetails } from "../../../core/remote/iroh/ticket.ts";
+import { getIrohRemoteWorkspaceNameAlias } from "../../../core/remote/iroh/workspace.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	type ControlEvent,
+	type ControlRelayCredentialStatus,
 	type ControlResponse,
 	type DaemonRemotePolicyStatus,
+	isRemoteTransportPairingAvailable,
 } from "../../../daemon/control-protocol.ts";
 import { type DaemonProbeState, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "../../../daemon/spawn.ts";
 import {
@@ -34,7 +39,6 @@ import {
 } from "../../../daemon/state.ts";
 import { DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS } from "../../../remote/integrated-runtime-retention.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
-import { resolveDaemonWorkspaceForCwd } from "../daemon-attach.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint } from "./keybinding-hints.ts";
 
@@ -52,6 +56,8 @@ export class RemoteControlRequestError extends Error {
 }
 
 const UNSAFE_TERMINAL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+// One title, three actions, and one keyboard-hint row; no extra borders or header.
+const PAIRING_QR_RESERVED_ROWS = 5;
 
 export type RemoteControlSnapshot =
 	| {
@@ -79,6 +85,7 @@ export interface RemoteControlBackend {
 		access: IrohRemoteAccessPresetName,
 		onProgress: (event: PairingProgress) => void,
 	): Promise<RemotePairingHandle>;
+	resetRelayCredential(): Promise<void>;
 	revokeClient(clientNodeId: string): Promise<void>;
 	approveClientRepair(clientNodeId: string): Promise<void>;
 	close(): Promise<void>;
@@ -216,9 +223,39 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 			return { preservedIdentity: recovered.preservedIdentity };
 		},
 		async registerCurrentWorkspace(path) {
-			const workspace = await resolveDaemonWorkspaceForCwd(await connect(), path);
-			if (!workspace) throw new Error("could not register the current directory with voltd");
-			return workspace;
+			const directory = await realpath(path);
+			if (!(await stat(directory)).isDirectory()) throw new Error(`Not a directory: ${directory}`);
+			const active = await connect();
+			const worktree = await active.request({ type: "worktree_resolve", path: directory });
+			if (worktree.type === "worktree_resolve_result") {
+				throw new Error(
+					`This directory belongs to managed worktree ${worktree.worktreeId}. Use parent workspace ${worktree.workspaceName}; managed worktrees cannot be registered separately.`,
+				);
+			}
+			if (worktree.type !== "error") throw new Error(`unexpected ${worktree.type} response`);
+			if (worktree.code !== "not_found") throw new RemoteControlRequestError(worktree.code, worktree.message);
+
+			const status = await active.request({ type: "status" });
+			if (status.type === "error") throw new RemoteControlRequestError(status.code, status.message);
+			if (status.type !== "status_result") throw new Error(`unexpected ${status.type} response`);
+			// Explicit registration must not reuse an enclosing workspace. Daemon
+			// registration stores canonical paths, so aliases reuse the exact entry.
+			const existing = status.workspaces.find((workspace) => workspace.path === directory);
+			if (existing) return { name: existing.name, path: existing.path };
+			const takenNames = new Set(
+				status.workspaces.map((workspace) => getIrohRemoteWorkspaceNameAlias(workspace.name)),
+			);
+			const directoryName = basename(directory);
+			const base = isIrohRemoteWorkspaceName(directoryName) ? directoryName : "workspace";
+			let name = base;
+			for (let suffix = 2; takenNames.has(getIrohRemoteWorkspaceNameAlias(name)); suffix++) {
+				name = `${base}-${suffix}`;
+				if (!isIrohRemoteWorkspaceName(name)) name = `workspace-${suffix}`;
+			}
+			const registered = await active.request({ type: "workspace_register", name, path: directory });
+			if (registered.type === "error") throw new RemoteControlRequestError(registered.code, registered.message);
+			if (registered.type !== "ok") throw new Error(`unexpected ${registered.type} response`);
+			return { name, path: directory };
 		},
 		async beginPairing(workspaceName, access, onProgress) {
 			const queued: PairingProgress[] = [];
@@ -264,6 +301,11 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 				throw error;
 			}
 		},
+		async resetRelayCredential() {
+			const response = await (await connect()).request({ type: "relay_credential_revoke" });
+			if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
+			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
+		},
 		async revokeClient(clientNodeId) {
 			const response = await (await connect()).request({ type: "client_revoke", clientNodeId });
 			if (response.type === "error") throw new Error(response.message);
@@ -292,7 +334,8 @@ type View =
 	| { kind: "loading"; label: string }
 	| { kind: "offline"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
 	| { kind: "overview"; status: RemoteStatus; notice?: string }
-	| { kind: "access-picker"; status: RemoteStatus }
+	| { kind: "access-picker"; status: RemoteStatus; notice?: string }
+	| { kind: "confirm-credential-reset"; status: RemoteStatus; error?: string }
 	| { kind: "workspace-picker"; status: RemoteStatus; access: IrohRemoteAccessPresetName }
 	| { kind: "confirm-regenerate"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
 	| {
@@ -320,6 +363,7 @@ type DisplayRow = {
 	key?: string;
 	text: string;
 	raw?: boolean;
+	wrap?: boolean;
 	tone?: "text" | "muted" | "dim" | "accent" | "success" | "warning" | "error";
 };
 
@@ -337,8 +381,47 @@ function abbreviatedId(value: string, width = 12): string {
 	return value.length <= width ? value : `${value.slice(0, Math.max(4, width - 1))}…`;
 }
 
+const RELAY_CREDENTIAL_DETAILS: Readonly<
+	Record<ControlRelayCredentialStatus["state"], { label: string; guidance: string; tone: DisplayRow["tone"] }>
+> = {
+	unpaired: {
+		label: "Not set up",
+		guidance: "Pair a phone with an active Volt Pro subscription to enable relay access.",
+		tone: "muted",
+	},
+	pairing: {
+		label: "Pairing in progress",
+		guidance: "Finish the current pairing, or reset credentials to start again.",
+		tone: "warning",
+	},
+	active: {
+		label: "Active",
+		guidance: "Pair another phone using the same subscription. Reset only to start a new enrollment.",
+		tone: "success",
+	},
+	expired: {
+		label: "Access expired",
+		guidance: "Relay access is paused. Volt retries automatically; check your connection and subscription.",
+		tone: "warning",
+	},
+	subscription_inactive: {
+		label: "Volt Pro subscription inactive",
+		guidance: "Renew the existing subscription, or reset credentials to enroll with a different subscribed phone.",
+		tone: "warning",
+	},
+	revocation_pending: {
+		label: "Credential reset pending",
+		guidance: "Retry the reset when online. Pairing is blocked until the old relay credentials are revoked.",
+		tone: "warning",
+	},
+};
+
 function supportsSafePairing(status: RemoteStatus): boolean {
 	return (
+		status.relayCredential?.state !== "subscription_inactive" &&
+		status.relayCredential?.state !== "revocation_pending" &&
+		status.relayCredential?.state !== "pairing" &&
+		isRemoteTransportPairingAvailable(status.remoteTransport) &&
 		status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true &&
 		status.capabilities.includes(CONTROL_RPC_GRANTS_CAPABILITY)
 	);
@@ -426,7 +509,11 @@ export class RemoteControlCenterComponent implements Component {
 		const footer = this.renderFooter(width);
 		const pageSize = Math.max(1, height - header.length - footer.length);
 		this.lastPageSize = pageSize;
-		const rows = this.buildRows(width, pageSize);
+		const rows = this.buildRows(width, height).flatMap((row) => {
+			if (!row.wrap) return [row];
+			const safeText = stripAnsi(row.text).replace(UNSAFE_TERMINAL_CHARACTERS, "");
+			return wrapTextWithAnsi(safeText, Math.max(1, width - 2)).map((text) => ({ ...row, text }));
+		});
 		this.lastRows = rows;
 		this.ensureSelection(rows);
 		const selectedIndex = rows.findIndex((row) => row.key === this.selectedKey);
@@ -444,6 +531,10 @@ export class RemoteControlCenterComponent implements Component {
 	handleInput(data: string): void {
 		const keybindings = getKeybindings();
 		if (keybindings.matches(data, "tui.select.cancel")) {
+			if (this.view.kind === "confirm-credential-reset") {
+				void this.refresh();
+				return;
+			}
 			if (
 				this.view.kind === "access-picker" ||
 				this.view.kind === "workspace-picker" ||
@@ -618,19 +709,18 @@ export class RemoteControlCenterComponent implements Component {
 		try {
 			const workspace = await this.backend.registerCurrentWorkspace(currentPath);
 			if (this.disposed || generation !== this.generation) return;
-			await this.refresh(`Workspace ${workspace.name} is available`);
+			await this.refresh(
+				`Registered directory: ${workspace.path} (workspace ${workspace.name}). Current conversation unchanged.`,
+			);
 		} catch (error) {
 			if (this.disposed || generation !== this.generation) return;
 			const snapshot = await this.backend.load();
 			if (this.disposed || generation !== this.generation) return;
+			const notice = `Workspace registration failed: ${error instanceof Error ? error.message : String(error)}`;
 			this.view =
 				snapshot.kind === "online"
-					? {
-							kind: "overview",
-							status: snapshot.status,
-							notice: `Workspace registration failed: ${error instanceof Error ? error.message : String(error)}`,
-						}
-					: { kind: "offline", snapshot };
+					? { kind: "overview", status: snapshot.status, notice }
+					: { kind: "offline", snapshot: { ...snapshot, error: notice } };
 			this.selectedKey = snapshot.kind === "online" ? "register-current" : "start";
 			this.options.requestRender();
 		}
@@ -735,6 +825,52 @@ export class RemoteControlCenterComponent implements Component {
 		if (!this.disposed) this.options.requestRender();
 	}
 
+	private async resetRelayCredential(): Promise<void> {
+		if (this.view.kind !== "confirm-credential-reset") return;
+		const status = this.view.status;
+		const generation = ++this.generation;
+		this.pairingAttempt++;
+		this.pairingHandle?.dispose();
+		this.pairingHandle = undefined;
+		this.view = { kind: "loading", label: "Resetting relay credentials…" };
+		this.options.requestRender();
+		try {
+			await this.backend.resetRelayCredential();
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			if (snapshot.kind === "offline") {
+				this.view = { kind: "offline", snapshot };
+				this.selectedKey = "refresh";
+			} else if (supportsSafePairing(snapshot.status) && snapshot.status.workspaces.length > 0) {
+				this.view = {
+					kind: "access-picker",
+					status: snapshot.status,
+					notice: "Relay credentials reset. Choose access for the new phone.",
+				};
+				this.selectedKey = "access:coding";
+			} else {
+				this.view = {
+					kind: "overview",
+					status: snapshot.status,
+					notice: "Relay credentials reset. Register a workspace or restore phone transport, then pair a phone.",
+				};
+				this.selectedKey = snapshot.status.workspaces.length === 0 ? "register-current" : "refresh";
+			}
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			this.view = {
+				kind: "confirm-credential-reset",
+				status,
+				error: `Reset failed: ${error instanceof Error ? error.message : String(error)}`,
+			};
+			this.selectedKey = "cancel-credential-reset";
+		}
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.options.requestRender();
+	}
+
 	private async revokeClient(clientNodeId: string): Promise<void> {
 		const generation = ++this.generation;
 		this.view = { kind: "loading", label: "Revoking device…" };
@@ -825,6 +961,21 @@ export class RemoteControlCenterComponent implements Component {
 		}
 		if (key === "register-current") {
 			if (this.view.kind === "overview") void this.registerCurrentWorkspace();
+			return;
+		}
+		if (key === "reset-credential" && this.view.kind === "overview" && this.view.status.relayCredential) {
+			this.view = { kind: "confirm-credential-reset", status: this.view.status };
+			this.selectedKey = "cancel-credential-reset";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "cancel-credential-reset" && this.view.kind === "confirm-credential-reset") {
+			void this.refresh();
+			return;
+		}
+		if (key === "confirm-credential-reset" && this.view.kind === "confirm-credential-reset") {
+			void this.resetRelayCredential();
 			return;
 		}
 		if (key === "pair") {
@@ -934,13 +1085,21 @@ export class RemoteControlCenterComponent implements Component {
 	}
 
 	private renderHeader(width: number): string[] {
+		if (this.view.kind === "pairing" && this.view.showQr) return [];
 		let state = "loading";
 		if (this.view.kind === "offline") state = this.view.snapshot.state;
 		else if (this.view.kind === "confirm-regenerate" || this.view.kind === "confirm-recover") state = "confirmation";
-		else if ("status" in this.view)
-			state = `online · ${this.view.status.phoneConnections} phone${this.view.status.phoneConnections === 1 ? "" : "s"}`;
+		else if ("status" in this.view) {
+			const status = this.view.status;
+			const relay = status.relayCredential;
+			state = `${status.remoteTransport?.state !== "ready" ? (status.remoteTransport?.state ?? "unavailable") : relay ? RELAY_CREDENTIAL_DETAILS[relay.state].label : "ready"} · ${status.phoneConnections} phone${status.phoneConnections === 1 ? "" : "s"}`;
+		}
 		const title = theme.bold(theme.fg("accent", "Remote Access"));
-		const right = theme.fg(this.view.kind === "offline" ? "warning" : "muted", state);
+		const remoteUnavailable =
+			"status" in this.view &&
+			(this.view.status.remoteTransport?.state !== "ready" ||
+				(this.view.status.relayCredential !== undefined && this.view.status.relayCredential.state !== "active"));
+		const right = theme.fg(this.view.kind === "offline" || remoteUnavailable ? "warning" : "muted", state);
 		const gap = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(right) - 2));
 		return [new DynamicBorder().render(width).lines[0]!, truncateToWidth(` ${title}${gap}${right} `, width, ""), ""];
 	}
@@ -951,16 +1110,20 @@ export class RemoteControlCenterComponent implements Component {
 		hints.push(
 			keyHint("tui.select.cancel", this.view.kind === "overview" || this.view.kind === "offline" ? "close" : "back"),
 		);
-		return [truncateToWidth(` ${hints.join("  ")}`, width, ""), new DynamicBorder().render(width).lines[0]!];
+		const hintLine = truncateToWidth(` ${hints.join("  ")}`, width, "");
+		if (this.view.kind === "pairing" && this.view.showQr) return [hintLine];
+		return [hintLine, new DynamicBorder().render(width).lines[0]!];
 	}
 
-	private buildRows(width: number, pageSize: number): DisplayRow[] {
+	private buildRows(width: number, height: number): DisplayRow[] {
 		if (this.view.kind === "loading") return [{ text: this.view.label, tone: "muted" }];
 		if (this.view.kind === "offline") {
 			return [
 				{ text: "DAEMON", tone: "accent" },
 				{ text: `voltd is ${this.view.snapshot.state}`, tone: "warning" },
-				...(this.view.snapshot.error ? [{ text: this.view.snapshot.error, tone: "error" as const }] : []),
+				...(this.view.snapshot.error
+					? [{ text: this.view.snapshot.error, tone: "error" as const, wrap: true }]
+					: []),
 				...(this.view.snapshot.invalidState
 					? [
 							{
@@ -993,8 +1156,49 @@ export class RemoteControlCenterComponent implements Component {
 				{ key: "confirm-recover-state", text: "Confirm recover and restart", tone: "warning" },
 			];
 		}
+		if (this.view.kind === "confirm-credential-reset") {
+			return [
+				{ text: "RESET RELAY CREDENTIALS", tone: "warning" },
+				...(this.view.error ? [{ text: this.view.error, tone: "error" as const, wrap: true }] : []),
+				{
+					text: "Use this to start a new subscription enrollment, not to renew your existing subscription.",
+					tone: "text",
+					wrap: true,
+				},
+				{
+					text: "This revokes relay credentials for this computer and all its phones, and cancels pending pairing codes.",
+					tone: "warning",
+					wrap: true,
+				},
+				{
+					text: "Your computer identity, workspaces, worktrees, and conversations stay unchanged.",
+					tone: "text",
+					wrap: true,
+				},
+				{
+					text: "Existing device permissions and direct connections are NOT revoked. Revoke old phones separately under Paired devices.",
+					tone: "warning",
+					wrap: true,
+				},
+				{
+					text: "After reset, pair using a phone with an active Volt Pro subscription. No daemon restart is needed.",
+					tone: "text",
+					wrap: true,
+				},
+				{ key: "cancel-credential-reset", text: "Cancel", tone: "text" },
+				{
+					key: "confirm-credential-reset",
+					text:
+						this.view.error || this.view.status.relayCredential?.state === "revocation_pending"
+							? "Retry reset and pair again"
+							: "Reset credentials and pair again",
+					tone: "warning",
+				},
+			];
+		}
 		if (this.view.kind === "access-picker") {
 			return [
+				...(this.view.notice ? [{ text: this.view.notice, tone: "success" as const, wrap: true }] : []),
 				{ text: "PAIR A PHONE · ACCESS", tone: "accent" },
 				{ text: "Choose what this phone may do. Access can be changed later.", tone: "muted" },
 				...IROH_REMOTE_ACCESS_PRESET_NAMES.flatMap((name) => {
@@ -1048,13 +1252,19 @@ export class RemoteControlCenterComponent implements Component {
 				{ key: `approve-repair:${repairView.clientNodeId}`, text: "Confirm allow re-pair", tone: "warning" },
 			];
 		}
-		if (this.view.kind === "pairing") return this.buildPairingRows(width, pageSize);
+		if (this.view.kind === "pairing") return this.buildPairingRows(width, height);
 
 		const status = this.view.status;
 		const remotePolicy = status.remotePolicy ?? {
 			allowTools: null,
 			detachedRuntimeTtlMs: DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,
 		};
+		const relayCredential = status.relayCredential;
+		const relayDetails = relayCredential === undefined ? undefined : RELAY_CREDENTIAL_DETAILS[relayCredential.state];
+		const credentialBlocksPairing =
+			relayCredential?.state === "subscription_inactive" ||
+			relayCredential?.state === "revocation_pending" ||
+			relayCredential?.state === "pairing";
 		const currentLease = status.leases.find((lease) => lease.sessionId === this.options.currentSessionId);
 		const currentWorkspace =
 			status.workspaces.find((workspace) => workspace.name === this.options.getCurrentWorkspaceName()) ??
@@ -1064,6 +1274,7 @@ export class RemoteControlCenterComponent implements Component {
 				? [
 						{
 							text: this.view.notice,
+							wrap: true,
 							tone: this.view.notice.includes("failed") ? ("error" as const) : ("success" as const),
 						},
 					]
@@ -1073,6 +1284,19 @@ export class RemoteControlCenterComponent implements Component {
 				text: `voltd ${status.version} · pid ${status.pid} · up ${formatDuration(Date.now() - status.startedAtMs)}`,
 				tone: "text",
 			},
+			{
+				text: `${relayCredential ? "Daemon endpoint" : "Phone transport"}: ${status.remoteTransport?.state ?? "unavailable"}${status.remoteTransport?.wrapperVersion ? ` · wrapper ${status.remoteTransport.wrapperVersion}` : ""}${status.remoteTransport?.reasonCode ? ` · ${status.remoteTransport.reasonCode}` : ""}`,
+				tone: status.remoteTransport?.state === "ready" ? "success" : "warning",
+			},
+			...(status.remoteTransport?.message
+				? [{ text: status.remoteTransport.message, tone: "warning" as const, wrap: true }]
+				: []),
+			...(relayDetails
+				? [
+						{ text: `Relay access: ${relayDetails.label}`, tone: relayDetails.tone, wrap: true },
+						{ text: relayDetails.guidance, tone: "muted" as const, wrap: true },
+					]
+				: []),
 			{
 				text: `${status.phoneConnections} attached phone${status.phoneConnections === 1 ? "" : "s"} · ${status.clients.length} paired device${status.clients.length === 1 ? "" : "s"}${status.revokedClients === undefined ? "" : ` · ${status.revokedClients.length} revoked`}`,
 				tone: status.phoneConnections > 0 ? "success" : "muted",
@@ -1086,11 +1310,27 @@ export class RemoteControlCenterComponent implements Component {
 			{ text: "ACTIONS", tone: "accent" },
 			{ key: "refresh", text: "Refresh status", tone: "text" },
 			{ key: "register-current", text: "Register current directory", tone: "text" },
-			...(status.workspaces.length === 0
-				? [{ text: "Pairing needs a registered workspace.", tone: "warning" as const }]
-				: supportsSafePairing(status)
-					? [{ key: "pair", text: "Pair a phone", tone: "text" as const }]
-					: [{ text: "Restart voltd to pair with explicit access grants.", tone: "warning" as const }]),
+			...(!isRemoteTransportPairingAvailable(status.remoteTransport)
+				? [{ text: "Pairing is disabled until phone transport is ready.", tone: "warning" as const }]
+				: status.workspaces.length === 0
+					? [{ text: "Pairing needs a registered workspace.", tone: "warning" as const }]
+					: credentialBlocksPairing
+						? []
+						: supportsSafePairing(status)
+							? [{ key: "pair", text: "Pair a phone", tone: "text" as const }]
+							: [{ text: "Restart voltd to pair with explicit access grants.", tone: "warning" as const }]),
+			...(relayCredential !== undefined && relayCredential.state !== "unpaired"
+				? [
+						{
+							key: "reset-credential",
+							text:
+								relayCredential.state === "revocation_pending"
+									? "Retry credential reset and pair again…"
+									: "Reset credentials and pair again…",
+							tone: "warning" as const,
+						},
+					]
+				: []),
 			{ text: "HEADLESS POLICY", tone: "accent" },
 			...(status.remotePolicy
 				? [
@@ -1167,7 +1407,7 @@ export class RemoteControlCenterComponent implements Component {
 		return rows;
 	}
 
-	private buildPairingRows(width: number, pageSize: number): DisplayRow[] {
+	private buildPairingRows(width: number, height: number): DisplayRow[] {
 		if (this.view.kind !== "pairing") return [];
 		const phaseLabel = {
 			starting: "Creating one-time ticket…",
@@ -1203,10 +1443,10 @@ export class RemoteControlCenterComponent implements Component {
 				qrError = error instanceof Error ? error.message : String(error);
 			}
 		}
-		const qrFits =
-			qrLines !== undefined &&
-			qrLines.length + 4 <= pageSize &&
-			qrLines.every((line) => visibleWidth(line) <= width);
+		const qrWidth = qrLines === undefined ? 0 : Math.max(...qrLines.map((line) => visibleWidth(line)));
+		const qrHeight = (qrLines?.length ?? 0) + PAIRING_QR_RESERVED_ROWS;
+		const qrFits = qrLines !== undefined && qrHeight <= height && qrWidth <= width;
+		const qrSizeWarning = `QR needs ${qrWidth} columns × ${qrHeight} rows; available: ${width} × ${height}.`;
 		if (this.view.showQr) {
 			if (qrFits && qrLines !== undefined) {
 				return [
@@ -1217,7 +1457,7 @@ export class RemoteControlCenterComponent implements Component {
 					{ key: "pairing-back", text: "Cancel pairing", tone: "text" },
 				];
 			}
-			rows.push({ text: "The terminal is no longer large enough to show the complete QR code.", tone: "warning" });
+			rows.push({ text: qrError ? `QR unavailable: ${qrError}` : qrSizeWarning, tone: "warning", wrap: true });
 			rows.push({ key: "pairing-verification", text: "Show verification details", tone: "text" });
 		} else if (this.view.ticket) {
 			try {
@@ -1254,8 +1494,8 @@ export class RemoteControlCenterComponent implements Component {
 			} else if (qrError) {
 				rows.push({ text: `QR unavailable: ${qrError}`, tone: "warning" });
 			} else {
-				rows.push({ text: "Enlarge the terminal to show the complete QR code.", tone: "warning" });
-				rows.push({ text: "Use Copy pairing ticket instead of exposing it in scrollback.", tone: "dim" });
+				rows.push({ text: qrSizeWarning, tone: "warning", wrap: true });
+				rows.push({ text: "Reduce the terminal font size, or use Copy pairing ticket.", tone: "dim", wrap: true });
 			}
 		}
 		if (this.view.ticket) rows.push({ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" });

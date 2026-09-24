@@ -76,13 +76,18 @@ describe("operation authorization", () => {
 
 	it("resolves parameter-sensitive LSP and inspection operations", () => {
 		const lsp = getTrustedToolOperationResolver("lsp");
-		expect(authorizeToolOperation(lsp, { action: "diagnostics" }, RESEARCH_OPERATION_GRANT_PROFILE)).toMatchObject({
-			allowed: true,
-		});
-		expect(authorizeToolOperation(lsp, { action: "rename" }, RESEARCH_OPERATION_GRANT_PROFILE)).toMatchObject({
-			allowed: false,
-			missingCapabilities: ["workspace.write"],
-		});
+		for (const action of ["status", "diagnostics"]) {
+			expect(authorizeToolOperation(lsp, { action }, RESEARCH_OPERATION_GRANT_PROFILE)).toMatchObject({
+				allowed: true,
+				resolution: { capabilities: ["workspace.read"] },
+			});
+		}
+		for (const action of ["rename", "fix"]) {
+			expect(authorizeToolOperation(lsp, { action }, RESEARCH_OPERATION_GRANT_PROFILE)).toMatchObject({
+				allowed: false,
+				missingCapabilities: ["workspace.write"],
+			});
+		}
 		expect(authorizeToolOperation(lsp, { action: "future-action" }, RESEARCH_OPERATION_GRANT_PROFILE)).toMatchObject({
 			allowed: false,
 			resolution: { kind: "unknown" },

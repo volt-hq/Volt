@@ -26,6 +26,7 @@ import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { resolvePromptCacheRetention } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
@@ -50,7 +51,17 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 	context: Context,
 	options?: MistralOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: {
@@ -77,10 +88,16 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 			});
 
 			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
-			const transformedMessages = transformMessages(context.messages, model, (id) => normalizeMistralToolCallId(id));
+			const toolResultPayload = new ToolResultPayloadTracker();
+			const transformedMessages = transformMessages(
+				context.messages,
+				model,
+				(id) => normalizeMistralToolCallId(id),
+				toolResultPayload,
+			);
 
-			let payload = buildChatPayload(model, context, transformedMessages, options);
-			const nextPayload = await options?.onPayload?.(payload, model);
+			let payload = buildChatPayload(model, context, transformedMessages, options, toolResultPayload);
+			const nextPayload = await options?.onPayload?.(payload, model, toolResultPayload.metadata);
 			if (nextPayload !== undefined) {
 				payload = nextPayload as ChatCompletionStreamRequest;
 			}
@@ -230,11 +247,12 @@ function buildChatPayload(
 	context: Context,
 	messages: Message[],
 	options?: MistralOptions,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): ChatCompletionStreamRequest {
 	const payload: ChatCompletionStreamRequest = {
 		model: model.id,
 		stream: true,
-		messages: toChatMessages(messages, model.input.includes("image")),
+		messages: toChatMessages(messages, model.input.includes("image"), toolResultPayload),
 	};
 
 	if (context.tools?.length) payload.tools = toFunctionTools(context.tools);
@@ -278,6 +296,7 @@ interface MistralStreamState {
 function createMistralStreamState(): MistralStreamState {
 	return {
 		usage: {
+			availability: "unavailable",
 			input: 0,
 			output: 0,
 			cacheRead: 0,
@@ -298,6 +317,7 @@ async function consumeChatStream(
 	mistralStream: AsyncIterable<CompletionEvent>,
 	state: MistralStreamState,
 ): Promise<void> {
+	let hasFinishReason = false;
 	for await (const event of mistralStream) {
 		const chunk = event.data;
 		// Mistral's streamed CompletionChunk carries an id field. Keep the first non-empty one,
@@ -307,8 +327,19 @@ async function consumeChatStream(
 			normalizer.push({ type: "meta", patch: { responseId: chunk.id } });
 		}
 
-		if (chunk.usage) {
+		if (
+			chunk.usage &&
+			[chunk.usage.promptTokens, chunk.usage.completionTokens, chunk.usage.totalTokens].some(
+				(value) => typeof value === "number",
+			)
+		) {
 			state.usage = {
+				availability:
+					(hasFinishReason || chunk.choices.length === 0 || chunk.choices[0]?.finishReason) &&
+					typeof chunk.usage.promptTokens === "number" &&
+					typeof chunk.usage.completionTokens === "number"
+						? "complete"
+						: "partial",
 				input: chunk.usage.promptTokens || 0,
 				output: chunk.usage.completionTokens || 0,
 				cacheRead: 0,
@@ -325,6 +356,7 @@ async function consumeChatStream(
 		if (!choice) continue;
 
 		if (choice.finishReason) {
+			hasFinishReason = true;
 			state.stopReason = mapChatStopReason(choice.finishReason);
 		}
 
@@ -380,6 +412,7 @@ async function consumeChatStream(
 
 			const argumentsValue = toolCall.function.arguments;
 			if (typeof argumentsValue === "string") {
+				block.authoritativeArguments = undefined;
 				normalizer.push({
 					type: "toolcall_delta",
 					contentIndex: block.contentIndex,
@@ -388,11 +421,14 @@ async function consumeChatStream(
 			} else {
 				const authoritativeArguments = toMistralToolArguments(argumentsValue);
 				if (block.authoritativeArguments === undefined) {
+					if (!normalizer.checkToolArgumentsObject(block.contentIndex, authoritativeArguments)) return;
 					normalizer.push({
 						type: "toolcall_delta",
 						contentIndex: block.contentIndex,
 						argsTextDelta: JSON.stringify(authoritativeArguments),
 					});
+				} else if (!normalizer.checkToolArgumentsObjectReplacement(block.contentIndex, authoritativeArguments)) {
+					return;
 				}
 				block.authoritativeArguments = authoritativeArguments;
 			}
@@ -400,6 +436,7 @@ async function consumeChatStream(
 	}
 
 	finishMistralContentBlock(normalizer, state);
+	if (!hasFinishReason || (state.stopReason !== "stop" && state.stopReason !== "toolUse")) return;
 	for (const block of state.toolBlocksByKey.values()) {
 		normalizer.push({
 			type: "toolcall_end",
@@ -457,7 +494,7 @@ function toMistralToolArguments(value: unknown): JsonObject {
 	if (value && typeof value === "object" && !Array.isArray(value)) {
 		return value as JsonObject;
 	}
-	return {};
+	throw new Error("Tool arguments must be a complete, valid JSON object");
 }
 
 function toFunctionTools(tools: Tool[]): Array<FunctionTool & { type: "function" }> {
@@ -488,7 +525,11 @@ function stripSymbolKeys(value: unknown): unknown {
 	return value;
 }
 
-function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompletionStreamRequestMessage[] {
+function toChatMessages(
+	messages: Message[],
+	supportsImages: boolean,
+	toolResultPayload?: ToolResultPayloadTracker,
+): ChatCompletionStreamRequestMessage[] {
 	const result: ChatCompletionStreamRequestMessage[] = [];
 
 	for (const msg of messages) {
@@ -570,6 +611,7 @@ function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompl
 			name: msg.toolName,
 			content: toolContent,
 		});
+		toolResultPayload?.include(msg);
 	}
 
 	return result;

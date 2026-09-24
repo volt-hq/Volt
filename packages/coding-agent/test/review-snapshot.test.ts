@@ -1,10 +1,25 @@
 import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	chmodSync,
+	cpSync,
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	renameSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { captureReviewGitHubContext } from "../src/core/github-pr-context.ts";
+import { delimiter, join, relative, resolve as resolvePath } from "node:path";
+import { pathToFileURL } from "node:url";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { capturePullRequestContextWithGitHubCli } from "../src/core/code-host/github-cli-context.ts";
+import * as githubDiscovery from "../src/core/code-host/github-cli-discovery.ts";
 import { normalizeReviewPath, type ReviewSnapshot, resolveReviewSnapshot } from "../src/core/review-snapshot.ts";
 
 const OPTIONS = { maxCommitRefBytes: 1_024, maxPullRequestNumber: 2_147_483_647 };
@@ -17,6 +32,17 @@ function run(cwd: string, command: string, ...args: string[]): string {
 
 function git(cwd: string, ...args: string[]): string {
 	return run(cwd, "git", ...args);
+}
+
+function processIsAlive(pidPath: string): boolean {
+	const pid = Number.parseInt(readFileSync(pidPath, "utf8"), 10);
+	if (!Number.isInteger(pid) || pid < 1) throw new Error(`Invalid process ID in ${pidPath}`);
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function installNodeCommandShim(directory: string, command: string, source: string): void {
@@ -36,9 +62,11 @@ function installNodeCommandShim(directory: string, command: string, source: stri
 
 interface GitHubShimConfig {
 	view: Record<string, unknown>;
+	omitViewFields?: string[];
 	finalHeadOid?: string;
 	graphql?: Record<string, unknown>;
 	maximumGraphqlRequests?: number;
+	graphqlGatePath?: string;
 }
 
 function graphqlKey(operation: string, id: string, cursor: string | null, manualOnly: boolean | null = null): string {
@@ -59,6 +87,17 @@ function graphqlConnection(field: string, nodes: unknown[], hasNextPage = false,
 }
 
 function installGitHubShim(directory: string, config: GitHubShimConfig): string {
+	const repositoryUrl = String(config.view.url).replace(/\/pull\/\d+$/, ".git");
+	if (!git(directory, "remote").split(/\r?\n/).includes("origin")) {
+		git(directory, "remote", "add", "origin", repositoryUrl);
+	}
+	// Model the local transport fixture as its GitHub repository. Remote selection and
+	// snapshot fetching still use the same source; #411 covers real URL validation + SSH.
+	const remoteUrl = git(directory, "remote", "get-url", "origin");
+	const canonicalize = githubDiscovery.canonicalizeGitHubRemoteUrl;
+	vi.spyOn(githubDiscovery, "canonicalizeGitHubRemoteUrl").mockImplementation((value) =>
+		canonicalize(value === remoteUrl ? repositoryUrl : value),
+	);
 	const bin = join(directory, "bin");
 	mkdirSync(bin, { recursive: true });
 	const configPath = join(bin, "gh-config.json");
@@ -67,20 +106,57 @@ function installGitHubShim(directory: string, config: GitHubShimConfig): string 
 	installNodeCommandShim(
 		bin,
 		"gh",
-		`import { appendFileSync, readFileSync } from "node:fs";
+		`import { appendFileSync, existsSync, readFileSync } from "node:fs";
 const config = JSON.parse(readFileSync(${JSON.stringify(configPath)}, "utf8"));
 const args = process.argv.slice(2);
+const view = {
+    author: { login: "review-author" },
+    state: "OPEN",
+    isDraft: false,
+    mergeable: "UNKNOWN",
+    statusCheckRollup: [],
+    ...config.view
+  };
+for (const field of config.omitViewFields ?? []) delete view[field];
 if (args[0] === "pr" && args[1] === "view") {
   const fields = args[args.indexOf("--json") + 1];
-  process.stdout.write(JSON.stringify(fields === "headRefOid" ? { headRefOid: config.finalHeadOid ?? config.view.headRefOid } : config.view));
+  if (fields !== "headRefOid") {
+    process.stderr.write('Unknown JSON field: "baseRefOid"');
+    process.exit(1);
+  }
+  const selector = args[2];
+  if (selector !== view.url) {
+    process.stderr.write("Pull request selector does not identify the fixture repository");
+    process.exit(1);
+  }
+  process.stdout.write(JSON.stringify({ headRefOid: config.finalHeadOid ?? view.headRefOid }));
 } else if (args[0] === "api" && args[1] === "graphql") {
+  if (args[args.indexOf("--hostname") + 1] !== new URL(config.view.url).host) {
+    process.stderr.write("GraphQL hostname does not identify the fixture host");
+    process.exit(1);
+  }
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
   const request = JSON.parse(input);
   const operation = /query\\s+(Volt\\w+)/.exec(request.query)?.[1];
   const variables = request.variables ?? {};
+  if (operation === "VoltReviewPullRequestMetadata") {
+    const [owner, name] = new URL(view.url).pathname.split('/').slice(1, 3);
+    if (variables.owner !== owner || variables.name !== name || variables.number !== view.number) process.exit(1);
+    const { statusCheckRollup, ...metadata } = view;
+    if (Array.isArray(statusCheckRollup)) metadata.commits = { nodes: [{ commit: {
+      id: 'COMMIT_fixture', oid: view.headRefOid,
+      statusCheckRollup: { contexts: { nodes: statusCheckRollup, pageInfo: { hasNextPage: false, endCursor: null } } }
+    } }] };
+    process.stdout.write(JSON.stringify({ data: { repository: { pullRequest: metadata } } }));
+    process.exit(0);
+  }
   const key = JSON.stringify([operation, variables.id, variables.cursor ?? null, variables.manualOnly ?? null]);
   appendFileSync(${JSON.stringify(logPath)}, JSON.stringify({ operation, variables }) + "\\n");
+  const initialOperations = new Set(["VoltReviewLinkedIssues", "VoltReviewPullRequestComments", "VoltReviewPullRequestReviews", "VoltReviewThreads"]);
+  if (config.graphqlGatePath && variables.cursor == null && initialOperations.has(operation)) {
+    while (!existsSync(config.graphqlGatePath)) await new Promise((resolve) => setTimeout(resolve, 10));
+  }
   const requestCount = readFileSync(${JSON.stringify(logPath)}, "utf8").trim().split("\\n").length;
   if (config.maximumGraphqlRequests !== undefined && requestCount > config.maximumGraphqlRequests) {
     process.stderr.write("GraphQL request limit exceeded");
@@ -126,16 +202,59 @@ function createSymlinkFixture(repository: string, path: string, target: string):
 describe("review snapshots", () => {
 	const tempDirectories: string[] = [];
 	const snapshots: ReviewSnapshot[] = [];
+	const servers: Server[] = [];
 	const initialPath = process.env.PATH;
 	const initialGitTrace = process.env.GIT_TRACE;
+	const initialGitConfigGlobal = process.env.GIT_CONFIG_GLOBAL;
+	const initialGitConfigNoSystem = process.env.GIT_CONFIG_NOSYSTEM;
+	const gitCommandConfigEnvironmentPattern = /^GIT_CONFIG_(?:COUNT|KEY_\d+|VALUE_\d+)$/;
+	const initialGitCommandConfigEnvironment = Object.fromEntries(
+		Object.entries(process.env).filter(
+			(entry): entry is [string, string] =>
+				gitCommandConfigEnvironmentPattern.test(entry[0]) && entry[1] !== undefined,
+		),
+	);
+
+	let repositorySeedRoot: string;
+	beforeAll(() => {
+		repositorySeedRoot = mkdtempSync(join(tmpdir(), "volt-review-snapshot-seeds-"));
+		const unborn = join(repositorySeedRoot, "unborn");
+		mkdirSync(unborn);
+		git(unborn, "init", "--initial-branch=main");
+		git(unborn, "config", "user.email", "review@example.com");
+		git(unborn, "config", "user.name", "Review Test");
+		git(unborn, "config", "commit.gpgsign", "false");
+
+		const committed = join(repositorySeedRoot, "committed");
+		cpSync(unborn, committed, { recursive: true, force: false, errorOnExist: true });
+		writeFileSync(join(committed, "tracked.txt"), "before\n");
+		git(committed, "add", "tracked.txt");
+		git(committed, "commit", "-m", "initial");
+	});
+	afterAll(() => {
+		if (repositorySeedRoot) rmSync(repositorySeedRoot, { recursive: true, force: true });
+	});
 
 	afterEach(async () => {
+		vi.restoreAllMocks();
 		for (const snapshot of snapshots.splice(0)) await snapshot.dispose();
+		for (const server of servers.splice(0)) {
+			server.closeAllConnections();
+			await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
+		}
 		for (const directory of tempDirectories.splice(0)) rmSync(directory, { recursive: true, force: true });
 		if (initialPath === undefined) delete process.env.PATH;
 		else process.env.PATH = initialPath;
 		if (initialGitTrace === undefined) delete process.env.GIT_TRACE;
 		else process.env.GIT_TRACE = initialGitTrace;
+		if (initialGitConfigGlobal === undefined) delete process.env.GIT_CONFIG_GLOBAL;
+		else process.env.GIT_CONFIG_GLOBAL = initialGitConfigGlobal;
+		if (initialGitConfigNoSystem === undefined) delete process.env.GIT_CONFIG_NOSYSTEM;
+		else process.env.GIT_CONFIG_NOSYSTEM = initialGitConfigNoSystem;
+		for (const key of Object.keys(process.env)) {
+			if (gitCommandConfigEnvironmentPattern.test(key)) delete process.env[key];
+		}
+		Object.assign(process.env, initialGitCommandConfigEnvironment);
 	});
 
 	function createRepository(withCommit = true): string {
@@ -145,16 +264,251 @@ describe("review snapshots", () => {
 		);
 		mkdirSync(directory, { recursive: true });
 		tempDirectories.push(directory);
-		git(directory, "init", "--initial-branch=main");
-		git(directory, "config", "user.email", "review@example.com");
-		git(directory, "config", "user.name", "Review Test");
-		git(directory, "config", "commit.gpgsign", "false");
-		if (withCommit) {
-			writeFileSync(join(directory, "tracked.txt"), "before\n");
-			git(directory, "add", "tracked.txt");
-			git(directory, "commit", "-m", "initial");
-		}
+		// Copy standalone repositories, not linked worktrees or shared object stores.
+		// Config, refs, index, objects and working files remain independent per test.
+		cpSync(join(repositorySeedRoot, withCommit ? "committed" : "unborn"), directory, {
+			recursive: true,
+			force: false,
+			errorOnExist: true,
+		});
 		return directory;
+	}
+
+	function createStaleBranchFixture(remoteName: string): {
+		repository: string;
+		remote: string;
+		staleBase: string;
+		authoritativeBase: string;
+		headCommit: string;
+	} {
+		const repository = createRepository();
+		const remote = join(tmpdir(), `volt-review-branch-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirectories.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(repository, "remote", "add", remoteName, remote);
+		git(repository, "push", "-u", remoteName, "main");
+		if (remoteName === "origin") git(repository, "remote", "set-head", "origin", "main");
+		const staleBase = git(repository, "rev-parse", "main");
+
+		writeFileSync(join(repository, "upstream.txt"), "already merged upstream\n");
+		git(repository, "add", "upstream.txt");
+		git(repository, "commit", "-m", "upstream change");
+		const authoritativeBase = git(repository, "rev-parse", "HEAD");
+		git(repository, "push", remoteName, "main");
+
+		git(repository, "checkout", "-b", "feature");
+		writeFileSync(join(repository, "feature.txt"), "feature only\n");
+		git(repository, "add", "feature.txt");
+		git(repository, "commit", "-m", "feature change");
+		const headCommit = git(repository, "rev-parse", "HEAD");
+		git(repository, "branch", "-f", "main", staleBase);
+		git(repository, "update-ref", `refs/remotes/${remoteName}/main`, staleBase);
+		rmSync(join(repository, ".git", "FETCH_HEAD"), { force: true });
+		return { repository, remote, staleBase, authoritativeBase, headCommit };
+	}
+
+	function createRemoteOnlyBranchFixture(): {
+		repository: string;
+		upstream: string;
+		staleBase: string;
+		authoritativeBase: string;
+		headCommit: string;
+	} {
+		const upstream = createRepository();
+		const remote = join(tmpdir(), `volt-review-remote-only-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirectories.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(upstream, "remote", "add", "origin", remote);
+		git(upstream, "push", "-u", "origin", "main");
+		const staleBase = git(upstream, "rev-parse", "HEAD");
+
+		const repository = join(
+			tmpdir(),
+			`volt-review-remote-only-workspace-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		tempDirectories.push(repository);
+		git(tmpdir(), "clone", remote, repository);
+		git(repository, "config", "user.email", "review@example.com");
+		git(repository, "config", "user.name", "Review Test");
+		git(repository, "checkout", "-b", "feature");
+		writeFileSync(join(repository, "feature.txt"), "feature only\n");
+		git(repository, "add", "feature.txt");
+		git(repository, "commit", "-m", "feature change");
+		const headCommit = git(repository, "rev-parse", "HEAD");
+
+		writeFileSync(join(upstream, "upstream.txt"), "advanced outside the workspace\n");
+		git(upstream, "add", "upstream.txt");
+		git(upstream, "commit", "-m", "advance remote base");
+		const authoritativeBase = git(upstream, "rev-parse", "HEAD");
+		git(upstream, "push", "origin", "main");
+		rmSync(join(repository, ".git", "FETCH_HEAD"), { force: true });
+		return { repository, upstream, staleBase, authoritativeBase, headCommit };
+	}
+
+	function createShallowBranchFixture(
+		depth: number,
+		withLocalCommit: boolean,
+	): {
+		repository: string;
+		baseCommit: string;
+		headCommit: string;
+		omittedParent: string;
+		localObjects: string;
+	} {
+		const seed = createRepository();
+		const omittedParent = git(seed, "rev-parse", "HEAD");
+		writeFileSync(join(seed, "tracked.txt"), "base\n");
+		git(seed, "commit", "-am", "base");
+		const baseCommit = git(seed, "rev-parse", "HEAD");
+		git(seed, "checkout", "-b", "feature");
+		writeFileSync(join(seed, "feature.txt"), "feature\n");
+		git(seed, "add", "feature.txt");
+		git(seed, "commit", "-m", "feature");
+
+		const remote = join(tmpdir(), `volt-review-shallow-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirectories.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(seed, "remote", "add", "origin", remote);
+		git(seed, "push", "origin", "main", "feature");
+
+		const repository = join(
+			tmpdir(),
+			`volt-review-shallow-branch-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		mkdirSync(repository, { recursive: true });
+		tempDirectories.push(repository);
+		git(repository, "init", "--initial-branch=feature");
+		git(repository, "config", "user.email", "review@example.com");
+		git(repository, "config", "user.name", "Review Test");
+		git(repository, "remote", "add", "origin", relative(repository, remote));
+		git(repository, "fetch", `--depth=${depth}`, "origin", "+refs/heads/feature:refs/remotes/origin/feature");
+		git(repository, "checkout", "-B", "feature", "refs/remotes/origin/feature");
+		if (withLocalCommit) {
+			writeFileSync(join(repository, "local.txt"), "local only\n");
+			git(repository, "add", "local.txt");
+			git(repository, "commit", "-m", "local only");
+		}
+		const headCommit = git(repository, "rev-parse", "HEAD");
+		const localObjects = git(repository, "rev-parse", "--path-format=absolute", "--git-path", "objects");
+		return { repository, baseCommit, headCommit, omittedParent, localObjects };
+	}
+
+	function createBloblessPartialCloneFixture(pullRequestNumber: number): {
+		repository: string;
+		baseCommit: string;
+		headCommit: string;
+		localObjects: string;
+	} {
+		const seed = createRepository();
+		const baseCommit = git(seed, "rev-parse", "HEAD");
+		git(seed, "checkout", "-b", "feature");
+		writeFileSync(join(seed, "tracked.txt"), "partial clone feature\n");
+		git(seed, "commit", "-am", "partial clone feature");
+		const headCommit = git(seed, "rev-parse", "HEAD");
+
+		const remote = join(tmpdir(), `volt-review-partial-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirectories.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(remote, "config", "uploadpack.allowFilter", "true");
+		git(seed, "remote", "add", "origin", remote);
+		git(seed, "push", "origin", "main", "feature", `HEAD:refs/pull/${pullRequestNumber}/head`);
+
+		const repository = join(
+			tmpdir(),
+			`volt-review-partial-clone-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		tempDirectories.push(repository);
+		git(
+			tmpdir(),
+			"clone",
+			"--filter=blob:none",
+			"--no-checkout",
+			"--branch",
+			"feature",
+			pathToFileURL(remote).href,
+			repository,
+		);
+		expect(git(repository, "rev-parse", "--is-shallow-repository")).toBe("false");
+		expect(git(repository, "config", "--local", "--get", "remote.origin.promisor")).toBe("true");
+		expect(git(repository, "rev-list", "--objects", "--all", "--missing=print")).toMatch(/^\?/m);
+		const localObjects = git(repository, "rev-parse", "--path-format=absolute", "--git-path", "objects");
+		return { repository, baseCommit, headCommit, localObjects };
+	}
+
+	async function serveAuthenticatedGitRepository(remote: string): Promise<{
+		url: string;
+		extraHeader: string;
+		authenticatedRequestCount(): number;
+		deniedRequestCount(): number;
+	}> {
+		const requiredHeader = 'review-"config\\secret';
+		let authenticatedRequestCount = 0;
+		let deniedRequestCount = 0;
+		const server = createServer((request, response) => {
+			if (request.headers["x-volt-auth"] !== requiredHeader) {
+				deniedRequestCount++;
+				response.writeHead(403, { "content-type": "text/plain" });
+				response.end("missing repository-local authentication header\n");
+				return;
+			}
+			authenticatedRequestCount++;
+			let pathname: string;
+			try {
+				pathname = decodeURIComponent(new URL(request.url ?? "/", "http://localhost").pathname);
+			} catch {
+				response.writeHead(400);
+				response.end();
+				return;
+			}
+			const prefix = "/remote.git/";
+			if (!pathname.startsWith(prefix)) {
+				response.writeHead(404);
+				response.end();
+				return;
+			}
+			const relativePath = pathname.slice(prefix.length);
+			if (
+				!relativePath ||
+				relativePath.split("/").some((segment) => !segment || segment === "." || segment === "..")
+			) {
+				response.writeHead(400);
+				response.end();
+				return;
+			}
+			let content: Buffer;
+			try {
+				content = readFileSync(join(remote, relativePath));
+			} catch {
+				response.writeHead(404);
+				response.end();
+				return;
+			}
+			response.writeHead(200, {
+				"cache-control": "no-cache",
+				"content-type": relativePath === "info/refs" ? "text/plain" : "application/octet-stream",
+			});
+			if (request.method === "HEAD") response.end();
+			else response.end(content);
+		});
+		await new Promise<void>((resolveListen, rejectListen) => {
+			server.once("error", rejectListen);
+			server.listen(0, "127.0.0.1", () => {
+				server.off("error", rejectListen);
+				resolveListen();
+			});
+		});
+		servers.push(server);
+		const { port } = server.address() as AddressInfo;
+		return {
+			url: `http://127.0.0.1:${port}/remote.git`,
+			extraHeader: `X-Volt-Auth: ${requiredHeader}`,
+			authenticatedRequestCount: () => authenticatedRequestCount,
+			deniedRequestCount: () => deniedRequestCount,
+		};
 	}
 
 	async function resolve(
@@ -173,6 +527,47 @@ describe("review snapshots", () => {
 		if (!file || !file.available) throw new Error(`Expected ${path} to be available`);
 		return file;
 	}
+
+	it.each([false, true])("keeps seeded repositories isolated (with commit: %s)", (withCommit) => {
+		const first = createRepository(withCommit);
+		const second = createRepository(withCommit);
+		const initialHead = withCommit ? git(first, "rev-parse", "HEAD") : undefined;
+		git(first, "config", "user.name", "Changed fixture");
+		git(first, "checkout", "-b", "fixture-only");
+		writeFileSync(join(first, "tracked.txt"), "fixture-only commit\n");
+		git(first, "add", "tracked.txt");
+		git(first, "commit", "-m", "fixture-only");
+		writeFileSync(join(first, "tracked.txt"), "fixture-only staged change\n");
+		git(first, "add", "tracked.txt");
+		git(first, "remote", "add", "fixture-only", second);
+		git(first, "worktree", "add", "--detach", join(first, "extra-worktree"), "HEAD");
+		if (initialHead) {
+			// Git objects are read-only; corrupt this copy in place to detect hardlinks.
+			const object = join(first, ".git", "objects", initialHead.slice(0, 2), initialHead.slice(2));
+			chmodSync(object, 0o600);
+			writeFileSync(object, "corrupt");
+		}
+
+		// Check both an existing sibling and a later copy of the seed.
+		const third = createRepository(withCommit);
+		for (const other of [second, third]) {
+			expect(git(other, "config", "user.name")).toBe("Review Test");
+			expect(git(other, "symbolic-ref", "--short", "HEAD")).toBe("main");
+			expect(git(other, "status", "--porcelain")).toBe("");
+			expect(git(other, "branch", "--list", "fixture-only")).toBe("");
+			expect(git(other, "remote")).toBe("");
+			expect(git(other, "worktree", "list", "--porcelain").match(/^worktree /gm)).toHaveLength(1);
+			expect(git(other, "ls-files")).toBe(withCommit ? "tracked.txt" : "");
+			if (withCommit) {
+				expect(git(other, "rev-parse", "HEAD")).toBe(initialHead);
+				expect(git(other, "show", "HEAD:tracked.txt")).toBe("before");
+				expect(readFileSync(join(other, "tracked.txt"), "utf8")).toBe("before\n");
+			} else {
+				expect(git(other, "for-each-ref", "--format=%(refname)")).toBe("");
+				expect(existsSync(join(other, "tracked.txt"))).toBe(false);
+			}
+		}
+	});
 
 	it("captures staged, unstaged, untracked, deleted, binary, executable, and symlink state immutably", async () => {
 		const repository = createRepository();
@@ -416,16 +811,22 @@ describe("review snapshots", () => {
 		const second = await resolve({ kind: "uncommitted" }, repository);
 		expect(first.changedFiles.find((file) => file.path === "tracked.txt")).toMatchObject({
 			status: "modified",
+			additions: 1,
+			deletions: 1,
 			binary: false,
 			reviewable: true,
 		});
 		expect(first.changedFiles.find((file) => file.path === "new-name.txt")).toMatchObject({
 			status: "renamed",
 			previousPath: "old-name.txt",
+			additions: 1,
+			deletions: 1,
 			binary: false,
 			reviewable: true,
 		});
 		expect(first.changedFiles.find((file) => file.path === "existing.bin")).toMatchObject({
+			additions: 0,
+			deletions: 0,
 			binary: true,
 			reviewable: false,
 			unsupportedReason: "Binary content has no reviewable text hunks.",
@@ -433,6 +834,52 @@ describe("review snapshots", () => {
 		expect(first.changedFiles.map((file) => [file.path, file.hunks.map((hunk) => hunk.id)])).toEqual(
 			second.changedFiles.map((file) => [file.path, file.hunks.map((hunk) => hunk.id)]),
 		);
+	});
+
+	it("rejects a changed file missing from Git numstat instead of reporting zero counts", async () => {
+		const repository = createRepository();
+		const realGit =
+			process.platform === "win32"
+				? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+				: run(repository, "which", "git");
+		if (!realGit) throw new Error("Unable to locate git executable");
+		const bin = join(repository, "missing-numstat-bin");
+		mkdirSync(bin);
+		installNodeCommandShim(
+			bin,
+			"git",
+			`import { spawnSync } from "node:child_process";
+const args = process.argv.slice(2);
+if (!args.includes("--numstat")) {
+  const result = spawnSync(${JSON.stringify(realGit)}, args, { cwd: process.cwd(), env: process.env, stdio: "inherit" });
+  if (result.error) throw result.error;
+  process.exitCode = result.status ?? 1;
+}
+`,
+		);
+		process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+
+		const result = await resolveReviewSnapshot({ kind: "commit", sha: "HEAD" }, repository, OPTIONS);
+		if (!("error" in result)) snapshots.push(result);
+		expect(result).toEqual({ error: "git diff --numstat is missing a changed-file entry." });
+	});
+
+	it("retains explicit zero line counts for a mode-only change", async () => {
+		const repository = createRepository();
+		git(repository, "update-index", "--chmod=+x", "--", "tracked.txt");
+		git(repository, "commit", "-m", "change executable mode");
+
+		const snapshot = await resolve({ kind: "commit", sha: "HEAD" }, repository);
+		expect(snapshot.changedFiles).toMatchObject([
+			{
+				path: "tracked.txt",
+				additions: 0,
+				deletions: 0,
+				binary: false,
+				base: { mode: "100644" },
+				head: { mode: "100755" },
+			},
+		]);
 	});
 
 	it("rejects oversized on-demand blobs before invoking cat-file", async () => {
@@ -485,6 +932,417 @@ describe("review snapshots", () => {
 		expect((await readAvailableFile(snapshot, "head", "tracked.txt")).content.toString()).toBe("feature\n");
 	});
 
+	it("refreshes short branch bases without changing stale workspace refs", async () => {
+		const { repository, staleBase, authoritativeBase, headCommit } = createStaleBranchFixture("origin");
+		for (const target of [
+			{ kind: "branch" as const, base: "main" },
+			{ kind: "branch" as const, base: "origin/main" },
+			{ kind: "branch" as const },
+		]) {
+			const snapshot = await resolve(target, repository);
+			expect(snapshot.description).toBe("branch changes vs origin/main");
+			expect(snapshot.branchBase).toEqual({
+				kind: "remote",
+				remote: "origin",
+				remoteRef: "refs/heads/main",
+			});
+			expect(snapshot.identity).toMatchObject({
+				baseCommit: authoritativeBase,
+				mergeBaseCommit: authoritativeBase,
+				headCommit,
+			});
+			expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		}
+
+		for (const base of ["refs/heads/main", "refs/remotes/origin/main"]) {
+			const snapshot = await resolve({ kind: "branch", base }, repository);
+			expect(snapshot.description).toBe(`branch changes vs ${base}`);
+			expect(snapshot.branchBase).toEqual({ kind: "local", ref: base });
+			expect(snapshot.identity.baseCommit).toBe(staleBase);
+			expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt", "upstream.txt"]);
+		}
+
+		expect(git(repository, "rev-parse", "main")).toBe(staleBase);
+		expect(git(repository, "rev-parse", "origin/main")).toBe(staleBase);
+		expect(git(repository, "rev-parse", "HEAD")).toBe(headCommit);
+		expect(existsSync(join(repository, ".git", "FETCH_HEAD"))).toBe(false);
+	});
+
+	it("recaptures a remote-only branch base from its durable locator after snapshot disposal", async () => {
+		const { repository, upstream, staleBase, authoritativeBase, headCommit } = createRemoteOnlyBranchFixture();
+		const localObjectStatus = (oid: string): number | null =>
+			spawnSync("git", ["cat-file", "-e", `${oid}^{commit}`], { cwd: repository }).status;
+		expect(localObjectStatus(authoritativeBase)).not.toBe(0);
+
+		const first = await resolve({ kind: "branch", base: "main" }, repository);
+		expect(first.identity).toMatchObject({ baseCommit: authoritativeBase, headCommit });
+		expect(first.branchBase).toEqual({
+			kind: "remote",
+			remote: "origin",
+			remoteRef: "refs/heads/main",
+		});
+		expect(localObjectStatus(authoritativeBase)).not.toBe(0);
+		await first.dispose();
+		expect(localObjectStatus(authoritativeBase)).not.toBe(0);
+		if (!first.branchBase) throw new Error("Expected a durable branch base locator");
+
+		writeFileSync(join(upstream, "upstream-second.txt"), "advanced again\n");
+		git(upstream, "add", "upstream-second.txt");
+		git(upstream, "commit", "-m", "advance remote base again");
+		const secondBase = git(upstream, "rev-parse", "HEAD");
+		git(upstream, "push", "origin", "main");
+
+		const rerun = await resolve({ kind: "branch", branchBase: first.branchBase }, repository);
+		expect(rerun.identity).toMatchObject({ baseCommit: secondBase, headCommit });
+		expect(rerun.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		expect(git(repository, "rev-parse", "main")).toBe(staleBase);
+		expect(git(repository, "rev-parse", "origin/main")).toBe(staleBase);
+		expect(existsSync(join(repository, ".git", "FETCH_HEAD"))).toBe(false);
+	});
+
+	it("ignores a colliding tag when resolving a short branch base", async () => {
+		const { repository, staleBase, authoritativeBase, headCommit } = createStaleBranchFixture("origin");
+		git(repository, "tag", "main", staleBase);
+
+		const snapshot = await resolve({ kind: "branch", base: "main" }, repository);
+		expect(snapshot.description).toBe("branch changes vs origin/main");
+		expect(snapshot.identity).toMatchObject({
+			baseCommit: authoritativeBase,
+			mergeBaseCommit: authoritativeBase,
+			headCommit,
+		});
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+	});
+
+	it("skips tag-only names while auto-detecting a branch base", async () => {
+		const repository = createRepository();
+		git(repository, "branch", "-m", "master");
+		git(repository, "tag", "main");
+		git(repository, "checkout", "-b", "feature");
+		writeFileSync(join(repository, "tracked.txt"), "feature\n");
+		git(repository, "commit", "-am", "feature");
+
+		const snapshot = await resolve({ kind: "branch" }, repository);
+		expect(snapshot.description).toBe("branch changes vs master");
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["tracked.txt"]);
+	});
+
+	it("resolves relative filesystem URLs before refreshing branch bases", async () => {
+		const { repository, remote, staleBase, authoritativeBase } = createStaleBranchFixture("origin");
+		const relativeRemote = relative(repository, remote);
+		git(repository, "remote", "set-url", "origin", relativeRemote);
+
+		const snapshot = await resolve({ kind: "branch", base: "main" }, repository);
+		expect(snapshot.identity).toMatchObject({
+			baseCommit: authoritativeBase,
+			mergeBaseCommit: authoritativeBase,
+		});
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		expect(git(repository, "remote", "get-url", "origin")).toBe(relativeRemote);
+		expect(git(repository, "rev-parse", "main")).toBe(staleBase);
+		expect(git(repository, "rev-parse", "origin/main")).toBe(staleBase);
+	});
+
+	it("applies insteadOf URL rewrites once when refreshing remote branch bases", async () => {
+		const { repository, remote, staleBase, authoritativeBase, headCommit } = createStaleBranchFixture("origin");
+		const rewriteRoot = join(
+			tmpdir(),
+			`volt-review-url-rewrite-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		const rewrittenRemote = join(rewriteRoot, "mirror", "remote.git");
+		mkdirSync(join(rewriteRoot, "mirror"), { recursive: true });
+		renameSync(remote, rewrittenRemote);
+		tempDirectories.push(rewriteRoot);
+
+		const rawPrefix = pathToFileURL(rewriteRoot).href;
+		const rewrittenPrefix = `${rawPrefix}/mirror`;
+		const rawRemote = `${rawPrefix}/remote.git`;
+		git(repository, "remote", "set-url", "origin", rawRemote);
+		git(repository, "config", "--local", `url.${rewrittenPrefix}.insteadOf`, rawPrefix);
+		expect(git(repository, "config", "--local", "--get", "remote.origin.url")).toBe(rawRemote);
+		expect(git(repository, "remote", "get-url", "origin")).toBe(pathToFileURL(rewrittenRemote).href);
+
+		const snapshot = await resolve({ kind: "branch", base: "main" }, repository);
+		expect(snapshot.identity).toMatchObject({
+			baseCommit: authoritativeBase,
+			mergeBaseCommit: authoritativeBase,
+			headCommit,
+		});
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		expect(git(repository, "rev-parse", "main")).toBe(staleBase);
+		expect(git(repository, "rev-parse", "origin/main")).toBe(staleBase);
+	});
+
+	it("applies command-scope URL rewrites once while preserving other command config", async () => {
+		const { repository, remote, authoritativeBase, headCommit } = createStaleBranchFixture("origin");
+		const rewriteRoot = join(
+			tmpdir(),
+			`volt-review-command-url-rewrite-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		const rewrittenRemote = join(rewriteRoot, "mirror", "remote.git");
+		mkdirSync(join(rewriteRoot, "mirror"), { recursive: true });
+		renameSync(remote, rewrittenRemote);
+		tempDirectories.push(rewriteRoot);
+
+		const rawPrefix = pathToFileURL(rewriteRoot).href;
+		const rewrittenPrefix = `${rawPrefix}/mirror`;
+		git(repository, "remote", "set-url", "origin", `${rawPrefix}/remote.git`);
+		const globalConfig = join(repository, "deny-file-transport.config");
+		git(repository, "config", "--file", globalConfig, "protocol.file.allow", "never");
+		process.env.GIT_CONFIG_GLOBAL = globalConfig;
+		process.env.GIT_CONFIG_COUNT = "2";
+		process.env.GIT_CONFIG_KEY_0 = `url.${rewrittenPrefix}.insteadOf`;
+		process.env.GIT_CONFIG_VALUE_0 = rawPrefix;
+		process.env.GIT_CONFIG_KEY_1 = "protocol.file.allow";
+		process.env.GIT_CONFIG_VALUE_1 = "always";
+		expect(git(repository, "remote", "get-url", "origin")).toBe(pathToFileURL(rewrittenRemote).href);
+		const denied = spawnSync("git", ["ls-remote", pathToFileURL(rewrittenRemote).href], {
+			cwd: repository,
+			encoding: "utf8",
+			env: { ...process.env, GIT_CONFIG_COUNT: "0" },
+		});
+		expect(denied.status).not.toBe(0);
+		expect(denied.stderr).toContain("transport 'file' not allowed");
+
+		const snapshot = await resolve({ kind: "branch", base: "main" }, repository);
+		expect(snapshot.identity).toMatchObject({
+			baseCommit: authoritativeBase,
+			mergeBaseCommit: authoritativeBase,
+			headCommit,
+		});
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+	});
+
+	it("preserves repository-local fetch configuration for isolated branch and PR snapshots", async () => {
+		const { repository, remote, staleBase, authoritativeBase, headCommit } = createStaleBranchFixture("origin");
+		git(repository, "push", remote, `${headCommit}:refs/pull/11/head`);
+		git(remote, "update-server-info");
+		const authenticatedRemote = await serveAuthenticatedGitRepository(remote);
+		git(repository, "remote", "set-url", "origin", authenticatedRemote.url);
+		git(
+			repository,
+			"config",
+			"--local",
+			`http.${authenticatedRemote.url}.extraHeader`,
+			authenticatedRemote.extraHeader,
+		);
+
+		const branchSnapshot = await resolve({ kind: "branch", base: "main" }, repository);
+		expect(branchSnapshot.identity).toMatchObject({
+			baseCommit: authoritativeBase,
+			mergeBaseCommit: authoritativeBase,
+			headCommit,
+		});
+		expect(branchSnapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		const branchRequestCount = authenticatedRemote.authenticatedRequestCount();
+		expect(branchRequestCount).toBeGreaterThan(0);
+
+		installGitHubShim(repository, {
+			view: {
+				id: "PR_local_config_11",
+				number: 11,
+				title: "Repository-local fetch config",
+				body: "Body",
+				baseRefName: "main",
+				headRefName: "feature",
+				url: "https://example.test/o/r/pull/11",
+				baseRefOid: authoritativeBase,
+				headRefOid: headCommit,
+			},
+		});
+		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
+		const pullRequestSnapshot = await resolve({ kind: "pr", number: "11" }, repository);
+		expect(pullRequestSnapshot.identity.pullRequest).toMatchObject({
+			number: 11,
+			baseRefOid: authoritativeBase,
+			headRefOid: headCommit,
+		});
+		expect(pullRequestSnapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		expect(authenticatedRemote.authenticatedRequestCount()).toBeGreaterThan(branchRequestCount);
+		expect(authenticatedRemote.deniedRequestCount()).toBe(0);
+		expect(git(repository, "rev-parse", "main")).toBe(staleBase);
+		expect(git(repository, "rev-parse", "origin/main")).toBe(staleBase);
+		expect(existsSync(join(repository, ".git", "FETCH_HEAD"))).toBe(false);
+	});
+
+	it("preserves conditionally included global fetch configuration", async () => {
+		const { repository, remote, authoritativeBase, headCommit } = createStaleBranchFixture("origin");
+		git(remote, "update-server-info");
+		const authenticatedRemote = await serveAuthenticatedGitRepository(remote);
+		git(repository, "remote", "set-url", "origin", authenticatedRemote.url);
+
+		const conditionalConfig = join(repository, "conditional-global.config");
+		git(
+			repository,
+			"config",
+			"--file",
+			conditionalConfig,
+			`http.${authenticatedRemote.url}.extraHeader`,
+			authenticatedRemote.extraHeader,
+		);
+		const gitDirectory = git(repository, "rev-parse", "--absolute-git-dir");
+		process.env.GIT_CONFIG_NOSYSTEM = "1";
+		for (const [index, condition] of [`gitdir:${gitDirectory}`, "onbranch:feature"].entries()) {
+			const globalConfig = join(repository, `global-${index}.config`);
+			git(repository, "config", "--file", globalConfig, `includeIf.${condition}.path`, conditionalConfig);
+			process.env.GIT_CONFIG_GLOBAL = globalConfig;
+			expect(
+				git(repository, "config", "--show-scope", "--get-all", `http.${authenticatedRemote.url}.extraHeader`),
+			).toBe(`global\t${authenticatedRemote.extraHeader}`);
+
+			const snapshot = await resolve({ kind: "branch", base: "main" }, repository);
+			expect(snapshot.identity).toMatchObject({
+				baseCommit: authoritativeBase,
+				mergeBaseCommit: authoritativeBase,
+				headCommit,
+			});
+			expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		}
+		expect(authenticatedRemote.authenticatedRequestCount()).toBeGreaterThan(0);
+		expect(authenticatedRemote.deniedRequestCount()).toBe(0);
+	});
+
+	it("refreshes a configured non-origin upstream for a plain branch name", async () => {
+		const { repository, staleBase, authoritativeBase } = createStaleBranchFixture("upstream");
+		const snapshot = await resolve({ kind: "branch", base: "main" }, repository);
+		expect(snapshot.description).toBe("branch changes vs upstream/main");
+		expect(snapshot.identity).toMatchObject({
+			baseCommit: authoritativeBase,
+			mergeBaseCommit: authoritativeBase,
+		});
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+		expect(git(repository, "rev-parse", "main")).toBe(staleBase);
+		expect(git(repository, "rev-parse", "upstream/main")).toBe(staleBase);
+	});
+
+	it("preserves shallow boundaries while refreshing remote branch bases", async () => {
+		const { repository, baseCommit, headCommit, omittedParent, localObjects } = createShallowBranchFixture(2, true);
+		expect(git(repository, "rev-parse", "--is-shallow-repository")).toBe("true");
+		expect(spawnSync("git", ["cat-file", "-e", `${omittedParent}^{commit}`], { cwd: repository }).status).not.toBe(0);
+
+		const snapshot = await resolve({ kind: "branch", base: "origin/main" }, repository);
+		expect(snapshot.identity).toMatchObject({ baseCommit, mergeBaseCommit: baseCommit, headCommit });
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["feature.txt", "local.txt"]);
+
+		const unavailableLocalObjects = `${localObjects}-unavailable`;
+		renameSync(localObjects, unavailableLocalObjects);
+		try {
+			expect((await readAvailableFile(snapshot, "head", "feature.txt")).content.toString()).toBe("feature\n");
+			expect((await readAvailableFile(snapshot, "head", "local.txt")).content.toString()).toBe("local only\n");
+			const checkout = await snapshot.materializeHead();
+			expect(readFileSync(join(checkout, "local.txt"), "utf8").replaceAll("\r\n", "\n")).toBe("local only\n");
+		} finally {
+			renameSync(unavailableLocalObjects, localObjects);
+		}
+	});
+
+	it("rejects remote-backed branch reviews from partial clones before borrowing promised objects", async () => {
+		const { repository } = createBloblessPartialCloneFixture(12);
+		const error =
+			"Remote-backed branch reviews are not supported from partial clones. Use a complete clone and retry.";
+		await expect(
+			resolveReviewSnapshot({ kind: "branch", base: "origin/main" }, repository, OPTIONS),
+		).resolves.toEqual({ error, remoteError: error });
+	});
+
+	it("reports when shallow history omits the remote branch merge base", async () => {
+		const { repository, baseCommit } = createShallowBranchFixture(1, false);
+		expect(git(repository, "rev-parse", "--is-shallow-repository")).toBe("true");
+		expect(spawnSync("git", ["cat-file", "-e", `${baseCommit}^{commit}`], { cwd: repository }).status).not.toBe(0);
+
+		const error =
+			"Could not resolve the branch merge base from the available shallow history. Deepen or unshallow the repository and retry.";
+		await expect(
+			resolveReviewSnapshot({ kind: "branch", base: "origin/main" }, repository, OPTIONS),
+		).resolves.toEqual({
+			error,
+			remoteError: error,
+		});
+	});
+
+	it("fails a remote base refresh without falling back and removes the temporary source", async () => {
+		const { repository, staleBase } = createStaleBranchFixture("origin");
+		const realGit =
+			process.platform === "win32"
+				? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+				: run(repository, "which", "git");
+		if (!realGit) throw new Error("Unable to locate git executable");
+		const bin = join(repository, "failed-branch-fetch-bin");
+		const temporaryDirectoryPath = join(repository, "failed-branch-fetch-directory");
+		mkdirSync(bin);
+		installNodeCommandShim(
+			bin,
+			"git",
+			`import { writeFileSync } from "node:fs";\nimport { spawnSync } from "node:child_process";\nconst args = process.argv.slice(2);\nconst gitDir = args.find((arg) => arg.startsWith("--git-dir="))?.slice("--git-dir=".length);\nif (args.includes("fetch") && gitDir?.includes("volt-review-branch-")) {\n  writeFileSync(${JSON.stringify(temporaryDirectoryPath)}, gitDir);\n  process.stderr.write("forced branch fetch failure\\n");\n  process.exit(1);\n} else {\n  const result = spawnSync(${JSON.stringify(realGit)}, args, { cwd: process.cwd(), env: process.env, stdio: "inherit" });\n  if (result.error) throw result.error;\n  process.exitCode = result.status ?? 1;\n}\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+
+		const result = await resolveReviewSnapshot({ kind: "branch", base: "main" }, repository, OPTIONS);
+		expect(result).toMatchObject({
+			error: expect.stringContaining("forced branch fetch failure"),
+			remoteError: "Could not refresh the review base branch.",
+		});
+		expect(git(repository, "rev-parse", "main")).toBe(staleBase);
+		const temporaryDirectory = readFileSync(temporaryDirectoryPath, "utf8");
+		expect(existsSync(temporaryDirectory)).toBe(false);
+		tempDirectories.splice(tempDirectories.indexOf(repository), 1);
+		rmSync(repository, { recursive: true });
+		expect(existsSync(repository)).toBe(false);
+	});
+
+	it("cancels a remote base fetch and removes the temporary source", async () => {
+		const { repository } = createStaleBranchFixture("origin");
+		const realGit =
+			process.platform === "win32"
+				? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+				: run(repository, "which", "git");
+		if (!realGit) throw new Error("Unable to locate git executable");
+		const bin = join(repository, "delayed-branch-fetch-bin");
+		const startedPath = join(repository, "delayed-branch-fetch-started");
+		const temporaryDirectoryPath = join(repository, "delayed-branch-fetch-directory");
+		mkdirSync(bin);
+		installNodeCommandShim(
+			bin,
+			"git",
+			`import { writeFileSync } from "node:fs";\nimport { spawnSync } from "node:child_process";\nconst args = process.argv.slice(2);\nconst gitDir = args.find((arg) => arg.startsWith("--git-dir="))?.slice("--git-dir=".length);\nif (args.includes("fetch") && gitDir?.includes("volt-review-branch-")) {\n  writeFileSync(${JSON.stringify(startedPath)}, String(process.pid));\n  writeFileSync(${JSON.stringify(temporaryDirectoryPath)}, gitDir);\n  setInterval(() => {}, 1_000);\n} else {\n  const result = spawnSync(${JSON.stringify(realGit)}, args, { cwd: process.cwd(), env: process.env, stdio: "inherit" });\n  if (result.error) throw result.error;\n  process.exitCode = result.status ?? 1;\n}\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+		const controller = new AbortController();
+		const resolution = resolveReviewSnapshot({ kind: "branch", base: "main" }, repository, {
+			...OPTIONS,
+			signal: controller.signal,
+		});
+		const waitOptions = { timeout: 15_000 };
+		let fetchStarted = false;
+		try {
+			await Promise.race([
+				vi
+					.waitFor(() => expect(existsSync(startedPath)).toBe(true), waitOptions)
+					.then(() => {
+						fetchStarted = true;
+					}),
+				resolution.then(async (result) => {
+					if (fetchStarted) return;
+					if (!("error" in result)) await result.dispose();
+					throw new Error(
+						`Review resolution settled before the delayed remote fetch started: ${"error" in result ? result.error : "snapshot completed"}`,
+					);
+				}),
+			]);
+			controller.abort();
+			await expect(resolution).resolves.toEqual({ error: "Review cancelled.", cancelled: true });
+			await vi.waitFor(() => expect(processIsAlive(startedPath)).toBe(false), waitOptions);
+			const temporaryDirectory = readFileSync(temporaryDirectoryPath, "utf8");
+			expect(existsSync(temporaryDirectory)).toBe(false);
+			tempDirectories.splice(tempDirectories.indexOf(repository), 1);
+			rmSync(repository, { recursive: true });
+			expect(existsSync(repository)).toBe(false);
+		} finally {
+			controller.abort();
+			await resolution;
+		}
+	});
+
 	it("reviews root commits against an empty tree and merge commits against first parent", async () => {
 		const rootRepository = createRepository(false);
 		writeFileSync(join(rootRepository, "root.txt"), "root\n");
@@ -511,7 +1369,191 @@ describe("review snapshots", () => {
 		).toContain("+feature");
 	});
 
-	it("verifies fetched pull request base and head OIDs and rejects moved metadata", async () => {
+	it("fetches PR snapshots from relative remotes without borrowing from shallow repositories", async () => {
+		const seed = createRepository();
+		const omittedParentOid = git(seed, "rev-parse", "HEAD");
+		writeFileSync(join(seed, "tracked.txt"), "base\n");
+		git(seed, "commit", "-am", "base");
+		const baseOid = git(seed, "rev-parse", "HEAD");
+		const remote = join(tmpdir(), `volt-review-snapshot-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirectories.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(seed, "remote", "add", "origin", remote);
+		git(seed, "push", "origin", "main");
+		git(seed, "checkout", "-b", "feature");
+		writeFileSync(join(seed, "tracked.txt"), "pull request\n");
+		git(seed, "commit", "-am", "pull request");
+		const headOid = git(seed, "rev-parse", "HEAD");
+		git(seed, "push", "origin", "HEAD:refs/pull/8/head");
+
+		const repository = join(
+			tmpdir(),
+			`volt-review-snapshot-shallow-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+		);
+		mkdirSync(repository, { recursive: true });
+		tempDirectories.push(repository);
+		git(repository, "init", "--initial-branch=main");
+		git(repository, "remote", "add", "origin", relative(repository, remote));
+		git(repository, "fetch", "--depth=1", "origin", "main");
+		git(repository, "checkout", "-B", "main", "FETCH_HEAD");
+		expect(git(repository, "rev-parse", "--is-shallow-repository")).toBe("true");
+		expect(spawnSync("git", ["cat-file", "-e", `${omittedParentOid}^{commit}`], { cwd: repository }).status).not.toBe(
+			0,
+		);
+
+		installGitHubShim(repository, {
+			view: {
+				id: "PR_node_8",
+				number: 8,
+				title: "Shallow snapshot",
+				body: "Body",
+				baseRefName: "main",
+				headRefName: "feature",
+				url: "https://example.test/o/r/pull/8",
+				baseRefOid: baseOid,
+				headRefOid: headOid,
+			},
+		});
+		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
+
+		const snapshot = await resolve({ kind: "pr", number: "8" }, repository);
+		expect(snapshot.identity.pullRequest).toMatchObject({ number: 8, baseRefOid: baseOid, headRefOid: headOid });
+		expect((await readAvailableFile(snapshot, "base", "tracked.txt")).content.toString()).toBe("base\n");
+		expect((await readAvailableFile(snapshot, "head", "tracked.txt")).content.toString()).toBe("pull request\n");
+
+		const localObjects = git(repository, "rev-parse", "--path-format=absolute", "--git-path", "objects");
+		const unavailableLocalObjects = `${localObjects}-unavailable`;
+		renameSync(localObjects, unavailableLocalObjects);
+		try {
+			expect((await readAvailableFile(snapshot, "base", "tracked.txt")).content.toString()).toBe("base\n");
+			expect((await readAvailableFile(snapshot, "head", "tracked.txt")).content.toString()).toBe("pull request\n");
+			const checkout = await snapshot.materializeHead();
+			expect(readFileSync(join(checkout, "tracked.txt"), "utf8").replaceAll("\r\n", "\n")).toBe("pull request\n");
+		} finally {
+			renameSync(unavailableLocalObjects, localObjects);
+		}
+	});
+
+	it("keeps PR snapshots from partial clones independent of promised local objects", async () => {
+		const pullRequestNumber = 12;
+		const { repository, baseCommit, headCommit, localObjects } = createBloblessPartialCloneFixture(pullRequestNumber);
+		installGitHubShim(repository, {
+			view: {
+				id: "PR_partial_clone_12",
+				number: pullRequestNumber,
+				title: "Partial clone snapshot",
+				body: "Body",
+				baseRefName: "main",
+				headRefName: "feature",
+				url: "https://example.test/o/r/pull/12",
+				baseRefOid: baseCommit,
+				headRefOid: headCommit,
+			},
+		});
+		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
+
+		const snapshot = await resolve({ kind: "pr", number: String(pullRequestNumber) }, repository);
+		expect(snapshot.identity.pullRequest).toMatchObject({
+			number: pullRequestNumber,
+			baseRefOid: baseCommit,
+			headRefOid: headCommit,
+		});
+		expect(snapshot.changedFiles.map((file) => file.path)).toEqual(["tracked.txt"]);
+
+		const unavailableLocalObjects = `${localObjects}-unavailable`;
+		renameSync(localObjects, unavailableLocalObjects);
+		try {
+			expect((await readAvailableFile(snapshot, "base", "tracked.txt")).content.toString()).toBe("before\n");
+			expect((await readAvailableFile(snapshot, "head", "tracked.txt")).content.toString()).toBe(
+				"partial clone feature\n",
+			);
+			const checkout = await snapshot.materializeHead();
+			expect(readFileSync(join(checkout, "tracked.txt"), "utf8").replaceAll("\r\n", "\n")).toBe(
+				"partial clone feature\n",
+			);
+		} finally {
+			renameSync(unavailableLocalObjects, localObjects);
+		}
+	});
+
+	it("keeps the captured PR base when the base branch advances during context capture", async () => {
+		const repository = createRepository();
+		const remote = join(tmpdir(), `volt-review-advanced-base-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+		mkdirSync(remote, { recursive: true });
+		tempDirectories.push(remote);
+		git(remote, "init", "--bare", "--initial-branch=main");
+		git(repository, "remote", "add", "origin", remote);
+		git(repository, "push", "origin", "main");
+		const capturedBase = git(repository, "rev-parse", "main");
+
+		git(repository, "checkout", "-b", "feature");
+		writeFileSync(join(repository, "feature.txt"), "pull request change\n");
+		git(repository, "add", "feature.txt");
+		git(repository, "commit", "-m", "pull request change");
+		const headOid = git(repository, "rev-parse", "HEAD");
+		git(repository, "push", "origin", "HEAD:refs/pull/7/head");
+		git(repository, "checkout", "main");
+
+		const graphqlGatePath = join(repository, "release-base-advance-context");
+		const logPath = installGitHubShim(repository, {
+			view: {
+				id: "PR_advanced_base_7",
+				number: 7,
+				title: "Advanced base",
+				body: "Body",
+				baseRefName: "main",
+				headRefName: "feature",
+				url: "https://example.test/o/r/pull/7",
+				baseRefOid: capturedBase,
+				headRefOid: headOid,
+			},
+			graphqlGatePath,
+		});
+		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
+
+		const resolution = resolveReviewSnapshot({ kind: "pr", number: "7" }, repository, OPTIONS);
+		try {
+			await vi.waitFor(
+				() => {
+					const initialRequests = readFileSync(logPath, "utf8")
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line) as { variables?: { cursor?: unknown } })
+						.filter((request) => request.variables?.cursor === null);
+					expect(initialRequests).toHaveLength(5);
+				},
+				// Allow real gh shim processes to start under parallel Windows load.
+				{ timeout: 10_000 },
+			);
+
+			writeFileSync(join(repository, "main-only.txt"), "later main change\n");
+			git(repository, "add", "main-only.txt");
+			git(repository, "commit", "-m", "advance main");
+			const advancedBase = git(repository, "rev-parse", "HEAD");
+			git(repository, "push", "origin", "main");
+			writeFileSync(graphqlGatePath, "release\n");
+
+			const result = await resolution;
+			if ("error" in result) throw new Error(result.error);
+			expect(result.identity).toMatchObject({
+				baseCommit: capturedBase,
+				mergeBaseCommit: capturedBase,
+				headCommit: headOid,
+			});
+			expect(result.changedFiles.map((file) => file.path)).toEqual(["feature.txt"]);
+			expect(await result.readFile("base", "main-only.txt")).toBeUndefined();
+			expect(await result.readFile("head", "main-only.txt")).toBeUndefined();
+			expect(git(remote, "rev-parse", "main")).toBe(advancedBase);
+		} finally {
+			// Release and drain every request even if readiness or a later assertion fails.
+			writeFileSync(graphqlGatePath, "release\n");
+			const result = await resolution;
+			if (!("error" in result)) await result.dispose();
+		}
+	});
+
+	it("detaches fetched PR snapshots from borrowed local objects and rejects moved metadata", async () => {
 		const repository = createRepository();
 		const remote = join(tmpdir(), `volt-review-snapshot-remote-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(remote, { recursive: true });
@@ -526,6 +1568,12 @@ describe("review snapshots", () => {
 		git(repository, "push", "origin", "HEAD:refs/pull/7/head");
 		const baseOid = git(repository, "rev-parse", "main");
 		const headOid = git(repository, "rev-parse", "HEAD");
+		const localObjects = git(repository, "rev-parse", "--path-format=absolute", "--git-path", "objects");
+		git(repository, "checkout", "main");
+		git(repository, "branch", "-D", "feature");
+		git(repository, "reflog", "expire", "--expire=now", "--all");
+		git(repository, "gc", "--prune=now");
+		expect(spawnSync("git", ["cat-file", "-e", `${headOid}^{commit}`], { cwd: repository }).status).not.toBe(0);
 
 		const config: GitHubShimConfig = {
 			view: {
@@ -535,23 +1583,46 @@ describe("review snapshots", () => {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/7",
+				url: "https://example.test/o/r/pull/7",
 				baseRefOid: baseOid,
 				headRefOid: headOid,
 			},
 		};
 		installGitHubShim(repository, config);
+		const realGit =
+			process.platform === "win32"
+				? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+				: run(repository, "which", "git");
+		if (!realGit) throw new Error("Unable to locate git executable");
+		const alternatesLog = join(repository, "fetch-alternates.log");
+		installNodeCommandShim(
+			join(repository, "bin"),
+			"git",
+			`import { appendFileSync, readFileSync } from "node:fs";\nimport { join } from "node:path";\nimport { spawnSync } from "node:child_process";\nconst args = process.argv.slice(2);\nconst gitDir = args.find((arg) => arg.startsWith("--git-dir="))?.slice("--git-dir=".length);\nif (args.includes("fetch") && gitDir) appendFileSync(${JSON.stringify(alternatesLog)}, readFileSync(join(gitDir, "objects", "info", "alternates"), "utf8"));\nconst result = spawnSync(${JSON.stringify(realGit)}, args, { cwd: process.cwd(), env: process.env, stdio: "inherit" });\nif (result.error) throw result.error;\nprocess.exitCode = result.status ?? 1;\n`,
+		);
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 
 		const snapshot = await resolve({ kind: "pr", number: "7" }, repository);
+		expect(readFileSync(alternatesLog, "utf8").trim()).toBe(resolvePath(localObjects));
 		expect(snapshot.identity.pullRequest).toMatchObject({ number: 7, baseRefOid: baseOid, headRefOid: headOid });
-		expect(snapshot.githubContext?.manifest).toMatchObject({ status: "complete", fingerprint: expect.any(String) });
+		expect(snapshot.codeHostContext?.manifest).toMatchObject({ status: "complete", fingerprint: expect.any(String) });
 		expect(
 			snapshot.changedFiles
 				.flatMap((file) => file.hunks)
 				.map((hunk) => hunk.patch)
 				.join("\n"),
 		).toContain("+pull request");
+
+		const unavailableLocalObjects = `${localObjects}-unavailable`;
+		renameSync(localObjects, unavailableLocalObjects);
+		try {
+			expect((await readAvailableFile(snapshot, "base", "tracked.txt")).content.toString()).toBe("before\n");
+			expect((await readAvailableFile(snapshot, "head", "tracked.txt")).content.toString()).toBe("pull request\n");
+			const checkout = await snapshot.materializeHead();
+			expect(readFileSync(join(checkout, "tracked.txt"), "utf8").replaceAll("\r\n", "\n")).toBe("pull request\n");
+		} finally {
+			renameSync(unavailableLocalObjects, localObjects);
+		}
 
 		config.finalHeadOid = baseOid;
 		writeFileSync(join(repository, "bin", "gh-config.json"), JSON.stringify(config));
@@ -560,6 +1631,69 @@ describe("review snapshots", () => {
 			error: "The pull request moved while Volt captured its GitHub context. Retry the review.",
 		});
 	});
+
+	it.each(["missing", "null", "unrecognized", "oversized checks"])(
+		"captures PR context with %s health metadata",
+		async (health) => {
+			const repository = createRepository();
+			const config: GitHubShimConfig = {
+				view: {
+					id: "PR_optional_health",
+					number: 7,
+					title: "Optional health metadata",
+					body: "Review context remains available",
+					baseRefName: "main",
+					headRefName: "feature",
+					url: "https://example.test/o/r/pull/7",
+					baseRefOid: "a".repeat(40),
+					headRefOid: "b".repeat(40),
+					...(health === "null" ? { state: null, mergeable: null, statusCheckRollup: null } : {}),
+					...(health === "unrecognized"
+						? { state: "UNRECOGNIZED", mergeable: "UNRECOGNIZED", statusCheckRollup: {} }
+						: {}),
+					...(health === "oversized checks"
+						? { statusCheckRollup: Array.from({ length: 10_001 }, () => ({})) }
+						: {}),
+				},
+				...(health === "missing" ? { omitViewFields: ["state", "isDraft", "mergeable", "statusCheckRollup"] } : {}),
+			};
+			installGitHubShim(repository, config);
+			process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
+
+			const captured = await capturePullRequestContextWithGitHubCli({
+				cwd: repository,
+				number: "7",
+				maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
+			});
+			expect(captured.ok).toBe(true);
+			if (!captured.ok) throw new Error(captured.error);
+			expect(captured.pullRequest).toMatchObject({
+				providerId: "github",
+				number: 7,
+				baseRefOid: "a".repeat(40),
+				headRefOid: "b".repeat(40),
+				observedAt: expect.any(Number),
+			});
+			expect(captured.pullRequest.checks).toBeUndefined();
+			expect(captured.pullRequest.reviewState).toBe(health === "oversized checks" ? "ready" : undefined);
+			expect(captured.pullRequest.mergeability).toBe(health === "oversized checks" ? "unknown" : undefined);
+			expect(captured.context.manifest).toMatchObject({ status: "complete", limitations: [] });
+			expect(captured.context.rendered).toContain("Review context remains available");
+
+			config.view.headRefOid = "invalid-head";
+			writeFileSync(join(repository, "bin", "gh-config.json"), JSON.stringify(config));
+			await expect(
+				capturePullRequestContextWithGitHubCli({
+					cwd: repository,
+					number: "7",
+					maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
+				}),
+			).resolves.toMatchObject({
+				ok: false,
+				error: expect.stringContaining("Invalid GitHub API pull request metadata"),
+			});
+		},
+	);
 
 	it("keeps the GitHub context fingerprint stable across pull request code revisions", async () => {
 		const repository = createRepository();
@@ -570,7 +1704,7 @@ describe("review snapshots", () => {
 			body: "Stable body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/7",
+			url: "https://example.test/o/r/pull/7",
 			baseRefOid: "a".repeat(40),
 			headRefOid: "b".repeat(40),
 		};
@@ -578,7 +1712,7 @@ describe("review snapshots", () => {
 		installGitHubShim(repository, { view });
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 		const captureFingerprint = async (): Promise<string> => {
-			const captured = await captureReviewGitHubContext({
+			const captured = await capturePullRequestContextWithGitHubCli({
 				cwd: repository,
 				number: "7",
 				maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
@@ -709,29 +1843,75 @@ describe("review snapshots", () => {
 				comment("issue-comment-1", "Linked issue discussion"),
 			]),
 		};
+		const graphqlGatePath = join(repository, "release-initial-graphql");
 		const logPath = installGitHubShim(repository, {
 			view: {
 				id: "PR_node_7",
 				number: 7,
 				title: "Context PR",
 				body: "PR body",
+				author: { login: "review-author" },
+				state: "OPEN",
+				isDraft: true,
+				mergeable: "CONFLICTING",
+				statusCheckRollup: [
+					{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" },
+					{ __typename: "CheckRun", status: "IN_PROGRESS", conclusion: null },
+					{ __typename: "StatusContext", state: "FAILURE" },
+				],
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/7",
+				url: "https://example.test/o/r/pull/7",
 				baseRefOid: oid,
 				headRefOid: oid,
 			},
 			graphql,
+			graphqlGatePath,
 		});
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 
-		const captured = await captureReviewGitHubContext({
+		const capturePromise = capturePullRequestContextWithGitHubCli({
 			cwd: repository,
 			number: "7",
 			maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
 		});
+		try {
+			await vi.waitFor(
+				() => {
+					const initialRequests = readFileSync(logPath, "utf8")
+						.trim()
+						.split("\n")
+						.map((line) => JSON.parse(line) as { variables?: { cursor?: unknown } })
+						.filter((request) => request.variables?.cursor === null);
+					expect(initialRequests).toHaveLength(5);
+				},
+				// Allow real gh shim processes to start under parallel Windows load.
+				{ timeout: 10_000 },
+			);
+		} finally {
+			// Drain the gated commands before afterEach can delete their working directory.
+			writeFileSync(graphqlGatePath, "release\n");
+			await capturePromise;
+		}
+		const captured = await capturePromise;
 		expect(captured.ok).toBe(true);
 		if (!captured.ok) throw new Error(captured.error);
+		expect(captured.pullRequest).toMatchObject({
+			author: {
+				login: "review-author",
+				avatarUrl: "https://example.test/review-author.png",
+			},
+			reviewState: "draft",
+			mergeability: "conflicting",
+			checks: {
+				state: "failing",
+				totalCount: 3,
+				passedCount: 1,
+				pendingCount: 1,
+				failedCount: 1,
+			},
+			observedAt: expect.any(Number),
+		});
 		expect(captured.context.manifest).toMatchObject({
 			status: "complete",
 			linkedIssueCount: 2,
@@ -778,7 +1958,7 @@ describe("review snapshots", () => {
 			body: "Body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/10",
+			url: "https://example.test/o/r/pull/10",
 			baseRefOid: oid,
 			headRefOid: oid,
 		};
@@ -876,7 +2056,7 @@ describe("review snapshots", () => {
 		const logPath = installGitHubShim(repository, { view, graphql, maximumGraphqlRequests: 16 });
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 
-		const captured = await captureReviewGitHubContext({
+		const captured = await capturePullRequestContextWithGitHubCli({
 			cwd: repository,
 			number: "10",
 			maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
@@ -963,7 +2143,7 @@ describe("review snapshots", () => {
 				body: "Body",
 				baseRefName: "main",
 				headRefName: "feature",
-				url: "https://example.test/pr/8",
+				url: "https://example.test/o/r/pull/8",
 				baseRefOid: oid,
 				headRefOid: oid,
 			},
@@ -971,7 +2151,7 @@ describe("review snapshots", () => {
 		});
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 
-		const captured = await captureReviewGitHubContext({
+		const captured = await capturePullRequestContextWithGitHubCli({
 			cwd: repository,
 			number: "8",
 			maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
@@ -1002,7 +2182,7 @@ describe("review snapshots", () => {
 			body: "Body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/9",
+			url: "https://example.test/o/r/pull/9",
 			baseRefOid: oid,
 			headRefOid: oid,
 		};
@@ -1018,7 +2198,7 @@ describe("review snapshots", () => {
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 
 		const capture = async () => {
-			const captured = await captureReviewGitHubContext({
+			const captured = await capturePullRequestContextWithGitHubCli({
 				cwd: repository,
 				number: "9",
 				maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
@@ -1063,7 +2243,7 @@ describe("review snapshots", () => {
 			body: "Body",
 			baseRefName: "main",
 			headRefName: "feature",
-			url: "https://example.test/pr/274",
+			url: "https://example.test/o/r/pull/274",
 			baseRefOid: oid,
 			headRefOid: oid,
 		};
@@ -1080,10 +2260,10 @@ describe("review snapshots", () => {
 				]),
 			},
 		});
-		installGitHubShim(repository, configFor(31_637));
+		installGitHubShim(repository, configFor(31_609));
 		process.env.PATH = `${join(repository, "bin")}${delimiter}${initialPath ?? ""}`;
 		const capture = async () => {
-			const captured = await captureReviewGitHubContext({
+			const captured = await capturePullRequestContextWithGitHubCli({
 				cwd: repository,
 				number: "274",
 				maxPullRequestNumber: OPTIONS.maxPullRequestNumber,
@@ -1109,7 +2289,7 @@ describe("review snapshots", () => {
 			limitations: [],
 		});
 
-		writeFileSync(configPath, JSON.stringify(configFor(31_638)));
+		writeFileSync(configPath, JSON.stringify(configFor(31_610)));
 		const overLimit = await capture();
 		expect(overLimit.manifest).toMatchObject({
 			status: "incomplete",
@@ -1153,6 +2333,65 @@ describe("review snapshots", () => {
 		expect(result).toMatchObject({
 			error: "Working tree changed while Volt captured the review snapshot. Retry the review.",
 		});
+	});
+
+	it("kills an in-flight Git command and classifies preparation cancellation", async () => {
+		const repository = createRepository();
+		writeFileSync(join(repository, "tracked.txt"), "after\n");
+		const realGit =
+			process.platform === "win32"
+				? run(repository, "where.exe", "git").split(/\r?\n/u)[0]
+				: run(repository, "which", "git");
+		if (!realGit) throw new Error("Unable to locate git executable");
+		const bin = join(repository, "delayed-git-bin");
+		const startedPath = join(repository, "delayed-git-started");
+		mkdirSync(bin);
+		installNodeCommandShim(
+			bin,
+			"git",
+			`import { writeFileSync } from "node:fs";\nimport { spawnSync } from "node:child_process";\nconst args = process.argv.slice(2);\nif (args[0] === "rev-parse" && args[1] === "--show-toplevel") {\n  writeFileSync(${JSON.stringify(startedPath)}, String(process.pid));\n  setInterval(() => {}, 1_000);\n} else {\n  const result = spawnSync(${JSON.stringify(realGit)}, args, { cwd: process.cwd(), env: process.env, stdio: "inherit" });\n  if (result.error) throw result.error;\n  process.exitCode = result.status ?? 1;\n}\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+		const controller = new AbortController();
+		const resolution = resolveReviewSnapshot({ kind: "uncommitted" }, repository, {
+			...OPTIONS,
+			signal: controller.signal,
+		});
+		try {
+			await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true));
+			controller.abort();
+			await expect(resolution).resolves.toEqual({ error: "Review cancelled.", cancelled: true });
+			await vi.waitFor(() => expect(processIsAlive(startedPath)).toBe(false));
+		} finally {
+			controller.abort();
+		}
+	});
+
+	it("kills an in-flight GitHub CLI command during PR preparation", async () => {
+		const repository = createRepository();
+		git(repository, "remote", "add", "origin", "https://example.test/o/r.git");
+		const bin = join(repository, "delayed-gh-bin");
+		const startedPath = join(repository, "delayed-gh-started");
+		mkdirSync(bin);
+		installNodeCommandShim(
+			bin,
+			"gh",
+			`import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(startedPath)}, String(process.pid));\nsetInterval(() => {}, 1_000);\n`,
+		);
+		process.env.PATH = `${bin}${delimiter}${initialPath ?? ""}`;
+		const controller = new AbortController();
+		const resolution = resolveReviewSnapshot({ kind: "pr", number: "7" }, repository, {
+			...OPTIONS,
+			signal: controller.signal,
+		});
+		try {
+			await vi.waitFor(() => expect(existsSync(startedPath)).toBe(true));
+			controller.abort();
+			await expect(resolution).resolves.toEqual({ error: "Review cancelled.", cancelled: true });
+			await vi.waitFor(() => expect(processIsAlive(startedPath)).toBe(false));
+		} finally {
+			controller.abort();
+		}
 	});
 
 	it("returns a distinct error when bounded metadata output is exceeded", async () => {

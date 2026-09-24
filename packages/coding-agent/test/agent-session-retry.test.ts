@@ -68,7 +68,12 @@ describe("AgentSession retry", () => {
 		}
 	});
 
-	function createSession(options?: { failCount?: number; maxRetries?: number; delayAssistantMessageEndMs?: number }) {
+	function createSession(options?: {
+		failCount?: number;
+		maxRetries?: number;
+		delayAssistantMessageEndMs?: number;
+		failure?: Pick<AssistantMessage, "errorMessage" | "diagnostics">;
+	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
 		const delayAssistantMessageEndMs = options?.delayAssistantMessageEndMs ?? 0;
@@ -85,6 +90,7 @@ describe("AgentSession retry", () => {
 						const msg = createAssistantMessage("", {
 							stopReason: "error",
 							errorMessage: "overloaded_error",
+							...options?.failure,
 						});
 						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
 						stream.push({ type: "error", seq: 1, reason: "error", error: msg });
@@ -141,6 +147,34 @@ describe("AgentSession retry", () => {
 		expect(created.getCallCount()).toBe(2);
 		expect(events).toEqual(["start:1", "end:success=true"]);
 		expect(created.session.isRetrying).toBe(false);
+	});
+
+	it.each(["assistant_stream_processing_error", "assistant_stream_queue_limit"])(
+		"does not automatically retry %s even with transient-looking error text",
+		async (type) => {
+			const created = createSession({
+				failure: {
+					errorMessage: "HTTP status 503: connection timeout",
+					diagnostics: [{ type, timestamp: 0, details: {} }],
+				},
+			});
+			const retries: string[] = [];
+			created.session.subscribe((event) => {
+				if (event.type === "auto_retry_start") retries.push(event.type);
+			});
+			await created.session.prompt("Test");
+			expect(created.getCallCount()).toBe(1);
+			expect(retries).toEqual([]);
+			expect(created.session.isRetrying).toBe(false);
+			expect(created.session.messages.at(-1)).toMatchObject({ stopReason: "error", diagnostics: [{ type }] });
+		},
+	);
+
+	it("continues to retry an ordinary 503 without a local processing diagnostic", async () => {
+		const created = createSession({ failure: { errorMessage: "HTTP status 503: connection timeout" } });
+		await created.session.prompt("Test");
+		expect(created.getCallCount()).toBe(2);
+		expect(created.session.messages.at(-1)).toMatchObject({ stopReason: "stop" });
 	});
 
 	it("exhausts max retries and emits failure", async () => {

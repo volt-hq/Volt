@@ -7,10 +7,13 @@ import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } fro
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
 import {
 	AGENT_MODE_ACTION_ID,
+	CONTEXT_AUTO_COMPACTION_ACTION_ID,
 	CONTEXT_COMPACT_ACTION_ID,
+	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
 	PLAN_CHANGE_ACTION_ID,
 	PLAN_DISCARD_ACTION_ID,
 	PLAN_EXECUTE_ACTION_ID,
@@ -43,10 +46,12 @@ import {
 	type RpcTransport,
 	type RpcUiActionStateChangedEvent,
 } from "../src/core/rpc/index.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
 import { createInProcessRpcClient } from "../src/modes/rpc/in-process-rpc-client.ts";
 import { createIrohRemoteCloseDeferringRpcTransport } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
+import { RpcClientBase } from "../src/modes/rpc/rpc-client-base.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../src/modes/rpc/rpc-transport-client.ts";
 import { createTestModel } from "./iroh-stream-doubles.ts";
@@ -1248,7 +1253,7 @@ describe("runRpcMode", () => {
 			);
 			expect(reviewPullRequestAction).toEqual(
 				expect.objectContaining({
-					description: expect.stringContaining("GitHub credentials and network"),
+					description: expect.stringContaining("GitHub CLI code-host provider"),
 					category: "review",
 					presentation: expect.objectContaining({ kind: "card", group: "Review" }),
 					requiresConfirmation: true,
@@ -1448,6 +1453,25 @@ describe("createInProcessRpcClient", () => {
 		expect(dispose).toHaveBeenCalledOnce();
 	});
 
+	test("exposes active agent-run timing metadata in state", async () => {
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
+			activeAgentRun: { startedAt: 1_782_470_400_000 },
+			isStreaming: true,
+		});
+		const client = await createInProcessRpcClient(runtimeHost);
+
+		try {
+			await expect(client.getState()).resolves.toMatchObject({
+				isStreaming: true,
+				activeAgentRun: { startedAt: 1_782_470_400_000 },
+			});
+		} finally {
+			await client.stop();
+		}
+		expect(dispose).toHaveBeenCalledOnce();
+	});
+
 	test("exposes active compaction metadata in state", async () => {
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = createRuntimeHost(dispose, async () => {}, {
@@ -1534,6 +1558,8 @@ describe("createInProcessRpcClient", () => {
 					enabled: true,
 					remoteSafe: true,
 				}),
+				expect.objectContaining({ id: CONTEXT_AUTO_COMPACTION_ACTION_ID, remoteSafe: true }),
+				expect.objectContaining({ id: CONTEXT_COMPACTION_THRESHOLD_ACTION_ID, remoteSafe: true }),
 				expect.objectContaining({
 					id: CONTEXT_COMPACT_ACTION_ID,
 					label: "Compact context",
@@ -1658,6 +1684,7 @@ describe("createInProcessRpcClient", () => {
 				actions.find((action) => action.id === REVIEW_COMMIT_ACTION_ID)?.args?.map((argument) => argument.name),
 			).toEqual(["ref", "focus", "scope", "effort", "includeOptional", "scopeMode"]);
 			await expect(client.getUiActions("primary")).resolves.toEqual([
+				expect.objectContaining({ id: CONTEXT_AUTO_COMPACTION_ACTION_ID }),
 				expect.objectContaining({
 					id: THINKING_FAST_MODE_ACTION_ID,
 					presentation: expect.objectContaining({ kind: "toggle" }),
@@ -1887,6 +1914,8 @@ describe("createInProcessRpcClient", () => {
 				PLAN_DISCARD_ACTION_ID,
 				SESSION_NEW_ACTION_ID,
 				RUN_CANCEL_ACTION_ID,
+				CONTEXT_AUTO_COMPACTION_ACTION_ID,
+				CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
 				CONTEXT_COMPACT_ACTION_ID,
 				SESSION_RENAME_ACTION_ID,
 				THINKING_FAST_MODE_ACTION_ID,
@@ -1939,6 +1968,7 @@ describe("createInProcessRpcClient", () => {
 				expect.objectContaining({ name: "arguments", type: "string", hint: "paste failing test output" }),
 			]);
 			expect(await client.getUiActions("primary")).toEqual([
+				expect.objectContaining({ id: CONTEXT_AUTO_COMPACTION_ACTION_ID }),
 				expect.objectContaining({ id: THINKING_FAST_MODE_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_UNCOMMITTED_ACTION_ID }),
 				expect.objectContaining({ id: REVIEW_BRANCH_ACTION_ID }),
@@ -2060,6 +2090,13 @@ describe("createInProcessRpcClient", () => {
 
 	test("serves git branch completions for the review.branch base argument", async () => {
 		const repo = createTestGitRepo(["feature/login", "zeta"]);
+		const remote = mkdtempSync(join(tmpdir(), "volt-rpc-branch-remote-"));
+		gitInTestRepo(remote, "init", "--bare", "--initial-branch=main");
+		gitInTestRepo(repo, "remote", "add", "origin", remote);
+		gitInTestRepo(repo, "branch", "remote-only");
+		gitInTestRepo(repo, "push", "-u", "origin", "main");
+		gitInTestRepo(repo, "push", "origin", "feature/login", "zeta", "remote-only");
+		gitInTestRepo(repo, "branch", "-D", "remote-only");
 		const noRepoDir = mkdtempSync(join(tmpdir(), "volt-rpc-norepo-"));
 		const runtimeHost = createRuntimeHost(
 			vi.fn(async () => {}),
@@ -2079,6 +2116,7 @@ describe("createInProcessRpcClient", () => {
 				{ value: "main" },
 				{ value: "feature/login" },
 				{ value: "zeta" },
+				{ value: "origin/remote-only" },
 			]);
 			await expect(client.getUiActionCompletions(REVIEW_BRANCH_ACTION_ID, "base", "FEAT")).resolves.toEqual([
 				{ value: "feature/login" },
@@ -2103,6 +2141,7 @@ describe("createInProcessRpcClient", () => {
 		} finally {
 			await noRepoClient.stop();
 			rmSync(repo, { recursive: true, force: true });
+			rmSync(remote, { recursive: true, force: true });
 			rmSync(noRepoDir, { recursive: true, force: true });
 		}
 	});
@@ -2297,6 +2336,51 @@ describe("createInProcessRpcClient", () => {
 		await expect(createInProcessRpcClient(runtimeHost)).rejects.toBe(bindError);
 		expect(dispose).toHaveBeenCalledOnce();
 	});
+
+	test("finalizes an owned runtime when client construction fails and preserves finalizer errors", async () => {
+		const constructionError = new Error("injected loopback client construction failure");
+		const finalizerError = new Error("injected runtime finalizer failure");
+		const dispose = vi.fn(async () => {
+			throw finalizerError;
+		});
+		const onEventSpy = vi.spyOn(RpcClientBase.prototype, "onEvent").mockImplementationOnce(() => {
+			throw constructionError;
+		});
+
+		try {
+			const thrown = await createInProcessRpcClient(createRuntimeHost(dispose), {
+				disposeRuntimeOnClose: true,
+				onEvent: () => undefined,
+			}).catch((error: unknown) => error);
+
+			expect(thrown).toBeInstanceOf(AggregateError);
+			if (!(thrown instanceof AggregateError)) throw new Error("expected aggregate construction cleanup failure");
+			expect(thrown.errors).toEqual([constructionError, finalizerError]);
+			expect(dispose).toHaveBeenCalledOnce();
+		} finally {
+			onEventSpy.mockRestore();
+		}
+	});
+
+	test("leaves caller-owned runtimes untouched when client construction fails", async () => {
+		const constructionError = new Error("injected loopback client construction failure");
+		const dispose = vi.fn(async () => {});
+		const onEventSpy = vi.spyOn(RpcClientBase.prototype, "onEvent").mockImplementationOnce(() => {
+			throw constructionError;
+		});
+
+		try {
+			await expect(
+				createInProcessRpcClient(createRuntimeHost(dispose), {
+					disposeRuntimeOnClose: false,
+					onEvent: () => undefined,
+				}),
+			).rejects.toBe(constructionError);
+			expect(dispose).not.toHaveBeenCalled();
+		} finally {
+			onEventSpy.mockRestore();
+		}
+	});
 });
 
 class ManualRpcTransport implements RpcTransport {
@@ -2353,6 +2437,7 @@ function createRuntimeHost(
 	resources: {
 		abort?: () => Promise<void>;
 		agentDir?: string;
+		activeAgentRun?: { startedAt: number };
 		activeCompaction?: { reason: "manual" | "threshold" | "overflow"; startedAt: number };
 		compact?: (customInstructions?: string) => Promise<ReturnType<typeof createCompactionResult>>;
 		commands?: ResolvedCommand[];
@@ -2388,11 +2473,7 @@ function createRuntimeHost(
 		refreshFromDisk: vi.fn(),
 		getAvailable: vi.fn(() => resources.availableModels ?? []),
 	};
-	const settingsManager = {
-		flush: vi.fn(async () => {}),
-		getReviewModel: vi.fn(() => undefined),
-		isProjectTrusted: vi.fn(() => true),
-	};
+	const settingsManager = SettingsManager.inMemory();
 	const resourceLoader = {
 		getSkills: vi.fn(() => ({ skills: resources.skills ?? [], diagnostics: [] })),
 	};
@@ -2420,6 +2501,7 @@ function createRuntimeHost(
 			agentDir: resources.agentDir ?? tmpdir(),
 		},
 		session: {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			bindExtensions: vi.fn(bindExtensions),
 			gitContextProvider: {
 				getSnapshot: () => null,
@@ -2431,6 +2513,9 @@ function createRuntimeHost(
 			}),
 			activeToolExecutions: new Map(),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
+			get activeAgentRun() {
+				return resources.activeAgentRun;
+			},
 			get activeCompaction() {
 				return resources.activeCompaction;
 			},
@@ -2473,6 +2558,9 @@ function createRuntimeHost(
 			sessionManager: {
 				flush: vi.fn(async () => {}),
 				getCwd: vi.fn(() => resources.cwd ?? tmpdir()),
+				getPrReviewBinding: vi.fn(() => undefined),
+				getSessionRef: vi.fn(() => undefined),
+				getStartingGitContext: vi.fn(() => undefined),
 			},
 			promptTemplates: resources.prompts ?? [],
 			modelRegistry,

@@ -1,4 +1,5 @@
 import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocomplete.ts";
+import type { EditorComponent } from "../editor-component.ts";
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
@@ -327,7 +328,7 @@ export class Editor implements Component, Focusable {
 	private undoStack = new UndoStack<EditorState>();
 
 	public onSubmit?: (text: string) => void;
-	public onChange?: (text: string) => void;
+	public onChange?: EditorComponent["onChange"];
 	public disableSubmit: boolean = false;
 
 	constructor(tui: TUI, theme: EditorTheme, options: EditorOptions = {}) {
@@ -1297,7 +1298,7 @@ export class Editor implements Component, Focusable {
 		this.undoStack.clear();
 		this.lastAction = null;
 
-		if (this.onChange) this.onChange("");
+		if (this.onChange) this.onChange("", { submittedText: result });
 		if (this.onSubmit) this.onSubmit(result);
 	}
 

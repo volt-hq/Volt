@@ -75,7 +75,13 @@
 			"client_input_conflict",
 			"client_input_outcome_ambiguous",
 			"stale_plan_revision",
-			"stale_conversation_authority"
+			"stale_conversation_authority",
+			"review_discussions_unavailable",
+			"review_source_unavailable",
+			"review_preparation_failed",
+			"review_preparation_stale",
+			"review_preparation_conflict",
+			"worktree_limit_reached"
 		],
 		"remoteErrorStrings": [
 			"invalid_cursor",
@@ -91,6 +97,18 @@
 		]
 	},
 	"$defs": {
+		"RpcActiveAgentRun": {
+			"type": "object",
+			"required": [
+				"startedAt"
+			],
+			"properties": {
+				"startedAt": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcActiveCompaction": {
 			"type": "object",
 			"required": [
@@ -253,6 +271,26 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcAgentStartEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"startedAt"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "agent_start"
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcApi": {
 			"type": "string",
 			"x-volt-known-values": [
@@ -381,6 +419,143 @@
 			"additionalProperties": false,
 			"x-volt-expected": "be a safe non-negative epoch/seq position"
 		},
+		"RpcBackgroundJobSnapshot": {
+			"type": "object",
+			"required": [
+				"id",
+				"toolName",
+				"label",
+				"status",
+				"startedAt",
+				"outputTruncated",
+				"output"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"toolName": {
+					"type": "string",
+					"enum": [
+						"bash",
+						"subagent"
+					]
+				},
+				"toolCallId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"label": {
+					"type": "string",
+					"maxLength": 200
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"running",
+						"cancelling",
+						"completed",
+						"failed",
+						"cancelled"
+					]
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"endedAt": {
+					"type": "number"
+				},
+				"lastOutputAt": {
+					"type": "number"
+				},
+				"outputTruncated": {
+					"type": "boolean"
+				},
+				"output": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcBackgroundJobSummary": {
+			"type": "object",
+			"required": [
+				"id",
+				"toolName",
+				"label",
+				"status",
+				"startedAt",
+				"outputTruncated"
+			],
+			"properties": {
+				"id": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"toolName": {
+					"type": "string",
+					"enum": [
+						"bash",
+						"subagent"
+					]
+				},
+				"toolCallId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"label": {
+					"type": "string",
+					"maxLength": 200
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"running",
+						"cancelling",
+						"completed",
+						"failed",
+						"cancelled"
+					]
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"endedAt": {
+					"type": "number"
+				},
+				"lastOutputAt": {
+					"type": "number"
+				},
+				"outputTruncated": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcBackgroundJobs": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/RpcBackgroundJobSummary"
+			},
+			"maxItems": 64
+		},
+		"RpcBackgroundJobsChangedEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"jobs"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "background_jobs_changed"
+				},
+				"jobs": {
+					"$ref": "#/$defs/RpcBackgroundJobs"
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcBashResult": {
 			"type": "object",
 			"required": [
@@ -403,6 +578,25 @@
 				},
 				"fullOutputPath": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCancelJobResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"job"
+			],
+			"properties": {
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"job": {
+					"$ref": "#/$defs/RpcBackgroundJobSummary"
 				}
 			},
 			"additionalProperties": false
@@ -639,6 +833,27 @@
 					"$ref": "#/$defs/RpcCommand.invoke_ui_action"
 				},
 				{
+					"$ref": "#/$defs/RpcCommand.resolve_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.prepare_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.start_review_discussions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_review_discussions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.reset_review_discussion"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_review_discussion_source"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_review_general"
+				},
+				{
 					"$ref": "#/$defs/RpcCommand.cancel_workflow"
 				},
 				{
@@ -685,6 +900,9 @@
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.get_agent_options"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_session_contexts"
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.upload_device_logs"
@@ -760,6 +978,15 @@
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.get_transcript_entry_text"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_jobs"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.read_job"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_job"
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.list_subagents"
@@ -921,6 +1148,27 @@
 					"$ref": "#/$defs/RpcCommand.invoke_ui_action"
 				},
 				{
+					"$ref": "#/$defs/RpcCommand.resolve_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.prepare_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.start_review_discussions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_review_discussions"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.reset_review_discussion"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_review_discussion_source"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_review_general"
+				},
+				{
 					"$ref": "#/$defs/RpcCommand.cancel_workflow"
 				},
 				{
@@ -967,6 +1215,9 @@
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.get_agent_options"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.get_session_contexts"
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.upload_device_logs"
@@ -1042,6 +1293,15 @@
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.get_transcript_entry_text"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.list_jobs"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.read_job"
+				},
+				{
+					"$ref": "#/$defs/RpcCommand.cancel_job"
 				},
 				{
 					"$ref": "#/$defs/RpcCommand.list_subagents"
@@ -1243,6 +1503,29 @@
 				},
 				"excludeFromContext": {
 					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.cancel_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"jobId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "cancel_job"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"jobId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				}
 			},
 			"additionalProperties": false
@@ -1838,6 +2121,48 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcCommand.get_review_discussion_source": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_review_discussion_source"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_review_general": {
+			"type": "object",
+			"required": [
+				"type",
+				"runId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_review_general"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcCommand.get_review_result": {
 			"type": "object",
 			"required": [
@@ -1857,6 +2182,43 @@
 				},
 				"runId": {
 					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.get_session_contexts": {
+			"type": "object",
+			"required": [
+				"type",
+				"workspaceName",
+				"sessionIds"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "get_session_contexts"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"workspaceName": {
+					"type": "string",
+					"pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+					"x-volt-expected": "be a non-empty workspace name"
+				},
+				"sessionIds": {
+					"type": "array",
+					"items": {
+						"type": "string",
+						"minLength": 1,
+						"maxLength": 128
+					},
+					"minItems": 1,
+					"maxItems": 64,
+					"uniqueItems": true
 				}
 			},
 			"additionalProperties": false
@@ -2136,6 +2498,25 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcCommand.list_jobs": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_jobs"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcCommand.list_mcp_prompts": {
 			"type": "object",
 			"required": [
@@ -2248,6 +2629,39 @@
 				},
 				"server": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.list_review_discussions": {
+			"type": "object",
+			"required": [
+				"type",
+				"runId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "list_review_discussions"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"cursor": {
+					"type": "string",
+					"maxLength": 32,
+					"pattern": "^[0-9]+$"
+				},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 50
 				}
 			},
 			"additionalProperties": false
@@ -2366,14 +2780,31 @@
 				"conversationAuthority": {
 					"$ref": "#/$defs/RpcConversationAuthority"
 				},
-				"parentSession": {
-					"type": "string"
+				"parentSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				},
 				"preserveReviewRunId": {
 					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"replaceReviewGeneral": {
+					"type": "boolean"
 				}
 			},
-			"additionalProperties": false
+			"additionalProperties": false,
+			"anyOf": [
+				{
+					"properties": {
+						"replaceReviewGeneral": {
+							"const": false
+						}
+					}
+				},
+				{
+					"required": [
+						"preserveReviewRunId"
+					]
+				}
+			]
 		},
 		"RpcCommand.open_review_session": {
 			"type": "object",
@@ -2516,6 +2947,86 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcCommand.prepare_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"workspaceName",
+				"sessionId",
+				"expectedPullRequest"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+					"x-volt-max-utf8-bytes": 256,
+					"x-volt-expected": "be a non-empty string",
+					"maxLength": 256
+				},
+				"type": {
+					"type": "string",
+					"const": "prepare_pr_review"
+				},
+				"workspaceName": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 255,
+					"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+				},
+				"workingDirectory": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096,
+					"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+				},
+				"sourceWorktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64,
+					"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+				},
+				"number": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 10,
+					"pattern": "^(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])$(?![\\s\\S])"
+				},
+				"sessionId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 128,
+					"pattern": "^[a-z0-9_-]{1,128}$(?![\\s\\S])"
+				},
+				"expectedPullRequest": {
+					"type": "object",
+					"required": [
+						"url",
+						"headRefOid"
+					],
+					"properties": {
+						"url": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 2048,
+							"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+						},
+						"headRefOid": {
+							"type": "string",
+							"maxLength": 64,
+							"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false,
+			"not": {
+				"required": [
+					"workingDirectory",
+					"sourceWorktreeId"
+				]
+			}
+		},
 		"RpcCommand.prompt": {
 			"type": "object",
 			"required": [
@@ -2573,6 +3084,29 @@
 				"confirmed": {
 					"type": "boolean",
 					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.read_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"jobId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "read_job"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"jobId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
 				}
 			},
 			"additionalProperties": false
@@ -2767,6 +3301,88 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"RpcCommand.reset_review_discussion": {
+			"type": "object",
+			"required": [
+				"type",
+				"discussionId",
+				"expectedSessionId",
+				"requestId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "reset_review_discussion"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"discussionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"expectedSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcCommand.resolve_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"workspaceName"
+			],
+			"properties": {
+				"id": {
+					"type": "string",
+					"pattern": "^\\S(?:[\\s\\S]*\\S)?$",
+					"x-volt-max-utf8-bytes": 256,
+					"x-volt-expected": "be a non-empty string",
+					"maxLength": 256
+				},
+				"type": {
+					"type": "string",
+					"const": "resolve_pr_review"
+				},
+				"workspaceName": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 255,
+					"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+				},
+				"workingDirectory": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 4096,
+					"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+				},
+				"sourceWorktreeId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64,
+					"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+				},
+				"number": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 10,
+					"pattern": "^(?:[1-9][0-9]{0,8}|1[0-9]{9}|20[0-9]{8}|21[0-3][0-9]{7}|214[0-6][0-9]{6}|2147[0-3][0-9]{5}|21474[0-7][0-9]{4}|214748[0-2][0-9]{3}|2147483[0-5][0-9]{2}|21474836[0-3][0-9]|214748364[0-7])$(?![\\s\\S])"
+				}
+			},
+			"additionalProperties": false,
+			"not": {
+				"required": [
+					"workingDirectory",
+					"sourceWorktreeId"
+				]
+			}
 		},
 		"RpcCommand.set_agent_mode": {
 			"type": "object",
@@ -3097,6 +3713,68 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcCommand.start_review_discussions": {
+			"type": "object",
+			"required": [
+				"type",
+				"runId",
+				"findingIds",
+				"requestId"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "start_review_discussions"
+				},
+				"conversationAuthority": {
+					"$ref": "#/$defs/RpcConversationAuthority"
+				},
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"findingIds": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcConversationIdentifier"
+					},
+					"minItems": 1,
+					"maxItems": 50,
+					"uniqueItems": true
+				},
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"discussionConfiguration": {
+					"type": "object",
+					"properties": {
+						"model": {
+							"type": "object",
+							"required": [
+								"provider",
+								"modelId"
+							],
+							"properties": {
+								"provider": {
+									"type": "string"
+								},
+								"modelId": {
+									"type": "string"
+								}
+							},
+							"additionalProperties": false
+						},
+						"thinkingLevel": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcCommand.steer": {
 			"type": "object",
 			"required": [
@@ -3256,7 +3934,7 @@
 			"type": "object",
 			"required": [
 				"type",
-				"sessionPath"
+				"sessionId"
 			],
 			"properties": {
 				"id": {
@@ -3269,7 +3947,7 @@
 				"conversationAuthority": {
 					"$ref": "#/$defs/RpcConversationAuthority"
 				},
-				"sessionPath": {
+				"sessionId": {
 					"type": "string"
 				}
 			},
@@ -3828,7 +4506,17 @@
 								"client_input_conflict",
 								"client_input_outcome_ambiguous",
 								"stale_plan_revision",
-								"stale_conversation_authority"
+								"stale_conversation_authority",
+								"review_discussions_unavailable",
+								"review_source_unavailable",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict",
+								"worktree_limit_reached",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict",
+								"worktree_limit_reached"
 							]
 						}
 					},
@@ -3870,7 +4558,17 @@
 								"client_input_conflict",
 								"client_input_outcome_ambiguous",
 								"stale_plan_revision",
-								"stale_conversation_authority"
+								"stale_conversation_authority",
+								"review_discussions_unavailable",
+								"review_source_unavailable",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict",
+								"worktree_limit_reached",
+								"review_preparation_failed",
+								"review_preparation_stale",
+								"review_preparation_conflict",
+								"worktree_limit_reached"
 							]
 						}
 					},
@@ -4715,6 +5413,49 @@
 				},
 				"reason": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcListJobsResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"jobs"
+			],
+			"properties": {
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"jobs": {
+					"$ref": "#/$defs/RpcBackgroundJobs"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcListReviewDiscussions": {
+			"type": "object",
+			"required": [
+				"runId",
+				"discussions"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"discussions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcReviewDiscussion"
+					},
+					"maxItems": 50
+				},
+				"nextCursor": {
+					"type": "string",
+					"maxLength": 32
 				}
 			},
 			"additionalProperties": false
@@ -5911,8 +6652,7 @@
 							"type": "array",
 							"items": {
 								"$ref": "#/$defs/RpcPlanStep"
-							},
-							"maxItems": 64
+							}
 						},
 						"phase": {
 							"type": "string",
@@ -5954,8 +6694,7 @@
 							"type": "array",
 							"items": {
 								"$ref": "#/$defs/RpcPlanStep"
-							},
-							"maxItems": 64
+							}
 						},
 						"phase": {
 							"type": "string",
@@ -5974,30 +6713,87 @@
 			]
 		},
 		"RpcPlanStep": {
-			"type": "object",
-			"required": [
-				"id",
-				"text",
-				"status"
-			],
-			"properties": {
-				"id": {
-					"type": "string",
-					"minLength": 1
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"id",
+						"text",
+						"status"
+					],
+					"properties": {
+						"id": {
+							"type": "string",
+							"minLength": 1
+						},
+						"text": {
+							"type": "string",
+							"minLength": 1
+						},
+						"status": {
+							"$ref": "#/$defs/RpcPlanStepStatus"
+						},
+						"note": {
+							"type": "string",
+							"minLength": 1
+						}
+					},
+					"additionalProperties": false
 				},
-				"text": {
-					"type": "string",
-					"minLength": 1
-				},
-				"status": {
-					"$ref": "#/$defs/RpcPlanStepStatus"
-				},
-				"note": {
-					"type": "string",
-					"minLength": 1
+				{
+					"type": "object",
+					"required": [
+						"id",
+						"text",
+						"status",
+						"substeps"
+					],
+					"properties": {
+						"id": {
+							"type": "string",
+							"minLength": 1
+						},
+						"text": {
+							"type": "string",
+							"minLength": 1
+						},
+						"status": {
+							"$ref": "#/$defs/RpcPlanStepStatus"
+						},
+						"substeps": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"required": [
+									"id",
+									"text",
+									"status"
+								],
+								"properties": {
+									"id": {
+										"type": "string",
+										"minLength": 1
+									},
+									"text": {
+										"type": "string",
+										"minLength": 1
+									},
+									"status": {
+										"$ref": "#/$defs/RpcPlanStepStatus"
+									},
+									"note": {
+										"type": "string",
+										"minLength": 1
+									}
+								},
+								"additionalProperties": false
+							},
+							"minItems": 1
+						}
+					},
+					"additionalProperties": false
 				}
-			},
-			"additionalProperties": false
+			]
 		},
 		"RpcPlanStepStatus": {
 			"type": "string",
@@ -6190,6 +6986,73 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcPromptCacheChangedEvent": {
+			"type": "object",
+			"required": [
+				"type",
+				"promptCache"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "prompt_cache_changed"
+				},
+				"promptCache": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcPromptCacheStatus"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"delivery": {
+					"$ref": "#/$defs/RpcConversationDeliveryPosition"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcPromptCacheStatus": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"lastRequestAt"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "retained"
+						},
+						"lastRequestAt": {
+							"type": "number"
+						},
+						"expiresAt": {
+							"type": "number"
+						},
+						"keepAliveUntil": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "model_changed"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
 		"RpcPromptResponse": {
 			"type": "object",
 			"required": [
@@ -6293,6 +7156,25 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcReadJobResponse": {
+			"type": "object",
+			"required": [
+				"sessionId",
+				"job"
+			],
+			"properties": {
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"branchEpoch": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"job": {
+					"$ref": "#/$defs/RpcBackgroundJobSnapshot"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcRegisterPushTargetArgs": {
 			"type": "object",
 			"required": [
@@ -6341,6 +7223,31 @@
 				},
 				"pushTargetId": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResetReviewDiscussion": {
+			"type": "object",
+			"required": [
+				"requestId",
+				"status",
+				"discussion"
+			],
+			"properties": {
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"reset",
+						"conflict",
+						"busy"
+					]
+				},
+				"discussion": {
+					"$ref": "#/$defs/RpcReviewDiscussion"
 				}
 			},
 			"additionalProperties": false
@@ -6396,7 +7303,28 @@
 					"$ref": "#/$defs/RpcResponse.invoke_ui_action"
 				},
 				{
+					"$ref": "#/$defs/RpcResponse.resolve_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.prepare_pr_review"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.start_review_discussions"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.list_review_discussions"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.reset_review_discussion"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_review_discussion_source"
+				},
+				{
 					"$ref": "#/$defs/RpcResponse.cancel_workflow"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_review_general"
 				},
 				{
 					"$ref": "#/$defs/RpcResponse.get_review_result"
@@ -6519,6 +7447,15 @@
 					"$ref": "#/$defs/RpcResponse.get_transcript_entry_text"
 				},
 				{
+					"$ref": "#/$defs/RpcResponse.list_jobs"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.read_job"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.cancel_job"
+				},
+				{
 					"$ref": "#/$defs/RpcResponse.list_subagents"
 				},
 				{
@@ -6583,6 +7520,9 @@
 				},
 				{
 					"$ref": "#/$defs/RpcResponse.list_sessions"
+				},
+				{
+					"$ref": "#/$defs/RpcResponse.get_session_contexts"
 				},
 				{
 					"$ref": "#/$defs/RpcResponse.export_html"
@@ -6753,6 +7693,36 @@
 				},
 				"data": {
 					"$ref": "#/$defs/RpcBashResult"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.cancel_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "cancel_job"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcCancelJobResponse"
 				}
 			},
 			"additionalProperties": false
@@ -7710,6 +8680,103 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcResponse.get_review_discussion_source": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_review_discussion_source"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcReviewDiscussion"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_review_general": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_review_general"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"runId",
+						"sourceSessionId",
+						"generalSessionId",
+						"generalSessionGeneration",
+						"generalRevision",
+						"generalAvailable"
+					],
+					"properties": {
+						"runId": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"sourceSessionId": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"generalSessionId": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"generalSessionGeneration": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"generalRevision": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"generalAvailable": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcResponse.get_review_result": {
 			"type": "object",
 			"required": [
@@ -7736,6 +8803,82 @@
 				},
 				"data": {
 					"$ref": "#/$defs/RpcReviewWorkflowResultResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.get_session_contexts": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "get_session_contexts"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"contexts"
+					],
+					"properties": {
+						"contexts": {
+							"type": "array",
+							"items": {
+								"type": "object",
+								"required": [
+									"sessionId",
+									"startingGitContext",
+									"workContext"
+								],
+								"properties": {
+									"sessionId": {
+										"type": "string",
+										"minLength": 1,
+										"maxLength": 128
+									},
+									"startingGitContext": {
+										"anyOf": [
+											{
+												"$ref": "#/$defs/RpcGitContext"
+											},
+											{
+												"type": "null"
+											}
+										]
+									},
+									"workContext": {
+										"anyOf": [
+											{
+												"$ref": "#/$defs/RpcSessionWorkContext"
+											},
+											{
+												"type": "null"
+											}
+										]
+									}
+								},
+								"additionalProperties": false
+							},
+							"maxItems": 64
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -8080,6 +9223,36 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcResponse.list_jobs": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_jobs"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcListJobsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcResponse.list_mcp_prompts": {
 			"type": "object",
 			"required": [
@@ -8226,6 +9399,36 @@
 				},
 				"data": {
 					"$ref": "#/$defs/RpcMcpToolsResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.list_review_discussions": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "list_review_discussions"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcListReviewDiscussions"
 				}
 			},
 			"additionalProperties": false
@@ -8560,6 +9763,124 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcResponse.prepare_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "prepare_pr_review"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"workspaceName",
+						"sessionId",
+						"worktreeId",
+						"pullRequest",
+						"disposition"
+					],
+					"properties": {
+						"workspaceName": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 255,
+							"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+						},
+						"sessionId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 128,
+							"pattern": "^[a-z0-9_-]{1,128}$(?![\\s\\S])"
+						},
+						"worktreeId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 64,
+							"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$(?![\\s\\S])"
+						},
+						"workingDirectory": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 4096,
+							"pattern": "^(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.{1,2}|\\.[gG][iI][tT])(?:/|$))[^/\\\\\\u0000-\\u001f\\u007f]+(?:/[^/\\\\\\u0000-\\u001f\\u007f]+)*$(?![\\s\\S])"
+						},
+						"pullRequest": {
+							"type": "object",
+							"required": [
+								"provider",
+								"url",
+								"number",
+								"title",
+								"repository",
+								"headRefName",
+								"headRefOid"
+							],
+							"properties": {
+								"provider": {
+									"type": "string",
+									"const": "github"
+								},
+								"url": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 2048,
+									"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+								},
+								"number": {
+									"type": "integer",
+									"minimum": 1,
+									"maximum": 2147483647
+								},
+								"title": {
+									"type": "string",
+									"maxLength": 512
+								},
+								"repository": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 256
+								},
+								"headRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefOid": {
+									"type": "string",
+									"maxLength": 64,
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+								}
+							},
+							"additionalProperties": false
+						},
+						"disposition": {
+							"type": "string",
+							"enum": [
+								"created",
+								"reused"
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcResponse.prompt": {
 			"type": "object",
 			"required": [
@@ -8641,6 +9962,36 @@
 						}
 					},
 					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.read_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "read_job"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcReadJobResponse"
 				}
 			},
 			"additionalProperties": false
@@ -8877,6 +10228,126 @@
 						},
 						"workflowId": {
 							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.reset_review_discussion": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "reset_review_discussion"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcResetReviewDiscussion"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.resolve_pr_review": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "resolve_pr_review"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"type": "object",
+					"required": [
+						"workspaceName",
+						"pullRequest"
+					],
+					"properties": {
+						"workspaceName": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 255,
+							"pattern": "^[^\\u0000-\\u001f\\u007f]+$(?![\\s\\S])"
+						},
+						"pullRequest": {
+							"type": "object",
+							"required": [
+								"provider",
+								"url",
+								"number",
+								"title",
+								"repository",
+								"headRefName",
+								"headRefOid"
+							],
+							"properties": {
+								"provider": {
+									"type": "string",
+									"const": "github"
+								},
+								"url": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 2048,
+									"pattern": "^https://[^\\s]+$(?![\\s\\S])"
+								},
+								"number": {
+									"type": "integer",
+									"minimum": 1,
+									"maximum": 2147483647
+								},
+								"title": {
+									"type": "string",
+									"maxLength": 512
+								},
+								"repository": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 256
+								},
+								"headRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefOid": {
+									"type": "string",
+									"maxLength": 64,
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$(?![\\s\\S])"
+								}
+							},
+							"additionalProperties": false
 						}
 					},
 					"additionalProperties": false
@@ -9273,6 +10744,36 @@
 				},
 				"data": {
 					"$ref": "#/$defs/RpcMcpAuthResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcResponse.start_review_discussions": {
+			"type": "object",
+			"required": [
+				"type",
+				"command",
+				"success",
+				"data"
+			],
+			"properties": {
+				"id": {
+					"type": "string"
+				},
+				"type": {
+					"type": "string",
+					"const": "response"
+				},
+				"command": {
+					"type": "string",
+					"const": "start_review_discussions"
+				},
+				"success": {
+					"type": "boolean",
+					"const": true
+				},
+				"data": {
+					"$ref": "#/$defs/RpcStartReviewDiscussions"
 				}
 			},
 			"additionalProperties": false
@@ -9784,6 +11285,88 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcReviewDiscussion": {
+			"type": "object",
+			"required": [
+				"discussionId",
+				"runId",
+				"findingId",
+				"sourceSessionId",
+				"sessionId",
+				"currentSessionId",
+				"sourceAvailable",
+				"available",
+				"status"
+			],
+			"properties": {
+				"discussionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"findingId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"sourceSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"currentSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"sourceAvailable": {
+					"type": "boolean"
+				},
+				"available": {
+					"type": "boolean"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"idle",
+						"running",
+						"pending",
+						"completed",
+						"failed",
+						"cancelled",
+						"interrupted",
+						"unavailable"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcReviewDiscussionLink": {
+			"type": "object",
+			"required": [
+				"discussionId",
+				"runId",
+				"findingId",
+				"sourceSessionId",
+				"sessionId"
+			],
+			"properties": {
+				"discussionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"findingId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"sourceSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"sessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcReviewFinding": {
 			"type": "object",
 			"required": [
@@ -9980,7 +11563,6 @@
 				"workflowAction",
 				"status",
 				"startedAt",
-				"endedAt",
 				"target",
 				"options"
 			],
@@ -10000,6 +11582,151 @@
 				"endedAt": {
 					"type": "number"
 				},
+				"usage": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"status",
+								"costBasis",
+								"requests",
+								"turns",
+								"pendingRequests",
+								"unavailableRequests",
+								"partialRequests"
+							],
+							"properties": {
+								"status": {
+									"anyOf": [
+										{
+											"type": "string",
+											"const": "complete"
+										},
+										{
+											"type": "string",
+											"const": "partial"
+										},
+										{
+											"type": "string",
+											"const": "unavailable"
+										}
+									]
+								},
+								"costBasis": {
+									"type": "string",
+									"const": "model-priced-usd"
+								},
+								"requests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"turns": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"pendingRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"unavailableRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"partialRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"tokens": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite"
+									],
+									"properties": {
+										"input": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"output": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheRead": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheWrite": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										}
+									},
+									"additionalProperties": false
+								},
+								"estimatedCost": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite",
+										"total"
+									],
+									"properties": {
+										"input": {
+											"type": "number",
+											"minimum": 0
+										},
+										"output": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheRead": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheWrite": {
+											"type": "number",
+											"minimum": 0
+										},
+										"total": {
+											"type": "number",
+											"minimum": 0
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "object",
+							"required": [
+								"status"
+							],
+							"properties": {
+								"status": {
+									"type": "string",
+									"const": "unavailable"
+								}
+							},
+							"additionalProperties": false
+						}
+					]
+				},
+				"usageUpdatedAt": {
+					"type": "number"
+				},
 				"acknowledgedAt": {
 					"type": "number"
 				},
@@ -10008,7 +11735,8 @@
 					"required": [
 						"description",
 						"diffCommand",
-						"identity"
+						"identity",
+						"files"
 					],
 					"properties": {
 						"description": {
@@ -10019,6 +11747,210 @@
 						},
 						"identity": {
 							"$ref": "#/$defs/RpcReviewTargetIdentity"
+						},
+						"pullRequest": {
+							"type": "object",
+							"required": [
+								"provider",
+								"number",
+								"title",
+								"url",
+								"baseRefName",
+								"headRefName",
+								"headRefOid"
+							],
+							"properties": {
+								"provider": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 64,
+									"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"
+								},
+								"number": {
+									"type": "integer",
+									"minimum": 1,
+									"maximum": 2147483647
+								},
+								"title": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 512
+								},
+								"url": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 2000
+								},
+								"baseRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefOid": {
+									"type": "string",
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+								},
+								"author": {
+									"type": "object",
+									"required": [
+										"login"
+									],
+									"properties": {
+										"login": {
+											"type": "string",
+											"minLength": 1,
+											"maxLength": 256
+										},
+										"avatarUrl": {
+											"type": "string",
+											"maxLength": 2000,
+											"pattern": "^https://"
+										}
+									},
+									"additionalProperties": false
+								},
+								"reviewState": {
+									"type": "string",
+									"enum": [
+										"draft",
+										"ready",
+										"merged",
+										"closed"
+									]
+								},
+								"mergeability": {
+									"type": "string",
+									"enum": [
+										"mergeable",
+										"conflicting",
+										"unknown"
+									]
+								},
+								"checks": {
+									"type": "object",
+									"required": [
+										"state",
+										"totalCount",
+										"passedCount",
+										"pendingCount",
+										"failedCount",
+										"neutralCount",
+										"unknownCount"
+									],
+									"properties": {
+										"state": {
+											"type": "string",
+											"enum": [
+												"passing",
+												"pending",
+												"failing",
+												"none",
+												"unknown"
+											]
+										},
+										"totalCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"passedCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"pendingCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"failedCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"neutralCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"unknownCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										}
+									},
+									"additionalProperties": false
+								},
+								"observedAt": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								}
+							},
+							"additionalProperties": false
+						},
+						"files": {
+							"type": "object",
+							"required": [
+								"totalCount",
+								"projectedCount",
+								"omittedCount",
+								"additions",
+								"deletions",
+								"isComplete",
+								"items"
+							],
+							"properties": {
+								"totalCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"projectedCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"omittedCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"additions": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"deletions": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"isComplete": {
+									"type": "boolean"
+								},
+								"items": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"required": [
+											"path",
+											"status",
+											"additions",
+											"deletions"
+										],
+										"properties": {
+											"path": {
+												"type": "string",
+												"minLength": 1,
+												"maxLength": 4096
+											},
+											"previousPath": {
+												"type": "string",
+												"minLength": 1,
+												"maxLength": 4096
+											},
+											"status": {
+												"type": "string",
+												"enum": [
+													"added",
+													"modified",
+													"deleted",
+													"renamed",
+													"copied",
+													"type-changed"
+												]
+											},
+											"additions": {
+												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+											},
+											"deletions": {
+												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+											}
+										},
+										"additionalProperties": false
+									},
+									"maxItems": 200
+								}
+							},
+							"additionalProperties": false
 						},
 						"context": {
 							"type": "object",
@@ -10096,6 +12028,7 @@
 		"RpcReviewRunStatus": {
 			"type": "string",
 			"enum": [
+				"unfinished",
 				"completed",
 				"incomplete",
 				"cancelled",
@@ -10139,7 +12072,6 @@
 					"required": [
 						"number",
 						"title",
-						"body",
 						"url",
 						"baseRefName",
 						"headRefName",
@@ -10208,6 +12140,210 @@
 						},
 						"diffCommand": {
 							"type": "string"
+						},
+						"pullRequest": {
+							"type": "object",
+							"required": [
+								"provider",
+								"number",
+								"title",
+								"url",
+								"baseRefName",
+								"headRefName",
+								"headRefOid"
+							],
+							"properties": {
+								"provider": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 64,
+									"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"
+								},
+								"number": {
+									"type": "integer",
+									"minimum": 1,
+									"maximum": 2147483647
+								},
+								"title": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 512
+								},
+								"url": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 2000
+								},
+								"baseRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefOid": {
+									"type": "string",
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+								},
+								"author": {
+									"type": "object",
+									"required": [
+										"login"
+									],
+									"properties": {
+										"login": {
+											"type": "string",
+											"minLength": 1,
+											"maxLength": 256
+										},
+										"avatarUrl": {
+											"type": "string",
+											"maxLength": 2000,
+											"pattern": "^https://"
+										}
+									},
+									"additionalProperties": false
+								},
+								"reviewState": {
+									"type": "string",
+									"enum": [
+										"draft",
+										"ready",
+										"merged",
+										"closed"
+									]
+								},
+								"mergeability": {
+									"type": "string",
+									"enum": [
+										"mergeable",
+										"conflicting",
+										"unknown"
+									]
+								},
+								"checks": {
+									"type": "object",
+									"required": [
+										"state",
+										"totalCount",
+										"passedCount",
+										"pendingCount",
+										"failedCount",
+										"neutralCount",
+										"unknownCount"
+									],
+									"properties": {
+										"state": {
+											"type": "string",
+											"enum": [
+												"passing",
+												"pending",
+												"failing",
+												"none",
+												"unknown"
+											]
+										},
+										"totalCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"passedCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"pendingCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"failedCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"neutralCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"unknownCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										}
+									},
+									"additionalProperties": false
+								},
+								"observedAt": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								}
+							},
+							"additionalProperties": false
+						},
+						"files": {
+							"type": "object",
+							"required": [
+								"totalCount",
+								"projectedCount",
+								"omittedCount",
+								"additions",
+								"deletions",
+								"isComplete",
+								"items"
+							],
+							"properties": {
+								"totalCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"projectedCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"omittedCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"additions": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"deletions": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"isComplete": {
+									"type": "boolean"
+								},
+								"items": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"required": [
+											"path",
+											"status",
+											"additions",
+											"deletions"
+										],
+										"properties": {
+											"path": {
+												"type": "string",
+												"minLength": 1,
+												"maxLength": 4096
+											},
+											"previousPath": {
+												"type": "string",
+												"minLength": 1,
+												"maxLength": 4096
+											},
+											"status": {
+												"type": "string",
+												"enum": [
+													"added",
+													"modified",
+													"deleted",
+													"renamed",
+													"copied",
+													"type-changed"
+												]
+											},
+											"additions": {
+												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+											},
+											"deletions": {
+												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+											}
+										},
+										"additionalProperties": false
+									},
+									"maxItems": 200
+								}
+							},
+							"additionalProperties": false
 						}
 					},
 					"additionalProperties": false
@@ -10268,7 +12404,6 @@
 				"workflowAction",
 				"status",
 				"startedAt",
-				"endedAt",
 				"target",
 				"options"
 			],
@@ -10288,6 +12423,151 @@
 				"endedAt": {
 					"type": "number"
 				},
+				"usage": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"status",
+								"costBasis",
+								"requests",
+								"turns",
+								"pendingRequests",
+								"unavailableRequests",
+								"partialRequests"
+							],
+							"properties": {
+								"status": {
+									"anyOf": [
+										{
+											"type": "string",
+											"const": "complete"
+										},
+										{
+											"type": "string",
+											"const": "partial"
+										},
+										{
+											"type": "string",
+											"const": "unavailable"
+										}
+									]
+								},
+								"costBasis": {
+									"type": "string",
+									"const": "model-priced-usd"
+								},
+								"requests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"turns": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"pendingRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"unavailableRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"partialRequests": {
+									"type": "integer",
+									"minimum": 0,
+									"maximum": 9007199254740991
+								},
+								"tokens": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite"
+									],
+									"properties": {
+										"input": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"output": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheRead": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										},
+										"cacheWrite": {
+											"type": "integer",
+											"minimum": 0,
+											"maximum": 9007199254740991
+										}
+									},
+									"additionalProperties": false
+								},
+								"estimatedCost": {
+									"type": "object",
+									"required": [
+										"input",
+										"output",
+										"cacheRead",
+										"cacheWrite",
+										"total"
+									],
+									"properties": {
+										"input": {
+											"type": "number",
+											"minimum": 0
+										},
+										"output": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheRead": {
+											"type": "number",
+											"minimum": 0
+										},
+										"cacheWrite": {
+											"type": "number",
+											"minimum": 0
+										},
+										"total": {
+											"type": "number",
+											"minimum": 0
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "object",
+							"required": [
+								"status"
+							],
+							"properties": {
+								"status": {
+									"type": "string",
+									"const": "unavailable"
+								}
+							},
+							"additionalProperties": false
+						}
+					]
+				},
+				"usageUpdatedAt": {
+					"type": "number"
+				},
 				"acknowledgedAt": {
 					"type": "number"
 				},
@@ -10296,7 +12576,8 @@
 					"required": [
 						"description",
 						"diffCommand",
-						"identity"
+						"identity",
+						"files"
 					],
 					"properties": {
 						"description": {
@@ -10307,6 +12588,210 @@
 						},
 						"identity": {
 							"$ref": "#/$defs/RpcReviewTargetIdentity"
+						},
+						"pullRequest": {
+							"type": "object",
+							"required": [
+								"provider",
+								"number",
+								"title",
+								"url",
+								"baseRefName",
+								"headRefName",
+								"headRefOid"
+							],
+							"properties": {
+								"provider": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 64,
+									"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"
+								},
+								"number": {
+									"type": "integer",
+									"minimum": 1,
+									"maximum": 2147483647
+								},
+								"title": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 512
+								},
+								"url": {
+									"type": "string",
+									"minLength": 1,
+									"maxLength": 2000
+								},
+								"baseRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefName": {
+									"$ref": "#/$defs/RpcGitRef"
+								},
+								"headRefOid": {
+									"type": "string",
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+								},
+								"author": {
+									"type": "object",
+									"required": [
+										"login"
+									],
+									"properties": {
+										"login": {
+											"type": "string",
+											"minLength": 1,
+											"maxLength": 256
+										},
+										"avatarUrl": {
+											"type": "string",
+											"maxLength": 2000,
+											"pattern": "^https://"
+										}
+									},
+									"additionalProperties": false
+								},
+								"reviewState": {
+									"type": "string",
+									"enum": [
+										"draft",
+										"ready",
+										"merged",
+										"closed"
+									]
+								},
+								"mergeability": {
+									"type": "string",
+									"enum": [
+										"mergeable",
+										"conflicting",
+										"unknown"
+									]
+								},
+								"checks": {
+									"type": "object",
+									"required": [
+										"state",
+										"totalCount",
+										"passedCount",
+										"pendingCount",
+										"failedCount",
+										"neutralCount",
+										"unknownCount"
+									],
+									"properties": {
+										"state": {
+											"type": "string",
+											"enum": [
+												"passing",
+												"pending",
+												"failing",
+												"none",
+												"unknown"
+											]
+										},
+										"totalCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"passedCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"pendingCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"failedCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"neutralCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										},
+										"unknownCount": {
+											"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+										}
+									},
+									"additionalProperties": false
+								},
+								"observedAt": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								}
+							},
+							"additionalProperties": false
+						},
+						"files": {
+							"type": "object",
+							"required": [
+								"totalCount",
+								"projectedCount",
+								"omittedCount",
+								"additions",
+								"deletions",
+								"isComplete",
+								"items"
+							],
+							"properties": {
+								"totalCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"projectedCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"omittedCount": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"additions": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"deletions": {
+									"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+								},
+								"isComplete": {
+									"type": "boolean"
+								},
+								"items": {
+									"type": "array",
+									"items": {
+										"type": "object",
+										"required": [
+											"path",
+											"status",
+											"additions",
+											"deletions"
+										],
+										"properties": {
+											"path": {
+												"type": "string",
+												"minLength": 1,
+												"maxLength": 4096
+											},
+											"previousPath": {
+												"type": "string",
+												"minLength": 1,
+												"maxLength": 4096
+											},
+											"status": {
+												"type": "string",
+												"enum": [
+													"added",
+													"modified",
+													"deleted",
+													"renamed",
+													"copied",
+													"type-changed"
+												]
+											},
+											"additions": {
+												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+											},
+											"deletions": {
+												"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+											}
+										},
+										"additionalProperties": false
+									},
+									"maxItems": 200
+								}
+							},
+							"additionalProperties": false
 						},
 						"context": {
 							"type": "object",
@@ -10371,6 +12856,231 @@
 				"errorMessage": {
 					"type": "string"
 				},
+				"usageBreakdown": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"required": [
+							"passId",
+							"phase",
+							"purpose",
+							"round",
+							"attempt",
+							"kind",
+							"provider",
+							"model",
+							"requests",
+							"turns",
+							"pendingRequests",
+							"unavailableRequests",
+							"partialRequests"
+						],
+						"properties": {
+							"passId": {
+								"type": "integer",
+								"minimum": 1
+							},
+							"phase": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "discovery"
+									},
+									{
+										"type": "string",
+										"const": "verification"
+									},
+									{
+										"type": "string",
+										"const": "presentation"
+									}
+								]
+							},
+							"purpose": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "findings"
+									},
+									{
+										"type": "string",
+										"const": "challenge"
+									}
+								]
+							},
+							"round": {
+								"type": "integer",
+								"minimum": 1
+							},
+							"attempt": {
+								"type": "integer",
+								"minimum": 1
+							},
+							"kind": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "turn"
+									},
+									{
+										"type": "string",
+										"const": "compaction"
+									}
+								]
+							},
+							"provider": {
+								"type": "string",
+								"minLength": 1,
+								"maxLength": 256
+							},
+							"model": {
+								"type": "string",
+								"minLength": 1,
+								"maxLength": 256
+							},
+							"requestedTier": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "auto"
+									},
+									{
+										"type": "string",
+										"const": "default"
+									},
+									{
+										"type": "string",
+										"const": "flex"
+									},
+									{
+										"type": "string",
+										"const": "scale"
+									},
+									{
+										"type": "string",
+										"const": "priority"
+									}
+								]
+							},
+							"effectiveTier": {
+								"anyOf": [
+									{
+										"type": "string",
+										"const": "auto"
+									},
+									{
+										"type": "string",
+										"const": "default"
+									},
+									{
+										"type": "string",
+										"const": "flex"
+									},
+									{
+										"type": "string",
+										"const": "scale"
+									},
+									{
+										"type": "string",
+										"const": "priority"
+									}
+								]
+							},
+							"requests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"turns": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"pendingRequests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"unavailableRequests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"partialRequests": {
+								"type": "integer",
+								"minimum": 0,
+								"maximum": 9007199254740991
+							},
+							"tokens": {
+								"type": "object",
+								"required": [
+									"input",
+									"output",
+									"cacheRead",
+									"cacheWrite"
+								],
+								"properties": {
+									"input": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									},
+									"output": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									},
+									"cacheRead": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									},
+									"cacheWrite": {
+										"type": "integer",
+										"minimum": 0,
+										"maximum": 9007199254740991
+									}
+								},
+								"additionalProperties": false
+							},
+							"estimatedCost": {
+								"type": "object",
+								"required": [
+									"input",
+									"output",
+									"cacheRead",
+									"cacheWrite",
+									"total"
+								],
+								"properties": {
+									"input": {
+										"type": "number",
+										"minimum": 0
+									},
+									"output": {
+										"type": "number",
+										"minimum": 0
+									},
+									"cacheRead": {
+										"type": "number",
+										"minimum": 0
+									},
+									"cacheWrite": {
+										"type": "number",
+										"minimum": 0
+									},
+									"total": {
+										"type": "number",
+										"minimum": 0
+									}
+								},
+								"additionalProperties": false
+							}
+						},
+						"additionalProperties": false
+					},
+					"maxItems": 1024
+				},
 				"completionStatus": {
 					"$ref": "#/$defs/RpcReviewCompletionStatus"
 				},
@@ -10406,6 +13116,12 @@
 		},
 		"RpcServerEvent": {
 			"anyOf": [
+				{
+					"$ref": "#/$defs/RpcAgentStartEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcBackgroundJobsChangedEvent"
+				},
 				{
 					"$ref": "#/$defs/RpcConversationBootstrapEvent"
 				},
@@ -10458,6 +13174,9 @@
 					"$ref": "#/$defs/RpcGitContextChangedEvent"
 				},
 				{
+					"$ref": "#/$defs/RpcPromptCacheChangedEvent"
+				},
+				{
 					"$ref": "#/$defs/RpcUiActionStateChangedEvent"
 				},
 				{
@@ -10476,6 +13195,9 @@
 				"current"
 			],
 			"properties": {
+				"reviewDiscussion": {
+					"$ref": "#/$defs/RpcReviewDiscussionLink"
+				},
 				"sessionId": {
 					"type": "string"
 				},
@@ -10500,6 +13222,19 @@
 				"origin": {
 					"type": "string",
 					"const": "subagent"
+				},
+				"startingGitContext": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcGitContext"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"workContext": {
+					"$ref": "#/$defs/RpcSessionWorkContext"
 				}
 			},
 			"additionalProperties": false
@@ -10521,9 +13256,13 @@
 				"messageCount",
 				"pendingMessageCount",
 				"steeringQueue",
-				"followUpQueue"
+				"followUpQueue",
+				"backgroundJobs"
 			],
 			"properties": {
+				"reviewDiscussion": {
+					"$ref": "#/$defs/RpcReviewDiscussionLink"
+				},
 				"model": {
 					"$ref": "#/$defs/RpcModel"
 				},
@@ -10552,6 +13291,16 @@
 						}
 					]
 				},
+				"startingGitContext": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcGitContext"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
 				"isStreaming": {
 					"type": "boolean"
 				},
@@ -10566,9 +13315,6 @@
 				},
 				"followUpMode": {
 					"$ref": "#/$defs/RpcQueueMode"
-				},
-				"sessionFile": {
-					"type": "string"
 				},
 				"sessionId": {
 					"type": "string"
@@ -10597,17 +13343,26 @@
 						"$ref": "#/$defs/RpcQueuedMessage"
 					}
 				},
+				"backgroundJobs": {
+					"$ref": "#/$defs/RpcBackgroundJobs"
+				},
 				"activeTools": {
 					"type": "array",
 					"items": {
 						"$ref": "#/$defs/RpcActiveToolExecution"
 					}
 				},
+				"activeAgentRun": {
+					"$ref": "#/$defs/RpcActiveAgentRun"
+				},
 				"activeCompaction": {
 					"$ref": "#/$defs/RpcActiveCompaction"
 				},
 				"activeRetry": {
 					"$ref": "#/$defs/RpcActiveRetry"
+				},
+				"promptCache": {
+					"$ref": "#/$defs/RpcPromptCacheStatus"
 				},
 				"projection": {
 					"$ref": "#/$defs/RpcSessionStateProjection"
@@ -10619,9 +13374,6 @@
 			"type": "object",
 			"properties": {
 				"model": {
-					"$ref": "#/$defs/RpcProjectionTruncation"
-				},
-				"sessionFile": {
 					"$ref": "#/$defs/RpcProjectionTruncation"
 				},
 				"sessionName": {
@@ -10655,9 +13407,6 @@
 				"cost"
 			],
 			"properties": {
-				"sessionFile": {
-					"type": "string"
-				},
 				"sessionId": {
 					"type": "string"
 				},
@@ -10851,6 +13600,115 @@
 							"type": "null"
 						}
 					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcSessionWorkContext": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"changeId",
+						"repository",
+						"branch",
+						"resolutionState",
+						"pullRequest"
+					],
+					"properties": {
+						"changeId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 128
+						},
+						"repository": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 256
+						},
+						"branch": {
+							"$ref": "#/$defs/RpcGitRef"
+						},
+						"resolutionState": {
+							"type": "string",
+							"const": "resolved"
+						},
+						"pullRequest": {
+							"$ref": "#/$defs/RpcSessionWorkPullRequest"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"changeId",
+						"repository",
+						"branch",
+						"resolutionState"
+					],
+					"properties": {
+						"changeId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 128
+						},
+						"repository": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 256
+						},
+						"branch": {
+							"$ref": "#/$defs/RpcGitRef"
+						},
+						"resolutionState": {
+							"type": "string",
+							"enum": [
+								"none",
+								"ambiguous",
+								"unavailable"
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RpcSessionWorkPullRequest": {
+			"type": "object",
+			"required": [
+				"provider",
+				"number",
+				"title",
+				"status",
+				"stale"
+			],
+			"properties": {
+				"provider": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64
+				},
+				"number": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"title": {
+					"type": "string",
+					"maxLength": 512
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"open",
+						"draft",
+						"merged",
+						"closed"
+					]
+				},
+				"stale": {
+					"type": "boolean"
 				}
 			},
 			"additionalProperties": false
@@ -11111,6 +13969,84 @@
 				},
 				"baseDir": {
 					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcStartReviewDiscussions": {
+			"type": "object",
+			"required": [
+				"runId",
+				"requestId",
+				"results"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"results": {
+					"type": "array",
+					"items": {
+						"anyOf": [
+							{
+								"type": "object",
+								"required": [
+									"findingId",
+									"outcome",
+									"discussion"
+								],
+								"properties": {
+									"findingId": {
+										"$ref": "#/$defs/RpcConversationIdentifier"
+									},
+									"outcome": {
+										"type": "string",
+										"enum": [
+											"created",
+											"existing"
+										]
+									},
+									"discussion": {
+										"$ref": "#/$defs/RpcReviewDiscussion"
+									}
+								},
+								"additionalProperties": false
+							},
+							{
+								"type": "object",
+								"required": [
+									"findingId",
+									"outcome",
+									"errorCode"
+								],
+								"properties": {
+									"findingId": {
+										"$ref": "#/$defs/RpcConversationIdentifier"
+									},
+									"outcome": {
+										"type": "string",
+										"const": "failed"
+									},
+									"errorCode": {
+										"type": "string",
+										"enum": [
+											"unknown_finding",
+											"source_unavailable",
+											"launch_failed"
+										]
+									},
+									"discussion": {
+										"$ref": "#/$defs/RpcReviewDiscussion"
+									}
+								},
+								"additionalProperties": false
+							}
+						]
+					},
+					"maxItems": 50
 				}
 			},
 			"additionalProperties": false
@@ -11918,6 +14854,14 @@
 				"cost"
 			],
 			"properties": {
+				"availability": {
+					"type": "string",
+					"enum": [
+						"complete",
+						"partial",
+						"unavailable"
+					]
+				},
 				"input": {
 					"type": "number"
 				},
@@ -12038,6 +14982,33 @@
 				},
 				"status": {
 					"$ref": "#/$defs/RpcWorkflowStatus"
+				},
+				"startedAt": {
+					"type": "number"
+				},
+				"endedAt": {
+					"type": "number"
+				},
+				"pullRequest": {
+					"type": "object",
+					"required": [
+						"provider",
+						"number"
+					],
+					"properties": {
+						"provider": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 64,
+							"pattern": "^[^\\s\\x00-\\x1f\\x7f]+$"
+						},
+						"number": {
+							"type": "integer",
+							"minimum": 1,
+							"maximum": 2147483647
+						}
+					},
+					"additionalProperties": false
 				},
 				"projection": {
 					"$ref": "#/$defs/RpcProjectionTruncation"

@@ -7,13 +7,16 @@ import {
 	parseIrohRemoteRpcCapabilities,
 	parseIrohRemoteRpcGrant,
 } from "../core/remote/iroh/access-grant.ts";
-import { parseIrohRemoteAllowTools } from "../core/remote/iroh/protocol.ts";
+import { IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE, parseIrohRemoteAllowTools } from "../core/remote/iroh/protocol.ts";
 import {
 	type IrohRemotePushNotificationDeliveryStatus,
 	type IrohRemotePushNotificationIntent,
 	parseIrohRemotePushNotificationIntent,
 } from "../core/remote/iroh/push.ts";
 import type { IrohRemoteClient } from "../core/remote/iroh/state.ts";
+import type { IrohRemoteWorkspaceMetadataSnapshot } from "../core/remote/iroh/workspace.ts";
+import { parseSessionReference } from "../core/session-entry-codec.ts";
+import type { SessionReference } from "../core/session-manager.ts";
 
 /**
  * Wire types and framing for the voltd control plane: JSONL over the unix
@@ -112,6 +115,19 @@ export type ControlRequest =
 	| { type: "lease_rekey_commit"; id: string; transactionId: string }
 	| { type: "lease_rekey_rollback"; id: string; transactionId: string }
 	| { type: "lease_rekey_dispose"; id: string; transactionId: string }
+	| {
+			type: "work_observe";
+			id: string;
+			workspaceName: string;
+			sessionId: string;
+			/** Path-free authoritative Git state from the exact TUI lease holder. */
+			gitContext: {
+				repository: string;
+				branch: string;
+				headOid: string;
+				baseRef?: string;
+			} | null;
+	  }
 	| ({ type: "pair_request"; id: string; workspaceName?: string } & ControlAccessSelection) // progress arrives as pairing_progress events
 	| { type: "pair_cancel"; id: string; requestId: string }
 	| { type: "clients_list"; id: string }
@@ -147,6 +163,8 @@ export type ControlRequest =
 	| { type: "worktree_prune"; id: string; workspaceName?: string; purgeRecovery?: boolean }
 	/** Resolve a filesystem path to the daemon-managed worktree containing it. */
 	| { type: "worktree_resolve"; id: string; path: string }
+	/** Restore and pin an exact local session's managed checkout without changing its stored cwd. */
+	| { type: "worktree_restore"; id: string; path: string; sessionRef: SessionReference }
 	/** Bind a session id to a worktree (TUI-created worktree sessions). */
 	| {
 			type: "worktree_bind";
@@ -291,6 +309,39 @@ export interface DaemonRemotePolicyStatus {
 	detachedRuntimeTtlMs: number;
 }
 
+/** Managed relay access, independent of local endpoint readiness. Contains no credentials. */
+export interface ControlRelayCredentialStatus {
+	state: "unpaired" | "pairing" | "active" | "expired" | "subscription_inactive" | "revocation_pending";
+	/** Current access-token expiry as epoch milliseconds, when a token exists. */
+	expiresAt?: number;
+}
+
+export type RemoteTransportState = "starting" | "ready" | "degraded" | "unavailable";
+
+export const REMOTE_TRANSPORT_REASON_MESSAGES = {
+	extension_missing: "Phone transport is not enabled in this daemon.",
+	native_binding_missing:
+		"Phone transport is unavailable on this platform. Reinstall Volt without `--omit=optional` on a supported platform.",
+	endpoint_start_failed: "Phone transport failed to start. Check `volt daemon logs`.",
+	host_storage_full: IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE,
+} as const;
+
+export type RemoteTransportReasonCode = keyof typeof REMOTE_TRANSPORT_REASON_MESSAGES;
+
+export interface RemoteTransportHealth {
+	state: RemoteTransportState;
+	/** Exact @hansjm10/volt-iroh wrapper version, when its manifest is readable. */
+	wrapperVersion?: string;
+	/** Stable machine-readable reason; present whenever state is degraded or unavailable. */
+	reasonCode?: RemoteTransportReasonCode;
+	/** Safe operator-facing guidance corresponding to reasonCode. */
+	message?: string;
+}
+
+export function isRemoteTransportPairingAvailable(health: RemoteTransportHealth | undefined): boolean {
+	return health?.state === "ready" || (health?.state === "degraded" && health.reasonCode === "host_storage_full");
+}
+
 export type ControlResponse =
 	| { type: "ok"; id: string }
 	| { type: "error"; id: string; code: string; message: string }
@@ -315,6 +366,10 @@ export type ControlResponse =
 			clients: ControlClientStatus[];
 			/** Revoked identities retained for explicit repair approval; absent on older running daemons. */
 			revokedClients?: ControlRevokedClientStatus[];
+			/** Required phone-transport readiness; local daemon functions remain available when not ready. */
+			remoteTransport: RemoteTransportHealth;
+			/** Omitted for non-managed relay setups. */
+			relayCredential?: ControlRelayCredentialStatus;
 			/** Added to protocol v1 after launch; absent on older running daemons. */
 			remotePolicy?: DaemonRemotePolicyStatus;
 			keepAwake: ControlKeepAwakeStatus;
@@ -351,7 +406,7 @@ export type ControlResponse =
 			/** verbatim RPC response object for the TUI to forward to the phone */
 			response: Record<string, unknown>;
 			/** refreshed workspace metadata after a successful unregister_workspace */
-			workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
+			workspaceMetadata?: IrohRemoteWorkspaceMetadataSnapshot;
 	  }
 	| { type: "relay_push_delivery_result"; id: string; status: IrohRemotePushNotificationDeliveryStatus };
 
@@ -416,7 +471,7 @@ export interface RelayPreamble {
 	/** verbatim phone handshake JSON as received (parsed object, re-serialized) */
 	handshake: unknown;
 	/** authorization subset — everything the TUI needs to serve the stream */
-	authorization: {
+	authorization: IrohRemoteWorkspaceMetadataSnapshot & {
 		clientNodeId: string;
 		workspaceName: string;
 		workspacePath: string;
@@ -441,7 +496,6 @@ export interface RelayPreamble {
 	streamId: string;
 	resolvedTarget: {
 		sessionId: string;
-		sessionFilePath?: string;
 		selection: "created" | "created_after_missing" | "resumed" | "session_rekeyed";
 		requestedSessionId?: string;
 		workspaceName: string;
@@ -575,6 +629,27 @@ function isLeaseReleaseReason(value: unknown): value is LeaseReleaseReason {
 	);
 }
 
+function isRemoteTransportHealth(value: unknown): value is RemoteTransportHealth {
+	if (!isRecord(value)) return false;
+	if (
+		value.state !== "starting" &&
+		value.state !== "ready" &&
+		value.state !== "degraded" &&
+		value.state !== "unavailable"
+	) {
+		return false;
+	}
+	if (value.wrapperVersion !== undefined && typeof value.wrapperVersion !== "string") return false;
+	if (
+		value.reasonCode !== undefined &&
+		(typeof value.reasonCode !== "string" || !(value.reasonCode in REMOTE_TRANSPORT_REASON_MESSAGES))
+	) {
+		return false;
+	}
+	if (value.message !== undefined && typeof value.message !== "string") return false;
+	return true;
+}
+
 function isPushDeliveryStatus(value: unknown): value is IrohRemotePushNotificationDeliveryStatus {
 	return (
 		value === "sent" ||
@@ -587,6 +662,20 @@ function isPushDeliveryStatus(value: unknown): value is IrohRemotePushNotificati
 
 function isPushNotificationIntent(value: unknown): value is IrohRemotePushNotificationIntent {
 	return parseIrohRemotePushNotificationIntent(value) !== undefined;
+}
+
+function isWorkspaceMetadataSnapshot(value: Record<string, unknown>): boolean {
+	return (
+		Array.isArray(value.workspaceNames) &&
+		value.workspaceNames.every((workspaceName) => typeof workspaceName === "string") &&
+		Array.isArray(value.workspaces) &&
+		value.workspaces.every(
+			(workspace) =>
+				isRecord(workspace) &&
+				typeof workspace.name === "string" &&
+				(workspace.status === "available" || workspace.status === "missing" || workspace.status === "unavailable"),
+		)
+	);
 }
 
 export function parseHelloMessage(value: unknown): HelloMessage | undefined {
@@ -672,6 +761,36 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 		case "lease_rekey_rollback":
 		case "lease_rekey_dispose":
 			return typeof value.transactionId === "string";
+		case "work_observe": {
+			if (
+				typeof value.workspaceName !== "string" ||
+				typeof value.sessionId !== "string" ||
+				value.workspaceName.length === 0 ||
+				value.workspaceName.length > 256 ||
+				value.sessionId.length === 0 ||
+				value.sessionId.length > 128
+			) {
+				return false;
+			}
+			if (value.gitContext === null) return true;
+			if (!isRecord(value.gitContext)) return false;
+			return (
+				typeof value.gitContext.repository === "string" &&
+				value.gitContext.repository.length > 0 &&
+				value.gitContext.repository.length <= 256 &&
+				!/[\0\r\n]/.test(value.gitContext.repository) &&
+				typeof value.gitContext.branch === "string" &&
+				value.gitContext.branch.length > 0 &&
+				value.gitContext.branch.length <= 1024 &&
+				!/[\0\r\n]/.test(value.gitContext.branch) &&
+				typeof value.gitContext.headOid === "string" &&
+				/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value.gitContext.headOid) &&
+				(value.gitContext.baseRef === undefined ||
+					(typeof value.gitContext.baseRef === "string" &&
+						value.gitContext.baseRef.length <= 1024 &&
+						!/[\0\r\n]/.test(value.gitContext.baseRef)))
+			);
+		}
 		case "pair_cancel":
 			return typeof value.requestId === "string";
 		case "client_access_update":
@@ -718,6 +837,14 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 			);
 		case "worktree_resolve":
 			return typeof value.path === "string";
+		case "worktree_restore":
+			if (typeof value.path !== "string") return false;
+			try {
+				parseSessionReference(value.sessionRef);
+				return true;
+			} catch {
+				return false;
+			}
 		case "worktree_bind":
 			return (
 				typeof value.workspaceName === "string" &&
@@ -764,13 +891,26 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "lease_granted":
 		case "lease_pending":
 		case "lease_denied":
-		case "status_result":
 		case "clients_result":
 		case "client_access_updated":
 		case "pair_started":
 			return true;
 		case "lease_rekey_prepared":
 			return typeof value.transactionId === "string";
+		case "status_result":
+			return (
+				isRemoteTransportHealth(value.remoteTransport) &&
+				(value.relayCredential === undefined ||
+					(isRecord(value.relayCredential) &&
+						typeof value.relayCredential.state === "string" &&
+						["unpaired", "pairing", "active", "expired", "subscription_inactive", "revocation_pending"].includes(
+							value.relayCredential.state,
+						) &&
+						(value.relayCredential.expiresAt === undefined ||
+							(typeof value.relayCredential.expiresAt === "number" &&
+								Number.isSafeInteger(value.relayCredential.expiresAt) &&
+								value.relayCredential.expiresAt > 0))))
+			);
 		case "worktree_result":
 			return isRecord(value.worktree);
 		case "worktrees_result":
@@ -787,7 +927,11 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 		case "keep_awake_result":
 			return isRecord(value.keepAwake);
 		case "relay_rpc_result":
-			return isRecord(value.response);
+			return (
+				isRecord(value.response) &&
+				(value.workspaceMetadata === undefined ||
+					(isRecord(value.workspaceMetadata) && isWorkspaceMetadataSnapshot(value.workspaceMetadata)))
+			);
 		case "relay_push_delivery_result":
 			return isPushDeliveryStatus(value.status);
 		default:
@@ -830,7 +974,13 @@ export function isRelayPreamble(value: unknown): value is RelayPreamble {
 		return false;
 	}
 	try {
-		if (typeof value.authorization.allowedTools !== "string") {
+		if (
+			typeof value.authorization.clientNodeId !== "string" ||
+			typeof value.authorization.workspaceName !== "string" ||
+			typeof value.authorization.workspacePath !== "string" ||
+			typeof value.authorization.allowedTools !== "string" ||
+			!isWorkspaceMetadataSnapshot(value.authorization)
+		) {
 			return false;
 		}
 		parseIrohRemoteRpcGrant(value.authorization.rpcGrant, "relay rpcGrant");
