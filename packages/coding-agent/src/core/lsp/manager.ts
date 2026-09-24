@@ -45,6 +45,7 @@ import {
 	waitForLsp,
 } from "./outcome.ts";
 import { swiftContextCaveat, swiftProjectContext } from "./project-context.ts";
+import { type LspLocatedExecutable, type LspToolchainLocator, toolchainLocatorFor } from "./toolchain-locator.ts";
 import { LspTracer } from "./trace.ts";
 import { type LspVersionProbe, LspVersionProbes } from "./version-probe.ts";
 import { type LspWorkspaceEdit, normalizeWorkspaceEdit } from "./workspace-edit.ts";
@@ -410,7 +411,9 @@ class MissingLspExecutableError extends Error {
 		super(
 			probe
 				? `Cannot start native TypeScript LSP: ${launch.resolvedExecutable} reports ${probe.version ?? "an unknown version"}; TypeScript >=7 is required (${probe.reason}).`
-				: `Failed to start LSP server "${serverName}": ${launch.requestedExecutable} was not found ${sourceContext} (ENOENT)`,
+				: launch.toolchain?.status === "missing"
+					? `Failed to start LSP server "${serverName}": ${launch.toolchain.detail}`
+					: `Failed to start LSP server "${serverName}": ${launch.requestedExecutable} was not found ${sourceContext} (ENOENT)`,
 		);
 		this.key = key;
 		this.launch = launch;
@@ -557,6 +560,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private installAllowed: () => boolean;
 	private installPromptsUsed = new Set<string>();
 	private installAttempts = new Map<string, LspInstallAttempt>();
+	/** Toolchain-located executables per server root; cleared on restart and after installs. */
+	private toolchainLocations = new Map<string, LspLocatedExecutable>();
 	private installAbortController = new AbortController();
 	private disposed = false;
 	private commandQueues = new Map<LspClient, Promise<void>>();
@@ -887,6 +892,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.installAbortController = new AbortController();
 		this.installAttempts.clear();
 		this.versionProbes.clear();
+		this.toolchainLocations.clear();
 		this.versions.clear();
 		this.startupEvidence.clear();
 		this.automaticTransitions.clear();
@@ -1999,9 +2005,10 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.clients.delete(key);
 		this.feedback.forget(key);
 
+		const locator = server.usesBuiltInCommand ? toolchainLocatorFor(server.command[0]) : undefined;
 		const launch = resolveLspLaunch(server.command, {
 			projectCwd: this.projectCwd,
-			builtInSwift: server.name === "swift" && server.usesBuiltInCommand,
+			...(locator ? { toolchain: { locator: this.cachedToolchainLocator(key, locator), root } } : {}),
 		});
 		this.launches.set(key, launch);
 		const attempt = (this.startAttempts.get(key) ?? 0) + 1;
@@ -2070,6 +2077,22 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		clientRef = client;
 		this.clients.set(key, client);
 		return client;
+	}
+
+	/** Reuse a located executable while it stays launchable and PATH still misses; misses are never cached. */
+	private cachedToolchainLocator(key: string, locator: LspToolchainLocator): LspToolchainLocator {
+		return {
+			binary: locator.binary,
+			locate: (context) => {
+				const cached = this.toolchainLocations.get(key);
+				if (cached && !context.pathExecutable && context.findExecutable(cached.executable) === cached.executable)
+					return cached;
+				const result = locator.locate(context);
+				if (result.status === "found") this.toolchainLocations.set(key, result);
+				else this.toolchainLocations.delete(key);
+				return result;
+			},
+		};
 	}
 
 	private handleUnusableExecutable(
@@ -2159,7 +2182,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			const detail = error instanceof Error ? error.message : String(error);
 			const recovery =
 				error instanceof MissingLspExecutableError || error instanceof UnusableLspExecutableError
-					? `Set lsp.servers.${server.name}.command to an explicit compatible executable path and run /reload.${server.name === "rust" ? " Locate the installed component with rustup which rust-analyzer." : ""} If the configured command becomes usable on the existing PATH, run /lsp restart. Reload/restart do not import PATH changes from another shell.`
+					? `Set lsp.servers.${server.name}.command to an explicit compatible executable path and run /reload.${server.name === "rust" ? " For rustup, start Volt with the directory containing the rust-analyzer, cargo, and rustc proxies on PATH; the rustup which binary cannot load Cargo workspaces without cargo on PATH." : ""} If the configured command becomes usable on the existing PATH, run /lsp restart. Reload/restart do not import PATH changes from another shell.`
 					: `The executable resolved but initialization failed. Inspect /lsp for startup details, repair the server or project configuration, then run /lsp restart. If changing lsp.servers.${server.name}.command, run /reload.`;
 			const message = cancelled
 				? "LSP readiness verification cancelled."
@@ -2264,6 +2287,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 						return new Map([...roots.keys()].map((rootKey) => [rootKey, installResult]));
 
 					this.versionProbes.clear();
+					this.toolchainLocations.clear();
 					const results = new Map(
 						await Promise.all(
 							[...roots].map(

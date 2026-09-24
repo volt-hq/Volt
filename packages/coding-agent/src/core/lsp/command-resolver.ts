@@ -1,9 +1,9 @@
 import { accessSync, constants, statSync } from "node:fs";
 import { posix, win32 } from "node:path";
-import { spawnProcessSync } from "../../utils/child-process.ts";
 import { getSubprocessEnv } from "../../utils/process-env.ts";
+import { defaultLspLocatorHost, type LspLocatorHost, type LspToolchainLocator } from "./toolchain-locator.ts";
 
-export type LspLaunchSource = "absolute" | "project-relative" | "path" | "xcrun";
+export type LspLaunchSource = "absolute" | "project-relative" | "path" | "toolchain";
 export type LspExecutableProbeResult = "missing" | "unusable" | "executable";
 
 export interface LspLaunchDescriptor {
@@ -17,6 +17,8 @@ export interface LspLaunchDescriptor {
 	environment: NodeJS.ProcessEnv;
 	/** Bare commands are the only launch form eligible for a reviewed automatic install. */
 	bare: boolean;
+	/** Toolchain locator evidence: how the executable was found, or why the server is not installed. */
+	toolchain?: { status: "found" | "missing"; detail: string };
 }
 
 export interface ResolveLspLaunchOptions {
@@ -28,8 +30,14 @@ export interface ResolveLspLaunchOptions {
 	platform?: NodeJS.Platform;
 	/** Injectable filesystem probe. Defaults to distinguishing missing, unusable, and executable candidates. */
 	probeExecutable?: (path: string, platform: NodeJS.Platform) => LspExecutableProbeResult;
-	/** Host-owned fallback, only for the unchanged built-in Swift command. */
-	builtInSwift?: boolean;
+	/** Host-owned toolchain fallback, only for an unchanged built-in bare command. */
+	toolchain?: {
+		locator: LspToolchainLocator;
+		/** Server root for project-scoped toolchain queries. Defaults to projectCwd. */
+		root?: string;
+		/** Injectable for deterministic cross-platform tests. */
+		host?: LspLocatorHost;
+	};
 }
 
 function missingProbeResult(error: unknown): LspExecutableProbeResult {
@@ -110,7 +118,9 @@ function unquotePathEntry(entry: string): string {
  *
  * Absolute commands remain absolute, explicit relative commands are based at
  * projectCwd, and bare commands are searched only through the supplied PATH and
- * PATHEXT. The returned environment is the exact object to pass to spawn.
+ * PATHEXT. A host-owned toolchain locator may then locate an unchanged built-in
+ * bare command, or report its server as not installed. The returned environment
+ * is the exact object to pass to spawn.
  */
 export function resolveLspLaunch(
 	configuredCommand: readonly string[],
@@ -125,6 +135,24 @@ export function resolveLspLaunch(
 	const probeExecutable = options.probeExecutable ?? defaultProbeExecutable;
 	const requestedExecutable = configuredCommand[0];
 	const explicitRelative = requestedExecutable.includes("/") || requestedExecutable.includes("\\");
+	const searchPath = (name: string): { executable?: string; unusable?: string } => {
+		const pathValue = environmentValue(environment, "PATH", platform);
+		const entries =
+			pathValue === undefined || pathValue === "" ? [] : pathValue.split(platform === "win32" ? ";" : ":");
+		let unusable: string | undefined;
+		for (const rawEntry of entries) {
+			const entry = platform === "win32" ? unquotePathEntry(rawEntry) : rawEntry;
+			const directory = pathApi.isAbsolute(entry) ? entry : pathApi.resolve(options.projectCwd, entry || ".");
+			const result = probeCandidates(
+				executableCandidates(pathApi.join(directory, name), platform, environment),
+				platform,
+				probeExecutable,
+			);
+			if (result.executable) return { executable: result.executable };
+			unusable ??= result.unusable;
+		}
+		return unusable ? { unusable } : {};
+	};
 	let source: LspLaunchSource;
 	let bare: boolean;
 	let resolvedExecutable: string | undefined;
@@ -154,50 +182,44 @@ export function resolveLspLaunch(
 	} else {
 		source = "path";
 		bare = true;
-		const pathValue = environmentValue(environment, "PATH", platform);
-		const entries =
-			pathValue === undefined || pathValue === "" ? [] : pathValue.split(platform === "win32" ? ";" : ":");
-		for (const rawEntry of entries) {
-			const entry = platform === "win32" ? unquotePathEntry(rawEntry) : rawEntry;
-			const directory = pathApi.isAbsolute(entry) ? entry : pathApi.resolve(options.projectCwd, entry || ".");
-			const result = probeCandidates(
-				executableCandidates(pathApi.join(directory, requestedExecutable), platform, environment),
-				platform,
-				probeExecutable,
-			);
-			if (result.executable) {
-				resolvedExecutable = result.executable;
-				break;
-			}
-			unusableExecutable ??= result.unusable;
-		}
+		const result = searchPath(requestedExecutable);
+		resolvedExecutable = result.executable;
+		unusableExecutable = result.unusable;
 	}
 
-	if (
-		!resolvedExecutable &&
-		!unusableExecutable &&
-		platform === "darwin" &&
-		options.builtInSwift &&
-		configuredCommand.length === 1 &&
-		requestedExecutable === "sourcekit-lsp"
-	) {
-		const found = spawnProcessSync("/usr/bin/xcrun", ["--find", "sourcekit-lsp"], {
-			cwd: options.projectCwd,
-			env: environment,
-			encoding: "utf-8",
-			timeout: 3000,
-			maxBuffer: 8192,
-			stdio: ["ignore", "pipe", "pipe"],
+	let launchEnvironment = environment;
+	let toolchain: LspLaunchDescriptor["toolchain"];
+	const locator = options.toolchain?.locator;
+	if (locator && bare && !unusableExecutable && locator.binary === requestedExecutable) {
+		const findExecutable = (path: string): string | undefined =>
+			pathApi.isAbsolute(path)
+				? probeCandidates(executableCandidates(path, platform, environment), platform, probeExecutable).executable
+				: undefined;
+		const host = options.toolchain?.host ?? defaultLspLocatorHost;
+		const result = locator.locate({
+			run: host.run,
+			realpath: host.realpath,
+			fileIdentity: host.fileIdentity,
+			projectCwd: options.projectCwd,
+			root: options.toolchain?.root ?? options.projectCwd,
+			platform,
+			environment,
+			...(resolvedExecutable ? { pathExecutable: resolvedExecutable } : {}),
+			findOnPath: (name) => searchPath(name).executable,
+			findExecutable,
 		});
-		const candidate = found.stdout?.trim();
 		if (
-			found.status === 0 &&
-			candidate &&
-			pathApi.isAbsolute(candidate) &&
-			probeExecutable(candidate, platform) === "executable"
+			result.status === "found" &&
+			pathApi.isAbsolute(result.executable) &&
+			probeExecutable(result.executable, platform) === "executable"
 		) {
-			resolvedExecutable = candidate;
-			source = "xcrun";
+			resolvedExecutable = result.executable;
+			source = "toolchain";
+			launchEnvironment = result.environment ?? environment;
+			toolchain = { status: "found", detail: result.detail };
+		} else if (result.status === "missing") {
+			resolvedExecutable = undefined;
+			toolchain = { status: "missing", detail: result.detail };
 		}
 	}
 
@@ -208,7 +230,8 @@ export function resolveLspLaunch(
 		...(resolvedExecutable ? { resolvedExecutable } : {}),
 		...(!resolvedExecutable && unusableExecutable ? { unusableExecutable } : {}),
 		source,
-		environment,
+		environment: launchEnvironment,
 		bare,
+		...(toolchain ? { toolchain } : {}),
 	};
 }

@@ -78,9 +78,17 @@ Every action except `status` requires `path`. The symbol is located by name: Vol
 
 ## Built-in Servers
 
-The matching server must be installed on the exact inherited `PATH`. Volt does not implicitly execute `node_modules/.bin`. Bare commands are searched in PATH order; relative PATH entries are based at the canonical project workspace. On Windows, commands with an explicit filename extension are probed as named before any `PATHEXT`-derived fallback, while extensionless commands use `PATHEXT` order for PATH, project-relative, and absolute launch forms. Commands containing `/` or `\\` resolve from the project workspace. All remaining command entries are passed as literal argv through Volt's cross-platform spawn wrapper, without shell joining.
+The matching server must be installed on the exact inherited `PATH`, or be reported by its own toolchain as described below. Volt does not implicitly execute `node_modules/.bin`. Bare commands are searched in PATH order; relative PATH entries are based at the canonical project workspace. On Windows, commands with an explicit filename extension are probed as named before any `PATHEXT`-derived fallback, while extensionless commands use `PATHEXT` order for PATH, project-relative, and absolute launch forms. Commands containing `/` or `\\` resolve from the project workspace. All remaining command entries are passed as literal argv through Volt's cross-platform spawn wrapper, without shell joining.
 
-Interactive and capable RPC hosts can request explicit consent for a reviewed built-in repair, then search PATH again and retry. Non-interactive hosts, clients without host-action support, overridden command argv, custom commands, explicit paths, and manual-install-only servers receive repair context instead. No arbitrary package or custom install command is executed.
+For unchanged built-in bare commands only, Volt asks the language's toolchain where its server lives. PATH stays the first lookup, and custom commands and explicit paths are never located. `/lsp` shows the launch source `toolchain` for these servers.
+
+- **Go:** when `gopls` is not on PATH, Volt runs `go env GOBIN GOPATH GOEXE` from a neutral directory with `GOTOOLCHAIN=local`, then launches `GOBIN/gopls`, or `gopls` in the first GOPATH entry's `bin` directory. This is where `go install` writes, and Go never adds it to PATH.
+- **Rust:** when `rust-analyzer` is not on PATH, Volt uses the rust-analyzer rustup proxy next to the real `rustup` executable (for Homebrew rustup, the keg `bin` directory) and prepends that directory to the server's PATH only, so it also finds `cargo` and `rustc`. Rustup proxies exist even without the component, so Volt first runs `rustup which rust-analyzer` in the server root with `RUSTUP_AUTO_INSTALL=0`. If the component is missing, including for a rustup proxy already on PATH, the reviewed component install is offered.
+- **Swift:** see below.
+
+Volt does not search other directories, change settings, or modify shell profiles. Located executables are reused until `/lsp restart`, `/reload`, or an install.
+
+Interactive and capable RPC hosts can request explicit consent for a reviewed built-in repair, then search PATH and the toolchain again and retry. Non-interactive hosts, clients without host-action support, overridden command argv, custom commands, explicit paths, and manual-install-only servers receive repair context instead. No arbitrary package or custom install command is executed.
 
 ### TypeScript
 
@@ -96,7 +104,7 @@ This replaces the global TypeScript compiler. Lifecycle scripts are disabled; op
 
 ### Swift
 
-The built-in Swift server resolves `sourcekit-lsp` from inherited PATH first. On macOS only, if that unchanged built-in bare command is missing, Volt may use `xcrun` to find SourceKit-LSP in the selected developer toolchain. There is no `xcrun` fallback for custom commands or explicit paths, and no automatic Swift/Xcode installation.
+The built-in Swift server resolves `sourcekit-lsp` from inherited PATH first. On macOS only, if that unchanged built-in bare command is missing, Volt may use `xcrun --find sourcekit-lsp` to find SourceKit-LSP in the selected developer toolchain. There is no `xcrun` fallback for custom commands or explicit paths, and no automatic Swift/Xcode installation.
 
 SwiftPM (`Package.swift`) and an existing BSP configuration (`buildServer.json`) provide project context. Module/reference coverage may require a recent build. A loose Swift file or an Xcode project without an already configured build server has limited semantics; a running server does not establish full workspace indexing. Volt defaults Swift initialization options to `backgroundIndexing: false`, does not create build-server configuration, select Xcode, run builds, or automatically set up an index. Explicit initialization options and SourceKit's own project configuration remain user-controlled; see [SourceKit configuration](https://github.com/swiftlang/sourcekit-lsp/blob/main/Documentation/Configuration%20File.md).
 
@@ -198,7 +206,7 @@ User entries merge field-wise over built-in defaults: overriding only `command` 
 
 ### Installed but not ready
 
-An installer can succeed without exposing the launcher on Volt's inherited PATH. For example, Homebrew's `rustup` can install Rust Analyzer while bare `rust-analyzer` remains unresolved. Find the installed executable yourself (for Rust, `rustup which rust-analyzer`), then set an explicit command:
+An installer can succeed without exposing the launcher on Volt's inherited PATH. Go and Rust installs are located through their toolchains, as described above. When a server is still unresolved, find the installed executable yourself, then set an explicit command. For Rust, point it at the rustup proxy rather than the toolchain binary from `rustup which`, and keep `cargo` and `rustc` on the PATH that starts Volt:
 
 ```json
 {
