@@ -27,6 +27,7 @@ export { resolvePromptCacheRetention } from "./providers/prompt-cache.ts";
 export * from "./providers/register-builtins.ts";
 export * from "./session-resources.ts";
 export * from "./stream/fragments.ts";
+export { createRejectedToolCallFeedback } from "./stream/invalid-tool-arguments.ts";
 export * from "./stream/normalizer.ts";
 export * from "./stream.ts";
 export * from "./types.ts";

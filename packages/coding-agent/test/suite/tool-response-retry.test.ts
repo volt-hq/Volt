@@ -132,16 +132,19 @@ describe("tool response transport recovery", () => {
 	);
 
 	it.each([
-		"invalid_tool_arguments",
-		"tool_argument_generation_limit",
-		"assistant_stream_queue_limit",
-		"assistant_stream_processing_error",
-	])("keeps %s non-retryable even with a transient-looking cause", async (type) => {
+		{ label: "tool_argument_generation_limit", types: ["tool_argument_generation_limit"] },
+		{ label: "assistant_stream_queue_limit", types: ["assistant_stream_queue_limit"] },
+		{ label: "assistant_stream_processing_error", types: ["assistant_stream_processing_error"] },
+		{
+			label: "invalid_tool_arguments after a generation limit",
+			types: ["invalid_tool_arguments", "tool_argument_generation_limit"],
+		},
+	])("keeps $label non-retryable even with a transient-looking cause", async ({ types }) => {
 		const { harness, execute } = await setup();
 		harness.setResponses([
 			async (...args) => ({
 				...(await interruptedResponse()(...args)),
-				diagnostics: [{ type, timestamp: 0, details: { code: "invalid_json" } }],
+				diagnostics: types.map((type) => ({ type, timestamp: 0, details: { code: "invalid_json" } })),
 			}),
 			fauxAssistantMessage("unused"),
 		]);

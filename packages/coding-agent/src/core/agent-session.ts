@@ -68,6 +68,7 @@ import {
 	clampThinkingLevel,
 	cleanupSessionResources,
 	completeSimple,
+	createRejectedToolCallFeedback,
 	estimateToolDefinitionTokens,
 	getSupportedThinkingLevels,
 	isContextOverflow,
@@ -194,7 +195,7 @@ import {
 	resolvePromptCacheStatus,
 } from "./prompt-cache-status.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
-import { isTransientProviderError } from "./provider-errors.ts";
+import { isRejectedToolCallResponse, isTransientProviderError } from "./provider-errors.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { RpcGitContext, UiActionStateDescriptor } from "./rpc/types.ts";
 import type {
@@ -8165,7 +8166,8 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Check if an error is retryable (overloaded, rate limit, server errors).
+	 * Check if an error is retryable: transient provider failures (overloaded, rate limit, server errors)
+	 * or tool calls rejected before execution, which retry with feedback explaining the rejection.
 	 * Context overflow errors are NOT retryable (handled by compaction instead).
 	 */
 	private _isRetryableError(message: AssistantMessage): boolean {
@@ -8176,7 +8178,7 @@ export class AgentSession {
 		if (isContextOverflow(message, contextWindow)) return false;
 
 		const err = message.errorMessage;
-		return isTransientProviderError(err, message.diagnostics);
+		return isRejectedToolCallResponse(message.diagnostics) || isTransientProviderError(err, message.diagnostics);
 	}
 
 	/**
@@ -8197,7 +8199,10 @@ export class AgentSession {
 			return false;
 		}
 
-		const delayMs = settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
+		// Feedback, not waiting, corrects a rejected tool call.
+		const delayMs = isRejectedToolCallResponse(message.diagnostics)
+			? 0
+			: settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
 
 		const retryAbortController = new AbortController();
 		this._retryAbortController = retryAbortController;
@@ -8216,7 +8221,8 @@ export class AgentSession {
 				return false;
 			}
 
-			// Keep the persisted error in history while excluding it from the retry request.
+			// Keep the persisted errors in history while excluding them from the retry request. A rejected
+			// tool call is replaced by the same feedback provider replay shows, so the model can correct it.
 			retryProjectionToken = await this._harness.rebaseContinuationContext({
 				source: "retry",
 				project: (messages) => {
@@ -8226,7 +8232,11 @@ export class AgentSession {
 						if (candidate?.role !== "assistant" || candidate.stopReason !== "error") break;
 						retryContextEnd--;
 					}
-					return messages.slice(0, retryContextEnd);
+					const feedback = messages.slice(retryContextEnd).flatMap((failed) => {
+						const note = failed.role === "assistant" ? createRejectedToolCallFeedback(failed) : undefined;
+						return note ? [note] : [];
+					});
+					return [...messages.slice(0, retryContextEnd), ...feedback];
 				},
 			});
 
