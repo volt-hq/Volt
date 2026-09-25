@@ -122,7 +122,7 @@ API key credentials can also include provider-scoped environment values. These v
 }
 ```
 
-Use this when pi should use different provider settings than the project shell environment.
+Use this when Volt should use different provider settings than the project shell environment.
 
 ### Key Resolution
 

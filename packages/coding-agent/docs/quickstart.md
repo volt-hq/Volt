@@ -4,13 +4,15 @@ This page gets you from install to a useful first volt session.
 
 ## Install
 
-Volt is distributed as an npm package:
+Install Node.js 22.19 or newer, then install Volt through npm:
 
 ```bash
 npm install -g --ignore-scripts @hansjm10/volt-coding-agent
 ```
 
-`--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.
+`--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs. Keep optional dependencies enabled if you want to connect the iOS app; `--omit=optional` leaves phone transport unavailable.
+
+The npm installation supports the daemon on macOS Apple Silicon, Windows x64/arm64, and Linux x64/arm64. Intel macOS has no native Iroh binding. Standalone executables are local CLI/TUI only and cannot host phone connections.
 
 ### Uninstall
 
@@ -74,14 +76,33 @@ Once volt starts, type a request and press Enter:
 Summarize this repository and tell me how to run its checks.
 ```
 
-By default, volt gives the model four tools:
+Volt includes tools for reading and editing files, running shell commands, searching/fetching the web, and managing background jobs and subagents. Other tools depend on the selected model, configuration, and runtime: for example, image generation requires OpenAI Codex, MCP requires configured servers, and structured questions are local-interactive only. See [Tool Options](usage.md#tool-options) to select or exclude tools.
 
-- `read` - read files
-- `write` - create or overwrite files
-- `edit` - patch files
-- `bash` - run shell commands
+Volt runs with your user account's permissions, not inside a built-in sandbox. Use git checkpoints for rollback and a [container or VM](containerization.md) when you need isolation.
 
-Additional built-in read-only tools (`grep`, `find`, `ls`) are available through tool options. Volt runs in your current working directory and can modify files there. Use git or another checkpointing workflow if you want easy rollback.
+## Continue from your iPhone
+
+The Volt iOS companion app connects to the agent on your computer; it does not run the agent or its tools on the phone. Install and authenticate the CLI first, and keep the computer running and reachable.
+
+From a shell on that computer:
+
+```bash
+volt daemon start
+volt remote workspace add /path/to/project --name my-project
+volt remote pair --workspace my-project
+```
+
+1. Open the companion app and scan the pairing QR. Treat the QR/ticket as a credential; do not share it in logs or screenshots.
+2. Select the registered workspace and start or resume a conversation. When a terminal session is attached to the daemon, the phone can join that same live conversation.
+3. Reconnect using the saved computer next time; ordinary reconnects do not require another QR scan.
+
+You can also open `/remote` in the terminal to start the daemon, register the current directory, pair a phone, or revoke a device. Set `remote.background: true` in settings if you want interactive Volt to start the daemon automatically.
+
+Pair only devices you control. Phone prompts can run tools on your computer, and a phone sharing a desktop-owned conversation uses that terminal session's full local tool set. App backgrounding or network loss detaches the phone without cancelling active work; use the app's stop action to cancel. Host shutdown stops in-memory work.
+
+Direct and self-hosted connections are separate from Volt Pro's managed relay and completion-notification services. An endpoint marked ready does not confirm managed relay access; `/remote` reports relay enrollment and subscription status separately. See the [privacy policy](https://volt-cli.dev/privacy) and [terms](https://volt-cli.dev/terms).
+
+If the phone cannot connect, run `volt daemon status` and inspect `/remote`. Status exits successfully only when phone transport is ready. See [Background daemon](daemon.md) for transport errors and [Security](security.md#remote-access-over-iroh-preview) for access boundaries.
 
 ## Give volt project instructions
 

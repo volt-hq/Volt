@@ -4,8 +4,6 @@ This page collects day-to-day usage details that do not fit on the quickstart pa
 
 ## Interactive Mode
 
-<p align="center"><img src="images/interactive-mode.png" alt="Interactive Mode" width="600"></p>
-
 The interface has four main areas:
 
 - **Startup header** - shortcuts, loaded context files, prompt templates, skills, and extensions
@@ -390,13 +388,13 @@ volt remote workspace add <workspace-dir> --name app
 # Ask the daemon for a short-lived one-time pairing ticket.
 volt remote pair --workspace volt
 
-# From a source checkout demo client, connect with the printed ticket.
-npm run iroh:poc:client -- "<ticket>" --get-state
-npm run iroh:poc:client -- "<ticket>" --message "List the top-level files."
+# Scan the QR in the Volt iOS app and select a registered workspace.
 
 # Later: register another local workspace for the same paired phone.
 volt remote workspace add <workspace-dir> --name other
 ```
+
+For the app setup flow and installation requirements, see [Continue from your iPhone](quickstart.md#continue-from-your-iphone).
 
 Use `/remote` for the common interactive management flow. Selecting a paired device asks for confirmation before revoking it; revoked identities remain visible and require a separate confirmed **Allow re-pair** action before that phone can use a fresh QR. Escape returns without changing access. Leaving an active TUI pairing screen cancels, invalidates, and durably removes that invitation. If `/remote` asks you to restart `voltd`, the already-running daemon predates safe TUI cancellation, so pairing stays disabled until restart. Equivalent shell commands are:
 

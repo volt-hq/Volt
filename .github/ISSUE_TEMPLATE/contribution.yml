@@ -5,9 +5,9 @@ body:
   - type: markdown
     attributes:
       value: |
-        **Before you start:** Read CONTRIBUTING.md.
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/volt-hq/Volt/blob/main/CONTRIBUTING.md) and check the [Volt Roadmap](https://github.com/orgs/volt-hq/projects/1).
 
-        Keep this short. If it doesn't fit on one screen, it's too long. Write in your own voice.
+        Keep this short. Explain the terminal or phone workflow it improves, and whether it affects the CLI, daemon, companion app, or shared libraries.
 
   - type: textarea
     id: what

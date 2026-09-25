@@ -74,8 +74,6 @@ Named sessions are easier to find in `/resume` and `volt -r`.
 
 Sessions are stored as trees. Every entry has an `id` and `parentId`, and the current position is the active leaf. `/tree` lets you jump to any previous point and continue from there without creating another session.
 
-<p align="center"><img src="images/tree-view.png" alt="Tree View" width="600"></p>
-
 Example shape:
 
 ```text
