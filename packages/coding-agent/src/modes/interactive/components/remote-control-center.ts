@@ -529,13 +529,23 @@ export class RemoteControlCenterComponent implements Component {
 		});
 		this.lastRows = rows;
 		this.ensureSelection(rows);
-		const pairingQrBody = this.renderPairingQrBody(width, height, pageSize, rows);
-		if (pairingQrBody) {
+		const pairingQrImage = this.renderPairingQrImage(width, height);
+		if (pairingQrImage) {
 			this.scrollOffset = 0;
 			this.manualScroll = false;
-			return concatRenderFrames([createRenderFrame(header), pairingQrBody, createRenderFrame(footer)]);
+			const body = concatRenderFrames([
+				createRenderFrame([this.renderRow(rows[0]!, width)]),
+				pairingQrImage,
+				createRenderFrame(rows.slice(1).map((row) => this.renderRow(row, width))),
+			]);
+			const padding = Array.from({ length: Math.max(0, pageSize - body.lines.length) }, () => "");
+			return concatRenderFrames([
+				createRenderFrame(header),
+				body,
+				createRenderFrame(padding),
+				createRenderFrame(footer),
+			]);
 		}
-		this.clearPairingQrImage();
 		const selectedIndex = rows.findIndex((row) => row.key === this.selectedKey);
 		const maxOffset = Math.max(0, rows.length - pageSize);
 		if (!this.manualScroll && selectedIndex >= 0) {
@@ -1469,7 +1479,7 @@ export class RemoteControlCenterComponent implements Component {
 		const qrSizeWarning = `QR needs ${qrWidth} columns × ${qrHeight} rows; available: ${width} × ${height}.`;
 		const inlineQrFits = this.inlinePairingQrFits(this.view.ticket, width, height);
 		if (this.view.showQr) {
-			if (inlineQrFits) {
+			if (this.renderPairingQrImage(width, height)) {
 				return [
 					{ text: `PAIR QR · ${this.view.workspaceName}`, tone: "accent" },
 					{ key: "pairing-verification", text: "Show verification details", tone: "text" },
@@ -1571,54 +1581,44 @@ export class RemoteControlCenterComponent implements Component {
 		}
 	}
 
-	private renderPairingQrBody(
-		width: number,
-		height: number,
-		pageSize: number,
-		rows: DisplayRow[],
-	): RenderFrame | undefined {
+	/**
+	 * Render the centered QR image for the QR view. Returns undefined when the terminal cannot draw it, so the
+	 * view falls back to the text QR or the size warning instead of showing actions without a code.
+	 */
+	private renderPairingQrImage(width: number, height: number): RenderFrame | undefined {
 		if (
 			this.view.kind !== "pairing" ||
 			!this.view.showQr ||
-			!this.inlinePairingQrFits(this.view.ticket, width, height) ||
-			!this.view.ticket
+			!this.view.ticket ||
+			!this.inlinePairingQrFits(this.view.ticket, width, height)
 		) {
+			this.clearPairingQrImage();
 			return undefined;
 		}
-		const imageRows = pageSize - rows.length;
-		if (imageRows < 1) return undefined;
-		const imageKey = `${this.view.ticket}\0${width}\0${imageRows}`;
+		const png = this.getPairingQrPng(this.view.ticket);
+		const cells = getCellDimensions();
+		// Never upscale past the PNG's native module size; larger Sixel rasters can exceed terminal limits.
+		const maxWidthCells = Math.min(width - 2, Math.ceil(png.widthPx / cells.widthPx));
+		const maxHeightCells = Math.min(height - PAIRING_QR_RESERVED_ROWS, Math.ceil(png.heightPx / cells.heightPx));
+		const imageKey = `${this.view.ticket}\0${maxWidthCells}\0${maxHeightCells}`;
 		if (this.pairingQrImage?.key !== imageKey) {
 			this.clearPairingQrImage();
-			const png = this.getPairingQrPng(this.view.ticket);
 			this.pairingQrImage = {
 				key: imageKey,
 				image: new Image(
 					png.base64Data,
 					"image/png",
 					{ fallbackColor: (value) => theme.fg("muted", value) },
-					{ maxWidthCells: width, maxHeightCells: imageRows, filename: "pairing-qr.png" },
+					{ maxWidthCells, maxHeightCells, filename: "pairing-qr.png" },
 					{ widthPx: png.widthPx, heightPx: png.heightPx },
 				),
 			};
 		}
+		// A failed render keeps its cached Image so later frames do not retry the same encode.
 		const imageFrame = this.pairingQrImage.image.render(width);
 		const placement = imageFrame.images[0];
-		if (!placement || imageFrame.lines.length > imageRows) return undefined;
-		const centeredImage = prefixRenderFrame(
-			imageFrame,
-			" ".repeat(Math.max(0, Math.floor((width - placement.columns) / 2))),
-		);
-		const body = concatRenderFrames([
-			createRenderFrame([this.renderRow(rows[0]!, width)]),
-			centeredImage,
-			createRenderFrame(rows.slice(1).map((row) => this.renderRow(row, width))),
-		]);
-		if (body.lines.length > pageSize) return undefined;
-		return concatRenderFrames([
-			body,
-			createRenderFrame(Array.from({ length: pageSize - body.lines.length }, () => "")),
-		]);
+		if (!placement) return undefined;
+		return prefixRenderFrame(imageFrame, " ".repeat(Math.max(0, Math.floor((width - placement.columns) / 2))));
 	}
 
 	private clearPairingQrImage(clearPng = false): void {

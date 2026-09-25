@@ -1,8 +1,16 @@
-import { getCapabilities, setCapabilities, visibleWidth } from "@hansjm10/volt-tui";
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	type CellDimensions,
+	getCapabilities,
+	getCellDimensions,
+	setCapabilities,
+	setCellDimensions,
+	type TerminalCapabilities,
+	visibleWidth,
+} from "@hansjm10/volt-tui";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
-import { formatIrohRemoteTicketQrCode } from "../src/core/remote/iroh/qr.ts";
+import { createIrohRemoteTicketQrCodePng, formatIrohRemoteTicketQrCode } from "../src/core/remote/iroh/qr.ts";
 import { encodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
@@ -291,8 +299,23 @@ function selectAction(component: RemoteControlCenterComponent, label: string, wi
 }
 
 describe("RemoteControlCenterComponent", () => {
+	let terminalCapabilities: TerminalCapabilities;
+	let cellDimensions: CellDimensions;
+
 	beforeAll(() => {
 		initTheme(undefined, false);
+	});
+
+	beforeEach(() => {
+		terminalCapabilities = getCapabilities();
+		cellDimensions = getCellDimensions();
+		// Text-QR expectations must not depend on the graphics protocol of the terminal running the tests.
+		setCapabilities({ ...terminalCapabilities, images: null });
+	});
+
+	afterEach(() => {
+		setCapabilities(terminalCapabilities);
+		setCellDimensions(cellDimensions);
 	});
 
 	it("renders daemon, ownership, device, workspace, and headless policy status", async () => {
@@ -949,7 +972,6 @@ describe("RemoteControlCenterComponent", () => {
 	});
 
 	it("renders the pairing QR as an inline image in a standard Windows Terminal viewport", async () => {
-		const previousCapabilities = getCapabilities();
 		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
 		const backend = new FakeBackend({ kind: "online", status: status() });
 		const { component } = createComponent(backend, 24);
@@ -985,7 +1007,72 @@ describe("RemoteControlCenterComponent", () => {
 			expect(frame.lines.some((line) => stripAnsi(line).includes("QR needs"))).toBe(false);
 		} finally {
 			component.dispose();
-			setCapabilities(previousCapabilities);
+		}
+	});
+
+	it("keeps the inline pairing QR at its native size in a large Sixel terminal", async () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+		const ticket = managedRelayTicket();
+		const png = createIrohRemoteTicketQrCodePng(ticket);
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component } = createComponent(backend, 80);
+		try {
+			await component.start();
+			selectAction(component, "Pair a phone", 300);
+			selectAction(component, "Coding", 300);
+			await settle();
+			backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
+			component.render(300);
+			component.handleInput("\x1b[A");
+			component.handleInput("\x1b[A");
+			selectAction(component, "Show pairing QR", 300);
+
+			const frame = component.render(300);
+			expect(frame.lines).toHaveLength(80);
+			expect(frame.images).toHaveLength(1);
+			expect(frame.images[0]).toMatchObject({
+				protocol: "sixel",
+				top: 1,
+				columns: Math.ceil(png.widthPx / 9),
+				rows: Math.ceil(png.heightPx / 18),
+			});
+			const text = frame.lines.map(stripAnsi).join("\n");
+			for (const label of ["PAIR QR · volt", "Show verification details", "Copy pairing ticket", "Cancel pairing"]) {
+				expect(text).toContain(label);
+			}
+		} finally {
+			component.dispose();
+		}
+	});
+
+	it("falls back to text QR guidance when the terminal cannot draw the pairing image", async () => {
+		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
+		// A single cell this large exceeds the Sixel raster budget, so the image render fails.
+		setCellDimensions({ widthPx: 1100, heightPx: 2200 });
+		const ticket = managedRelayTicket();
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component } = createComponent(backend, 24);
+		try {
+			await component.start();
+			selectAction(component, "Pair a phone", 80);
+			selectAction(component, "Coding", 80);
+			await settle();
+			backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
+			component.render(80);
+			component.handleInput("\x1b[A");
+			component.handleInput("\x1b[A");
+			selectAction(component, "Show pairing QR", 80);
+
+			const frame = component.render(80);
+			const text = frame.lines.map(stripAnsi).join("\n");
+			expect(frame.images).toHaveLength(0);
+			expect(text).not.toContain("PAIR QR");
+			expect(text).toContain("available: 80 × 24.");
+			expect(text).toContain("Show verification details");
+			expect(text).toContain("Copy pairing ticket");
+		} finally {
+			component.dispose();
 		}
 	});
 
