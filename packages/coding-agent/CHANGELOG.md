@@ -2,6 +2,8 @@
 
 ## [0.2.0] - 2026-09-25
 
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
 ### Highlights
 
 - Added a Simplified Technical English personality for user-facing responses without changing code or repository artifacts.
