@@ -1,4 +1,4 @@
-import { describeUnescapedControlCharacter } from "../stream/invalid-tool-arguments.ts";
+import { createRejectedToolCallFeedback } from "../stream/invalid-tool-arguments.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -56,46 +56,6 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
 
 		return msg;
 	});
-}
-
-/**
- * Explain a response rejected for invalid tool arguments. Omitting the response from replay would
- * otherwise hide why nothing ran; the explanation never includes the call or its arguments.
- */
-function createRejectedToolCallFeedback(message: AssistantMessage): Message | undefined {
-	if (message.stopReason !== "error") return undefined;
-	const diagnostic = message.diagnostics?.find((entry) => entry.type === "invalid_tool_arguments");
-	if (!diagnostic) return undefined;
-	const details = diagnostic.details ?? {};
-	const block = typeof details.contentIndex === "number" ? message.content[details.contentIndex] : undefined;
-	const target = block?.type === "toolCall" && block.name ? `the \`${block.name}\` tool call` : "a tool call";
-	const codePoint = details.codePoint;
-	let cause: string;
-	if (
-		details.reason === "unescaped_control_character" &&
-		typeof codePoint === "number" &&
-		Number.isInteger(codePoint) &&
-		codePoint >= 0 &&
-		codePoint < 0x20
-	) {
-		cause = `The arguments for ${target} contained ${describeUnescapedControlCharacter(codePoint)}.`;
-	} else if (details.code === "length_limit") {
-		cause = "It reached the output length limit before its tool calls were complete.";
-	} else if (details.code === "missing_completion") {
-		cause = `The provider did not complete ${target}.`;
-	} else {
-		cause = `The arguments for ${target} were not a complete, valid JSON object.`;
-	}
-	return {
-		role: "user",
-		content: [
-			{
-				type: "text",
-				text: `Your previous response was discarded and none of its tool calls were executed. ${cause}`,
-			},
-		],
-		timestamp: message.timestamp,
-	};
 }
 
 /**

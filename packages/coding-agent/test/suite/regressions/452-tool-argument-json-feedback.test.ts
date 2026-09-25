@@ -56,6 +56,10 @@ function messageTexts(request: AnthropicRequest): string[] {
 	);
 }
 
+const TAB_FEEDBACK =
+	"Your previous response was discarded and none of its tool calls were executed. " +
+	"The arguments for the `edit` tool call contained an unescaped tab (U+0009) inside a JSON string; encode it as \\t.";
+
 describe("issue #452 tool argument JSON feedback", () => {
 	const harnesses: Harness[] = [];
 	afterEach(() => {
@@ -92,22 +96,36 @@ describe("issue #452 tool argument JSON feedback", () => {
 		return { harness, execute, requests, anthropicStep };
 	}
 
-	it("rejects literal tabs with a specific reason and explains the rejection on continue", async () => {
+	it("rejects literal tabs with a specific reason and continues the turn with that feedback", async () => {
 		const { harness, execute, requests, anthropicStep } = await setup([
 			toolUseResponse('{"text":"private\tindented\tvalue"}'),
-			textResponse("Retrying with escaped tabs."),
+			toolUseResponse('{"text":"a\\tb"}'),
+			textResponse("Applied with escaped tabs."),
+			textResponse("You're welcome."),
 		]);
-		harness.setResponses([anthropicStep, anthropicStep]);
+		harness.setResponses([anthropicStep, anthropicStep, anthropicStep, anthropicStep]);
 
 		await harness.session.prompt("Apply the edit");
 
-		expect(execute).not.toHaveBeenCalled();
-		expect(harness.eventsOfType("tool_execution_start")).toHaveLength(0);
-		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
-		expect(harness.faux.state.callCount).toBe(1);
-		const failure = harness.session.messages.at(-1);
-		if (failure?.role !== "assistant") throw new Error("Expected assistant failure");
-		expect(failure.stopReason).toBe("error");
+		// The rejected call never runs; the corrected retry runs exactly once in the same prompt.
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(execute.mock.calls[0]).toEqual(expect.arrayContaining(["toolu_452", { text: "a\tb" }]));
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.eventsOfType("auto_retry_start")).toMatchObject([
+			{
+				attempt: 1,
+				delayMs: 0,
+				errorMessage:
+					"Tool arguments contained an unescaped tab (U+0009) inside a JSON string; encode it as \\t. No tools were executed.",
+			},
+		]);
+		expect(harness.eventsOfType("auto_retry_end")).toMatchObject([{ success: true, attempt: 1 }]);
+		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
+		expect(harness.session.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		const failure = harness.session.messages.find(
+			(message) => message.role === "assistant" && message.stopReason === "error",
+		);
+		if (failure?.role !== "assistant") throw new Error("Expected persisted assistant failure");
 		expect(failure.errorMessage).toBe(
 			"Tool arguments contained an unescaped tab (U+0009) inside a JSON string; encode it as \\t. No tools were executed.",
 		);
@@ -119,21 +137,50 @@ describe("issue #452 tool argument JSON feedback", () => {
 		);
 		expect(JSON.stringify(failure.diagnostics)).not.toContain("private");
 
-		await harness.session.prompt("continue");
-
-		expect(requests).toHaveLength(2);
-		const texts = messageTexts(requests[1]);
-		const feedbackIndex = texts.indexOf(
-			"Your previous response was discarded and none of its tool calls were executed. " +
-				"The arguments for the `edit` tool call contained an unescaped tab (U+0009) inside a JSON string; encode it as \\t.",
-		);
-		expect(feedbackIndex).toBeGreaterThan(texts.findIndex((text) => text.includes("Apply the edit")));
-		expect(texts.findIndex((text) => text.includes("continue"))).toBeGreaterThan(feedbackIndex);
+		// The retry request ends with the feedback and never replays the rejected call.
+		expect(messageTexts(requests[1])).toEqual(["Apply the edit", TAB_FEEDBACK]);
 		const replay = JSON.stringify(requests[1].messages);
 		expect(replay).not.toContain("tool_use");
 		expect(replay).not.toContain("private");
+
+		// Later canonical replay shows the same feedback once, so the retried prefix stays stable.
+		await harness.session.prompt("thanks");
+		const laterTexts = messageTexts(requests[3]);
+		expect(laterTexts.slice(0, 2)).toEqual(["Apply the edit", TAB_FEEDBACK]);
+		expect(laterTexts.filter((text) => text === TAB_FEEDBACK)).toHaveLength(1);
+		expect(JSON.stringify(requests[3].messages)).not.toContain("private");
+		expect(execute).toHaveBeenCalledTimes(1);
+	});
+
+	it("stops after the retry limit when every attempt is rejected", async () => {
+		const rejected = '{"text":"private\tvalue"}';
+		const { harness, execute, requests, anthropicStep } = await setup([
+			toolUseResponse(rejected),
+			toolUseResponse(rejected),
+			toolUseResponse(rejected),
+		]);
+		harness.setResponses([anthropicStep, anthropicStep, anthropicStep, fauxAssistantMessage("unused")]);
+
+		await harness.session.prompt("Apply the edit");
+
 		expect(execute).not.toHaveBeenCalled();
-		expect(harness.faux.state.callCount).toBe(2);
+		expect(harness.faux.state.callCount).toBe(3);
+		expect(harness.getPendingResponseCount()).toBe(1);
+		expect(harness.eventsOfType("auto_retry_start")).toMatchObject([
+			{ attempt: 1, delayMs: 0 },
+			{ attempt: 2, delayMs: 0 },
+		]);
+		expect(harness.eventsOfType("auto_retry_end")).toMatchObject([
+			{
+				success: false,
+				attempt: 2,
+				finalError:
+					"Tool arguments contained an unescaped tab (U+0009) inside a JSON string; encode it as \\t. No tools were executed.",
+			},
+		]);
+		// Each retry carries feedback for every rejected attempt so far.
+		expect(messageTexts(requests[2])).toEqual(["Apply the edit", TAB_FEEDBACK, TAB_FEEDBACK]);
+		expect(JSON.stringify(requests[2].messages)).not.toContain("private");
 	});
 
 	it("executes escaped tabs exactly once", async () => {

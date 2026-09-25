@@ -1596,7 +1596,7 @@ Events are streamed to stdout as JSON lines during agent operation. Events do NO
 | `queue_update` | Pending steering/follow-up queue changed |
 | `compaction_start` | Compaction begins |
 | `compaction_end` | Compaction completes |
-| `auto_retry_start` | Auto-retry begins (after transient error) |
+| `auto_retry_start` | Auto-retry begins (after a transient error or rejected tool call) |
 | `auto_retry_end` | Auto-retry completes (success or final failure) |
 | `subagent_event` | Wrapped child event from a local RPC-managed subagent |
 | `subagent_end` | Terminal completion result for a local RPC-managed subagent |
@@ -1898,7 +1898,7 @@ If compaction failed (e.g., API quota exceeded), `result` is `null`, `aborted` i
 
 ### auto_retry_start / auto_retry_end
 
-Emitted when automatic retry is triggered after a transient error (overloaded, rate limit, 5xx).
+Emitted when automatic retry is triggered after a transient error (overloaded, rate limit, 5xx) or after a response whose tool-call arguments were rejected before execution. Rejected tool calls retry immediately (`delayMs: 0`) with feedback that explains the rejection.
 
 ```json
 {

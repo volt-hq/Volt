@@ -233,7 +233,7 @@ Compaction runs at the next safe turn boundary when usage reaches the configured
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
+| `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors and rejected tool calls |
 | `retry.maxRetries` | number | `6` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s, 16s, 32s, 64s by default) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
@@ -241,6 +241,8 @@ Compaction runs at the next safe turn boundary when usage reaches the configured
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
 
 With the defaults, agent-level retries wait for up to 126 seconds in total across six attempts. In interactive mode, press the configured interrupt key (Escape by default) during the retry countdown to stop retrying.
+
+When a response is rejected because its tool-call arguments are not complete, valid JSON (for example, an unescaped tab inside a string), none of its tools run. Volt retries immediately, without backoff, and tells the model why the call was rejected. These retries count toward `retry.maxRetries`.
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
