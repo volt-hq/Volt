@@ -1072,8 +1072,6 @@ export async function main(args: string[], options?: MainOptions) {
 				excludeTools: sessionOptions.excludeTools,
 				noTools: sessionOptions.noTools,
 				customTools: sessionOptions.customTools,
-				extensionWorkLimits:
-					parsed.preparationWaitMs === undefined ? undefined : { firstRequestWaitMs: parsed.preparationWaitMs },
 				subagentToolManager: subagentManager,
 			});
 

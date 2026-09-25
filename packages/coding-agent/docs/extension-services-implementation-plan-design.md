@@ -29,7 +29,7 @@ This is the implemented delivery slice, not a claim that every facility in the p
 | Applicable host and extension policy gates | Transparent foreground tool-cache reuse and single-flight |
 | Evidence handles and bounded ready-only context admission | Repository indexes, import graphs, and test-association engines |
 | Task/operation metadata and extension-local status | New TUI/mobile inspectors, RPC fields, and persistent task storage |
-| Deterministic test-only extension factories | Actual extensions, distributable examples, Jev, model/provider dependencies |
+| Deterministic test-only extension factories | Actual extensions, distributable examples, auxiliary-model adapters, model/provider dependencies |
 | User-facing API documentation and changeset | Autonomous workflows, speculative commands/tests/edits |
 
 **User-visible tradeoff:** this PR does not guarantee preparation before the first model call. It never waits for unfinished preparation; ready work can improve later calls in the same request. First-call bounded waiting can be added separately without weakening task or authorization semantics.

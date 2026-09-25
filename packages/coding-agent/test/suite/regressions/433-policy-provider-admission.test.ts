@@ -72,13 +72,13 @@ describe("#433 provider handoff diagnostics", () => {
 			let boundaries = 0;
 			const harness = await createHarness({
 				settings: { compaction: { enabled: false } },
-				extensionWorkLimits: { firstRequestWaitMs: 1000 },
+				extensionWorkLimits: { firstRequestWaitMs: 100 },
 				extensionFactories: [
 					(volt) => {
 						api = volt;
 						volt.on("request_boundary", (_event, ctx) => {
 							boundaries++;
-							ctx.work!.context.requestWait(1000);
+							ctx.work!.context.requestWait(100);
 							ctx.work!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
 								task.context.put({ key: "suggestion", text: "prepared suggestion" });
 							});
@@ -127,7 +127,7 @@ describe("#433 managed task result exposure", () => {
 		let operations = 0;
 		const harness = await createHarness({
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
-			extensionWorkLimits: { firstRequestWaitMs: 1000 },
+			extensionWorkLimits: { firstRequestWaitMs: 100 },
 			extensionFactories: [
 				(volt) => {
 					if (layer === "tool_call") {
@@ -164,7 +164,7 @@ describe("#433 managed task result exposure", () => {
 							);
 					}
 					volt.on("request_boundary", (_event, ctx) => {
-						ctx.work!.context.requestWait(1000);
+						ctx.work!.context.requestWait(100);
 						ctx.work!.tasks.start({ key: "read", label: "Read" }, async (task) => {
 							result = await task.repository.readText({ path: "source.txt" });
 						});

@@ -32,7 +32,7 @@ The motivating research describes a decision model selecting among observed arti
 - A persistent repository index, import graph, or test-association database.
 - Speculative Bash, tests, builds, edits, subagents, MCP, or web operations.
 - A generic execute-any-tool method or a second autonomous agent loop.
-- A Jev adapter, model dependency, new provider registration, or inference billing system.
+- An auxiliary-model adapter, model dependency, new provider registration, or inference billing system.
 - A sandbox, secret detector, path-permission redesign, or protection from malicious installed extensions.
 - Durable task recovery, new mobile UI, new RPC methods, or session-format changes.
 - Removal of existing extension tools, commands, or mutation hooks.
@@ -277,7 +277,7 @@ These are proposed conservative defaults for the first implementation, not measu
 | Per-operation returned output | At most existing 50 KiB / 2,000-line bounds and the remaining budget |
 | Retained completed task summaries | 32 per runtime; metadata only |
 | Contributions | 8 keys and 8 KiB retained text per extension; 4 KiB each; 16 KiB aggregate request suffix including framing |
-| Optional wait | Default 0; host may allow up to 1,000 ms total on first scope attempt (expanded from 100 ms in [#440](https://github.com/volt-hq/Volt/pull/440)) |
+| Optional wait | Default 0; host may allow up to 100 ms total on first scope attempt |
 | Collection/source-validation deadline | 25 ms per attempt, separate from the optional wait; omit unfinished candidates |
 | Unsettled collection-validation leases | 1 per runtime, 4 process-wide; at most 2 operations per lease |
 

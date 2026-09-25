@@ -110,39 +110,36 @@ describe("bounded first-request preparation wait", () => {
 		expect(await manager.collect(1, () => true)).toBeUndefined();
 	});
 
-	it.each([100, 800, 1000])(
-		"shares a maximum, not a sum, with a %i ms host allowance and grants no renewal",
-		async (hostWait) => {
-			vi.useFakeTimers();
-			const gate = deferred();
-			let retained!: ExtensionWorkContext;
-			const manager = setup((work, event) => {
-				retained = work;
-				if (!event.first) {
-					expect(work.context.requestWait(100)).toBe(0);
-					return;
-				}
-				expect(work.context.requestWait(hostWait - 40)).toBe(hostWait - 40);
-				expect(manager.getContext("two")!.context.requestWait(hostWait)).toBe(hostWait);
-				work.tasks.start({ key: "slow", label: "slow" }, () => gate.promise);
-			}, hostWait);
-			manager.boundary(boundary());
-			expect(retained.context.requestWait(100)).toBe(0);
-			let settled = false;
-			const collecting = manager
-				.collect(1, () => true)
-				.then(() => {
-					settled = true;
-				});
-			await vi.advanceTimersByTimeAsync(hostWait - 1);
-			expect(settled).toBe(false);
-			await vi.advanceTimersByTimeAsync(1);
-			await collecting;
-			expect(settled).toBe(true);
-			manager.boundary({ ...boundary(), cause: "retry" });
-			expect(await manager.collect(1, () => true)).toBeUndefined();
-		},
-	);
+	it("shares a maximum, not a sum, and grants no renewed allowance", async () => {
+		vi.useFakeTimers();
+		const gate = deferred();
+		let retained!: ExtensionWorkContext;
+		const manager = setup((work, event) => {
+			retained = work;
+			if (!event.first) {
+				expect(work.context.requestWait(100)).toBe(0);
+				return;
+			}
+			expect(work.context.requestWait(40)).toBe(40);
+			expect(manager.getContext("two")!.context.requestWait(60)).toBe(60);
+			work.tasks.start({ key: "slow", label: "slow" }, () => gate.promise);
+		}, 100);
+		manager.boundary(boundary());
+		expect(retained.context.requestWait(100)).toBe(0);
+		let settled = false;
+		const collecting = manager
+			.collect(1, () => true)
+			.then(() => {
+				settled = true;
+			});
+		await vi.advanceTimersByTimeAsync(59);
+		expect(settled).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		await collecting;
+		expect(settled).toBe(true);
+		manager.boundary({ ...boundary(), cause: "retry" });
+		expect(await manager.collect(1, () => true)).toBeUndefined();
+	});
 
 	it("policy invalidation during preparation omits ready contributions without renewing the wait", async () => {
 		vi.useFakeTimers();
@@ -192,34 +189,31 @@ describe("bounded first-request preparation wait", () => {
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
-	it.each([0, 100, 1000])(
-		"retains the process collection ceiling with a %i ms preparation allowance",
-		async (wait) => {
-			vi.useFakeTimers();
-			vi.spyOn(performance, "now").mockReturnValue(0);
-			const runtimes = [];
-			for (let i = 0; i < 5; i++) runtimes.push(await prepareCollection(wait));
+	it.each([0, 100])("retains the process collection ceiling with a %i ms preparation allowance", async (wait) => {
+		vi.useFakeTimers();
+		vi.spyOn(performance, "now").mockReturnValue(0);
+		const runtimes = [];
+		for (let i = 0; i < 5; i++) runtimes.push(await prepareCollection(wait));
 
-			const collecting = runtimes.map(({ manager }) => manager.collect(1, () => true));
-			await vi.advanceTimersByTimeAsync(0);
-			expect(runtimes.map(({ validation }) => validation.mock.calls.length)).toEqual([1, 1, 1, 1, 0]);
-			expect(await collecting[4]).toBeUndefined();
-			expect(runtimes[4].manager.getStatus("one").contributions).toEqual([{ key: "source", status: "ready" }]);
+		const collecting = runtimes.map(({ manager }) => manager.collect(1, () => true));
+		await vi.advanceTimersByTimeAsync(0);
+		expect(runtimes.map(({ validation }) => validation.mock.calls.length)).toEqual([1, 1, 1, 1, 0]);
+		expect(await collecting[4]).toBeUndefined();
+		expect(runtimes[4].manager.getStatus("one").contributions).toEqual([{ key: "source", status: "ready" }]);
 
-			// Timeouts abort validation, but cannot release capacity before the operations drain.
-			await vi.advanceTimersByTimeAsync(25);
-			expect(await Promise.all(collecting)).toEqual(Array(5).fill(undefined));
-			for (const { validation } of runtimes.slice(0, 4)) expect(validation.mock.calls[0][0].aborted).toBe(true);
-			expect(await runtimes[4].manager.collect(1, () => true)).toBeUndefined();
-			expect(runtimes[4].validation).not.toHaveBeenCalled();
+		// Timeouts abort validation, but cannot release capacity before the operations drain.
+		await vi.advanceTimersByTimeAsync(25);
+		expect(await Promise.all(collecting)).toEqual(Array(5).fill(undefined));
+		for (const { validation } of runtimes.slice(0, 4)) expect(validation.mock.calls[0][0].aborted).toBe(true);
+		expect(await runtimes[4].manager.collect(1, () => true)).toBeUndefined();
+		expect(runtimes[4].validation).not.toHaveBeenCalled();
 
-			runtimes[0].gate.resolve();
-			await runtimes[0].manager.drain();
-			runtimes[4].gate.resolve();
-			expect((await runtimes[4].manager.collect(1, () => true))?.text).toContain("prepared source");
-			expect(runtimes[4].validation).toHaveBeenCalledTimes(1);
-		},
-	);
+		runtimes[0].gate.resolve();
+		await runtimes[0].manager.drain();
+		runtimes[4].gate.resolve();
+		expect((await runtimes[4].manager.collect(1, () => true))?.text).toContain("prepared source");
+		expect(runtimes[4].validation).toHaveBeenCalledTimes(1);
+	});
 
 	it("does not replace a same-runtime collection acquired during preparation waiting", async () => {
 		vi.useFakeTimers();
@@ -300,21 +294,8 @@ describe("bounded first-request preparation wait", () => {
 		expect(await manager.collect(1, () => true)).toBeUndefined();
 	});
 
-	it.each([-1, 1001, 800.5, Number.NaN, Number.POSITIVE_INFINITY])("rejects invalid host allowance %s", (wait) => {
-		expect(() => setup(() => {}, wait)).toThrow("Invalid extension work limit");
-	});
-
-	it("does not wait merely because the host permits one second", async () => {
-		vi.useFakeTimers();
-		const gate = deferred();
-		const manager = setup((work) => {
-			work.tasks.start({ key: "slow", label: "slow" }, () => gate.promise);
-		}, 1000);
-		manager.boundary(boundary());
-		expect(await manager.collect(1, () => true)).toBeUndefined();
-	});
-
-	it("does not grant waits for final responses", async () => {
+	it("rejects host ceilings above 100 ms and does not grant waits for final responses", async () => {
+		expect(() => setup(() => {}, 101)).toThrow("Invalid extension work limit");
 		const manager = setup((work, event) => {
 			expect(event.waitAvailableMs).toBe(0);
 			expect(work.context.requestWait(1)).toBe(0);
