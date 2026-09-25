@@ -1,7 +1,7 @@
 {
 	"name": "@hansjm10/volt-coding-agent",
 	"version": "0.2.0",
-	"description": "Coding agent CLI with read, bash, edit, write, web_search tools and session management",
+	"description": "Volt coding agent for terminal and iOS companion workflows, with a local runtime, planning, code review, and subagents",
 	"type": "module",
 	"voltConfig": {
 		"configDir": ".volt"
@@ -132,7 +132,7 @@
 		"url": "git+https://github.com/volt-hq/Volt.git",
 		"directory": "packages/coding-agent"
 	},
-	"homepage": "https://github.com/volt-hq/Volt#readme",
+	"homepage": "https://volt-cli.dev/",
 	"bugs": {
 		"url": "https://github.com/volt-hq/Volt/issues"
 	},

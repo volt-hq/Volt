@@ -1,14 +1,16 @@
 # Volt Coding Agent
 
-Volt is a minimal terminal coding harness. Adapt volt to your workflows, not the other way around, without having to fork and modify volt internals. Extend it with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes). Put your extensions, skills, prompt templates, and themes in [Volt Packages](#volt-packages) and share them with others via npm or git.
+Volt is a coding agent for terminal and phone workflows. The agent runtime, provider credentials, and tools stay on your computer; the iOS companion app connects to the same live conversations through Volt's background daemon.
+
+Native Plan mode, code review, subagents, background jobs, LSP, and MCP are built in. Adapt project-specific workflows with TypeScript [Extensions](#extensions), [Skills](#skills), [Prompt Templates](#prompt-templates), and [Themes](#themes), and share them through [Volt Packages](#volt-packages).
+
+Use Volt interactively, in print or JSON mode, through RPC, or as an SDK in your own applications. This package includes the CLI and host daemon, not the native iOS app.
+
+[Website](https://volt-cli.dev/) · [Documentation](https://volt-cli.dev/docs/) · [Phone setup](docs/quickstart.md#continue-from-your-iphone)
 
 Volt is maintained and distributed by [Jordan Hans](https://github.com/hansjm10).
-It is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono)
+It is derived from [Mario Zechner's Pi project](https://github.com/earendil-works/pi)
 under the MIT License.
-
-Volt ships with native subagents and a branch-local Plan mode, while extensions remain available for project-specific workflows.
-
-Volt runs in four modes: interactive, print or JSON, RPC for process integration, and an SDK for embedding in your own apps.
 
 ## Table of Contents
 
@@ -19,6 +21,8 @@ Volt runs in four modes: interactive, print or JSON, RPC for process integration
   - [Commands](#commands)
   - [Keyboard Shortcuts](#keyboard-shortcuts)
   - [Message Queue](#message-queue)
+- [Plan Mode](#plan-mode)
+- [Phone Access](#remote-access-over-iroh-preview)
 - [Sessions](#sessions)
   - [Branching](#branching)
   - [Compaction](#compaction)
@@ -37,6 +41,8 @@ Volt runs in four modes: interactive, print or JSON, RPC for process integration
 ---
 
 ## Quick Start
+
+Requires Node.js 22.19 or newer.
 
 ```bash
 npm install -g --ignore-scripts @hansjm10/volt-coding-agent
@@ -58,7 +64,7 @@ volt
 /login  # Then select provider
 ```
 
-Then just talk to volt. By default, volt gives the model four tools: `read`, `write`, `edit`, and `bash`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [volt packages](#volt-packages).
+Then describe a task. Volt includes file and shell tools, web search/fetch, background jobs, and native subagents. LSP, MCP, image generation, and structured questions are available according to the model, configuration, and runtime. See [Tool Options](#tool-options) to control the tool set, or use [Plan mode](#plan-mode) to research before approving implementation.
 
 **Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
@@ -112,8 +118,6 @@ See [docs/providers.md](docs/providers.md) for detailed setup instructions.
 ---
 
 ## Interactive Mode
-
-<p align="center"><img src="docs/images/interactive-mode.png" alt="Interactive Mode" width="600"></p>
 
 The interface from top to bottom:
 
@@ -172,6 +176,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/tree` | Jump to any point in the session and continue from there |
 | `/subagents` | Inspect active or completed subagent conversations and tool flow |
 | `/jobs` | Inspect background jobs, follow their output, or cancel one job |
+| `/review [target] [options]` | Review uncommitted, branch, PR, or commit changes with independent verification |
 | `/trust` | Save project trust decision for future sessions (restart required) |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -270,8 +275,6 @@ Use `/session` in interactive mode to see the current store directory and sessio
 ### Branching
 
 **`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history remains under the same session ID.
-
-<p align="center"><img src="docs/images/tree-view.png" alt="Tree View" width="600"></p>
 
 - Search by typing, fold/unfold and jump between branches with Ctrl+←/Ctrl+→ or Alt+←/Alt+→, page with ←/→
 - Filter modes (Ctrl+O): default → no-tools → user-only → labeled-only → all
@@ -396,14 +399,14 @@ The default export can also be `async`. volt waits for async extension factories
 
 **What's possible:**
 - Custom tools (or replace built-in tools entirely)
-- Sub-agents and plan mode
+- Specialized orchestration alongside native subagents and Plan mode
 - Custom compaction and summarization
 - Permission gates and path protection
 - Custom editors and UI components
 - Status lines, headers, footers
 - Git checkpointing and auto-commit
 - SSH and sandbox execution
-- MCP server integration
+- Custom integrations alongside native MCP support
 - Make volt look like Claude Code
 - Games while waiting (yes, Doom runs)
 - ...anything you can dream up
@@ -582,18 +585,18 @@ volt remote workspace add /path/to/repo --name volt
 # Create a short-lived one-time pairing ticket (QR when stderr is a TTY).
 volt remote pair --workspace volt
 
-# From a source checkout demo client, connect with the printed ticket.
-npm run iroh:poc:client -- "<ticket>" --get-state
-npm run iroh:poc:client -- "<ticket>" --message "List the top-level files."
+# Scan the QR in the Volt iOS app, then select the registered workspace.
 ```
 
-Set `remote.background: true` in settings and interactive Volt manages the daemon automatically: a paired phone can then attach to the SAME live conversation your desktop TUI has open (the footer shows `📱 n`), keep the conversation when you quit the TUI, and hand it back at the next turn boundary when you reopen it.
+See [Continue from your iPhone](docs/quickstart.md#continue-from-your-iphone) for requirements, pairing, and connection troubleshooting.
+
+Supported interactive Volt sessions connect to an already-running daemon, allowing a paired phone to join the same live conversation. Set `remote.background: true` to also start the daemon automatically. The daemon can keep the conversation when you quit the TUI and hand it back at the next turn boundary when you reopen it.
 
 Use `/remote` for interactive management, including registering Volt's current directory, QR pairing, confirmed device revocation, and explicit approval before a revoked identity can re-pair. Equivalent shell commands are:
 
 ```bash
 volt daemon status                        # exits 0 only when phone transport is ready
-volt remote status                        # same readiness contract                        # same status view
+volt remote status                        # same readiness contract as daemon status
 volt remote clients                       # paired client JSON
 volt remote revoke <node-id>              # revoke one client and close its connections
 volt remote workspace add . --name volt

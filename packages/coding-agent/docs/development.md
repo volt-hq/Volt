@@ -80,11 +80,23 @@ Files and their directory are owner-only on Unix. On Windows the existing ACL-aw
 
 ## Testing
 
+Run `npm run check` and only the tests affected by your changes, including every test file you create or modify. A full-suite run is not required before opening a PR. For docs-only changes, validate relevant links, examples, and metadata instead of unrelated runtime tests.
+
+From the repository root, select the affected package and test files (skill loading shown as an example):
+
 ```bash
-./test.sh                         # Run non-LLM tests (no API keys needed)
-npm test                          # Run all tests
-npm test -- test/specific.test.ts # Run specific test
+npm run check
+./test.sh test --workspace packages/coding-agent -- test/skills.test.ts
 ```
+
+You can also run a specific non-e2e test from its package root using the installed Vitest CLI. Check its location first; in this checkout it is available under `packages/coding-agent/node_modules` and `packages/ai/node_modules`:
+
+```bash
+cd packages/coding-agent
+node node_modules/vitest/dist/cli.js --run test/skills.test.ts
+```
+
+Only run the full non-e2e suite with root `./test.sh` when explicitly requested. Do not run an unfiltered Vitest command: provider e2e tests can activate when credentials or endpoint settings are present. See [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the validation policy and worker limits.
 
 ## Session discovery benchmark
 

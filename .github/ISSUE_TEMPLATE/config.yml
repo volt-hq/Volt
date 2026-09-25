@@ -1,1 +1,8 @@
 blank_issues_enabled: false
+contact_links:
+  - name: Volt documentation
+    url: https://volt-cli.dev/docs/
+    about: Installation, provider setup, and terminal-to-phone workflows.
+  - name: Report a security vulnerability
+    url: https://github.com/volt-hq/Volt/security/advisories/new
+    about: Report vulnerabilities privately rather than in a public issue.

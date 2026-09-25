@@ -1,6 +1,6 @@
 # Volt Documentation
 
-Volt is a minimal terminal coding harness. It is designed to stay small at the core while being extended through TypeScript extensions, skills, prompt templates, themes, and volt packages.
+Volt is a coding agent that runs on your computer and lets you continue the same live conversation from its iOS companion app. It includes native planning, code review, subagents, background jobs, LSP, and MCP, with extensions, skills, prompt templates, themes, and packages for project-specific workflows.
 
 ## Quick start
 
@@ -33,6 +33,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 ## Start here
 
 - [Quickstart](quickstart.md) - install, authenticate, and run a first session.
+- [Continue from your iPhone](quickstart.md#continue-from-your-iphone) - connect the companion app to your computer.
 - [Using Volt](usage.md) - interactive mode, slash commands, context files, and CLI reference.
 - [Providers](providers.md) - subscription and API-key setup for built-in providers.
 - [Security](security.md) - project trust, sandbox boundaries, remote access warnings, and vulnerability reporting.
