@@ -21,13 +21,24 @@ const MAX_REPOSITORY_DISPLAY_CHARS = 256;
 const MAX_BRANCH_CHARS = 1024;
 const MAX_PROVIDER_CHARS = 64;
 const MAX_PR_TITLE_CHARS = 512;
+const MAX_PR_REPOSITORY_HOST_CHARS = 253;
+const MAX_PR_REPOSITORY_SEGMENT_CHARS = 100;
+const PR_REPOSITORY_FORBIDDEN_PATTERN = /[\0-\x20\x7f/]/;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 
 export type WorkResolutionState = "resolved" | "none" | "ambiguous" | "unavailable";
 
+/** Host-private base repository of a linked pull request. Never projected to clients. */
+export interface WorkPullRequestRepositoryRecord {
+	host: string;
+	owner: string;
+	name: string;
+}
+
 export interface WorkPullRequestRecord {
 	provider: string;
+	repository: WorkPullRequestRepositoryRecord;
 	number: number;
 	title: string;
 	status: "open" | "draft" | "merged" | "closed";
@@ -145,6 +156,27 @@ export type WorkDiscoveryApplyOutcome =
 	| { state: "ambiguous" }
 	| { state: "unavailable" };
 
+/** A bound change whose linked pull request is still open or draft. */
+export interface WorkWatchedPullRequest {
+	changeId: string;
+	/** Snapshot fence: status updates apply only while `checkedAt` is unchanged. */
+	checkedAt: number;
+	provider: string;
+	number: number;
+	repository: WorkPullRequestRepositoryRecord;
+}
+
+export interface WorkPullRequestStatusUpdate extends WorkWatchedPullRequest {
+	outcome: { state: "resolved"; status: WorkPullRequestRecord["status"]; title: string } | { state: "unavailable" };
+}
+
+/** Mutation key that protects no session binding during trimming. */
+const NO_PROTECTED_BINDING_KEY = "";
+
+export function isActiveWorkPullRequestStatus(status: WorkPullRequestRecord["status"]): boolean {
+	return status === "open" || status === "draft";
+}
+
 export interface WorkStateStoreOptions {
 	path: string;
 	now?: () => number;
@@ -191,10 +223,43 @@ function safeNonNegativeInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
+function pullRequestRepositoryPart(value: unknown, maximum: number): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= maximum &&
+		!PR_REPOSITORY_FORBIDDEN_PATTERN.test(value)
+	);
+}
+
+function parsePullRequestRepository(value: unknown): WorkPullRequestRepositoryRecord {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, ["host", "owner", "name"]) ||
+		!pullRequestRepositoryPart(value.host, MAX_PR_REPOSITORY_HOST_CHARS) ||
+		!pullRequestRepositoryPart(value.owner, MAX_PR_REPOSITORY_SEGMENT_CHARS) ||
+		!pullRequestRepositoryPart(value.name, MAX_PR_REPOSITORY_SEGMENT_CHARS)
+	) {
+		throw new Error("invalid Work pull request repository");
+	}
+	return { host: value.host, owner: value.owner, name: value.name };
+}
+
+export function isSameWorkPullRequestRepository(
+	left: WorkPullRequestRepositoryRecord,
+	right: WorkPullRequestRepositoryRecord,
+): boolean {
+	return left.host === right.host && left.owner === right.owner && left.name === right.name;
+}
+
 function parsePullRequest(value: unknown): WorkPullRequestRecord {
-	if (!isRecord(value) || !hasExactKeys(value, ["provider", "number", "title", "status", "matchedHeadOid"])) {
+	if (
+		!isRecord(value) ||
+		!hasExactKeys(value, ["provider", "repository", "number", "title", "status", "matchedHeadOid"])
+	) {
 		throw new Error("invalid Work pull request record");
 	}
+	const repository = parsePullRequestRepository(value.repository);
 	if (
 		!boundedString(value.provider, MAX_PROVIDER_CHARS) ||
 		!safePositiveInteger(value.number) ||
@@ -208,6 +273,7 @@ function parsePullRequest(value: unknown): WorkPullRequestRecord {
 	}
 	return {
 		provider: value.provider,
+		repository,
 		number: value.number,
 		title: value.title,
 		status: value.status,
@@ -774,7 +840,8 @@ export class WorkStateStore {
 				if (
 					outcome.state === "resolved" &&
 					outcome.pullRequest.provider === change.pullRequest.provider &&
-					outcome.pullRequest.number === change.pullRequest.number
+					outcome.pullRequest.number === change.pullRequest.number &&
+					isSameWorkPullRequestRepository(outcome.pullRequest.repository, change.pullRequest.repository)
 				) {
 					change.pullRequest = cloneRecord(outcome.pullRequest);
 					change.headOid = fence.headOid;
@@ -813,6 +880,81 @@ export class WorkStateStore {
 	getChange(changeId: string): WorkChangeRecord | undefined {
 		const change = this.state.changes.find((candidate) => candidate.id === changeId);
 		return change ? cloneRecord(change) : undefined;
+	}
+
+	/** Bound open/draft pull requests, most recently updated first. */
+	listWatchedPullRequests(limit: number): WorkWatchedPullRequest[] {
+		const boundChangeIds = new Set(this.state.bindings.map((binding) => binding.changeId));
+		const watched: Array<{ updatedAt: number; entry: WorkWatchedPullRequest }> = [];
+		for (const change of this.state.changes) {
+			const pullRequest = change.pullRequest;
+			if (
+				!boundChangeIds.has(change.id) ||
+				change.resolutionState !== "resolved" ||
+				!pullRequest ||
+				!isActiveWorkPullRequestStatus(pullRequest.status)
+			) {
+				continue;
+			}
+			watched.push({
+				updatedAt: change.updatedAt,
+				entry: {
+					changeId: change.id,
+					checkedAt: change.checkedAt,
+					provider: pullRequest.provider,
+					number: pullRequest.number,
+					repository: cloneRecord(pullRequest.repository),
+				},
+			});
+		}
+		return watched
+			.sort((left, right) => right.updatedAt - left.updatedAt)
+			.slice(0, Math.max(0, Math.floor(limit)))
+			.map(({ entry }) => entry);
+	}
+
+	/**
+	 * Apply background status results to watched pull requests. Each update applies only while
+	 * its change still links the same open/draft pull request and has not been checked since the
+	 * snapshot, so a slow poll cannot overwrite newer discovery. Returns the changes whose
+	 * status or title changed.
+	 */
+	async applyPullRequestStatuses(
+		updates: readonly WorkPullRequestStatusUpdate[],
+		options: { now: number; nextRefreshAt: number },
+	): Promise<string[]> {
+		if (updates.length === 0) return [];
+		return this.mutate(NO_PROTECTED_BINDING_KEY, (state) => {
+			const changed: string[] = [];
+			for (const update of updates) {
+				const change = state.changes.find((candidate) => candidate.id === update.changeId);
+				const pullRequest = change?.pullRequest;
+				if (
+					!change ||
+					!pullRequest ||
+					change.resolutionState !== "resolved" ||
+					change.checkedAt !== update.checkedAt ||
+					!isActiveWorkPullRequestStatus(pullRequest.status) ||
+					pullRequest.provider !== update.provider ||
+					pullRequest.number !== update.number ||
+					!isSameWorkPullRequestRepository(pullRequest.repository, update.repository)
+				) {
+					continue;
+				}
+				if (update.outcome.state === "unavailable") {
+					change.lastRefreshSucceeded = false;
+					continue;
+				}
+				const title = update.outcome.title.slice(0, MAX_PR_TITLE_CHARS);
+				if (pullRequest.status !== update.outcome.status || pullRequest.title !== title) changed.push(change.id);
+				pullRequest.status = update.outcome.status;
+				pullRequest.title = title;
+				change.checkedAt = options.now;
+				change.nextRefreshAt = options.nextRefreshAt;
+				change.lastRefreshSucceeded = true;
+			}
+			return changed;
+		});
 	}
 
 	getWorkContext(

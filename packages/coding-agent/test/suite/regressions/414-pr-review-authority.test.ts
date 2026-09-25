@@ -18,6 +18,7 @@ import { getDaemonPaths } from "../../../src/daemon/paths.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationAuthority } from "../../../src/daemon/pr-review-checkout.ts";
 import * as reviewGit from "../../../src/daemon/pr-review-git.ts";
 import { VoltdStateStore } from "../../../src/daemon/state.ts";
+import type { WorkAssociationService } from "../../../src/daemon/work-association.ts";
 import { getWorktreesRoot, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 
@@ -261,9 +262,16 @@ async function fixture(grant = capabilities) {
 			async close() {},
 			async quiesce() {},
 		},
-		get work(): never {
-			throw new Error("utility must not start work observation");
-		},
+		// Streams record client activity for PR status polling; nothing else may touch Work.
+		work: new Proxy(
+			{},
+			{
+				get(_target, property) {
+					if (property === "retainClientActivity") return () => () => {};
+					throw new Error("utility must not start work observation");
+				},
+			},
+		) as unknown as WorkAssociationService,
 		get keepAwake(): never {
 			throw new Error("utility must not start keep-awake");
 		},

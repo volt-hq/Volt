@@ -3152,6 +3152,8 @@ class IrohDaemonService {
 			void owner.settled.then(releaseConversationTransport, releaseConversationTransport);
 		}
 		const removeActiveStream = this.activeStreams.register(entry);
+		// Every client stream, including short discovery reads, keeps linked PR status polling fast.
+		const releaseClientActivity = this.services.work.retainClientActivity();
 		let removed = false;
 		return {
 			entry,
@@ -3159,6 +3161,7 @@ class IrohDaemonService {
 				if (removed) return;
 				removed = true;
 				removeActiveStream();
+				releaseClientActivity();
 			},
 		};
 	}

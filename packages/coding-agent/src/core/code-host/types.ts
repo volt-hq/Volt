@@ -223,6 +223,31 @@ export interface CodeHostPullRequestDiscoveryProvider {
 	discoverPullRequest(request: CodeHostPullRequestDiscoveryRequest): Promise<CodeHostPullRequestDiscoveryOutcome>;
 }
 
+/** One already-associated pull request, identified by its base repository and number. */
+export interface CodeHostPullRequestStatusTarget {
+	owner: string;
+	name: string;
+	number: number;
+}
+
+export interface CodeHostPullRequestStatusRequest {
+	/** Neutral working directory for the provider CLI; never a repository checkout. */
+	cwd: string;
+	host: string;
+	pullRequests: readonly CodeHostPullRequestStatusTarget[];
+	signal?: AbortSignal;
+}
+
+export type CodeHostPullRequestStatusOutcome =
+	| { state: "resolved"; status: CodeHostPullRequestStatus; title: string }
+	| { state: "unavailable"; reason: CodeHostPullRequestDiscoveryUnavailableReason };
+
+export interface CodeHostPullRequestStatusProvider {
+	readonly id: string;
+	/** Returns exactly one outcome per requested pull request, in request order. */
+	refreshPullRequestStatuses(request: CodeHostPullRequestStatusRequest): Promise<CodeHostPullRequestStatusOutcome[]>;
+}
+
 export interface PullRequestFetchRef {
 	remoteRef: string;
 	localRef: string;

@@ -1349,7 +1349,9 @@ resolved context with bounded `pullRequest`, or an unresolved context whose
 `pullRequest`. The daemon joins this from its synchronous private store; a
 `list_sessions` request never starts Git or provider work. Only opaque
 `changeId`, repository display name, effective branch, resolution state, and
-the bounded PR provider/number/title/status/staleness cross the wire. Checkout
+the bounded PR provider/number/title/status/staleness cross the wire. The daemon
+refreshes linked open/draft PR status in the background; `stale` is `true` when
+the last refresh failed or the next one is overdue. Checkout
 paths, remotes, canonical repository IDs, matched object IDs, credentials, raw
 provider output, and diagnostics are excluded.
 

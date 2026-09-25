@@ -243,10 +243,22 @@ refresh failures, branch reuse, or a newer PR do not silently move the session
 to another change. Set `remote.pullRequestDiscovery: false` to disable provider
 calls.
 
+Once a PR is linked, the daemon keeps its status current in the background,
+whether or not the session is still on the PR branch or has a running runtime,
+and across daemon restarts. It refreshes every linked open or draft PR with one
+batched `gh api graphql` query per GitHub host: about every minute while any
+client stream is open or was open in the last few minutes, and about every 15
+minutes otherwise. It also refreshes right away on daemon start, when a session
+leaves a PR branch, and when a session's runtime ends. A PR stops being
+refreshed once it is merged or closed. A closed PR that is later reopened is
+picked up again only when a session returns to its branch. Reads never wait on
+GitHub; they return the stored status.
+
 Associations are stored separately in private `work-state.json`. The file uses
-opaque local IDs and a salted hash of the common Git directory; checkout paths,
-credentials, raw provider output, and provider diagnostics are not projected to
-phones. `list_sessions.workContext` contains only the opaque change ID,
+opaque local IDs and a salted hash of the common Git directory, and stores each
+linked PR's repository host, owner, and name so its status can be refreshed
+after the branch is gone. Checkout paths, repository identities, credentials,
+raw provider output, and provider diagnostics are not projected to phones. `list_sessions.workContext` contains only the opaque change ID,
 repository display name, effective branch, resolution state, and bounded PR
 summary described in [Iroh Remote Protocol](iroh-remote-protocol.md#remote-rpc-command-allowlist).
 
