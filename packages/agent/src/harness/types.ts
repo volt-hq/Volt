@@ -1,17 +1,22 @@
 import type {
+	Context,
 	ImageContent,
 	InferenceSpeed,
 	JsonObject,
 	JsonValue,
 	Message,
 	Model,
+	PromptCacheRefreshFunction,
+	PromptCacheRefreshResult,
 	ProviderEnv,
 	SimpleStreamOptions,
 	TextContent,
 	ThinkingBudgets,
+	ToolArgumentLimits,
 	Transport,
 } from "@hansjm10/volt-ai";
 import type {
+	AgentDeliveryKind,
 	AgentDeliveryOwner,
 	AgentEvent,
 	AgentLoopNextAction,
@@ -22,7 +27,17 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "../index.ts";
+import type { AgentHarnessAdmissionGate } from "./admission-gate.ts";
 import type { Session } from "./session/session.ts";
+
+/** Outcome of `AgentHarness.refreshPromptCache`. */
+export type AgentHarnessPromptCacheRefreshResult =
+	| (PromptCacheRefreshResult & { model: Model<any> })
+	| {
+			/** Nothing was sent: no refresh function, no retained request, or the retained request is stale. */
+			status: "unavailable";
+			reason: "no_refresh_function" | "no_request" | "configuration_changed" | "branch_changed";
+	  };
 
 /** Result of a fallible operation. Expected failures are returned as `ok: false` instead of thrown. */
 export type Result<TValue, TError> = { ok: true; value: TValue } | { ok: false; error: TError };
@@ -115,6 +130,8 @@ export interface AgentHarnessStreamOptions {
 	inferenceSpeed?: InferenceSpeed;
 	/** Per-level thinking token budgets. */
 	thinkingBudgets?: ThinkingBudgets;
+	/** Bounds for provider tool-argument generation before execution. */
+	toolArgumentLimits?: ToolArgumentLimits;
 	/** Provider-scoped environment overrides. */
 	env?: ProviderEnv;
 	/** Additional request headers merged with auth and lifecycle headers. */
@@ -141,6 +158,8 @@ export interface AgentHarnessStreamOptionsPatch {
 	inferenceSpeed?: InferenceSpeed | undefined;
 	/** Thinking-budget replacement. */
 	thinkingBudgets?: ThinkingBudgets | undefined;
+	/** Tool-argument limit replacement. Explicit `undefined` clears the configured limits. */
+	toolArgumentLimits?: ToolArgumentLimits | undefined;
 	/** Provider environment patch. `undefined` values delete keys. */
 	env?: Record<string, string | undefined> | undefined;
 	/** Cache-retention patch. Explicit `undefined` clears the configured hint. */
@@ -707,9 +726,19 @@ export interface ContextEvent {
 	messages: AgentMessage[];
 }
 
+/** Return undefined to preserve the suggested action; returning stop explicitly enforces termination. */
 export interface NextActionEvent extends AgentLoopNextActionContext {
 	type: "next_action";
 	signal: AbortSignal;
+}
+
+/** Final policy decision, after authority normalization and before delivery preparation or run settlement. */
+export interface NextActionResolvedEvent {
+	type: "next_action_resolved";
+	action: AgentLoopNextAction;
+	requestAuthority: AgentLoopNextActionContext["requestAuthority"];
+	/** Present only for stop actions. Completion permits independently authorized future work. */
+	stopReason?: "completion" | "policy" | "tool";
 }
 
 export interface BeforeProviderRequestEvent {
@@ -821,6 +850,7 @@ export type AgentHarnessOwnEvent<
 	| BeforeAgentStartEvent<TSkill, TPromptTemplate>
 	| ContextEvent
 	| NextActionEvent
+	| NextActionResolvedEvent
 	| BeforeProviderRequestEvent
 	| BeforeProviderPayloadEvent
 	| AfterProviderResponseEvent
@@ -890,6 +920,7 @@ export type AgentHarnessEventResultMap = {
 	context: ContextResult | undefined;
 	message_end: MessageEndResult | undefined;
 	next_action: AgentLoopNextAction | undefined;
+	next_action_resolved: undefined;
 	before_provider_request: BeforeProviderRequestResult | undefined;
 	before_provider_payload: BeforeProviderPayloadResult | undefined;
 	after_provider_response: undefined;
@@ -939,6 +970,10 @@ export interface AgentHarnessPromptOptions extends AgentHarnessRunOptions {
 	images?: ImageContent[];
 }
 
+/**
+ * Return undefined for no change. Every returned action is an explicit override,
+ * including stop when the suggested action is already stop. Use pause for resumable interruptions.
+ */
 export type AgentHarnessNextActionPolicy = (
 	context: AgentLoopNextActionContext,
 	signal: AbortSignal,
@@ -999,6 +1034,35 @@ export interface BranchSummaryResult {
 	modifiedFiles: string[];
 }
 
+/** Host-only post-delivery boundary. Structural requests never enter this callback. */
+export interface AgentHarnessRequestBoundary {
+	readonly attemptId: string;
+	readonly cause: "input" | "tools" | "continuation" | "retry";
+	readonly requestAuthority: AgentLoopNextActionContext["requestAuthority"];
+	readonly cursor: ProjectionCursor;
+	/** Most recent verified, user-bearing delivery batch; never inferred from transcript text. */
+	readonly batch?: {
+		readonly id: string;
+		readonly deliveries: readonly {
+			readonly deliveryId: string;
+			readonly kind: AgentDeliveryKind;
+			readonly messages: readonly Extract<AgentMessage, { role: "user" }>[];
+		}[];
+	};
+	readonly newInput: boolean;
+}
+
+/** Optional provider-only messages with host-owned, synchronous final admission authorization. */
+export interface AgentHarnessRequestContext {
+	readonly messages: readonly Message[];
+	readonly authorization: {
+		/** Recheck current host authority after the final admission await. Must be synchronous. */
+		isCurrent: () => boolean;
+		/** Report inclusion or discard exactly once. Must be synchronous. */
+		settle: (admitted: boolean) => void;
+	};
+}
+
 export interface AgentHarnessOptions<
 	TSkill extends Skill = Skill,
 	TPromptTemplate extends PromptTemplate = PromptTemplate,
@@ -1006,6 +1070,8 @@ export interface AgentHarnessOptions<
 > {
 	env: ExecutionEnv;
 	session: Session;
+	/** Shared host admission fence. Defaults to an independent gate; does not gate queues or cleanup. */
+	admissionGate?: AgentHarnessAdmissionGate;
 	tools?: TTool[];
 	/**
 	 * Concrete resources available to explicit invocation methods and system-prompt callbacks.
@@ -1028,6 +1094,17 @@ export interface AgentHarnessOptions<
 	) => Promise<{ apiKey: string; headers?: Record<string, string>; env?: ProviderEnv } | undefined>;
 	/** Base provider stream implementation wrapped by Harness lifecycle policy. */
 	streamFn?: StreamFn;
+	/**
+	 * No-output replay used by `refreshPromptCache`. Defaults to the provider refresh only when
+	 * `streamFn` is omitted; a custom `streamFn` must supply a matching refresh or refresh is unavailable.
+	 */
+	refreshPromptCacheFn?: PromptCacheRefreshFunction;
+	/** Append optional request-local messages after context reconciliation; never writes canonical history. */
+	requestBoundary?: (
+		boundary: AgentHarnessRequestBoundary,
+		context: Context,
+		signal?: AbortSignal,
+	) => Promise<AgentHarnessRequestContext | undefined>;
 	/** Convert application messages into provider-compatible messages. */
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** Curated stream/provider request options. Snapshotted at turn start. */

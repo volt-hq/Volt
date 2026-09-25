@@ -119,11 +119,16 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.interrupt` | `escape` | Cancel / abort |
 | `app.clear` | `ctrl+c` | Clear editor |
 | `app.exit` | `ctrl+d` | Exit (when editor empty) |
+| `app.debug` | `f12` | Capture diagnostics without interrupting work (`/debug`) |
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
 | `app.mode.toggle` | `shift+tab` | Toggle Build and Plan mode |
 | `app.plan.togglePane` | `alt+p` | Switch focus between the conversation and responsive plan pane |
 | `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
 | `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on Windows) | Paste image from clipboard |
+
+While work is active, quitting with `Ctrl+D`, double `Ctrl+C`, or `/quit` first shows a warning. Repeat the quit action within three seconds to confirm. Resuming editing or starting another operation requires a new confirmation. `Ctrl+C` always clears a nonempty editor first. Idle exit works immediately (`Ctrl+C` still needs two presses).
+
+Use `F12` or `/debug` to capture diagnostics while a response or tool is active. The shortcut works even when a selector or overlay has focus. Customize it with `app.debug`, or set it to `[]` to use only `/debug`. `F12` does not require extended keyboard encoding. Avoid shifted control shortcuts such as `Ctrl+Shift+D` on terminals that send the same bytes as `Ctrl+D`; they cannot be distinguished there.
 
 ### Sessions
 
@@ -143,6 +148,34 @@ This routing remains configurable through the ordinary action bindings. For exam
 | `app.session.delete` | `ctrl+d` | Delete session |
 | `app.session.deleteNoninvasive` | `ctrl+backspace` | Delete session when query is empty |
 
+### Background Jobs
+
+`/jobs` or Alt+J opens the live background-job inspector, including while the model is waiting. Arrow keys select a job; Enter opens its retained output. In the output view, arrow keys and PageUp/PageDown scroll a paused, bounded reading snapshot. End resumes following new output. Escape returns to the list or closes the inspector without cancelling work.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.jobs.open` | `alt+j` | Open or close the background-job inspector |
+| `app.jobs.cancel` | `ctrl+k` | Request cancellation of the selected job, after confirmation |
+| `app.jobs.follow` | `end` | Follow the latest output in the inspector |
+
+Cancellation uses Enter to confirm and Escape to keep the job running. The job remains **Cancelling** until its worker stops. Navigation and confirmation use the configurable `tui.select.*` actions.
+
+### Structured Questions
+
+Questions replace the editor while Volt waits for your preferences. Use `tui.select.up`/`down` to highlight an option and `tui.select.confirm` to answer. Typing or pasting starts a custom answer, including the first character. Custom answers and optional notes use the normal multiline editor (`tui.input.submit` to continue, `tui.input.newLine` for a newline).
+
+Multiple questions end with a review: highlight a question to edit it, or confirm **Submit answers**. Highlighting alone never supplies an answer. Skip discards the entire request's answers; cancel is a distinct result. Neither grants tool permissions.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.questions.back` | `shift+tab` | Return to choices, the previous question, or from review; preserve drafts |
+| `app.questions.skip` | `ctrl+s` | Skip this request without answers |
+| `app.questions.notes` | `ctrl+n` | Add optional notes to the highlighted option |
+| `tui.select.cancel` | `escape`, `ctrl+c` | Cancel the request without answers |
+| `app.questions.pageUp` / `app.questions.pageDown` | `ctrl+pageUp` / `ctrl+pageDown` | Scroll long questions and review summaries |
+
+Plain PageUp/PageDown also scroll the question in regular mode. In fullscreen mode they retain their normal transcript-scrolling behavior; use Ctrl+PageUp/Down for the question panel.
+
 ### Models and Thinking
 
 | Keybinding id | Default | Description |
@@ -157,7 +190,7 @@ This routing remains configurable through the ordinary action bindings. For exam
 
 | Keybinding id | Default | Description |
 |--------|---------|-------------|
-| `app.tools.expand` | `ctrl+o` | Collapse or expand tool output |
+| `app.tools.expand` | `ctrl+o` | Collapse or expand tool output and review details |
 | `app.message.followUp` | `alt+enter` | Queue follow-up message |
 | `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
 

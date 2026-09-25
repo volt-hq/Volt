@@ -1,9 +1,12 @@
 import { Buffer } from "node:buffer";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { relative, resolve, sep } from "node:path";
 import { createAgentSessionServices } from "../core/agent-session-services.ts";
+import { type GitContextObservation, GitContextObservationBinding } from "../core/git-context-provider.ts";
+import { discoverGitWorktree } from "../core/git-repository.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
@@ -22,7 +25,10 @@ import {
 	type IrohRemoteAgentOptionsRpcBackend,
 } from "../core/remote/iroh/agent-options.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
-import { hashIrohRemotePairingSecret } from "../core/remote/iroh/authorization.ts";
+import {
+	hashIrohRemotePairingSecret,
+	isIrohRemoteClientAllowedForWorkspace,
+} from "../core/remote/iroh/authorization.ts";
 import {
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
 	IrohRemoteHostEngine,
@@ -39,8 +45,10 @@ import {
 	writeIrohRemoteHandshakeResponse,
 } from "../core/remote/iroh/handshake-reader.ts";
 import { resolveIrohRemoteWorkspaceProjectTrusted } from "../core/remote/iroh/host-policy.ts";
+import { type IrohRemotePrReviewRpcBackend, PrReviewPreparationError } from "../core/remote/iroh/pr-review-rpc.ts";
 import {
 	IROH_REMOTE_ALPN,
+	isIrohRemoteHostStorageFullError,
 	normalizeIrohRemoteAllowTools,
 	resolveIrohRemoteRuntimeToolPolicy,
 } from "../core/remote/iroh/protocol.ts";
@@ -49,23 +57,30 @@ import {
 	type IrohRemotePushNotificationDeliveryStatus,
 	IrohRemotePushNotificationDispatcher,
 	type IrohRemotePushNotificationIntent,
-	IrohRemotePushRelayHttpClient,
+	type IrohRemotePushRelayHttpClient,
 	revokeIrohRemoteClientPushTargets,
 } from "../core/remote/iroh/push.ts";
 import {
 	createIrohRemoteRpcCapabilityDeniedResponse,
 	createIrohRemoteRpcErrorResponse,
 } from "../core/remote/iroh/rpc-command-filter.ts";
+import {
+	createIrohRemoteSessionContextsRpcBackend,
+	type IrohRemoteSessionContextsRpcBackend,
+} from "../core/remote/iroh/session-contexts.ts";
 import type { IrohRemoteClient, IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import {
 	IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
 	type IrohRemoteHostStateManager,
 	isIrohRemoteWorkspaceHasWorktreesError,
 } from "../core/remote/iroh/state-manager.ts";
-import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
+import {
+	getIrohRemoteWorkspaceAvailabilityStatus,
+	type IrohRemoteWorkspaceMetadataSnapshot,
+} from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
-import { getDefaultSessionDir } from "../core/session-manager.ts";
+import { getDefaultSessionDir, getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
@@ -74,10 +89,14 @@ import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlLeaseStatus,
+	type ControlRelayCredentialStatus,
 	type ControlRequest,
 	createControlClientStatus,
+	isRemoteTransportPairingAvailable,
 	RELAY_RPC_COMMAND_TYPES,
+	REMOTE_TRANSPORT_REASON_MESSAGES,
 	type RelayCloseReason,
+	type RemoteTransportHealth,
 } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
 import {
@@ -115,6 +134,7 @@ import {
 	type IntegratedRuntimeSubscriber,
 } from "./integrated-runtimes.ts";
 import { IrohConnectionSupervisor } from "./iroh-connection-supervisor.ts";
+import { createIrohEndpointTicket } from "./iroh-endpoint-ticket.ts";
 import {
 	formatIrohLoadError,
 	type IrohConnectionLike,
@@ -130,8 +150,14 @@ import {
 	isIrohStreamLifecycleClosedError,
 	runLifecycleFencedPhysicalOperation,
 } from "./iroh-stream-lifecycle.ts";
-import { type DaemonAttachClaim, LeaseBroker, type LeaseState } from "./lease-broker.ts";
+import { type DaemonAttachClaim, LeaseBroker, type LeaseRecord, type LeaseState } from "./lease-broker.ts";
 import type { VoltdRuntimeServices, VoltdServiceExtension } from "./main.ts";
+import {
+	PrReviewCheckoutError,
+	PrReviewCheckoutManager,
+	type PrReviewPreparationAuthority,
+} from "./pr-review-checkout.ts";
+import { createDaemonPushRelayClient } from "./push-relay-client.ts";
 import {
 	activateIrohManagedRelayCredential,
 	createIrohManagedRelayCredentialClaim,
@@ -139,6 +165,7 @@ import {
 	type IrohManagedRelayAppEndpoint,
 	type IrohManagedRelayCredential,
 	type IrohManagedRelayCredentialClaim,
+	IrohRelayCredentialSubscriptionInactiveError,
 	managedRelayCredentialFailureRetryMs,
 	managedRelayCredentialPendingRetryMs,
 	managedRelayCredentialRateLimitRetryMs,
@@ -152,9 +179,11 @@ import {
 	revokeIrohManagedRelayCredential,
 } from "./relay-credential.ts";
 import { RelayRegistry } from "./relay-stream.ts";
+import { beginReviewSiblingAdmission, withReviewSourceWriteLease } from "./review-sibling-admission.ts";
 import {
 	createSessionManagerTargetStore,
 	type IrohRemoteSessionTarget,
+	type ResolvedSessionTargetWithManager,
 	resolveIrohRemoteSessionTarget,
 } from "./session-target.ts";
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
@@ -190,6 +219,15 @@ const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
 const IROH_ENDPOINT_READY_TIMEOUT_MS = 15_000;
 const IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS = 15_000;
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
+
+export function isExactTuiWorkObservationLeaseHolder(
+	connection: Pick<ControlConnection, "client" | "connectionId">,
+	lease: Pick<LeaseRecord, "state" | "tuiConnectionId"> | undefined,
+): boolean {
+	return (
+		connection.client === "tui" && lease?.state === "tui-owned" && lease.tuiConnectionId === connection.connectionId
+	);
+}
 
 function normalizeRelayCloseReason(reason: string): RelayCloseReason {
 	switch (reason) {
@@ -305,6 +343,8 @@ export interface IrohDaemonServiceConfig {
 }
 
 export interface IrohDaemonServiceDependencies {
+	/** Override native module loading for deterministic missing-binding tests. */
+	loadIrohModule?: typeof loadIrohModule;
 	/** Decorate a freshly bound endpoint (used to exercise native lifecycle failures). */
 	decorateEndpoint?(endpoint: IrohEndpointLike): IrohEndpointLike;
 	/** Decorate an accepted raw stream before lifecycle fencing (test-only failure injection). */
@@ -314,12 +354,18 @@ export interface IrohDaemonServiceDependencies {
 		kind: "conversation" | "workspace_discovery" | "workspace_management" | "worktree_management" | "relay",
 		authorization: IrohRemoteClientAuthorizationSuccess,
 	): void | Promise<void>;
+	/** Pause a TUI Work receipt after its daemon revision is claimed and before validation (test-only race injection). */
+	beforeTuiWorkObservationValidation?(
+		request: Readonly<Extract<ControlRequest, { type: "work_observe" }>>,
+	): void | Promise<void>;
 	/** Override native relay-recovery capabilities and timing (test-only). */
 	relayWatchApiSafe?: boolean;
 	relayReconnectApiSafe?: boolean;
 	relayRecoveryDelayMs?: number;
 	relayRecoveryRetryMs?: number;
 	relayRecoveryConfirmationTimeoutMs?: number;
+	/** Override the connection authentication, first-stream accept, and stream handshake deadlines (test-only). */
+	handshakeTimeoutMs?: number;
 }
 
 export interface ResolvedIrohRelayConfig {
@@ -395,6 +441,57 @@ function parseRelayUrlsEnv(value: string | undefined): string[] | undefined {
 	return urls.length > 0 ? urls : undefined;
 }
 
+function createRelayCredentialStatus(
+	credential: IrohManagedRelayCredential | undefined,
+	claim: IrohManagedRelayCredentialClaim | undefined,
+	revocationPending = false,
+	subscriptionInactive = false,
+): ControlRelayCredentialStatus {
+	const expiresAt = credential?.accessTokenExpiresAt;
+	const state = revocationPending
+		? "revocation_pending"
+		: subscriptionInactive
+			? "subscription_inactive"
+			: expiresAt !== undefined && expiresAt <= Date.now()
+				? "expired"
+				: claim !== undefined && (claim.expiresAt === undefined || claim.expiresAt > Date.now())
+					? "pairing"
+					: credential !== undefined
+						? "active"
+						: "unpaired";
+	return { state, ...(expiresAt === undefined ? {} : { expiresAt }) };
+}
+
+function initialRelayCredentialStatus(
+	config: IrohDaemonServiceConfig,
+	services: VoltdRuntimeServices,
+): ControlRelayCredentialStatus | undefined {
+	const settings = services.state.state.settings;
+	const credential = config.relayCredential ?? settings.relayCredential;
+	const claim = settings.relayCredentialClaim;
+	const revocation = settings.relayCredentialRevocation;
+	const authority = revocation ?? credential ?? claim;
+	const relay = resolveIrohRelayConfig(config, process.env, authority?.relayUrls);
+	const staticToken =
+		config.relayAuthToken ?? process.env.VOLT_IROH_RELAY_AUTH_TOKEN?.trim() ?? settings.relayAuthToken;
+	if (relay.relayMode !== "production") return undefined;
+	if (authority === undefined) {
+		if (staticToken) return undefined;
+		try {
+			if (resolveIrohRelayCredentialServiceUrl(relay.relayMode, relay.relayUrls) === undefined) return undefined;
+		} catch {
+			// Malformed custom relay URLs must not break local status reporting
+			// after endpoint initialization has already reported its failure.
+			return undefined;
+		}
+	}
+	return createRelayCredentialStatus(
+		revocation === undefined ? credential : undefined,
+		claim,
+		revocation !== undefined,
+	);
+}
+
 interface PendingPairRequest {
 	requestId: string;
 	connectionId: string;
@@ -408,6 +505,12 @@ interface PendingPairRequest {
 interface ClientConnectionRecord {
 	connectionId: string;
 	supervisor: IrohConnectionSupervisor;
+}
+
+interface TuiWorkAuthorityClaim {
+	readonly connectionId: string;
+	readonly revision: bigint;
+	workspaceGeneration: number | undefined;
 }
 
 type RelayPushDeliveryResult =
@@ -656,9 +759,15 @@ export function createIrohDaemonService(
 ): VoltdServiceExtension {
 	return (services: VoltdRuntimeServices) => {
 		const log = services.logger.child("iroh");
-		const loaded = loadIrohModule();
+		const loaded = (dependencies.loadIrohModule ?? loadIrohModule)();
 		if (!loaded.iroh) {
 			log("warn", formatIrohLoadError(loaded.error));
+			const remoteTransport: RemoteTransportHealth = {
+				state: "unavailable",
+				reasonCode: "native_binding_missing",
+				message: REMOTE_TRANSPORT_REASON_MESSAGES.native_binding_missing,
+				...(loaded.packageVersion === undefined ? {} : { wrapperVersion: loaded.packageVersion }),
+			};
 			return {
 				async handleRequest(connection, request) {
 					if (request.type === "pair_request") {
@@ -666,23 +775,49 @@ export function createIrohDaemonService(
 							type: "error",
 							id: request.id,
 							code: "iroh_unavailable",
-							message: formatIrohLoadError(loaded.error),
+							message: remoteTransport.message!,
 						});
 						return true;
 					}
 					return false;
 				},
+				statusExtras: () => ({ remoteTransport, relayCredential: initialRelayCredentialStatus(config, services) }),
 			};
 		}
 
-		const service = new IrohDaemonService(
-			loaded.iroh,
-			services,
-			config,
-			loaded.capabilities?.connectedHomeRelayWatch === true,
-			loaded.capabilities?.reconnectRelay === true,
-			dependencies,
-		);
+		let service: IrohDaemonService;
+		try {
+			service = new IrohDaemonService(
+				loaded.iroh,
+				services,
+				config,
+				loaded.packageVersion,
+				loaded.capabilities?.connectedHomeRelayWatch === true,
+				loaded.capabilities?.reconnectRelay === true,
+				dependencies,
+			);
+		} catch (error) {
+			log("error", `failed to initialize iroh endpoint: ${error instanceof Error ? error.message : String(error)}`);
+			const remoteTransport: RemoteTransportHealth = {
+				state: "unavailable",
+				reasonCode: "endpoint_start_failed",
+				message: REMOTE_TRANSPORT_REASON_MESSAGES.endpoint_start_failed,
+				...(loaded.packageVersion === undefined ? {} : { wrapperVersion: loaded.packageVersion }),
+			};
+			return {
+				async handleRequest(connection, request) {
+					if (request.type !== "pair_request") return false;
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "iroh_unavailable",
+						message: remoteTransport.message!,
+					});
+					return true;
+				},
+				statusExtras: () => ({ remoteTransport, relayCredential: initialRelayCredentialStatus(config, services) }),
+			};
+		}
 		service.start();
 		return {
 			handleRequest: (connection, request) => service.handleRequest(connection, request),
@@ -721,8 +856,11 @@ class IrohDaemonService {
 	private relayRecoveryUnsupportedLogged = false;
 	private relayCredentialEpoch = 0;
 	private relayCredentialIsRevoking = false;
+	private relayCredentialSubscriptionInactive = false;
 	private readonly relayConfigWarning: string | undefined;
 	private readonly profile: string | undefined;
+	private readonly wrapperVersion: string | undefined;
+	private remoteTransport: RemoteTransportHealth;
 	private readonly log: ReturnType<VoltdRuntimeServices["logger"]["child"]>;
 	private readonly stateManager: IrohRemoteHostStateManager;
 	private readonly activeStreams = new IrohRemoteActiveStreamRegistry();
@@ -745,7 +883,15 @@ class IrohDaemonService {
 	private readonly trustStore: ProjectTrustStore;
 	private readonly conversationCoordinators = new ConversationCoordinatorRegistry();
 	private readonly runtimes: IntegratedRuntimeRegistry;
+	private readonly runtimeWorkObservers = new Map<
+		IntegratedRuntimeEntry,
+		{ binding: GitContextObservationBinding; unsubscribeSessionReplaced: () => void }
+	>();
+	private readonly tuiWorkAuthorities = new Map<string, TuiWorkAuthorityClaim>();
+	private readonly tuiWorkRetirementTasks = new Set<Promise<void>>();
+	private tuiWorkReceiptRevision = 0n;
 	private readonly worktrees: WorktreeManager;
+	private readonly prReviewCheckouts: PrReviewCheckoutManager;
 	private readonly worktreeRetention: WorktreeRetentionSweeper;
 	private readonly leaseBroker: LeaseBroker;
 	private readonly viewerFeeds: ViewerFeedRegistry;
@@ -760,6 +906,7 @@ class IrohDaemonService {
 		iroh: IrohModuleLike,
 		services: VoltdRuntimeServices,
 		config: IrohDaemonServiceConfig,
+		wrapperVersion: string | undefined,
 		nativeWatchApiSafe: boolean,
 		nativeReconnectApiSafe: boolean,
 		dependencies: IrohDaemonServiceDependencies,
@@ -767,6 +914,11 @@ class IrohDaemonService {
 		this.iroh = iroh;
 		this.services = services;
 		this.dependencies = dependencies;
+		this.wrapperVersion = wrapperVersion;
+		this.remoteTransport = {
+			state: "starting",
+			...(wrapperVersion === undefined ? {} : { wrapperVersion }),
+		};
 		this.relayWatchApiSafe = dependencies.relayWatchApiSafe ?? nativeWatchApiSafe;
 		this.relayReconnectApiSafe = dependencies.relayReconnectApiSafe ?? nativeReconnectApiSafe;
 		const persistedRevocation = services.state.state.settings.relayCredentialRevocation;
@@ -826,6 +978,7 @@ class IrohDaemonService {
 		this.relayCredentialServiceUrl =
 			builtInRelayCredentialServiceUrl ??
 			this.managedRelayCredential?.serviceUrl ??
+			this.managedRelayCredentialRevocation?.serviceUrl ??
 			this.managedRelayCredentialClaim?.serviceUrl;
 		const configuredRelayOrigins = this.relayUrls.map((url) => new URL(url).origin).sort();
 		if (this.managedRelayCredential !== undefined) {
@@ -873,10 +1026,7 @@ class IrohDaemonService {
 		this.log = services.logger.child("iroh");
 		this.stateManager = services.stateManager;
 		this.trustStore = new ProjectTrustStore(services.agentDir);
-		this.pushRelayClient = new IrohRemotePushRelayHttpClient({
-			authToken: config.pushRelayAuthToken ?? process.env.VOLT_PUSH_RELAY_AUTH_TOKEN,
-			baseUrl: config.pushRelayUrl ?? process.env.VOLT_PUSH_RELAY_URL,
-		});
+		this.pushRelayClient = createDaemonPushRelayClient(config, () => this.managedRelayCredential?.accessToken);
 		this.runtimes = new IntegratedRuntimeRegistry({
 			agentDir: services.agentDir,
 			profile: config.profile,
@@ -898,11 +1048,41 @@ class IrohDaemonService {
 			resolveWorktree: (workspaceName, hello, targetSessionId) =>
 				this.resolveConversationWorktree(workspaceName, hello, targetSessionId),
 			resolveWorkingDirectory: (options) => this.resolveConversationWorkingDirectory(options),
-			prepareWorktreeRuntime: (workspaceName, worktreeId) =>
-				this.worktrees.beginRuntimePreparation(workspaceName, worktreeId),
+			prepareWorktreeRuntime: (workspaceName, worktreeId, sessionId) =>
+				this.worktrees.beginRuntimePreparation(workspaceName, worktreeId, sessionId),
+			preparePrReviewSession: (authorization, hello, signal) =>
+				this.prReviewCheckouts.prepareSession(authorization, hello, this.prReviewAuthority(authorization, signal)),
 			bindWorktreeSession: (workspaceName, worktreeId, sessionId) =>
 				this.worktrees.bindSession(workspaceName, worktreeId, sessionId),
+			beginReviewSiblingAdmission: (parent, sessionId) => {
+				const lease = this.admission.tryAcquire();
+				if (!lease) throw new Error("Review sibling admission is closed");
+				return beginReviewSiblingAdmission({
+					workspaceName: parent.workspaceName,
+					sessionId,
+					broker: this.leaseBroker,
+					lease,
+					validateWorkspace: () => this.validateReviewWorkspace(parent),
+				});
+			},
+			withReviewSourceWrite: (parent, source, write) => {
+				const lease = this.admission.tryAcquire();
+				if (!lease) return Promise.reject(new Error("Review source write admission closed"));
+				return withReviewSourceWriteLease({
+					workspaceName: parent.workspaceName,
+					sessionId: source.sessionId,
+					broker: this.leaseBroker,
+					lease,
+					write,
+					validateWorkspace: () => this.validateReviewWorkspace(parent),
+				});
+			},
+			onRuntimePublished: (entry) => this.startRuntimeWorkObservation(entry),
+			onRuntimeSessionRekeyed: (entry, previousSessionId) => {
+				this.rekeyRuntimeWorkObservation(entry, previousSessionId);
+			},
 			onRuntimeDisposed: (entry) => {
+				this.stopRuntimeWorkObservation(entry);
 				if (entry.worktreeId !== undefined) {
 					this.worktreeRetention.onRuntimeDisposed(entry.workspaceName, entry.worktreeId);
 				}
@@ -923,6 +1103,18 @@ class IrohDaemonService {
 				this.leaseBroker.reserveSessionsForWorktreeRemoval(workspaceName, sessionIds),
 			flushState: () => services.state.flush(),
 		});
+		this.prReviewCheckouts = new PrReviewCheckoutManager({
+			agentDir: services.agentDir,
+			stateManager: this.stateManager,
+			worktrees: this.worktrees,
+			hasActiveSession: (workspaceName, sessionId) => {
+				const lease = this.leaseBroker.lookup(workspaceName, sessionId);
+				return (
+					this.runtimes.findOwner(workspaceName, sessionId) !== undefined ||
+					(lease !== undefined && (lease.state !== "unowned" || lease.pendingDaemonAttaches > 0))
+				);
+			},
+		});
 		this.worktreeRetention = new WorktreeRetentionSweeper({
 			manager: this.worktrees,
 			stateManager: this.stateManager,
@@ -936,7 +1128,7 @@ class IrohDaemonService {
 			isRuntimeStreaming: (workspaceName, sessionId) =>
 				this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.isBusy ?? false,
 			waitForRuntimeIdle: async (workspaceName, sessionId) => {
-				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.waitForIdle();
+				await this.runtimes.findOwner(workspaceName, sessionId)?.runtime.session.waitForNotBusy();
 			},
 			disposeRuntime: async (workspaceName, sessionId, reason) => {
 				const owner = this.runtimes.findOwner(workspaceName, sessionId);
@@ -1027,11 +1219,313 @@ class IrohDaemonService {
 		this.ready = { promise: readyPromise, resolve: readyResolve, reject: readyReject };
 	}
 
+	private startRuntimeWorkObservation(entry: IntegratedRuntimeEntry): void {
+		if (entry.workspaceGeneration === undefined || this.runtimeWorkObservers.has(entry)) return;
+		let observer!: {
+			binding: GitContextObservationBinding;
+			unsubscribeSessionReplaced: () => void;
+		};
+		const publish = (observation: GitContextObservation): void => {
+			if (
+				observation.status !== "definitive" ||
+				this.runtimeWorkObservers.get(entry) !== observer ||
+				entry.lifecycle !== "active"
+			) {
+				return;
+			}
+			const gitContext = observation.gitContext;
+			if (!gitContext || gitContext.stale || gitContext.head.kind !== "branch") {
+				this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
+				return;
+			}
+			const location = discoverGitWorktree(entry.runtime.cwd);
+			if (!location) {
+				this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration!, entry.sessionId);
+				return;
+			}
+			void this.services.work
+				.observe({
+					workspaceName: entry.workspaceName,
+					workspaceGeneration: entry.workspaceGeneration!,
+					sessionId: entry.sessionId,
+					cwd: entry.runtime.cwd,
+					commonGitDir: location.commonGitDir,
+					repositoryDisplayName: gitContext.repository,
+					branch: gitContext.head.name,
+					headOid: gitContext.head.oid,
+					trusted: entry.projectTrusted,
+					...(gitContext.base === null ? {} : { baseBranches: [gitContext.base.ref] }),
+				})
+				.catch(() => {});
+		};
+		const binding = new GitContextObservationBinding(publish, { monitor: true });
+		const unsubscribeSessionReplaced = entry.runtime.subscribeSessionReplaced((session) => {
+			if (this.runtimeWorkObservers.get(entry) !== observer) return;
+			binding.bind(session.gitContextProvider);
+		});
+		observer = { binding, unsubscribeSessionReplaced };
+		this.runtimeWorkObservers.set(entry, observer);
+		binding.bind(entry.runtime.session.gitContextProvider);
+	}
+
+	private rekeyRuntimeWorkObservation(entry: IntegratedRuntimeEntry, previousSessionId: string): void {
+		if (entry.workspaceGeneration === undefined) return;
+		void this.services.work
+			.inheritSession(entry.workspaceName, entry.workspaceGeneration, previousSessionId, entry.sessionId)
+			.catch(() => {});
+		void this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration, previousSessionId);
+	}
+
+	private stopRuntimeWorkObservation(entry: IntegratedRuntimeEntry): void {
+		const observer = this.runtimeWorkObservers.get(entry);
+		if (observer) {
+			this.runtimeWorkObservers.delete(entry);
+			observer.unsubscribeSessionReplaced();
+			observer.binding.dispose();
+		}
+		if (entry.workspaceGeneration === undefined) return;
+		void this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration, entry.sessionId);
+		for (const previousSessionId of entry.previousSessionIds) {
+			void this.services.work.retireSession(entry.workspaceName, entry.workspaceGeneration, previousSessionId);
+		}
+	}
+
+	private tuiWorkKey(workspaceName: string, sessionId: string): string {
+		return `${workspaceName}\0${sessionId}`;
+	}
+
+	private claimTuiWorkAuthority(
+		workspaceName: string,
+		sessionId: string,
+		connectionId: string,
+	): TuiWorkAuthorityClaim {
+		const key = this.tuiWorkKey(workspaceName, sessionId);
+		const previous = this.tuiWorkAuthorities.get(key);
+		const claim: TuiWorkAuthorityClaim = {
+			connectionId,
+			revision: ++this.tuiWorkReceiptRevision,
+			workspaceGeneration: previous?.workspaceGeneration,
+		};
+		this.tuiWorkAuthorities.set(key, claim);
+		return claim;
+	}
+
+	private isCurrentTuiWorkAuthority(key: string, claim: TuiWorkAuthorityClaim): boolean {
+		return this.tuiWorkAuthorities.get(key)?.revision === claim.revision;
+	}
+
+	private retireTuiWorkAuthorityClaim(
+		key: string,
+		workspaceName: string,
+		sessionId: string,
+		claim: TuiWorkAuthorityClaim,
+	): Promise<void> {
+		if (!this.isCurrentTuiWorkAuthority(key, claim)) return Promise.resolve();
+		this.tuiWorkAuthorities.delete(key);
+		return claim.workspaceGeneration === undefined
+			? Promise.resolve()
+			: this.services.work.retireSession(workspaceName, claim.workspaceGeneration, sessionId);
+	}
+
+	private retireTuiWorkAuthority(workspaceName: string, sessionId: string, connectionId?: string): Promise<void> {
+		const key = this.tuiWorkKey(workspaceName, sessionId);
+		const claim = this.tuiWorkAuthorities.get(key);
+		if (!claim || (connectionId !== undefined && claim.connectionId !== connectionId)) return Promise.resolve();
+		return this.retireTuiWorkAuthorityClaim(key, workspaceName, sessionId, claim);
+	}
+
+	private retireCurrentTuiWorkObservation(
+		key: string,
+		workspaceName: string,
+		sessionId: string,
+		claim: TuiWorkAuthorityClaim,
+	): Promise<void> {
+		if (!this.isCurrentTuiWorkAuthority(key, claim) || claim.workspaceGeneration === undefined) {
+			return Promise.resolve();
+		}
+		return this.services.work.retireSession(workspaceName, claim.workspaceGeneration, sessionId);
+	}
+
+	private retireTuiWorkWorkspace(workspaceName: string): Promise<void> {
+		for (const [key, claim] of this.tuiWorkAuthorities) {
+			if (key.startsWith(`${workspaceName}\0`) && this.isCurrentTuiWorkAuthority(key, claim)) {
+				this.tuiWorkAuthorities.delete(key);
+			}
+		}
+		return this.services.work.retireWorkspace(workspaceName);
+	}
+
+	private trackTuiWorkRetirement(task: Promise<void>): void {
+		const tracked = task.catch((error: unknown) => {
+			this.log("warn", "failed to retire TUI Work observation after control disconnect", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		this.tuiWorkRetirementTasks.add(tracked);
+		void tracked.finally(() => this.tuiWorkRetirementTasks.delete(tracked));
+	}
+
+	private async handleTuiWorkObservation(
+		connection: ControlConnection,
+		request: Extract<ControlRequest, { type: "work_observe" }>,
+	): Promise<void> {
+		const assertLease = (): boolean =>
+			isExactTuiWorkObservationLeaseHolder(
+				connection,
+				this.leaseBroker.lookup(request.workspaceName, request.sessionId),
+			);
+		if (!assertLease()) {
+			connection.send({ type: "error", id: request.id, code: "not_held", message: "lease not held" });
+			return;
+		}
+		const key = this.tuiWorkKey(request.workspaceName, request.sessionId);
+		const claim = this.claimTuiWorkAuthority(request.workspaceName, request.sessionId, connection.connectionId);
+		const isCurrentRevision = (): boolean => this.isCurrentTuiWorkAuthority(key, claim);
+		const initialRetirement =
+			request.gitContext === null
+				? this.retireCurrentTuiWorkObservation(key, request.workspaceName, request.sessionId, claim)
+				: Promise.resolve();
+		const finishIfSuperseded = async (): Promise<boolean> => {
+			if (isCurrentRevision()) return false;
+			await initialRetirement;
+			connection.send({ type: "ok", id: request.id });
+			return true;
+		};
+		await this.dependencies.beforeTuiWorkObservationValidation?.(request);
+		if (await finishIfSuperseded()) return;
+
+		const state = await this.stateManager.getState();
+		if (await finishIfSuperseded()) return;
+		const workspace = state.workspaces.find((candidate) => candidate.name === request.workspaceName);
+		const workspaceGeneration = (state.workspaceGenerations ?? []).find(
+			(candidate) => candidate.workspaceName === request.workspaceName,
+		)?.generation;
+		if (!workspace || workspaceGeneration === undefined) {
+			connection.send({ type: "error", id: request.id, code: "not_found", message: "workspace not found" });
+			return;
+		}
+		claim.workspaceGeneration = workspaceGeneration;
+		if (request.gitContext === null) {
+			if (!assertLease()) {
+				await this.retireTuiWorkAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
+				connection.send({ type: "error", id: request.id, code: "not_held", message: "lease not held" });
+				return;
+			}
+			await Promise.all([
+				initialRetirement,
+				this.retireCurrentTuiWorkObservation(key, request.workspaceName, request.sessionId, claim),
+			]);
+			connection.send({ type: "ok", id: request.id });
+			return;
+		}
+
+		const sessionDir = getDefaultSessionDirPath(workspace.path, this.services.agentDir);
+		let sessionCwd: string | undefined;
+		try {
+			const sessionRef = await SessionManager.findForResume(sessionDir, request.sessionId);
+			if (sessionRef !== undefined) {
+				const manager = await SessionManager.open(sessionRef);
+				try {
+					sessionCwd = manager.getCwd();
+				} finally {
+					await manager.closePersistence();
+				}
+			}
+		} catch {
+			sessionCwd = undefined;
+		}
+		if (await finishIfSuperseded()) return;
+		if (sessionCwd === undefined) {
+			connection.send({ type: "error", id: request.id, code: "not_found", message: "session not found" });
+			return;
+		}
+		const worktree = (state.worktrees ?? []).find(
+			(candidate) =>
+				candidate.workspaceName === request.workspaceName && candidate.sessionIds.includes(request.sessionId),
+		);
+		let runtimeDirectory: WorkspaceDirectoryResolution;
+		try {
+			const rootPath = await realpath(worktree?.path ?? workspace.path);
+			const absolutePath = await realpath(sessionCwd);
+			if (!isPathInside(rootPath, absolutePath) || !(await stat(absolutePath)).isDirectory()) {
+				throw new Error("session working directory escaped its workspace");
+			}
+			const relativePath = relative(rootPath, absolutePath).split(sep).join("/");
+			runtimeDirectory = {
+				absolutePath,
+				...(relativePath.length === 0 ? {} : { relativePath }),
+			};
+		} catch {
+			if (await finishIfSuperseded()) return;
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "session_unavailable",
+				message: "session working directory is unavailable",
+			});
+			return;
+		}
+		if (await finishIfSuperseded()) return;
+		const location = discoverGitWorktree(runtimeDirectory.absolutePath);
+		if (!location) {
+			connection.send({ type: "error", id: request.id, code: "not_git", message: "session is not in Git" });
+			return;
+		}
+		const currentState = await this.stateManager.getState();
+		if (await finishIfSuperseded()) return;
+		const currentWorkspace = currentState.workspaces.find(
+			(candidate) => candidate.name === request.workspaceName && candidate.path === workspace.path,
+		);
+		const currentGeneration = (currentState.workspaceGenerations ?? []).find(
+			(candidate) => candidate.workspaceName === request.workspaceName,
+		)?.generation;
+		if (!assertLease() || !currentWorkspace || currentGeneration !== workspaceGeneration) {
+			await this.retireTuiWorkAuthorityClaim(key, request.workspaceName, request.sessionId, claim);
+			connection.send({ type: "error", id: request.id, code: "authority_changed", message: "authority changed" });
+			return;
+		}
+		void this.services.work
+			.observe(
+				{
+					workspaceName: request.workspaceName,
+					workspaceGeneration,
+					sessionId: request.sessionId,
+					cwd: runtimeDirectory.absolutePath,
+					commonGitDir: location.commonGitDir,
+					repositoryDisplayName: request.gitContext.repository,
+					branch: request.gitContext.branch,
+					headOid: request.gitContext.headOid,
+					trusted: resolveIrohRemoteWorkspaceProjectTrusted(currentWorkspace, { trustStore: this.trustStore }),
+					...(request.gitContext.baseRef === undefined ? {} : { baseBranches: [request.gitContext.baseRef] }),
+				},
+				isCurrentRevision,
+			)
+			.catch(() => {});
+		connection.send({ type: "ok", id: request.id });
+	}
+
 	private requireEngine(): IrohRemoteHostEngine {
 		if (!this.engine) {
 			throw new Error("iroh host engine is not ready");
 		}
 		return this.engine;
+	}
+
+	private markStorageCapacityUnavailable(): void {
+		this.remoteTransport = {
+			state: this.endpoint && this.engine ? "degraded" : "unavailable",
+			reasonCode: "host_storage_full",
+			message: REMOTE_TRANSPORT_REASON_MESSAGES.host_storage_full,
+			...(this.wrapperVersion === undefined ? {} : { wrapperVersion: this.wrapperVersion }),
+		};
+	}
+
+	private clearStorageCapacityDegradation(): void {
+		if (this.remoteTransport.reasonCode !== "host_storage_full" || !this.endpoint || !this.engine) return;
+		this.remoteTransport = {
+			state: "ready",
+			...(this.wrapperVersion === undefined ? {} : { wrapperVersion: this.wrapperVersion }),
+		};
 	}
 
 	private async pruneWorktreesOnStart(signal: AbortSignal): Promise<void> {
@@ -1075,6 +1569,26 @@ class IrohDaemonService {
 		};
 	}
 
+	private async validateReviewWorkspace(parent: IntegratedRuntimeEntry): Promise<void> {
+		const state = await this.stateManager.getState();
+		const workspace = state.workspaces.find((item) => item.name === parent.workspaceName);
+		const generation = state.workspaceGenerations?.find(
+			(item) => item.workspaceName === parent.workspaceName,
+		)?.generation;
+		if (!workspace || generation !== parent.workspaceGeneration)
+			throw new Error("Review workspace authority changed");
+		const worktree =
+			parent.worktreeId === undefined
+				? undefined
+				: state.worktrees?.find(
+						(item) => item.workspaceName === parent.workspaceName && item.id === parent.worktreeId,
+					);
+		if (parent.worktreeId !== undefined && !worktree) throw new Error("Review worktree unavailable");
+		const root = await realpath(worktree?.path ?? workspace.path);
+		const cwd = await realpath(parent.runtime.cwd);
+		if (!isPathInside(root, cwd)) throw new Error("Review source escaped its workspace");
+	}
+
 	private isAuthorizationCurrent(authorization: IrohRemoteClientAuthorizationSuccess): Promise<boolean> {
 		return this.stateManager.isAuthorizationCurrent(authorization);
 	}
@@ -1111,6 +1625,8 @@ class IrohDaemonService {
 				}
 				return states;
 			},
+			getWorkContext: (workspaceName, workspaceGeneration, sessionId) =>
+				this.services.work.getWorkContext(workspaceName, workspaceGeneration, sessionId),
 			keepAwake: this.services.keepAwake,
 			onKeepAwakeSetting: (enabled) => this.services.state.updateSettings({ keepAwakeEnabled: enabled }),
 			webSearchKey: this.services.webSearchKey,
@@ -1246,10 +1762,12 @@ class IrohDaemonService {
 	}
 
 	private async createManagedRelayCredentialClaim(): Promise<IrohManagedRelayCredentialClaim | undefined> {
+		if (this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined) {
+			throw new Error("Relay credential reset is pending. Retry the reset before pairing.");
+		}
 		if (
 			this.relayMode !== "production" ||
 			this.relayCredentialServiceUrl === undefined ||
-			this.relayCredentialIsRevoking ||
 			(this.managedRelayCredential === undefined && this.relayAuthToken !== undefined)
 		) {
 			return undefined;
@@ -1319,6 +1837,8 @@ class IrohDaemonService {
 	}
 
 	private async authorizeRelayCredentialPairing(claimId: string, remoteNodeId: string): Promise<boolean> {
+		if (this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined) return false;
+		const expectedEpoch = this.relayCredentialEpoch;
 		const approved = () =>
 			this.managedRelayAppEndpoints.find((endpoint) => endpoint.claimId === claimId && !endpoint.revocationPending);
 		const existing = approved();
@@ -1331,18 +1851,30 @@ class IrohDaemonService {
 			10_000,
 			"managed relay credential claim exchange did not finish before pairing authorization",
 		).catch(() => {});
-		return approved()?.nodeId === remoteNodeId;
+		return (
+			expectedEpoch === this.relayCredentialEpoch &&
+			!this.relayCredentialIsRevoking &&
+			approved()?.nodeId === remoteNodeId
+		);
 	}
 
 	private startManagedRelayCredentialExchange(): void {
-		if (this.relayCredentialExchangeTask !== undefined || !this.admission.isOpen) return;
+		if (
+			this.relayCredentialExchangeTask !== undefined ||
+			!this.admission.isOpen ||
+			this.relayCredentialIsRevoking ||
+			this.managedRelayCredentialRevocation !== undefined
+		)
+			return;
 		const claim = this.managedRelayCredentialClaim;
 		if (claim?.claimId === undefined || claim.expiresAt === undefined) return;
 		const expectedEpoch = this.relayCredentialEpoch;
 		const task = this.runManagedRelayCredentialExchange(claim, expectedEpoch).finally(() => {
 			if (this.relayCredentialExchangeTask === task) {
 				this.relayCredentialExchangeTask = undefined;
-				this.startManagedRelayCredentialExchange();
+				// Only a replacement claim needs another task. Restarting the same
+				// cancelled/expired claim here can spin forever without yielding.
+				if (this.managedRelayCredentialClaim !== claim) this.startManagedRelayCredentialExchange();
 			}
 		});
 		this.relayCredentialExchangeTask = task;
@@ -1364,6 +1896,13 @@ class IrohDaemonService {
 		) {
 			try {
 				const result = await exchangeIrohManagedRelayCredentialClaim(claim);
+				if (
+					!this.admission.isOpen ||
+					this.relayCredentialIsRevoking ||
+					expectedEpoch !== this.relayCredentialEpoch ||
+					this.managedRelayCredentialClaim !== claim
+				)
+					return;
 				consecutiveFailureCount = 0;
 				if (result.status === "pending") {
 					pendingResponseCount++;
@@ -1403,7 +1942,13 @@ class IrohDaemonService {
 				}
 				return;
 			} catch (error) {
-				if (!this.admission.isOpen || this.relayCredentialIsRevoking) return;
+				if (
+					!this.admission.isOpen ||
+					this.relayCredentialIsRevoking ||
+					expectedEpoch !== this.relayCredentialEpoch ||
+					this.managedRelayCredentialClaim !== claim
+				)
+					return;
 				consecutiveFailureCount++;
 				this.log("warn", "managed Iroh relay credential claim exchange failed", {
 					error: error instanceof Error ? error.message : String(error),
@@ -1532,6 +2077,7 @@ class IrohDaemonService {
 					}
 				}
 			}
+			this.relayCredentialSubscriptionInactive = false;
 			installed = true;
 		});
 		return installed;
@@ -1592,69 +2138,88 @@ class IrohDaemonService {
 	}
 
 	private async revokeManagedRelayCredential(): Promise<void> {
-		const credential = this.managedRelayCredentialRevocation ?? this.managedRelayCredential;
-		if (credential === undefined) {
+		if (this.relayCredentialIsRevoking) {
+			throw new Error("Relay credential reset is already in progress. Wait for it to finish.");
+		}
+		let credential = this.managedRelayCredentialRevocation ?? this.managedRelayCredential;
+		if (credential === undefined && this.managedRelayCredentialClaim === undefined) {
 			throw new Error("no managed Iroh relay credential is configured");
 		}
-		if (this.endpoint !== undefined && this.endpoint.removeRelay === undefined) {
+		const endpoint = this.endpoint ?? this.startupEndpoint;
+		if (endpoint !== undefined && endpoint.removeRelay === undefined) {
 			throw new Error("the installed Iroh binding cannot remove a live relay credential");
 		}
 		this.relayCredentialIsRevoking = true;
 		this.relayCredentialEpoch += 1;
-		await this.stopRelayRecoveryMonitor();
-		if (this.relayCredentialRefreshTimer !== undefined) {
+		let removalError: unknown;
+		try {
+			await this.stopRelayRecoveryMonitor();
 			clearTimeout(this.relayCredentialRefreshTimer);
 			this.relayCredentialRefreshTimer = undefined;
-		}
-		if (this.relayCredentialExpiryTimer !== undefined) {
 			clearTimeout(this.relayCredentialExpiryTimer);
 			this.relayCredentialExpiryTimer = undefined;
-		}
-		const refreshTask = this.relayCredentialRefreshTask;
-		this.relayCredentialRefreshTask = undefined;
-		await refreshTask?.catch(() => {});
 
-		let removalError: unknown;
-		const endpoint = this.endpoint;
-		await this.enqueueRelayConfigurationMutation(async () => {
-			// An exchange installer admitted before the epoch change may still be
-			// crossing native insertion or its state flush. Publish the revocation
-			// tombstone only after that installer, then remove its live relay in the
-			// same serialized authority transition so it cannot restore credentials.
-			this.managedRelayCredential = undefined;
-			this.managedRelayCredentialRevocation = credential;
-			this.relayAuthToken = undefined;
-			this.managedRelayCredentialClaim = undefined;
+			await this.enqueueRelayConfigurationMutation(async () => {
+				// An earlier installer may have persisted authority before seeing the
+				// epoch fence. Revoke that durable grant too, even on first bootstrap.
+				credential =
+					this.services.state.state.settings.relayCredentialRevocation ??
+					this.services.state.state.settings.relayCredential ??
+					credential;
+				this.managedRelayCredential = undefined;
+				this.managedRelayCredentialRevocation = credential;
+				this.relayAuthToken = undefined;
+				this.managedRelayCredentialClaim = undefined;
+				this.services.state.updateSettings({
+					relayAuthToken: undefined,
+					relayCredential: undefined,
+					relayCredentialClaim: undefined,
+					relayCredentialRevocation: credential,
+				});
+				await this.services.state.flush();
+				if (endpoint === undefined) return;
+				for (const url of this.relayUrls) {
+					try {
+						await endpoint.removeRelay?.(url);
+					} catch (error) {
+						removalError ??= error;
+					}
+				}
+			});
+
+			// Include tickets restored after a crash, not just this process's QR
+			// requests. Pairings admitted before the epoch fence self-cancel below.
+			for (const [requestId, pending] of this.pendingPairRequests) {
+				await this.cancelPendingPairing(requestId, pending);
+				this.services.controlServer.sendTo(pending.connectionId, {
+					type: "pairing_progress",
+					requestId,
+					phase: "failed",
+					error: "Relay credential reset cancelled pairing.",
+				});
+			}
+			for (const ticket of (await this.stateManager.getState()).pendingPairingTickets ?? []) {
+				if (this.engine) await this.engine.cancelPairingSecretByHash(ticket.secretHash);
+				else await this.stateManager.removePendingPairingTicket(ticket.secretHash);
+			}
+			if (credential !== undefined) await revokeIrohManagedRelayCredential(credential);
+			if (removalError !== undefined) throw removalError;
 			this.services.state.updateSettings({
-				relayAuthToken: undefined,
-				relayCredential: undefined,
-				relayCredentialClaim: undefined,
-				relayCredentialRevocation: credential,
+				relayCredentialAppEndpoints: undefined,
+				relayCredentialRevocation: undefined,
 			});
 			await this.services.state.flush();
-			if (endpoint === undefined) return;
-			for (const url of this.relayUrls) {
-				try {
-					await endpoint.removeRelay?.(url);
-				} catch (error) {
-					removalError ??= error;
-				}
-			}
-		});
-		await revokeIrohManagedRelayCredential(credential);
-		this.services.state.updateSettings({
-			relayAuthToken: undefined,
-			relayCredential: undefined,
-			relayCredentialClaim: undefined,
-			relayCredentialAppEndpoints: undefined,
-			relayCredentialRevocation: undefined,
-		});
-		await this.services.state.flush();
-		this.managedRelayCredentialRevocation = undefined;
-		this.managedRelayAppEndpoints = [];
-		this.relayCredentialIsRevoking = false;
-		if (removalError !== undefined) {
-			throw removalError;
+			this.managedRelayCredentialRevocation = undefined;
+			this.managedRelayAppEndpoints = [];
+			this.relayCredentialSubscriptionInactive = false;
+		} catch (error) {
+			throw new Error(
+				`Relay credential reset failed. Retry the reset before pairing: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		} finally {
+			// A durable tombstone, not this in-flight guard, blocks pairing after
+			// failure. Releasing the guard makes the same operation retryable.
+			this.relayCredentialIsRevoking = false;
 		}
 	}
 
@@ -1761,12 +2326,18 @@ class IrohDaemonService {
 					) {
 						return;
 					}
-					const nextFailureCount = Math.min(consecutiveFailureCount + 1, 6);
-					this.log("warn", "managed Iroh relay credential refresh failed", {
-						error: error instanceof Error ? error.message : String(error),
-					});
+					const subscriptionInactive = error instanceof IrohRelayCredentialSubscriptionInactiveError;
+					// The broker paces suspended hosts with short retries; log the suspension once.
+					const repeatedSuspension = subscriptionInactive && this.relayCredentialSubscriptionInactive;
+					if (subscriptionInactive) this.relayCredentialSubscriptionInactive = true;
+					const nextFailureCount = subscriptionInactive ? 0 : Math.min(consecutiveFailureCount + 1, 6);
+					if (!repeatedSuspension) {
+						this.log("warn", "managed Iroh relay credential refresh failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
 					this.scheduleManagedRelayCredentialRefresh(
-						managedRelayCredentialFailureRetryMs(nextFailureCount),
+						subscriptionInactive ? error.retryAfterMs : managedRelayCredentialFailureRetryMs(nextFailureCount),
 						nextFailureCount,
 					);
 				})
@@ -1802,7 +2373,15 @@ class IrohDaemonService {
 			// inside the durable quiesce barrier, while its abort signal cancels git.
 			await this.pruneWorktreesOnStart(startupAdmission.signal);
 			if (this.managedRelayCredentialRevocation !== undefined) {
-				await this.revokeManagedRelayCredential();
+				try {
+					await this.revokeManagedRelayCredential();
+				} catch (error) {
+					// A broker outage must not strand the local endpoint. Keep the
+					// tombstone and block pairing until the same reset action succeeds.
+					this.log("warn", "managed relay credential reset remains pending", {
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
 			}
 			if (this.managedRelayCredential !== undefined) {
 				await this.services.state.flush();
@@ -1957,7 +2536,11 @@ class IrohDaemonService {
 				this.ready.reject(new Error("iroh service shut down during endpoint startup"));
 				return;
 			}
-			const endpointTicket = this.iroh.EndpointTicket.fromAddr(endpoint.addr()).toString();
+			const endpointTicket = createIrohEndpointTicket(
+				this.iroh,
+				endpoint.addr(),
+				this.relayMode === "production" ? this.relayUrls : [],
+			);
 			const engine = new IrohRemoteHostEngine({
 				auditLogger: this.services.auditLogger,
 				authorizeRelayCredentialPairing: (claimId, remoteNodeId) =>
@@ -1991,6 +2574,10 @@ class IrohDaemonService {
 					}),
 				);
 			}
+			this.remoteTransport = {
+				state: "ready",
+				...(this.wrapperVersion === undefined ? {} : { wrapperVersion: this.wrapperVersion }),
+			};
 			this.ready.resolve();
 			this.log("info", `iroh endpoint online`, {
 				hostNodeId: this.hostNodeId,
@@ -1998,12 +2585,28 @@ class IrohDaemonService {
 				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 			});
 			this.acceptLoopTask = this.acceptLoop(endpoint).catch((error) => {
+				this.remoteTransport = {
+					state: "unavailable",
+					reasonCode: "endpoint_start_failed",
+					message: REMOTE_TRANSPORT_REASON_MESSAGES.endpoint_start_failed,
+					...(this.wrapperVersion === undefined ? {} : { wrapperVersion: this.wrapperVersion }),
+				};
 				this.log("error", `accept loop failed: ${error instanceof Error ? error.message : String(error)}`);
 			});
 			endpoint = undefined;
 		} catch (error) {
 			if (endpoint) {
 				this.retireEndpoint(endpoint, "iroh endpoint disposal after startup failure failed");
+			}
+			if (isIrohRemoteHostStorageFullError(error)) {
+				this.markStorageCapacityUnavailable();
+			} else {
+				this.remoteTransport = {
+					state: "unavailable",
+					reasonCode: "endpoint_start_failed",
+					message: REMOTE_TRANSPORT_REASON_MESSAGES.endpoint_start_failed,
+					...(this.wrapperVersion === undefined ? {} : { wrapperVersion: this.wrapperVersion }),
+				};
 			}
 			this.ready.reject(error);
 			this.log("error", `failed to start iroh endpoint: ${error instanceof Error ? error.message : String(error)}`);
@@ -2021,11 +2624,13 @@ class IrohDaemonService {
 				if (!this.admission.isOpen) {
 					break;
 				}
-				this.log("error", `accept failed: ${error instanceof Error ? error.message : String(error)}`);
-				continue;
+				throw error;
 			}
 			if (!incoming) {
-				break;
+				if (!this.admission.isOpen) {
+					break;
+				}
+				throw new Error("Iroh endpoint accept loop terminated unexpectedly");
 			}
 			// Acquire once for the accepted incoming before branching. This is the
 			// exact publication fence for both rejection work and handleConnection;
@@ -2212,6 +2817,9 @@ class IrohDaemonService {
 		}
 		let acceptedStreamCount = 0;
 		let authenticated = false;
+		const unauthenticatedTimeoutMs =
+			this.dependencies.handshakeTimeoutMs ?? IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS;
+		const handshakeTimeoutMs = this.dependencies.handshakeTimeoutMs ?? DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS;
 		const unauthenticatedTimer = setTimeout(() => {
 			if (authenticated || supervisor.isClosing) return;
 			supervisor.requestClose("handshake_timeout", "immediate");
@@ -2220,9 +2828,9 @@ class IrohDaemonService {
 				clientNodeId: remoteId,
 				success: false,
 				error: "connection did not authenticate before the handshake deadline",
-				details: { connectionId, timeoutMs: IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS },
+				details: { connectionId, timeoutMs: unauthenticatedTimeoutMs },
 			});
-		}, IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS);
+		}, unauthenticatedTimeoutMs);
 		unauthenticatedTimer.unref?.();
 
 		const markAuthenticated = async (): Promise<boolean> => {
@@ -2243,8 +2851,12 @@ class IrohDaemonService {
 
 		try {
 			while (!supervisor.isClosing) {
-				const stream = await (!authenticated
-					? withTimeout(connection.acceptBi(), DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS, "handshake timed out")
+				// Bound only the wait for the first stream. The first stream authenticates
+				// asynchronously, and the unauthenticated timer already closes a connection
+				// that never authenticates; a sibling-accept deadline would tear down a
+				// single authenticated stream still serving a slow request.
+				const stream = await (acceptedStreamCount === 0
+					? withTimeout(connection.acceptBi(), handshakeTimeoutMs, "handshake timed out")
 					: connection.acceptBi());
 				acceptedStreamCount++;
 				if (!this.admission.isOpen) {
@@ -2319,7 +2931,7 @@ class IrohDaemonService {
 					clientNodeId: remoteId,
 					success: false,
 					error: "connection closed or timed out before opening a handshake stream",
-					details: { connectionId, timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS },
+					details: { connectionId, timeoutMs: handshakeTimeoutMs },
 				});
 			}
 		} finally {
@@ -2399,7 +3011,7 @@ class IrohDaemonService {
 				child: "volt",
 				isCancelled: () => owner.signal.aborted,
 				maxLineBytes: DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES,
-				timeoutMs: DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
+				timeoutMs: this.dependencies.handshakeTimeoutMs ?? DEFAULT_IROH_REMOTE_HANDSHAKE_TIMEOUT_MS,
 			});
 		} finally {
 			handshakeAdmission.lease.release();
@@ -2409,6 +3021,9 @@ class IrohDaemonService {
 			return;
 		}
 		if (!handshake.ok) {
+			if (handshake.response.outcome === "host_storage_full") {
+				this.markStorageCapacityUnavailable();
+			}
 			if (
 				handshake.response.outcome === "workspace_authorization_removed" &&
 				typeof handshake.response.workspace === "string"
@@ -2418,6 +3033,7 @@ class IrohDaemonService {
 			await this.writeTerminalHandshakeResponse(stream, handshake.response);
 			return;
 		}
+		this.clearStorageCapacityDegradation();
 		if (!(await markAuthenticated())) {
 			await owner.close("handshake_timeout").catch(() => {});
 			return;
@@ -2467,7 +3083,14 @@ class IrohDaemonService {
 				await this.runWorktreeManagement(stream, handshake, connectionId, streamId, owner);
 				return;
 			}
-			await this.runWorkspaceManagement(stream, handshake, connectionId, streamId, owner);
+			await this.runWorkspaceManagement(
+				stream,
+				handshake,
+				connectionId,
+				streamId,
+				owner,
+				handshake.hello.workspaceManagement.purpose,
+			);
 			return;
 		}
 		await this.runIntegratedConversation(stream, handshake, connectionId, streamId, owner);
@@ -2645,14 +3268,27 @@ class IrohDaemonService {
 			{ terminalSessionId: undefined },
 		);
 		try {
+			const purpose =
+				handshake.hello.mode === "workspaceDiscovery"
+					? handshake.hello.workspaceDiscovery.purpose
+					: "list_sessions";
 			const discoveryHooks =
-				handshake.hello.mode === "workspaceDiscovery" &&
-				handshake.hello.workspaceDiscovery.purpose === "agent_options"
+				purpose === "agent_options"
 					? {
 							purpose: "agent_options" as const,
 							agentOptions: this.createAgentOptionsRpcBackend(handshake.authorization.workspace),
 						}
-					: { purpose: "list_sessions" as const, commandContext: this.getCommandContext() };
+					: purpose === "session_contexts"
+						? {
+								purpose: "session_contexts" as const,
+								sessionContexts: this.createSessionContextsRpcBackend(handshake.authorization),
+							}
+						: purpose === "review"
+							? {
+									purpose: "review" as const,
+									prReviews: this.createPrReviewRpcBackend(handshake.authorization, owner.signal),
+								}
+							: { purpose: "list_sessions" as const, commandContext: this.getCommandContext() };
 			await runWorkspaceDiscoveryStream(
 				{
 					stream,
@@ -2668,6 +3304,40 @@ class IrohDaemonService {
 		} finally {
 			activeStream.remove();
 		}
+	}
+
+	private createSessionContextsRpcBackend(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+	): IrohRemoteSessionContextsRpcBackend {
+		const backend = createIrohRemoteSessionContextsRpcBackend({
+			workspaceName: authorization.workspace.name,
+			sessionDirectory: getDefaultSessionDirPath(authorization.workspace.path, this.services.agentDir),
+			getLiveStartingGitContext: (sessionId) => {
+				const owner = this.runtimes.findOwner(authorization.workspace.name, sessionId);
+				return owner?.sessionId === sessionId
+					? owner.runtime.session.sessionManager.getStartingGitContext()
+					: undefined;
+			},
+			getWorkContext: (sessionId) =>
+				authorization.workspaceGeneration === undefined
+					? undefined
+					: this.services.work.getWorkContext(
+							authorization.workspace.name,
+							authorization.workspaceGeneration,
+							sessionId,
+						),
+		});
+		return {
+			getSessionContexts: async (workspaceName, sessionIds) => {
+				const admission = this.admission.tryAcquire();
+				if (!admission) throw new Error("host is shutting down");
+				try {
+					return await backend.getSessionContexts(workspaceName, sessionIds);
+				} finally {
+					admission.release();
+				}
+			},
+		};
 	}
 
 	private createAgentOptionsRpcBackend(workspace: IrohRemoteWorkspace): IrohRemoteAgentOptionsRpcBackend {
@@ -2709,6 +3379,7 @@ class IrohDaemonService {
 		connectionId: string,
 		streamId: string,
 		owner: IrohPhysicalStreamOwner,
+		purpose: "unregister_workspace" | "list_workspace_directories",
 	): Promise<void> {
 		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
 		await this.dependencies.beforeAuthorizedStreamPublication?.("workspace_management", handshake.authorization);
@@ -2768,6 +3439,7 @@ class IrohDaemonService {
 						return { ok: true, closedStreamCount, stoppedRuntimeCount };
 					},
 				},
+				purpose,
 			);
 		} finally {
 			activeStream.remove();
@@ -2815,11 +3487,69 @@ class IrohDaemonService {
 					auditLogger: this.services.auditLogger,
 					additionalRedactedPaths: sanitizerOverrides.additionalRedactedPaths,
 					worktrees: this.createWorktreeRpcBackend(handshake.authorization.workspace),
+					prReviews: this.createPrReviewRpcBackend(handshake.authorization, owner.signal),
 				},
 			);
 		} finally {
 			activeStream.remove();
 		}
+	}
+
+	private prReviewAuthority(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		signal?: AbortSignal,
+	): PrReviewPreparationAuthority {
+		return {
+			workspaceGeneration: authorization.workspaceGeneration ?? 0,
+			signal,
+			assertCurrent: () => {
+				signal?.throwIfAborted();
+				const state = this.services.state.getHostState();
+				const client = state.clients.find((entry) => entry.nodeId === authorization.client.nodeId);
+				const workspace = state.workspaces.find((entry) => entry.name === authorization.workspace.name);
+				const generation = state.workspaceGenerations?.find(
+					(entry) => entry.workspaceName === authorization.workspace.name,
+				)?.generation;
+				if (
+					!this.admission.isOpen ||
+					client?.rpcGrant?.revision !== authorization.client.rpcGrant.revision ||
+					!isIrohRemoteClientAllowedForWorkspace(client, authorization.workspace.name) ||
+					client.allowedTools !== authorization.client.allowedTools ||
+					workspace?.path !== authorization.workspace.path ||
+					workspace.allowedTools !== authorization.workspace.allowedTools ||
+					generation !== authorization.workspaceGeneration
+				) {
+					throw new PrReviewPreparationError("review_preparation_failed");
+				}
+			},
+		};
+	}
+
+	private createPrReviewRpcBackend(
+		authorization: IrohRemoteClientAuthorizationSuccess,
+		signal: AbortSignal,
+	): IrohRemotePrReviewRpcBackend {
+		const run = async <T>(operation: (authority: PrReviewPreparationAuthority) => Promise<T>): Promise<T> => {
+			const admission = this.admission.tryAcquire();
+			if (!admission) throw new PrReviewPreparationError("review_preparation_failed");
+			try {
+				const authority = this.prReviewAuthority(authorization, AbortSignal.any([signal, admission.signal]));
+				authority.assertCurrent();
+				return await operation(authority);
+			} catch (error) {
+				throw new PrReviewPreparationError(
+					error instanceof PrReviewCheckoutError ? error.code : "review_preparation_failed",
+				);
+			} finally {
+				admission.release();
+			}
+		};
+		return {
+			resolvePrReview: (_workspaceName, request) =>
+				run((authority) => this.prReviewCheckouts.resolve(authorization.workspace, request, authority)),
+			preparePrReview: (_workspaceName, request) =>
+				run((authority) => this.prReviewCheckouts.prepare(authorization.workspace, request, authority)),
+		};
 	}
 
 	/** Backend for the worktree RPC helpers, bound to the stream's authorized workspace. */
@@ -3170,12 +3900,11 @@ class IrohDaemonService {
 			handshake.hello.mode === "conversation" && handshake.hello.conversation.target === "session"
 				? { kind: "session", sessionId: targetSessionId }
 				: { kind: "last", resumeSessionId: targetSessionId };
-		// A worktree-bound session must resolve against the worktree cwd (the
-		// parent-keyed session dir plus a non-matching cwd makes SessionManager.list
-		// filter by header cwd, restricting resolution to that worktree's sessions).
-		// resolveSessionWorktree also heals stranded bindings (rekeyed/subagent
-		// session ids) from the session's stored cwd, so relays fail with the
-		// designed worktree gates instead of session_unavailable (#83).
+		// A worktree-bound session opens with its stored cwd while retaining the
+		// parent workspace's session store. resolveSessionWorktree also heals
+		// stranded bindings (rekeyed/subagent session ids) from that stored cwd, so
+		// relays fail with the designed worktree gates instead of
+		// session_unavailable (#83).
 		const boundWorktree = await this.worktrees.resolveSessionWorktree(workspaceName, targetSessionId);
 		const relayOwnerCapabilities = this.services.controlServer
 			.connections()
@@ -3207,7 +3936,8 @@ class IrohDaemonService {
 			});
 			return;
 		}
-		let resolvedTarget: Awaited<ReturnType<typeof resolveIrohRemoteSessionTarget>>;
+		let resolvedTarget: ResolvedSessionTargetWithManager<SessionManager>;
+		let resolvedSessionCwd: string;
 		try {
 			resolvedTarget = await resolveIrohRemoteSessionTarget(
 				sessionTarget,
@@ -3218,13 +3948,15 @@ class IrohDaemonService {
 					{ listAll: true, preserveSessionCwd: true },
 				),
 			);
+			try {
+				resolvedSessionCwd = resolvedTarget.sessionManager.getCwd();
+			} finally {
+				await resolvedTarget.sessionManager.closePersistence();
+			}
 		} catch (error) {
 			await this.sendHandshakeError(stream, error);
 			return;
 		}
-		const resolvedSessionManager = resolvedTarget.sessionManager as { getCwd?: () => string };
-		const resolvedSessionCwd =
-			resolvedSessionManager.getCwd?.() ?? boundWorktree?.path ?? authorization.workspace.path;
 		const relayWorkingDirectoryRelativeToRoot = getRelativeWorkingDirectoryForRoot(
 			boundWorktree?.path ?? authorization.workspace.path,
 			resolvedSessionCwd,
@@ -3323,6 +4055,8 @@ class IrohDaemonService {
 					rpcGrant: authorization.client.rpcGrant,
 					workspaceName,
 					workspacePath: authorization.workspace.path,
+					workspaceNames: [...authorization.workspaceNames],
+					workspaces: authorization.workspaces.map((workspace) => ({ ...workspace })),
 					...(boundWorktree === undefined
 						? {}
 						: {
@@ -3343,9 +4077,6 @@ class IrohDaemonService {
 				streamId,
 				resolvedTarget: {
 					sessionId: resolvedTarget.sessionId,
-					...(resolvedTarget.sessionFilePath === undefined
-						? {}
-						: { sessionFilePath: resolvedTarget.sessionFilePath }),
 					selection: isExplicitSessionAlias ? "session_rekeyed" : resolvedTarget.selection,
 					...(isExplicitSessionAlias
 						? { requestedSessionId: target.requestedSessionId }
@@ -4196,6 +4927,13 @@ class IrohDaemonService {
 			workspacePath?: string;
 		} = {},
 	): Promise<{ closedStreamCount: number; stoppedRuntimeCount: number }> {
+		this.runtimes.fenceReviewOperations(
+			this.runtimes.values().filter((entry) => entry.workspaceName === workspaceName),
+		);
+		for (const entry of this.runtimeWorkObservers.keys()) {
+			if (entry.workspaceName === workspaceName) this.stopRuntimeWorkObservation(entry);
+		}
+		const workRetirement = this.retireTuiWorkWorkspace(workspaceName);
 		const closedStreamCount = await this.closeActiveStreamsForWorkspace(
 			workspaceName,
 			WORKSPACE_UNREGISTERED_CLOSE_REASON,
@@ -4212,6 +4950,7 @@ class IrohDaemonService {
 				.cleanupUnregisteredWorkspace({ name: workspaceName, path: exclusions.workspacePath })
 				.catch(() => {});
 		}
+		await workRetirement;
 		return { closedStreamCount, stoppedRuntimeCount };
 	}
 
@@ -4236,6 +4975,7 @@ class IrohDaemonService {
 			this.runtimes.values(),
 			nodeId,
 		);
+		this.runtimes.fenceReviewOperations(runtimeEntries);
 		const entries = collectClientAuthorityInvalidationStreams(this.activeStreams, runtimeEntries, nodeId);
 		for (const entry of entries) {
 			this.activeStreams.unregister(entry);
@@ -4267,9 +5007,14 @@ class IrohDaemonService {
 						.get(relay.workspaceName, relay.sessionId)
 						?.closeTransport(relay.relayId, reason) ?? Promise.resolve(false),
 			);
-		const runtimeEntries = this.runtimes
-			.values()
-			.filter((entry) => entry.clientNodeId === nodeId && entry.workspaceName === workspaceName);
+		const runtimeEntries = [
+			...collectClientAuthorityInvalidationRuntimes(
+				this.activeStreams,
+				this.runtimes.values().filter((entry) => entry.workspaceName === workspaceName),
+				nodeId,
+			),
+		];
+		this.runtimes.fenceReviewOperations(runtimeEntries);
 		const relayResults = await Promise.allSettled(relayClosures);
 		let closedStreamCount = relayResults.filter(
 			(result): result is PromiseFulfilledResult<true> => result.status === "fulfilled" && result.value,
@@ -4298,6 +5043,7 @@ class IrohDaemonService {
 			this.runtimes.values(),
 			nodeId,
 		);
+		this.runtimes.fenceReviewOperations(runtimeEntries);
 		const entries = collectClientAuthorityInvalidationStreams(this.activeStreams, runtimeEntries, nodeId);
 		for (const entry of entries) {
 			this.activeStreams.unregister(entry);
@@ -4391,25 +5137,42 @@ class IrohDaemonService {
 		connection: ControlConnection,
 		request: ControlRequest & { type: "pair_request" },
 	): Promise<void> {
+		if (this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "relay_credential_revocation_pending",
+				message: "Relay credential reset is pending. Retry the reset before pairing.",
+			});
+			return;
+		}
+		const expectedEpoch = this.relayCredentialEpoch;
 		try {
 			await withTimeout(
 				this.ready.promise,
 				IROH_ENDPOINT_READY_TIMEOUT_MS,
 				"Iroh endpoint did not become ready within 15s",
 			);
-		} catch (error) {
+		} catch {
 			connection.send({
 				type: "error",
 				id: request.id,
 				code: "iroh_unavailable",
-				message: error instanceof Error ? error.message : String(error),
+				message:
+					this.remoteTransport.message ??
+					"Phone transport is still starting. Run `volt daemon status`, then retry.",
 			});
 			return;
 		}
 		const engine = this.requireEngine();
 		const endpoint = this.endpoint;
-		if (!endpoint || !this.endpointTicket) {
-			connection.send({ type: "error", id: request.id, code: "iroh_unavailable", message: "endpoint not ready" });
+		if (!endpoint || !this.endpointTicket || !isRemoteTransportPairingAvailable(this.remoteTransport)) {
+			connection.send({
+				type: "error",
+				id: request.id,
+				code: "iroh_unavailable",
+				message: this.remoteTransport.message ?? "Phone transport is not ready. Run `volt daemon status`.",
+			});
 			return;
 		}
 		const workspaceName =
@@ -4430,6 +5193,9 @@ class IrohDaemonService {
 							)
 						: createIrohRemotePresetAccess("coding");
 			relayCredentialClaim = await this.createManagedRelayCredentialClaim();
+			if (this.relayCredentialIsRevoking || expectedEpoch !== this.relayCredentialEpoch) {
+				throw new Error("Relay credential reset cancelled pairing. Retry pairing after the reset completes.");
+			}
 			const pairing = await engine.pair({
 				allowTools: access.allowedTools,
 				...(relayCredentialClaim?.expiresAt === undefined
@@ -4460,6 +5226,11 @@ class IrohDaemonService {
 					: {}),
 				...(workspaceName === undefined ? {} : { workspace: workspaceName }),
 			});
+			if (this.relayCredentialIsRevoking || expectedEpoch !== this.relayCredentialEpoch) {
+				await engine.cancelPairingSecretByHash(hashIrohRemotePairingSecret(pairing.secret));
+				throw new Error("Relay credential reset cancelled pairing. Retry pairing after the reset completes.");
+			}
+			this.clearStorageCapacityDegradation();
 			connection.send({ type: "pair_started", id: request.id, requestId });
 			connection.send({
 				type: "pairing_progress",
@@ -4497,11 +5268,17 @@ class IrohDaemonService {
 			if (relayCredentialClaim !== undefined && !pairingPublished) {
 				await this.discardManagedRelayCredentialClaim(relayCredentialClaim).catch(() => {});
 			}
+			const storageFull = isIrohRemoteHostStorageFullError(error);
+			if (storageFull) this.markStorageCapacityUnavailable();
 			connection.send({
 				type: "error",
 				id: request.id,
-				code: "pair_failed",
-				message: error instanceof Error ? error.message : String(error),
+				code: storageFull ? "iroh_unavailable" : "pair_failed",
+				message: storageFull
+					? REMOTE_TRANSPORT_REASON_MESSAGES.host_storage_full
+					: error instanceof Error
+						? error.message
+						: String(error),
 			});
 		}
 	}
@@ -4512,6 +5289,10 @@ class IrohDaemonService {
 
 	async handleRequest(connection: ControlConnection, request: ControlRequest): Promise<boolean> {
 		switch (request.type) {
+			case "work_observe": {
+				await this.handleTuiWorkObservation(connection, request);
+				return true;
+			}
 			case "lease_acquire": {
 				const outcome = await this.leaseBroker.acquireForTui({
 					connectionId: connection.connectionId,
@@ -4566,6 +5347,7 @@ class IrohDaemonService {
 					connection.send({ type: "error", id: request.id, code: result.code, message: "lease not held" });
 					return true;
 				}
+				await this.retireTuiWorkAuthority(request.workspaceName, request.sessionId, connection.connectionId);
 				connection.send({ type: "ok", id: request.id });
 				return true;
 			}
@@ -4629,6 +5411,19 @@ class IrohDaemonService {
 							reservation.newSessionId,
 						);
 					}
+					const workspaceGeneration = (await this.stateManager.getState()).workspaceGenerations?.find(
+						(candidate) => candidate.workspaceName === reservation.workspaceName,
+					)?.generation;
+					if (workspaceGeneration !== undefined) {
+						await this.services.work
+							.inheritSession(
+								reservation.workspaceName,
+								workspaceGeneration,
+								reservation.oldSessionId,
+								reservation.newSessionId,
+							)
+							.catch(() => false);
+					}
 					await this.stateManager.setClientsLastSessionId(
 						Array.from(relayedClientNodeIds),
 						reservation.workspaceName,
@@ -4668,6 +5463,11 @@ class IrohDaemonService {
 					});
 					return true;
 				}
+				await this.retireTuiWorkAuthority(
+					reservation.workspaceName,
+					reservation.oldSessionId,
+					connection.connectionId,
+				);
 				connection.send({ type: "ok", id: request.id });
 				return true;
 			}
@@ -4765,6 +5565,7 @@ class IrohDaemonService {
 			}
 			case "relay_credential_revoke": {
 				try {
+					await this.startupTask;
 					await this.revokeManagedRelayCredential();
 					connection.send({ type: "ok", id: request.id });
 				} catch (error) {
@@ -5030,7 +5831,7 @@ class IrohDaemonService {
 		| {
 				ok: true;
 				response: Record<string, unknown>;
-				workspaceMetadata?: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> };
+				workspaceMetadata?: IrohRemoteWorkspaceMetadataSnapshot;
 		  }
 		| { ok: false; code: string; message: string }
 	> {
@@ -5069,6 +5870,7 @@ class IrohDaemonService {
 		if (!workspace) {
 			return { ok: false, code: "not_found", message: `no registered workspace named ${request.workspaceName}` };
 		}
+		const relayWorkspaceMetadata = relayAuthorization.relay.preamble.authorization;
 		const authorization: IrohRemoteClientAuthorizationSuccess = {
 			ok: true,
 			allowTools: normalizeIrohRemoteAllowTools(client.allowedTools),
@@ -5076,8 +5878,8 @@ class IrohDaemonService {
 			paired: true,
 			pairingSecretConsumed: false,
 			workspace,
-			workspaceNames: [workspace.name],
-			workspaces: [{ name: workspace.name, status: "available" }],
+			workspaceNames: [...relayWorkspaceMetadata.workspaceNames],
+			workspaces: relayWorkspaceMetadata.workspaces.map((entry) => ({ ...entry })),
 		};
 		const responseId = getRpcResponseId(command);
 		if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
@@ -5187,6 +5989,17 @@ class IrohDaemonService {
 
 	onControlConnectionClosed(connection: ControlConnection): void {
 		this.leaseBroker.releaseAllForConnection(connection.connectionId);
+		const workRetirements: Promise<void>[] = [];
+		for (const [key, claim] of this.tuiWorkAuthorities) {
+			if (claim.connectionId !== connection.connectionId) continue;
+			const separator = key.indexOf("\0");
+			workRetirements.push(
+				this.retireTuiWorkAuthorityClaim(key, key.slice(0, separator), key.slice(separator + 1), claim),
+			);
+		}
+		if (workRetirements.length > 0) {
+			this.trackTuiWorkRetirement(Promise.all(workRetirements).then(() => undefined));
+		}
 		const admission = this.admission.tryAcquire();
 		if (!admission) {
 			// Quiesce owns every remaining ticket after the admission cut. A final
@@ -5212,7 +6025,13 @@ class IrohDaemonService {
 		return this.relays.admit(relayId, relayToken, socket, bufferedRemainder);
 	}
 
-	statusExtras(): { leases: ControlLeaseStatus[]; phoneConnections: number; relayCount: number } {
+	statusExtras(): {
+		leases: ControlLeaseStatus[];
+		phoneConnections: number;
+		relayCount: number;
+		remoteTransport: RemoteTransportHealth;
+		relayCredential?: ControlRelayCredentialStatus;
+	} {
 		const leases: ControlLeaseStatus[] = this.leaseBroker.list().map((record) => ({
 			workspaceName: record.workspaceName,
 			sessionId: record.sessionId,
@@ -5220,7 +6039,24 @@ class IrohDaemonService {
 			relayCount: record.relayIds.size,
 			streamCount: record.streamCount,
 		}));
-		return { leases, phoneConnections: this.clientConnections.size, relayCount: this.relays.activeCount() };
+		return {
+			leases,
+			phoneConnections: this.clientConnections.size,
+			relayCount: this.relays.activeCount(),
+			remoteTransport: { ...this.remoteTransport },
+			...(this.relayMode !== "production" ||
+			this.relayCredentialServiceUrl === undefined ||
+			(this.managedRelayCredential === undefined && this.relayAuthToken !== undefined)
+				? {}
+				: {
+						relayCredential: createRelayCredentialStatus(
+							this.managedRelayCredential,
+							this.managedRelayCredentialClaim,
+							this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined,
+							this.relayCredentialSubscriptionInactive,
+						),
+					}),
+		};
 	}
 
 	async quiesce(): Promise<void> {
@@ -5228,6 +6064,14 @@ class IrohDaemonService {
 		// ownership commits, relay offers, and turn-starting commands now fail
 		// closed against the same state.
 		this.admission.close();
+		const workRetirements: Promise<void>[] = [];
+		for (const [key, claim] of this.tuiWorkAuthorities) {
+			const separator = key.indexOf("\0");
+			workRetirements.push(
+				this.retireTuiWorkAuthorityClaim(key, key.slice(0, separator), key.slice(separator + 1), claim),
+			);
+		}
+		await Promise.allSettled([...workRetirements, ...this.tuiWorkRetirementTasks]);
 		await this.stopRelayRecoveryMonitor();
 		if (this.relayCredentialRefreshTimer !== undefined) {
 			clearTimeout(this.relayCredentialRefreshTimer);
@@ -5300,7 +6144,7 @@ class IrohDaemonService {
 				.values()
 				.filter((entry) => entry.runtime.session.isBusy)
 				.map((entry) =>
-					withTimeout(entry.runtime.session.waitForIdle(), SHUTDOWN_RUNTIME_IDLE_CAP_MS, "drain cap"),
+					withTimeout(entry.runtime.session.waitForNotBusy(), SHUTDOWN_RUNTIME_IDLE_CAP_MS, "drain cap"),
 				),
 		);
 		const cappedRuntimes = drainResults.filter((result) => result.status === "rejected").length;

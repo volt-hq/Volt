@@ -1,5 +1,5 @@
 import type { AssistantMessage, ImageContent, JsonValue, Model, TextContent, Tool, Usage } from "@hansjm10/volt-ai";
-import { estimateToolDefinitionTokens, streamSimple } from "@hansjm10/volt-ai";
+import { drainEventStream, estimateToolDefinitionTokens, streamSimple } from "@hansjm10/volt-ai";
 import type { AgentMessage, StreamFn, ThinkingLevel } from "../../types.ts";
 import {
 	convertToLlm,
@@ -523,7 +523,7 @@ export async function generateSummary(
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
 		completionOptions,
 	);
-	const response = await stream.result();
+	const response = await drainEventStream(stream);
 	if (response.stopReason === "aborted") {
 		return err(new CompactionError("aborted", response.errorMessage || "Summarization aborted"));
 	}
@@ -785,7 +785,7 @@ async function generateTurnPrefixSummary(
 			...(model.reasoning && thinkingLevel && thinkingLevel !== "off" ? { reasoning: thinkingLevel } : {}),
 		},
 	);
-	const response = await stream.result();
+	const response = await drainEventStream(stream);
 	if (response.stopReason === "aborted") {
 		return err(new CompactionError("aborted", response.errorMessage || "Turn prefix summarization aborted"));
 	}

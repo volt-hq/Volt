@@ -70,6 +70,8 @@ const { session } = await createAgentSession({
 
 `agentMode` defaults to `"build"`. A new Plan-mode session exposes only read-only exploration and native checklist tools; persisted branches restore their own planning state.
 
+Passing `sessionManager` transfers its ownership to `createAgentSession()` immediately. On success, dispose the returned session and await `session.waitForClosed()`. If setup fails, the factory closes the consumed manager but retains any committed session row; do not reuse the manager object. Open its `SessionReference` again when another live manager is needed.
+
 ### AgentSession
 
 The session manages agent lifecycle, message history, model state, compaction, and event streaming.
@@ -89,8 +91,8 @@ interface AgentSession {
   // Subscribe to events (returns unsubscribe function)
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 
-  // Session info
-  sessionFile: string | undefined;
+  // Session identity
+  sessionRef: SessionReference | undefined; // undefined for in-memory sessions
   sessionId: string;
 
   // Model control
@@ -113,15 +115,15 @@ interface AgentSession {
   isStreaming: boolean; // provider run or session continuation
   isBusy: boolean;      // also includes prompt preflight and standalone session operations
 
-  // In-place tree navigation within the current session file
+  // In-place tree navigation within the current session
   navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
 
   // Compaction
   compact(customInstructions?: string): Promise<CompactionResult>;
   abortCompaction(): void;
 
-  // Abort current operation
-  abort(): Promise<void>;
+  // Abort current operation; queued input is retained unless deliverQueuedMessages is set
+  abort(source?: AgentAbortSource, options?: { deliverQueuedMessages?: boolean }): Promise<void>;
 
   // Cleanup
   dispose(): void;
@@ -141,12 +143,14 @@ await runtime.executePlan(plan.id, plan.revision, "new_session");
 
 All user plan actions are fenced by the exact plan ID and revision. Repeating an already-approved execution request is idempotent.
 
+Persisted review finding discussions use normal Build tools and Plan-mode research/authoring under the session's grants. Fix requests can be implemented in the discussion, including approved `retain_context` plan execution. Their source-linked identity cannot be replaced, forked/cloned or handed off with `new_session`; reset through the source review instead. Canonical finding outcomes also belong to the source review. These lifecycle boundaries do not restrict code fixes. Trusted host policy supersedes obsolete read-only guidance in resumed discussion context without rewriting history.
+
 ### createAgentSessionRuntime() and AgentSessionRuntime
 
 Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.
 This is the same layer used by the built-in interactive, print, and RPC modes.
 
-`createAgentSessionRuntime()` takes a runtime factory plus the initial cwd/session target. The factory closes over process-global fixed inputs, recreates cwd-bound services for the effective cwd, resolves session options against those services, and returns a full runtime result.
+`createAgentSessionRuntime()` takes a runtime factory plus the initial cwd/session target. Passing the manager consumes it immediately. The factory closes over process-global fixed inputs, recreates cwd-bound services for the effective cwd, resolves session options against those services, and returns a full runtime result. A `CreateAgentSessionRuntimeFactory` callback borrows cleanup ownership from its enclosing runtime operation until it returns an `AgentSession`; construct and return the session as its final ownership-transferring step.
 
 ```typescript
 import {
@@ -174,7 +178,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 ```
 
@@ -193,6 +197,8 @@ Important behavior:
 - if you use extensions, call `runtime.session.bindExtensions(...)` again for the new session
 - creation returns diagnostics on `runtime.diagnostics`
 - if runtime creation or replacement fails, the method throws and the caller decides how to handle it
+
+`AgentSession` owns its manager: `session.dispose()` installs the shutdown fence, and `await session.waitForClosed()` drains persistence and releases the SQLite store. `AgentSessionRuntime` does the same for its active session during `await runtime.dispose()`.
 
 ```typescript
 let session = runtime.session;
@@ -259,7 +265,7 @@ try {
 }
 ```
 
-`waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, and queued continuations. Its result has this contract:
+During normal execution, `waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, queued continuations, and child background jobs. Native background delegation keeps parent cancellation and delegation ownership until that work settles. Direct SDK callers using `retainRuntimeOnDispose: true` must abort and drain active child work before disposing the handle; the external owner must retain and eventually dispose the runtime. Retaining a runtime alone does not preserve delegation ownership after direct handle disposal. The result has this contract:
 
 ```typescript
 interface SubagentResult {
@@ -273,7 +279,7 @@ interface SubagentResult {
 
 `status` is the authoritative terminal outcome, and `error` supplies terminal failure detail when available. Do not infer the outcome from `event` or its assistant stop reasons: the latest low-level `agent_end` retains attempt history and can contain an error from a retry that was subsequently aborted.
 
-Cancellation remains authoritative while a child is prepared but not yet published. If `handle.abort()` is called or the delegation scope aborts before the first prompt is accepted, a later `handle.prompt()` rejects, rolls back the prepared runtime registration, disposes the handle, and leaves no activity or registry record.
+Cancellation remains authoritative while a child is prepared but not yet published. If `handle.abort()` is called or the delegation scope aborts before the first prompt is accepted, a later `handle.prompt()` rejects, rolls back the prepared runtime registration, disposes the handle, and leaves no activity or registry record. Any already committed child session row is retained and remains addressable by its session identity.
 
 Definition-less `start()` children join the session tree exactly like definition-backed ones — they share the session-wide registry, the delegation scope's ceilings, and depth accounting — but they are fail-closed for nested delegation: only a definition can declare an `allowedSubagents` policy, so an unnamed child cannot spawn further subagents.
 
@@ -323,6 +329,34 @@ const budgetedSubagents = new SubagentManager({
 ```
 
 Crossing a configured token, cost, or deadline budget aborts that delegation tree and its active descendants. Each child's turn budget instead requests its final report at `maxTurns`; refusing that report by requesting another tool aborts only that child.
+
+### Background jobs
+
+`AgentSession` augments its native `bash` and `subagent` tools with `background: true` and provides a `jobs` control tool. Include `jobs` in explicit tool allowlists when background work is needed. Standalone tool factories and custom/extension execution overrides are not automatically detached.
+
+The initial subagent confirmation preflight remains synchronous. A confirmed single, parallel, or chain spawning call can return a job ID before children finish. The `jobs` tool supports `list`, `read`, `wait`, and `cancel`; `read` and `wait` return bounded, non-consuming snapshots. See [Background jobs](usage.md#background-jobs) for arguments and limits.
+
+`session.waitForIdle()` reports foreground settlement, including already-scheduled background outcome continuations, but does not wait for still-running background jobs. `session.hasBackgroundJobs` includes running and cancelling jobs; `session.waitForBackgroundJobs()` joins them without cancellation. `session.abort()` cancels both foreground and background work and joins cleanup. `dispose()` synchronously fences new jobs; `waitForClosed()` joins their cleanup. Active jobs block reload, tree navigation, and Plan entry. Compaction keeps their handles valid. Background launch authorizes one automatic continuation for a successful or failed outcome, including when the parent has returned to idle. Notices are committed through normal provider boundaries. Explicit job cancellation suppresses its pending continuation without waking the parent; session abort suppresses all outstanding continuations. Natural foreground settlement does not revoke background outcome handling.
+
+Host policies registered with `session.registerTurnPolicy({ nextAction })` return `undefined` for no change, `{ type: "stop" }` for explicit termination, or `{ type: "pause" }` for a resumable interruption. Returning `context.defaultAction` is an explicit override, not a no-op. After the final policy decision, an explicit stop suppresses automatic continuation for all existing jobs, including still-running workers, without cancelling them or discarding output. A later explicit prompt remains subject to the policies; newly launched jobs receive independent wake authority. Ordinary completion and compaction pauses preserve background wakes. Proposing a notice does not consume its wake: only the final policy decision accepting that notice-bearing request does. Paused or discarded notices remain pending without repeatedly retrying the same policy. Registering or removing a next-action policy, an explicitly started run, or successful compaction allows another attempt; every attempt still passes through the current policies. A policy whose readiness changes internally calls its registration handle's `invalidate()` to request reevaluation. Failed automatic preflight also waits for such a readiness change, while failure after a notice-bearing request was accepted does not rearm that wake.
+
+While `session.abort()` drains cleanup, a shared admission gate prevents new foreground turns, continuations, compaction/tree operations, and native Bash/subagent work. This includes custom messages with `triggerTurn: true` when they would start a turn. Pending reservations cannot restart after the gate reopens. Queue storage, non-triggering custom messages, and job inspection remain available. Admission reopens after cleanup settles, even when abort reports a cleanup error; disposal keeps it closed permanently.
+
+Jobs are runtime- and branch-scoped. Running work and retained output are not recovered after a restart or runtime replacement. Existing transcript acknowledgements and completion notices remain historical records. A remote transport disconnect does not cancel jobs while the host runtime is retained.
+
+RPC clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, { conversationAuthority })`. Results include the owning `sessionId`; ordered responses also carry `branchEpoch`. `getState().backgroundJobs` and conversation bootstraps contain metadata-only snapshots, while `background_jobs_changed` invalidates the list and inspected output even after foreground settlement. RPC inspection does not acknowledge model collection. See [RPC background jobs](rpc.md#background-jobs) for remote grants, cancellation authority, and reconnect semantics.
+
+Native `tool_result` hooks run once for actual background completion rather than for the start acknowledgement. Completion hooks receive the job's abort signal through `ctx.signal`. Progress snapshots are available through `jobs` before completion hooks; `jobs` result hooks can inspect or transform those reads. Keep asynchronous completion hooks cancellation-aware and avoid assuming they run during a foreground model turn.
+
+### LSP health and outcomes
+
+`session.getLspStatus()` returns an on-demand snapshot with `enabled`, `workspaceRoot`, configured/per-root `servers`, and optional `traceFile`. Disabled and unused servers remain inspectable; reading status never starts a server, probes an executable, or offers an install. Per-root state distinguishes idle from failed and process startup from initialized readiness. Version, capability, coverage, recent error, and operation/latency evidence may be unknown until an operation runs.
+
+The model-facing `lsp` action `status` accepts optional `path`; all other actions require a path. Normal tool allowlists/exclusions still apply. Status is a read in Plan mode; rename/fix remain writes, and Plan never permits automatic installation.
+
+Explicit LSP tool results and automatic edit/write diagnostics carry `details.lsp`: bounded operation identity, trigger/action, completion time, outcome/reason, language/server, duration/cold-start timing, diagnostic/result counts, freshness, and source. Prefer this evidence over parsing human-readable text. Explicit failures set the normal `isError` flag; diagnostic failure never turns a successful edit/write into a failed mutation. No-publication timeouts are not clean results. RPC clients continue to use the existing tool-result error projection.
+
+See [LSP](lsp.md) for exact fields, TypeScript >=7 repair consent, Swift coverage limits, and the offline `volt lsp audit` command. Headless hosts do not install automatically; eligible interactive/RPC hosts must obtain explicit consent for reviewed built-in repairs.
 
 ### Prompting and Message Queueing
 
@@ -380,6 +414,14 @@ await session.followUp("After you're done, also do this");
 
 Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
 
+### Host inference accounting
+
+`createAgentSession({ inferenceAccounting })` accepts an awaited host-only metadata sink. It is used by isolated review sessions and also observes their compaction requests. The callback receives the selected model after auth resolution and returns `{ observe(usage, sequence, terminal, response): Promise<void> }`. `observe` receives cumulative usage snapshots, stream sequence, whether the attempt is terminal, and whether a terminal assistant response was observed (rather than a thrown request/stream failure). Replace earlier snapshots for that request; do not add them. The hook receives no prompt or response content.
+
+The admission callback finishes before provider dispatch. Observer promises are awaited; unlike `session.subscribe` listeners, rejection fails inference. Hosts must preserve request identity, bound retained metadata, and drain writes before reporting durable completion. Provider-internal HTTP retries are not separate admissions. An admitted request interrupted before dispatch is still a pending host attempt, not proof of a provider charge. Ordinary automatic session naming is outside this hook; isolated review sessions use deterministic names to avoid those cosmetic calls.
+
+`Usage.availability` distinguishes complete, partial, and unavailable provider reporting; absent metadata remains unknown. Preserve partial counters on failure instead of claiming zero. Model-priced estimates are not invoices or subscription charges. This hook does not persist anything by itself or enable a general billing service.
+
 ### Session state
 
 `AgentSession` exposes an owned, read-only runtime snapshot through `session.state`. Mutate the session through its explicit methods so persistence and the provider context remain synchronized.
@@ -407,7 +449,7 @@ session.setActiveToolsByName(["read", "bash"]);
 await session.waitForIdle();
 ```
 
-`session.waitForIdle()` includes prompt preflight, retries, compaction, and queued continuations. `session.dispose()` installs the close fence synchronously; call `await session.waitForClosed()` outside callbacks when teardown must fully drain.
+`session.waitForIdle()` includes prompt preflight, retries, compaction, and queued continuations. `session.waitForNotBusy()` waits until `session.isBusy` is false, which also covers `!` commands, extension commands, and reload; do not await it from inside an extension command. `session.dispose()` installs the close fence synchronously; call `await session.waitForClosed()` outside callbacks when teardown must fully drain.
 
 ### Events
 
@@ -456,7 +498,7 @@ session.subscribe((event) => {
       // A retry or compaction/queued continuation may still follow.
       break;
     case "agent_settled":
-      // Prompt fully settled: no further retries or continuations.
+      // Foreground prompt settled. Outstanding background jobs may later resume the session.
       break;
     
     // Turn lifecycle (one LLM response + tool calls)
@@ -501,7 +543,7 @@ const { session } = await createAgentSession({
   - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
 - Project prompts (`.volt/prompts/`)
 - Context files (`AGENTS.md` walking up from cwd)
-- Session directory naming
+- Workspace session-store directory selection
 
 `agentDir` is used by `DefaultResourceLoader` for:
 - Global extensions (`extensions/`)
@@ -513,9 +555,9 @@ const { session } = await createAgentSession({
 - Settings (`settings.json`)
 - Custom models (`models.json`)
 - Credentials (`auth.json`)
-- Sessions (`sessions/`)
+- Per-workspace SQLite session stores (`sessions/`)
 
-When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control resource discovery. They still influence session naming and tool path resolution.
+When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control resource discovery. They still influence workspace session-store selection and tool path resolution.
 
 ### Model
 
@@ -620,8 +662,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, and `mcp`
-- Default built-ins: `read`, `bash`, `edit`, `write`, `web_search`, `web_fetch`, `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
+- Built-in tool names: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, and `mcp`
+- Default built-ins: `read`, `bash`, `jobs`, `edit`, `write`, `web_search`, `web_fetch`, `lsp` (status remains available when LSP is disabled), `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins, including `subagent`, while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
@@ -748,6 +790,33 @@ eventBus.on("my-extension:status", (data) => console.log(data));
 
 > See [examples/sdk/06-extensions.ts](../examples/sdk/06-extensions.ts) and [docs/extensions.md](extensions.md)
 
+### Managed extension work
+
+Extensions can use `request_boundary`, `ctx.work`, and `volt.getWorkStatus()` to prepare bounded read-only context. No extension or auxiliary model is enabled by the SDK. See [Managed context preparation](extensions.md#managed-context-preparation) for task ownership, services, and context admission semantics.
+
+`session.registerTurnPolicy(policy)` snapshots and freezes the `beforeToolCall` and `nextAction` callbacks. Mutating the original object no longer changes registered behavior. The returned callable `PolicyRegistration` removes the policy; `registration.update(nextPolicy)` replaces its complete callback snapshot in place, and `registration.invalidate()` revokes previous authorization after a closure-state change. Make closure changes and invalidation synchronously, without an intervening await. Updates and removals preserve other registrations and their order. Removed handles cannot update or invalidate.
+
+Tool-policy revisions cover every managed operation, the complete source-validation collection, and final provider admission. Changes during collection or later admission awaits omit optional context with `authority_changed` rather than retrying validation or extending deadlines. Mandatory context continues normally. These controls do not sandbox trusted extensions or later provider payload hooks. Extension call/result policies use the same [registration-handle contract](extensions.md#updating-tool-policies).
+
+Hosts may tighten the default resource ceilings and opt into a bounded first-request preparation wait when constructing a session:
+
+```typescript
+const { session } = await createAgentSession({
+  extensionWorkLimits: {
+    perRuntimeTasks: 2,
+    perExtensionTasks: 1,
+    taskTimeoutMs: 3000,
+    maxTaskTimeoutMs: 5000,
+    suffixBytes: 8192,
+    firstRequestWaitMs: 800, // Initial allowance AND interactive ceiling; at most 1000 ms, shared across extensions.
+  },
+});
+```
+
+All supplied limits must be finite nonnegative integers. Resource ceilings can only tighten defaults; `firstRequestWaitMs` is the exception, with initial default 0 and maximum 1,000 ms. An explicit `firstRequestWaitMs` is also a hard ceiling on interactive changes: use `0` to prohibit any wait. If omitted, a user may approve up to 1,000 ms through an extension command's `ctx.requestPreparationWait()` in a bound local TUI. `ctx.getPreparationWait()` reports the current allowance and ceiling. Those host-confirmed changes survive resource reload but not runtime replacement or restart; they never persist themselves or change the configured ceiling. See [extension command controls](extensions.md#ctxgetpreparationwait--ctxrequestpreparationwaitmilliseconds). Extensions must still synchronously request that allowance at the first boundary; configuration alone neither enables an extension nor adds a delay. CLI `--preparation-wait-ms 800` sets the same initial allowance and ceiling for locally created runtimes; it does not reconfigure already-running remote runtimes. Workspace services require active trusted native `read`, `find`, `grep`, or `lsp` implementations. `readSkill` uses an exact native-loaded catalog resource grant and a registered trusted read implementation, without activating general reads. Custom overrides are not silently bypassed. Metadata-only SDK skills have no native file identity and are omitted from the managed catalog; use `DefaultResourceLoader` or the native `loadSkills`/`loadSkillsFromDir` results for resource-backed skills. Managed task completion cannot start model inference; cleanup participates in session teardown. The process-wide ceiling includes revoked callbacks that have not settled.
+
+This is a trusted-extension execution convenience, not a sandbox, provider spending cap, transparent cache, or additional permission for network export. Generic operation diagnostics contain metadata, not source text.
+
 ### Skills
 
 ```typescript
@@ -829,7 +898,18 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 ### Session Management
 
-Sessions use a tree structure with `id`/`parentId` linking, enabling in-place branching.
+Each workspace or custom session directory has one authoritative `sessions.sqlite` store. Persisted sessions use stable references:
+
+```typescript
+interface SessionReference {
+  readonly sessionDirectory: string;
+  readonly storeId: string;
+  readonly sessionId: string;
+  readonly sessionGeneration: string;
+}
+```
+
+Persisted factories and store queries are asynchronous. JSONL paths are explicit snapshot imports only.
 
 ```typescript
 import {
@@ -849,25 +929,41 @@ const { session } = await createAgentSession({
 
 // New persistent session
 const { session: persisted } = await createAgentSession({
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 // Continue most recent
 const { session: continued, modelFallbackMessage } = await createAgentSession({
-  sessionManager: SessionManager.continueRecent(process.cwd()),
+  sessionManager: await SessionManager.continueRecent(process.cwd()),
 });
 if (modelFallbackMessage) {
   console.log("Note:", modelFallbackMessage);
 }
 
-// Open specific file
-const { session: opened } = await createAgentSession({
-  sessionManager: SessionManager.open("/path/to/session.jsonl"),
-});
-
-// List sessions
+// Summary-only listing and deep search return SessionInfo objects with stable refs.
+// Search scans extracted searchable text one session at a time.
 const currentProjectSessions = await SessionManager.list(process.cwd());
-const allSessions = await SessionManager.listAll(process.cwd());
+const matchingSessions = await SessionManager.search(process.cwd(), "authentication");
+const allSessions = await SessionManager.listAll();
+const selectedRef = currentProjectSessions[0]?.ref;
+
+if (selectedRef) {
+  const { session: opened } = await createAgentSession({
+    sessionManager: await SessionManager.open(selectedRef),
+  });
+  console.log(opened.sessionId);
+}
+
+// Explicitly import or export a JSONL interchange snapshot
+const imported = await SessionManager.importFromJsonl("/path/to/session-snapshot.jsonl");
+try {
+  const importedRef = imported.getSessionRef();
+  if (importedRef) {
+    await SessionManager.exportJsonlSnapshot(importedRef, "/path/to/export.jsonl");
+  }
+} finally {
+  await imported.closePersistence();
+}
 
 // Session replacement API for /clear, /resume, /fork, /clone, and import flows.
 const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
@@ -886,48 +982,44 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
-// Replace the active session with a fresh one
 await runtime.newSession();
-
-// Replace the active session with another saved session
-await runtime.switchSession("/path/to/session.jsonl");
-
-// Replace the active session with a fork from a specific user entry
+if (selectedRef) await runtime.switchSession(selectedRef);
 await runtime.fork("entry-id");
-
-// Clone the active path through a specific entry
-await runtime.fork("entry-id", { position: "at" });
+await runtime.fork("entry-id", { position: "at" }); // clone through this entry
+await runtime.importFromJsonl("/path/to/session-snapshot.jsonl");
 ```
+
+`AgentSession.sessionRef` is the current persisted reference, or `undefined` for an in-memory session. `AgentSession.sessionId` is always available.
 
 **SessionManager tree API:**
 
 ```typescript
-const sm = SessionManager.open("/path/to/session.jsonl");
+if (!selectedRef) throw new Error("No saved session");
+const sm = await SessionManager.open(selectedRef);
+try {
+  const entries = sm.getEntries();
+  const tree = sm.getTree();
+  const path = sm.getBranch();
+  const leaf = sm.getLeafEntry();
+  const entry = sm.getEntry(id);
+  const children = sm.getChildren(id);
 
-// Session listing
-const currentProjectSessions = await SessionManager.list(process.cwd());
-const allSessions = await SessionManager.listAll(process.cwd());
+  const label = sm.getLabel(id);
+  sm.appendLabelChange(id, "checkpoint");
 
-// Tree traversal
-const entries = sm.getEntries();        // All entries (excludes header)
-const tree = sm.getTree();              // Full tree structure
-const path = sm.getPath();              // Path from root to current leaf
-const leaf = sm.getLeafEntry();         // Current leaf entry
-const entry = sm.getEntry(id);          // Get entry by ID
-const children = sm.getChildren(id);    // Direct children of entry
-
-// Labels
-const label = sm.getLabel(id);          // Get label for entry
-sm.appendLabelChange(id, "checkpoint"); // Set label
-
-// Branching
-sm.branch(entryId);                     // Move leaf to earlier entry
-sm.branchWithSummary(id, "Summary...");  // Branch with context summary
-sm.createBranchedSession(leafId);       // Extract path to new file
+  sm.branch(entryId);
+  sm.branchWithSummary(id, "Summary...");
+  await sm.createBranchedSession(leafId);
+  await sm.flush();
+} finally {
+  await sm.closePersistence();
+}
 ```
+
+Callers that directly own a persisted `SessionManager` must await `closePersistence()` before deleting its session directory or exiting. Static list, search, context lookup, export, and delete operations release their scoped store ownership before resolving.
 
 > See [examples/sdk/11-sessions.ts](../examples/sdk/11-sessions.ts) and [Session Format](session-format.md)
 
@@ -1140,7 +1232,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 const mode = new InteractiveMode(runtime, {
@@ -1180,7 +1272,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 await runPrintMode(runtime, {
@@ -1217,7 +1309,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 await runRpcMode(runtime);
@@ -1247,7 +1339,7 @@ const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionMan
 const runtime = await createAgentSessionRuntime(createRuntime, {
   cwd: process.cwd(),
   agentDir: getAgentDir(),
-  sessionManager: SessionManager.create(process.cwd()),
+  sessionManager: await SessionManager.create(process.cwd()),
 });
 
 const client = await createInProcessRpcClient(runtime);
@@ -1317,6 +1409,7 @@ getExamplesPath
 
 // Session management
 SessionManager
+type SessionReference
 SettingsManager
 
 // Tool factories

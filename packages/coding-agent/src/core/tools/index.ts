@@ -71,6 +71,13 @@ export {
 	resolveInspectionCommand,
 } from "./inspect.ts";
 export {
+	createJobsTool,
+	createJobsToolDefinition,
+	type JobsToolDetails,
+	type JobsToolInput,
+	type JobsToolOptions,
+} from "./jobs.ts";
+export {
 	createLsTool,
 	createLsToolDefinition,
 	type LsOperations,
@@ -95,6 +102,12 @@ export {
 	type ReadToolInput,
 	type ReadToolOptions,
 } from "./read.ts";
+export {
+	createRequestUserInputTool,
+	createRequestUserInputToolDefinition,
+	type RequestUserInputToolDetails,
+	type RequestUserInputToolInput,
+} from "./request-user-input.ts";
 export {
 	createSubagentRegistryTool,
 	createSubagentRegistryToolDefinition,
@@ -195,9 +208,11 @@ import { createFindTool, createFindToolDefinition, type FindToolOptions } from "
 import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "./grep.ts";
 import { createImageGenTool, createImageGenToolDefinition, type ImageGenToolOptions } from "./image-gen.ts";
 import { createInspectionTool, createInspectionToolDefinition, type InspectionToolOptions } from "./inspect.ts";
+import { createJobsTool, createJobsToolDefinition, type JobsToolOptions } from "./jobs.ts";
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createLspTool, createLspToolDefinition, type LspToolOptions } from "./lsp.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import { createRequestUserInputTool, createRequestUserInputToolDefinition } from "./request-user-input.ts";
 import {
 	createSubagentRegistryTool,
 	createSubagentRegistryToolDefinition,
@@ -224,9 +239,13 @@ export type CoreToolName =
 	| "find"
 	| "ls"
 	| "inspect"
-	| "lsp";
+	| "lsp"
+	| "jobs"
+	| "request_user_input";
 export type ToolName = CoreToolName | "subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp";
 export const DEFAULT_ACTIVE_TOOL_NAMES: readonly CoreToolName[] = [
+	"request_user_input",
+	"jobs",
 	"read",
 	"bash",
 	"edit",
@@ -245,6 +264,8 @@ export const READ_ONLY_TOOL_NAMES: readonly CoreToolName[] = [
 	"inspect",
 ];
 export const allToolNames: Set<ToolName> = new Set([
+	"request_user_input",
+	"jobs",
 	"read",
 	"bash",
 	"edit",
@@ -263,6 +284,7 @@ export const allToolNames: Set<ToolName> = new Set([
 ]);
 
 export interface ToolsOptions {
+	jobs?: JobsToolOptions;
 	read?: ReadToolOptions;
 	bash?: BashToolOptions;
 	write?: WriteToolOptions;
@@ -282,6 +304,10 @@ export interface ToolsOptions {
 
 export function createToolDefinition(toolName: ToolName, cwd: string, options?: ToolsOptions): ToolDef {
 	switch (toolName) {
+		case "request_user_input":
+			return createRequestUserInputToolDefinition();
+		case "jobs":
+			return createJobsToolDefinition(options?.jobs);
 		case "read":
 			return createReadToolDefinition(cwd, options?.read);
 		case "bash":
@@ -328,6 +354,10 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 
 export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptions): Tool {
 	switch (toolName) {
+		case "request_user_input":
+			return createRequestUserInputTool();
+		case "jobs":
+			return createJobsTool(options?.jobs);
 		case "read":
 			return createReadTool(cwd, options?.read);
 		case "bash":
@@ -400,6 +430,8 @@ export function createAllToolDefinitions(
 	options?: ToolsOptions,
 ): Record<CoreToolName, ToolDef> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", ToolDef>> {
 	return {
+		request_user_input: createRequestUserInputToolDefinition(),
+		jobs: createJobsToolDefinition(options?.jobs),
 		read: createReadToolDefinition(cwd, options?.read),
 		bash: createBashToolDefinition(cwd, options?.bash),
 		edit: createEditToolDefinition(cwd, options?.edit),
@@ -448,6 +480,8 @@ export function createAllTools(
 	options?: ToolsOptions,
 ): Record<CoreToolName, Tool> & Partial<Record<"subagent" | typeof SUBAGENT_REGISTRY_TOOL_NAME | "mcp", Tool>> {
 	return {
+		request_user_input: createRequestUserInputTool(),
+		jobs: createJobsTool(options?.jobs),
 		read: createReadTool(cwd, options?.read),
 		bash: createBashTool(cwd, options?.bash),
 		edit: createEditTool(cwd, options?.edit),

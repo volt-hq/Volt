@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import type { AssistantMessage, AssistantMessageEvent, Usage } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
@@ -93,6 +94,7 @@ function createRuntime(largePayload: string): AgentSessionRuntime {
 	return {
 		session: {
 			activeCompaction: undefined,
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			activeToolExecutions: pendingToolExecutions,
 			getSteeringMessages: () =>
 				Array.from({ length: 3 }, (_, index) => ({
@@ -132,10 +134,11 @@ function createRuntime(largePayload: string): AgentSessionRuntime {
 
 function createLinearSessionManager(
 	branch: SessionEntry[],
-): Pick<SessionManager, "getBranch" | "getBranchWindow" | "getLeafEntry"> {
+): Pick<SessionManager, "getBranch" | "getBranchWindow" | "getLeafEntry" | "getStartingGitContext"> {
 	return {
 		getBranch: () => branch,
 		getLeafEntry: () => branch.at(-1),
+		getStartingGitContext: () => undefined,
 		getBranchWindow: ({ beforeEntryId, maxEntries, lookbackEntries = 0 }) => {
 			const endIndex =
 				beforeEntryId === undefined ? branch.length : branch.findIndex((entry) => entry.id === beforeEntryId);
@@ -165,6 +168,7 @@ function createActiveWorkflows(largePayload: string): Array<{
 			kind: "review",
 			status: "running",
 			message: largePayload,
+			pullRequest: { provider: "github", number: 243 },
 			details: { payload: largePayload },
 		},
 		activeTools: Array.from({ length: 4 }, (_, toolIndex) => ({
@@ -347,12 +351,18 @@ describe("conversation projection resource bounds", () => {
 		expect(snapshot.activeWorkflows.map((workflow) => workflow.workflowId)).toEqual(
 			Array.from({ length: 4 }, (_, index) => `workflow-${index}`),
 		);
+		expect(snapshot.activeWorkflows[0]?.workflowEvent).toMatchObject({
+			pullRequest: { provider: "github", number: 243 },
+		});
 		expect(snapshot.state).not.toHaveProperty("remoteHost");
 
 		const liveProjector = createRemoteConversationExternalProjector({
 			authorization: createAuthorization(),
 			runtime,
 		});
+		const liveWorkflow = liveProjector(activeWorkflows[0]!.workflowEvent)!;
+		expect(liveWorkflow).toMatchObject({ pullRequest: { provider: "github", number: 243 } });
+		expect(liveWorkflow).toEqual(snapshot.activeWorkflows[0]?.workflowEvent);
 		const live = liveProjector(activeWorkflows[0]!.activeTools[0]!)!;
 		expect(live).toEqual(snapshot.activeWorkflows[0]?.activeTools[0]);
 		expect(Buffer.byteLength(JSON.stringify(live), "utf8")).toBeLessThanOrEqual(
@@ -371,6 +381,19 @@ describe("conversation projection resource bounds", () => {
 		expect(Buffer.byteLength(JSON.stringify(mediumArgs.args), "utf8")).toBeLessThanOrEqual(
 			REMOTE_CONVERSATION_WORKFLOW_ARGUMENTS_MAX_SERIALIZED_BYTES,
 		);
+	});
+
+	it("rejects pull request references with fields outside the bounded canonical shape", () => {
+		const feed = new ConversationProjectionFeed({ subscribe: () => () => {} });
+		expect(() =>
+			feed.publishExternal({
+				type: "workflow_start",
+				workflowId: "review:invalid-reference",
+				kind: "review",
+				pullRequest: { provider: "github", number: 243, title: "must not cross" },
+			}),
+		).toThrow("Conversation workflow event contains malformed optional fields");
+		feed.dispose();
 	});
 
 	it("bounds projection traversal before omitted queue, tool, and workflow tails", () => {
@@ -472,6 +495,7 @@ describe("conversation projection resource bounds", () => {
 				pendingMessageCount: 0,
 				steeringQueue: [],
 				followUpQueue: [],
+				backgroundJobs: [],
 			},
 			transcript: {
 				sessionId: "session-active-assistant",

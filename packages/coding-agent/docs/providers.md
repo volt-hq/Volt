@@ -30,6 +30,8 @@ Use `/logout` to clear credentials. Tokens are stored in `~/.volt/agent/auth.jso
 
 Anthropic subscription auth is active for Claude Pro/Max accounts. Third-party harness usage draws from [extra usage](https://claude.ai/settings/usage) and is billed per token, not against Claude plan limits.
 
+Volt sends subscription requests directly to Anthropic with a pinned Claude Code-compatible client identity; it does not invoke or inspect an installed `claude` executable. Inference and `/usage` share that identity, while inference also sends Volt's session ID and a per-request ID. Volt retains its own tools, system prompt, and supported feature flags rather than reproducing Claude Code's private runtime. If Anthropic reports `claude_code_version_too_old`, Volt's compatibility pin needs updating; running `claude update` does not change Volt's requests. API-key authentication is separate.
+
 ### GitHub Copilot
 
 - Press Enter for github.com, or enter your GitHub Enterprise Server domain

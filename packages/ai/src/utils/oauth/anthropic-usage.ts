@@ -1,3 +1,4 @@
+import { ANTHROPIC_OAUTH_BETA, ANTHROPIC_OAUTH_USER_AGENT } from "./anthropic-client.ts";
 import type {
 	OAuthCredentials,
 	SubscriptionUsageFetchOptions,
@@ -157,9 +158,11 @@ export async function fetchAnthropicSubscriptionUsage(
 		response = await fetch(ANTHROPIC_USAGE_URL, {
 			method: "GET",
 			headers: {
-				Accept: "application/json",
+				Accept: "application/json, text/plain, */*",
+				"Content-Type": "application/json",
 				Authorization: `Bearer ${credentials.access}`,
-				"anthropic-beta": "oauth-2025-04-20",
+				"anthropic-beta": ANTHROPIC_OAUTH_BETA,
+				"User-Agent": ANTHROPIC_OAUTH_USER_AGENT,
 			},
 			signal: options.signal,
 		});

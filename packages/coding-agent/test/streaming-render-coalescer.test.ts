@@ -82,11 +82,13 @@ describe("StreamingRenderCoalescer", () => {
 		expect(commits).toEqual(["partial", "final"]);
 	});
 
-	test("recognizes only Markdown-producing delta events as coalescable", () => {
+	test("coalesces text, thinking, and argument deltas while keeping semantic boundaries immediate", () => {
 		expect(isCoalescableAssistantUpdate("text_delta")).toBe(true);
 		expect(isCoalescableAssistantUpdate("thinking_delta")).toBe(true);
 		expect(isCoalescableAssistantUpdate("text_end")).toBe(false);
-		expect(isCoalescableAssistantUpdate("toolcall_delta")).toBe(false);
+		expect(isCoalescableAssistantUpdate("toolcall_delta")).toBe(true);
+		expect(isCoalescableAssistantUpdate("toolcall_start")).toBe(false);
+		expect(isCoalescableAssistantUpdate("toolcall_end")).toBe(false);
 		expect(isCoalescableAssistantUpdate(undefined)).toBe(false);
 	});
 });

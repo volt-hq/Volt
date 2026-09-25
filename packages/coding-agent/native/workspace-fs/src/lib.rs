@@ -1,3 +1,8 @@
+mod file_lock;
+mod private_diagnostics;
+
+pub use private_diagnostics::write_windows_private_file;
+
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, Metadata, OpenOptions, Permissions};
 use napi::bindgen_prelude::{AsyncTask, Buffer, Task};

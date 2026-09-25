@@ -36,6 +36,7 @@ import {
 	retainThoughtSignature,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
+import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 export interface GoogleVertexOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -67,7 +68,17 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 	context: Context,
 	options?: GoogleVertexOptions,
 ): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer();
+	const normalizer = new AssistantStreamNormalizer(options);
+	if (
+		!normalizer.validateConfiguration({
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			timestamp: Date.now(),
+		})
+	)
+		return normalizer.stream;
+	options = { ...options, signal: normalizer.signal };
 	normalizer.push({
 		type: "start",
 		init: { api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() },
@@ -81,6 +92,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 		let currentBlock: { type: "text" | "thinking"; contentIndex: number; signature?: string } | undefined;
 		const toolCallIds = new Set<string>();
 		let hasToolCalls = false;
+		let hasFinishReason = false;
 
 		const closeCurrentBlock = () => {
 			if (!currentBlock) {
@@ -108,8 +120,9 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			const client = apiKey
 				? createClientWithApiKey(model, apiKey, options?.headers)
 				: createClient(model, resolveProject(options), resolveLocation(options), options?.headers, options?.env);
-			let params = buildParams(model, context, options);
-			const nextParams = await options?.onPayload?.(params, model);
+			const toolResultPayload = new ToolResultPayloadTracker();
+			let params = buildParams(model, context, options, toolResultPayload);
+			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
 			if (nextParams !== undefined) {
 				params = nextParams as GenerateContentParameters;
 			}
@@ -152,7 +165,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 							toolCallIds.add(toolCallId);
 							hasToolCalls = true;
 							const contentIndex = nextContentIndex++;
-							const args = (part.functionCall.args as JsonObject | undefined) ?? {};
+							const args = (part.functionCall.args === undefined ? {} : part.functionCall.args) as JsonObject;
 							const toolCall: ToolCall = {
 								type: "toolCall",
 								id: toolCallId,
@@ -166,6 +179,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 								id: toolCall.id,
 								name: toolCall.name,
 							});
+							if (!normalizer.checkToolArgumentsObject(contentIndex, args)) return;
 							normalizer.push({
 								type: "toolcall_delta",
 								contentIndex,
@@ -177,11 +191,28 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 				}
 
 				if (candidate?.finishReason) {
-					stopReason = hasToolCalls ? "toolUse" : mapStopReason(candidate.finishReason);
+					hasFinishReason = true;
+					stopReason = mapStopReason(candidate.finishReason);
+					if (hasToolCalls && stopReason === "stop") stopReason = "toolUse";
 				}
 
-				if (chunk.usageMetadata) {
+				if (
+					chunk.usageMetadata &&
+					[
+						chunk.usageMetadata.promptTokenCount,
+						chunk.usageMetadata.candidatesTokenCount,
+						chunk.usageMetadata.thoughtsTokenCount,
+						chunk.usageMetadata.cachedContentTokenCount,
+						chunk.usageMetadata.totalTokenCount,
+					].some((value) => typeof value === "number")
+				) {
 					usage = {
+						availability:
+							hasFinishReason &&
+							typeof chunk.usageMetadata.promptTokenCount === "number" &&
+							typeof chunk.usageMetadata.candidatesTokenCount === "number"
+								? "complete"
+								: "partial",
 						input:
 							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
 						output:
@@ -203,6 +234,9 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 			}
 
 			closeCurrentBlock();
+			if (hasToolCalls && !hasFinishReason) {
+				throw new Error("Google Vertex stream ended without finishReason");
+			}
 
 			if (options?.signal?.aborted) {
 				throw new Error("Request was aborted");
@@ -230,6 +264,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 
 function createEmptyUsage(): Usage {
 	return {
+		availability: "unavailable",
 		input: 0,
 		output: 0,
 		cacheRead: 0,
@@ -386,8 +421,9 @@ function buildParams(
 	model: Model<"google-vertex">,
 	context: Context,
 	options: GoogleVertexOptions = {},
+	toolResultPayload?: ToolResultPayloadTracker,
 ): GenerateContentParameters {
-	const contents = convertMessages(model, context);
+	const contents = convertMessages(model, context, toolResultPayload);
 
 	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) {

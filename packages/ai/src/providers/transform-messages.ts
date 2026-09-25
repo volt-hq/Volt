@@ -1,3 +1,4 @@
+import { createRejectedToolCallFeedback } from "../stream/invalid-tool-arguments.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -8,6 +9,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import type { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -65,13 +67,14 @@ export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+	toolResultPayload?: ToolResultPayloadTracker,
 ): Message[] {
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 	const imageAwareMessages = downgradeUnsupportedImages(messages, model);
 
 	// First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
-	const transformed = imageAwareMessages.map((msg) => {
+	const transformed = imageAwareMessages.map((msg, index) => {
 		// User messages pass through unchanged
 		if (msg.role === "user") {
 			return msg;
@@ -80,10 +83,13 @@ export function transformMessages<TApi extends Api>(
 		// Handle toolResult messages - normalize toolCallId if we have a mapping
 		if (msg.role === "toolResult") {
 			const normalizedId = toolCallIdMap.get(msg.toolCallId);
-			if (normalizedId && normalizedId !== msg.toolCallId) {
-				return { ...msg, toolCallId: normalizedId };
-			}
-			return msg;
+			// A distinct object per input position keeps repeated references distinguishable.
+			const result =
+				toolResultPayload || (normalizedId && normalizedId !== msg.toolCallId)
+					? { ...msg, toolCallId: normalizedId ?? msg.toolCallId }
+					: msg;
+			toolResultPayload?.recordSource(result, index);
+			return result;
 		}
 
 		// Assistant messages need transformation check
@@ -152,9 +158,11 @@ export function transformMessages<TApi extends Api>(
 		return msg;
 	});
 
-	// Second pass: insert synthetic empty tool results for orphaned tool calls
-	// This preserves thinking signatures and satisfies API requirements
+	// Second pass: omit interrupted calls and their results, explain calls rejected for invalid arguments,
+	// and synthesize missing results for completed calls.
+	// This only changes provider replay; the original diagnostic history remains intact.
 	const result: Message[] = [];
+	const omittedToolCallIds = new Set<string>();
 	let pendingToolCalls: ToolCall[] = [];
 	let existingToolResultIds = new Set<string>();
 	const insertSyntheticToolResults = () => {
@@ -190,11 +198,19 @@ export function transformMessages<TApi extends Api>(
 			// - The model should retry from the last valid state
 			const assistantMsg = msg as AssistantMessage;
 			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+				for (const block of assistantMsg.content) {
+					if (block.type === "toolCall") omittedToolCallIds.add(block.id);
+				}
+				// Read content indices from the untransformed message; the first pass may drop blocks.
+				const feedback = createRejectedToolCallFeedback(messages[i] as AssistantMessage);
+				if (feedback) result.push(feedback);
 				continue;
 			}
 
 			// Track tool calls from this assistant message
 			const toolCalls = assistantMsg.content.filter((b) => b.type === "toolCall") as ToolCall[];
+			// A later completed call can reuse an ID from an interrupted attempt.
+			for (const toolCall of toolCalls) omittedToolCallIds.delete(toolCall.id);
 			if (toolCalls.length > 0) {
 				pendingToolCalls = toolCalls;
 				existingToolResultIds = new Set();
@@ -202,6 +218,8 @@ export function transformMessages<TApi extends Api>(
 
 			result.push(msg);
 		} else if (msg.role === "toolResult") {
+			// IDs have already been normalized for both calls and results in the first pass.
+			if (omittedToolCallIds.has(msg.toolCallId)) continue;
 			existingToolResultIds.add(msg.toolCallId);
 			result.push(msg);
 		} else if (msg.role === "user") {

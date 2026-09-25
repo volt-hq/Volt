@@ -2,16 +2,19 @@ import "./providers/register-builtins.ts";
 
 import { getApiProvider } from "./api-registry.ts";
 import { getEnvApiKey } from "./env-api-keys.ts";
+import { resolvePromptCacheRetention } from "./providers/prompt-cache.ts";
 import type {
 	Api,
 	AssistantMessage,
 	AssistantMessageEventStream,
 	Context,
 	Model,
+	PromptCacheRefreshResult,
 	ProviderStreamOptions,
 	SimpleStreamOptions,
 	StreamOptions,
 } from "./types.ts";
+import { drainEventStream } from "./utils/event-stream.ts";
 
 export { getEnvApiKey } from "./env-api-keys.ts";
 
@@ -52,7 +55,7 @@ export async function complete<TApi extends Api>(
 	options?: ProviderStreamOptions,
 ): Promise<AssistantMessage> {
 	const s = stream(model, context, options);
-	return s.result();
+	return drainEventStream(s);
 }
 
 export function streamSimple<TApi extends Api>(
@@ -62,6 +65,38 @@ export function streamSimple<TApi extends Api>(
 ): AssistantMessageEventStream {
 	const provider = resolveApiProvider(model.api);
 	return provider.streamSimple(model, context, withEnvApiKey(model, options));
+}
+
+/**
+ * Whether `refreshPromptCache` can renew the prompt cache of `streamSimple(model, context, options)`:
+ * its provider implements a no-output refresh for these options, the model documents a cache that
+ * renews on hit, and caching is enabled. Sends nothing.
+ */
+export function supportsPromptCacheRefresh(model: Model<Api>, options?: SimpleStreamOptions): boolean {
+	const provider = getApiProvider(model.api);
+	if (!provider?.refreshPromptCache || model.promptCache?.refreshesOnHit !== true) return false;
+	if (resolvePromptCacheRetention(model, options?.cacheRetention, options?.env) === "none") return false;
+	return provider.canRefreshPromptCache?.(model, options) ?? true;
+}
+
+/**
+ * Replay the request `streamSimple(model, context, options)` would send, without generating
+ * output, so the provider renews its cached prefix. Returns "unsupported" instead of sending
+ * anything when the model, provider, or cache settings cannot refresh that request.
+ */
+export async function refreshPromptCache<TApi extends Api>(
+	model: Model<TApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+): Promise<PromptCacheRefreshResult> {
+	const refresh = resolveApiProvider(model.api).refreshPromptCache;
+	if (!refresh || model.promptCache?.refreshesOnHit !== true) {
+		return { status: "unsupported", reason: "model does not support prompt-cache refresh" };
+	}
+	if (resolvePromptCacheRetention(model, options?.cacheRetention, options?.env) === "none") {
+		return { status: "unsupported", reason: "prompt caching is disabled" };
+	}
+	return await refresh(model, context, withEnvApiKey(model, options));
 }
 
 /**
@@ -76,5 +111,5 @@ export async function completeSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): Promise<AssistantMessage> {
 	const s = streamSimple(model, context, options);
-	return s.result();
+	return drainEventStream(s);
 }

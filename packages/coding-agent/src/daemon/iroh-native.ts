@@ -17,9 +17,15 @@ export interface IrohSecretKeyLike {
 	toBytes(): number[];
 }
 
+export interface IrohEndpointAddrLike {
+	id(): IrohNodeIdLike;
+	relayUrl(): string | null;
+	directAddresses(): string[];
+}
+
 export interface IrohEndpointLike {
 	id(): IrohNodeIdLike;
-	addr(): unknown;
+	addr(): IrohEndpointAddrLike;
 	online(): Promise<void>;
 	close(): Promise<void>;
 	insertRelay?(config: IrohRelayConfigLike): Promise<void>;
@@ -72,7 +78,8 @@ export interface IrohBindingCapabilities {
 export interface IrohModuleLike {
 	bindingCapabilities(): IrohBindingCapabilities;
 	Endpoint: { builder(): IrohEndpointBuilderLike };
-	EndpointTicket: { fromAddr(addr: unknown): { toString(): string } };
+	EndpointAddr: new (id: IrohNodeIdLike, relayUrl?: string | null, addresses?: string[]) => IrohEndpointAddrLike;
+	EndpointTicket: { fromAddr(addr: IrohEndpointAddrLike): { toString(): string } };
 	RelayMap: { empty(): IrohRelayMapLike };
 	RelayMode: { disabled(): unknown; custom(map: IrohRelayMapLike): unknown; customFromUrls(urls: string[]): unknown };
 	presetMinimal(builder: IrohEndpointBuilderLike): void;
@@ -93,8 +100,12 @@ export function loadIrohModule(): IrohNativeLoadResult {
 		irohLoadError?: unknown;
 		irohPackageVersion?: unknown;
 	};
+	const packageVersion = typeof irohPackageVersion === "string" ? irohPackageVersion : undefined;
 	if (!iroh) {
-		return { error: irohLoadError };
+		return {
+			error: irohLoadError,
+			...(packageVersion === undefined ? {} : { packageVersion }),
+		};
 	}
 	const typedIroh = iroh as IrohModuleLike;
 	let capabilities: IrohBindingCapabilities;
@@ -110,7 +121,6 @@ export function loadIrohModule(): IrohNativeLoadResult {
 	if (!capabilities.connectedHomeRelayWatch || !capabilities.reconnectRelay) {
 		return { error: new Error("the installed Volt Iroh binding lacks required relay recovery capabilities") };
 	}
-	const packageVersion = typeof irohPackageVersion === "string" ? irohPackageVersion : undefined;
 	return {
 		iroh: typedIroh,
 		capabilities,
@@ -121,9 +131,9 @@ export function loadIrohModule(): IrohNativeLoadResult {
 export function formatIrohLoadError(error: unknown): string {
 	const detail = error instanceof Error ? error.message : error ? String(error) : "unknown native adapter error";
 	return [
-		"The optional @hansjm10/volt-iroh native adapter is not available.",
-		`Native adapter error: ${detail}`,
-		"Install Volt with optional dependencies enabled for this platform, then retry.",
+		"The required @hansjm10/volt-iroh wrapper could not load its platform-native binding.",
+		`Native binding error: ${detail}`,
+		"Reinstall Volt with optional dependencies enabled on a supported platform, then retry.",
 		"If optional dependencies were omitted, reinstall without `--omit=optional`.",
 	].join("\n");
 }

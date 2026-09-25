@@ -32,15 +32,18 @@ import { BRAVE_SEARCH_AUTH_PROVIDER } from "../core/tools/web-search.ts";
 import type {
 	ControlClientStatus,
 	ControlLeaseStatus,
+	ControlRelayCredentialStatus,
 	ControlRequest,
 	ControlRevokedClientStatus,
 	ControlWorkspaceStatus,
+	RemoteTransportHealth,
 } from "./control-protocol.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	createControlClientStatus,
 	PROTOCOL_VERSION,
+	REMOTE_TRANSPORT_REASON_MESSAGES,
 } from "./control-protocol.ts";
 import {
 	type ControlConnection,
@@ -66,6 +69,8 @@ import {
 } from "./paths.ts";
 import { verifyPidfileProcess, verifyVoltdProcessIdentity } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
+import { WorkAssociationService } from "./work-association.ts";
+import { WorkStateStore } from "./work-state.ts";
 import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
 
 export interface Clock {
@@ -122,6 +127,7 @@ export function readPidfile(pidfilePath: string): PidfileContents | undefined {
 export const VOLTD_EXIT_ALREADY_RUNNING = 3;
 export const VOLTD_EXIT_BIND_FAILED = 4;
 export const VOLTD_EXIT_INCOMPATIBLE_RUNNING = 5;
+export const VOLTD_EXIT_STARTUP_CONTENDED = 6;
 
 const DAEMON_BIND_WAIT_TIMEOUT_MS = 75_000;
 const DAEMON_BIND_WAIT_POLL_MS = 200;
@@ -152,6 +158,7 @@ export interface VoltdRuntimeServices {
 	logger: DaemonLogger;
 	state: VoltdStateStore;
 	stateManager: IrohRemoteHostStateManager;
+	work: WorkAssociationService;
 	auditLogger: IrohRemoteAuditLogger;
 	controlServer: ControlServer;
 	keepAwake: KeepAwakeController;
@@ -178,7 +185,13 @@ export interface VoltdServiceExtensionInstance {
 	onThemeChanged?(): void;
 	/** Keep-awake status changed (control toggle, phone RPC toggle, or degradation). */
 	onKeepAwakeChanged?(): void;
-	statusExtras?(): { leases?: ControlLeaseStatus[]; phoneConnections?: number; relayCount?: number };
+	statusExtras?(): {
+		leases?: ControlLeaseStatus[];
+		phoneConnections?: number;
+		relayCount?: number;
+		remoteTransport?: RemoteTransportHealth;
+		relayCredential?: ControlRelayCredentialStatus;
+	};
 	/** Redeem a relay hello token; true when the socket was taken over. */
 	admitRelay?(relayId: string, relayToken: string, socket: Socket, bufferedRemainder: Buffer): boolean;
 	/** Stop admitting work, settle durable ownership, and flush extension state. */
@@ -261,7 +274,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		}
 		const owner = lockResult.owner ? ` by pid ${lockResult.owner.pid}` : "";
 		log("error", `daemon startup lock is held${owner}; not starting a second daemon`);
-		return VOLTD_EXIT_BIND_FAILED;
+		return VOLTD_EXIT_STARTUP_CONTENDED;
 	}
 	daemonLock = lockResult.lock;
 	if (usingDefaultSocketPath && process.platform === "win32") {
@@ -312,6 +325,10 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		log("error", "invalid remote.allowTools setting: expected an array of tool names");
 		return finishBeforeServing(1);
 	}
+	if (remoteSettings.pullRequestDiscovery !== undefined && typeof remoteSettings.pullRequestDiscovery !== "boolean") {
+		log("error", "invalid remote.pullRequestDiscovery setting: expected a boolean");
+		return finishBeforeServing(1);
+	}
 	const allowTools =
 		configuredAllowTools === undefined
 			? null
@@ -333,14 +350,36 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		store: {
 			read: () => state.getHostState(),
 			write: async (hostState) => {
-				state.setHostState(hostState);
 				// State-manager mutations are security-sensitive: callers must not
 				// expose tickets or acknowledge pairing/revocation before durability.
-				await state.flush();
+				await state.persistHostState(hostState);
 			},
 		},
 	});
 	const auditLogger = new IrohRemoteAuditLogger({ path: paths.auditPath });
+	const workState = new WorkStateStore({ path: paths.workStatePath, now: () => clock.now() });
+	try {
+		const workLoad = await workState.load();
+		if (workLoad.corruptBackupPath) {
+			log("warn", "replaced invalid Work association state with an empty private store", {
+				backupPath: workLoad.corruptBackupPath,
+			});
+		}
+	} catch (error) {
+		log("error", `failed to load Work association state: ${error instanceof Error ? error.message : String(error)}`);
+		return finishBeforeServing(1);
+	}
+	const work = new WorkAssociationService({
+		store: workState,
+		enabled: remoteSettings.pullRequestDiscovery !== false,
+		now: () => clock.now(),
+		onRefreshError: (phase, error) => {
+			const operation = phase === "discovery" ? "provider discovery" : "scheduled refresh";
+			log("warn", `Work association ${operation} failed; retrying with backoff`, {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		},
+	});
 	const fallbackPushRelayClient = new IrohRemotePushRelayHttpClient({
 		authToken: process.env.VOLT_PUSH_RELAY_AUTH_TOKEN,
 		baseUrl: process.env.VOLT_PUSH_RELAY_URL,
@@ -429,6 +468,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			}
 		}
 		await keepAwake.shutdown().catch(() => {});
+		await work.close().catch(() => {});
 		await state.close().catch(() => {});
 
 		shutdownPhase = "disposing";
@@ -542,12 +582,22 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 				}));
 				let leases: ControlLeaseStatus[] = [];
 				let phoneConnections = 0;
+				let relayCredential: ControlRelayCredentialStatus | undefined;
+				let remoteTransport: RemoteTransportHealth = {
+					state: "unavailable",
+					reasonCode: "extension_missing",
+					message: REMOTE_TRANSPORT_REASON_MESSAGES.extension_missing,
+				};
 				for (const extension of extensionInstances) {
 					const extras = extension.statusExtras?.();
 					if (extras?.leases) {
 						leases = leases.concat(extras.leases);
 					}
 					phoneConnections += extras?.phoneConnections ?? 0;
+					relayCredential = extras?.relayCredential ?? relayCredential;
+					if (extras?.remoteTransport) {
+						remoteTransport = extras.remoteTransport;
+					}
 				}
 				connection.send({
 					type: "status_result",
@@ -559,6 +609,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 					leases,
 					phoneConnections,
+					remoteTransport,
+					...(relayCredential === undefined ? {} : { relayCredential }),
 					workspaces,
 					clients: toClientStatuses(),
 					revokedClients: toRevokedClientStatuses(),
@@ -969,6 +1021,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		logger,
 		state,
 		stateManager,
+		work,
 		auditLogger,
 		controlServer,
 		keepAwake,

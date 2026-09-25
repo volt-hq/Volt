@@ -4,15 +4,70 @@
  */
 
 import { Type } from "typebox";
+import {
+	RPC_WORK_BRANCH_MAX_CHARS,
+	RPC_WORK_CHANGE_ID_MAX_CHARS,
+	RPC_WORK_PROVIDER_MAX_CHARS,
+	RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS,
+	RPC_WORK_REPOSITORY_MAX_CHARS,
+} from "../wire-limits.ts";
+import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
 import { RpcModelSchema, rpcModelProperties } from "./external.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { readonlyArrayOf, stringEnum } from "./helpers.ts";
 import { RpcPlanningStateSchema } from "./planning.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
 import { RpcProjectionCollectionTruncationSchema, RpcProjectionTruncationSchema } from "./projections.ts";
+import { RpcReviewDiscussionLinkSchema } from "./review-discussions.ts";
+
+export const RpcSessionWorkPullRequestSchema = Type.Object(
+	{
+		provider: Type.String({ minLength: 1, maxLength: RPC_WORK_PROVIDER_MAX_CHARS }),
+		number: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		title: Type.String({ maxLength: RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS }),
+		status: stringEnum(["open", "draft", "merged", "closed"]),
+		stale: Type.Boolean(),
+	},
+	{ additionalProperties: false },
+);
+
+const rpcSessionWorkBaseProperties = {
+	changeId: Type.String({ minLength: 1, maxLength: RPC_WORK_CHANGE_ID_MAX_CHARS }),
+	repository: Type.String({ minLength: 1, maxLength: RPC_WORK_REPOSITORY_MAX_CHARS }),
+	branch: Type.String({ minLength: 1, maxLength: RPC_WORK_BRANCH_MAX_CHARS }),
+};
+
+/** Sanitized provider-neutral Work association exposed only through session lists. */
+export const RpcSessionWorkContextSchema = Type.Union([
+	Type.Object(
+		{
+			...rpcSessionWorkBaseProperties,
+			resolutionState: Type.Literal("resolved"),
+			pullRequest: RpcSessionWorkPullRequestSchema,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			...rpcSessionWorkBaseProperties,
+			resolutionState: stringEnum(["none", "ambiguous", "unavailable"]),
+		},
+		{ additionalProperties: false },
+	),
+]);
+
+export const RpcSessionContextSchema = Type.Object(
+	{
+		sessionId: Type.String({ minLength: 1, maxLength: 128 }),
+		startingGitContext: Type.Union([RpcGitContextSchema, Type.Null()]),
+		workContext: Type.Union([RpcSessionWorkContextSchema, Type.Null()]),
+	},
+	{ additionalProperties: false },
+);
 
 export const RpcSessionListItemSchema = Type.Object(
 	{
+		reviewDiscussion: Type.Optional(RpcReviewDiscussionLinkSchema),
 		sessionId: Type.String(),
 		sessionName: Type.Optional(Type.String()),
 		createdAt: Type.String(),
@@ -22,6 +77,10 @@ export const RpcSessionListItemSchema = Type.Object(
 		current: Type.Boolean(),
 		/** "subagent" when this session was created for a delegated subagent run. */
 		origin: Type.Optional(Type.Literal("subagent")),
+		/** First host-observed path-free Git state for this session. */
+		startingGitContext: Type.Optional(Type.Union([RpcGitContextSchema, Type.Null()])),
+		/** Daemon-owned Work association, when one has been observed. */
+		workContext: Type.Optional(RpcSessionWorkContextSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -36,6 +95,14 @@ export const RpcActiveToolExecutionSchema = Type.Object(
 		 *  attach mid-turn can restore live tool state (currently `subagent` only). */
 		details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 		projection: Type.Optional(RpcProjectionTruncationSchema),
+	},
+	{ additionalProperties: false },
+);
+
+export const RpcActiveAgentRunSchema = Type.Object(
+	{
+		/** Logical operation start in Unix epoch milliseconds; retained through automatic recovery until settlement. */
+		startedAt: Type.Number(),
 	},
 	{ additionalProperties: false },
 );
@@ -56,6 +123,27 @@ export const RpcActiveRetrySchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+
+/**
+ * Documented prompt-cache retention for the current model's reusable prefix.
+ * Clients compare `expiresAt` with their clock; no event fires at expiry.
+ */
+export const RpcPromptCacheStatusSchema = Type.Union([
+	Type.Object(
+		{
+			kind: Type.Literal("retained"),
+			/** Unix epoch milliseconds when the latest request or cache refresh with the current model started. */
+			lastRequestAt: Type.Number(),
+			/** Unix epoch milliseconds when the documented retention window lapses; absent when the provider publishes none. */
+			expiresAt: Type.Optional(Type.Number()),
+			/** Unix epoch milliseconds until which the host keeps refreshing the idle cache; absent unless idle keepalive applies. */
+			keepAliveUntil: Type.Optional(Type.Number()),
+		},
+		{ additionalProperties: false },
+	),
+	/** Earlier requests used other models, so the next request starts uncached. */
+	Type.Object({ kind: Type.Literal("model_changed") }, { additionalProperties: false }),
+]);
 
 /** One authoritative queued user message exposed to remote clients. */
 export const RpcQueuedMessageSchema = Type.Object(
@@ -79,7 +167,6 @@ export const RpcQueueUpdateProjectionSchema = Type.Object(
 export const RpcSessionStateProjectionSchema = Type.Object(
 	{
 		model: Type.Optional(RpcProjectionTruncationSchema),
-		sessionFile: Type.Optional(RpcProjectionTruncationSchema),
 		sessionName: Type.Optional(RpcProjectionTruncationSchema),
 		steeringQueue: Type.Optional(RpcProjectionCollectionTruncationSchema),
 		followUpQueue: Type.Optional(RpcProjectionCollectionTruncationSchema),
@@ -92,6 +179,7 @@ export const RpcSessionStateProjectionSchema = Type.Object(
 
 export const RpcSessionStateSchema = Type.Object(
 	{
+		reviewDiscussion: Type.Optional(RpcReviewDiscussionLinkSchema),
 		model: Type.Optional(RpcModelSchema),
 		thinkingLevel: RpcThinkingLevelSchema,
 		availableThinkingLevels: Type.Array(RpcThinkingLevelSchema),
@@ -101,6 +189,8 @@ export const RpcSessionStateSchema = Type.Object(
 		planning: RpcPlanningStateSchema,
 		/** Path-free host Git metadata, or null when the cwd is not a usable worktree. */
 		gitContext: Type.Union([RpcGitContextSchema, Type.Null()]),
+		/** First host-observed path-free Git state, when captured for this session. */
+		startingGitContext: Type.Optional(Type.Union([RpcGitContextSchema, Type.Null()])),
 		/** Whether a provider run or session-level continuation is active. */
 		isStreaming: Type.Boolean(),
 		/** Whether any prompt work, including asynchronous preflight, is active. */
@@ -108,7 +198,6 @@ export const RpcSessionStateSchema = Type.Object(
 		isCompacting: Type.Boolean(),
 		steeringMode: stringEnum(["all", "one-at-a-time"]),
 		followUpMode: stringEnum(["all", "one-at-a-time"]),
-		sessionFile: Type.Optional(Type.String()),
 		sessionId: Type.String(),
 		sessionName: Type.Optional(Type.String()),
 		autoCompactionEnabled: Type.Boolean(),
@@ -117,9 +206,14 @@ export const RpcSessionStateSchema = Type.Object(
 		/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. Always emitted; the iOS bootstrap decoder fails closed without them. */
 		steeringQueue: readonlyArrayOf(RpcQueuedMessageSchema),
 		followUpQueue: readonlyArrayOf(RpcQueuedMessageSchema),
+		/** Accessible live-runtime jobs, including retained terminal results. Never contains output. */
+		backgroundJobs: RpcBackgroundJobsSchema,
 		activeTools: Type.Optional(Type.Array(RpcActiveToolExecutionSchema)),
+		activeAgentRun: Type.Optional(RpcActiveAgentRunSchema),
 		activeCompaction: Type.Optional(RpcActiveCompactionSchema),
 		activeRetry: Type.Optional(RpcActiveRetrySchema),
+		/** Absent when the model does not cache or the active prefix has no prior request. */
+		promptCache: Type.Optional(RpcPromptCacheStatusSchema),
 		projection: Type.Optional(RpcSessionStateProjectionSchema),
 	},
 	{ additionalProperties: false },

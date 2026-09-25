@@ -39,6 +39,7 @@ import {
 	Container,
 	fuzzyFilter,
 	isKeyRelease,
+	isKeyRepeat,
 	isViewportTUI,
 	Loader,
 	type LoaderIndicatorOptions,
@@ -54,7 +55,6 @@ import {
 	TuiAltScreen,
 	TuiMainScreen,
 	VStack,
-	visibleWidth,
 } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { spawn, spawnSync } from "child_process";
@@ -63,7 +63,6 @@ import {
 	APP_TITLE,
 	getAgentDir,
 	getAuthPath,
-	getDebugLogPath,
 	getDocsPath,
 	getShareViewerUrl,
 	isStandaloneBinary,
@@ -89,6 +88,7 @@ import type {
 	ToolInfo,
 } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
+import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
 import {
 	BUILTIN_HOST_ACTION_REGISTRY,
 	CONTEXT_COMPACT_SLASH_ALIAS,
@@ -109,8 +109,6 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
-import { parseIrohRemoteRpcGrant } from "../../core/remote/iroh/access-grant.ts";
-import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
 import { createIrohRemoteRpcErrorResponse } from "../../core/remote/iroh/rpc-command-filter.ts";
@@ -125,24 +123,30 @@ import {
 	probeCurrentBranchPullRequest,
 	REMOTE_REVIEW_TOOL_NAMES,
 	REVIEW_USAGE,
-	type ResolvedReview,
 	type ReviewRunControls,
 	type ReviewTarget,
 	type ReviewWorkflowHooks,
+	reviewTargetForRerun,
 	runReviewWorkflow,
 	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
 import { publishReviewRun } from "../../core/review-publish.ts";
 import {
 	acknowledgeReviewRun,
-	appendReviewFindingTransition,
 	appendReviewPublication,
 	appendReviewRun,
-	exportReviewFeedback,
-	getReviewRun,
+	exportCanonicalReviewFeedback,
+	getCanonicalReviewRun,
+	recordReviewFindingOutcome,
+	resolveReviewAccountingMessage,
 } from "../../core/review-state.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import { getDefaultSessionDir, type SessionContext, SessionManager } from "../../core/session-manager.ts";
+import {
+	getDefaultSessionDir,
+	type SessionContext,
+	SessionManager,
+	type SessionReference,
+} from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
@@ -166,6 +170,7 @@ import {
 	decorateRemoteHostState,
 	type IntegratedConversationSessionSelection,
 } from "../../daemon/handshake-responses.ts";
+import { LocalSessionWorktreeRestoreError } from "../../daemon/session-worktree.ts";
 import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "../../daemon/worktree-manager.ts";
 import {
 	findCatalogPackage,
@@ -194,24 +199,18 @@ import {
 import { getChangelogPath, getNewEntries, normalizeChangelogLinks, parseChangelog } from "../../utils/changelog.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { extensionForImageMimeType, readClipboardImage } from "../../utils/clipboard-image.ts";
-import { writeDurableAtomicFileSync } from "../../utils/durable-atomic-write.ts";
 import { parseGitUrl } from "../../utils/git.ts";
 import { openBrowser } from "../../utils/open-browser.ts";
-import { resolvePath } from "../../utils/paths.ts";
-import {
-	createPrivateTempDirectorySync,
-	ensurePrivateDirectorySync,
-	PRIVATE_DIRECTORY_MODE,
-	PRIVATE_FILE_MODE,
-	writePrivateNewFileSync,
-} from "../../utils/private-files.ts";
+import { createPrivateTempDirectorySync, writePrivateNewFileSync } from "../../utils/private-files.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
 import { runIrohRemoteRpcMode } from "../rpc/iroh-remote-rpc-mode.ts";
+import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
+import { BackgroundJobsInspector, BackgroundJobsStatus } from "./components/background-jobs.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
 import { BorderedLoader } from "./components/bordered-loader.ts";
 import { BranchSummaryMessageComponent } from "./components/branch-summary-message.ts";
@@ -237,6 +236,7 @@ import {
 	createDaemonAttach,
 	createDisabledDaemonAttach,
 	createRelayWorkspaceUnregisterRetirement,
+	createTuiRelayAuthorization,
 	type DaemonAttach,
 	type DaemonRelayOffer,
 	type DaemonWorktreeControl,
@@ -292,6 +292,7 @@ import { SubagentInspectorComponent } from "./components/subagent-inspector.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
+import { UserInputDialog } from "./components/user-input-dialog.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 
@@ -354,6 +355,8 @@ function isDeadTerminalError(error: unknown): boolean {
 const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
 	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
 const TURN_DONE_ALERT_BUSY_RETRY_MS = 250;
+/** Idle time after settlement before the transcript records when work finished. */
+const WORK_SUMMARY_IDLE_MS = 60_000;
 const STDOUT_FLUSH_TIMEOUT_MS = 1000;
 
 /** Format an elapsed duration for the working indicator, e.g. "42s", "3m 12s", "1h 4m". */
@@ -364,6 +367,11 @@ function formatElapsedDuration(ms: number): string {
 	const seconds = totalSeconds % 60;
 	if (minutes < 60) return `${minutes}m ${seconds}s`;
 	return `${Math.floor(minutes / 60)}h ${minutes % 60}m`;
+}
+
+/** Local wall-clock time, e.g. "3:42 PM". */
+function formatClockTime(ms: number): string {
+	return new Date(ms).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
 }
 
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
@@ -385,8 +393,7 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
 	if (!process.stdout.isTTY) return undefined;
 	if (!sessionManager.isPersisted()) return undefined;
 
-	const sessionFile = sessionManager.getSessionFile();
-	if (!sessionFile || !fs.existsSync(sessionFile)) return undefined;
+	if (!sessionManager.getSessionRef()) return undefined;
 
 	const args = [APP_NAME];
 	if (!sessionManager.usesDefaultSessionDir()) {
@@ -513,6 +520,8 @@ export class InteractiveMode {
 	private chatContainer: Container;
 	private pendingMessagesContainer: Container;
 	private statusContainer: Container;
+	private backgroundJobsContainer: Container;
+	private backgroundJobsStatus: BackgroundJobsStatus;
 	private planStatusContainer: Container;
 	private planDetailsContainer: Container;
 	private documentContainer: Container;
@@ -528,6 +537,7 @@ export class InteractiveMode {
 	private mainView: ResponsivePlanLayoutComponent;
 	private planPaneReturnFocus: Component | undefined;
 	private planPaneInputUnsubscribe: (() => void) | undefined;
+	private globalInputUnsubscribe: (() => void) | undefined;
 	private readyPlanFocusKey: string | undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
@@ -550,6 +560,11 @@ export class InteractiveMode {
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined = undefined;
 	private turnStartedAt: number | undefined = undefined;
 	private workingElapsedTimer: ReturnType<typeof setInterval> | undefined = undefined;
+	/** Current operation, summarized in the transcript once the session stays idle. */
+	private workSummary: { startedAt: number; aborted: boolean } | undefined = undefined;
+	private workSummaryTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private promptCacheAlertTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private promptCacheAlertAt: number | undefined = undefined;
 	private readonly defaultWorkingMessage = "Working...";
 	private readonly defaultHiddenThinkingLabel = "Thinking...";
 	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
@@ -559,6 +574,7 @@ export class InteractiveMode {
 	private changelogMarkdown: string | undefined = undefined;
 	private startupNoticesShown = false;
 	private anthropicSubscriptionWarningShown = false;
+	private activeInteractiveReview = false;
 
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
@@ -571,6 +587,13 @@ export class InteractiveMode {
 
 	// Tool execution tracking: toolCallId -> component
 	private pendingTools = new Map<string, ToolExecutionComponent>();
+	/** Launch cards outlive settlement only while their bounded current-runtime records remain accessible. */
+	private liveBackgroundJobTools = new Map<string, { component: ToolExecutionComponent; settled?: boolean }>();
+	private unsubscribeBackgroundJobs: (() => void) | undefined;
+	private backgroundJobsRenderCoalescer: StreamingRenderCoalescer<void> | undefined;
+	private backgroundJobsInspector: BackgroundJobsInspector | undefined;
+	private backgroundJobsOverlay: OverlayHandle | undefined;
+	private dismissBackgroundJobsInspector: (() => void) | undefined;
 
 	// Tool output expansion state
 	private toolOutputExpanded = false;
@@ -613,11 +636,16 @@ export class InteractiveMode {
 	// Shutdown state
 	private shutdownRequested = false;
 	private turnDoneAlertTimer: ReturnType<typeof setTimeout> | undefined = undefined;
+	private runtimeDisposePromise: Promise<void> | undefined;
 
 	// Daemon integration (conversation leases + byte relay). Supported TUIs keep
 	// a reconnecting client even when auto-start is off, so a daemon started by
 	// another process can discover every already-running agent.
 	private daemonAttach: DaemonAttach = createDisabledDaemonAttach();
+	private readonly daemonWorkObservation = new GitContextObservationBinding((observation) => {
+		if (observation.status !== "definitive") return;
+		void this.daemonAttach.publishGitObservation(this.session.sessionId, observation.gitContext);
+	});
 	private daemonRelayServers = new Set<Promise<void>>();
 	/** list_sessions cursor state shared across relayed phone conversations. */
 	private readonly relaySessionListCursors = new Map<string, RemoteSessionListCursorEntry>();
@@ -634,8 +662,10 @@ export class InteractiveMode {
 	private drainViewer: DrainViewerComponent | undefined;
 	private drainViewerFeedId: string | undefined;
 	private dismissSubagentInspector: (() => void) | undefined;
-	/** Timestamp of the last quit warning (phone attached + turn streaming). */
-	private lastQuitWarningAt = 0;
+	/** Confirmation belongs to the work that was active when the warning appeared. */
+	private quitConfirmation:
+		| { warnedAt: number; activityRevision: number; signal: AbortSignal | undefined }
+		| undefined;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -703,12 +733,24 @@ export class InteractiveMode {
 			logDirectory: getAgentDir(),
 			onRightClickPaste: this.onRightClickPaste,
 		});
-		this.ui = createInteractiveTuiReference(() => this.renderer);
+		const ui = createInteractiveTuiReference(() => this.renderer);
+		const setFocus: TUI["setFocus"] = (component) => {
+			// Host loaders can restore focus without changing views. Never leave their input behind this overlay.
+			if (component !== this.backgroundJobsInspector) this.dismissBackgroundJobsInspector?.();
+			ui.setFocus(component);
+		};
+		this.ui = new Proxy(ui, {
+			get: (target, property, receiver) =>
+				property === "setFocus" ? setFocus : Reflect.get(target, property, receiver),
+		});
 		this.ui.setClearOnShrink(this.settingsManager.getClearOnShrink());
 		this.headerContainer = new Container();
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.backgroundJobsContainer = new Container();
+		this.backgroundJobsStatus = new BackgroundJobsStatus(() => this.session.backgroundJobs);
+		this.backgroundJobsContainer.addChild(this.backgroundJobsStatus);
 		this.planStatusContainer = new Container();
 		this.planDetailsContainer = new Container();
 		this.widgetContainerAbove = new Container();
@@ -743,7 +785,7 @@ export class InteractiveMode {
 			requestRender: () => this.ui.requestRender(),
 		});
 		this.footerDataProvider = new FooterDataProvider(this.session.gitContextProvider);
-		this.footer = new FooterComponent(this.session, this.footerDataProvider);
+		this.footer = new FooterComponent(this.session, this.footerDataProvider, () => this.ui.requestRender());
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
 		this.footerContainer.addChild(this.footer);
 		this.fullscreenTranscript = new ScrollView(this.documentContainer, {
@@ -765,6 +807,7 @@ export class InteractiveMode {
 				minSize: 0,
 				visible: () => !this.mainView.isTerminalSplit(),
 			},
+			{ component: this.backgroundJobsContainer, shrink: 2, minSize: 0 },
 			{ component: this.editorContainer, shrink: 1, minSize: 1 },
 			{ component: this.widgetContainerBelow, shrink: 3, minSize: 0 },
 		]);
@@ -779,6 +822,7 @@ export class InteractiveMode {
 				this.pendingMessagesContainer,
 				this.statusContainer,
 				this.widgetContainerAbove,
+				this.backgroundJobsContainer,
 				this.editorContainer,
 				this.widgetContainerBelow,
 			],
@@ -790,6 +834,7 @@ export class InteractiveMode {
 				this.widgetContainerAbove,
 				this.planStatusContainer,
 				this.planDetailsContainer,
+				this.backgroundJobsContainer,
 				this.editorContainer,
 				this.widgetContainerBelow,
 			],
@@ -1189,6 +1234,38 @@ export class InteractiveMode {
 	 * Initializes the UI, shows warnings, processes initial messages, and starts the interactive loop.
 	 */
 	async run(): Promise<void> {
+		try {
+			await this.runInteractiveLoop();
+		} catch (error) {
+			const cleanupErrors: unknown[] = [];
+			try {
+				this.stop();
+			} catch (cleanupError) {
+				cleanupErrors.push(cleanupError);
+			}
+			try {
+				await this.disposeRuntimeHost();
+			} catch (cleanupError) {
+				cleanupErrors.push(cleanupError);
+			}
+			try {
+				await this.releaseDaemonLeaseOnQuit();
+			} catch (cleanupError) {
+				cleanupErrors.push(cleanupError);
+			}
+			try {
+				stopThemeWatcher();
+			} catch (cleanupError) {
+				cleanupErrors.push(cleanupError);
+			}
+			if (cleanupErrors.length > 0) {
+				throw new AggregateError([error, ...cleanupErrors], "Interactive mode failed and cleanup did not complete");
+			}
+			throw error;
+		}
+	}
+
+	private async runInteractiveLoop(): Promise<void> {
 		await this.init();
 
 		// Start version check asynchronously
@@ -1902,8 +1979,8 @@ export class InteractiveMode {
 					void this.flushCompactionQueue({ willRetry: false });
 					return { cancelled: false };
 				},
-				switchSession: async (sessionPath, options) => {
-					return this.handleResumeSession(sessionPath, options);
+				switchSession: async (sessionRef, options) => {
+					return this.handleResumeSession(sessionRef, options);
 				},
 				reload: async () => {
 					await this.handleReloadCommand();
@@ -1968,6 +2045,7 @@ export class InteractiveMode {
 		});
 		await this.daemonAttach.start();
 		const acquireOutcome = await this.acquireCurrentSessionLease();
+		this.bindDaemonWorkObservation(this.session);
 		this.runtimeHost.setPrepareSessionReplacement(async ({ previousSessionId, sessionId, cwd }) => {
 			const rekey = await this.daemonAttach.prepareRekey(previousSessionId, sessionId, cwd);
 			if (!rekey) {
@@ -1977,6 +2055,7 @@ export class InteractiveMode {
 				commit: async () => {
 					await rekey.commit();
 					this.daemonLeaseSessionId = sessionId;
+					this.bindDaemonWorkObservation(this.session);
 				},
 				rollback: () => rekey.rollback(),
 				dispose: async () => {
@@ -2025,6 +2104,7 @@ export class InteractiveMode {
 		}
 		if (outcome.kind === "granted") {
 			await this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
+			void this.session.gitContextProvider.refresh();
 		}
 	}
 
@@ -2077,13 +2157,13 @@ export class InteractiveMode {
 	 * or the re-open is cancelled.
 	 */
 	private async absorbRemoteSessionChangesFromDisk(): Promise<void> {
-		const sessionFile = this.session.sessionFile;
-		if (!sessionFile) {
+		const sessionRef = this.session.sessionRef;
+		if (!sessionRef) {
 			await this.session.reload().catch(() => {});
 			return;
 		}
 		try {
-			const result = await this.runtimeHost.switchSession(sessionFile, {
+			const result = await this.runtimeHost.switchSession(sessionRef, {
 				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 			});
 			if (result.cancelled) {
@@ -2148,28 +2228,11 @@ export class InteractiveMode {
 			initialInput?: number[];
 		};
 		const authorizationSubset = preamble.authorization;
-		const rpcGrant = parseIrohRemoteRpcGrant(authorizationSubset.rpcGrant, "relay rpcGrant");
+		const authorization = createTuiRelayAuthorization(authorizationSubset);
+		const rpcGrant = authorization.client.rpcGrant;
 		// Worktree-bound conversations sanitize with the worktree checkout as the
 		// root; the parent checkout and the worktrees root must also redact.
 		const sanitizerOptions = getRelayServingSanitizerOptions(authorizationSubset, getAgentDir());
-		const authorization = {
-			ok: true as const,
-			allowTools: "",
-			client: {
-				nodeId: authorizationSubset.clientNodeId,
-				label: authorizationSubset.clientNodeId,
-				allowedWorkspaces: [authorizationSubset.workspaceName],
-				allowedTools: "",
-				rpcGrant,
-				pairedAt: 0,
-				lastSeenAt: 0,
-			},
-			paired: true,
-			pairingSecretConsumed: false,
-			workspace: { name: authorizationSubset.workspaceName, path: authorizationSubset.workspacePath },
-			workspaceNames: [authorizationSubset.workspaceName],
-			workspaces: [{ name: authorizationSubset.workspaceName, status: "available" as const }],
-		} satisfies IrohRemoteClientAuthorizationSuccess;
 
 		// The daemon's identity from the preamble: the phone verifies the saved
 		// host node id in the handshake response and every notification destination.
@@ -2278,7 +2341,7 @@ export class InteractiveMode {
 								authorization.workspaceNames = [...forwarded.workspaceMetadata.workspaceNames];
 								authorization.workspaces = forwarded.workspaceMetadata.workspaces.map((workspace) => ({
 									...workspace,
-								})) as typeof authorization.workspaces;
+								}));
 							}
 							return forwarded.response;
 						}
@@ -2342,6 +2405,7 @@ export class InteractiveMode {
 	}
 
 	private async releaseDaemonLeaseOnQuit(): Promise<void> {
+		this.daemonWorkObservation.dispose();
 		if (this.daemonAttach.connectionState() === "disabled") {
 			return;
 		}
@@ -2381,11 +2445,15 @@ export class InteractiveMode {
 
 	private beginSessionReplacementUi(): void {
 		this.sessionRenderSuspension ??= this.ui.suspendRendering();
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
 		this.dismissSubagentInspector?.();
 		this.resetExtensionUI();
 	}
 
 	private async rebindReplacementSession(session: AgentSession): Promise<void> {
+		this.bindDaemonWorkObservation(session);
 		await this.rebindCurrentSession(session);
 		this.ui.requestRender(true);
 		const suspension = this.sessionRenderSuspension;
@@ -2393,12 +2461,25 @@ export class InteractiveMode {
 		suspension?.release();
 	}
 
+	private bindDaemonWorkObservation(session: AgentSession): void {
+		if (this.daemonAttach.connectionState() === "disabled") return;
+		this.daemonWorkObservation.bind(session.gitContextProvider);
+	}
+
 	private async rebindCurrentSession(session: AgentSession): Promise<void> {
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
 		if (this.session !== session) {
 			throw new Error("Agent session changed before interactive rebind");
 		}
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
+		this.clearWorkSummaryTimer();
+		this.clearPromptCacheAlertTimer();
+		this.workSummary = undefined;
 		this.applyRuntimeSettings(session);
 		session.setHostInteraction(this.createHostInteraction());
 		await this.bindCurrentSessionExtensions(session);
@@ -2406,6 +2487,7 @@ export class InteractiveMode {
 			throw new Error("Agent session changed during interactive rebind");
 		}
 		this.subscribeToAgent(session);
+		this.subscribeToBackgroundJobs(session);
 		await this.updateAvailableProviderCount();
 		this.closePlanDetails();
 		this.refreshPlanningUi();
@@ -2460,8 +2542,9 @@ export class InteractiveMode {
 	 * resources (e.g. the subagent repaint interval) must be released here.
 	 */
 	private disposePendingTools(): void {
-		for (const component of this.pendingTools.values()) {
+		for (const [toolCallId, component] of this.pendingTools) {
 			component.dispose();
+			this.liveBackgroundJobTools.delete(toolCallId);
 		}
 		this.pendingTools.clear();
 	}
@@ -2627,6 +2710,66 @@ export class InteractiveMode {
 		this.scheduleTurnDoneAlertTimer(0);
 	}
 
+	private clearPromptCacheAlertTimer(): void {
+		if (this.promptCacheAlertTimer) clearTimeout(this.promptCacheAlertTimer);
+		this.promptCacheAlertTimer = undefined;
+		this.promptCacheAlertAt = undefined;
+	}
+
+	/** When idle keepalive ends, alert through the turn-done channel that the cache will now lapse. */
+	private schedulePromptCacheAlert(): void {
+		const status = this.session.getPromptCacheStatus();
+		const until = status?.kind === "retained" ? status.keepAliveUntil : undefined;
+		if (until === this.promptCacheAlertAt) return;
+		this.clearPromptCacheAlertTimer();
+		if (until === undefined || this.settingsManager.getTurnDoneAlert() === "off") return;
+		this.promptCacheAlertAt = until;
+		this.promptCacheAlertTimer = setTimeout(
+			() => {
+				this.promptCacheAlertTimer = undefined;
+				this.promptCacheAlertAt = undefined;
+				const mode = this.settingsManager.getTurnDoneAlert();
+				if (mode === "off" || this.shutdownRequested || this.isShuttingDown || this.session.isStreaming) return;
+				if (this.ui.terminal.focusState === "focused") return;
+				const current = this.session.getPromptCacheStatus();
+				if (current?.kind !== "retained" || current.expiresAt === undefined) return;
+				const remaining = current.expiresAt - Date.now();
+				if (remaining <= 0) return;
+				if (mode === "notify") {
+					const dir = path.basename(this.sessionManager.getCwd());
+					this.ui.terminal.notify("Volt", `Prompt cache expires in ${Math.ceil(remaining / 60_000)}m · ${dir}`);
+				} else {
+					this.ui.terminal.alert();
+				}
+			},
+			Math.max(0, until - Date.now()),
+		);
+		this.promptCacheAlertTimer.unref?.();
+	}
+
+	private clearWorkSummaryTimer(): void {
+		if (!this.workSummaryTimer) return;
+		clearTimeout(this.workSummaryTimer);
+		this.workSummaryTimer = undefined;
+	}
+
+	/** After settlement, record how long the operation ran and when it finished unless new work starts first. */
+	private scheduleWorkSummary(): void {
+		this.clearWorkSummaryTimer();
+		const summary = this.workSummary;
+		this.workSummary = undefined;
+		if (!summary || summary.aborted || this.shutdownRequested) return;
+		const doneAt = Date.now();
+		const text = `Worked for ${formatElapsedDuration(doneAt - summary.startedAt)} · done ${formatClockTime(doneAt)}`;
+		this.workSummaryTimer = setTimeout(() => {
+			this.workSummaryTimer = undefined;
+			if (this.isShuttingDown || this.session.isStreaming || this.session.isCompacting) return;
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(new Text(theme.fg("dim", text), 1, 0));
+			this.ui.requestRender();
+		}, WORK_SUMMARY_IDLE_MS);
+	}
+
 	private scheduleTurnDoneAlertTimer(delayMs: number): void {
 		this.turnDoneAlertTimer = setTimeout(() => {
 			this.turnDoneAlertTimer = undefined;
@@ -2725,6 +2868,7 @@ export class InteractiveMode {
 	}
 
 	private resetExtensionUI(): void {
+		this.dismissBackgroundJobsInspector?.();
 		if (this.extensionSelector) {
 			this.hideExtensionSelector();
 		}
@@ -2736,6 +2880,7 @@ export class InteractiveMode {
 		}
 		this.ui.hideOverlay();
 		this.clearTurnDoneAlertTimer();
+		this.clearPromptCacheAlertTimer();
 		this.clearExtensionTerminalInputListeners();
 		this.setExtensionFooter(undefined);
 		this.setExtensionHeader(undefined);
@@ -3019,6 +3164,7 @@ export class InteractiveMode {
 			};
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
+			this.dismissBackgroundJobsInspector?.();
 			this.extensionSelectorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionSelector = new ExtensionSelectorComponent(
 				title,
@@ -3106,6 +3252,7 @@ export class InteractiveMode {
 			};
 			opts?.signal?.addEventListener("abort", onAbort, { once: true });
 
+			this.dismissBackgroundJobsInspector?.();
 			this.extensionInputRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionInput = new ExtensionInputComponent(
 				title,
@@ -3149,6 +3296,7 @@ export class InteractiveMode {
 	 */
 	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			this.dismissBackgroundJobsInspector?.();
 			this.extensionEditorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionEditor = new ExtensionEditorComponent(
 				this.ui,
@@ -3190,6 +3338,7 @@ export class InteractiveMode {
 	 * Pass undefined to restore the default editor.
 	 */
 	private setCustomEditorComponent(factory: EditorFactory | undefined): void {
+		this.dismissBackgroundJobsInspector?.();
 		this.editorComponentFactory = factory;
 
 		// Save text from current editor before switching
@@ -3292,24 +3441,30 @@ export class InteractiveMode {
 	): Promise<T> {
 		const savedText = this.editor.getText();
 		const isOverlay = options?.overlay ?? false;
+		if (!isOverlay) this.dismissBackgroundJobsInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
+		let nativeQuestion = false;
 
 		const restoreView = () => {
 			this.editorContainer.clear();
 			this.editorContainer.addChild(this.editor);
-			this.editor.setText(savedText);
+			// Native questions leave the editor untouched, including paste expansions,
+			// cursor/undo state, and queued text restored during an external abort.
+			if (!nativeQuestion) this.editor.setText(savedText);
 			this.activateView(previousView, previousFocus ?? this.editor, false);
 		};
 
 		return new Promise((resolve, reject) => {
 			let component: Component & { dispose?(): void };
+			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
 
 			const close = (result: T) => {
 				if (closed) return;
 				closed = true;
-				if (isOverlay) this.ui.hideOverlay();
+				// A local jobs inspector can be stacked above an asynchronous extension dialog.
+				if (isOverlay) overlayHandle?.hide();
 				else restoreView();
 				resolve(result);
 				try {
@@ -3335,9 +3490,16 @@ export class InteractiveMode {
 							const width = (component as { width?: number }).width;
 							return width ? { width } : undefined;
 						};
-						const handle = this.ui.showOverlay(component, resolveOptions());
+						overlayHandle = this.ui.showOverlay(component, resolveOptions());
 						// Expose handle to caller for visibility control
-						options?.onHandle?.(handle);
+						options?.onHandle?.(overlayHandle);
+					} else if (component instanceof UserInputDialog) {
+						// Keep native preferences in the conversation with its real status,
+						// footer and plan pane; extensions retain their dedicated view.
+						nativeQuestion = true;
+						this.editorContainer.clear();
+						this.editorContainer.addChild(component);
+						this.activateView(this.conversationView, component);
 					} else {
 						this.activateView(this.createDedicatedView(component), component);
 					}
@@ -3440,7 +3602,8 @@ export class InteractiveMode {
 				}
 				return;
 			}
-			if (this.session.isStreaming) {
+			// Preserve foreground Bash's interrupt priority when only background jobs remain.
+			if (this.session.isStreaming || (!this.session.isBashRunning && this.session.hasBackgroundJobs)) {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "keyboard_interrupt" }).catch((error) => {
 					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
 				});
@@ -3480,8 +3643,7 @@ export class InteractiveMode {
 			this.runKeyAction(() => this.cycleModel("backward")),
 		);
 
-		// Global debug handler on TUI (works regardless of focus)
-		this.ui.onDebug = () => this.handleDebugCommand();
+		this.setupGlobalInputRouting();
 		this.defaultEditor.onAction("app.model.select", () => this.showModelSelector());
 		this.defaultEditor.onAction("app.tools.expand", () => this.toggleToolOutputExpansion());
 		this.defaultEditor.onAction("app.thinking.toggle", () => this.toggleThinkingBlockVisibility());
@@ -3494,7 +3656,19 @@ export class InteractiveMode {
 		this.defaultEditor.onAction("app.session.resume", () => this.showSessionSelector());
 		this.defaultEditor.onAction("app.subagents.open", () => this.showSubagentInspector());
 
-		this.defaultEditor.onChange = (text: string) => {
+		let previousEditorText = this.editor.getText();
+		this.defaultEditor.onChange = (text, change) => {
+			if (text !== previousEditorText) {
+				this.lastSigintTime = 0;
+				// Keep intent while composing /quit, including completion whitespace,
+				// and through submission. Other drafts or deletion withdraw that intent.
+				if (
+					change?.submittedText !== "/quit" &&
+					(!"/quit".startsWith(text.trim()) || !text.startsWith(previousEditorText))
+				)
+					this.quitConfirmation = undefined;
+				previousEditorText = text;
+			}
 			const wasBashMode = this.isBashMode;
 			const hadText = this.editorHasText;
 			this.isBashMode = text.trimStart().startsWith("!");
@@ -3508,6 +3682,24 @@ export class InteractiveMode {
 		this.defaultEditor.onPasteImage = () => {
 			this.handleClipboardImagePaste();
 		};
+	}
+
+	private setupGlobalInputRouting(): void {
+		this.globalInputUnsubscribe?.();
+		this.globalInputUnsubscribe = this.ui.addInputListener((data) => {
+			if (this.keybindings.matches(data, "app.jobs.open")) {
+				if (!isKeyRelease(data) && !isKeyRepeat(data)) {
+					if (this.backgroundJobsOverlay?.isFocused()) this.backgroundJobsInspector?.handleInput(data);
+					else this.showBackgroundJobsInspector();
+				}
+				return { consume: true };
+			}
+			if (!this.keybindings.matches(data, "app.debug")) return undefined;
+			if (!isKeyRelease(data) && !isKeyRepeat(data)) {
+				this.runKeyAction(() => this.handleDebugCommand());
+			}
+			return { consume: true };
+		});
 	}
 
 	private setupPlanPaneInputRouting(): void {
@@ -3647,6 +3839,13 @@ export class InteractiveMode {
 			text = text.trim();
 			if (!text) return;
 
+			// Local inspection never enters prompt admission or the foreground wait queue.
+			if (text === "/jobs") {
+				this.editor.setText("");
+				this.showBackgroundJobsInspector();
+				return;
+			}
+
 			if (this.isDrainViewerActive()) {
 				// Read-only while the remote turn drains: keep the text in the editor
 				// (it lands un-submitted once the handoff completes).
@@ -3655,16 +3854,15 @@ export class InteractiveMode {
 			}
 
 			// Handle commands
-			if (text === "/plan") {
+			if (text === "/plan" || text === "/build") {
 				this.editor.setText("");
-				this.refreshPlanningUi(await this.session.setAgentMode("plan"));
-				this.showStatus("Plan mode: agent tools are read-only");
-				return;
-			}
-			if (text === "/build") {
-				this.editor.setText("");
-				this.refreshPlanningUi(await this.session.setAgentMode("build"));
-				this.showStatus("Build mode");
+				const mode = text === "/plan" ? "plan" : "build";
+				try {
+					this.refreshPlanningUi(await this.session.setAgentMode(mode));
+					this.showStatus(mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
+				} catch (error: unknown) {
+					this.showError(error instanceof Error ? error.message : String(error));
+				}
 				return;
 			}
 			if (text === "/plan-details") {
@@ -3834,7 +4032,7 @@ export class InteractiveMode {
 				return;
 			}
 			if (text === "/debug") {
-				this.handleDebugCommand();
+				this.runKeyAction(() => this.handleDebugCommand());
 				this.editor.setText("");
 				return;
 			}
@@ -3855,10 +4053,7 @@ export class InteractiveMode {
 			}
 			if (text === "/quit") {
 				this.editor.setText("");
-				if (!this.confirmQuitWithAttachedPhone()) {
-					return;
-				}
-				await this.shutdown();
+				await this.requestQuit();
 				return;
 			}
 
@@ -3923,6 +4118,69 @@ export class InteractiveMode {
 		});
 	}
 
+	private subscribeToBackgroundJobs(session: AgentSession): void {
+		this.unsubscribeBackgroundJobs?.();
+		const source = session.backgroundJobs;
+		let elapsedTimer: ReturnType<typeof setInterval> | undefined;
+		const coalescer = new StreamingRenderCoalescer<void>(() => {
+			if (this.session !== session || this.isShuttingDown) return;
+			const jobs = source.list();
+			const launchJobs = new Map(jobs.map((job) => [job.toolCallId, job]));
+			const activeJobs = jobs.filter((job) => job.status === "running" || job.status === "cancelling");
+			const activeToolCalls = new Set(activeJobs.map((job) => job.toolCallId));
+			// Settled launch cards survive reconstruction, but no longer need live invalidation.
+			// Retain only one launch per accessible manager record, not every jobs inspection.
+			for (const [toolCallId, binding] of this.liveBackgroundJobTools) {
+				const { component } = binding;
+				const launchJob = launchJobs.get(toolCallId);
+				if (launchJob) {
+					if (!binding.settled) component.invalidate();
+					binding.settled = launchJob.endedAt !== undefined;
+				} else if (this.pendingTools.has(toolCallId)) {
+					component.invalidate();
+				} else {
+					if (binding.settled !== undefined) {
+						component.invalidate();
+						component.dispose();
+					}
+					this.liveBackgroundJobTools.delete(toolCallId);
+				}
+			}
+			this.backgroundJobsStatus.invalidate();
+			this.ui.requestRender();
+			if (activeToolCalls.size > 0 && elapsedTimer === undefined) {
+				elapsedTimer = setInterval(() => coalescer.update(undefined), 1000);
+				elapsedTimer.unref();
+			} else if (activeToolCalls.size === 0 && elapsedTimer !== undefined) {
+				clearInterval(elapsedTimer);
+				elapsedTimer = undefined;
+			}
+		});
+		this.backgroundJobsRenderCoalescer = coalescer;
+		const unsubscribe = source.subscribe(() => {
+			// Release settled bindings immediately on grant/branch changes or eviction, even
+			// if access returns before the next coalesced repaint.
+			const accessibleToolCalls = new Set(source.list().map((job) => job.toolCallId));
+			for (const [toolCallId, binding] of this.liveBackgroundJobTools) {
+				if (binding.settled && !accessibleToolCalls.has(toolCallId)) {
+					binding.component.invalidate();
+					binding.component.dispose();
+					this.liveBackgroundJobTools.delete(toolCallId);
+				}
+			}
+			coalescer.update(undefined);
+		});
+		this.unsubscribeBackgroundJobs = () => {
+			unsubscribe();
+			coalescer.dispose();
+			clearInterval(elapsedTimer);
+			this.backgroundJobsRenderCoalescer = undefined;
+			for (const { component } of this.liveBackgroundJobTools.values()) component.dispose();
+			this.liveBackgroundJobTools.clear();
+		};
+		coalescer.update(undefined);
+	}
+
 	private async handleEvent(event: AgentSessionEvent): Promise<void> {
 		if (!this.isInitialized) {
 			await this.init();
@@ -3932,8 +4190,12 @@ export class InteractiveMode {
 
 		switch (event.type) {
 			case "agent_start":
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
 				this.disposePendingTools();
-				this.turnStartedAt = Date.now();
+				this.turnStartedAt = event.startedAt;
+				this.clearWorkSummaryTimer();
+				this.workSummary = { startedAt: event.startedAt, aborted: false };
 				this.startWorkingElapsedTicker();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
@@ -3979,6 +4241,11 @@ export class InteractiveMode {
 
 			case "planning_state_changed":
 				this.refreshPlanningUi(event.planning);
+				break;
+
+			case "prompt_cache_changed":
+				this.schedulePromptCacheAlert();
+				this.ui.requestRender();
 				break;
 
 			case "ui_action_state_changed":
@@ -4029,6 +4296,7 @@ export class InteractiveMode {
 										content.id,
 										content.arguments,
 										{
+											liveProgress: true,
 											showImages: this.settingsManager.getShowImages(),
 											imageWidthCells: this.settingsManager.getImageWidthCells(),
 										},
@@ -4101,6 +4369,7 @@ export class InteractiveMode {
 						event.toolCallId,
 						event.args,
 						{
+							liveProgress: true,
 							showImages: this.settingsManager.getShowImages(),
 							imageWidthCells: this.settingsManager.getImageWidthCells(),
 						},
@@ -4111,6 +4380,9 @@ export class InteractiveMode {
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 					this.pendingTools.set(event.toolCallId, component);
+				}
+				if (event.toolName === "bash" || event.toolName === "subagent" || event.toolName === "jobs") {
+					this.liveBackgroundJobTools.set(event.toolCallId, { component });
 				}
 				component.markExecutionStarted();
 				this.ui.requestRender();
@@ -4131,6 +4403,12 @@ export class InteractiveMode {
 				if (component) {
 					component.updateResult({ ...event.result, isError: event.isError });
 					this.pendingTools.delete(event.toolCallId);
+					if (event.toolName === "jobs") {
+						// Returned inspection snapshots do not follow worker updates.
+						this.liveBackgroundJobTools.delete(event.toolCallId);
+					} else if (this.liveBackgroundJobTools.has(event.toolCallId)) {
+						this.backgroundJobsRenderCoalescer?.update(undefined);
+					}
 					this.ui.requestRender();
 				}
 				break;
@@ -4155,6 +4433,12 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.disposePendingTools();
+				if (this.workSummary && !event.willRetry) {
+					const lastAssistant = event.messages.findLast(
+						(message): message is AssistantMessage => message.role === "assistant",
+					);
+					this.workSummary.aborted = lastAssistant?.stopReason === "aborted";
+				}
 
 				this.scheduleTurnDoneAlert(event);
 				this.updateEditorBorderColor(false);
@@ -4163,10 +4447,16 @@ export class InteractiveMode {
 				break;
 
 			case "agent_settled":
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
+				this.scheduleWorkSummary();
 				await this.checkShutdownRequested();
 				break;
 
 			case "compaction_start": {
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
+				this.clearWorkSummaryTimer();
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -4193,6 +4483,8 @@ export class InteractiveMode {
 			}
 
 			case "compaction_end": {
+				this.quitConfirmation = undefined;
+				this.lastSigintTime = 0;
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(false);
 				}
@@ -4221,6 +4513,9 @@ export class InteractiveMode {
 							new Date().toISOString(),
 						),
 					);
+					for (const line of formatCompactionUsage(event.result.details)) {
+						this.chatContainer.addChild(new Text(theme.fg("dim", line), 1, 0));
+					}
 					this.footer.invalidate();
 				} else if (event.errorMessage) {
 					if (event.reason === "manual") {
@@ -4348,7 +4643,19 @@ export class InteractiveMode {
 			case "custom": {
 				if (message.display) {
 					const renderer = this.session.extensionRunner.getMessageRenderer(message.customType);
-					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings());
+					const component = new CustomMessageComponent(
+						resolveReviewAccountingMessage(this.sessionManager, message),
+						renderer,
+						this.getMarkdownThemeWithSettings(),
+						(id) => {
+							// Replay-only launch snapshots may still say Running; keep their terminal notices visible.
+							for (const { component } of this.liveBackgroundJobTools.values()) {
+								if (component.getBackgroundJobId() === id && this.chatContainer.children.includes(component))
+									return true;
+							}
+							return false;
+						},
+					);
 					component.setExpanded(this.toolOutputExpanded);
 					this.chatContainer.addChild(component);
 				}
@@ -4432,7 +4739,12 @@ export class InteractiveMode {
 		sessionContext: SessionContext,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
+		this.backgroundJobsRenderCoalescer?.flush();
+		const liveBackgroundJobTools = new Map(this.liveBackgroundJobTools);
+		// Pending waits have live render state too. Re-register them below instead of disposing them.
+		for (const toolCallId of liveBackgroundJobTools.keys()) this.pendingTools.delete(toolCallId);
 		this.disposePendingTools();
+		this.liveBackgroundJobTools.clear();
 		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
 
 		if (options.updateFooter) {
@@ -4447,18 +4759,27 @@ export class InteractiveMode {
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
-						const component = new ToolExecutionComponent(
-							content.name,
-							content.id,
-							content.arguments,
-							{
-								showImages: this.settingsManager.getShowImages(),
-								imageWidthCells: this.settingsManager.getImageWidthCells(),
-							},
-							this.getRegisteredToolDefinition(content.name),
-							this.ui,
-							this.sessionManager.getCwd(),
-						);
+						// Reuse this runtime's retained launch cards across compaction/display rebuilds.
+						// Other rows use replay options rather than live progress.
+						const liveCard = liveBackgroundJobTools.get(content.id);
+						const component =
+							liveCard?.component ??
+							new ToolExecutionComponent(
+								content.name,
+								content.id,
+								content.arguments,
+								{
+									showImages: this.settingsManager.getShowImages(),
+									imageWidthCells: this.settingsManager.getImageWidthCells(),
+								},
+								this.getRegisteredToolDefinition(content.name),
+								this.ui,
+								this.sessionManager.getCwd(),
+							);
+						if (liveCard) {
+							this.liveBackgroundJobTools.set(content.id, liveCard);
+							liveBackgroundJobTools.delete(content.id);
+						}
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
 
@@ -4492,6 +4813,7 @@ export class InteractiveMode {
 			}
 		}
 
+		for (const { component } of liveBackgroundJobTools.values()) component.dispose();
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
@@ -4562,9 +4884,10 @@ export class InteractiveMode {
 
 	private handleCtrlC(): void {
 		const now = Date.now();
-		if (now - this.lastSigintTime < 500) {
-			void this.shutdown();
+		if (this.editor.getText().length === 0 && (now - this.lastSigintTime < 500 || this.hasQuitConfirmation(now))) {
+			this.runKeyAction(() => this.requestQuit());
 		} else {
+			this.quitConfirmation = undefined;
 			this.clearEditor();
 			this.lastSigintTime = now;
 		}
@@ -4572,30 +4895,40 @@ export class InteractiveMode {
 
 	private handleCtrlD(): void {
 		// Only called when editor is empty (enforced by CustomEditor)
-		if (!this.confirmQuitWithAttachedPhone()) {
-			return;
-		}
-		void this.shutdown();
+		this.runKeyAction(() => this.requestQuit());
+	}
+
+	private hasQuitConfirmation(now: number): boolean {
+		return (
+			this.quitConfirmation !== undefined &&
+			now - this.quitConfirmation.warnedAt < 3000 &&
+			this.quitConfirmation.activityRevision === this.session.activityRevision &&
+			this.quitConfirmation.signal === this.session.signal
+		);
 	}
 
 	/**
-	 * Quit seam (§6.2): when a phone is attached over a relay and a turn is
-	 * streaming, quitting kills the turn (the daemon resumes from the file, not
-	 * the in-flight state). Require a second quit within 3s to confirm.
+	 * Every interactive quit path must confirm before disposing active work.
+	 * Phone attachment does not change local runtime ownership or this protection.
 	 */
-	private confirmQuitWithAttachedPhone(): boolean {
-		if (!this.session.isStreaming || this.daemonAttach.relayCount() < 1) {
-			return true;
-		}
+	private async requestQuit(): Promise<void> {
 		const now = Date.now();
-		if (now - this.lastQuitWarningAt < 3000) {
-			return true;
+		if (
+			(this.session.isBusy || this.session.hasBackgroundJobs || this.activeInteractiveReview) &&
+			!this.hasQuitConfirmation(now)
+		) {
+			this.quitConfirmation = {
+				warnedAt: now,
+				activityRevision: this.session.activityRevision,
+				signal: this.session.signal,
+			};
+			this.showWarning(
+				"Work is active; quitting will interrupt it. Quit again within 3 seconds to confirm. Use /debug to capture diagnostics.",
+			);
+			return;
 		}
-		this.lastQuitWarningAt = now;
-		this.showWarning(
-			"A phone is attached and a turn is streaming; quitting will kill the turn. Quit again to confirm.",
-		);
-		return false;
+		this.quitConfirmation = undefined;
+		await this.shutdown();
 	}
 
 	/**
@@ -4604,6 +4937,11 @@ export class InteractiveMode {
 	 * repaint the final frame while the process is exiting.
 	 */
 	private isShuttingDown = false;
+
+	private disposeRuntimeHost(): Promise<void> {
+		this.runtimeDisposePromise ??= Promise.resolve().then(() => this.runtimeHost.dispose());
+		return this.runtimeDisposePromise;
+	}
 
 	private async flushStdout(): Promise<void> {
 		await new Promise<void>((resolve) => {
@@ -4628,6 +4966,9 @@ export class InteractiveMode {
 	private async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
 		if (this.isShuttingDown) return;
 		this.isShuttingDown = true;
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
 		// Keep signal handlers registered until terminal cleanup has completed.
 		// `signal-exit` checks the listener list during the same SIGTERM/SIGHUP
 		// dispatch and re-sends the signal if only its own listeners remain.
@@ -4647,7 +4988,7 @@ export class InteractiveMode {
 			// terminal. If the terminal is gone, the restore writes below emit EIO,
 			// which the stdout/stderr error handler turns into emergencyTerminalExit;
 			// the render loop is already idle, so this cannot hot-spin (see #4144).
-			await this.runtimeHost.dispose();
+			await this.disposeRuntimeHost();
 			// Hand the session back to the daemon only after the runtime finished
 			// writing the session file, so the daemon's lazy resume sees final state.
 			await this.releaseDaemonLeaseOnQuit();
@@ -4666,7 +5007,7 @@ export class InteractiveMode {
 		await this.ui.terminal.drainInput(1000);
 
 		this.stop();
-		await this.runtimeHost.dispose();
+		await this.disposeRuntimeHost();
 		// Hand the session back to the daemon only after the runtime finished
 		// writing the session file, so the daemon's lazy resume sees final state.
 		await this.releaseDaemonLeaseOnQuit();
@@ -4819,6 +5160,11 @@ export class InteractiveMode {
 	private async handleFollowUp(): Promise<void> {
 		const text = (this.editor.getExpandedText?.() ?? this.editor.getText()).trim();
 		if (!text) return;
+		if (text === "/jobs") {
+			this.editor.setText("");
+			this.showBackgroundJobsInspector();
+			return;
+		}
 
 		// Queue input during compaction (extension commands execute immediately)
 		if (this.session.isCompacting) {
@@ -5561,7 +5907,6 @@ export class InteractiveMode {
 		const terminal = previousUi.terminal;
 		const showHardwareCursor = previousUi.getShowHardwareCursor();
 		const clearOnShrink = previousUi.getClearOnShrink();
-		const onDebug = previousUi.onDebug;
 		if (previousUi instanceof TuiMainScreen) {
 			this.mainScreenRenderState = previousUi.captureRenderState();
 		}
@@ -5580,7 +5925,6 @@ export class InteractiveMode {
 			onRightClickPaste: this.onRightClickPaste,
 		});
 		nextUi.setClearOnShrink(clearOnShrink);
-		nextUi.onDebug = onDebug;
 		if (nextUi instanceof TuiMainScreen && this.mainScreenRenderState) {
 			nextUi.restoreRenderState(this.mainScreenRenderState);
 		}
@@ -5591,6 +5935,7 @@ export class InteractiveMode {
 		this.activateView(this.activeView, focus, false);
 		nextUi.invalidate();
 		if (startRenderer) nextUi.start();
+		this.setupGlobalInputRouting();
 		this.setupPlanPaneInputRouting();
 		this.rebindExtensionTerminalInputListeners();
 		if (
@@ -5610,6 +5955,9 @@ export class InteractiveMode {
 	}
 
 	private activateView(view: ActiveViewDescriptor, focus: Component | null, forceRender = true): void {
+		// A dedicated view must never receive input behind the jobs overlay.
+		if (focus === this.backgroundJobsInspector) focus = this.editor;
+		this.dismissBackgroundJobsInspector?.();
 		this.ui.clear();
 		for (const component of view.regularComponents) this.ui.addChild(component);
 		if (isViewportTUI(this.ui)) this.ui.setLayoutRoot(view.fullscreenRoot);
@@ -5636,6 +5984,7 @@ export class InteractiveMode {
 	private showSelector(
 		create: (done: () => void) => { component: Component; focus: Component; dispose?: () => void },
 	): void {
+		this.dismissBackgroundJobsInspector?.();
 		this.dismissSubagentInspector?.();
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
@@ -5659,6 +6008,48 @@ export class InteractiveMode {
 			return;
 		}
 		this.activateView(this.createDedicatedView(component), created.focus);
+	}
+
+	private showBackgroundJobsInspector(): void {
+		if (this.isShuttingDown || this.sessionRenderSuspension) return;
+		if (this.backgroundJobsOverlay) {
+			this.backgroundJobsOverlay.focus();
+			this.backgroundJobsInspector?.refresh();
+			return;
+		}
+		let closed = false;
+		let overlay: OverlayHandle | undefined;
+		const inspector = new BackgroundJobsInspector(this.session.backgroundJobs, {
+			getHeight: () => Math.max(1, this.ui.terminal.rows - 2),
+			requestRender: () => this.ui.requestRender(),
+			onClose: () => close(),
+		});
+		const close = () => {
+			if (closed) return;
+			closed = true;
+			inspector.dispose();
+			// Remove only this overlay; another dialog can be stacked above it.
+			overlay?.hide();
+			if (this.backgroundJobsInspector === inspector) {
+				this.backgroundJobsInspector = undefined;
+				this.backgroundJobsOverlay = undefined;
+				this.dismissBackgroundJobsInspector = undefined;
+			}
+			this.ui.requestRender();
+		};
+		try {
+			overlay = this.ui.showOverlay(inspector, {
+				width: "100%",
+				maxHeight: "100%",
+				margin: { top: 1, bottom: 1, left: 0, right: 0 },
+			});
+		} catch (error) {
+			inspector.dispose();
+			throw error;
+		}
+		this.backgroundJobsInspector = inspector;
+		this.backgroundJobsOverlay = overlay;
+		this.dismissBackgroundJobsInspector = close;
 	}
 
 	private showSubagentInspector(): void {
@@ -5709,12 +6100,17 @@ export class InteractiveMode {
 	}
 
 	private showSettingsSelector(): void {
+		const model = this.session.model;
+		const currentModel = model ? `${model.provider}/${model.id}` : undefined;
+		const settingsManager = this.settingsManager;
 		this.session.modelRegistry.refresh();
 		const availableModels = this.session.modelRegistry.getAvailable().map((model) => `${model.provider}/${model.id}`);
 		this.showSelector((done) => {
 			const selector = new SettingsSelectorComponent(
 				{
 					autoCompact: this.session.autoCompactionEnabled,
+					currentModel,
+					compactionThresholdTokens: currentModel ? settingsManager.getCompactionThresholdTokens(currentModel) : 0,
 					personality: this.settingsManager.getPersonality(),
 					showImages: this.settingsManager.getShowImages(),
 					imageWidthCells: this.settingsManager.getImageWidthCells(),
@@ -5744,6 +6140,7 @@ export class InteractiveMode {
 					clearOnShrink: this.settingsManager.getClearOnShrink(),
 					showTerminalProgress: this.settingsManager.getShowTerminalProgress(),
 					turnDoneAlert: this.settingsManager.getTurnDoneAlert(),
+					promptCacheKeepAlive: this.settingsManager.getPromptCacheKeepAlive(),
 					tuiMode: this.ui.mode,
 					fullscreenExitOutput: this.settingsManager.getFullscreenExitOutput(),
 					fullscreenScrollbar: this.settingsManager.getFullscreenScrollbar(),
@@ -5753,6 +6150,9 @@ export class InteractiveMode {
 					onAutoCompactChange: (enabled) => {
 						this.session.setAutoCompactionEnabled(enabled);
 						this.footer.setAutoCompactEnabled(enabled);
+					},
+					onCompactionThresholdChange: (tokens) => {
+						if (currentModel) settingsManager.setCompactionThresholdTokens(currentModel, tokens);
 					},
 					onPersonalityChange: (personality) => {
 						this.session.setPersonality(personality);
@@ -5880,6 +6280,10 @@ export class InteractiveMode {
 					},
 					onTurnDoneAlertChange: (mode) => {
 						this.settingsManager.setTurnDoneAlert(mode);
+					},
+					onPromptCacheKeepAliveChange: (mode) => {
+						this.settingsManager.setPromptCacheKeepAlive(mode);
+						this.session.promptCacheSettingsChanged();
 					},
 					onTuiModeChange: (mode) => {
 						if (!this.switchTuiMode(mode)) {
@@ -7224,50 +7628,77 @@ export class InteractiveMode {
 	private showSessionSelector(): void {
 		this.showSelector((done) => {
 			const selector = new SessionSelectorComponent(
-				(onProgress) =>
-					SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
-				(onProgress) =>
-					this.sessionManager.usesDefaultSessionDir()
+				(onProgress, query) =>
+					query
+						? SessionManager.search(this.sessionManager.getCwd(), query, this.sessionManager.getSessionDir())
+						: SessionManager.list(this.sessionManager.getCwd(), this.sessionManager.getSessionDir(), onProgress),
+				(onProgress, query) => {
+					if (query) {
+						return this.sessionManager.usesDefaultSessionDir()
+							? SessionManager.searchAll(query)
+							: SessionManager.searchAll(query, this.sessionManager.getSessionDir());
+					}
+					return this.sessionManager.usesDefaultSessionDir()
 						? SessionManager.listAll(onProgress)
-						: SessionManager.listAll(this.sessionManager.getSessionDir(), onProgress),
-				async (sessionPath) => {
+						: SessionManager.listAll(this.sessionManager.getSessionDir(), onProgress);
+				},
+				async (sessionRef) => {
 					done();
-					await this.handleResumeSession(sessionPath);
+					await this.handleResumeSession(sessionRef);
 				},
 				() => {
 					done();
 					this.ui.requestRender();
 				},
 				() => {
-					void this.shutdown();
+					done();
+					this.runKeyAction(() => this.requestQuit());
 				},
 				() => this.ui.requestRender(),
 				{
-					renameSession: async (sessionFilePath: string, nextName: string | undefined) => {
+					renameSession: async (sessionRef, nextName) => {
 						const next = (nextName ?? "").trim();
 						if (!next) return;
-						const currentSessionFile = this.sessionManager.getSessionFile();
-						if (currentSessionFile && path.resolve(currentSessionFile) === path.resolve(sessionFilePath)) {
+						const currentRef = this.sessionManager.getSessionRef();
+						if (
+							currentRef &&
+							currentRef.storeId === sessionRef.storeId &&
+							currentRef.sessionId === sessionRef.sessionId &&
+							currentRef.sessionGeneration === sessionRef.sessionGeneration
+						) {
 							this.session.setSessionName(next);
 							await this.sessionManager.flush();
 							return;
 						}
-						const mgr = SessionManager.open(sessionFilePath);
-						mgr.appendSessionInfo(next);
-						await mgr.flush();
+						const manager = await SessionManager.open(sessionRef);
+						try {
+							manager.appendSessionInfo(next);
+							await manager.flush();
+						} catch (error) {
+							try {
+								await manager.closePersistence();
+							} catch (closeError) {
+								throw new AggregateError(
+									[error, closeError],
+									"Session rename failed and its manager could not be closed",
+								);
+							}
+							throw error;
+						}
+						await manager.closePersistence();
 					},
 					showRenameHint: true,
 					keybindings: this.keybindings,
 				},
 
-				this.sessionManager.getSessionFile(),
+				this.sessionManager.getSessionRef(),
 			);
 			return { component: selector, focus: selector };
 		});
 	}
 
 	private async handleResumeSession(
-		sessionPath: string,
+		sessionRef: SessionReference,
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
 	): Promise<{ cancelled: boolean; seeded: boolean }> {
 		if (this.loadingAnimation) {
@@ -7276,7 +7707,7 @@ export class InteractiveMode {
 		}
 		this.statusContainer.clear();
 		try {
-			const result = await this.runtimeHost.switchSession(sessionPath, {
+			const result = await this.runtimeHost.switchSession(sessionRef, {
 				withSession: options?.withSession,
 				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 			});
@@ -7287,13 +7718,17 @@ export class InteractiveMode {
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
+			if (error instanceof LocalSessionWorktreeRestoreError) {
+				this.showError(error.message);
+				return { cancelled: true, seeded: false };
+			}
 			if (error instanceof MissingSessionCwdError) {
 				const selectedCwd = await this.promptForMissingSessionCwd(error);
 				if (!selectedCwd) {
 					this.showStatus("Resume cancelled");
 					return { cancelled: true, seeded: false };
 				}
-				const result = await this.runtimeHost.switchSession(sessionPath, {
+				const result = await this.runtimeHost.switchSession(sessionRef, {
 					cwdOverride: selectedCwd,
 					withSession: options?.withSession,
 					projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
@@ -7578,6 +8013,7 @@ export class InteractiveMode {
 
 	private showOAuthLoginSelect(dialog: LoginDialogComponent, prompt: OAuthSelectPrompt): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			this.dismissBackgroundJobsInspector?.();
 			const previousView = this.activeView;
 			const previousFocus = this.ui.getFocusedComponent();
 			const restoreDialog = () => this.activateView(previousView, previousFocus ?? dialog);
@@ -7735,6 +8171,7 @@ export class InteractiveMode {
 		await new Promise((resolve) => process.nextTick(resolve));
 
 		const dismissReloadBox = (editor: Component) => {
+			this.dismissBackgroundJobsInspector?.();
 			this.editorContainer.clear();
 			this.editorContainer.addChild(editor);
 			this.ui.setFocus(editor);
@@ -8080,7 +8517,7 @@ export class InteractiveMode {
 		if (sessionName) {
 			info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
 		}
-		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
+		info += `${theme.fg("dim", "Store:")} ${stats.sessionRef?.sessionDirectory ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
 		info += `${theme.bold("Messages")}\n`;
 		info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
@@ -8209,7 +8646,7 @@ export class InteractiveMode {
 					await this.closeLspTrace();
 					let tracePath: string;
 					if (traceArg && traceArg.length > 0) {
-						tracePath = resolvePath(traceArg, this.session.sessionManager.getCwd());
+						tracePath = traceArg;
 					} else {
 						const scratchDirectory = this.createScratchDirectory("volt-lsp-trace-");
 						this.lspTraceScratchDirectory = scratchDirectory;
@@ -8217,7 +8654,8 @@ export class InteractiveMode {
 					}
 					try {
 						await this.session.setLspTraceFile(tracePath);
-						info = `LSP tracing enabled: ${tracePath}\nUse /lsp trace off to disable.`;
+						const resolvedTracePath = this.session.getLspStatus().traceFile ?? tracePath;
+						info = `LSP tracing enabled: ${resolvedTracePath}\nUse /lsp trace off to disable.`;
 					} catch (error) {
 						if (this.lspTraceScratchDirectory) {
 							this.removeScratchDirectory(this.lspTraceScratchDirectory);
@@ -8226,22 +8664,47 @@ export class InteractiveMode {
 					}
 				}
 			}
-		} else if (!status.enabled) {
-			info = "LSP is disabled. Run with --lsp or set lsp.enabled=true in settings.";
-		} else if (status.servers.length === 0) {
-			info = `${theme.bold("LSP Servers")}\n\nNo servers running. Servers spawn on first use of a matching file.`;
 		} else {
-			info = `${theme.bold("LSP Servers")}\n`;
+			info = `${theme.bold("LSP Health")}\n${theme.fg("muted", "Workspace:")} ${status.workspaceRoot ?? "unknown"}\n`;
+			info += `${theme.fg("muted", "Snapshot only; no server starts or installs. /lsp restart · /lsp trace [path|off]")}\n`;
+			info += `${theme.fg("muted", "Ready means transport initialized; build settings/indexing are not verified.")}\n`;
+			if (!status.enabled) {
+				info += `${theme.fg("warning", "LSP is disabled. Enable with --lsp or lsp.enabled=true.")}\n`;
+			}
+			if (status.servers.length === 0) info += "No configured language servers.\n";
 			for (const server of status.servers) {
-				info += `\n${theme.bold(server.name)} ${server.alive ? theme.fg("success", "running") : theme.fg("error", "dead")}\n`;
-				info += `${theme.fg("dim", "Root:")} ${server.root}\n`;
-				info += `${theme.fg("dim", "Open documents:")} ${server.openDocuments}\n`;
-				info += `${theme.fg("dim", "Idle:")} ${formatIdle(server.idleMs)}\n`;
+				const state = server.state ?? (server.alive ? "starting" : server.lastError ? "failed" : "unused");
+				const color =
+					state === "ready"
+						? "success"
+						: state === "failed" || state === "blocked"
+							? "error"
+							: state === "degraded"
+								? "warning"
+								: "muted";
+				info += `\n${theme.bold(server.name)} ${theme.fg(color, state)}`;
+				const notStarted = state === "unused" || state === "disabled";
+				if (notStarted) {
+					info += ` ${theme.fg("muted", "· capabilities unknown; not started")}\n`;
+				} else {
+					info += ` ${theme.fg("muted", `· version ${server.version ?? server.serverInfo?.version ?? "unknown"} · breaker ${server.breaker ?? "unknown"}`)}\n`;
+				}
+				if (server.projectContext) info += `${theme.fg("muted", "Project context:")} ${server.projectContext}\n`;
+				if (server.coverage) info += `${theme.fg("warning", `Coverage: ${server.coverage}`)}\n`;
+				if (notStarted) continue;
+				info += `${theme.fg("muted", "Root:")} ${server.root}\n`;
+				info += `${theme.fg("muted", "Executable:")} ${server.resolvedExecutable ?? `unresolved: ${server.unresolvedCommand ?? "unknown"}`} (${server.launchSource})\n`;
+				if (server.serverInfo) info += `${theme.fg("muted", "Server:")} ${server.serverInfo.name}\n`;
+				info += `${theme.fg("muted", "Capabilities:")} ${server.capabilities === undefined ? "unknown" : server.capabilities.length === 0 ? "none advertised" : server.capabilities.join(", ")}\n`;
+				info += `${theme.fg("muted", "Activity:")} ${server.operations ?? 0} operations · ${server.failures ?? 0} failures · ${server.attempts} starts · ${server.openDocuments} documents · idle ${formatIdle(server.idleMs)}\n`;
+				info += `${theme.fg("muted", "Latency:")} last ${server.lastDurationMs === undefined ? "unknown" : `${Math.round(server.lastDurationMs)}ms`} · total ${Math.round(server.totalDurationMs ?? 0)}ms\n`;
+				if (server.lastSuccess || server.lastFailure)
+					info += `${theme.fg("muted", "Last success:")} ${server.lastSuccess ?? "none"} · last failure: ${server.lastFailure ?? "none"}\n`;
+				if (server.lastError) info += `${theme.fg("error", `Startup: ${server.lastError}`)}\n`;
+				if (server.startupStderr) info += `${theme.fg("muted", `Stderr: ${server.startupStderr}`)}\n`;
+				if (server.requestError) info += `${theme.fg("warning", `Request: ${server.requestError}`)}\n`;
 			}
-			if (status.traceFile) {
-				info += `\n${theme.fg("dim", "Trace:")} ${status.traceFile}\n`;
-			}
-			info += `\n${theme.fg("dim", "Use /lsp restart to restart servers, /lsp trace [path|off] to toggle tracing.")}`;
+			if (status.traceFile) info += `\n${theme.fg("muted", "Trace:")} ${status.traceFile}\n`;
 		}
 
 		this.chatContainer.addChild(new Spacer(1));
@@ -8371,6 +8834,7 @@ export class InteractiveMode {
 		const interrupt = this.getAppKeyDisplay("app.interrupt");
 		const clear = this.getAppKeyDisplay("app.clear");
 		const exit = this.getAppKeyDisplay("app.exit");
+		const debug = this.getAppKeyDisplay("app.debug");
 		const suspend = this.getAppKeyDisplay("app.suspend");
 		const toggleAgentMode = this.getAppKeyDisplay("app.mode.toggle");
 		const togglePlanPane = this.getAppKeyDisplay("app.plan.togglePane");
@@ -8385,6 +8849,7 @@ export class InteractiveMode {
 		const dequeue = this.getAppKeyDisplay("app.message.dequeue");
 		const pasteImage = this.getAppKeyDisplay("app.clipboard.pasteImage");
 		const openSubagents = this.getAppKeyDisplay("app.subagents.open");
+		const openJobs = this.getAppKeyDisplay("app.jobs.open");
 
 		const sections: HotkeySection[] = [
 			{
@@ -8400,6 +8865,7 @@ export class InteractiveMode {
 					{ key: togglePlanPane, action: "Switch conversation / plan pane focus" },
 					{ key: cycleThinkingLevel, action: "Cycle thinking level" },
 					{ key: openSubagents, action: "Switch to subagent conversations" },
+					{ key: openJobs, action: "Inspect background jobs" },
 				],
 			},
 			{
@@ -8438,8 +8904,9 @@ export class InteractiveMode {
 				entries: [
 					{ key: tab, action: "Path completion / accept autocomplete" },
 					{ key: interrupt, action: "Cancel autocomplete / abort streaming" },
-					{ key: clear, action: "Clear editor (first) / exit (second)" },
-					{ key: exit, action: "Exit when editor is empty" },
+					{ key: clear, action: "Clear editor / exit; confirm when work is active" },
+					{ key: exit, action: "Exit (empty editor); confirm when work is active" },
+					{ key: `${debug} / /debug`, action: "Capture diagnostics without interrupting work" },
 					{ key: suspend, action: "Suspend to background" },
 					{ key: toggleAgentMode, action: "Toggle Build / Plan mode" },
 					{ key: togglePlanPane, action: "Switch conversation / plan pane focus" },
@@ -8453,6 +8920,7 @@ export class InteractiveMode {
 					{ key: dequeue, action: "Restore queued messages" },
 					{ key: pasteImage, action: "Paste image from clipboard" },
 					{ key: openSubagents, action: "Switch to subagent conversations" },
+					{ key: `${openJobs} / /jobs`, action: "Inspect background jobs without interrupting work" },
 					{ key: "/", action: "Slash commands" },
 					{ key: "!", action: "Run bash command" },
 					{ key: "!!", action: "Run bash command (excluded from context)" },
@@ -8513,45 +8981,24 @@ export class InteractiveMode {
 		}
 	}
 
-	private handleDebugCommand(): void {
-		const width = this.ui.terminal.columns;
-		const height = this.ui.terminal.rows;
-		const allLines = this.ui.render(width).lines;
-
-		const debugLogPath = getDebugLogPath();
-		const debugData = [
-			`Debug output at ${new Date().toISOString()}`,
-			`Terminal: ${width}x${height}`,
-			`Total lines: ${allLines.length}`,
-			"",
-			"=== All rendered lines with visible widths ===",
-			...allLines.map((line, idx) => {
-				const vw = visibleWidth(line);
-				const escaped = JSON.stringify(line);
-				return `[${idx}] (w=${vw}) ${escaped}`;
-			}),
-			"",
-			"=== Agent messages (JSONL) ===",
-			...this.session.messages.map((msg) => JSON.stringify(msg)),
-			"",
-		].join("\n");
-
+	private async handleDebugCommand(): Promise<void> {
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
+		const session = this.session;
+		const canNotify = () => this.isInitialized && !this.isShuttingDown && this.session === session;
 		try {
-			ensurePrivateDirectorySync(path.dirname(debugLogPath), { hardenExisting: false });
-			writeDurableAtomicFileSync(debugLogPath, debugData, {
-				directoryMode: PRIVATE_DIRECTORY_MODE,
-				fileMode: PRIVATE_FILE_MODE,
-			});
+			const debugLogPath = await session.captureToolProgressDiagnostics();
+			if (!canNotify()) return;
+			this.chatContainer.addChild(new Spacer(1));
+			this.chatContainer.addChild(
+				new Text(`${theme.fg("accent", "✓ Tool progress captured")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
+			);
+			this.ui.requestRender();
 		} catch (error) {
-			this.showError(`Failed to write debug log: ${error instanceof Error ? error.message : String(error)}`);
-			return;
+			if (canNotify()) {
+				this.showError(`Failed to write debug log: ${error instanceof Error ? error.message : String(error)}`);
+			}
 		}
-
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(
-			new Text(`${theme.fg("accent", "✓ Debug log written")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
-		);
-		this.ui.requestRender();
 	}
 
 	private handleArminSaysHi(): void {
@@ -8668,7 +9115,7 @@ export class InteractiveMode {
 	private async promptForReviewTarget(): Promise<ReviewTarget | undefined> {
 		const branchLabel = "Against base branch";
 		const uncommittedLabel = "Uncommitted changes";
-		const prLabel = "GitHub pull request";
+		const prLabel = "Pull request";
 		const commitLabel = "Specific commit";
 		const currentPullRequest = await probeCurrentBranchPullRequest(this.sessionManager.getCwd());
 		const currentPullRequestLabel = currentPullRequest
@@ -8685,7 +9132,11 @@ export class InteractiveMode {
 			return undefined;
 		}
 		if (choice === currentPullRequestLabel && currentPullRequest) {
-			return { kind: "pr", number: String(currentPullRequest.number) };
+			return {
+				kind: "pr",
+				number: String(currentPullRequest.number),
+				expectedUrl: currentPullRequest.url,
+			};
 		}
 		if (choice === branchLabel) {
 			const base = await this.promptForReviewBaseBranch();
@@ -8708,7 +9159,7 @@ export class InteractiveMode {
 		return { kind: "commit" };
 	}
 
-	/** Show a local-branch picker and return the selected base branch. */
+	/** Show logical local/upstream base branches and return the selected target. */
 	private async promptForReviewBaseBranch(): Promise<string | undefined> {
 		const branches = await listBaseBranches(this.sessionManager.getCwd());
 		if ("error" in branches) {
@@ -8865,57 +9316,57 @@ export class InteractiveMode {
 		});
 	}
 
-	private createReviewWorkflowHooks(resolution: ResolvedReview, model: Model<any>): ReviewWorkflowHooks {
-		const baseMessage = `Reviewing ${resolution.description} with ${model.id}...`;
-		const loader = new BorderedLoader(this.ui, theme, baseMessage);
+	private createReviewWorkflowHooks(): ReviewWorkflowHooks {
+		const loader = new BorderedLoader(this.ui, theme, "Preparing review…");
 		this.editorContainer.clear();
 		this.editorContainer.addChild(loader);
 		this.ui.setFocus(loader);
-
-		// Render the isolated review session live in the transcript so it reads like
-		// a normal conversation. This is display-only and transient: the review runs
-		// in its own session, and the handoff (or the next full re-render) rebuilds
-		// the transcript, at which point this group is gone. The machine `<response>`
-		// envelope is stripped from displayed text; the formatted findings are
-		// surfaced later via the handoff.
-		const reviewRenderer = this.createInlineSessionRenderer({
-			headerText: theme.fg("accent", `Reviewing ${resolution.description} with ${model.id}`),
-			transformAssistantMessage: (message) => ({
-				...message,
-				content: message.content.map((part) =>
-					part.type === "text" ? { ...part, text: stripReviewEnvelopeForDisplay(part.text) } : part,
-				),
-			}),
-		});
 		this.ui.requestRender();
 
-		const abortController = new AbortController();
-		loader.onAbort = () => {
-			abortController.abort();
-		};
-
-		const cleanup = () => {
-			this.footer.setTransientUsage(undefined);
-			reviewRenderer.dispose();
-			loader.dispose();
-			this.editorContainer.clear();
-			this.editorContainer.addChild(this.editor);
-			this.ui.setFocus(this.editor);
-			this.ui.requestRender();
-		};
-
+		let baseMessage = "Preparing review…";
+		let reviewRenderer: InlineSessionRenderer | undefined;
+		let cleanedUp = false;
 		return {
-			signal: abortController.signal,
+			signal: loader.signal,
 			onProgress: (message) => {
-				loader.setMessage(`${baseMessage} ${message}`);
+				loader.setMessage(reviewRenderer ? `${baseMessage} ${message}` : message);
 				this.ui.requestRender();
 			},
-			onSessionEvent: reviewRenderer.onSessionEvent,
+			onPrepared: (resolution, model) => {
+				baseMessage = `Reviewing ${resolution.description} with ${model.id}…`;
+				loader.setMessage(baseMessage);
+				this.editorContainer.clear();
+				this.editorContainer.addChild(loader);
+				this.ui.setFocus(loader);
+				// Render the isolated review session live in the transcript so it reads like
+				// a normal conversation. This remains transient and is removed on handoff.
+				reviewRenderer = this.createInlineSessionRenderer({
+					headerText: theme.fg("accent", `Reviewing ${resolution.description} with ${model.id}`),
+					transformAssistantMessage: (message) => ({
+						...message,
+						content: message.content.map((part) =>
+							part.type === "text" ? { ...part, text: stripReviewEnvelopeForDisplay(part.text) } : part,
+						),
+					}),
+				});
+				this.ui.requestRender();
+			},
+			onSessionEvent: (event) => reviewRenderer?.onSessionEvent(event),
 			onUsage: (usage) => {
 				this.footer.setTransientUsage(usage);
 				this.ui.requestRender();
 			},
-			cleanup,
+			cleanup: () => {
+				if (cleanedUp) return;
+				cleanedUp = true;
+				this.footer.setTransientUsage(undefined);
+				reviewRenderer?.dispose();
+				loader.dispose();
+				this.editorContainer.clear();
+				this.editorContainer.addChild(this.editor);
+				this.ui.setFocus(this.editor);
+				this.ui.requestRender();
+			},
 		};
 	}
 
@@ -8941,6 +9392,7 @@ export class InteractiveMode {
 		let streamingRenderCoalescer: StreamingRenderCoalescer<AssistantMessage> | undefined;
 		const pending = new Map<string, ToolExecutionComponent>();
 		const toolOptions = () => ({
+			liveProgress: true,
 			showImages: this.settingsManager.getShowImages(),
 			imageWidthCells: this.settingsManager.getImageWidthCells(),
 		});
@@ -9067,8 +9519,15 @@ export class InteractiveMode {
 		action: string,
 		args: Record<string, unknown>,
 	): Promise<Awaited<ReturnType<NonNullable<HostActionInvocationContext["runReviewLifecycleAction"]>>>> {
+		const session = this.session;
+		const generation = session.conversationGenerationRevision;
+		const assertCurrent = () => {
+			if (this.session !== session || session.conversationGenerationRevision !== generation)
+				throw new Error("The review conversation changed; retry from the current session.");
+		};
 		const runId = typeof args.runId === "string" ? args.runId : undefined;
-		const record = runId ? getReviewRun(this.session.sessionManager, runId) : undefined;
+		const record = runId ? await getCanonicalReviewRun(session.sessionManager, runId) : undefined;
+		assertCurrent();
 		if (action !== REVIEW_EXPORT_FEEDBACK_ACTION_ID && !record)
 			throw new Error(`Unknown durable review run: ${runId ?? "missing"}`);
 		if (action === REVIEW_FIX_ACTION_ID) {
@@ -9086,12 +9545,8 @@ export class InteractiveMode {
 				(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
 			);
 			if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
-			const selectedResult = {
-				...record.result,
-				findings: record.result.findings.filter((finding) => selectedIds.has(finding.id)),
-			};
 			const sourceSessionManager = this.session.sessionManager;
-			const seedMessage = createReviewSeedMessage(record.target, { parsed: selectedResult });
+			const seedMessage = createReviewSeedMessage(record, requestedFindingIds);
 			let targetSessionManager: SessionManager | undefined;
 			let acknowledgedAt: number | undefined;
 			const opened = await this.runtimeHost.newSession({
@@ -9113,13 +9568,27 @@ export class InteractiveMode {
 				throw new Error("The review session opened without the selected findings.");
 			if (opened.seeded && requestedFindingIds === undefined) {
 				if (acknowledgedAt === undefined) throw new Error("Review session was seeded without acknowledgment");
-				const sourceSessionFile = sourceSessionManager.getSessionFile();
-				const acknowledgmentManager = sourceSessionFile
-					? SessionManager.open(sourceSessionFile, sourceSessionManager.getSessionDir())
+				const sourceSessionRef = sourceSessionManager.getSessionRef();
+				const acknowledgmentManager = sourceSessionRef
+					? await SessionManager.open(sourceSessionRef)
 					: sourceSessionManager;
-				acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
-				await acknowledgmentManager.flush();
-				if (sourceSessionFile) sourceSessionManager.setSessionFile(sourceSessionFile);
+				try {
+					acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
+					await acknowledgmentManager.flush();
+				} catch (error) {
+					if (sourceSessionRef) {
+						try {
+							await acknowledgmentManager.closePersistence();
+						} catch (closeError) {
+							throw new AggregateError(
+								[error, closeError],
+								"Review acknowledgment failed and its source manager could not be closed",
+							);
+						}
+					}
+					throw error;
+				}
+				if (sourceSessionRef) await acknowledgmentManager.closePersistence();
 			}
 			if (!opened.cancelled) this.renderCurrentSessionState();
 			return {
@@ -9129,7 +9598,7 @@ export class InteractiveMode {
 				actionsChanged: !opened.cancelled,
 				message: opened.cancelled
 					? "Review fix session cancelled"
-					: `Opened ${selectedResult.findings.length} selected review finding${selectedResult.findings.length === 1 ? "" : "s"}`,
+					: `Opened ${selectedIds.size} selected review finding${selectedIds.size === 1 ? "" : "s"}`,
 			};
 		}
 		if (action === REVIEW_FEEDBACK_ACTION_ID) {
@@ -9149,18 +9618,25 @@ export class InteractiveMode {
 				reason !== "other"
 			)
 				throw new Error("Dismissed findings require an explicit reason.");
-			appendReviewFindingTransition(this.session.sessionManager, {
-				runId: record.runId,
-				findingId,
-				status,
-				...(reason === "false_positive" ||
-				reason === "intentional" ||
-				reason === "not_actionable" ||
-				reason === "other"
-					? { reason }
-					: {}),
-				...(typeof args.note === "string" ? { note: args.note } : {}),
-			});
+			await recordReviewFindingOutcome(
+				session.sessionManager,
+				{
+					runId: record.runId,
+					findingId,
+					status,
+					...(reason === "false_positive" ||
+					reason === "intentional" ||
+					reason === "not_actionable" ||
+					reason === "other"
+						? { reason }
+						: {}),
+					...(typeof args.note === "string" ? { note: args.note } : {}),
+				},
+				{
+					recordCanonicalOutcome: this.runtimeHost.reviewDiscussions?.recordOutcome,
+					assertCurrent,
+				},
+			);
 			await this.session.sessionManager.flush();
 			return {
 				action,
@@ -9172,15 +9648,7 @@ export class InteractiveMode {
 		}
 		if (action === REVIEW_RERUN_ACTION_ID) {
 			if (!record) throw new Error(`Unknown durable review run: ${runId}`);
-			const identity = record.target.identity;
-			const target: ReviewTarget =
-				identity.kind === "uncommitted"
-					? { kind: "uncommitted" }
-					: identity.kind === "branch"
-						? { kind: "branch", base: identity.baseCommit }
-						: identity.kind === "pr"
-							? { kind: "pr", number: identity.pullRequest ? String(identity.pullRequest.number) : undefined }
-							: { kind: "commit", sha: identity.headCommit };
+			const target = reviewTargetForRerun(record);
 			const rerun = await this.runInteractiveReviewWorkflow(target, {
 				tools: this.getReviewToolsForRun(),
 				requireConfirmation: true,
@@ -9200,12 +9668,17 @@ export class InteractiveMode {
 			if (!record) throw new Error(`Unknown durable review run: ${runId}`);
 			const confirmed = await this.showExtensionConfirm(
 				"Publish pull request review",
-				`Publish complete review ${record.runId} to GitHub? The PR head will be rechecked first.`,
+				`Publish complete review ${record.runId} to its code host? The PR head will be rechecked first.`,
 			);
 			if (!confirmed) return { action, status: "cancelled", message: "Review publishing cancelled" };
-			const published = await publishReviewRun(this.sessionManager.getCwd(), record);
-			appendReviewPublication(this.session.sessionManager, { runId: record.runId, ...published });
-			await this.session.sessionManager.flush();
+			assertCurrent();
+			const current = await getCanonicalReviewRun(session.sessionManager, record.runId);
+			assertCurrent();
+			if (!current) throw new Error(`Unknown durable review run: ${record.runId}`);
+			const published = await publishReviewRun(session.sessionManager.getCwd(), current);
+			assertCurrent();
+			appendReviewPublication(session.sessionManager, { runId: record.runId, ...published });
+			await session.sessionManager.flush();
 			return {
 				action,
 				status: "completed",
@@ -9219,13 +9692,12 @@ export class InteractiveMode {
 					: await this.showExtensionInput("Export review feedback", "review-feedback.json");
 			if (!requestedPath?.trim())
 				return { action, status: "cancelled", message: "Review feedback export cancelled" };
-			const outputPath = path.resolve(this.sessionManager.getCwd(), requestedPath.trim());
+			assertCurrent();
+			const feedback = await exportCanonicalReviewFeedback(session.sessionManager);
+			assertCurrent();
+			const outputPath = path.resolve(session.sessionManager.getCwd(), requestedPath.trim());
 			fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-			fs.writeFileSync(
-				outputPath,
-				`${JSON.stringify(exportReviewFeedback(this.session.sessionManager), null, 2)}\n`,
-				{ mode: 0o600 },
-			);
+			fs.writeFileSync(outputPath, `${JSON.stringify(feedback, null, 2)}\n`, { mode: 0o600 });
 			return { action, status: "completed", message: `Review feedback exported to ${outputPath}` };
 		}
 		throw new Error(`Unsupported review lifecycle action: ${action}`);
@@ -9241,6 +9713,14 @@ export class InteractiveMode {
 			parentRunId?: string;
 		},
 	): Promise<Awaited<ReturnType<NonNullable<HostActionInvocationContext["runReviewAction"]>>>> {
+		if (this.activeInteractiveReview) {
+			this.showWarning("A review is already running. Cancel it before starting another.");
+			return { status: "cancelled" };
+		}
+		this.activeInteractiveReview = true;
+		this.quitConfirmation = undefined;
+		this.lastSigintTime = 0;
+		let diagnosticRetentionWarning: string | undefined;
 		try {
 			const result = await runReviewWorkflow({
 				target,
@@ -9255,31 +9735,52 @@ export class InteractiveMode {
 				tools: options.tools,
 				requireConfirmation: options.requireConfirmation,
 				requireProjectTrust: options.requireProjectTrust,
-				confirm: ({ title, message }) => this.showExtensionConfirm(title, message),
+				confirm: ({ title, message, signal }) =>
+					this.showExtensionConfirm(title, message, signal ? { signal } : undefined),
 				onReviewModelWarning: (message) => this.showWarning(message),
-				onBeforeReview: (resolution, model) => this.createReviewWorkflowHooks(resolution, model),
+				onDiagnosticRetentionWarning: (message) => {
+					diagnosticRetentionWarning = message;
+				},
+				createHooks: () => this.createReviewWorkflowHooks(),
+				workflowManager: this.runtimeHost.reviewWorkflows,
 			});
 
 			if (result.status !== "completed") {
+				this.renderCurrentSessionState();
 				this.showStatus("Review cancelled");
 				return result;
 			}
 
 			if (result.sessionSwitchCancelled) {
-				this.showStatus("Review complete (session switch was cancelled; findings added to this session)");
+				this.showStatus("Session switch cancelled; review added to this session.");
 				return result;
 			}
 			this.renderCurrentSessionState();
-			this.showStatus(
-				`${formatReviewWorkflowSummary(result)} This is a fresh session seeded with the review. Tell me which findings to fix (e.g. "fix 1 and 3").`,
-			);
 			return result;
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
+			this.renderCurrentSessionState();
 			this.showError(
 				message.includes("git") || message.includes("repository") ? `${message} ${REVIEW_USAGE}` : message,
 			);
 			return { status: "cancelled" };
+		} finally {
+			this.activeInteractiveReview = false;
+			this.quitConfirmation = undefined;
+			this.lastSigintTime = 0;
+			// Handoff and renderCurrentSessionState clear transient chat rows. Warn only
+			// after they settle, including cancellation and failure paths, without persistence.
+			if (diagnosticRetentionWarning) {
+				try {
+					this.showWarning(diagnosticRetentionWarning);
+				} catch {
+					try {
+						console.warn(`Warning: ${diagnosticRetentionWarning}`);
+					} catch {
+						// A warning observer cannot turn a completed review into a failure.
+					}
+				}
+			}
 		}
 	}
 
@@ -9312,7 +9813,12 @@ export class InteractiveMode {
 	}
 
 	stop(fullscreenExitOutput = this.settingsManager.getFullscreenExitOutput()): void {
+		this.dismissBackgroundJobsInspector?.();
+		this.unsubscribeBackgroundJobs?.();
+		this.unsubscribeBackgroundJobs = undefined;
 		this.clearTurnDoneAlertTimer();
+		this.clearPromptCacheAlertTimer();
+		this.clearWorkSummaryTimer();
 		this.stopWorkingElapsedTicker();
 		this.streamingRenderCoalescer?.dispose();
 		this.streamingRenderCoalescer = undefined;
@@ -9324,6 +9830,8 @@ export class InteractiveMode {
 			this.loadingAnimation = undefined;
 		}
 		this.clearExtensionTerminalInputListeners();
+		this.globalInputUnsubscribe?.();
+		this.globalInputUnsubscribe = undefined;
 		this.planPaneInputUnsubscribe?.();
 		this.planPaneInputUnsubscribe = undefined;
 		this.dismissSubagentInspector?.();

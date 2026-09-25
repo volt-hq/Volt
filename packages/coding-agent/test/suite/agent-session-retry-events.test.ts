@@ -324,6 +324,8 @@ describe("AgentSession retry and event characterization", () => {
 		await sawRetryStart;
 
 		expect(harness.session.isStreaming).toBe(true);
+		// The backoff holds no Harness lease, but the prompt is still running.
+		expect(harness.session.isBusy).toBe(true);
 		await expect(harness.session.prompt("overlapping prompt")).rejects.toThrow(
 			"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 		);
@@ -431,6 +433,7 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_end",
 			"agent_end",
 			"agent_settled",
+			"prompt_cache_changed",
 		]);
 	});
 
@@ -478,6 +481,7 @@ describe("AgentSession retry and event characterization", () => {
 			"turn_end",
 			"agent_end",
 			"agent_settled",
+			"prompt_cache_changed",
 		]);
 	});
 
@@ -508,8 +512,11 @@ describe("AgentSession retry and event characterization", () => {
 
 		await harness.session.prompt("hi");
 
-		expect(harness.events[harness.events.length - 2]?.type).toBe("agent_end");
-		expect(harness.events[harness.events.length - 1]?.type).toBe("agent_settled");
+		expect(harness.events.slice(-3).map((event) => event.type)).toEqual([
+			"agent_end",
+			"agent_settled",
+			"prompt_cache_changed",
+		]);
 	});
 
 	it("settles after resumed overflow recovery when new prompt construction fails", async () => {
@@ -575,8 +582,11 @@ describe("AgentSession retry and event characterization", () => {
 		await harness.session.abort();
 		await promptPromise;
 
-		expect(harness.events[harness.events.length - 2]?.type).toBe("agent_end");
-		expect(harness.events[harness.events.length - 1]?.type).toBe("agent_settled");
+		expect(harness.events.slice(-3).map((event) => event.type)).toEqual([
+			"agent_end",
+			"agent_settled",
+			"prompt_cache_changed",
+		]);
 		const lastMessage = harness.session.messages[harness.session.messages.length - 1];
 		expect(lastMessage?.role).toBe("assistant");
 		if (lastMessage?.role === "assistant") {

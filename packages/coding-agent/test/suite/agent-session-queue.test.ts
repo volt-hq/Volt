@@ -2,8 +2,35 @@ import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
+
+function deferred(): { promise: Promise<void>; resolve(): void } {
+	let resolve: () => void = () => {};
+	const promise = new Promise<void>((promiseResolve) => {
+		resolve = promiseResolve;
+	});
+	return { promise, resolve };
+}
+
+/** A provider response that stays in flight until the test stops it. */
+async function createInterruptibleHarness(): Promise<{
+	harness: Harness;
+	responseStarted: Promise<void>;
+	finishResponse(): void;
+}> {
+	const started = deferred();
+	const finish = deferred();
+	const harness = await createHarness();
+	harness.setResponses([
+		async () => {
+			started.resolve();
+			await finish.promise;
+			return fauxAssistantMessage("late response");
+		},
+	]);
+	return { harness, responseStarted: started.promise, finishResponse: finish.resolve };
+}
 
 async function createWaitingHarness(
 	options: {
@@ -613,5 +640,157 @@ describe("AgentSession queue characterization", () => {
 		await harness.session.waitForIdle();
 
 		expect(getUserTexts(harness)).toEqual(["hello", "conflict report"]);
+	});
+
+	it("delivers queued steer and follow-up input after a stop that requests queue delivery", async () => {
+		const { harness, responseStarted, finishResponse } = await createInterruptibleHarness();
+		harnesses.push(harness);
+		harness.appendResponses([fauxAssistantMessage("handled steer"), fauxAssistantMessage("handled follow-up")]);
+
+		const prompt = harness.session.prompt("start");
+		await responseStarted;
+		await harness.session.prompt("steer after stop", {
+			streamingBehavior: "steer",
+			clientMessageId: "steer-after-stop",
+		});
+		await harness.session.prompt("follow up after stop", {
+			streamingBehavior: "followUp",
+			clientMessageId: "follow-up-after-stop",
+		});
+		expect(harness.session.pendingMessageCount).toBe(2);
+
+		const abort = harness.session.abort("remote_request", { deliverQueuedMessages: true });
+		finishResponse();
+		await Promise.all([prompt, abort]);
+		await harness.session.waitForIdle();
+
+		expect(getUserTexts(harness)).toEqual(["start", "steer after stop", "follow up after stop"]);
+		expect(getAssistantTexts(harness).slice(1)).toEqual(["handled steer", "handled follow-up"]);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.sessionManager.getClientInput("steer-after-stop")).toMatchObject({ state: "completed" });
+		expect(harness.sessionManager.getClientInput("follow-up-after-stop")).toMatchObject({ state: "completed" });
+	});
+
+	it("delivers a queued follow-up instead of resuming tool work interrupted by a delivering stop", async () => {
+		const waiting = await createWaitingHarness();
+		const { harness, waitForToolStart, promptPromise, releaseToolExecution } = waiting;
+		harnesses.push(harness);
+		const requestsAfterStop: string[][] = [];
+		harness.setResponses([
+			fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
+			(context) => {
+				requestsAfterStop.push(
+					context.messages.filter((message) => message.role === "user").map((message) => getMessageText(message)),
+				);
+				return fauxAssistantMessage("handled follow-up");
+			},
+		]);
+
+		await waitForToolStart;
+		await harness.session.prompt("follow up after stop", {
+			streamingBehavior: "followUp",
+			clientMessageId: "tool-follow-up-after-stop",
+		});
+		const abort = harness.session.abort("remote_request", { deliverQueuedMessages: true });
+		releaseToolExecution();
+		await Promise.all([promptPromise, abort]);
+		await harness.session.waitForIdle();
+
+		expect(requestsAfterStop).toEqual([["start", "follow up after stop"]]);
+		expect(getUserTexts(harness)).toEqual(["start", "follow up after stop"]);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
+	it("retains queued input after a stop that does not request queue delivery", async () => {
+		const { harness, responseStarted, finishResponse } = await createInterruptibleHarness();
+		harnesses.push(harness);
+		harness.appendResponses([fauxAssistantMessage("must not run")]);
+
+		const prompt = harness.session.prompt("start");
+		await responseStarted;
+		await harness.session.prompt("retained follow-up", {
+			streamingBehavior: "followUp",
+			clientMessageId: "retained-follow-up",
+		});
+
+		const abort = harness.session.abort("remote_request");
+		finishResponse();
+		await Promise.all([prompt, abort]);
+		await harness.session.waitForIdle();
+
+		expect(getUserTexts(harness)).toEqual(["start"]);
+		expect(harness.session.getFollowUpMessages().map((message) => message.text)).toEqual(["retained follow-up"]);
+		expect(harness.eventsOfType("agent_start")).toHaveLength(1);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("retains queued input when a stop that declines delivery joins a delivering stop", async () => {
+		const { harness, responseStarted, finishResponse } = await createInterruptibleHarness();
+		harnesses.push(harness);
+		harness.appendResponses([fauxAssistantMessage("must not run")]);
+
+		const prompt = harness.session.prompt("start");
+		await responseStarted;
+		await harness.session.prompt("retained follow-up", {
+			streamingBehavior: "followUp",
+			clientMessageId: "joined-retained-follow-up",
+		});
+
+		const delivering = harness.session.abort("remote_request", { deliverQueuedMessages: true });
+		const declining = harness.session.abort("host_action");
+		finishResponse();
+		await Promise.all([prompt, delivering, declining]);
+		await harness.session.waitForIdle();
+
+		expect(getUserTexts(harness)).toEqual(["start"]);
+		expect(harness.session.getFollowUpMessages().map((message) => message.text)).toEqual(["retained follow-up"]);
+		expect(harness.getPendingResponseCount()).toBe(1);
+	});
+
+	it("delivers a queued admission that was still persisting when a delivering stop settled", async () => {
+		const { harness, responseStarted, finishResponse } = await createInterruptibleHarness();
+		harnesses.push(harness);
+		harness.appendResponses([fauxAssistantMessage("handled late follow-up")]);
+		const { sessionManager } = harness;
+		const markClientInputQueued = sessionManager.markClientInputQueued.bind(sessionManager);
+		const flush = sessionManager.flush.bind(sessionManager);
+		const persistenceStarted = deferred();
+		const releasePersistence = deferred();
+		let holdNextFlush = false;
+		vi.spyOn(sessionManager, "markClientInputQueued").mockImplementation((...args) => {
+			holdNextFlush = true;
+			return markClientInputQueued(...args);
+		});
+		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
+			if (holdNextFlush) {
+				holdNextFlush = false;
+				persistenceStarted.resolve();
+				await releasePersistence.promise;
+			}
+			return flush();
+		});
+
+		const prompt = harness.session.prompt("start");
+		await responseStarted;
+		const queued = harness.session.prompt("late follow-up", {
+			streamingBehavior: "followUp",
+			clientMessageId: "late-follow-up",
+		});
+		await persistenceStarted.promise;
+
+		const abort = harness.session.abort("remote_request", { deliverQueuedMessages: true });
+		finishResponse();
+		await Promise.all([prompt, abort]);
+		expect(harness.session.pendingMessageCount).toBe(0);
+		expect(getUserTexts(harness)).toEqual(["start"]);
+
+		releasePersistence.resolve();
+		await queued;
+		await vi.waitFor(() => expect(getUserTexts(harness)).toEqual(["start", "late follow-up"]));
+		await harness.session.waitForIdle();
+
+		expect(getAssistantTexts(harness).at(-1)).toBe("handled late follow-up");
+		expect(harness.sessionManager.getClientInput("late-follow-up")).toMatchObject({ state: "completed" });
 	});
 });

@@ -62,13 +62,15 @@ Profiles do not isolate auth or sessions yet. `sessionDir` and reserved profile 
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `personality` | string | `"default"` | Communication style for Volt's built-in system prompt: `"default"` for a collaborative, adaptive voice or `"pragmatic"` for direct recommendations focused on simple, maintainable solutions. Ignored when a custom `SYSTEM.md` replaces the built-in prompt |
+| `personality` | string | `"default"` | Communication style for Volt's built-in system prompt: `"default"` for a collaborative, adaptive voice, `"pragmatic"` for direct recommendations focused on simple, maintainable solutions, or `"simplified-technical"` for ASD-STE100-inspired Simplified Technical English in user-facing prose. Ignored when a custom `SYSTEM.md` replaces the built-in prompt |
 
 In interactive mode, run `/settings` and change **Personality**. The selection applies to the next turn.
 
+The `"simplified-technical"` personality keeps source code, identifiers, commands, configuration, quoted text, and repository artifacts in their normal technical form. It follows project conventions for code comments and documentation unless the user requests Simplified Technical English. It is a writing aid and does not certify full ASD-STE100 compliance.
+
 ```json
 {
-  "personality": "pragmatic"
+  "personality": "simplified-technical"
 }
 ```
 
@@ -154,6 +156,30 @@ Both options are available under **Warnings** in `/settings`.
 }
 ```
 
+### Prompt Cache
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `promptCache.keepAlive` | boolean | `true` | Refresh the prompt cache shortly before it expires, so the next request reuses it instead of resending the conversation uncached |
+| `promptCache.keepAliveIdleMinutes` | number | `15` | How long to keep refreshing after work finishes. `0` refreshes only while work runs: a turn, compaction, background job, `!` command, or extension command (including one waiting for your input) |
+
+Keepalive applies only to models whose provider documents a cache lifetime that renews on each hit and supports a refresh that generates no output. Today that is Anthropic's Messages API with adaptive thinking or thinking off (for example Claude Opus 5.5 with its 5-minute cache). Claude 4.5 and earlier models with thinking on use a thinking budget, which cannot be refreshed; keepalive stays off for those requests, and changing the thinking level ends keepalive until the next request. A refresh replays the previous request with `max_tokens: 0`, about a minute before expiry. It bills as a cache read (for example $0.20 per million tokens on Opus 5.5), usually a small fraction of resending the whole conversation. On a Claude subscription, refreshes count toward plan usage at the same reduced rate as other cache reads.
+
+After each real request, Volt sends at most as many refreshes as cost less together than the cache miss they prevent, even when work keeps running (for example a long background job). On Opus 5.5 that is 24 refreshes, about 96 minutes, on the 5-minute cache. Models without cache prices are never refreshed. A refresh whose timer fires late, for example after the computer sleeps, is skipped instead of being sent so close to expiry that it could pay for a full cache write.
+
+Refresh costs appear in the footer totals and session stats. While the idle window runs, the footer shows `cache warm 12m`. When it ends, the footer counts down to expiry and, if `terminal.turnDoneAlert` is on, Volt sends the same bell or notification as a finished turn while the terminal is unfocused.
+
+Volt records metadata-only prompt-cache audit logs (request token counts and gaps, refresh outcomes and costs, keepalive stops; never prompt or response content) as JSONL batches in `~/.volt/agent/prompt-cache-audit/`, keeping the newest 200 files up to 50 MB. Set `VOLT_PROMPT_CACHE_AUDIT=0` to turn them off.
+
+```json
+{
+  "promptCache": {
+    "keepAlive": true,
+    "keepAliveIdleMinutes": 15
+  }
+}
+```
+
 ### Compaction
 
 | Setting | Type | Default | Description |
@@ -161,6 +187,7 @@ Both options are available under **Warnings** in `/settings`.
 | `compaction.enabled` | boolean | `true` | Enable auto-compaction |
 | `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.modelThresholds` | object | `{}` | Absolute auto-compaction token counts keyed by exact `provider/model-id`. Omitted entries or `0` use the normal context-limit trigger |
 
 ```json
 {
@@ -171,6 +198,29 @@ Both options are available under **Warnings** in `/settings`.
   }
 }
 ```
+
+Under **Agent** in `/settings`, **Compact at** configures the currently selected provider/model. Choose `350k` to compact at 350,000 tokens, or `default` to restore the context-limit trigger. **Auto-compact** must be enabled. The model reference is shown in the description; switch models to configure another one. Changes are saved to global settings (or the active global profile), with trusted project settings taking precedence as usual.
+
+A paired phone can configure these same preferences through native Context actions: **Auto-compaction** and **Compact at**. They save on the connected host globally, or in its active global profile—not in phone storage or just the current session. **Compact at** targets the exact provider/model shown when the control opens. Switching the host model or profile before saving rejects the stale edit; refresh the controls and try again. The host retains the threshold when auto-compaction is off.
+
+Phone controls show effective values but disable edits when trusted project settings, the active trusted project profile, or a runtime override controls that setting. Edit that override on the host instead; saving a shadowed global preference would have no effect. Controls are also unavailable during an agent operation or compaction, or without a selected model. Saves wait for host persistence and report write errors. See [Native UI actions](rpc.md#native-ui-actions) for the invocation contract.
+
+For an arbitrary count, use the phone's token-count control or edit `settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "modelThresholds": {
+      "openai-codex/gpt-6-astra": 350000
+    }
+  }
+}
+```
+
+Use the exact provider/model reference from `/model`; `openai` and `openai-codex` are separate entries. Counts must be positive safe integers; invalid entries are ignored. `0` explicitly restores the default, including over an inherited profile setting. These thresholds do not change the model's real context window, response reserve, recent-message budget, or `warnings.contextTokens`.
+
+Compaction runs at the next safe turn boundary when usage reaches the configured count (including estimated trailing tool results), or earlier if the normal context-limit trigger fires. A single response or tool batch can overshoot the count; it is not a hard input cap. Keep thresholds comfortably above the retained context size to avoid frequent compactions. See [Compaction](compaction.md) for behavior and tradeoffs. Restart or `/reload` after editing JSON; `/settings` changes apply to subsequent checks immediately.
 
 ### Branch Summary
 
@@ -183,7 +233,7 @@ Both options are available under **Warnings** in `/settings`.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors |
+| `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors and rejected tool calls |
 | `retry.maxRetries` | number | `6` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s, 16s, 32s, 64s by default) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
@@ -191,6 +241,8 @@ Both options are available under **Warnings** in `/settings`.
 | `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
 
 With the defaults, agent-level retries wait for up to 126 seconds in total across six attempts. In interactive mode, press the configured interrupt key (Escape by default) during the retry countdown to stop retrying.
+
+When a response is rejected because its tool-call arguments are not complete, valid JSON (for example, an unescaped tab inside a string), none of its tools run. Volt retries immediately, without backoff, and tells the model why the call was rejected. These retries count toward `retry.maxRetries`.
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
@@ -210,6 +262,33 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
   }
 }
 ```
+
+### Tool Argument Generation
+
+Tool argument preparation has independent byte limits and an idle timeout. By default, long tool calls can continue while argument bytes arrive. These limits apply before a tool can execute; they do not change tool execution timeouts or the HTTP idle timeout.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `toolArgumentLimits.maxBytes` | integer | `1048576` (1 MiB) | Maximum UTF-8 JSON bytes for one tool call |
+| `toolArgumentLimits.maxTotalBytes` | integer | `8388608` (8 MiB) | Maximum aggregate argument bytes across one provider response |
+| `toolArgumentLimits.maxIdleMs` | integer | `300000` (5 minutes) | Maximum time without new argument bytes for each tool call |
+| `toolArgumentLimits.maxDurationMs` | integer | Disabled | Optional maximum elapsed preparation time for each tool call, including time with continuing deltas |
+
+Nonempty argument deltas reset that call's idle timeout. For providers that send replacement argument objects or strings, growth in argument bytes resets it. Empty deltas, unchanged replacements, and activity on other calls do not reset it. Arguments must still be a complete, valid JSON object before execution.
+
+Values must be positive safe integers; `maxIdleMs` and `maxDurationMs` must also be at most `2147483647`. Omitted fields use the defaults; omit `maxDurationMs` to leave total preparation time uncapped. If you previously configured `maxDurationMs` to accommodate long documents, remove it to use only the idle timeout. If a limit is exceeded, Volt cancels the provider stream and executes no tools from that response. The failure does not automatically retry; explicitly continue after reviewing the failure or adjusting the limit.
+
+```json
+{
+  "toolArgumentLimits": {
+    "maxBytes": 2097152,
+    "maxTotalBytes": 8388608,
+    "maxIdleMs": 300000
+  }
+}
+```
+
+Add `"maxDurationMs": 1800000` to opt into a 30-minute total preparation cap per call, in addition to the idle timeout. SDK callers can pass `toolArgumentLimits` to `createAgentSession`; supplied fields override matching settings fields. Direct `stream`/`streamSimple` callers and `AgentHarness` stream options accept the same object.
 
 ### Message Delivery
 
@@ -253,7 +332,7 @@ Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explic
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
+| `sessionDir` | string | - | Directory containing the authoritative `sessions.sqlite` store. Accepts absolute or relative paths, plus `~`. |
 
 ```json
 { "sessionDir": ".volt/sessions" }
@@ -286,11 +365,11 @@ See [LSP Diagnostics](lsp.md) for the full reference, including built-in server 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `lsp.enabled` | boolean | `true` | Run language servers and append diagnostics to `edit`/`write` results; set `false` to disable (`--lsp` force-enables per run) |
-| `lsp.servers` | object | built-ins | Server definitions keyed by name, merged over the built-in defaults |
+| `lsp.servers` | object | built-ins | Server definitions keyed by name, merged over the built-in defaults. Command paths and root discovery are confined to the canonical project workspace |
 | `lsp.settleMs` | number | `1500` | How long to wait for published diagnostics after a change |
 | `lsp.firstSettleMs` | number | `10000` | Wait window for the first diagnostics from a freshly started server |
 | `lsp.idleShutdownMs` | number | `600000` | Shut down servers idle for this long; `0` disables |
-| `lsp.traceFile` | string | | Append LSP protocol traffic and server stderr to this file |
+| `lsp.traceFile` | string | | Append LSP protocol traffic, server stderr, and launch context to this file; relative paths resolve from the canonical project workspace |
 | `lsp.maxDiagnostics` | number | `20` | Maximum diagnostics reported per tool call |
 | `lsp.severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
 
@@ -303,6 +382,7 @@ Settings for the background daemon and live shared sessions; see [Background dae
 | `remote.background` | boolean | `false` | Interactive Volt starts the daemon automatically. Supported TUIs connect to an already-running daemon regardless, auto-register their workspace, and acquire a conversation lease. |
 | `remote.detachedRuntimeTtlMs` | number | `1800000` | How long the daemon retains an idle detached headless runtime (30 minutes) |
 | `remote.allowTools` | string[] | - | Additional tool ceiling for daemon-owned headless runtimes, intersected with the paired client's persisted grant and any workspace ceiling; `[]` denies all tools. TUI-owned conversations use the TUI session's full tool set. |
+| `remote.pullRequestDiscovery` | boolean | `true` | Let the daemon use local Git metadata and the authenticated GitHub CLI to discover exact repository + branch + head-OID pull-request associations for trusted sessions. Set `false` to disable provider calls; existing private Work state remains local. |
 
 ### Resources
 

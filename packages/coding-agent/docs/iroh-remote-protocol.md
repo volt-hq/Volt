@@ -4,7 +4,7 @@ Iroh remote access tunnels Volt RPC JSONL over an Iroh QUIC bidirectional stream
 
 This protocol is preview-stable for external client authors. Clients must reject unsupported required values, ignore unknown fields unless this document says otherwise, and treat secrets as one-time credentials.
 
-For user-facing setup, start the background daemon with `volt daemon start` (see [Background daemon](daemon.md)), create tickets with `volt remote pair`, inspect `volt remote status`, revoke clients with `volt remote revoke <node-id>`, and approve same-device re-pairing with `volt remote approve-repair <node-id>`. The host-side management workflow, state/audit paths, unsafe tool warnings, relay mode, and npm/source-only daemon limitation are documented in [Using Volt](usage.md#remote-access-over-iroh-preview) and [Security](security.md#remote-access-over-iroh-preview). This document defines the wire contract only.
+For user-facing setup, start the background daemon with `volt daemon start` (see [Background daemon](daemon.md)), create tickets with `volt remote pair`, inspect `volt remote status`, revoke clients with `volt remote revoke <node-id>`, and approve same-device re-pairing with `volt remote approve-repair <node-id>`. The host-side management workflow, state/audit paths, unsafe tool warnings, relay mode, and npm/source-only daemon limitation are documented in [Using Volt](usage.md#remote-access-over-iroh-preview) and [Security](security.md#remote-access-over-iroh-preview). This document defines the wire contract only. The npm daemon requires the exact `@hansjm10/volt-iroh` wrapper plus npm's optional selected native binding; `--omit=optional` and Darwin x64 cannot provide phone transport. Local daemon status exposes `remoteTransport.state` (`starting`, `ready`, `degraded`, or `unavailable`) and exits nonzero unless ready.
 
 ## Version and ALPN
 
@@ -81,7 +81,7 @@ Fields:
 | `protocol` | yes | Must be `volt-rpc/0`. |
 | `workspace` | yes | Registered workspace name requested by the client. |
 | `conversation` | one mode required | Conversation stream target: `{ "target": "last" }`, `{ "target": "new", "sessionId": "..." }`, or `{ "target": "session", "sessionId": "..." }`. A `new` target may include a `worktreeId` on `worktrees.v1` hosts and/or `workingDirectory` on `working_directories.v1` hosts. |
-| `workspaceDiscovery` | one mode required | Utility stream target: `{ "purpose": "list_sessions" }` or, on `agent_options.v1` hosts, `{ "purpose": "agent_options" }`. |
+| `workspaceDiscovery` | one mode required | Utility stream target: `{ "purpose": "list_sessions" }`, `{ "purpose": "review" }`, or, on `agent_options.v1` hosts, `{ "purpose": "agent_options" }`. |
 | `workspaceManagement` | one mode required | Utility stream target. Payloads are `{ "purpose": "unregister_workspace" }` or, on `worktrees.v1` hosts, `{ "purpose": "manage_worktrees" }`. |
 | `secret` | no | Pairing secret when completing a pairing ticket. Omitted for already-paired clients. |
 | `clientLabel` | no | Human-readable client label requested during pairing. |
@@ -117,6 +117,7 @@ Host handshake failure outcomes:
 
 | Outcome | Meaning |
 | --- | --- |
+| `host_storage_full` | The host could not durably commit authorization because computer storage or quota is exhausted. Preserve pairing/selection/transcript authority, do not auto-redial, and offer manual Retry after the user frees space. |
 | `invalid_workspace` | The workspace field is malformed. |
 | `invalid_conversation_target` | The stream mode, target, purpose, or session ID syntax is malformed or unsupported. |
 | `conversation_streams_unsupported` | Reserved for hosts that cannot provide conversation-bound mobile streams. Current daemon builds are conversation-only. |
@@ -137,7 +138,7 @@ Client-local reconnect outcomes are not sent by the host: `host_unreachable` mea
 
 `client_revoked` remains authoritative for a revoked client node ID. A generic new pairing ticket does not let that same node silently return. The desktop host must first approve re-pair for the revoked node ID, then issue a fresh active pairing ticket; successful re-pair creates a new active client record and clears the revocation tombstone.
 
-A successful pairing stores the client as authorized for the workstation represented by the host state file. That paired client can use any registered workspace name in that state file, including workspaces registered later, without scanning another QR. Revocation blocks that client node ID from every registered workspace. The client's persisted `allowedTools` value is a **headless agent tool grant** that applies to daemon-owned runtimes across all selected workspaces; registering a workspace does not add built-in tools. The default built-in grant is `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp`. The Codex-only `image_gen` tool can read and upload local reference images and write generated PNG files on the host. When the persisted grant is the default built-in list, the host also exposes active tools registered by loaded extensions in the selected workspace. A TUI-owned conversation continues to use the TUI session's full local tool set; `review` and `chat` pairing presets do not narrow that local runtime.
+A successful pairing stores the client as authorized for the workstation represented by the host state file. That paired client can use any registered workspace name in that state file, including workspaces registered later, without scanning another QR. Revocation blocks that client node ID from every registered workspace. The client's persisted `allowedTools` value is a **headless agent tool grant** that applies to daemon-owned runtimes across all selected workspaces; registering a workspace does not add built-in tools. The default built-in grant is `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs`. The Codex-only `image_gen` tool can read and upload local reference images and write generated PNG files on the host. When the persisted grant is the default built-in list, the host also exposes active tools registered by loaded extensions in the selected workspace. A TUI-owned conversation continues to use the TUI session's full local tool set; `review` and `chat` pairing presets do not narrow that local runtime.
 
 A paired client may open multiple conversation streams, including multiple sessions in the same registered workspace. The identity key is authoritative client node ID, workspace name, and resolved session ID. If the same authoritative client opens the same workspace/session twice on one live Iroh connection, the host rejects the new stream and preserves the existing stream:
 
@@ -159,13 +160,13 @@ If the duplicate is the first conversation stream on a new Iroh connection from 
 
 `agent_options.v1` is an optional host feature for read-only configured-agent discovery. Clients open a workspace-discovery stream with purpose `agent_options` and send `get_agent_options { workspaceName }`. The command requires `model.select.v1`; `workspaceName` must match the stream-authorized workspace. Its response contains `workspaceName`, the current authenticated model catalog, and `defaultConfig:{model:{provider,modelId},thinkingLevel,fastModeEnabled,agentMode}`. It has no catalog revision and performs no session, selection, worktree, runtime, or host-default mutation.
 
-Configured-agent creation remains an app-owned sequence over ordinary primitives: optional deterministic `create_worktree`, retry-safe `target:"new"` attach with a stable session ID, then session-only model, thinking, Fast, and agent-mode commands before the first prompt. The host publishes runtimes only through the normal integrated runtime registry and durably records caller-named sessions through `SessionManager`. Concurrent same-ID attempts wait for that publication and converge; after a daemon restart the same request resumes the durable session after validating its stored cwd and worktree binding. There is no launch record, receipt, cleanup transaction, or rollback across resources. A worktree created before a later failure remains for explicit retry or removal, and a configuration failure leaves an empty resumable session; clients must not send the prompt until all configuration commands succeed.
+Configured-agent creation remains an app-owned sequence over ordinary primitives: optional deterministic `create_worktree`, retry-safe `target:"new"` attach with a stable session ID, then session-only model, thinking, Fast, and agent-mode commands before the first prompt. The host publishes runtimes only through the normal integrated runtime registry and durably records caller-named sessions through `SessionManager`. Concurrent same-ID attempts wait for that publication and converge; after a daemon restart the same request resumes the durable session after validating its stored cwd and worktree binding. Ordinary configured-agent creation has no launch record, receipt, cleanup transaction, or rollback across resources. Prepared PR reviews additionally retain host-owned placement metadata as described below. A worktree created before a later failure remains for explicit retry or removal, and a configuration failure leaves an empty resumable session; clients must not send the prompt until all configuration commands succeed.
 
-Missing stream features, `conversation_streams_unsupported`, `workspace_unavailable`, `workspace_missing`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_in_use` are not QR re-pair requirements by themselves. `workspace_has_worktrees` means the user must explicitly remove each child worktree first; it is not an authorization or connectivity failure. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
+Missing stream features, `conversation_streams_unsupported`, `host_storage_full`, `workspace_unavailable`, `workspace_missing`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, and `conversation_in_use` are not QR re-pair requirements by themselves. `workspace_has_worktrees` means the user must explicitly remove each child worktree first; it is not an authorization or connectivity failure. `host_storage_full` is a Retry-only capacity state that keeps the saved relationship but does not automatically redial. Ordinary `host_unreachable` recovery is bounded to five attempts on a 0/1/2/5/10-second cycle before manual Retry, with a fresh cycle permitted after a later network/foreground event. `host_identity_mismatch`, malformed saved-host data, `client_unknown`, and `client_revoked` still require explicit Pair Again or Forget Host style UX.
 
 ## Reconnect and session selection
 
-A reconnecting paired client with the same authoritative Iroh node ID selects a conversation in the handshake. `target:last` resumes the last recorded session for that workspace when the remembered ID is valid and the session file still exists; if the remembered ID is invalid or missing, the host creates a new session and reports `conversation.selection:"created_missing_last"` or `created`. `target:new` creates the exact supplied session ID once and resumes it on retry; concurrent identical attempts serialize until one runtime is published. The request must repeat the original placement, and a resumed session's durable cwd must still match it. `target:session` resumes a strict session ID, fails with `session_unavailable`, or returns `conversation.selection:"session_rekeyed"` with `conversation.requestedSessionId` when a live runtime has moved from the requested session to a canonical replacement session. Clients must validate state/transcript against the returned canonical `sessionId` and update the selected pin only after that validation commits.
+A reconnecting paired client with the same authoritative Iroh node ID selects a conversation in the handshake. `target:last` resumes the last recorded session for that workspace when the remembered ID is valid and its authoritative SQLite row remains available; if the remembered ID is invalid or missing, the host creates a new session and reports `conversation.selection:"created_missing_last"` or `created`. `target:new` creates the exact supplied session ID once and resumes it on retry; concurrent identical attempts serialize until one runtime is published. The request must repeat the original placement, and a resumed session's durable cwd must still match it. `target:session` resumes a strict session ID, fails with `session_unavailable`, or returns `conversation.selection:"session_rekeyed"` with `conversation.requestedSessionId` when a live runtime has moved from the requested session to a canonical replacement session. Clients must validate state/transcript against the returned canonical `sessionId` and update the selected pin only after that validation commits.
 
 Saved-host clients must verify that the native endpoint ticket node ID and the handshake `hostNodeId` match the saved host's `nodeId` before trusting authorization failures or refreshing non-secret discovery fields. If the reached identity differs, clients should treat the attempt as `host_identity_mismatch` and leave the saved host identity and discovery data unchanged.
 
@@ -179,7 +180,7 @@ Subsequent semantic changes arrive as ordered full replacements:
 {"type":"git_context_changed","gitContext":{"repository":"volt","head":{"kind":"branch","name":"main","oid":"0123456789abcdef0123456789abcdef01234567"},"upstream":null,"base":null,"status":{"staged":{"added":0,"modified":0,"deleted":0,"renamed":0},"unstaged":{"added":0,"modified":1,"deleted":0,"renamed":0},"untracked":0,"conflicted":0,"total":1,"clean":false},"operation":null,"revision":2,"observedAt":"2026-07-29T17:00:00.000Z","stale":false},"delivery":{"subscriptionId":"sub-1","cursor":42}}
 ```
 
-`gitContext` can be `null` for a non-Git cwd. A bootstrap/checkpoint replaces the entire value and resets the client-side provider-revision baseline; after that, clients apply `git_context_changed` in `delivery.cursor` order. Provider revisions are local to one runtime and must not be compared across session rebinds. Git context is conversation-scoped session state, not handshake or host identity data: it is deliberately absent from `remoteHost`, tickets, workspace discovery metadata, persisted session JSONL, model context, and extension prompts.
+`gitContext` can be `null` for a non-Git cwd. A bootstrap/checkpoint replaces the entire value and resets the client-side provider-revision baseline; after that, clients apply `git_context_changed` in `delivery.cursor` order. Provider revisions are local to one runtime and must not be compared across session rebinds. Live Git context is conversation-scoped session state, not handshake or host identity data, and is absent from `remoteHost`, tickets, and workspace discovery metadata. A current-format session may separately expose optional `startingGitContext`: the first definitive path-free observation persisted in a strictly validated host-only SQLite entry. It never enters model context, transcript projection, or extension prompts.
 
 `get_state` responses for Iroh sessions include remote host metadata with the current workspace, the available workspace names, and the availability of every registered workspace visible to the saved host:
 
@@ -221,7 +222,7 @@ The successful response uses the normal RPC response shape:
 {"id":"cancel-1","type":"response","command":"abort","success":true}
 ```
 
-`abort` is the only direct remote cancellation command in v1. Command names such as `cancel`, `cancel_run`, `detach`, and `disconnect` are not forwarded by the remote command allowlist. App-level disconnect without stop should close the stream only; clients reconnect by opening a new authorized stream, then calling `get_state` and `get_transcript`.
+`abort` cancels foreground work and all session-owned background jobs, joining cleanup. `cancel_job` requests cancellation of one accessible background job without stopping the foreground run or its siblings; `cancelling` is not terminal until cleanup settles. Command names such as `cancel`, `cancel_run`, `detach`, and `disconnect` are not forwarded by the remote command allowlist. App-level disconnect without stop should close the stream only; clients reconnect by opening a new authorized stream, then calling `get_state` and `get_transcript`.
 
 The daemon's integrated runtime treats an authorized stream as a subscriber to host-owned session state. When the only subscriber detaches during active work, the prompt continues on the host. The same authoritative Iroh node ID, workspace, and session can reconnect to the detached runtime; `get_state.isStreaming` reports an active provider run or continuation, `get_state.isBusy` additionally covers prompt preflight and standalone session operations, and `get_transcript` recovers persisted output. Idle detached runtimes are retained for 30 minutes by default, configurable with the `remote.detachedRuntimeTtlMs` setting. Distinct paired devices may co-attach to one runtime, and when a desktop TUI owns the conversation lease the daemon transparently relays the stream to it; `remote_terminal` reasons `lease_transferred` and `session_rekeyed_reconnect` signal expected closures the client should reconnect through immediately. Prompt-class commands during an ownership drain fail with the transient error code `lease_draining` (with `retryAfterMs`).
 
@@ -246,6 +247,9 @@ Conversation streams forward or handle these remote commands:
 - `steer`
 - `follow_up`
 - `abort`
+- `list_jobs`
+- `read_job`
+- `cancel_job`
 - `get_state`
 - `get_transcript`
 - `get_subscription_usage`
@@ -270,15 +274,38 @@ Conversation streams on `worktrees.v1` hosts also accept `create_worktree` and `
 
 `list_sessions` entries include an optional `worktreeId` when the session is bound to a daemon-managed worktree, so clients can badge worktree sessions without a `list_worktrees` join. Entries also include optional `workingDirectory` when the session cwd is below the workspace/worktree root. Worktree attribution may be absent while a desktop TUI owns the conversation lease.
 
+An entry may also include daemon-owned `workContext`:
+
+```json
+{"changeId":"c56d55ca-3937-4fc8-b13a-a7525577864b","repository":"Volt","branch":"feature/work-association","resolutionState":"resolved","pullRequest":{"provider":"github","number":42,"title":"Add Work association","status":"open","stale":false}}
+```
+
+`resolutionState` is `resolved`, `none`, `ambiguous`, or `unavailable`.
+`pullRequest` is required only for `resolved`; its status is `open`, `draft`,
+`merged`, or `closed`. The daemon joins this value synchronously from private
+bounded state. Listing never invokes Git or a provider. The wire omits checkout
+paths, remotes, canonical repository identities, matched object IDs,
+credentials, raw provider output, and diagnostics. Default/configured base
+branches are not grouped across sessions, and an exact positive PR association
+is sticky rather than silently moving to a newer match.
+
 On hosts advertising `session_runtime_state.v1`, an entry may also include `runtimeState` with one of `tui-owned`, `daemon-active`, `daemon-detached`, or `daemon-draining`. The field is omitted when the session has no live lease/runtime. `tui-owned` means a desktop TUI process currently owns the conversation. `daemon-active` means a daemon runtime has at least one attached phone stream. `daemon-detached` means the daemon still retains the runtime with no attached streams and may represent idle warm retention rather than active work. `daemon-draining` means the daemon runtime is handing ownership to a TUI. Clients should therefore use the exact state, not mere field presence, when deciding which hidden sessions to auto-connect.
 
-Workspace discovery streams are purpose-scoped. `list_sessions` streams accept only `list_sessions`; `agent_options` streams accept only `get_agent_options`. Any other valid RPC command receives `unsupported_on_workspace_discovery_stream`. Discovery streams create no conversation runtime and do not update last-session state.
+Workspace discovery streams are purpose-scoped. `list_sessions` streams accept only `list_sessions`; `agent_options` streams accept only `get_agent_options`; `review` streams accept only `resolve_pr_review`. Any other valid RPC command receives `unsupported_on_workspace_discovery_stream`. Discovery streams create no conversation runtime and do not update last-session state.
 
-Workspace management streams with purpose `unregister_workspace` accept `unregister_workspace` and `list_workspace_directories`. The directory-listing RPC takes `workspaceName` plus optional relative `path`, and returns `directories:[{name,path}]` with relative paths only. Unregister refuses with `workspace_has_worktrees` while any persisted child worktree remains; clients must remove each worktree through `remove_worktree`, using `force:true` only as the user's explicit destructive choice. Management streams with purpose `manage_worktrees` (worktrees.v1) accept only `create_worktree`, `list_worktrees`, and `remove_worktree`. Any other valid RPC command receives `unsupported_on_workspace_management_stream`. Every management command must include a `workspaceName` matching the stream workspace (`session_mismatch` otherwise) and may not include extra fields (`invalid_request`); inbound host-local filesystem paths are always rejected.
+Workspace management streams with purpose `unregister_workspace` accept `unregister_workspace` and `list_workspace_directories`. The directory-listing RPC takes `workspaceName` plus optional relative `path`, and returns `directories:[{name,path}]` with relative paths only. Unregister refuses with `workspace_has_worktrees` while any persisted child worktree remains; clients must remove each worktree through `remove_worktree`, using `force:true` only as the user's explicit destructive choice. Management streams with purpose `manage_worktrees` (worktrees.v1) accept only `create_worktree`, `list_worktrees`, `remove_worktree`, and `prepare_pr_review`. Any other valid RPC command receives `unsupported_on_workspace_management_stream`. Every management command must include a `workspaceName` matching the stream workspace (`session_mismatch` otherwise) and may not include extra fields (`invalid_request`); inbound host-local filesystem paths are always rejected.
 
-All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. This includes local-only subagent lifecycle commands such as `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`. Within the remote surface, only `abort` is a direct cancellation command.
+All other command types receive a JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process. This includes local-only subagent lifecycle commands such as `list_subagents`, `subagent_start`, `subagent_abort`, `subagent_get_state`, `subagent_get_transcript`, and `subagent_dispose`. Background-job controls are independent of the local-only subagent lifecycle commands.
 
 `get_subscription_usage` is an account-level read on a conversation stream. It requires `host.manage.v1` and returns normalized quota windows for stored OAuth logins using the same brief host-side cache as `/usage`; API keys are not queried. Results can report `providers`, `no_subscription`, or `unsupported`, and provider entries independently carry either a snapshot or a categorized error. Credentials, account identity, and raw provider payloads never cross the wire. The standard `coding`, `review`, and `chat` presets include `host.manage.v1`.
+
+### Background jobs on conversation streams
+
+`list_jobs` and `read_job {jobId}` require `conversation.observe.v1`; `cancel_job {jobId}` requires `conversation.control.v1` and the current bootstrap's `conversationAuthority`. All three remain scoped to the owning runtime/branch and the active `jobs` plus originating-tool grants. They are not admitted on discovery or management streams and do not start inference.
+
+`get_state.backgroundJobs` and `conversation_bootstrap.state.backgroundJobs` always contain accessible job summaries, without output. Ordered `background_jobs_changed` events replace those summaries and invalidate cached output; clients read only the selected job. Read/cancel responses contain `data.job`, list responses contain `data.jobs`, and all carry `data.sessionId` plus the ordered `data.branchEpoch`. Discard responses from obsolete session/branch identities.
+
+`read_job` returns a non-consuming retained tail, at most 50 KiB UTF-8 or 2000 lines before remote path sanitization, never arbitrary logfile contents. The normal workspace/worktree path handling applies. RPC reads do not mark results collected by the model. Foreground `agent_settled`/`isBusy` do not imply job completion. Detach keeps retained jobs alive; runtime replacement/restart invalidates their handles. See [RPC background jobs](rpc.md#background-jobs) for the complete contract.
 
 ### Subagent delegation trees on conversation streams
 
@@ -347,6 +374,79 @@ The host rejects missing or malformed names, names that do not match the managem
 
 This command is host-state metadata management only. It does not create, rename, path-map, or delete host workspace or worktree directories, including unrecognized/orphan directories under the daemon worktree root. Response data contains the registered name only, never a host-local path. Folder browsing is a separate read-only `list_workspace_directories` RPC on the same management stream and returns relative paths only.
 
+### Prepared pull-request reviews
+
+Resolve the PR before creating any conversation. Open `workspaceDiscovery:{"purpose":"review"}` and send:
+
+```json
+{"id":"resolve-1","type":"resolve_pr_review","workspaceName":"myrepo","number":"414"}
+```
+
+Optional `workingDirectory` selects a validated repository-relative directory;
+optional `sourceWorktreeId` selects an already registered source worktree. They
+are mutually exclusive. Omit `number` to resolve the current PR in that source,
+not in a generated review branch. Numbers are canonical decimal strings from
+1 through 2147483647. Resolution requires `conversation.observe.v1` and creates
+no session, runtime, checkout or discussion snapshot.
+
+```json
+{"id":"resolve-1","type":"response","command":"resolve_pr_review","success":true,"data":{"workspaceName":"myrepo","pullRequest":{"provider":"github","url":"https://github.com/owner/myrepo/pull/414","number":414,"title":"Fix value","repository":"owner/myrepo","headRefName":"fix-value","headRefOid":"0123456789abcdef0123456789abcdef01234567"}}}
+```
+
+Then open `workspaceManagement:{"purpose":"manage_worktrees"}` and send the same
+source, a caller-generated `sessionId`, the resolved explicit PR number and the
+expected URL/head. Expected identity is an assertion, not repository authority:
+
+```json
+{"id":"prepare-1","type":"prepare_pr_review","workspaceName":"myrepo","number":"414","sessionId":"review-intent-one","expectedPullRequest":{"url":"https://github.com/owner/myrepo/pull/414","headRefOid":"0123456789abcdef0123456789abcdef01234567"}}
+```
+
+Preparation requires both `conversation.control.v1` and `worktrees.manage.v1`.
+It rechecks persisted workspace generation, grants and revocation before effects;
+no preset is broadened. Unknown fields, absolute paths and arbitrary remotes
+are rejected. Replies contain only bounded display metadata and relative
+placement, never checkout paths, credentials or internal repository identities:
+
+```json
+{"id":"prepare-1","type":"response","command":"prepare_pr_review","success":true,"data":{"workspaceName":"myrepo","sessionId":"review-intent-one","worktreeId":"review-opaque-id","pullRequest":{"provider":"github","url":"https://github.com/owner/myrepo/pull/414","number":414,"title":"Fix value","repository":"owner/myrepo","headRefName":"fix-value","headRefOid":"0123456789abcdef0123456789abcdef01234567"},"disposition":"created"}}
+```
+
+`disposition` is `created` or `reused`. Optional `workingDirectory` is the effective
+workspace-relative source-repository placement. Repeat the returned placement
+in an ordinary `conversation:{"target":"new","sessionId":...,"worktreeId":...}`
+hello, configure model/thinking/Fast/mode, then invoke `review.pr`. Do not send
+inference before preparation and configuration succeed. No old-host fallback
+or additional compatibility feature flag is provided.
+
+Only clean, idle, registered/adopted worktrees with the exact repository/head
+and matching branch or host-owned PR metadata are reusable. Dirty, busy,
+unreadable, in-progress-operation or conflicting candidates are skipped. New
+checkouts fetch into private Volt refs without changing ordinary branches,
+tracking refs or `FETCH_HEAD`; the parent checkout is never switched or reset.
+
+Keep the session ID and complete request stable for a retry. Changing source,
+PR or expected head requires a new launch intent. Pending placement survives
+restart and is revalidated before session creation. Error codes are
+`review_preparation_stale` (head/checkout changed), `review_preparation_conflict`
+(identity/placement conflicts), `worktree_limit_reached` (no safe checkout capacity
+could be reclaimed), or `review_preparation_failed` (safe generic failure).
+Capacity failures carry both `error:"worktree_limit_reached"` and
+`errorCode:"worktree_limit_reached"`. Preserve the launch intent and offer Retry
+once active sessions finish or protected checkouts are explicitly cleaned up;
+do not suggest GitHub authentication or automatic forced removal. Normal
+capability-denial errors remain distinct. Successful worktrees
+are retained on cancellation or later failure. Retry or offer explicit cleanup;
+never automatically delete a reused checkout. An unconfirmed review invocation
+must be reconciled through workflow state, not blindly invoked again.
+
+The session's immutable host-only binding pins `review.pr` to the original PR
+and authorized source repository, not the generated local branch. Head and
+checkout checks run before inference. General/findings handoffs and discussion
+creation/reset/resume preserve checkout authority. Ordinary fix prompts may
+edit files; reruns do not reset those edits or silently follow a moved PR.
+Prepare a new review when the bound head no longer matches. Portable transcripts
+and imported/forked conversations do not carry this host-only binding.
+
 ### Worktree management (`manage_worktrees`, worktrees.v1)
 
 A `manage_worktrees` management stream drives daemon-managed git worktrees for the stream workspace. Checkout paths are computed host-side under the agent dir and never cross the wire in either direction; requests carry ids and git refs only. If `workingDirectory` is inside a nested git repository or submodule under the registered workspace, the daemon creates the worktree from that nested repository root while keeping the worktree record and sessions under the registered parent workspace.
@@ -362,6 +462,14 @@ A `manage_worktrees` management stream drives daemon-managed git worktrees for t
 ```
 
 Failures use the standard error response with reasons such as `not_a_git_repository`, `worktree_exists`, `worktree_branch_conflict`, `worktree_limit_reached`, `invalid_worktree_id`, `invalid_working_directory`, or `git_failed`. The wire `workingDirectory` remains registered-workspace-relative for both root and nested-repo worktrees; host-local nested repo roots and checkout paths are never exposed.
+
+The 16-worktree limit counts retained checkouts, not archived provenance records.
+The host attempts safe reclamation before returning `worktree_limit_reached`.
+Inactive disposable checkouts may be archived while their branches, exact commits,
+session bindings and review receipts remain durable. Archived records report
+`available:false`; resuming a bound session recreates the original checkout when
+its repository and branch still match. Clients must not interpret checkout
+unavailability as transcript deletion or redirect the session to another worktree.
 
 `list_worktrees` reports each worktree with availability, dirtiness, bound session ids, and merge-back counts (`aheadBehind` compares the worktree branch against its recorded base ref):
 
@@ -399,7 +507,7 @@ A conversation hello with `{"target":"new","sessionId":"agent-one","worktreeId":
 {"id":"logs-1","type":"response","command":"upload_device_logs","success":true,"data":{"path":".volt/device-logs/volt-device.log","byteCount":42}}
 ```
 
-`get_ui_capabilities`, `get_ui_actions`, `get_ui_action_completions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation and `ui_action_completions.v1` when action argument completions are available. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host session files, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
+`get_ui_capabilities`, `get_ui_actions`, `get_ui_action_completions`, and `invoke_ui_action` expose the v1 native UI action protocol for the narrow remote-safe action set. Remote `get_ui_capabilities` advertises `ui_action_invocation.v1` only when the host accepts invocation and `ui_action_completions.v1` when action argument completions are available. Descriptor responses omit prompt bodies, skill content, raw `sourceInfo`, extension source paths, prompt and skill file paths, skill base directories, host-local session store locators, JSONL snapshot paths, provider metadata, and secrets. They still pass through the outbound path handling layer below before being written to the remote stream.
 
 Remote `get_ui_action_completions` and `invoke_ui_action` are allowlist-based. Every `invoke_ui_action` command requires a trimmed, non-empty string correlation `id` of at most 256 UTF-8 bytes; every success or command-level failure response produced for it echoes that exact id through the filter, grant, daemon-admission, identity, and runtime-dispatch layers, although transport failure can prevent delivery. A known invocation payload with a missing, non-string, empty, whitespace-padded, or overbound id receives an uncorrelated JSONL failure with no `id` and `command:"invalid"`; no layer emits an id-less or unusably correlated response tagged `invoke_ui_action`. V1 forwards exact reviewed built-in ids `session.new`, `run.cancel`, `thinking.fast_mode`, `review.uncommitted`, `review.branch`, `review.pr`, and `review.commit`, plus projected prompt-template and skill ids. `review.branch`'s `base` argument advertises the `gitBranches` completion source; its completion responses contain workspace branch names only and pass through the same outbound redaction layer as other descriptor surfaces. Extension commands are denied by default and are discovered or invoked remotely only when their registration explicitly sets `remoteSafe: true`; the same opt-in is rechecked for direct RPC prompts containing an extension slash command. The host still resolves the current action catalog, rechecks action availability and remote safety, validates arguments, and applies streaming policy at invocation time; review descriptors advertise `requiresConfirmation` and clients confirm before invoking. Local-only built-ins such as `context.compact` and `session.rename`, deferred `review.tools`, stale action ids, malformed action ids, near-prefix action ids, and unreviewed action id prefixes receive a normal JSONL `response` with `success:false` and are not forwarded to the local Volt RPC process.
 
@@ -407,11 +515,11 @@ Remote clients should use `get_ui_actions` rather than `get_commands` to build n
 
 Projected extension command, prompt-template, and skill actions execute through the host's existing prompt/command expansion path. Extension UI requests raised during those commands continue to use the existing `extension_ui_request` / `extension_ui_response` protocol. RPC-degraded extension UI methods keep the behavior documented in [RPC mode](rpc.md#extension-ui-protocol); Iroh does not add terminal-only UI support.
 
-Remote review descriptors expose only bounded card metadata. All Git-backed review diffs disable textconv and external diff drivers. `review.commit` discloses that it inspects workspace commit history and sends commit metadata and diff to the review model; its required `ref` is trimmed, bounded to 1024 UTF-8 bytes, resolved to a commit object, and replaced with the canonical object id before `git show`. `review.pr` discloses use of the host's GitHub credentials and network and submission to discovery and independent verification of pull request metadata/diff, authoritative closing/manual-linked issues, PR comments, submitted review summaries, inline review threads/replies, and linked-issue comments. Its optional string `number` must be a canonical positive decimal no greater than `2147483647`, and omission selects the current branch's pull request. Explicit `null` is not omission and fails string argument validation.
+Remote review descriptors expose only bounded card metadata. All Git-backed review diffs disable textconv and external diff drivers. `review.commit` discloses that it inspects workspace commit history and sends commit metadata and diff to the review model; its required `ref` is trimmed, bounded to 1024 UTF-8 bytes, resolved to a commit object, and replaced with the canonical object id before `git show`. `review.pr` discloses use of the host's GitHub credentials and network and submission to discovery and independent verification of pull request metadata/diff, authoritative closing/manual-linked issues, PR comments, submitted review summaries, inline review threads/replies, and linked-issue comments. Its optional string `number` must be a canonical positive decimal no greater than `2147483647`, and omission selects the current branch's pull request for unprepared sessions. Prepared sessions use their host-owned explicit PR binding instead. Explicit `null` is not omission and fails string argument validation.
 
 PR context is host-captured and bounded to 32 KiB per GitHub text field, 20 linked issues, 200 total discussion entries, and 256 KiB rendered. Volt neither infers links from arbitrary text nor follows relationships recursively. Both isolated analysis passes must inspect the same captured context completely and treat GitHub-authored text as untrusted evidence, not policy or tool instructions. Capture limitations or incomplete inspection make the result incomplete and withhold its correctness verdict; a final exact head-OID check rejects a PR that moved during capture. Newly accepted findings then receive code-derived prose from a fresh context-blind verifier-model pass that sees only one-time host ids, validated finding structure, trusted base policy, and immutable repository tools; it has no GitHub context, target title/body, private analysis prose, extensions, or command-capable tools. It must inspect every accepted hunk and cannot change finding identity, anchor, severity, or status. Runs with no new findings skip that pass.
 
-Review invocations run detached: synchronous target or credential failures return `success:false` without an accepted response or workflow events; otherwise the response reports `accepted` with a `workflowId`, the conversation stays fully usable while the review runs, and the client's session is never force-switched. Review invocation responses do not include raw diffs, pull request titles or bodies, linked-issue or discussion text, configured review model values, auth state, or raw tool output. Configured-model fallback warnings are suppressed remotely, and subprocess/provider failures are replaced with stable remote messages while detailed diagnostics remain host-local. Workflow metadata identifies commit targets by canonical object id and pull request targets as `PR #N`. While review runs, the host emits `workflow_start`, sanitized workflow-scoped `tool_execution_start`/`tool_execution_end`, `workflow_update`, and `workflow_end` events so clients can render a live progress timeline. Pull request tool events omit all model-controlled string arguments so GitHub-authored text cannot be reflected through them; other activity events include bounded tool names and approved arguments only. Raw read contents, grep output, review prompts, diffs, newly captured GitHub text, and free-form discovery/verifier prose remain ephemeral and hidden from durable records, RPC responses, opened review sessions, transcripts, notifications, and publication payloads. Volt explicitly declassifies host-validated finding existence, anchors/evidence, identity, priority/status, and confidence rounded to one percent; finding prose comes from the context-blind pass, while PR summaries, diagnostics, limitation counts, and command-attempt counts are host-generated. The remote review workflow uses the host-owned read-only review tool set (`read`, `grep`, `find`, `ls`) and never inherits extension tools or ordinary conversation tool grants. `get_review_result` and `list_review_workflows` (observe capability) fetch structured findings and discover active or recently finished reviews after a reconnect; PR projections may include bounded capture/inspection status, counts, limitation codes, rendered byte counts, and a content fingerprint, but never the captured text. `cancel_workflow` and `open_review_session` (control capability) abort a running review and seed a fresh session with completed findings on demand.
+Review invocations run detached: synchronous target or credential failures return `success:false` without an accepted response or workflow events; otherwise the response reports `accepted` with a `workflowId`, the conversation stays fully usable while the review runs, and the client's session is never force-switched. The invocation response itself contains no target text. Configured-model fallback warnings are suppressed remotely, and subprocess/provider failures are replaced with stable remote messages while detailed diagnostics remain host-local. PR lifecycle events carry only a strict bounded `{provider,number}` association reference; provisional reviews add it after target preparation succeeds. `list_review_workflows` and `get_review_result` may additionally project bounded PR title/URL, author/avatar, head/base refs, reviewed head OID, captured review state/mergeability/check counts, observation time, and truthful changed-file totals. File items are capped and report projected/omitted counts plus completeness. Durable list rows omit file items and the PR body; the full result may include the bounded body retained with the reviewed identity. Linked-issue and discussion text never cross the RPC boundary. While review runs, the host emits `workflow_start`, sanitized workflow-scoped `tool_execution_start`/`tool_execution_end`, `workflow_update`, and `workflow_end`; pull request tool events omit all model-controlled string arguments. Raw read contents, grep output, review prompts, diffs, and free-form discovery/verifier prose remain hidden from RPC responses, opened review sessions, transcripts, notifications, and publication payloads. Volt explicitly declassifies host-validated finding structure and context-blind finding prose. The remote review workflow uses the host-owned read-only review tool set (`read`, `grep`, `find`, `ls`) and never inherits extension tools or ordinary conversation tool grants. `cancel_workflow` and `open_review_session` (control capability) abort a running review and seed a fresh session with completed findings on demand.
 
 Remote Fast mode descriptors expose only bounded toggle metadata and current boolean state. `thinking.fast_mode` invocation accepts a boolean `enabled` argument, changes only the current session's branch-local inference-speed policy without changing thinking level, persisting defaults, or switching models, and returns updated action state. The action is available only for supported models on the canonical OpenAI Responses and OpenAI Codex endpoints; enabled requests Priority processing and disabled requests the default service tier for normal conversation turns.
 
@@ -427,7 +535,7 @@ First-class extension-provided native cards, persisted chat/global Fast mode def
 
 The preview RPC surface intentionally stays narrow. It excludes local tools such as `bash`, `edit`, and `write`; those tools can only be used through the normal model/tool flow and host-side permission policy. It also excludes read-only local RPC commands such as `get_messages`, `get_commands`, and `get_last_assistant_text` for v1 preview.
 
-The path-based `switch_session` command remains blocked remotely, and mobile conversation streams also reject direct `switch_session_by_id`; clients select another session by opening a new `conversation.target:"session"` stream. `get_transcript` is the remote-safe transcript read: it returns only the bound session's projected user, assistant, tool-summary, and compaction-summary items, ordered oldest-to-newest, with server-bounded page sizes. Host session file paths, raw `get_messages` payloads, thinking blocks, raw tool output, full file contents, provider payloads, and extension-private custom data are not returned. Transcript path and text fields still pass through the outbound redaction layer below.
+The path-based `switch_session` command remains blocked remotely, and mobile conversation streams also reject direct `switch_session_by_id`; clients select another session by opening a new `conversation.target:"session"` stream. `get_transcript` is the remote-safe transcript read: it returns only the bound session's projected user, assistant, tool-summary, and compaction-summary items, ordered oldest-to-newest, with server-bounded page sizes. Host-local session store locators and JSONL snapshot paths, raw `get_messages` payloads, thinking blocks, raw tool output, full file contents, provider payloads, and extension-private custom data are not returned. Transcript path and text fields still pass through the outbound redaction layer below.
 
 - `get_messages` can return the full raw transcript, including prompts, tool output, file excerpts, provider payloads, and extension content beyond the projected transcript needed for reconnect.
 - `get_commands` exposes installed extension, prompt-template, and skill metadata; remote clients must use the sanitized `get_ui_actions` discovery surface instead.
@@ -448,7 +556,7 @@ Before host RPC output is sent to the remote stream, Volt normalizes remote-mean
 - A multi-stream host applies this mapping independently per stream; sibling workspace paths are not rewritten to `/workspace` unless they are the selected workspace for that stream.
 - Host-local paths outside the workspace are left unchanged; Volt no longer emits a generic placeholder for them.
 - Export paths are redacted when recognized with `[redacted export path]`.
-- Session files are omitted or replaced with `[redacted session file]`.
+- Structured SQLite session locators are omitted; recognized JSONL snapshot paths are replaced with `[redacted session file]`.
 - Bash output file paths are omitted or replaced with `[redacted bash output path]`.
 - Path handling applies to responses, extension UI requests, assistant content, tool-call arguments, and plain-text fallback lines.
 - Opaque model/provider data such as image base64 payloads and signature fields are preserved, while adjacent text and structured arguments are still processed as above.

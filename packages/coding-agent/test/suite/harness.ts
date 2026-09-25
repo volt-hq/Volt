@@ -2,12 +2,20 @@
  * Local test harness for the new coding-agent test suite.
  */
 
-import { existsSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import type { FauxModelDefinition, FauxProviderRegistration, FauxResponseStep, Model } from "@hansjm10/volt-ai";
-import { registerFauxProvider, streamSimple } from "@hansjm10/volt-ai";
+import type {
+	FauxModelDefinition,
+	FauxPromptCacheRefresh,
+	FauxProviderRegistration,
+	FauxResponseStep,
+	Model,
+	PromptCacheRefreshCheck,
+} from "@hansjm10/volt-ai";
+import { refreshPromptCache, registerFauxProvider, streamSimple } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
@@ -16,7 +24,8 @@ import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
-import type { ExtensionFactory, ResourceLoader } from "../../src/index.ts";
+import type { SubagentToolManager } from "../../src/core/tools/subagent.ts";
+import type { ExtensionFactory, ExtensionWorkLimits, ResourceLoader } from "../../src/index.ts";
 import { createAgentSessionTestControl, type LegacyPrepareDelivery } from "../agent-session-test-control.ts";
 import {
 	type CreateTestExtensionsResultInput,
@@ -57,19 +66,27 @@ export function getAssistantTexts(harness: Harness): string[] {
 
 export interface HarnessOptions {
 	agentDir?: string;
+	/** Optional faux streaming pace for tests that interrupt an unfinished provider response. */
+	tokensPerSecond?: number;
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
+	extensionWorkLimits?: Partial<ExtensionWorkLimits>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
 	initialActiveToolNames?: string[];
 	allowedToolNames?: string[];
 	excludedToolNames?: string[];
+	subagentToolManager?: SubagentToolManager;
 	resourceLoader?: ResourceLoader;
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
 	prepareDelivery?: LegacyPrepareDelivery;
 	withConfiguredAuth?: boolean;
 	/** Inject a persisted manager when a test needs to exercise session reload behavior. */
 	sessionManager?: SessionManager;
+	/** Register a faux prompt-cache refresh and wire the session to it. */
+	refreshPromptCache?: true | FauxPromptCacheRefresh;
+	/** Which request options the faux refresh supports; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 export interface Harness {
@@ -89,18 +106,17 @@ export interface Harness {
 	eventsOfType<T extends AgentSessionEvent["type"]>(type: T): Extract<AgentSessionEvent, { type: T }>[];
 	tempDir: string;
 	cleanup: () => void;
-}
-
-function createTempDir(): string {
-	const tempDir = join(tmpdir(), `volt-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-	mkdirSync(tempDir, { recursive: true });
-	return tempDir;
+	cleanupAsync: () => Promise<void>;
 }
 
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
-	const tempDir = createTempDir();
+	// Leave room for nested worktree/quarantine paths within Git for Windows' path limit.
+	const tempDir = mkdtempSync(join(tmpdir(), "volt-"));
 	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
 		models: options.models,
+		tokensPerSecond: options.tokensPerSecond,
+		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCache: options.refreshPromptCache }),
+		...(options.canRefreshPromptCache === undefined ? {} : { canRefreshPromptCache: options.canRefreshPromptCache }),
 	});
 	fauxProvider.setResponses([]);
 	const model = fauxProvider.getModel();
@@ -150,8 +166,10 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		model,
 		thinkingLevel: "off",
 		streamFn: streamSimple,
+		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCacheFn: refreshPromptCache }),
 		convertToLlm,
 		settingsManager,
+		extensionWorkLimits: options.extensionWorkLimits,
 		cwd: tempDir,
 		agentDir: options.agentDir ?? tempDir,
 		modelRegistry,
@@ -160,6 +178,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		initialActiveToolNames: options.initialActiveToolNames,
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
+		subagentToolManager: options.subagentToolManager,
 		extensionRunnerRef,
 	});
 	const control = createAgentSessionTestControl(session);
@@ -188,10 +207,24 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		},
 		tempDir,
 		cleanup() {
+			if (sessionManager.isPersisted()) {
+				throw new Error("Persisted harness cleanup must await cleanupAsync()");
+			}
 			session.dispose();
 			fauxProvider.unregister();
-			if (existsSync(tempDir)) {
-				rmSync(tempDir, { recursive: true });
+			if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
+		},
+		async cleanupAsync() {
+			session.dispose();
+			fauxProvider.unregister();
+			try {
+				await session.waitForClosed();
+			} finally {
+				await rm(tempDir, {
+					recursive: true,
+					force: true,
+					...(process.platform === "win32" ? { maxRetries: 10, retryDelay: 50 } : {}),
+				});
 			}
 		},
 	};

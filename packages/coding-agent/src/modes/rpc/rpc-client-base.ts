@@ -8,14 +8,19 @@ import type { ExtensionError } from "../../core/extensions/index.ts";
 import { type ProjectionDiagnostic, StreamProjectionDecoder } from "../../core/rpc/stream-projection.ts";
 import type { SubagentEvent, SubagentResult } from "../../core/subagents/index.ts";
 import type {
+	RpcBackgroundJobsChangedEvent,
+	RpcCancelJobResponse,
 	RpcClientCapabilityFeature,
 	RpcCommand,
+	RpcConversationAuthority,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHostActionRequest,
 	RpcHostActionResponse,
 	RpcHostActionUpdate,
+	RpcListJobsResponse,
 	RpcListSubagentsResponse,
+	RpcReadJobResponse,
 	RpcResponse,
 	RpcReviewAcknowledgmentResponse,
 	RpcReviewWorkflowListResponse,
@@ -75,6 +80,7 @@ export type RpcSubagentDisposedEvent = { type: "subagent_disposed"; subagentId: 
 export type RpcModelsChangedEvent = { type: "models_changed" };
 export type RpcClientEvent =
 	| AgentSessionEvent
+	| RpcBackgroundJobsChangedEvent
 	| RpcModelsChangedEvent
 	| RpcWorkflowEvent
 	| RpcWorkflowToolEvent
@@ -158,8 +164,8 @@ export abstract class RpcClientBase {
 	}
 
 	/** Start a new session, optionally with parent tracking. */
-	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
-		const response = await this.send({ type: "new_session", parentSession });
+	async newSession(parentSessionId?: string): Promise<{ cancelled: boolean }> {
+		const response = await this.send({ type: "new_session", parentSessionId });
 		return this.getData(response);
 	}
 
@@ -177,6 +183,24 @@ export abstract class RpcClientBase {
 			beforeEntryId: options.beforeEntryId,
 		});
 		return this.getData(response);
+	}
+
+	/** List accessible background jobs, without output or model-result acknowledgement. */
+	async listJobs(): Promise<RpcListJobsResponse> {
+		return this.getData(await this.send({ type: "list_jobs" }));
+	}
+
+	/** Read the latest bounded job output without consuming it. */
+	async readJob(jobId: string): Promise<RpcReadJobResponse> {
+		return this.getData(await this.send({ type: "read_job", jobId }));
+	}
+
+	/** Request per-job cancellation. Cancelling is not terminal until the worker settles. */
+	async cancelJob(
+		jobId: string,
+		options: { conversationAuthority?: RpcConversationAuthority } = {},
+	): Promise<RpcCancelJobResponse> {
+		return this.getData(await this.send({ type: "cancel_job", jobId, ...options }));
 	}
 
 	/** Get native UI action protocol capabilities. */
@@ -377,7 +401,7 @@ export abstract class RpcClientBase {
 	}
 
 	/** Get session statistics. */
-	async getSessionStats(): Promise<SessionStats> {
+	async getSessionStats(): Promise<Omit<SessionStats, "sessionRef">> {
 		const response = await this.send({ type: "get_session_stats" });
 		return this.getData(response);
 	}
@@ -400,9 +424,9 @@ export abstract class RpcClientBase {
 		return this.getData(response);
 	}
 
-	/** Switch to a different session file. */
-	async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {
-		const response = await this.send({ type: "switch_session", sessionPath });
+	/** Switch to a workspace session by stable session id. */
+	async switchSession(sessionId: string): Promise<{ cancelled: boolean }> {
+		const response = await this.send({ type: "switch_session", sessionId });
 		return this.getData(response);
 	}
 

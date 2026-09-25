@@ -19,7 +19,14 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const API_VERSION = "volt-workspace-fs-v1";
-const EXPECTED_EXPORTS = ["WorkspaceRoot", "workspaceFsApiVersion", "workspaceFsSourceFingerprint"];
+const EXPECTED_EXPORTS = [
+	"FileLock",
+	"WorkspaceRoot",
+	"tryAcquireFileLock",
+	"workspaceFsApiVersion",
+	"workspaceFsSourceFingerprint",
+	"writeWindowsPrivateFile",
+];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const crate = join(root, "packages", "coding-agent", "native", "workspace-fs");
 const prebuilds = join(crate, "prebuilds");
@@ -366,21 +373,25 @@ function usage() {
 	console.log(`Usage: node scripts/workspace-fs-native.mjs <command> [options]\n\nCommands:\n  build [target]        Build the current or named target\n  manifest [--allow-partial]\n  verify [--allow-partial]\n  licenses              Generate Rust third-party license texts and inventory\n  verify-licenses       Verify the generated Rust license set\n  check                 Run formatting, clippy, tests, artifact, and license verification\n  fingerprint           Print the source/Cargo fingerprint\n  target                Print the current native target`);
 }
 
-const [command, argument] = process.argv.slice(2);
-try {
-	if (command === "build") build(argument ?? currentTarget());
-	else if (command === "manifest") writeManifest(argument === "--allow-partial");
-	else if (command === "verify") verify(argument === "--allow-partial");
-	else if (command === "licenses") generateLicenses();
-	else if (command === "verify-licenses") verifyLicenses();
-	else if (command === "check") check();
-	else if (command === "fingerprint") console.log(sourceFingerprint());
-	else if (command === "target") console.log(currentTarget());
-	else {
-		usage();
-		if (command) process.exitCode = 1;
+export { API_VERSION, currentTarget, sourceFingerprint, targets, verifyAddon, verifyLicenses };
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+	const [command, argument] = process.argv.slice(2);
+	try {
+		if (command === "build") build(argument ?? currentTarget());
+		else if (command === "manifest") writeManifest(argument === "--allow-partial");
+		else if (command === "verify") verify(argument === "--allow-partial");
+		else if (command === "licenses") generateLicenses();
+		else if (command === "verify-licenses") verifyLicenses();
+		else if (command === "check") check();
+		else if (command === "fingerprint") console.log(sourceFingerprint());
+		else if (command === "target") console.log(currentTarget());
+		else {
+			usage();
+			if (command) process.exitCode = 1;
+		}
+	} catch (error) {
+		console.error(error instanceof Error ? error.stack || error.message : String(error));
+		process.exitCode = 1;
 	}
-} catch (error) {
-	console.error(error instanceof Error ? error.stack || error.message : String(error));
-	process.exitCode = 1;
 }

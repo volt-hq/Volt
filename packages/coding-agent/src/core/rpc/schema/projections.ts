@@ -6,11 +6,85 @@
  */
 
 import { Type } from "typebox";
+import { ReviewUsageAccountingSchema, ReviewUsageSummarySchema } from "../../review-usage.ts";
 import type { RpcProjectionTruncation } from "../types.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
+import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 
 export const RpcWorkflowKindSchema = openStringEnum(["review"]);
 export const RpcWorkflowStatusSchema = openStringEnum(["running", "finalizing", "completed", "cancelled", "failed"]);
+
+const reviewPullRequestReferenceProperties = {
+	provider: Type.String({ minLength: 1, maxLength: 64, pattern: "^[^\\s\\x00-\\x1f\\x7f]+$" }),
+	number: Type.Integer({ minimum: 1, maximum: 2_147_483_647 }),
+};
+
+export const RpcReviewPullRequestReferenceSchema = Type.Object(reviewPullRequestReferenceProperties, {
+	additionalProperties: false,
+});
+
+export const RpcReviewPullRequestMetadataSchema = Type.Object(
+	{
+		...reviewPullRequestReferenceProperties,
+		title: Type.String({ minLength: 1, maxLength: 512 }),
+		url: Type.String({ minLength: 1, maxLength: 2_000 }),
+		baseRefName: Type.String({ minLength: 1, maxLength: 1_024 }),
+		headRefName: Type.String({ minLength: 1, maxLength: 1_024 }),
+		headRefOid: Type.String({ pattern: "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" }),
+		author: Type.Optional(
+			Type.Object(
+				{
+					login: Type.String({ minLength: 1, maxLength: 256 }),
+					avatarUrl: Type.Optional(Type.String({ maxLength: 2_000, pattern: "^https://" })),
+				},
+				{ additionalProperties: false },
+			),
+		),
+		reviewState: Type.Optional(stringEnum(["draft", "ready", "merged", "closed"])),
+		mergeability: Type.Optional(stringEnum(["mergeable", "conflicting", "unknown"])),
+		checks: Type.Optional(
+			Type.Object(
+				{
+					state: stringEnum(["passing", "pending", "failing", "none", "unknown"]),
+					totalCount: RpcSafeNonNegativeIntegerSchema,
+					passedCount: RpcSafeNonNegativeIntegerSchema,
+					pendingCount: RpcSafeNonNegativeIntegerSchema,
+					failedCount: RpcSafeNonNegativeIntegerSchema,
+					neutralCount: RpcSafeNonNegativeIntegerSchema,
+					unknownCount: RpcSafeNonNegativeIntegerSchema,
+				},
+				{ additionalProperties: false },
+			),
+		),
+		observedAt: Type.Optional(RpcSafeNonNegativeIntegerSchema),
+	},
+	{ additionalProperties: false },
+);
+
+export const RpcReviewFileMetadataSchema = Type.Object(
+	{
+		totalCount: RpcSafeNonNegativeIntegerSchema,
+		projectedCount: RpcSafeNonNegativeIntegerSchema,
+		omittedCount: RpcSafeNonNegativeIntegerSchema,
+		additions: RpcSafeNonNegativeIntegerSchema,
+		deletions: RpcSafeNonNegativeIntegerSchema,
+		isComplete: Type.Boolean(),
+		items: Type.Array(
+			Type.Object(
+				{
+					path: Type.String({ minLength: 1, maxLength: 4_096 }),
+					previousPath: Type.Optional(Type.String({ minLength: 1, maxLength: 4_096 })),
+					status: stringEnum(["added", "modified", "deleted", "renamed", "copied", "type-changed"]),
+					additions: RpcSafeNonNegativeIntegerSchema,
+					deletions: RpcSafeNonNegativeIntegerSchema,
+				},
+				{ additionalProperties: false },
+			),
+			{ maxItems: 200 },
+		),
+	},
+	{ additionalProperties: false },
+);
 
 /** Describes a value whose wire projection was reduced to satisfy a byte budget. */
 export const RpcProjectionTruncationSchema = Type.Unsafe<RpcProjectionTruncation>(
@@ -69,6 +143,10 @@ export const RpcWorkflowEventSchema = Type.Object(
 		title: Type.Optional(Type.String()),
 		message: Type.Optional(Type.String()),
 		status: Type.Optional(RpcWorkflowStatusSchema),
+		/** Host-authoritative Unix epoch milliseconds for timed workflow presentation. */
+		startedAt: Type.Optional(Type.Number()),
+		endedAt: Type.Optional(Type.Number()),
+		pullRequest: Type.Optional(RpcReviewPullRequestReferenceSchema),
 		projection: Type.Optional(RpcProjectionTruncationSchema),
 	},
 	{ additionalProperties: false },
@@ -108,7 +186,7 @@ export const RpcWorkflowToolEventSchema = Type.Union([
 // ============================================================================
 
 export const RpcReviewWorkflowLifecycleStatusSchema = stringEnum(["running", "completed", "cancelled", "failed"]);
-export const RpcReviewRunStatusSchema = stringEnum(["completed", "incomplete", "cancelled", "failed"]);
+export const RpcReviewRunStatusSchema = stringEnum(["unfinished", "completed", "incomplete", "cancelled", "failed"]);
 export const RpcReviewCompletionStatusSchema = stringEnum(["complete", "incomplete"]);
 export const RpcReviewCorrectnessSchema = stringEnum(["correct", "incorrect"]);
 export const RpcReviewFindingStatusSchema = stringEnum(["open", "accepted", "fixed", "dismissed", "uncertain"]);
@@ -117,7 +195,15 @@ const reviewWorkflowDescriptorProperties = {
 	workflowId: Type.String(),
 	action: Type.String(),
 	status: RpcReviewWorkflowLifecycleStatusSchema,
-	target: Type.Object({ description: Type.String(), diffCommand: Type.String() }, { additionalProperties: false }),
+	target: Type.Object(
+		{
+			description: Type.String(),
+			diffCommand: Type.String(),
+			pullRequest: Type.Optional(RpcReviewPullRequestMetadataSchema),
+			files: Type.Optional(RpcReviewFileMetadataSchema),
+		},
+		{ additionalProperties: false },
+	),
 	findingsCount: Type.Optional(Type.Number()),
 	errorMessage: Type.Optional(Type.String()),
 	startedAt: Type.Number(),
@@ -223,7 +309,7 @@ export const RpcReviewTargetIdentitySchema = Type.Object(
 				{
 					number: Type.Integer(),
 					title: Type.String(),
-					body: Type.String(),
+					body: Type.Optional(Type.String()),
 					url: Type.String(),
 					baseRefName: Type.String(),
 					headRefName: Type.String(),
@@ -242,13 +328,22 @@ const reviewRunProperties = {
 	workflowAction: Type.String(),
 	status: RpcReviewRunStatusSchema,
 	startedAt: Type.Number(),
-	endedAt: Type.Number(),
+	endedAt: Type.Optional(Type.Number()),
+	usage: Type.Optional(
+		Type.Union([
+			ReviewUsageSummarySchema,
+			Type.Object({ status: Type.Literal("unavailable") }, { additionalProperties: false }),
+		]),
+	),
+	usageUpdatedAt: Type.Optional(Type.Number()),
 	acknowledgedAt: Type.Optional(Type.Number()),
 	target: Type.Object(
 		{
 			description: Type.String(),
 			diffCommand: Type.String(),
 			identity: RpcReviewTargetIdentitySchema,
+			pullRequest: Type.Optional(RpcReviewPullRequestMetadataSchema),
+			files: RpcReviewFileMetadataSchema,
 			context: Type.Optional(
 				Type.Object(
 					{
@@ -276,6 +371,7 @@ const reviewRunProperties = {
 export const RpcReviewWorkflowResultResponseSchema = Type.Object(
 	{
 		...reviewRunProperties,
+		usageBreakdown: Type.Optional(ReviewUsageAccountingSchema.properties.attempts),
 		completionStatus: Type.Optional(RpcReviewCompletionStatusSchema),
 		summary: Type.Optional(Type.String()),
 		findings: Type.Optional(Type.Array(RpcReviewFindingSchema)),

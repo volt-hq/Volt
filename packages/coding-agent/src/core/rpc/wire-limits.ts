@@ -71,6 +71,16 @@ export const RPC_GIT_CONTEXT_OID_PATTERN = "^(?:[0-9a-f]{40}|[0-9a-f]{64})$";
 export const RPC_GIT_CONTEXT_OBSERVED_AT_MAX_CHARS = 32;
 
 // ============================================================================
+// Work association
+// ============================================================================
+
+export const RPC_WORK_CHANGE_ID_MAX_CHARS = 128;
+export const RPC_WORK_REPOSITORY_MAX_CHARS = 256;
+export const RPC_WORK_BRANCH_MAX_CHARS = 1024;
+export const RPC_WORK_PROVIDER_MAX_CHARS = 64;
+export const RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS = 512;
+
+// ============================================================================
 // UI action-state events
 // ============================================================================
 
@@ -169,6 +179,12 @@ export const RPC_STABLE_ERROR_CODES = [
 	"client_input_outcome_ambiguous",
 	"stale_plan_revision",
 	"stale_conversation_authority",
+	"review_discussions_unavailable",
+	"review_source_unavailable",
+	"review_preparation_failed",
+	"review_preparation_stale",
+	"review_preparation_conflict",
+	"worktree_limit_reached",
 ] as const;
 export type RpcStableErrorCode = (typeof RPC_STABLE_ERROR_CODES)[number];
 

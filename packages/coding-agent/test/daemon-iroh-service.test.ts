@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import {
 	type IrohRemoteHandshakeSuccess,
 	type IrohRemoteHello,
@@ -16,7 +15,11 @@ import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts
 import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
-import { CONTROL_RPC_GRANTS_CAPABILITY, type ControlEvent } from "../src/daemon/control-protocol.ts";
+import {
+	CONTROL_RPC_GRANTS_CAPABILITY,
+	type ControlEvent,
+	type RemoteTransportHealth,
+} from "../src/daemon/control-protocol.ts";
 import { createIntegratedConversationHandshakeResponse } from "../src/daemon/handshake-responses.ts";
 import {
 	formatIrohLoadError,
@@ -48,12 +51,191 @@ import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
 import { readLineFromIroh } from "../src/daemon/workspace-streams.ts";
+import { createTuiRelayAuthorization } from "../src/modes/interactive/daemon-attach.ts";
 
 const native = loadIrohModule();
 const nativeAvailable = native.iroh !== undefined;
 const nativeRequired = process.env.VOLT_TEST_REQUIRE_NATIVE_IROH === "1";
 
+beforeAll(() => {
+	// Fixtures own their relay config and persisted credentials. Inherited canary
+	// URLs or shared tokens must not override that authority in in-process daemons.
+	vi.stubEnv("VOLT_IROH_RELAY_MODE", undefined);
+	vi.stubEnv("VOLT_IROH_RELAY_URLS", undefined);
+	vi.stubEnv("VOLT_IROH_RELAY_AUTH_TOKEN", undefined);
+});
+
+afterAll(() => {
+	vi.unstubAllEnvs();
+});
+
 describe("native Iroh test prerequisite", () => {
+	it("reports an injected missing native binding without taking down local daemon control", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-missing-iroh-"));
+		let control: DaemonClient | undefined;
+		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+			createIrohDaemonService(
+				{ relayMode: "disabled" },
+				{
+					loadIrohModule: () => ({
+						packageVersion: "1.1.1-volt.2",
+						error: Object.assign(new Error("binding omitted"), { code: "MODULE_NOT_FOUND" }),
+					}),
+				},
+			),
+		]);
+		try {
+			const healthy = await waitForHealthyDaemon(agentDir);
+			control = createDaemonClient({
+				socketPath: healthy.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: healthy.authToken,
+				reconnect: false,
+			});
+			const status = await control.request({ type: "status" });
+			expect(status).toMatchObject({
+				type: "status_result",
+				remoteTransport: {
+					state: "unavailable",
+					reasonCode: "native_binding_missing",
+					wrapperVersion: "1.1.1-volt.2",
+				},
+			});
+			expect(await control.request({ type: "clients_list" })).toMatchObject({ type: "clients_result" });
+			expect(await control.request({ type: "pair_request", access: "coding" })).toMatchObject({
+				type: "error",
+				code: "iroh_unavailable",
+			});
+			await control.request({ type: "shutdown" });
+			await expect(daemon).resolves.toBe(0);
+		} finally {
+			await control?.close();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 20_000);
+
+	it.runIf(nativeAvailable)(
+		"reports injected endpoint startup failure through remote health",
+		async () => {
+			const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-start-failure-"));
+			let control: DaemonClient | undefined;
+			const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+				createIrohDaemonService(
+					{ relayMode: "disabled" },
+					{
+						decorateEndpoint: () => {
+							throw new Error("injected endpoint startup failure");
+						},
+					},
+				),
+			]);
+			try {
+				const healthy = await waitForHealthyDaemon(agentDir);
+				control = createDaemonClient({
+					socketPath: healthy.socketPath,
+					client: "cli",
+					version: "test",
+					authToken: healthy.authToken,
+					reconnect: false,
+				});
+				await expect
+					.poll(async () => {
+						const status = await control?.request({ type: "status" });
+						return status?.type === "status_result" ? status.remoteTransport : undefined;
+					})
+					.toMatchObject({ state: "unavailable", reasonCode: "endpoint_start_failed" });
+				await control.request({ type: "shutdown" });
+				await expect(daemon).resolves.toBe(0);
+			} finally {
+				await control?.close();
+				rmSync(agentDir, { recursive: true, force: true });
+			}
+		},
+		20_000,
+	);
+
+	it.runIf(nativeAvailable).each([
+		{
+			outcome: "rejection",
+			terminalAccept: () => Promise.reject(new Error("injected acceptNext rejection")),
+		},
+		{ outcome: "null", terminalAccept: () => Promise.resolve(null) },
+		{ outcome: "undefined", terminalAccept: () => Promise.resolve(undefined) },
+	] satisfies Array<{
+		outcome: string;
+		terminalAccept: () => Promise<IrohIncomingLike | null | undefined>;
+	}>)(
+		"marks a ready phone transport unavailable after acceptNext returns $outcome",
+		async ({ terminalAccept }) => {
+			const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-accept-terminal-"));
+			const acceptTerminalGate = createDeferred();
+			let acceptStarted = false;
+			let daemonStopped = false;
+			let control: DaemonClient | undefined;
+			const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+				createIrohDaemonService(
+					{ relayMode: "disabled" },
+					{
+						decorateEndpoint: (endpoint) => ({
+							id: () => endpoint.id(),
+							addr: () => endpoint.addr(),
+							online: () => endpoint.online(),
+							async acceptNext() {
+								acceptStarted = true;
+								await acceptTerminalGate.promise;
+								return terminalAccept();
+							},
+							secretKey: () => endpoint.secretKey(),
+							close: () => endpoint.close(),
+						}),
+					},
+				),
+			]);
+			try {
+				const healthy = await waitForHealthyDaemon(agentDir);
+				control = createDaemonClient({
+					socketPath: healthy.socketPath,
+					client: "cli",
+					version: "test",
+					authToken: healthy.authToken,
+					reconnect: false,
+				});
+				await expect
+					.poll(async () => {
+						const status = await control?.request({ type: "status" });
+						return status?.type === "status_result" ? status.remoteTransport : undefined;
+					})
+					.toMatchObject({ state: "ready" });
+				await expect.poll(() => acceptStarted).toBe(true);
+
+				acceptTerminalGate.resolve();
+				await expect
+					.poll(async () => {
+						const status = await control?.request({ type: "status" });
+						return status?.type === "status_result" ? status.remoteTransport : undefined;
+					})
+					.toMatchObject({ state: "unavailable", reasonCode: "endpoint_start_failed" });
+				expect(await control.request({ type: "pair_request", access: "coding" })).toMatchObject({
+					type: "error",
+					code: "iroh_unavailable",
+				});
+				expect((await control.request({ type: "shutdown" })).type).toBe("ok");
+				await expect(daemon).resolves.toBe(0);
+				daemonStopped = true;
+			} finally {
+				acceptTerminalGate.resolve();
+				if (!daemonStopped) {
+					await control?.request({ type: "shutdown" }).catch(() => {});
+					await daemon;
+				}
+				await control?.close();
+				rmSync(agentDir, { recursive: true, force: true });
+			}
+		},
+		20_000,
+	);
+
 	it("loads the native adapter when required", () => {
 		if (nativeRequired && !native.iroh) {
 			throw new Error(formatIrohLoadError(native.error));
@@ -85,6 +267,8 @@ interface PhoneConnection {
 }
 
 const ALPN = Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"));
+const WORK_OID_A = "0123456789abcdef0123456789abcdef01234567";
+const WORK_OID_B = "abcdef0123456789abcdef0123456789abcdef01";
 
 function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = () => {};
@@ -249,7 +433,12 @@ function persistCanaryManagedRelayAuthority(
 async function captureIrohStartupError(
 	agentDir: string,
 	config: Parameters<typeof createIrohDaemonService>[0] = {},
-): Promise<{ error: string | undefined; endpointDecorations: number }> {
+): Promise<{
+	error: string | undefined;
+	endpointDecorations: number;
+	remoteTransport: RemoteTransportHealth;
+	startupLog: string;
+}> {
 	let startupError: string | undefined;
 	let endpointDecorations = 0;
 	let daemonStopped = false;
@@ -279,10 +468,17 @@ async function captureIrohStartupError(
 			authToken: status.authToken,
 			reconnect: false,
 		});
+		const statusResponse = await control.request({ type: "status" });
+		if (statusResponse.type !== "status_result") throw new Error("daemon status missing");
 		await control.request({ type: "shutdown" });
 		await daemon;
 		daemonStopped = true;
-		return { error: startupError, endpointDecorations };
+		return {
+			error: startupError,
+			endpointDecorations,
+			remoteTransport: statusResponse.remoteTransport,
+			startupLog: readFileSync(getDaemonPaths(agentDir).logPath, "utf8"),
+		};
 	} finally {
 		if (!daemonStopped) {
 			await control?.request({ type: "shutdown" }).catch(() => {});
@@ -460,7 +656,7 @@ async function readJsonLineMatching(
 
 describe("relay config resolution", () => {
 	it("defaults to the Volt production relays", () => {
-		expect(resolveIrohRelayConfig({}, {})).toEqual({
+		expect(resolveIrohRelayConfig({})).toEqual({
 			relayMode: "production",
 			relayUrls: VOLT_PRODUCTION_RELAY_URLS,
 		});
@@ -882,18 +1078,177 @@ describe("iroh daemon lifecycle ownership", () => {
 	});
 });
 
+describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () => {
+	it("keeps delayed positive and null receipts from invalidating a newer claim", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-work-revision-"));
+		const unresolvedWorkspaceDir = join(agentDir, "ws");
+		mkdirSync(join(unresolvedWorkspaceDir, ".git"), { recursive: true });
+		writeFileSync(join(unresolvedWorkspaceDir, ".git", "HEAD"), "ref: refs/heads/main\n");
+		const workspaceDir = realpathSync.native(unresolvedWorkspaceDir);
+		const sessionId = randomUUID();
+		const session = await SessionManager.create(workspaceDir, getDefaultSessionDir(workspaceDir, agentDir), {
+			id: sessionId,
+		});
+		await session.materialize();
+		await session.closePersistence();
+
+		const oldPositiveGate = createDeferred();
+		const oldNullGate = createDeferred();
+		let oldPositiveStarted = false;
+		let oldNullStarted = false;
+		let retirementCount = 0;
+		let getCurrentBranch = (): string | undefined => undefined;
+		let daemonStopped = false;
+		let control: DaemonClient | undefined;
+		let tui: DaemonClient | undefined;
+		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+			(services) => {
+				getCurrentBranch = () => services.work.getWorkContext("ws", 1, sessionId)?.branch;
+				const retireSession = services.work.retireSession.bind(services.work);
+				services.work.retireSession = (workspaceName, workspaceGeneration, retiredSessionId) => {
+					if (workspaceName === "ws" && retiredSessionId === sessionId) retirementCount++;
+					return retireSession(workspaceName, workspaceGeneration, retiredSessionId);
+				};
+				return {};
+			},
+			createIrohDaemonService(
+				{ relayMode: "disabled" },
+				{
+					beforeTuiWorkObservationValidation: async (request) => {
+						if (request.gitContext?.branch === "feature/old") {
+							oldPositiveStarted = true;
+							await oldPositiveGate.promise;
+						} else if (request.gitContext === null) {
+							oldNullStarted = true;
+							await oldNullGate.promise;
+						}
+					},
+				},
+			),
+		]);
+
+		try {
+			const status = await waitForHealthyDaemon(agentDir);
+			control = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "cli",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			tui = createDaemonClient({
+				socketPath: status.socketPath,
+				client: "tui",
+				version: "test",
+				authToken: status.authToken,
+				reconnect: false,
+			});
+			expect(await control.request({ type: "workspace_register", name: "ws", path: workspaceDir })).toMatchObject({
+				type: "ok",
+			});
+			expect(await tui.request({ type: "lease_acquire", workspaceName: "ws", sessionId })).toMatchObject({
+				type: "lease_granted",
+			});
+
+			const oldPositive = tui.request({
+				type: "work_observe",
+				workspaceName: "ws",
+				sessionId,
+				gitContext: {
+					repository: "Volt",
+					branch: "feature/old",
+					headOid: WORK_OID_A,
+				},
+			});
+			void oldPositive.catch(() => {});
+			await expect.poll(() => oldPositiveStarted).toBe(true);
+			expect(
+				await tui.request({
+					type: "work_observe",
+					workspaceName: "ws",
+					sessionId,
+					gitContext: {
+						repository: "Volt",
+						branch: "feature/new",
+						headOid: WORK_OID_B,
+					},
+				}),
+			).toMatchObject({ type: "ok" });
+			await expect.poll(getCurrentBranch).toBe("feature/new");
+
+			oldPositiveGate.resolve();
+			await expect(oldPositive).resolves.toMatchObject({ type: "ok" });
+			await expect.poll(getCurrentBranch).toBe("feature/new");
+
+			const oldNull = tui.request({
+				type: "work_observe",
+				workspaceName: "ws",
+				sessionId,
+				gitContext: null,
+			});
+			void oldNull.catch(() => {});
+			await expect.poll(() => oldNullStarted).toBe(true);
+			expect(retirementCount).toBe(1);
+			expect(
+				await tui.request({
+					type: "work_observe",
+					workspaceName: "ws",
+					sessionId,
+					gitContext: {
+						repository: "Volt",
+						branch: "feature/replacement",
+						headOid: WORK_OID_A,
+					},
+				}),
+			).toMatchObject({ type: "ok" });
+			await expect.poll(getCurrentBranch).toBe("feature/replacement");
+
+			oldNullGate.resolve();
+			await expect(oldNull).resolves.toMatchObject({ type: "ok" });
+			expect(retirementCount).toBe(1);
+			expect(
+				await tui.request({
+					type: "lease_release",
+					workspaceName: "ws",
+					sessionId,
+					reason: "quit",
+				}),
+			).toMatchObject({ type: "ok" });
+			expect(retirementCount).toBe(2);
+			expect(getCurrentBranch()).toBe("feature/replacement");
+
+			expect((await control.request({ type: "shutdown" })).type).toBe("ok");
+			await daemon;
+			daemonStopped = true;
+		} finally {
+			oldPositiveGate.resolve();
+			oldNullGate.resolve();
+			if (!daemonStopped) {
+				await control?.request({ type: "shutdown" }).catch(() => {});
+				await daemon;
+			}
+			await tui?.close();
+			await control?.close();
+			rmSync(agentDir, { recursive: true, force: true });
+		}
+	}, 30_000);
+});
+
 describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () => {
 	it("reconnects an explicit old session alias through the canonical TUI lease", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-rekey-alias-"));
 		const unresolvedWorkspaceDir = join(agentDir, "ws");
 		mkdirSync(unresolvedWorkspaceDir, { recursive: true });
-		const workspaceDir = realpathSync(unresolvedWorkspaceDir);
+		const workspaceDir = realpathSync.native(unresolvedWorkspaceDir);
 		const sourceSessionId = randomUUID();
 		const replacementSessionId = randomUUID();
+		// Native relay replacement also drains the previous stream under host load.
+		const relayOfferTimeout = 15_000;
 		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
-		const sourceSession = SessionManager.create(workspaceDir, sessionDir, { id: sourceSessionId });
-		const replacementSession = SessionManager.create(workspaceDir, sessionDir, { id: replacementSessionId });
+		const sourceSession = await SessionManager.create(workspaceDir, sessionDir, { id: sourceSessionId });
+		const replacementSession = await SessionManager.create(workspaceDir, sessionDir, { id: replacementSessionId });
 		await Promise.all([sourceSession.materialize(), replacementSession.materialize()]);
+		await Promise.all([sourceSession.closePersistence(), replacementSession.closePersistence()]);
 
 		const faux = registerFauxProvider();
 		const model = faux.getModel();
@@ -989,7 +1344,6 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 			if (clients.type !== "clients_result" || !clients.clients[0]) {
 				throw new Error("paired client missing");
 			}
-			const pairedClient = clients.clients[0];
 			tui = createDaemonClient({
 				socketPath: status.socketPath,
 				client: "tui",
@@ -1017,7 +1371,9 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 			});
 			await Promise.race([
 				expect
-					.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, { timeout: 5_000 })
+					.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, {
+						timeout: relayOfferTimeout,
+					})
 					.toBe(1),
 				initialResponse,
 			]);
@@ -1059,7 +1415,9 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 				conversation: { target: "session", sessionId: sourceSessionId },
 			});
 			await expect
-				.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, { timeout: 5_000 })
+				.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, {
+					timeout: relayOfferTimeout,
+				})
 				.toBe(2);
 			const aliasOffer = tuiEvents.filter((event) => event.type === "relay_offer")[1];
 			if (aliasOffer?.type !== "relay_offer") throw new Error("alias relay offer missing");
@@ -1080,24 +1438,7 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 				response: IrohRemoteHandshakeSuccess;
 			};
 			const authorizationSubset = aliasRelay.preamble.authorization;
-			const authorization = {
-				ok: true as const,
-				allowTools: authorizationSubset.allowedTools,
-				client: {
-					nodeId: pairedClient.clientNodeId,
-					label: pairedClient.label ?? pairedClient.clientNodeId,
-					allowedWorkspaces: ["ws"],
-					allowedTools: authorizationSubset.allowedTools,
-					rpcGrant: authorizationSubset.rpcGrant,
-					pairedAt: pairedClient.pairedAtMs,
-					lastSeenAt: pairedClient.lastSeenAtMs ?? pairedClient.pairedAtMs,
-				},
-				paired: true,
-				pairingSecretConsumed: false,
-				workspace: { name: "ws", path: workspaceDir },
-				workspaceNames: ["ws"],
-				workspaces: [{ name: "ws", status: "available" as const }],
-			} satisfies IrohRemoteClientAuthorizationSuccess;
+			const authorization = createTuiRelayAuthorization(authorizationSubset);
 			const handshakeResponse = createIntegratedConversationHandshakeResponse(
 				relayHandshake,
 				authorization,
@@ -1131,9 +1472,17 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 				workspace: "ws",
 				conversation: { target: "session", sessionId: replacementSessionId },
 			});
-			await expect
-				.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, { timeout: 5_000 })
-				.toBe(3);
+			const directResponse = readJsonLine(directStream).then((response) => {
+				throw new Error(`canonical relay failed before offer: ${JSON.stringify(response.value)}`);
+			});
+			await Promise.race([
+				expect
+					.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, {
+						timeout: relayOfferTimeout,
+					})
+					.toBe(3),
+				directResponse,
+			]);
 			const directOffer = tuiEvents.filter((event) => event.type === "relay_offer")[2];
 			if (directOffer?.type !== "relay_offer") throw new Error("canonical relay offer missing");
 			expect(directOffer.sessionId).toBe(replacementSessionId);
@@ -1173,7 +1522,7 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 			faux.unregister();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
-	}, 30_000);
+	}, 60_000);
 });
 
 describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
@@ -1330,14 +1679,24 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 			type: "volt_iroh_hello",
 			protocol: IROH_REMOTE_ALPN,
 			workspace: "ws",
-			workspaceDiscovery: { purpose: "list_sessions" },
+			workspaceDiscovery: { purpose: "session_contexts" },
 		});
 		const reusedHandshake = await readJsonLine(reusedStream);
 		expect(reusedHandshake.value.success).toBe(true);
-		await writeJsonLine(reusedStream, { id: "ls-reconnect-2", type: "list_sessions" });
-		const reusedListResponse = await readJsonLine(reusedStream, reusedHandshake.rest);
-		expect(reusedListResponse.value.command).toBe("list_sessions");
-		expect(reusedListResponse.value.success).toBe(true);
+		await writeJsonLine(reusedStream, {
+			id: "contexts-reconnect-2",
+			type: "get_session_contexts",
+			workspaceName: "ws",
+			sessionIds: ["session-missing"],
+		});
+		const reusedContextResponse = await readJsonLine(reusedStream, reusedHandshake.rest);
+		expect(reusedContextResponse.value).toMatchObject({
+			command: "get_session_contexts",
+			success: true,
+			data: {
+				contexts: [{ sessionId: "session-missing", startingGitContext: null, workContext: null }],
+			},
+		});
 		reconnection.close(0n, Array.from(Buffer.from("done", "utf8")));
 		await reconnection.closed();
 
@@ -1695,7 +2054,12 @@ describe.skipIf(!nativeAvailable)("voltd managed relay credential startup", () =
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network must not be used"));
 		try {
 			const result = await captureIrohStartupError(agentDir);
-			expect(result.error).toBe(
+			expect(result.error).toBeUndefined();
+			expect(result.remoteTransport).toMatchObject({
+				state: "unavailable",
+				reasonCode: "endpoint_start_failed",
+			});
+			expect(result.startupLog).toContain(
 				`managed relay credential authority service URL ${VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL} conflicts with the built-in relay deployment broker ${VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL}`,
 			);
 			expect(result.endpointDecorations).toBe(0);
@@ -1713,7 +2077,12 @@ describe.skipIf(!nativeAvailable)("voltd managed relay credential startup", () =
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("network must not be used"));
 		try {
 			const result = await captureIrohStartupError(agentDir);
-			expect(result.error).toBe(
+			expect(result.error).toBeUndefined();
+			expect(result.remoteTransport).toMatchObject({
+				state: "unavailable",
+				reasonCode: "endpoint_start_failed",
+			});
+			expect(result.startupLog).toContain(
 				`managed relay claim authority service URL ${VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL} conflicts with the built-in relay deployment broker ${VOLT_CANARY_RELAY_CREDENTIAL_SERVICE_URL}`,
 			);
 			expect(result.endpointDecorations).toBe(0);
@@ -1740,7 +2109,14 @@ describe.skipIf(!nativeAvailable)("voltd managed relay credential startup", () =
 				relayUrls: [...VOLT_PRODUCTION_RELAY_URLS],
 				relayCredentialServiceUrl: VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
 			});
-			expect(result.error).toBe("managed relay credential revocation is scoped to a different relay origin set");
+			expect(result.error).toBeUndefined();
+			expect(result.remoteTransport).toMatchObject({
+				state: "unavailable",
+				reasonCode: "endpoint_start_failed",
+			});
+			expect(result.startupLog).toContain(
+				"managed relay credential revocation is scoped to a different relay origin set",
+			);
 			expect(result.endpointDecorations).toBe(0);
 			expect(fetchSpy).not.toHaveBeenCalled();
 		} finally {
@@ -2782,6 +3158,95 @@ describe.skipIf(!nativeAvailable)("voltd iroh startup ownership", () => {
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	}, 30_000);
+});
+
+describe.skipIf(!nativeAvailable)("voltd iroh pairing storage recovery", () => {
+	it.each(["ENOSPC", "EDQUOT"] as const)(
+		"retries pairing persistence after %s capacity is restored",
+		async (code) => {
+			const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-pairing-storage-recovery-"));
+			const workspaceDir = join(agentDir, "ws");
+			mkdirSync(workspaceDir, { recursive: true });
+			let failNextHostStateWrite = false;
+			let injectedFailureCount = 0;
+			let daemonStopped = false;
+			let control: DaemonClient | undefined;
+			const daemon = runVoltDaemon({ agentDir, foreground: false }, [
+				(services) => {
+					const persistHostState = services.state.persistHostState.bind(services.state);
+					services.state.persistHostState = async (hostState) => {
+						if (failNextHostStateWrite) {
+							failNextHostStateWrite = false;
+							injectedFailureCount++;
+							throw Object.assign(new Error(`${code}: injected pairing persistence failure`), { code });
+						}
+						await persistHostState(hostState);
+					};
+					return {};
+				},
+				createIrohDaemonService({ relayMode: "disabled" }),
+			]);
+
+			try {
+				const status = await waitForHealthyDaemon(agentDir);
+				control = createDaemonClient({
+					socketPath: status.socketPath,
+					client: "cli",
+					version: "test",
+					authToken: status.authToken,
+					reconnect: false,
+				});
+				// Wait for the service's startup barrier before arming the storage fault.
+				// Local control can be healthy while Iroh is still persisting its identity.
+				await expectIrohEndpointReady(control);
+				expect(await control.request({ type: "status" })).toMatchObject({
+					type: "status_result",
+					remoteTransport: { state: "ready" },
+				});
+				expect(await control.request({ type: "workspace_register", name: "ws", path: workspaceDir })).toMatchObject(
+					{ type: "ok" },
+				);
+
+				failNextHostStateWrite = true;
+				expect(await control.request({ type: "pair_request", workspaceName: "ws" })).toMatchObject({
+					type: "error",
+					code: "iroh_unavailable",
+				});
+				expect(injectedFailureCount).toBe(1);
+				expect(await control.request({ type: "status" })).toMatchObject({
+					type: "status_result",
+					remoteTransport: { state: "degraded", reasonCode: "host_storage_full" },
+				});
+
+				const retry = await control.request({ type: "pair_request", workspaceName: "ws" });
+				expect(retry).toMatchObject({ type: "pair_started" });
+				if (retry.type !== "pair_started") throw new Error("pairing persistence retry did not start");
+				expect(await control.request({ type: "status" })).toMatchObject({
+					type: "status_result",
+					remoteTransport: { state: "ready" },
+				});
+				const persistedState = JSON.parse(readFileSync(getDaemonPaths(agentDir).statePath, "utf8")) as {
+					pendingPairingTickets: unknown[];
+				};
+				expect(persistedState.pendingPairingTickets).toHaveLength(1);
+				expect(await control.request({ type: "pair_cancel", requestId: retry.requestId })).toMatchObject({
+					type: "ok",
+				});
+				expect((await control.request({ type: "shutdown" })).type).toBe("ok");
+				await daemon;
+				daemonStopped = true;
+			} finally {
+				failNextHostStateWrite = false;
+				if (!daemonStopped) {
+					await control?.request({ type: "shutdown" }).catch(() => {});
+					await daemon;
+				}
+				await control?.close();
+				rmSync(agentDir, { recursive: true, force: true });
+			}
+		},
+		30_000,
+	);
 });
 
 describe.skipIf(!nativeAvailable)("voltd iroh control pairing ownership", () => {

@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import type { Transport } from "@hansjm10/volt-ai";
+import type { ToolArgumentLimits, Transport } from "@hansjm10/volt-ai";
 import type { TuiMode as RendererTuiMode, ScrollViewScrollbar } from "@hansjm10/volt-tui";
 import { randomUUID } from "crypto";
 import { existsSync, lstatSync, mkdirSync, readFileSync } from "fs";
@@ -11,14 +11,17 @@ import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { ensurePrivateDirectorySync, hardenPrivateRegularFileSync } from "../utils/private-files.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
 import type { LspSettings } from "./lsp/config.ts";
-import type { Personality } from "./personality.ts";
+import { isPersonality, type Personality } from "./personality.ts";
 
 const DEFAULT_CONTEXT_WARNING_TOKENS = 350_000;
+const DEFAULT_PROMPT_CACHE_KEEPALIVE_IDLE_MINUTES = 15;
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
 	reserveTokens?: number; // default: 16384
 	keepRecentTokens?: number; // default: 20000
+	/** Absolute auto-compaction thresholds keyed by exact provider/model ID. 0 uses the context-limit default. */
+	modelThresholds?: Record<string, number>;
 }
 
 export interface BranchSummarySettings {
@@ -65,6 +68,16 @@ export interface ThinkingBudgetsSettings {
 
 export interface MarkdownSettings {
 	codeBlockIndent?: string; // default: "  "
+}
+
+export interface PromptCacheSettings {
+	keepAlive?: boolean; // default: true - refresh renewing prompt caches shortly before expiry
+	keepAliveIdleMinutes?: number; // default: 15 - keep refreshing this long after work settles; 0 = only while work runs
+}
+
+export interface PromptCacheKeepAliveConfig {
+	enabled: boolean;
+	idleWindowMs: number;
 }
 
 export interface WarningSettings {
@@ -129,6 +142,8 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	branchSummary?: BranchSummarySettings;
 	retry?: RetrySettings;
+	/** Independent byte and elapsed-time bounds on tool arguments before execution. */
+	toolArgumentLimits?: ToolArgumentLimits;
 	hideThinkingBlock?: boolean;
 	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
 	quietStartup?: boolean;
@@ -159,6 +174,7 @@ export interface Settings {
 	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
 	markdown?: MarkdownSettings;
 	warnings?: WarningSettings;
+	promptCache?: PromptCacheSettings;
 	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
 	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
 	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
@@ -177,6 +193,8 @@ export interface RemoteSettings {
 	detachedRuntimeTtlMs?: number;
 	/** Tool allowlist for daemon-owned headless runtimes only. */
 	allowTools?: string[];
+	/** Discover exact pull-request associations for trusted Work sessions. Default: true. */
+	pullRequestDiscovery?: boolean;
 }
 
 /** Deep merge records: overrides take precedence, nested objects merge recursively, arrays replace. */
@@ -224,6 +242,21 @@ function defineOwnEnumerableProperty(target: Record<string, unknown>, key: strin
 		configurable: true,
 		writable: true,
 	});
+}
+
+function mergeModifiedModelThresholds(
+	current: unknown,
+	snapshot: unknown,
+	modifiedModels: Set<string> | undefined,
+): unknown {
+	if (!modifiedModels || !isSettingsRecord(snapshot)) {
+		return snapshot;
+	}
+	const merged: Record<string, unknown> = isSettingsRecord(current) ? { ...current } : {};
+	for (const modelReference of modifiedModels) {
+		defineOwnEnumerableProperty(merged, modelReference, snapshot[modelReference]);
+	}
+	return merged;
 }
 
 function normalizeProfileClears(profile: Record<string, unknown>): void {
@@ -449,6 +482,8 @@ export class SettingsManager {
 	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
 	private modifiedProfileFields = new Map<string, Set<keyof Settings>>(); // Track global profile field modifications
 	private modifiedProfileNestedFields: ModifiedProfileNestedFields = new Map(); // Track global profile nested field modifications
+	/** Global threshold edits keyed by profile; undefined denotes the base global settings. */
+	private modifiedCompactionThresholds = new Map<string | undefined, Set<string>>();
 	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
 	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
 	private modifiedProjectProfileFields = new Map<string, Set<keyof Settings>>(); // Track project profile field modifications
@@ -461,6 +496,8 @@ export class SettingsManager {
 	private writeWatermark: Promise<void> = Promise.resolve();
 	private errors: SettingsError[];
 	private sessionOverrides: Settings = {}; // Runtime overrides (e.g. CLI flags), reapplied on every re-merge
+	private readonly compactionListeners = new Set<() => void>();
+	private compactionFingerprint = "";
 
 	private constructor(
 		storage: SettingsStorage,
@@ -509,7 +546,7 @@ export class SettingsManager {
 	}
 
 	/** Re-merge effective settings from global, project, profile overlays, and session overrides */
-	private mergeEffectiveSettings(): void {
+	private mergeEffectiveSettings(notifyCompaction = true): void {
 		const baseSettings = deepMergeSettings(this.globalSettings, this.projectSettings);
 		const profileName = this.requestedProfile ?? normalizeProfileName(baseSettings.defaultProfile);
 		this.activeProfile = profileName;
@@ -530,6 +567,60 @@ export class SettingsManager {
 		if (profileName) {
 			this.reportMissingProfile(profileName);
 		}
+		if (notifyCompaction) this.notifyCompactionSettingsChanged();
+	}
+
+	/** Observe effective compaction preferences and their scope; saves notify after durability. */
+	subscribeCompactionSettings(listener: () => void): () => void {
+		this.compactionListeners.add(listener);
+		return () => this.compactionListeners.delete(listener);
+	}
+
+	private notifyCompactionSettingsChanged(): void {
+		const fingerprint = JSON.stringify({
+			profile: this.activeProfile,
+			compaction: this.settings.compaction,
+			projectTrusted: this.projectTrusted,
+			projectCompaction: this.projectSettings.compaction,
+			projectProfileCompaction: this.getProfileOverlay(this.projectSettings, this.activeProfile).compaction,
+			runtimeCompaction: this.sessionOverrides.compaction,
+			globalLoadError: this.globalSettingsLoadError?.message,
+			projectLoadError: this.projectSettingsLoadError?.message,
+		});
+		if (fingerprint === this.compactionFingerprint) return;
+		this.compactionFingerprint = fingerprint;
+		for (const listener of this.compactionListeners) {
+			try {
+				listener();
+			} catch {
+				// Presentation observers must not affect settings persistence.
+			}
+		}
+	}
+
+	/** Why a global compaction edit would be unsafe or ineffective in this scope. */
+	getCompactionWriteDisabledReason(field: "enabled" | "modelThresholds", modelReference?: string): string | undefined {
+		if (this.globalSettingsLoadError) return "Host global settings could not be loaded; repair them and reload";
+		if (this.projectSettingsLoadError) return "Host project settings could not be loaded; repair them and reload";
+		const path = ["compaction", field, ...(field === "modelThresholds" ? [modelReference ?? ""] : [])];
+		const overridesPath = (settings: Settings): boolean => {
+			let current: unknown = settings;
+			for (const key of path) {
+				if (!isSettingsRecord(current)) return true;
+				if (!Object.hasOwn(current, key) || current[key] === undefined) return false;
+				current = current[key];
+			}
+			return true;
+		};
+		if (overridesPath(this.sessionOverrides))
+			return "A runtime override controls this setting; global edits would not apply";
+		if (this.projectTrusted && overridesPath(this.getProfileOverlay(this.projectSettings, this.activeProfile))) {
+			return `Trusted project profile "${this.activeProfile}" overrides this setting; edit it on the host`;
+		}
+		if (this.projectTrusted && overridesPath(this.projectSettings)) {
+			return "Trusted project settings override this setting; edit them on the host";
+		}
+		return undefined;
 	}
 
 	/** Create a SettingsManager that loads from files */
@@ -802,6 +893,7 @@ export class SettingsManager {
 		this.modifiedNestedFields.clear();
 		this.modifiedProfileFields.clear();
 		this.modifiedProfileNestedFields.clear();
+		this.modifiedCompactionThresholds.clear();
 		this.modifiedProjectFields.clear();
 		this.modifiedProjectNestedFields.clear();
 		this.modifiedProjectProfileFields.clear();
@@ -905,6 +997,7 @@ export class SettingsManager {
 			this.modifiedNestedFields.clear();
 			this.modifiedProfileFields.clear();
 			this.modifiedProfileNestedFields.clear();
+			this.modifiedCompactionThresholds.clear();
 			return;
 		}
 
@@ -921,6 +1014,9 @@ export class SettingsManager {
 			}
 			task();
 			this.clearModifiedScope(scope);
+			// A later accepted write may already have changed the effective values.
+			// Publish only once the latest snapshot is durable, not after an older write.
+			if (this.writeWatermark === write) this.notifyCompactionSettingsChanged();
 		});
 		this.writeQueue = write.catch((error) => {
 			this.recordError(scope, error);
@@ -964,6 +1060,7 @@ export class SettingsManager {
 		modifiedNestedFields: Map<keyof Settings, Set<string>>,
 		modifiedProfileFields: Map<string, Set<keyof Settings>>,
 		modifiedProfileNestedFields: ModifiedProfileNestedFields,
+		modifiedCompactionThresholds?: Map<string | undefined, Set<string>>,
 	): void {
 		this.storage.withLock(scope, (current) => {
 			const currentFileSettings = current
@@ -1009,7 +1106,14 @@ export class SettingsManager {
 									: {};
 								const mergedNested: Record<string, unknown> = { ...baseNested };
 								for (const nestedKey of nestedModified) {
-									mergedNested[nestedKey] = snapshotValue[nestedKey];
+									mergedNested[nestedKey] =
+										profileField === "compaction" && nestedKey === "modelThresholds"
+											? mergeModifiedModelThresholds(
+													baseNested[nestedKey],
+													snapshotValue[nestedKey],
+													modifiedCompactionThresholds?.get(profileName),
+												)
+											: snapshotValue[nestedKey];
 								}
 								defineOwnEnumerableProperty(mergedProfile, profileField, mergedNested);
 							} else {
@@ -1025,7 +1129,14 @@ export class SettingsManager {
 					const baseNested = isSettingsRecord(currentFileSettings[field]) ? currentFileSettings[field] : {};
 					const mergedNested: Record<string, unknown> = { ...baseNested };
 					for (const nestedKey of nestedModified) {
-						mergedNested[nestedKey] = value[nestedKey];
+						mergedNested[nestedKey] =
+							field === "compaction" && nestedKey === "modelThresholds"
+								? mergeModifiedModelThresholds(
+										baseNested[nestedKey],
+										value[nestedKey],
+										modifiedCompactionThresholds?.get(undefined),
+									)
+								: value[nestedKey];
 					}
 					(mergedSettings as Record<string, unknown>)[field] = mergedNested;
 				} else {
@@ -1038,7 +1149,7 @@ export class SettingsManager {
 	}
 
 	private save(): void {
-		this.mergeEffectiveSettings();
+		this.mergeEffectiveSettings(false);
 
 		if (this.globalSettingsLoadError) {
 			return;
@@ -1049,6 +1160,7 @@ export class SettingsManager {
 		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedNestedFields);
 		const modifiedProfileFields = this.cloneModifiedProfileFields(this.modifiedProfileFields);
 		const modifiedProfileNestedFields = this.cloneModifiedProfileNestedFields(this.modifiedProfileNestedFields);
+		const modifiedCompactionThresholds = structuredClone(this.modifiedCompactionThresholds);
 
 		this.enqueueWrite("global", () => {
 			this.persistScopedSettings(
@@ -1058,6 +1170,7 @@ export class SettingsManager {
 				modifiedNestedFields,
 				modifiedProfileFields,
 				modifiedProfileNestedFields,
+				modifiedCompactionThresholds,
 			);
 		});
 	}
@@ -1179,7 +1292,7 @@ export class SettingsManager {
 	}
 
 	getPersonality(): Personality {
-		return this.settings.personality === "pragmatic" ? "pragmatic" : "default";
+		return isPersonality(this.settings.personality) ? this.settings.personality : "default";
 	}
 
 	setPersonality(personality: Personality): void {
@@ -1282,11 +1395,46 @@ export class SettingsManager {
 		return this.settings.compaction?.keepRecentTokens ?? 20000;
 	}
 
-	getCompactionSettings(): { enabled: boolean; reserveTokens: number; keepRecentTokens: number } {
+	getCompactionThresholdTokens(modelReference: string): number {
+		const thresholds = this.settings.compaction?.modelThresholds;
+		const value = thresholds && Object.hasOwn(thresholds, modelReference) ? thresholds[modelReference] : undefined;
+		return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+	}
+
+	setCompactionThresholdTokens(modelReference: string, tokens: number): void {
+		if (!Number.isSafeInteger(tokens) || tokens < 0) {
+			throw new Error("Compaction threshold must be a non-negative safe integer (0 uses the default)");
+		}
+		let modifiedModels = this.modifiedCompactionThresholds.get(this.activeProfile);
+		if (!modifiedModels) {
+			modifiedModels = new Set();
+			this.modifiedCompactionThresholds.set(this.activeProfile, modifiedModels);
+		}
+		modifiedModels.add(modelReference);
+		this.updateGlobalSettings(
+			"compaction",
+			(settings) => {
+				settings.compaction ??= {};
+				settings.compaction.modelThresholds = {
+					...settings.compaction.modelThresholds,
+					[modelReference]: tokens,
+				};
+			},
+			"modelThresholds",
+		);
+	}
+
+	getCompactionSettings(model?: { provider: string; id: string }): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		thresholdTokens?: number;
+	} {
 		return {
 			enabled: this.getCompactionEnabled(),
 			reserveTokens: this.getCompactionReserveTokens(),
 			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			...(model ? { thresholdTokens: this.getCompactionThresholdTokens(`${model.provider}/${model.id}`) } : {}),
 		};
 	}
 
@@ -1349,6 +1497,13 @@ export class SettingsManager {
 			maxRetries: this.settings.retry?.provider?.maxRetries,
 			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
 		};
+	}
+
+	getToolArgumentLimits(): ToolArgumentLimits | undefined {
+		const limits = this.settings.toolArgumentLimits;
+		if (limits === undefined) return undefined;
+		if (!isSettingsRecord(limits)) throw new Error("Invalid toolArgumentLimits setting: expected an object");
+		return structuredClone(limits);
 	}
 
 	getWebSocketConnectTimeoutMs(): number | undefined {
@@ -1622,6 +1777,31 @@ export class SettingsManager {
 				settings.terminal.showTerminalProgress = enabled;
 			},
 			"showTerminalProgress",
+		);
+	}
+
+	getPromptCacheKeepAlive(): PromptCacheKeepAliveConfig {
+		const settings = this.settings.promptCache;
+		const minutes = settings?.keepAliveIdleMinutes;
+		const idleMinutes =
+			typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 0
+				? minutes
+				: DEFAULT_PROMPT_CACHE_KEEPALIVE_IDLE_MINUTES;
+		return { enabled: settings?.keepAlive !== false, idleWindowMs: Math.round(idleMinutes * 60_000) };
+	}
+
+	/** `"off"` disables keepalive; a number of minutes enables it with that idle window. */
+	setPromptCacheKeepAlive(mode: "off" | number): void {
+		this.updateGlobalSettingsFields(
+			[
+				{ field: "promptCache", nestedKey: "keepAlive" },
+				{ field: "promptCache", nestedKey: "keepAliveIdleMinutes" },
+			],
+			(settings) => {
+				if (!settings.promptCache) settings.promptCache = {};
+				settings.promptCache.keepAlive = mode !== "off";
+				if (mode !== "off") settings.promptCache.keepAliveIdleMinutes = mode;
+			},
 		);
 	}
 

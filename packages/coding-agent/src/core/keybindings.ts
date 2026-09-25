@@ -14,6 +14,7 @@ export interface AppKeybindings {
 	"app.interrupt": true;
 	"app.clear": true;
 	"app.exit": true;
+	"app.debug": true;
 	"app.suspend": true;
 	"app.mode.toggle": true;
 	"app.plan.togglePane": true;
@@ -32,6 +33,9 @@ export interface AppKeybindings {
 	"app.session.tree": true;
 	"app.session.fork": true;
 	"app.session.resume": true;
+	"app.jobs.open": true;
+	"app.jobs.cancel": true;
+	"app.jobs.follow": true;
 	"app.subagents.open": true;
 	"app.subagents.previous": true;
 	"app.subagents.next": true;
@@ -51,6 +55,11 @@ export interface AppKeybindings {
 	"app.models.reorderUp": true;
 	"app.models.reorderDown": true;
 	"app.reviewTools.toggle": true;
+	"app.questions.back": true;
+	"app.questions.skip": true;
+	"app.questions.notes": true;
+	"app.questions.pageUp": true;
+	"app.questions.pageDown": true;
 	"app.tree.filter.default": true;
 	"app.tree.filter.noTools": true;
 	"app.tree.filter.userOnly": true;
@@ -71,6 +80,7 @@ export const KEYBINDINGS = {
 	"app.interrupt": { defaultKeys: "escape", description: "Cancel or abort" },
 	"app.clear": { defaultKeys: "ctrl+c", description: "Clear editor" },
 	"app.exit": { defaultKeys: "ctrl+d", description: "Exit when editor is empty" },
+	"app.debug": { defaultKeys: "f12", description: "Capture diagnostics without interrupting work" },
 	"app.suspend": {
 		defaultKeys: process.platform === "win32" ? [] : "ctrl+z",
 		description: "Suspend to background",
@@ -125,6 +135,9 @@ export const KEYBINDINGS = {
 	"app.session.tree": { defaultKeys: [], description: "Open session tree" },
 	"app.session.fork": { defaultKeys: [], description: "Fork current session" },
 	"app.session.resume": { defaultKeys: [], description: "Resume a session" },
+	"app.jobs.open": { defaultKeys: "alt+j", description: "Inspect background jobs" },
+	"app.jobs.cancel": { defaultKeys: "ctrl+k", description: "Cancel the selected background job (with confirmation)" },
+	"app.jobs.follow": { defaultKeys: "end", description: "Follow the latest background job output" },
 	"app.subagents.open": { defaultKeys: "alt+a", description: "Switch between main and subagent views" },
 	"app.subagents.previous": { defaultKeys: "left", description: "Show previous subagent" },
 	"app.subagents.next": { defaultKeys: "right", description: "Show next subagent" },
@@ -191,6 +204,26 @@ export const KEYBINDINGS = {
 	"app.reviewTools.toggle": {
 		defaultKeys: "space",
 		description: "Toggle review tool selection",
+	},
+	"app.questions.back": {
+		defaultKeys: "shift+tab",
+		description: "Return to choices or the previous question, preserving drafts",
+	},
+	"app.questions.skip": {
+		defaultKeys: "ctrl+s",
+		description: "Skip the question request without providing answers",
+	},
+	"app.questions.notes": {
+		defaultKeys: "ctrl+n",
+		description: "Add notes to the highlighted answer",
+	},
+	"app.questions.pageUp": {
+		defaultKeys: "ctrl+pageUp",
+		description: "Scroll a long question or answer review up",
+	},
+	"app.questions.pageDown": {
+		defaultKeys: "ctrl+pageDown",
+		description: "Scroll a long question or answer review down",
 	},
 	"app.tree.filter.default": {
 		defaultKeys: "ctrl+d",

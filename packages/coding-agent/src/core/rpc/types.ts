@@ -18,6 +18,13 @@ import type {
 	RpcAgentOptionsModelSelectionSchema,
 	RpcAgentOptionsSchema,
 } from "./schema/agent-options.ts";
+import type {
+	RpcBackgroundJobSnapshotSchema,
+	RpcBackgroundJobSummarySchema,
+	RpcCancelJobResponseSchema,
+	RpcListJobsResponseSchema,
+	RpcReadJobResponseSchema,
+} from "./schema/background-jobs.ts";
 import type { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema } from "./schema/commands.ts";
 import type {
 	RpcConversationActiveAssistantSchema,
@@ -33,6 +40,8 @@ import type {
 	RpcTranscriptEntryEventSchema,
 } from "./schema/conversation.ts";
 import type {
+	RpcAgentStartEventSchema,
+	RpcBackgroundJobsChangedEventSchema,
 	RpcExtensionErrorEventSchema,
 	RpcExtensionUIRequestSchema,
 	RpcExtensionUIResponseSchema,
@@ -42,6 +51,7 @@ import type {
 	RpcHostActionUpdateSchema,
 	RpcModelsChangedEventSchema,
 	RpcPendingHostActionsResponseSchema,
+	RpcPromptCacheChangedEventSchema,
 	RpcSubagentDisposedEventSchema,
 	RpcSubagentEndEventSchema,
 	RpcSubagentEventSchema,
@@ -108,12 +118,14 @@ import type {
 	RpcTranscriptEntryTextResponseSchema,
 } from "./schema/responses.ts";
 import type {
+	RpcActiveAgentRunSchema,
 	RpcActiveCompactionSchema,
 	RpcActiveRetrySchema,
 	RpcActiveToolExecutionSchema,
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
 	RpcListSubagentsResponseSchema,
+	RpcPromptCacheStatusSchema,
 	RpcPromptResponseSchema,
 	RpcQueuedMessageSchema,
 	RpcQueueUpdateProjectionSchema,
@@ -121,6 +133,8 @@ import type {
 	RpcSessionListItemSchema,
 	RpcSessionStateProjectionSchema,
 	RpcSessionStateSchema,
+	RpcSessionWorkContextSchema,
+	RpcSessionWorkPullRequestSchema,
 	RpcSubagentDefinitionSchema,
 	RpcSubagentDefinitionSourceSchema,
 	RpcSubagentSourceInfoSchema,
@@ -309,13 +323,23 @@ export type RpcSlashCommand = Static<typeof RpcSlashCommandSchema>;
 // RPC State
 // ============================================================================
 
+export type RpcBackgroundJobSummary = Static<typeof RpcBackgroundJobSummarySchema>;
+export type RpcBackgroundJobSnapshot = Static<typeof RpcBackgroundJobSnapshotSchema>;
+export type RpcListJobsResponse = Static<typeof RpcListJobsResponseSchema>;
+export type RpcReadJobResponse = Static<typeof RpcReadJobResponseSchema>;
+export type RpcCancelJobResponse = Static<typeof RpcCancelJobResponseSchema>;
+export type RpcBackgroundJobsChangedEvent = Static<typeof RpcBackgroundJobsChangedEventSchema>;
 export type RpcSessionListItem = Static<typeof RpcSessionListItemSchema>;
+export type RpcSessionWorkContext = Static<typeof RpcSessionWorkContextSchema>;
+export type RpcSessionWorkPullRequest = Static<typeof RpcSessionWorkPullRequestSchema>;
 export type RpcSubscriptionUsageReport = Static<typeof RpcSubscriptionUsageReportSchema>;
 /** Path-free host-observed metadata for one active session worktree. */
 export type RpcGitContext = Static<typeof RpcGitContextSchema>;
 export type RpcActiveToolExecution = Static<typeof RpcActiveToolExecutionSchema>;
+export type RpcActiveAgentRun = Static<typeof RpcActiveAgentRunSchema>;
 export type RpcActiveCompaction = Static<typeof RpcActiveCompactionSchema>;
 export type RpcActiveRetry = Static<typeof RpcActiveRetrySchema>;
+export type RpcPromptCacheStatus = Static<typeof RpcPromptCacheStatusSchema>;
 /** One authoritative queued user message exposed to remote clients. */
 export type RpcQueuedMessage = Static<typeof RpcQueuedMessageSchema>;
 export type RpcQueueUpdateProjection = Static<typeof RpcQueueUpdateProjectionSchema>;
@@ -408,6 +432,8 @@ export type RpcResponse =
 // Host→client events and client→host control messages
 // ============================================================================
 
+/** Agent provider run started with a host-authoritative presentation timestamp. */
+export type RpcAgentStartEvent = Static<typeof RpcAgentStartEventSchema>;
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest = Static<typeof RpcExtensionUIRequestSchema>;
 /** Response to an extension UI request */
@@ -423,6 +449,8 @@ export type RpcSubagentDisposedEvent = Static<typeof RpcSubagentDisposedEventSch
 export type RpcModelsChangedEvent = Static<typeof RpcModelsChangedEventSchema>;
 /** Full replacement of the active session's path-free Git context. */
 export type RpcGitContextChangedEvent = Static<typeof RpcGitContextChangedEventSchema>;
+/** Full replacement of the current model's prompt-cache status. */
+export type RpcPromptCacheChangedEvent = Static<typeof RpcPromptCacheChangedEventSchema>;
 /** Settled, bounded state of a host UI action. */
 export type RpcUiActionStateChangedEvent = Static<typeof RpcUiActionStateChangedEventSchema>;
 /** Full authoritative planning snapshot emitted after every mutation. */

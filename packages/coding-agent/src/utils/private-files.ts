@@ -10,6 +10,7 @@ import {
 	mkdtempSync,
 	openSync,
 	rmSync,
+	type Stats,
 	writeFileSync,
 } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
@@ -82,8 +83,14 @@ export function ensurePrivateDirectorySync(directoryPath: string, options: { har
 	}
 }
 
-/** Reject links and tighten an existing sensitive file to owner-only access. */
-export function hardenPrivateRegularFileSync(filePath: string): void {
+/**
+ * Reject links and tighten an existing sensitive file to owner-only access.
+ *
+ * Path-based on purpose: this never opens the file, so it cannot release POSIX
+ * record locks that another part of this process (such as SQLite) holds on it.
+ * Returns the validated lstat identity for callers that need a later identity check.
+ */
+export function hardenPrivateRegularFileSync(filePath: string): Stats {
 	const stat = lstatSync(filePath);
 	if (stat.isSymbolicLink() || !stat.isFile()) {
 		throw new Error(`Refusing to use non-regular private file: ${filePath}`);
@@ -92,6 +99,7 @@ export function hardenPrivateRegularFileSync(filePath: string): void {
 		throw new Error(`Refusing to use multiply-linked private file: ${filePath}`);
 	}
 	chmodSync(filePath, PRIVATE_FILE_MODE);
+	return stat;
 }
 
 function appendPrivateFileWithDurabilitySync(filePath: string, content: string, durable: boolean): void {

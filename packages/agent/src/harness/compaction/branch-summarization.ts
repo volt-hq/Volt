@@ -1,5 +1,5 @@
 import type { Model } from "@hansjm10/volt-ai";
-import { streamSimple } from "@hansjm10/volt-ai";
+import { drainEventStream, streamSimple } from "@hansjm10/volt-ai";
 import type { AgentMessage, StreamFn } from "../../types.ts";
 import {
 	convertToLlm,
@@ -253,7 +253,7 @@ export async function generateBranchSummary(
 			maxTokens: 2048,
 		},
 	);
-	const response = await stream.result();
+	const response = await drainEventStream(stream);
 	if (response.stopReason === "aborted") {
 		return err(new BranchSummaryError("aborted", response.errorMessage || "Branch summary aborted"));
 	}

@@ -2,6 +2,7 @@ import { getCapabilities, setCapabilities, visibleWidth } from "@hansjm10/volt-t
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
+import { formatIrohRemoteTicketQrCode } from "../src/core/remote/iroh/qr.ts";
 import { encodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
@@ -39,6 +40,20 @@ function verificationTicket(): string {
 	});
 }
 
+function managedRelayTicket(): string {
+	return encodeIrohRemoteTicketPayload({
+		alpn: IROH_REMOTE_ALPN,
+		expiresAt: 1_800_000_000_000,
+		irohTicket: "a".repeat(150),
+		nodeId: PAIRING_HOST_NODE_ID,
+		relayMode: "production",
+		relayUrls: ["https://relay.example/"],
+		relayCredentialClaim: { claimId: "a".repeat(24), serviceUrl: "https://broker.example/" },
+		secret: "s".repeat(43),
+		workspace: "volt",
+	});
+}
+
 function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 	return {
 		type: "status_result",
@@ -58,6 +73,7 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 			},
 		],
 		phoneConnections: 1,
+		remoteTransport: { state: "ready", wrapperVersion: "1.1.1-volt.2" },
 		workspaces: [{ name: "volt", path: "/tmp/volt", allowedTools: ["read", "bash"] }],
 		clients: [
 			{
@@ -82,7 +98,12 @@ class FakeBackend implements RemoteControlBackend {
 	regenerateCalls = 0;
 	recoverCalls: string[] = [];
 	registerCalls: string[] = [];
+	registerError: Error | undefined;
+	registerName = "volt";
 	revokeCalls: string[] = [];
+	resetCalls = 0;
+	resetError: Error | undefined;
+	resetPending: Promise<void> | undefined;
 	repairApprovalCalls: string[] = [];
 	pairWorkspace: string | undefined;
 	pairAccess: IrohRemoteAccessPresetName | undefined;
@@ -122,7 +143,8 @@ class FakeBackend implements RemoteControlBackend {
 
 	async registerCurrentWorkspace(path: string): Promise<{ name: string; path: string }> {
 		this.registerCalls.push(path);
-		const workspace = { name: "volt", path };
+		if (this.registerError) throw this.registerError;
+		const workspace = { name: this.registerName, path };
 		if (this.snapshot.kind === "online") {
 			this.snapshot = {
 				kind: "online",
@@ -146,6 +168,18 @@ class FakeBackend implements RemoteControlBackend {
 				this.pairDisposeCalls++;
 			},
 		};
+	}
+
+	async resetRelayCredential(): Promise<void> {
+		this.resetCalls++;
+		await this.resetPending;
+		if (this.resetError) throw this.resetError;
+		if (this.snapshot.kind === "online") {
+			this.snapshot = {
+				kind: "online",
+				status: { ...this.snapshot.status, relayCredential: { state: "unpaired" } },
+			};
+		}
 	}
 
 	async revokeClient(clientNodeId: string): Promise<void> {
@@ -214,14 +248,14 @@ class DeferredPairBackend extends FakeBackend {
 	}
 }
 
-function createComponent(backend: FakeBackend, rows = 36) {
+function createComponent(backend: FakeBackend, rows = 36, currentPath = "/tmp/volt") {
 	const requestRender = vi.fn();
 	const onClose = vi.fn();
 	const copied: string[] = [];
 	const component = new RemoteControlCenterComponent(backend, {
 		getTerminalRows: () => rows,
 		getCurrentWorkspaceName: () => "volt",
-		getCurrentWorkspacePath: () => "/tmp/volt",
+		getCurrentWorkspacePath: () => currentPath,
 		currentSessionId: "session-current",
 		requestRender,
 		copyText: async (text) => {
@@ -229,11 +263,31 @@ function createComponent(backend: FakeBackend, rows = 36) {
 		},
 		onClose,
 	});
-	return { component, requestRender, onClose, copied };
+	return {
+		component,
+		requestRender,
+		onClose,
+		copied,
+		setRows: (value: number) => {
+			rows = value;
+		},
+	};
 }
 
 async function settle(): Promise<void> {
 	for (let index = 0; index < 5; index++) await Promise.resolve();
+}
+
+function selectAction(component: RemoteControlCenterComponent, label: string, width = 120): void {
+	for (let attempt = 0; attempt < 30; attempt++) {
+		const text = component.render(width).lines.map(stripAnsi).join("\n");
+		if (text.includes(`› ${label}`)) {
+			component.handleInput("\n");
+			return;
+		}
+		component.handleInput("\x1b[B");
+	}
+	throw new Error(`Action not reachable: ${label}`);
 }
 
 describe("RemoteControlCenterComponent", () => {
@@ -248,6 +302,7 @@ describe("RemoteControlCenterComponent", () => {
 		const text = component.render(120).lines.map(stripAnsi).join("\n");
 
 		expect(text).toContain("Remote Access");
+		expect(text).toContain("Phone transport: ready · wrapper 1.1.1-volt.2");
 		expect(text).toContain("1 attached phone · 1 paired device");
 		expect(text).toContain("Current lease: tui-owned");
 		expect(text).toContain("Register current directory");
@@ -255,6 +310,227 @@ describe("RemoteControlCenterComponent", () => {
 		expect(text).toContain("Detached runtime retention: 30m");
 		expect(text).toContain("Jordan's iPhone");
 		expect(text).toContain("/tmp/volt");
+	});
+
+	it("allows pairing retries while storage-full degradation is recoverable", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({
+				remoteTransport: {
+					state: "degraded",
+					reasonCode: "host_storage_full",
+					message: "Computer storage is full. Free space on the computer, then retry.",
+					wrapperVersion: "1.1.1-volt.2",
+				},
+			}),
+		});
+		const { component } = createComponent(backend, 45);
+		await component.start();
+		let text = component.render(120).lines.map(stripAnsi).join("\n");
+
+		expect(text).toContain("Phone transport: degraded · wrapper 1.1.1-volt.2 · host_storage_full");
+		expect(text).toContain("Computer storage is full");
+		expect(text).toContain("Pair a phone");
+		expect(text).not.toContain("Pairing is disabled until phone transport is ready");
+
+		component.handleInput("\x1b[B");
+		component.handleInput("\x1b[B");
+		component.handleInput("\n");
+		component.handleInput("\n");
+		await settle();
+
+		expect(backend.pairWorkspace).toBe("volt");
+		expect(backend.pairAccess).toBe("coding");
+		text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("PAIR PHONE · volt · Coding");
+	});
+
+	it("blocks pairing when storage-full degradation is unavailable", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({
+				remoteTransport: {
+					state: "unavailable",
+					reasonCode: "host_storage_full",
+					message: "Computer storage is full. Free space on the computer, then retry.",
+				},
+			}),
+		});
+		const { component } = createComponent(backend, 45);
+		await component.start();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+
+		expect(text).toContain("Pairing is disabled until phone transport is ready");
+		expect(text).not.toContain("Pair a phone");
+	});
+
+	it.each([
+		["unpaired", "Not set up", true],
+		["pairing", "Pairing in progress", false],
+		["active", "Active", true],
+		["expired", "Access expired", true],
+		["subscription_inactive", "Volt Pro subscription inactive", false],
+		["revocation_pending", "Credential reset pending", false],
+	] as const)("explains %s relay access separately from endpoint readiness", async (state, label, canPair) => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state } }) });
+		const { component } = createComponent(backend, 45);
+		await component.start();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Daemon endpoint: ready");
+		expect(text).toContain(`Relay access: ${label}`);
+		expect(text).not.toContain("Phone transport: ready");
+		expect(text.includes("  Pair a phone\n")).toBe(canPair);
+		expect(text.includes("credentials and pair again…") || text.includes("credential reset and pair again…")).toBe(
+			state !== "unpaired",
+		);
+		if (state === "subscription_inactive") {
+			expect(text).toContain("Renew the existing subscription");
+			expect(text).not.toContain("Restart voltd");
+		}
+	});
+
+	it("defaults reset confirmation to Cancel and leaves credentials untouched", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state: "active" } }) });
+		const { component } = createComponent(backend, 24);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…", 80);
+		let text = component.render(80).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("RESET RELAY CREDENTIALS");
+		expect(text).toContain("all its phones");
+		expect(text).toContain("workspaces, worktrees, and conversations");
+		expect(text).toContain("direct connections are NOT revoked");
+		expect(text).toContain("› Cancel");
+		expect(backend.resetCalls).toBe(0);
+		component.handleInput("\n");
+		await settle();
+		text = component.render(80).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay access: Active");
+		expect(backend.resetCalls).toBe(0);
+	});
+
+	it("resets once after confirmation and guides a fresh pairing without restarting or revoking devices", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({ relayCredential: { state: "subscription_inactive" } }),
+		});
+		const { component } = createComponent(backend, 36);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		component.handleInput("\n");
+		await settle();
+		expect(backend.resetCalls).toBe(1);
+		expect(backend.startCalls).toBe(0);
+		expect(backend.revokeCalls).toEqual([]);
+		let text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay credentials reset. Choose access for the new phone.");
+		expect(text).toContain("PAIR A PHONE · ACCESS");
+		expect(backend.pairWorkspace).toBeUndefined();
+		component.handleInput("\n");
+		await settle();
+		expect(backend.pairWorkspace).toBe("volt");
+		expect(backend.pairAccess).toBe("coding");
+		backend.pairingProgress?.({
+			type: "pairing_progress",
+			requestId: "pair-1",
+			phase: "ticket",
+			ticket: verificationTicket(),
+		});
+		text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Ticket ready");
+		expect(text).toContain("Copy pairing ticket");
+	});
+
+	it("offers a confirmed retry after an offline reset failure without starting pairing", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({ relayCredential: { state: "revocation_pending" } }),
+		});
+		backend.resetError = new Error("Broker unavailable. Retry when online.");
+		const { component } = createComponent(backend, 36);
+		await component.start();
+		selectAction(component, "Retry credential reset and pair again…");
+		selectAction(component, "Retry reset and pair again");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Reset failed: Broker unavailable. Retry when online.");
+		expect(text).toContain("› Cancel");
+		expect(backend.pairWorkspace).toBeUndefined();
+		backend.resetError = undefined;
+		selectAction(component, "Retry reset and pair again");
+		await settle();
+		expect(backend.resetCalls).toBe(2);
+		expect(component.render(120).lines.map(stripAnsi).join("\n")).toContain("PAIR A PHONE · ACCESS");
+	});
+
+	it("reloads pending revocation status when escaping a failed reset", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state: "active" } }) });
+		backend.resetError = new Error("Offline");
+		const { component } = createComponent(backend, 36);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		await settle();
+		backend.nextSnapshot = { kind: "online", status: status({ relayCredential: { state: "revocation_pending" } }) };
+		component.handleInput("\x1b");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay access: Credential reset pending");
+		expect(text).toContain("Retry credential reset and pair again…");
+		expect(text).not.toContain("  Pair a phone\n");
+	});
+
+	it("does not open pairing after the reset screen is disposed", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status({ relayCredential: { state: "expired" } }) });
+		let finish: (() => void) | undefined;
+		backend.resetPending = new Promise((resolve) => {
+			finish = resolve;
+		});
+		const { component, requestRender } = createComponent(backend);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		component.dispose();
+		const renders = requestRender.mock.calls.length;
+		finish?.();
+		await settle();
+		expect(requestRender).toHaveBeenCalledTimes(renders);
+		expect(backend.pairWorkspace).toBeUndefined();
+	});
+
+	it("retains workspace registration guidance after reset when no workspaces exist", async () => {
+		const backend = new FakeBackend({
+			kind: "online",
+			status: status({ workspaces: [], relayCredential: { state: "expired" } }),
+		});
+		const { component } = createComponent(backend);
+		await component.start();
+		selectAction(component, "Reset credentials and pair again…");
+		selectAction(component, "Reset credentials and pair again");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Relay credentials reset. Register a workspace");
+		expect(text).toContain("› Register current directory");
+		expect(backend.pairWorkspace).toBeUndefined();
+	});
+
+	it("keeps credential status and reset confirmation within small viewports", async () => {
+		for (const [width, rows] of [
+			[24, 12],
+			[80, 24],
+			[120, 36],
+		] as const) {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({ relayCredential: { state: "subscription_inactive" } }),
+			});
+			const { component } = createComponent(backend, rows);
+			await component.start();
+			selectAction(component, "Reset credentials and pair again…");
+			const lines = component.render(width).lines;
+			expect(lines).toHaveLength(rows);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+		}
 	});
 
 	it("labels default-tracking and deny-all device grants", async () => {
@@ -404,9 +680,57 @@ describe("RemoteControlCenterComponent", () => {
 
 		expect(backend.registerCalls).toEqual(["/tmp/volt"]);
 		const text = component.render(100).lines.map(stripAnsi).join("\n");
-		expect(text).toContain("Workspace volt is available");
+		expect(text).toContain("Registered directory: /tmp/volt (workspace volt).");
+		expect(text).toContain("Current conversation unchanged.");
 		expect(text).toContain("Current · volt · /tmp/volt");
 		expect(text).toContain("Pair a phone");
+	});
+
+	it("does not register a directory when opening or refreshing the overview", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component } = createComponent(backend, 36, "/tmp/volt/child");
+		await component.start();
+		selectAction(component, "Refresh status");
+		await settle();
+		expect(backend.registerCalls).toEqual([]);
+	});
+
+	it("lists the registered child while preserving the active parent workspace and lease", async () => {
+		const originalStatus = status();
+		const backend = new FakeBackend({ kind: "online", status: originalStatus });
+		backend.registerName = "child";
+		const { component } = createComponent(backend, 50, "/tmp/volt/child");
+		await component.start();
+		selectAction(component, "Register current directory");
+		await settle();
+		const text = component.render(120).lines.map(stripAnsi).join("\n");
+		expect(backend.registerCalls).toEqual(["/tmp/volt/child"]);
+		expect(text).toContain("Registered directory: /tmp/volt/child (workspace child).");
+		expect(text).toContain("Current conversation unchanged.");
+		expect(text).toContain("Current · volt · /tmp/volt");
+		expect(text).toContain("child · /tmp/volt/child");
+		expect(text).not.toContain("Current · child");
+		expect(text).toContain("Current · volt/session-current · tui-owned");
+		if (backend.snapshot.kind === "online") expect(backend.snapshot.status.leases).toEqual(originalStatus.leases);
+	});
+
+	it.each([false, true])("shows registration errors even if the daemon goes offline: %s", async (offline) => {
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		backend.registerError = new Error(
+			"Use parent workspace volt; managed worktrees cannot be registered separately.",
+		);
+		const { component } = createComponent(backend, 24, "/tmp/worktree");
+		await component.start();
+		if (offline) backend.nextSnapshot = { kind: "offline", state: "not-running" };
+		selectAction(component, "Register current directory", 80);
+		await settle();
+		const lines = component.render(80).lines;
+		const text = lines.map(stripAnsi).join("\n");
+		expect(text).toContain("Workspace registration failed:");
+		expect(text).toContain("Use parent workspace volt;");
+		expect(text).toContain("cannot be registered separately.");
+		expect(text).not.toContain("Registered directory:");
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(80);
 	});
 
 	it("pairs the current workspace, preserves ticket progress, and copies the ticket", async () => {
@@ -438,7 +762,7 @@ describe("RemoteControlCenterComponent", () => {
 		text = component.render(40).lines.map(stripAnsi).join("\n");
 		expect(text).toContain("PAIR PHONE · volt · Full access");
 		expect(text).toContain("Scan with Volt, then compare");
-		expect(text).toContain("Enlarge the terminal");
+		expect(text).toContain("Show pairing QR");
 
 		component.handleInput("\x1b[A");
 		component.handleInput("\n");
@@ -654,16 +978,105 @@ describe("RemoteControlCenterComponent", () => {
 
 			expect(frame.lines).toHaveLength(24);
 			expect(frame.images).toHaveLength(1);
-			expect(frame.images[0]).toMatchObject({ protocol: "sixel", top: 4 });
+			expect(frame.images[0]).toMatchObject({ protocol: "sixel", top: 1 });
 			expect(frame.images[0]!.columns).toBeLessThanOrEqual(80);
-			expect(frame.images[0]!.rows).toBeLessThanOrEqual(15);
+			expect(frame.images[0]!.rows).toBeLessThanOrEqual(19);
 			expect(frame.lines.some((line) => stripAnsi(line).includes("Show verification details"))).toBe(true);
-			expect(frame.lines.some((line) => stripAnsi(line).includes("Enlarge the terminal"))).toBe(false);
+			expect(frame.lines.some((line) => stripAnsi(line).includes("QR needs"))).toBe(false);
 		} finally {
 			component.dispose();
 			setCapabilities(previousCapabilities);
 		}
 	});
+
+	it("fits a complete managed-relay QR and all actions in a 252x53 terminal", async () => {
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component, copied } = createComponent(backend, 53);
+		await component.start();
+		selectAction(component, "Pair a phone", 252);
+		selectAction(component, "Coding", 252);
+		await settle();
+		const ticket = managedRelayTicket();
+		backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
+		component.render(252);
+		component.handleInput("\x1b[A");
+		component.handleInput("\x1b[A");
+		selectAction(component, "Show pairing QR", 252);
+
+		const lines = component.render(252).lines.map(stripAnsi);
+		const qrLines = formatIrohRemoteTicketQrCode(ticket).trimEnd().split("\n");
+		expect(lines).toHaveLength(53);
+		expect(lines.slice(1, 1 + qrLines.length)).toEqual(qrLines);
+		expect(lines.join("\n")).toContain("PAIR QR · volt");
+		for (const label of ["Show verification details", "Copy pairing ticket", "Cancel pairing"]) {
+			expect(lines.join("\n")).toContain(label);
+		}
+		for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(252);
+
+		selectAction(component, "Show verification details", 252);
+		expect(component.render(252).lines.map(stripAnsi).join("\n")).toContain(PAIRING_HOST_NODE_ID);
+		selectAction(component, "Show pairing QR", 252);
+		selectAction(component, "Copy pairing ticket", 252);
+		await settle();
+		expect(copied).toEqual([ticket]);
+		selectAction(component, "Cancel pairing", 252);
+		expect(backend.pairDisposeCalls).toBe(1);
+		expect(component.render(252).lines.map(stripAnsi).join("\n")).toContain("Remote Access");
+	});
+
+	it.each(["width", "height"] as const)(
+		"hides the entire QR below its minimum %s and restores it after resize",
+		async (dimension) => {
+			const ticket = managedRelayTicket();
+			const qrLines = formatIrohRemoteTicketQrCode(ticket).trimEnd().split("\n");
+			const requiredWidth = Math.max(...qrLines.map(visibleWidth));
+			const requiredHeight = qrLines.length + 5;
+			let width = dimension === "width" ? requiredWidth - 1 : requiredWidth;
+			const height = dimension === "height" ? requiredHeight - 1 : requiredHeight;
+			const backend = new FakeBackend({ kind: "online", status: status() });
+			const { component, setRows } = createComponent(backend, height);
+			await component.start();
+			selectAction(component, "Pair a phone", width);
+			selectAction(component, "Coding", width);
+			await settle();
+			backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
+			const warning = `QR needs ${requiredWidth} columns × ${requiredHeight} rows; available: ${width} × ${height}.`;
+			let text = component.render(width).lines.map(stripAnsi).join("\n");
+			expect(text).toContain(warning);
+			expect(text).not.toContain("Show pairing QR");
+			expect(text).not.toMatch(/[▀▄█]/);
+			expect(text).not.toContain(ticket);
+
+			width = requiredWidth;
+			setRows(requiredHeight);
+			component.render(width);
+			component.handleInput("\x1b[A");
+			component.handleInput("\x1b[A");
+			selectAction(component, "Show pairing QR", width);
+			let lines = component.render(width).lines.map(stripAnsi);
+			expect(lines).toHaveLength(requiredHeight);
+			expect(lines.slice(1, 1 + qrLines.length)).toEqual(qrLines);
+			component.handleInput("\x1b[6~");
+			expect(component.render(width).lines.map(stripAnsi)).toEqual(lines);
+
+			width = dimension === "width" ? requiredWidth - 1 : requiredWidth;
+			setRows(height);
+			text = component.render(width).lines.map(stripAnsi).join("\n");
+			expect(text).toContain(warning);
+			expect(text).not.toMatch(/[▀▄█]/);
+			expect(text).toContain("Copy pairing ticket");
+			expect(text).toContain("Show verification details");
+			expect(text).not.toContain(ticket);
+
+			width = requiredWidth;
+			setRows(requiredHeight);
+			lines = component.render(width).lines.map(stripAnsi);
+			expect(lines.slice(1, 1 + qrLines.length)).toEqual(qrLines);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			component.handleInput("\x1b");
+			expect(backend.pairDisposeCalls).toBe(1);
+		},
+	);
 
 	it("requires confirmation before revoking a paired device", async () => {
 		const backend = new FakeBackend({ kind: "online", status: status() });

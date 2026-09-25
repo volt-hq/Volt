@@ -10,15 +10,16 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AgentSessionRuntime, type CreateAgentSessionRuntimeResult } from "../src/core/agent-session-runtime.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
-import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
+import { getDefaultSessionDir, SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import {
 	CONTROL_WORKTREES_CAPABILITY,
@@ -28,7 +29,9 @@ import {
 } from "../src/daemon/control-protocol.ts";
 import { type ControlConnection, type ControlServer, startControlServer } from "../src/daemon/control-server.ts";
 import { ensureDaemonDirs, getDaemonPaths } from "../src/daemon/paths.ts";
+import { releaseLocalSessionWorktree } from "../src/daemon/session-worktree.ts";
 import type { EnsureDaemonResult } from "../src/daemon/spawn.ts";
+import * as daemonSpawn from "../src/daemon/spawn.ts";
 import {
 	evaluateWorktreeRelayGate,
 	getWorktreeCheckoutPath,
@@ -52,22 +55,27 @@ import {
 	ManualIrohSendStream,
 	parseWrittenObjects,
 } from "./iroh-stream-doubles.ts";
+import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
+const tempDirs: string[] = [];
+const managerOwner = createSessionManagerTestOwner();
 const HOST_FIXTURE_ROOT = join(tmpdir(), "volt-worktree-tui");
 const HOST_PARENT_PATH = join(HOST_FIXTURE_ROOT, "parent-repo");
 const HOST_AGENT_DIR = join(HOST_FIXTURE_ROOT, ".volt", "agent");
 const HOST_WORKTREE_PATH = join(getWorktreesRoot(HOST_AGENT_DIR), "--repo--", "fix-login");
 
+beforeEach(() => managerOwner.start());
+
 afterEach(async () => {
-	for (const cleanup of cleanups.splice(0)) {
-		await cleanup();
-	}
+	while (cleanups.length > 0) await cleanups.pop()?.();
+	await managerOwner.drain();
+	for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
 function makeTempDir(prefix: string): string {
 	const dir = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
-	cleanups.push(() => rmSync(dir, { recursive: true, force: true }));
+	tempDirs.push(dir);
 	return dir;
 }
 
@@ -197,6 +205,7 @@ describe("resolveDaemonWorkspaceForCwd (§5.2.2 auto-registration fix)", () => {
 					startedAtMs: 0,
 					leases: [],
 					phoneConnections: 0,
+					remoteTransport: { state: "ready" },
 					workspaces: handlers.workspaces,
 					clients: [],
 					keepAwake: { enabled: false, state: "disabled" },
@@ -302,6 +311,7 @@ function statusResult(id: string, workspaces: Array<{ name: string; path: string
 		startedAtMs: 0,
 		leases: [],
 		phoneConnections: 0,
+		remoteTransport: { state: "ready" },
 		workspaces,
 		clients: [],
 		keepAwake: { enabled: false, state: "disabled" },
@@ -497,6 +507,8 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 		clientNodeId: "n-1",
 		workspaceName: "repo",
 		workspacePath: HOST_PARENT_PATH,
+		workspaceNames: ["repo"],
+		workspaces: [{ name: "repo", status: "available" }],
 		allowedTools: "read",
 		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 	} satisfies RelayPreamble["authorization"];
@@ -683,24 +695,25 @@ describe("trust pinning helpers (§5.2.1)", () => {
 });
 
 describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () => {
-	function createRuntimeFixture(parentCwd: string, agentDir: string) {
+	async function createRuntimeFixture(parentCwd: string, agentDir: string) {
 		const createdSessions: Array<{
 			cwd: string;
 			sessionDir: string;
-			sessionFile: string | undefined;
+			sessionRef: SessionReference | undefined;
 			workspaceName?: string;
 			baseRef?: string;
 		}> = [];
 		const makeSessionDouble = (sessionManager: SessionManager): AgentSession =>
 			({
 				sessionManager,
+				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 				extensionRunner: { hasHandlers: () => false },
 				disposeSubagentToolManager: vi.fn(),
 				disposeForSessionReplacement: vi.fn(),
 				dispose: vi.fn(),
 				subscribe: vi.fn(() => () => {}),
-				get sessionFile() {
-					return sessionManager.getSessionFile();
+				get sessionRef() {
+					return sessionManager.getSessionRef();
 				},
 				get sessionId() {
 					return sessionManager.getSessionId();
@@ -722,7 +735,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				createdSessions.push({
 					cwd: options.cwd,
 					sessionDir: options.sessionManager.getSessionDir(),
-					sessionFile: options.sessionManager.getSessionFile(),
+					sessionRef: options.sessionManager.getSessionRef(),
 					workspaceName: options.workspaceName,
 					baseRef: options.baseRef,
 				});
@@ -734,7 +747,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 			},
 		);
 		const parentSessionDir = getDefaultSessionDir(parentCwd, agentDir);
-		const initialManager = SessionManager.create(parentCwd, parentSessionDir);
+		const initialManager = await SessionManager.create(parentCwd, parentSessionDir);
 		const runtime = new AgentSessionRuntime(
 			makeSessionDouble(initialManager),
 			makeServices(parentCwd),
@@ -744,12 +757,37 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 	}
 
 	it("creates the session with the worktree cwd in the PARENT workspace's session dir", async () => {
-		const agentDir = makeTempDir("volt-wt-newsession-");
-		const parentCwd = join(agentDir, "parent-repo");
-		const worktreeCwd = join(getWorktreesRoot(agentDir), "--parent-repo--", "fix-login");
-		mkdirSync(parentCwd, { recursive: true });
-		mkdirSync(worktreeCwd, { recursive: true });
-		const fixture = createRuntimeFixture(parentCwd, agentDir);
+		const {
+			agentDir,
+			workspacePath: parentCwd,
+			checkoutPath: worktreeCwd,
+			manager,
+			stateManager,
+		} = await createWorktreeFixture();
+		const paths = getDaemonPaths(agentDir);
+		ensureDaemonDirs(paths);
+		const server = await startControlServer({
+			socketPath: paths.socketPath,
+			version: "test",
+			handlers: {
+				async onRequest(connection, request) {
+					if (request.type !== "worktree_restore") throw new Error(`Unexpected request: ${request.type}`);
+					await handleWorktreeControlRequest(connection, request, { manager, stateManager });
+				},
+			},
+		});
+		cleanups.push(() => server.close());
+		const ensure = vi.spyOn(daemonSpawn, "ensureDaemonRunning").mockResolvedValue({
+			healthy: true,
+			state: "healthy",
+			spawned: false,
+			socketPath: paths.socketPath,
+		});
+		cleanups.push(() => {
+			ensure.mockRestore();
+		});
+		const fixture = await createRuntimeFixture(parentCwd, agentDir);
+		cleanups.push(() => releaseLocalSessionWorktree(fixture.runtime.session.sessionManager));
 
 		const result = await fixture.runtime.newSession({
 			cwd: worktreeCwd,
@@ -793,7 +831,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		const agentDir = makeTempDir("volt-wt-newsession2-");
 		const parentCwd = join(agentDir, "parent-repo");
 		mkdirSync(parentCwd, { recursive: true });
-		const fixture = createRuntimeFixture(parentCwd, agentDir);
+		const fixture = await createRuntimeFixture(parentCwd, agentDir);
 
 		await fixture.runtime.newSession();
 		expect(fixture.createdSessions[0]).toMatchObject({ cwd: parentCwd, sessionDir: fixture.parentSessionDir });

@@ -1,3 +1,6 @@
+import { isUtf8 } from "node:buffer";
+import { createHash } from "node:crypto";
+import { open, realpath } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve as resolvePath, sep } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import type { Api, ImageContent, Model, TextContent } from "@hansjm10/volt-ai";
@@ -8,12 +11,13 @@ import { type Static, Type } from "typebox";
 import { getReadmePath } from "../../config.ts";
 import { keyHint, keyText } from "../../modes/interactive/components/keybinding-hints.ts";
 import { formatDimensionNote, resizeImage } from "../../utils/image-resize.ts";
-import { detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
+import { detectSupportedImageMimeType, detectSupportedImageMimeTypeFromFile } from "../../utils/mime.ts";
 import { formatPathRelativeToCwdOrAbsolute } from "../../utils/paths.ts";
 import type { ToolDefinition, ToolRenderResultOptions } from "../extensions/types.ts";
 import { getLanguageFromPath, highlightCode, type Theme } from "../theme/runtime.ts";
 import { resolveReadPathAsync, resolveToCwd } from "./path-utils.ts";
 import { getTextOutput, renderToolPath, replaceTabs, str } from "./render-utils.ts";
+import { getRepositoryObservationContext, RepositoryObservationError } from "./repository-observation.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, formatSize, type TruncationResult, truncateHead } from "./truncate.ts";
 
@@ -205,7 +209,8 @@ export function createReadToolDefinition(
 	options?: ReadToolOptions,
 ): ToolDefinition<typeof readSchema, ReadToolDetails | undefined> {
 	const autoResizeImages = options?.autoResizeImages ?? true;
-	const ops = options?.operations ?? defaultReadOperations;
+	const customOps = options?.operations;
+	const ops = customOps ?? defaultReadOperations;
 	return {
 		name: "read",
 		label: "read",
@@ -220,6 +225,7 @@ export function createReadToolDefinition(
 			_onUpdate?,
 			ctx?,
 		) {
+			const observation = getRepositoryObservationContext();
 			return new Promise<{ content: (TextContent | ImageContent)[]; details?: ReadToolDetails }>(
 				(resolve, reject) => {
 					if (signal?.aborted) {
@@ -229,27 +235,53 @@ export function createReadToolDefinition(
 					let aborted = false;
 					const onAbort = () => {
 						aborted = true;
-						reject(new Error("Operation aborted"));
+						// Managed work keeps ownership until the in-flight file operation has drained.
+						if (!observation) reject(new Error("Operation aborted"));
 					};
 					signal?.addEventListener("abort", onAbort, { once: true });
 
 					(async () => {
 						try {
-							const absolutePath = await resolveReadPathAsync(path, cwd);
-							if (aborted) return;
+							const absolutePath =
+								observation && customOps ? resolveToCwd(path, cwd) : await resolveReadPathAsync(path, cwd);
+							if (aborted) throw new Error("Operation aborted");
+							// Pin local managed reads to their canonical source. Custom backends must not
+							// acquire local identity evidence for potentially unrelated remote content.
+							const canonicalPath = observation && !customOps ? await realpath(absolutePath) : undefined;
+							if (aborted) throw new Error("Operation aborted");
+							const expected = observation?.expectedRead;
+							if (expected && canonicalPath !== expected.path)
+								throw new RepositoryObservationError(
+									"invalidated",
+									"resource_changed",
+									"Skill resource identity changed",
+								);
+							const readPath = canonicalPath ?? absolutePath;
 							// Check if file exists and is readable.
-							await ops.access(absolutePath);
-							if (aborted) return;
-							const mimeType = ops.detectImageMimeType ? await ops.detectImageMimeType(absolutePath) : undefined;
+							await ops.access(readPath);
+							if (aborted) throw new Error("Operation aborted");
+							// Native managed reads sniff the actual read buffer, without a second file read.
+							const mimeType =
+								!canonicalPath && ops.detectImageMimeType ? await ops.detectImageMimeType(readPath) : undefined;
+							if (aborted) throw new Error("Operation aborted");
+							if (observation && mimeType) {
+								throw new RepositoryObservationError(
+									"unsupported",
+									"non_text_input",
+									"Binary and image reads are unsupported in repository observations",
+								);
+							}
 							let content: (TextContent | ImageContent)[];
 							let details: ReadToolDetails | undefined;
 							const nonVisionImageNote = getNonVisionImageNote(ctx?.model);
 							if (mimeType) {
 								// Read image as binary.
-								const buffer = await ops.readFile(absolutePath);
+								const buffer = await ops.readFile(readPath);
+								if (aborted) throw new Error("Operation aborted");
 								if (autoResizeImages) {
 									// Resize image if needed before sending it back to the model.
 									const resized = await resizeImage(buffer, mimeType);
+									if (aborted) throw new Error("Operation aborted");
 									if (!resized) {
 										const reason =
 											mimeType === "image/webp"
@@ -277,8 +309,39 @@ export function createReadToolDefinition(
 									];
 								}
 							} else {
-								// Read text content.
-								const buffer = await ops.readFile(absolutePath);
+								// Exact skill grants read only through a descriptor with the issued identity.
+								let buffer: Buffer;
+								if (expected) {
+									const file = await open(readPath, "r");
+									try {
+										const stat = await file.stat();
+										if (aborted) throw new Error("Operation aborted");
+										if (stat.dev !== expected.device || stat.ino !== expected.inode)
+											throw new RepositoryObservationError(
+												"invalidated",
+												"resource_changed",
+												"Skill resource identity changed",
+											);
+										buffer = await file.readFile();
+									} finally {
+										await file.close();
+									}
+								} else buffer = await ops.readFile(readPath);
+								if (aborted) throw new Error("Operation aborted");
+								if (
+									observation &&
+									(detectSupportedImageMimeType(buffer) ||
+										!isUtf8(buffer) ||
+										buffer.some(
+											(byte) => byte < 32 && byte !== 9 && byte !== 10 && byte !== 12 && byte !== 13,
+										))
+								) {
+									throw new RepositoryObservationError(
+										"unsupported",
+										"non_text_input",
+										"Binary and image reads are unsupported in repository observations",
+									);
+								}
 								const textContent = buffer.toString("utf-8");
 								const allLines = textContent.split("\n");
 								const totalFileLines = allLines.length;
@@ -301,6 +364,24 @@ export function createReadToolDefinition(
 								}
 								// Apply truncation, respecting both line and byte limits.
 								const truncation = truncateHead(selectedContent);
+								if (observation && canonicalPath) {
+									const currentPath = await realpath(absolutePath).catch(() => undefined);
+									if (aborted) throw new Error("Operation aborted");
+									// A retarget during the read makes identity unverifiable, not a local fallback.
+									if (currentPath === canonicalPath) {
+										observation.capture({
+											kind: "read",
+											path: canonicalPath,
+											text: truncation.content,
+											startLine: startLineDisplay,
+											endLine: startLine + truncation.outputLines,
+											revision: `sha256:${createHash("sha256").update(buffer).digest("hex")}`,
+											truncated:
+												truncation.truncated ||
+												(userLimitedLines !== undefined && startLine + userLimitedLines < allLines.length),
+										});
+									}
+								}
 								let outputText: string;
 								if (truncation.firstLineExceedsLimit) {
 									// First line alone exceeds the byte limit. Point the model at a bash fallback.
@@ -330,12 +411,12 @@ export function createReadToolDefinition(
 								content = [{ type: "text", text: outputText }];
 							}
 
-							if (aborted) return;
-							signal?.removeEventListener("abort", onAbort);
+							if (aborted) throw new Error("Operation aborted");
 							resolve({ content, ...(details === undefined ? {} : { details }) });
-						} catch (error: any) {
+						} catch (error) {
+							if (observation || !aborted) reject(aborted ? new Error("Operation aborted") : error);
+						} finally {
 							signal?.removeEventListener("abort", onAbort);
-							if (!aborted) reject(error);
 						}
 					})();
 				},

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { writeDurableAtomicFile } from "../../../utils/durable-atomic-write.ts";
+import { type PrReviewLaunch, parsePrReviewLaunches } from "../../pr-review-placement.ts";
 import { cloneIrohRemoteRpcGrant, type IrohRemoteRpcGrant, parseIrohRemoteRpcGrant } from "./access-grant.ts";
 import {
 	canonicalizePersistedIrohRemoteAllowTools,
@@ -31,8 +32,22 @@ export interface IrohRemoteWorkspaceWorktree {
 	branch: string;
 	baseRef?: string;
 	createdAt: number;
+	/** Host-created disposable checkout; adopted directories are never automatically reclaimed. */
+	disposable?: boolean;
+	/** Durable idle timestamp, reconstructed on startup rather than held only in timers. */
+	inactiveAt?: number;
+	/** Durable archive intent. Bindings and review receipts survive checkout reclamation. */
+	checkoutArchive?: {
+		head: string;
+		commonDirectory: string;
+		archivedAt: number;
+		quarantinePath: string;
+		restoring?: boolean;
+	};
 	/** Sessions bound to this worktree (usually exactly one). */
 	sessionIds: string[];
+	/** Host-only PR preparation receipts; at most 64 per checkout. */
+	prReviewLaunches?: PrReviewLaunch[];
 }
 
 export type IrohRemotePushTargetProvider = "fcm";
@@ -139,6 +154,19 @@ export function createEmptyIrohRemoteHostState(): IrohRemoteHostState {
 	};
 }
 
+export function allocateIrohRemoteWorkspaceGeneration(state: IrohRemoteHostState, workspaceName: string): void {
+	const currentGeneration = state.workspaceGenerationCounter ?? 0;
+	if (currentGeneration === Number.MAX_SAFE_INTEGER) {
+		throw new Error("Workspace generation counter is exhausted");
+	}
+	const generation = currentGeneration + 1;
+	state.workspaceGenerationCounter = generation;
+	state.workspaceGenerations = [
+		...(state.workspaceGenerations ?? []).filter((record) => record.workspaceName !== workspaceName),
+		{ workspaceName, generation },
+	];
+}
+
 export interface IrohRemoteStateParseOptions {
 	/** Default grant to canonicalize against; tests inject alternate defaults. */
 	defaultAllowTools?: string;
@@ -166,7 +194,7 @@ export async function writeIrohRemoteHostState(path: string, state: IrohRemoteHo
 
 export function parseIrohRemoteHostState(value: unknown, options?: IrohRemoteStateParseOptions): IrohRemoteHostState {
 	const state = expectRecord(value, "Iroh remote host state");
-	return {
+	const parsed: IrohRemoteHostState = {
 		hostSecretKey: parseOptionalByteArray(state.hostSecretKey, "hostSecretKey"),
 		pairingSecretTombstones: parseOptionalArray(
 			state.pairingSecretTombstones,
@@ -184,6 +212,12 @@ export function parseIrohRemoteHostState(value: unknown, options?: IrohRemoteSta
 			parseIrohRemotePendingPairingTicket(entry, options),
 		),
 	};
+	for (const workspace of parsed.workspaces) {
+		if (!(parsed.workspaceGenerations ?? []).some((record) => record.workspaceName === workspace.name)) {
+			allocateIrohRemoteWorkspaceGeneration(parsed, workspace.name);
+		}
+	}
+	return parsed;
 }
 
 function serializeIrohRemoteHostState(state: IrohRemoteHostState): IrohRemoteHostState {
@@ -274,11 +308,36 @@ export function parseIrohRemoteWorkspaceWorktree(value: unknown): IrohRemoteWork
 		worktree.sourceRootRelativePath,
 		"worktree sourceRootRelativePath",
 	);
+	let checkoutArchive: IrohRemoteWorkspaceWorktree["checkoutArchive"];
+	if (worktree.checkoutArchive !== undefined) {
+		const archive = expectRecord(worktree.checkoutArchive, "worktree archive");
+		const head = expectString(archive.head, "archive head");
+		if (!/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(head)) throw new Error("invalid archive head");
+		checkoutArchive = {
+			head,
+			commonDirectory: expectString(archive.commonDirectory, "archive common directory"),
+			archivedAt: expectNonNegativeSafeInteger(archive.archivedAt, "archive timestamp"),
+			quarantinePath: expectString(archive.quarantinePath, "archive quarantine path"),
+			...(archive.restoring === undefined
+				? {}
+				: { restoring: expectBoolean(archive.restoring, "archive restoring") }),
+		};
+	}
 	return {
 		id: expectWorktreeId(worktree.id),
+		...(worktree.disposable === undefined
+			? {}
+			: { disposable: expectBoolean(worktree.disposable, "disposable checkout") }),
+		...(worktree.inactiveAt === undefined
+			? {}
+			: { inactiveAt: expectNonNegativeSafeInteger(worktree.inactiveAt, "inactive timestamp") }),
+		...(checkoutArchive === undefined ? {} : { checkoutArchive }),
 		workspaceName: expectString(worktree.workspaceName, "worktree workspaceName"),
 		path: expectString(worktree.path, "worktree path"),
 		...(sourceRootRelativePath === undefined ? {} : { sourceRootRelativePath }),
+		...(worktree.prReviewLaunches === undefined
+			? {}
+			: { prReviewLaunches: parsePrReviewLaunches(worktree.prReviewLaunches) }),
 		branch: expectString(worktree.branch, "worktree branch"),
 		...(baseRef === undefined ? {} : { baseRef }),
 		createdAt: expectNumber(worktree.createdAt, "worktree createdAt"),

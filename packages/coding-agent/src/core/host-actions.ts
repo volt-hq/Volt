@@ -3,6 +3,10 @@ import { type Api, type Model, supportsFastInference } from "@hansjm10/volt-ai";
 import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
 import type { AgentMode, PlanExecutionStrategy, PlanningState } from "./planning.ts";
 import type { ReviewRunControls, ReviewTarget, ReviewWorkflowResult } from "./review.ts";
+import {
+	isReviewDiscussionHostActionAllowed,
+	REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE,
+} from "./review-discussion-policy.ts";
 import type {
 	UiActionArgumentDescriptor,
 	UiActionDescriptor,
@@ -11,6 +15,7 @@ import type {
 	UiActionStateDescriptor,
 } from "./rpc/types.ts";
 import { validateUiActionArgs } from "./rpc/ui-action-args.ts";
+import type { SettingsManager } from "./settings-manager.ts";
 
 type RuntimeNewSession = AgentSessionRuntime["newSession"];
 type RuntimeSession = AgentSessionRuntime["session"];
@@ -20,14 +25,18 @@ export type HostActionNewSessionResult = Awaited<ReturnType<RuntimeNewSession>>;
 export type HostActionCompactResult = Awaited<ReturnType<RuntimeSession["compact"]>>;
 
 export interface HostActionSessionState {
+	isReviewDiscussion?: boolean;
 	/** Falls back to isStreaming for legacy host integrations. */
 	isBusy?: boolean;
 	isStreaming: boolean;
 	isCompacting: boolean;
+	/** Background work remains cancellable after foreground settlement. */
+	hasBackgroundJobs?: boolean;
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled?: boolean;
 	planningState?: PlanningState;
+	settingsManager?: SettingsManager;
 }
 
 export interface HostActionDescriptorContext {
@@ -41,6 +50,8 @@ export interface HostActionDescriptorContext {
 }
 
 export interface HostActionInvocationContext extends HostActionDescriptorContext {
+	/** Recheck the host's session/branch authority immediately before a settings mutation. */
+	assertCurrent?: () => void;
 	abortRun(): Promise<void>;
 	compactContext(customInstructions?: string): Promise<HostActionCompactResult>;
 	newSession(options?: HostActionNewSessionOptions): Promise<HostActionNewSessionResult>;
@@ -72,10 +83,12 @@ export type HostActionAvailability =
 export interface HostActionDefinition {
 	id: string;
 	label: string;
-	description?: string;
+	description?: string | ((context: HostActionDescriptorContext) => string);
 	category: UiActionDescriptor["category"];
 	presentation: UiActionDescriptor["presentation"];
-	args?: ReadonlyArray<UiActionArgumentDescriptor>;
+	args?:
+		| ReadonlyArray<UiActionArgumentDescriptor>
+		| ((context: HostActionDescriptorContext) => ReadonlyArray<UiActionArgumentDescriptor>);
 	destructive?: boolean;
 	requiresConfirmation?: boolean;
 	streamingBehavior?: UiActionDescriptor["streamingBehavior"];
@@ -100,6 +113,8 @@ export interface HostActionSlashCommand {
 	description: string;
 }
 
+export const CONTEXT_AUTO_COMPACTION_ACTION_ID = "context.auto_compaction";
+export const CONTEXT_COMPACTION_THRESHOLD_ACTION_ID = "context.compaction_threshold";
 export const CONTEXT_COMPACT_ACTION_ID = "context.compact";
 export const CONTEXT_COMPACT_SLASH_ALIAS = "compact";
 export const REVIEW_BRANCH_ACTION_ID = "review.branch";
@@ -171,6 +186,8 @@ const REVIEW_OPTION_ARGUMENTS: ReadonlyArray<UiActionArgumentDescriptor> = [
 ];
 
 const REMOTE_SAFE_BUILTIN_HOST_ACTION_IDS = new Set<string>([
+	CONTEXT_AUTO_COMPACTION_ACTION_ID,
+	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
 	SESSION_NEW_ACTION_ID,
 	RUN_CANCEL_ACTION_ID,
 	THINKING_FAST_MODE_ACTION_ID,
@@ -240,7 +257,7 @@ export class HostActionRegistry {
 		}
 		return {
 			name: normalizedAlias,
-			description: action.description ?? action.label,
+			description: typeof action.description === "string" ? action.description : action.label,
 		};
 	}
 
@@ -252,7 +269,7 @@ export class HostActionRegistry {
 			}
 			return (action.slashAliases ?? []).map((alias) => ({
 				name: normalizeSlashAlias(alias.name),
-				description: action.description ?? action.label,
+				description: typeof action.description === "string" ? action.description : action.label,
 			}));
 		});
 	}
@@ -275,6 +292,8 @@ export class HostActionRegistry {
 		args: unknown,
 		options: HostActionInvokeOptions = {},
 	): Promise<UiActionInvocationResponse> {
+		if (context.session.isReviewDiscussion && !isReviewDiscussionHostActionAllowed(actionId, args))
+			throw new Error(REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE);
 		if (actionId.length === 0) {
 			throw new Error("UI action id must be a non-empty string");
 		}
@@ -289,7 +308,10 @@ export class HostActionRegistry {
 		if (!availability.enabled) {
 			throw new Error(availability.disabledReason ?? `UI action is disabled: ${actionId}`);
 		}
-		const validatedArgs = validateUiActionArgs(args, action.args ?? []);
+		const validatedArgs = validateUiActionArgs(
+			args,
+			typeof action.args === "function" ? action.args(context) : (action.args ?? []),
+		);
 		return action.handler(context, validatedArgs, options);
 	}
 
@@ -311,6 +333,7 @@ export async function runSessionNewHostAction(
 	context: HostActionInvocationContext,
 	options?: HostActionNewSessionOptions,
 ): Promise<HostActionNewSessionResult> {
+	if (context.session.isReviewDiscussion) throw new Error(REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE);
 	const result = await context.newSession(options);
 	if (!result.cancelled) {
 		await context.afterSessionSwitch?.();
@@ -343,6 +366,7 @@ export async function runReviewHostAction(
 	target: ReviewTarget,
 	options: HostActionReviewOptions,
 ): Promise<ReviewWorkflowResult> {
+	if (context.session.isReviewDiscussion) throw new Error(REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE);
 	if (!context.runReviewAction) {
 		throw new Error("Review actions are not available in this host");
 	}
@@ -454,7 +478,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 	registry.register({
 		id: RUN_CANCEL_ACTION_ID,
 		label: "Cancel run",
-		description: "Abort the current agent operation",
+		description: "Abort the current agent operation and all background jobs",
 		category: "session",
 		presentation: { kind: "button", group: "Session" },
 		args: [],
@@ -463,10 +487,44 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		streamingBehavior: "immediate",
 		remoteSafe: true,
 		availability: (context) =>
-			isHostSessionBusy(context.session) || context.session.isCompacting
+			isHostSessionBusy(context.session) || context.session.isCompacting || context.session.hasBackgroundJobs
 				? { enabled: true }
 				: { enabled: false, disabledReason: "No active run to cancel" },
 		handler: invokeRunCancelAction,
+	});
+	registry.register({
+		id: CONTEXT_AUTO_COMPACTION_ACTION_ID,
+		label: "Auto-compaction",
+		description: (context) =>
+			`Save auto-compaction ${compactionSaveScope(context)}. Trusted project and runtime overrides take precedence. Disabling retains model thresholds.`,
+		category: "context",
+		presentation: { kind: "toggle", group: "Context", priority: 100 },
+		args: (context) => [
+			{ name: "enabled", label: "Enabled", type: "boolean", required: true },
+			...compactionTargetArguments(context),
+		],
+		remoteSafe: true,
+		streamingBehavior: "disabled",
+		state: createAutoCompactionState,
+		availability: (context) => compactionSettingsAvailability(context, "enabled"),
+		handler: (context, args) => invokeCompactionSetting(context, args, "enabled"),
+	});
+	registry.register({
+		id: CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
+		label: "Compact at",
+		description: (context) =>
+			`Save the token threshold for ${context.session.model ? `${context.session.model.provider}/${context.session.model.id}` : "the selected model"} ${compactionSaveScope(context)}. 0 uses the context-limit default. Trusted project and runtime overrides take precedence.`,
+		category: "context",
+		presentation: { kind: "picker", group: "Context", priority: 90 },
+		args: (context) => [
+			{ name: "tokens", label: "Tokens (0 uses default)", type: "integer", required: true },
+			...compactionTargetArguments(context),
+		],
+		remoteSafe: true,
+		streamingBehavior: "disabled",
+		state: createCompactionThresholdState,
+		availability: (context) => compactionSettingsAvailability(context, "modelThresholds"),
+		handler: (context, args) => invokeCompactionSetting(context, args, "modelThresholds"),
 	});
 	registry.register({
 		id: CONTEXT_COMPACT_ACTION_ID,
@@ -576,7 +634,8 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 	registry.register({
 		id: REVIEW_BRANCH_ACTION_ID,
 		label: "Review branch",
-		description: "Review the current branch against its merge base.",
+		description:
+			"Review the current branch against a refreshed upstream merge base using host Git credentials and network; full refs use local cached state.",
 		category: "review",
 		presentation: {
 			kind: "card",
@@ -591,6 +650,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 				type: "string",
 				required: false,
 				placeholder: "main",
+				description: "Plain names refresh their upstream; refs/heads/* and refs/remotes/* use local cached state.",
 				completion: "gitBranches",
 			},
 			...REVIEW_OPTION_ARGUMENTS,
@@ -610,7 +670,7 @@ export function registerBuiltinHostActions(registry: HostActionRegistry): HostAc
 		id: REVIEW_PR_ACTION_ID,
 		label: "Review pull request",
 		description:
-			"Review a GitHub pull request using the host's GitHub credentials and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without GitHub context.",
+			"Review a pull request using the built-in GitHub CLI code-host provider, host credentials, and network; its metadata, diff, authoritative linked issues, comments, submitted review summaries, and inline review threads are sent to discovery and verification, while retained finding prose is rendered separately without code-host context.",
 		category: "review",
 		presentation: { kind: "card", group: "Review", priority: 80, icon: "arrow.triangle.pull" },
 		args: [
@@ -1133,18 +1193,21 @@ function createReviewInvocationResponse(action: string, result: ReviewWorkflowRe
 }
 
 function createDescriptor(action: HostActionDefinition, context: HostActionDescriptorContext): UiActionDescriptor {
-	const availability = action.availability?.(context) ?? { enabled: true };
+	const availability =
+		context.session.isReviewDiscussion && !isReviewDiscussionHostActionAllowed(action.id)
+			? { enabled: false, disabledReason: REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE }
+			: (action.availability?.(context) ?? { enabled: true });
 	const state = typeof action.state === "function" ? action.state(context) : action.state;
 	const descriptor: UiActionDescriptor = {
 		schemaVersion: 1,
 		id: action.id,
 		label: action.label,
-		description: action.description,
+		description: typeof action.description === "function" ? action.description(context) : action.description,
 		source: "builtin",
 		sourceLabel: "Built in",
 		category: action.category,
 		presentation: action.presentation,
-		args: [...(action.args ?? [])],
+		args: [...(typeof action.args === "function" ? action.args(context) : (action.args ?? []))],
 		enabled: availability.enabled,
 		disabledReason: availability.enabled ? null : availability.disabledReason,
 		destructive: action.destructive ?? false,
@@ -1157,6 +1220,114 @@ function createDescriptor(action: HostActionDefinition, context: HostActionDescr
 		descriptor.state = state;
 	}
 	return descriptor;
+}
+
+function compactionSaveScope(context: HostActionDescriptorContext): string {
+	const profile = context.session.settingsManager?.getActiveProfile();
+	return profile ? `in global profile "${profile}" on the connected host` : "globally on the connected host";
+}
+
+function compactionTargetArguments(context: HostActionDescriptorContext): UiActionArgumentDescriptor[] {
+	return [
+		{
+			name: "provider",
+			label: "Provider",
+			type: "string",
+			required: true,
+			defaultValue: context.session.model?.provider ?? "",
+		},
+		{
+			name: "modelId",
+			label: "Model ID",
+			type: "string",
+			required: true,
+			defaultValue: context.session.model?.id ?? "",
+		},
+		{
+			name: "expectedProfile",
+			label: "Profile",
+			type: "string",
+			required: true,
+			defaultValue: context.session.settingsManager?.getActiveProfile() ?? "",
+		},
+	];
+}
+
+function compactionSettingsAvailability(
+	context: HostActionDescriptorContext,
+	field: "enabled" | "modelThresholds",
+): HostActionAvailability {
+	if (context.session.isStreaming)
+		return { enabled: false, disabledReason: "Compaction settings are unavailable while streaming" };
+	if (isHostSessionBusy(context.session))
+		return {
+			enabled: false,
+			disabledReason: "Compaction settings are unavailable while an agent operation is running",
+		};
+	if (context.session.isCompacting)
+		return { enabled: false, disabledReason: "Compaction settings are unavailable while compacting" };
+	const { model, settingsManager } = context.session;
+	if (!model) return { enabled: false, disabledReason: "Select a model to configure compaction" };
+	if (!settingsManager) return { enabled: false, disabledReason: "Compaction settings are unavailable in this host" };
+	const disabledReason = settingsManager.getCompactionWriteDisabledReason(field, `${model.provider}/${model.id}`);
+	return disabledReason ? { enabled: false, disabledReason } : { enabled: true };
+}
+
+function createAutoCompactionState(context: HostActionDescriptorContext): UiActionStateDescriptor {
+	const value = context.session.settingsManager?.getCompactionEnabled() ?? true;
+	return { type: "boolean", value, label: value ? "Auto-compaction enabled" : "Auto-compaction disabled" };
+}
+
+function createCompactionThresholdState(context: HostActionDescriptorContext): UiActionStateDescriptor {
+	const { model, settingsManager } = context.session;
+	const value = model ? (settingsManager?.getCompactionThresholdTokens(`${model.provider}/${model.id}`) ?? 0) : 0;
+	const presets = [...new Set([0, 100_000, 150_000, 200_000, 250_000, 350_000, 500_000, 750_000, value])].sort(
+		(a, b) => a - b,
+	);
+	return {
+		type: "integer",
+		value,
+		label: value === 0 ? "Default" : `${value.toLocaleString("en-US")} tokens`,
+		options: presets.map((tokens) => ({
+			value: String(tokens),
+			label: tokens === 0 ? "Default" : `${tokens.toLocaleString("en-US")} tokens`,
+		})),
+	};
+}
+
+async function invokeCompactionSetting(
+	context: HostActionInvocationContext,
+	args: unknown,
+	field: "enabled" | "modelThresholds",
+): Promise<UiActionInvocationResponse> {
+	const record = getArgsRecord(args);
+	context.assertCurrent?.();
+	const { model, settingsManager } = context.session;
+	if (!model || !settingsManager) throw new Error("Compaction settings are unavailable in this host");
+	if (
+		record.provider !== model.provider ||
+		record.modelId !== model.id ||
+		record.expectedProfile !== (settingsManager.getActiveProfile() ?? "")
+	) {
+		throw new Error("Compaction settings target changed; refresh actions and retry");
+	}
+	const availability = compactionSettingsAvailability(context, field);
+	if (!availability.enabled) throw new Error(availability.disabledReason);
+	// No await between target/authority checks and the scoped SettingsManager mutation.
+	if (field === "enabled") {
+		settingsManager.setCompactionEnabled(record.enabled as boolean);
+	} else {
+		settingsManager.setCompactionThresholdTokens(`${model.provider}/${model.id}`, record.tokens as number);
+	}
+	await settingsManager.flush();
+	return {
+		action: field === "enabled" ? CONTEXT_AUTO_COMPACTION_ACTION_ID : CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
+		status: "completed",
+		state: field === "enabled" ? createAutoCompactionState(context) : createCompactionThresholdState(context),
+		stateChanged: true,
+		actionsChanged: true,
+		message: "Compaction settings saved",
+	};
 }
 
 function createThinkingFastModeState(context: HostActionDescriptorContext): UiActionStateDescriptor {

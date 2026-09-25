@@ -1,6 +1,19 @@
-import { access, chmod, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import {
+	access,
+	chmod,
+	lstat,
+	mkdir,
+	mkdtemp,
+	readFile,
+	realpath,
+	rm,
+	stat,
+	symlink,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, parse } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { type LspApplyEditResult, LspClient } from "../src/core/lsp/client.ts";
@@ -130,7 +143,7 @@ describe("WorkspaceEdit protocol planning", () => {
 });
 
 describe("WorkspaceEdit applier", () => {
-	it("rejects direct and symlink-mediated paths outside the canonical root", async () => {
+	it("allows external edit targets but rejects unresolved symlink traversal", async () => {
 		const root = await createTempDir();
 		const outside = await createTempDir("volt-lsp-outside-");
 		const outsideFile = join(outside, "outside.foo");
@@ -141,7 +154,9 @@ describe("WorkspaceEdit applier", () => {
 			edit: replaceFirst(uri(outsideFile), "secret", "pwned"),
 			snapshots: [],
 		});
-		expect(direct).toMatchObject({ applied: false, failedChange: 0 });
+		expect(direct.applied).toBe(true);
+		expect(await readFile(outsideFile, "utf-8")).toBe("pwned");
+		await writeFile(outsideFile, "secret", "utf-8");
 
 		const fileAlias = join(root, "file-alias.foo");
 		try {
@@ -166,6 +181,128 @@ describe("WorkspaceEdit applier", () => {
 		});
 		expect(directoryEscape.applied).toBe(false);
 		expect(await readFile(outsideFile, "utf-8")).toBe("secret");
+	});
+
+	it("applies ordered resource operations across projects with snapshot validation", async () => {
+		const root = await createTempDir();
+		const outside = await createTempDir("volt-lsp-outside-");
+		const source = join(root, "source");
+		const destination = join(outside, "destination");
+		const original = join(source, "child.foo");
+		const moved = join(destination, "child.foo");
+		const created = join(destination, "created.foo");
+		const deleted = join(outside, "deleted.foo");
+		await mkdir(source);
+		await writeFile(original, "old");
+		await writeFile(deleted, "remove me");
+		const result = await applyWorkspaceEdit({
+			rootDir: root,
+			edit: {
+				documentChanges: [
+					{ kind: "rename", oldUri: uri(source), newUri: uri(destination) },
+					...replaceFirst(uri(moved), "old", "new", 7).documentChanges!,
+					{ kind: "create", uri: uri(created) },
+					...replaceFirst(uri(created), "", "created").documentChanges!,
+					{ kind: "delete", uri: uri(deleted) },
+				],
+			},
+			snapshots: [{ uri: uri(original), absolutePath: original, version: 7, content: "old" }],
+		});
+		expect(result.applied).toBe(true);
+		expect(result.changes.map((change) => change.kind)).toEqual(["rename", "edit", "create", "edit", "delete"]);
+		expect(await pathExists(source)).toBe(false);
+		expect(await readFile(moved, "utf-8")).toBe("new");
+		expect(await readFile(created, "utf-8")).toBe("created");
+		expect(await pathExists(deleted)).toBe(false);
+	});
+
+	it.skipIf(process.platform !== "linux" || !existsSync("/dev/shm"))(
+		"preflights cross-mount renames while allowing independent edits on both filesystems",
+		async () => {
+			const root = await createTempDir();
+			const outside = await mkdtemp(join("/dev/shm", "volt-lsp-cross-mount-"));
+			tempDirs.push(outside);
+			if ((await stat(root)).dev === (await stat(outside)).dev) return;
+			const stable = join(root, "stable.foo");
+			const source = join(root, "source.foo");
+			const destination = join(outside, "destination.foo");
+			await writeFile(stable, "old");
+			await writeFile(source, "source");
+			const result = await applyWorkspaceEdit({
+				rootDir: root,
+				edit: {
+					documentChanges: [
+						...replaceFirst(uri(stable), "old", "new").documentChanges!,
+						{ kind: "rename", oldUri: uri(source), newUri: uri(destination) },
+					],
+				},
+				snapshots: [],
+			});
+			expect(result).toMatchObject({ applied: false, failedChange: 1, changes: [] });
+			expect(result.failureReason).toContain("Cannot rename resources across filesystems");
+			expect(await readFile(stable, "utf-8")).toBe("old");
+			expect(await readFile(source, "utf-8")).toBe("source");
+			expect(await pathExists(destination)).toBe(false);
+
+			await writeFile(destination, "old");
+			const edited = await applyWorkspaceEdit({
+				rootDir: root,
+				edit: {
+					documentChanges: [
+						...replaceFirst(uri(stable), "old", "new").documentChanges!,
+						...replaceFirst(uri(destination), "old", "new").documentChanges!,
+					],
+				},
+				snapshots: [],
+			});
+			expect(edited.applied).toBe(true);
+			expect(await readFile(stable, "utf-8")).toBe("new");
+			expect(await readFile(destination, "utf-8")).toBe("new");
+		},
+	);
+
+	it("preflights stale external snapshots before changing any project", async () => {
+		const root = await createTempDir();
+		const outside = await createTempDir("volt-lsp-outside-");
+		const local = join(root, "local.foo");
+		const external = join(outside, "external.foo");
+		await writeFile(local, "old");
+		await writeFile(external, "changed after request");
+		const result = await applyWorkspaceEdit({
+			rootDir: root,
+			edit: {
+				documentChanges: [
+					...replaceFirst(uri(local), "old", "new").documentChanges!,
+					...replaceFirst(uri(external), "old", "new").documentChanges!,
+				],
+			},
+			snapshots: [{ uri: uri(external), absolutePath: external, version: 1, content: "old" }],
+		});
+		expect(result).toMatchObject({ applied: false, failedChange: 1, changes: [] });
+		expect(result.failureReason).toContain("changed after the LSP request");
+		expect(await readFile(local, "utf-8")).toBe("old");
+		expect(await readFile(external, "utf-8")).toBe("changed after request");
+	});
+
+	it("rejects non-file URIs and filesystem roots before mutation", async () => {
+		const root = await createTempDir();
+		const local = join(root, "local.foo");
+		await writeFile(local, "old");
+		for (const target of ["untitled:external.foo", uri(parse(root).root)]) {
+			const result = await applyWorkspaceEdit({
+				rootDir: root,
+				edit: {
+					documentChanges: [
+						...replaceFirst(uri(local), "old", "new").documentChanges!,
+						{ kind: "delete", uri: target },
+					],
+				},
+				snapshots: [],
+			});
+			expect(result).toMatchObject({ applied: false, changes: [] });
+			expect(result.failureReason).toContain(target.startsWith("untitled:") ? "file URI scheme" : "filesystem root");
+			expect(await readFile(local, "utf-8")).toBe("old");
+		}
 	});
 
 	it("replaces relative in-root text-edit symlinks without changing their referents", async () => {
@@ -727,6 +864,67 @@ describe("LSP WorkspaceEdit integration", () => {
 		}
 	});
 
+	it("applies WorkspaceEdits through both startup and external project aliases", async () => {
+		const tempRoot = await createTempDir();
+		const realProjectRoot = join(tempRoot, "real-project");
+		const projectRoot = join(tempRoot, "project-alias");
+		const serverRoot = join(projectRoot, "package");
+		await mkdir(realProjectRoot);
+		try {
+			await symlink(realProjectRoot, projectRoot, directorySymlinkType());
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "EPERM") return;
+			throw error;
+		}
+		await mkdir(serverRoot);
+		await writeFile(join(serverRoot, ".root"), "", "utf-8");
+		const manager = new LspManager({
+			cwd: serverRoot,
+			projectCwd: projectRoot,
+			config: resolveLspConfig({
+				servers: {
+					typescript: { enabled: false },
+					python: { enabled: false },
+					go: { enabled: false },
+					rust: { enabled: false },
+					fake: {
+						command: [process.execPath, FAKE_SERVER],
+						fileExtensions: [".foo"],
+						rootMarkers: [".root"],
+					},
+				},
+			}),
+		});
+		try {
+			const source = join(serverRoot, "source.foo");
+			const sibling = join(projectRoot, "sibling.foo");
+			await writeFile(source, `OUTSIDE_EDIT ${uri(sibling)}\n`, "utf-8");
+			await writeFile(sibling, "SECRET\n", "utf-8");
+
+			const result = await manager.codeFix(source, { line: 1 });
+
+			expect(result.text).toContain('Applied "Edit outside workspace"');
+			expect(await readFile(sibling, "utf-8")).toBe("PWNED\n");
+			expect(manager.getStatus()[0]).toMatchObject({
+				workspaceRoot: await realpath(projectRoot),
+				root: await realpath(serverRoot),
+			});
+
+			const externalAlias = join(tempRoot, "external-alias");
+			await symlink(realProjectRoot, externalAlias, directorySymlinkType());
+			const target = join(projectRoot, "external.foo");
+			await writeFile(source, `OUTSIDE_EDIT ${uri(join(externalAlias, "external.foo"))}\n`, "utf-8");
+			await writeFile(target, "SECRET\n", "utf-8");
+
+			const applied = await manager.codeFix(source, { line: 1 });
+
+			expect(applied.text).toContain('Applied "Edit outside workspace"');
+			expect(await readFile(target, "utf-8")).toBe("PWNED\n");
+		} finally {
+			manager.dispose();
+		}
+	});
+
 	it("advances sequential command edits, rejects stale ones, and isolates concurrent summaries", async () => {
 		const root = await createTempDir();
 		const manager = new LspManager({
@@ -750,14 +948,15 @@ describe("LSP WorkspaceEdit integration", () => {
 			await new Promise((resolve) => setTimeout(resolve, 75));
 			await writeFile(delayedPath, "changed by write tool", "utf-8");
 			const delayedResult = await delayedFix;
-			expect(delayedResult).toContain("no workspace edits reported");
+			expect(delayedResult.outcome).toBe("edit-failed");
+			expect(delayedResult.text).toContain("changed after the LSP request");
 			expect(await readFile(delayedPath, "utf-8")).toBe("changed by write tool");
 
 			const sequentialPath = join(root, "sequential.foo");
 			await writeFile(sequentialPath, "SEQUENTIAL_CMDFIX", "utf-8");
 			const sequentialResult = await manager.codeFix(sequentialPath, { line: 1 });
-			expect(sequentialResult).toContain('Applied "Fix via sequential command edits"');
-			expect(sequentialResult.match(/sequential\.foo \(1 edit\)/g)).toHaveLength(2);
+			expect(sequentialResult.text).toContain('Applied "Fix via sequential command edits"');
+			expect(sequentialResult.text.match(/sequential\.foo \(1 edit\)/g)).toHaveLength(2);
 			expect(await readFile(sequentialPath, "utf-8")).toBe("FIXED");
 
 			const firstPath = join(root, "first.foo");
@@ -770,10 +969,10 @@ describe("LSP WorkspaceEdit integration", () => {
 				manager.codeFix(firstPath, { line: 1 }),
 				manager.codeFix(secondPath, { line: 1 }),
 			]);
-			expect(firstResult).toContain("first.foo (1 edit)");
-			expect(firstResult).not.toContain("second.foo (1 edit)");
-			expect(secondResult).toContain("second.foo (1 edit)");
-			expect(secondResult).not.toContain("first.foo (1 edit)");
+			expect(firstResult.text).toContain("first.foo (1 edit)");
+			expect(firstResult.text).not.toContain("second.foo (1 edit)");
+			expect(secondResult.text).toContain("second.foo (1 edit)");
+			expect(secondResult.text).not.toContain("first.foo (1 edit)");
 		} finally {
 			manager.dispose();
 		}

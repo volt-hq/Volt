@@ -81,6 +81,18 @@ export type ControlSocketProbe =
 	| { kind: "unresponsive"; error?: string }
 	| { kind: "no-listener"; cause: "not-found" | "refused" | "reset" | "error"; error?: string };
 
+const connectionResources = new WeakMap<ControlConnection, { closed: boolean; releases: Set<() => void> }>();
+
+/** Transfer a synchronous resource release to this exact connection, including late completions. */
+export function retainControlConnectionResource(connection: ControlConnection, release: () => void): void {
+	const resources = connectionResources.get(connection);
+	if (!resources || resources.closed) {
+		release();
+		throw new Error("Control connection closed before resource publication");
+	}
+	resources.releases.add(release);
+}
+
 let controlConnectionSequence = 0;
 
 export async function startControlServer(options: ControlServerOptions): Promise<ControlServer> {
@@ -118,6 +130,7 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			this.version = hello.version;
 			this.capabilities = new Set(hello.capabilities ?? []);
 			this.socket = socket;
+			connectionResources.set(this, { closed: false, releases: new Set() });
 		}
 
 		send(message: ControlResponse | ControlEvent): void {
@@ -311,6 +324,10 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			pendingSockets.delete(socket);
 			if (established) {
 				connections.delete(established.connectionId);
+				const resources = connectionResources.get(established)!;
+				resources.closed = true;
+				for (const release of resources.releases) release();
+				resources.releases.clear();
 				handlers.onConnectionClosed?.(established);
 			}
 		});

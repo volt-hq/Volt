@@ -11,6 +11,7 @@ import { type TLiteral, type TObject, type TOptional, type TSchema, type TString
 import type { RpcCommandType } from "../types.ts";
 import { RPC_STABLE_ERROR_CODES } from "../wire-limits.ts";
 import { RpcAgentOptionsSchema } from "./agent-options.ts";
+import { RpcCancelJobResponseSchema, RpcListJobsResponseSchema, RpcReadJobResponseSchema } from "./background-jobs.ts";
 import { RpcSessionTreePageSchema } from "./conversation.ts";
 import { RpcPendingHostActionsResponseSchema } from "./events.ts";
 import { RpcModelSchema } from "./external.ts";
@@ -26,6 +27,11 @@ import {
 	RpcSlashCommandSchema,
 } from "./mcp.ts";
 import { RpcPlanExecutionResultSchema, RpcPlanningStateSchema } from "./planning.ts";
+import {
+	RPC_PR_REVIEW_ERROR_CODES,
+	RpcPreparePrReviewResponseSchema,
+	RpcResolvePrReviewResponseSchema,
+} from "./pr-review.ts";
 import { RpcConversationIdentifierSchema, RpcThinkingLevelSchema } from "./primitives.ts";
 import {
 	RpcReviewAcknowledgmentResponseSchema,
@@ -33,11 +39,19 @@ import {
 	RpcReviewWorkflowResultResponseSchema,
 } from "./projections.ts";
 import {
+	RpcListReviewDiscussionsSchema,
+	RpcResetReviewDiscussionSchema,
+	RpcReviewDiscussionSchema,
+	RpcReviewGeneralSchema,
+	RpcStartReviewDiscussionsSchema,
+} from "./review-discussions.ts";
+import {
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
 	RpcListSubagentsResponseSchema,
 	RpcPromptResponseSchema,
 	RpcRegisterPushTargetResponseSchema,
+	RpcSessionContextSchema,
 	RpcSessionListItemSchema,
 	RpcSessionStateSchema,
 	RpcSubagentStartResponseSchema,
@@ -59,7 +73,6 @@ import {
 /** Wire projection of core/agent-session.ts SessionStats (pinned in type-assertions.ts). */
 export const RpcSessionStatsSchema = Type.Object(
 	{
-		sessionFile: Type.Optional(Type.String()),
 		sessionId: Type.String(),
 		userMessages: Type.Number(),
 		assistantMessages: Type.Number(),
@@ -320,8 +333,19 @@ export const RPC_RESPONSE_SCHEMAS = {
 		{ additionalProperties: false },
 	),
 
+	resolve_pr_review: dataResponse("resolve_pr_review", RpcResolvePrReviewResponseSchema),
+	prepare_pr_review: dataResponse("prepare_pr_review", RpcPreparePrReviewResponseSchema),
+
 	// Detached review workflows
+	start_review_discussions: dataResponse("start_review_discussions", RpcStartReviewDiscussionsSchema),
+	list_review_discussions: dataResponse("list_review_discussions", RpcListReviewDiscussionsSchema),
+	reset_review_discussion: dataResponse("reset_review_discussion", RpcResetReviewDiscussionSchema),
+	get_review_discussion_source: dataResponse(
+		"get_review_discussion_source",
+		Type.Union([RpcReviewDiscussionSchema, Type.Null()]),
+	),
 	cancel_workflow: voidResponse("cancel_workflow"),
+	get_review_general: dataResponse("get_review_general", RpcReviewGeneralSchema),
 	get_review_result: dataResponse("get_review_result", RpcReviewWorkflowResultResponseSchema),
 	list_review_workflows: dataResponse("list_review_workflows", RpcReviewWorkflowListResponseSchema),
 	open_review_session: dataResponse("open_review_session", cancelledDataSchema),
@@ -437,6 +461,11 @@ export const RPC_RESPONSE_SCHEMAS = {
 	get_message_images: dataResponse("get_message_images", RpcMessageImagesResponseSchema),
 	get_transcript_entry_text: dataResponse("get_transcript_entry_text", RpcTranscriptEntryTextResponseSchema),
 
+	// Session-owned background jobs
+	list_jobs: dataResponse("list_jobs", RpcListJobsResponseSchema),
+	read_job: dataResponse("read_job", RpcReadJobResponseSchema),
+	cancel_job: dataResponse("cancel_job", RpcCancelJobResponseSchema),
+
 	// Subagents (local RPC only)
 	list_subagents: dataResponse("list_subagents", RpcListSubagentsResponseSchema),
 	subagent_start: dataResponse("subagent_start", RpcSubagentStartResponseSchema),
@@ -495,6 +524,10 @@ export const RPC_RESPONSE_SCHEMAS = {
 		"list_sessions",
 		Type.Object({ sessions: Type.Array(RpcSessionListItemSchema) }, { additionalProperties: false }),
 	),
+	get_session_contexts: dataResponse(
+		"get_session_contexts",
+		Type.Object({ contexts: Type.Array(RpcSessionContextSchema, { maxItems: 64 }) }, { additionalProperties: false }),
+	),
 	export_html: dataResponse("export_html", Type.Object({ path: Type.String() }, { additionalProperties: false })),
 	switch_session: dataResponse("switch_session", cancelledDataSchema),
 	switch_session_by_id: dataResponse("switch_session_by_id", cancelledDataSchema),
@@ -542,7 +575,7 @@ export const RPC_RESPONSE_SCHEMAS = {
 	),
 } as const satisfies { [K in RpcCommandType]: TObject };
 
-const RpcErrorCodeSchema = Type.Optional(openStringEnum(RPC_STABLE_ERROR_CODES));
+const RpcErrorCodeSchema = Type.Optional(openStringEnum([...RPC_STABLE_ERROR_CODES, ...RPC_PR_REVIEW_ERROR_CODES]));
 
 /**
  * Error responses are split so invoke_ui_action can never use the generic

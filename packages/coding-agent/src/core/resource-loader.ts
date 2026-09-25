@@ -16,7 +16,7 @@ import type { PromptTemplate } from "./prompt-templates.ts";
 import { loadPromptTemplates } from "./prompt-templates.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import type { Skill } from "./skills.ts";
-import { loadSkills } from "./skills.ts";
+import { loadSkills, skillFileIdentities } from "./skills.ts";
 import { createSourceInfo, type SourceInfo } from "./source-info.ts";
 import { discoverSubagentDefinitions, type SubagentDefinition } from "./subagents/index.ts";
 
@@ -633,13 +633,18 @@ export class DefaultResourceLoader implements ResourceLoader {
 			});
 		}
 		const resolvedSkills = this.skillsOverride ? this.skillsOverride(skillsResult) : skillsResult;
-		this.skills = resolvedSkills.skills.map((skill) => ({
-			...skill,
-			sourceInfo:
-				this.findSourceInfoForPath(skill.filePath, this.extensionSkillSourceInfos, metadataByPath) ??
-				skill.sourceInfo ??
-				this.getDefaultSourceInfoForPath(skill.filePath),
-		}));
+		this.skills = resolvedSkills.skills.map((skill) => {
+			const resolvedSkill = {
+				...skill,
+				sourceInfo:
+					this.findSourceInfoForPath(skill.filePath, this.extensionSkillSourceInfos, metadataByPath) ??
+					skill.sourceInfo ??
+					this.getDefaultSourceInfoForPath(skill.filePath),
+			};
+			const identity = skillFileIdentities.get(skill);
+			if (identity) skillFileIdentities.set(resolvedSkill, identity);
+			return resolvedSkill;
+		});
 		this.skillDiagnostics = resolvedSkills.diagnostics;
 	}
 

@@ -42,7 +42,7 @@ Volt runs in four modes: interactive, print or JSON, RPC for process integration
 npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
 ```
 
-`--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.
+`--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs. Phone transport requires the exact bundled `@hansjm10/volt-iroh` wrapper plus npm's optional native binding for the current platform; do not install with `--omit=optional`. Darwin x64 has no binding and remains local CLI/TUI only.
 
 Authenticate with an API key:
 
@@ -120,7 +120,7 @@ The interface from top to bottom:
 - **Startup header** - Shows shortcuts (`/hotkeys` for all), loaded AGENTS.md files, prompt templates, skills, and extensions
 - **Messages** - Your messages, assistant responses, tool calls and results, notifications, errors, and extension UI
 - **Editor** - Where you type; border color indicates thinking level
-- **Plan inspector** - At 129x24 and larger, Plan mode or any structured plan opens a persistent 48–72-column right pane while keeping at least 80 columns for the conversation
+- **Plan inspector** - At 129x24 and larger, plans ready for review or already executing open a persistent 48–72-column right pane while working drafts stay in a compact status above the editor
 - **Footer** - Full-width working directory, session name, total token/cache usage (`↑` input, `↓` output, `R` cache read, `W` cache write, `CH` latest cache hit rate), cost, context usage, current model, active Fast mode
 
 The editor can be temporarily replaced by other UI, like built-in `/settings` or custom UI from extensions (e.g., a Q&A tool that lets the user answer model questions in a structured format). [Extensions](#extensions) can also replace the editor, add widgets above/below it, a status line, custom footer, or overlays.
@@ -136,6 +136,17 @@ The editor can be temporarily replaced by other UI, like built-in `/settings` or
 | Bash commands | `!command` runs and sends output to LLM, `!!command` runs without sending |
 
 Standard editing keybindings for delete word, undo, etc. See [docs/keybindings.md](docs/keybindings.md).
+
+### Questions from Volt
+
+When a material preference cannot be discovered from the workspace, the built-in `request_user_input` tool opens a question panel in place of the editor. It is available in local interactive Build and Plan sessions; print, JSON, RPC/phone, and subagent runtimes do not expose it.
+
+- Use the arrow keys to choose an option and Enter to answer. The recommendation appears first.
+- Start typing to write your own answer, or press Ctrl+N to add notes to a selected option. Shift+Enter inserts a newline.
+- Multi-question requests show a review step before submission. Shift+Tab goes back without losing drafts.
+- Ctrl+S skips the entire request without selecting any default. Escape cancels the request and stops the current run.
+
+Questions have no automatic timeout. Skipping is not consent or permission to expand the task; Volt should continue only within existing authorization, stating any reasonable assumptions. Your normal editor draft is restored when the panel closes, and submitted answers remain in the transcript. These shortcuts are configurable in [keybindings](docs/keybindings.md). Use `--exclude-tools request_user_input` to disable structured questions.
 
 ### Commands
 
@@ -155,10 +166,12 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/resume` | Pick from previous sessions |
 | `/clear` | Start a new session |
 | `/name <name>` | Set session display name |
-| `/session` | Show session info (file, ID, messages, tokens, cost) |
+| `/session` | Show session info (store, ID, messages, tokens, cost) |
 | `/usage` | Show remaining subscription quota and local reset times |
+| `/lsp` | Inspect language-server health without starting servers; `/lsp restart` and `/lsp trace [path\|off]` manage recovery/tracing |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/subagents` | Inspect active or completed subagent conversations and tool flow |
+| `/jobs` | Inspect background jobs, follow their output, or cancel one job |
 | `/trust` | Save project trust decision for future sessions (restart required) |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -196,6 +209,7 @@ See `/hotkeys` for the full list. Customize via `~/.volt/agent/keybindings.json`
 | Ctrl+O | Collapse/expand tool output |
 | Ctrl+T | Collapse/expand thinking blocks |
 | Alt+A | Open the subagent inspector |
+| Alt+J | Open the background-job inspector |
 
 ### Message Queue
 
@@ -214,9 +228,9 @@ Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUp
 
 ## Plan Mode
 
-Plan mode makes the agent research the workspace with authorized read operations before it can submit a structured implementation checklist. After an initial orientation pass, the agent creates a working draft early and maintains it as a compact, self-contained handoff artifact, explicitly naming the objective or review target, concrete findings, decisions, assumptions, and verification intent while refining the candidate implementation path whenever material evidence changes its understanding. Submitted titles, summaries, and checklist steps must be sufficient for an executor that receives none of the planning transcript or prior discussion. Its research surface includes file and web inspection, non-mutating LSP queries, structured Git/GitHub inspection, and explicitly trusted MCP reads. LSP rename/fix actions, unrestricted Bash, extension/custom tools, and unresolved operations remain blocked. Start it with `volt --plan`, `/plan`, or Shift+Tab. Drafts and ready plans are stored on the active session branch and survive compaction, reconnects, and branch switching. When user feedback returns a researched ready plan to draft in the same conversation generation, including feedback queued during submission, the agent can revise and resubmit it without a redundant read; fresh Plan-mode entry, execution replanning, tree navigation, and restored drafts still require new research evidence.
+Plan mode makes the agent research the workspace with authorized read operations before it can submit a structured implementation checklist. Checklist outcomes can contain one level of executable substeps, with no arbitrary item target: the agent uses as many as the task requires while keeping unrelated work separate. After an initial orientation pass, the agent creates a working draft early and maintains it as a compact, self-contained handoff artifact, explicitly naming the objective or review target, decision-driving findings, assumptions, and verification intent while refining the candidate implementation path whenever material evidence changes its understanding. Submitted titles, summaries, outcomes, and substeps must be sufficient for an executor that receives none of the planning transcript or prior discussion. Its research surface includes file and web inspection, non-mutating LSP queries, structured Git/GitHub inspection, and explicitly trusted MCP reads. LSP rename/fix actions, unrestricted Bash, extension/custom tools, and unresolved operations remain blocked. Start it with `volt --plan`, `/plan`, or Shift+Tab. Drafts and ready plans are stored on the active session branch and survive compaction, reconnects, and branch switching. When user feedback returns a researched ready plan to draft in the same conversation generation, including feedback queued during submission, the agent can revise and resubmit it without a redundant read; fresh Plan-mode entry, execution replanning, tree navigation, and restored drafts still require new research evidence.
 
-At 129 columns by 24 rows and larger, Volt splits both regular and fullscreen interactive views into an 80-column-or-wider conversation pane, a themed divider, and a 48–72-column plan inspector capped at 40% of terminal width. The full-width footer remains below both panes. The inspector stays visible whenever Plan mode is active or canonical plan state exists, including active/completed Build execution and handoff, and shows only modeled lifecycle state: title, summary, progress, steps, notes, ready actions, and handoff target. Use Alt+P to switch focus; fullscreen paging and search follow the focused pane, and resize recovery returns focus safely. Smaller terminals retain the compact status and `/plan-details` viewer.
+At 129 columns by 24 rows and larger, a plan that is ready for review, executing, completed, or handed off splits both regular and fullscreen interactive views into an 80-column-or-wider conversation pane, a themed divider, and a 48–72-column plan inspector capped at 40% of terminal width. Research and working drafts remain a compact status above the editor so the evolving scratchpad does not compete with the conversation; use `/plan-details` to inspect one on demand. The full-width footer remains below both panes. The inspector shows only modeled lifecycle state: title, summary, progress, steps, notes, ready actions, and handoff target. Use Alt+P to switch focus; fullscreen paging and search follow the focused pane, and resize recovery returns focus safely. Smaller terminals use the same compact status and `/plan-details` viewer.
 
 Repository inspection uses the native `inspect` tool, which executes fixed read operations directly without a shell. Supported operations cover `git status`, log/show/diff/blame, branches/tags/refs, plus `gh issue`, `gh pr`, and `gh search` reads. For example, the model can request `git.log` with literal arguments such as `["--oneline", "-20"]` or `gh.pr.view` with `["123", "--comments"]`. Each Git operation has a positive option grammar; unknown, negated, mutating, helper-enabling, pager, and output-file flags fail closed, while repository-configured fsmonitor, diff/textconv, hook, pager, and signature helpers are disabled. GitHub operations require the `gh` CLI and its normal host authentication, such as `gh auth login` performed by the user outside the agent tool call.
 
@@ -228,32 +242,34 @@ When the agent submits a plan, Volt offers exactly:
 2. **Execute Plan & Clear Context** — create and select a linked execution session containing the approved plan but none of the prior conversation.
 3. **Change Plan** — return the ready plan to draft and focus the normal editor for feedback.
 
-Approval freezes the plan title, summary, step text, order, and scope. During execution, the agent can update only existing step status and evidence with `update_plan_progress`. If implementation reveals that the scope must change, `request_replan` pauses execution, returns the plan to draft without its approval metadata, and ends the run so the revision must be approved again. Switching to Build by itself never approves a ready plan, and explicit `!` shell commands remain available because Plan mode constrains agent tools rather than the host shell.
+Approval freezes the plan title, summary, outcome and substep text, ordering, hierarchy, and scope. During execution, the agent can update only executable leaf status and evidence with `update_plan_progress`; group outcome status is derived from its substeps. The inspector expands the active group while collapsing inactive execution groups, while ready-plan review shows the full hierarchy. If implementation reveals that the scope must change, `request_replan` pauses execution, returns the plan to draft without its approval metadata, and ends the run so the revision must be approved again. Switching to Build by itself never approves a ready plan, and explicit `!` shell commands remain available because Plan mode constrains agent tools rather than the host shell.
 
 ---
 
 ## Sessions
 
-Sessions are stored as JSONL files with a tree structure. Each entry has an `id` and `parentId`, enabling in-place branching without creating new files. See [docs/session-format.md](docs/session-format.md) for file format.
+Persisted sessions use a tree structure in SQLite. Each entry has an `id` and `parentId`, enabling in-place branching without creating another session. See [docs/session-format.md](docs/session-format.md) for storage and JSONL snapshot details.
 
 ### Management
 
-Sessions auto-save to `~/.volt/agent/sessions/` organized by working directory.
+Volt creates one authoritative `sessions.sqlite` store per workspace directory under `~/.volt/agent/sessions/`, or one in a custom session directory. Live sessions are addressed by stable IDs. Listing, exact-ID resolution, continuation candidate selection, and remote discovery read materialized SQLite summaries without scanning transcripts. Deep search scans extracted searchable text one session at a time; its cost grows with searchable text and query complexity, and JavaScript regular expressions have no general runtime bound.
 
 ```bash
 volt -c                  # Continue most recent session
 volt -r                  # Browse and select from past sessions
 volt --no-session        # Ephemeral mode (don't save)
 volt --name "my task"    # Set session display name at startup
-volt --session <path|id> # Use specific session file or ID
-volt --fork <path|id>    # Fork specific session file or ID into a new session
+volt --session <id|path> # Resume by partial ID, or import a JSONL snapshot by path
+volt --fork <id|path>    # Fork by partial ID, or import a JSONL snapshot as a new session
 ```
 
-Use `/session` in interactive mode to see the current session ID before reusing it with `--session <id>` or `--fork <id>`.
+Paths are one-time JSONL snapshot imports, never live session files. Imports require the current marked snapshot format.
+
+Use `/session` in interactive mode to see the current store directory and session ID before reusing the ID with `--session <id>` or `--fork <id>`.
 
 ### Branching
 
-**`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history preserved in a single file.
+**`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history remains under the same session ID.
 
 <p align="center"><img src="docs/images/tree-view.png" alt="Tree View" width="600"></p>
 
@@ -261,11 +277,11 @@ Use `/session` in interactive mode to see the current session ID before reusing 
 - Filter modes (Ctrl+O): default → no-tools → user-only → labeled-only → all
 - Press Shift+L to label entries as bookmarks and Shift+T to toggle label timestamps
 
-**`/fork`** - Create a new session file from a previous user message on the active branch. Opens a selector, copies the active path up to that point, and places the selected prompt in the editor for modification.
+**`/fork`** - Create a new session from a previous user message on the active branch. Opens a selector, copies the active path up to that point, and places the selected prompt in the editor for modification.
 
-**`/clone`** - Duplicate the current active branch into a new session file at the current position. The new session keeps the full active-path history and opens with an empty editor.
+**`/clone`** - Duplicate the current active branch into a new session at the current position. The new session keeps the full active-path history and opens with an empty editor.
 
-**`--fork <path|id>`** - Fork an existing session file or partial session UUID directly from the CLI. This copies the full source session into a new session file in the current project.
+**`--fork <id|path>`** - Fork an existing session by partial ID. If the argument is a path, Volt imports that JSONL snapshot once as a new session in the current project.
 
 ### Compaction
 
@@ -275,7 +291,7 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
-Compaction is lossy. The full history remains in the JSONL file; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
+Compaction is lossy for model context. The full history remains in the SQLite session tree; use `/tree` to revisit it. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
 
 ---
 
@@ -502,21 +518,19 @@ See [docs/rpc.md](docs/rpc.md) for the protocol.
 
 ## Philosophy
 
-Volt is aggressively extensible so it doesn't have to dictate your workflow. Features that other tools bake in can be built with [extensions](#extensions), [skills](#skills), or installed from third-party [volt packages](#volt-packages). This keeps the core minimal while letting you shape volt to fit how you work.
+Volt includes common coding-agent primitives in core while keeping project-specific workflows customizable. Use [extensions](#extensions), [skills](#skills), [prompt templates](#prompt-templates), and [volt packages](#volt-packages) to shape volt without forking it.
+
+**Planning and delegation are first-class.** [Plan mode](#plan-mode) provides a restricted research and approval workflow, while [native subagents](docs/usage.md#subagents-mvp) provide isolated contexts for bounded delegation. Custom agents and extensions remain available for specialized orchestration.
+
+**LSP provides semantic code intelligence.** Built-in navigation, refactoring, and best-effort edit/write diagnostics report structured outcomes and freshness. `/lsp` and the model's `lsp status` action inspect health without starting or installing servers; `volt lsp audit` summarizes persisted evidence offline. Native TypeScript requires >=7, with explicit consent for pinned global repair; Swift uses SourceKit-LSP with project-dependent coverage. See [LSP](docs/lsp.md).
 
 **MCP stays explicit.** Native MCP support is available through `.mcp.json` or `.volt/mcp.json` and a single gateway tool; project MCP configs follow project trust and MCP server outputs are treated as untrusted data.
 
-**No sub-agents.** There's many ways to do this. Spawn volt instances via tmux, or build your own with [extensions](#extensions), or install a package that does it your way.
+**Safety is host-controlled.** Volt does not put a permission popup in front of every tool call. Control capabilities with tool allowlists and exclusions, project trust, Plan mode's restricted research profile, and remote tool grants. Use a container or an extension when a workflow requires additional isolation or confirmation.
 
-**No permission popups.** Run in a container, or build your own confirmation flow with [extensions](#extensions) inline with your environment and security requirements.
+**Task tracking stays lightweight.** Plan mode tracks approved implementation steps. For standalone task management, use a TODO file or an extension.
 
-**No plan mode.** Write plans to files, or build it with [extensions](#extensions), or install a package.
-
-**No built-in to-dos.** They confuse models. Use a TODO.md file, or build your own with [extensions](#extensions).
-
-**No background bash.** Use tmux. Full observability, direct interaction.
-
-The project keeps the core small and relies on extensions for workflow-specific behavior.
+**Shell work stays observable.** Native Bash and subagent calls support session-owned background jobs. Use `background: true`, then `jobs` to inspect, wait for, or cancel the work. Use tmux for terminals that must outlive a Volt runtime. See [Background jobs](docs/usage.md#background-jobs).
 
 ---
 
@@ -578,8 +592,8 @@ Set `remote.background: true` in settings and interactive Volt manages the daemo
 Use `/remote` for interactive management, including registering Volt's current directory, QR pairing, confirmed device revocation, and explicit approval before a revoked identity can re-pair. Equivalent shell commands are:
 
 ```bash
-volt daemon status                        # daemon health, workspaces, clients, leases
-volt remote status                        # same status view
+volt daemon status                        # exits 0 only when phone transport is ready
+volt remote status                        # same readiness contract                        # same status view
 volt remote clients                       # paired client JSON
 volt remote revoke <node-id>              # revoke one client and close its connections
 volt remote workspace add . --name volt
@@ -588,13 +602,13 @@ volt remote workspace remove volt
 
 Security defaults and limitations:
 
-- The default remote tool grant enables built-in `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes; when a desktop TUI owns the conversation, phone prompts use the TUI session's full local tool set.
+- The default remote tool grant enables built-in `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes; when a desktop TUI owns the conversation, phone prompts use the TUI session's full local tool set.
 - Granting `bash`, `edit`, `write`, or `image_gen` can modify the host; `image_gen` can read and upload local reference images and write generated PNG files. Extension tools run code installed on the host and may do the same. Pair only devices you control.
 - Pairing tickets are short-lived, one-time credentials. `volt remote pair` talks to the running daemon; it does not generate offline tickets from persisted state.
 - Remote workspaces are selected by saved name, not arbitrary client-provided paths.
 - Remote sessions do not bypass project trust. Saved workspace trust is honored; otherwise project resources run untrusted.
 - Daemon files live under `~/.volt/agent/daemon/` (`state.json`, `audit.jsonl`, `voltd.log`); legacy `remote/iroh-host.json` state migrates automatically with pairings intact.
-- The daemon requires a Node.js npm package install or source checkout with optional `@hansjm10/volt-iroh` available for the platform. Standalone Node SEA builds reject `volt daemon` because the native Iroh adapter is intentionally not bundled.
+- The daemon requires a Node.js npm package install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected platform binding. `--omit=optional` installs cannot provide phone transport; Darwin x64 has no binding. `volt daemon status --json` reports `remoteTransport` (`starting`, `ready`, `degraded`, or `unavailable`) and exits nonzero unless ready. Standalone Node SEA builds reject `volt daemon` because Iroh is intentionally not bundled.
 
 See [Background daemon](docs/daemon.md), [Iroh remote protocol v1](docs/iroh-remote-protocol.md), and [Security](docs/security.md#remote-access-over-iroh-preview).
 
@@ -624,9 +638,9 @@ cat README.md | volt -p "Summarize this text"
 |--------|-------------|
 | `-c`, `--continue` | Continue most recent session |
 | `-r`, `--resume` | Browse and select session |
-| `--session <path\|id>` | Use specific session file or partial UUID |
-| `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
-| `--session-dir <dir>` | Custom session storage directory |
+| `--session <id\|path>` | Resume by partial session ID, or import a JSONL snapshot path |
+| `--fork <id\|path>` | Fork by partial session ID, or import a JSONL snapshot as a new session |
+| `--session-dir <dir>` | Directory containing the authoritative `sessions.sqlite` store |
 | `--no-session` | Ephemeral mode (don't save) |
 | `--name <name>`, `-n <name>` | Set session display name at startup |
 
@@ -639,7 +653,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools by default but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools by default |
 
-Available built-in tools: `read`, `bash`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
+Available built-in tools: `request_user_input` (root local TUI only), `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (status remains available when disabled), `subagent` (when available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured)
 
 ### Resource Options
 
@@ -647,6 +661,7 @@ Available built-in tools: `read`, `bash`, `edit`, `write`, `image_gen` (when an 
 |--------|-------------|
 | `-e`, `--extension <source>` | Load extension from path, npm, or git (repeatable) |
 | `--no-extensions` | Disable extension discovery |
+| `--preparation-wait-ms <0-1000>` | Shared first-request preparation allowance for local runtimes (default: 0); requires an extension wait request |
 | `--skill <path>` | Load skill (repeatable) |
 | `--no-skills` | Disable skill discovery |
 | `--prompt-template <path>` | Load prompt template (repeatable) |
@@ -721,7 +736,7 @@ volt --thinking high "Solve this complex problem"
 | Variable | Description |
 |----------|-------------|
 | `VOLT_CODING_AGENT_DIR` | Override config directory (default: `~/.volt/agent`) |
-| `VOLT_CODING_AGENT_SESSION_DIR` | Override session storage directory (overridden by `--session-dir`) |
+| `VOLT_CODING_AGENT_SESSION_DIR` | Override the directory containing `sessions.sqlite` (overridden by `--session-dir`) |
 | `VOLT_PACKAGE_DIR` | Override package directory (useful for Nix/Guix where store paths tokenize poorly) |
 | `VOLT_PROFILE` | Apply a named settings profile |
 | `VOLT_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |

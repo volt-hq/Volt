@@ -11,9 +11,11 @@ The interface has four main areas:
 - **Startup header** - shortcuts, loaded context files, prompt templates, skills, and extensions
 - **Messages** - user messages, assistant responses, tool calls, tool results, notifications, errors, and extension UI
 - **Editor** - where you type; border color indicates the current thinking level
-- **Footer** - working directory, session name, token/cache usage, cost, context usage, current model, and active Fast mode
+- **Footer** - working directory, session name, token/cache usage, prompt-cache expiry, cost, context usage, current model, and active Fast mode
 
 The editor can be replaced temporarily by built-in UI such as `/settings` or by custom extension UI.
+
+When the provider documents how long it retains the prompt cache, the footer counts down to expiry (`cache 4m`). `cache expired`, or `cache cold` after a model switch, means your next message resends the whole conversation without cache hits, which costs more tokens than usual. Providers that publish no retention window show no countdown. Where the provider supports it, Volt keeps the cache warm while work runs and for 15 minutes after it finishes, shown as `cache warm 12m` (see [prompt-cache keepalive](settings.md#prompt-cache)). After a response has sat idle for a minute, the transcript records how long the work took and when it finished, for example `Worked for 3m 12s · done 3:42 PM`.
 
 ### Editor Features
 
@@ -44,8 +46,9 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/resume` | Pick from previous sessions |
 | `/clear` | Start a new session |
 | `/name <name>` | Set session display name |
-| `/session` | Show session file, ID, messages, tokens, and cost |
+| `/session` | Show session store, ID, messages, tokens, and cost |
 | `/usage` | Show remaining subscription quota and local reset times |
+| `/jobs` | Inspect background jobs, view retained output, or cancel one job |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/fork` | Create a new session from a previous user message |
 | `/clone` | Duplicate the current active branch into a new session |
@@ -77,37 +80,94 @@ On Windows Terminal, Alt+Enter is fullscreen by default. Remap it as described i
 
 Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpMode`.
 
+## Background Jobs
+
+Native `bash` and `subagent` spawning calls accept `background: true`. Volt returns a job ID so the model can continue independent work instead of waiting for the entire tool call. Ordinary calls still wait for completion. This is separate from parallel tool batches, which wait for all calls before the model continues.
+
+```json
+{ "command": "./run-checks.sh", "background": true }
+```
+
+Subagent confirmation is unchanged. The first spawning call returns the registry preflight directly without starting a job. Repeat the exact request with its `confirm` token and `background: true` to start a background single, parallel, or chain job. Child concurrency, budget, tool-policy, and duplicate-request safeguards still apply. Background mode does not apply to registry list/follow/resume operations.
+
+The `jobs` tool controls work owned by the current runtime and branch:
+
+```json
+{ "action": "list" }
+{ "action": "read", "id": "job_..." }
+{ "action": "wait", "ids": ["job_tests", "job_review"], "mode": "any" }
+{ "action": "cancel", "id": "job_..." }
+```
+
+- `read` returns the latest output snapshot without consuming it. Output is capped at the last 50 KB or 2000 lines; repeated reads may contain the same text.
+- `wait` takes 1–64 unique accessible `ids` and waits for terminal events without a default deadline. `mode: "any"` (the default) returns when at least one selected job is terminal; `"all"` waits for every selected job. Already-terminal jobs return immediately. An optional integer `timeoutMs` from 0 to 300000 supplies an explicit deadline; it never cancels the jobs. Use `id` only for `read` and `cancel`.
+- `cancel` requests cancellation. Status remains `cancelling` until the worker settles, then becomes `cancelled`. A cancellation request is not proof that a process has already stopped.
+- Terminal statuses are `completed`, `failed`, and `cancelled`. Read the result before relying on the work or reporting success.
+- Each session allows 8 active jobs and retains at most 64 records. Active waits pin their selected records until they return. Older unpinned terminal records are evicted when space is needed; admission fails if no record can be evicted. Existing Bash wall-clock and silence timeouts remain active.
+
+After completing useful independent work, call `wait` once rather than polling or issuing shell `sleep` commands. The parent makes no model requests while the tool call waits. Worker output can update the UI without ending the wait. Admitted steering interrupts the wait but leaves jobs running; follow-up messages remain queued. Ordinary tool-batch boundaries still apply when sibling foreground tools are executing. Abort retains the existing job-cancellation behavior.
+
+A wait returns `terminal`, `steered`, or `timeout` with terminal results and metadata-only pending statuses. Failed and cancelled workers are terminal, not successful work. Simultaneously available results are returned together. Combined result text is capped at 50 KiB/2000 lines, including metadata, with output capacity shared across returned terminal jobs. Truncation does not change retained output; use `read` for a specific job's full retained snapshot. Only terminal results included in the response can become collected after provider-confirmed delivery.
+
+**Wait API migration:** replace `{ "action": "wait", "id": "job_..." }` with `{ "action": "wait", "ids": ["job_..."] }`. Wait metadata is now a `backgroundJobWait` envelope containing `results`, `pending`, and the wake `reason`, rather than a single `backgroundJob` snapshot. To retain a bounded wait, explicitly provide `timeoutMs`. Successful and failed background outcomes now resume an idle conversation automatically; explicit job cancellation does not.
+
+Both the originating tool and `jobs` must be active. Explicit tool allowlists must include `jobs`; removing either grant cancels affected jobs. Plan mode does not expose jobs. Active jobs block Plan entry, `/reload`, and `/tree` navigation until they finish or are aborted. Compaction preserves active jobs and their IDs.
+
+Session abort cancels jobs even when the model is idle. Escape uses this cancellation path when no foreground Bash command has interrupt priority. Runtime shutdown cancels jobs and waits for cleanup, including pending subagent startup and disposal. A remote client disconnect is still detach, not cancellation, while its host runtime remains alive. Running and cancelling jobs keep a detached daemon runtime active; its idle retention timeout starts after work settles. Jobs do not survive runtime replacement, restart, or a branch change. Tool results and delivered completion notices remain in the transcript, but historical job IDs are not live handles after a restart. Use tmux for independent long-lived terminals.
+
+Launching background work authorizes Volt to handle its outcome without another user message. Successful and failed jobs resume an idle parent even after a natural final response. When the parent is busy, compact completion notices enter its next authorized request, or trigger a follow-up after foreground work settles. Simultaneous outcomes are grouped, and already-delivered notices or collected results do not cause duplicate automatic follow-ups. Failed continuation attempts remain visible for manual recovery rather than repeatedly waking the model. Explicit host stop/final-response policies remain authoritative.
+
+Cancelling a job never authorizes an automatic follow-up. Cancellation also suppresses a pending wake if the worker already settled, without changing its recorded outcome; cancellation wins until the automatic request starts. Session Stop cancels running jobs and suppresses outstanding automatic continuations. Later launches receive their own continuation authority. Job output is untrusted data; notices contain host-generated status and IDs, not worker output. Volt must read the result before relying on it, and outcome handling remains within the original task and the user's latest instructions.
+
+In the TUI, the main background-job card shows the command or task, worker status, job duration, and the latest three non-empty output lines. Waiting calls identify the target job instead of showing a generic tool timer. Returned `jobs` reads and cancellation results collapse to one line with the action, worker status, truncation warning when needed, and expansion shortcut, without snapshot labels, job IDs, or repeated command/output text. Wait results show terminal-state counts and pending counts, omit the redundant `terminal` reason, and show `any`/`all` only for multiple selected jobs. Timeout and steering reasons remain visible. Ctrl+O expands captured commands or tasks, full job IDs, and returned output, with one `/jobs` hint per inspection. Expanded waits omit internal wait IDs and model-only instructions; the model-facing results remain unchanged. These post-hook snapshots remain fixed; launch cards, pending waits, and the `/jobs` inspector remain live. Running snapshots show their state "at capture" without an advancing timer. A completed inspection is not displayed as successful work when the worker is still running or has failed. Output previews are literal worker output, not inferred test progress. The original launch card also preserves the full submitted command or task.
+
+Completion notices do not add another block when the transcript already contains that job's native live launch card. Notices for other jobs remain visible, including historical notices whose saved launch snapshots cannot show the final status. Extension message renderers retain precedence. This changes only presentation: model-facing notifications, captured results, and the status above the editor remain unchanged.
+
+A single status line above the editor shows active jobs and terminal results awaiting model review, independently of model activity. One job shows its state, command or task, and whole-second duration; multiple jobs show counts by state. The configured inspector shortcut stays at the right, with `/jobs` as the fallback when unbound. Long labels truncate instead of wrapping, and output previews remain in tool cards and the inspector.
+
+Completed, failed, and cancelled jobs remain in this status line until a native `jobs read` or `jobs wait` terminal result is included in an authorized model request whose response completes successfully. Unrelated model activity, job listings, completion notifications, local inspection, and reads or waits that capture an active worker do not clear the notice. A read blocked by policy, replaced with an inspection error, or removed from model context also does not clear it. Collection hides only that job's notice; retained history and output remain accessible in `/jobs`. When no active or uncollected jobs remain, the status line disappears. Notices have no expiry timer. Merely viewing or refreshing them never starts inference; automatic continuation is authorized by job settlement, not UI inspection. Collection does not mean a failed job was fixed.
+
+Collection is conservative around provider payload hooks. A `before_provider_request` hook must finish without errors and leave the serialized JSON payload unchanged. Any payload change, even an unrelated request setting, keeps the notice visible until a later unchanged, successful request includes the result. Aborted or failed responses also leave notices pending. The provider serializer must also identify the original tool-result messages included after replay filtering. Results omitted during provider conversion and synthetic replacement results do not count. Custom providers that omit the payload callback or its delivery metadata, or payloads that cannot be compared as JSON, cannot confirm collection.
+
+Open `/jobs` or press Alt+J to select a job and inspect its output without starting inference. Enter opens the scrollable output view. Arrow keys and PageUp/PageDown pause following on a bounded reading snapshot, so retention rollover cannot move the text you are reading. The inspector indicates when newer output is available; End resumes following the latest retained output. Ctrl+K requests cancellation of only the selected job after confirmation. Escape returns or closes the inspector without stopping work. These shortcuts are configurable; see [Keybindings](keybindings.md#background-jobs).
+
+The inspector shows only jobs accessible in the current runtime and branch. Its output uses the existing latest-50-KB/2000-line retention limit, with a visible truncation notice. Task labels in the inspector use the manager's 200-character bound; the full submitted command remains in the original launch card. Saved running snapshots whose handles are no longer accessible are labelled as historical, without a misleading live timer. Completion notices remain metadata-only; model-facing job instructions stay in context without appearing in job cards.
+
+Background support applies only to native tools in `AgentSession`. Extension and SDK execution overrides are not automatically detached. Final native results pass through `tool_result` hooks once at completion; the initial job acknowledgement is not a completed native result. Live progress snapshots are available before those completion hooks run. Hooks for `jobs` can inspect or transform reads of those snapshots.
+
 ## Sessions
 
-Sessions are saved automatically to `~/.volt/agent/sessions/`, organized by working directory.
+Sessions are saved automatically in a per-workspace `sessions.sqlite` database under `~/.volt/agent/sessions/`. A custom session directory contains its own authoritative database. Live sessions are addressed by stable IDs. Listing, exact-ID resolution, continuation candidate selection, and RPC discovery use materialized SQLite summaries without reading transcript payloads. Deep search scans extracted searchable text one session at a time, so its cost still grows with searchable history and query complexity.
 
 ```bash
 volt -c                  # Continue most recent session
 volt -r                  # Browse and select a session
 volt --no-session        # Ephemeral mode; do not save
 volt --name "my task"    # Set session display name at startup
-volt --session <path|id> # Use a specific session file or session ID
-volt --fork <path|id>    # Fork a session into a new session file
+volt --session <id|path> # Resume by partial ID, or import a JSONL snapshot by path
+volt --fork <id|path>    # Fork by partial ID, or import a JSONL snapshot as a new session
 ```
+
+A path argument is always a one-time JSONL snapshot import; Volt never uses that file as live storage. Imports require the current `snapshotVersion: 1` format.
 
 Useful session commands:
 
-- `/session` shows the current session file and ID.
-- `/tree` navigates the in-file session tree and can summarize abandoned branches.
+- `/session` shows the current store directory and session ID.
+- `/tree` navigates the current session tree and can summarize abandoned branches.
 - `/fork` creates a new session from an earlier user message.
-- `/clone` duplicates the current active branch into a new session file.
+- `/clone` duplicates the current active branch into a new session.
 - `/compact` summarizes older messages to free context.
 
 See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 
 ## Code Review
 
-`/review` captures the selected change as an exact Git snapshot, then runs candidate discovery and independent verification in separate isolated contexts. Host-owned paged tools read only that snapshot. For PR runs with newly accepted findings, a third context-blind pass uses the verifier model to render code-derived finding prose from host-validated anchors; it receives immutable repository tools but no GitHub context or private discovery/verifier prose. Zero-new-finding and prior-only incremental runs skip that pass. Optional auxiliary tools selected with `/review tools` run in a disposable checkout for analysis only; mutable workspace `read`/`grep`/`find`/`ls`/edit tools are never used by a review. When `/review` opens the local target selector, Volt also makes a short best-effort GitHub lookup and puts `Current PR #N — title` first when the current branch has one unambiguous pull request; lookup failures silently leave the normal selector unchanged. Explicit review targets and RPC actions never perform or inherit this selector lookup.
+`/review` immediately shows preparation progress while it captures the selected change as an exact Git snapshot, then runs candidate discovery and independent verification in separate isolated contexts. Press Escape to cancel snapshot and GitHub context capture as well as review inference. When the TUI is sharing its conversation through `voltd`, a paired Volt app sees the same running review and can cancel it, inspect its progress, and act on the durable result. Host-owned paged tools read only that snapshot. For PR runs with newly accepted findings, a third context-blind pass uses the verifier model to render code-derived finding prose from host-validated anchors; it receives immutable repository tools but no GitHub context or private discovery/verifier prose. Runs without new findings or unresolved code concerns skip presentation. Optional auxiliary tools selected with `/review tools` run in a disposable checkout for analysis only; mutable workspace `read`/`grep`/`find`/`ls`/edit tools are never used by a review. When `/review` opens the local target selector, Volt also makes a short best-effort GitHub lookup and puts `Current PR #N — title` first when the current branch has one unambiguous pull request; lookup failures silently leave the normal selector unchanged. Explicit review targets and RPC actions never perform or inherit this selector lookup.
 
 ```
 /review                                      # open a target selector
 /review uncommitted                          # staged, unstaged, deleted, and nonignored untracked files
-/review branch [base]                        # captured HEAD vs its merge base with base
+/review branch [base]                        # captured HEAD vs a refreshed upstream merge base
 /review pr [number]                          # fetched GitHub base/head OIDs (requires gh)
 /review commit [sha]                         # commit vs first parent, or empty tree for a root commit
 /review branch main --focus "authorization" # add a focused question
@@ -116,13 +176,29 @@ See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
 /review uncommitted --include-optional       # opt in to P3 suggestions
 ```
 
+For branch targets, Volt captures local `HEAD` first. A plain branch such as `main` resolves through its configured upstream, then a matching `origin/main` or sole matching remote branch, and fetches that remote source ref into an isolated snapshot using the host's Git credentials and network. Short remote targets such as `origin/main` are refreshed the same way. The fetch does not move the working tree, local branches, remote-tracking refs, or the workspace's `FETCH_HEAD`; a failed refresh stops the review instead of falling back to stale state. Use an explicit full ref such as `refs/heads/main` or `refs/remotes/origin/main` to intentionally review against local or cached state. Durable branch reruns recapture that resolved source: remote-backed targets refresh the same remote branch again, while explicit full refs remain local or cached.
+
+With `/review pr` or an empty PR number in the app, Volt resolves the current branch's configured remote tracking branch, including when its name differs from the local branch. It searches that remote's GitHub repository explicitly, prefers one open PR over historical matches, and otherwise accepts only one historical match. Missing tracking, unsupported or ambiguous remotes, no matching PR, and multiple matching PRs stop with recovery guidance rather than guessing. Configure the intended upstream on the host or supply a PR number. Explicitly numbered reviews use the current branch's configured remote; without a remote tracking configuration (including detached HEAD), they use `origin`, or the sole remote if there is no `origin`. Unsupported, missing, or ambiguous repository URLs stop the review rather than falling back to GitHub CLI's fork-parent/default selection. Numbered reviews do not require the PR to match the current branch. Metadata and subsequent context reads stay pinned to the selected PR and GitHub host. Volt queries authoritative PR metadata through `gh api graphql`, so it does not require `baseRefOid` support in `gh pr view --json`. Failed or invalid metadata stops the review rather than substituting local branch tips. Snapshot fetching uses that same selected remote and its validated fetch URL, preserving the host's Git transport settings rather than assuming `origin`.
+
 For PR targets, Volt uses the host's `gh` credentials and network to capture the authoritative closing/manual-linked issues, PR issue comments, submitted review summaries, inline review threads and replies, and linked-issue comments. It does not infer links from arbitrary text or follow relationships recursively. GitHub text is capped at 32 KiB per field, capture is capped at 20 linked issues and 200 total discussion entries, and the rendered context is capped at 256 KiB. Truncation, limits, malformed responses, and ancillary API failures are recorded as capture limitations. PR identity or fetch failures are fatal before inference, and Volt rechecks the exact head OID after context capture; if it moved, retry the review.
 
 Both context-aware analysis passes must page the same host-captured context to completion. GitHub-authored text is untrusted evidence: it can establish intent or prior discussion, but cannot change review policy, direct tools, or support a retained finding without independently verified changed-code evidence. P0-P2 findings must have a changed-side anchor, concrete trigger and impact, and an independent verifier decision. P3 findings are disabled by default. Results are marked `incomplete` and have no correctness verdict when GitHub context capture or either analysis pass's context inspection is incomplete, or when verification or in-scope hunk coverage is incomplete. The presentation pass must inspect every accepted hunk but cannot change finding identity, anchor, severity, or status.
 
+When the verifier identifies an omitted issue or another completeness challenge, Volt runs at most one additional discovery and independent verification cycle against the same snapshot. Existing candidates remain available to the follow-up verifier. A newly accepted candidate becomes a normal verified finding; the verifier cannot directly promote its own challenge. These extra passes consume model tokens and remain cancellable.
+
+If the challenge remains unresolved, the result explains it as an **unverified concern**, not a finding. A separate context-blind presentation reads host-validated changed-code locations and provides a code-grounded explanation and a concrete next check. It receives neither private challenge prose nor GitHub discussion. If the verifier supplies no valid code location, the report states that evidence gap and suggests a focused rerun. If explanation generation fails, validated locations and the failed stage remain visible. Failed follow-up analysis preserves the earlier verified result instead of replacing it with a generic failure. Coverage gaps and unresolved explanations appear in both the compact result and the expanded report; static-only validation remains a separate notice.
+
 Review policy comes from user `REVIEW.md` in the Volt agent directory and hierarchical project `REVIEW.md`/`AGENTS.md` files read from the trusted base snapshot. Candidate changes and GitHub discussion cannot alter the active review policy.
 
-Completed, incomplete, failed, and cancelled runs plus explicit finding outcomes are stored as bounded host-only records on the current session branch. Existing bounded PR identity includes its title and body, but newly captured linked-issue and discussion text and all free-form prose from context-aware model passes remain ephemeral. Volt declassifies only host-validated finding existence, anchors/evidence, identity, priority/status, and confidence rounded to one percent; durable finding prose comes from the context-blind pass, while summaries, incomplete copy, model-limitation counts, command-attempt counts, and persisted PR failures use host-generated text. Durable and RPC records retain only bounded capture counts/status/limitation codes and a content fingerprint for the captured context. A changed fingerprint forces a full incremental PR rerun. Opening a fix session copies the same public durable result and can select findings by ID; it does not consume the original result. Publishing uses that result, is explicit and PR-only, and is refused if the PR head moved.
+Completed, incomplete, failed, and cancelled runs plus explicit finding outcomes are stored as bounded host-only records on the current session branch. Existing bounded PR identity includes its title and body, but newly captured linked-issue and discussion text and all free-form prose from context-aware model passes remain ephemeral. Volt declassifies only host-validated finding existence, anchors/evidence, identity, priority/status, confidence rounded to one percent, and changed-code locations for unresolved concerns. Durable finding and unresolved-concern prose comes from context-blind presentation; summaries, coverage-gap explanations, model-limitation counts, command-attempt counts, and persisted PR failure diagnoses use host-generated text. Failure diagnoses identify the failed review stage and a recovery action without exposing raw provider errors. Durable and RPC records retain only bounded capture counts/status/limitation codes and a content fingerprint for the captured context. A changed fingerprint forces a full incremental PR rerun. Opening a fix session copies the same public durable result and can select findings by ID; it does not consume the original result. Publishing uses that result, is explicit and PR-only, and is refused if the PR head moved.
+
+Recoverable tool-attempt failures are omitted from both compact and expanded review reports; they remain in diagnostic records. Failures that prevent completion or materially limit the review still surface as failed-stage messages, coverage gaps, or unresolved concerns.
+
+New review messages in the TUI show a compact result, active findings, and validation limits. Use the configured `app.tools.expand` action (Ctrl+O by default) to expand the full public report, including retained coverage and finding evidence. This is the same global expansion action used for tool output; it does not rerun the review or start inference. Extension message renderers keep their existing precedence.
+
+A complete review is not a claim that tests passed. Volt reports static-only validation when the host confirms that the review used only its immutable inspection and report tools. Otherwise, the report states that runtime validation is not established. Private PR model-limit text remains private; expanded reports retain the public limitation counts. Selected-finding sessions distinguish their selection from the full run. Original conclusions remain labelled as historical when finding statuses change.
+
+The full report and fix guidance remain in model context and exports. Existing messages without compact presentation data are not rewritten.
 
 Set `reviewModel` to choose the discovery model. Set `reviewVerifierModel` to choose a separate verifier; it defaults to `reviewModel`, which defaults to the active session model. Example: `"anthropic/claude-opus-4-5"`.
 
@@ -130,7 +206,7 @@ Set `reviewModel` to choose the discovery model. Set `reviewVerifierModel` to ch
 
 Subagents are named child Volt sessions with isolated context. Volt includes built-in subagents for common workflows:
 
-Volt's default model policy is local-first: the root agent normally completes work itself. It delegates when the user or project requests it, or when a bounded, self-contained task benefits enough from specialization or context isolation to justify synchronous coordination. Model-facing `subagent` calls are awaited until their child work finishes, so delegation does not let the root agent continue working concurrently.
+Volt's default model policy is local-first: the root agent normally completes work itself. It delegates when the user or project requests it, or when a bounded, self-contained task benefits enough from specialization or context isolation to justify coordination. Ordinary `subagent` calls wait for child completion. Confirmed spawning calls with `background: true` return a job ID and let the root continue independent work; see [Background jobs](#background-jobs).
 
 | Name | Purpose | Tool posture |
 | --- | --- | --- |
@@ -253,7 +329,7 @@ Use `/trust` in interactive mode to save a project trust decision for future ses
 
 ## Exporting and Sharing Sessions
 
-Use `/export [file]` to write a session to HTML.
+Use `/export [file]` to write a session to HTML. This does not replace the live SQLite store or create a JSONL interchange snapshot.
 
 Use `/share` to upload a private GitHub gist with a shareable HTML link. Set `VOLT_SHARE_VIEWER_URL` if you want those links to point at a custom session viewer; otherwise Volt returns the private gist URL.
 
@@ -325,7 +401,7 @@ volt remote workspace add <workspace-dir> --name other
 Use `/remote` for the common interactive management flow. Selecting a paired device asks for confirmation before revoking it; revoked identities remain visible and require a separate confirmed **Allow re-pair** action before that phone can use a fresh QR. Escape returns without changing access. Leaving an active TUI pairing screen cancels, invalidates, and durably removes that invitation. If `/remote` asks you to restart `voltd`, the already-running daemon predates safe TUI cancellation, so pairing stays disabled until restart. Equivalent shell commands are:
 
 ```bash
-volt daemon status                        # daemon health, workspaces, clients, leases
+volt daemon status                        # exits 0 only when phone transport is ready
 volt daemon logs -f                       # follow the daemon log
 volt remote status                        # same status view as volt daemon status
 volt remote clients                       # paired client JSON without secrets
@@ -345,7 +421,7 @@ Options to know:
 
 Security and support boundary:
 
-- The default remote tool grant enables the built-in tools `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this canonical default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes only; name extension tools explicitly when using one. When a desktop TUI owns the conversation lease, phone prompts run with the TUI session's full local tool set (see [Security](security.md)). The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
+- The default remote tool grant enables the built-in tools `read,bash,edit,write,image_gen,web_search,web_fetch,grep,find,ls,inspect,lsp,subagent,subagent_registry,mcp,jobs` plus active tools registered by loaded extensions. The `coding` and `full` remote RPC presets use this canonical default, so `image_gen` is enabled automatically when an OpenAI Codex model is selected. A custom `remote.allowTools` list restricts daemon-owned headless runtimes only; name extension tools explicitly when using one. When a desktop TUI owns the conversation lease, phone prompts run with the TUI session's full local tool set (see [Security](security.md)). The `subagent` tool can only run built-in or discovered named definitions, and child tools are clamped by the remote session's active tool grant.
 - Granting `bash`, `edit`, or `write` can modify host files or run shell commands. Granting the Codex-only `image_gen` tool lets the session read and upload local reference images and write generated PNG files. Extension tools run code installed on the host and may do the same. Pairing a phone grants it desktop-equivalent power over the workspaces it can reach; pair only devices you control.
 - `volt remote workspace add` is a local desktop action. It stores a workspace name and realpath in the daemon's state file, without starting a remote API for clients to create, rename, browse, or path-map workspaces. Removing a workspace unregisters the saved name from daemon state only; it does not delete files. If any daemon-managed worktree record remains, unregister fails with `workspace_has_worktrees`; run `volt remote worktree list --workspace <name>` and explicitly remove each worktree first. Only per-worktree `remove --force` is allowed to discard dirty or busy work.
 - When interactive Volt connects to the daemon, it auto-registers its working directory when it is not inside a registered workspace (named by basename, with a numeric suffix on collision).
@@ -357,7 +433,7 @@ Security and support boundary:
 - Hosts that do not advertise `conversation_streams.v1` are incompatible with the mobile pinned-agent model. The app keeps the saved host and shows an update/integrated-host-required state rather than falling back to mobile mutation commands.
 - Registering a workspace does not add built-in tools to a client. For daemon-owned runtimes, the persisted client `allowedTools` grant is intersected with any workspace and `remote.allowTools` ceilings; an explicit empty daemon ceiling denies all tools. The client grant applies across all registered workspaces until the client is revoked and paired again with a different grant. Active extension tools are exposed only when every active policy layer retains default-grant semantics.
 - Revoked clients cannot reconnect or silently re-pair. Live hosts close active streams and runtimes for that phone across all workspaces. To trust the same phone identity again, select it under **Revoked devices** in `/remote` and confirm **Allow re-pair**, or run `volt remote approve-repair <node-id>` on the desktop host; then create a fresh pairing ticket.
-- Reconnect clients should distinguish `host_unreachable`, `host_identity_mismatch`, `saved_host_invalid`, `client_unknown`, `client_revoked`, `workspace_unavailable`, `workspace_missing`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, `conversation_in_use`, and `conversation_streams_unsupported`. Ordinary offline hosts are retry states that keep the saved host; invalid, mismatched, unknown, or revoked relationships require Pair Again or Forget Host decisions. `workspace_unavailable` is transient and carries a `retryAfterMs` pacing hint; `workspace_missing` means the registered path no longer exists, so clients keep the saved host but stop automatic redialing. `workspace_has_worktrees` is an actionable management conflict: keep the host and workspace, show the worktrees, and require explicit per-worktree removal.
+- Reconnect clients should distinguish `host_unreachable`, `host_storage_full`, `host_identity_mismatch`, `saved_host_invalid`, `client_unknown`, `client_revoked`, `workspace_unavailable`, `workspace_missing`, `workspace_unregistered`, `workspace_has_worktrees`, `workspace_authorization_removed`, `session_unavailable`, `duplicate_conversation_connection`, `conversation_in_use`, and `conversation_streams_unsupported`. Ordinary offline hosts are bounded retry states that keep the saved host; after five automatic attempts (0/1/2/5/10 seconds), clients stop at a manual Retry state until a later network/foreground event. `host_storage_full` is Retry-only but must not auto-redial: preserve pairing, selected agent, transcript, and authority, tell the user to free computer space and run `volt daemon status`, then allow manual Retry. Invalid, mismatched, unknown, or revoked relationships require Pair Again or Forget Host decisions. `workspace_unavailable` is transient and carries a `retryAfterMs` pacing hint; `workspace_missing` means the registered path no longer exists, so clients keep the saved host but stop automatic redialing. `workspace_has_worktrees` is an actionable management conflict: keep the host and workspace, show the worktrees, and require explicit per-worktree removal.
 - Remote clients select saved workspace names only. They cannot request arbitrary host paths. If a selected name is not registered, its saved path is deleted, or its saved path is transiently unreadable, reconnect fails with `workspace_unregistered`, `workspace_missing`, or `workspace_unavailable` respectively while keeping the saved host. A reviewed remote unregister request can remove an empty known workspace name from host state without deleting files; registered, dirty, unmerged, busy, and unknown/orphan worktree checkouts are never implicit unregister cleanup. Creating, renaming, browsing, or path-mapping host workspaces stays local to the desktop host.
 - Remote sessions do not bypass project trust. A saved trust decision for the workspace is honored; otherwise the host runs project resources untrusted unless the host user chooses `trust` in the prompt or passes `--approve`.
 - In the default integrated runtime, app backgrounding, network loss, or stream close detaches the client and does not send `abort`. Active work continues on the host; the same paired client/workspace/session can reconnect and refresh with `get_state` and `get_transcript`. On foreground recovery, a pinned-agent client may reopen the selected saved agent plus sessions reported as currently desktop-owned by a `session_runtime_state.v1` host; dormant hidden pins remain detached until selected and then catch up from state/transcript.
@@ -367,7 +443,7 @@ Security and support boundary:
 - Remote push notifications use the managed Volt push relay by default. The mobile app registers its FCM token with the relay and sends the host target-scoped relay credentials over Iroh; the host does not store raw FCM tokens. Use `VOLT_PUSH_RELAY_URL` only for a custom relay, and `VOLT_PUSH_RELAY_AUTH_TOKEN` only when that custom relay requires shared bearer auth.
 - The daemon defaults to Iroh relay mode `production`, using the Volt-operated relay fleet so saved-host reconnects survive restarts and network changes. Set `VOLT_IROH_RELAY_MODE` to `disabled` for LAN-only connections, `development` for the public n0 development relays, or `production`; set `VOLT_IROH_RELAY_URLS` to use custom production relay origins.
 - `volt remote pair` creates pairing tickets with the daemon's live relay mode; it cannot change a running daemon's relay mode.
-- The daemon requires a Node.js npm install or source checkout with optional `@hansjm10/volt-iroh` available for the platform. The pinned adapter supports macOS arm64, Linux x64/arm64 (glibc and musl), and Windows x64/arm64; it does not ship a Darwin x64 binding, so Intel macOS npm installs are local CLI/TUI only. Standalone Node SEA builds reject `volt daemon` because the native Iroh adapter is intentionally not bundled.
+- The daemon requires a Node.js npm install or source checkout with the exact required `@hansjm10/volt-iroh` wrapper and its optional selected native binding. Installing with `--omit=optional` leaves `remoteTransport` unavailable. The pinned adapter supports macOS arm64, Linux x64/arm64 (glibc and musl), and Windows x64/arm64; it does not ship a Darwin x64 binding, so Intel macOS npm installs are local CLI/TUI only. `volt daemon status --json` reports structured phone-transport health and exits nonzero unless ready. Standalone Node SEA builds reject `volt daemon` because Iroh is intentionally not bundled.
 - Known preview limitations: daemon exit is not durable active-work recovery, idle detached runtime retention is time-limited, very large hidden-agent sets may need future host/app resource controls, per-workspace client grants are deferred, remote workspace creation/rename/path browsing stays local to the desktop host, and production relay/discovery should be validated in the target cross-network environment.
 
 See [Iroh remote protocol v1](iroh-remote-protocol.md), [Iroh remote access design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/iroh-remote-access-design.md), and [Security](security.md#remote-access-over-iroh-preview).
@@ -405,9 +481,9 @@ cat README.md | volt -p "Summarize this text"
 |--------|-------------|
 | `-c`, `--continue` | Continue the most recent session |
 | `-r`, `--resume` | Browse and select a session |
-| `--session <path\|id>` | Use a specific session file or partial UUID |
-| `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
-| `--session-dir <dir>` | Custom session storage directory |
+| `--session <id\|path>` | Resume by partial session ID, or import a JSONL snapshot path |
+| `--fork <id\|path>` | Fork by partial session ID, or import a JSONL snapshot as a new session |
+| `--session-dir <dir>` | Directory containing the authoritative `sessions.sqlite` store |
 | `--no-session` | Ephemeral mode; do not save |
 | `--name <name>`, `-n <name>` | Set session display name at startup |
 
@@ -420,7 +496,7 @@ cat README.md | volt -p "Summarize this text"
 | `--no-builtin-tools`, `-nbt` | Disable built-in tools but keep extension/custom tools enabled |
 | `--no-tools`, `-nt` | Disable all tools |
 
-Built-in tools include `read`, `bash`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when spawning is available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured). The `image_gen` tool can read and upload local reference images and write generated PNG files. The `subagent` tool only runs built-in or discovered named definitions from the ResourceLoader; `subagent_registry` lists or follows runs in a child runtime's shared session registry; the `mcp` tool is a single gateway for configured MCP servers.
+Built-in tools include `read`, `bash`, `jobs`, `edit`, `write`, `image_gen` (when an OpenAI Codex model is selected), `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp` (when enabled), `subagent` (when spawning is available), child-only `subagent_registry`, and `mcp` (when MCP servers are configured). The `image_gen` tool can read and upload local reference images and write generated PNG files. The `subagent` tool only runs built-in or discovered named definitions from the ResourceLoader; `subagent_registry` lists or follows runs in a child runtime's shared session registry; the `mcp` tool is a single gateway for configured MCP servers.
 
 ### Resource Options
 
@@ -510,7 +586,7 @@ volt --exclude-tools ask_question
 | Variable | Description |
 |----------|-------------|
 | `VOLT_CODING_AGENT_DIR` | Override config directory; default is `~/.volt/agent` |
-| `VOLT_CODING_AGENT_SESSION_DIR` | Override session storage directory; overridden by `--session-dir` |
+| `VOLT_CODING_AGENT_SESSION_DIR` | Override the directory containing `sessions.sqlite`; overridden by `--session-dir` |
 | `VOLT_PACKAGE_DIR` | Override package directory, useful for Nix/Guix store paths |
 | `VOLT_OFFLINE` | Disable startup network operations, including update checks, package update checks, and install/update telemetry |
 | `VOLT_SKIP_VERSION_CHECK` | Skip the Volt version update check at startup |
@@ -519,13 +595,18 @@ volt --exclude-tools ask_question
 | `VOLT_SHARE_VIEWER_URL` | Base URL for `/share` command viewer links |
 | `VOLT_TELEMETRY` | Override install/update telemetry and provider attribution headers: `1`/`true`/`yes` or `0`/`false`/`no`. This does not disable update checks |
 | `VOLT_CACHE_RETENTION` | Set to `long` for extended prompt cache where supported |
+| `VOLT_PROMPT_CACHE_AUDIT` | Set to `0` to stop writing prompt-cache audit logs to `~/.volt/agent/prompt-cache-audit/` |
 | `VOLT_TUI_ESC_TIMEOUT` | Milliseconds to wait for bytes following a lone Escape key; defaults to 10 locally and 100 over SSH |
 | `VISUAL`, `EDITOR` | External editor for Ctrl+G |
 
 ## Design Principles
 
-Volt keeps the core small and pushes workflow-specific behavior into extensions, skills, prompt templates, and packages.
+Volt includes common coding-agent primitives in core while pushing project-specific behavior into extensions, skills, prompt templates, and packages.
 
-Native MCP support is intentionally explicit: configured servers are exposed through a single `mcp` gateway tool and project MCP config follows project trust. HTTP/SSE MCP servers that require OAuth can be authenticated with `volt mcp auth <server>` or `volt mcp auth-device <server>`; tokens stay on the host. Volt still avoids permission popups, plan mode, built-in to-dos, background bash, or advanced subagent orchestration. The core subagent MVP is limited to built-in/discovered named agents, the single/parallel/chain `subagent` spawning tool, and child registry list/follow access; richer workflows can be built as extensions or external tools.
+Plan mode provides restricted research, explicit approval, and tracked execution steps. Native subagents provide isolated contexts through built-in or discovered agents, single/parallel/chain spawning, and shared registry access. Extensions and the SDK remain available for specialized planning, delegation, task management, and approval workflows.
+
+Native MCP support is intentionally explicit: configured servers are exposed through a single `mcp` gateway tool and project MCP config follows project trust. HTTP/SSE MCP servers that require OAuth can be authenticated with `volt mcp auth <server>` or `volt mcp auth-device <server>`; tokens stay on the host.
+
+Volt does not put a permission popup in front of every tool call. Control capabilities with tool allowlists and exclusions, project trust, Plan mode's restricted research profile, and remote tool grants; use a container or extension when a workflow requires additional isolation or confirmation. Volt leaves standalone task tracking to TODO files or extensions. Native background jobs provide session-owned shell execution and delegation; use tmux for terminals that must outlive the runtime.
 
 For the full rationale, see the project documentation and extension examples.

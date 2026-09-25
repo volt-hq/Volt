@@ -6,6 +6,10 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	PromptCacheMetadata,
+	PromptCacheRefreshCheck,
+	PromptCacheRefreshFunction,
+	PromptCacheRefreshResult,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -26,6 +30,7 @@ const DEFAULT_MIN_TOKEN_SIZE = 3;
 const DEFAULT_MAX_TOKEN_SIZE = 5;
 
 const DEFAULT_USAGE: Usage = {
+	availability: "unavailable",
 	input: 0,
 	output: 0,
 	cacheRead: 0,
@@ -42,6 +47,8 @@ export interface FauxModelDefinition {
 	cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
 	contextWindow?: number;
 	maxTokens?: number;
+	/** Defaults to implicit caching without a documented TTL. */
+	promptCache?: PromptCacheMetadata;
 }
 
 export type FauxContentBlock = TextContent | ThinkingContent | ToolCall;
@@ -77,6 +84,7 @@ export function fauxAssistantMessage(
 		errorMessage?: string;
 		responseId?: string;
 		timestamp?: number;
+		usage?: Usage;
 	} = {},
 ): AssistantMessage {
 	return {
@@ -85,7 +93,7 @@ export function fauxAssistantMessage(
 		api: DEFAULT_API,
 		provider: DEFAULT_PROVIDER,
 		model: DEFAULT_MODEL_ID,
-		usage: DEFAULT_USAGE,
+		usage: options.usage === undefined ? DEFAULT_USAGE : structuredClone(options.usage),
 		stopReason: options.stopReason ?? "stop",
 		...(options.errorMessage === undefined ? {} : { errorMessage: options.errorMessage }),
 		...(options.responseId === undefined ? {} : { responseId: options.responseId }),
@@ -98,7 +106,16 @@ export interface FauxProviderState {
 	callCount: number;
 	/** Auxiliary simple completions (no `context.tools`): naming, compaction, summaries. */
 	simpleCallCount: number;
+	/** Prompt-cache refresh requests; only counted when refresh is enabled. */
+	refreshCount: number;
 }
+
+export type FauxPromptCacheRefresh = (
+	context: Context,
+	options: SimpleStreamOptions | undefined,
+	state: FauxProviderState,
+	model: Model<string>,
+) => PromptCacheRefreshResult | Promise<PromptCacheRefreshResult>;
 
 export type FauxResponseFactory = (
 	context: Context,
@@ -118,6 +135,13 @@ export interface RegisterFauxProviderOptions {
 		min?: number;
 		max?: number;
 	};
+	/**
+	 * Register a prompt-cache refresh. `true` reports a read of the prompt this session last
+	 * cached (or a write when it differs); a function supplies the outcome.
+	 */
+	refreshPromptCache?: true | FauxPromptCacheRefresh;
+	/** Which request options the registered refresh supports; omitted means all of them. */
+	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
 export interface FauxProviderRegistration {
@@ -222,6 +246,8 @@ function withUsageEstimate(
 	options: StreamOptions | undefined,
 	promptCache: Map<string, string>,
 ): AssistantMessage {
+	// Only helper-generated defaults request estimates; explicit usage is a test fixture.
+	if (message.usage !== DEFAULT_USAGE) return message;
 	const promptText = serializeContext(context);
 	const promptTokens = estimateTokens(promptText);
 	const outputTokens = estimateTokens(assistantContentToText(message.content));
@@ -247,6 +273,7 @@ function withUsageEstimate(
 	return {
 		...message,
 		usage: {
+			availability: "complete",
 			input,
 			output: outputTokens,
 			cacheRead,
@@ -254,6 +281,34 @@ function withUsageEstimate(
 			totalTokens: input + outputTokens + cacheRead + cacheWrite,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
+	};
+}
+
+function estimateRefreshUsage(
+	context: Context,
+	model: Model<string>,
+	options: SimpleStreamOptions | undefined,
+	promptCache: Map<string, string>,
+): Usage {
+	const promptText = serializeContext(context);
+	const promptTokens = estimateTokens(promptText);
+	const sessionId = options?.sessionId;
+	const cached = sessionId && resolvePromptCacheRetention(model, options?.cacheRetention, options?.env) !== "none";
+	const previousPrompt = cached ? promptCache.get(sessionId) : undefined;
+	const cacheRead = previousPrompt
+		? estimateTokens(previousPrompt.slice(0, commonPrefixLength(previousPrompt, promptText)))
+		: 0;
+	const cacheWrite = cached ? promptTokens - cacheRead : 0;
+	if (cached) promptCache.set(sessionId, promptText);
+	const input = promptTokens - cacheRead - cacheWrite;
+	return {
+		availability: "complete",
+		input,
+		output: 0,
+		cacheRead,
+		cacheWrite,
+		totalTokens: promptTokens,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 }
 
@@ -295,12 +350,22 @@ function createErrorMessage(error: unknown, api: string, provider: string, model
 	};
 }
 
-function scheduleChunk(chunk: string, tokensPerSecond: number | undefined): Promise<void> {
+function scheduleChunk(chunk: string, tokensPerSecond: number | undefined, signal?: AbortSignal): Promise<void> {
+	if (signal?.aborted) return Promise.resolve();
 	if (!tokensPerSecond || tokensPerSecond <= 0) {
 		return new Promise((resolve) => queueMicrotask(resolve));
 	}
 	const delayMs = (estimateTokens(chunk) / tokensPerSecond) * 1000;
-	return new Promise((resolve) => setTimeout(resolve, delayMs));
+	return new Promise((resolve) => {
+		const finish = () => {
+			clearTimeout(timer);
+			signal?.removeEventListener("abort", finish);
+			resolve();
+		};
+		const timer = setTimeout(finish, delayMs);
+		signal?.addEventListener("abort", finish, { once: true });
+		if (signal?.aborted) finish();
+	});
 }
 
 async function streamWithDeltas(
@@ -366,7 +431,7 @@ async function streamWithDeltas(
 				continue;
 			}
 			for (const chunk of splitStringByTokenSize(block.thinking, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
+				await scheduleChunk(chunk, tokensPerSecond, signal);
 				if (signal?.aborted) {
 					normalizer.push({
 						type: "error",
@@ -391,7 +456,7 @@ async function streamWithDeltas(
 		if (block.type === "text") {
 			normalizer.push({ type: "text_start", contentIndex: index });
 			for (const chunk of splitStringByTokenSize(block.text, minTokenSize, maxTokenSize)) {
-				await scheduleChunk(chunk, tokensPerSecond);
+				await scheduleChunk(chunk, tokensPerSecond, signal);
 				if (signal?.aborted) {
 					normalizer.push({
 						type: "error",
@@ -413,8 +478,9 @@ async function streamWithDeltas(
 		}
 
 		normalizer.push({ type: "toolcall_start", contentIndex: index, id: block.id, name: block.name });
+		if (!normalizer.checkToolArgumentsObject(index, block.arguments)) return;
 		for (const chunk of splitStringByTokenSize(JSON.stringify(block.arguments), minTokenSize, maxTokenSize)) {
-			await scheduleChunk(chunk, tokensPerSecond);
+			await scheduleChunk(chunk, tokensPerSecond, signal);
 			if (signal?.aborted) {
 				normalizer.push({
 					type: "error",
@@ -454,7 +520,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	let pendingResponses: FauxResponseStep[] = [];
 	let pendingSimpleResponses: FauxResponseStep[] = [];
 	const tokensPerSecond = options.tokensPerSecond;
-	const state: FauxProviderState = { callCount: 0, simpleCallCount: 0 };
+	const state: FauxProviderState = { callCount: 0, simpleCallCount: 0, refreshCount: 0 };
 	const promptCache = new Map<string, string>();
 
 	const modelDefinitions = options.models?.length
@@ -478,7 +544,7 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		baseUrl: DEFAULT_BASE_URL,
 		reasoning: definition.reasoning ?? false,
 		input: definition.input ?? ["text", "image"],
-		promptCache: { modes: ["implicit"], retention: { short: {} } },
+		promptCache: definition.promptCache ?? { modes: ["implicit"], retention: { short: {} } },
 		cost: definition.cost ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: definition.contextWindow ?? 128000,
 		maxTokens: definition.maxTokens ?? 16384,
@@ -490,7 +556,17 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	const createQueueStream =
 		(takeStep: () => FauxResponseStep | undefined, recordCall: () => void): StreamFunction<string, StreamOptions> =>
 		(requestModel, context, streamOptions) => {
-			const normalizer = new AssistantStreamNormalizer();
+			const normalizer = new AssistantStreamNormalizer(streamOptions);
+			if (
+				!normalizer.validateConfiguration({
+					api: requestModel.api,
+					provider: requestModel.provider,
+					model: requestModel.id,
+					timestamp: Date.now(),
+				})
+			)
+				return normalizer.stream;
+			streamOptions = { ...streamOptions, signal: normalizer.signal };
 			const step = takeStep();
 			recordCall();
 
@@ -498,13 +574,12 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 				try {
 					await streamOptions?.onResponse?.({ status: 200, headers: {} }, requestModel);
 					if (!step) {
-						let message = createErrorMessage(
+						const message = createErrorMessage(
 							new Error("No more faux responses queued"),
 							api,
 							provider,
 							requestModel.id,
 						);
-						message = withUsageEstimate(message, context, requestModel, streamOptions, promptCache);
 						await streamWithDeltas(
 							normalizer,
 							message,
@@ -518,8 +593,12 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 
 					const resolved =
 						typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
-					let message = cloneMessage(resolved, api, provider, requestModel.id);
-					message = withUsageEstimate(message, context, requestModel, streamOptions, promptCache);
+					const message = cloneMessage(
+						withUsageEstimate(resolved, context, requestModel, streamOptions, promptCache),
+						api,
+						provider,
+						requestModel.id,
+					);
 					await streamWithDeltas(
 						normalizer,
 						message,
@@ -574,7 +653,28 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 			? streamAuxiliary(requestModel, context, streamOptions)
 			: stream(requestModel, context, streamOptions);
 
-	registerApiProvider({ api, stream, streamSimple }, sourceId);
+	const refreshOption = options.refreshPromptCache;
+	const refreshPromptCache: PromptCacheRefreshFunction | undefined = refreshOption
+		? async (requestModel, context, refreshOptions) => {
+				state.refreshCount++;
+				if (refreshOption !== true) return await refreshOption(context, refreshOptions, state, requestModel);
+				return {
+					status: "refreshed",
+					usage: estimateRefreshUsage(context, requestModel, refreshOptions, promptCache),
+				};
+			}
+		: undefined;
+
+	registerApiProvider(
+		{
+			api,
+			stream,
+			streamSimple,
+			...(refreshPromptCache ? { refreshPromptCache } : {}),
+			...(options.canRefreshPromptCache ? { canRefreshPromptCache: options.canRefreshPromptCache } : {}),
+		},
+		sourceId,
+	);
 
 	function getModel(): Model<string>;
 	function getModel(requestedModelId: string): Model<string> | undefined;

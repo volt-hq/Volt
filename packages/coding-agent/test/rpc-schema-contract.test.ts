@@ -358,7 +358,17 @@ describe("RPC contract emission conformance", () => {
 					phase: "active",
 					title: "Ship Plan mode",
 					summary: "Implement and verify the native workflow.",
-					steps: [{ id: "step-1", text: "Implement", status: "in_progress" }],
+					steps: [
+						{
+							id: "step-1",
+							text: "Implement",
+							status: "in_progress",
+							substeps: [
+								{ id: "substep-1", text: "Persist", status: "completed" },
+								{ id: "substep-2", text: "Render", status: "in_progress" },
+							],
+						},
+					],
 					execution,
 				},
 			},
@@ -381,6 +391,23 @@ describe("RPC contract emission conformance", () => {
 				planning: {
 					...event.planning,
 					plan: { ...event.planning.plan, phase: "ready" },
+				},
+			}),
+		).toBe(false);
+		expect(
+			validator.Check({
+				...event,
+				planning: {
+					...event.planning,
+					plan: {
+						...event.planning.plan,
+						steps: [
+							{
+								...event.planning.plan.steps[0],
+								note: "Groups cannot carry execution notes",
+							},
+						],
+					},
 				},
 			}),
 		).toBe(false);
@@ -410,6 +437,7 @@ describe("RPC contract emission conformance", () => {
 				pendingMessageCount: 0,
 				steeringQueue: [{ clientMessageId: "m-1", text: "queued" }],
 				followUpQueue: [],
+				backgroundJobs: [],
 			},
 			transcript: {
 				sessionId: "session-1",

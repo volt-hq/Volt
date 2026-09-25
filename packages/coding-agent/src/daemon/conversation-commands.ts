@@ -15,7 +15,10 @@ import {
 	type IrohRemoteTranscriptTextLayout,
 	sanitizeIrohRemoteTranscriptText,
 } from "../core/remote/iroh/transcript-text.ts";
-import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
+import {
+	getIrohRemoteWorkspaceAvailabilityStatus,
+	type IrohRemoteWorkspaceMetadataSnapshot,
+} from "../core/remote/iroh/workspace.ts";
 import {
 	handleIrohRemoteWorkspaceUnregisterRpcCommand,
 	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
@@ -26,12 +29,15 @@ import {
 	IROH_REMOTE_LIST_WORKTREES_RPC_TYPE,
 	type IrohRemoteWorktreeRpcBackend,
 } from "../core/remote/iroh/worktree-rpc.ts";
+import { getReviewDiscussionLink } from "../core/review-discussions.ts";
+import { projectRpcBackgroundJobDetails } from "../core/rpc/background-jobs.ts";
 import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	measureConversationProjectionUtf8BytesWithin,
 } from "../core/rpc/conversation-projection-limits.ts";
 import { getRpcErrorResponseTarget } from "../core/rpc/correlation.ts";
 import { getRemoteVisibleCustomMessageRole } from "../core/rpc/custom-message-projection.ts";
+import type { RpcReviewDiscussionLink } from "../core/rpc/schema/review-discussions.ts";
 import { projectSessionTreePage } from "../core/rpc/session-tree.ts";
 import {
 	type ResolvedSessionToolCall,
@@ -41,8 +47,10 @@ import { extractMessageImages, projectMessageImages } from "../core/rpc/transcri
 import type {
 	RpcConversationAssistantPart,
 	RpcConversationTranscriptItem,
+	RpcGitContext,
 	RpcKeepAwakeStatus,
 	RpcSessionTreePage,
+	RpcSessionWorkContext,
 } from "../core/rpc/types.ts";
 import { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES } from "../core/rpc/wire-limits.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
@@ -65,6 +73,8 @@ export const TURN_INITIATING_RPC_TYPES: ReadonlySet<string> = new Set([
 	"prompt",
 	"new_session",
 	"plan_execute",
+	"start_review_discussions",
+	"reset_review_discussion",
 	"invoke_ui_action",
 	"steer",
 	"follow_up",
@@ -119,6 +129,7 @@ export type RemoteRpcCommand = Record<string, unknown> & { type: string };
 export type RemoteSessionRuntimeState = Exclude<LeaseState, "unowned">;
 
 export interface RemoteSessionListEntry {
+	reviewDiscussion?: RpcReviewDiscussionLink;
 	sessionId: string;
 	title: string;
 	createdAt: string;
@@ -126,6 +137,10 @@ export interface RemoteSessionListEntry {
 	messageCount: number;
 	/** "subagent" when this session was created for a delegated subagent run. */
 	origin?: "subagent";
+	/** First host-observed path-free Git state for this session. */
+	startingGitContext?: RpcGitContext | null;
+	/** Sanitized daemon-owned change and pull-request association. */
+	workContext?: RpcSessionWorkContext;
 	/** Live host ownership for this session. Omitted when no runtime is currently owned. */
 	runtimeState?: RemoteSessionRuntimeState;
 	/** Present when the session is bound to a daemon-managed worktree (worktrees.v1). */
@@ -142,6 +157,19 @@ export interface RemoteSessionListCursorEntry {
 	expiresAt: number;
 }
 
+interface ConversationSessionSummary {
+	reviewDiscussion?: RpcReviewDiscussionLink;
+	sessionId: string;
+	sessionName?: string;
+	createdAt: string;
+	modifiedAt: string;
+	messageCount: number;
+	firstMessage: string;
+	cwd?: string;
+	origin?: "subagent";
+	startingGitContext?: RpcGitContext | null;
+}
+
 /** Minimal runtime surface the conversation command handlers consume. */
 export interface ConversationCommandRuntime {
 	session: {
@@ -149,18 +177,8 @@ export interface ConversationCommandRuntime {
 		sessionManager: Pick<SessionManager, "getBranch" | "getBranchWindow" | "getLeafEntry"> &
 			Partial<Pick<SessionManager, "getEntries">>;
 	};
-	listSessions(): Promise<
-		Array<{
-			sessionId: string;
-			sessionName?: string;
-			createdAt: string;
-			modifiedAt: string;
-			messageCount: number;
-			firstMessage: string;
-			cwd?: string;
-			origin?: "subagent";
-		}>
-	>;
+	listSessions(): Promise<ConversationSessionSummary[]>;
+	getCurrentSessionSummary?(): ConversationSessionSummary;
 }
 
 export interface ConversationCommandContext {
@@ -181,6 +199,12 @@ export interface ConversationCommandContext {
 	listRuntimeStates?: (
 		workspaceName: string,
 	) => Promise<ReadonlyMap<string, RemoteSessionRuntimeState>> | ReadonlyMap<string, RemoteSessionRuntimeState>;
+	/** Synchronous Work-store lookup. Must never start provider discovery. */
+	getWorkContext?: (
+		workspaceName: string,
+		workspaceGeneration: number,
+		sessionId: string,
+	) => RpcSessionWorkContext | undefined;
 	/** True while this conversation's lease is draining to a TUI (§4.5 rejection). */
 	isDraining?: () => boolean;
 	/** True once the daemon has closed its admission epoch for shutdown. */
@@ -664,7 +688,10 @@ export function projectRemoteTranscriptEntry(
 			typeof message.toolName === "string" && message.toolName.trim() ? message.toolName.trim() : "tool";
 		const args = isRemoteRecord(toolCall?.arguments) ? toolCall.arguments : undefined;
 		const path = getRemoteToolPath(toolName, args, authorization);
-		const summary = summarizeRemoteToolResult(toolName, status, args, path, authorization);
+		const backgroundDetails = projectRpcBackgroundJobDetails(message.details);
+		const summary = backgroundDetails
+			? `Background job ${backgroundDetails.backgroundJob.id}: ${backgroundDetails.backgroundJob.status} (snapshot)`
+			: summarizeRemoteToolResult(toolName, status, args, path, authorization);
 		const item = createRemoteTranscriptItem(entry, "tool", summary, authorization);
 		item.toolName = toolName;
 		item.status = status;
@@ -676,7 +703,12 @@ export function projectRemoteTranscriptEntry(
 		if (projectedArgs) {
 			item.args = projectedArgs;
 		}
-		if (toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
+		if (backgroundDetails) {
+			item.details = sanitizeIrohRemoteOutbound(
+				backgroundDetails,
+				getRemoteSanitizerOptions(authorization),
+			) as Record<string, unknown>;
+		} else if (toolName === "subagent" || toolName === SUBAGENT_REGISTRY_TOOL_NAME) {
 			const details = projectRemoteSubagentDetails(message.details, authorization);
 			if (details) {
 				item.details = details;
@@ -884,6 +916,14 @@ function projectRemoteToolArgs(
 		case "bash":
 			copyRemoteString(args, projected, "command", authorization, REMOTE_TOOL_COMMAND_MAX_SCALARS);
 			copyRemoteNumber(args, projected, "timeout");
+			copyRemoteBoolean(args, projected, "background");
+			break;
+		case "jobs":
+			copyRemoteString(args, projected, "action", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "id", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteStringArray(args, projected, "ids", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteString(args, projected, "mode", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
+			copyRemoteNumber(args, projected, "timeoutMs");
 			break;
 		case "read":
 			copyRemoteString(args, projected, "path", authorization, REMOTE_TOOL_ARGUMENT_MAX_SCALARS);
@@ -1010,6 +1050,7 @@ function projectRemoteSubagentArgs(
 	if (chain) {
 		projected.chain = chain;
 	}
+	copyRemoteBoolean(args, projected, "background");
 	if (typeof args.list === "boolean") {
 		projected.list = args.list;
 	}
@@ -1606,6 +1647,7 @@ function getRemoteSessionTimestampMs(value: string): number {
 }
 
 interface RemoteSessionSummaryInput {
+	reviewDiscussion?: RpcReviewDiscussionLink;
 	sessionId: string;
 	title: unknown;
 	createdAt: string | Date;
@@ -1613,6 +1655,7 @@ interface RemoteSessionSummaryInput {
 	messageCount: number;
 	cwd?: string;
 	origin?: "subagent";
+	startingGitContext?: RpcGitContext | null;
 }
 
 function getRelativeWorkingDirectory(rootPath: string, cwd: string | undefined): string | null | undefined {
@@ -1648,11 +1691,13 @@ function createRemoteSessionSummary(
 		sortUpdatedAtMs: getRemoteSessionTimestampMs(updatedAt),
 		session: {
 			sessionId: input.sessionId,
+			...(input.reviewDiscussion ? { reviewDiscussion: input.reviewDiscussion } : {}),
 			title: sanitizeRemoteTextField(typeof input.title === "string" ? input.title : "", 160, authorization),
 			createdAt,
 			updatedAt,
 			messageCount: input.messageCount,
 			...(input.origin === undefined ? {} : { origin: input.origin }),
+			...(input.startingGitContext === undefined ? {} : { startingGitContext: input.startingGitContext }),
 			...(workingDirectory === undefined || workingDirectory === null ? {} : { workingDirectory }),
 		},
 		...(input.cwd === undefined ? {} : { cwd: input.cwd }),
@@ -1661,6 +1706,28 @@ function createRemoteSessionSummary(
 
 function sortRemoteSessionSummaries(left: RemoteSessionSummary, right: RemoteSessionSummary): number {
 	return right.sortUpdatedAtMs - left.sortUpdatedAtMs || left.session.sessionId.localeCompare(right.session.sessionId);
+}
+
+function projectRemoteWorkContext(workContext: RpcSessionWorkContext): RpcSessionWorkContext {
+	const base = {
+		changeId: workContext.changeId,
+		repository: workContext.repository,
+		branch: workContext.branch,
+	};
+	if (workContext.resolutionState === "resolved") {
+		return {
+			...base,
+			resolutionState: "resolved",
+			pullRequest: {
+				provider: workContext.pullRequest.provider,
+				number: workContext.pullRequest.number,
+				title: workContext.pullRequest.title,
+				status: workContext.pullRequest.status,
+				stale: workContext.pullRequest.stale,
+			},
+		};
+	}
+	return { ...base, resolutionState: workContext.resolutionState };
 }
 
 export async function listRemoteWorkspaceSessionSummaries(
@@ -1677,12 +1744,14 @@ export async function listRemoteWorkspaceSessionSummaries(
 			const summary = createRemoteSessionSummary(
 				{
 					sessionId: info.id,
+					reviewDiscussion: await getReviewDiscussionLink(info.ref),
 					title: info.name ?? info.firstMessage,
 					createdAt: info.created,
 					updatedAt: info.modified,
 					messageCount: info.messageCount,
 					cwd: info.cwd,
 					...(info.origin === undefined ? {} : { origin: info.origin }),
+					...(info.startingGitContext === undefined ? {} : { startingGitContext: info.startingGitContext }),
 				},
 				authorization,
 			);
@@ -1690,16 +1759,24 @@ export async function listRemoteWorkspaceSessionSummaries(
 		}
 	}
 	if (runtime !== undefined) {
-		for (const liveSummary of await runtime.listSessions()) {
+		const liveSummaries =
+			context.agentDir !== undefined && runtime.getCurrentSessionSummary
+				? [runtime.getCurrentSessionSummary()]
+				: await runtime.listSessions();
+		for (const liveSummary of liveSummaries) {
 			const summary = createRemoteSessionSummary(
 				{
 					sessionId: liveSummary.sessionId,
+					reviewDiscussion: liveSummary.reviewDiscussion,
 					title: liveSummary.sessionName ?? liveSummary.firstMessage,
 					createdAt: liveSummary.createdAt,
 					updatedAt: liveSummary.modifiedAt,
 					messageCount: liveSummary.messageCount,
 					cwd: liveSummary.cwd,
 					...(liveSummary.origin === undefined ? {} : { origin: liveSummary.origin }),
+					...(liveSummary.startingGitContext === undefined
+						? {}
+						: { startingGitContext: liveSummary.startingGitContext }),
 				},
 				authorization,
 			);
@@ -1744,6 +1821,16 @@ export async function listRemoteWorkspaceSessionSummaries(
 		}
 	} catch {
 		// Presence is best-effort; persisted session discovery remains authoritative.
+	}
+	if (authorization.workspaceGeneration !== undefined && context.getWorkContext) {
+		for (const summary of bySessionId.values()) {
+			const workContext = context.getWorkContext(
+				authorization.workspace.name,
+				authorization.workspaceGeneration,
+				summary.session.sessionId,
+			);
+			if (workContext) summary.session.workContext = projectRemoteWorkContext(workContext);
+		}
 	}
 	return Array.from(bySessionId.values()).sort(sortRemoteSessionSummaries);
 }
@@ -1947,12 +2034,12 @@ async function createRemoteUploadDeviceLogsRpcResponse(
 
 function updateAuthorizationWorkspaceMetadata(
 	authorization: IrohRemoteClientAuthorizationSuccess,
-	metadata: { workspaceNames: string[]; workspaces: Array<{ name: string; status: string }> },
+	metadata: IrohRemoteWorkspaceMetadataSnapshot,
 ): void {
 	authorization.workspaceNames = [...metadata.workspaceNames];
 	authorization.workspaces = metadata.workspaces.map((workspace) => ({
 		...workspace,
-	})) as typeof authorization.workspaces;
+	}));
 }
 
 export async function handleRemoteHostRpcCommand(
@@ -2003,6 +2090,7 @@ export async function handleRemoteHostRpcCommand(
 	try {
 		result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(command, {
 			classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
+			client: authorization.client,
 			stateManager: context.stateManager,
 		});
 	} catch (error) {

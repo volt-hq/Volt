@@ -14,11 +14,13 @@ import type { Api, Model } from "@hansjm10/volt-ai";
 import { expect, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { ConversationProjectionFeed } from "../src/core/rpc/conversation-projection-feed.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
+import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
@@ -130,6 +132,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 	const session = {
 		leafId,
 		autoCompactionEnabled: false,
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		bindExtensions: vi.fn(async () => {}),
 		followUpMode: "all" as const,
 		gitContextProvider: {
@@ -150,7 +153,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 				options?.preflightResult?.({ success: true, outcome: "admitted" });
 			},
 		),
-		sessionFile: `/sessions/${sessionId}.jsonl`,
+		sessionRef: undefined,
 		sessionId,
 		sessionManager: {
 			flush: vi.fn(async () => {}),
@@ -181,8 +184,9 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 			getLeafEntry: (): SessionEntry | undefined => (session.sessionManager.getBranch() as SessionEntry[]).at(-1),
 			getLeafId: (): string | null => session.leafId,
 			getSessionId: (): string => sessionId,
+			getStartingGitContext: () => undefined,
 		},
-		settingsManager: { flush: vi.fn(async () => {}) },
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
 		steeringMode: "all" as const,
 		subscribe: vi.fn((_handler: (event: AgentSessionEvent) => void) => () => {}),
 		thinkingLevel: "off" as const,
@@ -247,13 +251,13 @@ export function createTestIrohConversationOptions(runtimeHost: AgentSessionRunti
 					isCompacting: session.isCompacting,
 					steeringMode: session.steeringMode,
 					followUpMode: session.followUpMode,
-					sessionFile: session.sessionFile,
 					sessionId: session.sessionId,
 					autoCompactionEnabled: session.autoCompactionEnabled,
 					messageCount: session.messages.length,
 					pendingMessageCount: session.pendingMessageCount,
 					steeringQueue: [],
 					followUpQueue: [],
+					backgroundJobs: [],
 				},
 				transcript: {
 					sessionId: session.sessionId,
