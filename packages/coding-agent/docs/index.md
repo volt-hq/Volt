@@ -7,7 +7,7 @@ Volt is a minimal terminal coding harness. It is designed to stay small at the c
 Install Volt with npm:
 
 ```bash
-npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.

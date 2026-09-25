@@ -8,7 +8,7 @@ Volt is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi
 ## Installation
 
 ```bash
-npm install @hansjm10/volt-agent-core@beta
+npm install @hansjm10/volt-agent-core
 ```
 
 ## Quick start

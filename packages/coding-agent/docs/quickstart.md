@@ -7,7 +7,7 @@ This page gets you from install to a useful first volt session.
 Volt is distributed as an npm package:
 
 ```bash
-npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.
