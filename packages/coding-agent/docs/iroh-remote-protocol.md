@@ -282,7 +282,9 @@ An entry may also include daemon-owned `workContext`:
 
 `resolutionState` is `resolved`, `none`, `ambiguous`, or `unavailable`.
 `pullRequest` is required only for `resolved`; its status is `open`, `draft`,
-`merged`, or `closed`. The daemon joins this value synchronously from private
+`merged`, or `closed`. The daemon refreshes linked open/draft PR status in the
+background; `stale` is `true` when the last refresh failed or the next one is
+overdue. The daemon joins this value synchronously from private
 bounded state. Listing never invokes Git or a provider. The wire omits checkout
 paths, remotes, canonical repository identities, matched object IDs,
 credentials, raw provider output, and diagnostics. Default/configured base

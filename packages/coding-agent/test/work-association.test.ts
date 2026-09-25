@@ -7,6 +7,10 @@ import type {
 	CodeHostPullRequestDiscoveryOutcome,
 	CodeHostPullRequestDiscoveryProvider,
 	CodeHostPullRequestDiscoveryRequest,
+	CodeHostPullRequestStatus,
+	CodeHostPullRequestStatusOutcome,
+	CodeHostPullRequestStatusProvider,
+	CodeHostPullRequestStatusRequest,
 } from "../src/core/code-host/types.ts";
 import { isExactTuiWorkObservationLeaseHolder } from "../src/daemon/iroh-service.ts";
 import { WorkAssociationService } from "../src/daemon/work-association.ts";
@@ -20,6 +24,7 @@ import {
 
 const OID_A = "0123456789abcdef0123456789abcdef01234567";
 const OID_B = "abcdef0123456789abcdef0123456789abcdef01";
+const PR_REPOSITORY = { host: "github.com", owner: "volt-hq", name: "volt" };
 const tempDirectories: string[] = [];
 
 function tempDirectory(label: string): string {
@@ -83,6 +88,25 @@ class FakeDiscoveryProvider implements CodeHostPullRequestDiscoveryProvider {
 	}
 }
 
+class FakeStatusProvider implements CodeHostPullRequestStatusProvider {
+	readonly id = "github";
+	readonly requests: CodeHostPullRequestStatusRequest[] = [];
+	readonly statuses = new Map<number, CodeHostPullRequestStatus>();
+	resolver?: (request: CodeHostPullRequestStatusRequest) => Promise<CodeHostPullRequestStatusOutcome[]>;
+
+	async refreshPullRequestStatuses(
+		request: CodeHostPullRequestStatusRequest,
+	): Promise<CodeHostPullRequestStatusOutcome[]> {
+		this.requests.push(request);
+		if (this.resolver) return this.resolver(request);
+		return request.pullRequests.map((pullRequest) => ({
+			state: "resolved",
+			status: this.statuses.get(pullRequest.number) ?? "open",
+			title: `PR ${pullRequest.number}`,
+		}));
+	}
+}
+
 function observation(
 	overrides: Partial<{
 		workspaceName: string;
@@ -119,12 +143,105 @@ async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void
 	}
 }
 
+async function statusFixture(label: string) {
+	const store = new WorkStateStore({ path: statePath(label), writeStateFile: async () => {} });
+	await store.load();
+	const discovery = new FakeDiscoveryProvider();
+	discovery.outcome = resolved(42);
+	const status = new FakeStatusProvider();
+	const service = new WorkAssociationService({
+		store,
+		discoveryProvider: discovery,
+		statusProvider: status,
+		statusCwd: "/neutral",
+	});
+	return { store, discovery, status, service };
+}
+
+/** Resolve a PR on its branch, then switch the session to `main`, as after a merge. */
+async function linkOffBranch(
+	service: WorkAssociationService,
+	overrides: Parameters<typeof observation>[0] = {},
+): Promise<void> {
+	await service.observe(observation(overrides));
+	await service.observe(observation({ ...overrides, branch: "main", headOid: OID_B }));
+}
+
 function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = () => {};
 	const promise = new Promise<void>((innerResolve) => {
 		resolve = innerResolve;
 	});
 	return { promise, resolve };
+}
+
+interface WorkStateFixtureChange {
+	id: string;
+	updatedAt: number;
+	resolutionState?: "resolved" | "none";
+	status?: "open" | "draft" | "merged" | "closed";
+	number?: number;
+	/** Session ids bound to this change; defaults to one session named after the change. */
+	boundSessions?: string[];
+}
+
+/** Write a strict Work state file directly so unbound and terminal changes can be expressed. */
+function writeWorkStateFixture(path: string, changes: WorkStateFixtureChange[]): void {
+	mkdirSync(join(path, ".."), { recursive: true });
+	const state = {
+		version: 1,
+		repositoryHashSalt: "a".repeat(64),
+		repositories: [
+			{
+				id: "repository",
+				workspaceName: "volt",
+				workspaceGeneration: 1,
+				commonGitDirHash: "b".repeat(64),
+				displayName: "Volt",
+				updatedAt: 1,
+			},
+		],
+		changes: changes.map((change) => ({
+			id: change.id,
+			repositoryId: "repository",
+			branch: `feature/${change.id}`,
+			headOid: OID_A,
+			baseBranch: false,
+			resolutionState: change.resolutionState ?? "resolved",
+			...((change.resolutionState ?? "resolved") === "resolved"
+				? {
+						pullRequest: {
+							provider: "github",
+							repository: PR_REPOSITORY,
+							number: change.number ?? 1,
+							title: `PR ${change.id}`,
+							status: change.status ?? "open",
+							matchedHeadOid: OID_A,
+						},
+					}
+				: {}),
+			checkedAt: 100,
+			nextRefreshAt: 1000,
+			failureCount: 2,
+			lastRefreshSucceeded: true,
+			updatedAt: change.updatedAt,
+		})),
+		bindings: changes.flatMap((change) =>
+			(change.boundSessions ?? [change.id]).map((sessionId) => ({
+				workspaceName: "volt",
+				workspaceGeneration: 1,
+				sessionId,
+				bindingGeneration: 1,
+				repositoryId: "repository",
+				changeId: change.id,
+				observedRepositoryId: "repository",
+				observedBranch: `feature/${change.id}`,
+				observedHeadOid: OID_A,
+				updatedAt: change.updatedAt,
+			})),
+		),
+	};
+	writeFileSync(path, JSON.stringify(state), { mode: 0o600 });
 }
 
 afterEach(() => {
@@ -150,6 +267,7 @@ describe("WorkStateStore", () => {
 				state: "resolved",
 				pullRequest: {
 					provider: "github",
+					repository: PR_REPOSITORY,
 					number: 42,
 					title: "Exact PR",
 					status: "open",
@@ -200,6 +318,42 @@ describe("WorkStateStore", () => {
 		).toThrow(/invalid|unsupported/i);
 		now++;
 		await store.close();
+	});
+
+	it("resets persisted resolved pull requests that lack their repository", async () => {
+		const path = statePath("work-state-missing-repository");
+		const store = new WorkStateStore({ path });
+		await store.load();
+		const binding = await store.bindObservation({ ...observation(), baseBranch: false, now: 100 });
+		await store.applyDiscovery(
+			binding.fence,
+			{
+				state: "resolved",
+				pullRequest: {
+					provider: "github",
+					repository: PR_REPOSITORY,
+					number: 42,
+					title: "Exact PR",
+					status: "open",
+					matchedHeadOid: OID_A,
+				},
+			},
+			{ now: 101, nextRefreshAt: 1000, refreshSucceeded: true },
+		);
+		await store.close();
+		const persisted = JSON.parse(readFileSync(path, "utf8")) as {
+			changes: Array<{ pullRequest?: Record<string, unknown> }>;
+		};
+		expect(persisted.changes[0]?.pullRequest?.repository).toEqual(PR_REPOSITORY);
+		delete persisted.changes[0]!.pullRequest!.repository;
+		writeFileSync(path, JSON.stringify(persisted), { mode: 0o600 });
+
+		const reopened = new WorkStateStore({ path, now: () => 500 });
+		const loaded = await reopened.load();
+		expect(loaded.corruptBackupPath).toBe(`${path}.corrupt-500`);
+		expect(loaded.state.changes).toEqual([]);
+		expect(reopened.getWorkContext("volt", 1, "session-a")).toBeUndefined();
+		await reopened.close();
 	});
 
 	it("trims by serialized bytes while retaining the successful mutation", async () => {
@@ -269,6 +423,7 @@ describe("WorkStateStore", () => {
 					state: "resolved",
 					pullRequest: {
 						provider: "github",
+						repository: PR_REPOSITORY,
 						number: 42,
 						title: "\u0001界".repeat(256),
 						status: "open",
@@ -347,6 +502,131 @@ describe("WorkStateStore", () => {
 		});
 		expect(moved.change.id).not.toBe(featureA.change.id);
 		expect(moved.binding.bindingGeneration).toBe(2);
+		await store.close();
+	});
+
+	it("lists bound open and draft pull requests as the watch set, newest first and bounded", async () => {
+		const path = statePath("work-state-watch-set");
+		writeWorkStateFixture(path, [
+			{ id: "open", updatedAt: 10, number: 1 },
+			{ id: "shared", updatedAt: 20, number: 2, boundSessions: ["shared-a", "shared-b"] },
+			{ id: "draft", updatedAt: 30, number: 3, status: "draft" },
+			{ id: "merged", updatedAt: 40, number: 4, status: "merged" },
+			{ id: "closed", updatedAt: 50, number: 5, status: "closed" },
+			{ id: "unbound", updatedAt: 60, number: 6, boundSessions: [] },
+			{ id: "unresolved", updatedAt: 70, resolutionState: "none" },
+		]);
+		const store = new WorkStateStore({ path });
+		expect((await store.load()).corruptBackupPath).toBeUndefined();
+
+		expect(store.listWatchedPullRequests(10).map((entry) => entry.changeId)).toEqual(["draft", "shared", "open"]);
+		expect(store.listWatchedPullRequests(2).map((entry) => entry.changeId)).toEqual(["draft", "shared"]);
+		expect(store.listWatchedPullRequests(10)[0]).toEqual({
+			changeId: "draft",
+			checkedAt: 100,
+			provider: "github",
+			number: 3,
+			repository: PR_REPOSITORY,
+		});
+		await store.close();
+	});
+
+	it("applies fenced batched status results without touching discovery backoff", async () => {
+		const path = statePath("work-state-apply-statuses");
+		writeWorkStateFixture(path, [
+			{ id: "open", updatedAt: 10, number: 1 },
+			{ id: "draft", updatedAt: 20, number: 2, status: "draft" },
+			{ id: "moved", updatedAt: 30, number: 3 },
+			{ id: "merged", updatedAt: 40, number: 4, status: "merged" },
+		]);
+		let writes = 0;
+		const store = new WorkStateStore({
+			path,
+			writeStateFile: async () => {
+				writes++;
+			},
+		});
+		await store.load();
+		const watched = new Map(store.listWatchedPullRequests(10).map((entry) => [entry.changeId, entry]));
+		expect(await store.applyPullRequestStatuses([], { now: 500, nextRefreshAt: 2000 })).toEqual([]);
+		expect(writes).toBe(0);
+
+		const changed = await store.applyPullRequestStatuses(
+			[
+				{ ...watched.get("open")!, outcome: { state: "resolved", status: "merged", title: "Renamed" } },
+				{
+					...watched.get("draft")!,
+					checkedAt: 99,
+					outcome: { state: "resolved", status: "merged", title: "Stale snapshot" },
+				},
+				{
+					...watched.get("moved")!,
+					repository: { ...PR_REPOSITORY, owner: "someone-else" },
+					outcome: { state: "resolved", status: "closed", title: "Wrong repository" },
+				},
+				{
+					changeId: "merged",
+					checkedAt: 100,
+					provider: "github",
+					number: 4,
+					repository: PR_REPOSITORY,
+					outcome: { state: "resolved", status: "open", title: "Reopened" },
+				},
+			],
+			{ now: 500, nextRefreshAt: 2000 },
+		);
+		expect(changed).toEqual(["open"]);
+		expect(writes).toBe(1);
+		expect(store.getChange("open")).toMatchObject({
+			checkedAt: 500,
+			nextRefreshAt: 2000,
+			lastRefreshSucceeded: true,
+			failureCount: 2,
+			updatedAt: 10,
+			headOid: OID_A,
+			pullRequest: { status: "merged", title: "Renamed" },
+		});
+		expect(store.getChange("draft")).toMatchObject({
+			checkedAt: 100,
+			pullRequest: { status: "draft", title: "PR draft" },
+		});
+		expect(store.getChange("moved")).toMatchObject({ checkedAt: 100, pullRequest: { status: "open" } });
+		expect(store.getChange("merged")).toMatchObject({ checkedAt: 100, pullRequest: { status: "merged" } });
+		expect(store.listWatchedPullRequests(10).map((entry) => entry.changeId)).toEqual(["moved", "draft"]);
+		expect(store.getWorkContext("volt", 1, "open", 1999)).toMatchObject({
+			pullRequest: { status: "merged", stale: false },
+		});
+		expect(store.getWorkContext("volt", 1, "open", 2000)).toMatchObject({ pullRequest: { stale: true } });
+
+		expect(
+			await store.applyPullRequestStatuses(
+				[{ ...watched.get("moved")!, outcome: { state: "resolved", status: "open", title: "PR moved" } }],
+				{ now: 600, nextRefreshAt: 2100 },
+			),
+		).toEqual([]);
+		expect(store.getChange("moved")).toMatchObject({
+			checkedAt: 600,
+			nextRefreshAt: 2100,
+			lastRefreshSucceeded: true,
+		});
+
+		expect(
+			await store.applyPullRequestStatuses([{ ...watched.get("draft")!, outcome: { state: "unavailable" } }], {
+				now: 700,
+				nextRefreshAt: 2200,
+			}),
+		).toEqual([]);
+		expect(store.getChange("draft")).toMatchObject({
+			checkedAt: 100,
+			nextRefreshAt: 1000,
+			lastRefreshSucceeded: false,
+			failureCount: 2,
+			updatedAt: 20,
+			pullRequest: { status: "draft" },
+		});
+		expect(store.getWorkContext("volt", 1, "draft", 500)).toMatchObject({
+			pullRequest: { status: "draft", stale: true },
+		});
 		await store.close();
 	});
 });
@@ -815,6 +1095,233 @@ describe("WorkAssociationService", () => {
 		expect(service.getWorkContext("volt", 2, "replacement")?.changeId).not.toBe(
 			service.getWorkContext("volt", 1, "root")?.changeId,
 		);
+		await service.close();
+	});
+});
+
+describe("WorkAssociationService background PR status refresh", () => {
+	it("stays dormant until started, then polls immediately and every 15 minutes while idle", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status } = await statusFixture("work-status-idle");
+		await linkOffBranch(service);
+		await vi.advanceTimersByTimeAsync(30 * 60_000);
+		expect(status.requests).toHaveLength(0);
+
+		service.start();
+		service.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(status.requests).toHaveLength(1);
+		expect(status.requests[0]).toMatchObject({
+			cwd: "/neutral",
+			host: "github.com",
+			pullRequests: [{ owner: "volt-hq", name: "volt", number: 42 }],
+		});
+		await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
+		expect(status.requests).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(status.requests).toHaveLength(2);
+
+		await service.close();
+		await vi.advanceTimersByTimeAsync(60 * 60_000);
+		expect(status.requests).toHaveLength(2);
+	});
+
+	it("polls every minute while clients are active and returns to 15 minutes after the activity window", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status } = await statusFixture("work-status-active");
+		await linkOffBranch(service);
+		service.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(status.requests).toHaveLength(1);
+
+		await vi.advanceTimersByTimeAsync(5_000);
+		const release = service.retainClientActivity();
+		const releaseSecond = service.retainClientActivity();
+		expect(status.requests).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(10_000 - 1);
+		expect(status.requests).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(status.requests).toHaveLength(2);
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(status.requests).toHaveLength(3);
+		release();
+		release();
+		releaseSecond();
+		await vi.advanceTimersByTimeAsync(3 * 60_000);
+		expect(status.requests).toHaveLength(6);
+		await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
+		expect(status.requests).toHaveLength(6);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(status.requests).toHaveLength(7);
+		await service.close();
+	});
+
+	it("refreshes a linked PR as soon as its session leaves the PR branch", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status } = await statusFixture("work-status-leave");
+		service.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(status.requests).toHaveLength(0);
+
+		await service.observe(observation());
+		await service.observe(observation());
+		expect(status.requests).toHaveLength(0);
+		status.statuses.set(42, "merged");
+		await vi.advanceTimersByTimeAsync(20_000);
+		await service.observe(observation({ branch: "main", headOid: OID_B }));
+		expect(status.requests).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+			branch: "feature/work",
+			pullRequest: { number: 42, status: "merged", stale: false },
+		});
+
+		await vi.advanceTimersByTimeAsync(20_000);
+		await service.observe(observation({ branch: "main", headOid: OID_A }));
+		expect(status.requests).toHaveLength(1);
+		await service.close();
+	});
+
+	it("refreshes a linked PR after its session runtime retires", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status } = await statusFixture("work-status-retire");
+		service.start();
+		await vi.advanceTimersByTimeAsync(0);
+		await service.observe(observation());
+		await vi.advanceTimersByTimeAsync(20_000);
+		await service.retireSession("volt", 1, "unknown-session");
+		expect(status.requests).toHaveLength(0);
+
+		status.statuses.set(42, "merged");
+		await service.retireSession("volt", 1, "session-a");
+		expect(status.requests).toHaveLength(1);
+		await vi.advanceTimersByTimeAsync(0);
+		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+			pullRequest: { number: 42, status: "merged", stale: false },
+		});
+		await service.close();
+	});
+
+	it("never polls when pull request discovery is disabled", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const path = statePath("work-status-disabled");
+		writeWorkStateFixture(path, [{ id: "open", updatedAt: 10, number: 42 }]);
+		const store = new WorkStateStore({ path, writeStateFile: async () => {} });
+		await store.load();
+		expect(store.listWatchedPullRequests(10)).toHaveLength(1);
+		const status = new FakeStatusProvider();
+		const service = new WorkAssociationService({ store, statusProvider: status, enabled: false });
+		service.start();
+		service.retainClientActivity();
+		await service.retireSession("volt", 1, "open");
+		await vi.advanceTimersByTimeAsync(60 * 60_000);
+		expect(status.requests).toHaveLength(0);
+		await service.close();
+	});
+
+	it("backs off after polls without a successful result and resets after success", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status } = await statusFixture("work-status-backoff");
+		await linkOffBranch(service);
+		service.retainClientActivity();
+		let failing = true;
+		status.resolver = async (request): Promise<CodeHostPullRequestStatusOutcome[]> =>
+			request.pullRequests.map(() =>
+				failing
+					? { state: "unavailable", reason: "rate_limited" }
+					: { state: "resolved", status: "open", title: "PR 42" },
+			);
+		service.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(status.requests).toHaveLength(1);
+		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+			pullRequest: { status: "open", stale: true },
+		});
+
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(status.requests).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(120_000 - 1);
+		expect(status.requests).toHaveLength(2);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(status.requests).toHaveLength(3);
+
+		failing = false;
+		await vi.advanceTimersByTimeAsync(240_000 - 1);
+		expect(status.requests).toHaveLength(3);
+		await vi.advanceTimersByTimeAsync(1);
+		expect(status.requests).toHaveLength(4);
+		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+			pullRequest: { status: "open", stale: false },
+		});
+		await vi.advanceTimersByTimeAsync(60_000);
+		expect(status.requests).toHaveLength(5);
+		await service.close();
+	});
+
+	it("deduplicates a pull request linked from several changes into one batched lookup", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status, discovery } = await statusFixture("work-status-dedupe");
+		await linkOffBranch(service, { sessionId: "a", commonGitDir: "/a/.git" });
+		await linkOffBranch(service, { sessionId: "b", commonGitDir: "/b/.git" });
+		discovery.outcome = resolved(43);
+		await linkOffBranch(service, { sessionId: "c", commonGitDir: "/c/.git" });
+		expect(service.getWorkContext("volt", 1, "a")?.changeId).not.toBe(
+			service.getWorkContext("volt", 1, "b")?.changeId,
+		);
+
+		status.statuses.set(42, "merged");
+		service.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(status.requests).toHaveLength(1);
+		expect(status.requests[0]!.pullRequests.map((pullRequest) => pullRequest.number).sort()).toEqual([42, 43]);
+		expect(service.getWorkContext("volt", 1, "a")).toMatchObject({ pullRequest: { status: "merged" } });
+		expect(service.getWorkContext("volt", 1, "b")).toMatchObject({ pullRequest: { status: "merged" } });
+		expect(service.getWorkContext("volt", 1, "c")).toMatchObject({ pullRequest: { number: 43, status: "open" } });
+		await service.close();
+	});
+
+	it("settles an in-flight poll on close without marking the pull request stale", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status, store } = await statusFixture("work-status-close");
+		await linkOffBranch(service);
+		const changeId = service.getWorkContext("volt", 1, "session-a")!.changeId;
+		status.resolver = (request) =>
+			new Promise((resolve) => {
+				request.signal?.addEventListener(
+					"abort",
+					() => resolve(request.pullRequests.map(() => ({ state: "unavailable", reason: "cancelled" }))),
+					{ once: true },
+				);
+			});
+		service.start();
+		expect(status.requests).toHaveLength(1);
+		await service.close();
+		expect(status.requests[0]!.signal?.aborted).toBe(true);
+		expect(store.getChange(changeId)).toMatchObject({ lastRefreshSucceeded: true, pullRequest: { status: "open" } });
+		await vi.advanceTimersByTimeAsync(60 * 60_000);
+		expect(status.requests).toHaveLength(1);
+	});
+
+	it("drops cached discovery when a poll changes a pull request status", async () => {
+		vi.useFakeTimers({ now: 1000 });
+		const { service, status, discovery } = await statusFixture("work-status-cache");
+		service.retainClientActivity();
+		await service.observe(observation());
+		expect(discovery.requests).toHaveLength(1);
+
+		status.statuses.set(42, "merged");
+		service.start();
+		await vi.advanceTimersByTimeAsync(0);
+		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({ pullRequest: { status: "merged" } });
+
+		discovery.outcome = resolved(42, "merged");
+		await vi.advanceTimersByTimeAsync(120_000);
+		await service.observe(observation());
+		expect(discovery.requests).toHaveLength(2);
+		expect(service.getWorkContext("volt", 1, "session-a")).toMatchObject({
+			pullRequest: { status: "merged", stale: false },
+		});
 		await service.close();
 	});
 });

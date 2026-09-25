@@ -10,6 +10,11 @@ import type {
 	CodeHostPullRequestDiscoveryProvider,
 	CodeHostPullRequestDiscoveryRequest,
 	CodeHostPullRequestDiscoveryUnavailableReason,
+	CodeHostPullRequestStatus,
+	CodeHostPullRequestStatusOutcome,
+	CodeHostPullRequestStatusProvider,
+	CodeHostPullRequestStatusRequest,
+	CodeHostPullRequestStatusTarget,
 } from "./types.ts";
 
 const MAX_REMOTES = 16;
@@ -22,6 +27,9 @@ const GIT_TIMEOUT_MS = 2500;
 const GH_TIMEOUT_MS = 15_000;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const REMOTE_NAME_PATTERN = /^(?!-)[A-Za-z0-9][A-Za-z0-9._/-]*$/;
+const STATUS_CHUNK_SIZE = 50;
+const MAX_GRAPHQL_INT = 2_147_483_647;
+const STATUS_IDENTITY_FORBIDDEN_PATTERN = /[\0-\x20\x7f/]/;
 
 interface GitCommandResult {
 	readonly ok: boolean;
@@ -487,4 +495,193 @@ export async function discoverPullRequestWithGitHubCli(
 export const githubCliPullRequestDiscoveryProvider: CodeHostPullRequestDiscoveryProvider = {
 	id: "github",
 	discoverPullRequest: discoverPullRequestWithGitHubCli,
+};
+
+interface StatusChunkEntry {
+	readonly index: number;
+	readonly target: CodeHostPullRequestStatusTarget;
+}
+
+interface StatusQuery {
+	readonly query: string;
+	readonly variables: Record<string, string | number>;
+	/** Response aliases in chunk order. */
+	readonly aliases: ReadonlyArray<{ readonly repository: string; readonly pullRequest: string }>;
+}
+
+function isJsonObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStatusIdentityPart(value: unknown, maximum: number): value is string {
+	return (
+		typeof value === "string" &&
+		value.length > 0 &&
+		value.length <= maximum &&
+		!STATUS_IDENTITY_FORBIDDEN_PATTERN.test(value)
+	);
+}
+
+function isValidStatusTarget(target: CodeHostPullRequestStatusTarget): boolean {
+	return (
+		isStatusIdentityPart(target.owner, 100) &&
+		isStatusIdentityPart(target.name, 100) &&
+		Number.isSafeInteger(target.number) &&
+		target.number >= 1 &&
+		target.number <= MAX_GRAPHQL_INT
+	);
+}
+
+/** Build one aliased query; every owner, name, and number travels as a GraphQL variable. */
+function buildStatusQuery(chunk: readonly StatusChunkEntry[]): StatusQuery {
+	const groups = new Map<string, { index: number; owner: string; name: string; members: number[] }>();
+	chunk.forEach((entry, position) => {
+		const key = `${entry.target.owner}\0${entry.target.name}`;
+		let group = groups.get(key);
+		if (!group) {
+			group = { index: groups.size, owner: entry.target.owner, name: entry.target.name, members: [] };
+			groups.set(key, group);
+		}
+		group.members.push(position);
+	});
+	const variables: Record<string, string | number> = {};
+	const declarations: string[] = [];
+	const selections: string[] = [];
+	const aliases: Array<{ repository: string; pullRequest: string }> = [];
+	for (const group of groups.values()) {
+		const repositoryAlias = `r${group.index}`;
+		variables[`o${group.index}`] = group.owner;
+		variables[`n${group.index}`] = group.name;
+		declarations.push(`$o${group.index}:String!`, `$n${group.index}:String!`);
+		const fields = group.members.map((position, memberIndex) => {
+			const variable = `p${group.index}_${memberIndex}`;
+			const pullRequestAlias = `${repositoryAlias}p${memberIndex}`;
+			variables[variable] = chunk[position]!.target.number;
+			declarations.push(`$${variable}:Int!`);
+			aliases[position] = { repository: repositoryAlias, pullRequest: pullRequestAlias };
+			return `${pullRequestAlias}: pullRequest(number:$${variable}){ state isDraft title }`;
+		});
+		selections.push(
+			`${repositoryAlias}: repository(owner:$o${group.index},name:$n${group.index}){ ${fields.join(" ")} }`,
+		);
+	}
+	return {
+		query: `query WorkPullRequestStatuses(${declarations.join(",")}){ ${selections.join(" ")} }`,
+		variables,
+		aliases,
+	};
+}
+
+function hasRateLimitedGraphqlError(value: unknown): boolean {
+	return (
+		isJsonObject(value) &&
+		Array.isArray(value.errors) &&
+		value.errors.some((error) => isJsonObject(error) && error.type === "RATE_LIMITED")
+	);
+}
+
+function parseStatusNode(value: unknown): CodeHostPullRequestStatusOutcome {
+	// GitHub nulls a repository or pull request it cannot resolve for this viewer.
+	if (value === null) return { state: "unavailable", reason: "provider_error" };
+	if (
+		!isJsonObject(value) ||
+		typeof value.state !== "string" ||
+		typeof value.isDraft !== "boolean" ||
+		typeof value.title !== "string"
+	) {
+		return { state: "unavailable", reason: "invalid_response" };
+	}
+	let status: CodeHostPullRequestStatus;
+	switch (value.state) {
+		case "OPEN":
+			status = value.isDraft ? "draft" : "open";
+			break;
+		case "MERGED":
+			status = "merged";
+			break;
+		case "CLOSED":
+			status = "closed";
+			break;
+		default:
+			return { state: "unavailable", reason: "invalid_response" };
+	}
+	return { state: "resolved", status, title: value.title.slice(0, MAX_TITLE_CHARS) };
+}
+
+async function refreshStatusChunk(
+	request: CodeHostPullRequestStatusRequest,
+	chunk: readonly StatusChunkEntry[],
+): Promise<CodeHostPullRequestStatusOutcome[]> {
+	const unavailable = (reason: CodeHostPullRequestDiscoveryUnavailableReason): CodeHostPullRequestStatusOutcome[] =>
+		chunk.map(() => ({ state: "unavailable", reason }));
+	const { query, variables, aliases } = buildStatusQuery(chunk);
+	let result: Awaited<ReturnType<typeof runGitHubCli>>;
+	try {
+		result = await runGitHubCli(["api", "graphql", "--hostname", request.host, "--input", "-"], {
+			cwd: request.cwd,
+			input: JSON.stringify({ query, variables }),
+			...(request.signal === undefined ? {} : { signal: request.signal }),
+			stdoutMaxBytes: MAX_GH_OUTPUT_BYTES,
+			stderrMaxBytes: 32 * 1024,
+			timeoutMs: GH_TIMEOUT_MS,
+			cancellationMessage: "GitHub pull request status refresh was cancelled.",
+		});
+	} catch {
+		return unavailable(request.signal?.aborted ? "cancelled" : "provider_error");
+	}
+	// `gh api graphql` exits non-zero when any aliased lookup fails, but still prints
+	// the partial `data` for the others, so parse stdout regardless of exit status.
+	let parsed: unknown;
+	if (!result.outputLimited && !result.timedOut) {
+		try {
+			parsed = JSON.parse(result.stdout.toString("utf8"));
+		} catch {
+			parsed = undefined;
+		}
+	}
+	const data = isJsonObject(parsed) ? parsed.data : undefined;
+	if (!isJsonObject(data)) {
+		if (hasRateLimitedGraphqlError(parsed)) return unavailable("rate_limited");
+		return unavailable(
+			result.ok ? "invalid_response" : unavailableReason(result.stderr, result.outputLimited, result.timedOut),
+		);
+	}
+	return aliases.map((alias) => {
+		const repository = data[alias.repository];
+		if (repository === null) return { state: "unavailable", reason: "provider_error" };
+		if (!isJsonObject(repository) || !Object.hasOwn(repository, alias.pullRequest)) {
+			return { state: "unavailable", reason: "invalid_response" };
+		}
+		return parseStatusNode(repository[alias.pullRequest]);
+	});
+}
+
+/** Refresh the status of already-associated pull requests with batched GraphQL queries. */
+export async function refreshPullRequestStatusesWithGitHubCli(
+	request: CodeHostPullRequestStatusRequest,
+): Promise<CodeHostPullRequestStatusOutcome[]> {
+	const outcomes: CodeHostPullRequestStatusOutcome[] = request.pullRequests.map(() => ({
+		state: "unavailable",
+		reason: "invalid_response",
+	}));
+	if (!isStatusIdentityPart(request.host, 253) || request.host.startsWith("-")) return outcomes;
+	const valid: StatusChunkEntry[] = [];
+	request.pullRequests.forEach((target, index) => {
+		if (isValidStatusTarget(target)) valid.push({ index, target });
+	});
+	for (let offset = 0; offset < valid.length; offset += STATUS_CHUNK_SIZE) {
+		const chunk = valid.slice(offset, offset + STATUS_CHUNK_SIZE);
+		const chunkOutcomes: CodeHostPullRequestStatusOutcome[] = request.signal?.aborted
+			? chunk.map(() => ({ state: "unavailable", reason: "cancelled" }))
+			: await refreshStatusChunk(request, chunk);
+		chunk.forEach((entry, position) => {
+			outcomes[entry.index] = chunkOutcomes[position]!;
+		});
+	}
+	return outcomes;
+}
+
+export const githubCliPullRequestStatusProvider: CodeHostPullRequestStatusProvider = {
+	id: "github",
+	refreshPullRequestStatuses: refreshPullRequestStatusesWithGitHubCli,
 };

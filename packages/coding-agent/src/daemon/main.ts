@@ -374,7 +374,12 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		enabled: remoteSettings.pullRequestDiscovery !== false,
 		now: () => clock.now(),
 		onRefreshError: (phase, error) => {
-			const operation = phase === "discovery" ? "provider discovery" : "scheduled refresh";
+			const operation =
+				phase === "discovery"
+					? "provider discovery"
+					: phase === "status_refresh"
+						? "PR status refresh"
+						: "scheduled refresh";
 			log("warn", `Work association ${operation} failed; retrying with backoff`, {
 				error: error instanceof Error ? error.message : String(error),
 			});
@@ -999,6 +1004,10 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		`${JSON.stringify({ pid: process.pid, version: VERSION, startedAtMs, socketPath: paths.socketPath, token: pidfileToken } satisfies PidfileContents)}\n`,
 		{ mode: 0o600 },
 	);
+
+	// Background PR status refresh starts only once this daemon is committed to serving:
+	// earlier bind-failure exits return without closing `work`.
+	work.start();
 
 	// Broadcast every successful theme change (control theme_set, or an extension
 	// calling ctx.ui.setTheme inside a daemon-owned runtime) to all control
