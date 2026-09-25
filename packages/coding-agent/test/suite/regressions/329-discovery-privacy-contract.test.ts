@@ -791,10 +791,12 @@ describe("PR #329 RFC and pending changelog contracts", () => {
 			correction: "Retained committed sessions when new-session preparation fails",
 		},
 	])("records retained-row semantics directly in $fileName", ({ fileName, contradiction, correction }) => {
-		const fragment = readFileSync(join(repositoryRoot, ".changeset", fileName), "utf8");
-		expect(fragment).toContain(correction);
-		expect(fragment, `Pending changelog contradicts immediate row adoption: ${contradiction}`).not.toContain(
-			contradiction,
-		);
+		// A release consumes pending fragments into the changelog; check whichever currently holds the entry.
+		const fragmentPath = join(repositoryRoot, ".changeset", fileName);
+		const entry = existsSync(fragmentPath)
+			? readFileSync(fragmentPath, "utf8")
+			: readFileSync(join(packageRoot, "CHANGELOG.md"), "utf8");
+		expect(entry).toContain(correction);
+		expect(entry, `Changelog contradicts immediate row adoption: ${contradiction}`).not.toContain(contradiction);
 	});
 });
