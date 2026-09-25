@@ -21,7 +21,13 @@ import {
 	isIrohRemoteAccessPresetName,
 } from "../../../core/remote/iroh/access-grant.ts";
 import { isIrohRemoteWorkspaceName } from "../../../core/remote/iroh/handshake.ts";
-import { createIrohRemoteTicketQrCodePng, formatIrohRemoteTicketQrCode } from "../../../core/remote/iroh/qr.ts";
+import {
+	createIrohRemoteTicketQrCode,
+	encodeIrohRemoteTicketQrCodePng,
+	formatIrohRemoteTicketQrCode,
+	IROH_REMOTE_QR_QUIET_ZONE_MODULES,
+	type IrohRemoteTicketQrCode,
+} from "../../../core/remote/iroh/qr.ts";
 import { getIrohRemotePairingVerificationDetails } from "../../../core/remote/iroh/ticket.ts";
 import { getIrohRemoteWorkspaceNameAlias } from "../../../core/remote/iroh/workspace.ts";
 import { theme } from "../../../core/theme/runtime.ts";
@@ -63,6 +69,18 @@ export class RemoteControlRequestError extends Error {
 const UNSAFE_TERMINAL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
 // One title, three actions, and one keyboard-hint row; no extra borders or header.
 const PAIRING_QR_RESERVED_ROWS = 5;
+// Inline QR images use whole-pixel modules; 4 px modules scan reliably and keep Sixel rasters well within limits.
+const PAIRING_QR_MIN_MODULE_PIXELS = 2;
+const PAIRING_QR_MAX_MODULE_PIXELS = 4;
+
+interface PairingQrImageLayout {
+	qrCode: IrohRemoteTicketQrCode;
+	modulePixels: number;
+	columns: number;
+	rows: number;
+	widthPx: number;
+	heightPx: number;
+}
 
 export type RemoteControlSnapshot =
 	| {
@@ -485,7 +503,7 @@ export class RemoteControlCenterComponent implements Component {
 	private lastRows: DisplayRow[] = [];
 	private lastPageSize = 1;
 	private pairingHandle: RemotePairingHandle | undefined;
-	private pairingQrPng: { ticket: string; png: ReturnType<typeof createIrohRemoteTicketQrCodePng> } | undefined;
+	private pairingQrCode: { ticket: string; qrCode: IrohRemoteTicketQrCode } | undefined;
 	private pairingQrImage: { key: string; image: Image } | undefined;
 	private pairingAttempt = 0;
 	private generation = 0;
@@ -1477,7 +1495,7 @@ export class RemoteControlCenterComponent implements Component {
 		const qrHeight = (qrLines?.length ?? 0) + PAIRING_QR_RESERVED_ROWS;
 		const qrFits = qrLines !== undefined && qrHeight <= height && qrWidth <= width;
 		const qrSizeWarning = `QR needs ${qrWidth} columns × ${qrHeight} rows; available: ${width} × ${height}.`;
-		const inlineQrFits = this.inlinePairingQrFits(this.view.ticket, width, height);
+		const inlineQrFits = this.pairingQrImageLayout(this.view.ticket, width, height) !== undefined;
 		if (this.view.showQr) {
 			if (this.renderPairingQrImage(width, height)) {
 				return [
@@ -1558,27 +1576,36 @@ export class RemoteControlCenterComponent implements Component {
 		return rows;
 	}
 
-	private getPairingQrPng(ticket: string): ReturnType<typeof createIrohRemoteTicketQrCodePng> {
-		if (this.pairingQrPng?.ticket === ticket) return this.pairingQrPng.png;
+	private getPairingQrCode(ticket: string): IrohRemoteTicketQrCode {
+		if (this.pairingQrCode?.ticket === ticket) return this.pairingQrCode.qrCode;
 		this.clearPairingQrImage(true);
-		const png = createIrohRemoteTicketQrCodePng(ticket);
-		this.pairingQrPng = { ticket, png };
-		return png;
+		const qrCode = createIrohRemoteTicketQrCode(ticket);
+		this.pairingQrCode = { ticket, qrCode };
+		return qrCode;
 	}
 
-	private inlinePairingQrFits(ticket: string | undefined, width: number, height: number): boolean {
-		if (!ticket || !supportsInlinePairingQr() || width <= 2 || height <= PAIRING_QR_RESERVED_ROWS) return false;
+	/** Pick the largest whole-pixel module size whose image fits the QR view, or undefined when none fits. */
+	private pairingQrImageLayout(
+		ticket: string | undefined,
+		width: number,
+		height: number,
+	): PairingQrImageLayout | undefined {
+		if (!ticket || !supportsInlinePairingQr() || width <= 2 || height <= PAIRING_QR_RESERVED_ROWS) return undefined;
+		let qrCode: IrohRemoteTicketQrCode;
 		try {
-			const png = this.getPairingQrPng(ticket);
-			const cells = getCellDimensions();
-			const availableSidePixels = Math.min(
-				(width - 2) * cells.widthPx,
-				(height - PAIRING_QR_RESERVED_ROWS) * cells.heightPx,
-			);
-			return availableSidePixels >= png.widthPx / 2;
+			qrCode = this.getPairingQrCode(ticket);
 		} catch {
-			return false;
+			return undefined;
 		}
+		const cells = getCellDimensions();
+		const sideModules = qrCode.size + IROH_REMOTE_QR_QUIET_ZONE_MODULES * 2;
+		const availablePx = Math.min((width - 2) * cells.widthPx, (height - PAIRING_QR_RESERVED_ROWS) * cells.heightPx);
+		const modulePixels = Math.min(PAIRING_QR_MAX_MODULE_PIXELS, Math.floor(availablePx / sideModules));
+		if (modulePixels < PAIRING_QR_MIN_MODULE_PIXELS) return undefined;
+		// Fill whole cells exactly so the image is displayed 1:1 instead of being resampled to fit them.
+		const columns = Math.ceil((sideModules * modulePixels) / cells.widthPx);
+		const rows = Math.ceil((sideModules * modulePixels) / cells.heightPx);
+		return { qrCode, modulePixels, columns, rows, widthPx: columns * cells.widthPx, heightPx: rows * cells.heightPx };
 	}
 
 	/**
@@ -1586,31 +1613,24 @@ export class RemoteControlCenterComponent implements Component {
 	 * view falls back to the text QR or the size warning instead of showing actions without a code.
 	 */
 	private renderPairingQrImage(width: number, height: number): RenderFrame | undefined {
-		if (
-			this.view.kind !== "pairing" ||
-			!this.view.showQr ||
-			!this.view.ticket ||
-			!this.inlinePairingQrFits(this.view.ticket, width, height)
-		) {
+		const ticket = this.view.kind === "pairing" && this.view.showQr ? this.view.ticket : undefined;
+		const layout = this.pairingQrImageLayout(ticket, width, height);
+		if (!ticket || !layout) {
 			this.clearPairingQrImage();
 			return undefined;
 		}
-		const png = this.getPairingQrPng(this.view.ticket);
-		const cells = getCellDimensions();
-		// Never upscale past the PNG's native module size; larger Sixel rasters can exceed terminal limits.
-		const maxWidthCells = Math.min(width - 2, Math.ceil(png.widthPx / cells.widthPx));
-		const maxHeightCells = Math.min(height - PAIRING_QR_RESERVED_ROWS, Math.ceil(png.heightPx / cells.heightPx));
-		const imageKey = `${this.view.ticket}\0${maxWidthCells}\0${maxHeightCells}`;
+		const { columns, rows, modulePixels, widthPx, heightPx } = layout;
+		const imageKey = `${ticket}\0${modulePixels}\0${columns}x${rows}\0${widthPx}x${heightPx}`;
 		if (this.pairingQrImage?.key !== imageKey) {
 			this.clearPairingQrImage();
 			this.pairingQrImage = {
 				key: imageKey,
 				image: new Image(
-					png.base64Data,
+					encodeIrohRemoteTicketQrCodePng(layout.qrCode, { modulePixels, widthPx, heightPx }),
 					"image/png",
 					{ fallbackColor: (value) => theme.fg("muted", value) },
-					{ maxWidthCells, maxHeightCells, filename: "pairing-qr.png" },
-					{ widthPx: png.widthPx, heightPx: png.heightPx },
+					{ maxWidthCells: columns, maxHeightCells: rows, filename: "pairing-qr.png" },
+					{ widthPx, heightPx },
 				),
 			};
 		}
@@ -1621,10 +1641,10 @@ export class RemoteControlCenterComponent implements Component {
 		return prefixRenderFrame(imageFrame, " ".repeat(Math.max(0, Math.floor((width - placement.columns) / 2))));
 	}
 
-	private clearPairingQrImage(clearPng = false): void {
+	private clearPairingQrImage(clearQrCode = false): void {
 		this.pairingQrImage?.image.dispose();
 		this.pairingQrImage = undefined;
-		if (clearPng) this.pairingQrPng = undefined;
+		if (clearQrCode) this.pairingQrCode = undefined;
 	}
 
 	private renderRow(row: DisplayRow, width: number): string {

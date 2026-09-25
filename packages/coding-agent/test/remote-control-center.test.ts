@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import {
 	type CellDimensions,
 	getCapabilities,
@@ -7,10 +8,15 @@ import {
 	type TerminalCapabilities,
 	visibleWidth,
 } from "@hansjm10/volt-tui";
+import png from "@jimp/js-png";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IrohRemoteAccessPresetName } from "../src/core/remote/iroh/access-grant.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
-import { createIrohRemoteTicketQrCodePng, formatIrohRemoteTicketQrCode } from "../src/core/remote/iroh/qr.ts";
+import {
+	createIrohRemoteTicketQrCode,
+	formatIrohRemoteTicketQrCode,
+	IROH_REMOTE_QR_QUIET_ZONE_MODULES,
+} from "../src/core/remote/iroh/qr.ts";
 import { encodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
@@ -296,6 +302,33 @@ function selectAction(component: RemoteControlCenterComponent, label: string, wi
 		component.handleInput("\x1b[B");
 	}
 	throw new Error(`Action not reachable: ${label}`);
+}
+
+async function showPairingQr(
+	component: RemoteControlCenterComponent,
+	backend: FakeBackend,
+	ticket: string,
+	width: number,
+): Promise<void> {
+	await component.start();
+	selectAction(component, "Pair a phone", width);
+	selectAction(component, "Coding", width);
+	await settle();
+	backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
+	component.render(width);
+	component.handleInput("\x1b[A");
+	component.handleInput("\x1b[A");
+	selectAction(component, "Show pairing QR", width);
+}
+
+/** Decode the PNG payload carried by a Kitty graphics placement. */
+function decodeKittyPng(sequence: string): { data: Buffer; width: number; height: number } {
+	const base64 = sequence
+		.split("\x1b\\")
+		.filter((chunk) => chunk.startsWith("\x1b_G"))
+		.map((chunk) => chunk.slice(chunk.indexOf(";") + 1))
+		.join("");
+	return png().decode(Buffer.from(base64, "base64"));
 }
 
 describe("RemoteControlCenterComponent", () => {
@@ -1010,23 +1043,15 @@ describe("RemoteControlCenterComponent", () => {
 		}
 	});
 
-	it("keeps the inline pairing QR at its native size in a large Sixel terminal", async () => {
+	it("caps inline pairing QR modules at 4 px in a large Sixel terminal", async () => {
 		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
 		setCellDimensions({ widthPx: 9, heightPx: 18 });
 		const ticket = managedRelayTicket();
-		const png = createIrohRemoteTicketQrCodePng(ticket);
+		const sidePx = (createIrohRemoteTicketQrCode(ticket).size + IROH_REMOTE_QR_QUIET_ZONE_MODULES * 2) * 4;
 		const backend = new FakeBackend({ kind: "online", status: status() });
 		const { component } = createComponent(backend, 80);
 		try {
-			await component.start();
-			selectAction(component, "Pair a phone", 300);
-			selectAction(component, "Coding", 300);
-			await settle();
-			backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
-			component.render(300);
-			component.handleInput("\x1b[A");
-			component.handleInput("\x1b[A");
-			selectAction(component, "Show pairing QR", 300);
+			await showPairingQr(component, backend, ticket, 300);
 
 			const frame = component.render(300);
 			expect(frame.lines).toHaveLength(80);
@@ -1034,8 +1059,8 @@ describe("RemoteControlCenterComponent", () => {
 			expect(frame.images[0]).toMatchObject({
 				protocol: "sixel",
 				top: 1,
-				columns: Math.ceil(png.widthPx / 9),
-				rows: Math.ceil(png.heightPx / 18),
+				columns: Math.ceil(sidePx / 9),
+				rows: Math.ceil(sidePx / 18),
 			});
 			const text = frame.lines.map(stripAnsi).join("\n");
 			for (const label of ["PAIR QR · volt", "Show verification details", "Copy pairing ticket", "Cancel pairing"]) {
@@ -1046,23 +1071,66 @@ describe("RemoteControlCenterComponent", () => {
 		}
 	});
 
+	it("sends a pixel-exact pairing QR image that fills whole cells", async () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 9, heightPx: 18 });
+		const ticket = managedRelayTicket();
+		const qrCode = createIrohRemoteTicketQrCode(ticket);
+		const backend = new FakeBackend({ kind: "online", status: status() });
+		const { component } = createComponent(backend, 24);
+		try {
+			await showPairingQr(component, backend, ticket, 80);
+
+			const placement = component.render(80).images[0]!;
+			expect(placement).toMatchObject({ protocol: "kitty", top: 1 });
+			const image = decodeKittyPng(placement.sequence);
+			// A canvas that exactly fills its cells is displayed 1:1 instead of being resampled.
+			expect(image.width).toBe(placement.columns * 9);
+			expect(image.height).toBe(placement.rows * 18);
+
+			const isDark = (x: number, y: number): boolean => image.data[(y * image.width + x) * 4] === 0;
+			let [left, top, right, bottom] = [image.width, image.height, -1, -1];
+			for (let y = 0; y < image.height; y++) {
+				for (let x = 0; x < image.width; x++) {
+					if (!isDark(x, y)) continue;
+					[left, top, right, bottom] = [
+						Math.min(left, x),
+						Math.min(top, y),
+						Math.max(right, x),
+						Math.max(bottom, y),
+					];
+				}
+			}
+			const modulePixels = (right - left + 1) / qrCode.size;
+			// 19 image rows of 18 px bound the square at 80x24; modules use the largest whole size that fits.
+			expect(modulePixels).toBe(Math.floor((19 * 18) / (qrCode.size + IROH_REMOTE_QR_QUIET_ZONE_MODULES * 2)));
+			expect(bottom - top + 1).toBe(qrCode.size * modulePixels);
+			expect(Math.min(left, top, image.width - 1 - right, image.height - 1 - bottom)).toBeGreaterThanOrEqual(
+				IROH_REMOTE_QR_QUIET_ZONE_MODULES * modulePixels,
+			);
+			let mismatchedPixels = 0;
+			for (let y = top; y <= bottom; y++) {
+				for (let x = left; x <= right; x++) {
+					const module =
+						qrCode.modules[Math.floor((y - top) / modulePixels)]![Math.floor((x - left) / modulePixels)];
+					if (isDark(x, y) !== module) mismatchedPixels++;
+				}
+			}
+			expect(mismatchedPixels).toBe(0);
+		} finally {
+			component.dispose();
+		}
+	});
+
 	it("falls back to text QR guidance when the terminal cannot draw the pairing image", async () => {
 		setCapabilities({ images: "sixel", trueColor: true, hyperlinks: true });
-		// A single cell this large exceeds the Sixel raster budget, so the image render fails.
-		setCellDimensions({ widthPx: 1100, heightPx: 2200 });
+		// A single 1100 px cell already exceeds the Sixel raster budget, so the image render fails.
+		setCellDimensions({ widthPx: 1100, heightPx: 1100 });
 		const ticket = managedRelayTicket();
 		const backend = new FakeBackend({ kind: "online", status: status() });
 		const { component } = createComponent(backend, 24);
 		try {
-			await component.start();
-			selectAction(component, "Pair a phone", 80);
-			selectAction(component, "Coding", 80);
-			await settle();
-			backend.pairingProgress?.({ type: "pairing_progress", requestId: "pair-1", phase: "ticket", ticket });
-			component.render(80);
-			component.handleInput("\x1b[A");
-			component.handleInput("\x1b[A");
-			selectAction(component, "Show pairing QR", 80);
+			await showPairingQr(component, backend, ticket, 80);
 
 			const frame = component.render(80);
 			const text = frame.lines.map(stripAnsi).join("\n");
