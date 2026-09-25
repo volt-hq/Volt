@@ -89,7 +89,7 @@ under the MIT License.
 ## Installation
 
 ```bash
-npm install @hansjm10/volt-ai@beta
+npm install @hansjm10/volt-ai
 ```
 
 TypeBox exports are re-exported from `@hansjm10/volt-ai`: `Type`, `Static`, and `TSchema`.
@@ -1275,9 +1275,9 @@ Official docs: [Application Default Credentials](https://cloud.google.com/docs/a
 The quickest way to authenticate:
 
 ```bash
-npx @hansjm10/volt-ai@beta login              # interactive provider selection
-npx @hansjm10/volt-ai@beta login anthropic    # login to specific provider
-npx @hansjm10/volt-ai@beta list               # list available providers
+npx @hansjm10/volt-ai login              # interactive provider selection
+npx @hansjm10/volt-ai login anthropic    # login to specific provider
+npx @hansjm10/volt-ai list               # list available providers
 ```
 
 Credentials are saved to `auth.json` in the current directory.

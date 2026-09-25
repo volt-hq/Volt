@@ -41,7 +41,7 @@ For a local CLI/TUI without daemon or remote/iOS support:
     [ "$node_supported" = "1" ] || fail "Node.js $(node --version) is too old. Volt requires Node.js >= 22.19."
     have npm || fail "npm not found. It normally ships with Node.js; install Node.js from https://nodejs.org."
 
-    npm_spec="$PACKAGE@beta"
+    npm_spec="$PACKAGE"
     if [ "$VERSION" != "latest" ]; then
         npm_spec="$PACKAGE@${VERSION#v}"
     fi

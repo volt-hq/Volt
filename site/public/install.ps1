@@ -39,7 +39,7 @@ function Install-NpmVolt {
         Fail "npm not found. It normally ships with Node.js; install Node.js from https://nodejs.org."
     }
 
-    $npmSpec = "$package@beta"
+    $npmSpec = "$package"
     if ($version -ne "latest") {
         $npmSpec = "$package@$($version.TrimStart('v'))"
     }

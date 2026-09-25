@@ -1745,8 +1745,8 @@ test("installers use the published package and verify binary checksums before ex
 		assert.match(installer, /SHA-256 verification failed/);
 		assert.match(installer, /local CLI\/TUI only/i);
 	}
-	assert.match(shellInstaller, /npm_spec="\$PACKAGE@beta"/);
-	assert.match(windowsInstaller, /\$npmSpec = "\$package@beta"/);
+	assert.match(shellInstaller, /npm_spec="\$PACKAGE"\n/);
+	assert.match(windowsInstaller, /\$npmSpec = "\$package"\r?\n/);
 	assert.match(shellInstaller, /tar -xzf "\$tmp\/\$asset" -C "\$tmp\/extract"/);
 	assert.match(shellInstaller, /standalone-file-manifest\.json/);
 	assert.match(shellInstaller, /release_tag="v\$\{VERSION#v\}"/);
@@ -2098,7 +2098,7 @@ esac
 		assert.equal(result.status, 0, result.stderr);
 		assert.equal(
 			readFileSync(join(directory, "npm-args.log"), "utf8").trim(),
-			"install -g --ignore-scripts @hansjm10/volt-coding-agent@beta",
+			"install -g --ignore-scripts @hansjm10/volt-coding-agent",
 		);
 		assert.match(result.stdout, /unavailable on Intel macOS/);
 		assert.doesNotMatch(result.stdout, /This npm install supports 'volt daemon'/);

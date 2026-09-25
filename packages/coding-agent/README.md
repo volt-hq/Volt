@@ -39,7 +39,7 @@ Volt runs in four modes: interactive, print or JSON, RPC for process integration
 ## Quick Start
 
 ```bash
-npm install -g --ignore-scripts @hansjm10/volt-coding-agent@beta
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent
 ```
 
 `--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs. Phone transport requires the exact bundled `@hansjm10/volt-iroh` wrapper plus npm's optional native binding for the current platform; do not install with `--omit=optional`. Darwin x64 has no binding and remains local CLI/TUI only.
