@@ -318,7 +318,15 @@ function assertStagedWorkspaceFsAddon(stageDirectory, target) {
 	const addonPath = join(prebuilds, ...manifest.artifacts[0].path.split("/"));
 	const addon = cjsRequire(addonPath);
 	const exports = Object.keys(addon).sort();
-	const expectedExports = ["WorkspaceRoot", "workspaceFsApiVersion", "workspaceFsSourceFingerprint"];
+	// Keep in sync with isNativeAddon() in packages/coding-agent/src/core/workspace-fs/native-loader.ts.
+	const expectedExports = [
+		"FileLock",
+		"WorkspaceRoot",
+		"tryAcquireFileLock",
+		"workspaceFsApiVersion",
+		"workspaceFsSourceFingerprint",
+		"writeWindowsPrivateFile",
+	];
 	if (JSON.stringify(exports) !== JSON.stringify(expectedExports)) {
 		throw new Error(`Standalone workspace filesystem addon exports are invalid: ${exports.join(", ")}`);
 	}
