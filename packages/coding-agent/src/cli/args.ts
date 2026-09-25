@@ -38,7 +38,6 @@ export interface Args {
 	noBuiltinTools?: boolean;
 	extensions?: string[];
 	noExtensions?: boolean;
-	preparationWaitMs?: number;
 	print?: boolean;
 	export?: string;
 	noSkills?: boolean;
@@ -170,22 +169,6 @@ export function parseArgs(args: string[]): Args {
 			result.extensions.push(args[++i]);
 		} else if (arg === "--no-extensions" || arg === "-ne") {
 			result.noExtensions = true;
-		} else if (arg === "--preparation-wait-ms" || arg.startsWith("--preparation-wait-ms=")) {
-			const inline = arg.startsWith("--preparation-wait-ms=");
-			const value = inline ? arg.slice("--preparation-wait-ms=".length) : args[i + 1];
-			if (value === undefined || value.startsWith("--") || value.startsWith("@")) {
-				result.diagnostics.push({ type: "error", message: "--preparation-wait-ms requires a value" });
-			} else {
-				if (!inline) i++;
-				if (!/^\d+$/.test(value) || Number(value) > 1000) {
-					result.diagnostics.push({
-						type: "error",
-						message: "--preparation-wait-ms must be an integer from 0 to 1000",
-					});
-				} else {
-					result.preparationWaitMs = Number(value);
-				}
-			}
 		} else if (arg === "--skill" && i + 1 < args.length) {
 			result.skills = result.skills ?? [];
 			result.skills.push(args[++i]);
@@ -320,7 +303,6 @@ ${chalk.bold("Options:")}
   --plan                         Start in Plan mode with read-only agent tools
   --extension, -e <path>         Load an extension file (can be used multiple times)
   --no-extensions, -ne           Disable extension discovery (explicit -e paths still work)
-  --preparation-wait-ms <ms>     Shared first-request preparation allowance (0-1000, default: 0)
   --skill <path>                 Load a skill file or directory (can be used multiple times)
   --no-skills, -ns               Disable skills discovery and loading
   --prompt-template <path>       Load a prompt template file or directory (can be used multiple times)

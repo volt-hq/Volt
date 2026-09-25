@@ -195,7 +195,7 @@ export type ExtensionOperationOrigin =
 	| { kind: "agent" }
 	| { kind: "extension"; extensionId: string; scopeId: string; ownerId: string; ownerKind: "task" | "validation" };
 
-/** Host ceilings. All values are finite nonnegative integers; only firstRequestWaitMs can exceed its default (up to 1000 ms). */
+/** Host ceilings. All values are finite nonnegative integers; only firstRequestWaitMs can exceed its default (up to 100). */
 export interface ExtensionWorkLimits {
 	perExtensionTasks: number;
 	perRuntimeTasks: number;
@@ -209,6 +209,6 @@ export interface ExtensionWorkLimits {
 	extensionContributionBytes: number;
 	suffixBytes: number;
 	collectionMs: number;
-	/** Initial shared first-request wait and hard ceiling for command changes. Omitted: initial 0, ceiling 1000 ms. */
+	/** Opt-in shared preparation wait on the first request, default 0, maximum 100 ms. */
 	firstRequestWaitMs: number;
 }
