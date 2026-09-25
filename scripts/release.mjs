@@ -235,6 +235,11 @@ function prepareReleaseCommit(target, options = {}) {
 	run("npm run shrinkwrap:coding-agent");
 	console.log();
 
+	// Match CI: per-package type checks resolve workspace packages through their built dist.
+	console.log("Building workspaces...");
+	run("npm run build");
+	console.log();
+
 	console.log("Running checks...");
 	run("npm run check");
 	console.log();
