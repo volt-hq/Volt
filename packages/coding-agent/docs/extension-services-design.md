@@ -32,7 +32,7 @@ The motivating research describes a decision model selecting among observed arti
 - A persistent repository index, import graph, or test-association database.
 - Speculative Bash, tests, builds, edits, subagents, MCP, or web operations.
 - A generic execute-any-tool method or a second autonomous agent loop.
-- A Jev adapter, model dependency, new provider registration, or inference billing system.
+- An auxiliary-model adapter, model dependency, new provider registration, or inference billing system.
 - A sandbox, secret detector, path-permission redesign, or protection from malicious installed extensions.
 - Durable task recovery, new mobile UI, new RPC methods, or session-format changes.
 - Removal of existing extension tools, commands, or mutation hooks.
