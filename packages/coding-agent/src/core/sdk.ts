@@ -465,6 +465,7 @@ async function createAgentSessionWithTrackedResources(
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
+	const isSubagentRuntime = options.subagentToolManager?.isSubagentRuntime?.() === true;
 	const createDefaultMcpManager = async (): Promise<McpManager | undefined> => {
 		const mcpProjectTrusted =
 			options.projectTrusted ?? (options.settingsManager ? settingsManager.isProjectTrusted() : false);
@@ -490,11 +491,15 @@ async function createAgentSessionWithTrackedResources(
 			sessionId: sessionManager.getSessionId(),
 			workspaceId: projectCwd,
 		});
-		await manager
-			.startEagerServers(undefined, {
-				trustedReadsOnly: sessionManager.buildSessionContext().planning.mode === "plan",
-			})
-			.catch(() => undefined);
+		// Subagents connect to servers on first use and build direct tools from the metadata cache
+		// the parent refreshed at startup, instead of starting their own copy of every eager server.
+		if (!isSubagentRuntime) {
+			await manager
+				.startEagerServers(undefined, {
+					trustedReadsOnly: sessionManager.buildSessionContext().planning.mode === "plan",
+				})
+				.catch(() => undefined);
+		}
 		return manager;
 	};
 	const suppliedMcpManager = options.mcpManager;
@@ -504,7 +509,6 @@ async function createAgentSessionWithTrackedResources(
 	}
 
 	const defaultActiveToolNames: string[] = [...DEFAULT_ACTIVE_TOOL_NAMES];
-	const isSubagentRuntime = options.subagentToolManager?.isSubagentRuntime?.() === true;
 	if (options.subagentToolManager) {
 		defaultActiveToolNames.push("subagent");
 		if (isSubagentRuntime) {

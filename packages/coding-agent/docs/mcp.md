@@ -375,7 +375,7 @@ Startup:
 2. Load metadata cache.
 3. Construct MCP manager.
 4. Register only the native `mcp` tool when MCP is enabled.
-5. Start eager/keep-alive servers from trusted config. Restricted startup starts only servers with trusted resources or configured, normally filtered trusted tools, and refreshes only those authorized metadata categories without listing prompts.
+5. Start eager/keep-alive servers from trusted config. Restricted startup starts only servers with trusted resources or configured, normally filtered trusted tools, and refreshes only those authorized metadata categories without listing prompts. Subagent sessions skip eager/keep-alive startup: they connect to a server the first time they use it and build direct tools from cached metadata.
 6. Lazy servers remain cold. A later transition to Build awaits unrestricted eager/keep-alive startup and rebuilds direct tools from fresh metadata before exposing Build.
 
 Search/describe:
