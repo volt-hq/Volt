@@ -137,7 +137,9 @@ import { IrohConnectionSupervisor } from "./iroh-connection-supervisor.ts";
 import { createIrohEndpointTicket } from "./iroh-endpoint-ticket.ts";
 import {
 	formatIrohLoadError,
+	type IrohBoundEndpointLike,
 	type IrohConnectionLike,
+	type IrohEndpointBuilderLike,
 	type IrohEndpointLike,
 	type IrohModuleLike,
 	loadIrohModule,
@@ -221,6 +223,9 @@ const IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS = 15_000;
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
 /** Local floor between broker refresh attempts started by a manual relay access check. */
 const RELAY_CREDENTIAL_CHECK_MIN_INTERVAL_MS = 5_000;
+/** Pinned direct-port bind attempts; covers a predecessor daemon still releasing the socket. */
+const DIRECT_PORT_BIND_ATTEMPTS = 3;
+const DIRECT_PORT_RETRY_DELAY_MS = 250;
 
 type ManagedRelayRefreshOutcome =
 	| { status: "refreshed" }
@@ -375,6 +380,9 @@ export interface IrohDaemonServiceDependencies {
 	relayRecoveryConfirmationTimeoutMs?: number;
 	/** Override the manual relay access check's minimum interval since the last broker attempt (test-only). */
 	relayCredentialCheckMinIntervalMs?: number;
+	/** Override pinned direct-port bind attempts and their retry spacing before the unpinned fallback (test-only). */
+	directPortBindAttempts?: number;
+	directPortRetryDelayMs?: number;
 	/** Override the connection authentication, first-stream accept, and stream handshake deadlines (test-only). */
 	handshakeTimeoutMs?: number;
 }
@@ -543,6 +551,32 @@ function isExpectedApplicationClose(error: unknown): boolean {
 			message.includes(`reason: b"${ACTIVE_REPLACE_CLOSE_REASON}"`) ||
 			message.includes(`reason: b"${WORKSPACE_UNREGISTERED_CLOSE_REASON}"`))
 	);
+}
+
+/** The IPv4 port among native bound sockets (`a.b.c.d:port`); bracketed IPv6 entries are skipped. */
+function ipv4PortFromBoundSockets(sockets: readonly string[]): number | undefined {
+	for (const socket of sockets) {
+		const match = /^\d{1,3}(?:\.\d{1,3}){3}:(\d{1,5})$/.exec(socket);
+		const port = match === null ? Number.NaN : Number(match[1]);
+		if (port >= 1 && port <= 65_535) return port;
+	}
+	return undefined;
+}
+
+/** Resolves true after `delayMs`, or false as soon as `signal` aborts. */
+async function delayUnlessAborted(delayMs: number, signal: AbortSignal): Promise<boolean> {
+	if (signal.aborted) return false;
+	return await new Promise<boolean>((resolve) => {
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve(true);
+		}, delayMs);
+		function onAbort() {
+			clearTimeout(timer);
+			resolve(false);
+		}
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 async function waitForRelayCredentialRetry(delayMs: number): Promise<void> {
@@ -1711,6 +1745,42 @@ class IrohDaemonService {
 		return closeTask;
 	}
 
+	/** A fresh builder for one bind attempt; `bind()` consumes it. Production relay URLs are validated by the caller. */
+	private createEndpointBuilder(
+		secretKey: number[] | undefined,
+		pinnedPort: number | undefined,
+	): IrohEndpointBuilderLike {
+		const builder = this.iroh.Endpoint.builder();
+		if (this.relayMode === "development") {
+			this.iroh.presetN0(builder);
+		} else if (this.relayMode === "production") {
+			this.iroh.presetN0DisableRelay(builder);
+			const relayAuthToken = this.currentRelayAuthToken();
+			if (relayAuthToken !== undefined) {
+				const relayMap = this.iroh.RelayMap.empty();
+				for (const url of this.relayUrls) {
+					relayMap.insert({ url, authToken: relayAuthToken });
+				}
+				builder.relayMode(this.iroh.RelayMode.custom(relayMap));
+			} else {
+				builder.relayMode(this.iroh.RelayMode.customFromUrls(this.relayUrls));
+			}
+		} else {
+			this.iroh.presetMinimal(builder);
+			builder.relayMode(this.iroh.RelayMode.disabled());
+		}
+		if (secretKey) {
+			builder.secretKey(secretKey);
+		}
+		builder.alpns([Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"))]);
+		if (pinnedPort !== undefined) {
+			// Replaces only the default IPv4 socket and makes it required; IPv6
+			// stays on an optional random port so IPv6-less hosts still start.
+			builder.bindAddr(`0.0.0.0:${pinnedPort}`);
+		}
+		return builder;
+	}
+
 	private retireLateBoundEndpoint(bindTask: Promise<IrohEndpointLike>): void {
 		const cleanupTask = bindTask.then(
 			(endpoint) => this.retireEndpoint(endpoint, "late iroh endpoint disposal failed"),
@@ -2485,43 +2555,70 @@ class IrohDaemonService {
 				this.relayMode === "production" &&
 				this.relayCredentialServiceUrl !== undefined &&
 				(this.managedRelayCredential !== undefined || this.relayAuthToken === undefined);
-			const builder = this.iroh.Endpoint.builder();
 			if (this.relayMode === "development") {
 				this.log(
 					"warn",
 					"using public n0 relays (development only; unset VOLT_IROH_RELAY_MODE for the Volt relays)",
 				);
-				this.iroh.presetN0(builder);
-			} else if (this.relayMode === "production") {
-				if (this.relayUrls.length === 0) {
-					throw new Error("relayMode production requires relay URLs (config.relayUrls or VOLT_IROH_RELAY_URLS)");
-				}
-				this.iroh.presetN0DisableRelay(builder);
-				const relayAuthToken = this.currentRelayAuthToken();
-				if (relayAuthToken !== undefined) {
-					const relayMap = this.iroh.RelayMap.empty();
-					for (const url of this.relayUrls) {
-						relayMap.insert({ url, authToken: relayAuthToken });
-					}
-					builder.relayMode(this.iroh.RelayMode.custom(relayMap));
-				} else {
-					builder.relayMode(this.iroh.RelayMode.customFromUrls(this.relayUrls));
-				}
-			} else {
-				this.iroh.presetMinimal(builder);
-				builder.relayMode(this.iroh.RelayMode.disabled());
+			} else if (this.relayMode === "production" && this.relayUrls.length === 0) {
+				throw new Error("relayMode production requires relay URLs (config.relayUrls or VOLT_IROH_RELAY_URLS)");
 			}
 			const secretKey = this.services.state.state.irohSecretKey;
-			if (secretKey) {
-				builder.secretKey(secretKey);
+			// Saved direct tickets carry this port and relay-disabled phones have no
+			// discovery, so reuse it. Retry briefly in case a predecessor daemon is
+			// still releasing the socket, then fall back to a fresh port.
+			const savedBindPort = this.services.state.state.settings.irohBindPort;
+			let boundEndpoint: IrohBoundEndpointLike | undefined;
+			let pinnedBindError: unknown;
+			if (savedBindPort !== undefined) {
+				const attempts = Math.max(1, this.dependencies.directPortBindAttempts ?? DIRECT_PORT_BIND_ATTEMPTS);
+				const retryDelayMs = this.dependencies.directPortRetryDelayMs ?? DIRECT_PORT_RETRY_DELAY_MS;
+				for (let attempt = 0; boundEndpoint === undefined && attempt < attempts; attempt++) {
+					if (attempt > 0 && !(await delayUnlessAborted(retryDelayMs, startupAdmission.signal))) break;
+					const bindTask = Promise.resolve().then(() =>
+						this.createEndpointBuilder(secretKey, savedBindPort).bind(),
+					);
+					let bound: IrohBoundEndpointLike | undefined;
+					try {
+						bound = await waitUntilAdmissionCancelled(bindTask, startupAdmission.signal);
+					} catch (error) {
+						pinnedBindError = error;
+						continue;
+					}
+					if (bound === undefined) {
+						this.retireLateBoundEndpoint(bindTask);
+						this.ready.reject(new Error("iroh service shut down during endpoint bind"));
+						return;
+					}
+					boundEndpoint = bound;
+				}
 			}
-			builder.alpns([Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"))]);
-			const bindTask = builder.bind();
-			endpoint = await waitUntilAdmissionCancelled(bindTask, startupAdmission.signal);
-			if (!endpoint) {
-				this.retireLateBoundEndpoint(bindTask);
+			if (boundEndpoint === undefined && startupAdmission.signal.aborted) {
 				this.ready.reject(new Error("iroh service shut down during endpoint bind"));
 				return;
+			}
+			const pinnedBindFailed = savedBindPort !== undefined && boundEndpoint === undefined;
+			if (boundEndpoint === undefined) {
+				const bindTask = this.createEndpointBuilder(secretKey, undefined).bind();
+				boundEndpoint = await waitUntilAdmissionCancelled(bindTask, startupAdmission.signal);
+				if (!boundEndpoint) {
+					this.retireLateBoundEndpoint(bindTask);
+					this.ready.reject(new Error("iroh service shut down during endpoint bind"));
+					return;
+				}
+			}
+			endpoint = boundEndpoint;
+			const directPort = ipv4PortFromBoundSockets(boundEndpoint.boundSockets());
+			if (pinnedBindFailed) {
+				this.log(
+					"warn",
+					"could not reuse the saved Iroh direct port; relay-disabled phone pairings made before this start must pair again",
+					{
+						savedPort: savedBindPort,
+						...(directPort === undefined ? {} : { directPort }),
+						error: pinnedBindError instanceof Error ? pinnedBindError.message : String(pinnedBindError),
+					},
+				);
 			}
 			endpoint = this.dependencies.decorateEndpoint?.(endpoint) ?? endpoint;
 			this.startupEndpoint = endpoint;
@@ -2549,22 +2646,28 @@ class IrohDaemonService {
 				this.ready.reject(new Error("iroh service shut down during endpoint startup"));
 				return;
 			}
-			if (!secretKey) {
-				const boundKey = endpoint.secretKey().toBytes();
-				this.services.state.setHostState({
-					...this.services.state.getHostState(),
-					hostSecretKey: boundKey,
-				});
-				// Persist the freshly minted identity synchronously before the accept
-				// loop starts taking pairings. A crash/SIGKILL inside the 250ms debounce
-				// window would otherwise lose the key, and every phone paired against
-				// this endpoint would be talking to a node id the daemon can never
-				// reproduce on restart.
+			const persistDirectPort = directPort !== undefined && directPort !== savedBindPort;
+			if (!secretKey || persistDirectPort) {
+				if (!secretKey) {
+					const boundKey = endpoint.secretKey().toBytes();
+					this.services.state.setHostState({
+						...this.services.state.getHostState(),
+						hostSecretKey: boundKey,
+					});
+				}
+				if (persistDirectPort) {
+					this.services.state.updateSettings({ irohBindPort: directPort });
+				}
+				// Persist the freshly minted identity and direct port synchronously
+				// before the accept loop starts taking pairings. A crash/SIGKILL inside
+				// the 250ms debounce window would otherwise lose them, and every phone
+				// paired against this endpoint would hold a node id or direct address
+				// the daemon can never reproduce on restart.
 				await this.services.state.flush();
 				if (!startupAdmission.isCurrent()) {
-					this.retireEndpoint(endpoint, "iroh endpoint disposal after identity persistence failed");
+					this.retireEndpoint(endpoint, "iroh endpoint disposal after endpoint state persistence failed");
 					endpoint = undefined;
-					this.ready.reject(new Error("iroh service shut down during identity persistence"));
+					this.ready.reject(new Error("iroh service shut down during endpoint state persistence"));
 					return;
 				}
 			}
@@ -2661,6 +2764,7 @@ class IrohDaemonService {
 			this.log("info", `iroh endpoint online`, {
 				hostNodeId: this.hostNodeId,
 				relayMode: this.relayMode,
+				...(directPort === undefined ? {} : { directPort }),
 				...(this.relayMode === "production" ? { relayUrls: this.relayUrls } : {}),
 			});
 			this.acceptLoopTask = this.acceptLoop(endpoint).catch((error) => {

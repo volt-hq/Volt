@@ -93,10 +93,12 @@ function fakeIroh() {
 				relayMode() {},
 				secretKey() {},
 				alpns() {},
+				bindAddr() {},
 				async bind() {
 					binds++;
 					return {
 						id: () => ({ toString: () => HOST }),
+						boundSockets: () => ["0.0.0.0:47000"],
 						addr: () => ({
 							id: () => ({ toString: () => HOST }),
 							relayUrl: () => null,
@@ -992,6 +994,7 @@ describe("managed relay credential recovery", () => {
 				vi.stubEnv(ENV_AGENT_DIR, fixture.agentDir);
 				try {
 					await expect.poll(async () => (await status(fixture.control)).relayCredential?.state).toBe(relayState);
+					await expect.poll(async () => (await status(fixture.control)).remoteTransport.state).toBe("ready");
 					process.exitCode = undefined;
 					await main(["daemon", "status", "--json"]);
 					expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toMatchObject({

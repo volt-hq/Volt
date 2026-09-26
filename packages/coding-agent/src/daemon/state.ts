@@ -63,6 +63,11 @@ export interface VoltdStateFileV1 {
 		relayCredentialRevocation?: IrohManagedRelayCredential;
 		/** Worktree checkout retention and startup reconciliation policies. */
 		worktreeCleanup?: WorktreeCleanupSettings;
+		/**
+		 * Pinned IPv4 UDP port of the Iroh endpoint. Reusing it on restart keeps
+		 * the direct address in saved phone tickets dialable across restarts.
+		 */
+		irohBindPort?: number;
 	};
 }
 
@@ -224,6 +229,13 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 			? undefined
 			: parseIrohManagedRelayCredential(settingsRecord.relayCredentialRevocation);
 	const worktreeCleanup = parseWorktreeCleanupSettings(settingsRecord.worktreeCleanup);
+	const irohBindPort =
+		typeof settingsRecord.irohBindPort === "number" &&
+		Number.isInteger(settingsRecord.irohBindPort) &&
+		settingsRecord.irohBindPort >= 1 &&
+		settingsRecord.irohBindPort <= 65_535
+			? settingsRecord.irohBindPort
+			: undefined;
 	return hostStateToVoltdState(hostState, {
 		detachedRuntimeTtlMs,
 		allowTools,
@@ -236,6 +248,7 @@ export function parseVoltdState(value: unknown): VoltdStateFileV1 {
 		...(relayCredentialAppEndpoints === undefined ? {} : { relayCredentialAppEndpoints }),
 		...(relayCredentialRevocation === undefined ? {} : { relayCredentialRevocation }),
 		...(worktreeCleanup === undefined ? {} : { worktreeCleanup }),
+		...(irohBindPort === undefined ? {} : { irohBindPort }),
 	});
 }
 

@@ -36,6 +36,12 @@ export interface IrohEndpointLike {
 	secretKey(): IrohSecretKeyLike;
 }
 
+/** A freshly bound native endpoint, before any test decoration. */
+export interface IrohBoundEndpointLike extends IrohEndpointLike {
+	/** Local socket addresses (`ip:port`, IPv6 bracketed) the endpoint is bound to. */
+	boundSockets(): string[];
+}
+
 export interface IrohIncomingLike {
 	accept(): Promise<IrohAcceptingLike>;
 	refuse(): Promise<void>;
@@ -57,7 +63,9 @@ export interface IrohEndpointBuilderLike {
 	relayMode(mode: unknown): void;
 	secretKey(key: number[]): void;
 	alpns(alpns: number[][]): void;
-	bind(): Promise<IrohEndpointLike>;
+	/** Pin the socket for one address family (`host:port`); binding fails if the port is taken. */
+	bindAddr(addr: string): void;
+	bind(): Promise<IrohBoundEndpointLike>;
 }
 
 export interface IrohRelayConfigLike {

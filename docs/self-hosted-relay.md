@@ -6,6 +6,9 @@ Volt uses [iroh](https://www.iroh.computer/) for the daemon ↔ phone transport.
 `iroh-relay-us-central.volt-cli.dev`) and pairing tickets carry those URLs to
 the app. The n0 public relays are development-only: opt in with
 `VOLT_IROH_RELAY_MODE=development` (the daemon logs a warning when they're in use).
+Release builds of the iOS app reject `development` pairings; without Volt Pro
+or a self-hosted relay, use `VOLT_IROH_RELAY_MODE=disabled` for direct LAN
+connections instead.
 
 This guide covers running a relay of your own — the fleet is deployed with
 `scripts/deploy-iroh-relay.sh`, which automates everything below:
