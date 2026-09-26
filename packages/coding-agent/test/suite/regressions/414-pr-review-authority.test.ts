@@ -63,9 +63,11 @@ function fakeIroh() {
 				relayMode() {},
 				secretKey() {},
 				alpns() {},
+				bindAddr() {},
 				async bind() {
 					return {
 						id: () => ({ toString: () => HOST }),
+						boundSockets: () => ["0.0.0.0:47000"],
 						addr: () => ({
 							id: () => ({ toString: () => HOST }),
 							relayUrl: () => null,

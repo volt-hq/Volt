@@ -215,6 +215,23 @@ describe("voltd state migration", () => {
 		expect(() => parseVoltdState(JSON.parse(JSON.stringify(state)))).toThrow(/HTTPS origin or the local canary/);
 	});
 
+	it("round-trips a valid Iroh bind port across host-state writes and drops invalid ones", async () => {
+		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
+		await store.load();
+		store.updateSettings({ irohBindPort: 47_000 });
+		store.setHostState(createGrantedHostState());
+		await store.close();
+		expect(parseVoltdState(JSON.parse(readFileSync(statePath, "utf8"))).settings.irohBindPort).toBe(47_000);
+
+		for (const invalid of [0, 70_000, 1.5, "47000"]) {
+			const state = JSON.parse(JSON.stringify(createEmptyVoltdState())) as Record<string, unknown> & {
+				settings: Record<string, unknown>;
+			};
+			state.settings.irohBindPort = invalid;
+			expect(parseVoltdState(state).settings).not.toHaveProperty("irohBindPort");
+		}
+	});
+
 	it("setHostState updates the persisted host portion", async () => {
 		const store = new VoltdStateStore({ agentDir, statePath, debounceMs: 1 });
 		await store.load();
