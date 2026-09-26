@@ -13,6 +13,7 @@ the MIT License.
 - `packages/coding-agent/docs/` — the documentation source of truth. `scripts/sync-docs.mjs` copies it into the Starlight content collection at build time, deriving the sidebar and redirects from `docs.json`. Do not edit `src/content/docs/docs/` or `src/generated/`; both are generated and gitignored.
 - The sync step preserves the canonical package identities used by the source documentation, including `@hansjm10/volt-coding-agent`.
 - `public/volt-icon.png` — site copy of the companion app icon, used by the landing page, blog, docs, and favicon. Keep it synchronized with `volt-app/Volt/Assets.xcassets/AppIcon.appiconset/AppIcon.png`.
+- `public/media/volt-explainer.mp4`, `public/media/volt-explainer-poster.jpg` — animated explainer shown in the landing page's remote-access section (1080p H.264/AAC, burned-in captions, ElevenLabs voices). Rendered outside this repository; replace both files together.
 - `public/install.sh`, `public/install.ps1` — served at `https://volt-cli.dev/install.sh` and `/install.ps1`. The shell installer defaults to `npm install -g --ignore-scripts`; `VOLT_INSTALL_METHOD=binary` fetches a standalone binary from GitHub Releases instead (binary builds do not support `volt daemon`).
 - `public/_headers`, `public/_redirects` — Cloudflare Pages config (`/install` → `/install.sh`, `/github` → repo).
 
