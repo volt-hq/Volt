@@ -409,7 +409,7 @@ describe("generateSummary reasoning options", () => {
 		expect(prefixAttempts).toBe(2);
 	});
 
-	it("cancels and settles a split-summary sibling after terminal failure", async () => {
+	it("never sends the turn-prefix summary after a terminal history failure", async () => {
 		const preparation: CompactionPreparation = {
 			firstKeptEntryId: "entry-keep",
 			messagesToSummarize: messages,
@@ -419,33 +419,27 @@ describe("generateSummary reasoning options", () => {
 			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
 			settings: { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 },
 		};
-		let historyAborted = false;
-		completeSimpleMock.mockImplementation((_model, context, options) => {
-			const prompt = context.messages[0].content[0].text as string;
-			if (prompt.includes("PREFIX of a turn")) {
-				return Promise.resolve({
-					...mockSummaryResponse,
-					stopReason: "error",
-					errorMessage: "insufficient_quota",
-				});
-			}
-			return new Promise<AssistantMessage>((_resolve, reject) => {
-				const abort = (): void => {
-					historyAborted = true;
-					const error = new Error("history cancelled");
-					error.name = "AbortError";
-					reject(error);
-				};
-				if (options.signal?.aborted) {
-					abort();
-				} else {
-					options.signal?.addEventListener("abort", abort, { once: true });
-				}
-			});
+		const prompts: string[] = [];
+		completeSimpleMock.mockImplementation(async (_model, context) => {
+			prompts.push(context.messages[0].content[0].text as string);
+			return { ...mockSummaryResponse, stopReason: "error", errorMessage: "insufficient_quota" };
 		});
 
-		await expect(compact(preparation, createModel(false), "test-key")).rejects.toThrow("insufficient_quota");
-		expect(historyAborted).toBe(true);
-		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		await expect(
+			compact(
+				preparation,
+				createModel(false),
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				{ maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 },
+			),
+		).rejects.toThrow("insufficient_quota");
+		expect(prompts).toHaveLength(1);
+		expect(prompts[0]).not.toContain("PREFIX of a turn");
 	});
 });
