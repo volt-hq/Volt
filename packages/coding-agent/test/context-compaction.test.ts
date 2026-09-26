@@ -411,31 +411,42 @@ describe("cache-preserving compaction", () => {
 		);
 	});
 
-	it("keeps parallel split fallback records in dispatch order", async () => {
+	it("records sequential split fallback requests in dispatch order", async () => {
 		const prepared = preparation();
 		prepared.isSplitTurn = true;
 		prepared.turnPrefixMessages = [{ role: "user", content: "turn prefix", timestamp: 2 }];
 		const historyStream = createAssistantMessageEventStream();
+		let markHistoryStarted!: () => void;
+		const historyStarted = new Promise<void>((resolve) => {
+			markHistoryStarted = resolve;
+		});
+		let historySettled = false;
+		let prefixStartedAfterHistory: boolean | undefined;
 		let calls = 0;
-		const result = await compactContext(
+		const compaction = compactContext(
 			prepared,
 			{ ...model, contextWindow: 16_384 },
 			options(() => {
 				calls++;
-				if (calls === 1) return historyStream;
-				const prefixStream = streamResponse("Prefix checkpoint", "stop", undefined, {
-					input: 200,
-					totalTokens: 200,
-				});
-				void prefixStream.result().then(() => {
-					const message = fauxAssistantMessage("History checkpoint");
-					message.usage = { ...message.usage, input: 100, totalTokens: 100 };
-					historyStream.push({ type: "done", seq: 1, reason: "stop", message });
-				});
-				return prefixStream;
+				if (calls === 1) {
+					markHistoryStarted();
+					return historyStream;
+				}
+				// Record instead of asserting: the bounded stream would swallow a thrown expectation.
+				prefixStartedAfterHistory = historySettled;
+				return streamResponse("Prefix checkpoint", "stop", undefined, { input: 200, totalTokens: 200 });
 			}),
 		);
+		await historyStarted;
+		// Give a parallel dispatch every chance to start before the history request settles.
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		historySettled = true;
+		const message = fauxAssistantMessage("History checkpoint");
+		message.usage = { ...message.usage, input: 100, totalTokens: 100 };
+		historyStream.push({ type: "done", seq: 1, reason: "stop", message });
+		const result = await compaction;
 		expect(calls).toBe(2);
+		expect(prefixStartedAfterHistory).toBe(true);
 		expect(result.summary).toContain("History checkpoint");
 		expect(result.summary).toContain("Prefix checkpoint");
 		expect(result.details.requests).toMatchObject([
