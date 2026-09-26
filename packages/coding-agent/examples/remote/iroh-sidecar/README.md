@@ -31,7 +31,7 @@ npm run iroh:poc:client -- "<ticket>"    # one-shot client
 npm run iroh:poc:client -- "<ticket>" --interactive  # persistent prompt loop
 npm run iroh:poc:clients                # list paired clients through the example wrapper
 volt remote clients                     # list paired clients through the product CLI
-volt remote status                      # exits 0 only when phone transport is ready
+volt remote status                      # exits 0 only when phone transport and relay access are ready
 npm run iroh:poc:revoke -- <node-id>    # revoke a paired client through the wrapper
 volt remote revoke <node-id>            # revoke a paired client through the product CLI
 ```
@@ -118,7 +118,7 @@ volt remote status
 volt remote status
 ```
 
-`volt remote status` reports live daemon and structured phone-transport health without printing pairing secrets or secret hashes. It exits nonzero unless `remoteTransport.state` is `ready`.
+`volt remote status` reports live daemon and structured phone-transport health without printing pairing secrets or secret hashes. It exits nonzero unless `remoteTransport.state` is `ready` and managed `relayCredential.state`, when present, is not `expired`, `subscription_inactive`, or `revocation_pending`.
 
 Revoke a client:
 

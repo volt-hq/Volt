@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { ENV_AGENT_DIR } from "../src/config.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
@@ -19,6 +20,7 @@ import type {
 import {
 	createIrohDaemonService,
 	type IrohDaemonServiceConfig,
+	type IrohDaemonServiceDependencies,
 	VOLT_PRODUCTION_RELAY_CREDENTIAL_SERVICE_URL,
 	VOLT_PRODUCTION_RELAY_URLS,
 } from "../src/daemon/iroh-service.ts";
@@ -27,6 +29,7 @@ import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
 import { createEmptyVoltdState, type VoltdStateFileV1 } from "../src/daemon/state.ts";
+import { main } from "../src/main.ts";
 
 const HOST = "a".repeat(64);
 const OLD_PHONE = "b".repeat(64);
@@ -162,6 +165,10 @@ function fakeIroh() {
 		},
 		async pair(ticket: string, phone: string): Promise<Record<string, unknown>> {
 			const payload = decodeIrohRemoteTicketPayload(ticket);
+			return this.connect(phone, payload.workspace, payload.secret);
+		},
+		/** Handshake as `phone`; omit the secret to reconnect an already-paired device. */
+		async connect(phone: string, workspace: string, secret?: string): Promise<Record<string, unknown>> {
 			const response = deferred<Record<string, unknown>>();
 			const closed = deferred<void>();
 			let delivered = false;
@@ -173,7 +180,7 @@ function fakeIroh() {
 						delivered = true;
 						return Array.from(
 							Buffer.from(
-								`${JSON.stringify({ type: "volt_iroh_hello", protocol: "volt-rpc/0", workspace: payload.workspace, workspaceDiscovery: { purpose: "list_sessions" }, secret: payload.secret, clientLabel: "Fresh phone" })}\n`,
+								`${JSON.stringify({ type: "volt_iroh_hello", protocol: "volt-rpc/0", workspace, workspaceDiscovery: { purpose: "list_sessions" }, ...(secret === undefined ? {} : { secret }), clientLabel: "Fresh phone" })}\n`,
 							),
 						);
 					},
@@ -224,7 +231,12 @@ function fakeIroh() {
 }
 
 async function startFixture(
-	options: { state?: VoltdStateFileV1; config?: IrohDaemonServiceConfig; missingNative?: boolean } = {},
+	options: {
+		state?: VoltdStateFileV1;
+		config?: IrohDaemonServiceConfig;
+		dependencies?: Omit<IrohDaemonServiceDependencies, "loadIrohModule">;
+		missingNative?: boolean;
+	} = {},
 ) {
 	const agentDir = mkdtempSync(join(tmpdir(), "volt-relay-recovery-"));
 	const paths = getDaemonPaths(agentDir);
@@ -236,6 +248,7 @@ async function startFixture(
 	const native = fakeIroh();
 	const daemon = runVoltDaemon({ agentDir, foreground: false }, [
 		createIrohDaemonService(options.config, {
+			...options.dependencies,
 			loadIrohModule: () =>
 				options.missingNative
 					? { error: new Error("missing binding") }
@@ -283,6 +296,47 @@ async function status(control: DaemonClient): Promise<Extract<ControlResponse, {
 	return result;
 }
 
+/** Paired clients without presence metadata (label, last seen) that a reconnect may refresh. */
+async function pairedClientGrants(control: DaemonClient) {
+	const result = await control.request({ type: "clients_list" });
+	if (result.type !== "clients_result") throw new Error("clients missing");
+	return result.clients.map(({ clientNodeId, pairedAtMs, allowedTools, usesDefaultTools, rpcGrant }) => ({
+		clientNodeId,
+		pairedAtMs,
+		allowedTools,
+		usesDefaultTools,
+		rpcGrant,
+	}));
+}
+
+const deniedRefresh = (retryAfterSeconds: string) => () =>
+	jsonResponse({ error: "subscription_inactive" }, 402, { "Retry-After": retryAfterSeconds });
+
+const renewedRefresh = () =>
+	jsonResponse({
+		accessToken: "renewed.payload.signature",
+		accessTokenExpiresAt: new Date(Date.now() + 600_000).toISOString(),
+		tokenType: "Bearer",
+	});
+
+/** Broker that only accepts host token refreshes; the response can be switched mid-test. */
+function refreshBroker(initial: () => Response | Promise<Response>) {
+	const requests: string[] = [];
+	let respond = initial;
+	vi.mocked(fetch).mockImplementation(async (input) => {
+		const url = String(input);
+		requests.push(url);
+		if (!url.endsWith("/v1/tokens/refresh")) throw new Error(`unexpected broker request ${url}`);
+		return respond();
+	});
+	return {
+		requests,
+		set(next: () => Response | Promise<Response>) {
+			respond = next;
+		},
+	};
+}
+
 beforeEach(() => {
 	vi.stubEnv("VOLT_IROH_RELAY_MODE", undefined);
 	vi.stubEnv("VOLT_IROH_RELAY_URLS", undefined);
@@ -324,9 +378,18 @@ describe("managed relay credential recovery", () => {
 				expect(current.relayCredential).toEqual({
 					state: stateName,
 					...(state.settings.relayCredential
-						? { expiresAt: state.settings.relayCredential.accessTokenExpiresAt }
+						? {
+								expiresAt: state.settings.relayCredential.accessTokenExpiresAt,
+								nextRefreshAt: expect.any(Number),
+							}
 						: {}),
 				});
+				if (stateName === "active") {
+					// Proactive refresh is scheduled inside the token's lifetime.
+					expect(current.relayCredential?.nextRefreshAt).toBeLessThan(
+						state.settings.relayCredential?.accessTokenExpiresAt ?? 0,
+					);
+				}
 				expect(JSON.stringify(current.relayCredential)).not.toContain("Token");
 				if (stateName === "expired") expect(fixture.native.boundTokens).toEqual([]);
 			} finally {
@@ -701,5 +764,253 @@ describe("managed relay credential recovery", () => {
 		} finally {
 			await fixture.close();
 		}
+	});
+
+	describe("renewal recovery (#375)", () => {
+		it("reconnects an existing pairing within the broker Retry-After after a delayed renewal", async () => {
+			const state = createEmptyVoltdState();
+			// Live but inside the refresh lead window: the first refresh runs at startup and
+			// the token expires while the subscription is still inactive.
+			const original = credential(1_500);
+			state.settings.relayCredential = original;
+			const access = createIrohRemotePresetAccess("coding");
+			state.clients = [
+				{
+					nodeId: OLD_PHONE,
+					label: "Existing phone",
+					allowedWorkspaces: [],
+					pairedAt: 1,
+					lastSeenAt: 2,
+					allowedTools: access.allowedTools,
+					rpcGrant: access.rpcGrant,
+				},
+			];
+			const broker = refreshBroker(deniedRefresh("1"));
+			const fixture = await startFixture({ state });
+			try {
+				expect(
+					await fixture.control.request({ type: "workspace_register", name: "repo", path: fixture.agentDir }),
+				).toMatchObject({ type: "ok" });
+				const grantsBefore = await pairedClientGrants(fixture.control);
+				expect(grantsBefore).toHaveLength(1);
+				await expect
+					.poll(async () => (await status(fixture.control)).relayCredential?.state)
+					.toBe("subscription_inactive");
+				await expect.poll(async () => (await status(fixture.control)).relayCredential?.nextRefreshAt).toBeDefined();
+				const suspended = await status(fixture.control);
+				// The next check follows the broker's Retry-After, not a fixed hourly timer.
+				expect(suspended.relayCredential?.nextRefreshAt ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(
+					Date.now() + 1_000,
+				);
+				await expect
+					.poll(() => fixture.native.removals, { timeout: 5_000 })
+					.toEqual([...VOLT_PRODUCTION_RELAY_URLS]);
+				expect((await status(fixture.control)).relayCredential?.state).toBe("subscription_inactive");
+				// The renewal notification is delayed: more suspended retries are denied first.
+				const deniedAtExpiry = broker.requests.length;
+				await expect
+					.poll(() => broker.requests.length, { timeout: 5_000 })
+					.toBeGreaterThanOrEqual(deniedAtExpiry + 2);
+				const renewedAt = Date.now();
+				broker.set(renewedRefresh);
+				await expect
+					.poll(() => fixture.native.reconnects.map((config) => config.authToken), { timeout: 5_000 })
+					.toContain("renewed.payload.signature");
+				expect(Date.now() - renewedAt).toBeLessThan(3_000);
+				for (const url of VOLT_PRODUCTION_RELAY_URLS) {
+					expect(fixture.native.reconnects).toContainEqual({ url, authToken: "renewed.payload.signature" });
+				}
+				expect((await status(fixture.control)).relayCredential?.state).toBe("active");
+
+				// The existing pairing reconnects without a pairing secret or a new claim.
+				const reconnected = await fixture.native.connect(OLD_PHONE, "repo");
+				expect(reconnected, JSON.stringify(reconnected)).toMatchObject({
+					success: true,
+					clientNodeId: OLD_PHONE,
+					hostNodeId: HOST,
+				});
+				// Identity and grants are unchanged; only presence metadata may update on connect.
+				expect(await pairedClientGrants(fixture.control)).toEqual(grantsBefore);
+				const persisted = fixture.readState();
+				expect(persisted.pendingPairingTickets ?? []).toEqual([]);
+				expect(persisted.settings.relayCredentialClaim).toBeUndefined();
+				expect(persisted.settings.relayCredential).toMatchObject({
+					grantId: original.grantId,
+					endpointId: original.endpointId,
+					refreshToken: original.refreshToken,
+					accessToken: "renewed.payload.signature",
+				});
+				expect(broker.requests.every((url) => url.endsWith("/v1/tokens/refresh"))).toBe(true);
+				expect(fixture.native.binds).toBe(1);
+				const log = readFileSync(getDaemonPaths(fixture.agentDir).logPath, "utf8");
+				expect(log.split("managed Iroh relay credential refresh failed")).toHaveLength(2);
+			} finally {
+				await fixture.close();
+			}
+		}, 20_000);
+
+		it("checks relay access immediately after renewal instead of waiting for a long Retry-After", async () => {
+			const state = createEmptyVoltdState();
+			state.settings.relayCredential = credential(-1);
+			const broker = refreshBroker(deniedRefresh("3600"));
+			const fixture = await startFixture({ state, dependencies: { relayCredentialCheckMinIntervalMs: 0 } });
+			try {
+				await expect
+					.poll(async () => (await status(fixture.control)).relayCredential?.state)
+					.toBe("subscription_inactive");
+				expect((await status(fixture.control)).relayCredential?.nextRefreshAt).toBeGreaterThan(
+					Date.now() + 3_500_000,
+				);
+				expect(broker.requests).toHaveLength(1);
+				broker.set(renewedRefresh);
+				expect(await fixture.control.request({ type: "relay_credential_check" })).toMatchObject({ type: "ok" });
+				expect(broker.requests).toHaveLength(2);
+				for (const url of VOLT_PRODUCTION_RELAY_URLS) {
+					expect(fixture.native.reconnects).toContainEqual({ url, authToken: "renewed.payload.signature" });
+				}
+				const restored = (await status(fixture.control)).relayCredential;
+				expect(restored?.state).toBe("active");
+				expect(restored?.nextRefreshAt).toBeLessThan(restored?.expiresAt ?? 0);
+			} finally {
+				await fixture.close();
+			}
+		});
+
+		it("refuses manual checks while relay access is active or a reset is pending", async () => {
+			const active = createEmptyVoltdState();
+			active.settings.relayCredential = credential();
+			let fixture = await startFixture({ state: active });
+			try {
+				expect(await fixture.control.request({ type: "relay_credential_check" })).toMatchObject({
+					type: "error",
+					code: "relay_credential_check_unavailable",
+					message: expect.stringContaining("active"),
+				});
+				expect(fetch).not.toHaveBeenCalled();
+			} finally {
+				await fixture.close();
+			}
+
+			const pending = createEmptyVoltdState();
+			pending.settings.relayCredentialRevocation = credential();
+			vi.mocked(fetch).mockImplementation(async () => new Response(null, { status: 503 }));
+			fixture = await startFixture({ state: pending });
+			try {
+				expect(await fixture.control.request({ type: "relay_credential_check" })).toMatchObject({
+					type: "error",
+					code: "relay_credential_check_unavailable",
+					message: expect.stringContaining("reset is pending"),
+				});
+				expect((await status(fixture.control)).relayCredential?.state).toBe("revocation_pending");
+				expect(vi.mocked(fetch).mock.calls.every(([input]) => String(input).endsWith("/v1/grant/revoke"))).toBe(
+					true,
+				);
+			} finally {
+				await fixture.close();
+			}
+		});
+
+		it("joins an in-flight check and reports broker failures with the retry still scheduled", async () => {
+			const state = createEmptyVoltdState();
+			state.settings.relayCredential = credential(-1);
+			const broker = refreshBroker(deniedRefresh("3600"));
+			const fixture = await startFixture({ state, dependencies: { relayCredentialCheckMinIntervalMs: 0 } });
+			try {
+				await expect
+					.poll(async () => (await status(fixture.control)).relayCredential?.state)
+					.toBe("subscription_inactive");
+				expect(broker.requests).toHaveLength(1);
+				const gate = deferred<Response>();
+				broker.set(() => gate.promise);
+				const checks = Promise.all([
+					fixture.control.request({ type: "relay_credential_check" }),
+					fixture.control.request({ type: "relay_credential_check" }),
+				]);
+				await expect.poll(() => broker.requests.length).toBe(2);
+				expect((await status(fixture.control)).relayCredential?.nextRefreshAt).toBeUndefined();
+				gate.resolve(deniedRefresh("3600")());
+				expect(await checks).toEqual([
+					expect.objectContaining({ type: "ok" }),
+					expect.objectContaining({ type: "ok" }),
+				]);
+				expect(broker.requests).toHaveLength(2);
+
+				broker.set(() => new Response(null, { status: 503 }));
+				expect(await fixture.control.request({ type: "relay_credential_check" })).toMatchObject({
+					type: "error",
+					code: "relay_credential_check_failed",
+					message: expect.stringContaining("503"),
+				});
+				expect(broker.requests).toHaveLength(3);
+				const afterFailure = (await status(fixture.control)).relayCredential;
+				expect(afterFailure?.state).toBe("subscription_inactive");
+				// The first failure backs off about one second rather than dropping the retry.
+				expect(afterFailure?.nextRefreshAt).toBeDefined();
+				expect(afterFailure?.nextRefreshAt ?? Number.POSITIVE_INFINITY).toBeLessThanOrEqual(Date.now() + 1_200);
+			} finally {
+				await fixture.close();
+			}
+		});
+
+		it("answers a check inside the local floor without calling the broker", async () => {
+			const state = createEmptyVoltdState();
+			state.settings.relayCredential = credential(-1);
+			const broker = refreshBroker(deniedRefresh("3600"));
+			const fixture = await startFixture({ state });
+			try {
+				await expect
+					.poll(async () => (await status(fixture.control)).relayCredential?.state)
+					.toBe("subscription_inactive");
+				expect(await fixture.control.request({ type: "relay_credential_check" })).toMatchObject({ type: "ok" });
+				expect(broker.requests).toHaveLength(1);
+				const current = (await status(fixture.control)).relayCredential;
+				expect(current?.state).toBe("subscription_inactive");
+				expect(current?.nextRefreshAt).toBeGreaterThan(Date.now() + 3_500_000);
+			} finally {
+				await fixture.close();
+			}
+		});
+
+		it.each([
+			{ relayState: "active", lifetimeMs: 600_000, exitCode: 0, line: "relay access: active" },
+			{
+				relayState: "subscription_inactive",
+				lifetimeMs: -1,
+				exitCode: 1,
+				line: "relay access: subscription inactive · next check in ",
+			},
+		] as const)(
+			"daemon and remote status report $relayState relay access with exit code $exitCode",
+			async ({ relayState, lifetimeMs, exitCode, line }) => {
+				const state = createEmptyVoltdState();
+				state.settings.relayCredential = credential(lifetimeMs);
+				refreshBroker(deniedRefresh("3600"));
+				const fixture = await startFixture({ state });
+				const originalExitCode = process.exitCode;
+				const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+				const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+				vi.stubEnv(ENV_AGENT_DIR, fixture.agentDir);
+				try {
+					await expect.poll(async () => (await status(fixture.control)).relayCredential?.state).toBe(relayState);
+					process.exitCode = undefined;
+					await main(["daemon", "status", "--json"]);
+					expect(JSON.parse(String(logSpy.mock.calls.at(-1)?.[0]))).toMatchObject({
+						running: true,
+						remoteTransport: { state: "ready" },
+						relayCredential: { state: relayState },
+					});
+					expect(process.exitCode ?? 0).toBe(exitCode);
+					process.exitCode = undefined;
+					await main(["remote", "status"]);
+					const text = errorSpy.mock.calls.map((call) => call.join(" ")).join("\n");
+					expect(text).toContain("remote transport: ready");
+					expect(text).toContain(line);
+					expect(process.exitCode ?? 0).toBe(exitCode);
+				} finally {
+					process.exitCode = originalExitCode;
+					await fixture.close();
+				}
+			},
+		);
 	});
 });

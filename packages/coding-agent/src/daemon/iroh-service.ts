@@ -219,6 +219,15 @@ const WORKSPACE_MANAGEMENT_STREAM_SESSION_ID = "$workspace-management";
 const IROH_ENDPOINT_READY_TIMEOUT_MS = 15_000;
 const IROH_UNAUTHENTICATED_CONNECTION_TIMEOUT_MS = 15_000;
 const SHUTDOWN_RUNTIME_IDLE_CAP_MS = 60_000;
+/** Local floor between broker refresh attempts started by a manual relay access check. */
+const RELAY_CREDENTIAL_CHECK_MIN_INTERVAL_MS = 5_000;
+
+type ManagedRelayRefreshOutcome =
+	| { status: "refreshed" }
+	| { status: "subscription_inactive" }
+	/** Fenced by reset, shutdown, or a newer credential; nothing was scheduled. */
+	| { status: "superseded" }
+	| { status: "failed"; message: string };
 
 export function isExactTuiWorkObservationLeaseHolder(
 	connection: Pick<ControlConnection, "client" | "connectionId">,
@@ -364,6 +373,8 @@ export interface IrohDaemonServiceDependencies {
 	relayRecoveryDelayMs?: number;
 	relayRecoveryRetryMs?: number;
 	relayRecoveryConfirmationTimeoutMs?: number;
+	/** Override the manual relay access check's minimum interval since the last broker attempt (test-only). */
+	relayCredentialCheckMinIntervalMs?: number;
 	/** Override the connection authentication, first-stream accept, and stream handshake deadlines (test-only). */
 	handshakeTimeoutMs?: number;
 }
@@ -446,6 +457,7 @@ function createRelayCredentialStatus(
 	claim: IrohManagedRelayCredentialClaim | undefined,
 	revocationPending = false,
 	subscriptionInactive = false,
+	nextRefreshAt?: number,
 ): ControlRelayCredentialStatus {
 	const expiresAt = credential?.accessTokenExpiresAt;
 	const state = revocationPending
@@ -459,7 +471,11 @@ function createRelayCredentialStatus(
 					: credential !== undefined
 						? "active"
 						: "unpaired";
-	return { state, ...(expiresAt === undefined ? {} : { expiresAt }) };
+	return {
+		state,
+		...(expiresAt === undefined ? {} : { expiresAt }),
+		...(nextRefreshAt === undefined ? {} : { nextRefreshAt }),
+	};
 }
 
 function initialRelayCredentialStatus(
@@ -770,7 +786,7 @@ export function createIrohDaemonService(
 			};
 			return {
 				async handleRequest(connection, request) {
-					if (request.type === "pair_request") {
+					if (request.type === "pair_request" || request.type === "relay_credential_check") {
 						connection.send({
 							type: "error",
 							id: request.id,
@@ -806,7 +822,7 @@ export function createIrohDaemonService(
 			};
 			return {
 				async handleRequest(connection, request) {
-					if (request.type !== "pair_request") return false;
+					if (request.type !== "pair_request" && request.type !== "relay_credential_check") return false;
 					connection.send({
 						type: "error",
 						id: request.id,
@@ -848,8 +864,12 @@ class IrohDaemonService {
 	private managedRelayCredentialRevocation: IrohManagedRelayCredential | undefined;
 	private readonly relayCredentialServiceUrl: string | undefined;
 	private relayCredentialRefreshTimer: ReturnType<typeof setTimeout> | undefined;
+	/** Epoch ms when relayCredentialRefreshTimer fires; set exactly while that timer is pending. */
+	private relayCredentialNextRefreshAt: number | undefined;
+	private relayCredentialRefreshFailureCount = 0;
+	private relayCredentialLastRefreshAttemptAt: number | undefined;
 	private relayCredentialExpiryTimer: ReturnType<typeof setTimeout> | undefined;
-	private relayCredentialRefreshTask: Promise<void> | undefined;
+	private relayCredentialRefreshTask: Promise<ManagedRelayRefreshOutcome> | undefined;
 	private relayCredentialExchangeTask: Promise<void> | undefined;
 	private relayConfigurationTask: Promise<void> = Promise.resolve();
 	private relayRecoveryMonitor: IrohRelayRecoveryMonitor | undefined;
@@ -1923,10 +1943,7 @@ class IrohDaemonService {
 				) {
 					return;
 				}
-				if (this.relayCredentialRefreshTimer !== undefined) {
-					clearTimeout(this.relayCredentialRefreshTimer);
-					this.relayCredentialRefreshTimer = undefined;
-				}
+				this.clearManagedRelayCredentialRefreshTimer();
 				await this.relayCredentialRefreshTask?.catch(() => {});
 				const credential = activateIrohManagedRelayCredential(claim, result.exchange, this.managedRelayCredential);
 				const approvedAppEndpoint = parseIrohManagedRelayAppEndpoint({
@@ -2078,6 +2095,7 @@ class IrohDaemonService {
 				}
 			}
 			this.relayCredentialSubscriptionInactive = false;
+			this.relayCredentialRefreshFailureCount = 0;
 			installed = true;
 		});
 		return installed;
@@ -2154,8 +2172,7 @@ class IrohDaemonService {
 		let removalError: unknown;
 		try {
 			await this.stopRelayRecoveryMonitor();
-			clearTimeout(this.relayCredentialRefreshTimer);
-			this.relayCredentialRefreshTimer = undefined;
+			this.clearManagedRelayCredentialRefreshTimer();
 			clearTimeout(this.relayCredentialExpiryTimer);
 			this.relayCredentialExpiryTimer = undefined;
 
@@ -2212,6 +2229,7 @@ class IrohDaemonService {
 			this.managedRelayCredentialRevocation = undefined;
 			this.managedRelayAppEndpoints = [];
 			this.relayCredentialSubscriptionInactive = false;
+			this.relayCredentialRefreshFailureCount = 0;
 		} catch (error) {
 			throw new Error(
 				`Relay credential reset failed. Retry the reset before pairing: ${error instanceof Error ? error.message : String(error)}`,
@@ -2294,61 +2312,122 @@ class IrohDaemonService {
 		this.relayCredentialExpiryTimer.unref?.();
 	}
 
-	private scheduleManagedRelayCredentialRefresh(delayOverride?: number, consecutiveFailureCount = 0): void {
-		if (this.relayCredentialRefreshTimer !== undefined) {
-			clearTimeout(this.relayCredentialRefreshTimer);
-			this.relayCredentialRefreshTimer = undefined;
-		}
+	private clearManagedRelayCredentialRefreshTimer(): void {
+		clearTimeout(this.relayCredentialRefreshTimer);
+		this.relayCredentialRefreshTimer = undefined;
+		this.relayCredentialNextRefreshAt = undefined;
+	}
+
+	private scheduleManagedRelayCredentialRefresh(delayOverride?: number): void {
+		this.clearManagedRelayCredentialRefreshTimer();
 		const credential = this.managedRelayCredential;
 		if (credential === undefined || !this.admission.isOpen || this.relayCredentialIsRevoking) return;
 		const expectedEpoch = this.relayCredentialEpoch;
 		const delay = Math.max(0, delayOverride ?? managedRelayCredentialRefreshAt(credential) - Date.now());
+		this.relayCredentialNextRefreshAt = Date.now() + delay;
 		this.relayCredentialRefreshTimer = setTimeout(() => {
 			this.relayCredentialRefreshTimer = undefined;
-			const task = this.refreshManagedRelayCredential(expectedEpoch)
-				.then((installed) => {
-					if (
-						!installed ||
-						!this.admission.isOpen ||
-						expectedEpoch !== this.relayCredentialEpoch ||
-						this.relayCredentialIsRevoking
-					) {
-						return;
-					}
-					this.log("info", "refreshed managed Iroh relay credential");
-					this.scheduleManagedRelayCredentialRefresh();
-				})
-				.catch((error: unknown) => {
-					if (
-						!this.admission.isOpen ||
-						expectedEpoch !== this.relayCredentialEpoch ||
-						this.relayCredentialIsRevoking
-					) {
-						return;
-					}
-					const subscriptionInactive = error instanceof IrohRelayCredentialSubscriptionInactiveError;
-					// The broker paces suspended hosts with short retries; log the suspension once.
-					const repeatedSuspension = subscriptionInactive && this.relayCredentialSubscriptionInactive;
-					if (subscriptionInactive) this.relayCredentialSubscriptionInactive = true;
-					const nextFailureCount = subscriptionInactive ? 0 : Math.min(consecutiveFailureCount + 1, 6);
-					if (!repeatedSuspension) {
-						this.log("warn", "managed Iroh relay credential refresh failed", {
-							error: error instanceof Error ? error.message : String(error),
-						});
-					}
-					this.scheduleManagedRelayCredentialRefresh(
-						subscriptionInactive ? error.retryAfterMs : managedRelayCredentialFailureRetryMs(nextFailureCount),
-						nextFailureCount,
-					);
-				})
-				.finally(() => {
-					if (this.relayCredentialRefreshTask === task) {
-						this.relayCredentialRefreshTask = undefined;
-					}
-				});
-			this.relayCredentialRefreshTask = task;
+			this.relayCredentialNextRefreshAt = undefined;
+			void this.startManagedRelayCredentialRefresh(expectedEpoch);
 		}, delay);
 		this.relayCredentialRefreshTimer.unref?.();
+	}
+
+	/**
+	 * One broker refresh attempt, shared by the scheduled timer and manual checks.
+	 * The outcome always schedules the next attempt (unless fenced), so a manual
+	 * check follows the same Retry-After and backoff as the timer.
+	 */
+	private startManagedRelayCredentialRefresh(expectedEpoch: number): Promise<ManagedRelayRefreshOutcome> {
+		this.relayCredentialLastRefreshAttemptAt = Date.now();
+		const isFenced = () =>
+			!this.admission.isOpen || expectedEpoch !== this.relayCredentialEpoch || this.relayCredentialIsRevoking;
+		const task = this.refreshManagedRelayCredential(expectedEpoch)
+			.then((installed): ManagedRelayRefreshOutcome => {
+				if (!installed || isFenced()) return { status: "superseded" };
+				this.log("info", "refreshed managed Iroh relay credential");
+				this.scheduleManagedRelayCredentialRefresh();
+				return { status: "refreshed" };
+			})
+			.catch((error: unknown): ManagedRelayRefreshOutcome => {
+				if (isFenced()) return { status: "superseded" };
+				const subscriptionInactive = error instanceof IrohRelayCredentialSubscriptionInactiveError;
+				const message = error instanceof Error ? error.message : String(error);
+				// The broker paces suspended hosts with short retries; log the suspension once.
+				const repeatedSuspension = subscriptionInactive && this.relayCredentialSubscriptionInactive;
+				if (subscriptionInactive) this.relayCredentialSubscriptionInactive = true;
+				this.relayCredentialRefreshFailureCount = subscriptionInactive
+					? 0
+					: Math.min(this.relayCredentialRefreshFailureCount + 1, 6);
+				if (!repeatedSuspension) {
+					this.log("warn", "managed Iroh relay credential refresh failed", { error: message });
+				}
+				this.scheduleManagedRelayCredentialRefresh(
+					subscriptionInactive
+						? error.retryAfterMs
+						: managedRelayCredentialFailureRetryMs(this.relayCredentialRefreshFailureCount),
+				);
+				return subscriptionInactive ? { status: "subscription_inactive" } : { status: "failed", message };
+			})
+			.finally(() => {
+				if (this.relayCredentialRefreshTask === task) {
+					this.relayCredentialRefreshTask = undefined;
+				}
+			});
+		this.relayCredentialRefreshTask = task;
+		return task;
+	}
+
+	/**
+	 * Manual "check now" for expired or suspended relay access. It joins an
+	 * in-flight refresh, skips the broker inside RELAY_CREDENTIAL_CHECK_MIN_INTERVAL_MS
+	 * of the last attempt, and otherwise runs the scheduled refresh early. It never
+	 * bypasses broker pacing: denied refreshes read cached broker state.
+	 */
+	private async checkManagedRelayCredential(): Promise<{ ok: true } | { ok: false; code: string; message: string }> {
+		const unavailable = (message: string) =>
+			({ ok: false, code: "relay_credential_check_unavailable", message }) as const;
+		if (this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined) {
+			return unavailable("A relay credential reset is pending. Retry the reset instead.");
+		}
+		if (this.relayCredentialServiceUrl === undefined || this.managedRelayCredential === undefined) {
+			return unavailable("No managed relay credential is configured. Pair a phone to set up relay access.");
+		}
+		if (!this.admission.isOpen || this.endpoint === undefined) {
+			return unavailable("Phone transport is not running. Run `volt daemon status`.");
+		}
+		const { state } = createRelayCredentialStatus(
+			this.managedRelayCredential,
+			this.managedRelayCredentialClaim,
+			false,
+			this.relayCredentialSubscriptionInactive,
+		);
+		if (state !== "expired" && state !== "subscription_inactive") {
+			return unavailable(
+				state === "pairing"
+					? "A phone pairing is in progress. Finish it before checking relay access."
+					: "Relay access is active; there is nothing to check.",
+			);
+		}
+		let task = this.relayCredentialRefreshTask;
+		if (task === undefined) {
+			const lastAttemptAt = this.relayCredentialLastRefreshAttemptAt;
+			const minimumIntervalMs =
+				this.dependencies.relayCredentialCheckMinIntervalMs ?? RELAY_CREDENTIAL_CHECK_MIN_INTERVAL_MS;
+			if (lastAttemptAt !== undefined && Date.now() - lastAttemptAt < minimumIntervalMs) {
+				return { ok: true };
+			}
+			this.clearManagedRelayCredentialRefreshTimer();
+			task = this.startManagedRelayCredentialRefresh(this.relayCredentialEpoch);
+		}
+		const outcome = await task;
+		if (outcome.status === "failed") {
+			return { ok: false, code: "relay_credential_check_failed", message: outcome.message };
+		}
+		if (outcome.status === "superseded") {
+			return unavailable("Relay credentials changed during the check. Refresh status.");
+		}
+		return { ok: true };
 	}
 
 	private async runStart(): Promise<void> {
@@ -5581,6 +5660,25 @@ class IrohDaemonService {
 				}
 				return true;
 			}
+			case "relay_credential_check": {
+				try {
+					await this.startupTask;
+					const result = await this.checkManagedRelayCredential();
+					connection.send(
+						result.ok
+							? { type: "ok", id: request.id }
+							: { type: "error", id: request.id, code: result.code, message: result.message },
+					);
+				} catch (error) {
+					connection.send({
+						type: "error",
+						id: request.id,
+						code: "relay_credential_check_failed",
+						message: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return true;
+			}
 			case "client_access_update": {
 				const access =
 					request.access !== undefined
@@ -6057,6 +6155,7 @@ class IrohDaemonService {
 							this.managedRelayCredentialClaim,
 							this.relayCredentialIsRevoking || this.managedRelayCredentialRevocation !== undefined,
 							this.relayCredentialSubscriptionInactive,
+							this.relayCredentialNextRefreshAt,
 						),
 					}),
 		};
@@ -6076,10 +6175,7 @@ class IrohDaemonService {
 		}
 		await Promise.allSettled([...workRetirements, ...this.tuiWorkRetirementTasks]);
 		await this.stopRelayRecoveryMonitor();
-		if (this.relayCredentialRefreshTimer !== undefined) {
-			clearTimeout(this.relayCredentialRefreshTimer);
-			this.relayCredentialRefreshTimer = undefined;
-		}
+		this.clearManagedRelayCredentialRefreshTimer();
 		if (this.relayCredentialExpiryTimer !== undefined) {
 			clearTimeout(this.relayCredentialExpiryTimer);
 			this.relayCredentialExpiryTimer = undefined;

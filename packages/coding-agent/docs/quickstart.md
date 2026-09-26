@@ -102,7 +102,7 @@ Pair only devices you control. Phone prompts can run tools on your computer, and
 
 Direct and self-hosted connections are separate from Volt Pro's managed relay and completion-notification services. An endpoint marked ready does not confirm managed relay access; `/remote` reports relay enrollment and subscription status separately. See the [privacy policy](https://volt-cli.dev/privacy) and [terms](https://volt-cli.dev/terms).
 
-If the phone cannot connect, run `volt daemon status` and inspect `/remote`. Status exits successfully only when phone transport is ready. See [Background daemon](daemon.md) for transport errors and [Security](security.md#remote-access-over-iroh-preview) for access boundaries.
+If the phone cannot connect, run `volt daemon status` and inspect `/remote`. Status exits successfully only when phone transport is ready and managed relay access is available. See [Background daemon](daemon.md) for transport errors and [Security](security.md#remote-access-over-iroh-preview) for access boundaries.
 
 ## Give volt project instructions
 

@@ -334,6 +334,37 @@ func TestRefreshReconciliationSuspensionHeartbeatsAndNotificationRecovery(t *tes
 	}
 }
 
+// A renewal whose App Store notification never arrives is still recovered by a
+// host refresh, bounded by the one-hour reconciliation cooldown. Suspended
+// retries inside the cooldown read cached state, keep the short Retry-After,
+// and never call Apple.
+func TestRefreshReconciliationRecoversMissedRenewalNotification(t *testing.T) {
+	f := newReconciliationFixture(t, appstore.StatusInactive, 0)
+	f.verifier.status = appstore.StatusInactive
+	headers := map[string]string{"Authorization": "Bearer " + f.hostRefresh}
+	suspendedAt := f.service.now
+	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusPaymentRequired, "15")
+	if got := f.verifier.calls.Load(); got != 1 {
+		t.Fatalf("lapsed refresh reconciliation calls=%d, want 1", got)
+	}
+
+	// The subscription renews, but its notification is lost: only Apple knows.
+	f.verifier.status = appstore.StatusActive
+	for _, elapsed := range []time.Duration{15 * time.Second, 30 * time.Minute, time.Hour - time.Second} {
+		f.service.now = suspendedAt.Add(elapsed)
+		assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusPaymentRequired, "15")
+	}
+	if got := f.verifier.calls.Load(); got != 1 {
+		t.Fatalf("refreshes inside the reconciliation cooldown called Apple: calls=%d", got)
+	}
+
+	f.service.now = suspendedAt.Add(time.Hour)
+	assertRefreshResponse(t, f.service.request(t, http.MethodPost, "/v1/tokens/refresh", "", headers), http.StatusOK, "")
+	if got := f.verifier.calls.Load(); got != 2 {
+		t.Fatalf("refresh at cooldown expiry reconciliation calls=%d, want 2", got)
+	}
+}
+
 func (f *reconciliationFixture) assertHeartbeat(t *testing.T, token string) {
 	t.Helper()
 	digest := sha256.Sum256([]byte(token))

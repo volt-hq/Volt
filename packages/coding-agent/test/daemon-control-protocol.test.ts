@@ -83,6 +83,7 @@ describe("control protocol framing", () => {
 			{ type: "pair_cancel", id: "6b", requestId: "pair-1" },
 			{ type: "clients_list", id: "7" },
 			{ type: "relay_credential_revoke", id: "7b" },
+			{ type: "relay_credential_check", id: "7c" },
 			{ type: "client_revoke", id: "8", clientNodeId: "n-1" },
 			{ type: "client_approve_repair", id: "8b", clientNodeId: "n-1" },
 			{ type: "workspace_register", id: "9", name: "volt", path: "/tmp/volt" },
@@ -146,6 +147,7 @@ describe("control protocol framing", () => {
 				leases: [{ workspaceName: "volt", sessionId: "s-1", state: "tui-owned", relayCount: 1, streamCount: 0 }],
 				phoneConnections: 1,
 				remoteTransport: { state: "ready", wrapperVersion: "1.1.1-volt.2" },
+				relayCredential: { state: "subscription_inactive", expiresAt: 2_000, nextRefreshAt: 3_000 },
 				workspaces: [{ name: "volt", path: "/tmp/volt", allowedTools: ["read", "bash"] }],
 				clients: [
 					{
@@ -229,6 +231,21 @@ describe("control protocol framing", () => {
 		expect(isControlResponse({ ...base, remoteTransport: { state: "unavailable", reasonCode: "secret" } })).toBe(
 			false,
 		);
+	});
+
+	it("validates the relay access next refresh time as an optional epoch timestamp", () => {
+		const base = { type: "status_result", id: "status", remoteTransport: { state: "ready" } };
+		for (const nextRefreshAt of [undefined, 1, Date.now() + 15_000]) {
+			expect(
+				isControlResponse({ ...base, relayCredential: { state: "subscription_inactive", nextRefreshAt } }),
+			).toBe(true);
+		}
+		for (const nextRefreshAt of [0, -1, 1.5, "15", null, Number.MAX_SAFE_INTEGER + 1]) {
+			expect(
+				isControlResponse({ ...base, relayCredential: { state: "subscription_inactive", nextRefreshAt } }),
+				String(nextRefreshAt),
+			).toBe(false);
+		}
 	});
 
 	it("rejects a prepared-rekey response without its transaction id", () => {
