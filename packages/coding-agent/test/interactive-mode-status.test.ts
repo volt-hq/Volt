@@ -1239,6 +1239,137 @@ describe("InteractiveMode plan pane integration", () => {
 	});
 });
 
+describe("InteractiveMode finished plan closing", () => {
+	beforeAll(() => {
+		setKeybindings(new KeybindingsManager());
+	});
+
+	const prototype = (
+		InteractiveMode as unknown as {
+			prototype: {
+				closeFinishedPlan: (this: unknown) => void;
+				handlePlanDetailsAction: (this: unknown, action: string) => Promise<void>;
+				handlePlanningStateChanged: (this: unknown, planning: unknown) => void;
+				refreshPlanningUi: (this: unknown, planning?: unknown) => void;
+			};
+		}
+	).prototype;
+
+	function planState(phase: string, id = "plan-1") {
+		return { id, revision: 7, phase, title: "Plan", summary: "Summary", steps: [] };
+	}
+
+	function closeFixture(plan: ReturnType<typeof planState> | null, isStreaming = false) {
+		return {
+			session: { planningState: { mode: "build", plan }, isStreaming, discardPlan: vi.fn() },
+			closePlanDetails: vi.fn(),
+			showStatus: vi.fn(),
+			showWarning: vi.fn(),
+			showError: vi.fn(),
+		};
+	}
+
+	test("discards completed and handed-off plans at their exact revision", () => {
+		for (const phase of ["completed", "handed_off"]) {
+			const fakeThis = closeFixture(planState(phase));
+			prototype.closeFinishedPlan.call(fakeThis);
+			expect(fakeThis.closePlanDetails).toHaveBeenCalledTimes(1);
+			expect(fakeThis.session.discardPlan).toHaveBeenCalledExactlyOnceWith("plan-1", 7);
+			expect(fakeThis.showStatus).toHaveBeenCalledWith("Plan closed");
+			expect(fakeThis.showWarning).not.toHaveBeenCalled();
+		}
+	});
+
+	test("refuses unfinished plans and streaming runs without discarding", () => {
+		const cases = [
+			{ plan: planState("draft"), streaming: false, warning: "still a draft" },
+			{ plan: planState("ready"), streaming: false, warning: "Execute Plan or Change Plan" },
+			{ plan: planState("active"), streaming: false, warning: "returns it to draft" },
+			{ plan: planState("completed"), streaming: true, warning: "Wait for the current run to finish" },
+		];
+		for (const { plan, streaming, warning } of cases) {
+			const fakeThis = closeFixture(plan, streaming);
+			prototype.closeFinishedPlan.call(fakeThis);
+			expect(fakeThis.session.discardPlan).not.toHaveBeenCalled();
+			expect(fakeThis.closePlanDetails).not.toHaveBeenCalled();
+			expect(fakeThis.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(warning));
+		}
+
+		const empty = closeFixture(null);
+		prototype.closeFinishedPlan.call(empty);
+		expect(empty.session.discardPlan).not.toHaveBeenCalled();
+		expect(empty.showStatus).toHaveBeenCalledWith("No plan to close");
+	});
+
+	test("names configured keys in unfinished-plan warnings", () => {
+		setKeybindings(new KeybindingsManager({ "app.mode.toggle": "alt+m", "app.plan.togglePane": "alt+x" }));
+		try {
+			const active = closeFixture(planState("active"));
+			prototype.closeFinishedPlan.call(active);
+			expect(active.showWarning.mock.calls[0]?.[0]).toMatch(/(alt|option)\+m/);
+			const ready = closeFixture(planState("ready"));
+			prototype.closeFinishedPlan.call(ready);
+			expect(ready.showWarning.mock.calls[0]?.[0]).toMatch(/(alt|option)\+x/);
+		} finally {
+			setKeybindings(new KeybindingsManager());
+		}
+	});
+
+	test("reports discard failures as errors", () => {
+		const fakeThis = closeFixture(planState("completed"));
+		fakeThis.session.discardPlan.mockImplementation(() => {
+			throw new Error("Plan revision is stale");
+		});
+		prototype.closeFinishedPlan.call(fakeThis);
+		expect(fakeThis.showError).toHaveBeenCalledWith("Plan revision is stale");
+		expect(fakeThis.showStatus).not.toHaveBeenCalledWith("Plan closed");
+	});
+
+	test("routes the Close Plan action to the finished-plan close path", async () => {
+		const fakeThis = { ...closeFixture(planState("completed")), closeFinishedPlan: vi.fn() };
+		await prototype.handlePlanDetailsAction.call(fakeThis, "close");
+		expect(fakeThis.closeFinishedPlan).toHaveBeenCalledTimes(1);
+		expect(fakeThis.showWarning).not.toHaveBeenCalled();
+		expect(fakeThis.closePlanDetails).not.toHaveBeenCalled();
+	});
+
+	test("announces completion once for a live active-to-completed transition", () => {
+		const fakeThis: any = {
+			lastObservedPlan: undefined,
+			planStatus: { setPlanning: vi.fn() },
+			planInspector: { setPlanning: vi.fn() },
+			mainView: { setPlanning: vi.fn(), isTerminalSplit: () => false },
+			planDetails: undefined,
+			readyPlanFocusKey: undefined,
+			focusConversation: vi.fn(),
+			updateEditorBorderColor: vi.fn(),
+			showStatus: vi.fn(),
+			ui: { requestRender: vi.fn() },
+		};
+		fakeThis.refreshPlanningUi = (planning: unknown) => prototype.refreshPlanningUi.call(fakeThis, planning);
+		const changed = (phase: string, id?: string) =>
+			prototype.handlePlanningStateChanged.call(fakeThis, { mode: "build", plan: planState(phase, id) });
+		const announcements = () =>
+			fakeThis.showStatus.mock.calls.filter(([message]: [string]) => message.startsWith("Plan complete"));
+
+		// Startup/resume render a completed plan without a live transition.
+		fakeThis.refreshPlanningUi({ mode: "build", plan: planState("completed") });
+		changed("completed");
+		expect(announcements()).toHaveLength(0);
+
+		changed("active", "plan-2");
+		changed("completed", "plan-3");
+		expect(announcements()).toHaveLength(0);
+
+		changed("active", "plan-4");
+		changed("completed", "plan-4");
+		changed("completed", "plan-4");
+		expect(announcements()).toHaveLength(1);
+		expect(announcements()[0]?.[0]).toContain("/plan-close");
+		expect(fakeThis.planStatus.setPlanning).toHaveBeenCalledTimes(7);
+	});
+});
+
 describe("InteractiveMode.showLoadedResources", () => {
 	beforeAll(() => {
 		initTheme("dark");

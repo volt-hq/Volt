@@ -188,6 +188,61 @@ describe("PlanInspectorComponent", () => {
 		expect(actions).toEqual(["retain_context", "new_session"]);
 	});
 
+	it("offers Close Plan only for finished plans and confirms it with Enter", () => {
+		for (const phase of ["completed", "handed_off"] as const) {
+			const actions: PlanDetailsAction[] = [];
+			const inspector = createInspector(planning(phase), { actions });
+			const output = text(inspector);
+			expect(output).toContain("> Close Plan");
+			expect(output).toContain("close plan");
+			expect(output).not.toContain("choose");
+			inspector.handleInput("\x1b[C");
+			inspector.handleInput("\x1b[D");
+			expect(text(inspector)).toContain("> Close Plan");
+			inspector.handleInput("\r");
+			expect(actions).toEqual(["close"]);
+		}
+
+		for (const phase of ["draft", "active"] as const) {
+			const actions: PlanDetailsAction[] = [];
+			const inspector = createInspector(planning(phase), { actions });
+			const output = text(inspector);
+			expect(output).not.toContain("Close Plan");
+			expect(output).not.toContain("Execute Plan");
+			inspector.handleInput("\r");
+			expect(actions).toEqual([]);
+		}
+	});
+
+	it("selects Close Plan when a ready plan with another action selected completes", () => {
+		const actions: PlanDetailsAction[] = [];
+		const inspector = createInspector(planning("ready"), { actions });
+		inspector.handleInput("\x1b[C");
+		inspector.handleInput("\x1b[C");
+		expect(text(inspector)).toContain("> Change Plan");
+
+		inspector.setPlanning(planning("completed"));
+		const output = text(inspector);
+		expect(output).toContain("> Close Plan");
+		expect(output).not.toContain("Change Plan");
+		inspector.handleInput("\r");
+		expect(actions).toEqual(["close"]);
+	});
+
+	it("ignores Close Plan confirmation while the action footer is hidden", () => {
+		const actions: PlanDetailsAction[] = [];
+		const inspector = createInspector(planning("completed"), { actions });
+		inspector.setViewportRows(2);
+		expect(text(inspector, 48)).not.toContain("Close Plan");
+		inspector.handleInput("\r");
+		expect(actions).toEqual([]);
+
+		inspector.setViewportRows(4);
+		expect(text(inspector, 48)).toContain("> Close Plan");
+		inspector.handleInput("\r");
+		expect(actions).toEqual(["close"]);
+	});
+
 	it("scrolls long wrapped content and reports page position", () => {
 		const state = planning("active", 30);
 		state.plan!.steps[0]!.text =

@@ -167,6 +167,7 @@ Type `/` in the editor to trigger commands. [Extensions](#extensions) can regist
 | `/plan` | Enter read-only Plan mode |
 | `/build` | Return to Build mode without activating a ready plan |
 | `/plan-details` | Focus the wide plan inspector, or open the compact checklist viewer |
+| `/plan-close` | Close a completed or handed-off plan and return to the full-width conversation |
 | `/resume` | Pick from previous sessions |
 | `/clear` | Start a new session |
 | `/name <name>` | Set session display name |
@@ -247,7 +248,7 @@ When the agent submits a plan, Volt offers exactly:
 2. **Execute Plan & Clear Context** — create and select a linked execution session containing the approved plan but none of the prior conversation.
 3. **Change Plan** — return the ready plan to draft and focus the normal editor for feedback.
 
-Approval freezes the plan title, summary, outcome and substep text, ordering, hierarchy, and scope. During execution, the agent can update only executable leaf status and evidence with `update_plan_progress`; group outcome status is derived from its substeps. The inspector expands the active group while collapsing inactive execution groups, while ready-plan review shows the full hierarchy. If implementation reveals that the scope must change, `request_replan` pauses execution, returns the plan to draft without its approval metadata, and ends the run so the revision must be approved again. Switching to Build by itself never approves a ready plan, and explicit `!` shell commands remain available because Plan mode constrains agent tools rather than the host shell.
+Approval freezes the plan title, summary, outcome and substep text, ordering, hierarchy, and scope. During execution, the agent can update only executable leaf status and evidence with `update_plan_progress`; group outcome status is derived from its substeps. The inspector expands the active group while collapsing inactive execution groups, while ready-plan review shows the full hierarchy. If implementation reveals that the scope must change, `request_replan` pauses execution, returns the plan to draft without its approval metadata, and ends the run so the revision must be approved again. Switching to Build by itself never approves a ready plan, and explicit `!` shell commands remain available because Plan mode constrains agent tools rather than the host shell. Completed or handed-off plans stay visible until you close them with the plan pane's **Close Plan** action (Alt+P, then Enter) or `/plan-close`; Volt posts a notice when execution completes, and closing a plan keeps it in session history.
 
 ---
 

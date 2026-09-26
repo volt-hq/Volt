@@ -20,13 +20,7 @@ import {
 	planPhaseLabel,
 	usesAsciiPlanMarkers,
 } from "./plan-content.ts";
-import type { PlanDetailsAction } from "./plan-status.ts";
-
-const READY_ACTIONS: ReadonlyArray<{ label: string; action: PlanDetailsAction }> = [
-	{ label: "Execute Plan", action: "retain_context" },
-	{ label: "Execute Plan & Clear Context", action: "new_session" },
-	{ label: "Change Plan", action: "change" },
-];
+import { getPlanActions, type PlanDetailsAction } from "./plan-status.ts";
 
 function stepMarker(status: PlanStepStatus): string {
 	if (usesAsciiPlanMarkers()) {
@@ -125,8 +119,8 @@ export class PlanInspectorComponent implements Component, Focusable {
 	}
 
 	setPlanning(planning: PlanningState): void {
-		if (planning.plan?.id !== this.planning.plan?.id) {
-			this.bodyScroll.scrollToStart();
+		if (planning.plan?.id !== this.planning.plan?.id) this.bodyScroll.scrollToStart();
+		if (planning.plan?.id !== this.planning.plan?.id || planning.plan?.phase !== this.planning.plan?.phase) {
 			this.actionIndex = 0;
 		}
 		this.planning = planning;
@@ -174,7 +168,7 @@ export class PlanInspectorComponent implements Component, Focusable {
 		const page = body.slice(this.bodyScroll.scrollTop, end);
 		const visibleFooter = this.selectVisibleFooter(footer, footerRows);
 		this.selectedActionVisible =
-			this.planning.plan?.phase === "ready" && visibleFooter.includes(footer[this.actionIndex] ?? "");
+			getPlanActions(this.planning.plan?.phase).length > 0 && visibleFooter.includes(footer[this.actionIndex] ?? "");
 		const padding = Array.from(
 			{ length: Math.max(0, this.regularViewportRows - header.length - page.length - visibleFooter.length) },
 			() => "",
@@ -194,25 +188,25 @@ export class PlanInspectorComponent implements Component, Focusable {
 			this.onReturnFocus();
 			return;
 		}
-		if (this.planning.plan?.phase === "ready") {
+		const actions = getPlanActions(this.planning.plan?.phase);
+		if (actions.length > 1) {
 			if (kb.matches(data, "tui.editor.cursorLeft")) {
-				this.actionIndex = (this.actionIndex + READY_ACTIONS.length - 1) % READY_ACTIONS.length;
+				this.actionIndex = (this.actionIndex + actions.length - 1) % actions.length;
 				this.selectedActionVisible = false;
 				this.requestRender();
 				return;
 			}
 			if (kb.matches(data, "tui.editor.cursorRight")) {
-				this.actionIndex = (this.actionIndex + 1) % READY_ACTIONS.length;
+				this.actionIndex = (this.actionIndex + 1) % actions.length;
 				this.selectedActionVisible = false;
 				this.requestRender();
 				return;
 			}
-			if (kb.matches(data, "tui.select.confirm")) {
-				if (this.fullscreenActive || this.selectedActionVisible) {
-					this.onAction(READY_ACTIONS[this.actionIndex]!.action);
-				}
-				return;
-			}
+		}
+		if (actions.length > 0 && kb.matches(data, "tui.select.confirm")) {
+			const selected = actions[this.actionIndex];
+			if (selected && (this.fullscreenActive || this.selectedActionVisible)) this.onAction(selected.action);
+			return;
 		}
 		if (kb.matches(data, "tui.select.up")) {
 			this.bodyScroll.scrollBy(-1);
@@ -347,22 +341,24 @@ export class PlanInspectorComponent implements Component, Focusable {
 
 	private selectVisibleFooter(footer: readonly string[], rows: number): string[] {
 		if (rows <= 0) return [];
-		if (this.planning.plan?.phase !== "ready" || rows >= footer.length) return footer.slice(-rows);
+		const actionCount = getPlanActions(this.planning.plan?.phase).length;
+		if (actionCount === 0 || rows >= footer.length) return footer.slice(-rows);
 
 		const selectedAction = footer[this.actionIndex];
-		const actionHint = footer[READY_ACTIONS.length];
+		const actionHint = footer[actionCount];
 		const scrollHint = footer.at(-1);
 		if (!selectedAction || !actionHint || !scrollHint) return footer.slice(-rows);
 		if (rows === 1) return [selectedAction];
 		if (rows === 2) return [selectedAction, actionHint];
 		if (rows === 3) return [selectedAction, actionHint, scrollHint];
-		return [...footer.slice(0, READY_ACTIONS.length), actionHint].slice(0, rows);
+		return [...footer.slice(0, actionCount), actionHint].slice(0, rows);
 	}
 
 	private renderFooter(width: number): string[] {
 		const lines: string[] = [];
-		if (this.planning.plan?.phase === "ready") {
-			for (const [index, item] of READY_ACTIONS.entries()) {
+		const actions = getPlanActions(this.planning.plan?.phase);
+		if (actions.length > 0) {
+			for (const [index, item] of actions.entries()) {
 				const label = index === this.actionIndex ? `> ${item.label}` : `  ${item.label}`;
 				lines.push(
 					truncateToWidth(
@@ -372,9 +368,11 @@ export class PlanInspectorComponent implements Component, Focusable {
 					),
 				);
 			}
-			lines.push(
-				truncateToWidth(` ${rawKeyHint("←/→", "choose")}  ${keyHint("tui.select.confirm", "confirm")}`, width, ""),
-			);
+			const actionHint =
+				actions.length > 1
+					? `${rawKeyHint("←/→", "choose")}  ${keyHint("tui.select.confirm", "confirm")}`
+					: keyHint("tui.select.confirm", actions[0]!.label.toLowerCase());
+			lines.push(truncateToWidth(` ${actionHint}`, width, ""));
 		}
 		lines.push(
 			truncateToWidth(

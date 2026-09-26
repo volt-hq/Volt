@@ -47,6 +47,22 @@ function longPlan(): PlanState {
 	};
 }
 
+function finishedPlan(phase: "completed" | "handed_off", stepCount = 12): PlanState {
+	const plan = readyPlan(stepCount);
+	return {
+		...plan,
+		phase,
+		steps: plan.steps.map((step) => ({ ...step, status: "completed" as const })),
+		execution: {
+			id: "execution-1",
+			approvedRevision: plan.revision,
+			strategy: "new_session",
+			sourceSessionId: "source-session",
+			targetSessionId: "target-session",
+		},
+	};
+}
+
 function plain(lines: readonly string[]): string {
 	return lines.join("\n").replace(/\u001b\[[0-9;]*m/g, "");
 }
@@ -249,6 +265,57 @@ describe("Plan TUI components", () => {
 
 		expect(renders).toBe(2);
 		expect(actions).toEqual(["new_session", "change"]);
+	});
+
+	it("scrolls a completed plan with the vertical keys and closes it with Enter", () => {
+		initTheme("dark");
+		const actions: PlanDetailsAction[] = [];
+		const details = createDetails(finishedPlan("completed", 40), 24, (action) => actions.push(action));
+		for (const width of [80, 120]) {
+			const rendered = plain(details.render(width).lines);
+			expect(rendered).toContain("Close Plan");
+			expect(rendered).toContain("close plan");
+			expect(rendered).not.toContain("Execute Plan");
+		}
+		for (const width of [100, 120]) {
+			expect(plain(details.render(width).lines)).toMatch(/escape\/ctrl\+c back$/m);
+		}
+
+		expect(plain(details.render(80).lines)).toContain("rows 1–");
+		details.handleInput("\u001b[B");
+		expect(plain(details.render(80).lines)).toContain("rows 2–");
+		details.handleInput("\u001b[A");
+		expect(plain(details.render(80).lines)).toContain("rows 1–");
+		expect(actions).toEqual([]);
+
+		details.handleInput("\r");
+		expect(actions).toEqual(["close"]);
+	});
+
+	it("selects Close Plan when a ready plan in Plan Details completes", () => {
+		initTheme("dark");
+		const actions: PlanDetailsAction[] = [];
+		const details = createDetails(readyPlan(), 36, (action) => actions.push(action));
+		details.handleInput("\u001b[C");
+		details.handleInput("\u001b[C");
+		details.setPlan(finishedPlan("handed_off"));
+		details.handleInput("\r");
+		expect(actions).toEqual(["close"]);
+	});
+
+	it("hints /plan-close for finished plans only in the wide status strip", () => {
+		initTheme("dark");
+		const completed = new PlanStatusComponent({ mode: "build", plan: finishedPlan("completed") });
+		const wide = completed.render(120).lines;
+		expect(wide).toHaveLength(2);
+		expect(plain(wide)).toContain("All steps complete · /plan-close to close");
+		const compact = completed.render(80).lines;
+		expect(compact).toHaveLength(1);
+		expect(plain(compact)).not.toContain("/plan-close");
+
+		const handedOff = new PlanStatusComponent({ mode: "build", plan: finishedPlan("handed_off") });
+		expect(plain(handedOff.render(120).lines)).toContain("Execution session: target-session · /plan-close to close");
+		expect(plain(handedOff.render(80).lines)).not.toContain("/plan-close");
 	});
 
 	it("renders Unicode markers normally and ASCII markers when requested", () => {

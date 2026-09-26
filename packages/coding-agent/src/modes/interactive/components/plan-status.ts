@@ -9,7 +9,7 @@ import {
 	VStack,
 	visibleWidth,
 } from "@hansjm10/volt-tui";
-import type { PlanningState, PlanState } from "../../../core/planning.ts";
+import type { PlanningState, PlanPhase, PlanState } from "../../../core/planning.ts";
 import { theme } from "../../../core/theme/runtime.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
@@ -79,7 +79,14 @@ export class PlanStatusComponent implements Component {
 				),
 			);
 		} else if (plan.phase === "handed_off" && plan.execution) {
-			lines.push(truncateToWidth(theme.fg("muted", ` Execution session: ${plan.execution.targetSessionId}`), width));
+			lines.push(
+				truncateToWidth(
+					theme.fg("muted", ` Execution session: ${plan.execution.targetSessionId} · /plan-close to close`),
+					width,
+				),
+			);
+		} else if (plan.phase === "completed") {
+			lines.push(truncateToWidth(theme.fg("muted", " All steps complete · /plan-close to close"), width));
 		} else if (step) {
 			lines.push(truncateToWidth(theme.fg("muted", ` Current · ${step}`), width));
 		} else if (plan.phase === "ready") {
@@ -89,7 +96,27 @@ export class PlanStatusComponent implements Component {
 	}
 }
 
-export type PlanDetailsAction = "retain_context" | "new_session" | "change";
+export type PlanDetailsAction = "retain_context" | "new_session" | "change" | "close";
+
+export interface PlanActionItem {
+	label: string;
+	action: PlanDetailsAction;
+}
+
+const READY_PLAN_ACTIONS: ReadonlyArray<PlanActionItem> = [
+	{ label: "Execute Plan", action: "retain_context" },
+	{ label: "Execute Plan & Clear Context", action: "new_session" },
+	{ label: "Change Plan", action: "change" },
+];
+
+const FINISHED_PLAN_ACTIONS: ReadonlyArray<PlanActionItem> = [{ label: "Close Plan", action: "close" }];
+
+/** Actions offered by the plan views for a lifecycle phase; draft and active plans offer none. */
+export function getPlanActions(phase: PlanPhase | undefined): ReadonlyArray<PlanActionItem> {
+	if (phase === "ready") return READY_PLAN_ACTIONS;
+	if (phase === "completed" || phase === "handed_off") return FINISHED_PLAN_ACTIONS;
+	return [];
+}
 
 class PlanDetailsSection implements Component {
 	private readonly renderSection: (width: number) => string[];
@@ -158,6 +185,7 @@ export class PlanDetailsComponent implements Component {
 
 	setPlan(plan: PlanState): void {
 		if (plan.id !== this.plan.id) this.bodyScroll.scrollToStart();
+		if (plan.id !== this.plan.id || plan.phase !== this.plan.phase) this.actionIndex = 0;
 		this.plan = plan;
 	}
 
@@ -209,19 +237,22 @@ export class PlanDetailsComponent implements Component {
 			this.onClose();
 			return;
 		}
-		if (this.plan.phase === "ready") {
+		const actions = getPlanActions(this.plan.phase);
+		if (actions.length > 0 && kb.matches(data, "tui.select.confirm")) {
+			const selected = actions[Math.min(this.actionIndex, actions.length - 1)];
+			if (selected) this.onAction(selected.action);
+			return;
+		}
+		// Several actions take the vertical keys for selection; otherwise they scroll.
+		if (actions.length > 1) {
 			if (kb.matches(data, "tui.editor.cursorLeft") || kb.matches(data, "tui.select.up")) {
-				this.actionIndex = (this.actionIndex + 2) % 3;
+				this.actionIndex = (this.actionIndex + actions.length - 1) % actions.length;
 				this.requestRender();
 				return;
 			}
 			if (kb.matches(data, "tui.editor.cursorRight") || kb.matches(data, "tui.select.down")) {
-				this.actionIndex = (this.actionIndex + 1) % 3;
+				this.actionIndex = (this.actionIndex + 1) % actions.length;
 				this.requestRender();
-				return;
-			}
-			if (kb.matches(data, "tui.select.confirm")) {
-				this.onAction((["retain_context", "new_session", "change"] as const)[this.actionIndex]!);
 				return;
 			}
 		} else if (kb.matches(data, "tui.select.up")) {
@@ -269,14 +300,17 @@ export class PlanDetailsComponent implements Component {
 
 	private renderFooter(width: number, compact: boolean, border: string): string[] {
 		const lines: string[] = [];
-		if (this.plan.phase === "ready") {
-			const actions = ["Execute Plan", "Execute Plan & Clear Context", "Change Plan"];
+		const actions = getPlanActions(this.plan.phase).map((item) => item.label);
+		// A lone action carries its Enter hint on its own row so the shared hint line keeps its length.
+		const singleActionHint =
+			actions.length === 1 ? `  ${keyHint("tui.select.confirm", actions[0]!.toLowerCase())}` : "";
+		if (actions.length > 0) {
 			lines.push("");
 			if (compact) {
 				lines.push(
 					...actions.map((label, index) =>
 						truncateToWidth(
-							` ${index === this.actionIndex ? theme.bold(theme.fg("accent", `> ${label}`)) : theme.fg("muted", `  ${label}`)}`,
+							` ${index === this.actionIndex ? theme.bold(theme.fg("accent", `> ${label}`)) : theme.fg("muted", `  ${label}`)}${singleActionHint}`,
 							width,
 						),
 					),
@@ -290,7 +324,7 @@ export class PlanDetailsComponent implements Component {
 									? theme.bold(theme.fg("accent", `[ ${label} ]`))
 									: theme.fg("muted", label),
 							)
-							.join(theme.fg("dim", "   "))}`,
+							.join(theme.fg("dim", "   "))}${singleActionHint}`,
 						width,
 					),
 				);
@@ -298,11 +332,11 @@ export class PlanDetailsComponent implements Component {
 		}
 
 		const actionHints =
-			this.plan.phase === "ready"
+			actions.length > 1
 				? `${rawKeyHint("←/→", "choose")}  ${keyHint("tui.select.confirm", "confirm")}  `
 				: `${rawKeyHint(`${keyText("tui.select.up")}/${keyText("tui.select.down")}`, "scroll")}  `;
 		const pageHint = rawKeyHint(`${keyText("tui.editor.pageUp")}/${keyText("tui.editor.pageDown")}`, "page");
-		lines.push(truncateToWidth(` ${actionHints}${pageHint}  ${keyHint("tui.select.cancel", "close")}`, width, ""));
+		lines.push(truncateToWidth(` ${actionHints}${pageHint}  ${keyHint("tui.select.cancel", "back")}`, width, ""));
 		lines.push(border);
 		return lines;
 	}
