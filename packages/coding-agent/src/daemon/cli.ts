@@ -5,6 +5,7 @@ import { getAgentDir, VERSION } from "../config.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlKeepAwakeStatus, ControlResponse, RemoteTransportHealth } from "./control-protocol.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
+import { type DaemonEnvironmentStatus, resolveDaemonEnvironment } from "./login-environment.ts";
 import { type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
@@ -287,6 +288,14 @@ function formatKeepAwake(keepAwake: ControlKeepAwakeStatus | undefined): string 
 	return keepAwake.state === "active" ? "on (active)" : `on (degraded: ${keepAwake.reason ?? "unknown"})`;
 }
 
+function formatEnvironment(environment: DaemonEnvironmentStatus): string {
+	if (environment.source === "login-shell") {
+		const duration = environment.durationMs === undefined ? "" : ` (${environment.durationMs}ms)`;
+		return `login shell ${environment.shell ?? "unknown"}${duration}`;
+	}
+	return `inherited (${environment.reason ?? "unknown"})`;
+}
+
 function formatRemoteTransport(health: RemoteTransportHealth | undefined): string {
 	if (!health) return "unavailable (status missing from daemon)";
 	const version = health.wrapperVersion === undefined ? "" : ` · wrapper ${health.wrapperVersion}`;
@@ -321,6 +330,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	console.error(`voltd ${status.version} (protocol ${status.protocolVersion})`);
 	console.error(`pid: ${status.pid}`);
 	console.error(`uptime: ${formatUptime(status.startedAtMs)}`);
+	console.error(`environment: ${formatEnvironment(status.environment)}`);
 	console.error(`keep awake: ${formatKeepAwake(status.keepAwake)}`);
 	console.error(`remote transport: ${formatRemoteTransport(status.remoteTransport)}`);
 	if (status.remoteTransport?.message) console.error(`  ${status.remoteTransport.message}`);
@@ -574,7 +584,10 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 				process.exitCode = 1;
 				return true;
 			}
-			const code = await runVoltDaemon({ agentDir, foreground: true }, [createIrohDaemonService()]);
+			const code = await runVoltDaemon(
+				{ agentDir, foreground: true, prepareEnvironment: () => resolveDaemonEnvironment() },
+				[createIrohDaemonService()],
+			);
 			// The run loop resolves after durable quiescing and bounded native disposal, but
 			// the native iroh handle can keep the event loop alive afterwards (notably
 			// on Windows), leaving a zombie that clients still probe as "draining".

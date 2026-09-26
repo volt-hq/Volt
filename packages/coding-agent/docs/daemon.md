@@ -70,6 +70,57 @@ not auto-restart after a graceful `volt daemon stop`; on Linux, run
 `loginctl enable-linger` if the daemon should also run without an active
 login session.
 
+## Daemon environment
+
+Headless conversation runtimes run inside the daemon process, so their bash
+commands, language servers, MCP servers, tool installers, and Git all resolve
+through the daemon's environment. Whether the login service or a terminal
+started the daemon, it builds that environment the same way at startup:
+
+1. It runs your login shell (from the user database, falling back to `SHELL`)
+   as an interactive login shell (`-i -l -c`) without a terminal, starting from
+   a minimal environment: the system default `PATH` plus `HOME`, `USER`,
+   `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `SSH_AUTH_SOCK`,
+   `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS`.
+2. It adopts the environment the shell produces, so `PATH` and the variables
+   your shell profile exports match a new terminal. `VOLT_*` variables from
+   the process that started the daemon are kept.
+
+Supported login shells are bash, zsh, fish, sh, dash, and ksh. While
+resolving, the shell runs with `VOLT_RESOLVING_ENVIRONMENT=1`. If your profile
+starts interactive programs or prompts, for example auto-attaching tmux, skip
+that work when the variable is set:
+
+```sh
+if [ -z "$VOLT_RESOLVING_ENVIRONMENT" ]; then
+  # interactive-only setup
+fi
+```
+
+If the shell is unsupported, exits without printing an environment, or takes
+longer than 10 seconds, the daemon keeps the environment it was started with
+and logs a warning. Windows always keeps the inherited environment. To skip
+resolution, start the daemon with `VOLT_DAEMON_INHERIT_ENV=1`, for example
+`VOLT_DAEMON_INHERIT_ENV=1 volt daemon restart`.
+
+Consequences:
+
+- Variables exported only in the terminal that started the daemon, including
+  API keys, do not reach daemon-hosted sessions. Export them from your shell
+  profile instead.
+- The environment is resolved once per daemon start. After changing `PATH` or
+  your shell profile, run `volt daemon restart`.
+- Per-directory environments are not applied: direnv, activated virtualenvs,
+  and hook-based version managers such as `mise activate`. Version managers
+  that work through shims on `PATH` (asdf, mise shims) still pick the version
+  for the session's working directory.
+
+`volt daemon status` shows the result, for example
+`environment: login shell /bin/zsh (412ms)` or
+`environment: inherited (timed out after 10000ms)`. `volt daemon logs` records
+the resolved `PATH`, or on failure the shell's exit status and the end of its
+error output.
+
 ## Manage remote access from the TUI
 
 Open `/remote` to inspect connections, pair a phone, and revoke device access.

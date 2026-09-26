@@ -77,6 +77,7 @@ function status(overrides: Partial<RemoteStatus> = {}): RemoteStatus {
 		protocolVersion: 1,
 		pid: 42,
 		startedAtMs: Date.now() - 5 * 60 * 1000,
+		environment: { source: "inherited", reason: "not resolved" },
 		capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 		leases: [
 			{

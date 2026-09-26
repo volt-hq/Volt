@@ -140,6 +140,7 @@ async function startDaemonHalf(
 					protocolVersion: 1,
 					pid: process.pid,
 					startedAtMs: 0,
+					environment: { source: "inherited", reason: "not resolved" },
 					leases: broker.list().map((record) => ({
 						workspaceName: record.workspaceName,
 						sessionId: record.sessionId,
