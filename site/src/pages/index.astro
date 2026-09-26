@@ -108,6 +108,20 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
 
       <section class="remote">
         <h2>Start on your desk. Finish from anywhere.</h2>
+        <figure class="explainer">
+          <video
+            controls
+            playsinline
+            preload="none"
+            width="1920"
+            height="1080"
+            poster="/media/volt-explainer-poster.jpg"
+            aria-label="Animated explainer: the Volt CLI, the Volt daemon, Iroh, and the Volt app"
+          >
+            <source src="/media/volt-explainer.mp4" type="video/mp4" />
+          </video>
+          <figcaption>How the CLI, daemon, Iroh, and the iPhone app fit together. 47 seconds, sound on.</figcaption>
+        </figure>
         <p>
           <code>volt daemon start</code> keeps the agent runtime on your workstation. Pair
           your iPhone from <code>/remote</code>, register workspaces by name, and continue the
@@ -234,6 +248,12 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
         padding: 3rem 2rem; margin-bottom: 5rem; background: var(--panel);
       }
       .remote h2 { font-size: 1.6rem; margin-bottom: 1rem; }
+      .explainer { max-width: 52rem; margin: 0 auto 1.8rem; }
+      .explainer video {
+        display: block; width: 100%; height: auto; aspect-ratio: 16 / 9;
+        border: 1px solid var(--border); border-radius: 12px; background: #120f1a;
+      }
+      .explainer figcaption { color: var(--muted); font-size: 0.85rem; margin-top: 0.6rem; }
       .remote p { color: var(--muted); max-width: 42rem; margin: 0 auto 1.6rem; }
       .remote code { color: var(--accent); }
 
