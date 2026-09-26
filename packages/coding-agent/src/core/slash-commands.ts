@@ -44,6 +44,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 	{ name: "plan", description: "Switch the agent to read-only Plan mode" },
 	{ name: "build", description: "Switch the agent to Build mode" },
 	{ name: "plan-details", description: "Open the current structured plan" },
+	{ name: "plan-close", description: "Close a completed or handed-off plan" },
 	{ name: "profile", description: "Show, switch, or create the active settings profile" },
 	{ name: "model", description: "Select model (opens selector UI)" },
 	THINKING_FAST_MODE_SLASH_COMMAND,

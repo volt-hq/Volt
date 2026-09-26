@@ -108,6 +108,7 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.t
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
+import type { PlanningState, PlanPhase } from "../../core/planning.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
@@ -539,6 +540,8 @@ export class InteractiveMode {
 	private planPaneInputUnsubscribe: (() => void) | undefined;
 	private globalInputUnsubscribe: (() => void) | undefined;
 	private readyPlanFocusKey: string | undefined;
+	/** Last plan identity/phase rendered, used to announce a live active-to-completed transition once. */
+	private lastObservedPlan: { id: string; phase: PlanPhase } | undefined;
 	private defaultEditor: CustomEditor;
 	private editor: EditorComponent;
 	private editorComponentFactory: EditorFactory | undefined;
@@ -3870,6 +3873,11 @@ export class InteractiveMode {
 				this.showPlanDetails();
 				return;
 			}
+			if (text === "/plan-close") {
+				this.editor.setText("");
+				this.closeFinishedPlan();
+				return;
+			}
 			if (text === "/settings") {
 				this.showSettingsSelector();
 				this.editor.setText("");
@@ -4240,7 +4248,7 @@ export class InteractiveMode {
 				break;
 
 			case "planning_state_changed":
-				this.refreshPlanningUi(event.planning);
+				this.handlePlanningStateChanged(event.planning);
 				break;
 
 			case "prompt_cache_changed":
@@ -5247,7 +5255,17 @@ export class InteractiveMode {
 		this.showStatus(planning.mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
 	}
 
+	private handlePlanningStateChanged(planning: PlanningState): void {
+		const previous = this.lastObservedPlan;
+		const plan = planning.plan;
+		if (plan?.phase === "completed" && previous?.id === plan.id && previous.phase === "active") {
+			this.showStatus(`Plan complete · /plan-close or ${keyText("app.plan.togglePane")} → Close Plan`);
+		}
+		this.refreshPlanningUi(planning);
+	}
+
 	private refreshPlanningUi(planning = this.session.planningState): void {
+		this.lastObservedPlan = planning.plan ? { id: planning.plan.id, phase: planning.plan.phase } : undefined;
 		this.planStatus.setPlanning(planning);
 		this.planInspector.setPlanning(planning);
 		this.mainView.setPlanning(planning);
@@ -5419,7 +5437,45 @@ export class InteractiveMode {
 		}
 	}
 
+	private closeFinishedPlan(): void {
+		const plan = this.session.planningState.plan;
+		if (!plan) {
+			this.showStatus("No plan to close");
+			return;
+		}
+		if (this.session.isStreaming) {
+			this.showWarning("Wait for the current run to finish before closing the plan");
+			return;
+		}
+		switch (plan.phase) {
+			case "draft":
+				this.showWarning("This plan is still a draft; keep refining it or submit it in Plan mode");
+				return;
+			case "ready":
+				this.showWarning(
+					`This plan is ready; choose Execute Plan or Change Plan in the plan pane (${keyText("app.plan.togglePane")})`,
+				);
+				return;
+			case "active":
+				this.showWarning(
+					`This plan is still executing; ${keyText("app.mode.toggle")} returns it to draft for replanning`,
+				);
+				return;
+		}
+		try {
+			this.closePlanDetails();
+			this.session.discardPlan(plan.id, plan.revision);
+			this.showStatus("Plan closed");
+		} catch (error: unknown) {
+			this.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
 	private async handlePlanDetailsAction(action: PlanDetailsAction): Promise<void> {
+		if (action === "close") {
+			this.closeFinishedPlan();
+			return;
+		}
 		const plan = this.session.planningState.plan;
 		if (!plan || plan.phase !== "ready") {
 			this.showWarning("The ready plan changed; reopen Plan Details");
