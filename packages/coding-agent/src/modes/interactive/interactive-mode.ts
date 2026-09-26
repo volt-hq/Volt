@@ -8688,7 +8688,7 @@ export class InteractiveMode {
 		if (args === "restart") {
 			const count = this.session.restartLspServers();
 			info = status.enabled
-				? `Stopped ${count} language server${count === 1 ? "" : "s"}. Servers respawn on next use.`
+				? `Stopped ${count} language server${count === 1 ? "" : "s"}. Servers respawn on next use.\nThis includes servers shared with subagents.`
 				: "LSP is disabled. Run with --lsp or set lsp.enabled=true in settings.";
 		} else if (args === "trace" || args?.startsWith("trace ")) {
 			if (!status.enabled) {

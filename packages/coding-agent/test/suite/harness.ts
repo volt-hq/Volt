@@ -19,6 +19,7 @@ import { refreshPromptCache, registerFauxProvider, streamSimple } from "@hansjm1
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
+import type { LspServerPool } from "../../src/core/lsp/server-pool.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
@@ -83,6 +84,10 @@ export interface HarnessOptions {
 	withConfiguredAuth?: boolean;
 	/** Inject a persisted manager when a test needs to exercise session reload behavior. */
 	sessionManager?: SessionManager;
+	/** Project root for project-scoped services such as LSP. Defaults to the harness temp dir. */
+	projectCwd?: string;
+	/** Share language servers with other sessions using the same pool. */
+	lspServerPool?: LspServerPool;
 	/** Register a faux prompt-cache refresh and wire the session to it. */
 	refreshPromptCache?: true | FauxPromptCacheRefresh;
 	/** Which request options the faux refresh supports; omitted means all of them. */
@@ -171,6 +176,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		settingsManager,
 		extensionWorkLimits: options.extensionWorkLimits,
 		cwd: tempDir,
+		...(options.projectCwd === undefined ? {} : { projectCwd: options.projectCwd }),
 		agentDir: options.agentDir ?? tempDir,
 		modelRegistry,
 		resourceLoader,
@@ -179,6 +185,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		allowedToolNames: options.allowedToolNames,
 		excludedToolNames: options.excludedToolNames,
 		subagentToolManager: options.subagentToolManager,
+		...(options.lspServerPool === undefined ? {} : { lspServerPool: options.lspServerPool }),
 		extensionRunnerRef,
 	});
 	const control = createAgentSessionTestControl(session);

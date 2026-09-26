@@ -43,6 +43,7 @@ import { AuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
+import { LspServerPool } from "./core/lsp/server-pool.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
@@ -933,6 +934,8 @@ export async function main(args: string[], options?: MainOptions) {
 		);
 	}
 	const projectTrustByCwd = new Map<string, boolean>();
+	// Every session this factory creates (root, subagents, replacements) shares language servers.
+	const lspServerPool = new LspServerPool();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
 		const { cwd, agentDir, sessionManager, sessionStartEvent, projectTrustContext, subagentContext } = runtimeOptions;
 		const runtimeProfile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : requestedProfile;
@@ -1073,6 +1076,7 @@ export async function main(args: string[], options?: MainOptions) {
 				noTools: sessionOptions.noTools,
 				customTools: sessionOptions.customTools,
 				subagentToolManager: subagentManager,
+				lspServerPool,
 			});
 
 			return {
