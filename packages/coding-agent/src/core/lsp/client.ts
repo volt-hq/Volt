@@ -117,9 +117,29 @@ interface TrackedDocument {
 	version: number;
 	/** The exact content last synced to the server */
 	content: string;
-	/** Disk stat at last sync, used as a cheap staleness filter */
+	/** Stat of a disk state known to hold `content`; unset forces the next refresh to re-read */
 	mtimeMs?: number;
 	size?: number;
+}
+
+/**
+ * Stat evidence for synced content, or none when the file on disk no longer
+ * holds that content. Stat precedes the read, so a later write changes
+ * mtime/size and the next refresh re-reads the file.
+ */
+async function statMatchingContent(
+	absolutePath: string,
+	content: string,
+): Promise<{ mtimeMs?: number; size?: number }> {
+	try {
+		const fileStat = await stat(absolutePath);
+		if ((await readFile(absolutePath, "utf-8")) === content) {
+			return { mtimeMs: fileStat.mtimeMs, size: fileStat.size };
+		}
+	} catch {
+		// Stat is only a staleness filter; missing or unreadable files still sync in-memory content.
+	}
+	return {};
 }
 
 /** LSP FileChangeType values for workspace/didChangeWatchedFiles */
@@ -977,14 +997,12 @@ export class LspClient {
 	}
 
 	private async updateTrackedStat(document: TrackedDocument): Promise<void> {
-		try {
-			const metadata = await stat(document.absolutePath);
-			document.mtimeMs = metadata.mtimeMs;
-			document.size = metadata.size;
-		} catch {
-			document.mtimeMs = undefined;
-			document.size = undefined;
-		}
+		const content = document.content;
+		const evidence = await statMatchingContent(document.absolutePath, content);
+		// A sync that replaced the content during the check owns the evidence.
+		if (document.content !== content) return;
+		document.mtimeMs = evidence.mtimeMs;
+		document.size = evidence.size;
 	}
 
 	private notifyWatchedFile(uri: string, type: number): void {
@@ -1034,17 +1052,9 @@ export class LspClient {
 	private async syncContent(absolutePath: string, content: string): Promise<{ uri: string; changed: boolean }> {
 		const uri = pathToFileURL(absolutePath).toString();
 		const key = normalizeUri(uri);
+		const { mtimeMs, size } = await statMatchingContent(absolutePath, content);
+		// Look up after the disk check so concurrent syncs of one document cannot both open it.
 		const existing = this.documents.get(key);
-
-		let mtimeMs: number | undefined;
-		let size: number | undefined;
-		try {
-			const fileStat = await stat(absolutePath);
-			mtimeMs = fileStat.mtimeMs;
-			size = fileStat.size;
-		} catch {
-			// Stat is only a staleness filter; missing files still sync in-memory content.
-		}
 
 		if (!existing) {
 			this.diagnosticEpoch++;
