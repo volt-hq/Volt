@@ -462,7 +462,10 @@ Fired on compaction. See [compaction.md](compaction.md) for details.
 
 ```typescript
 volt.on("session_before_compact", async (event, ctx) => {
-  const { preparation, branchEntries, customInstructions, signal } = event;
+  const { preparation, branchEntries, customInstructions, reason, willRetry, signal } = event;
+
+  // reason - "manual" (/compact), "threshold", or "overflow"
+  // willRetry - whether the interrupted turn resumes after compaction
 
   // Cancel:
   return { cancel: true };
@@ -480,6 +483,8 @@ volt.on("session_before_compact", async (event, ctx) => {
 volt.on("session_compact", async (event, ctx) => {
   // event.compactionEntry - the saved compaction
   // event.fromExtension - whether extension provided it
+  // event.reason - "manual" (/compact), "threshold", or "overflow"
+  // event.willRetry - whether the interrupted turn resumes after compaction
 });
 ```
 

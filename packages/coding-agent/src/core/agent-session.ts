@@ -6695,6 +6695,7 @@ export class AgentSession {
 	 * projection to Harness. Overflow recovery removes its trailing assistant
 	 * error before retry, and length continuation removes the tool-free truncated
 	 * assistant turn, so neither stale terminal is replayed into the next request.
+	 * Continuation is supplied exactly when the interrupted turn resumes.
 	 */
 	private async _finalizeCompaction(
 		summary: string,
@@ -6702,6 +6703,7 @@ export class AgentSession {
 		tokensBefore: number,
 		details: JsonValue | undefined,
 		fromExtension: boolean,
+		reason: CompactionReason,
 		continuation?: { dropTrailingErrorMessage: boolean; dropTrailingLengthMessage?: boolean },
 		assertConversationGenerationCurrent?: () => void,
 	): Promise<CompactionResult> {
@@ -6747,6 +6749,8 @@ export class AgentSession {
 				type: "session_compact",
 				compactionEntry: savedCompactionEntry,
 				fromExtension,
+				reason,
+				willRetry: continuation !== undefined,
 			});
 			assertConversationGenerationCurrent?.();
 		}
@@ -6827,6 +6831,8 @@ export class AgentSession {
 					preparation,
 					branchEntries: pathEntries,
 					customInstructions,
+					reason: "manual",
+					willRetry: false,
 					signal: operation.signal,
 				})) as SessionBeforeCompactResult | undefined;
 				assertConversationGenerationCurrent?.();
@@ -6915,6 +6921,7 @@ export class AgentSession {
 				tokensBefore,
 				details,
 				fromExtension,
+				"manual",
 				undefined,
 				assertConversationGenerationCurrent,
 			);
@@ -7134,6 +7141,7 @@ export class AgentSession {
 		const settings = this.settingsManager.getCompactionSettings();
 		const abortGeneration = this._abortGeneration;
 		const canContinue = (): boolean => !this._disposed && abortGeneration === this._abortGeneration;
+		const resumesTurn = willRetry || continueAfterCompaction;
 		let conversationGenerationAssertionFailed = false;
 		const hasExternalAuthorityAssertion = assertConversationGenerationCurrent !== undefined;
 		const assertCapturedConversationCurrent = this._captureConversationGenerationAssertion(
@@ -7177,6 +7185,8 @@ export class AgentSession {
 					type: "session_before_compact",
 					preparation,
 					branchEntries: pathEntries,
+					reason,
+					willRetry: resumesTurn,
 					signal: operation.signal,
 				})) as SessionBeforeCompactResult | undefined;
 				assertConversationCurrent();
@@ -7265,7 +7275,8 @@ export class AgentSession {
 				tokensBefore,
 				details,
 				fromExtension,
-				willRetry || continueAfterCompaction
+				reason,
+				resumesTurn
 					? {
 							dropTrailingErrorMessage: willRetry,
 							dropTrailingLengthMessage: continueAfterCompaction,
@@ -7278,10 +7289,10 @@ export class AgentSession {
 				reason,
 				result,
 				aborted: false,
-				willRetry: canContinue() && (willRetry || continueAfterCompaction),
+				willRetry: canContinue() && resumesTurn,
 			});
 
-			if (willRetry || continueAfterCompaction) {
+			if (resumesTurn) {
 				return true;
 			}
 

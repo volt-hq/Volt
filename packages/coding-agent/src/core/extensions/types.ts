@@ -613,6 +613,10 @@ export interface SessionBeforeCompactEvent {
 	preparation: CompactionPreparation;
 	branchEntries: SessionEntry[];
 	customInstructions?: string;
+	/** What triggered compaction: `/compact`, the context threshold, or context overflow recovery. */
+	reason: "manual" | "threshold" | "overflow";
+	/** Whether the interrupted turn resumes after compaction (overflow retry or threshold continuation). */
+	willRetry: boolean;
 	signal: AbortSignal;
 }
 
@@ -621,6 +625,10 @@ export interface SessionCompactEvent {
 	type: "session_compact";
 	compactionEntry: CompactionEntry;
 	fromExtension: boolean;
+	/** What triggered compaction: `/compact`, the context threshold, or context overflow recovery. */
+	reason: "manual" | "threshold" | "overflow";
+	/** Whether the interrupted turn resumes after compaction (overflow retry or threshold continuation). */
+	willRetry: boolean;
 }
 
 /** Fired before an extension runtime is torn down due to quit, reload, or session replacement. */

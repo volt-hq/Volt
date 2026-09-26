@@ -1,5 +1,6 @@
 import {
 	type AssistantMessage,
+	type Context,
 	estimateToolDefinitionTokens,
 	type FauxProviderRegistration,
 	fauxAssistantMessage,
@@ -675,6 +676,131 @@ describe("harness compaction", () => {
 		getOrThrow(await compact(preparation, model, "test-key"));
 
 		expect(seenOptions.map((options) => options?.["maxTokens"])).toEqual([128000, 128000]);
+	});
+
+	it("serializes split-turn summary requests", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const { faux, model } = createFauxModel(false);
+		let activeRequests = 0;
+		let maxActiveRequests = 0;
+		let releaseHistory!: () => void;
+		const historyReleased = new Promise<void>((resolve) => {
+			releaseHistory = resolve;
+		});
+		let markHistoryStarted!: () => void;
+		const historyStarted = new Promise<void>((resolve) => {
+			markHistoryStarted = resolve;
+		});
+		const requestOrder: string[] = [];
+		faux.setSimpleResponses([
+			async () => {
+				activeRequests++;
+				maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+				requestOrder.push("history-start");
+				markHistoryStarted();
+				await historyReleased;
+				requestOrder.push("history-end");
+				activeRequests--;
+				return fauxAssistantMessage("history summary");
+			},
+			() => {
+				activeRequests++;
+				maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+				requestOrder.push("prefix-start");
+				activeRequests--;
+				return fauxAssistantMessage("prefix summary");
+			},
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: messages,
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+
+		const compaction = compact(preparation, model, "test-key");
+		await historyStarted;
+		expect(faux.state.simpleCallCount).toBe(1);
+		releaseHistory();
+		const result = getOrThrow(await compaction);
+
+		expect(result.summary).toContain("history summary");
+		expect(result.summary).toContain("prefix summary");
+		expect(faux.state.simpleCallCount).toBe(2);
+		expect(maxActiveRequests).toBe(1);
+		expect(requestOrder).toEqual(["history-start", "history-end", "prefix-start"]);
+	});
+
+	it("does not request the turn-prefix summary after a history failure", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const { faux, model } = createFauxModel(false);
+		faux.setSimpleResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "history failed" }),
+			fauxAssistantMessage("prefix summary"),
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: messages,
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+
+		expect(await compact(preparation, model, "test-key")).toMatchObject({
+			ok: false,
+			error: { code: "summarization_failed", message: "Summarization failed: history failed" },
+		});
+		expect(faux.state.simpleCallCount).toBe(1);
+		expect(faux.getPendingSimpleResponseCount()).toBe(1);
+	});
+
+	it("updates the previous summary for a split turn with no new history", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Continue the implementation.")];
+		const previousSummary = "## Goal\nKeep the public API unchanged.";
+		const { faux, model } = createFauxModel(false);
+		const prompts: string[] = [];
+		const recordPrompt = (context: Context): void => {
+			const content = context.messages[0]?.content;
+			prompts.push(
+				Array.isArray(content)
+					? content.map((part) => (part.type === "text" ? part.text : "")).join("")
+					: (content ?? ""),
+			);
+		};
+		faux.setSimpleResponses([
+			(context) => {
+				recordPrompt(context);
+				return fauxAssistantMessage("updated history summary");
+			},
+			(context) => {
+				recordPrompt(context);
+				return fauxAssistantMessage("prefix summary");
+			},
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [],
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			previousSummary,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+
+		const result = getOrThrow(await compact(preparation, model, "test-key"));
+
+		expect(prompts).toHaveLength(2);
+		expect(prompts[0]).toContain("<previous-summary>");
+		expect(prompts[0]).toContain(previousSummary);
+		expect(result.summary).toContain("updated history summary");
+		expect(result.summary).toContain("prefix summary");
+		expect(result.summary).not.toContain("No prior history.");
 	});
 
 	it("returns compaction error results without throwing", async () => {

@@ -89,7 +89,7 @@ Built-in compaction requests at most 4096 summary tokens per request, independen
 
 The normal single-pass request preserves the session's reasoning level, Fast mode, transport, routing identity and cache policy. Keeping the full conversation avoids relying on a shorter intermediate prefix having been cached, and can preserve append-only WebSocket continuation. Cache hits are not guaranteed, particularly after provider/extension transformations or cache expiry. Context hooks receive the full history once. Boundary excerpts use only content already present after context hooks and conversion, never saved raw content that they may have removed or redacted. If message counts change, the excerpt is omitted rather than guessed. Arbitrary reordering can still make the boundary reference less precise. Compaction never executes returned tool calls.
 
-If the full native request (including the recent suffix, checkpoint instruction, and output/thinking allowance) is estimated not to fit, or the provider reports a context overflow, Volt uses the existing chronological chunked summarizer with a small fixed output allowance and minimal supported reasoning. This fallback still summarizes only the older source; it does not add the retained suffix to its chunks. Other errors do not select the fallback. Built-in summary generation has a five-minute deadline covering context conversion, requests, retry delays and any fallback. Transient failures have at most two compaction-level retries per request; provider-level retries are disabled for session compaction.
+If the full native request (including the recent suffix, checkpoint instruction, and output/thinking allowance) is estimated not to fit, or the provider reports a context overflow, Volt uses the existing chronological chunked summarizer with a small fixed output allowance and minimal supported reasoning. This fallback still summarizes only the older source; it does not add the retained suffix to its chunks. It sends one request at a time, so it also works with providers that permit only one active request. Other errors do not select the fallback. Built-in summary generation has a five-minute deadline covering context conversion, requests, retry delays and any fallback. Transient failures have at most two compaction-level retries per request; provider-level retries are disabled for session compaction.
 
 Cancellation, timeout, empty responses, truncated output and tool-calling responses do not install a checkpoint. The original conversation remains intact. Custom extension-provided summaries retain their extension hook behavior.
 
@@ -164,7 +164,7 @@ Split turn (one huge turn exceeds budget):
   turnPrefixMessages = [usr, ass, tool, ass, tool, tool]
 ```
 
-The normal single-pass request summarizes older history and the turn prefix together, with the retained suffix visible for continuity and newer corrections. The cut point and verbatim retained messages are unchanged. The oversized-input fallback generates history and turn-prefix summaries separately and merges them; each stream processes its chunks chronologically.
+The normal single-pass request summarizes older history and the turn prefix together, with the retained suffix visible for continuity and newer corrections. The cut point and verbatim retained messages are unchanged. The oversized-input fallback generates the history summary first and then the turn-prefix summary, and merges them; each processes its chunks chronologically. If the history summary fails or is cancelled, the turn-prefix request is never sent.
 
 ### Cut Point Rules
 
@@ -337,7 +337,7 @@ Fired before auto-compaction or `/compact`. Can cancel or provide custom summary
 
 ```typescript
 volt.on("session_before_compact", async (event, ctx) => {
-  const { preparation, branchEntries, customInstructions, signal } = event;
+  const { preparation, branchEntries, customInstructions, reason, willRetry, signal } = event;
 
   // preparation.messagesToSummarize - messages to summarize
   // preparation.turnPrefixMessages - split turn prefix (if isSplitTurn)
@@ -348,6 +348,8 @@ volt.on("session_before_compact", async (event, ctx) => {
   // preparation.settings - compaction settings
 
   // branchEntries - all entries on current branch (for custom state)
+  // reason - "manual" (/compact), "threshold", or "overflow"
+  // willRetry - whether the interrupted turn resumes after compaction
   // signal - AbortSignal (pass to LLM calls)
 
   // Cancel:
@@ -364,6 +366,8 @@ volt.on("session_before_compact", async (event, ctx) => {
   };
 });
 ```
+
+Both `session_before_compact` and `session_compact` carry `reason` and `willRetry`, so extensions can distinguish manual compaction, proactive threshold compaction, and overflow recovery. `willRetry` is true when the interrupted turn resumes after compaction: overflow recovery retries it, and threshold compaction continues a turn that was stopped mid-run or produced an empty length-limited response.
 
 #### Converting Messages to Text
 
