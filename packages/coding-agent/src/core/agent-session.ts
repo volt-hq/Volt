@@ -585,7 +585,6 @@ interface LiveClientInputOperation {
 	resolveAccepted(outcome: PromptAdmissionOutcome): void;
 	rejectAccepted(error: Error): void;
 	acceptanceSettled: boolean;
-	acceptedForDispatch: boolean;
 	dispatchBoundaryPersisted: boolean;
 	completion: Promise<void>;
 	attachCompletion(completion: Promise<void>): void;
@@ -4682,7 +4681,6 @@ export class AgentSession {
 			semanticDigest,
 			accepted,
 			acceptanceSettled: false,
-			acceptedForDispatch: false,
 			dispatchBoundaryPersisted: false,
 			completion,
 			attachCompletion(nextCompletion) {
@@ -4697,7 +4695,6 @@ export class AgentSession {
 			resolveAccepted(outcome) {
 				if (operation.acceptanceSettled) return;
 				operation.acceptanceSettled = true;
-				operation.acceptedForDispatch = true;
 				resolveAccepted(outcome);
 			},
 			rejectAccepted(error) {
@@ -4707,6 +4704,19 @@ export class AgentSession {
 			},
 		};
 		return operation;
+	}
+
+	/**
+	 * True while this live operation still owns an identified input that has not
+	 * reached a canonical commit, retained delivery, or terminal record. Without
+	 * conversation authority the durable state cannot be read; the terminal write
+	 * then reports the fail-stop instead of leaving the admission pending.
+	 */
+	private _ownsUncommittedClientInput(clientMessageId: string, operation: LiveClientInputOperation): boolean {
+		if (this._disposed || this._liveClientInputs.get(clientMessageId) !== operation) return false;
+		if (!this._isConversationAuthorityAvailable()) return true;
+		const state = this.sessionManager.getClientInput(clientMessageId)?.state;
+		return state === "accepted" || state === "started";
 	}
 
 	private async _failLiveClientInput(
@@ -4780,7 +4790,6 @@ export class AgentSession {
 			return;
 		}
 		operation.dispatchBoundaryPersisted = true;
-		operation.acceptedForDispatch = true;
 	}
 
 	private _observeLivePrompt(
@@ -4897,6 +4906,22 @@ export class AgentSession {
 				// append removes its receipt from this query, so completed inputs cannot
 				// be resurrected; anything still accepted becomes attach-visible again.
 				if (this._disposed) throw error;
+				// This live owner observed the promoted input fail after its dispatch
+				// boundary. Record the failure: `started` is reserved for a lost owner.
+				// A failed terminal write keeps the durable fence, but the queue rebuild
+				// below must still run.
+				if (
+					firstOperation !== undefined &&
+					this._isConversationAuthorityAvailable() &&
+					this._liveClientInputs.get(first.clientMessageId) === firstOperation &&
+					this.sessionManager.getClientInput(first.clientMessageId)?.state === "started"
+				) {
+					await this._failLiveClientInput(
+						first.clientMessageId,
+						firstOperation,
+						error instanceof Error ? error : new Error(String(error)),
+					).catch(() => undefined);
+				}
 				await this._clearAgentQueues();
 				this._assertConversationAuthorityAvailable();
 				this._steeringMessages = [];
@@ -5334,9 +5359,10 @@ export class AgentSession {
 			});
 		}
 		const completion = (async () => {
+			const settlementRevision = this._agentSettlementRevision;
+			let outcome: PromptDispatchOutcome;
 			try {
-				const settlementRevision = this._agentSettlementRevision;
-				const outcome = await this._prompt(
+				outcome = await this._prompt(
 					text,
 					promptOptions,
 					shouldQueue,
@@ -5345,29 +5371,49 @@ export class AgentSession {
 					operation,
 					reservedRun,
 				);
-				if (operation && clientMessageId && outcome === "handled") {
-					this._assertConversationAuthorityAvailable();
-					this.sessionManager.transitionClientInput(clientMessageId, "completed");
-					await this.sessionManager.flush();
-					this._completeLiveClientInput(clientMessageId, "completed");
-				} else if (!operation && outcome === "handled" && !this._disposed) {
-					// Local/prompt-backed UI actions have no durable client identity, but
-					// their completed handler is still an authoritative admission boundary.
-					promptOptions?.preflightResult?.({ success: true, outcome: "admitted" });
-				}
-				if (outcome === "handled" && this._agentSettlementRevision === settlementRevision) {
-					// A handler-owned prompt has no AgentHarness run to publish settlement.
-					// Emit the same terminal boundary after the handler and any durable
-					// client-input completion have finished, unless the handler already
-					// completed a custom turn and published that boundary itself.
-					this._emitAgentSettledIfIdle();
+				if (
+					outcome === "run" &&
+					operation &&
+					clientMessageId !== undefined &&
+					this._ownsUncommittedClientInput(clientMessageId, operation)
+				) {
+					// The run stopped without committing, retaining, or terminally
+					// consuming this identified input, so this live owner cancelled it.
+					// Report that now instead of leaving its admission pending.
+					throw new Error("Client input stopped before its canonical user message committed");
 				}
 			} catch (error) {
 				const normalized = error instanceof Error ? error : new Error(String(error));
-				if (!this._disposed && operation && clientMessageId && !operation.acceptedForDispatch) {
+				// This process observed the failure before the canonical user append.
+				// Leaving `started` would misreport it as a lost owner and fence every
+				// later input after a reload.
+				if (
+					operation &&
+					clientMessageId !== undefined &&
+					this._ownsUncommittedClientInput(clientMessageId, operation)
+				) {
 					await this._failLiveClientInput(clientMessageId, operation, normalized);
 				}
 				throw normalized;
+			}
+			// A handled command or input hook already ran its side effects. If its
+			// terminal write fails, `started` remains the truthful ambiguous outcome.
+			if (operation && clientMessageId && outcome === "handled") {
+				this._assertConversationAuthorityAvailable();
+				this.sessionManager.transitionClientInput(clientMessageId, "completed");
+				await this.sessionManager.flush();
+				this._completeLiveClientInput(clientMessageId, "completed");
+			} else if (!operation && outcome === "handled" && !this._disposed) {
+				// Local/prompt-backed UI actions have no durable client identity, but
+				// their completed handler is still an authoritative admission boundary.
+				promptOptions?.preflightResult?.({ success: true, outcome: "admitted" });
+			}
+			if (outcome === "handled" && this._agentSettlementRevision === settlementRevision) {
+				// A handler-owned prompt has no AgentHarness run to publish settlement.
+				// Emit the same terminal boundary after the handler and any durable
+				// client-input completion have finished, unless the handler already
+				// completed a custom turn and published that boundary itself.
+				this._emitAgentSettledIfIdle();
 			}
 		})();
 		if (operation) {
