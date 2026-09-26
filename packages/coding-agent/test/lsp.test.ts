@@ -2605,6 +2605,37 @@ describe("LspClient disk sync", () => {
 		expect(state.watched).toEqual([{ uri: state.opens[0], type: 2 }]);
 	});
 
+	it("re-reads a document whose disk content changed before it was synced", async () => {
+		const client = setupClient();
+		const fileA = join(tempDir, "a.foo");
+		// Another writer replaced the file after the synced content was captured.
+		writeFileSync(fileA, "written by another agent\n");
+		await client.openDocument(fileA, "captured before the write\n");
+
+		expect(await client.refreshStaleDocuments()).toEqual([fileA]);
+		expect(await client.refreshStaleDocuments()).toEqual([]);
+
+		const state = (await client.sendRequest("fake/state", {})) as FakeState;
+		expect(state.changes).toHaveLength(1);
+		expect(state.changes[0].version).toBe(2);
+	});
+
+	it("re-reads a workspace-edited document when disk changed before reconciliation", async () => {
+		const client = setupClient();
+		const fileA = join(tempDir, "a.foo");
+		writeFileSync(fileA, "original\n");
+		await client.openDocument(fileA, "original\n");
+		// The edit reached disk, then another writer replaced it before the client recorded it.
+		writeFileSync(fileA, "written by another agent\n");
+		await client.applyWorkspaceChanges([{ kind: "edit", path: fileA, content: "edited\n" }]);
+
+		expect(await client.refreshStaleDocuments()).toEqual([fileA]);
+		expect(await client.refreshStaleDocuments()).toEqual([]);
+
+		const state = (await client.sendRequest("fake/state", {})) as FakeState;
+		expect(state.changes.map((change) => change.version)).toEqual([2, 3]);
+	});
+
 	it("closes documents that were deleted on disk", async () => {
 		const client = setupClient();
 		const fileA = join(tempDir, "a.foo");
