@@ -111,7 +111,8 @@ accepted -> started -> completed
 - `accepted` means the original input, or the exact transformed queued payload, is durably recoverable.
 - `started` fences replay before a potentially non-repeatable boundary.
 - A canonical identified user entry implies `completed`.
-- `started` without a canonical or terminal entry is ambiguous and cannot be replayed automatically.
+- A failure the live owner observes before the canonical user append persists `failed`. That includes errors, aborts, and runs that stop without committing after `started`; a retained delivery instead returns to `accepted`. A handled command or input hook that already ran keeps `started` if its `completed` write fails, because its side effects are not repeatable.
+- `started` without a canonical or terminal entry therefore means only that the owner was lost mid-dispatch (process exit or disposal). It is ambiguous and cannot be replayed automatically.
 - A retained queued delivery remains `accepted`; retention must not falsely mark the logical input failed.
 
 ### Run attempt

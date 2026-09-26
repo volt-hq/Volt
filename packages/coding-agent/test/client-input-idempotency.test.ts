@@ -1128,7 +1128,7 @@ describe("durable client input idempotency", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
-	it("does not let a failed recovered dispatch replay outrank its durable ambiguity fence", async () => {
+	it("terminalizes a recovered dispatch that fails after its boundary instead of fencing later input", async () => {
 		const tempDir = createTempDir();
 		tempDirs.push(tempDir);
 		const manager = await SessionManager.create(tempDir, tempDir);
@@ -1150,11 +1150,25 @@ describe("durable client input idempotency", () => {
 		await expect(harness.session.resumeRecoveredClientInputs()).rejects.toThrow(
 			"injected failure after message_start before canonical append",
 		);
-		expect(reopened.getClientInput("recover-started")?.state).toBe("started");
-		expect(reopened.buildSessionContext().messages).toEqual([]);
-		await expect(harness.session.steer("recover me", undefined, "recover-started")).rejects.toMatchObject({
-			code: "client_input_outcome_ambiguous",
+		expect(reopened.getClientInput("recover-started")).toMatchObject({
+			state: "failed",
+			error: "injected failure after message_start before canonical append",
 		});
+		expect(harness.eventsOfType("client_input_outcome")).toEqual([
+			{
+				type: "client_input_outcome",
+				clientMessageId: "recover-started",
+				outcome: "failed",
+				reason: "dispatch_failed",
+			},
+		]);
+		expect(reopened.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+		expect(reopened.buildSessionContext().messages).toEqual([]);
+		// The same-ID retry replays the definitive failure; it is neither ambiguous nor re-dispatched.
+		await expect(harness.session.steer("recover me", undefined, "recover-started")).rejects.toThrow(
+			"injected failure after message_start before canonical append",
+		);
+		expect(harness.session.getSteeringMessages()).toEqual([]);
 	});
 
 	it("rejects and restores recovery when prompt entry is cancelled without throwing", async () => {
