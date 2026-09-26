@@ -20,6 +20,7 @@ import type { ExtensionWorkLimits } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import { accountInference, type InferenceAccounting } from "./inference-accounting.ts";
+import type { LspServerPool } from "./lsp/server-pool.ts";
 import { McpAuditLogger } from "./mcp/audit.ts";
 import { DefaultMcpClientFactory } from "./mcp/client-factory.ts";
 import { loadMcpConfig } from "./mcp/config-loader.ts";
@@ -164,6 +165,11 @@ export interface CreateAgentSessionOptions {
 	hostInteraction?: HostInteraction;
 	/** Optional manager enabling the built-in subagent tool when selected. */
 	subagentToolManager?: SubagentToolManager;
+	/**
+	 * Language servers shared with other sessions created from the same pool
+	 * (e.g. a session and its subagents). Each session starts its own when omitted.
+	 */
+	lspServerPool?: LspServerPool;
 	/** Optional manager enabling the native MCP gateway tool when selected. */
 	mcpManager?: McpManager;
 	/**
@@ -657,6 +663,7 @@ async function createAgentSessionWithTrackedResources(
 		sessionStartEvent: options.sessionStartEvent,
 		hostInteraction: options.hostInteraction,
 		subagentToolManager: options.subagentToolManager,
+		lspServerPool: options.lspServerPool,
 		mcpManager,
 		mcpManagerFactory: options.disableMcp || suppliedMcpManager ? undefined : createDefaultMcpManager,
 	});

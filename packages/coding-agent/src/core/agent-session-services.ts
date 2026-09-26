@@ -7,6 +7,7 @@ import { AuthStorage } from "./auth-storage.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import type { HostInteraction } from "./host-interaction.ts";
+import type { LspServerPool } from "./lsp/server-pool.ts";
 import { ModelRegistry } from "./model-registry.ts";
 import type { AgentMode } from "./planning.ts";
 import {
@@ -80,6 +81,8 @@ export interface CreateAgentSessionFromServicesOptions {
 	extensionWorkLimits?: CreateAgentSessionOptions["extensionWorkLimits"];
 	hostInteraction?: HostInteraction;
 	subagentToolManager?: SubagentToolManager;
+	/** Share language servers with other sessions of the same runtime factory. */
+	lspServerPool?: LspServerPool;
 }
 
 /**
@@ -265,5 +268,6 @@ export async function createAgentSessionFromServices(
 		sessionStartEvent: options.sessionStartEvent,
 		hostInteraction: options.hostInteraction,
 		subagentToolManager: options.subagentToolManager,
+		lspServerPool: options.lspServerPool,
 	});
 }

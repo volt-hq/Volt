@@ -36,6 +36,8 @@ export {
 	lspResult,
 	lspSucceeded,
 } from "./outcome.ts";
+export type { LspServerLease } from "./server-core.ts";
+export { LspServerPool, type LspServerPoolAcquireOptions } from "./server-pool.ts";
 export { type LspTraceDirection, LspTracer } from "./trace.ts";
 export {
 	applyTextEdits,

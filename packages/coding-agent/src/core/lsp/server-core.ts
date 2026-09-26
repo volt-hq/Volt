@@ -12,7 +12,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { lstat, realpath } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { spawnProcess, spawnProcessSync } from "../../utils/child-process.ts";
 import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
 import { getSubprocessEnv } from "../../utils/process-env.ts";
@@ -102,6 +102,16 @@ export interface LspServerCoreSubscriber {
 	restarted(): void;
 	/** Start-failure breakers and install prompts were reset; healthy clients kept running. */
 	failuresReset(): void;
+	/**
+	 * A workspace edit is about to move open documents of the client for key.
+	 * The returned callback runs after the moves (and any destination closes).
+	 */
+	documentsMoving(key: string, moves: readonly LspDocumentMove[]): (() => void) | undefined;
+}
+
+export interface LspDocumentMove {
+	readonly from: string;
+	readonly to: string;
 }
 
 export interface LspServerCoreOptions {
@@ -810,6 +820,9 @@ export class LspServerCore {
 		);
 
 		if (decision.decision !== "approved") {
+			// A host that cannot show prompts (e.g. a subagent) never offered the
+			// install; leave the offer for a view whose host can.
+			if (decision.decision === "unavailable") this.installPromptsUsed.delete(identity);
 			return { retry: false, message: decision.message };
 		}
 		if (signal?.aborted || !initiator.installAllowed() || /^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? "")) {
@@ -880,7 +893,25 @@ export class LspServerCore {
 				return canonical.path;
 			},
 		});
+		const key = [...this.clients].find(([, current]) => current === client)?.[0];
+		const moves: LspDocumentMove[] = [];
+		if (key !== undefined) {
+			// Mirror LspClient.applyWorkspaceChanges: documents at or inside a renamed path reopen at its destination.
+			for (const change of result.changes) {
+				if (change.kind !== "rename") continue;
+				for (const path of client.getOpenDocumentPaths()) {
+					if (!isPathAtOrInside(change.oldPath, path)) continue;
+					const suffix = relative(change.oldPath, path);
+					moves.push({ from: path, to: suffix ? join(change.newPath, suffix) : change.newPath });
+				}
+			}
+		}
+		const moved =
+			key === undefined || moves.length === 0
+				? []
+				: [...this.subscribers].map((subscriber) => subscriber.documentsMoving(key, moves));
 		await client.applyWorkspaceChanges(result.changes);
+		for (const finish of moved) finish?.();
 		return result;
 	}
 
@@ -951,6 +982,22 @@ export class LspServerCore {
 		this.startupEvidence.clear();
 		this.notify((subscriber) => subscriber.restarted());
 		return count;
+	}
+
+	/**
+	 * Clear start-failure breakers, install prompts, and launch caches without
+	 * stopping healthy clients, so the next use of a failed server retries fresh.
+	 */
+	resetFailures(): void {
+		this.startFailures.clear();
+		this.startAttempts.clear();
+		this.installPromptsUsed.clear();
+		this.toolchainLocations.clear();
+		this.versionProbes.clear();
+		for (const key of [...this.launches.keys()]) {
+			if (!this.clients.has(key)) this.launches.delete(key);
+		}
+		this.notify((subscriber) => subscriber.failuresReset());
 	}
 
 	private shutdownIdleClients(): void {

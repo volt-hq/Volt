@@ -44,6 +44,7 @@ import {
 	effectiveInstallRecipe,
 	installRecipeIdentity,
 	isPathAtOrInside,
+	type LspDocumentMove,
 	type LspFailureNotice,
 	type LspInstallAttemptResult,
 	type LspInstallInitiator,
@@ -359,12 +360,16 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	private contextTransitions = new Map<string, { sequence: number; context: LspProjectContext }>();
 	/** First start failure this view reported per shared failure record; later ones stay silent. */
 	private reportedFailures = new WeakMap<ServerFailureState, LspStartFailureEvent>();
+	/** Failure records for which this view already took its one past-the-breaker install offer. */
+	private breakerInstallOffers = new WeakSet<ServerFailureState>();
 	private hostInteraction: HostInteraction | undefined;
 	private installAllowed: () => boolean;
 	private installInitiator: LspInstallInitiator;
 	private viewDisposed = false;
 	/** Stops only this view's waits; the shared core keeps running. */
 	private viewAbort = new AbortController();
+	/** Documents this view synced per server key; scopes cross-file feedback on a shared server. */
+	private syncedDocuments = new Map<string, Set<string>>();
 
 	constructor(options: LspManagerOptions) {
 		this.cwd = resolvePath(options.cwd);
@@ -403,11 +408,23 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	/** @internal Core notification. */
 	clientReplaced(key: string): void {
 		this.feedback.forget(key);
+		this.syncedDocuments.delete(key);
 	}
 
 	/** @internal Core notification. */
 	documentClosed(key: string, path: string): void {
 		this.feedback.forget(key, path);
+		this.syncedDocuments.get(key)?.delete(path);
+	}
+
+	/** @internal Core notification. */
+	documentsMoving(key: string, moves: readonly LspDocumentMove[]): (() => void) | undefined {
+		const paths = this.syncedDocuments.get(key);
+		const owned = paths ? moves.filter((move) => paths.has(move.from)) : [];
+		if (owned.length === 0) return undefined;
+		return () => {
+			for (const move of owned) this.recordSyncedDocument(key, move.to);
+		};
 	}
 
 	/** @internal Core notification. */
@@ -415,6 +432,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.automaticTransitions.clear();
 		this.feedback.clear();
 		this.contextTransitions.clear();
+		this.syncedDocuments.clear();
 	}
 
 	/** @internal Core notification. */
@@ -665,9 +683,22 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.core.closeTraceSync();
 	}
 
-	/** Dispose all running servers. They respawn lazily on next use. Returns the number stopped. */
+	/**
+	 * Dispose all running servers. They respawn lazily on next use. Returns the
+	 * number stopped. A shared core restarts for every session using it.
+	 */
 	restart(): number {
 		return this.core.restart();
+	}
+
+	/** Clear failed-start breakers and install prompts without stopping healthy servers. */
+	resetFailures(): void {
+		this.core.resetFailures();
+	}
+
+	/** Whether both views use the same server core. */
+	sharesServersWith(other: LspManager): boolean {
+		return this.core === other.core;
 	}
 
 	/**
@@ -715,10 +746,13 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const root = this.findRoot(absolutePath, server.rootMarkers);
 		const key = this.serverKey(server.name, root);
 
+		let installOffer = false;
 		while (!this.disposed) {
 			const failure = this.core.startFailures.get(key);
-			if (failure && failure.count >= MAX_START_ATTEMPTS)
-				return lspResult("unavailable", "", { reason: "breaker-open" });
+			if (failure && failure.count >= MAX_START_ATTEMPTS) {
+				if (!this.takeBreakerInstallOffer(failure)) return lspResult("unavailable", "", { reason: "breaker-open" });
+				installOffer = true;
+			}
 
 			let client: LspClient;
 			try {
@@ -730,14 +764,14 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					});
 				}
 				if (!(error instanceof MissingLspExecutableError)) throw error;
-				const result = await this.handleMissingExecutable(server, error, signal);
+				const result = await this.handleMissingExecutable(server, error, signal, installOffer);
 				if (result.retry) continue;
 				if (result.failure) return result.failure;
 				return lspResult(signal?.aborted ? "cancelled" : "unavailable", result.message ?? "", {
 					reason: signal?.aborted ? "aborted" : error.reason,
 				});
 			}
-			const cleanBefore = this.collectCleanOpenDocuments(client, absolutePath);
+			const cleanBefore = this.collectCleanOpenDocuments(key, client, absolutePath);
 			let diagnostics: LspDiagnosticResult;
 			try {
 				await this.core.ensureStarted(server, key, client, signal);
@@ -757,6 +791,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			}
 			if (this.disposed || this.core.clients.get(key) !== client)
 				return lspResult("unavailable", "", { reason: "disposed" });
+			if (client.isDocumentOpen(absolutePath)) this.recordSyncedDocument(key, absolutePath);
 
 			if (lspSucceeded(diagnostics) && diagnostics.epoch !== client.getDiagnosticEpoch()) {
 				diagnostics = {
@@ -793,7 +828,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			// Even when the target timed out, independent current publications can
 			// provide useful feedback. Never lend them the target's confidence.
 			if (diagnostics.outcome !== "cancelled") {
-				for (const path of client.getOpenDocumentPaths()) {
+				for (const path of this.ownOpenDocumentPaths(key, client)) {
 					if (path === absolutePath) continue;
 					const snapshot = client.getPublicationSnapshot(path);
 					if (snapshot)
@@ -828,7 +863,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		return lspResult("unavailable", "", { reason: "disposed" });
 	}
 
-	/** Other open documents with a current publication and no reportable diagnostics. */
+	/** Stop this view. A shared core keeps running until its last lease is released. */
 	dispose(): void {
 		if (this.viewDisposed) return;
 		this.viewDisposed = true;
@@ -837,12 +872,30 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		this.feedback.clear();
 		this.contextTransitions.clear();
 		this.automaticTransitions.clear();
+		this.syncedDocuments.clear();
 		this.lease.release();
 	}
 
-	private collectCleanOpenDocuments(client: LspClient, excludePath: string): Set<string> {
+	private recordSyncedDocument(key: string, path: string): void {
+		if (this.disposed || this.core.clients.get(key) === undefined) return;
+		let paths = this.syncedDocuments.get(key);
+		if (!paths) {
+			paths = new Set();
+			this.syncedDocuments.set(key, paths);
+		}
+		paths.add(path);
+	}
+
+	/** Open documents this view synced; a shared server also holds other sessions' files. */
+	private ownOpenDocumentPaths(key: string, client: LspClient): string[] {
+		const paths = this.syncedDocuments.get(key);
+		return client.getOpenDocumentPaths().filter((path) => paths?.has(path) === true);
+	}
+
+	/** Other open documents with a current publication and no reportable diagnostics. */
+	private collectCleanOpenDocuments(key: string, client: LspClient, excludePath: string): Set<string> {
 		const clean = new Set<string>();
-		for (const path of client.getOpenDocumentPaths()) {
+		for (const path of this.ownOpenDocumentPaths(key, client)) {
 			if (path === excludePath) {
 				continue;
 			}
@@ -1238,16 +1291,19 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const root = this.findRoot(absolutePath, server.rootMarkers);
 		const key = this.serverKey(server.name, root);
 
+		let installOffer = false;
 		while (!this.disposed) {
 			const failure = this.core.startFailures.get(key);
 			if (failure && failure.count >= MAX_START_ATTEMPTS) {
-				return {
-					error: lspResult(
-						"unavailable",
-						`lsp(${server.name}): server unavailable after ${failure.count} failed starts. Last error: ${failure.lastError}`,
-						{ reason: "breaker-open" },
-					),
-				};
+				if (!this.takeBreakerInstallOffer(failure))
+					return {
+						error: lspResult(
+							"unavailable",
+							`lsp(${server.name}): server unavailable after ${failure.count} failed starts. Last error: ${failure.lastError}`,
+							{ reason: "breaker-open" },
+						),
+					};
+				installOffer = true;
 			}
 			let client: LspClient;
 			try {
@@ -1262,7 +1318,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					};
 				}
 				if (!(error instanceof MissingLspExecutableError)) throw error;
-				const result = await this.handleMissingExecutable(server, error, signal);
+				const result = await this.handleMissingExecutable(server, error, signal, installOffer);
 				if (result.retry) continue;
 				if (result.failure) return { error: result.failure };
 				return {
@@ -1276,6 +1332,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			try {
 				await this.core.ensureStarted(server, key, client, signal);
 				const uri = await client.openDocument(absolutePath, content, signal);
+				if (this.core.clients.get(key) === client) this.recordSyncedDocument(key, absolutePath);
 				await this.refreshStale(client, absolutePath);
 				return { client, uri, content, absolutePath };
 			} catch (error) {
@@ -1644,8 +1701,34 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		key: string,
 		message: string,
 		extraMessage?: string,
+		installRecipe?: LspInstallRecipe,
 	): string | undefined {
-		return this.reportStartFailure(server, this.core.recordStartFailure(server, key, message, extraMessage));
+		return this.reportStartFailure(
+			server,
+			this.core.recordStartFailure(server, key, message, extraMessage, installRecipe),
+		);
+	}
+
+	/**
+	 * The shared breaker may be opened by views that cannot prompt (subagents).
+	 * A view that can prompt still gets one install offer per failure record when
+	 * the last failure was install-eligible and the reviewed prompt was never shown.
+	 */
+	private takeBreakerInstallOffer(failure: ServerFailureState): boolean {
+		const recipe = failure.installRecipe;
+		if (
+			!recipe ||
+			this.disposed ||
+			!this.hostInteraction ||
+			isManagedLspObservation() ||
+			!this.installAllowed() ||
+			/^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? "") ||
+			this.core.installPromptsUsed.has(installRecipeIdentity(recipe)) ||
+			this.breakerInstallOffers.has(failure)
+		)
+			return false;
+		this.breakerInstallOffers.add(failure);
+		return true;
 	}
 
 	/**
@@ -1683,6 +1766,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		server: ResolvedLspServerConfig,
 		error: MissingLspExecutableError,
 		signal?: AbortSignal,
+		installOffer = false,
 	): Promise<LspClientErrorResult> {
 		// Do not join a foreground install or consume its prompt/breaker state.
 		// This policy belongs to the operation, not the shared server startup.
@@ -1695,11 +1779,17 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			recipe !== undefined &&
 			recipe.binary === error.launch.requestedExecutable;
 		const installPending = recipe && this.core.installAttempts.has(installRecipeIdentity(recipe));
-		if (!this.disposed && installEligible && (!reported || installPending)) {
+		// Recorded on the shared failure so a prompt-capable view can still offer it past the breaker.
+		const installable = installEligible ? recipe : undefined;
+		if (!this.disposed && installEligible && (!reported || installPending || installOffer)) {
 			// Readiness, like installation, must finish even if every operation stops waiting.
 			const installSignal = this.core.installAbortController.signal;
 			const attempt = this.tryInstallMissingServer(server, recipe, error.key);
-			const result = await this.waitForInstallAttempt(attempt, signal);
+			// Disposing this view stops its wait; a shared install continues for other views.
+			const result = await this.waitForInstallAttempt(
+				attempt,
+				signal ? AbortSignal.any([signal, this.viewAbort.signal]) : this.viewAbort.signal,
+			);
 			// Restart/disposal revokes this attempt, including host prompt rejections.
 			// Never let its completion restore failures against the reset manager.
 			if (installSignal.aborted || this.disposed)
@@ -1714,10 +1804,13 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			}
 			return {
 				retry: false,
-				message: this.recordStartFailure(server, error.key, error.message, result.message),
+				message: this.recordStartFailure(server, error.key, error.message, result.message, installable),
 			};
 		}
-		return { retry: false, message: this.recordStartFailure(server, error.key, error.message) };
+		return {
+			retry: false,
+			message: this.recordStartFailure(server, error.key, error.message, undefined, installable),
+		};
 	}
 
 	private async tryInstallMissingServer(
