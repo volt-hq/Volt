@@ -6,22 +6,17 @@
  * results. Server start failures are reported once and then suppressed.
  */
 
-import { AsyncLocalStorage } from "node:async_hooks";
-import type { ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
-import { lstat, readFile, realpath } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, extname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, extname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnProcess, spawnProcessSync } from "../../utils/child-process.ts";
 import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
-import { getSubprocessEnv } from "../../utils/process-env.ts";
 import type { HostInteraction } from "../host-interaction.ts";
 import type { ToolDiagnosticsProvider } from "../tools/diagnostics-provider.ts";
 import type { LspNavigationProvider } from "../tools/lsp.ts";
-import { LspClient, type LspDiagnostic, type LspDiagnosticResult, type LspPosition, type LspRange } from "./client.ts";
-import { type LspLaunchDescriptor, type LspLaunchSource, resolveLspLaunch } from "./command-resolver.ts";
+import type { LspClient, LspDiagnostic, LspDiagnosticResult, LspPosition, LspRange } from "./client.ts";
+import type { LspLaunchSource } from "./command-resolver.ts";
 import {
 	type LspInstallRecipe,
 	languageIdForExtension,
@@ -42,46 +37,58 @@ import {
 	lspErrorResult,
 	lspResult,
 	lspSucceeded,
-	waitForLsp,
 } from "./outcome.ts";
 import { swiftContextCaveat, swiftProjectContext } from "./project-context.ts";
-import { type LspLocatedExecutable, type LspToolchainLocator, toolchainLocatorFor } from "./toolchain-locator.ts";
-import { LspTracer } from "./trace.ts";
-import { type LspVersionProbe, LspVersionProbes } from "./version-probe.ts";
-import { type LspWorkspaceEdit, normalizeWorkspaceEdit } from "./workspace-edit.ts";
 import {
-	applyWorkspaceEdit as applyWorkspaceEditToDisk,
-	type WorkspaceEditApplyResult,
-	type WorkspaceEditDocumentSnapshot,
-} from "./workspace-edit-applier.ts";
+	canonicalizeLspPath,
+	effectiveInstallRecipe,
+	installRecipeIdentity,
+	isPathAtOrInside,
+	type LspDocumentMove,
+	type LspFailureNotice,
+	type LspInstallAttemptResult,
+	type LspInstallInitiator,
+	type LspInstallRunner,
+	LspServerCore,
+	type LspServerCoreSubscriber,
+	type LspServerLease,
+	type LspStartFailureEvent,
+	lspServerKey,
+	MAX_START_ATTEMPTS,
+	MissingLspExecutableError,
+	type ServerFailureState,
+	UnusableLspExecutableError,
+} from "./server-core.ts";
+import { type LspWorkspaceEdit, normalizeWorkspaceEdit } from "./workspace-edit.ts";
+import type { WorkspaceEditApplyResult, WorkspaceEditDocumentSnapshot } from "./workspace-edit-applier.ts";
+
+export {
+	type LspInstallCommandOptions,
+	type LspInstallCommandResult,
+	type LspInstallRunner,
+	runDefaultLspInstallCommand,
+} from "./server-core.ts";
 
 export interface LspManagerOptions {
 	/** Runtime cwd used only to shorten displayed tool paths. */
 	cwd: string;
-	/** Default project root and base for commands/traces, not an access boundary. Defaults to cwd. */
+	/**
+	 * Default project root and base for commands/traces, not an access boundary. Defaults to cwd.
+	 * Ignored with `server`, whose core already fixes the project root.
+	 */
 	projectCwd?: string;
 	config: ResolvedLspConfig;
 	hostInteraction?: HostInteraction;
+	/** Used only for a private core; a shared core keeps the runner it was created with. */
 	installRunner?: LspInstallRunner;
 	/** Host-owned live policy; false in restricted modes. Checked again after consent. */
 	installAllowed?: () => boolean;
+	/**
+	 * Shared server state from LspServerPool. The manager takes ownership of the
+	 * lease and releases it on dispose. Without it, the manager owns a private core.
+	 */
+	server?: LspServerLease;
 }
-
-export interface LspInstallCommandOptions {
-	cwd: string;
-	signal?: AbortSignal;
-	onChunk?: (chunk: string) => void;
-}
-
-export interface LspInstallCommandResult {
-	exitCode: number | null;
-	output: string;
-}
-
-export type LspInstallRunner = (
-	command: readonly string[],
-	options: LspInstallCommandOptions,
-) => Promise<LspInstallCommandResult>;
 
 export interface LspServerStatus {
 	name: string;
@@ -120,81 +127,10 @@ interface LspOperationResult extends LspResult {
 	diagnosticsText?: string;
 }
 
-interface ServerFailureState {
-	count: number;
-	reported: boolean;
-	lastError: string;
-}
-
 type LspClientErrorResult = { retry: true } | { retry: false; message?: string; failure?: LspResult };
 
-interface ManagedLspStartup {
-	promise: Promise<void>;
-	failure?: LspClientErrorResult;
-}
-
-interface LspInstallAttemptResult {
-	retry: boolean;
-	message?: string;
-	cancelled?: boolean;
-	/** Successful installer; readiness is verified separately for each server root. */
-	requestId?: string;
-	failure?: LspResult;
-}
-
-/** Roots admitted while one recipe-scoped installer is pending. */
-interface LspInstallAttempt {
-	roots: Map<string, ResolvedLspServerConfig>;
-	promise: Promise<Map<string, LspInstallAttemptResult>>;
-}
-
-const MAX_START_ATTEMPTS = 3;
 const MAX_REFERENCES = 50;
 const MAX_SYMBOL_LINES = 200;
-const LSP_INSTALL_REQUEST_TIMEOUT_MS = 10 * 60_000;
-const MAX_INSTALL_OUTPUT_CHARS = 12000;
-
-function isPathAtOrInside(parentPath: string, candidatePath: string): boolean {
-	const relativePath = relative(parentPath, candidatePath);
-	return (
-		relativePath === "" ||
-		(relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath))
-	);
-}
-
-function isMissingPathError(error: unknown): boolean {
-	return (
-		typeof error === "object" &&
-		error !== null &&
-		"code" in error &&
-		(error.code === "ENOENT" || error.code === "ENOTDIR")
-	);
-}
-
-function installRecipeIdentity(recipe: LspInstallRecipe): string {
-	return `${recipe.binary}\u0000${recipe.command.join("\u0000")}`;
-}
-
-/**
- * The reviewed recipe, targeted at the toolchain a locator checked. Undefined when
- * the locator found the server missing but no reviewed install can repair it.
- */
-function effectiveInstallRecipe(
-	server: ResolvedLspServerConfig,
-	launch: LspLaunchDescriptor | undefined,
-): LspInstallRecipe | undefined {
-	const recipe = server.installRecipe;
-	const toolchain = launch?.toolchain;
-	if (!recipe || toolchain?.status !== "missing") return recipe;
-	if (!toolchain.installArgs) return undefined;
-	const displayCommand = [recipe.displayCommand, ...toolchain.installArgs].join(" ");
-	return {
-		...recipe,
-		command: [...recipe.command, ...toolchain.installArgs],
-		displayCommand,
-		installHint: `Install with: ${displayCommand}`,
-	};
-}
 
 function pathEntryExists(path: string): boolean {
 	try {
@@ -296,98 +232,6 @@ function rangesOverlap(a: LspRange, b: LspRange): boolean {
 	return positionLeq(a.start, b.end) && positionLeq(b.start, a.end);
 }
 
-function appendBoundedOutput(current: string, chunk: string): string {
-	const next = current + chunk;
-	if (next.length <= MAX_INSTALL_OUTPUT_CHARS) {
-		return next;
-	}
-	return next.slice(next.length - MAX_INSTALL_OUTPUT_CHARS);
-}
-
-function commandToDisplay(command: readonly string[]): string {
-	return command.map((arg) => (/\s/.test(arg) ? JSON.stringify(arg) : arg)).join(" ");
-}
-
-function terminateProcessTree(child: ChildProcess): void {
-	if (child.pid === undefined || child.exitCode !== null) return;
-	try {
-		if (process.platform === "win32") {
-			spawnProcessSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], {
-				encoding: "utf-8",
-				stdio: "ignore",
-			});
-		} else {
-			child.kill("SIGKILL");
-		}
-	} catch {
-		// Process already exited.
-	}
-}
-
-export function runDefaultLspInstallCommand(
-	command: readonly string[],
-	options: LspInstallCommandOptions,
-): Promise<LspInstallCommandResult> {
-	if (command.length === 0) {
-		return Promise.reject(new Error("LSP install command cannot be empty"));
-	}
-	if (options.signal?.aborted) {
-		return Promise.reject(new Error("LSP server install aborted"));
-	}
-
-	return new Promise((resolve, reject) => {
-		let output = "";
-		let settled = false;
-		const child = spawnProcess(command[0], [...command.slice(1)], {
-			cwd: options.cwd,
-			env: getSubprocessEnv(),
-			stdio: ["ignore", "pipe", "pipe"],
-		});
-
-		const cleanup = (): void => {
-			options.signal?.removeEventListener("abort", onAbort);
-		};
-		const finish = (result: LspInstallCommandResult): void => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			cleanup();
-			resolve(result);
-		};
-		const fail = (error: Error): void => {
-			if (settled) {
-				return;
-			}
-			settled = true;
-			cleanup();
-			reject(error);
-		};
-		function onAbort(): void {
-			terminateProcessTree(child);
-			fail(new Error("LSP server install aborted"));
-		}
-
-		child.stdout?.on("data", (chunk: Buffer) => {
-			const text = chunk.toString("utf-8");
-			output = appendBoundedOutput(output, text);
-			options.onChunk?.(text);
-		});
-		child.stderr?.on("data", (chunk: Buffer) => {
-			const text = chunk.toString("utf-8");
-			output = appendBoundedOutput(output, text);
-			options.onChunk?.(text);
-		});
-		child.once("error", (error) => {
-			fail(new Error(`Failed to run LSP install command "${commandToDisplay(command)}": ${error.message}`));
-		});
-		child.once("close", (code) => {
-			finish({ exitCode: code, output });
-		});
-		options.signal?.addEventListener("abort", onAbort, { once: true });
-	});
-}
-
 /** Normalize codeAction results: bare Commands and CodeAction literals. */
 function normalizeCodeActions(result: unknown): NormalizedCodeAction[] {
 	if (!Array.isArray(result)) {
@@ -410,50 +254,6 @@ function normalizeCodeActions(result: unknown): NormalizedCodeAction[] {
 }
 
 type DocumentSession = { error: LspResult } | { client: LspClient; uri: string; content: string; absolutePath: string };
-
-class MissingLspExecutableError extends Error {
-	readonly key: string;
-	readonly launch: LspLaunchDescriptor;
-	readonly reason: string;
-
-	constructor(
-		serverName: string,
-		key: string,
-		launch: LspLaunchDescriptor,
-		projectCwd: string,
-		probe?: LspVersionProbe,
-	) {
-		const sourceContext =
-			launch.source === "path"
-				? `in the inherited PATH (relative entries based at ${projectCwd})`
-				: launch.source === "project-relative"
-					? `relative to project workspace ${projectCwd}`
-					: "at the configured absolute path";
-		super(
-			probe
-				? `Cannot start native TypeScript LSP: ${launch.resolvedExecutable} reports ${probe.version ?? "an unknown version"}; TypeScript >=7 is required (${probe.reason}).`
-				: launch.toolchain?.status === "missing"
-					? `Failed to start LSP server "${serverName}": ${launch.toolchain.detail}`
-					: `Failed to start LSP server "${serverName}": ${launch.requestedExecutable} was not found ${sourceContext} (ENOENT)`,
-		);
-		this.key = key;
-		this.launch = launch;
-		this.reason = probe?.reason ?? "missing-executable";
-	}
-}
-
-class UnusableLspExecutableError extends Error {
-	readonly key: string;
-	readonly launch: LspLaunchDescriptor;
-
-	constructor(serverName: string, key: string, launch: LspLaunchDescriptor) {
-		super(
-			`Failed to start LSP server "${serverName}": ${launch.requestedExecutable} is present but not executable: ${launch.unusableExecutable ?? launch.requestedExecutable} (EACCES)`,
-		);
-		this.key = key;
-		this.launch = launch;
-	}
-}
 
 /** Normalize definition results: Location | Location[] | LocationLink[] | null. */
 function normalizeLocations(result: unknown): LspLocation[] {
@@ -540,119 +340,108 @@ function findSymbolPosition(content: string, symbol: string, line?: number): Lsp
 	return undefined;
 }
 
-export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvider {
+/**
+ * Per-session LSP view. Server processes and startup/failure accounting live in
+ * an LspServerCore that may be shared with other sessions; delivery history,
+ * failure reporting, host interaction, and install policy stay per view.
+ */
+export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvider, LspServerCoreSubscriber {
 	private cwd: string;
 	private displayCwd: string;
 	private projectCwd: string;
 	private config: ResolvedLspConfig;
-	private clients = new Map<string, LspClient>();
-	/** One completion/accounting owner per client, independent of operation waiters. */
-	private startups = new WeakMap<LspClient, ManagedLspStartup>();
-	private launches = new Map<string, LspLaunchDescriptor>();
-	private startAttempts = new Map<string, number>();
-	private versionProbes = new LspVersionProbes();
-	private operationContext = new AsyncLocalStorage<{
-		coldStartMs: number;
-		managedReads: Map<LspClient, () => void>;
-	}>();
-	private versions = new Map<string, string>();
-	private startupEvidence = new Map<string, Pick<LspServerStatus, "serverInfo" | "capabilities" | "startupStderr">>();
-	private metrics = new Map<
-		string,
-		{
-			operations: number;
-			failures: number;
-			totalDurationMs: number;
-			lastDurationMs: number;
-			lastSuccess?: string;
-			lastFailure?: string;
-			requestError?: string;
-		}
-	>();
-	private activeOperations = new Map<string, number>();
+	private core: LspServerCore;
+	private lease: LspServerLease;
+	private unsubscribe: () => void;
 	private automaticTransitions = new Map<string, { sequence: number; transition: string }>();
 	private operationSequence = 0;
 	private feedback = new LspDiagnosticFeedback();
 	private feedbackSequence = 0;
 	private contextTransitions = new Map<string, { sequence: number; context: LspProjectContext }>();
-	private startFailures = new Map<string, ServerFailureState>();
+	/** First start failure this view reported per shared failure record; later ones stay silent. */
+	private reportedFailures = new WeakMap<ServerFailureState, LspStartFailureEvent>();
+	/** Failure records for which this view already took its one past-the-breaker install offer. */
+	private breakerInstallOffers = new WeakSet<ServerFailureState>();
 	private hostInteraction: HostInteraction | undefined;
-	private installRunner: LspInstallRunner;
 	private installAllowed: () => boolean;
-	private installPromptsUsed = new Set<string>();
-	private installAttempts = new Map<string, LspInstallAttempt>();
-	/** Toolchain-located executables per server root; cleared on restart and after installs. */
-	private toolchainLocations = new Map<string, LspLocatedExecutable>();
-	private installAbortController = new AbortController();
-	private disposed = false;
-	private commandQueues = new Map<LspClient, Promise<void>>();
-	private commandApplyContexts = new Map<
-		LspClient,
-		{ snapshots: WorkspaceEditDocumentSnapshot[]; summaries: string[]; failure?: string }
-	>();
-	private lastUsedAt = new Map<string, number>();
-	private idleTimer: NodeJS.Timeout | undefined;
-	private tracer: LspTracer | undefined;
+	private installInitiator: LspInstallInitiator;
+	private viewDisposed = false;
+	/** Stops only this view's waits; the shared core keeps running. */
+	private viewAbort = new AbortController();
+	/** Documents this view synced per server key; scopes cross-file feedback on a shared server. */
+	private syncedDocuments = new Map<string, Set<string>>();
 
 	constructor(options: LspManagerOptions) {
 		this.cwd = resolvePath(options.cwd);
-		this.projectCwd = canonicalizePath(resolvePath(options.projectCwd ?? this.cwd));
 		this.displayCwd = canonicalizePath(this.cwd);
 		this.config = options.config;
+		if (options.server) {
+			this.lease = options.server;
+		} else {
+			const core = new LspServerCore({
+				projectCwd: options.projectCwd ?? this.cwd,
+				config: options.config,
+				installRunner: options.installRunner,
+			});
+			this.lease = { core, release: () => core.dispose() };
+		}
+		this.core = this.lease.core;
+		this.projectCwd = this.core.projectCwd;
 		this.hostInteraction = options.hostInteraction;
-		this.installRunner = options.installRunner ?? runDefaultLspInstallCommand;
 		this.installAllowed = options.installAllowed ?? (() => true);
-		if (this.config.traceFile) {
-			this.tracer = new LspTracer(resolvePath(this.config.traceFile, this.projectCwd));
-		}
-		if (this.config.enabled && this.config.idleShutdownMs > 0) {
-			const checkIntervalMs = Math.max(250, Math.min(this.config.idleShutdownMs / 2, 60000));
-			this.idleTimer = setInterval(() => this.shutdownIdleClients(), checkIntervalMs);
-			this.idleTimer.unref();
-		}
+		this.installInitiator = {
+			host: () => this.hostInteraction,
+			installAllowed: () => this.installAllowed(),
+		};
+		this.unsubscribe = this.core.subscribe(this);
+	}
+
+	/** View or shared core disposed. */
+	private get disposed(): boolean {
+		return this.viewDisposed || this.core.isDisposed;
 	}
 
 	setHostInteraction(hostInteraction: HostInteraction | undefined): void {
 		this.hostInteraction = hostInteraction;
 	}
 
-	private async canonicalizeRequestedPath(inputPath: string): Promise<{ path: string } | { error: string }> {
-		const lexicalPath = resolvePath(inputPath, this.cwd);
-		let probe = lexicalPath;
-		const missingSuffix: string[] = [];
-		let canonicalPath: string;
-		while (true) {
-			try {
-				canonicalPath = resolve(await realpath(probe), ...missingSuffix);
-				break;
-			} catch (error) {
-				if (!isMissingPathError(error)) {
-					return {
-						error: `Could not resolve LSP path ${lexicalPath}: ${error instanceof Error ? error.message : String(error)}`,
-					};
-				}
-				try {
-					if ((await lstat(probe)).isSymbolicLink()) {
-						return {
-							error: `Could not resolve LSP path through a dangling symlink: ${lexicalPath}`,
-						};
-					}
-				} catch (lstatError) {
-					if (!isMissingPathError(lstatError)) {
-						return {
-							error: `Could not resolve LSP path ${lexicalPath}: ${lstatError instanceof Error ? lstatError.message : String(lstatError)}`,
-						};
-					}
-				}
-				const parent = dirname(probe);
-				if (parent === probe) {
-					return { error: `Could not resolve LSP path ${lexicalPath}` };
-				}
-				missingSuffix.unshift(probe.slice(parent.length + (parent.endsWith("/") || parent.endsWith("\\") ? 0 : 1)));
-				probe = parent;
-			}
-		}
-		return { path: canonicalPath };
+	/** @internal Core notification. */
+	clientReplaced(key: string): void {
+		this.feedback.forget(key);
+		this.syncedDocuments.delete(key);
+	}
+
+	/** @internal Core notification. */
+	documentClosed(key: string, path: string): void {
+		this.feedback.forget(key, path);
+		this.syncedDocuments.get(key)?.delete(path);
+	}
+
+	/** @internal Core notification. */
+	documentsMoving(key: string, moves: readonly LspDocumentMove[]): (() => void) | undefined {
+		const paths = this.syncedDocuments.get(key);
+		const owned = paths ? moves.filter((move) => paths.has(move.from)) : [];
+		if (owned.length === 0) return undefined;
+		return () => {
+			for (const move of owned) this.recordSyncedDocument(key, move.to);
+		};
+	}
+
+	/** @internal Core notification. */
+	restarted(): void {
+		this.automaticTransitions.clear();
+		this.feedback.clear();
+		this.contextTransitions.clear();
+		this.syncedDocuments.clear();
+	}
+
+	/** @internal Core notification. */
+	failuresReset(): void {
+		this.automaticTransitions.clear();
+	}
+
+	private canonicalizeRequestedPath(inputPath: string): Promise<{ path: string } | { error: string }> {
+		return canonicalizeLspPath(inputPath, this.cwd);
 	}
 
 	private async resolveLocationPath(uri: string): Promise<{ path: string } | { error: string }> {
@@ -670,21 +459,25 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	/** Status of all spawned language servers. */
 	getStatus(): LspServerStatus[] {
 		const now = Date.now();
-		const keys = new Set([...this.clients.keys(), ...this.startFailures.keys(), ...this.launches.keys()]);
+		const keys = new Set([
+			...this.core.clients.keys(),
+			...this.core.startFailures.keys(),
+			...this.core.launches.keys(),
+		]);
 		for (const server of [...this.config.servers, ...(this.config.disabledServers ?? [])]) {
 			if (![...keys].some((key) => key.startsWith(`${server.name}\u0000`)))
 				keys.add(this.serverKey(server.name, this.projectCwd));
 		}
 		return [...keys].map((key) => {
 			const [name, root] = key.split("\u0000");
-			const client = this.clients.get(key);
-			const launch = this.launches.get(key);
-			const failure = this.startFailures.get(key);
+			const client = this.core.clients.get(key);
+			const launch = this.core.launches.get(key);
+			const failure = this.core.startFailures.get(key);
 			const server = [...this.config.servers, ...(this.config.disabledServers ?? [])].find(
 				(entry) => entry.name === name,
 			);
 			const disabled = !this.config.enabled || this.config.disabledServers?.some((entry) => entry.name === name);
-			const metrics = this.metrics.get(key);
+			const metrics = this.core.metrics.get(key);
 			const state: LspServerStatus["state"] = disabled
 				? "disabled"
 				: failure
@@ -711,8 +504,8 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				alive: client?.isAlive ?? false,
 				state,
 				breaker: failure && failure.count >= MAX_START_ATTEMPTS ? ("open" as const) : ("closed" as const),
-				...this.startupEvidence.get(key),
-				...(this.versions.has(key) ? { version: this.versions.get(key) } : {}),
+				...this.core.startupEvidence.get(key),
+				...(this.core.versions.has(key) ? { version: this.core.versions.get(key) } : {}),
 				...(client?.getServerInfo() ? { serverInfo: client.getServerInfo() } : {}),
 				...(client?.getCapabilities()
 					? {
@@ -725,7 +518,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				...metrics,
 				...this.projectContextEvidence(name, root),
 				openDocuments: client?.openDocumentCount ?? 0,
-				idleMs: now - (this.lastUsedAt.get(key) ?? now),
+				idleMs: now - (this.core.lastUsedAt.get(key) ?? now),
 				...(launch?.resolvedExecutable
 					? { resolvedExecutable: launch.resolvedExecutable }
 					: {
@@ -733,7 +526,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 								launch?.unusableExecutable ?? launch?.requestedExecutable ?? server?.command[0] ?? "unknown",
 						}),
 				launchSource: launch?.source ?? "path",
-				attempts: this.startAttempts.get(key) ?? 0,
+				attempts: this.core.startAttempts.get(key) ?? 0,
 				...(failure ? { lastError: failure.lastError } : {}),
 			};
 		});
@@ -817,15 +610,15 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const root = server ? this.findRoot(path, server.rootMarkers) : this.projectCwd;
 		const key = this.serverKey(server?.name ?? "none", root);
 		const context = { coldStartMs: 0, managedReads: new Map<LspClient, () => void>() };
-		this.activeOperations.set(key, (this.activeOperations.get(key) ?? 0) + 1);
+		this.core.activeOperations.set(key, (this.core.activeOperations.get(key) ?? 0) + 1);
 		let operationResult: LspOperationResult;
 		try {
-			operationResult = await this.operationContext.run(context, operation);
+			operationResult = await this.core.operationContext.run(context, operation);
 		} catch (error) {
 			operationResult = lspErrorResult(error);
 		} finally {
 			for (const release of context.managedReads.values()) release();
-			this.activeOperations.set(key, Math.max(0, (this.activeOperations.get(key) ?? 1) - 1));
+			this.core.activeOperations.set(key, Math.max(0, (this.core.activeOperations.get(key) ?? 1) - 1));
 		}
 		const durationMs = performance.now() - startedAt;
 		const { diagnosticsText, ...evidence } = operationResult;
@@ -839,7 +632,12 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			coldStartMs: Math.min(durationMs, context.coldStartMs),
 		};
 		if (!server) return result;
-		const metrics = this.metrics.get(key) ?? { operations: 0, failures: 0, totalDurationMs: 0, lastDurationMs: 0 };
+		const metrics = this.core.metrics.get(key) ?? {
+			operations: 0,
+			failures: 0,
+			totalDurationMs: 0,
+			lastDurationMs: 0,
+		};
 		metrics.operations++;
 		metrics.totalDurationMs += durationMs;
 		metrics.lastDurationMs = durationMs;
@@ -849,9 +647,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		} else if (result.outcome !== "skipped") {
 			metrics.failures++;
 			metrics.lastFailure = new Date().toISOString();
-			if (!this.startFailures.has(key)) metrics.requestError = result.text.slice(0, 1000);
+			if (!this.core.startFailures.has(key)) metrics.requestError = result.text.slice(0, 1000);
 		}
-		this.metrics.set(key, metrics);
+		this.core.metrics.set(key, metrics);
 		if (automatic) {
 			const transition = `${result.outcome}:${result.reason}`;
 			const previous = this.automaticTransitions.get(key);
@@ -872,70 +670,35 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 
 	/** Path of the active trace file, if tracing is enabled. */
 	getTraceFile(): string | undefined {
-		return this.tracer?.filePath;
+		return this.core.getTraceFile();
 	}
 
 	/** Enable or disable protocol tracing for current and future servers. */
-	async setTraceFile(filePath: string | undefined): Promise<void> {
-		const previousTracer = this.tracer;
-		this.tracer = filePath ? new LspTracer(resolvePath(filePath, this.projectCwd)) : undefined;
-		for (const client of this.clients.values()) {
-			client.setTracer(this.tracer);
-		}
-		await previousTracer?.dispose();
+	setTraceFile(filePath: string | undefined): Promise<void> {
+		return this.core.setTraceFile(filePath);
 	}
 
 	/** Synchronously stop tracing during non-awaitable process teardown. */
 	closeTraceSync(): void {
-		const previousTracer = this.tracer;
-		this.tracer = undefined;
-		for (const client of this.clients.values()) {
-			client.setTracer(undefined);
-		}
-		previousTracer?.disposeSync();
+		this.core.closeTraceSync();
 	}
 
-	/** Dispose all running servers. They respawn lazily on next use. Returns the number stopped. */
+	/**
+	 * Dispose all running servers. They respawn lazily on next use. Returns the
+	 * number stopped. A shared core restarts for every session using it.
+	 */
 	restart(): number {
-		const count = this.clients.size;
-		for (const client of this.clients.values()) {
-			client.dispose();
-		}
-		this.clients.clear();
-		this.commandQueues.clear();
-		this.commandApplyContexts.clear();
-		this.lastUsedAt.clear();
-		this.launches.clear();
-		this.startAttempts.clear();
-		this.startFailures.clear();
-		this.installPromptsUsed.clear();
-		this.installAbortController.abort();
-		this.installAbortController = new AbortController();
-		this.installAttempts.clear();
-		this.versionProbes.clear();
-		this.toolchainLocations.clear();
-		this.versions.clear();
-		this.startupEvidence.clear();
-		this.automaticTransitions.clear();
-		this.feedback.clear();
-		this.contextTransitions.clear();
-		return count;
+		return this.core.restart();
 	}
 
-	private shutdownIdleClients(): void {
-		if (this.disposed) {
-			return;
-		}
-		const now = Date.now();
-		for (const [key, client] of [...this.clients.entries()]) {
-			const lastUsed = this.lastUsedAt.get(key) ?? now;
-			if (!client.isStarting && !this.activeOperations.get(key) && now - lastUsed >= this.config.idleShutdownMs) {
-				client.dispose();
-				this.clients.delete(key);
-				this.feedback.forget(key);
-				// Keep launch, timing and failure evidence after idle shutdown.
-			}
-		}
+	/** Clear failed-start breakers and install prompts without stopping healthy servers. */
+	resetFailures(): void {
+		this.core.resetFailures();
+	}
+
+	/** Whether both views use the same server core. */
+	sharesServersWith(other: LspManager): boolean {
+		return this.core === other.core;
 	}
 
 	/**
@@ -983,14 +746,17 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const root = this.findRoot(absolutePath, server.rootMarkers);
 		const key = this.serverKey(server.name, root);
 
+		let installOffer = false;
 		while (!this.disposed) {
-			const failure = this.startFailures.get(key);
-			if (failure && failure.count >= MAX_START_ATTEMPTS)
-				return lspResult("unavailable", "", { reason: "breaker-open" });
+			const failure = this.core.startFailures.get(key);
+			if (failure && failure.count >= MAX_START_ATTEMPTS) {
+				if (!this.takeBreakerInstallOffer(failure)) return lspResult("unavailable", "", { reason: "breaker-open" });
+				installOffer = true;
+			}
 
 			let client: LspClient;
 			try {
-				client = this.getClient(server, root);
+				client = this.core.getClient(server, root);
 			} catch (error) {
 				if (error instanceof UnusableLspExecutableError) {
 					return lspResult("unavailable", this.handleUnusableExecutable(server, error).message ?? "", {
@@ -998,17 +764,17 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					});
 				}
 				if (!(error instanceof MissingLspExecutableError)) throw error;
-				const result = await this.handleMissingExecutable(server, error, signal);
+				const result = await this.handleMissingExecutable(server, error, signal, installOffer);
 				if (result.retry) continue;
 				if (result.failure) return result.failure;
 				return lspResult(signal?.aborted ? "cancelled" : "unavailable", result.message ?? "", {
 					reason: signal?.aborted ? "aborted" : error.reason,
 				});
 			}
-			const cleanBefore = this.collectCleanOpenDocuments(client, absolutePath);
+			const cleanBefore = this.collectCleanOpenDocuments(key, client, absolutePath);
 			let diagnostics: LspDiagnosticResult;
 			try {
-				await this.ensureStarted(server, key, client, signal);
+				await this.core.ensureStarted(server, key, client, signal);
 				diagnostics = await client.getDiagnostics(
 					absolutePath,
 					content,
@@ -1023,8 +789,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				}
 				return { ...lspErrorResult(error), text: result.message ?? "" };
 			}
-			if (this.disposed || this.clients.get(key) !== client)
+			if (this.disposed || this.core.clients.get(key) !== client)
 				return lspResult("unavailable", "", { reason: "disposed" });
+			if (client.isDocumentOpen(absolutePath)) this.recordSyncedDocument(key, absolutePath);
 
 			if (lspSucceeded(diagnostics) && diagnostics.epoch !== client.getDiagnosticEpoch()) {
 				diagnostics = {
@@ -1061,7 +828,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			// Even when the target timed out, independent current publications can
 			// provide useful feedback. Never lend them the target's confidence.
 			if (diagnostics.outcome !== "cancelled") {
-				for (const path of client.getOpenDocumentPaths()) {
+				for (const path of this.ownOpenDocumentPaths(key, client)) {
 					if (path === absolutePath) continue;
 					const snapshot = client.getPublicationSnapshot(path);
 					if (snapshot)
@@ -1096,10 +863,39 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		return lspResult("unavailable", "", { reason: "disposed" });
 	}
 
+	/** Stop this view. A shared core keeps running until its last lease is released. */
+	dispose(): void {
+		if (this.viewDisposed) return;
+		this.viewDisposed = true;
+		this.viewAbort.abort();
+		this.unsubscribe();
+		this.feedback.clear();
+		this.contextTransitions.clear();
+		this.automaticTransitions.clear();
+		this.syncedDocuments.clear();
+		this.lease.release();
+	}
+
+	private recordSyncedDocument(key: string, path: string): void {
+		if (this.disposed || this.core.clients.get(key) === undefined) return;
+		let paths = this.syncedDocuments.get(key);
+		if (!paths) {
+			paths = new Set();
+			this.syncedDocuments.set(key, paths);
+		}
+		paths.add(path);
+	}
+
+	/** Open documents this view synced; a shared server also holds other sessions' files. */
+	private ownOpenDocumentPaths(key: string, client: LspClient): string[] {
+		const paths = this.syncedDocuments.get(key);
+		return client.getOpenDocumentPaths().filter((path) => paths?.has(path) === true);
+	}
+
 	/** Other open documents with a current publication and no reportable diagnostics. */
-	private collectCleanOpenDocuments(client: LspClient, excludePath: string): Set<string> {
+	private collectCleanOpenDocuments(key: string, client: LspClient, excludePath: string): Set<string> {
 		const clean = new Set<string>();
-		for (const path of client.getOpenDocumentPaths()) {
+		for (const path of this.ownOpenDocumentPaths(key, client)) {
 			if (path === excludePath) {
 				continue;
 			}
@@ -1112,31 +908,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			}
 		}
 		return clean;
-	}
-
-	dispose(): void {
-		this.disposed = true;
-		this.installAbortController.abort();
-		this.installAttempts.clear();
-		if (this.idleTimer) {
-			clearInterval(this.idleTimer);
-			this.idleTimer = undefined;
-		}
-		for (const client of this.clients.values()) {
-			client.dispose();
-		}
-		this.clients.clear();
-		this.commandQueues.clear();
-		this.commandApplyContexts.clear();
-		this.lastUsedAt.clear();
-		this.launches.clear();
-		this.startAttempts.clear();
-		this.startFailures.clear();
-		this.feedback.clear();
-		this.contextTransitions.clear();
-		this.automaticTransitions.clear();
-		void this.tracer?.dispose();
-		this.tracer = undefined;
 	}
 
 	// =========================================================================
@@ -1520,20 +1291,23 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		const root = this.findRoot(absolutePath, server.rootMarkers);
 		const key = this.serverKey(server.name, root);
 
+		let installOffer = false;
 		while (!this.disposed) {
-			const failure = this.startFailures.get(key);
+			const failure = this.core.startFailures.get(key);
 			if (failure && failure.count >= MAX_START_ATTEMPTS) {
-				return {
-					error: lspResult(
-						"unavailable",
-						`lsp(${server.name}): server unavailable after ${failure.count} failed starts. Last error: ${failure.lastError}`,
-						{ reason: "breaker-open" },
-					),
-				};
+				if (!this.takeBreakerInstallOffer(failure))
+					return {
+						error: lspResult(
+							"unavailable",
+							`lsp(${server.name}): server unavailable after ${failure.count} failed starts. Last error: ${failure.lastError}`,
+							{ reason: "breaker-open" },
+						),
+					};
+				installOffer = true;
 			}
 			let client: LspClient;
 			try {
-				client = this.getClient(server, root);
+				client = this.core.getClient(server, root);
 			} catch (error) {
 				if (error instanceof UnusableLspExecutableError) {
 					const result = this.handleUnusableExecutable(server, error);
@@ -1544,7 +1318,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					};
 				}
 				if (!(error instanceof MissingLspExecutableError)) throw error;
-				const result = await this.handleMissingExecutable(server, error, signal);
+				const result = await this.handleMissingExecutable(server, error, signal, installOffer);
 				if (result.retry) continue;
 				if (result.failure) return { error: result.failure };
 				return {
@@ -1556,8 +1330,9 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 				};
 			}
 			try {
-				await this.ensureStarted(server, key, client, signal);
+				await this.core.ensureStarted(server, key, client, signal);
 				const uri = await client.openDocument(absolutePath, content, signal);
+				if (this.core.clients.get(key) === client) this.recordSyncedDocument(key, absolutePath);
 				await this.refreshStale(client, absolutePath);
 				return { client, uri, content, absolutePath };
 			} catch (error) {
@@ -1617,7 +1392,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			if (!result || normalizeWorkspaceEdit(result).length === 0) {
 				return lspResult("empty", `Rename of "${symbol}" is not available at this position.`);
 			}
-			const applied = await this.applyWorkspaceEdit(session.client, result, snapshots);
+			const applied = await this.core.applyWorkspaceEdit(session.client, result, snapshots);
 			this.assertWorkspaceEditApplied(applied);
 			return lspResult("success", `Renamed "${symbol}" to "${newName}":\n${applied.summary}`, {
 				resultCount: applied.changes.length,
@@ -1756,19 +1531,19 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			}
 		}
 		if (edit && normalizeWorkspaceEdit(edit).length > 0) {
-			const applied = await this.applyWorkspaceEdit(client, edit, snapshots);
+			const applied = await this.core.applyWorkspaceEdit(client, edit, snapshots);
 			this.assertWorkspaceEditApplied(applied);
 			return lspResult("success", `Applied "${action.title}":\n${applied.summary}`, {
 				resultCount: applied.changes.length,
 			});
 		}
 		if (action.command) {
-			return this.withClientCommandQueue(client, async () => {
+			return this.core.withClientCommandQueue(client, async () => {
 				const context: { snapshots: WorkspaceEditDocumentSnapshot[]; summaries: string[]; failure?: string } = {
 					snapshots: client.captureWorkspaceEditSnapshots(),
 					summaries: [],
 				};
-				this.commandApplyContexts.set(client, context);
+				this.core.commandApplyContexts.set(client, context);
 				try {
 					await client.sendRequest(
 						"workspace/executeCommand",
@@ -1776,7 +1551,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 						signal,
 					);
 				} finally {
-					this.commandApplyContexts.delete(client);
+					this.core.commandApplyContexts.delete(client);
 				}
 				if (context.failure) throw new LspOperationError("edit-failed", "workspace-edit-rejected", context.failure);
 				if (context.summaries.length > 0) {
@@ -1788,44 +1563,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			});
 		}
 		return lspResult("empty", `Code action "${action.title}" produced no edits.`);
-	}
-
-	private async withClientCommandQueue<T>(client: LspClient, fn: () => Promise<T>): Promise<T> {
-		const previous = this.commandQueues.get(client) ?? Promise.resolve();
-		let release!: () => void;
-		const current = new Promise<void>((resolveQueue) => {
-			release = resolveQueue;
-		});
-		const queued = previous.then(() => current);
-		this.commandQueues.set(client, queued);
-		await previous;
-		try {
-			return await fn();
-		} finally {
-			release();
-			if (this.commandQueues.get(client) === queued) {
-				this.commandQueues.delete(client);
-			}
-		}
-	}
-
-	private async applyWorkspaceEdit(
-		client: LspClient,
-		edit: LspWorkspaceEdit,
-		snapshots: readonly WorkspaceEditDocumentSnapshot[],
-	): Promise<WorkspaceEditApplyResult> {
-		const result = await applyWorkspaceEditToDisk({
-			rootDir: this.projectCwd,
-			edit,
-			snapshots,
-			canonicalizePath: async (absolutePath) => {
-				const canonical = await this.canonicalizeRequestedPath(absolutePath);
-				if ("error" in canonical) throw new Error(canonical.error);
-				return canonical.path;
-			},
-		});
-		await client.applyWorkspaceChanges(result.changes);
-		return result;
 	}
 
 	private assertWorkspaceEditApplied(result: WorkspaceEditApplyResult): void {
@@ -1913,7 +1650,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	}
 
 	private serverKey(serverName: string, root: string): string {
-		return `${serverName}\u0000${root}`;
+		return lspServerKey(serverName, root);
 	}
 
 	private findRoot(absolutePath: string, rootMarkers: string[]): string {
@@ -1945,175 +1682,77 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		return fallback;
 	}
 
-	private async ensureStarted(
+	private async handleClientError(
 		server: ResolvedLspServerConfig,
 		key: string,
 		client: LspClient,
-		signal?: AbortSignal,
-	): Promise<void> {
-		if (signal?.aborted) throw new LspOperationError("cancelled", "aborted", "LSP operation aborted");
-		const operation = this.operationContext.getStore();
-		if (isManagedLspObservation() && operation && !operation.managedReads.has(client)) {
-			operation.managedReads.set(client, client.acquireManagedRead());
-		}
-		if (client.isReady) return;
-		const startedAt = performance.now();
-		let startup = this.startups.get(client);
-		if (!startup) {
-			const owned: ManagedLspStartup = { promise: client.start() };
-			this.startups.set(client, owned);
-			owned.promise = owned.promise.then(
-				() => {
-					if (this.disposed || this.clients.get(key) !== client) return;
-					this.captureStartupEvidence(key, client);
-					this.startFailures.delete(key);
-					// Idle time starts at completion, not at the cancelled caller's last use.
-					this.lastUsedAt.set(key, Date.now());
-				},
-				async (error: unknown) => {
-					if (!this.disposed && this.clients.get(key) === client) {
-						this.captureStartupEvidence(key, client);
-						owned.failure = await this.handleClientError(server, key, client, error);
-					} else {
-						// Restart/disposal revoked ownership. Never account against a replacement client.
-						owned.failure = { retry: false, message: error instanceof Error ? error.message : String(error) };
-					}
-					throw error;
-				},
-			);
-			// This manager-owned chain must settle even when every operation has cancelled.
-			void owned.promise.catch(() => {});
-			startup = owned;
-		}
-		// A cancelled waiter must not release read-only startup ownership while the
-		// shared handshake can still issue server-to-host requests.
-		if (isManagedLspObservation()) {
-			const release = client.acquireManagedRead();
-			void startup.promise.then(release, release);
-		}
-		try {
-			await waitForLsp(startup.promise, signal);
-		} finally {
-			const context = this.operationContext.getStore();
-			if (context) context.coldStartMs += performance.now() - startedAt;
-		}
-	}
-
-	private captureStartupEvidence(key: string, client: LspClient): void {
-		this.startupEvidence.set(key, {
-			...(client.getServerInfo() ? { serverInfo: client.getServerInfo() } : {}),
-			...(client.getCapabilities()
-				? {
-						capabilities: Object.keys(client.getCapabilities()!).filter((capability) =>
-							Boolean(client.getCapabilities()![capability]),
-						),
-					}
-				: {}),
-			...(client.getStartupStderr() ? { startupStderr: client.getStartupStderr() } : {}),
-		});
-	}
-
-	private getClient(server: ResolvedLspServerConfig, root: string): LspClient {
-		const key = this.serverKey(server.name, root);
-		this.lastUsedAt.set(key, Date.now());
-		const existing = this.clients.get(key);
-		// A terminated process may still be draining startup stderr. Join its
-		// owned completion rather than replacing it before failure accounting.
-		if (existing?.isAlive || existing?.isStarting) {
-			return existing;
-		}
-		existing?.dispose();
-		this.clients.delete(key);
-		this.feedback.forget(key);
-
-		const locator = server.usesBuiltInCommand ? toolchainLocatorFor(server.command[0]) : undefined;
-		const launch = resolveLspLaunch(server.command, {
-			projectCwd: this.projectCwd,
-			...(locator ? { toolchain: { locator: this.cachedToolchainLocator(key, locator), root } } : {}),
-		});
-		this.launches.set(key, launch);
-		const attempt = (this.startAttempts.get(key) ?? 0) + 1;
-		this.startAttempts.set(key, attempt);
-		if (!launch.resolvedExecutable) {
-			if (launch.unusableExecutable) {
-				throw new UnusableLspExecutableError(server.name, key, launch);
-			}
-			throw new MissingLspExecutableError(server.name, key, launch, this.projectCwd);
-		}
-
-		if (server.name === "typescript" && server.usesBuiltInCommand) {
-			const startedAt = performance.now();
-			const probe = this.versionProbes.probe(launch, this.projectCwd);
-			const context = this.operationContext.getStore();
-			if (context) context.coldStartMs += performance.now() - startedAt;
-			if (probe.version) this.versions.set(key, probe.version);
-			if (!probe.compatible) throw new MissingLspExecutableError(server.name, key, launch, this.projectCwd, probe);
-		}
-
-		let clientRef!: LspClient;
-		const client = new LspClient({
-			serverName: server.name,
-			command: launch.command,
-			rootDir: root,
-			environment: launch.environment,
-			launchContext: {
-				configuredCommand: launch.configuredCommand,
-				source: launch.source,
-				workspaceRoot: this.projectCwd,
-				attempt,
-			},
-			initializationOptions: server.initializationOptions,
-			settings: server.settings,
-			tracer: this.tracer,
-			onDocumentClosed: (path) => {
-				if (this.clients.get(key) === clientRef) this.feedback.forget(key, path);
-			},
-			resolveTrackedDocumentPath: async (absolutePath) => {
-				const canonical = await this.canonicalizeRequestedPath(absolutePath);
-				return "error" in canonical ? undefined : canonical.path;
-			},
-			onApplyEditRejected: (failureReason) => {
-				const context = this.commandApplyContexts.get(clientRef);
-				if (context) context.failure = failureReason;
-			},
-			onApplyEdit: async (edit) => {
-				const context = this.commandApplyContexts.get(clientRef);
-				const snapshots = context?.snapshots ?? clientRef.captureWorkspaceEditSnapshots();
-				const result = await this.applyWorkspaceEdit(clientRef, edit as LspWorkspaceEdit, snapshots);
-				if (context && !result.applied)
-					context.failure = result.failureReason ?? "Server-initiated workspace edit failed";
-				if (context && result.applied) {
-					context.snapshots = clientRef.captureWorkspaceEditSnapshots();
-				}
-				if (context && result.summary) {
-					context.summaries.push(result.summary);
-				}
-				return {
-					applied: result.applied,
-					failureReason: result.failureReason,
-					failedChange: result.failedChange,
-				};
-			},
-		});
-		clientRef = client;
-		this.clients.set(key, client);
-		return client;
-	}
-
-	/** Reuse a located executable while it stays launchable and PATH still misses; misses are never cached. */
-	private cachedToolchainLocator(key: string, locator: LspToolchainLocator): LspToolchainLocator {
+		error: unknown,
+	): Promise<LspClientErrorResult> {
+		const notice: LspFailureNotice = await this.core.handleClientError(server, key, client, error);
 		return {
-			binary: locator.binary,
-			locate: (context) => {
-				const cached = this.toolchainLocations.get(key);
-				if (cached && !context.pathExecutable && context.findExecutable(cached.executable) === cached.executable)
-					return cached;
-				const result = locator.locate(context);
-				if (result.status === "found") this.toolchainLocations.set(key, result);
-				else this.toolchainLocations.delete(key);
-				return result;
-			},
+			retry: false,
+			message: "event" in notice ? this.reportStartFailure(server, notice.event) : notice.message,
 		};
+	}
+
+	/** Account a start failure in the shared breaker and report it if this view has not yet. */
+	private recordStartFailure(
+		server: ResolvedLspServerConfig,
+		key: string,
+		message: string,
+		extraMessage?: string,
+		installRecipe?: LspInstallRecipe,
+	): string | undefined {
+		return this.reportStartFailure(
+			server,
+			this.core.recordStartFailure(server, key, message, extraMessage, installRecipe),
+		);
+	}
+
+	/**
+	 * The shared breaker may be opened by views that cannot prompt (subagents).
+	 * A view that can prompt still gets one install offer per failure record when
+	 * the last failure was install-eligible and the reviewed prompt was never shown.
+	 */
+	private takeBreakerInstallOffer(failure: ServerFailureState): boolean {
+		const recipe = failure.installRecipe;
+		if (
+			!recipe ||
+			this.disposed ||
+			!this.hostInteraction ||
+			isManagedLspObservation() ||
+			!this.installAllowed() ||
+			/^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? "") ||
+			this.core.installPromptsUsed.has(installRecipeIdentity(recipe)) ||
+			this.breakerInstallOffers.has(failure)
+		)
+			return false;
+		this.breakerInstallOffers.add(failure);
+		return true;
+	}
+
+	/**
+	 * The first failure event for a shared failure record is reported (to every
+	 * waiter of that event); later failures for the record stay silent in this view.
+	 */
+	private reportStartFailure(server: ResolvedLspServerConfig, event: LspStartFailureEvent): string | undefined {
+		if (this.disposed) return undefined;
+		const first = this.reportedFailures.get(event.state);
+		if (first !== undefined && first !== event) return undefined;
+		this.reportedFailures.set(event.state, event);
+		return `lsp(${server.name}): ${event.actionable} (further failures for this server root will be silent until /lsp restart or /reload)`;
+	}
+
+	private hasReportedFailure(key: string): boolean {
+		const state = this.core.startFailures.get(key);
+		return state !== undefined && this.reportedFailures.has(state);
+	}
+
+	/** A delivered install/readiness failure counts as this view's report for the record. */
+	private markFailureReported(key: string): void {
+		const state = this.core.startFailures.get(key);
+		if (state && !this.reportedFailures.has(state))
+			this.reportedFailures.set(state, { state, actionable: state.lastError });
 	}
 
 	private handleUnusableExecutable(
@@ -2123,49 +1762,34 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 		return { retry: false, message: this.recordStartFailure(server, error.key, error.message) };
 	}
 
-	private async handleClientError(
-		server: ResolvedLspServerConfig,
-		key: string,
-		client: LspClient,
-		error: unknown,
-	): Promise<LspClientErrorResult> {
-		const message = error instanceof Error ? error.message : String(error);
-		if (error instanceof LspOperationError && error.outcome === "cancelled") return { retry: false, message };
-		const startupFailure = this.startups.get(client)?.failure;
-		if (startupFailure) return startupFailure;
-		if (client.isAlive && !client.startFailed) {
-			// Request-level failure on a started, healthy server: report it without
-			// counting toward the start-failure breaker.
-			return { retry: false, message: `lsp(${server.name}): ${message}` };
-		}
-
-		if (this.clients.get(key) !== client)
-			return { retry: false, message: this.startFailures.get(key)?.lastError ?? message };
-		this.removeFailedClient(key, client);
-		return { retry: false, message: this.recordStartFailure(server, key, message) };
-	}
-
 	private async handleMissingExecutable(
 		server: ResolvedLspServerConfig,
 		error: MissingLspExecutableError,
 		signal?: AbortSignal,
+		installOffer = false,
 	): Promise<LspClientErrorResult> {
 		// Do not join a foreground install or consume its prompt/breaker state.
 		// This policy belongs to the operation, not the shared server startup.
 		if (isManagedLspObservation()) return { retry: false, message: error.message };
-		const failure = this.startFailures.get(error.key);
+		const reported = this.hasReportedFailure(error.key);
 		const recipe = effectiveInstallRecipe(server, error.launch);
 		const installEligible =
 			error.launch.bare &&
 			(error.reason === "missing-executable" || error.reason === "incompatible-version") &&
 			recipe !== undefined &&
 			recipe.binary === error.launch.requestedExecutable;
-		const installPending = recipe && this.installAttempts.has(installRecipeIdentity(recipe));
-		if (!this.disposed && installEligible && (!failure?.reported || installPending)) {
+		const installPending = recipe && this.core.installAttempts.has(installRecipeIdentity(recipe));
+		// Recorded on the shared failure so a prompt-capable view can still offer it past the breaker.
+		const installable = installEligible ? recipe : undefined;
+		if (!this.disposed && installEligible && (!reported || installPending || installOffer)) {
 			// Readiness, like installation, must finish even if every operation stops waiting.
-			const installSignal = this.installAbortController.signal;
+			const installSignal = this.core.installAbortController.signal;
 			const attempt = this.tryInstallMissingServer(server, recipe, error.key);
-			const result = await this.waitForInstallAttempt(attempt, signal);
+			// Disposing this view stops its wait; a shared install continues for other views.
+			const result = await this.waitForInstallAttempt(
+				attempt,
+				signal ? AbortSignal.any([signal, this.viewAbort.signal]) : this.viewAbort.signal,
+			);
 			// Restart/disposal revokes this attempt, including host prompt rejections.
 			// Never let its completion restore failures against the reset manager.
 			if (installSignal.aborted || this.disposed)
@@ -2174,104 +1798,19 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 					failure: lspResult("cancelled", "LSP install cancelled.", { reason: "aborted" }),
 				};
 			if (result.retry) return { retry: true };
-			if (result.failure || result.cancelled)
+			if (result.failure || result.cancelled) {
+				if (!result.cancelled) this.markFailureReported(error.key);
 				return { retry: false, message: result.message, failure: result.failure };
+			}
 			return {
 				retry: false,
-				message: this.recordStartFailure(server, error.key, error.message, result.message),
+				message: this.recordStartFailure(server, error.key, error.message, result.message, installable),
 			};
 		}
-		return { retry: false, message: this.recordStartFailure(server, error.key, error.message) };
-	}
-
-	/** Installation is recipe-scoped; initialization and failure accounting remain root-scoped. */
-	private async verifyInstalledServer(
-		server: ResolvedLspServerConfig,
-		key: string,
-		signal: AbortSignal,
-	): Promise<LspInstallAttemptResult> {
-		const root = key.split("\u0000")[1];
-		let client: LspClient | undefined;
-		try {
-			if (signal.aborted || this.disposed) throw new Error("LSP readiness verification cancelled.");
-			client = this.getClient(server, root);
-			await this.ensureStarted(server, key, client, signal);
-			if (signal.aborted || this.disposed || this.clients.get(key) !== client)
-				throw new Error("LSP readiness verification cancelled.");
-		} catch (error) {
-			const cancelled = signal.aborted || this.disposed;
-			const detail = error instanceof Error ? error.message : String(error);
-			const recovery =
-				error instanceof MissingLspExecutableError || error instanceof UnusableLspExecutableError
-					? `Set lsp.servers.${server.name}.command to an explicit compatible executable path and run /reload.${server.name === "rust" ? " For rustup, start Volt with the directory containing the rust-analyzer, cargo, and rustc proxies on PATH; the rustup which binary cannot load Cargo workspaces without cargo on PATH." : ""} If the configured command becomes usable on the existing PATH, run /lsp restart. Reload/restart do not import PATH changes from another shell.`
-					: `The executable resolved but initialization failed. Inspect /lsp for startup details, repair the server or project configuration, then run /lsp restart. If changing lsp.servers.${server.name}.command, run /reload.`;
-			const message = cancelled
-				? "LSP readiness verification cancelled."
-				: `Install command succeeded, but ${server.name} language server is not ready at ${root}: ${detail}. ${recovery}`;
-			if (!cancelled) {
-				// ensureStarted owns handshake failure accounting; resolution failed before it could run.
-				if (!client) this.recordStartFailure(server, key, message);
-				const failure = this.startFailures.get(key);
-				if (failure) failure.lastError = message;
-			}
-			const failure = cancelled
-				? lspResult("cancelled", message, { reason: "aborted" })
-				: error instanceof MissingLspExecutableError
-					? lspResult("unavailable", message, { reason: error.reason })
-					: error instanceof UnusableLspExecutableError
-						? lspResult("unavailable", message, { reason: "unusable-executable" })
-						: { ...lspErrorResult(error), text: message };
-			return { retry: false, message, cancelled, failure };
-		}
 		return {
-			retry: true,
-			message: `${server.name} language server ready at ${root} (initialize succeeded). Retrying LSP request.`,
+			retry: false,
+			message: this.recordStartFailure(server, error.key, error.message, undefined, installable),
 		};
-	}
-
-	private removeFailedClient(key: string, client: LspClient): void {
-		// Remove and dispose the failed client (this also kills a process stuck
-		// in the handshake) so the next call attempts a genuinely fresh start.
-		if (this.clients.get(key) === client) {
-			this.clients.delete(key);
-			this.feedback.forget(key);
-		}
-		client.dispose();
-	}
-
-	private recordStartFailure(
-		server: ResolvedLspServerConfig,
-		key: string,
-		message: string,
-		extraMessage?: string,
-	): string | undefined {
-		const launch = this.launches.get(key);
-		const commandContext = launch?.resolvedExecutable
-			? `Resolved executable: ${launch.resolvedExecutable}`
-			: launch?.unusableExecutable
-				? `Unusable executable: ${launch.unusableExecutable}`
-				: `Unresolved command: ${launch?.requestedExecutable ?? server.command[0]}`;
-		const sourceContext = launch ? `Launch source: ${launch.source}` : undefined;
-		const repairContext = `Project workspace: ${this.projectCwd}; ${commandContext}${sourceContext ? `; ${sourceContext}` : ""}`;
-		const hint =
-			launch?.toolchain?.status === "missing"
-				? effectiveInstallRecipe(server, launch)?.installHint
-				: server.installHint;
-		const explicitRepair =
-			launch && !launch.bare
-				? "Automatic install is unavailable for explicit paths; repair lsp.servers command configuration."
-				: undefined;
-		const actionable = [message, repairContext, hint, explicitRepair, extraMessage].filter(Boolean).join(". ");
-		const failure = this.startFailures.get(key) ?? { count: 0, reported: false, lastError: actionable };
-		failure.count++;
-		failure.lastError = actionable;
-		this.startFailures.set(key, failure);
-		this.tracer?.log(server.name, "info", `startup failed: ${actionable}`);
-		if (this.disposed || failure.reported) {
-			return undefined;
-		}
-		failure.reported = true;
-		return `lsp(${server.name}): ${actionable} (further failures for this server root will be silent until /lsp restart or /reload)`;
 	}
 
 	private async tryInstallMissingServer(
@@ -2281,65 +1820,7 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 	): Promise<LspInstallAttemptResult> {
 		if (isManagedLspObservation() || !this.installAllowed() || /^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? ""))
 			return { retry: false, message: "Automatic LSP repair is unavailable in offline/restricted contexts." };
-		const interaction = this.hostInteraction;
-		const identity = installRecipeIdentity(recipe);
-		let attempt = this.installAttempts.get(identity);
-		if (!attempt) {
-			if (!interaction || this.installPromptsUsed.has(identity)) return { retry: false };
-
-			const signal = this.installAbortController.signal;
-			const roots = new Map<string, ResolvedLspServerConfig>();
-			const promise = this.runInstallPrompt(server, recipe, identity, interaction, signal)
-				.then(async (installResult) => {
-					// Freeze the participating roots before verification. New requests use normal startup,
-					// not a readiness result already being finalized for this host action.
-					if (this.installAttempts.get(identity)?.promise === promise) this.installAttempts.delete(identity);
-					if (this.disposed || signal.aborted) {
-						// A successful installer leaves its host action open for readiness.
-						// Finalize it even when cancellation wins before verification starts.
-						if (installResult.requestId)
-							await this.emitHostActionUpdate({
-								id: installResult.requestId,
-								action: "lsp.install_server",
-								status: "cancelled",
-								message: "LSP install cancelled.",
-								exitCode: 0,
-							});
-						installResult = { retry: false, cancelled: true, message: "LSP install cancelled." };
-					}
-					if (!installResult.retry || !installResult.requestId)
-						return new Map([...roots.keys()].map((rootKey) => [rootKey, installResult]));
-
-					this.versionProbes.clear();
-					this.toolchainLocations.clear();
-					const results = new Map(
-						await Promise.all(
-							[...roots].map(
-								async ([rootKey, rootServer]) =>
-									[rootKey, await this.verifyInstalledServer(rootServer, rootKey, signal)] as const,
-							),
-						),
-					);
-					const failures = [...results.values()].filter((result) => !result.retry);
-					await this.emitHostActionUpdate({
-						id: installResult.requestId,
-						action: "lsp.install_server",
-						status: signal.aborted || this.disposed ? "cancelled" : failures.length ? "failed" : "completed",
-						message: (failures.length ? failures : [...results.values()])
-							.map((result) => result.message)
-							.join("\n"),
-						exitCode: 0,
-					});
-					return results;
-				})
-				.finally(() => {
-					if (this.installAttempts.get(identity)?.promise === promise) this.installAttempts.delete(identity);
-				});
-			attempt = { roots, promise };
-			this.installAttempts.set(identity, attempt);
-		}
-		attempt.roots.set(key, server);
-		return (await attempt.promise).get(key)!;
+		return (await this.core.installMissingServer(server, recipe, key, this.installInitiator)) ?? { retry: false };
 	}
 
 	private waitForInstallAttempt(
@@ -2372,97 +1853,6 @@ export class LspManager implements ToolDiagnosticsProvider, LspNavigationProvide
 			retry: false,
 			message: `LSP install prompt failed: ${error instanceof Error ? error.message : String(error)}`,
 		};
-	}
-
-	private async runInstallPrompt(
-		server: ResolvedLspServerConfig,
-		recipe: LspInstallRecipe,
-		identity: string,
-		interaction: HostInteraction,
-		signal?: AbortSignal,
-	): Promise<LspInstallAttemptResult> {
-		this.installPromptsUsed.add(identity);
-		const requestId = `lsp-install-${randomUUID()}`;
-		const decision = await interaction.requestAction(
-			{
-				id: requestId,
-				action: "lsp.install_server",
-				title: `Install ${server.name} language server?`,
-				message:
-					server.name === "typescript"
-						? `The built-in TypeScript executable is missing or incompatible with native LSP. Install TypeScript 7.0.2? This replaces the global compiler. Alternatively set lsp.servers.typescript.command to an explicit compatible executable. Optional native dependencies are required; lifecycle scripts are disabled.`
-						: `Volt tried to use LSP for ${server.name}, but ${recipe.binary} is not installed. Install it now and retry diagnostics?`,
-				confirmLabel: "Install",
-				cancelLabel: "Skip",
-				commandPreview: recipe.displayCommand,
-				blocking: true,
-				destructive: server.name === "typescript",
-				metadata: {
-					server: server.name,
-					binary: recipe.binary,
-				},
-				timeoutMs: LSP_INSTALL_REQUEST_TIMEOUT_MS,
-			},
-			{ signal },
-		);
-
-		if (decision.decision !== "approved") {
-			return { retry: false, message: decision.message };
-		}
-		if (signal?.aborted || !this.installAllowed() || /^(1|true|yes)$/i.test(process.env.VOLT_OFFLINE ?? "")) {
-			return { retry: false, message: "LSP install cancelled or restricted." };
-		}
-
-		await this.emitHostActionUpdate({
-			id: requestId,
-			action: "lsp.install_server",
-			status: "running",
-			message: `Running ${recipe.displayCommand}, then verifying language server readiness.`,
-		});
-		let result: LspInstallCommandResult;
-		try {
-			result = await this.installRunner(recipe.command, { cwd: this.projectCwd, signal });
-		} catch (error) {
-			const message = `LSP install failed: ${error instanceof Error ? error.message : String(error)}`;
-			await this.emitHostActionUpdate({
-				id: requestId,
-				action: "lsp.install_server",
-				status: signal?.aborted ? "cancelled" : "failed",
-				message,
-			});
-			return { retry: false, message };
-		}
-
-		if (result.exitCode !== 0) {
-			const message = this.formatInstallFailure(recipe, result);
-			await this.emitHostActionUpdate({
-				id: requestId,
-				action: "lsp.install_server",
-				status: "failed",
-				message,
-				exitCode: result.exitCode,
-			});
-			return { retry: false, message };
-		}
-
-		// The shared attempt owns readiness and cancellation updates after installer success.
-		return { retry: true, requestId };
-	}
-
-	private formatInstallFailure(recipe: LspInstallRecipe, result: LspInstallCommandResult): string {
-		const output = result.output.trim();
-		const summary = `LSP install command failed (${recipe.displayCommand}) with exit code ${result.exitCode ?? "unknown"}.`;
-		return output ? `${summary} Output:\n${output}` : summary;
-	}
-
-	private async emitHostActionUpdate(
-		update: Parameters<NonNullable<HostInteraction["updateAction"]>>[0],
-	): Promise<void> {
-		try {
-			await this.hostInteraction?.updateAction?.(update);
-		} catch {
-			// Host action updates are advisory; do not fail the underlying LSP operation.
-		}
 	}
 
 	private formatDiagnostics(absolutePath: string, diagnostics: LspDiagnostic[]): string | undefined {

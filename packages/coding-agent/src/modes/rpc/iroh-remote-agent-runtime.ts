@@ -9,6 +9,7 @@ import { createAgentSessionFromServices, createAgentSessionServices } from "../.
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
+import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import {
 	type IrohRemoteRuntimeToolPolicy,
 	parseIrohRemoteAllowTools,
@@ -139,6 +140,8 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			}
 		})();
 
+	// Sessions of this attach (root, subagents, replacements) share language servers.
+	const lspServerPool = new LspServerPool();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
 		const profile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : options.profile;
 		const settingsManager = SettingsManager.create(projectCwd, runtimeOptions.agentDir, {
@@ -185,6 +188,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 				tools,
 				allowUnlistedExtensionTools,
 				subagentToolManager: subagentManager,
+				lspServerPool,
 			});
 			return {
 				...created,

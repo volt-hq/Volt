@@ -143,6 +143,7 @@ import type { HostInteraction } from "./host-interaction.ts";
 import { resolveLspConfig } from "./lsp/config.ts";
 import { withManagedLspObservation } from "./lsp/managed-observation.ts";
 import { LspManager, type LspServerStatus } from "./lsp/manager.ts";
+import type { LspServerPool } from "./lsp/server-pool.ts";
 import { createMcpDirectToolDefinitions } from "./mcp/direct-tools.ts";
 import type { McpManager } from "./mcp/manager.ts";
 import type { McpManagerEvent } from "./mcp/types.ts";
@@ -457,6 +458,8 @@ export interface AgentSessionConfig {
 	mcpManager?: McpManager;
 	/** Factory used to rebuild the default MCP manager on session reload. */
 	mcpManagerFactory?: () => Promise<McpManager | undefined> | McpManager | undefined;
+	/** Language servers shared with other sessions of the same delegation tree. Private per session when omitted. */
+	lspServerPool?: LspServerPool;
 }
 
 /** AgentSession runtime projection. A model is optional until one is selected. */
@@ -896,6 +899,7 @@ export class AgentSession {
 
 	// Keep disabled configuration inspectable without starting language servers.
 	private _lspManager?: LspManager;
+	private _lspServerPool?: LspServerPool;
 	private _lspEnabled = false;
 	private _hostInteraction?: HostInteraction;
 	private _subagentToolManager?: SubagentToolManager;
@@ -1168,6 +1172,7 @@ export class AgentSession {
 			this._baseToolsOverride = config.baseToolsOverride;
 			this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 			this._hostInteraction = config.hostInteraction;
+			this._lspServerPool = config.lspServerPool;
 			this._subagentToolManager = config.subagentToolManager;
 			this._mcpManager = config.mcpManager;
 			this._mcpManagerFactory = config.mcpManagerFactory;
@@ -1336,7 +1341,10 @@ export class AgentSession {
 		this._lspManager?.closeTraceSync();
 	}
 
-	/** Stop all running language servers; they respawn lazily on next use. Returns the number stopped. */
+	/**
+	 * Stop all running language servers, including those shared with subagents and
+	 * other sessions from the same pool; they respawn lazily on next use. Returns the number stopped.
+	 */
 	restartLspServers(): number {
 		this._assertConversationAuthorityAvailable();
 		return this._lspManager?.restart() ?? 0;
@@ -7783,17 +7791,23 @@ export class AgentSession {
 		const shellCommandPrefix = this.settingsManager.getShellCommandPrefix();
 		const shellPath = this.settingsManager.getShellPath();
 
-		this._lspManager?.dispose();
-		this._lspManager = undefined;
 		const lspConfig = resolveLspConfig(this.settingsManager.getLspSettings());
 		this._lspEnabled = lspConfig.enabled;
+		// Acquire the new lease before releasing the old one so a reload with
+		// unchanged server settings keeps shared servers running.
+		const previousLspManager = this._lspManager;
 		this._lspManager = new LspManager({
 			cwd: this._cwd,
 			projectCwd: this._lexicalProjectCwd,
 			config: lspConfig,
 			hostInteraction: this._hostInteraction,
 			installAllowed: () => !this._disposed && this._getOperationGrantProfile() === undefined,
+			...(this._lspServerPool
+				? { server: this._lspServerPool.acquire({ projectCwd: this._lexicalProjectCwd, config: lspConfig }) }
+				: {}),
 		});
+		if (previousLspManager?.sharesServersWith(this._lspManager)) this._lspManager.resetFailures();
+		previousLspManager?.dispose();
 
 		const directMcpToolDefinitions = this._mcpManager ? createMcpDirectToolDefinitions(this._mcpManager) : [];
 		this._directMcpToolNames = new Set(directMcpToolDefinitions.map((definition) => definition.name));
