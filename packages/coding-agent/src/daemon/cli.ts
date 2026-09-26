@@ -5,7 +5,11 @@ import { getAgentDir, VERSION } from "../config.ts";
 import { createDaemonClient } from "./control-client.ts";
 import type { ControlKeepAwakeStatus, ControlResponse, RemoteTransportHealth } from "./control-protocol.ts";
 import { createIrohDaemonService } from "./iroh-service.ts";
-import { type DaemonEnvironmentStatus, resolveDaemonEnvironment } from "./login-environment.ts";
+import {
+	type DaemonEnvironmentBase,
+	type DaemonEnvironmentStatus,
+	resolveDaemonEnvironment,
+} from "./login-environment.ts";
 import { type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
@@ -39,7 +43,8 @@ Commands:
   logs [-f] [-n N]      Tail the daemon log (default ${DEFAULT_LOG_TAIL_LINES} lines).
   install-service       Register a login service (launchd/systemd) that starts the daemon.
   uninstall-service     Remove the login service.
-  run --foreground      Run the daemon in this process (internal; used by start).
+  run --foreground      Run the daemon in this process (internal; used by start, and with
+                        --service by install-service).
 `);
 }
 
@@ -288,10 +293,19 @@ function formatKeepAwake(keepAwake: ControlKeepAwakeStatus | undefined): string 
 	return keepAwake.state === "active" ? "on (active)" : `on (degraded: ${keepAwake.reason ?? "unknown"})`;
 }
 
+const ENVIRONMENT_BASE_LABELS: Record<DaemonEnvironmentBase, string> = {
+	service: "service environment",
+	systemd: "systemd user environment",
+	minimal: "minimal environment",
+};
+
 function formatEnvironment(environment: DaemonEnvironmentStatus): string {
 	if (environment.source === "login-shell") {
-		const duration = environment.durationMs === undefined ? "" : ` (${environment.durationMs}ms)`;
-		return `login shell ${environment.shell ?? "unknown"}${duration}`;
+		const details = [
+			...(environment.base === undefined ? [] : [ENVIRONMENT_BASE_LABELS[environment.base]]),
+			...(environment.durationMs === undefined ? [] : [`${environment.durationMs}ms`]),
+		];
+		return `login shell ${environment.shell ?? "unknown"}${details.length > 0 ? ` (${details.join(", ")})` : ""}`;
 	}
 	return `inherited (${environment.reason ?? "unknown"})`;
 }
@@ -585,7 +599,11 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 				return true;
 			}
 			const code = await runVoltDaemon(
-				{ agentDir, foreground: true, prepareEnvironment: () => resolveDaemonEnvironment() },
+				{
+					agentDir,
+					foreground: true,
+					prepareEnvironment: () => resolveDaemonEnvironment({ serviceStart: rest.includes("--service") }),
+				},
 				[createIrohDaemonService()],
 			);
 			// The run loop resolves after durable quiescing and bounded native disposal, but

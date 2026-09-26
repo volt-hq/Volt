@@ -6,13 +6,14 @@
 
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlResponse } from "../src/daemon/control-protocol.ts";
 import {
 	type DaemonEnvironmentResolution,
 	type DaemonEnvironmentStatus,
+	readSystemdUserEnvironment,
 	resolveDaemonEnvironment,
 } from "../src/daemon/login-environment.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
@@ -29,8 +30,8 @@ afterEach(() => {
 	rmSync(tempDir, { recursive: true, force: true });
 });
 
-function writeShell(name: string, body: string): string {
-	const binDir = join(tempDir, "bin");
+function writeShell(name: string, body: string, directory = "bin"): string {
+	const binDir = join(tempDir, directory);
 	mkdirSync(binDir, { recursive: true });
 	const path = join(binDir, name);
 	writeFileSync(path, `#!/bin/sh\n${body}\n`);
@@ -39,7 +40,7 @@ function writeShell(name: string, body: string): string {
 }
 
 /** Stands in for a login shell: noisy profile, exports, then runs the real command string. */
-function writeProfileShell(): string {
+function writeProfileShell(extraLines: string[] = []): string {
 	return writeShell(
 		"zsh",
 		[
@@ -48,6 +49,7 @@ function writeProfileShell(): string {
 			'export SAW_RESOLVING="[$VOLT_RESOLVING_ENVIRONMENT]"',
 			"export FROM_DOTFILES=1",
 			'export PATH="/opt/fake/bin:$PATH"',
+			...extraLines,
 			'exec /bin/sh -c "$4"',
 		].join("\n"),
 	);
@@ -83,8 +85,9 @@ describe.skipIf(process.platform === "win32")("resolveDaemonEnvironment", () => 
 		const result = await resolveDaemonEnvironment({ target, inherited, platform: "darwin", shell });
 
 		expect(result.failed).toBe(false);
-		expect(result.status).toMatchObject({ source: "login-shell", shell });
+		expect(result.status).toMatchObject({ source: "login-shell", base: "minimal", shell });
 		expect(result.status.durationMs).toBeGreaterThanOrEqual(0);
+		expect(result.droppedVariables).toEqual(["TERM_PROGRAM"]);
 		expect(target.FROM_DOTFILES).toBe("1");
 		expect(target.PATH).toBe("/opt/fake/bin:/usr/bin:/bin:/usr/sbin:/sbin");
 		expect(target.HOME).toBe(tempDir);
@@ -109,14 +112,119 @@ describe.skipIf(process.platform === "win32")("resolveDaemonEnvironment", () => 
 		}
 	});
 
-	it("uses the Linux default PATH as the base", async () => {
+	it("uses the Linux default PATH and keeps display and XDG variables without a session environment", async () => {
 		const shell = writeProfileShell();
-		const inherited = terminalEnvironment();
+		const inherited: NodeJS.ProcessEnv = {
+			...terminalEnvironment(),
+			DISPLAY: ":0",
+			WAYLAND_DISPLAY: "wayland-0",
+			XDG_CONFIG_HOME: "/home/tester/.config",
+		};
 		const target = { ...inherited };
 
-		await resolveDaemonEnvironment({ target, inherited, platform: "linux", shell });
+		const result = await resolveDaemonEnvironment({
+			target,
+			inherited,
+			platform: "linux",
+			shell,
+			readSessionEnvironment: async () => undefined,
+		});
 
+		expect(result.status).toMatchObject({ source: "login-shell", base: "minimal" });
 		expect(target.PATH).toBe("/opt/fake/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+		expect(target).toMatchObject({
+			DISPLAY: ":0",
+			WAYLAND_DISPLAY: "wayland-0",
+			XDG_CONFIG_HOME: "/home/tester/.config",
+		});
+	});
+
+	it("seeds a service start from the full inherited session environment", async () => {
+		const shell = writeProfileShell(["unset REMOVED_BY_PROFILE"]);
+		const inherited: NodeJS.ProcessEnv = {
+			HOME: tempDir,
+			USER: "tester",
+			PATH: "/session/bin:/usr/bin:/bin",
+			WAYLAND_DISPLAY: "wayland-0",
+			HTTPS_PROXY: "http://proxy.internal:3128",
+			NODE_EXTRA_CA_CERTS: "/etc/ssl/corp.pem",
+			REMOVED_BY_PROFILE: "1",
+			VOLT_CODING_AGENT_DIR: "/agent/dir",
+		};
+		const target = { ...inherited };
+
+		const result = await resolveDaemonEnvironment({
+			target,
+			inherited,
+			platform: "linux",
+			serviceStart: true,
+			shell,
+		});
+
+		expect(result.status).toMatchObject({ source: "login-shell", base: "service", shell });
+		expect(target.PATH).toBe("/opt/fake/bin:/session/bin:/usr/bin:/bin");
+		expect(target).toMatchObject({
+			WAYLAND_DISPLAY: "wayland-0",
+			HTTPS_PROXY: "http://proxy.internal:3128",
+			NODE_EXTRA_CA_CERTS: "/etc/ssl/corp.pem",
+			FROM_DOTFILES: "1",
+			VOLT_CODING_AGENT_DIR: "/agent/dir",
+		});
+		// The profile still decides: a variable it unsets does not come back.
+		expect(target).not.toHaveProperty("REMOVED_BY_PROFILE");
+		expect(result.droppedVariables).toEqual(["REMOVED_BY_PROFILE"]);
+	});
+
+	it("seeds a Linux terminal start from the systemd user manager environment", async () => {
+		const shell = writeProfileShell();
+		const inherited: NodeJS.ProcessEnv = { ...terminalEnvironment(), AD_HOC_TOKEN: "terminal-only" };
+		const target = { ...inherited };
+		const readSessionEnvironment = vi.fn(async () => ({
+			HOME: tempDir,
+			USER: "tester",
+			PATH: "/manager/bin:/usr/bin:/bin",
+			FROM_ENVIRONMENT_D: "1",
+		}));
+
+		const result = await resolveDaemonEnvironment({
+			target,
+			inherited,
+			platform: "linux",
+			shell,
+			readSessionEnvironment,
+		});
+
+		expect(readSessionEnvironment).toHaveBeenCalledOnce();
+		expect(result.status).toMatchObject({ source: "login-shell", base: "systemd", shell });
+		expect(target.PATH).toBe("/opt/fake/bin:/manager/bin:/usr/bin:/bin");
+		expect(target.FROM_ENVIRONMENT_D).toBe("1");
+		expect(target.VOLT_CODING_AGENT_DIR).toBe("/agent/dir");
+		expect(target.SAW_TERM_PROGRAM).toBe("[]");
+		expect(target).not.toHaveProperty("TERM_PROGRAM");
+		expect(target).not.toHaveProperty("AD_HOC_TOKEN");
+		expect(result.droppedVariables).toEqual(["AD_HOC_TOKEN", "LC_ALL", "TERM_PROGRAM"]);
+	});
+
+	it("reads the session environment only for Linux terminal starts", async () => {
+		const shell = writeProfileShell();
+		const readSessionEnvironment = vi.fn(async () => ({ PATH: "/manager/bin" }));
+
+		for (const [platform, serviceStart, base] of [
+			["darwin", false, "minimal"],
+			["linux", true, "service"],
+		] as const) {
+			const inherited = terminalEnvironment();
+			const result = await resolveDaemonEnvironment({
+				target: { ...inherited },
+				inherited,
+				platform,
+				serviceStart,
+				shell,
+				readSessionEnvironment,
+			});
+			expect(result.status.base, platform).toBe(base);
+		}
+		expect(readSessionEnvironment).not.toHaveBeenCalled();
 	});
 
 	it("kills a hung shell tree at the timeout and keeps the inherited environment", async () => {
@@ -196,6 +304,43 @@ describe.skipIf(process.platform === "win32")("resolveDaemonEnvironment", () => 
 	});
 });
 
+describe.skipIf(process.platform === "win32")("readSystemdUserEnvironment", () => {
+	const expectedArgs =
+		"--user --json=short get-property org.freedesktop.systemd1 /org/freedesktop/systemd1 org.freedesktop.systemd1.Manager Environment";
+
+	function busctlDirectory(directory: string, body: string): string {
+		return dirname(writeShell("busctl", body, directory));
+	}
+
+	it("parses the manager environment, including values that contain '='", async () => {
+		const bin = busctlDirectory(
+			"busctl-ok",
+			[
+				`[ "$*" = "${expectedArgs}" ] || exit 9`,
+				`printf '%s\\n' '{"type":"as","data":["PATH=/manager/bin:/usr/bin","JAVA_TOOL_OPTIONS=-Da=b","EMPTY="]}'`,
+			].join("\n"),
+		);
+
+		await expect(readSystemdUserEnvironment({ PATH: bin })).resolves.toEqual({
+			PATH: "/manager/bin:/usr/bin",
+			JAVA_TOOL_OPTIONS: "-Da=b",
+			EMPTY: "",
+		});
+	});
+
+	it("returns undefined when busctl fails, prints something else, or is missing", async () => {
+		const failing = busctlDirectory("busctl-exit", `echo '{"type":"as","data":[]}'\nexit 1`);
+		const malformed = busctlDirectory("busctl-malformed", "echo not-json");
+		const nonString = busctlDirectory("busctl-non-string", `echo '{"type":"as","data":[1]}'`);
+		const missing = join(tempDir, "empty");
+		mkdirSync(missing);
+
+		for (const bin of [failing, malformed, nonString, missing]) {
+			await expect(readSystemdUserEnvironment({ PATH: bin }), bin).resolves.toBeUndefined();
+		}
+	});
+});
+
 describe("voltd environment status", () => {
 	async function waitForHealthy(agentDir: string): Promise<DaemonProbeResult> {
 		let status = await probeDaemon(agentDir);
@@ -233,11 +378,20 @@ describe("voltd environment status", () => {
 	}
 
 	it("reports and logs the prepared environment", async () => {
-		const prepared: DaemonEnvironmentStatus = { source: "login-shell", shell: "/bin/zsh", durationMs: 42 };
+		const prepared: DaemonEnvironmentStatus = {
+			source: "login-shell",
+			base: "service",
+			shell: "/bin/zsh",
+			durationMs: 42,
+		};
 
-		await expect(runAndReadStatus(async () => ({ status: prepared, failed: false }))).resolves.toEqual(prepared);
+		await expect(
+			runAndReadStatus(async () => ({ status: prepared, failed: false, droppedVariables: ["TERM_PROGRAM"] })),
+		).resolves.toEqual(prepared);
 		const log = readFileSync(getDaemonPaths(join(tempDir, "agent")).logPath, "utf8");
 		expect(log).toContain("resolved environment from login shell /bin/zsh");
+		expect(log).toContain('"base":"service"');
+		expect(log).toContain('"droppedVariables":["TERM_PROGRAM"]');
 	}, 30_000);
 
 	it("reports an unresolved inherited environment without a hook", async () => {

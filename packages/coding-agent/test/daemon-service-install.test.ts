@@ -44,13 +44,15 @@ describe("daemon service install (M9)", () => {
 		const invocation = getDaemonServiceInvocation(agentDir);
 		expect(invocation.programArguments[0]).toBe(process.execPath);
 		expect(invocation.programArguments).toContain("--optimize-for-size");
-		expect(invocation.programArguments.slice(-3)).toEqual(["daemon", "run", "--foreground"]);
+		// --service tells the daemon its inherited environment is the login session's.
+		expect(invocation.programArguments.slice(-4)).toEqual(["daemon", "run", "--foreground", "--service"]);
 
 		const plist = renderLaunchdPlist(invocation);
 		expect(plist).toContain(`<string>${LAUNCHD_SERVICE_LABEL}</string>`);
 		for (const argument of invocation.programArguments) {
 			expect(plist).toContain(`<string>${argument}</string>`);
 		}
+		expect(plist).toContain("<string>--service</string>");
 		expect(plist).toContain(`<key>${ENV_AGENT_DIR}</key>`);
 		expect(plist).toContain(`<string>${agentDir}</string>`);
 		expect(plist).toContain("<key>RunAtLoad</key>\n\t<true/>");
@@ -78,6 +80,9 @@ describe("daemon service install (M9)", () => {
 		expect(unit).toContain(`Environment=${ENV_AGENT_DIR}="/home/user/agent dir"`);
 		expect(unit).toContain("Restart=no");
 		expect(unit).toContain("WantedBy=default.target");
+
+		const installedUnit = renderSystemdUnit(getDaemonServiceInvocation(agentDir));
+		expect(installedUnit).toMatch(/^ExecStart=.* daemon run --foreground --service$/m);
 	});
 
 	it("install on macOS writes the plist and loads it via launchctl", async () => {

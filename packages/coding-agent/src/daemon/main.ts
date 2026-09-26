@@ -301,9 +301,12 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	}
 	const environmentStatus = environmentResolution.status;
 	if (environmentStatus.source === "login-shell") {
+		const droppedVariables = environmentResolution.droppedVariables ?? [];
 		log("info", `resolved environment from login shell ${environmentStatus.shell ?? "unknown"}`, {
+			base: environmentStatus.base,
 			durationMs: environmentStatus.durationMs,
 			exitCode: environmentResolution.exitCode,
+			...(droppedVariables.length > 0 ? { droppedVariables } : {}),
 			PATH: process.env.PATH,
 		});
 	} else if (environmentResolution.failed) {

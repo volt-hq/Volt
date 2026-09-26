@@ -39,7 +39,7 @@ volt daemon restart               Stop then start; persistent state survives.
 volt daemon logs [-f] [-n N]      Tail the daemon log.
 volt daemon install-service       Register a login service (launchd/systemd).
 volt daemon uninstall-service     Remove the login service.
-volt daemon run --foreground      Run in this process (internal; used by start).
+volt daemon run --foreground      Run in this process (internal; used by start and the login service).
 
 volt remote pair [--workspace <name>]   Create a pairing ticket, wait for the phone.
 volt remote status [--json]             Same status view as volt daemon status.
@@ -77,12 +77,24 @@ commands, language servers, MCP servers, tool installers, and Git all resolve
 through the daemon's environment. Whether the login service or a terminal
 started the daemon, it builds that environment the same way at startup:
 
-1. It runs your login shell (from the user database, falling back to `SHELL`)
-   as an interactive login shell (`-i -l -c`) without a terminal, starting from
-   a minimal environment: the system default `PATH` plus `HOME`, `USER`,
-   `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `SSH_AUTH_SOCK`,
-   `XDG_RUNTIME_DIR`, and `DBUS_SESSION_BUS_ADDRESS`.
-2. It adopts the environment the shell produces, so `PATH` and the variables
+1. It takes the environment a new terminal session starts from, before any
+   shell profile runs:
+   - Started by the login service (`volt daemon install-service`): the
+     environment launchd or the systemd user manager gave the daemon. This
+     includes their `PATH`, values set with `launchctl setenv` or
+     `systemctl --user set-environment`, `environment.d` files, and variables
+     the desktop session imports, such as `DISPLAY` and `WAYLAND_DISPLAY`.
+   - Started from a terminal on Linux: the systemd user manager's environment
+     (what `systemctl --user show-environment` prints), read with `busctl`.
+   - Otherwise, for example started from a terminal on macOS or without a
+     systemd user session: the system default `PATH` plus `HOME`, `USER`,
+     `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `XDG_*`, `SSH_AUTH_SOCK`,
+     `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`, `WAYLAND_DISPLAY`, and
+     `XAUTHORITY` from the process that started it.
+2. It runs your login shell (from the user database, falling back to `SHELL`)
+   from that environment, as an interactive login shell (`-i -l -c`) without a
+   terminal.
+3. It adopts the environment the shell produces, so `PATH` and the variables
    your shell profile exports match a new terminal. `VOLT_*` variables from
    the process that started the daemon are kept.
 
@@ -107,19 +119,28 @@ Consequences:
 
 - Variables exported only in the terminal that started the daemon, including
   API keys, do not reach daemon-hosted sessions. Export them from your shell
-  profile instead.
+  profile (or on Linux, an `environment.d` file) instead.
 - The environment is resolved once per daemon start. After changing `PATH` or
   your shell profile, run `volt daemon restart`.
+- `volt daemon restart` starts the daemon from your terminal, not through the
+  login service. On macOS, values set with `launchctl setenv` therefore reach
+  the daemon only when the login service starts it. To restart through the
+  service, run `volt daemon stop`, then
+  `launchctl kickstart -k gui/$(id -u)/com.github.hansjm10.voltd` on macOS or
+  `systemctl --user restart voltd.service` on Linux.
 - Per-directory environments are not applied: direnv, activated virtualenvs,
   and hook-based version managers such as `mise activate`. Version managers
   that work through shims on `PATH` (asdf, mise shims) still pick the version
   for the session's working directory.
 
 `volt daemon status` shows the result, for example
-`environment: login shell /bin/zsh (412ms)` or
-`environment: inherited (timed out after 10000ms)`. `volt daemon logs` records
-the resolved `PATH`, or on failure the shell's exit status and the end of its
-error output.
+`environment: login shell /bin/zsh (service environment, 412ms)` or
+`environment: inherited (timed out after 10000ms)`. The parenthesized base is
+`service environment`, `systemd user environment`, or `minimal environment`,
+matching the three cases above. `volt daemon logs` records the resolved `PATH`
+and the names, not values, of variables the daemon started with that the
+resolved environment no longer has. On failure it records the shell's exit
+status and the end of its error output.
 
 ## Manage remote access from the TUI
 
