@@ -13,6 +13,7 @@ import {
 	type RemoteTransportHealth,
 } from "./control-protocol.ts";
 import { getDaemonPaths } from "./paths.ts";
+import { formatRelayAccessStatus, isRemoteAccessReady } from "./relay-access-status.ts";
 import { ensureDaemonRunning, probeDaemon } from "./spawn.ts";
 
 function printRemoteUsage(): void {
@@ -315,12 +316,17 @@ async function handleStatusCommand(args: string[]): Promise<void> {
 		}
 		if (args.includes("--json")) {
 			console.log(JSON.stringify({ ...response, id: undefined, type: undefined }, null, 2));
-			if (response.remoteTransport?.state !== "ready") process.exitCode = 1;
+			if (!isRemoteAccessReady(response)) process.exitCode = 1;
 			return;
 		}
 		console.error(`voltd ${response.version} (pid ${response.pid})`);
 		console.error(`remote transport: ${formatRemoteTransport(response.remoteTransport)}`);
 		if (response.remoteTransport?.message) console.error(`  ${response.remoteTransport.message}`);
+		if (response.relayCredential) {
+			const relayAccess = formatRelayAccessStatus(response.relayCredential);
+			console.error(`relay access: ${relayAccess.summary}`);
+			if (relayAccess.guidance) console.error(`  ${relayAccess.guidance}`);
+		}
 		console.error(`workspaces: ${response.workspaces.length}`);
 		for (const workspace of response.workspaces) {
 			console.error(`  ${workspace.name} -> ${workspace.path}`);
@@ -336,7 +342,7 @@ async function handleStatusCommand(args: string[]): Promise<void> {
 				`  ${lease.workspaceName}/${lease.sessionId}: ${lease.state} (streams ${lease.streamCount}, relays ${lease.relayCount})`,
 			);
 		}
-		if (response.remoteTransport?.state !== "ready") process.exitCode = 1;
+		if (!isRemoteAccessReady(response)) process.exitCode = 1;
 	} finally {
 		await session.close();
 	}

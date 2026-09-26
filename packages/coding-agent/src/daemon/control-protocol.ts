@@ -132,6 +132,8 @@ export type ControlRequest =
 	| { type: "pair_cancel"; id: string; requestId: string }
 	| { type: "clients_list"; id: string }
 	| { type: "relay_credential_revoke"; id: string }
+	/** Refresh expired or suspended managed relay access now, instead of waiting for the next scheduled check. */
+	| { type: "relay_credential_check"; id: string }
 	| ({
 			type: "client_access_update";
 			id: string;
@@ -314,6 +316,8 @@ export interface ControlRelayCredentialStatus {
 	state: "unpaired" | "pairing" | "active" | "expired" | "subscription_inactive" | "revocation_pending";
 	/** Current access-token expiry as epoch milliseconds, when a token exists. */
 	expiresAt?: number;
+	/** Next scheduled broker refresh as epoch milliseconds; absent while a refresh runs or none is scheduled. */
+	nextRefreshAt?: number;
 }
 
 export type RemoteTransportState = "starting" | "ready" | "degraded" | "unavailable";
@@ -595,6 +599,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isOptionalEpochMs(value: unknown): boolean {
+	return value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value > 0);
+}
+
 function isControlAccessSelection(value: Record<string, unknown>, allowDefault: boolean): boolean {
 	if (value.access !== undefined) {
 		return (
@@ -737,6 +745,7 @@ export function isControlRequest(value: unknown): value is ControlRequest {
 		case "shutdown":
 		case "clients_list":
 		case "relay_credential_revoke":
+		case "relay_credential_check":
 			return true;
 		case "pair_request":
 			return (
@@ -906,10 +915,8 @@ export function isControlResponse(value: unknown): value is ControlResponse {
 						["unpaired", "pairing", "active", "expired", "subscription_inactive", "revocation_pending"].includes(
 							value.relayCredential.state,
 						) &&
-						(value.relayCredential.expiresAt === undefined ||
-							(typeof value.relayCredential.expiresAt === "number" &&
-								Number.isSafeInteger(value.relayCredential.expiresAt) &&
-								value.relayCredential.expiresAt > 0))))
+						isOptionalEpochMs(value.relayCredential.expiresAt) &&
+						isOptionalEpochMs(value.relayCredential.nextRefreshAt)))
 			);
 		case "worktree_result":
 			return isRecord(value.worktree);

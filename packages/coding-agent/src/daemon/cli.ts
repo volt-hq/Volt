@@ -8,6 +8,7 @@ import { createIrohDaemonService } from "./iroh-service.ts";
 import { type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
+import { formatRelayAccessStatus, isRemoteAccessReady } from "./relay-access-status.ts";
 import { installDaemonService, uninstallDaemonService } from "./service-install.ts";
 import {
 	classifyPublishedDaemonGeneration,
@@ -30,7 +31,7 @@ function printDaemonUsage(): void {
 Commands:
   start                 Start the background daemon (no-op if already running).
   stop                  Ask the daemon to shut down gracefully.
-  status [--json]       Show daemon status; exit 0 only when phone transport is ready.
+  status [--json]       Show daemon status; exit 0 only when phone transport and relay access are ready.
   restart               Stop then start; persistent state survives.
   regenerate-state      Back up invalid state and regenerate it after confirmation.
   keep-awake [on|off]   Prevent the host from sleeping while voltd runs; no arg prints state.
@@ -314,7 +315,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	}
 	if (json) {
 		console.log(JSON.stringify({ running: true, ...status, id: undefined, type: undefined }));
-		if (status.remoteTransport?.state !== "ready") process.exitCode = 1;
+		if (!isRemoteAccessReady(status)) process.exitCode = 1;
 		return;
 	}
 	console.error(`voltd ${status.version} (protocol ${status.protocolVersion})`);
@@ -323,6 +324,11 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 	console.error(`keep awake: ${formatKeepAwake(status.keepAwake)}`);
 	console.error(`remote transport: ${formatRemoteTransport(status.remoteTransport)}`);
 	if (status.remoteTransport?.message) console.error(`  ${status.remoteTransport.message}`);
+	if (status.relayCredential) {
+		const relayAccess = formatRelayAccessStatus(status.relayCredential);
+		console.error(`relay access: ${relayAccess.summary}`);
+		if (relayAccess.guidance) console.error(`  ${relayAccess.guidance}`);
+	}
 	console.error(`phone connections: ${status.phoneConnections}`);
 	console.error(`workspaces: ${status.workspaces.length}`);
 	for (const workspace of status.workspaces) {
@@ -338,7 +344,7 @@ async function daemonStatus(agentDir: string, json: boolean): Promise<void> {
 			`  ${lease.workspaceName}/${lease.sessionId}: ${lease.state} (streams ${lease.streamCount}, relays ${lease.relayCount})`,
 		);
 	}
-	if (status.remoteTransport?.state !== "ready") process.exitCode = 1;
+	if (!isRemoteAccessReady(status)) process.exitCode = 1;
 }
 
 async function daemonKeepAwake(agentDir: string, args: string[]): Promise<void> {

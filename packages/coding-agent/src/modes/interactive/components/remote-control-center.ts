@@ -109,6 +109,8 @@ export interface RemoteControlBackend {
 		onProgress: (event: PairingProgress) => void,
 	): Promise<RemotePairingHandle>;
 	resetRelayCredential(): Promise<void>;
+	/** Ask the daemon to refresh expired or suspended relay access now. */
+	checkRelayAccess(): Promise<void>;
 	revokeClient(clientNodeId: string): Promise<void>;
 	approveClientRepair(clientNodeId: string): Promise<void>;
 	close(): Promise<void>;
@@ -329,6 +331,11 @@ export function createRemoteControlBackend(agentDir: string = getAgentDir()): Re
 			if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
 			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
 		},
+		async checkRelayAccess() {
+			const response = await (await connect()).request({ type: "relay_credential_check" });
+			if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
+			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
+		},
 		async revokeClient(clientNodeId) {
 			const response = await (await connect()).request({ type: "client_revoke", clientNodeId });
 			if (response.type === "error") throw new Error(response.message);
@@ -356,7 +363,7 @@ export interface RemoteControlCenterOptions {
 type View =
 	| { kind: "loading"; label: string }
 	| { kind: "offline"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
-	| { kind: "overview"; status: RemoteStatus; notice?: string }
+	| { kind: "overview"; status: RemoteStatus; notice?: string; noticeTone?: NoticeTone }
 	| { kind: "access-picker"; status: RemoteStatus; notice?: string }
 	| { kind: "confirm-credential-reset"; status: RemoteStatus; error?: string }
 	| { kind: "workspace-picker"; status: RemoteStatus; access: IrohRemoteAccessPresetName }
@@ -381,6 +388,8 @@ type View =
 			recoveryBackupPath?: string;
 			showQr?: boolean;
 	  };
+
+type NoticeTone = "success" | "warning" | "error";
 
 type DisplayRow = {
 	key?: string;
@@ -424,12 +433,14 @@ const RELAY_CREDENTIAL_DETAILS: Readonly<
 	},
 	expired: {
 		label: "Access expired",
-		guidance: "Relay access is paused. Volt retries automatically; check your connection and subscription.",
+		guidance:
+			"Relay access is paused. Volt retries automatically; check your connection and subscription, or choose Check relay access now.",
 		tone: "warning",
 	},
 	subscription_inactive: {
 		label: "Volt Pro subscription inactive",
-		guidance: "Renew the existing subscription, or reset credentials to enroll with a different subscribed phone.",
+		guidance:
+			"Renew the existing subscription, then choose Check relay access now; Volt also reconnects automatically. To enroll a different subscribed phone, reset credentials.",
 		tone: "warning",
 	},
 	revocation_pending: {
@@ -438,6 +449,10 @@ const RELAY_CREDENTIAL_DETAILS: Readonly<
 		tone: "warning",
 	},
 };
+
+function relayAccessNeedsRecovery(status: RemoteStatus): boolean {
+	return status.relayCredential?.state === "expired" || status.relayCredential?.state === "subscription_inactive";
+}
 
 function supportsSafePairing(status: RemoteStatus): boolean {
 	return (
@@ -742,6 +757,7 @@ export class RemoteControlCenterComponent implements Component {
 							kind: "overview",
 							status: snapshot.status,
 							notice: `State recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+							noticeTone: "error",
 						}
 					: { kind: "offline", snapshot };
 			this.selectedKey = "refresh";
@@ -767,7 +783,7 @@ export class RemoteControlCenterComponent implements Component {
 			const notice = `Workspace registration failed: ${error instanceof Error ? error.message : String(error)}`;
 			this.view =
 				snapshot.kind === "online"
-					? { kind: "overview", status: snapshot.status, notice }
+					? { kind: "overview", status: snapshot.status, notice, noticeTone: "error" }
 					: { kind: "offline", snapshot: { ...snapshot, error: notice } };
 			this.selectedKey = snapshot.kind === "online" ? "register-current" : "start";
 			this.options.requestRender();
@@ -919,6 +935,53 @@ export class RemoteControlCenterComponent implements Component {
 		this.options.requestRender();
 	}
 
+	private async checkRelayAccess(): Promise<void> {
+		if (this.view.kind !== "overview") return;
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Checking relay access…" };
+		this.options.requestRender();
+		let checkError: unknown;
+		try {
+			await this.backend.checkRelayAccess();
+		} catch (error) {
+			checkError = error;
+		}
+		if (this.disposed || generation !== this.generation) return;
+		const snapshot = await this.backend.load();
+		if (this.disposed || generation !== this.generation) return;
+		if (snapshot.kind === "offline") {
+			this.view = { kind: "offline", snapshot };
+			this.selectedKey = "start";
+		} else {
+			const state = snapshot.status.relayCredential?.state;
+			const notice: { notice: string; noticeTone: NoticeTone } | undefined =
+				checkError !== undefined
+					? {
+							notice: `Relay access check failed: ${checkError instanceof Error ? checkError.message : String(checkError)}`,
+							noticeTone: "error",
+						}
+					: state === "active"
+						? { notice: "Relay access restored. Paired phones can reconnect.", noticeTone: "success" }
+						: state === "subscription_inactive"
+							? {
+									notice:
+										"Volt Pro is still inactive. If you just renewed, Apple can take a few minutes to confirm; Volt keeps checking automatically.",
+									noticeTone: "warning",
+								}
+							: state === "expired"
+								? {
+										notice: "Relay access is still expired. Volt keeps retrying automatically.",
+										noticeTone: "warning",
+									}
+								: undefined;
+			this.view = { kind: "overview", status: snapshot.status, ...notice };
+			this.selectedKey = relayAccessNeedsRecovery(snapshot.status) ? "check-relay-access" : "refresh";
+		}
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.options.requestRender();
+	}
+
 	private async revokeClient(clientNodeId: string): Promise<void> {
 		const generation = ++this.generation;
 		this.view = { kind: "loading", label: "Revoking device…" };
@@ -937,6 +1000,7 @@ export class RemoteControlCenterComponent implements Component {
 							kind: "overview",
 							status: snapshot.status,
 							notice: `Revoke failed: ${error instanceof Error ? error.message : String(error)}`,
+							noticeTone: "error",
 						}
 					: { kind: "offline", snapshot };
 			this.options.requestRender();
@@ -961,6 +1025,7 @@ export class RemoteControlCenterComponent implements Component {
 							kind: "overview",
 							status: snapshot.status,
 							notice: `Repair approval failed: ${error instanceof Error ? error.message : String(error)}`,
+							noticeTone: "error",
 						}
 					: { kind: "offline", snapshot };
 			this.selectedKey = snapshot.kind === "online" ? `revoked:${clientNodeId}` : "start";
@@ -1009,6 +1074,10 @@ export class RemoteControlCenterComponent implements Component {
 		}
 		if (key === "register-current") {
 			if (this.view.kind === "overview") void this.registerCurrentWorkspace();
+			return;
+		}
+		if (key === "check-relay-access") {
+			if (this.view.kind === "overview" && relayAccessNeedsRecovery(this.view.status)) void this.checkRelayAccess();
 			return;
 		}
 		if (key === "reset-credential" && this.view.kind === "overview" && this.view.status.relayCredential) {
@@ -1323,7 +1392,7 @@ export class RemoteControlCenterComponent implements Component {
 						{
 							text: this.view.notice,
 							wrap: true,
-							tone: this.view.notice.includes("failed") ? ("error" as const) : ("success" as const),
+							tone: this.view.noticeTone ?? ("success" as const),
 						},
 					]
 				: []),
@@ -1345,6 +1414,18 @@ export class RemoteControlCenterComponent implements Component {
 						{ text: relayDetails.guidance, tone: "muted" as const, wrap: true },
 					]
 				: []),
+			...(relayAccessNeedsRecovery(status)
+				? [
+						{
+							text:
+								relayCredential?.nextRefreshAt === undefined
+									? "Checking relay access now"
+									: `Next automatic check in ${formatDuration(relayCredential.nextRefreshAt - Date.now())}`,
+							tone: "muted" as const,
+							wrap: true,
+						},
+					]
+				: []),
 			{
 				text: `${status.phoneConnections} attached phone${status.phoneConnections === 1 ? "" : "s"} · ${status.clients.length} paired device${status.clients.length === 1 ? "" : "s"}${status.revokedClients === undefined ? "" : ` · ${status.revokedClients.length} revoked`}`,
 				tone: status.phoneConnections > 0 ? "success" : "muted",
@@ -1357,6 +1438,9 @@ export class RemoteControlCenterComponent implements Component {
 			},
 			{ text: "ACTIONS", tone: "accent" },
 			{ key: "refresh", text: "Refresh status", tone: "text" },
+			...(relayAccessNeedsRecovery(status)
+				? [{ key: "check-relay-access", text: "Check relay access now", tone: "text" as const }]
+				: []),
 			{ key: "register-current", text: "Register current directory", tone: "text" },
 			...(!isRemoteTransportPairingAvailable(status.remoteTransport)
 				? [{ text: "Pairing is disabled until phone transport is ready.", tone: "warning" as const }]

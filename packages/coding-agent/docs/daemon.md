@@ -34,7 +34,7 @@ when another process starts it.
 ```
 volt daemon start                 Start the background daemon.
 volt daemon stop                  Graceful shutdown (state flushed, phones notified).
-volt daemon status [--json]       Status; exit 0 only when phone transport is ready.
+volt daemon status [--json]       Status; exit 0 only when phone transport and relay access are ready.
 volt daemon restart               Stop then start; persistent state survives.
 volt daemon logs [-f] [-n N]      Tail the daemon log.
 volt daemon install-service       Register a login service (launchd/systemd).
@@ -92,9 +92,14 @@ local daemon endpoint. An endpoint marked ready does not mean relay access is
 active.
 
 Use **Pair a phone** for another phone using the same active subscription. If
-Volt Pro is inactive, renew the existing subscription; the daemon retries
-credential refresh automatically. **Refresh status** reloads the display, not
-the subscription itself.
+Volt Pro is inactive, renew the existing subscription; the daemon checks again
+automatically and reconnects existing phones without restarting or pairing again.
+Automatic checks run every 15 seconds for a computer that lost relay access less
+than a day ago, every 5 minutes for up to a week, then hourly. **Relay access**
+shows when the next check runs. After renewing, choose **Check relay access now**
+to check immediately. If the renewal is not recognized yet, Volt keeps checking;
+if Apple's renewal notification is missed, confirmation can take up to about an
+hour. **Refresh status** reloads the display, not the subscription itself.
 
 To enroll using a different subscribed phone, choose **Reset credentials and
 pair again…**. Review the confirmation (Cancel is selected by default). Reset
@@ -357,9 +362,12 @@ supported.
   log before retrying; slow source loading can delay the control endpoint.
 - `volt daemon status --json` reports `remoteTransport.state` as `starting`,
   `ready`, `degraded`, or `unavailable`, plus a safe reason code/message and the
-  wrapper version when discoverable. Both daemon and remote status exit nonzero
-  unless phone transport is `ready`; local daemon workspace/client maintenance
-  remains available while it is not ready.
+  wrapper version when discoverable. For managed relays, `relayCredential.state`
+  reports relay access and `relayCredential.nextRefreshAt` the next automatic
+  check. Both daemon and remote status exit nonzero unless phone transport is
+  `ready` and managed relay access is not `expired`, `subscription_inactive`, or
+  `revocation_pending`; local daemon workspace/client maintenance remains
+  available while it is not ready.
 - `native_binding_missing` → reinstall without `--omit=optional` on a supported
   platform. Darwin x64 is intentionally local CLI/TUI only.
 - `endpoint_start_failed` → inspect `volt daemon logs`, fix the reported host

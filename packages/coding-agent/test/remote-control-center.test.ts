@@ -19,11 +19,12 @@ import {
 } from "../src/core/remote/iroh/qr.ts";
 import { encodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../src/core/slash-commands.ts";
-import { initTheme } from "../src/core/theme/runtime.ts";
+import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import {
 	CONTROL_PAIR_CANCEL_CAPABILITY,
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	type ControlEvent,
+	type ControlRelayCredentialStatus,
 	type ControlResponse,
 } from "../src/daemon/control-protocol.ts";
 import {
@@ -119,6 +120,10 @@ class FakeBackend implements RemoteControlBackend {
 	resetError: Error | undefined;
 	resetPending: Promise<void> | undefined;
 	repairApprovalCalls: string[] = [];
+	checkCalls = 0;
+	checkError: Error | undefined;
+	/** Relay access reported after a successful check; unchanged when undefined. */
+	checkResult: ControlRelayCredentialStatus | undefined;
 	pairWorkspace: string | undefined;
 	pairAccess: IrohRemoteAccessPresetName | undefined;
 	pairingProgress: ((event: PairingProgress) => void) | undefined;
@@ -192,6 +197,17 @@ class FakeBackend implements RemoteControlBackend {
 			this.snapshot = {
 				kind: "online",
 				status: { ...this.snapshot.status, relayCredential: { state: "unpaired" } },
+			};
+		}
+	}
+
+	async checkRelayAccess(): Promise<void> {
+		this.checkCalls++;
+		if (this.checkError) throw this.checkError;
+		if (this.checkResult && this.snapshot.kind === "online") {
+			this.snapshot = {
+				kind: "online",
+				status: { ...this.snapshot.status, relayCredential: this.checkResult },
 			};
 		}
 	}
@@ -290,6 +306,15 @@ function createComponent(backend: FakeBackend, rows = 36, currentPath = "/tmp/vo
 
 async function settle(): Promise<void> {
 	for (let index = 0; index < 5; index++) await Promise.resolve();
+}
+
+/** Theme tone of the first rendered line containing `text`. */
+function toneOf(component: RemoteControlCenterComponent, text: string, width = 120): string | undefined {
+	const line = component.render(width).lines.find((candidate) => stripAnsi(candidate).includes(text));
+	if (line === undefined) return undefined;
+	return (["success", "warning", "error"] as const).find((tone) =>
+		line.startsWith(theme.fg(tone, "\0").split("\0")[0]!),
+	);
 }
 
 function selectAction(component: RemoteControlCenterComponent, label: string, width = 120): void {
@@ -589,6 +614,145 @@ describe("RemoteControlCenterComponent", () => {
 		}
 	});
 
+	describe("relay access check", () => {
+		it("uses distinct theme colors for notice tones", () => {
+			const prefixes = (["success", "warning", "error"] as const).map((tone) => theme.fg(tone, "\0").split("\0")[0]);
+			expect(new Set(prefixes).size).toBe(3);
+		});
+
+		it.each([
+			["unpaired", false],
+			["pairing", false],
+			["active", false],
+			["expired", true],
+			["subscription_inactive", true],
+			["revocation_pending", false],
+		] as const)("offers the check and next automatic check for %s: %s", async (state, offered) => {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({ relayCredential: { state, nextRefreshAt: Date.now() + 14_500 } }),
+			});
+			const { component } = createComponent(backend, 45);
+			await component.start();
+			const text = component.render(120).lines.map(stripAnsi).join("\n");
+			expect(text.includes("  Check relay access now")).toBe(offered);
+			expect(text.includes("Next automatic check in 14s")).toBe(offered);
+			if (offered) expect(text.replace(/\s+/g, " ")).toContain("choose Check relay access now");
+		});
+
+		it("shows a check in progress when no automatic check is scheduled", async () => {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({ relayCredential: { state: "subscription_inactive" } }),
+			});
+			const { component } = createComponent(backend, 45);
+			await component.start();
+			const text = component.render(120).lines.map(stripAnsi).join("\n");
+			expect(text).toContain("Checking relay access now");
+			expect(text).toContain("Renew the existing subscription");
+		});
+
+		it("restores relay access after renewal without resetting or pairing", async () => {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({
+					relayCredential: { state: "subscription_inactive", nextRefreshAt: Date.now() + 3_600_000 },
+				}),
+			});
+			backend.checkResult = { state: "active", expiresAt: Date.now() + 600_000 };
+			const { component } = createComponent(backend, 45);
+			await component.start();
+			selectAction(component, "Check relay access now");
+			await settle();
+			expect(backend.checkCalls).toBe(1);
+			expect(backend.resetCalls).toBe(0);
+			expect(backend.pairWorkspace).toBeUndefined();
+			const text = component.render(120).lines.map(stripAnsi).join("\n");
+			expect(text).toContain("Relay access restored. Paired phones can reconnect.");
+			expect(text).toContain("Relay access: Active");
+			expect(text).not.toContain("Check relay access now");
+			expect(toneOf(component, "Relay access restored.")).toBe("success");
+		});
+
+		it.each([
+			{
+				state: "subscription_inactive",
+				notice: "Volt Pro is still inactive. If you just renewed, Apple can take a few minutes to confirm",
+			},
+			{ state: "expired", notice: "Relay access is still expired. Volt keeps retrying automatically." },
+		] as const)("warns when relay access is still $state after a check", async ({ state, notice }) => {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({ relayCredential: { state, nextRefreshAt: Date.now() + 15_000 } }),
+			});
+			const { component } = createComponent(backend, 45);
+			await component.start();
+			selectAction(component, "Check relay access now");
+			await settle();
+			expect(backend.checkCalls).toBe(1);
+			const text = component.render(120).lines.map(stripAnsi).join("\n");
+			expect(text).toContain(notice);
+			expect(toneOf(component, notice.slice(0, 30))).toBe("warning");
+			// Selection stays on the action so the user can check again.
+			expect(text).toContain("› Check relay access now");
+		});
+
+		it("reports a failed check as an error and keeps the action available", async () => {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({ relayCredential: { state: "subscription_inactive", nextRefreshAt: Date.now() + 15_000 } }),
+			});
+			backend.checkError = new RemoteControlRequestError(
+				"relay_credential_check_failed",
+				"relay credential refresh failed with status 503",
+			);
+			const { component } = createComponent(backend, 45);
+			await component.start();
+			selectAction(component, "Check relay access now");
+			await settle();
+			const text = component.render(120).lines.map(stripAnsi).join("\n");
+			expect(text).toContain("Relay access check failed: relay credential refresh failed with status 503");
+			expect(toneOf(component, "Relay access check failed")).toBe("error");
+			expect(text).toContain("› Check relay access now");
+		});
+
+		it("ignores a check result after the screen is disposed", async () => {
+			const backend = new FakeBackend({
+				kind: "online",
+				status: status({ relayCredential: { state: "expired" } }),
+			});
+			const { component, requestRender } = createComponent(backend);
+			await component.start();
+			selectAction(component, "Check relay access now");
+			component.dispose();
+			const renders = requestRender.mock.calls.length;
+			await settle();
+			expect(requestRender).toHaveBeenCalledTimes(renders);
+		});
+
+		it("keeps relay access recovery rows within small viewports", async () => {
+			for (const [width, rows] of [
+				[24, 12],
+				[80, 24],
+				[120, 36],
+			] as const) {
+				const backend = new FakeBackend({
+					kind: "online",
+					status: status({
+						relayCredential: { state: "subscription_inactive", nextRefreshAt: Date.now() + 300_000 },
+					}),
+				});
+				const { component } = createComponent(backend, rows);
+				await component.start();
+				selectAction(component, "Check relay access now", width);
+				await settle();
+				const lines = component.render(width).lines;
+				expect(lines).toHaveLength(rows);
+				for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		});
+	});
+
 	it("labels default-tracking and deny-all device grants", async () => {
 		const backend = new FakeBackend({
 			kind: "online",
@@ -783,6 +947,7 @@ describe("RemoteControlCenterComponent", () => {
 		const lines = component.render(80).lines;
 		const text = lines.map(stripAnsi).join("\n");
 		expect(text).toContain("Workspace registration failed:");
+		if (!offline) expect(toneOf(component, "Workspace registration failed:", 80)).toBe("error");
 		expect(text).toContain("Use parent workspace volt;");
 		expect(text).toContain("cannot be registered separately.");
 		expect(text).not.toContain("Registered directory:");
