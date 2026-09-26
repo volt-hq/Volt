@@ -60,6 +60,7 @@ import {
 import { KeepAwakeController, type KeepAwakeControllerOptions } from "./keep-awake.ts";
 import type { DaemonLogger } from "./log.ts";
 import { createDaemonLogger } from "./log.ts";
+import type { DaemonEnvironmentResolution } from "./login-environment.ts";
 import {
 	createDaemonControlSocketPath,
 	type DaemonPaths,
@@ -89,6 +90,11 @@ export interface VoltdConfig {
 	extensionDisposeTimeoutMs?: number;
 	/** Process lifecycle override for deterministic signal tests. */
 	processLifecycle?: VoltdProcessLifecycle;
+	/**
+	 * Resolve the environment runtimes and tools use, once, after the startup
+	 * lock is held. Omitted (tests) keeps the inherited environment.
+	 */
+	prepareEnvironment?: () => Promise<DaemonEnvironmentResolution>;
 }
 
 export interface VoltdProcessLifecycle {
@@ -281,6 +287,38 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		selectedSocketPath = createDaemonControlSocketPath(agentDir);
 		paths = resolvePaths();
 		ensureDaemonDirs(paths);
+	}
+
+	// Before any runtime, extension, or tool reads process.env.
+	let environmentResolution: DaemonEnvironmentResolution;
+	try {
+		environmentResolution = config.prepareEnvironment
+			? await config.prepareEnvironment()
+			: { status: { source: "inherited", reason: "not resolved" }, failed: false };
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		environmentResolution = { status: { source: "inherited", reason }, failed: true };
+	}
+	const environmentStatus = environmentResolution.status;
+	if (environmentStatus.source === "login-shell") {
+		const droppedVariables = environmentResolution.droppedVariables ?? [];
+		log("info", `resolved environment from login shell ${environmentStatus.shell ?? "unknown"}`, {
+			base: environmentStatus.base,
+			durationMs: environmentStatus.durationMs,
+			exitCode: environmentResolution.exitCode,
+			...(droppedVariables.length > 0 ? { droppedVariables } : {}),
+			PATH: process.env.PATH,
+		});
+	} else if (environmentResolution.failed) {
+		log("warn", `using inherited environment: ${environmentStatus.reason ?? "unknown"}`, {
+			shell: environmentStatus.shell,
+			durationMs: environmentStatus.durationMs,
+			exitCode: environmentResolution.exitCode,
+			signal: environmentResolution.signal,
+			stderrTail: environmentResolution.stderrTail,
+		});
+	} else {
+		log("info", `using inherited environment: ${environmentStatus.reason ?? "unknown"}`);
 	}
 
 	const state = new VoltdStateStore({ agentDir, statePath: paths.statePath });
@@ -611,6 +649,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					protocolVersion: PROTOCOL_VERSION,
 					pid: process.pid,
 					startedAtMs,
+					environment: environmentStatus,
 					capabilities: [CONTROL_PAIR_CANCEL_CAPABILITY, CONTROL_RPC_GRANTS_CAPABILITY],
 					leases,
 					phoneConnections,

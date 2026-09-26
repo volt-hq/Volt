@@ -46,6 +46,7 @@ describe("#418 explicit current-directory registration", () => {
 			protocolVersion: 1,
 			pid: process.pid,
 			startedAtMs: 0,
+			environment: { source: "inherited", reason: "not resolved" },
 			leases: structuredClone(initialLeases),
 			phoneConnections: 1,
 			remoteTransport: { state: "ready" },

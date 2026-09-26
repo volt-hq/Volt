@@ -17,6 +17,7 @@ import type { IrohRemoteClient } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteWorkspaceMetadataSnapshot } from "../core/remote/iroh/workspace.ts";
 import { parseSessionReference } from "../core/session-entry-codec.ts";
 import type { SessionReference } from "../core/session-manager.ts";
+import type { DaemonEnvironmentStatus } from "./login-environment.ts";
 
 /**
  * Wire types and framing for the voltd control plane: JSONL over the unix
@@ -362,6 +363,8 @@ export type ControlResponse =
 			protocolVersion: number;
 			pid: number;
 			startedAtMs: number;
+			/** How the daemon resolved the environment its runtimes and tools use. */
+			environment: DaemonEnvironmentStatus;
 			/** Optional feature flags for protocol-v1 additions. */
 			capabilities?: string[];
 			leases: ControlLeaseStatus[];

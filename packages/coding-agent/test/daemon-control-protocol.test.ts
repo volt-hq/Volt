@@ -143,6 +143,7 @@ describe("control protocol framing", () => {
 				protocolVersion: PROTOCOL_VERSION,
 				pid: 42,
 				startedAtMs: 1000,
+				environment: { source: "inherited", reason: "not resolved" },
 				capabilities: ["pair_cancel"],
 				leases: [{ workspaceName: "volt", sessionId: "s-1", state: "tui-owned", relayCount: 1, streamCount: 0 }],
 				phoneConnections: 1,

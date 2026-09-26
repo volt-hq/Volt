@@ -9,8 +9,9 @@ import { resolveDaemonCliInvocation } from "./spawn.ts";
 /**
  * `volt daemon install-service` (M9): generate and register an OS login
  * service — a launchd LaunchAgent on macOS, a systemd user unit on Linux —
- * that runs `volt daemon run --foreground` so the daemon comes back after
- * logout/login without anything having to spawn it on demand.
+ * that runs `volt daemon run --foreground --service` so the daemon comes back
+ * after logout/login without anything having to spawn it on demand. `--service`
+ * tells the daemon its inherited environment is the session's, not a terminal's.
  *
  * The service does NOT auto-restart after `volt daemon stop` (KeepAlive off /
  * Restart=no): a graceful stop stays stopped until the next login or a manual
@@ -22,7 +23,7 @@ export const LAUNCHD_SERVICE_LABEL = "com.github.hansjm10.voltd";
 export const SYSTEMD_SERVICE_NAME = "voltd.service";
 
 export interface DaemonServiceInvocation {
-	/** Full program argv: node executable, entry, "daemon", "run", "--foreground". */
+	/** Full program argv: node executable, entry, "daemon", "run", "--foreground", "--service". */
 	programArguments: string[];
 	agentDir: string;
 	/** Captures pre-logger crashes; the daemon's own log is voltd.log. */
@@ -33,7 +34,7 @@ export function getDaemonServiceInvocation(agentDir: string = getAgentDir()): Da
 	const { nodeArgs, entry } = resolveDaemonCliInvocation();
 	const paths = getDaemonPaths(agentDir);
 	return {
-		programArguments: [process.execPath, ...nodeArgs, entry, "daemon", "run", "--foreground"],
+		programArguments: [process.execPath, ...nodeArgs, entry, "daemon", "run", "--foreground", "--service"],
 		agentDir,
 		serviceLogPath: join(paths.daemonDir, "voltd.service.log"),
 	};
