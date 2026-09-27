@@ -4,7 +4,11 @@ import type {
 	ExtensionWorkExecutionResult,
 	ExtensionWorkManagerOptions,
 } from "../src/core/extensions/work-host.ts";
-import { ExtensionWorkManager, withoutExtensionWork } from "../src/core/extensions/work-runtime.ts";
+import {
+	DEFAULT_EXTENSION_WORK_LIMITS,
+	ExtensionWorkManager,
+	withoutExtensionWork,
+} from "../src/core/extensions/work-runtime.ts";
 import type {
 	ExtensionWorkContext,
 	ExtensionWorkTaskHandle,
@@ -202,7 +206,7 @@ describe("bounded first-request preparation wait", () => {
 		expect(runtimes[4].manager.getStatus("one").contributions).toEqual([{ key: "source", status: "ready" }]);
 
 		// Timeouts abort validation, but cannot release capacity before the operations drain.
-		await vi.advanceTimersByTimeAsync(25);
+		await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs);
 		expect(await Promise.all(collecting)).toEqual(Array(5).fill(undefined));
 		for (const { validation } of runtimes.slice(0, 4)) expect(validation.mock.calls[0][0].aborted).toBe(true);
 		expect(await runtimes[4].manager.collect(1, () => true)).toBeUndefined();

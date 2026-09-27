@@ -4,7 +4,11 @@ import type {
 	ExtensionWorkExecutionResult,
 	ExtensionWorkManagerOptions,
 } from "../src/core/extensions/work-host.ts";
-import { ExtensionWorkManager, withoutExtensionWork } from "../src/core/extensions/work-runtime.ts";
+import {
+	DEFAULT_EXTENSION_WORK_LIMITS,
+	ExtensionWorkManager,
+	withoutExtensionWork,
+} from "../src/core/extensions/work-runtime.ts";
 import type {
 	ExtensionWorkContext,
 	ExtensionWorkTaskContext,
@@ -293,8 +297,11 @@ describe("extension managed work", () => {
 		const release = deferred<ExtensionWorkExecutionResult>();
 		execute.mockImplementation(async () => release.promise);
 		const collecting = manager.collect(1, () => true);
-		await vi.advanceTimersByTimeAsync(25);
+		await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs);
 		expect(await collecting).toBeUndefined();
+		expect(manager.getStatus("one").contributions).toEqual([
+			{ key: "source", status: "omitted", reason: "validation_deadline" },
+		]);
 		expect(await manager.collect(1, () => true)).toBeUndefined();
 		let closed = false;
 		const closing = manager.close().then(() => {
@@ -315,13 +322,42 @@ describe("extension managed work", () => {
 			for (const key of ["one", "two", "three"]) await contribute(manager, "one", key);
 			execute.mockClear();
 			execute.mockImplementation(async () => {
-				clock.mockReturnValue(26);
+				clock.mockReturnValue(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs + 1);
 				return readResult();
 			});
 			expect(await manager.collect(1, () => true)).toBeUndefined();
 			expect(execute).toHaveBeenCalledTimes(2);
-			expect(manager.getStatus("one").contributions.every((item) => item.reason === "source_unverified")).toBe(true);
+			expect(manager.getStatus("one").contributions.every((item) => item.reason === "validation_deadline")).toBe(
+				true,
+			);
 		} finally {
+			clock.mockRestore();
+		}
+	});
+
+	it("keeps a completed source mismatch definitive when the deadline also expires", async () => {
+		vi.useFakeTimers();
+		const clock = vi.spyOn(performance, "now").mockReturnValue(0);
+		const release = deferred<ExtensionWorkExecutionResult>();
+		try {
+			const { manager, execute } = setup();
+			await start(context(manager), async (task) => {
+				const evidenceIds: string[] = [];
+				for (let i = 0; i < 2; i++) {
+					const result = await task.repository.readText({ path: "file.ts" });
+					if (result.status === "ok") evidenceIds.push(result.evidence.id);
+				}
+				task.context.put({ key: "source", text: "source", dependency: "sources", evidenceIds });
+			}).wait();
+			execute.mockResolvedValueOnce(readResult("v2")).mockImplementationOnce(() => release.promise);
+			const collecting = manager.collect(1, () => true);
+			await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs);
+			expect(await collecting).toBeUndefined();
+			expect(manager.getStatus("one").contributions).toEqual([
+				{ key: "source", status: "omitted", reason: "source_unverified" },
+			]);
+		} finally {
+			release.resolve(readResult());
 			clock.mockRestore();
 		}
 	});

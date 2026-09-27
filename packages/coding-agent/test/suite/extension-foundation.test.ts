@@ -52,7 +52,7 @@ function consumer(run: (task: ExtensionWorkTaskContext) => Promise<void>, extra?
 			parameters: Type.Object({}),
 			execute: async () => {
 				await handle.wait();
-				// Test source authority, not whether real I/O fits the 25 ms collection budget.
+				// Test source authority, not whether real I/O fits the collection budget.
 				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 				return { content: [] };
 			},

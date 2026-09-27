@@ -278,10 +278,10 @@ These are proposed conservative defaults for the first implementation, not measu
 | Retained completed task summaries | 32 per runtime; metadata only |
 | Contributions | 8 keys and 8 KiB retained text per extension; 4 KiB each; 16 KiB aggregate request suffix including framing |
 | Optional wait | Default 0; host may allow up to 100 ms total on first scope attempt |
-| Collection/source-validation deadline | 25 ms per attempt, separate from the optional wait; omit unfinished candidates |
+| Collection/source-validation deadline | 100 ms per attempt, separate from the optional wait; omit unfinished candidates |
 | Unsettled collection-validation leases | 1 per runtime, 4 process-wide; at most 2 operations per lease |
 
-For determinism, collection may await bounded source checks even in ready-only mode, but never unfinished preparation. Cheap identity checks and cached host change evidence may avoid I/O; this is not a reusable tool-result cache. Expensive sources can simply miss the boundary. Do not advertise zero added latency.
+For determinism, collection may await bounded source checks even in ready-only mode, but never unfinished preparation. Cheap identity checks and cached host change evidence may avoid I/O; this is not a reusable tool-result cache. Expensive sources can simply miss the boundary. Do not advertise zero added latency. The initial 25 ms deadline was raised to 100 ms after sub-millisecond validation reads missed it under event-loop contention ([#509](https://github.com/volt-hq/Volt/issues/509)); collection still returns as soon as validation finishes, so the larger deadline only costs latency when validation stalls. Deadline omissions report `validation_deadline`, distinct from `source_unverified`.
 
 Byte limits bound returned/retained material, not necessarily filesystem scan I/O or language-server indexing. Deadline/cancellation bounds supported host operations; scan cost and server startup remain explicit limitations. The process-wide task ceiling prevents many sessions or reloads from bypassing callback admission limits.
 
