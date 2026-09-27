@@ -1,4 +1,6 @@
-const LOGO_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 800" aria-hidden="true"><path fill="#fff" fill-rule="evenodd" d="M165.29 165.29 H517.36 V400 H400 V517.36 H282.65 V634.72 H165.29 Z M282.65 282.65 V400 H400 V282.65 Z"/><path fill="#fff" d="M517.36 400 H634.72 V634.72 H517.36 Z"/></svg>`;
+// Inline copy of the Volt app icon (volt-app scripts/render-app-icon.swift, "halo" style) so the
+// page stays self-contained: no external assets, and no xmlns URL since inline HTML SVG needs none.
+const LOGO_SVG = `<svg viewBox="0 0 1024 1024" aria-hidden="true"><defs><linearGradient id="volt-logo-base" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a2537"/><stop offset=".55" stop-color="#191621"/><stop offset="1" stop-color="#0e0c12"/></linearGradient><radialGradient id="volt-logo-glow" cx="512" cy="512" r="740" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#a685ff" stop-opacity=".12"/><stop offset=".62" stop-color="#a685ff" stop-opacity=".04"/><stop offset="1" stop-color="#a685ff" stop-opacity="0"/></radialGradient></defs><rect width="1024" height="1024" rx="224" fill="url(#volt-logo-base)"/><rect width="1024" height="1024" rx="224" fill="url(#volt-logo-glow)"/><g transform="translate(512 512) scale(6.0413) translate(-50.2 -67.1)"><polygon fill="#6d4dc4" points="48.4,62.2 42.4,4.2 86.4,70.2 54.4,70.2"/><polygon fill="#a685ff" points="52,72 58,130 14,64 46,64"/></g></svg>`;
 
 function escapeHtml(value: string): string {
 	return value
@@ -20,7 +22,7 @@ function renderPage(options: { title: string; heading: string; message: string; 
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>${title}</title>
+  <title>Volt · ${title}</title>
   <style>
     :root {
       --text: #fafafa;
@@ -55,7 +57,19 @@ function renderPage(options: { title: string; heading: string; message: string; 
       width: 72px;
       height: 72px;
       display: block;
+      margin-bottom: 12px;
+    }
+    .logo svg {
+      display: block;
+      width: 100%;
+      height: 100%;
+    }
+    .brand {
       margin-bottom: 24px;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--text-dim);
     }
     h1 {
       margin: 0 0 10px;
@@ -83,6 +97,7 @@ function renderPage(options: { title: string; heading: string; message: string; 
 <body>
   <main>
     <div class="logo">${LOGO_SVG}</div>
+    <div class="brand">Volt</div>
     <h1>${heading}</h1>
     <p>${message}</p>
     ${details ? `<div class="details">${details}</div>` : ""}
