@@ -22,8 +22,12 @@ the MIT License.
 ```bash
 npm install --ignore-scripts
 npm run dev        # syncs docs, then serves at localhost:4321
-npm run build      # syncs docs, then builds to dist/
+npm run build      # syncs docs, builds to dist/, then checks rendered text spacing
 ```
+
+The spacing regression checks run against the production HTML, where whitespace
+compression can remove separators around inline links and code. After a build,
+rerun them with `node --test test/spacing.test.mjs` from this directory.
 
 Docs edits go in `packages/coding-agent/docs/`; re-run `npm run sync-docs` (or restart dev) to pick them up. New pages must be added to `docs.json` to appear in the sidebar.
 
