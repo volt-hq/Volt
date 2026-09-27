@@ -19219,13 +19219,13 @@ export const MODELS = {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.24634,
-				output: 3.5,
-				cacheRead: 0.24584,
+				input: 0.24552,
+				output: 0.73656,
+				cacheRead: 0.007812,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
-			maxTokens: 943718,
+			maxTokens: 393216,
 		} satisfies Model<"openai-completions">,
 		"~deepseek/deepseek-v4-flash-latest": {
 			id: "~deepseek/deepseek-v4-flash-latest",
@@ -19290,8 +19290,8 @@ export const MODELS = {
 			input: ["text", "image"],
 			cost: {
 				input: 1,
-				output: 5.6,
-				cacheRead: 0.116,
+				output: 9,
+				cacheRead: 0.3,
 				cacheWrite: 0,
 			},
 			contextWindow: 1048576,
