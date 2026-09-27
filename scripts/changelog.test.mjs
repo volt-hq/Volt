@@ -6,12 +6,16 @@ import { test } from "node:test";
 import {
 	applyReleaseSection,
 	assertNoPendingChangesets,
+	assertReleaseSectionNotices,
 	assertReleaseTargetSatisfiesChangesets,
 	parseChangeset,
 	readChangesets,
+	RELEASE_NOTICES,
 	renderReleaseSection,
 	requiredReleaseBump,
 } from "./changelog.mjs";
+
+const [UNSIGNED_WINDOWS_NOTICE] = RELEASE_NOTICES;
 
 function changeset(body) {
 	return `---\n"@hansjm10/volt-coding-agent": patch\n---\n\n${body}\n`;
@@ -102,6 +106,45 @@ test("renderReleaseSection notes maintenance releases with only internal changes
 	assert.match(renderReleaseSection(changesets, "1.2.3", "2026-07-13"), /Maintenance release with no user-facing changes\./);
 });
 
+test("renderReleaseSection opens with release notices before entries and maintenance notes", () => {
+	const fix = parseChangeset(".changeset/fix.md", changeset("fix(daemon): Fixed lease cleanup."));
+	assert.equal(
+		renderReleaseSection([fix], "1.2.3", "2026-07-13", ["First notice.", "Second notice."]),
+		"## [1.2.3] - 2026-07-13\n\nFirst notice.\n\nSecond notice.\n\n### Fixes\n\n- **daemon:** Fixed lease cleanup.\n",
+	);
+	const internal = parseChangeset(".changeset/internal.md", changeset("internal: Refactored CI."));
+	assert.equal(
+		renderReleaseSection([internal], "1.2.3", "2026-07-13", ["First notice."]),
+		"## [1.2.3] - 2026-07-13\n\nFirst notice.\n\nMaintenance release with no user-facing changes.\n",
+	);
+	assert.doesNotMatch(renderReleaseSection([fix], "1.2.3", "2026-07-13"), /notice/);
+});
+
+test("assertReleaseSectionNotices requires every notice as a paragraph of the exact version section", () => {
+	const section = `## [0.2.1] - 2026-09-27\n\n${UNSIGNED_WINDOWS_NOTICE}\n\n### Fixes\n\n- Fixed a defect.\n`;
+	const changelog = `# Changelog\n\n${section}\n## [0.2.0] - 2026-09-25\n\nOlder release.\n`;
+	assert.doesNotThrow(() => assertReleaseSectionNotices(changelog, "0.2.1"));
+	assert.doesNotThrow(() => assertReleaseSectionNotices(changelog.replaceAll("\n", "\r\n"), "0.2.1"));
+	assert.throws(
+		() => assertReleaseSectionNotices(changelog.replace(`${UNSIGNED_WINDOWS_NOTICE}\n\n`, ""), "0.2.1"),
+		/missing required release notices/,
+	);
+	assert.throws(
+		() =>
+			assertReleaseSectionNotices(
+				`# Changelog\n\n## [0.2.1] - 2026-09-27\n\n### Fixes\n\n- Fixed a defect.\n\n## [0.2.0] - 2026-09-25\n\n${UNSIGNED_WINDOWS_NOTICE}\n`,
+				"0.2.1",
+			),
+		/missing required release notices/,
+	);
+	assert.throws(
+		() => assertReleaseSectionNotices(changelog.replace(`\n\n${UNSIGNED_WINDOWS_NOTICE}\n\n`, `\n\n- ${UNSIGNED_WINDOWS_NOTICE}\n\n`), "0.2.1"),
+		/missing required release notices/,
+	);
+	assert.throws(() => assertReleaseSectionNotices(changelog, "0.2.2"), /no release section for 0\.2\.2/);
+	assert.throws(() => assertReleaseSectionNotices(changelog.replace("[0.2.1]", "[0x2.1]"), "0.2.1"), /no release section/);
+});
+
 test("renderReleaseSection omits the date suffix for dateless previews", () => {
 	const changesets = [parseChangeset(".changeset/fix.md", changeset("fix: X."))];
 	assert.match(renderReleaseSection(changesets, "Unreleased", undefined), /^## \[Unreleased\]\n/);
@@ -142,8 +185,9 @@ test("applyReleaseSection inserts the section, consumes fragments, and is idempo
 		assert.match(section, /## \[0\.1\.1\] - 2026-07-14/);
 		assert.equal(
 			readFileSync(changelogPath, "utf8"),
-			"# Changelog\n\n## [0.1.1] - 2026-07-14\n\n### Fixes\n\n- **daemon:** Fixed lease cleanup.\n\n## [0.1.0] - 2026-07-13\n\nInitial release.\n",
+			`# Changelog\n\n## [0.1.1] - 2026-07-14\n\n${UNSIGNED_WINDOWS_NOTICE}\n\n### Fixes\n\n- **daemon:** Fixed lease cleanup.\n\n## [0.1.0] - 2026-07-13\n\nInitial release.\n`,
 		);
+		assert.doesNotThrow(() => assertReleaseSectionNotices(readFileSync(changelogPath, "utf8"), "0.1.1"));
 		assert.doesNotThrow(() => assertNoPendingChangesets(changesetDir));
 		assert.equal(readFileSync(join(changesetDir, "README.md"), "utf8"), "# Changesets\n");
 
@@ -167,7 +211,7 @@ test("applyReleaseSection preserves CRLF line endings", () => {
 		applyReleaseSection({ version: "0.1.1", date: "2026-07-14", changelogPath, changesetDir });
 		assert.equal(
 			readFileSync(changelogPath, "utf8"),
-			"# Changelog\r\n\r\n## [0.1.1] - 2026-07-14\r\n\r\n### Fixes\r\n\r\n- **daemon:** Fixed lease cleanup.\r\n\r\n## [0.1.0] - 2026-07-13\r\n\r\nInitial release.\r\n",
+			`# Changelog\r\n\r\n## [0.1.1] - 2026-07-14\r\n\r\n${UNSIGNED_WINDOWS_NOTICE}\r\n\r\n### Fixes\r\n\r\n- **daemon:** Fixed lease cleanup.\r\n\r\n## [0.1.0] - 2026-07-13\r\n\r\nInitial release.\r\n`,
 		);
 	} finally {
 		rmSync(directory, { force: true, recursive: true });

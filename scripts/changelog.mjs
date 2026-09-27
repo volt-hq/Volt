@@ -24,6 +24,16 @@ import { RELEASE_CHANGELOG, RELEASE_PACKAGE_IDENTITIES } from "./verify-release-
 
 export const CHANGESET_DIR = ".changeset";
 
+/**
+ * Paragraphs every generated version section opens with. The publisher builds
+ * GitHub release notes from that section, and release approval rejects a
+ * section that lacks any of them. Remove the unsigned-Windows disclosure only
+ * once the standalone Windows executables are Authenticode-signed.
+ */
+export const RELEASE_NOTICES = [
+	"Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.",
+];
+
 const KNOWN_PACKAGE_NAMES = new Set(RELEASE_PACKAGE_IDENTITIES.map(({ name }) => name));
 const RENDERED_SECTIONS = [
 	{ heading: "Highlights", kind: "feature" },
@@ -161,8 +171,11 @@ function renderEntry(changeset, { includeArea }) {
 	return lines;
 }
 
-export function renderReleaseSection(changesets, version, date) {
+export function renderReleaseSection(changesets, version, date, notices = []) {
 	const lines = [date ? `## [${version}] - ${date}` : `## [${version}]`, ""];
+	for (const notice of notices) {
+		lines.push(notice, "");
+	}
 	const visible = changesets.filter(({ kind }) => kind !== "internal");
 	if (visible.length === 0) {
 		lines.push("Maintenance release with no user-facing changes.", "");
@@ -191,7 +204,38 @@ export function assertNoPendingChangesets(changesetDir = CHANGESET_DIR) {
 	}
 }
 
-export function applyReleaseSection({ version, date, changelogPath = RELEASE_CHANGELOG, changesetDir = CHANGESET_DIR }) {
+function extractReleaseSection(changelog, version) {
+	const normalized = changelog.replaceAll("\r\n", "\n");
+	const heading = new RegExp(`^## \\[${version.replaceAll(".", "\\.")}\\](?: - \\d{4}-\\d{2}-\\d{2})?$`, "m").exec(normalized);
+	if (!heading) {
+		return undefined;
+	}
+	const rest = normalized.slice(heading.index + heading[0].length);
+	const nextHeading = rest.search(/^## \[/m);
+	return nextHeading === -1 ? rest : rest.slice(0, nextHeading);
+}
+
+export function assertReleaseSectionNotices(changelog, version, notices = RELEASE_NOTICES) {
+	const section = extractReleaseSection(changelog, version);
+	if (section === undefined) {
+		throw new Error(`${RELEASE_CHANGELOG} has no release section for ${version}`);
+	}
+	const paragraphs = new Set(section.split(/\n{2,}/).map((paragraph) => paragraph.trim()));
+	const missing = notices.filter((notice) => !paragraphs.has(notice));
+	if (missing.length > 0) {
+		throw new Error(
+			`${RELEASE_CHANGELOG} section for ${version} is missing required release notices: ${missing.map((notice) => JSON.stringify(notice)).join(", ")}`,
+		);
+	}
+}
+
+export function applyReleaseSection({
+	version,
+	date,
+	notices = RELEASE_NOTICES,
+	changelogPath = RELEASE_CHANGELOG,
+	changesetDir = CHANGESET_DIR,
+}) {
 	const changesets = readChangesets(changesetDir);
 	if (changesets.length === 0) {
 		throw new Error(`no changesets found in ${changesetDir}; add release fragments before preparing a release`);
@@ -207,7 +251,7 @@ export function applyReleaseSection({ version, date, changelogPath = RELEASE_CHA
 		throw new Error(`${changelogPath} already contains a section for ${version}`);
 	}
 
-	const section = renderReleaseSection(changesets, version, date);
+	const section = renderReleaseSection(changesets, version, date, notices);
 	const rest = changelog.slice("# Changelog\n".length).replace(/^\n+/, "");
 	const updated = `# Changelog\n\n${section}${rest ? `\n${rest}` : ""}`;
 	writeFileSync(changelogPath, usesCrlf ? updated.replaceAll("\n", "\r\n") : updated);
@@ -316,7 +360,7 @@ function main(argv) {
 			return;
 		}
 		const date = options.date ?? (options.version ? todayIsoDate() : undefined);
-		process.stdout.write(renderReleaseSection(changesets, options.version ?? "Unreleased", date));
+		process.stdout.write(renderReleaseSection(changesets, options.version ?? "Unreleased", date, RELEASE_NOTICES));
 		return;
 	}
 	if (command === "release") {

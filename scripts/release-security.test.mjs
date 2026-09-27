@@ -5,6 +5,7 @@ import { chmodSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSyn
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { RELEASE_NOTICES } from "./changelog.mjs";
 import { collectBinaryLicenses } from "./collect-binary-licenses.mjs";
 import {
 	assertPublishedPackageMatchesRelease,
@@ -26,6 +27,7 @@ import {
 	assertCandidateRunId,
 	assertCandidateWorkflowArtifact,
 	assertCandidateWorkflowRun,
+	assertReleaseCommitSubject,
 	assertReleaseTagMatchesCandidate,
 	candidateTagAttestation,
 	createReleaseAuthorization,
@@ -255,6 +257,26 @@ test("release finalization requires explicit sign-off for the exact prepared can
 	}
 	assert.equal(assertCandidateMatchesHead(commit, commit), commit);
 	assert.throws(() => assertCandidateMatchesHead(commit, "b".repeat(40)), /does not match current HEAD/);
+	for (const subject of ["Release v0.2.0", "Release v0.2.0 (#504)", "Release v0.2.0 (#1)"]) {
+		assert.equal(assertReleaseCommitSubject(subject, "v0.2.0"), subject);
+	}
+	for (const subject of [
+		undefined,
+		"",
+		"Release v0.2.1",
+		"Release v0.2.0 ",
+		"release v0.2.0",
+		"Release v0.2.0(#504)",
+		"Release v0.2.0 (#0)",
+		"Release v0.2.0 (#0504)",
+		"Release v0.2.0 (#504) ",
+		"Release v0.2.0 (#504) (#505)",
+		"Release v0.2.0 (504)",
+		"Release v0.2.0-rc (#504)",
+		'Revert "Release v0.2.0 (#504)"',
+	]) {
+		assert.throws(() => assertReleaseCommitSubject(subject, "v0.2.0"), /prepared release commit/, String(subject));
+	}
 	assert.equal(assertCandidateRunId("123456789"), "123456789");
 	for (const invalidRunId of [undefined, "", "0", "01", "-1", "1.5", "abc", "1\n2"]) {
 		assert.throws(() => assertCandidateRunId(invalidRunId), /VOLT_APPROVED_CANDIDATE_RUN_ID/);
@@ -589,36 +611,64 @@ if (process.argv.join(" ").includes("/artifacts?")) {
 			env: releaseEnvironment,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
-		const candidateCommit = git(["rev-parse", "HEAD"]);
-		assert.notEqual(candidateCommit, initialCommit);
+		const preparedCommit = git(["rev-parse", "HEAD"]);
+		assert.notEqual(preparedCommit, initialCommit);
 		assert.equal(git(["log", "-1", "--format=%s"]), "Release v0.1.1");
 		assert.equal(git(["rev-parse", "refs/remotes/origin/main"]), initialCommit);
 		assert.equal(git(["tag", "--list"]), "");
 		assert.equal(git(["status", "--porcelain"]), "");
-		const preparedChangelog = readFileSync(join(repository, "packages", "coding-agent", "CHANGELOG.md"), "utf8");
-		assert.match(preparedChangelog, /^# Changelog\n\n## \[0\.1\.1\] - \d{4}-\d{2}-\d{2}\n\n### Fixes\n\n- \*\*daemon:\*\* Fixed a fixture defect\.\n\n## \[0\.1\.0\]/);
+		const changelogPath = join(repository, "packages", "coding-agent", "CHANGELOG.md");
+		const preparedChangelog = readFileSync(changelogPath, "utf8");
+		assert.equal(
+			preparedChangelog.replace(/^(## \[0\.1\.1\]) - \d{4}-\d{2}-\d{2}$/m, "$1 - DATE"),
+			`# Changelog\n\n## [0.1.1] - DATE\n\n${RELEASE_NOTICES.map((notice) => `${notice}\n\n`).join("")}### Fixes\n\n- **daemon:** Fixed a fixture defect.\n\n## [0.1.0] - 2026-07-13\n\nInitial release.\n`,
+		);
 		assert.equal(existsSync(join(repository, ".changeset", "fixture-fix.md")), false);
 		assert.equal(readFileSync(join(repository, ".changeset", "README.md"), "utf8"), "# Changesets fixture\n");
 		assert.match(preparedOutput, /resulting exact main SHA/);
 		assert.match(preparedOutput, /post-merge main SHA/);
-		assert.doesNotMatch(preparedOutput, new RegExp(`Build Standalone Candidate workflow with commit ${candidateCommit}`));
-
-		git(["checkout", "main"]);
-		git(["merge", "--ff-only", "release/v0.1.1"]);
-		git(["push", "origin", "main"]);
-		assert.equal(git(["rev-parse", "refs/remotes/origin/main"]), candidateCommit);
+		assert.doesNotMatch(preparedOutput, new RegExp(`Build Standalone Candidate workflow with commit ${preparedCommit}`));
 
 		const candidateRunId = "123456789";
 		const candidateArtifactDigest = `sha256:${"c".repeat(64)}`;
 		const authorizationOutput = join(directory, "authorize-output");
 		writeFileSync(authorizationOutput, "");
-		const authorizedEnvironment = {
+		const authorizeEnvironment = (commit) => ({
 			...releaseEnvironment,
 			GITHUB_OUTPUT: authorizationOutput,
 			VOLT_APPROVED_CANDIDATE_RUN_ID: candidateRunId,
 			VOLT_APPROVED_CANDIDATE_ARTIFACT_DIGEST: candidateArtifactDigest,
-			VOLT_TEST_CANDIDATE_COMMIT: candidateCommit,
-		};
+			VOLT_TEST_CANDIDATE_COMMIT: commit,
+		});
+
+		// GitHub's default squash subject appends the pull request number. A merge
+		// whose release notices were edited out must not be approvable.
+		git(["checkout", "main"]);
+		git(["merge", "--squash", "release/v0.1.1"]);
+		const strippedChangelog = RELEASE_NOTICES.reduce(
+			(changelog, notice) => changelog.replace(`${notice}\n\n`, ""),
+			preparedChangelog,
+		);
+		assert.notEqual(strippedChangelog, preparedChangelog);
+		writeFileSync(changelogPath, strippedChangelog);
+		git(["commit", "-am", "Release v0.1.1 (#123)"]);
+		git(["push", "origin", "main"]);
+		const strippedCommit = git(["rev-parse", "HEAD"]);
+		const missingNotice = spawnSync(process.execPath, [releaseScript, "authorize", strippedCommit], {
+			cwd: repository,
+			encoding: "utf8",
+			env: authorizeEnvironment(strippedCommit),
+		});
+		assert.notEqual(missingNotice.status, 0);
+		assert.match(missingNotice.stderr, /missing required release notices/);
+		assert.equal(readFileSync(authorizationOutput, "utf8"), "");
+
+		writeFileSync(changelogPath, preparedChangelog);
+		git(["commit", "-am", "Release v0.1.1 (#124)"]);
+		git(["push", "origin", "main"]);
+		const candidateCommit = git(["rev-parse", "HEAD"]);
+		assert.equal(git(["rev-parse", "refs/remotes/origin/main"]), candidateCommit);
+		const authorizedEnvironment = authorizeEnvironment(candidateCommit);
 		const missingDigestEnvironment = { ...authorizedEnvironment };
 		delete missingDigestEnvironment.VOLT_APPROVED_CANDIDATE_ARTIFACT_DIGEST;
 		const missingDigest = spawnSync(process.execPath, [releaseScript, "authorize", candidateCommit], {
