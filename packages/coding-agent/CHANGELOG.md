@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.2.1] - 2026-09-27
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Improvements
+
+- **docs:** Updated Volt's project overview and onboarding to explain built-in features, iPhone pairing, and installation requirements.
+- **extensions:** Extension `session_before_compact` and `session_compact` events now include `reason` and `willRetry`, so extensions can tell manual, threshold, and overflow compaction apart. ([#239](https://github.com/volt-hq/Volt/issues/239))
+- **lsp:** Subagents now share language servers with their parent session instead of starting their own. ([#47](https://github.com/volt-hq/Volt/issues/47))
+  `/reload` now keeps healthy language servers running when their server settings are unchanged, and `/lsp restart` also restarts the servers shared with subagents. If subagents fail to start a missing language server, the interactive session still offers once to install it.
+- **subagents:** Subagents no longer start their own copy of every eager and keep-alive MCP server; they connect to a server the first time they use it. ([#498](https://github.com/volt-hq/Volt/issues/498))
+- **tui:** Completed and handed-off plans can now be closed from the plan pane or with /plan-close, and Volt notes when a plan finishes.
+
+### Fixes
+
+- **ai:** The volt-ai CLI help now shows stable npm commands instead of the retired beta tag.
+- **auth:** The local Anthropic and OpenAI Codex sign-in result pages now show the current Volt icon. ([#486](https://github.com/volt-hq/Volt/issues/486))
+- **compaction:** Split-turn compaction now works with providers that permit only one active request, and compacting a split turn with no new history keeps the previous summary instead of replacing it with "No prior history." ([#239](https://github.com/volt-hq/Volt/issues/239))
+- **daemon:** Daemon-hosted sessions now resolve tools from your login shell environment instead of the environment of whatever started the daemon. ([#464](https://github.com/volt-hq/Volt/issues/464))
+  The login shell starts from your session's environment: the launchd or systemd user environment when the login service starts the daemon, or the systemd user manager's environment when a terminal starts it on Linux. Service-manager and desktop-session variables such as `launchctl setenv` values, `environment.d` files, display, and proxy settings are kept. Variables exported only in the terminal that started the daemon no longer reach its sessions. The environment is resolved once per daemon start; run `volt daemon restart` after changing PATH or your shell profile. Set `VOLT_DAEMON_INHERIT_ENV=1` to keep the inherited environment, and check `volt daemon status` for the environment source.
+- **daemon:** Fixed relay-disabled phone pairings failing to reconnect after a daemon restart. ([#487](https://github.com/volt-hq/Volt/issues/487))
+  Existing relay-disabled pairings need to pair once more after upgrading; later restarts keep them working. A change of the host's LAN IP address still requires pairing again.
+- **lsp:** Fixed language servers keeping outdated file contents when a file changed on disk while Volt was syncing it.
+- **models:** Fireworks now defaults to DeepSeek V4.1 Flash because Fireworks retired Kimi K2.6.
+  The Fireworks model list also drops the other models Fireworks retired. Choose another Fireworks model with /model or --model if you prefer a different default.
+- **remote:** Fixed remote sessions rejecting every new message after a prompt failed before reaching the model and the session was later reopened. ([#474](https://github.com/volt-hq/Volt/issues/474))
+- **remote:** Relay access now shows when Volt next checks a lapsed Volt Pro subscription, /remote can check immediately after renewal, and daemon status exits nonzero while relay access is unavailable. ([#375](https://github.com/volt-hq/Volt/issues/375))
+
 ## [0.2.0] - 2026-09-25
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
