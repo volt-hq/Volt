@@ -10,6 +10,7 @@
 /scripts/verify-npm-package-bootstrap.mjs @hansjm10
 /scripts/build-binaries.sh @hansjm10
 /scripts/build-standalone.mjs @hansjm10
+/scripts/pe-certificate.mjs @hansjm10
 /scripts/collect-binary-licenses.mjs @hansjm10
 /compliance/ @hansjm10
 /package.json @hansjm10
