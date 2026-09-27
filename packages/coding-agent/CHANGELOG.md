@@ -2,6 +2,8 @@
 
 ## [0.2.1] - 2026-09-27
 
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
 ### Improvements
 
 - **docs:** Updated Volt's project overview and onboarding to explain built-in features, iPhone pairing, and installation requirements.
