@@ -65,7 +65,7 @@ gh run download <run-id> -n standalone-candidate-<sha> -D /tmp/volt-candidate-<v
 node .volt/skills/release/verify-candidate.mjs /tmp/volt-candidate-<version> --commit <sha> --run <run-id>
 ```
 
-The verifier checks the nine-file layout, `source-commit.txt`, `SHA256SUMS`, `release-record.json`, each archive's build manifest against `compliance/standalone-runtime.json`, the copied Node license, the metafile checksum, every npm license file, the complete file manifest, prohibited files, and one attestation per file bound to the commit, `main`, the candidate workflow, and the run. It must end with `Problems: none`. Review the declared-license summary for anything new. Windows executables currently show a stale certificate entry (#510).
+The verifier checks the nine-file layout, `source-commit.txt`, `SHA256SUMS`, `release-record.json`, each archive's build manifest against `compliance/standalone-runtime.json`, the copied Node license, the metafile checksum, every npm license file, the complete file manifest, prohibited files, and one attestation per file bound to the commit, `main`, the candidate workflow, and the run. It must end with `Problems: none`. Review the declared-license summary for anything new. Windows archives must report `no certificate table (unsigned)`; the verifier fails if a Windows `volt.exe` has any certificate table.
 
 ## 4. Native smoke tests
 

@@ -24,6 +24,7 @@ import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import esbuild from "esbuild";
 import postject from "postject";
+import { readPeCertificateTable, stripPeCertificateTable } from "./pe-certificate.mjs";
 
 const SEA_SENTINEL_FUSE = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 const ALLOWED_EXTERNAL_PACKAGES = new Set(["bufferutil", "supports-color", "utf-8-validate"]);
@@ -714,6 +715,14 @@ async function build() {
 		copyFileSync(nodeExecutable, standaloneExecutable);
 		if (!target.startsWith("windows-")) chmodSync(standaloneExecutable, statSync(standaloneExecutable).mode | 0o111);
 		if (target.startsWith("darwin-")) run("codesign", ["--remove-signature", standaloneExecutable]);
+		if (target.startsWith("windows-")) {
+			const removed = stripPeCertificateTable(standaloneExecutable);
+			console.log(
+				removed
+					? `Removed inherited Node.js certificate table (${removed.size} bytes at offset ${removed.offset})`
+					: "Node.js runtime has no certificate table to remove",
+			);
+		}
 
 		const seaBlobPath = join(scratchDirectory, "sea-prep.blob");
 		const seaConfigPath = join(scratchDirectory, "sea-config.json");
@@ -739,6 +748,14 @@ async function build() {
 		});
 		if (target.startsWith("darwin-")) {
 			run("codesign", ["--sign", "-", "--force", "--timestamp=none", standaloneExecutable]);
+		}
+		if (target.startsWith("windows-")) {
+			const certificateTable = readPeCertificateTable(readFileSync(standaloneExecutable));
+			if (certificateTable.size !== 0) {
+				throw new Error(
+					`Unsigned Windows executable must have no certificate table; found ${certificateTable.size} bytes at offset ${certificateTable.offset}`,
+				);
+			}
 		}
 		const packageJson = JSON.parse(readFileSync(join(codingAgentRoot, "package.json"), "utf8"));
 		const standaloneVersion = run(standaloneExecutable, ["--version"], { capture: true });

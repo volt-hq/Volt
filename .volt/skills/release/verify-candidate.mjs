@@ -7,7 +7,8 @@
 // Checks the combined artifact layout, source-commit.txt, SHA256SUMS, and release-record.json;
 // every archive's build manifest against compliance/standalone-runtime.json, the copied Node
 // license, the bundle metafile checksum, every copied npm license file, and the complete file
-// manifest; prohibited files; and one matching GitHub attestation per archive and record.
+// manifest; prohibited files; that Windows executables carry no certificate table; and one
+// matching GitHub attestation per archive and record.
 // Exits non-zero when any check fails.
 
 import { spawnSync } from "node:child_process";
@@ -15,6 +16,7 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
+import { readPeCertificateTable } from "../../../scripts/pe-certificate.mjs";
 
 const REPOSITORY = "volt-hq/Volt";
 const CANDIDATE_WORKFLOW = `${REPOSITORY}/.github/workflows/build-standalone-candidate.yml`;
@@ -53,21 +55,6 @@ function describeLicense(declared) {
 	if (Array.isArray(declared)) return declared.map((entry) => entry?.type ?? JSON.stringify(entry)).join(" OR ");
 	if (declared && typeof declared === "object") return declared.type ?? JSON.stringify(declared);
 	return "(undeclared)";
-}
-
-// Reports the PE certificate-table entry. Standalone Windows executables currently inherit a
-// stale entry from node.exe (volt-hq/Volt#510); a zero entry means no signature at all.
-function describeWindowsSignature(executable) {
-	const bytes = readFileSync(executable);
-	const pe = bytes.readUInt32LE(0x3c);
-	const dataDirectories = pe + 24 + (bytes.readUInt16LE(pe + 24) === 0x20b ? 112 : 96);
-	const offset = bytes.readUInt32LE(dataDirectories + 32);
-	const size = bytes.readUInt32LE(dataDirectories + 36);
-	if (size === 0) return "no certificate table (unsigned)";
-	const headerLength = offset + 8 <= bytes.length ? bytes.readUInt32LE(offset) : 0;
-	return headerLength === 0
-		? `stale certificate entry (${size} bytes at ${offset}, empty header; see #510)`
-		: `certificate table present (${size} bytes); verify the signer before claiming "unsigned"`;
 }
 
 function verifyArchive(archive, target, context) {
@@ -135,7 +122,16 @@ function verifyArchive(archive, target, context) {
 		if (prohibited.length > 0) fail(`${target}: prohibited files: ${prohibited.slice(0, 5).join(", ")}`);
 		const executable = windows ? "volt.exe" : "volt";
 		if (!files.includes(executable)) fail(`${target}: ${executable} is missing`);
-		const signature = windows && files.includes(executable) ? `, ${describeWindowsSignature(join(root, executable))}` : "";
+		let signature = "";
+		if (windows && files.includes(executable)) {
+			const { offset, size } = readPeCertificateTable(readFileSync(join(root, executable)));
+			if (size === 0) signature = ", no certificate table (unsigned)";
+			else {
+				fail(
+					`${target}: ${executable} has a certificate table (${size} bytes at offset ${offset}); releases ship unsigned Windows executables, so a signed build must update this check and the unsigned-Windows notice in scripts/changelog.mjs`,
+				);
+			}
+		}
 		console.log(
 			`${target}: ${files.length} files, ${licenseManifest.npmPackageCount} npm packages, ${licenseFiles} license files, commit ${build.sourceCommit.slice(0, 9)}${signature}`,
 		);
