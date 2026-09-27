@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionTurnPolicy } from "../../src/core/agent-session.ts";
 import type { ExtensionAPI, ExtensionFactory, PolicyRegistration } from "../../src/core/extensions/types.ts";
 import type {
@@ -18,6 +18,7 @@ import { createHarness, getMessageText, type Harness, type HarnessOptions } from
 const harnesses: Harness[] = [];
 const providerChecks: Array<() => void> = [];
 afterEach(async () => {
+	vi.useRealTimers();
 	const checks = providerChecks.splice(0);
 	try {
 		for (const check of checks) check();
@@ -78,6 +79,8 @@ function consumer(run: (task: ExtensionWorkTaskContext) => Promise<void>, extra?
 			parameters: Type.Object({}),
 			execute: async () => {
 				await handle?.wait();
+				// Native validation reads still run; a virtual clock keeps collection outcomes independent of machine load.
+				vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "performance"] });
 				return { content: [{ type: "text", text: "checkpoint" }] };
 			},
 		});

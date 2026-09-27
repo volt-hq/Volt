@@ -57,7 +57,7 @@ export const DEFAULT_EXTENSION_WORK_LIMITS: Readonly<ExtensionWorkLimits> = Obje
 	contributionBytes: 4 * 1024,
 	extensionContributionBytes: 8 * 1024,
 	suffixBytes: 16 * 1024,
-	collectionMs: 25,
+	collectionMs: 100,
 	firstRequestWaitMs: 0,
 });
 
@@ -714,6 +714,7 @@ export class ExtensionWorkManager {
 		const controller = new AbortController();
 		const admission = {};
 		const valid = new Set<string>();
+		const checked = new Set<string>();
 		const evidence: Evidence[] = [];
 		const seen = new Set<string>();
 		for (const { contribution } of candidates) {
@@ -756,6 +757,8 @@ export class ExtensionWorkManager {
 					controller.abort();
 					return;
 				}
+				if (controller.signal.aborted) return;
+				checked.add(item.public.id);
 				if (
 					result.status === "ok" &&
 					result.observation.kind === "read" &&
@@ -764,8 +767,7 @@ export class ExtensionWorkManager {
 					result.observation.revision === item.observation.revision &&
 					result.observation.startLine === item.observation.startLine &&
 					result.observation.endLine === item.observation.endLine &&
-					result.observation.text === item.observation.text &&
-					!controller.signal.aborted
+					result.observation.text === item.observation.text
 				)
 					valid.add(item.public.id);
 			}
@@ -778,10 +780,12 @@ export class ExtensionWorkManager {
 			if (this.collection === lease) this.collection = undefined;
 		});
 		let timer: ReturnType<typeof setTimeout> | undefined;
+		let timedOut = false;
 		await Promise.race([
 			lease.settled,
 			new Promise<void>((resolve) => {
 				timer = setTimeout(() => {
+					timedOut = true;
 					controller.abort();
 					resolve();
 				}, this.limits.collectionMs);
@@ -789,6 +793,8 @@ export class ExtensionWorkManager {
 		]);
 		if (timer) clearTimeout(timer);
 		controller.abort();
+		// Timer delivery can lag the clock; either one ends validation.
+		const expired = timedOut || performance.now() >= validationDeadline;
 		if (!this.current(scope) || scope.snapshot.revision !== revision) return undefined;
 		if (!policiesCurrent()) {
 			for (const { contribution } of candidates) contribution.reason = "authority_changed";
@@ -803,7 +809,11 @@ export class ExtensionWorkManager {
 			if (contribution.reason === "snapshot_changed") continue;
 			const ids = contribution.value.evidenceIds ?? [];
 			if (ids.some((id) => !valid.has(id))) {
-				contribution.reason = "source_unverified";
+				// A completed mismatch is definitive; otherwise the deadline left a source unchecked.
+				contribution.reason =
+					expired && !ids.some((id) => checked.has(id) && !valid.has(id))
+						? "validation_deadline"
+						: "source_unverified";
 				continue;
 			}
 			const sources = ids.map((id) => {
