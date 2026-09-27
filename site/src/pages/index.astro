@@ -1,7 +1,8 @@
 ---
 import { getCollection } from "astro:content";
 
-const install = "curl -fsSL https://volt-cli.dev/install.sh | sh";
+const installUnix = "curl -fsSL https://volt-cli.dev/install.sh | sh";
+const installWindows = "irm https://volt-cli.dev/install.ps1 | iex";
 const title = "Volt — a coding agent from terminal to phone";
 const description =
   "Volt is an open-source coding agent that runs on your machine, adapts to your workflow, and lets you continue the same live session from your phone.";
@@ -44,13 +45,19 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
           preferred model, adapt the workflow with extensions, and continue the same live
           session from your iPhone when you step away.
         </p>
-        <div class="install" id="install-box">
-          <code>{install}</code>
+        <div
+          class="install"
+          id="install-box"
+          data-unix={installUnix}
+          data-windows={installWindows}
+        >
+          <code id="install-cmd">{installUnix}</code>
           <button id="copy-btn" aria-label="Copy install command">Copy</button>
         </div>
         <p class="install-alt">
           or <code>npm install -g --ignore-scripts @hansjm10/volt-coding-agent</code>
-          &nbsp;·&nbsp; Windows: <code>irm volt-cli.dev/install.ps1 | iex</code>
+          &nbsp;·&nbsp; <span id="install-other-label">Windows</span>:
+          <code id="install-other-cmd">{installWindows}</code>
         </p>
         <div class="cta">
           <a class="btn primary" href="/docs/quickstart/">Get started</a>
@@ -151,10 +158,22 @@ const hasPublishedPosts = (await getCollection("blog", ({ data }) => !data.draft
     </footer>
 
     <script>
+      // Server-rendered default is macOS/Linux; swap to PowerShell on Windows hosts.
+      const box = document.getElementById("install-box");
+      const cmdEl = document.getElementById("install-cmd");
+      const otherLabel = document.getElementById("install-other-label");
+      const otherCmd = document.getElementById("install-other-cmd");
+      const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
+      const platform = uaData?.platform || navigator.platform || navigator.userAgent;
+      if (/windows|win32|win64/i.test(platform) && box && cmdEl && otherLabel && otherCmd) {
+        cmdEl.textContent = box.dataset.windows ?? "";
+        otherLabel.textContent = "macOS / Linux";
+        otherCmd.textContent = box.dataset.unix ?? "";
+      }
+
       const btn = document.getElementById("copy-btn");
-      const cmd = document.querySelector("#install-box code")?.textContent ?? "";
       btn?.addEventListener("click", async () => {
-        await navigator.clipboard.writeText(cmd);
+        await navigator.clipboard.writeText(cmdEl?.textContent ?? "");
         btn.textContent = "Copied";
         setTimeout(() => (btn.textContent = "Copy"), 1500);
       });
