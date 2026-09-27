@@ -36,6 +36,24 @@ export function assertCandidateMatchesHead(candidateCommit, headCommit) {
 	return candidateCommit;
 }
 
+/**
+ * Accepts the prepared release commit subject, including GitHub's default
+ * squash-merge subject, which appends the pull request number.
+ */
+export function assertReleaseCommitSubject(subject, tag) {
+	const expected = `Release ${tag}`;
+	if (
+		typeof subject === "string" &&
+		subject.startsWith(expected) &&
+		/^(?: \(#[1-9]\d*\))?$/.test(subject.slice(expected.length))
+	) {
+		return subject;
+	}
+	throw new Error(
+		`approved candidate must be the prepared release commit named "${expected}" or "${expected} (#<pull request>)"; found ${JSON.stringify(subject)}.`,
+	);
+}
+
 export function assertCandidateRunId(runId) {
 	if (!/^[1-9]\d*$/.test(runId || "")) {
 		throw new Error("VOLT_APPROVED_CANDIDATE_RUN_ID must be the positive decimal ID of the approved candidate workflow run");

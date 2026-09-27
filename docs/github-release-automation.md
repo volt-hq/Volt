@@ -111,6 +111,12 @@ required checks, and merges it. Consumed `.changeset/` fragments are deleted in
 the same commit. The candidate SHA is the resulting commit on `main`, not the
 pre-merge release-branch SHA.
 
+The generated version section opens with the required release notices
+(`RELEASE_NOTICES` in `scripts/changelog.mjs`), currently the unsigned-Windows
+disclosure. The publisher builds the GitHub release notes from that section,
+so the notices must survive review. The release pull request may be
+squash-merged with GitHub's default subject, `Release v<version> (#<pull request>)`.
+
 The prepare job uses a write-scoped ordinary `GITHUB_TOKEN` only after all
 repository code and release checks have finished. It pushes a release branch,
 and opens the pull request. GitHub places `pull_request` runs caused by
@@ -179,8 +185,8 @@ before starting **Approve Release**. At minimum, the owner verifies:
 - Node runtime and copied license checksums match the pinned compliance data;
 - prohibited generated artifacts and excluded examples are absent;
 - native smoke-test results are acceptable; and
-- Windows executables remain intentionally unsigned and that fact is disclosed
-  in the release notes.
+- Windows executables remain intentionally unsigned and the version section
+  still opens with the generated unsigned-Windows disclosure.
 
 ### 3. Approve Release
 
@@ -216,8 +222,11 @@ Preflight must fail unless all of the following are true:
   designated release owner, `hansjm10`;
 - the workflow runs from `refs/heads/main`;
 - `candidate_commit` is the exact current `main` commit;
-- the prepared commit, package versions, and the product changelog heading
-  match `version`, with no unconsumed `.changeset/` fragments;
+- the `main` commit subject is `Release v<version>`, optionally followed by
+  GitHub's ` (#<pull request>)` squash-merge suffix;
+- package versions and the product changelog heading match `version`, the
+  version section contains every required release notice, and no unconsumed
+  `.changeset/` fragments remain;
 - `v<version>` is absent locally and remotely and the npm versions are
   available;
 - the candidate run is a successful `workflow_dispatch` run of
@@ -495,9 +504,15 @@ GitHub describes job-level `GITHUB_TOKEN` permission controls in
 5. Click **Approve workflows to run** so the PR checks execute against the
    merge ref.
 6. Review the generated changelog section, every package version, dependency
-   metadata file, generated artifact, and workflow result.
-7. Merge only after all required checks pass.
+   metadata file, generated artifact, and workflow result. Confirm the section
+   opens with the unsigned-Windows disclosure.
+7. Merge only after all required checks pass. GitHub's default squash subject
+   is accepted.
 8. Copy the resulting full `main` commit SHA.
+
+The [`release` skill](../.volt/skills/release/SKILL.md) walks an agent through
+this runbook, including local pre-flight checks, candidate verification, and
+native smoke tests.
 
 If preparation is wrong, close the pull request. Because no tag or package has
 been created, prepare a replacement pull request normally.
@@ -512,7 +527,8 @@ been created, prepare a replacement pull request normally.
 5. Download the combined artifact.
 6. Verify its attestation, `source-commit.txt`, `SHA256SUMS`, archive manifests,
    license inventory, prohibited-file exclusions, and smoke-test evidence.
-7. Record the unsigned-Windows disclosure for the release notes.
+7. Confirm the unsigned-Windows disclosure still opens the version section.
+   Approve Release rejects a section without it.
 
 Do not continue if the artifact has expired, any platform failed, or any value
 does not match the exact `main` SHA. Fix the problem through a new pull request

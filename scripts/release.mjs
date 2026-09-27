@@ -21,6 +21,7 @@ import { readFileSync, writeFileSync } from "fs";
 import {
 	applyReleaseSection,
 	assertNoPendingChangesets,
+	assertReleaseSectionNotices,
 	assertReleaseTargetSatisfiesChangesets,
 	readChangesets,
 } from "./changelog.mjs";
@@ -30,6 +31,7 @@ import {
 	assertCandidateRunId,
 	assertCandidateWorkflowArtifact,
 	assertCandidateWorkflowRun,
+	assertReleaseCommitSubject,
 	candidateTagAttestation,
 	createReleaseAuthorization,
 	formatGitHubOutputs,
@@ -41,7 +43,7 @@ import {
 	getPlannedReleaseVersion,
 	planReleaseTarget,
 } from "./release-target.mjs";
-import { verifyReleasePackageMetadata } from "./verify-release-provenance.mjs";
+import { RELEASE_CHANGELOG, verifyReleasePackageMetadata } from "./verify-release-provenance.mjs";
 
 let invocation;
 try {
@@ -297,11 +299,10 @@ function verifyReleaseAuthorization(candidateCommit, candidateRunId, candidateAr
 	const version = getVersion();
 	const tag = `v${version}`;
 	const subject = run("git log -1 --format=%s", { silent: true })?.trim();
-	if (subject !== `Release ${tag}`) {
-		fail(`approved candidate must be the prepared release commit named "Release ${tag}"; found ${JSON.stringify(subject)}.`);
-	}
 	try {
+		assertReleaseCommitSubject(subject, tag);
 		verifyReleasePackageMetadata(tag);
+		assertReleaseSectionNotices(readFileSync(RELEASE_CHANGELOG, "utf8"), version);
 	} catch (error) {
 		fail(error instanceof Error ? error.message : String(error));
 	}
