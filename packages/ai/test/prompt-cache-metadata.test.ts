@@ -43,7 +43,9 @@ describe("generated prompt-cache metadata", () => {
 			modes: ["implicit"],
 			retention: { short: {} },
 		});
-		expect(getModel("fireworks", "accounts/fireworks/models/kimi-k2p6").promptCache?.retention.short).toEqual({});
+		expect(
+			getModel("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash").promptCache?.retention.short,
+		).toEqual({});
 		expect(getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6").promptCache?.retention.short).toEqual({});
 		expect(getModel("openai-codex", "gpt-5.4").promptCache?.retention.short).toEqual({});
 	});
