@@ -161,6 +161,21 @@ describe("regression #524: reloading the current session after another owner wro
 		}
 	}
 
+	function customEntryData(manager: SessionManager, customType: string): unknown[] {
+		return manager
+			.getEntries()
+			.flatMap((entry) => (entry.type === "custom" && entry.customType === customType ? [entry.data] : []));
+	}
+
+	async function readStoredCustomEntryData(sessionRef: SessionReference, customType: string): Promise<unknown[]> {
+		const manager = await SessionManager.open(sessionRef);
+		try {
+			return customEntryData(manager, customType);
+		} finally {
+			await manager.closePersistence();
+		}
+	}
+
 	it("absorbs the other owner's turns and persists the next prompt without a revision conflict", async () => {
 		const { runtime } = await createRuntimeForTest(["tui reply", "after handoff"]);
 		await runtime.session.prompt("tui prompt");
@@ -258,6 +273,98 @@ describe("regression #524: reloading the current session after another owner wro
 		expect(lifecycle).toEqual([
 			{ type: "session_shutdown", reason: "resume", targetSessionRef: sessionRef },
 			{ type: "session_start", reason: "resume", previousSessionRef: sessionRef },
+		]);
+	});
+
+	it("keeps what a session_shutdown handler writes during the reload and persists the next prompt", async () => {
+		const { runtime } = await createRuntimeForTest(["tui reply", "after handoff"], (volt) => {
+			volt.on("session_shutdown", (event) => {
+				if (event.reason === "resume") volt.appendEntry("handoff-state", { phase: "shutdown" });
+			});
+		});
+		await runtime.session.prompt("tui prompt");
+		const sessionRef = requireSessionRef(runtime);
+
+		// No other owner wrote: a warm grant still reloads, and the shutdown write
+		// advances the store past the revision a pre-teardown read would pin.
+		await expect(
+			runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId }),
+		).resolves.toEqual({ reloaded: true });
+
+		expect(customEntryData(runtime.session.sessionManager, "handoff-state")).toEqual([{ phase: "shutdown" }]);
+		await runtime.session.prompt("after handoff prompt");
+		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
+		expect(await readStoredCustomEntryData(sessionRef, "handoff-state")).toEqual([{ phase: "shutdown" }]);
+		expect(await readStoredMessageTexts(sessionRef)).toEqual([
+			"tui prompt",
+			"tui reply",
+			"after handoff prompt",
+			"after handoff",
+		]);
+	});
+
+	it("reloads when the replacement's session_start handler writes after a session_shutdown write", async () => {
+		const { runtime } = await createRuntimeForTest(["tui reply"], (volt) => {
+			volt.on("session_shutdown", (event) => {
+				if (event.reason === "resume") volt.appendEntry("handoff-state", { phase: "shutdown" });
+			});
+			volt.on("session_start", (event) => {
+				if (event.reason === "resume") volt.appendEntry("handoff-state", { phase: "start" });
+			});
+		});
+		await runtime.session.prompt("tui prompt");
+		const sessionRef = requireSessionRef(runtime);
+
+		await expect(
+			runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId }),
+		).resolves.toEqual({ reloaded: true });
+
+		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
+		expect(customEntryData(runtime.session.sessionManager, "handoff-state")).toEqual([
+			{ phase: "shutdown" },
+			{ phase: "start" },
+		]);
+		expect(await readStoredCustomEntryData(sessionRef, "handoff-state")).toEqual([
+			{ phase: "shutdown" },
+			{ phase: "start" },
+		]);
+	});
+
+	it("drops a session_shutdown write from an outdated copy without failing the reload", async () => {
+		const { runtime } = await createRuntimeForTest(["tui reply", "after handoff"], (volt) => {
+			volt.on("session_shutdown", (event) => {
+				if (event.reason === "resume") volt.appendEntry("handoff-state", { phase: "shutdown" });
+			});
+		});
+		await runtime.session.prompt("tui prompt");
+		const sessionRef = requireSessionRef(runtime);
+		await appendAsOtherOwner(sessionRef, (manager) => {
+			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
+			manager.appendMessage(fauxAssistantMessage("phone reply"));
+		});
+
+		await expect(
+			runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId }),
+		).resolves.toEqual({ reloaded: true });
+
+		// Known limitation: the outdated copy's write conflicts with the other
+		// owner's turns and is dropped. The reload itself must stay non-fatal.
+		expect(runtime.session.messages.map(getMessageText)).toEqual([
+			"tui prompt",
+			"tui reply",
+			"phone prompt",
+			"phone reply",
+		]);
+		expect(customEntryData(runtime.session.sessionManager, "handoff-state")).toEqual([]);
+		await runtime.session.prompt("after handoff prompt");
+		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
+		expect(await readStoredMessageTexts(sessionRef)).toEqual([
+			"tui prompt",
+			"tui reply",
+			"phone prompt",
+			"phone reply",
+			"after handoff prompt",
+			"after handoff",
 		]);
 	});
 

@@ -816,7 +816,12 @@ export class AgentSessionRuntime {
 		previousSessionId?: string;
 		allowSameSessionIdentity?: boolean;
 		sessionManager: SessionManager;
-		create: () => Promise<CreateAgentSessionRuntimeResult>;
+		/**
+		 * Build the replacement around `sessionManager`, which it must own. Same-identity
+		 * reopens pass a manager read from the store after the outgoing session drained,
+		 * not `options.sessionManager`.
+		 */
+		create: (sessionManager: SessionManager) => Promise<CreateAgentSessionRuntimeResult>;
 		afterApply?: () => Promise<void>;
 		/** Last durable publication step, after every fallible replacement callback. */
 		commitPublication?: () => Promise<void>;
@@ -825,6 +830,9 @@ export class AgentSessionRuntime {
 		rebindRequestId?: string;
 	}): Promise<{ seeded: boolean }> {
 		const ownsCandidateManager = options.sessionManager !== this.session.sessionManager;
+		// The manager the replacement will own. A same-identity reopen swaps in a
+		// post-drain read before creating the replacement.
+		let candidateManager = options.sessionManager;
 		let candidateSessionOwnsManager = false;
 		try {
 			// The entire public operation runs in the lifecycle actor. Re-check at the
@@ -845,6 +853,8 @@ export class AgentSessionRuntime {
 			// Reopening the same session re-reads its durable client-input queue from the
 			// store and recovery resumes it after rebind, so input queued in the outgoing
 			// copy (possibly already delivered by another owner) is never stranded.
+			// The store is read again once the outgoing copy drains, so writes from its
+			// session_shutdown handlers and disposal are part of the replacement.
 			const reopensSameSession = sameSessionIdentity && options.allowSameSessionIdentity === true;
 			if (
 				!reopensSameSession &&
@@ -900,7 +910,18 @@ export class AgentSessionRuntime {
 						this.sessionInvalidated = true;
 						this.lifecycleRevision++;
 					});
-					created = await options.create();
+					if (reopensSameSession) {
+						// The preflight read pinned the store revision before session_shutdown
+						// handlers and disposal wrote through the outgoing copy. Read again now
+						// that those writes are durable, handing worktree protection over first.
+						const preflightManager = candidateManager;
+						const replacementRef = preflightManager.getSessionRef();
+						if (!replacementRef) throw new Error("Reopened session is missing a session reference");
+						candidateManager = await SessionManager.open(replacementRef, preflightManager.getCwd());
+						retainLocalSessionWorktree(preflightManager, candidateManager);
+						await closeLocalSessionManager(preflightManager);
+					}
+					created = await options.create(candidateManager);
 					candidateSessionOwnsManager = true;
 					await created.session.sessionManager.flush();
 					this.applyReplacement(created);
@@ -990,7 +1011,7 @@ export class AgentSessionRuntime {
 		} catch (error) {
 			if (ownsCandidateManager && !candidateSessionOwnsManager) {
 				return await closeOwnedSessionManager(
-					options.sessionManager,
+					candidateManager,
 					error,
 					"Session replacement failed and its owned manager could not be closed",
 				);
@@ -1284,7 +1305,9 @@ export class AgentSessionRuntime {
 	 *
 	 * Unlike switchSession, extensions cannot cancel the reload through
 	 * `session_before_switch`; `session_shutdown` and `session_start` still fire
-	 * with reason "resume". Resolves `{ reloaded: false }` without changes when the
+	 * with reason "resume". The replacement is read from the store only after the
+	 * outgoing copy drains, so what `session_shutdown` handlers and disposal write
+	 * is part of it. Resolves `{ reloaded: false }` without changes when the
 	 * current session is no longer `expectedSessionId` (a later switch superseded
 	 * the handoff) or has no store reference.
 	 *
@@ -1361,14 +1384,14 @@ export class AgentSessionRuntime {
 				reason: "resume",
 				allowSameSessionIdentity,
 				sessionManager,
-				create: () =>
+				create: (replacementManager) =>
 					this.createRuntime({
-						cwd: sessionManager.getCwd(),
+						cwd: replacementManager.getCwd(),
 						agentDir: this.services.agentDir,
-						sessionManager,
-						...this.getReplacementGitContextOptions(sessionManager.getCwd()),
+						sessionManager: replacementManager,
+						...this.getReplacementGitContextOptions(replacementManager.getCwd()),
 						sessionStartEvent: { type: "session_start", reason: "resume", previousSessionRef },
-						projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
+						projectTrustContext: options?.projectTrustContextFactory?.(replacementManager.getCwd()),
 						profile: this.getReplacementProfile(),
 						subagentContext: this.subagentContext,
 					}),

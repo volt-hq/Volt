@@ -379,6 +379,36 @@ describe("#442 local archived-worktree resume", () => {
 		expect(existsSync(f.record.path)).toBe(false);
 	});
 
+	it("protects the checkout across a same-session store reload and releases it afterwards", async () => {
+		const f = await fixture();
+		const replacementChecks: unknown[] = [];
+		const runtime = await createAgentSessionRuntime(
+			async (options) => {
+				if (options.sessionStartEvent?.reason === "resume")
+					replacementChecks.push(await f.manager.archiveDisposable(f.workspace.name, f.record.id));
+				return f.factory(options);
+			},
+			{
+				cwd: f.record.path,
+				agentDir: f.agentDir,
+				sessionManager: await SessionManager.open(f.ref),
+			},
+		);
+		cleanups.push(() => runtime.dispose());
+		await expect(runtime.reloadCurrentSessionFromStore({ expectedSessionId: f.ref.sessionId })).resolves.toEqual({
+			reloaded: true,
+		});
+		// The post-drain read inherits protection before the preflight read closes.
+		expect(replacementChecks).toEqual([{ removed: false, reason: "busy" }]);
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({
+			removed: false,
+			reason: "busy",
+		});
+		await runtime.dispose();
+		await vi.waitFor(() => expect(f.server.connections()).toHaveLength(0));
+		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({ removed: true });
+	});
+
 	it.each(["disconnect", "restart"])("protects active local work through daemon %s", async (failure) => {
 		const f = await fixture();
 		const runtime = await createAgentSessionRuntime(f.factory, {
