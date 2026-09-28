@@ -4,6 +4,9 @@ This page collects day-to-day usage details that do not fit on the quickstart pa
 
 ## Interactive Mode
 
+<p align="center"><img src="images/interactive-mode.png" alt="Volt terminal session in a sample project. Below the startup header, the user asks Volt to make a failing slugify test pass. Volt reads src/slugify.js, runs npm test and sees the failure, edits the file with an inline diff, reruns npm test successfully, and summarizes the fix. The editor and footer show the project path, git branch, session name, model, and context usage." width="720"></p>
+<p align="center"><em>Volt 0.2.1 fixing a failing test in a sample project.</em></p>
+
 The interface has four main areas:
 
 - **Startup header** - shortcuts, loaded context files, prompt templates, skills, and extensions

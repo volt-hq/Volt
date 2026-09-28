@@ -96,6 +96,12 @@ volt remote pair --workspace my-project
 2. Select the registered workspace and start or resume a conversation. When a terminal session is attached to the daemon, the phone can join that same live conversation.
 3. Reconnect using the saved computer next time; ordinary reconnects do not require another QR scan.
 
+<p align="center">
+<img src="images/shared-session-phone.png" alt="Volt iOS app showing the conversation Discuss a Small Todo App in the volt workspace on branch fix/511-stale-default-models. The prompt Tell me about a small todo app, sent from the phone, is followed by the model's reply. The composer shows Build mode and the gpt-6-luna model." width="240">
+<img src="images/shared-session-terminal.png" alt="The same conversation open in the Volt terminal UI on the computer, showing the same prompt and reply. The footer shows the branch, session name, gpt-6-luna, and [phone 1], meaning one phone is attached." width="540">
+</p>
+<p align="center"><em>One conversation in the Volt iOS app and in the terminal (Volt 0.2.1). The prompt came from the phone and ran on the computer; <code>[phone 1]</code> in the terminal footer shows the attached phone.</em></p>
+
 You can also open `/remote` in the terminal to start the daemon, register the current directory, pair a phone, or revoke a device. Set `remote.background: true` in settings if you want interactive Volt to start the daemon automatically.
 
 Pair only devices you control. Phone prompts can run tools on your computer, and a phone sharing a desktop-owned conversation uses that terminal session's full local tool set. App backgrounding or network loss detaches the phone without cancelling active work; use the app's stop action to cancel. Host shutdown stops in-memory work.

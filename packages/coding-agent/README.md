@@ -119,6 +119,9 @@ See [docs/providers.md](docs/providers.md) for detailed setup instructions.
 
 ## Interactive Mode
 
+<p align="center"><img src="docs/images/interactive-mode.png" alt="Volt terminal session in a sample project. Below the startup header, the user asks Volt to make a failing slugify test pass. Volt reads src/slugify.js, runs npm test and sees the failure, edits the file with an inline diff, reruns npm test successfully, and summarizes the fix. The editor and footer show the project path, git branch, session name, model, and context usage." width="720"></p>
+<p align="center"><em>Volt 0.2.1 fixing a failing test in a sample project.</em></p>
+
 The interface from top to bottom:
 
 - **Startup header** - Shows shortcuts (`/hotkeys` for all), loaded AGENTS.md files, prompt templates, skills, and extensions
@@ -276,6 +279,9 @@ Use `/session` in interactive mode to see the current store directory and sessio
 ### Branching
 
 **`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history remains under the same session ID.
+
+<p align="center"><img src="docs/images/tree-view.png" alt="Volt session tree selector. After the first answer the session splits into two branches: the active, highlighted branch adds a separator option, and the other branch, labeled maxLength draft, adds a maxLength option. Each branch lists its user prompt, tool calls, and assistant reply." width="720"></p>
+<p align="center"><em><code>/tree</code> in Volt 0.2.1 after rewriting an earlier prompt. Both branches remain in the same session.</em></p>
 
 - Search by typing, fold/unfold and jump between branches with Ctrl+←/Ctrl+→ or Alt+←/Alt+→, page with ←/→
 - Filter modes (Ctrl+O): default → no-tools → user-only → labeled-only → all
@@ -592,6 +598,12 @@ volt remote pair --workspace volt
 See [Continue from your iPhone](docs/quickstart.md#continue-from-your-iphone) for requirements, pairing, and connection troubleshooting.
 
 Supported interactive Volt sessions connect to an already-running daemon, allowing a paired phone to join the same live conversation. Set `remote.background: true` to also start the daemon automatically. The daemon can keep the conversation when you quit the TUI and hand it back at the next turn boundary when you reopen it.
+
+<p align="center">
+<img src="docs/images/shared-session-phone.png" alt="Volt iOS app showing the conversation Discuss a Small Todo App in the volt workspace on branch fix/511-stale-default-models. The prompt Tell me about a small todo app, sent from the phone, is followed by the model's reply. The composer shows Build mode and the gpt-6-luna model." width="240">
+<img src="docs/images/shared-session-terminal.png" alt="The same conversation open in the Volt terminal UI on the computer, showing the same prompt and reply. The footer shows the branch, session name, gpt-6-luna, and [phone 1], meaning one phone is attached." width="540">
+</p>
+<p align="center"><em>One conversation in the Volt iOS app and in the terminal (Volt 0.2.1). The prompt came from the phone and ran on the computer; <code>[phone 1]</code> in the terminal footer shows the attached phone.</em></p>
 
 Use `/remote` for interactive management, including registering Volt's current directory, QR pairing, confirmed device revocation, and explicit approval before a revoked identity can re-pair. Equivalent shell commands are:
 
