@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.2.2] - 2026-09-28
+
+Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
+
+### Improvements
+
+- **docs:** Added current Volt screenshots to the README and guides, including the terminal UI, the session tree, and one conversation shared between the iOS app and the terminal, replacing the inherited Pi images. ([#484](https://github.com/volt-hq/Volt/issues/484))
+- **models:** Anthropic, Amazon Bedrock, and Cloudflare AI Gateway now default to Claude Opus 5.5. ([#511](https://github.com/volt-hq/Volt/issues/511))
+- **models:** Updated the model catalog with Claude Sonnet 5.5, DeepSeek V4.1 Flash, OpenAI Daybreak aliases, and current provider pricing and limits. ([#528](https://github.com/volt-hq/Volt/issues/528))
+  Removed retired OpenCode Go and OpenRouter entries; OpenCode Go now defaults to Kimi K3 instead of Kimi K2.6.
+
+  Claude Sonnet 5.5 offers adaptive reasoning from low through max. Daybreak aliases require separate OpenAI approval. Direct DeepSeek cost estimates use published off-peak prices; peak-hour rates are twice those estimates.
+- **plan:** Ready plans now wait at an explicit approval checkpoint with a persistent PLAN READY cue and next-step key hints. ([#330](https://github.com/volt-hq/Volt/issues/330))
+  The plan chooser opens once the planning run settles, and the approval cue stays in the plan status line, plan pane, and composer border until you decide. Turn-done notifications say the plan is ready for approval.
+
+  Text typed or pasted while the chooser is focused goes to the composer instead of being dropped, so Enter sends feedback rather than executing the plan. The chooser no longer takes focus mid-run or from a composer holding a draft, and Change Plan keeps any draft already in the composer.
+- **site:** Reorganized the volt-cli.dev homepage around a new showcase video, with phone setup requirements and a closing call to action.
+
+### Fixes
+
+- **daemon:** Fixed volt -r keeping an outdated transcript after taking a session over from the daemon, which made the first message fail with a revision conflict. ([#524](https://github.com/volt-hq/Volt/issues/524))
+  When a turn or review is still running on the desktop, the transcript reloads after it finishes; typed input stays in the editor until then.
+- **extensions:** Extension source context is no longer dropped on a busy machine when revalidation misses a 25 ms deadline; the deadline is now 100 ms. ([#509](https://github.com/volt-hq/Volt/issues/509))
+  `volt.getWorkStatus()` now reports `validation_deadline` for context whose sources could not be revalidated in time, instead of `source_unverified`.
+- **models:** Z.ai, Z.ai Coding CN, and Cerebras now default to models that exist in the catalog. ([#511](https://github.com/volt-hq/Volt/issues/511))
+- **sessions:** Fixed forking or re-syncing a session resumed with "continue in current cwd" switching it back to its original, possibly missing, working directory. ([#524](https://github.com/volt-hq/Volt/issues/524))
+- **site:** Fixed missing spaces around installation commands and attribution links on the homepage, blog, and legal pages.
+- **standalone:** Windows standalone executables no longer carry a broken signature entry inherited from Node.js, so Windows treats them as unsigned instead of as having an invalid signature. ([#510](https://github.com/volt-hq/Volt/issues/510))
+- **store:** The default `/store` catalog is now fetched from volt-cli.dev after the retired GitHub Pages deployment was shut down. ([#485](https://github.com/volt-hq/Volt/issues/485))
+
 ## [0.2.1] - 2026-09-27
 
 Standalone Windows executables in this release are not code-signed. Windows may show a SmartScreen warning when you first run them.
