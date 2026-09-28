@@ -15,6 +15,7 @@ the MIT License.
 - `public/volt-icon.png` — site copy of the companion app icon, used by the landing page, blog, docs, and favicon. Keep it synchronized with `volt-app/Volt/Assets.xcassets/AppIcon.appiconset/AppIcon.png`.
 - `public/media/volt-showcase.mp4`, `public/media/volt-showcase-poster.jpg` — animated showcase shown in the landing page's remote-access section (64 s, 1080p H.264/AAC, burned-in captions, Gemini TTS voices, Lyria music). Rendered from the private `volt-hq/volt-showcase-video` repository, which also holds the editable project, stems, and SRT/VTT captions; replace both files together. It replaces the earlier remote-access explainer.
 - `public/install.sh`, `public/install.ps1` — served at `https://volt-cli.dev/install.sh` and `/install.ps1`. The shell installer defaults to `npm install -g --ignore-scripts`; `VOLT_INSTALL_METHOD=binary` fetches a standalone binary from GitHub Releases instead (binary builds do not support `volt daemon`).
+- `public/store/catalog.json` — the default `/store` package catalog, served at `https://volt-cli.dev/store/catalog.json` (`DEFAULT_STORE_CATALOG_URL` in `packages/coding-agent/src/store/catalog.ts`). Add or update store packages here; changes go live when the site deploys.
 - `public/_headers`, `public/_redirects` — Cloudflare Pages config (`/install` → `/install.sh`, `/github` → repo).
 
 ## Development
