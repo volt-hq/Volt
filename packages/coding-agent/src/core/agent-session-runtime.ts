@@ -108,6 +108,11 @@ export interface AgentSessionSwitchOptions {
 	assertConversationGenerationCurrent?: () => void;
 }
 
+type ReloadCurrentSessionOptions = { expectedSessionId: string } & Pick<
+	AgentSessionSwitchOptions,
+	"projectTrustContextFactory"
+>;
+
 export interface AgentSessionReplacementTransaction {
 	commit(): Promise<void>;
 	/** Finish host ownership before replacement callbacks and any durable publication barrier. */
@@ -816,7 +821,12 @@ export class AgentSessionRuntime {
 		previousSessionId?: string;
 		allowSameSessionIdentity?: boolean;
 		sessionManager: SessionManager;
-		create: () => Promise<CreateAgentSessionRuntimeResult>;
+		/**
+		 * Build the replacement around `sessionManager`, which it must own. Same-identity
+		 * reopens pass a manager read from the store after the outgoing session drained,
+		 * not `options.sessionManager`.
+		 */
+		create: (sessionManager: SessionManager) => Promise<CreateAgentSessionRuntimeResult>;
 		afterApply?: () => Promise<void>;
 		/** Last durable publication step, after every fallible replacement callback. */
 		commitPublication?: () => Promise<void>;
@@ -825,6 +835,9 @@ export class AgentSessionRuntime {
 		rebindRequestId?: string;
 	}): Promise<{ seeded: boolean }> {
 		const ownsCandidateManager = options.sessionManager !== this.session.sessionManager;
+		// The manager the replacement will own. A same-identity reopen swaps in a
+		// post-drain read before creating the replacement.
+		let candidateManager = options.sessionManager;
 		let candidateSessionOwnsManager = false;
 		try {
 			// The entire public operation runs in the lifecycle actor. Re-check at the
@@ -839,7 +852,19 @@ export class AgentSessionRuntime {
 			// has either durably queued, canonically started, or failed preflight.
 			await this.waitForClientInputAdmissions(this.session);
 			this.assertStructuralOperationCurrent(options.operation);
-			if (this.session.sessionManager.getConversationAuthorityStatus().status === "available") {
+			const previousSessionId = options.previousSessionId ?? this.session.sessionId;
+			const sessionId = options.sessionManager.getSessionId();
+			const sameSessionIdentity = previousSessionId === sessionId;
+			// Reopening the same session re-reads its durable client-input queue from the
+			// store and recovery resumes it after rebind, so input queued in the outgoing
+			// copy (possibly already delivered by another owner) is never stranded.
+			// The store is read again once the outgoing copy drains, so writes from its
+			// session_shutdown handlers and disposal are part of the replacement.
+			const reopensSameSession = sameSessionIdentity && options.allowSameSessionIdentity === true;
+			if (
+				!reopensSameSession &&
+				this.session.sessionManager.getConversationAuthorityStatus().status === "available"
+			) {
 				const clientInputRecovery = this.session.sessionManager.getClientInputRecoveryPlan();
 				if (clientInputRecovery.kind === "blocked") {
 					throw new Error("Cannot replace the session while a durable client input outcome is ambiguous");
@@ -848,9 +873,6 @@ export class AgentSessionRuntime {
 					throw new Error("Cannot replace the session while durable client input is still queued");
 				}
 			}
-			const previousSessionId = options.previousSessionId ?? this.session.sessionId;
-			const sessionId = options.sessionManager.getSessionId();
-			const sameSessionIdentity = previousSessionId === sessionId;
 			if (sameSessionIdentity) {
 				const previousSessionRef = this.session.sessionRef;
 				const replacementSessionRef = options.sessionManager.getSessionRef();
@@ -893,7 +915,18 @@ export class AgentSessionRuntime {
 						this.sessionInvalidated = true;
 						this.lifecycleRevision++;
 					});
-					created = await options.create();
+					if (reopensSameSession) {
+						// The preflight read pinned the store revision before session_shutdown
+						// handlers and disposal wrote through the outgoing copy. Read again now
+						// that those writes are durable, handing worktree protection over first.
+						const preflightManager = candidateManager;
+						const replacementRef = preflightManager.getSessionRef();
+						if (!replacementRef) throw new Error("Reopened session is missing a session reference");
+						candidateManager = await SessionManager.open(replacementRef, preflightManager.getCwd());
+						retainLocalSessionWorktree(preflightManager, candidateManager);
+						await closeLocalSessionManager(preflightManager);
+					}
+					created = await options.create(candidateManager);
 					candidateSessionOwnsManager = true;
 					await created.session.sessionManager.flush();
 					this.applyReplacement(created);
@@ -983,7 +1016,7 @@ export class AgentSessionRuntime {
 		} catch (error) {
 			if (ownsCandidateManager && !candidateSessionOwnsManager) {
 				return await closeOwnedSessionManager(
-					options.sessionManager,
+					candidateManager,
 					error,
 					"Session replacement failed and its owned manager could not be closed",
 				);
@@ -1256,10 +1289,141 @@ export class AgentSessionRuntime {
 		if (beforeResult.cancelled) {
 			return { cancelled: true, seeded: false };
 		}
+		const replacement = await this.reopenSessionWithinOperation(
+			sessionRef,
+			options,
+			operation,
+			refreshCurrentSession,
+		);
+		return { cancelled: false, seeded: replacement.seeded };
+	}
+
+	/**
+	 * Reopen the current session from its store at the persisted revision, even
+	 * when this process still holds conversation authority. Another owner (the
+	 * daemon during a drain handoff or a reconnect gap) may have appended turns the
+	 * in-memory copy has not seen; keeping that copy would fail the next append on
+	 * a revision conflict.
+	 *
+	 * The reload keeps the session's current cwd, including a "continue in current
+	 * cwd" override that the store never recorded.
+	 *
+	 * Unlike switchSession, extensions cannot cancel the reload through
+	 * `session_before_switch`; `session_shutdown` and `session_start` still fire
+	 * with reason "resume". The replacement is read from the store only after the
+	 * outgoing copy drains, so what `session_shutdown` handlers and disposal write
+	 * is part of it. Resolves `{ reloaded: false }` without changes when the
+	 * current session is no longer `expectedSessionId` (a later switch superseded
+	 * the handoff) or has no store reference.
+	 *
+	 * Local work that the reopen would reject or tear down (agent runs, bash,
+	 * compaction, extension commands, detached reviews) is waited out rather than
+	 * failing the reload. Work that starts while the reload is queued defers it
+	 * again.
+	 *
+	 * Triggered by external lease events, so it always queues behind in-flight
+	 * lifecycle work instead of running re-entrantly. Do not await it from inside a
+	 * lifecycle operation: the FIFO cannot reach it until that operation settles.
+	 */
+	reloadCurrentSessionFromStore(options: ReloadCurrentSessionOptions): Promise<{ reloaded: boolean }> {
+		if (!this.acceptingStructuralOperations) {
+			return Promise.reject(new Error("Agent session runtime is no longer accepting structural operations"));
+		}
+		this.pendingStructuralOperationCount++;
+		return this.reloadCurrentSessionWhenIdle(options).finally(() => {
+			this.pendingStructuralOperationCount--;
+		});
+	}
+
+	private async reloadCurrentSessionWhenIdle(options: ReloadCurrentSessionOptions): Promise<{ reloaded: boolean }> {
+		while (true) {
+			// Wait outside the lifecycle FIFO: the work being waited for may itself
+			// need it (a finished review opens its findings session).
+			await this.waitForReplacementBlockingWork(options.expectedSessionId);
+			if (!this.acceptingStructuralOperations) {
+				throw new Error("Agent session runtime is no longer accepting structural operations");
+			}
+			const result = await this.enqueueLifecycleOperation(() => this.reloadCurrentSessionIfIdle(options));
+			if (result) return result;
+		}
+	}
+
+	/** Resolves `undefined` when local work started while the reload was queued. */
+	private async reloadCurrentSessionIfIdle(
+		options: ReloadCurrentSessionOptions,
+	): Promise<{ reloaded: boolean } | undefined> {
+		const sessionRef = this.session.sessionRef;
+		if (this.session.sessionId !== options.expectedSessionId || sessionRef === undefined) {
+			return { reloaded: false };
+		}
+		// An invalidated session fails the structural check below instead.
+		if (!this.sessionInvalidated && this.hasReplacementBlockingWork()) {
+			return undefined;
+		}
+		const operation: AgentSessionStructuralOperation = {
+			expectedSession: this.session,
+			expectedRevision: this.lifecycleRevision,
+			expectedConversationGenerationRevision: this.session.conversationGenerationRevision,
+		};
+		this.assertStructuralOperationCurrent(operation);
+		await this.reopenSessionWithinOperation(
+			sessionRef,
+			{ projectTrustContextFactory: options.projectTrustContextFactory },
+			operation,
+			true,
+		);
+		return { reloaded: true };
+	}
+
+	/**
+	 * Local work that replacing the current session would reject or tear down:
+	 * everything `AgentSession.isBusy` covers plus detached review workflows.
+	 */
+	private hasReplacementBlockingWork(): boolean {
+		return this.session.isBusy || this._reviewWorkflows?.hasActiveWorkflows === true;
+	}
+
+	private async waitForReplacementBlockingWork(expectedSessionId: string): Promise<void> {
+		while (
+			this.acceptingStructuralOperations &&
+			this.session.sessionId === expectedSessionId &&
+			this.hasReplacementBlockingWork()
+		) {
+			const session = this.session;
+			await session.waitForNotBusy();
+			// waitForNotBusy also returns once the session is disposed. The lifecycle
+			// operation disposing it decides what the queued reload observes.
+			if (session.isBusy) return;
+			await this._reviewWorkflows?.waitForIdle();
+		}
+	}
+
+	/**
+	 * Open a session reference, keeping the current session's cwd when the ref is
+	 * the current session. A cwd override ("continue in current cwd") lives only in
+	 * memory; the store keeps the original, possibly missing, cwd.
+	 */
+	private openSessionManager(sessionRef: SessionReference, cwdOverride?: string): Promise<SessionManager> {
+		const currentSessionRef = this.session.sessionRef;
+		return SessionManager.open(
+			sessionRef,
+			cwdOverride ??
+				(currentSessionRef !== undefined && sessionRefsEqual(sessionRef, currentSessionRef)
+					? this.session.sessionManager.getCwd()
+					: undefined),
+		);
+	}
+
+	private async reopenSessionWithinOperation(
+		sessionRef: SessionReference,
+		options: AgentSessionSwitchOptions | undefined,
+		operation: AgentSessionStructuralOperation,
+		allowSameSessionIdentity: boolean,
+	): Promise<{ seeded: boolean }> {
 		this.assertNoActiveDetachedReview();
 
 		const previousSessionRef = this.session.sessionRef;
-		const sessionManager = await SessionManager.open(sessionRef, options?.cwdOverride);
+		const sessionManager = await this.openSessionManager(sessionRef, options?.cwdOverride);
 		let managerTransferred = false;
 		try {
 			this.assertStructuralOperationCurrent(operation);
@@ -1267,25 +1431,24 @@ export class AgentSessionRuntime {
 			this.assertStructuralOperationCurrent(operation);
 			assertSessionCwdExists(sessionManager, this.cwd);
 			managerTransferred = true;
-			const replacement = await this.replaceCurrentSession({
+			return await this.replaceCurrentSession({
 				operation,
 				reason: "resume",
-				allowSameSessionIdentity: refreshCurrentSession,
+				allowSameSessionIdentity,
 				sessionManager,
-				create: () =>
+				create: (replacementManager) =>
 					this.createRuntime({
-						cwd: sessionManager.getCwd(),
+						cwd: replacementManager.getCwd(),
 						agentDir: this.services.agentDir,
-						sessionManager,
-						...this.getReplacementGitContextOptions(sessionManager.getCwd()),
+						sessionManager: replacementManager,
+						...this.getReplacementGitContextOptions(replacementManager.getCwd()),
 						sessionStartEvent: { type: "session_start", reason: "resume", previousSessionRef },
-						projectTrustContext: options?.projectTrustContextFactory?.(sessionManager.getCwd()),
+						projectTrustContext: options?.projectTrustContextFactory?.(replacementManager.getCwd()),
 						profile: this.getReplacementProfile(),
 						subagentContext: this.subagentContext,
 					}),
 				withSession: options?.withSession,
 			});
-			return { cancelled: false, seeded: replacement.seeded };
 		} catch (error) {
 			if (managerTransferred) throw error;
 			return await closeOwnedSessionManager(
@@ -1680,7 +1843,7 @@ export class AgentSessionRuntime {
 
 			await this.session.sessionManager.flush();
 			this.assertStructuralOperationCurrent(operation);
-			const sessionManager = await SessionManager.open(currentSessionRef);
+			const sessionManager = await this.openSessionManager(currentSessionRef);
 			let managerTransferred = false;
 			try {
 				this.assertStructuralOperationCurrent(operation);

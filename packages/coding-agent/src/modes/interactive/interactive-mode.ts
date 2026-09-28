@@ -664,6 +664,8 @@ export class InteractiveMode {
 	/** Read-only attach overlay while a remote turn drains (§6.3). */
 	private drainViewer: DrainViewerComponent | undefined;
 	private drainViewerFeedId: string | undefined;
+	/** Handoff reloads in flight; editor submissions stay held until they finish. */
+	private handoffReloadsPending = 0;
 	private dismissSubagentInspector: (() => void) | undefined;
 	/** Confirmation belongs to the work that was active when the warning appeared. */
 	private quitConfirmation:
@@ -2029,8 +2031,8 @@ export class InteractiveMode {
 			void this.serveRelayConversation(offer, openRelay);
 		});
 		this.daemonAttach.onRelayCountChange(() => this.updatePhoneFooterIndicator());
-		this.daemonAttach.onReacquired((_sessionId, outcome) => {
-			void this.handleReacquireOutcome(outcome);
+		this.daemonAttach.onReacquired((sessionId, outcome) => {
+			void this.handleReacquireOutcome(sessionId, outcome);
 		});
 		this.daemonAttach.onEvent((event) => {
 			if (event.type === "theme_snapshot") {
@@ -2079,32 +2081,33 @@ export class InteractiveMode {
 		if (this.daemonAttach.connectionState() === "disabled") {
 			return { kind: "noop" };
 		}
-		this.daemonLeaseSessionId = this.session.sessionId;
-		const outcome = await this.daemonAttach.acquire(this.session.sessionId);
+		const sessionId = this.session.sessionId;
+		this.daemonLeaseSessionId = sessionId;
+		const outcome = await this.daemonAttach.acquire(sessionId);
 		if (outcome.kind === "denied") {
 			// Multi-TUI is a non-goal: another TUI owns the session. Continue in a
 			// plain read-from-file open (no live view); the user may retry on action.
 			this.showWarning("This conversation is open in another desktop window; live sharing is disabled here.");
 		}
 		if (outcome.kind === "pending") {
-			this.enterDrainViewer(outcome);
+			this.enterDrainViewer(outcome, sessionId);
 		}
 		this.updatePhoneFooterIndicator();
 		return outcome;
 	}
 
-	private async handleReacquireOutcome(outcome: AcquireOutcome): Promise<void> {
+	private async handleReacquireOutcome(sessionId: string, outcome: AcquireOutcome): Promise<void> {
 		if (outcome.kind === "granted" && (outcome.handoff === "warm" || outcome.handoff === "cold")) {
-			// The daemon spun up a runtime during the reconnect gap; absorb any file
-			// changes it appended.
-			await this.absorbRemoteSessionChangesFromDisk();
+			// The daemon spun up a runtime during the reconnect gap (or owned the
+			// conversation this desktop just switched to); absorb what it appended.
+			await this.absorbRemoteSessionChangesFromDisk(sessionId);
 			this.renderCurrentSessionState();
 			this.ui.requestRender();
 		}
 		if (outcome.kind === "pending") {
 			// A remote turn is mid-flight; watch it finish behind the current
 			// transcript, then take over warm.
-			this.enterDrainViewer(outcome);
+			this.enterDrainViewer(outcome, sessionId);
 		}
 		if (outcome.kind === "granted") {
 			await this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
@@ -2116,10 +2119,10 @@ export class InteractiveMode {
 	 * Read-only attach overlay while the daemon drains a mid-flight remote turn
 	 * (§6.3): viewer events render through the normal message/tool components;
 	 * the editor keeps accepting text but never submits; esc stops the remote
-	 * turn. On grant the session file is reloaded (authoritative) and whatever
-	 * was typed stays in the editor, un-submitted.
+	 * turn. On grant the session is reloaded from the store (authoritative) and
+	 * whatever was typed stays in the editor, un-submitted.
 	 */
-	private enterDrainViewer(pending: Extract<AcquireOutcome, { kind: "pending" }>): void {
+	private enterDrainViewer(pending: Extract<AcquireOutcome, { kind: "pending" }>, sessionId: string): void {
 		if (this.drainViewer) {
 			return;
 		}
@@ -2138,7 +2141,7 @@ export class InteractiveMode {
 		void this.daemonAttach.viewerSubscribe(pending.viewerFeedId);
 		pending.granted.then(
 			() => {
-				void this.finishDrainViewerGrant();
+				void this.finishDrainViewerGrant(sessionId);
 			},
 			(error: unknown) => {
 				// A transient control-socket drop rejects the grant with
@@ -2154,38 +2157,45 @@ export class InteractiveMode {
 
 	/**
 	 * Absorb transcript entries another owner (the daemon, during a drain handoff
-	 * or a reconnect gap) appended to the session file. session.reload() only
-	 * reloads settings/resources — NOT the conversation — so re-open the session
-	 * file to pull in the appended turns, rebuilding the in-process transcript and
-	 * model context. Falls back to a settings reload when there is no session file
-	 * or the re-open is cancelled.
+	 * or a reconnect gap) appended to the session. session.reload() only reloads
+	 * settings/resources — NOT the conversation — so reopen the session from the
+	 * store at its current revision, rebuilding the in-process transcript and
+	 * model context. Keeping the outdated copy would fail the next append on a
+	 * revision conflict, so a failed reload is fatal. The runtime waits out local
+	 * work (runs, reviews) before reopening; editor submissions stay held until the
+	 * reload finishes. Sessions without a store reference only reload settings.
 	 */
-	private async absorbRemoteSessionChangesFromDisk(): Promise<void> {
-		const sessionRef = this.session.sessionRef;
-		if (!sessionRef) {
-			await this.session.reload().catch(() => {});
-			return;
-		}
+	private async absorbRemoteSessionChangesFromDisk(sessionId: string): Promise<void> {
+		this.handoffReloadsPending++;
 		try {
-			const result = await this.runtimeHost.switchSession(sessionRef, {
+			if (!this.session.sessionRef) {
+				await this.session.reload().catch(() => {});
+				return;
+			}
+			await this.runtimeHost.reloadCurrentSessionFromStore({
+				expectedSessionId: sessionId,
 				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
 			});
-			if (result.cancelled) {
-				await this.session.reload().catch(() => {});
-			}
-		} catch {
-			await this.session.reload().catch(() => {});
+		} catch (error: unknown) {
+			// Shutdown disposes the runtime and owns the exit.
+			if (this.isShuttingDown) return;
+			await this.handleFatalRuntimeError("Failed to reload the session after the daemon handoff", error, {
+				unsentDraft: this.editor.getText(),
+			});
+		} finally {
+			this.handoffReloadsPending--;
 		}
 	}
 
-	private async finishDrainViewerGrant(): Promise<void> {
+	private async finishDrainViewerGrant(sessionId: string): Promise<void> {
 		const viewer = this.drainViewer;
 		this.drainViewer = undefined;
 		this.drainViewerFeedId = undefined;
 		viewer?.finish("Remote turn finished — taking over…");
-		// Load what the remote turn wrote; the file is the source of truth. The
+		// Load what the remote turn wrote; the store is the source of truth. The
 		// re-render drops the viewer component; editor text survives un-submitted.
-		await this.absorbRemoteSessionChangesFromDisk();
+		// Input stays held: the reload marks itself pending before its first await.
+		await this.absorbRemoteSessionChangesFromDisk(sessionId);
 		this.renderCurrentSessionState();
 		this.showStatus("Attached — the remote turn finished and this desktop now owns the session.");
 		this.ui.requestRender();
@@ -2522,11 +2532,20 @@ export class InteractiveMode {
 		await this.acquireCurrentSessionLease();
 	}
 
-	private async handleFatalRuntimeError(prefix: string, error: unknown): Promise<never> {
+	private async handleFatalRuntimeError(
+		prefix: string,
+		error: unknown,
+		options?: { unsentDraft?: string },
+	): Promise<never> {
 		const message = error instanceof Error ? error.message : String(error);
 		this.showError(`${prefix}: ${message}`);
 		stopThemeWatcher();
 		this.stop();
+		const unsentDraft = options?.unsentDraft?.trim();
+		if (unsentDraft) {
+			// The editor dies with the process; hand the draft back for copying.
+			process.stderr.write(`Unsent input (not submitted before volt exited):\n${unsentDraft}\n`);
+		}
 		process.exit(1);
 	}
 
@@ -3855,10 +3874,16 @@ export class InteractiveMode {
 				return;
 			}
 
-			if (this.isDrainViewerActive()) {
-				// Read-only while the remote turn drains: keep the text in the editor
-				// (it lands un-submitted once the handoff completes).
-				this.showStatus("Attaching — input will stay in the editor until the remote turn finishes.");
+			if (this.isDrainViewerActive() || this.handoffReloadsPending > 0) {
+				// Read-only while the remote turn drains or its transcript reloads: put
+				// the text back in the editor (it lands un-submitted once the handoff
+				// completes).
+				this.editor.setText(text);
+				this.showStatus(
+					this.isDrainViewerActive()
+						? "Attaching — input will stay in the editor until the remote turn finishes."
+						: "Loading the remote turn — input will stay in the editor until it finishes.",
+				);
 				return;
 			}
 

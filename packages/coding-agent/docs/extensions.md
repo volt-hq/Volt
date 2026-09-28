@@ -437,7 +437,7 @@ volt.on("session_before_switch", async (event, ctx) => {
 After a successful switch or new-session action, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
-A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner opens the same session ID from the authoritative store and emits `session_start` (reason `"resume"`). Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
+A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner opens the same session ID from the authoritative store and emits `session_start` (reason `"resume"`). A TUI that already has the session open first emits `session_shutdown` (reason `"resume"`) for its outdated instance, then reloads the session from the store. Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
 
 #### session_before_fork
 
@@ -511,11 +511,13 @@ volt.on("session_tree", async (event, ctx) => {
 
 Fired before a started session runtime is torn down. Use this to clean up resources opened from `session_start` or other session-scoped hooks.
 
+Session writes from this handler (`volt.appendEntry()`, `volt.setLabel()`, `volt.setSessionName()`) are best-effort. If another owner, such as the background daemon during a handoff, added to the session after this instance last saw it, the instance's state is outdated and its writes are discarded so they cannot overwrite the newer owner's state. Save durable state when it changes rather than only at shutdown, and rebuild in-memory state in `session_start`.
+
 ```typescript
 volt.on("session_shutdown", async (event, ctx) => {
   // event.reason - "quit" | "reload" | "new" | "resume" | "fork"
   // event.targetSessionRef - destination reference for session replacement flows
-  // Cleanup, save state, etc.
+  // Clean up resources; session writes here are best-effort (see above)
 });
 ```
 
