@@ -178,7 +178,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		expect(control.renderer.getFocusedComponent()).toBe(control.defaultEditor);
 		const output = await screen(fixture);
 		expect(output).toContain("PLAN READY · APPROVAL NEEDED");
-		expect(output).toMatch(/PLAN READY · Alt\+P choose next step · Enter send feedback/);
+		expect(output).toMatch(/PLAN READY · (Alt|Option)\+P choose next step · Enter send feedback/);
 
 		terminal.sendInput("\r");
 		expect(control.pendingUserInputs).toEqual(["looks good"]);
