@@ -119,6 +119,7 @@ const GPT_6_SOL_LUNA_MODELS = [
 	},
 ] as const;
 const GPT_6_SOL_LUNA_MODEL_IDS = new Set<string>(GPT_6_SOL_LUNA_MODELS.map((model) => model.id));
+const DAYBREAK_MODEL_IDS = new Set(["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"]);
 
 const MOONSHOT_CN_MIRRORED_MODEL_IDS = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
 
@@ -329,6 +330,8 @@ const BEDROCK_LONG_PROMPT_CACHE_MODEL_IDS = new Set([
 	"anthropic.claude-opus-4-8",
 	"anthropic.claude-sonnet-4-5-20250929-v1:0",
 	"anthropic.claude-sonnet-5",
+	// https://docs.aws.amazon.com/bedrock/latest/userguide/prompt-caching.html (2026-09-28)
+	"anthropic.claude-sonnet-5-5",
 ]);
 
 const IMPLICIT_SHORT_PROMPT_CACHE = {
@@ -621,9 +624,18 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	if (model.provider === "openrouter" && /^openai\/gpt-6-(sol|luna)(?:-pro)?(?::batch)?$/.test(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
 	}
-	if (model.id.includes("opus-5-5") || model.id.includes("opus-5.5")) {
+	if (
+		model.id.includes("opus-5-5") || model.id.includes("opus-5.5") ||
+		model.id.includes("sonnet-5-5") || model.id.includes("sonnet-5.5")
+	) {
 		// https://platform.claude.com/docs/en/models/opus-5-5/overview
+		// https://platform.claude.com/docs/en/models/sonnet-5-5/whats-new-sonnet-5-5
+		// Neither accepts disabled thinking. Sonnet's between_tools mode still thinks between tools.
 		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
+	}
+	if (DAYBREAK_MODEL_IDS.has(model.id)) {
+		// models.dev reasoning_options for the current GPT-5.6 Sol/Cyber aliases (2026-09-28).
+		mergeThinkingLevelMap(model, { off: "none", minimal: null, xhigh: "xhigh", max: "max" });
 	}
 	if (
 		model.id === GPT_6_ASTRA_ID &&
@@ -2150,25 +2162,25 @@ async function generateModels() {
 		requiresReasoningContentOnAssistantMessages: true,
 		thinkingFormat: "deepseek",
 	};
-	const deepseekV4Models: Model<"openai-completions">[] = [
-		{
-			id: "deepseek-v4-flash",
-			name: "DeepSeek V4 Flash",
-			api: "openai-completions",
-			baseUrl: "https://api.deepseek.com",
-			provider: "deepseek",
-			reasoning: true,
-			input: ["text"],
-			cost: {
-				input: 0.14,
-				output: 0.28,
-				cacheRead: 0.0028,
-				cacheWrite: 0,
-			},
-			contextWindow: 1000000,
-			maxTokens: 384000,
-			compat: deepseekCompat,
-		},
+	// Verified 2026-09-28 against https://api-docs.deepseek.com/api/list-models/
+	// and https://api-docs.deepseek.com/quick_start/pricing/.
+	// Catalog costs use published off-peak rates; peak rates are twice these values.
+	const deepseekFlashModel: Model<"openai-completions"> = {
+		id: "deepseek-flash",
+		name: "DeepSeek V4.1 Flash",
+		api: "openai-completions",
+		baseUrl: "https://api.deepseek.com",
+		provider: "deepseek",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.15, output: 0.6, cacheRead: 0.003, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 393216,
+		compat: deepseekCompat,
+	};
+	const deepseekModels: Model<"openai-completions">[] = [
+		deepseekFlashModel,
+		{ ...deepseekFlashModel, id: "deepseek-v4-flash" },
 		{
 			id: "deepseek-v4-pro",
 			name: "DeepSeek V4 Pro",
@@ -2178,17 +2190,17 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text"],
 			cost: {
-				input: 0.435,
-				output: 0.87,
-				cacheRead: 0.003625,
+				input: 0.66,
+				output: 1.98,
+				cacheRead: 0.022,
 				cacheWrite: 0,
 			},
-			contextWindow: 1000000,
-			maxTokens: 384000,
+			contextWindow: 1048576,
+			maxTokens: 393216,
 			compat: deepseekCompat,
 		},
 	];
-	allModels.push(...deepseekV4Models);
+	allModels.push(...deepseekModels);
 
 	const antLingCompat: OpenAICompletionsCompat = {
 		supportsStore: false,
@@ -2467,6 +2479,10 @@ async function generateModels() {
 
 	for (const model of allModels) {
 		applyThinkingLevelMetadata(model);
+		if (model.provider === "deepseek") {
+			// https://api-docs.deepseek.com/api/create-chat-completion/ (2026-09-28)
+			mergeThinkingLevelMap(model, { minimal: null, low: "low", medium: null, high: "high", xhigh: null, max: "max" });
+		}
 		applyPromptCacheMetadata(model);
 	}
 

@@ -1,4 +1,4 @@
-import { getModel, type KnownProvider, type Model } from "@hansjm10/volt-ai";
+import { getModel, getModels, type KnownProvider, type Model } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -554,6 +554,21 @@ describe("default model selection", () => {
 		expect(defaultModelPerProvider.anthropic).toBe("claude-opus-5-5");
 		expect(defaultModelPerProvider["amazon-bedrock"]).toBe("us.anthropic.claude-opus-5-5");
 		expect(defaultModelPerProvider["cloudflare-ai-gateway"]).toBe("claude-opus-5.5");
+	});
+
+	test("findInitialModel selects Kimi K3 from the current OpenCode Go catalog", async () => {
+		const registry = {
+			getAvailable: async () => getModels("opencode-go"),
+		} as unknown as Parameters<typeof findInitialModel>[0]["modelRegistry"];
+
+		const result = await findInitialModel({
+			scopedModels: [],
+			isContinuing: false,
+			modelRegistry: registry,
+		});
+
+		expect(result.model?.provider).toBe("opencode-go");
+		expect(result.model?.id).toBe("kimi-k3");
 	});
 
 	test("every provider default exists in the model catalog", () => {
