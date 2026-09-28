@@ -12,6 +12,9 @@ for (const [provider, models] of Object.entries(MODELS)) {
 	modelRegistry.set(provider, providerModels);
 }
 
+/** Model IDs present in the generated catalog for a known provider. */
+export type KnownModelId<TProvider extends KnownProvider> = keyof (typeof MODELS)[TProvider] & string;
+
 type ModelApi<
 	TProvider extends KnownProvider,
 	TModelId extends keyof (typeof MODELS)[TProvider],

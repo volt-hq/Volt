@@ -3,7 +3,7 @@
  */
 
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { type Api, type KnownProvider, type Model, modelsAreEqual } from "@hansjm10/volt-ai";
+import { type Api, type KnownModelId, type KnownProvider, type Model, modelsAreEqual } from "@hansjm10/volt-ai";
 import chalk from "chalk";
 import { minimatch } from "minimatch";
 import { isValidThinkingLevel } from "../cli/args.ts";
@@ -11,10 +11,10 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 
 /** Default model IDs for each known provider */
-export const defaultModelPerProvider: Record<KnownProvider, string> = {
-	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
+export const defaultModelPerProvider: { [P in KnownProvider]: KnownModelId<P> } = {
+	"amazon-bedrock": "us.anthropic.claude-opus-5-5",
 	"ant-ling": "Ring-2.6-1T",
-	anthropic: "claude-opus-4-8",
+	anthropic: "claude-opus-5-5",
 	openai: "gpt-5.4",
 	"azure-openai-responses": "gpt-5.4",
 	"openai-codex": "gpt-5.5",
@@ -27,9 +27,9 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"vercel-ai-gateway": "zai/glm-5.1",
 	xai: "grok-4.20-0309-reasoning",
 	groq: "openai/gpt-oss-120b",
-	cerebras: "zai-glm-4.7",
-	zai: "glm-5.1",
-	"zai-coding-cn": "glm-5.1",
+	cerebras: "qwen-3.8-27b",
+	zai: "glm-5.3",
+	"zai-coding-cn": "glm-5.3",
 	mistral: "devstral-medium-latest",
 	minimax: "MiniMax-M2.7",
 	"minimax-cn": "MiniMax-M2.7",
@@ -42,7 +42,7 @@ export const defaultModelPerProvider: Record<KnownProvider, string> = {
 	"opencode-go": "kimi-k2.6",
 	"kimi-coding": "kimi-for-coding",
 	"cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
-	"cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
+	"cloudflare-ai-gateway": "claude-opus-5.5",
 	xiaomi: "mimo-v2.5-pro",
 	"xiaomi-token-plan-cn": "mimo-v2.5-pro",
 	"xiaomi-token-plan-ams": "mimo-v2.5-pro",
