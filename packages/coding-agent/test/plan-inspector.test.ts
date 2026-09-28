@@ -149,6 +149,52 @@ describe("PlanInspectorComponent", () => {
 		expect(ready).toContain("Visible active child");
 	});
 
+	it("marks a ready plan as waiting for a decision", () => {
+		setKeybindings(new KeybindingsManager({ "app.plan.togglePane": "alt+x" }));
+		try {
+			const inspector = createInspector(planning("ready"));
+			const lines = inspector.render(48).lines;
+			const header = stripAnsi(lines[0] ?? "");
+			expect(header).toContain("PLAN · READY · APPROVAL NEEDED");
+			expect(header).toMatch(/(alt|option)\+x choose$/);
+			for (const line of lines) expect(visibleWidth(line)).toBeLessThanOrEqual(48);
+
+			inspector.focused = true;
+			expect(stripAnsi(inspector.render(60).lines[0] ?? "")).toMatch(/APPROVAL NEEDED.*FOCUSED$/);
+
+			const active = stripAnsi(createInspector(planning("active")).render(60).lines[0] ?? "");
+			expect(active).not.toContain("APPROVAL NEEDED");
+			expect(active).toMatch(/(alt|option)\+x focus$/);
+		} finally {
+			setKeybindings(new KeybindingsManager());
+		}
+	});
+
+	it("hands typed and pasted text to the composer while a ready plan is focused", () => {
+		const actions: PlanDetailsAction[] = [];
+		const typed: string[] = [];
+		const create = (phase: PlanPhase) =>
+			new PlanInspectorComponent({
+				planning: planning(phase),
+				onAction: (action) => actions.push(action),
+				onReturnFocus: () => undefined,
+				onToggleFocus: () => undefined,
+				onTextInput: (data) => typed.push(data),
+				requestRender: () => undefined,
+			});
+		const inspector = create("ready");
+		inspector.setViewportRows(22);
+		inspector.render(60);
+		for (const data of ["o", "\x1b[111u", "\x1b[200~pasted\x1b[201~"]) inspector.handleInput(data);
+		expect(typed).toEqual(["o", "\x1b[111u", "\x1b[200~pasted\x1b[201~"]);
+		expect(actions).toEqual([]);
+		inspector.handleInput("\r");
+		expect(actions).toEqual(["retain_context"]);
+
+		for (const phase of ["draft", "active", "completed"] as const) create(phase).handleInput("x");
+		expect(typed).toHaveLength(3);
+	});
+
 	it("routes ready actions without changing planning state", () => {
 		const actions: PlanDetailsAction[] = [];
 		const state = planning("ready");

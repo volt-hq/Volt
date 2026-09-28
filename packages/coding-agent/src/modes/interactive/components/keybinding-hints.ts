@@ -50,8 +50,13 @@ export function editorTopBorderLabelForState(state: {
 	streaming: boolean;
 	hasText: boolean;
 	agentMode: "build" | "plan";
+	planReady: boolean;
 }): string {
 	if (state.bashMode) return editorTopBorderLabel("shell");
+	// A ready plan blocks on the user in either mode, so its cue outranks the mode label.
+	if (state.planReady && !state.streaming) {
+		return `PLAN READY · ${keyDisplayText("app.plan.togglePane")} choose next step · ${keyDisplayText("tui.input.submit")} send feedback`;
+	}
 	if (state.agentMode === "plan") return "PLAN · AGENT READ-ONLY";
 	if (state.streaming && state.hasText) return editorTopBorderLabel("steer");
 	return "ASK VOLT · BUILD";

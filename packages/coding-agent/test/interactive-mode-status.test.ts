@@ -287,6 +287,36 @@ describe("InteractiveMode.scheduleTurnDoneAlert", () => {
 		}
 	});
 
+	test("names a pending plan decision in turn-done notifications", () => {
+		vi.useFakeTimers();
+		try {
+			for (const [phase, expected] of [
+				["ready", "Plan ready for approval · project"],
+				["draft", "Finished responding · project"],
+			] as const) {
+				const notify = vi.fn();
+				const base = createFakeThis();
+				const fakeThis = {
+					...base,
+					settingsManager: { getTurnDoneAlert: vi.fn(() => "notify") },
+					sessionManager: { getCwd: () => "/work/project" },
+					session: { ...base.session, planningState: { mode: "plan", plan: { phase } } },
+					ui: { terminal: { ...base.ui.terminal, notify } },
+				};
+
+				(InteractiveMode as any).prototype.scheduleTurnDoneAlert.call(fakeThis, {
+					type: "agent_end",
+					willRetry: false,
+					messages: [{ role: "assistant", stopReason: "toolUse" }],
+				});
+				vi.runOnlyPendingTimers();
+				expect(notify).toHaveBeenCalledExactlyOnceWith("Volt", expected);
+			}
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	test("skips retrying and aborted turns", () => {
 		vi.useFakeTimers();
 		try {

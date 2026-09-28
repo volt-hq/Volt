@@ -108,7 +108,7 @@ import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.t
 import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
-import type { PlanningState, PlanPhase } from "../../core/planning.ts";
+import type { PlanningState, PlanPhase, PlanState } from "../../core/planning.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
@@ -785,6 +785,7 @@ export class InteractiveMode {
 			},
 			onReturnFocus: () => this.focusConversation(),
 			onToggleFocus: () => this.togglePlanPaneFocus(),
+			onTextInput: (data) => this.composeFromPlanChooser(data),
 			requestRender: () => this.ui.requestRender(),
 		});
 		this.footerDataProvider = new FooterDataProvider(this.session.gitContextProvider);
@@ -2493,6 +2494,8 @@ export class InteractiveMode {
 		this.subscribeToBackgroundJobs(session);
 		await this.updateAvailableProviderCount();
 		this.closePlanDetails();
+		// A rebound session is a fresh presentation, so a ready plan is offered again.
+		this.readyPlanFocusKey = undefined;
 		this.refreshPlanningUi();
 		this.updateTerminalTitle();
 		await this.reconcileDaemonLease();
@@ -2793,7 +2796,9 @@ export class InteractiveMode {
 
 			if (this.settingsManager.getTurnDoneAlert() === "notify") {
 				const dir = path.basename(this.sessionManager.getCwd());
-				this.ui.terminal.notify("Volt", `Finished responding · ${dir}`);
+				const status =
+					this.session.planningState.plan?.phase === "ready" ? "Plan ready for approval" : "Finished responding";
+				this.ui.terminal.notify("Volt", `${status} · ${dir}`);
 			} else {
 				this.ui.terminal.alert();
 			}
@@ -3373,6 +3378,7 @@ export class InteractiveMode {
 					streaming: this.session.isStreaming,
 					hasText: currentText.length > 0,
 					agentMode: this.session.agentMode,
+					planReady: this.session.planningState.plan?.phase === "ready",
 				}),
 			);
 
@@ -4454,12 +4460,16 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
-			case "agent_settled":
+			case "agent_settled": {
 				this.quitConfirmation = undefined;
 				this.lastSigintTime = 0;
+				// A plan submitted during the run is offered only now that the run has settled.
+				const settledPlan = this.session.planningState.plan;
+				if (settledPlan?.phase === "ready") this.presentReadyPlan(settledPlan);
 				this.scheduleWorkSummary();
 				await this.checkShutdownRequested();
 				break;
+			}
 
 			case "compaction_start": {
 				this.quitConfirmation = undefined;
@@ -5244,6 +5254,7 @@ export class InteractiveMode {
 				streaming,
 				hasText: this.editor.getText().length > 0,
 				agentMode: this.session.agentMode,
+				planReady: this.session.planningState.plan?.phase === "ready",
 			}),
 		);
 		this.ui.requestRender();
@@ -5282,16 +5293,35 @@ export class InteractiveMode {
 		if (!split) this.focusConversation(true);
 		this.updateEditorBorderColor();
 		if (plan?.phase === "ready") {
-			const readyKey = `${plan.id}:${plan.revision}`;
-			if (split) {
-				if (this.readyPlanFocusKey !== readyKey && this.focusPlanInspector()) this.readyPlanFocusKey = readyKey;
-			} else if (!this.planDetails && this.activeView === this.conversationView) {
-				this.showPlanDetails();
-				this.readyPlanFocusKey = readyKey;
-			}
+			this.presentReadyPlan(plan);
 		} else {
 			this.readyPlanFocusKey = undefined;
 		}
+		this.ui.requestRender();
+	}
+
+	/**
+	 * Offer the ready-plan chooser once per plan revision. Focus moves only between
+	 * runs and away from an empty composer, so in-flight typing never reaches it;
+	 * otherwise the persistent approval cues stay until the next settlement or refresh.
+	 */
+	private presentReadyPlan(plan: PlanState): void {
+		const readyKey = `${plan.id}:${plan.revision}`;
+		if (this.readyPlanFocusKey === readyKey) return;
+		if (this.session.isStreaming || this.session.isCompacting || this.editor.getText().length > 0) return;
+		if (this.mainView.isTerminalSplit()) {
+			if (this.focusPlanInspector()) this.readyPlanFocusKey = readyKey;
+		} else if (this.activeView === this.conversationView) {
+			if (!this.planDetails) this.showPlanDetails();
+			this.readyPlanFocusKey = readyKey;
+		}
+	}
+
+	/** Return typing from the ready-plan chooser to the composer instead of dropping it. */
+	private composeFromPlanChooser(data: string): void {
+		if (this.planDetails) this.closePlanDetails();
+		else this.focusConversation();
+		this.ui.getFocusedComponent()?.handleInput?.(data);
 		this.ui.requestRender();
 	}
 
@@ -5314,6 +5344,7 @@ export class InteractiveMode {
 				void this.handlePlanDetailsAction(action);
 			},
 			onClose: () => this.closePlanDetails(),
+			onTextInput: (data) => this.composeFromPlanChooser(data),
 			requestRender: () => this.ui.requestRender(),
 		});
 		this.planDetailsContainer.addChild(this.planDetails);
@@ -5422,8 +5453,14 @@ export class InteractiveMode {
 		this.planInspector.setFullscreenActive(split && this.ui.mode === "fullscreen");
 		if (split) {
 			const hadPlanDetails = this.planDetails !== undefined;
-			if (hadPlanDetails || this.session.planningState.plan?.phase === "ready") this.focusPlanInspector();
-			if (hadPlanDetails) this.closePlanDetails({ focusConversation: false });
+			const plan = this.session.planningState.plan;
+			if (hadPlanDetails) {
+				this.focusPlanInspector();
+				this.closePlanDetails({ focusConversation: false });
+			} else if (plan?.phase === "ready") {
+				// A plan that just became ready opens the split mid-run; offer it under the same rules as settlement.
+				this.presentReadyPlan(plan);
+			}
 			return;
 		}
 		this.fullscreenTranscript.setPrimary(true);
@@ -5486,7 +5523,6 @@ export class InteractiveMode {
 			if (action === "change") {
 				this.session.changePlan(plan.id, plan.revision);
 				this.closePlanDetails();
-				this.editor.setText("");
 				this.showStatus("Describe the changes you want in the normal composer");
 				return;
 			}
@@ -5501,6 +5537,8 @@ export class InteractiveMode {
 			);
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
+			// Offer the chooser again if the plan is still waiting on a decision.
+			this.readyPlanFocusKey = undefined;
 			this.refreshPlanningUi();
 		}
 	}
