@@ -108,6 +108,11 @@ export interface AgentSessionSwitchOptions {
 	assertConversationGenerationCurrent?: () => void;
 }
 
+type ReloadCurrentSessionOptions = { expectedSessionId: string } & Pick<
+	AgentSessionSwitchOptions,
+	"projectTrustContextFactory"
+>;
+
 export interface AgentSessionReplacementTransaction {
 	commit(): Promise<void>;
 	/** Finish host ownership before replacement callbacks and any durable publication barrier. */
@@ -1311,39 +1316,86 @@ export class AgentSessionRuntime {
 	 * current session is no longer `expectedSessionId` (a later switch superseded
 	 * the handoff) or has no store reference.
 	 *
+	 * Local work that the reopen would reject or tear down (agent runs, bash,
+	 * compaction, extension commands, detached reviews) is waited out rather than
+	 * failing the reload. Work that starts while the reload is queued defers it
+	 * again.
+	 *
 	 * Triggered by external lease events, so it always queues behind in-flight
 	 * lifecycle work instead of running re-entrantly. Do not await it from inside a
 	 * lifecycle operation: the FIFO cannot reach it until that operation settles.
 	 */
-	reloadCurrentSessionFromStore(
-		options: { expectedSessionId: string } & Pick<AgentSessionSwitchOptions, "projectTrustContextFactory">,
-	): Promise<{ reloaded: boolean }> {
+	reloadCurrentSessionFromStore(options: ReloadCurrentSessionOptions): Promise<{ reloaded: boolean }> {
 		if (!this.acceptingStructuralOperations) {
 			return Promise.reject(new Error("Agent session runtime is no longer accepting structural operations"));
 		}
 		this.pendingStructuralOperationCount++;
-		const result = this.enqueueLifecycleOperation(async () => {
-			const sessionRef = this.session.sessionRef;
-			if (this.session.sessionId !== options.expectedSessionId || sessionRef === undefined) {
-				return { reloaded: false };
-			}
-			const operation: AgentSessionStructuralOperation = {
-				expectedSession: this.session,
-				expectedRevision: this.lifecycleRevision,
-				expectedConversationGenerationRevision: this.session.conversationGenerationRevision,
-			};
-			this.assertStructuralOperationCurrent(operation);
-			await this.reopenSessionWithinOperation(
-				sessionRef,
-				{ projectTrustContextFactory: options.projectTrustContextFactory },
-				operation,
-				true,
-			);
-			return { reloaded: true };
-		});
-		return result.finally(() => {
+		return this.reloadCurrentSessionWhenIdle(options).finally(() => {
 			this.pendingStructuralOperationCount--;
 		});
+	}
+
+	private async reloadCurrentSessionWhenIdle(options: ReloadCurrentSessionOptions): Promise<{ reloaded: boolean }> {
+		while (true) {
+			// Wait outside the lifecycle FIFO: the work being waited for may itself
+			// need it (a finished review opens its findings session).
+			await this.waitForReplacementBlockingWork(options.expectedSessionId);
+			if (!this.acceptingStructuralOperations) {
+				throw new Error("Agent session runtime is no longer accepting structural operations");
+			}
+			const result = await this.enqueueLifecycleOperation(() => this.reloadCurrentSessionIfIdle(options));
+			if (result) return result;
+		}
+	}
+
+	/** Resolves `undefined` when local work started while the reload was queued. */
+	private async reloadCurrentSessionIfIdle(
+		options: ReloadCurrentSessionOptions,
+	): Promise<{ reloaded: boolean } | undefined> {
+		const sessionRef = this.session.sessionRef;
+		if (this.session.sessionId !== options.expectedSessionId || sessionRef === undefined) {
+			return { reloaded: false };
+		}
+		// An invalidated session fails the structural check below instead.
+		if (!this.sessionInvalidated && this.hasReplacementBlockingWork()) {
+			return undefined;
+		}
+		const operation: AgentSessionStructuralOperation = {
+			expectedSession: this.session,
+			expectedRevision: this.lifecycleRevision,
+			expectedConversationGenerationRevision: this.session.conversationGenerationRevision,
+		};
+		this.assertStructuralOperationCurrent(operation);
+		await this.reopenSessionWithinOperation(
+			sessionRef,
+			{ projectTrustContextFactory: options.projectTrustContextFactory },
+			operation,
+			true,
+		);
+		return { reloaded: true };
+	}
+
+	/**
+	 * Local work that replacing the current session would reject or tear down:
+	 * everything `AgentSession.isBusy` covers plus detached review workflows.
+	 */
+	private hasReplacementBlockingWork(): boolean {
+		return this.session.isBusy || this._reviewWorkflows?.hasActiveWorkflows === true;
+	}
+
+	private async waitForReplacementBlockingWork(expectedSessionId: string): Promise<void> {
+		while (
+			this.acceptingStructuralOperations &&
+			this.session.sessionId === expectedSessionId &&
+			this.hasReplacementBlockingWork()
+		) {
+			const session = this.session;
+			await session.waitForNotBusy();
+			// waitForNotBusy also returns once the session is disposed. The lifecycle
+			// operation disposing it decides what the queued reload observes.
+			if (session.isBusy) return;
+			await this._reviewWorkflows?.waitForIdle();
+		}
 	}
 
 	/**

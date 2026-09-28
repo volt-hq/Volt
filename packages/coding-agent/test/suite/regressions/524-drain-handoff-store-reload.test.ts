@@ -167,6 +167,48 @@ describe("regression #524: reloading the current session after another owner wro
 			.flatMap((entry) => (entry.type === "custom" && entry.customType === customType ? [entry.data] : []));
 	}
 
+	function delay(ms: number): Promise<void> {
+		return new Promise((resolve) => setTimeout(resolve, ms));
+	}
+
+	function trackSettlement(promise: Promise<unknown>): () => boolean {
+		let settled = false;
+		promise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		return () => settled;
+	}
+
+	/** Register a detached review the way interactive /review does; it runs until released or aborted. */
+	function startGatedReview(runtime: AgentSessionRuntime) {
+		let release = (): void => {};
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const workflow = runtime.reviewWorkflows.start({
+			prepared: {
+				workflowId: `review:${Math.random().toString(36).slice(2)}`,
+				action: "review.uncommitted",
+				startedAt: Date.now(),
+				resolution: { description: "uncommitted changes", diffCommand: "git diff" },
+			},
+			execute: async ({ signal }) => {
+				await Promise.race([
+					gate,
+					new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })),
+				]);
+				return { status: "cancelled" };
+			},
+		});
+		workflow.launch();
+		return { finished: workflow.finished, release };
+	}
+
 	async function readStoredCustomEntryData(sessionRef: SessionReference, customType: string): Promise<unknown[]> {
 		const manager = await SessionManager.open(sessionRef);
 		try {
@@ -388,6 +430,130 @@ describe("regression #524: reloading the current session after another owner wro
 		await expect(reload).resolves.toEqual({ reloaded: true });
 		expect(order).toEqual(["outer", "reload"]);
 		expect(runtime.session.messages.map(getMessageText)).toEqual(["phone prompt"]);
+	});
+
+	it("waits for a running detached review instead of failing the reload", async () => {
+		const { runtime } = await createRuntimeForTest(["tui reply"]);
+		await runtime.session.prompt("tui prompt");
+		const sessionRef = requireSessionRef(runtime);
+		const session = runtime.session;
+		const review = startGatedReview(runtime);
+		await appendAsOtherOwner(sessionRef, (manager) => {
+			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
+			manager.appendMessage(fauxAssistantMessage("phone reply"));
+		});
+
+		const reload = runtime.reloadCurrentSessionFromStore({ expectedSessionId: session.sessionId });
+		const reloadSettled = trackSettlement(reload);
+		await delay(20);
+		expect(reloadSettled()).toBe(false);
+		expect(runtime.session).toBe(session);
+
+		review.release();
+		await expect(reload).resolves.toEqual({ reloaded: true });
+		expect(runtime.session).not.toBe(session);
+		expect(runtime.session.messages.map(getMessageText)).toEqual([
+			"tui prompt",
+			"tui reply",
+			"phone prompt",
+			"phone reply",
+		]);
+	});
+
+	it("waits again for a review that starts while the reload is queued", async () => {
+		const { runtime } = await createRuntimeForTest([]);
+		const session = runtime.session;
+		let reload: Promise<{ reloaded: boolean }> | undefined;
+		let review: ReturnType<typeof startGatedReview> | undefined;
+		await runtime.runWithStableSession(async (current) => {
+			// The session is idle here, so the reload queues behind this operation.
+			reload = runtime.reloadCurrentSessionFromStore({ expectedSessionId: current.sessionId });
+			await delay(10);
+			review = startGatedReview(runtime);
+		});
+		if (!reload || !review) throw new Error("expected a queued reload and a running review");
+
+		const reloadSettled = trackSettlement(reload);
+		await delay(20);
+		expect(reloadSettled()).toBe(false);
+		expect(runtime.session).toBe(session);
+
+		review.release();
+		await expect(reload).resolves.toEqual({ reloaded: true });
+		expect(runtime.session).not.toBe(session);
+	});
+
+	it("waits again for an agent run that starts while the reload is queued", async () => {
+		const { runtime, faux } = await createRuntimeForTest([]);
+		let releaseRun = (): void => {};
+		const runGate = new Promise<void>((resolve) => {
+			releaseRun = resolve;
+		});
+		// Runs before runtime disposal, so a failed assertion cannot strand the run.
+		cleanups.push(() => releaseRun());
+		let markRunStarted = (): void => {};
+		const runStarted = new Promise<void>((resolve) => {
+			markRunStarted = resolve;
+		});
+		faux.setResponses([
+			async () => {
+				markRunStarted();
+				await runGate;
+				return fauxAssistantMessage("local reply");
+			},
+		]);
+		const sessionRef = requireSessionRef(runtime);
+		const session = runtime.session;
+		let reload: Promise<{ reloaded: boolean }> | undefined;
+		let prompt: Promise<void> | undefined;
+		await runtime.runWithStableSession(async (current) => {
+			reload = runtime.reloadCurrentSessionFromStore({ expectedSessionId: current.sessionId });
+			prompt = current.prompt("local prompt");
+			await runStarted;
+		});
+		if (!reload || !prompt) throw new Error("expected a queued reload and a running prompt");
+
+		const reloadSettled = trackSettlement(reload);
+		await delay(20);
+		expect(reloadSettled()).toBe(false);
+		expect(runtime.session).toBe(session);
+		expect(session.isStreaming).toBe(true);
+
+		releaseRun();
+		await prompt;
+		await expect(reload).resolves.toEqual({ reloaded: true });
+		expect(runtime.session).not.toBe(session);
+		expect(runtime.session.messages.map(getMessageText)).toEqual(["local prompt", "local reply"]);
+		expect(await readStoredMessageTexts(sessionRef)).toEqual(["local prompt", "local reply"]);
+	});
+
+	it("lets a finished review open its findings session before the waiting reload runs", async () => {
+		const { runtime } = await createRuntimeForTest([]);
+		const session = runtime.session;
+		const review = startGatedReview(runtime);
+		const reload = runtime.reloadCurrentSessionFromStore({ expectedSessionId: session.sessionId });
+		await delay(10);
+
+		// Interactive /review opens a findings session as soon as its workflow ends.
+		const promoted = review.finished.then(() => runtime.newSession());
+		review.release();
+
+		await expect(promoted).resolves.toEqual({ cancelled: false, seeded: false });
+		await expect(reload).resolves.toEqual({ reloaded: false });
+		expect(runtime.session.sessionId).not.toBe(session.sessionId);
+	});
+
+	it("stops waiting and rejects when the runtime is disposed", async () => {
+		const { runtime } = await createRuntimeForTest([]);
+		startGatedReview(runtime);
+		const reload = runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId });
+		const rejected = expect(reload).rejects.toThrow(
+			"Agent session runtime is no longer accepting structural operations",
+		);
+		await delay(10);
+
+		await runtime.dispose();
+		await rejected;
 	});
 
 	it("keeps a cwd override when the stored cwd is missing", async () => {

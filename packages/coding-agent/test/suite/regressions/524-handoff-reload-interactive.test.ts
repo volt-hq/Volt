@@ -9,7 +9,6 @@ type AbsorbContext = {
 	isShuttingDown: boolean;
 	session: {
 		sessionRef: object | undefined;
-		waitForNotBusy: () => Promise<void>;
 		reload: () => Promise<void>;
 	};
 	runtimeHost: {
@@ -65,8 +64,9 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 	return { promise, resolve };
 }
 
-function createGrantContext(overrides: { waitForNotBusy?: () => Promise<void>; reloadError?: Error } = {}) {
+function createGrantContext(overrides: { reloadGate?: Promise<void>; reloadError?: Error } = {}) {
 	const reloadCurrentSessionFromStore = vi.fn(async (_options: ReloadRequest) => {
+		await overrides.reloadGate;
 		if (overrides.reloadError) throw overrides.reloadError;
 		return { reloaded: true };
 	});
@@ -77,7 +77,6 @@ function createGrantContext(overrides: { waitForNotBusy?: () => Promise<void>; r
 		isShuttingDown: false,
 		session: {
 			sessionRef: { sessionId: "s-1" },
-			waitForNotBusy: vi.fn(overrides.waitForNotBusy ?? (async () => {})),
 			reload: vi.fn(async () => {}),
 		},
 		runtimeHost: { reloadCurrentSessionFromStore, startRecoveredClientInputs: vi.fn(async () => {}) },
@@ -99,10 +98,11 @@ describe("regression #524: interactive handoff reload", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("holds input from the drain grant and reloads the granted session once local work settles", async () => {
-		const notBusy = deferred();
+	it("holds input from the drain grant until the granted session finishes reloading", async () => {
+		// The runtime reload waits out local work (runs, reviews) before it settles.
+		const reloadGate = deferred();
 		const { context, reloadCurrentSessionFromStore, handleFatalRuntimeError, finish } = createGrantContext({
-			waitForNotBusy: () => notBusy.promise,
+			reloadGate: reloadGate.promise,
 		});
 
 		const grant = interactiveModePrototype.finishDrainViewerGrant.call(context, "s-1");
@@ -111,16 +111,17 @@ describe("regression #524: interactive handoff reload", () => {
 		expect(context.drainViewer).toBeUndefined();
 		expect(finish).toHaveBeenCalledTimes(1);
 		expect(context.handoffReloadsPending).toBe(1);
-		await Promise.resolve();
-		expect(reloadCurrentSessionFromStore).not.toHaveBeenCalled();
-
-		notBusy.resolve();
-		await grant;
-
 		expect(reloadCurrentSessionFromStore).toHaveBeenCalledWith({
 			expectedSessionId: "s-1",
 			projectTrustContextFactory: expect.any(Function),
 		});
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(context.handoffReloadsPending).toBe(1);
+		expect(context.runtimeHost.startRecoveredClientInputs).not.toHaveBeenCalled();
+
+		reloadGate.resolve();
+		await grant;
+
 		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
 		expect(context.handoffReloadsPending).toBe(0);
 		expect(context.runtimeHost.startRecoveredClientInputs).toHaveBeenCalledTimes(1);

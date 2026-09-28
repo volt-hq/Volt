@@ -2160,9 +2160,9 @@ export class InteractiveMode {
 	 * settings/resources — NOT the conversation — so reopen the session from the
 	 * store at its current revision, rebuilding the in-process transcript and
 	 * model context. Keeping the outdated copy would fail the next append on a
-	 * revision conflict, so a failed reload is fatal. Editor submissions stay held
-	 * until the reload finishes. Sessions without a store reference only reload
-	 * settings.
+	 * revision conflict, so a failed reload is fatal. The runtime waits out local
+	 * work (runs, reviews) before reopening; editor submissions stay held until the
+	 * reload finishes. Sessions without a store reference only reload settings.
 	 */
 	private async absorbRemoteSessionChangesFromDisk(sessionId: string): Promise<void> {
 		this.handoffReloadsPending++;
@@ -2171,7 +2171,6 @@ export class InteractiveMode {
 				await this.session.reload().catch(() => {});
 				return;
 			}
-			await this.session.waitForNotBusy();
 			await this.runtimeHost.reloadCurrentSessionFromStore({
 				expectedSessionId: sessionId,
 				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
