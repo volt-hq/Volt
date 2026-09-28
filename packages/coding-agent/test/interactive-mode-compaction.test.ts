@@ -258,6 +258,7 @@ describe("InteractiveMode compaction events", () => {
 			scheduleWorkSummary: vi.fn(),
 			updateEditorBorderColor: vi.fn(),
 			checkShutdownRequested: vi.fn(async () => undefined),
+			session: { planningState: { mode: "build", plan: null } },
 		};
 		const handleEvent = Reflect.get(InteractiveMode.prototype, "handleEvent") as (
 			this: typeof fakeThis,

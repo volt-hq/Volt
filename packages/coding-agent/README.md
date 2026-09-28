@@ -249,7 +249,9 @@ When the agent submits a plan, Volt offers exactly:
 
 1. **Execute Plan** — return to Build mode and execute in the current conversation.
 2. **Execute Plan & Clear Context** — create and select a linked execution session containing the approved plan but none of the prior conversation.
-3. **Change Plan** — return the ready plan to draft and focus the normal editor for feedback.
+3. **Change Plan** — return the ready plan to draft and focus the normal editor for feedback, keeping any text already there.
+
+A ready plan is an approval checkpoint: nothing proceeds until you choose. Volt opens the chooser once the planning run settles, unless the editor already holds a draft, and keeps a `PLAN READY · APPROVAL NEEDED` cue in the plan status or inspector and the editor border until you act. Alt+P opens the chooser again. Text typed or pasted while the chooser is focused goes to the editor, and submitting it sends feedback that returns the plan to draft.
 
 Approval freezes the plan title, summary, outcome and substep text, ordering, hierarchy, and scope. During execution, the agent can update only executable leaf status and evidence with `update_plan_progress`; group outcome status is derived from its substeps. The inspector expands the active group while collapsing inactive execution groups, while ready-plan review shows the full hierarchy. If implementation reveals that the scope must change, `request_replan` pauses execution, returns the plan to draft without its approval metadata, and ends the run so the revision must be approved again. Switching to Build by itself never approves a ready plan, and explicit `!` shell commands remain available because Plan mode constrains agent tools rather than the host shell. Completed or handed-off plans stay visible until you close them with the plan pane's **Close Plan** action (Alt+P, then Enter) or `/plan-close`; Volt posts a notice when execution completes, and closing a plan keeps it in session history.
 

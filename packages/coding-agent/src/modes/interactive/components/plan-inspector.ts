@@ -20,7 +20,7 @@ import {
 	planPhaseLabel,
 	usesAsciiPlanMarkers,
 } from "./plan-content.ts";
-import { getPlanActions, type PlanDetailsAction } from "./plan-status.ts";
+import { getPlanActions, isComposerInput, type PlanDetailsAction } from "./plan-status.ts";
 
 function stepMarker(status: PlanStepStatus): string {
 	if (usesAsciiPlanMarkers()) {
@@ -64,6 +64,7 @@ export class PlanInspectorComponent implements Component, Focusable {
 	private readonly onAction: (action: PlanDetailsAction) => void;
 	private readonly onReturnFocus: () => void;
 	private readonly onToggleFocus: () => void;
+	private readonly onTextInput: ((data: string) => void) | undefined;
 	private readonly requestRender: () => void;
 	private readonly bodyScroll: ScrollView;
 	private readonly fullscreenLayout: VStack;
@@ -81,12 +82,15 @@ export class PlanInspectorComponent implements Component, Focusable {
 		onAction: (action: PlanDetailsAction) => void;
 		onReturnFocus: () => void;
 		onToggleFocus: () => void;
+		/** Receives text typed or pasted while a ready plan is focused, so it can reach the composer. */
+		onTextInput?: (data: string) => void;
 		requestRender: () => void;
 	}) {
 		this.planning = options.planning;
 		this.onAction = options.onAction;
 		this.onReturnFocus = options.onReturnFocus;
 		this.onToggleFocus = options.onToggleFocus;
+		this.onTextInput = options.onTextInput;
 		this.requestRender = options.requestRender;
 
 		this.bodyScroll = new ScrollView(new PlanInspectorSection((width) => this.renderBody(width)), {
@@ -216,6 +220,8 @@ export class PlanInspectorComponent implements Component, Focusable {
 			this.bodyScroll.scrollBy(-this.getPageSize());
 		} else if (kb.matches(data, "tui.editor.pageDown")) {
 			this.bodyScroll.scrollBy(this.getPageSize());
+		} else if (this.planning.plan?.phase === "ready" && isComposerInput(data)) {
+			this.onTextInput?.(data);
 		}
 	}
 
@@ -233,12 +239,15 @@ export class PlanInspectorComponent implements Component, Focusable {
 		const plan = this.planning.plan;
 		const phase = plan ? planPhaseLabel(plan) : "DRAFT";
 		const marker = usesAsciiPlanMarkers() ? "PLAN" : "◆ PLAN";
+		const ready = plan?.phase === "ready";
 		const focus = this.focused
 			? theme.bold(theme.fg("accent", "FOCUSED"))
-			: theme.fg("dim", `${keyText("app.plan.togglePane")} focus`);
+			: theme.fg("dim", `${keyText("app.plan.togglePane")} ${ready ? "choose" : "focus"}`);
 		return [
 			fitSides(
-				theme.bold(theme.fg(plan?.phase === "ready" ? "warning" : "accent", `${marker} · ${phase}`)),
+				theme.bold(
+					theme.fg(ready ? "warning" : "accent", `${marker} · ${phase}${ready ? " · APPROVAL NEEDED" : ""}`),
+				),
 				focus,
 				width,
 			),

@@ -1,6 +1,7 @@
 import {
 	type Component,
 	createRenderFrame,
+	decodePrintableKey,
 	getKeybindings,
 	type RenderFrame,
 	ScrollView,
@@ -54,8 +55,9 @@ export class PlanStatusComponent implements Component {
 		}
 
 		const { completed, total, percent } = getPlanProgress(plan);
+		const ready = plan.phase === "ready";
 		const left = theme.bold(
-			theme.fg(plan.phase === "ready" ? "warning" : "accent", `${mark} ${planPhaseLabel(plan)}`),
+			theme.fg(ready ? "warning" : "accent", `${mark} ${planPhaseLabel(plan)}${ready ? " · APPROVAL NEEDED" : ""}`),
 		);
 		const hasSubsteps = plan.steps.some((step) => step.substeps !== undefined);
 		const right = theme.fg(
@@ -68,6 +70,16 @@ export class PlanStatusComponent implements Component {
 		);
 		const gap = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
 		const lines = [truncateToWidth(`${left}${gap}${right}`, width)];
+		// The approval cue stays at every width: nothing proceeds until the user decides.
+		if (ready) {
+			lines.push(
+				truncateToWidth(
+					` ${keyHint("app.plan.togglePane", "choose next step")}  ${keyHint("tui.input.submit", "send feedback")}`,
+					width,
+				),
+			);
+			return createRenderFrame(lines);
+		}
 		if (width < 100) return createRenderFrame(lines);
 
 		const step = getCurrentPlanStep(plan);
@@ -89,8 +101,6 @@ export class PlanStatusComponent implements Component {
 			lines.push(truncateToWidth(theme.fg("muted", " All steps complete · /plan-close to close"), width));
 		} else if (step) {
 			lines.push(truncateToWidth(theme.fg("muted", ` Current · ${step}`), width));
-		} else if (plan.phase === "ready") {
-			lines.push(truncateToWidth(theme.fg("muted", " Choose how to execute or return to editing"), width));
 		}
 		return createRenderFrame(lines);
 	}
@@ -116,6 +126,11 @@ export function getPlanActions(phase: PlanPhase | undefined): ReadonlyArray<Plan
 	if (phase === "ready") return READY_PLAN_ACTIONS;
 	if (phase === "completed" || phase === "handed_off") return FINISHED_PLAN_ACTIONS;
 	return [];
+}
+
+/** Printable keystrokes and pastes that belong in the composer rather than the ready-plan chooser. */
+export function isComposerInput(data: string): boolean {
+	return data.includes("\x1b[200~") || decodePrintableKey(data) !== undefined || /^[^\x00-\x1f\x7f]/u.test(data);
 }
 
 class PlanDetailsSection implements Component {
@@ -145,6 +160,7 @@ export class PlanDetailsComponent implements Component {
 	private readonly getTerminalRows: () => number;
 	private readonly onAction: (action: PlanDetailsAction) => void;
 	private readonly onClose: () => void;
+	private readonly onTextInput: ((data: string) => void) | undefined;
 	private readonly requestRender: () => void;
 	private readonly bodyScroll: ScrollView;
 	private readonly fullscreenLayout: VStack;
@@ -158,12 +174,15 @@ export class PlanDetailsComponent implements Component {
 		fullscreenScrollbar?: ScrollViewScrollbar;
 		onAction: (action: PlanDetailsAction) => void;
 		onClose: () => void;
+		/** Receives text typed or pasted while a ready plan is shown, so it can reach the composer. */
+		onTextInput?: (data: string) => void;
 		requestRender: () => void;
 	}) {
 		this.plan = options.plan;
 		this.getTerminalRows = options.getTerminalRows;
 		this.onAction = options.onAction;
 		this.onClose = options.onClose;
+		this.onTextInput = options.onTextInput;
 		this.requestRender = options.requestRender;
 
 		const body = new PlanDetailsSection((width) => renderPlanContentLines(this.plan, width, theme));
@@ -268,6 +287,8 @@ export class PlanDetailsComponent implements Component {
 			this.bodyScroll.scrollBy(-pageSize);
 		} else if (kb.matches(data, "tui.editor.pageDown")) {
 			this.bodyScroll.scrollBy(pageSize);
+		} else if (this.plan.phase === "ready" && isComposerInput(data)) {
+			this.onTextInput?.(data);
 		}
 	}
 
@@ -305,7 +326,11 @@ export class PlanDetailsComponent implements Component {
 		const singleActionHint =
 			actions.length === 1 ? `  ${keyHint("tui.select.confirm", actions[0]!.toLowerCase())}` : "";
 		if (actions.length > 0) {
-			lines.push("");
+			lines.push(
+				this.plan.phase === "ready"
+					? truncateToWidth(` ${theme.bold(theme.fg("warning", "Plan ready — choose the next step"))}`, width)
+					: "",
+			);
 			if (compact) {
 				lines.push(
 					...actions.map((label, index) =>

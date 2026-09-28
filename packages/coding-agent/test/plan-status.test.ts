@@ -1,6 +1,7 @@
-import { TuiAltScreen, visibleWidth } from "@hansjm10/volt-tui";
+import { setKeybindings, TuiAltScreen, visibleWidth } from "@hansjm10/volt-tui";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal.ts";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
 import type { PlanState } from "../src/core/planning.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import {
@@ -94,10 +95,29 @@ describe("Plan TUI components", () => {
 		initTheme("dark");
 		expect(new PlanStatusComponent({ mode: "build", plan: null }).render(80).lines).toEqual([]);
 
-		const rendered = new PlanStatusComponent({ mode: "plan", plan: readyPlan() }).render(80).lines;
+		const active = { ...readyPlan(), phase: "active" as const };
+		const rendered = new PlanStatusComponent({ mode: "build", plan: active }).render(80).lines;
 		expect(rendered).toHaveLength(1);
-		expect(plain(rendered)).toContain("PLAN READY");
+		expect(plain(rendered)).toContain("PLAN EXECUTING");
 		expect(plain(rendered)).toContain("4/12 · 33%");
+	});
+
+	it("keeps a ready plan's approval cue and next-step keys at every width", () => {
+		initTheme("dark");
+		setKeybindings(new KeybindingsManager({ "app.plan.togglePane": "alt+x" }));
+		try {
+			const status = new PlanStatusComponent({ mode: "plan", plan: readyPlan() });
+			for (const width of [60, 80, 120]) {
+				const rendered = status.render(width).lines;
+				expect(rendered).toHaveLength(2);
+				const text = plain(rendered);
+				expect(text).toContain("PLAN READY · APPROVAL NEEDED");
+				expect(text).toMatch(/(alt|option)\+x choose next step {2}enter send feedback/);
+				for (const line of rendered) expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+			}
+		} finally {
+			setKeybindings(new KeybindingsManager());
+		}
 	});
 
 	it("summarizes a working draft without exposing authored content", () => {
@@ -242,6 +262,42 @@ describe("Plan TUI components", () => {
 				tui.stop({ preserveScreen: true });
 			}
 		}
+	});
+
+	it("heads ready actions with the pending decision", () => {
+		initTheme("dark");
+		for (const width of [80, 120]) {
+			const footer = plain(createDetails(readyPlan(), 36).render(width).lines);
+			expect(footer).toMatch(/Plan ready — choose the next step\n.*Execute Plan/);
+		}
+		expect(plain(createDetails(finishedPlan("completed"), 36).render(120).lines)).not.toContain("Plan ready");
+	});
+
+	it("hands typed and pasted text to the composer instead of confirming a ready action", () => {
+		initTheme("dark");
+		const actions: PlanDetailsAction[] = [];
+		const typed: string[] = [];
+		const options = {
+			getTerminalRows: () => 36,
+			onAction: (action: PlanDetailsAction) => actions.push(action),
+			onClose: () => undefined,
+			onTextInput: (data: string) => typed.push(data),
+			requestRender: () => undefined,
+		};
+		const details = new PlanDetailsComponent({ ...options, plan: readyPlan() });
+		for (const data of ["l", "é", "\x1b[108u", "\x1b[200~pasted\x1b[201~"]) details.handleInput(data);
+		expect(typed).toEqual(["l", "é", "\x1b[108u", "\x1b[200~pasted\x1b[201~"]);
+		expect(actions).toEqual([]);
+
+		details.handleInput("\x1b[C");
+		details.handleInput("\x01");
+		expect(typed).toHaveLength(4);
+		details.handleInput("\r");
+		expect(actions).toEqual(["new_session"]);
+
+		const finished = new PlanDetailsComponent({ ...options, plan: finishedPlan("completed") });
+		finished.handleInput("x");
+		expect(typed).toHaveLength(4);
 	});
 
 	it("moves through ready actions and confirms the exact selected strategy", () => {
