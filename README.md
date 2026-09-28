@@ -31,6 +31,9 @@ Run `/login` to configure a supported subscription or API-key provider, then `/m
 
 Standalone executables are available on the [releases page](https://github.com/volt-hq/Volt/releases), but provide **local CLI/TUI only**, not the daemon or iOS connection. Use the npm installation for phone access. Intel macOS also lacks the native phone-transport binding. See [Standalone Binary Capabilities](packages/coding-agent/BINARY-CAPABILITIES.md).
 
+<p align="center"><img src="packages/coding-agent/docs/images/interactive-mode.png" alt="Volt terminal session in a sample project. Below the startup header, the user asks Volt to make a failing slugify test pass. Volt reads src/slugify.js, runs npm test and sees the failure, edits the file with an inline diff, reruns npm test successfully, and summarizes the fix. The editor and footer show the project path, git branch, session name, model, and context usage." width="720"></p>
+<p align="center"><em>Volt 0.2.1 fixing a failing test in a sample project. See <a href="packages/coding-agent/docs/usage.md">Using Volt</a> for the interface and <a href="packages/coding-agent/docs/sessions.md">Sessions</a> for branching with <code>/tree</code>.</em></p>
+
 ## Continue from your iPhone
 
 With the Volt companion app installed, start the host and register a project:
@@ -47,6 +50,12 @@ Scan the one-time pairing QR in the app. You can also manage pairing, registered
 - Reconnect to the saved computer without scanning another QR. Supported terminal sessions attach to the running daemon so the phone can join the same conversation.
 - Disconnecting or backgrounding the app does not cancel active work. Your computer must remain running and reachable; shutting down the host stops in-memory work.
 - Direct and self-hosted connections are separate from Volt Pro's managed relay and completion-notification services. See the [privacy policy](https://volt-cli.dev/privacy) and [terms](https://volt-cli.dev/terms) for service details.
+
+<p align="center">
+<img src="packages/coding-agent/docs/images/shared-session-phone.png" alt="Volt iOS app showing the conversation Discuss a Small Todo App in the volt workspace on branch fix/511-stale-default-models. The prompt Tell me about a small todo app, sent from the phone, is followed by the model's reply. The composer shows Build mode and the gpt-6-luna model." width="240">
+<img src="packages/coding-agent/docs/images/shared-session-terminal.png" alt="The same conversation open in the Volt terminal UI on the computer, showing the same prompt and reply. The footer shows the branch, session name, gpt-6-luna, and [phone 1], meaning one phone is attached." width="540">
+</p>
+<p align="center"><em>One conversation in the Volt iOS app and in the terminal (Volt 0.2.1). The prompt came from the phone and ran on the computer; <code>[phone 1]</code> in the terminal footer shows the attached phone.</em></p>
 
 See the [phone quickstart](packages/coding-agent/docs/quickstart.md#continue-from-your-iphone), [daemon guide](packages/coding-agent/docs/daemon.md), and [remote security model](packages/coding-agent/docs/security.md#remote-access-over-iroh-preview) for requirements and troubleshooting.
 

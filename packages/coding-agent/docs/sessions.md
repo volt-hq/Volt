@@ -74,6 +74,9 @@ Named sessions are easier to find in `/resume` and `volt -r`.
 
 Sessions are stored as trees. Every entry has an `id` and `parentId`, and the current position is the active leaf. `/tree` lets you jump to any previous point and continue from there without creating another session.
 
+<p align="center"><img src="images/tree-view.png" alt="Volt session tree selector. After the first answer the session splits into two branches: the active, highlighted branch adds a separator option, and the other branch, labeled maxLength draft, adds a maxLength option. Each branch lists its user prompt, tool calls, and assistant reply." width="720"></p>
+<p align="center"><em><code>/tree</code> in Volt 0.2.1 after rewriting an earlier prompt. Both branches remain in the same session.</em></p>
+
 Example shape:
 
 ```text
