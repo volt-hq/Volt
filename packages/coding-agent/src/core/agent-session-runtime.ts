@@ -1279,6 +1279,9 @@ export class AgentSessionRuntime {
 	 * in-memory copy has not seen; keeping that copy would fail the next append on
 	 * a revision conflict.
 	 *
+	 * The reload keeps the session's current cwd, including a "continue in current
+	 * cwd" override that the store never recorded.
+	 *
 	 * Unlike switchSession, extensions cannot cancel the reload through
 	 * `session_before_switch`; `session_shutdown` and `session_start` still fire
 	 * with reason "resume". Resolves `{ reloaded: false }` without changes when the
@@ -1320,6 +1323,22 @@ export class AgentSessionRuntime {
 		});
 	}
 
+	/**
+	 * Open a session reference, keeping the current session's cwd when the ref is
+	 * the current session. A cwd override ("continue in current cwd") lives only in
+	 * memory; the store keeps the original, possibly missing, cwd.
+	 */
+	private openSessionManager(sessionRef: SessionReference, cwdOverride?: string): Promise<SessionManager> {
+		const currentSessionRef = this.session.sessionRef;
+		return SessionManager.open(
+			sessionRef,
+			cwdOverride ??
+				(currentSessionRef !== undefined && sessionRefsEqual(sessionRef, currentSessionRef)
+					? this.session.sessionManager.getCwd()
+					: undefined),
+		);
+	}
+
 	private async reopenSessionWithinOperation(
 		sessionRef: SessionReference,
 		options: AgentSessionSwitchOptions | undefined,
@@ -1329,7 +1348,7 @@ export class AgentSessionRuntime {
 		this.assertNoActiveDetachedReview();
 
 		const previousSessionRef = this.session.sessionRef;
-		const sessionManager = await SessionManager.open(sessionRef, options?.cwdOverride);
+		const sessionManager = await this.openSessionManager(sessionRef, options?.cwdOverride);
 		let managerTransferred = false;
 		try {
 			this.assertStructuralOperationCurrent(operation);
@@ -1749,7 +1768,7 @@ export class AgentSessionRuntime {
 
 			await this.session.sessionManager.flush();
 			this.assertStructuralOperationCurrent(operation);
-			const sessionManager = await SessionManager.open(currentSessionRef);
+			const sessionManager = await this.openSessionManager(currentSessionRef);
 			let managerTransferred = false;
 			try {
 				this.assertStructuralOperationCurrent(operation);

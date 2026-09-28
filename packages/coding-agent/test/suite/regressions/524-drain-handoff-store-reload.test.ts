@@ -24,7 +24,11 @@ describe("regression #524: reloading the current session after another owner wro
 		}
 	});
 
-	async function createRuntimeForTest(responses: string[], extensionFactory: ExtensionFactory = () => {}) {
+	async function createRuntimeForTest(
+		responses: string[],
+		extensionFactory: ExtensionFactory = () => {},
+		createSessionManager: (tempDir: string) => Promise<SessionManager> = (tempDir) => SessionManager.create(tempDir),
+	) {
 		const tempDir = join(tmpdir(), `volt-524-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -76,10 +80,11 @@ describe("regression #524: reloading the current session after another owner wro
 			};
 		};
 
+		const sessionManager = await createSessionManager(tempDir);
 		const runtime = await createAgentSessionRuntime(createRuntime, {
-			cwd: tempDir,
+			cwd: sessionManager.getCwd(),
 			agentDir: tempDir,
-			sessionManager: await SessionManager.create(tempDir),
+			sessionManager,
 		});
 		// Bind replacements the way interactive mode does.
 		runtime.setRebindSession(async (session) => {
@@ -94,7 +99,37 @@ describe("regression #524: reloading the current session after another owner wro
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		});
-		return { runtime, faux };
+		return { runtime, faux, tempDir };
+	}
+
+	/**
+	 * A session whose stored cwd was deleted, opened with a "continue in current
+	 * cwd" override the way startup and /resume do. The store keeps the old cwd.
+	 */
+	async function createRuntimeWithCwdOverride(responses: string[]) {
+		let storedCwd = "";
+		const created = await createRuntimeForTest(responses, undefined, async (tempDir) => {
+			storedCwd = join(tempDir, "moved-project");
+			mkdirSync(storedCwd, { recursive: true });
+			const seed = await SessionManager.create(storedCwd, join(tempDir, "sessions"));
+			let sessionRef: SessionReference | undefined;
+			try {
+				seed.appendMessage({ role: "user", content: "before move", timestamp: Date.now() });
+				seed.appendMessage(fauxAssistantMessage("before move reply"));
+				await seed.flush();
+				sessionRef = seed.getSessionRef();
+			} finally {
+				await seed.closePersistence();
+			}
+			if (!sessionRef) throw new Error("expected a persisted session");
+			rmSync(storedCwd, { recursive: true, force: true });
+			return SessionManager.open(sessionRef, tempDir);
+		});
+		await created.runtime.session.sessionManager.flush();
+		const cwdBefore = created.runtime.session.sessionManager.getCwd();
+		expect(cwdBefore).toBe(created.tempDir);
+		expect(created.runtime.cwd).toBe(cwdBefore);
+		return { ...created, storedCwd, cwdBefore };
 	}
 
 	function requireSessionRef(runtime: AgentSessionRuntime): SessionReference {
@@ -246,6 +281,93 @@ describe("regression #524: reloading the current session after another owner wro
 		await expect(reload).resolves.toEqual({ reloaded: true });
 		expect(order).toEqual(["outer", "reload"]);
 		expect(runtime.session.messages.map(getMessageText)).toEqual(["phone prompt"]);
+	});
+
+	it("keeps a cwd override when the stored cwd is missing", async () => {
+		const { runtime, cwdBefore } = await createRuntimeWithCwdOverride(["after handoff"]);
+		const sessionRef = requireSessionRef(runtime);
+		await appendAsOtherOwner(sessionRef, (manager) => {
+			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
+			manager.appendMessage(fauxAssistantMessage("phone reply"));
+		});
+
+		await expect(
+			runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId }),
+		).resolves.toEqual({ reloaded: true });
+
+		expect(runtime.cwd).toBe(cwdBefore);
+		expect(runtime.session.sessionManager.getCwd()).toBe(cwdBefore);
+		expect(runtime.session.messages.map(getMessageText)).toEqual([
+			"before move",
+			"before move reply",
+			"phone prompt",
+			"phone reply",
+		]);
+		await runtime.session.prompt("after handoff prompt");
+		expect(await readStoredMessageTexts(sessionRef)).toEqual([
+			"before move",
+			"before move reply",
+			"phone prompt",
+			"phone reply",
+			"after handoff prompt",
+			"after handoff",
+		]);
+	});
+
+	it("keeps a cwd override when the stored cwd exists again", async () => {
+		const { runtime, storedCwd, cwdBefore } = await createRuntimeWithCwdOverride([]);
+		mkdirSync(storedCwd, { recursive: true });
+
+		await expect(
+			runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId }),
+		).resolves.toEqual({ reloaded: true });
+
+		expect(runtime.cwd).toBe(cwdBefore);
+		expect(runtime.session.sessionManager.getCwd()).toBe(cwdBefore);
+	});
+
+	it("keeps a cwd override when switching to the current session without conversation authority", async () => {
+		const { runtime, cwdBefore } = await createRuntimeWithCwdOverride([]);
+		const sessionRef = requireSessionRef(runtime);
+		await appendAsOtherOwner(sessionRef, (manager) => {
+			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
+		});
+		const staleManager = runtime.session.sessionManager;
+		staleManager.appendCustomEntry("test", { writer: "stale" });
+		await expect(staleManager.flush()).rejects.toThrow("Session revision changed");
+		expect(staleManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+
+		await expect(runtime.switchSession(sessionRef)).resolves.toMatchObject({ cancelled: false });
+
+		expect(runtime.session.sessionManager).not.toBe(staleManager);
+		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
+		expect(runtime.cwd).toBe(cwdBefore);
+		expect(runtime.session.sessionManager.getCwd()).toBe(cwdBefore);
+		expect(runtime.session.messages.map(getMessageText)).toEqual([
+			"before move",
+			"before move reply",
+			"phone prompt",
+		]);
+	});
+
+	it("keeps a cwd override in the forked session", async () => {
+		const { runtime, cwdBefore } = await createRuntimeWithCwdOverride([]);
+		const sourceSessionRef = requireSessionRef(runtime);
+		const leafId = runtime.session.sessionManager.getLeafId();
+		if (!leafId) throw new Error("expected a leaf entry");
+
+		await expect(runtime.fork(leafId, { position: "at" })).resolves.toMatchObject({ cancelled: false });
+
+		const forkedSessionRef = requireSessionRef(runtime);
+		expect(forkedSessionRef.sessionId).not.toBe(sourceSessionRef.sessionId);
+		expect(runtime.cwd).toBe(cwdBefore);
+		expect(runtime.session.sessionManager.getCwd()).toBe(cwdBefore);
+		const reopened = await SessionManager.open(forkedSessionRef);
+		try {
+			expect(reopened.getCwd()).toBe(cwdBefore);
+		} finally {
+			await reopened.closePersistence();
+		}
 	});
 
 	it("does nothing when the current session changed before the reload ran", async () => {
