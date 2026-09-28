@@ -1,4 +1,4 @@
-import type { Model } from "@hansjm10/volt-ai";
+import { getModel, type KnownProvider, type Model } from "@hansjm10/volt-ai";
 import { describe, expect, test } from "vitest";
 import {
 	defaultModelPerProvider,
@@ -542,11 +542,27 @@ describe("default model selection", () => {
 	});
 
 	test("zai, minimax, cerebras, and ant-ling defaults track current models", () => {
-		expect(defaultModelPerProvider.zai).toBe("glm-5.1");
+		expect(defaultModelPerProvider.zai).toBe("glm-5.3");
+		expect(defaultModelPerProvider["zai-coding-cn"]).toBe("glm-5.3");
 		expect(defaultModelPerProvider.minimax).toBe("MiniMax-M2.7");
 		expect(defaultModelPerProvider["minimax-cn"]).toBe("MiniMax-M2.7");
-		expect(defaultModelPerProvider.cerebras).toBe("zai-glm-4.7");
+		expect(defaultModelPerProvider.cerebras).toBe("qwen-3.8-27b");
 		expect(defaultModelPerProvider["ant-ling"]).toBe("Ring-2.6-1T");
+	});
+
+	test("anthropic, bedrock, and cloudflare-ai-gateway defaults track Claude Opus 5.5", () => {
+		expect(defaultModelPerProvider.anthropic).toBe("claude-opus-5-5");
+		expect(defaultModelPerProvider["amazon-bedrock"]).toBe("us.anthropic.claude-opus-5-5");
+		expect(defaultModelPerProvider["cloudflare-ai-gateway"]).toBe("claude-opus-5.5");
+	});
+
+	test("every provider default exists in the model catalog", () => {
+		for (const [provider, modelId] of Object.entries(defaultModelPerProvider) as [KnownProvider, string][]) {
+			const model = getModel(provider, modelId as never);
+			expect(model, `${provider}/${modelId}`).toBeDefined();
+			expect(model.provider).toBe(provider);
+			expect(model.id).toBe(modelId);
+		}
 	});
 
 	test("ai-gateway default tracks current model", () => {
