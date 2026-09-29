@@ -41,7 +41,7 @@ Vitest can run files in workers and tests within a file concurrently; these are 
 - Cleanup cannot dispose a resource another test still uses.
 - Assertions use the test context's `expect` when running concurrently.
 
-Do not enable concurrency globally or disable isolation as an incidental speed improvement. A sequential annotation is appropriate only when sharing is intentional and documented, not as a way to conceal a leak. Diagnose scheduling failures with a bounded filtered test set; never run unfiltered Vitest for convenience.
+Do not enable concurrency globally or disable isolation as an incidental speed improvement. Opting out with `{ concurrent: false }` (Vitest 5 removed `test.sequential` and `describe.sequential`) is appropriate only when sharing is intentional and documented, not as a way to conceal a leak. Diagnose scheduling failures with a bounded filtered test set; never run unfiltered Vitest for convenience.
 
 ## Type assertions need a compiler
 

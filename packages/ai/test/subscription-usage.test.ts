@@ -36,7 +36,7 @@ function getRequestUrl(input: string | URL | Request): string {
 	return input instanceof Request ? input.url : input.toString();
 }
 
-describe.sequential("subscription usage adapters", () => {
+describe("subscription usage adapters", { concurrent: false }, () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
 		vi.restoreAllMocks();

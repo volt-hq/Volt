@@ -184,11 +184,11 @@ Added test files:
 
 Private factories live in the relevant test or a test-only fixture, not a new example/package. If tracking reveals a specific existing bug, put its regression under `test/suite/regressions/<issue-number>-<slug>.test.ts`; do not invent an issue number.
 
-Run selected tests from their package roots. Both relevant Vitest CLIs currently exist in package-local `node_modules`; recheck paths rather than reinstalling dependencies if the environment changes.
+Run selected tests from their package roots with the Vitest CLI hoisted to the root `node_modules`.
 
 ```bash
 cd packages/agent
-node node_modules/vitest/dist/cli.js --run --config vitest.harness.config.ts \
+node ../../node_modules/vitest/dist/cli.js --run --config vitest.harness.config.ts \
   test/harness/agent-harness-request-boundary.test.ts \
   test/harness/agent-harness-delivery-transaction.test.ts \
   test/harness/agent-harness-lifecycle.test.ts
@@ -196,7 +196,7 @@ node node_modules/vitest/dist/cli.js --run --config vitest.harness.config.ts \
 
 ```bash
 cd packages/coding-agent
-node node_modules/vitest/dist/cli.js --run \
+node ../../node_modules/vitest/dist/cli.js --run \
   test/extension-work-runtime.test.ts \
   test/extension-work-runner.test.ts \
   test/repository-observation.test.ts \

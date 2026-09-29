@@ -1,16 +1,16 @@
 ---
 name: vitest
-description: Write and diagnose Volt's Vitest 3 tests using typed mocks, hoisting, fake timers, fixtures, concurrency isolation, and type assertions. Use for unit or harness testing and targeted test execution; not live-provider e2e testing or dependency upgrades.
+description: Write and diagnose Volt's Vitest 5 tests using typed mocks, hoisting, fake timers, fixtures, concurrency isolation, and type assertions. Use for unit or harness testing and targeted test execution; not live-provider e2e testing or dependency upgrades.
 license: MIT
 metadata:
   upstream: antfu/skills
-  upstream-commit: 5cae97ca87e0dcfb5a192cd2cbf8b83a9f769e8f
-  baseline: Vitest 3.2.6
+  upstream-commit: d02c48452d782231e4c32d7069cde731a4c7db42
+  baseline: Vitest 5.0.2
 ---
 
 # Vitest for Volt
 
-Adapted from Anthony Fu's Vitest 3.x skill revision; see [provenance and license](SOURCES.md). The upstream head targets a newer release. Treat the installed types and owning test configuration as authoritative, even for examples labeled 3.x.
+Adapted from Anthony Fu's Vitest 5.x skill revision; see [provenance and license](SOURCES.md). Treat the installed types and owning test configuration as authoritative over any example.
 
 ## Start with the owning suite
 
@@ -39,10 +39,10 @@ All command paths below are relative to the repository root unless a `cd` is sho
 
 ```bash
 cd packages/coding-agent
-node node_modules/vitest/dist/cli.js --run test/skills.test.ts
+node ../../node_modules/vitest/dist/cli.js --run test/skills.test.ts
 ```
 
-Replace the example file with the actual changed test. Verify the CLI exists first. Vitest is installed under `packages/coding-agent/node_modules` and `packages/ai/node_modules`; for another package, resolve an existing installed CLI without reinstalling dependencies or changing the test's working directory assumptions.
+Replace the example file with the actual changed test. Vitest is hoisted to the root `node_modules`; run it from the owning package root so that package's `vitest.config.ts` applies. If the CLI is missing, the checkout's `node_modules` predates the lockfile; hydrate with `npm ci --ignore-scripts` instead of changing dependency metadata.
 
 - Run every created or modified test and iterate until it passes.
 - Never run an unfiltered Vitest command: the full suite can activate live-provider e2e tests when credentials or endpoints are present.

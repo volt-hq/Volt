@@ -177,7 +177,7 @@ Only successful managed reads contribute source-backed text. Policies, overrides
 From `packages/coding-agent`, using the installed Vitest CLI:
 
 ```bash
-node node_modules/vitest/dist/cli.js --run test/context-preparation-example.test.ts test/suite/context-preparation.test.ts
+node ../../node_modules/vitest/dist/cli.js --run test/context-preparation-example.test.ts test/suite/context-preparation.test.ts
 ```
 
 The SDK-harness comparison uses native temporary skill/source files and a faux provider, with preparation enabled versus omitted. It reports labeled evidence selection, estimated extra message tokens, and production-plus-validation operation counts. Cases cover a skill plus file, a named skill, the two-file cap, ambiguous metadata, irrelevant input, and a negated request. Unit cases also exercise semantic ranges, truncation, unavailable services, and UTF-8 limits. SDK cases verify policy/redaction/staleness omission, the default zero wait, and a slow read reaching the 100 ms cutoff without waking another inference.
