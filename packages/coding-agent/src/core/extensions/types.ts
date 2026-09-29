@@ -109,6 +109,17 @@ export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 // UI Context
 // ============================================================================
 
+/**
+ * Rejection of `ctx.ui.custom()` when Volt removes the component before it calls `done()`,
+ * for example when the session is replaced, reloaded, or loses conversation authority.
+ */
+export class ExtensionUIDismissedError extends Error {
+	constructor() {
+		super("Extension UI was dismissed by the host before it completed");
+		this.name = "ExtensionUIDismissedError";
+	}
+}
+
 /** Options for extension UI dialogs. */
 export interface ExtensionUIDialogOptions {
 	/** AbortSignal to programmatically dismiss the dialog. */
@@ -363,6 +374,13 @@ export interface ExtensionContext {
  * Includes session control methods only safe in user-initiated commands.
  */
 export interface ExtensionCommandContext extends ExtensionContext {
+	/**
+	 * Aborted when this command's session loses conversation authority or is disposed
+	 * (including replacement by newSession, fork, switchSession, or a reload from the store).
+	 * Unlike event-handler contexts, it is always defined and is not the agent run's signal.
+	 */
+	signal: AbortSignal;
+
 	/** Get the current base system-prompt construction options. */
 	getSystemPromptOptions(): BuildSystemPromptOptions;
 

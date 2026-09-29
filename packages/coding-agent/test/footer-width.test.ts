@@ -3,6 +3,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import type { PromptCacheStatus } from "../src/core/prompt-cache-status.ts";
+import { SessionConversationStateUnavailableError } from "../src/core/session-manager.ts";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -48,16 +49,15 @@ function createSession(options: {
 	const contextTokens = options.contextTokens === undefined ? 24_600 : options.contextTokens;
 	const session = {
 		fastModeEnabled: options.fastModeEnabled ?? false,
-		state: {
-			model: {
-				id: options.modelId ?? "test-model",
-				provider: options.provider ?? "test",
-				contextWindow,
-				reasoning: options.reasoning ?? false,
-			},
-			thinkingLevel: options.thinkingLevel ?? "off",
+		model: {
+			id: options.modelId ?? "test-model",
+			provider: options.provider ?? "test",
+			contextWindow,
+			reasoning: options.reasoning ?? false,
 		},
+		thinkingLevel: options.thinkingLevel ?? "off",
 		sessionManager: {
+			getConversationAuthorityStatus: () => ({ status: "available" }),
 			getEntries: () => entries,
 			getSessionName: () => options.sessionName,
 			getCwd: () => "/tmp/project",
@@ -261,6 +261,40 @@ describe("FooterComponent width handling", () => {
 		expect(contextReads).toBe(2);
 	});
 
+	it("renders without conversation readers after conversation authority loss", () => {
+		const loseAuthority = (session: AgentSession) => {
+			const error = new SessionConversationStateUnavailableError({ cause: new Error("commit failed") });
+			const unavailable = () => {
+				throw error;
+			};
+			session.sessionManager.getConversationAuthorityStatus = () => ({
+				status: "reconciliation_required",
+				error,
+			});
+			session.sessionManager.getSessionName = unavailable;
+			session.sessionManager.getEntries = unavailable;
+			session.getContextUsage = unavailable;
+			session.getPromptCacheStatus = unavailable;
+		};
+		const usage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 0.25 } };
+
+		const renderedSession = createSession({ sessionName: "named-session", modelId: "kept-model", usage });
+		const rendered = new FooterComponent(renderedSession, createFooterData(1));
+		expect(stripAnsi(rendered.render(120).lines[1])).toContain("$0.250");
+		loseAuthority(renderedSession);
+		rendered.invalidate();
+		const renderedLines = rendered.render(120).lines.map(stripAnsi);
+		expect(renderedLines[0]).toContain("kept-model");
+		expect(renderedLines[0]).not.toContain("named-session");
+		expect(renderedLines[1]).toContain("$0.250");
+
+		const freshSession = createSession({ sessionName: "named-session", modelId: "fresh-model", usage });
+		loseAuthority(freshSession);
+		const freshLines = new FooterComponent(freshSession, createFooterData(1)).render(120).lines.map(stripAnsi);
+		expect(freshLines[0]).toContain("fresh-model");
+		expect(freshLines[1]).not.toContain("$");
+	});
+
 	it("labels subscription billing without showing a misleading zero cost", () => {
 		const footer = new FooterComponent(
 			createSession({ sessionName: "", usingSubscription: true }),
@@ -305,7 +339,7 @@ describe("FooterComponent width handling", () => {
 		});
 		const footer = new FooterComponent(session, createFooterData(1));
 		footer.setTransientUsage({
-			model: { ...session.state.model!, id: "review-model", contextWindow: 100_000 },
+			model: { ...session.model!, id: "review-model", contextWindow: 100_000 },
 			thinkingLevel: "high",
 			fastModeEnabled: true,
 			contextUsage: { tokens: 75_000, contextWindow: 100_000, percent: 75 },
@@ -413,7 +447,7 @@ describe("FooterComponent width handling", () => {
 			});
 			const transient = new FooterComponent(session, createFooterData(1));
 			transient.setTransientUsage({
-				model: session.state.model!,
+				model: session.model!,
 				thinkingLevel: "off",
 				fastModeEnabled: false,
 				contextUsage: { tokens: 1_000, contextWindow: 200_000, percent: 0.5 },

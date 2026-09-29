@@ -87,6 +87,7 @@ import type {
 	ProjectTrustContext,
 	ToolInfo,
 } from "../../core/extensions/index.ts";
+import { ExtensionUIDismissedError } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
 import {
@@ -145,6 +146,7 @@ import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../cor
 import {
 	getDefaultSessionDir,
 	type SessionContext,
+	SessionConversationStateUnavailableError,
 	SessionManager,
 	type SessionReference,
 } from "../../core/session-manager.ts";
@@ -337,6 +339,9 @@ interface InlineSessionRenderer {
 	onSessionEvent: (event: AgentSessionEvent) => void;
 	dispose: () => void;
 }
+
+/** How an extension selector closed: an option picked, cancelled by the user, or dismissed by Volt or its signal. */
+type ExtensionSelectorOutcome = { kind: "selected"; option: string } | { kind: "cancelled" } | { kind: "dismissed" };
 
 interface ActiveViewDescriptor {
 	regularComponents: readonly Component[];
@@ -666,6 +671,10 @@ export class InteractiveMode {
 	private drainViewerFeedId: string | undefined;
 	/** Handoff reloads in flight; editor submissions stay held until they finish. */
 	private handoffReloadsPending = 0;
+	/** Reloads after conversation authority loss; editor submissions stay held until they finish. */
+	private authorityRecoveriesPending = 0;
+	/** Sessions whose authority-loss reload already started. */
+	private readonly authorityRecoveryStarted = new WeakSet<AgentSession>();
 	private dismissSubagentInspector: (() => void) | undefined;
 	/** Confirmation belongs to the work that was active when the warning appeared. */
 	private quitConfirmation:
@@ -679,6 +688,8 @@ export class InteractiveMode {
 	private extensionInputRestore: { view: ActiveViewDescriptor; focus: Component | null } | undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
 	private extensionEditorRestore: { view: ActiveViewDescriptor; focus: Component | null } | undefined;
+	/** Dismiss callbacks of pending extension dialogs, in opening order. Each settles its dialog once. */
+	private readonly pendingExtensionDialogs = new Set<() => void>();
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
@@ -1227,7 +1238,11 @@ export class InteractiveMode {
 	 */
 	private updateTerminalTitle(): void {
 		const cwdBasename = path.basename(this.sessionManager.getCwd());
-		const sessionName = this.sessionManager.getSessionName();
+		// Session replacement retitles while a session without conversation authority is still current.
+		const sessionName =
+			this.sessionManager.getConversationAuthorityStatus().status === "available"
+				? this.sessionManager.getSessionName()
+				: undefined;
 		if (sessionName) {
 			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
 		} else {
@@ -1337,13 +1352,17 @@ export class InteractiveMode {
 		// Main interactive loop
 		while (true) {
 			const userInput = await this.getUserInput();
+			let session = this.session;
 			try {
 				const images = await this.collectPromptImages(userInput);
-				await this.session.prompt(userInput, images ? { images } : undefined);
+				session = this.session;
+				await session.prompt(userInput, images ? { images } : undefined);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
 			}
+			// A failed delivery commit resolves the prompt (delivery_failed) instead of rejecting it.
+			this.restoreInputAfterAuthorityLoss(session, userInput);
 		}
 	}
 
@@ -2896,16 +2915,7 @@ export class InteractiveMode {
 
 	private resetExtensionUI(): void {
 		this.dismissBackgroundJobsInspector?.();
-		if (this.extensionSelector) {
-			this.hideExtensionSelector();
-		}
-		if (this.extensionInput) {
-			this.hideExtensionInput();
-		}
-		if (this.extensionEditor) {
-			this.hideExtensionEditor();
-		}
-		this.ui.hideOverlay();
+		this.dismissPendingExtensionDialogs();
 		this.clearTurnDoneAlertTimer();
 		this.clearPromptCacheAlertTimer();
 		this.clearExtensionTerminalInputListeners();
@@ -3093,11 +3103,12 @@ export class InteractiveMode {
 		const details = [request.message, request.commandPreview ? `Command: ${request.commandPreview}` : undefined]
 			.filter((line): line is string => line !== undefined && line.length > 0)
 			.join("\n\n");
-		const confirmed = await this.showExtensionConfirm(request.title, details, {
+		const outcome = await this.showExtensionSelectorOutcome(`${request.title}\n${details}`, ["Yes", "No"], {
 			signal: options?.signal,
 			timeout: request.timeoutMs,
 		});
-		return { decision: confirmed ? "approved" : "denied" };
+		if (outcome.kind === "dismissed") return { decision: "dismissed" };
+		return { decision: outcome.kind === "selected" && outcome.option === "Yes" ? "approved" : "denied" };
 	}
 
 	private updateHostAction(update: HostActionUpdate): void {
@@ -3172,6 +3183,14 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * Settle every pending extension dialog as dismissed, newest first so view
+	 * restoration unwinds in reverse opening order.
+	 */
+	private dismissPendingExtensionDialogs(): void {
+		for (const dismiss of [...this.pendingExtensionDialogs].reverse()) dismiss();
+	}
+
+	/**
 	 * Show a selector for extensions.
 	 */
 	private showExtensionSelector(
@@ -3179,33 +3198,42 @@ export class InteractiveMode {
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
+		return this.showExtensionSelectorOutcome(title, options, opts).then((outcome) =>
+			outcome.kind === "selected" ? outcome.option : undefined,
+		);
+	}
+
+	private showExtensionSelectorOutcome(
+		title: string,
+		options: string[],
+		opts?: ExtensionUIDialogOptions,
+	): Promise<ExtensionSelectorOutcome> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
-				resolve(undefined);
+				resolve({ kind: "dismissed" });
 				return;
 			}
 
-			const onAbort = () => {
+			let settled = false;
+			const settle = (outcome: ExtensionSelectorOutcome) => {
+				if (settled) return;
+				settled = true;
+				opts?.signal?.removeEventListener("abort", dismiss);
+				this.pendingExtensionDialogs.delete(dismiss);
 				this.hideExtensionSelector();
-				resolve(undefined);
+				resolve(outcome);
 			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			const dismiss = () => settle({ kind: "dismissed" });
+			opts?.signal?.addEventListener("abort", dismiss, { once: true });
+			this.pendingExtensionDialogs.add(dismiss);
 
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionSelectorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionSelector = new ExtensionSelectorComponent(
 				title,
 				options,
-				(option) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(option);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(undefined);
-				},
+				(option) => settle({ kind: "selected", option }),
+				() => settle({ kind: "cancelled" }),
 				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
 			);
 
@@ -3273,29 +3301,25 @@ export class InteractiveMode {
 				return;
 			}
 
-			const onAbort = () => {
+			let settled = false;
+			const settle = (value: string | undefined) => {
+				if (settled) return;
+				settled = true;
+				opts?.signal?.removeEventListener("abort", dismiss);
+				this.pendingExtensionDialogs.delete(dismiss);
 				this.hideExtensionInput();
-				resolve(undefined);
+				resolve(value);
 			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			const dismiss = () => settle(undefined);
+			opts?.signal?.addEventListener("abort", dismiss, { once: true });
+			this.pendingExtensionDialogs.add(dismiss);
 
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionInputRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
-			this.extensionInput = new ExtensionInputComponent(
-				title,
-				placeholder,
-				(value) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(value);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(undefined);
-				},
-				{ tui: this.ui, timeout: opts?.timeout },
-			);
+			this.extensionInput = new ExtensionInputComponent(title, placeholder, (value) => settle(value), dismiss, {
+				tui: this.ui,
+				timeout: opts?.timeout,
+			});
 
 			this.activateView(this.createDedicatedView(this.extensionInput), this.extensionInput);
 		});
@@ -3323,6 +3347,17 @@ export class InteractiveMode {
 	 */
 	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			let settled = false;
+			const settle = (value: string | undefined) => {
+				if (settled) return;
+				settled = true;
+				this.pendingExtensionDialogs.delete(dismiss);
+				this.hideExtensionEditor();
+				resolve(value);
+			};
+			const dismiss = () => settle(undefined);
+			this.pendingExtensionDialogs.add(dismiss);
+
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionEditorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionEditor = new ExtensionEditorComponent(
@@ -3330,14 +3365,8 @@ export class InteractiveMode {
 				this.keybindings,
 				title,
 				prefill,
-				(value) => {
-					this.hideExtensionEditor();
-					resolve(value);
-				},
-				() => {
-					this.hideExtensionEditor();
-					resolve(undefined);
-				},
+				(value) => settle(value),
+				dismiss,
 			);
 
 			this.activateView(this.createDedicatedView(this.extensionEditor), this.extensionEditor);
@@ -3487,24 +3516,46 @@ export class InteractiveMode {
 			let component: Component & { dispose?(): void };
 			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
+			let dismissed = false;
 
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				// A local jobs inspector can be stacked above an asynchronous extension dialog.
-				if (isOverlay) overlayHandle?.hide();
-				else restoreView();
-				resolve(result);
+			const disposeComponent = (target: (Component & { dispose?(): void }) | undefined) => {
 				try {
-					component?.dispose?.();
+					target?.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
+			const finish = (): boolean => {
+				if (closed) return false;
+				closed = true;
+				this.pendingExtensionDialogs.delete(dismiss);
+				// A local jobs inspector can be stacked above an asynchronous extension dialog.
+				if (isOverlay) overlayHandle?.hide();
+				else restoreView();
+				return true;
+			};
+			const close = (result: T) => {
+				if (!finish()) return;
+				resolve(result);
+				disposeComponent(component);
+			};
+			// Volt removed the component before done(); settle so its caller cannot hang.
+			const dismiss = () => {
+				if (!finish()) return;
+				dismissed = true;
+				reject(new ExtensionUIDismissedError());
+				disposeComponent(component);
+			};
 
-			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
+			const created = factory(this.ui, theme, this.keybindings, close);
+			if (!closed) this.pendingExtensionDialogs.add(dismiss);
+			Promise.resolve(created)
 				.then((c) => {
-					if (closed) return;
+					if (closed) {
+						// Never mounted: an asynchronous factory resolved after dismissal.
+						if (dismissed) disposeComponent(c);
+						return;
+					}
 					component = c;
 					if (isOverlay) {
 						// Resolve overlay options - can be static or dynamic function
@@ -3534,6 +3585,8 @@ export class InteractiveMode {
 				})
 				.catch((err) => {
 					if (closed) return;
+					closed = true;
+					this.pendingExtensionDialogs.delete(dismiss);
 					if (!isOverlay) restoreView();
 					reject(err);
 				});
@@ -3863,7 +3916,7 @@ export class InteractiveMode {
 	}
 
 	private setupEditorSubmitHandler(): void {
-		this.defaultEditor.onSubmit = async (text: string) => {
+		const submit = async (text: string): Promise<void> => {
 			text = text.trim();
 			if (!text) return;
 
@@ -3874,15 +3927,17 @@ export class InteractiveMode {
 				return;
 			}
 
-			if (this.isDrainViewerActive() || this.handoffReloadsPending > 0) {
-				// Read-only while the remote turn drains or its transcript reloads: put
-				// the text back in the editor (it lands un-submitted once the handoff
-				// completes).
+			if (this.isDrainViewerActive() || this.handoffReloadsPending > 0 || this.authorityRecoveriesPending > 0) {
+				// Read-only while the remote turn drains or the session reloads from the
+				// store: put the text back in the editor (it lands un-submitted once the
+				// reload completes).
 				this.editor.setText(text);
 				this.showStatus(
 					this.isDrainViewerActive()
 						? "Attaching — input will stay in the editor until the remote turn finishes."
-						: "Loading the remote turn — input will stay in the editor until it finishes.",
+						: this.authorityRecoveriesPending > 0
+							? "Reloading the session — input will stay in the editor until it finishes."
+							: "Loading the remote turn — input will stay in the editor until it finishes.",
 				);
 				return;
 			}
@@ -4119,7 +4174,13 @@ export class InteractiveMode {
 				if (this.isExtensionCommand(text)) {
 					this.editor.addToHistory?.(text);
 					this.editor.setText("");
-					await this.session.prompt(text);
+					const session = this.session;
+					try {
+						await session.prompt(text);
+					} catch (error: unknown) {
+						this.restoreInputAfterAuthorityLoss(session, text);
+						throw error;
+					}
 				} else {
 					this.queueCompactionMessage(text, "steer");
 				}
@@ -4132,7 +4193,13 @@ export class InteractiveMode {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				const images = await this.collectPromptImages(text);
-				await this.session.prompt(text, { streamingBehavior: "steer", images });
+				const session = this.session;
+				try {
+					await session.prompt(text, { streamingBehavior: "steer", images });
+				} catch (error: unknown) {
+					this.restoreInputAfterAuthorityLoss(session, text);
+					throw error;
+				}
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -4149,12 +4216,81 @@ export class InteractiveMode {
 			}
 			this.editor.addToHistory?.(text);
 		};
+		this.defaultEditor.onSubmit = async (text: string) => {
+			try {
+				await submit(text);
+			} catch (error: unknown) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+		};
 	}
 
 	private subscribeToAgent(session: AgentSession): void {
-		this.unsubscribe = session.subscribe(async (event) => {
+		const unsubscribeEvents = session.subscribe(async (event) => {
 			await this.handleEvent(event);
 		});
+		// Runs synchronously inside the failing write; recover once it has unwound.
+		const unsubscribeAuthority = session.sessionManager.subscribeConversationAuthorityChanges((status) => {
+			queueMicrotask(() => void this.handleConversationAuthorityLoss(session, status.error));
+		});
+		this.unsubscribe = () => {
+			unsubscribeEvents();
+			unsubscribeAuthority();
+		};
+	}
+
+	/**
+	 * A write this session could not prove persisted retired its conversation
+	 * authority, so its in-memory copy is unusable. Reopen it from the store, the
+	 * source of truth, as after a daemon handoff. Editor submissions stay held until
+	 * the reload finishes. A failed reload is fatal, as is a session that cannot be
+	 * reloaded (no store reference).
+	 */
+	private async handleConversationAuthorityLoss(
+		session: AgentSession,
+		error: SessionConversationStateUnavailableError,
+	): Promise<void> {
+		if (this.isShuttingDown || session !== this.session || this.authorityRecoveryStarted.has(session)) return;
+		this.authorityRecoveryStarted.add(session);
+		this.authorityRecoveriesPending++;
+		const cause = error.cause instanceof Error ? error.cause.message : error.message;
+		const failure = `Could not confirm the session's saved state: ${cause}`;
+		// Extension UI can read the lost session while rendering. Replacement removes it
+		// anyway, and extensions reinstall it on session_start after the reload. Pending
+		// dialogs settle as dismissed, so no caller waits on UI that is gone.
+		this.resetExtensionUI();
+		this.showError(`${failure}. Reloading the session from the store…`);
+		try {
+			await this.runtimeHost.reloadCurrentSessionFromStore({
+				expectedSessionId: session.sessionId,
+				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+			});
+			const status = this.session.sessionManager.getConversationAuthorityStatus();
+			if (status.status === "reconciliation_required") throw status.error;
+			if (this.isShuttingDown) return;
+			this.stopWorkingLoader();
+			this.renderCurrentSessionState();
+			this.showError(failure);
+			this.showStatus("Reloaded the session from the store. Check the transcript before resending anything.");
+		} catch (reloadError: unknown) {
+			// Shutdown disposes the runtime and owns the exit.
+			if (this.isShuttingDown) return;
+			await this.handleFatalRuntimeError(
+				"Failed to reload the session after its state could not be saved",
+				reloadError,
+				{ unsentDraft: this.editor.getText() },
+			);
+		} finally {
+			this.authorityRecoveriesPending--;
+		}
+	}
+
+	/** Put submitted input back in the editor when its session lost conversation authority. */
+	private restoreInputAfterAuthorityLoss(session: AgentSession, text: string): void {
+		if (session.sessionManager.getConversationAuthorityStatus().status !== "reconciliation_required") return;
+		if (this.editor.getText()) return;
+		this.editor.setText(text);
+		this.ui.requestRender();
 	}
 
 	private subscribeToBackgroundJobs(session: AgentSession): void {
@@ -5151,9 +5287,33 @@ export class InteractiveMode {
 		// Restore the terminal before the process dies on any uncaught throw.
 		// Without this, an unhandled exception from extension code (or anywhere
 		// in volt) leaves the terminal in raw mode with no cursor.
-		const uncaughtExceptionHandler = (error: Error) => this.uncaughtCrash(error);
+		const uncaughtExceptionHandler = (error: Error) => {
+			if (!this.recoverUncaughtAuthorityError(error)) this.uncaughtCrash(error);
+		};
 		process.prependListener("uncaughtException", uncaughtExceptionHandler);
 		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
+		// Registering a listener disables Node's default throw, so other reasons
+		// still crash exactly like an uncaught exception.
+		const unhandledRejectionHandler = (reason: unknown) => {
+			if (this.recoverUncaughtAuthorityError(reason)) return;
+			this.uncaughtCrash(reason instanceof Error ? reason : new Error(String(reason)));
+		};
+		process.prependListener("unhandledRejection", unhandledRejectionHandler);
+		this.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
+	}
+
+	/**
+	 * Whether an uncaught error is a conversation-authority failure that session
+	 * recovery owns: a reader of the fail-stopped session threw. Recovery starts if
+	 * the current session lost authority; otherwise the error came from a session
+	 * that was already replaced and is dropped.
+	 */
+	private recoverUncaughtAuthorityError(error: unknown): boolean {
+		if (!(error instanceof SessionConversationStateUnavailableError) || this.isShuttingDown) return false;
+		if (this.session.sessionManager.getConversationAuthorityStatus().status === "reconciliation_required") {
+			void this.handleConversationAuthorityLoss(this.session, error);
+		}
+		return true;
 	}
 
 	private unregisterSignalHandlers(): void {

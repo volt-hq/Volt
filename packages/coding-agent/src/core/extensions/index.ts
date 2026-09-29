@@ -171,6 +171,7 @@ export type {
 // Type guards
 export {
 	defineTool,
+	ExtensionUIDismissedError,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,

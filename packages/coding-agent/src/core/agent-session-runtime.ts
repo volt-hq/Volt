@@ -1319,7 +1319,8 @@ export class AgentSessionRuntime {
 	 * Local work that the reopen would reject or tear down (agent runs, bash,
 	 * compaction, extension commands, detached reviews) is waited out rather than
 	 * failing the reload. Work that starts while the reload is queued defers it
-	 * again.
+	 * again. A session that lost conversation authority cancels its own blocking
+	 * work (see AgentSession), so the wait ends once that cancellation settles.
 	 *
 	 * Triggered by external lease events, so it always queues behind in-flight
 	 * lifecycle work instead of running re-entrantly. Do not await it from inside a

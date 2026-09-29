@@ -80,6 +80,17 @@ type FooterSnapshot = {
 	promptCache: PromptCacheStatus | undefined;
 };
 
+const EMPTY_FOOTER_SNAPSHOT: FooterSnapshot = {
+	totalInput: 0,
+	totalOutput: 0,
+	totalCacheRead: 0,
+	totalCacheWrite: 0,
+	totalCost: 0,
+	latestCacheHitRate: undefined,
+	contextUsage: undefined,
+	promptCache: undefined,
+};
+
 export function formatCwdForFooter(cwd: string, home: string | undefined): string {
 	if (!home) return cwd;
 
@@ -103,6 +114,8 @@ export class FooterComponent implements Component {
 	private session: AgentSession;
 	private footerData: ReadonlyFooterDataProvider;
 	private snapshot?: FooterSnapshot;
+	/** Last computed snapshot; survives `invalidate()` so it can stand in after conversation authority loss. */
+	private lastSnapshot?: FooterSnapshot;
 	private transientUsage?: SessionUsageProjection;
 	private readonly requestRender: (() => void) | undefined;
 	private cacheRefreshTimer: ReturnType<typeof setTimeout> | undefined;
@@ -118,6 +131,7 @@ export class FooterComponent implements Component {
 	setSession(session: AgentSession): void {
 		this.session = session;
 		this.snapshot = undefined;
+		this.lastSnapshot = undefined;
 		this.transientUsage = undefined;
 		this.clearCacheRefresh();
 	}
@@ -164,8 +178,10 @@ export class FooterComponent implements Component {
 		this.cacheRefreshTimer.unref?.();
 	}
 
-	private getSnapshot(): FooterSnapshot {
+	private getSnapshot(conversationAvailable: boolean): FooterSnapshot {
 		if (this.snapshot) return this.snapshot;
+		// Conversation readers throw after authority loss; keep the last totals until the session is replaced.
+		if (!conversationAvailable) return this.lastSnapshot ?? EMPTY_FOOTER_SNAPSHOT;
 
 		let totalInput = 0;
 		let totalOutput = 0;
@@ -203,13 +219,14 @@ export class FooterComponent implements Component {
 			contextUsage: this.session.getContextUsage(),
 			promptCache: this.session.getPromptCacheStatus(),
 		};
+		this.lastSnapshot = this.snapshot;
 		return this.snapshot;
 	}
 
 	render(width: number): RenderFrame {
 		if (width <= 0) return createRenderFrame([]);
-		const state = this.session.state;
-		const snapshot = this.getSnapshot();
+		const conversationAvailable = this.session.sessionManager.getConversationAuthorityStatus().status === "available";
+		const snapshot = this.getSnapshot(conversationAvailable);
 		const transientUsage = this.transientUsage;
 		const totalInput = transientUsage?.totals.input ?? snapshot.totalInput;
 		const totalOutput = transientUsage?.totals.output ?? snapshot.totalOutput;
@@ -218,8 +235,9 @@ export class FooterComponent implements Component {
 		const totalCost = transientUsage?.totals.cost ?? snapshot.totalCost;
 		const latestCacheHitRate = transientUsage ? transientUsage.latestCacheHitRate : snapshot.latestCacheHitRate;
 		const contextUsage = transientUsage ? transientUsage.contextUsage : snapshot.contextUsage;
-		const activeModel = transientUsage?.model ?? state.model;
-		const activeThinkingLevel = transientUsage ? transientUsage.thinkingLevel : state.thinkingLevel;
+		// Unchecked accessors: the footer renders every frame, including after conversation authority loss.
+		const activeModel = transientUsage?.model ?? this.session.model;
+		const activeThinkingLevel = transientUsage ? transientUsage.thinkingLevel : this.session.thinkingLevel;
 		const fastModeEnabled = transientUsage ? transientUsage.fastModeEnabled : this.session.fastModeEnabled;
 
 		const cwd = this.session.sessionManager.getCwd();
@@ -230,7 +248,7 @@ export class FooterComponent implements Component {
 		const workspaceParts = [workspace];
 		const branch = this.footerData.getGitBranch();
 		if (branch) workspaceParts.push(branch);
-		const sessionName = this.session.sessionManager.getSessionName();
+		const sessionName = conversationAvailable ? this.session.sessionManager.getSessionName() : undefined;
 		if (sessionName) workspaceParts.push(sessionName);
 
 		const workspaceSide =
