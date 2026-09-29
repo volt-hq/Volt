@@ -212,7 +212,7 @@ For an arbitrary count, use the phone's token-count control or edit `settings.js
   "compaction": {
     "enabled": true,
     "modelThresholds": {
-      "openai-codex/gpt-6-astra": 350000
+      "openai/gpt-6-astra": 350000
     }
   }
 }

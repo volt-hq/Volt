@@ -12,6 +12,7 @@ interface PriorityTokenRates {
 }
 
 const OPENAI_PRIORITY_RATES: Readonly<Partial<Record<string, PriorityTokenRates>>> = {
+	"gpt-6.1-sol": { input: 4, cacheRead: 0.2, cacheWrite: 5, output: 20 },
 	"gpt-6-sol": { input: 4, cacheRead: 0.4, cacheWrite: 5, output: 20 },
 	"gpt-6-luna": { input: 0.2, cacheRead: 0.02, cacheWrite: 0.25, output: 1 },
 	"gpt-6-astra": { input: 20, cacheRead: 2, cacheWrite: 25, output: 100 },
@@ -37,6 +38,7 @@ const OPENAI_PRIORITY_RATES: Readonly<Partial<Record<string, PriorityTokenRates>
 };
 
 const OPENAI_CODEX_FAST_MODELS = new Set([
+	"gpt-6.1-sol",
 	"gpt-6-sol",
 	"gpt-6-luna",
 	"gpt-6-astra",
@@ -44,7 +46,6 @@ const OPENAI_CODEX_FAST_MODELS = new Set([
 	"gpt-5.6-terra",
 	"gpt-5.6-luna",
 	"gpt-5.5",
-	"gpt-5.4",
 ]);
 
 function normalizeBaseUrl(baseUrl: string): string {

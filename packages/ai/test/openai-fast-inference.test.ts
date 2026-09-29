@@ -55,7 +55,7 @@ describe("OpenAI fast inference eligibility", () => {
 		const codexAstra = getModel("openai-codex", "gpt-6-astra");
 		const canonical = getModel("openai", "gpt-5.6");
 		const direct = getModel("openai", "gpt-5.4");
-		const codex = getModel("openai-codex", "gpt-5.4");
+		const codex = getModel("openai-codex", "gpt-6.1-sol");
 
 		expect(supportsFastInference(astra)).toBe(true);
 		expect(supportsFastInference(codexAstra)).toBe(true);
@@ -171,7 +171,7 @@ describe("OpenAI Responses fast inference", () => {
 
 describe("OpenAI Codex fast inference", () => {
 	it("sends priority while preserving the raw effective service tier", async () => {
-		const model = getModel("openai-codex", "gpt-5.4");
+		const model = getModel("openai-codex", "gpt-6.1-sol");
 		let payload: { service_tier?: string } | undefined;
 		mockSSE("default");
 
