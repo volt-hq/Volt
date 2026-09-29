@@ -2,18 +2,20 @@
 // Verifies a downloaded Build Standalone Candidate artifact before Approve Release.
 //
 // Usage (from the repository root):
-//   node .volt/skills/release/verify-candidate.mjs <candidate-dir> --commit <sha> --run <run-id> [--skip-attestations]
+//   node .volt/skills/release/verify-candidate.mjs <candidate-dir> --commit <sha> --run <run-id> [--previous <tag>] [--skip-attestations]
 //
 // Checks the combined artifact layout, source-commit.txt, SHA256SUMS, and release-record.json;
 // every archive's build manifest against compliance/standalone-runtime.json, the copied Node
 // license, the bundle metafile checksum, every copied npm license file, and the complete file
 // manifest; prohibited files; that Windows executables carry no certificate table; and one
 // matching GitHub attestation per archive and record.
+// With --previous, also downloads that release's archives and lists bundled npm packages that
+// were added, removed, updated, or relicensed since then.
 // Exits non-zero when any check fails.
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { readPeCertificateTable } from "../../../scripts/pe-certificate.mjs";
@@ -24,17 +26,25 @@ const PROHIBITED_PATH = /doom|\.wad$|(^|\/)\.env|\.pem$|\.map$/i;
 const RESTRICTED_LICENSE = /GPL|SSPL|BUSL|Commons-Clause|UNLICENSED|SEE LICENSE/i;
 
 function parseArgs(argv) {
-	const options = { attestations: true, candidateDir: undefined, commit: undefined, runId: undefined };
+	const options = { attestations: true, candidateDir: undefined, commit: undefined, previous: undefined, runId: undefined };
 	for (let index = 0; index < argv.length; index++) {
 		const arg = argv[index];
 		if (arg === "--commit") options.commit = argv[++index];
 		else if (arg === "--run") options.runId = argv[++index];
+		else if (arg === "--previous") options.previous = argv[++index];
 		else if (arg === "--skip-attestations") options.attestations = false;
 		else if (!arg.startsWith("--") && options.candidateDir === undefined) options.candidateDir = arg;
 		else throw new Error(`Unknown argument: ${arg}`);
 	}
-	if (!options.candidateDir || !/^[0-9a-f]{40}$/.test(options.commit ?? "") || !/^[1-9]\d*$/.test(options.runId ?? "")) {
-		throw new Error("Usage: verify-candidate.mjs <candidate-dir> --commit <40-char sha> --run <run-id> [--skip-attestations]");
+	if (
+		!options.candidateDir ||
+		!/^[0-9a-f]{40}$/.test(options.commit ?? "") ||
+		!/^[1-9]\d*$/.test(options.runId ?? "") ||
+		(options.previous !== undefined && !/^v\d+\.\d+\.\d+$/.test(options.previous))
+	) {
+		throw new Error(
+			"Usage: verify-candidate.mjs <candidate-dir> --commit <40-char sha> --run <run-id> [--previous <vX.Y.Z>] [--skip-attestations]",
+		);
 	}
 	return options;
 }
@@ -57,12 +67,25 @@ function describeLicense(declared) {
 	return "(undeclared)";
 }
 
-function verifyArchive(archive, target, context) {
-	const { commit, compliance, fail, licenses } = context;
+function extractArchive(archive) {
 	const extracted = mkdtempSync(join(tmpdir(), "volt-candidate-"));
+	const extract = spawnSync("tar", ["-xf", archive, "-C", extracted], { encoding: "utf8" });
+	if (extract.status !== 0) {
+		rmSync(extracted, { force: true, recursive: true });
+		throw new Error(`extraction failed: ${extract.stderr}`);
+	}
+	return extracted;
+}
+
+function verifyArchive(archive, target, context) {
+	const { commit, compliance, fail, licenses, packages } = context;
+	let extracted;
 	try {
-		const extract = spawnSync("tar", ["-xf", archive, "-C", extracted], { encoding: "utf8" });
-		if (extract.status !== 0) return fail(`${target}: extraction failed: ${extract.stderr}`);
+		extracted = extractArchive(archive);
+	} catch (error) {
+		return fail(`${target}: ${error.message}`);
+	}
+	try {
 		const windows = target.startsWith("windows-");
 		const top = readdirSync(extracted);
 		if (windows ? !top.includes("volt.exe") : top.length !== 1 || top[0] !== "volt") {
@@ -94,6 +117,7 @@ function verifyArchive(archive, target, context) {
 			const id = `${pkg.name}@${pkg.version}`;
 			if (!licenses.has(license)) licenses.set(license, new Set());
 			licenses.get(license).add(id);
+			packages.set(id, { name: pkg.name, version: pkg.version, license });
 			if (!pkg.licenseFiles?.length) fail(`${target}: ${id} ships no license file`);
 			if (RESTRICTED_LICENSE.test(license) && !/LGPL/i.test(license)) fail(`${target}: ${id} declares ${license}`);
 			for (const file of pkg.licenseFiles ?? []) {
@@ -140,6 +164,82 @@ function verifyArchive(archive, target, context) {
 	}
 }
 
+// Collects the npm packages bundled in a published release's archives, keyed by name@version.
+function readReleasePackages(tag, archives, fail) {
+	const directory = mkdtempSync(join(tmpdir(), "volt-previous-"));
+	try {
+		const download = spawnSync(
+			"gh",
+			["release", "download", tag, "--repo", REPOSITORY, "--dir", directory, ...archives.flatMap(({ name }) => ["--pattern", name])],
+			{ encoding: "utf8" },
+		);
+		if (download.status !== 0) {
+			fail(`${tag}: gh release download failed: ${(download.stderr || download.stdout).trim().slice(0, 300)}`);
+			return undefined;
+		}
+		const packages = new Map();
+		for (const { name, target } of archives) {
+			// gh exits 0 when any pattern matches, so a target missing from the older release is only visible here.
+			if (!existsSync(join(directory, name))) {
+				console.log(`${tag} has no ${name}; its ${target} packages count as added`);
+				continue;
+			}
+			let extracted;
+			try {
+				extracted = extractArchive(join(directory, name));
+			} catch (error) {
+				fail(`${tag} ${target}: ${error.message}`);
+				continue;
+			}
+			try {
+				const root = target.startsWith("windows-") ? extracted : join(extracted, "volt");
+				const build = JSON.parse(readFileSync(join(root, "standalone-build-manifest.json"), "utf8"));
+				const manifest = JSON.parse(readFileSync(join(root, build.binaryLicenseManifest), "utf8"));
+				for (const pkg of manifest.packages) {
+					const license = describeLicense(pkg.declaredLicense);
+					packages.set(`${pkg.name}@${pkg.version}`, { name: pkg.name, version: pkg.version, license });
+				}
+			} finally {
+				rmSync(extracted, { force: true, recursive: true });
+			}
+		}
+		return packages;
+	} finally {
+		rmSync(directory, { force: true, recursive: true });
+	}
+}
+
+function describeDependencyChanges(previous, current) {
+	const missingFrom = (from, to) => {
+		const names = new Map();
+		for (const [id, pkg] of from) {
+			if (to.has(id)) continue;
+			if (!names.has(pkg.name)) names.set(pkg.name, []);
+			names.get(pkg.name).push(pkg);
+		}
+		return names;
+	};
+	const removed = missingFrom(previous, current);
+	const added = missingFrom(current, previous);
+	const versions = (pkgs) => pkgs.map((pkg) => pkg.version).join(", ");
+	const licenses = (pkgs) => [...new Set(pkgs.map((pkg) => pkg.license))].join(" / ");
+	const lines = [];
+	for (const name of [...new Set([...removed.keys(), ...added.keys()])].sort()) {
+		const before = removed.get(name);
+		const after = added.get(name);
+		if (before && after) {
+			const license = licenses(before) === licenses(after) ? licenses(after) : `${licenses(before)} -> ${licenses(after)}`;
+			lines.push(`updated  ${name} ${versions(before)} -> ${versions(after)} (${license})`);
+		} else if (after) lines.push(`added    ${name}@${versions(after)} (${licenses(after)})`);
+		else lines.push(`removed  ${name}@${versions(before)} (${licenses(before)})`);
+	}
+	for (const [id, pkg] of current) {
+		const old = previous.get(id);
+		if (old && old.license !== pkg.license) lines.push(`license  ${id}: ${old.license} -> ${pkg.license}`);
+	}
+	return lines;
+}
+
 function verifyAttestation(file, { candidateDir, commit, runId, fail }) {
 	const path = join(candidateDir, file);
 	const result = spawnSync(
@@ -182,7 +282,13 @@ function main() {
 	const { candidateDir, commit, runId } = options;
 	const compliance = JSON.parse(readFileSync("compliance/standalone-runtime.json", "utf8"));
 	const problems = [];
-	const context = { ...options, compliance, fail: (message) => problems.push(message), licenses: new Map() };
+	const context = {
+		...options,
+		compliance,
+		fail: (message) => problems.push(message),
+		licenses: new Map(),
+		packages: new Map(),
+	};
 
 	const archives = Object.keys(compliance.targets).map((target) => ({
 		name: `volt-${target}.${target.startsWith("windows-") ? "zip" : "tar.gz"}`,
@@ -218,6 +324,14 @@ function main() {
 	console.log("\nDeclared licenses (distinct packages):");
 	for (const [license, packages] of [...context.licenses].sort((a, b) => b[1].size - a[1].size)) {
 		console.log(`  ${license}: ${packages.size}`);
+	}
+	if (options.previous) {
+		const previous = readReleasePackages(options.previous, archives, context.fail);
+		if (previous) {
+			const changes = describeDependencyChanges(previous, context.packages);
+			console.log(`\nBundled npm packages since ${options.previous} (all targets):`);
+			console.log(changes.length ? `  ${changes.join("\n  ")}` : "  no changes");
+		}
 	}
 	console.log(problems.length ? `\nProblems:\n  ${problems.join("\n  ")}` : "\nProblems: none");
 	process.exitCode = problems.length ? 1 : 0;
