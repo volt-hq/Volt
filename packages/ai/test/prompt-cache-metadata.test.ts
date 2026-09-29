@@ -47,7 +47,7 @@ describe("generated prompt-cache metadata", () => {
 			getModel("fireworks", "accounts/fireworks/models/deepseek-v4p1-flash").promptCache?.retention.short,
 		).toEqual({});
 		expect(getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6").promptCache?.retention.short).toEqual({});
-		expect(getModel("openai-codex", "gpt-5.4").promptCache?.retention.short).toEqual({});
+		expect(getModel("openai-codex", "gpt-6.1-sol").promptCache?.retention.short).toEqual({});
 	});
 
 	it("leaves dynamically routed providers unknown", () => {

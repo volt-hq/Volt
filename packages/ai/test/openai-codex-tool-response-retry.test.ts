@@ -8,7 +8,7 @@ import {
 } from "../src/providers/openai-codex-responses.ts";
 import type { Context } from "../src/types.ts";
 
-const model = getModel("openai-codex", "gpt-5.4");
+const model = getModel("openai-codex", "gpt-6.1-sol");
 const context: Context = { messages: [{ role: "user", content: "write the report", timestamp: 0 }] };
 const payload = Buffer.from(
 	JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "test-account" } }),

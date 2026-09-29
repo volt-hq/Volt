@@ -662,7 +662,7 @@ describe("openai-codex streaming", () => {
 		);
 
 		await streamOpenAICodexResponses(
-			getModel("openai-codex", "gpt-5.4"),
+			getModel("openai-codex", "gpt-6.1-sol"),
 			{
 				systemPrompt: "You are a helpful assistant.",
 				messages: [{ role: "user", content: "Say hello", timestamp: 1 }],

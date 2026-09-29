@@ -119,6 +119,13 @@ const GPT_6_SOL_LUNA_MODELS = [
 	},
 ] as const;
 const GPT_6_SOL_LUNA_MODEL_IDS = new Set<string>(GPT_6_SOL_LUNA_MODELS.map((model) => model.id));
+// Verified 2026-09-29 against https://developers.openai.com/api/docs/models/gpt-6.1-sol.
+// Unlike GPT-6 Sol, it rejects the none and minimal reasoning efforts.
+const GPT_6_1_SOL_MODEL = {
+	id: "gpt-6.1-sol",
+	name: "GPT-6.1 Sol",
+	cost: { input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5 },
+} as const;
 const DAYBREAK_MODEL_IDS = new Set(["gpt-daybreak-blue-latest", "gpt-daybreak-red-latest"]);
 
 const MOONSHOT_CN_MIRRORED_MODEL_IDS = new Set(["kimi-k2.7-code", "kimi-k2.7-code-highspeed"]);
@@ -385,11 +392,14 @@ const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 	{
 		name: "OpenAI 30-minute prompt caching",
 		sourceUrl: "https://developers.openai.com/api/docs/guides/prompt-caching",
-		verifiedAt: "2026-09-22",
+		verifiedAt: "2026-09-29",
 		matches: (model) =>
 			model.provider === "openai" &&
 			model.api === "openai-responses" &&
-			(GPT_5_6_MODEL_IDS.has(model.id) || GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
+			(GPT_5_6_MODEL_IDS.has(model.id) ||
+				GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) ||
+				model.id === GPT_6_1_SOL_MODEL.id ||
+				model.id === GPT_6_ASTRA_ID),
 		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
@@ -415,10 +425,13 @@ const PROMPT_CACHE_POLICIES: readonly PromptCachePolicyRecord[] = [
 	{
 		name: "Azure OpenAI 30-minute prompt caching",
 		sourceUrl: "https://learn.microsoft.com/azure/foundry/openai/how-to/prompt-caching",
-		verifiedAt: "2026-09-04",
+		verifiedAt: "2026-09-29",
 		matches: (model) =>
 			model.provider === "azure-openai-responses" &&
-			(GPT_5_6_MODEL_IDS.has(model.id) || GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) || model.id === GPT_6_ASTRA_ID),
+			(GPT_5_6_MODEL_IDS.has(model.id) ||
+				GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) ||
+				model.id === GPT_6_1_SOL_MODEL.id ||
+				model.id === GPT_6_ASTRA_ID),
 		metadata: OPENAI_30_MINUTE_PROMPT_CACHE,
 	},
 	{
@@ -623,6 +636,13 @@ function applyThinkingLevelMetadata(model: Model<any>): void {
 	}
 	if (model.provider === "openrouter" && /^openai\/gpt-6-(sol|luna)(?:-pro)?(?::batch)?$/.test(model.id)) {
 		mergeThinkingLevelMap(model, { minimal: null, xhigh: "xhigh", max: "max" });
+	}
+	if (
+		model.id === GPT_6_1_SOL_MODEL.id ||
+		(model.provider === "openrouter" && /^openai\/gpt-6\.1-sol(?:-pro)?(?::batch)?$/.test(model.id))
+	) {
+		// Low through max on the API and the Codex catalog; none and minimal are rejected.
+		mergeThinkingLevelMap(model, { off: null, minimal: null, xhigh: "xhigh", max: "max" });
 	}
 	if (
 		model.id.includes("opus-5-5") || model.id.includes("opus-5.5") ||
@@ -2126,7 +2146,7 @@ async function generateModels() {
 		});
 	}
 
-	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS]) {
+	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS, GPT_6_1_SOL_MODEL]) {
 		if (!allModels.some((m) => m.provider === "openai" && m.id === model.id)) {
 			allModels.push({
 				id: model.id,
@@ -2137,7 +2157,8 @@ async function generateModels() {
 				reasoning: true,
 				input: ["text", "image"],
 				cost: { ...model.cost },
-				contextWindow: GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) ? 1050000 : 272000,
+				contextWindow:
+					GPT_6_SOL_LUNA_MODEL_IDS.has(model.id) || model.id === GPT_6_1_SOL_MODEL.id ? 1050000 : 272000,
 				maxTokens: 128000,
 			});
 		}
@@ -2280,13 +2301,13 @@ async function generateModels() {
 
 	// OpenAI Codex (ChatGPT OAuth) models
 	// NOTE: These are not fetched from models.dev; we keep a small, explicit list to avoid aliases.
-	// Keep the 272k default advertised by the Codex catalog, including GPT-6 Sol/Luna
-	// (verified 2026-09-22). GPT-5.6 Sol officially supports 1M.
+	// Every model uses the 272k default context from the Codex catalog (verified 2026-09-29 against
+	// openai/codex codex-rs/models-manager/models.json). GPT-6 and GPT-5.6 models accept up to 872k
+	// only when the client opts in, which users can do with a contextWindow model override.
+	// GPT-5.3 Codex Spark, GPT-5.4, and GPT-5.4 mini are retired from Codex with ChatGPT sign-in
+	// (https://developers.openai.com/codex/models, verified 2026-09-29).
 	const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 	const CODEX_CONTEXT = 272000;
-	const CODEX_GPT_5_6_SOL_CONTEXT = 1000000;
-	const CODEX_GPT_6_ASTRA_CONTEXT = 1050000;
-	const CODEX_SPARK_CONTEXT = 128000;
 	const CODEX_MAX_TOKENS = 128000;
 	const codexModels: Model<"openai-codex-responses">[] = [
 		{
@@ -2298,42 +2319,6 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { ...GPT_6_ASTRA_COST },
-			contextWindow: CODEX_GPT_6_ASTRA_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			id: "gpt-5.3-codex-spark",
-			name: "GPT-5.3 Codex Spark",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			input: ["text"],
-			cost: { input: 1.75, output: 14, cacheRead: 0.175, cacheWrite: 0 },
-			contextWindow: CODEX_SPARK_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			id: "gpt-5.4",
-			name: "GPT-5.4",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
-			contextWindow: CODEX_CONTEXT,
-			maxTokens: CODEX_MAX_TOKENS,
-		},
-		{
-			id: "gpt-5.4-mini",
-			name: "GPT-5.4 mini",
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: CODEX_BASE_URL,
-			reasoning: true,
-			input: ["text", "image"],
-			cost: { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
 			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		},
@@ -2350,7 +2335,7 @@ async function generateModels() {
 			maxTokens: CODEX_MAX_TOKENS,
 		},
 	];
-	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS]) {
+	for (const model of [...GPT_5_6_MODELS, ...GPT_6_SOL_LUNA_MODELS, GPT_6_1_SOL_MODEL]) {
 		codexModels.push({
 			id: model.id,
 			name: model.name,
@@ -2360,7 +2345,7 @@ async function generateModels() {
 			reasoning: true,
 			input: ["text", "image"],
 			cost: { ...model.cost },
-			contextWindow: model.id === "gpt-5.6-sol" ? CODEX_GPT_5_6_SOL_CONTEXT : CODEX_CONTEXT,
+			contextWindow: CODEX_CONTEXT,
 			maxTokens: CODEX_MAX_TOKENS,
 		});
 	}

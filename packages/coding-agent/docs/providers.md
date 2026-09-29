@@ -25,6 +25,19 @@ Use `/logout` to clear credentials. Tokens are stored in `~/.volt/agent/auth.jso
 
 - Requires ChatGPT Plus or Pro subscription
 - Officially endorsed by OpenAI: [Codex for OSS](https://developers.openai.com/community/codex-for-oss)
+- Models use Codex's default 272K-token context window. GPT-6 and GPT-5.6 models accept up to 872K tokens; opt in with a `contextWindow` [model override](models.md#per-model-overrides) in `~/.volt/agent/models.json`. Longer contexts use plan limits faster.
+
+  ```json
+  {
+    "providers": {
+      "openai-codex": {
+        "modelOverrides": {
+          "gpt-6.1-sol": { "contextWindow": 872000 }
+        }
+      }
+    }
+  }
+  ```
 
 ### Claude Pro/Max
 

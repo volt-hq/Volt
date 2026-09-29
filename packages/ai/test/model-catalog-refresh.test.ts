@@ -132,6 +132,24 @@ describe("Daybreak catalog aliases", () => {
 	});
 });
 
+// https://developers.openai.com/codex/models (verified 2026-09-29)
+describe("OpenAI Codex catalog", () => {
+	it("omits models retired from Codex with ChatGPT sign-in", () => {
+		const ids = getModels("openai-codex").map((model) => model.id);
+		expect(ids).toContain("gpt-6.1-sol");
+		for (const retiredId of ["gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini"]) {
+			expect(ids).not.toContain(retiredId);
+		}
+	});
+
+	// https://github.com/openai/codex/blob/main/codex-rs/models-manager/models.json
+	it("uses the Codex default 272k context for every model", () => {
+		for (const model of getModels("openai-codex")) {
+			expect(model.contextWindow, model.id).toBe(272_000);
+		}
+	});
+});
+
 // https://api-docs.deepseek.com/api/list-models/
 // https://api-docs.deepseek.com/api/create-chat-completion/
 // https://api-docs.deepseek.com/quick_start/pricing/
