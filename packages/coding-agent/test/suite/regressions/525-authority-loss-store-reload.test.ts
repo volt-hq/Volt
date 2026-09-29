@@ -2,7 +2,10 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { type Component, createRenderFrame, type TUI } from "@hansjm10/volt-tui";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
+import type { AgentSession } from "../../../src/core/agent-session.ts";
 import {
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
@@ -14,10 +17,29 @@ import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import type { ReadonlyFooterDataProvider } from "../../../src/core/footer-data-provider.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
-import type { ExtensionAPI } from "../../../src/index.ts";
+import type { ExtensionAPI, ExtensionFactory } from "../../../src/index.ts";
+import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
+import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
 import { getMessageText } from "../harness.ts";
+
+type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
+type InteractiveAccess = {
+	renderer: ReturnType<typeof createInteractiveTui>;
+	ui: TUI;
+	editor: CustomEditor;
+	conversationView: View;
+	isInitialized: boolean;
+	setupKeyHandlers(): void;
+	setupPlanPaneInputRouting(): void;
+	setupEditorSubmitHandler(): void;
+	renderWidgets(): void;
+	bindCurrentSessionExtensions(session: AgentSession): Promise<void>;
+	subscribeToAgent(session: AgentSession): void;
+	activateView(view: View, focus: Component, forceRender?: boolean): void;
+	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
+};
 
 describe("regression #525: recovering a session whose saved state could not be confirmed", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
@@ -32,7 +54,10 @@ describe("regression #525: recovering a session whose saved state could not be c
 		}
 	});
 
-	async function createRuntimeForTest(responses: string[]) {
+	async function createRuntimeForTest(
+		responses: string[],
+		options: { extensionFactory?: ExtensionFactory; interactive?: boolean } = {},
+	) {
 		const tempDir = join(tmpdir(), `volt-525-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -64,6 +89,7 @@ describe("regression #525: recovering a session whose saved state could not be c
 									maxTokens: registeredModel.maxTokens,
 								})),
 							});
+							options.extensionFactory?.(volt);
 						},
 					],
 					noSkills: true,
@@ -89,11 +115,13 @@ describe("regression #525: recovering a session whose saved state could not be c
 			agentDir: tempDir,
 			sessionManager,
 		});
-		// Bind replacements the way interactive mode does.
-		runtime.setRebindSession(async (session) => {
-			await session.bindExtensions({});
-		});
-		await runtime.session.bindExtensions({});
+		if (!options.interactive) {
+			// Bind replacements the way interactive mode does.
+			runtime.setRebindSession(async (session) => {
+				await session.bindExtensions({});
+			});
+			await runtime.session.bindExtensions({});
+		}
 
 		cleanups.push(async () => {
 			await runtime.dispose();
@@ -102,7 +130,7 @@ describe("regression #525: recovering a session whose saved state could not be c
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		});
-		return { runtime, faux };
+		return { runtime, faux, tempDir };
 	}
 
 	function requireSessionRef(runtime: AgentSessionRuntime): SessionReference {
@@ -140,6 +168,16 @@ describe("regression #525: recovering a session whose saved state could not be c
 			timer = setTimeout(() => reject(new Error(`${label} did not settle within ${ms}ms`)), ms);
 		});
 		return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+	}
+
+	function viewport(terminal: VirtualTerminal): string {
+		return terminal.getViewport().join("\n");
+	}
+
+	function extensionFooterEntries(terminal: VirtualTerminal): number {
+		const match = /extension footer: (\d+) entries/.exec(viewport(terminal));
+		if (!match) throw new Error("extension footer is not rendered");
+		return Number(match[1]);
 	}
 
 	function createFooterData(): ReadonlyFooterDataProvider {
@@ -219,5 +257,79 @@ describe("regression #525: recovering a session whose saved state could not be c
 
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandledRejections).toEqual([]);
+	});
+
+	it("reloads in interactive mode, replacing an extension footer that reads the lost session", async () => {
+		const extensionFooter = (volt: ExtensionAPI) => {
+			volt.on("session_start", (_event, ctx) => {
+				ctx.ui.setFooter(() => ({
+					invalidate() {},
+					// Like examples/extensions/custom-footer.ts: reads the session on every frame.
+					render: () => createRenderFrame([`extension footer: ${ctx.sessionManager.getBranch().length} entries`]),
+				}));
+			});
+		};
+		const { runtime, tempDir } = await createRuntimeForTest(["tui reply"], {
+			extensionFactory: extensionFooter,
+			interactive: true,
+		});
+		const mode = new InteractiveMode(runtime, { tuiMode: "regular" });
+		cleanups.push(() => mode.stop());
+		const access = mode as unknown as InteractiveAccess;
+		const handleFatalRuntimeError = vi.fn(async () => {});
+		access.handleFatalRuntimeError = handleFatalRuntimeError;
+		const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+		cleanups.push(() => exit.mockRestore());
+		const terminal = new VirtualTerminal(140, 30);
+		access.renderer = createInteractiveTui({
+			tuiMode: "regular",
+			showHardwareCursor: false,
+			logDirectory: tempDir,
+			terminal,
+		});
+		access.renderWidgets();
+		access.setupKeyHandlers();
+		access.setupPlanPaneInputRouting();
+		access.setupEditorSubmitHandler();
+		access.activateView(access.conversationView, access.editor, false);
+		access.isInitialized = true;
+		access.ui.start();
+		await access.bindCurrentSessionExtensions(runtime.session);
+		access.subscribeToAgent(runtime.session);
+
+		await runtime.session.prompt("tui prompt");
+		await terminal.waitForRender();
+		const entriesBefore = extensionFooterEntries(terminal);
+		expect(entriesBefore).toBeGreaterThan(0);
+
+		const sessionRef = requireSessionRef(runtime);
+		const staleSession = runtime.session;
+		await appendAsOtherOwner(sessionRef, (manager) => {
+			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
+			manager.appendMessage(fauxAssistantMessage("phone reply"));
+		});
+		access.editor.setText("unsent draft");
+
+		await Promise.allSettled([staleSession.prompt("stale prompt")]);
+		expect(staleSession.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+
+		await vi.waitFor(() => expect(viewport(terminal)).toContain("Reloaded the session from the store."), {
+			timeout: 5_000,
+		});
+		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
+		expect(exit).not.toHaveBeenCalled();
+		expect(runtime.session).not.toBe(staleSession);
+		expect(runtime.session.messages.map(getMessageText)).toEqual([
+			"tui prompt",
+			"tui reply",
+			"phone prompt",
+			"phone reply",
+		]);
+		const recovered = viewport(terminal);
+		expect(recovered).toContain("Could not confirm the session's saved state");
+		expect(recovered).toContain("phone reply");
+		// The extension reinstalled its footer for the reloaded session, which has the other owner's turns.
+		expect(extensionFooterEntries(terminal)).toBeGreaterThanOrEqual(entriesBefore + 2);
+		expect(access.editor.getText()).toBe("unsent draft");
 	});
 });

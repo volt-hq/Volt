@@ -1232,7 +1232,11 @@ export class InteractiveMode {
 	 */
 	private updateTerminalTitle(): void {
 		const cwdBasename = path.basename(this.sessionManager.getCwd());
-		const sessionName = this.sessionManager.getSessionName();
+		// Session replacement retitles while a session without conversation authority is still current.
+		const sessionName =
+			this.sessionManager.getConversationAuthorityStatus().status === "available"
+				? this.sessionManager.getSessionName()
+				: undefined;
 		if (sessionName) {
 			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
 		} else {
@@ -4211,6 +4215,9 @@ export class InteractiveMode {
 		this.authorityRecoveriesPending++;
 		const cause = error.cause instanceof Error ? error.cause.message : error.message;
 		const failure = `Could not confirm the session's saved state: ${cause}`;
+		// Extension UI can read the lost session while rendering. Replacement removes it
+		// anyway, and extensions reinstall it on session_start after the reload.
+		this.resetExtensionUI();
 		this.showError(`${failure}. Reloading the session from the store…`);
 		try {
 			await this.runtimeHost.reloadCurrentSessionFromStore({
