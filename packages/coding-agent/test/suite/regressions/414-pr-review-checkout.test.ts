@@ -2,9 +2,12 @@ import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	chmodSync,
+	closeSync,
+	constants,
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	openSync,
 	readFileSync,
 	realpathSync,
 	rmSync,
@@ -616,6 +619,50 @@ describe("#414 prepared PR checkouts", () => {
 		expect(await f.state.listWorktrees()).toHaveLength(1);
 		expect((await f.state.listWorktrees())[0].prReviewLaunches![0].sessionGeneration).toBeUndefined();
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"settles cancelled checkout validation only after its Git processes exit",
+		async () => {
+			const f = await fixture();
+			await f.manager.prepare(f.workspace, f.request, f.authority);
+			const record = (await f.state.listWorktrees())[0];
+			// Like the Git for Windows launcher, this git does its work in a child that
+			// outlives the launcher. The child holds a FIFO open while it runs.
+			const bin = join(f.root, "bin");
+			const fifo = join(f.root, "git-running");
+			const started = join(f.root, "git-started");
+			mkdirSync(bin);
+			execFileSync("mkfifo", [fifo]);
+			writeFileSync(
+				join(bin, "git"),
+				`#!/bin/sh\nsh -c 'exec 3<>"${fifo}"; : > "${started}"; exec sleep 30' &\nwait\n`,
+				{ mode: 0o755 },
+			);
+			vi.stubEnv("PATH", `${bin}${delimiter}${process.env.PATH}`);
+			const gitRunning = () => {
+				try {
+					closeSync(openSync(fifo, constants.O_WRONLY | constants.O_NONBLOCK));
+					return true;
+				} catch (error) {
+					if ((error as NodeJS.ErrnoException).code === "ENXIO") return false;
+					throw error;
+				}
+			};
+
+			const controller = new AbortController();
+			const validation = assertPrReviewCheckout(
+				record.prReviewLaunches![0].placement,
+				record.path,
+				controller.signal,
+			);
+			await vi.waitFor(() => expect(existsSync(started)).toBe(true), { timeout: 10_000 });
+			expect(gitRunning()).toBe(true);
+			controller.abort();
+			await expect(validation).rejects.toThrow(PR_CHECKOUT_UNAVAILABLE);
+			// Callers may now dispose the checkout; on Windows a running Git would hold it.
+			expect(gitRunning()).toBe(false);
+		},
+	);
 
 	it.each(["dirty", "busy", "head", "operation", "unreadable"])("does not reuse a %s candidate", async (kind) => {
 		const f = await fixture();
