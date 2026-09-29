@@ -14,7 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { pathToFileURL } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
 	HostActionDecision,
 	HostActionRequest,
@@ -1078,12 +1078,16 @@ describe("LspManager", () => {
 			writeFileSync(filePath, "ok\n");
 			await manager.documentSymbols(filePath).then((result) => result.text);
 
-			let content = "";
-			for (let attempt = 0; attempt < 20; attempt++) {
-				content = readFileSync(traceFile, "utf-8");
-				if (content.includes("textDocument/documentSymbol")) break;
-				await new Promise((resolve) => setTimeout(resolve, 100));
-			}
+			// The tracer opens its file on the first queued async write, so the file
+			// may not exist yet when the request resolves.
+			const content = await vi.waitFor(
+				() => {
+					const text = readFileSync(traceFile, "utf-8");
+					expect(text).toContain("textDocument/documentSymbol");
+					return text;
+				},
+				{ timeout: 5000, interval: 100 },
+			);
 			expect(content).toContain("info: workspace:");
 			expect(content).toContain("server root:");
 			expect(content).toContain("configured argv:");
