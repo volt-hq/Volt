@@ -11,6 +11,8 @@ import {
 	assertPublishedPackageMatchesRelease,
 	NPM_PROVENANCE_PREDICATE_TYPE,
 	NPM_PUBLISHED_METADATA_FIELDS,
+	NpmRegistryUnavailableError,
+	TRANSIENT_NPM_REGISTRY_FAILURE,
 	verifyPublishedPackageAfterPublish,
 } from "./npm-publish-verification.mjs";
 import {
@@ -1044,12 +1046,9 @@ test("release tooling publishes only the canonical Volt package identities under
 		{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
 	]);
 	const publishScript = readFileSync("scripts/publish.mjs", "utf8");
-	const publishVerification = readFileSync("scripts/npm-publish-verification.mjs", "utf8");
 	assert.match(publishScript, /const NPM_DIST_TAG = "latest";/);
 	assert.match(publishScript, /"--tag", NPM_DIST_TAG/);
 	assert.ok(publishScript.indexOf('run("npm", ["publish"') < publishScript.lastIndexOf("verifyPublishedPackageAfterPublish({"));
-	assert.match(publishVerification, /DEFAULT_POST_PUBLISH_VERIFICATION_ATTEMPTS = 61/);
-	assert.match(publishVerification, /DEFAULT_POST_PUBLISH_VERIFICATION_DELAY_MS = 5_000/);
 	assert.doesNotMatch(publishScript, /@earendil-works\/volt-/);
 	assert.doesNotMatch(publishScript, /@hansjm10\/volt-cli/);
 });
@@ -1134,29 +1133,45 @@ test("idempotent npm publication requires exact release bytes and provenance", (
 		/preserve the historical beta/,
 	);
 
+	const fakeClock = () => {
+		const clock = { nowMs: 0, sleeps: [] };
+		clock.now = () => clock.nowMs;
+		clock.sleep = (milliseconds) => {
+			clock.sleeps.push(milliseconds);
+			clock.nowMs += milliseconds;
+		};
+		return clock;
+	};
+
 	const visibilityQueries = [];
-	const sleeps = [];
 	const logs = [];
+	const visibleClock = fakeClock();
 	const published = verifyPublishedPackageAfterPublish(
 		release,
 		(name, version) => {
 			visibilityQueries.push(`${name}@${version}`);
 			return visibilityQueries.length === 1 ? undefined : release.metadata;
 		},
-		{
-			attempts: 2,
-			delayMs: 25,
-			sleep: (milliseconds) => sleeps.push(milliseconds),
-			log: (message) => logs.push(message),
-		},
+		{ sleep: visibleClock.sleep, now: visibleClock.now, log: (message) => logs.push(message) },
 	);
 	assert.equal(published, release.metadata);
 	assert.deepEqual(visibilityQueries, ["@hansjm10/volt-ai@0.2.0", "@hansjm10/volt-ai@0.2.0"]);
-	assert.deepEqual(sleeps, [25]);
+	assert.deepEqual(visibleClock.sleeps, [10_000]);
 	assert.equal(logs.length, 1);
-	assert.match(logs[0], /waiting for npm registry metadata/);
+	assert.match(logs[0], /waiting up to 20 minutes for npm registry metadata/);
+
+	// v0.2.2 took about 7 minutes to become visible after npm accepted it (#533).
+	const slowClock = fakeClock();
+	const slowlyPublished = verifyPublishedPackageAfterPublish(
+		release,
+		() => (slowClock.nowMs >= 7 * 60_000 ? release.metadata : undefined),
+		{ sleep: slowClock.sleep, now: slowClock.now, log: () => {} },
+	);
+	assert.equal(slowlyPublished, release.metadata);
 
 	let missingQueries = 0;
+	const missingLogs = [];
+	const missingClock = fakeClock();
 	assert.throws(
 		() =>
 			verifyPublishedPackageAfterPublish(
@@ -1165,11 +1180,70 @@ test("idempotent npm publication requires exact release bytes and provenance", (
 					missingQueries += 1;
 					return undefined;
 				},
-				{ attempts: 2, delayMs: 1, sleep: () => {}, log: () => {} },
+				{ sleep: missingClock.sleep, now: missingClock.now, log: (message) => missingLogs.push(message) },
 			),
-		/after 2 verification attempts/,
+		(error) => {
+			assert.match(error.message, /npm accepted @hansjm10\/volt-ai@0\.2\.0, but its registry metadata is not visible after 20 minutes/);
+			assert.match(error.message, /Do not republish/);
+			assert.match(error.message, /npm view @hansjm10\/volt-ai@0\.2\.0 dist\.integrity/);
+			assert.match(error.message, /rerun Publish Release at v0\.2\.0/);
+			return true;
+		},
 	);
-	assert.equal(missingQueries, 2);
+	assert.equal(missingClock.nowMs, 20 * 60_000);
+	assert.equal(missingQueries, 121);
+	assert.equal(missingLogs.filter((message) => message.includes("still not visible")).length, 19);
+
+	const registryFailure = [
+		"npm error code E503",
+		"npm error 503 Service Unavailable - GET https://registry.npmjs.org/@hansjm10%2fvolt-ai",
+	].join("\n");
+	assert.match(registryFailure, TRANSIENT_NPM_REGISTRY_FAILURE);
+	assert.match("npm error code ECONNRESET\nnpm error errno ECONNRESET", TRANSIENT_NPM_REGISTRY_FAILURE);
+	assert.doesNotMatch("npm error code E404\nnpm error 404 Not Found", TRANSIENT_NPM_REGISTRY_FAILURE);
+	assert.doesNotMatch("npm error code E401\nnpm error 401 Unauthorized", TRANSIENT_NPM_REGISTRY_FAILURE);
+
+	let flakyQueries = 0;
+	const flakyClock = fakeClock();
+	const publishedAfterRegistryFailure = verifyPublishedPackageAfterPublish(
+		release,
+		() => {
+			flakyQueries += 1;
+			if (flakyQueries === 1) throw new NpmRegistryUnavailableError(registryFailure);
+			return release.metadata;
+		},
+		{ sleep: flakyClock.sleep, now: flakyClock.now, log: () => {} },
+	);
+	assert.equal(publishedAfterRegistryFailure, release.metadata);
+	assert.equal(flakyQueries, 2);
+
+	const downClock = fakeClock();
+	assert.throws(
+		() =>
+			verifyPublishedPackageAfterPublish(
+				release,
+				() => {
+					throw new NpmRegistryUnavailableError(registryFailure);
+				},
+				{ timeoutMs: 120_000, sleep: downClock.sleep, now: downClock.now, log: () => {} },
+			),
+		/not visible after 2 minutes[\s\S]*Last registry query failed: npm error code E503/,
+	);
+
+	let unexpectedQueries = 0;
+	assert.throws(
+		() =>
+			verifyPublishedPackageAfterPublish(
+				release,
+				() => {
+					unexpectedQueries += 1;
+					throw new Error("Failed to query @hansjm10/volt-ai@0.2.0\nnpm error code E401");
+				},
+				{ sleep: () => {}, now: () => 0, log: () => {} },
+			),
+		/E401/,
+	);
+	assert.equal(unexpectedQueries, 1);
 
 	let mismatchedQueries = 0;
 	assert.throws(
@@ -1180,7 +1254,7 @@ test("idempotent npm publication requires exact release bytes and provenance", (
 					mismatchedQueries += 1;
 					return { ...release.metadata, dist: { ...release.metadata.dist, integrity: "sha512-other" } };
 				},
-				{ attempts: 2, delayMs: 1, sleep: () => {}, log: () => {} },
+				{ sleep: () => {}, now: () => 0, log: () => {} },
 			),
 		/does not match/,
 	);

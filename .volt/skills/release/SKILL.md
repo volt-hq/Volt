@@ -103,7 +103,7 @@ Expect `preflight`, `tag-release`, and `dispatch-publication` to succeed, then c
 
 Approval dispatches **Publish Release** at the tag: `gh run list --workflow build-binaries.yml --limit 1`. Expect `validate`, `assemble`, `publish-npm`, and `release` to succeed.
 
-If `publish-npm` fails with `<pkg>@<version> is not visible on npm after 61 verification attempts`, npm accepted that package but has not served it yet (#533). In v0.2.2, `volt-coding-agent` took about 7 minutes to list and 12 minutes to serve its tarball. Do not publish by hand or rerun preparation or approval. Wait until `npm view @hansjm10/<pkg>@<version> dist.integrity` answers and `https://registry.npmjs.org/@hansjm10/<pkg>/-/<pkg>-<version>.tgz` returns 200, then rerun at the same tag:
+`publish-npm` waits up to 20 minutes for each accepted package to become visible (#533); in v0.2.2, `volt-coding-agent` took about 7 minutes to list and 12 minutes to serve its tarball. If it still fails with `npm accepted @hansjm10/<pkg>@<version>, but its registry metadata is not visible after 20 minutes`, npm accepted that package but has not served it yet. Do not publish by hand or rerun preparation or approval. Wait until `npm view @hansjm10/<pkg>@<version> dist.integrity` answers and `https://registry.npmjs.org/@hansjm10/<pkg>/-/<pkg>-<version>.tgz` returns 200, then rerun at the same tag:
 
 ```bash
 gh workflow run build-binaries.yml --ref v<version> -f tag=v<version>

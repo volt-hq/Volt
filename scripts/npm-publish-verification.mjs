@@ -2,8 +2,23 @@ import { BOOTSTRAP_VERSION, INITIAL_BETA_VERSION } from "./verify-npm-package-bo
 
 export const NPM_PROVENANCE_PREDICATE_TYPE = "https://slsa.dev/provenance/v1";
 export const NPM_PUBLISHED_METADATA_FIELDS = ["name", "version", "gitHead", "repository", "dist-tags", "dist"];
-const DEFAULT_POST_PUBLISH_VERIFICATION_ATTEMPTS = 61;
-const DEFAULT_POST_PUBLISH_VERIFICATION_DELAY_MS = 5_000;
+// npm accepted @hansjm10/volt-coding-agent@0.2.2 about 7 minutes before serving
+// its metadata (#533); the window keeps roughly 3x margin over that.
+const DEFAULT_POST_PUBLISH_VERIFICATION_TIMEOUT_MS = 20 * 60_000;
+const DEFAULT_POST_PUBLISH_VERIFICATION_DELAY_MS = 10_000;
+const POST_PUBLISH_PROGRESS_INTERVAL_MS = 60_000;
+
+// npm 11 reports these after its own fetch retries. They mean the registry
+// query failed, not that the version is missing or mismatched.
+export const TRANSIENT_NPM_REGISTRY_FAILURE =
+	/^npm error code (?:E408|E429|E5\d\d|ECONNRESET|ECONNREFUSED|ETIMEDOUT|ERR_SOCKET_TIMEOUT|EAI_AGAIN|EAI_FAIL|ENOTFOUND|FETCH_ERROR)$/m;
+
+export class NpmRegistryUnavailableError extends Error {
+	constructor(message) {
+		super(message);
+		this.name = "NpmRegistryUnavailableError";
+	}
+}
 
 export function assertPublishedPackageMatchesRelease({
 	name,
@@ -54,23 +69,50 @@ function sleepSync(milliseconds) {
 }
 
 export function verifyPublishedPackageAfterPublish(release, getMetadata, options = {}) {
-	const attempts = options.attempts ?? DEFAULT_POST_PUBLISH_VERIFICATION_ATTEMPTS;
+	const timeoutMs = options.timeoutMs ?? DEFAULT_POST_PUBLISH_VERIFICATION_TIMEOUT_MS;
 	const delayMs = options.delayMs ?? DEFAULT_POST_PUBLISH_VERIFICATION_DELAY_MS;
 	const sleep = options.sleep ?? sleepSync;
+	const now = options.now ?? Date.now;
 	const log = options.log ?? ((message) => process.stdout.write(`${message}\n`));
+	const label = `${release.name}@${release.version}`;
+	const startedAt = now();
+	let lastProgressAt;
+	let registryError;
 
-	for (let attempt = 1; attempt <= attempts; attempt += 1) {
-		const metadata = getMetadata(release.name, release.version);
+	while (true) {
+		let metadata;
+		try {
+			metadata = getMetadata(release.name, release.version);
+			registryError = undefined;
+		} catch (error) {
+			if (!(error instanceof NpmRegistryUnavailableError)) throw error;
+			registryError = error;
+			log(`${label} registry query failed transiently; retrying.`);
+		}
 		if (metadata) {
 			assertPublishedPackageMatchesRelease({ ...release, metadata });
 			return metadata;
 		}
-		if (attempt === attempts) break;
-		if (attempt === 1) {
-			log(`${release.name}@${release.version} publish accepted; waiting for npm registry metadata to become visible...`);
+
+		const elapsedMs = now() - startedAt;
+		if (elapsedMs >= timeoutMs) break;
+		if (lastProgressAt === undefined) {
+			log(`${label} publish accepted; waiting up to ${Math.round(timeoutMs / 60_000)} minutes for npm registry metadata to become visible...`);
+			lastProgressAt = elapsedMs;
+		} else if (elapsedMs - lastProgressAt >= POST_PUBLISH_PROGRESS_INTERVAL_MS) {
+			log(`${label} still not visible on npm after ${Math.round(elapsedMs / 60_000)} minutes; waiting...`);
+			lastProgressAt = elapsedMs;
 		}
-		sleep(delayMs);
+		sleep(Math.min(delayMs, timeoutMs - elapsedMs));
 	}
 
-	throw new Error(`${release.name}@${release.version} is not visible on npm after ${attempts} verification attempts`);
+	const minutes = Math.round((now() - startedAt) / 60_000);
+	throw new Error(
+		[
+			`npm accepted ${label}, but its registry metadata is not visible after ${minutes} minutes.`,
+			"Do not republish, move the tag, or rerun Prepare Release or Approve Release.",
+			`Wait until \`npm view ${label} dist.integrity\` answers, then rerun Publish Release at v${release.version}.`,
+			...(registryError ? [`Last registry query failed: ${registryError.message}`] : []),
+		].join("\n"),
+	);
 }
