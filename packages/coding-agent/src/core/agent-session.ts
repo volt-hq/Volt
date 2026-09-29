@@ -2168,7 +2168,11 @@ export class AgentSession {
 
 	/** Publish an isolated passive projection to every public session observer. */
 	private _emit(event: AgentSessionEvent): void {
-		if (this.sessionManager.getConversationAuthorityStatus().status !== "available") return;
+		if (this.sessionManager.getConversationAuthorityStatus().status !== "available") {
+			// Dropped events still end `isBusy` inputs (agent_settled); waiters re-check it, so wake them.
+			this._releaseActivityWaiters();
+			return;
+		}
 		if (isAgentEvent(event)) {
 			try {
 				this._toolProgressDiagnostics.observe(event, this._harness.activeRunSnapshot);

@@ -145,6 +145,7 @@ import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../cor
 import {
 	getDefaultSessionDir,
 	type SessionContext,
+	SessionConversationStateUnavailableError,
 	SessionManager,
 	type SessionReference,
 } from "../../core/session-manager.ts";
@@ -666,6 +667,10 @@ export class InteractiveMode {
 	private drainViewerFeedId: string | undefined;
 	/** Handoff reloads in flight; editor submissions stay held until they finish. */
 	private handoffReloadsPending = 0;
+	/** Reloads after conversation authority loss; editor submissions stay held until they finish. */
+	private authorityRecoveriesPending = 0;
+	/** Sessions whose authority-loss reload already started. */
+	private readonly authorityRecoveryStarted = new WeakSet<AgentSession>();
 	private dismissSubagentInspector: (() => void) | undefined;
 	/** Confirmation belongs to the work that was active when the warning appeared. */
 	private quitConfirmation:
@@ -1337,13 +1342,17 @@ export class InteractiveMode {
 		// Main interactive loop
 		while (true) {
 			const userInput = await this.getUserInput();
+			let session = this.session;
 			try {
 				const images = await this.collectPromptImages(userInput);
-				await this.session.prompt(userInput, images ? { images } : undefined);
+				session = this.session;
+				await session.prompt(userInput, images ? { images } : undefined);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
 			}
+			// A failed delivery commit resolves the prompt (delivery_failed) instead of rejecting it.
+			this.restoreInputAfterAuthorityLoss(session, userInput);
 		}
 	}
 
@@ -3863,7 +3872,7 @@ export class InteractiveMode {
 	}
 
 	private setupEditorSubmitHandler(): void {
-		this.defaultEditor.onSubmit = async (text: string) => {
+		const submit = async (text: string): Promise<void> => {
 			text = text.trim();
 			if (!text) return;
 
@@ -3874,15 +3883,17 @@ export class InteractiveMode {
 				return;
 			}
 
-			if (this.isDrainViewerActive() || this.handoffReloadsPending > 0) {
-				// Read-only while the remote turn drains or its transcript reloads: put
-				// the text back in the editor (it lands un-submitted once the handoff
-				// completes).
+			if (this.isDrainViewerActive() || this.handoffReloadsPending > 0 || this.authorityRecoveriesPending > 0) {
+				// Read-only while the remote turn drains or the session reloads from the
+				// store: put the text back in the editor (it lands un-submitted once the
+				// reload completes).
 				this.editor.setText(text);
 				this.showStatus(
 					this.isDrainViewerActive()
 						? "Attaching — input will stay in the editor until the remote turn finishes."
-						: "Loading the remote turn — input will stay in the editor until it finishes.",
+						: this.authorityRecoveriesPending > 0
+							? "Reloading the session — input will stay in the editor until it finishes."
+							: "Loading the remote turn — input will stay in the editor until it finishes.",
 				);
 				return;
 			}
@@ -4119,7 +4130,13 @@ export class InteractiveMode {
 				if (this.isExtensionCommand(text)) {
 					this.editor.addToHistory?.(text);
 					this.editor.setText("");
-					await this.session.prompt(text);
+					const session = this.session;
+					try {
+						await session.prompt(text);
+					} catch (error: unknown) {
+						this.restoreInputAfterAuthorityLoss(session, text);
+						throw error;
+					}
 				} else {
 					this.queueCompactionMessage(text, "steer");
 				}
@@ -4132,7 +4149,13 @@ export class InteractiveMode {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				const images = await this.collectPromptImages(text);
-				await this.session.prompt(text, { streamingBehavior: "steer", images });
+				const session = this.session;
+				try {
+					await session.prompt(text, { streamingBehavior: "steer", images });
+				} catch (error: unknown) {
+					this.restoreInputAfterAuthorityLoss(session, text);
+					throw error;
+				}
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -4149,12 +4172,77 @@ export class InteractiveMode {
 			}
 			this.editor.addToHistory?.(text);
 		};
+		this.defaultEditor.onSubmit = async (text: string) => {
+			try {
+				await submit(text);
+			} catch (error: unknown) {
+				this.showError(error instanceof Error ? error.message : String(error));
+			}
+		};
 	}
 
 	private subscribeToAgent(session: AgentSession): void {
-		this.unsubscribe = session.subscribe(async (event) => {
+		const unsubscribeEvents = session.subscribe(async (event) => {
 			await this.handleEvent(event);
 		});
+		// Runs synchronously inside the failing write; recover once it has unwound.
+		const unsubscribeAuthority = session.sessionManager.subscribeConversationAuthorityChanges((status) => {
+			queueMicrotask(() => void this.handleConversationAuthorityLoss(session, status.error));
+		});
+		this.unsubscribe = () => {
+			unsubscribeEvents();
+			unsubscribeAuthority();
+		};
+	}
+
+	/**
+	 * A write this session could not prove persisted retired its conversation
+	 * authority, so its in-memory copy is unusable. Reopen it from the store, the
+	 * source of truth, as after a daemon handoff. Editor submissions stay held until
+	 * the reload finishes. A failed reload is fatal, as is a session that cannot be
+	 * reloaded (no store reference).
+	 */
+	private async handleConversationAuthorityLoss(
+		session: AgentSession,
+		error: SessionConversationStateUnavailableError,
+	): Promise<void> {
+		if (this.isShuttingDown || session !== this.session || this.authorityRecoveryStarted.has(session)) return;
+		this.authorityRecoveryStarted.add(session);
+		this.authorityRecoveriesPending++;
+		const cause = error.cause instanceof Error ? error.cause.message : error.message;
+		const failure = `Could not confirm the session's saved state: ${cause}`;
+		this.showError(`${failure}. Reloading the session from the store…`);
+		try {
+			await this.runtimeHost.reloadCurrentSessionFromStore({
+				expectedSessionId: session.sessionId,
+				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
+			});
+			const status = this.session.sessionManager.getConversationAuthorityStatus();
+			if (status.status === "reconciliation_required") throw status.error;
+			if (this.isShuttingDown) return;
+			this.stopWorkingLoader();
+			this.renderCurrentSessionState();
+			this.showError(failure);
+			this.showStatus("Reloaded the session from the store. Check the transcript before resending anything.");
+		} catch (reloadError: unknown) {
+			// Shutdown disposes the runtime and owns the exit.
+			if (this.isShuttingDown) return;
+			await this.handleFatalRuntimeError(
+				"Failed to reload the session after its state could not be saved",
+				reloadError,
+				{ unsentDraft: this.editor.getText() },
+			);
+		} finally {
+			this.authorityRecoveriesPending--;
+		}
+	}
+
+	/** Put submitted input back in the editor when its session lost conversation authority. */
+	private restoreInputAfterAuthorityLoss(session: AgentSession, text: string): void {
+		if (session.sessionManager.getConversationAuthorityStatus().status !== "reconciliation_required") return;
+		if (this.editor.getText()) return;
+		this.editor.setText(text);
+		this.ui.requestRender();
 	}
 
 	private subscribeToBackgroundJobs(session: AgentSession): void {
@@ -5151,9 +5239,33 @@ export class InteractiveMode {
 		// Restore the terminal before the process dies on any uncaught throw.
 		// Without this, an unhandled exception from extension code (or anywhere
 		// in volt) leaves the terminal in raw mode with no cursor.
-		const uncaughtExceptionHandler = (error: Error) => this.uncaughtCrash(error);
+		const uncaughtExceptionHandler = (error: Error) => {
+			if (!this.recoverUncaughtAuthorityError(error)) this.uncaughtCrash(error);
+		};
 		process.prependListener("uncaughtException", uncaughtExceptionHandler);
 		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
+		// Registering a listener disables Node's default throw, so other reasons
+		// still crash exactly like an uncaught exception.
+		const unhandledRejectionHandler = (reason: unknown) => {
+			if (this.recoverUncaughtAuthorityError(reason)) return;
+			this.uncaughtCrash(reason instanceof Error ? reason : new Error(String(reason)));
+		};
+		process.prependListener("unhandledRejection", unhandledRejectionHandler);
+		this.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
+	}
+
+	/**
+	 * Whether an uncaught error is a conversation-authority failure that session
+	 * recovery owns: a reader of the fail-stopped session threw. Recovery starts if
+	 * the current session lost authority; otherwise the error came from a session
+	 * that was already replaced and is dropped.
+	 */
+	private recoverUncaughtAuthorityError(error: unknown): boolean {
+		if (!(error instanceof SessionConversationStateUnavailableError) || this.isShuttingDown) return false;
+		if (this.session.sessionManager.getConversationAuthorityStatus().status === "reconciliation_required") {
+			void this.handleConversationAuthorityLoss(this.session, error);
+		}
+		return true;
 	}
 
 	private unregisterSignalHandlers(): void {
