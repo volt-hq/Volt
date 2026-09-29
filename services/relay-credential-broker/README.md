@@ -76,7 +76,7 @@ Refresh never returns or changes the refresh secret. It issues a new access JWT 
 
 ## Run locally
 
-Go 1.23 or newer is required.
+Go 1.27 or newer is required.
 
 ```sh
 cd services/relay-credential-broker
