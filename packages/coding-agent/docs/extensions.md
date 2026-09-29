@@ -986,7 +986,9 @@ Use this for abort-aware nested work started by extension handlers, for example:
 - file or process helpers that accept `AbortSignal`
 
 `ctx.signal` is typically defined during active turn events such as `tool_call`, `tool_result`, `message_update`, and `turn_end`.
-It is usually `undefined` in idle or non-turn contexts such as session events, extension commands, and shortcuts fired while volt is idle.
+It is usually `undefined` in idle or non-turn contexts such as session events and shortcuts fired while volt is idle.
+
+Command handlers get a different, always-defined signal tied to the session rather than the agent turn. See [ExtensionCommandContext](#extensioncommandcontext).
 
 ```typescript
 volt.on("tool_result", async (event, ctx) => {
@@ -1069,6 +1071,24 @@ volt.on("before_agent_start", (event, ctx) => {
 ## ExtensionCommandContext
 
 Command handlers receive `ExtensionCommandContext`, which extends `ExtensionContext` with session control methods. These are only available in commands because they can deadlock if called from event handlers.
+
+### ctx.signal (commands)
+
+In a command handler, `ctx.signal` is always defined. It is aborted when the command's session is disposed, including when `ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, or a reload replaces it. It is also aborted when the session loses conversation authority because a write could not be confirmed as saved. It is not the agent turn's signal, so a command started during a turn is not cancelled when that turn is.
+
+After authority is lost, volt stops waiting for the command, cancels the session's other work, and reloads the session from the store. Nothing the command does afterwards can be saved. Pass the signal to long-running work and dialogs so the command ends promptly:
+
+```typescript
+volt.registerCommand("deploy", {
+  handler: async (args, ctx) => {
+    const target = await ctx.ui.select("Deploy to", ["staging", "production"], { signal: ctx.signal });
+    if (!target) return;
+    await fetch(`https://example.com/deploy/${target}`, { method: "POST", signal: ctx.signal });
+  },
+});
+```
+
+After `ctx.newSession()`, `ctx.fork()`, or `ctx.switchSession()`, use the signal of the `ctx` passed to `withSession`, which belongs to the replacement session.
 
 ### ctx.getSystemPromptOptions()
 
@@ -2396,6 +2416,10 @@ if (confirmed) {
 - `confirm()` returns `false`
 - `input()` returns `undefined`
 
+#### Host Dismissal
+
+Volt dismisses pending dialogs when it tears down extension UI: when the session is replaced or reloaded (including `/reload`), and when the session loses conversation authority. Dismissed dialogs return the same values as a cancel: `select()`, `input()`, and `editor()` return `undefined`, and `confirm()` returns `false`.
+
 #### Manual Dismissal with AbortSignal
 
 For more control (e.g., to distinguish timeout from user cancel), use `AbortSignal`:
@@ -2597,6 +2621,19 @@ The callback receives:
 - `theme` - Current theme for styling
 - `keybindings` - App keybinding manager (for checking shortcuts)
 - `done(value)` - Call to close component and return value
+
+If volt removes the component before `done()` is called (see [Host Dismissal](#host-dismissal)), it disposes the component and `custom()` rejects with `ExtensionUIDismissedError`. A command handler that lets this error propagate ends quietly, without an extension error. Catch it when you need to clean up:
+
+```typescript
+import { ExtensionUIDismissedError } from "@hansjm10/volt-coding-agent";
+
+try {
+  const result = await ctx.ui.custom<boolean>((tui, theme, keybindings, done) => new MyComponent(done));
+} catch (error) {
+  if (!(error instanceof ExtensionUIDismissedError)) throw error;
+  // The UI was torn down; undo any partial work here.
+}
+```
 
 See [tui.md](tui.md) for the full component API.
 

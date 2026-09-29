@@ -111,6 +111,7 @@ import {
 	type ExtensionMode,
 	ExtensionRunner,
 	type ExtensionUIContext,
+	ExtensionUIDismissedError,
 	type InputSource,
 	type MessageEndEvent,
 	type MessageStartEvent,
@@ -846,6 +847,11 @@ export class AgentSession {
 	private _extensionWorkSignal: AbortSignal | undefined;
 	private _extensionWorkAbort: (() => void) | undefined;
 	private _unsubscribeWorkAuthority?: () => void;
+	/** Aborted on conversation-authority loss or disposal; command handlers see it as `ctx.signal`. */
+	private readonly _lifetimeAbort = new AbortController();
+	/** Resolves when authority-loss cancellation starts; in-flight command handlers are no longer awaited. */
+	private readonly _conversationAuthorityLoss = Promise.withResolvers<void>();
+	private _conversationAuthorityLossObserved = false;
 	private readonly _workToolPolicies = new Set<{ policy: Readonly<AgentSessionTurnPolicy> }>();
 	private _workPolicyRevision = 0n;
 	private readonly _workImplementations = new WeakMap<
@@ -1178,9 +1184,10 @@ export class AgentSession {
 			this._mcpManagerFactory = config.mcpManagerFactory;
 			this._attachMcpManagerEvents();
 			this._extensionWork = this._createExtensionWorkManager();
-			this._unsubscribeWorkAuthority = this.sessionManager.subscribeConversationAuthorityChanges(() =>
-				this._invalidateExtensionWork(),
-			);
+			this._unsubscribeWorkAuthority = this.sessionManager.subscribeConversationAuthorityChanges((status) => {
+				this._invalidateExtensionWork();
+				this._cancelWorkAfterAuthorityLoss(status.error);
+			});
 
 			// Always subscribe to finalized Harness events for internal handling.
 			this._unsubscribeAgent = this._harness.subscribe(async (event) => {
@@ -1294,6 +1301,29 @@ export class AgentSession {
 			}
 			throw error;
 		}
+	}
+
+	/**
+	 * Nothing this session does after losing conversation authority can be saved, so it cancels
+	 * its own work: the run (with retry, compaction, and background jobs), branch summary, bash,
+	 * and the lifetime signal command handlers observe. In-flight command handlers stop being
+	 * awaited, so `isBusy` clears once cooperative work settles and a store reload can proceed.
+	 * Deferred to a microtask: the loss is reported synchronously inside the failing write, and
+	 * abort listeners must not reenter it.
+	 */
+	private _cancelWorkAfterAuthorityLoss(error: Error): void {
+		if (this._conversationAuthorityLossObserved) return;
+		this._conversationAuthorityLossObserved = true;
+		queueMicrotask(() => {
+			// First, so in-flight commands are abandoned before reactions to the abort below run.
+			this._conversationAuthorityLoss.resolve();
+			if (this._disposed) return;
+			this._lifetimeAbort.abort(error);
+			void this.abort("session_replacement").catch(() => undefined);
+			this.abortBranchSummary();
+			this.abortBash();
+			this._activityChanged();
+		});
 	}
 
 	private _assertConversationAuthorityAvailable(): void {
@@ -3231,6 +3261,7 @@ export class AgentSession {
 			this._unsubscribeBackgroundJobs = undefined;
 			this._promptCacheKeepAlive.dispose();
 			this._promptCacheRefreshAbort.abort();
+			this._lifetimeAbort.abort(new Error("AgentSession is disposed"));
 			this._releaseActivityWaiters();
 			this._cancelBackgroundContinuationSchedule();
 			// Teardown never releases its hold, even if an overlapping abort finishes.
@@ -5744,15 +5775,27 @@ export class AgentSession {
 
 		// Command transactions must not wait on themselves or each other.
 		// waitForIdle still waits for active runs and non-command prompt work.
-		const ctx = this._extensionRunner.createCommandContext(() => this._waitForIdle());
+		const ctx = this._extensionRunner.createCommandContext(() => this._waitForIdle(), this._lifetimeAbort.signal);
 
 		try {
 			this._activeExtensionCommandHandlers++;
 			this._activityChanged();
-			await command.handler(args, ctx);
+			const handler = Promise.resolve(command.handler(args, ctx));
+			// After authority loss nothing the handler does can be saved. Stop awaiting it (its
+			// ctx.signal is aborted) so a handler that never settles cannot block a store reload.
+			const abandoned = await Promise.race([
+				handler.then(() => false),
+				this._conversationAuthorityLoss.promise.then(() => true),
+			]);
+			if (abandoned) {
+				void handler.catch(() => undefined);
+				return true;
+			}
 			await this._waitForHarnessMutations();
 			return true;
 		} catch (err) {
+			// Volt tore the handler's custom UI down (session replacement, reload, authority loss).
+			if (err instanceof ExtensionUIDismissedError) return true;
 			// Emit error via extension runner
 			this._extensionRunner.emitError({
 				extensionPath: `command:${commandName}`,
@@ -9206,7 +9249,9 @@ export class AgentSession {
 	createReplacedSessionContext(): ReplacedSessionContext {
 		const context = Object.defineProperties(
 			{},
-			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
+			Object.getOwnPropertyDescriptors(
+				this._extensionRunner.createCommandContext(undefined, this._lifetimeAbort.signal),
+			),
 		) as ReplacedSessionContext;
 		context.sendMessage = (message, options) => this._sendCustomMessage(message, options, true);
 		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);

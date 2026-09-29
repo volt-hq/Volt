@@ -514,6 +514,7 @@ describe("InteractiveMode.showExtensionCustom", () => {
 			activeView: previousView,
 			conversationView: previousView,
 			planDetails: undefined,
+			pendingExtensionDialogs: new Set<() => void>(),
 		};
 		fakeThis.createDedicatedView = (component: Component) =>
 			(InteractiveMode as any).prototype.createDedicatedView.call(fakeThis, component);

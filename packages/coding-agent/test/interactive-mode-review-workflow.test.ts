@@ -91,6 +91,7 @@ function createContext(): ReviewContext {
 		activeInteractiveReview: false,
 		activeView: view,
 		conversationView: view,
+		pendingExtensionDialogs: new Set<() => void>(),
 		createInlineSessionRenderer: vi.fn(() => ({ onSessionEvent: vi.fn(), dispose: vi.fn() })),
 		showWarning: vi.fn(InteractiveMode.prototype.showWarning),
 		showStatus: vi.fn(),

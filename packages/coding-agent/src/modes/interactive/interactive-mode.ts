@@ -87,6 +87,7 @@ import type {
 	ProjectTrustContext,
 	ToolInfo,
 } from "../../core/extensions/index.ts";
+import { ExtensionUIDismissedError } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
 import {
@@ -338,6 +339,9 @@ interface InlineSessionRenderer {
 	onSessionEvent: (event: AgentSessionEvent) => void;
 	dispose: () => void;
 }
+
+/** How an extension selector closed: an option picked, cancelled by the user, or dismissed by Volt or its signal. */
+type ExtensionSelectorOutcome = { kind: "selected"; option: string } | { kind: "cancelled" } | { kind: "dismissed" };
 
 interface ActiveViewDescriptor {
 	regularComponents: readonly Component[];
@@ -684,6 +688,8 @@ export class InteractiveMode {
 	private extensionInputRestore: { view: ActiveViewDescriptor; focus: Component | null } | undefined;
 	private extensionEditor: ExtensionEditorComponent | undefined = undefined;
 	private extensionEditorRestore: { view: ActiveViewDescriptor; focus: Component | null } | undefined;
+	/** Dismiss callbacks of pending extension dialogs, in opening order. Each settles its dialog once. */
+	private readonly pendingExtensionDialogs = new Set<() => void>();
 	private extensionTerminalInputSubscriptions = new Set<{
 		handler: (data: string) => { consume?: boolean; data?: string } | undefined;
 		unsubscribe: () => void;
@@ -2909,16 +2915,7 @@ export class InteractiveMode {
 
 	private resetExtensionUI(): void {
 		this.dismissBackgroundJobsInspector?.();
-		if (this.extensionSelector) {
-			this.hideExtensionSelector();
-		}
-		if (this.extensionInput) {
-			this.hideExtensionInput();
-		}
-		if (this.extensionEditor) {
-			this.hideExtensionEditor();
-		}
-		this.ui.hideOverlay();
+		this.dismissPendingExtensionDialogs();
 		this.clearTurnDoneAlertTimer();
 		this.clearPromptCacheAlertTimer();
 		this.clearExtensionTerminalInputListeners();
@@ -3106,11 +3103,12 @@ export class InteractiveMode {
 		const details = [request.message, request.commandPreview ? `Command: ${request.commandPreview}` : undefined]
 			.filter((line): line is string => line !== undefined && line.length > 0)
 			.join("\n\n");
-		const confirmed = await this.showExtensionConfirm(request.title, details, {
+		const outcome = await this.showExtensionSelectorOutcome(`${request.title}\n${details}`, ["Yes", "No"], {
 			signal: options?.signal,
 			timeout: request.timeoutMs,
 		});
-		return { decision: confirmed ? "approved" : "denied" };
+		if (outcome.kind === "dismissed") return { decision: "dismissed" };
+		return { decision: outcome.kind === "selected" && outcome.option === "Yes" ? "approved" : "denied" };
 	}
 
 	private updateHostAction(update: HostActionUpdate): void {
@@ -3185,6 +3183,14 @@ export class InteractiveMode {
 	}
 
 	/**
+	 * Settle every pending extension dialog as dismissed, newest first so view
+	 * restoration unwinds in reverse opening order.
+	 */
+	private dismissPendingExtensionDialogs(): void {
+		for (const dismiss of [...this.pendingExtensionDialogs].reverse()) dismiss();
+	}
+
+	/**
 	 * Show a selector for extensions.
 	 */
 	private showExtensionSelector(
@@ -3192,33 +3198,42 @@ export class InteractiveMode {
 		options: string[],
 		opts?: ExtensionUIDialogOptions,
 	): Promise<string | undefined> {
+		return this.showExtensionSelectorOutcome(title, options, opts).then((outcome) =>
+			outcome.kind === "selected" ? outcome.option : undefined,
+		);
+	}
+
+	private showExtensionSelectorOutcome(
+		title: string,
+		options: string[],
+		opts?: ExtensionUIDialogOptions,
+	): Promise<ExtensionSelectorOutcome> {
 		return new Promise((resolve) => {
 			if (opts?.signal?.aborted) {
-				resolve(undefined);
+				resolve({ kind: "dismissed" });
 				return;
 			}
 
-			const onAbort = () => {
+			let settled = false;
+			const settle = (outcome: ExtensionSelectorOutcome) => {
+				if (settled) return;
+				settled = true;
+				opts?.signal?.removeEventListener("abort", dismiss);
+				this.pendingExtensionDialogs.delete(dismiss);
 				this.hideExtensionSelector();
-				resolve(undefined);
+				resolve(outcome);
 			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			const dismiss = () => settle({ kind: "dismissed" });
+			opts?.signal?.addEventListener("abort", dismiss, { once: true });
+			this.pendingExtensionDialogs.add(dismiss);
 
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionSelectorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionSelector = new ExtensionSelectorComponent(
 				title,
 				options,
-				(option) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(option);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionSelector();
-					resolve(undefined);
-				},
+				(option) => settle({ kind: "selected", option }),
+				() => settle({ kind: "cancelled" }),
 				{ tui: this.ui, timeout: opts?.timeout, onToggleToolsExpanded: () => this.toggleToolOutputExpansion() },
 			);
 
@@ -3286,29 +3301,25 @@ export class InteractiveMode {
 				return;
 			}
 
-			const onAbort = () => {
+			let settled = false;
+			const settle = (value: string | undefined) => {
+				if (settled) return;
+				settled = true;
+				opts?.signal?.removeEventListener("abort", dismiss);
+				this.pendingExtensionDialogs.delete(dismiss);
 				this.hideExtensionInput();
-				resolve(undefined);
+				resolve(value);
 			};
-			opts?.signal?.addEventListener("abort", onAbort, { once: true });
+			const dismiss = () => settle(undefined);
+			opts?.signal?.addEventListener("abort", dismiss, { once: true });
+			this.pendingExtensionDialogs.add(dismiss);
 
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionInputRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
-			this.extensionInput = new ExtensionInputComponent(
-				title,
-				placeholder,
-				(value) => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(value);
-				},
-				() => {
-					opts?.signal?.removeEventListener("abort", onAbort);
-					this.hideExtensionInput();
-					resolve(undefined);
-				},
-				{ tui: this.ui, timeout: opts?.timeout },
-			);
+			this.extensionInput = new ExtensionInputComponent(title, placeholder, (value) => settle(value), dismiss, {
+				tui: this.ui,
+				timeout: opts?.timeout,
+			});
 
 			this.activateView(this.createDedicatedView(this.extensionInput), this.extensionInput);
 		});
@@ -3336,6 +3347,17 @@ export class InteractiveMode {
 	 */
 	private showExtensionEditor(title: string, prefill?: string): Promise<string | undefined> {
 		return new Promise((resolve) => {
+			let settled = false;
+			const settle = (value: string | undefined) => {
+				if (settled) return;
+				settled = true;
+				this.pendingExtensionDialogs.delete(dismiss);
+				this.hideExtensionEditor();
+				resolve(value);
+			};
+			const dismiss = () => settle(undefined);
+			this.pendingExtensionDialogs.add(dismiss);
+
 			this.dismissBackgroundJobsInspector?.();
 			this.extensionEditorRestore = { view: this.activeView, focus: this.ui.getFocusedComponent() };
 			this.extensionEditor = new ExtensionEditorComponent(
@@ -3343,14 +3365,8 @@ export class InteractiveMode {
 				this.keybindings,
 				title,
 				prefill,
-				(value) => {
-					this.hideExtensionEditor();
-					resolve(value);
-				},
-				() => {
-					this.hideExtensionEditor();
-					resolve(undefined);
-				},
+				(value) => settle(value),
+				dismiss,
 			);
 
 			this.activateView(this.createDedicatedView(this.extensionEditor), this.extensionEditor);
@@ -3500,24 +3516,46 @@ export class InteractiveMode {
 			let component: Component & { dispose?(): void };
 			let overlayHandle: OverlayHandle | undefined;
 			let closed = false;
+			let dismissed = false;
 
-			const close = (result: T) => {
-				if (closed) return;
-				closed = true;
-				// A local jobs inspector can be stacked above an asynchronous extension dialog.
-				if (isOverlay) overlayHandle?.hide();
-				else restoreView();
-				resolve(result);
+			const disposeComponent = (target: (Component & { dispose?(): void }) | undefined) => {
 				try {
-					component?.dispose?.();
+					target?.dispose?.();
 				} catch {
 					/* ignore dispose errors */
 				}
 			};
+			const finish = (): boolean => {
+				if (closed) return false;
+				closed = true;
+				this.pendingExtensionDialogs.delete(dismiss);
+				// A local jobs inspector can be stacked above an asynchronous extension dialog.
+				if (isOverlay) overlayHandle?.hide();
+				else restoreView();
+				return true;
+			};
+			const close = (result: T) => {
+				if (!finish()) return;
+				resolve(result);
+				disposeComponent(component);
+			};
+			// Volt removed the component before done(); settle so its caller cannot hang.
+			const dismiss = () => {
+				if (!finish()) return;
+				dismissed = true;
+				reject(new ExtensionUIDismissedError());
+				disposeComponent(component);
+			};
 
-			Promise.resolve(factory(this.ui, theme, this.keybindings, close))
+			const created = factory(this.ui, theme, this.keybindings, close);
+			if (!closed) this.pendingExtensionDialogs.add(dismiss);
+			Promise.resolve(created)
 				.then((c) => {
-					if (closed) return;
+					if (closed) {
+						// Never mounted: an asynchronous factory resolved after dismissal.
+						if (dismissed) disposeComponent(c);
+						return;
+					}
 					component = c;
 					if (isOverlay) {
 						// Resolve overlay options - can be static or dynamic function
@@ -3547,6 +3585,8 @@ export class InteractiveMode {
 				})
 				.catch((err) => {
 					if (closed) return;
+					closed = true;
+					this.pendingExtensionDialogs.delete(dismiss);
 					if (!isOverlay) restoreView();
 					reject(err);
 				});
@@ -4216,7 +4256,8 @@ export class InteractiveMode {
 		const cause = error.cause instanceof Error ? error.cause.message : error.message;
 		const failure = `Could not confirm the session's saved state: ${cause}`;
 		// Extension UI can read the lost session while rendering. Replacement removes it
-		// anyway, and extensions reinstall it on session_start after the reload.
+		// anyway, and extensions reinstall it on session_start after the reload. Pending
+		// dialogs settle as dismissed, so no caller waits on UI that is gone.
 		this.resetExtensionUI();
 		this.showError(`${failure}. Reloading the session from the store…`);
 		try {

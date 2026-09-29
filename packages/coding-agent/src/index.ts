@@ -186,6 +186,7 @@ export {
 	defineTool,
 	discoverAndLoadExtensions,
 	ExtensionRunner,
+	ExtensionUIDismissedError,
 	isBashToolResult,
 	isEditToolResult,
 	isFindToolResult,
