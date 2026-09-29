@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import type { DaemonClient, DaemonClientOptions, DistributiveOmit } from "../src/daemon/control-client.ts";
 import type { ControlRequest, ControlResponse, RemoteTransportHealth } from "../src/daemon/control-protocol.ts";
 
@@ -73,7 +73,7 @@ import { handleRemoteControlCommand } from "../src/daemon/remote-cli.ts";
 
 describe("remote pair CLI transport availability", () => {
 	let originalExitCode: typeof process.exitCode;
-	let errorSpy: ReturnType<typeof vi.spyOn>;
+	let errorSpy: MockInstance<typeof console.error>;
 
 	beforeEach(() => {
 		originalExitCode = process.exitCode;

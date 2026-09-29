@@ -113,7 +113,7 @@
 		"fast-check": "4.9.0",
 		"shx": "0.4.0",
 		"typescript": "npm:@typescript/typescript6@6.0.2",
-		"vitest": "3.2.6"
+		"vitest": "5.0.2"
 	},
 	"keywords": [
 		"coding-agent",

@@ -89,11 +89,11 @@ npm run check
 ./test.sh test --workspace packages/coding-agent -- test/skills.test.ts
 ```
 
-You can also run a specific non-e2e test from its package root using the installed Vitest CLI. Check its location first; in this checkout it is available under `packages/coding-agent/node_modules` and `packages/ai/node_modules`:
+You can also run a specific non-e2e test from its package root using the Vitest CLI installed in the root `node_modules`:
 
 ```bash
 cd packages/coding-agent
-node node_modules/vitest/dist/cli.js --run test/skills.test.ts
+node ../../node_modules/vitest/dist/cli.js --run test/skills.test.ts
 ```
 
 Only run the full non-e2e suite with root `./test.sh` when explicitly requested. Do not run an unfiltered Vitest command: provider e2e tests can activate when credentials or endpoint settings are present. See [CONTRIBUTING.md](../../../CONTRIBUTING.md) for the validation policy and worker limits.

@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import { runVoltDaemon } from "../src/daemon/main.ts";
 import { probeDaemon } from "../src/daemon/spawn.ts";
@@ -18,8 +18,8 @@ describe("remote CLI (daemon control client)", () => {
 	let daemon: Promise<number> | undefined;
 	let originalAgentDir: string | undefined;
 	let originalExitCode: typeof process.exitCode;
-	let logSpy: ReturnType<typeof vi.spyOn>;
-	let errorSpy: ReturnType<typeof vi.spyOn>;
+	let logSpy: MockInstance<typeof console.log>;
+	let errorSpy: MockInstance<typeof console.error>;
 
 	beforeAll(async () => {
 		agentDir = realpathSync(mkdtempSync(join(tmpdir(), "volt-remote-cli-")));
@@ -62,7 +62,7 @@ describe("remote CLI (daemon control client)", () => {
 		}
 	});
 
-	function loggedLines(spy: ReturnType<typeof vi.spyOn>): string {
+	function loggedLines(spy: MockInstance<typeof console.log>): string {
 		return spy.mock.calls.map((call) => call.join(" ")).join("\n");
 	}
 

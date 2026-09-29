@@ -27,6 +27,7 @@ swebench-output/
 # Package specific
 .npm/
 coverage/
+.vitest/
 .nyc_output/
 .pi_config/
 tui-debug.log

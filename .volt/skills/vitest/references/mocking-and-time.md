@@ -1,4 +1,4 @@
-# Mocking and time in Vitest 3
+# Mocking and time in Vitest 5
 
 Adapted from Anthony Fu's Vitest skill; attribution and license are in the skill's `SOURCES.md`.
 
@@ -33,6 +33,8 @@ test("configures the imported seam", async () => {
 });
 ```
 
+`vi.mock`, `vi.unmock`, and `vi.hoisted` must be called at module top level. Vitest 5 throws when they appear inside a function, block, or `describe`/`test` callback, because hoisting would run them before the surrounding code.
+
 `./label-source.ts` is an illustrative module, not a Volt file. In real tests call the consumer being tested rather than only asserting the mock's configured behavior. Type-only imports may describe mock signatures because they erase; do not access runtime imports inside `vi.hoisted`.
 
 Do not use upstream recipes based on `vi.doMock` plus dynamic imports, `import("...")` type arguments, or `vi.mock(import("..."))`: they conflict with Volt's top-level import rule. `vi.resetModules()` also does not re-evaluate an already-bound top-level import. Find an existing reset/injection seam instead of inventing a module-reload workaround.
@@ -46,7 +48,9 @@ Do not use upstream recipes based on `vi.doMock` plus dynamic imports, `import("
 | `mockRestore` | Also restore an object's original property descriptor when spying |
 | `vi.unstubAllEnvs` / `vi.unstubAllGlobals` | Undo values changed by the corresponding stub APIs |
 
-For Vitest 3, resetting `vi.fn(implementation)` restores that implementation; resetting a bare `vi.fn()` returns it to an empty function. Do not assume all resets produce `undefined` or that restoring spies un-mocks module factories. Read the installed declarations when exact behavior matters.
+Resetting `vi.fn(implementation)` restores that implementation; resetting a bare `vi.fn()` returns it to an empty function. `vi.restoreAllMocks()` only restores spies created with `vi.spyOn`; it does not clear `vi.fn()` history or un-mock module factories. Read the installed declarations when exact behavior matters.
+
+Volt uses Vitest 5's default `clearMocks: true`: every mock's call history is cleared before each test, while implementations are kept. Do not assert on calls recorded in `beforeAll`, setup files, or module scope from inside a test; trigger them within the test or capture the needed values before the test starts. Clearing history does not reset implementations, so still reset `mockReturnValue`/`mockImplementation` state that must not leak between tests. Class-backed mocks such as `vi.fn(SomeClass)` construct instances that inherit the implementation's prototype methods; implementations for mocks called with `new` must use `function` or `class`, not arrow functions.
 
 Use cleanup for resources the test actually owns. Environment stubs, globals, module mocks, and clocks are shared within a worker context; do not mutate them from concurrent tests.
 
@@ -74,4 +78,4 @@ test("does not fire before the deadline", async () => {
 
 This demonstrates clock semantics; replace the raw timer with the production deadline/debounce operation in a real test. Prefer async timer advancement when callbacks schedule promise work. Avoid `runAllTimers` on recurring timers or retry loops; advance only the interval being tested. Dispose the production object before clearing remaining timers so blanket cleanup cannot hide a missing production cancellation path.
 
-Await promise assertions and reject paths. For `vi.waitFor`, throw/assert until the condition holds; returning false is not a failed assertion. Fake timers do not complete sockets, child processes, or arbitrary promises, so use explicit completion signals for those boundaries.
+Await promise assertions and reject paths; an unawaited `.resolves` or `.rejects` assertion fails the test in Vitest 5. `expect.poll` also fails when its callback or assertion has not settled by its timeout, so raise the timeout deliberately instead of relying on a late success. For `vi.waitFor`, throw/assert until the condition holds; returning false is not a failed assertion. Fake timers do not complete sockets, child processes, or arbitrary promises, so use explicit completion signals for those boundaries.

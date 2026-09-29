@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, sep } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteHostState, IrohRemoteWorkspace } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
@@ -82,7 +82,7 @@ describe("worktree manager (fake git)", () => {
 	let workspaceDir: string;
 	let workspace: IrohRemoteWorkspace;
 	let stateManager: IrohRemoteHostStateManager;
-	let flushState: ReturnType<typeof vi.fn>;
+	let flushState: Mock<() => Promise<void>>;
 
 	beforeEach(() => {
 		agentDir = mkdtempSync(join(tmpdir(), "volt-worktree-mgr-"));

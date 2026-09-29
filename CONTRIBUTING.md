@@ -59,14 +59,14 @@ workspace run with the standard Vitest option:
 ./test.sh test --workspace packages/coding-agent -- test/skills.test.ts --maxWorkers=1
 ```
 
-Only run the full non-e2e suite when explicitly requested. To limit its concurrency, set both Vitest pool limits:
+Only run the full non-e2e suite when explicitly requested. To limit its concurrency, set the Vitest worker limit:
 
 ```bash
-VITEST_MAX_FORKS=1 VITEST_MAX_THREADS=1 ./test.sh
+VITEST_MAX_WORKERS=1 ./test.sh
 ```
 
-Explicit CLI and pool limits are preserved. Vitest's pool-specific environment
-variables take precedence over `--maxWorkers` when both are set. CI retains its
+Explicit CLI and environment limits are preserved. `VITEST_MAX_WORKERS` takes
+precedence over `--maxWorkers` when both are set. CI retains its
 existing worker limits and shards, and Node's built-in test runner (including
 the TUI suite) keeps its existing concurrency. Limits are per invocation, so
 avoid running several full suites simultaneously on the same host.

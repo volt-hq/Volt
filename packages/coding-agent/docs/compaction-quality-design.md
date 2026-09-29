@@ -146,9 +146,9 @@ Repeat trials and report paired per-case outcomes and uncertainty, not just one 
 From `packages/coding-agent`:
 
 ```bash
-node node_modules/vitest/dist/cli.js --run test/compaction-quality-runner.test.ts test/compaction-quality.test.ts test/suite/agent-session-context-compaction.test.ts test/context-compaction.test.ts test/compaction-summary-reasoning.test.ts
+node ../../node_modules/vitest/dist/cli.js --run test/compaction-quality-runner.test.ts test/compaction-quality.test.ts test/suite/agent-session-context-compaction.test.ts test/context-compaction.test.ts test/compaction-summary-reasoning.test.ts
 ```
 
-Use `../../node_modules/vitest/dist/cli.js` instead when Vitest is hoisted to the repository root. These selected tests use faux responses or pure accounting and do not call real model providers.
+These selected tests use faux responses or pure accounting and do not call real model providers.
 
 Run `npm run check` from the repository root after code changes. Report unrelated validation failures without expanding this work to fix them.

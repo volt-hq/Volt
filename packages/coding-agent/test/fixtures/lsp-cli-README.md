@@ -4,7 +4,7 @@ From `packages/coding-agent`:
 
 ```bash
 node test/lsp-cli-runner.mjs --scenario deltas
-node node_modules/vitest/dist/cli.js --run test/lsp-cli-diagnostics.test.ts
+node ../../node_modules/vitest/dist/cli.js --run test/lsp-cli-diagnostics.test.ts
 ```
 
 No build, installation, API credentials, actual TypeScript/Swift server, or paid
