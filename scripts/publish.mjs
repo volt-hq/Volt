@@ -6,6 +6,8 @@ import { join } from "node:path";
 import {
 	assertPublishedPackageMatchesRelease,
 	NPM_PUBLISHED_METADATA_FIELDS,
+	NpmRegistryUnavailableError,
+	TRANSIENT_NPM_REGISTRY_FAILURE,
 	verifyPublishedPackageAfterPublish,
 } from "./npm-publish-verification.mjs";
 
@@ -97,7 +99,9 @@ function getPublishedMetadata(name, version) {
 		return undefined;
 	}
 
-	throw new Error(output ? `Failed to query ${name}@${version}\n${output}` : `Failed to query ${name}@${version}`);
+	const message = output ? `Failed to query ${name}@${version}\n${output}` : `Failed to query ${name}@${version}`;
+	if (TRANSIENT_NPM_REGISTRY_FAILURE.test(output)) throw new NpmRegistryUnavailableError(message);
+	throw new Error(message);
 }
 
 const sourceCommit = execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim();

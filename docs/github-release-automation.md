@@ -595,9 +595,10 @@ The publisher must be idempotent:
   byte-identical; and
 - a published immutable release is treated as final.
 
-If npm accepted a package but its metadata has not propagated, wait for the
-registry record to become visible and rerun the same tag. Do not republish under
-a different tarball and do not move the tag.
+After each `npm publish`, the publisher waits up to 20 minutes for the registry
+record to become visible. If npm accepted a package but its metadata has still
+not propagated, wait for the registry record to become visible and rerun the
+same tag. Do not republish under a different tarball and do not move the tag.
 
 If the approval workflow created the tag but failed before dispatching the
 publisher, manually dispatch **Publish Release** at that exact tag. If it
