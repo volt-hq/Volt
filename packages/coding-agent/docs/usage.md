@@ -354,7 +354,7 @@ volt list                      # List installed packages
 volt config                    # Enable/disable package resources
 ```
 
-These commands manage volt packages, not the volt CLI installation. To uninstall volt itself, see [Quickstart](quickstart.md#uninstall). `volt config` and project package commands accept `--approve`/`--no-approve` to trust or ignore project-local settings for one command. `volt update` never prompts for project trust.
+These commands manage volt packages, not the volt CLI installation. To uninstall volt itself, see [Quickstart](quickstart.md#uninstall). `volt config` and project package commands accept `--approve`/`--no-approve` to trust or ignore project-local settings for one command. `volt update` never prompts for project trust. If the [background daemon](daemon.md) is running, `volt update` asks before stopping it for the self-update and starts it again afterwards.
 
 See [Volt Packages](packages.md) for package sources and security notes.
 

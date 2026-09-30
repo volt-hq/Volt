@@ -109,8 +109,31 @@ export async function probeDaemon(agentDir: string = getAgentDir(), timeoutMs?: 
 	return { healthy: false, state: "not-running", socketPath: paths.socketPath };
 }
 
-export function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: string } {
-	const packageDir = getPackageDir();
+export interface RunningDaemon {
+	pid?: number;
+}
+
+/**
+ * Find a voltd for this agent dir that may still hold installed package files
+ * open: anything answering on its control endpoint, or a verified pidfile process.
+ */
+export async function findRunningDaemon(agentDir: string = getAgentDir()): Promise<RunningDaemon | undefined> {
+	const probe = await probeDaemon(agentDir);
+	const pidfile = readPidfile(getDaemonPaths(agentDir).pidfilePath);
+	if (probe.state !== "not-running") {
+		const pid = probe.pid ?? pidfile?.pid;
+		return pid === undefined ? {} : { pid };
+	}
+	if (pidfile && (await verifyPidfileProcess(pidfile)) === "match") {
+		return { pid: pidfile.pid };
+	}
+	return undefined;
+}
+
+export function resolveDaemonCliInvocation(packageDir: string = getPackageDir()): {
+	nodeArgs: string[];
+	entry: string;
+} {
 	const sourceEntry = join(packageDir, "src", "cli.ts");
 	const sourceRunner = join(packageDir, "..", "..", "scripts", "run-coding-agent-source.mjs");
 	if (existsSync(sourceEntry) && existsSync(sourceRunner)) {
@@ -128,6 +151,57 @@ export function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: strin
 export type SpawnDaemonResult =
 	| { ok: true; pid?: number; socketPath: string }
 	| { ok: false; state: "starting" | "not-running"; pid?: number; socketPath: string; error: string };
+
+/** Who started a daemon: a terminal command, or the login service from `volt daemon install-service`. */
+export type DaemonStarter = "terminal" | "service";
+
+export interface StartInstalledDaemonDependencies {
+	readonly probeDaemon?: (agentDir: string, timeoutMs?: number) => Promise<DaemonProbeResult>;
+	readonly readyTimeoutMs?: number;
+}
+
+/**
+ * Start the daemon from the installation at `packageDir`, so a daemon stopped for a
+ * self-update starts with the updated code and protocol. A daemon the login service
+ * ran is started by reinstalling the service from that installation: the service
+ * definition records the entrypoint path, which the update may have moved.
+ */
+export async function startInstalledDaemon(
+	agentDir: string,
+	packageDir: string,
+	starter: DaemonStarter,
+	dependencies: StartInstalledDaemonDependencies = {},
+): Promise<boolean> {
+	const { entry } = resolveDaemonCliInvocation(packageDir);
+	const started = await new Promise<boolean>((resolve) => {
+		const child = spawn(process.execPath, [entry, "daemon", starter === "service" ? "install-service" : "start"], {
+			stdio: "inherit",
+			windowsHide: true,
+			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
+		});
+		child.once("error", () => resolve(false));
+		child.once("close", (code) => resolve(code === 0));
+	});
+	if (!started || starter === "terminal") {
+		return started;
+	}
+	// `daemon start` waits for readiness itself; the service manager starts voltd asynchronously.
+	const probeRunningDaemon = dependencies.probeDaemon ?? probeDaemon;
+	const deadline = Date.now() + (dependencies.readyTimeoutMs ?? SPAWN_HEALTH_TIMEOUT_MS);
+	while (true) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			return false;
+		}
+		const probe = await probeRunningDaemon(agentDir, Math.min(SPAWN_HEALTH_PROBE_TIMEOUT_MS, remainingMs));
+		// This process still runs the pre-update code. A newer daemon rejecting its protocol
+		// has already accepted the connection, so it is up and serving updated clients.
+		if (probe.healthy || probe.state === "protocol-mismatch") {
+			return true;
+		}
+		await new Promise((resolve) => setTimeout(resolve, SPAWN_HEALTH_POLL_MS));
+	}
+}
 
 export interface PublishedDaemonEndpoint {
 	socketPath: string;

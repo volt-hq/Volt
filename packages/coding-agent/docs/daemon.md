@@ -70,6 +70,16 @@ not auto-restart after a graceful `volt daemon stop`; on Linux, run
 `loginctl enable-linger` if the daemon should also run without an active
 login session.
 
+The daemon keeps volt's native modules open, so `volt update` must stop it
+before replacing the installation. It asks first, and after the update it
+starts the daemon again from the updated installation. If the login service was
+running the daemon, `volt update` reinstalls the service from the updated
+installation and starts the daemon through it, so the daemon keeps the service
+environment. Without an interactive terminal, it does not update and prints the
+commands to run instead: `volt daemon stop`, `volt update --self`, then `volt
+daemon start`, or `volt daemon install-service` when the login service runs the
+daemon.
+
 ## Daemon environment
 
 Headless conversation runtimes run inside the daemon process, so their bash

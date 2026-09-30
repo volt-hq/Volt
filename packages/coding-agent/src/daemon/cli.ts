@@ -207,13 +207,14 @@ async function signalPidfileDaemon(
 	}
 }
 
-async function daemonStop(agentDir: string): Promise<void> {
+/** Stop voltd gracefully, escalating to signals; resolves true once no daemon is running. */
+export async function daemonStop(agentDir: string): Promise<boolean> {
 	const paths = getDaemonPaths(agentDir);
 	const probe = await probeDaemon(agentDir);
 	const pidfile = readPidfile(paths.pidfilePath);
 	if (!probe.healthy && probe.state === "not-running" && !pidfile) {
 		console.error("voltd is not running");
-		return;
+		return true;
 	}
 
 	if (probe.healthy) {
@@ -273,13 +274,14 @@ async function daemonStop(agentDir: string): Promise<void> {
 	});
 	if (result === "exited") {
 		console.error("voltd stopped");
-		return;
+		return true;
 	}
 	if (result === "refused") {
-		return;
+		return false;
 	}
 	console.error("Error: voltd did not stop after SIGKILL");
 	process.exitCode = 1;
+	return false;
 }
 
 function formatKeepAwake(keepAwake: ControlKeepAwakeStatus | undefined): string {
@@ -430,7 +432,8 @@ function tailLines(content: string, count: number): string[] {
 	return lines.slice(-count);
 }
 
-async function promptConfirm(message: string): Promise<boolean> {
+/** Ask a yes/no question on an interactive terminal; non-interactive runs answer no. */
+export async function promptConfirm(message: string): Promise<boolean> {
 	if (!process.stdin.isTTY || !process.stdout.isTTY) {
 		return false;
 	}

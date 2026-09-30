@@ -200,6 +200,31 @@ export async function installDaemonService(options: ServiceInstallOptions = {}):
 	};
 }
 
+/**
+ * Whether the login service is running the daemon with this pid. Restarting such a
+ * daemon from a terminal would drop the service environment and supervision.
+ */
+export async function isDaemonServiceProcess(pid: number, options: ServiceInstallOptions = {}): Promise<boolean> {
+	const platform = options.platform ?? process.platform;
+	const runCommand = options.runCommand ?? defaultRunCommand;
+	if (platform === "darwin") {
+		const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+		const result = await runCommand("launchctl", ["print", `gui/${uid}/${LAUNCHD_SERVICE_LABEL}`]);
+		return result.code === 0 && /^\s*pid = (\d+)\s*$/m.exec(result.output)?.[1] === String(pid);
+	}
+	if (platform === "linux") {
+		const result = await runCommand("systemctl", [
+			"--user",
+			"show",
+			SYSTEMD_SERVICE_NAME,
+			"--property=MainPID",
+			"--value",
+		]);
+		return result.code === 0 && result.output.trim() === String(pid);
+	}
+	return false;
+}
+
 export async function uninstallDaemonService(options: ServiceInstallOptions = {}): Promise<ServiceInstallResult> {
 	const platform = options.platform ?? process.platform;
 	const runCommand = options.runCommand ?? defaultRunCommand;

@@ -350,15 +350,67 @@ function isSelfUpdatePathWritable(): boolean {
 	}
 }
 
-function isManagedByGlobalPackageManager(method: InstallMethod, packageName: string, npmCommand?: string[]): boolean {
-	const packageDirs = [getPackageDir(), getEntrypointPackageDir()].filter((dir): dir is string => !!dir);
-	const packageDirCandidates = packageDirs.flatMap((dir) => getPathComparisonCandidates(dir));
-	return getGlobalPackageRoots(method, packageName, npmCommand).some((root) => {
-		return getPathComparisonCandidates(root).some((normalizedRoot) => {
-			const rootPrefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
-			return packageDirCandidates.some((packageDir) => packageDir.startsWith(rootPrefix));
-		});
+/** Whether any of `paths` lies inside `root`, comparing both as given and with symlinks resolved. */
+function isInsideRoot(root: string, paths: string[]): boolean {
+	const pathCandidates = paths.flatMap((path) => getPathComparisonCandidates(path));
+	return getPathComparisonCandidates(root).some((normalizedRoot) => {
+		const rootPrefix = normalizedRoot.endsWith(sep) ? normalizedRoot : `${normalizedRoot}${sep}`;
+		return pathCandidates.some((path) => path.startsWith(rootPrefix));
 	});
+}
+
+function getManagingGlobalPackageRoots(method: InstallMethod, packageName: string, npmCommand?: string[]): string[] {
+	const packageDirs = [getPackageDir(), getEntrypointPackageDir()].filter((dir): dir is string => !!dir);
+	return getGlobalPackageRoots(method, packageName, npmCommand).filter((root) => isInsideRoot(root, packageDirs));
+}
+
+function isManagedByGlobalPackageManager(method: InstallMethod, packageName: string, npmCommand?: string[]): boolean {
+	return getManagingGlobalPackageRoots(method, packageName, npmCommand).length > 0;
+}
+
+function readPnpmGlobalPackagePath(packageName: string): string | undefined {
+	const output = readCommandOutput("pnpm", ["list", "-g", "--depth", "0", "--json"]);
+	if (!output) return undefined;
+	try {
+		const entries = JSON.parse(output) as Array<{ dependencies?: Record<string, { path?: string }> }>;
+		return entries.map((entry) => entry.dependencies?.[packageName]?.path).find((path) => !!path);
+	} catch {
+		return undefined;
+	}
+}
+
+function readPackageName(packageDir: string): string | undefined {
+	try {
+		const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as { name?: unknown };
+		return typeof manifest.name === "string" ? manifest.name : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Capture the global package-manager roots that hold this installation and return a
+ * lookup for packages installed under them. Create it before a self-update: the update
+ * can remove the running package directory, and with it the evidence of which root
+ * manages this installation. pnpm keeps global packages in versioned or hashed
+ * directories, so ask pnpm for the path instead of joining it onto the root.
+ */
+export function createGlobalPackageLocator(
+	installedPackageName: string,
+	npmCommand?: string[],
+): (packageName: string) => string | undefined {
+	const method = detectInstallMethod();
+	const roots = getManagingGlobalPackageRoots(method, installedPackageName, npmCommand);
+	return (packageName) => {
+		const candidates = [
+			...(method === "pnpm" ? [readPnpmGlobalPackagePath(packageName)] : []),
+			...roots.flatMap((root) => [join(root, packageName), join(root, "node_modules", packageName)]),
+		];
+		return candidates.find(
+			(dir): dir is string =>
+				!!dir && readPackageName(dir) === packageName && roots.some((root) => isInsideRoot(root, [dir])),
+		);
+	};
 }
 
 export function getSelfUpdateCommand(
