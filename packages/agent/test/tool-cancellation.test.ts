@@ -3,7 +3,7 @@ import { fauxAssistantMessage, fauxToolCall, type Message, registerFauxProvider 
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAgentLoop } from "../src/agent-loop.ts";
-import type { AgentEvent, AgentTool, AgentToolResult, AgentToolUpdateCallback } from "../src/types.ts";
+import type { AgentEvent, AgentTool, AgentToolUpdateCallback } from "../src/types.ts";
 
 const cleanups: Array<() => void> = [];
 afterEach(() => {
@@ -11,31 +11,40 @@ afterEach(() => {
 });
 
 describe("tool cancellation", () => {
-	it.each(["parallel", "sequential"] as const)(
-		"settles %s execution without waiting for tools and fences late output",
-		async (toolExecution) => {
+	it.each([
+		["parallel", "resolve"],
+		["parallel", "reject"],
+		["sequential", "resolve"],
+		["sequential", "reject"],
+	] as const)(
+		"preserves cooperative cancellation output in %s execution when tools %s",
+		async (toolExecution, outcome) => {
 			const faux = registerFauxProvider();
 			cleanups.push(() => faux.unregister());
 			faux.setResponses([
-				fauxAssistantMessage([fauxToolCall("wait", {}), fauxToolCall("wait", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
 				fauxAssistantMessage("must not run"),
 			]);
 			const controller = new AbortController();
 			const started = Promise.withResolvers<void>();
-			const calls: Array<{
-				result: ReturnType<typeof Promise.withResolvers<AgentToolResult>>;
-				update: AgentToolUpdateCallback | undefined;
-			}> = [];
+			const aborted = Promise.withResolvers<void>();
+			const cleanup = Promise.withResolvers<void>();
+			cleanups.push(() => cleanup.resolve());
+			let lateUpdate: AgentToolUpdateCallback | undefined;
 			const tool: AgentTool = {
 				name: "wait",
 				label: "Wait",
-				description: "Ignores cancellation",
+				description: "Finishes asynchronous cleanup after cancellation",
 				parameters: Type.Object({}),
-				execute: (_id, _args, _signal, update) => {
-					const result = Promise.withResolvers<AgentToolResult>();
-					calls.push({ result, update });
-					if (calls.length === (toolExecution === "parallel" ? 2 : 1)) started.resolve();
-					return result.promise;
+				execute: async (_id, _args, signal, update) => {
+					lateUpdate = update;
+					signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+					started.resolve();
+					await aborted.promise;
+					await cleanup.promise;
+					update?.({ content: [{ type: "text", text: "final progress" }] });
+					if (outcome === "reject") throw new Error("partial output\nCommand aborted");
+					return { content: [{ type: "text", text: "partial result" }], details: { retained: true } };
 				},
 			};
 			const events: AgentEvent[] = [];
@@ -54,25 +63,30 @@ describe("tool cancellation", () => {
 				controller.signal,
 			);
 			await started.promise;
+			const settled = vi.fn();
+			void running.then(settled);
 			controller.abort();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			expect(settled).not.toHaveBeenCalled();
+			cleanup.resolve();
 			const messages = await running;
 			const results = messages.filter((message) => message.role === "toolResult");
-			expect(results).toHaveLength(calls.length);
-			expect(results.every((result) => result.isError)).toBe(true);
-			expect(
-				results.every(
-					(result) => result.content[0]?.type === "text" && result.content[0].text === "Operation aborted",
-				),
-			).toBe(true);
+			expect(results).toHaveLength(1);
+			expect(results[0]).toMatchObject({
+				isError: outcome === "reject",
+				content: [
+					{ type: "text", text: outcome === "reject" ? "partial output\nCommand aborted" : "partial result" },
+				],
+				...(outcome === "resolve" ? { details: { retained: true } } : {}),
+			});
+			expect(events.filter((event) => event.type === "tool_execution_update")).toMatchObject([
+				{ partialResult: { content: [{ type: "text", text: "final progress" }] } },
+			]);
 			expect(events.at(-1)?.type).toBe("agent_end");
 			expect(faux.state.callCount).toBe(1);
 			expect(getEventListeners(controller.signal, "abort")).toEqual([]);
 			const settledEvents = [...events];
-			for (const [index, call] of calls.entries()) {
-				call.update?.({ content: [{ type: "text", text: "late progress" }] });
-				if (index === 0) call.result.reject(new Error("late rejection"));
-				else call.result.resolve({ content: [{ type: "text", text: "late result" }] });
-			}
+			lateUpdate?.({ content: [{ type: "text", text: "late progress" }] });
 			await new Promise((resolve) => setTimeout(resolve, 0));
 			expect(events).toEqual(settledEvents);
 		},

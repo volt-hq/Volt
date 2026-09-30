@@ -207,9 +207,16 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 		return { access, terminal, handleFatalRuntimeError, exit };
 	}
 
-	it.each(["resolve", "reject", "never"] as const)(
-		"preserves the draft and next prompt when abandoned output will %s",
-		async (lateOutcome) => {
+	it.each([
+		["resolve", false],
+		["reject", false],
+		["never", false],
+		["resolve", true],
+		["reject", true],
+		["never", true],
+	] as const)(
+		"preserves the draft and next prompt when abandoned output will %s (already cancelled: %s)",
+		async (lateOutcome, cancelFirst) => {
 			const started = Promise.withResolvers<AbortSignal>();
 			const result = Promise.withResolvers<AgentToolResult>();
 			let lateUpdate: AgentToolUpdateCallback | undefined;
@@ -238,6 +245,8 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 			const staleSession = runtime.session;
 			const prompt = Promise.allSettled([staleSession.prompt("start")]);
 			const signal = await started.promise;
+			const abort = cancelFirst ? staleSession.abort("keyboard_interrupt") : Promise.resolve();
+			if (cancelFirst) await vi.waitFor(() => expect(signal.aborted).toBe(true));
 			const sessionRef = requireSessionRef(runtime);
 			await staleSession.sessionManager.flush();
 			await appendAsOtherOwner(sessionRef, (manager) => {
@@ -247,6 +256,7 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 			access.editor.setText("unsent draft");
 			staleSession.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
 			await withinTimeout(prompt, "aborted prompt");
+			await withinTimeout(abort, "prior cancellation");
 			await vi.waitFor(() => expect(viewport(terminal)).toContain("Reloaded the session from the store."), {
 				timeout: 5_000,
 			});
