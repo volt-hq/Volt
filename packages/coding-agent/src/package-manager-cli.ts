@@ -19,6 +19,8 @@ import { type AppMode, resolveProjectTrusted } from "./core/project-trust.ts";
 import { DefaultResourceLoader } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
+import { daemonStop, promptConfirm } from "./daemon/cli.ts";
+import { findRunningDaemon, startInstalledDaemon } from "./daemon/spawn.ts";
 import { spawnProcess } from "./utils/child-process.ts";
 import { getLatestVoltRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
@@ -335,8 +337,22 @@ function printSelfUpdateUnavailable(npmCommand?: string[], updatePackageSpec = P
 	}
 }
 
-function printSelfUpdateFallback(command: SelfUpdateCommand): void {
-	console.error(chalk.dim(`If this keeps failing, run this command yourself: ${command.display}`));
+/** The update failed, but the rollback step reinstalled the previous version. */
+class SelfUpdateRestoredError extends Error {}
+
+function printSelfUpdateFailure(error: unknown, command: SelfUpdateCommand): void {
+	const message = error instanceof Error ? error.message : "Unknown package command error";
+	console.error(chalk.red(`Error: ${message}`));
+	if (error instanceof SelfUpdateRestoredError) {
+		console.error(chalk.dim(`If this keeps failing, run this command yourself: ${command.display}`));
+		return;
+	}
+	console.error(chalk.yellow(`The update did not finish, so this ${APP_NAME} installation may be incomplete.`));
+	console.error(
+		chalk.dim(
+			`If ${APP_NAME} still starts, run \`${APP_NAME} update --self\` again. Otherwise close every ${APP_NAME} process, including voltd, then reinstall with: ${command.display}`,
+		),
+	);
 }
 
 function printSelfUpdateNote(note: string): void {
@@ -442,7 +458,7 @@ async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 					`${selfUpdateErrorMessage(updateError)}; rollback command ${command.rollbackStep.display} also failed: ${selfUpdateErrorMessage(rollbackError)}`,
 				);
 			}
-			throw new Error(
+			throw new SelfUpdateRestoredError(
 				`${selfUpdateErrorMessage(updateError)}; restored the previous ${APP_NAME} version with ${command.rollbackStep.display}`,
 			);
 		}
@@ -758,19 +774,51 @@ export async function handlePackageCommand(
 					if (selfUpdatePlan.note) {
 						printSelfUpdateNote(selfUpdatePlan.note);
 					}
+					// A running daemon holds this installation's native addons open, which can
+					// make the package manager fail halfway and leave volt unusable.
+					const runningDaemon = await findRunningDaemon(agentDir);
+					if (runningDaemon) {
+						const daemonLabel = runningDaemon.pid === undefined ? "voltd" : `voltd (pid ${runningDaemon.pid})`;
+						console.error(
+							chalk.yellow(
+								`${daemonLabel} is running and must stop while ${APP_NAME} updates. Running phone sessions will be interrupted.`,
+							),
+						);
+						if (!(await promptConfirm(`Stop voltd, update ${APP_NAME}, and start voltd again?`))) {
+							console.error(chalk.red(`${APP_NAME} was not updated because voltd is running.`));
+							console.error(
+								chalk.dim(
+									`Run \`${APP_NAME} daemon stop\`, then \`${APP_NAME} update --self\`, then \`${APP_NAME} daemon start\`.`,
+								),
+							);
+							process.exitCode = 1;
+							return true;
+						}
+						if (!(await daemonStop(agentDir))) {
+							console.error(chalk.red(`${APP_NAME} was not updated because voltd did not stop.`));
+							process.exitCode = 1;
+							return true;
+						}
+					}
 					try {
 						if (installMethod === "npm") {
 							prepareWindowsNpmSelfUpdate();
 						}
 						await runSelfUpdate(selfUpdateCommand);
+						console.log(chalk.green(`Updated ${APP_NAME}`));
 					} catch (error: unknown) {
-						const message = error instanceof Error ? error.message : "Unknown package command error";
-						console.error(chalk.red(`Error: ${message}`));
-						printSelfUpdateFallback(selfUpdateCommand);
+						printSelfUpdateFailure(error, selfUpdateCommand);
 						process.exitCode = 1;
-						return true;
 					}
-					console.log(chalk.green(`Updated ${APP_NAME}`));
+					// Restart even after a failed update: the previous install may still be intact.
+					if (runningDaemon && !(await startInstalledDaemon(agentDir))) {
+						console.error(
+							chalk.red(
+								`voltd was stopped for the update and did not start again. Start it with \`${APP_NAME} daemon start\`.`,
+							),
+						);
+						process.exitCode = 1;
+					}
 				}
 				return true;
 			}

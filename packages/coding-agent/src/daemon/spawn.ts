@@ -109,6 +109,27 @@ export async function probeDaemon(agentDir: string = getAgentDir(), timeoutMs?: 
 	return { healthy: false, state: "not-running", socketPath: paths.socketPath };
 }
 
+export interface RunningDaemon {
+	pid?: number;
+}
+
+/**
+ * Find a voltd for this agent dir that may still hold installed package files
+ * open: anything answering on its control endpoint, or a verified pidfile process.
+ */
+export async function findRunningDaemon(agentDir: string = getAgentDir()): Promise<RunningDaemon | undefined> {
+	const probe = await probeDaemon(agentDir);
+	const pidfile = readPidfile(getDaemonPaths(agentDir).pidfilePath);
+	if (probe.state !== "not-running") {
+		const pid = probe.pid ?? pidfile?.pid;
+		return pid === undefined ? {} : { pid };
+	}
+	if (pidfile && (await verifyPidfileProcess(pidfile)) === "match") {
+		return { pid: pidfile.pid };
+	}
+	return undefined;
+}
+
 export function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: string } {
 	const packageDir = getPackageDir();
 	const sourceEntry = join(packageDir, "src", "cli.ts");
@@ -128,6 +149,23 @@ export function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: strin
 export type SpawnDaemonResult =
 	| { ok: true; pid?: number; socketPath: string }
 	| { ok: false; state: "starting" | "not-running"; pid?: number; socketPath: string; error: string };
+
+/**
+ * Run `volt daemon start` from the package files now on disk, so a daemon
+ * stopped for a self-update starts with the updated code and protocol.
+ */
+export async function startInstalledDaemon(agentDir: string = getAgentDir()): Promise<boolean> {
+	const { entry } = resolveDaemonCliInvocation();
+	return new Promise((resolve) => {
+		const child = spawn(process.execPath, [entry, "daemon", "start"], {
+			stdio: "inherit",
+			windowsHide: true,
+			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
+		});
+		child.once("error", () => resolve(false));
+		child.once("close", (code) => resolve(code === 0));
+	});
+}
 
 export interface PublishedDaemonEndpoint {
 	socketPath: string;

@@ -854,9 +854,11 @@ if(${JSON.stringify(rollbackFails)} && args.includes(${JSON.stringify(rollbackSp
 			if (rollbackFails) {
 				expect(stderr).toContain("rollback command");
 				expect(stderr).toContain("exited with code 29");
+				expect(stderr).toContain("may be incomplete");
 			} else {
 				expect(stderr).toContain("restored the previous volt version");
 				expect(stderr).not.toContain("also failed");
+				expect(stderr).not.toContain("may be incomplete");
 			}
 		} finally {
 			logSpy.mockRestore();
