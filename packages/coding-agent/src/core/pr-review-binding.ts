@@ -150,9 +150,10 @@ export async function assertPrReviewCheckout(
 		const operationPaths = await readPrReviewOperationPaths((args) => readGit(cwd, args, signal));
 		if (operationPaths.some((path) => existsSync(path))) throw new Error("Git operation in progress");
 	} catch (cause) {
-		throw new Error(cause instanceof PrReviewGitReadError ? PR_CHECKOUT_UNAVAILABLE : PR_CHECKOUT_CHANGED, {
-			cause,
-		});
+		// A cancelled validation reached no verdict. Other checks can observe the abort
+		// before the cancelled Git reads settle, so do not report their error as a change.
+		const unavailable = cause instanceof PrReviewGitReadError || signal?.aborted;
+		throw new Error(unavailable ? PR_CHECKOUT_UNAVAILABLE : PR_CHECKOUT_CHANGED, { cause });
 	}
 }
 
