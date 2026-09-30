@@ -788,13 +788,11 @@ export class AgentSessionRuntime {
 		targetSessionRef?: SessionReference,
 		onInvalidated?: () => void,
 	): Promise<void> {
-		if (this.session.sessionManager.getConversationAuthorityStatus().status === "available") {
-			await emitSessionShutdownEvent(this.session.extensionRunner, {
-				type: "session_shutdown",
-				reason,
-				targetSessionRef,
-			});
-		}
+		await emitSessionShutdownEvent(this.session.extensionRunner, {
+			type: "session_shutdown",
+			reason,
+			targetSessionRef,
+		});
 		this.beforeSessionInvalidate?.();
 		onInvalidated?.();
 		await finalizeRuntimeOwnedSession(
@@ -2052,12 +2050,10 @@ export class AgentSessionRuntime {
 			}
 			const shutdownErrors: unknown[] = [];
 			try {
-				if (this.session.sessionManager.getConversationAuthorityStatus().status === "available") {
-					await emitSessionShutdownEvent(this.session.extensionRunner, {
-						type: "session_shutdown",
-						reason: "quit",
-					});
-				}
+				await emitSessionShutdownEvent(this.session.extensionRunner, {
+					type: "session_shutdown",
+					reason: "quit",
+				});
 				this.beforeSessionInvalidate?.();
 			} catch (error) {
 				shutdownErrors.push(error);

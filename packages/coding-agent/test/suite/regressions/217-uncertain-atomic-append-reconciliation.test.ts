@@ -25,7 +25,7 @@ import {
 	type SQLiteSessionStoreLease,
 } from "../../../src/core/session-store/index.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
-import type { ExtensionAPI } from "../../../src/index.ts";
+import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionShutdownEvent } from "../../../src/index.ts";
 import { createAgentSessionTestControl } from "../../agent-session-test-control.ts";
 import {
 	createHarness,
@@ -184,7 +184,9 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 	});
 
-	async function setupRuntime(replacementHook: () => void = () => {}): Promise<{
+	async function setupRuntime(
+		replacementHook: (event: SessionBeforeSwitchEvent | SessionShutdownEvent) => void = () => {},
+	): Promise<{
 		runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
 		faux: ReturnType<typeof registerFauxProvider>;
 	}> {
@@ -295,10 +297,10 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		};
 	}
 
-	it("replaces a genuinely reconciliation-required runtime without old-generation hooks", async () => {
-		let replacementHookCalls = 0;
-		const { runtime } = await setupRuntime(() => {
-			replacementHookCalls++;
+	it("replaces a genuinely reconciliation-required runtime with cleanup but no before-switch hook", async () => {
+		const replacementHooks: string[] = [];
+		const { runtime } = await setupRuntime((event) => {
+			replacementHooks.push(event.type);
 		});
 		await makeRuntimeAuthorityUncertain(runtime);
 		const previousSession = runtime.session;
@@ -315,7 +317,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 
 		expect(runtime.session).not.toBe(previousSession);
 		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
-		expect(replacementHookCalls).toBe(0);
+		expect(replacementHooks).toEqual(["session_shutdown"]);
 	});
 
 	it("refreshes a reconciliation-required runtime from the same stable session reference", async () => {

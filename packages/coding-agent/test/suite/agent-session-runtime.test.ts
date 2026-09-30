@@ -408,14 +408,14 @@ describe("AgentSessionRuntime characterization", () => {
 		]);
 	});
 
-	it("replaces a reconciliation-required runtime without invoking old-generation extension hooks", async () => {
-		let replacementHookCalls = 0;
+	it("replaces a reconciliation-required runtime with cleanup but no before-switch hook", async () => {
+		const replacementHooks: string[] = [];
 		const { runtime } = await createRuntimeForTest((volt: ExtensionAPI) => {
-			volt.on("session_before_switch", () => {
-				replacementHookCalls++;
+			volt.on("session_before_switch", (event) => {
+				replacementHooks.push(event.type);
 			});
-			volt.on("session_shutdown", () => {
-				replacementHookCalls++;
+			volt.on("session_shutdown", (event) => {
+				replacementHooks.push(event.type);
 			});
 		});
 		const previousSession = runtime.session;
@@ -435,7 +435,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 		expect(runtime.session).not.toBe(previousSession);
 		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
-		expect(replacementHookCalls).toBe(0);
+		expect(replacementHooks).toEqual(["session_shutdown"]);
 	});
 
 	it("applies new-session setup before constructing the replacement session", async () => {
