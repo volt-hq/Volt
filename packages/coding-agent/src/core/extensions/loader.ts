@@ -44,7 +44,7 @@ import type {
 	ToolDefinition,
 } from "./types.ts";
 
-/** Modules available to extensions through the standalone binary's virtual module map. */
+/** Host module instances served to every extension instead of per-extension copies. */
 const VIRTUAL_MODULES: Record<string, unknown> = {
 	typebox: _bundledTypebox,
 	"typebox/compile": _bundledTypeboxCompile,
@@ -409,12 +409,12 @@ function createExtensionAPI(
 async function loadExtensionModule(extensionPath: string) {
 	const jiti = createJiti(moduleUrl || pathToFileURL(process.execPath).href, {
 		moduleCache: false,
-		// In a standalone binary: use virtualModules for bundled packages (no filesystem resolution)
-		// Also disable tryNative so jiti handles ALL imports (not just the entry point)
-		// In Node.js/dev: use aliases to resolve to node_modules paths
-		...(isStandaloneBinary || isBundledCli
-			? { virtualModules: VIRTUAL_MODULES, tryNative: false }
-			: { alias: getAliases() }),
+		// Serve Volt packages and typebox from the host's loaded instances. Without this, a source
+		// checkout would re-evaluate the coding-agent sources for every extension load.
+		virtualModules: VIRTUAL_MODULES,
+		// In a standalone binary: disable tryNative so jiti handles ALL imports (not just the entry point)
+		// In Node.js/dev: aliases resolve package subpaths the virtual module map does not cover
+		...(isStandaloneBinary || isBundledCli ? { tryNative: false } : { alias: getAliases() }),
 	});
 
 	const module = await jiti.import(extensionPath, { default: true });
