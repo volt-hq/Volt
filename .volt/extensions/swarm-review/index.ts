@@ -280,6 +280,10 @@ export default function swarmReview(volt: ExtensionAPI) {
 	volt.registerCommand("swarm-review", {
 		description:
 			"Review with waves of cheap workers, cluster their claims, and verify each cluster with two independent verifiers",
+		// Audited for paired remote clients: arguments only select Git revisions, path globs, models, and counts, and
+		// the review is read-only against a throwaway checkout. --exec (arbitrary commands) is refused outside a local
+		// TUI, so a remote client can never enable it.
+		remoteSafe: true,
 		handler: async (args, ctx) => {
 			const notify = (message: string, level: "info" | "warning" | "error"): void => {
 				if (ctx.hasUI) ctx.ui.notify(message, level);
@@ -291,6 +295,9 @@ export default function swarmReview(volt: ExtensionAPI) {
 				return notify(error instanceof Error ? error.message : String(error), "error");
 			}
 			if (options.exec) {
+				// RPC hosts (including daemon sessions driven from a phone) cannot distinguish a local user from a remote one.
+				if (ctx.mode !== "tui")
+					return notify("--exec is only available in a local terminal (TUI) session.", "error");
 				if (!ctx.hasUI) return notify("--exec needs an interactive confirmation.", "error");
 				const allowed = await ctx.ui.confirm(
 					"Allow verifiers to run commands?",
