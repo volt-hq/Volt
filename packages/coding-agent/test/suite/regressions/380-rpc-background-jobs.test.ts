@@ -43,6 +43,7 @@ function services(harness: Harness): AgentSessionServices {
 		modelRegistry: harness.session.modelRegistry,
 		resourceLoader: harness.session.resourceLoader,
 		gitContextProvider: harness.session.gitContextProvider,
+		releaseGitContextProvider: () => {},
 		diagnostics: [],
 	};
 }

@@ -144,6 +144,7 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 					modelRegistry: harness.session.modelRegistry,
 					resourceLoader: harness.session.resourceLoader,
 					gitContextProvider: harness.session.gitContextProvider,
+					releaseGitContextProvider: () => {},
 					diagnostics: [],
 				},
 				async () => {

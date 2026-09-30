@@ -8,6 +8,7 @@ import {
 import { createAgentSessionFromServices, createAgentSessionServices } from "../../core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "../../core/auth-guidance.ts";
 import { AuthStorage } from "../../core/auth-storage.ts";
+import { GitContextProviderPool } from "../../core/git-context-provider-pool.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { LspServerPool } from "../../core/lsp/server-pool.ts";
 import {
@@ -140,8 +141,10 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			}
 		})();
 
-	// Sessions of this attach (root, subagents, replacements) share language servers.
+	// Sessions of this attach (root, subagents, replacements) share language servers and,
+	// per cwd, Git context tracking.
 	const lspServerPool = new LspServerPool();
+	const gitContextProviderPool = new GitContextProviderPool();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
 		const profile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : options.profile;
 		const settingsManager = SettingsManager.create(projectCwd, runtimeOptions.agentDir, {
@@ -158,6 +161,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 			settingsManager,
 			workspaceName: runtimeOptions.workspaceName ?? options.workspaceName,
 			baseRef: runtimeOptions.baseRef ?? options.baseRef,
+			gitContextProviderPool,
 		});
 		const subagentManager = new SubagentManager({
 			createRuntime,
@@ -203,7 +207,7 @@ export async function createIrohRemoteAgentRuntimeWithSessionSelection(
 				cleanupErrors.push(cleanupError);
 			}
 			try {
-				services.gitContextProvider.dispose();
+				services.releaseGitContextProvider();
 			} catch (cleanupError) {
 				cleanupErrors.push(cleanupError);
 			}

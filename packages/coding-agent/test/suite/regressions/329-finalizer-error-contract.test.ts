@@ -23,6 +23,7 @@ function createServices(harness: Harness, cwd = harness.tempDir, agentDir = harn
 		modelRegistry: harness.session.modelRegistry,
 		resourceLoader: harness.session.resourceLoader,
 		gitContextProvider: harness.session.gitContextProvider,
+		releaseGitContextProvider: () => {},
 		diagnostics: [],
 	};
 }
@@ -195,6 +196,7 @@ describe("PR #329 finalizer error contract", () => {
 			modelRegistry: created.session.modelRegistry,
 			resourceLoader: created.session.resourceLoader,
 			gitContextProvider: created.session.gitContextProvider,
+			releaseGitContextProvider: () => {},
 			diagnostics: [],
 		};
 		const runtime = new AgentSessionRuntime(created.session, services, async () => {

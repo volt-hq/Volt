@@ -150,6 +150,7 @@ function servicesForHarness(harness: Harness, cwd: string, agentDir = harness.te
 		modelRegistry: harness.session.modelRegistry,
 		resourceLoader: harness.session.resourceLoader,
 		gitContextProvider: harness.session.gitContextProvider,
+		releaseGitContextProvider: () => {},
 		diagnostics: [],
 	};
 }

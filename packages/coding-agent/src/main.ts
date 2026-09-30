@@ -42,6 +42,7 @@ import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
+import { GitContextProviderPool } from "./core/git-context-provider-pool.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
 import { LspServerPool } from "./core/lsp/server-pool.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
@@ -934,8 +935,10 @@ export async function main(args: string[], options?: MainOptions) {
 		);
 	}
 	const projectTrustByCwd = new Map<string, boolean>();
-	// Every session this factory creates (root, subagents, replacements) shares language servers.
+	// Every session this factory creates (root, subagents, replacements) shares language servers
+	// and, per cwd, Git context tracking.
 	const lspServerPool = new LspServerPool();
+	const gitContextProviderPool = new GitContextProviderPool();
 	const createRuntime: CreateAgentSessionRuntimeFactory = async (runtimeOptions) => {
 		const { cwd, agentDir, sessionManager, sessionStartEvent, projectTrustContext, subagentContext } = runtimeOptions;
 		const runtimeProfile = Object.hasOwn(runtimeOptions, "profile") ? runtimeOptions.profile : requestedProfile;
@@ -971,6 +974,7 @@ export async function main(args: string[], options?: MainOptions) {
 			settingsManager: runtimeSettingsManager,
 			workspaceName: runtimeOptions.workspaceName,
 			baseRef: runtimeOptions.baseRef,
+			gitContextProviderPool,
 			extensionFlagValues: parsed.unknownFlags,
 			resourceLoaderReloadOptions:
 				shouldResolveProjectTrust && trustPath !== undefined
@@ -1094,7 +1098,7 @@ export async function main(args: string[], options?: MainOptions) {
 				}
 			}
 			try {
-				services.gitContextProvider.dispose();
+				services.releaseGitContextProvider();
 			} catch (cleanupError) {
 				cleanupErrors.push(cleanupError);
 			}

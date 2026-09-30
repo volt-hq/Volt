@@ -419,6 +419,8 @@ export interface AgentSessionConfig {
 	followUpMode?: "all" | "one-at-a-time";
 	settingsManager: SettingsManager;
 	gitContextProvider?: GitContextProvider;
+	/** Called instead of disposing a supplied `gitContextProvider` on disposal (e.g. to release a pooled provider). */
+	releaseGitContextProvider?: () => void;
 	cwd: string;
 	/** Project/config root and hard LSP workspace boundary. Defaults to cwd. */
 	projectCwd?: string;
@@ -669,6 +671,7 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 	readonly gitContextProvider: GitContextProvider;
+	private readonly _releaseGitContextProvider: () => void;
 
 	private readonly _harness: AgentHarness;
 	private readonly _harnessSessionStorage: SessionManagerHarnessStorage;
@@ -1156,6 +1159,10 @@ export class AgentSession {
 		this.settingsManager = config.settingsManager;
 		const ownsGitContextProvider = config.gitContextProvider === undefined;
 		this.gitContextProvider = config.gitContextProvider ?? new GitContextProvider(config.cwd);
+		this._releaseGitContextProvider =
+			ownsGitContextProvider || config.releaseGitContextProvider === undefined
+				? () => this.gitContextProvider.dispose()
+				: config.releaseGitContextProvider;
 		const gitContextSubscriptionFinalizers: Array<() => void> = [];
 
 		try {
@@ -3385,7 +3392,7 @@ export class AgentSession {
 		this._unsubscribeGitContext = undefined;
 		for (const releaseObservation of this._eventListenerGitObservations) releaseObservation();
 		this._eventListenerGitObservations.clear();
-		this.gitContextProvider.dispose();
+		this._releaseGitContextProvider();
 		this._eventListeners = [];
 		this._conversationGenerationListeners.clear();
 		cleanupSessionResources(this.sessionId);

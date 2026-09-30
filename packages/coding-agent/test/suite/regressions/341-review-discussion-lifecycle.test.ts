@@ -123,6 +123,7 @@ async function fixture(models?: FauxModelDefinition[]) {
 				settingsManager: harness.settingsManager,
 				resourceLoader: harness.session.resourceLoader,
 				gitContextProvider: created.session.gitContextProvider,
+				releaseGitContextProvider: () => {},
 				diagnostics: [],
 			},
 			diagnostics: [],

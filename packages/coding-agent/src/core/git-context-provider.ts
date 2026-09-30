@@ -13,6 +13,8 @@ const DEFAULT_POLL_INTERVAL_MS = 30_000;
 const MAX_POLL_INTERVAL_MS = 5 * 60_000;
 const WATCH_RETRY_MS = 5000;
 const WATCH_DEBOUNCE_MS = 100;
+/** Upper bound on how long repeated scheduleRefresh() calls may postpone one scan. */
+const MAX_REFRESH_DEFER_MS = 1000;
 const MAX_OPERATION_MARKER_BYTES = 4096;
 
 const STATUS_ARGS = [
@@ -452,6 +454,7 @@ export class GitContextProvider {
 	private currentLocation: GitWorktreeLocation | null = null;
 	private refreshPromise: Promise<GitContextObservation> | null = null;
 	private scheduledRefresh: NodeJS.Timeout | null = null;
+	private scheduledRefreshDeadline: number | null = null;
 	private pollTimer: NodeJS.Timeout | null = null;
 	private watchRetryTimer: NodeJS.Timeout | null = null;
 	private watchers: FSWatcher[] = [];
@@ -482,6 +485,10 @@ export class GitContextProvider {
 
 	getSnapshot(): RpcGitContext | null {
 		return this.cachedSnapshot;
+	}
+
+	get isDisposed(): boolean {
+		return this.disposed;
 	}
 
 	subscribe(listener: GitContextListener, options: GitContextSubscriptionOptions = {}): () => void {
@@ -539,15 +546,23 @@ export class GitContextProvider {
 		return wrapped;
 	}
 
+	/**
+	 * Debounce a scan. Each call restarts the delay, but a scan still runs within
+	 * MAX_REFRESH_DEFER_MS of the first unserved request, so sessions sharing a
+	 * provider cannot postpone it indefinitely.
+	 */
 	scheduleRefresh(delayMs = WATCH_DEBOUNCE_MS): void {
 		if (this.disposed) return;
 		if (this.scheduledRefresh) clearTimeout(this.scheduledRefresh);
+		const now = Date.now();
+		this.scheduledRefreshDeadline ??= now + MAX_REFRESH_DEFER_MS;
 		this.scheduledRefresh = setTimeout(
 			() => {
 				this.scheduledRefresh = null;
+				this.scheduledRefreshDeadline = null;
 				void this.refresh();
 			},
-			Math.max(0, delayMs),
+			Math.max(0, Math.min(delayMs, this.scheduledRefreshDeadline - now)),
 		);
 		this.scheduledRefresh.unref?.();
 	}
@@ -561,6 +576,7 @@ export class GitContextProvider {
 		this.stopMonitoring();
 		if (this.scheduledRefresh) clearTimeout(this.scheduledRefresh);
 		this.scheduledRefresh = null;
+		this.scheduledRefreshDeadline = null;
 		for (const child of this.children) child.kill("SIGKILL");
 		this.children.clear();
 	}

@@ -49,6 +49,7 @@ async function fixture() {
 				settingsManager: h.settingsManager,
 				resourceLoader: h.session.resourceLoader,
 				gitContextProvider: h.session.gitContextProvider,
+				releaseGitContextProvider: () => {},
 				diagnostics: [],
 			},
 		};
