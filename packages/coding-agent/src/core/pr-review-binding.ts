@@ -10,6 +10,7 @@ import {
 	getPrReviewGitEnvironment,
 	PR_REVIEW_GIT_CONFIG_ARGS,
 } from "../utils/pr-review-git-policy.ts";
+import { terminateProcessTree } from "../utils/shell.ts";
 import type { ReviewPullRequestIdentity } from "./code-host/types.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import { ReviewSourceUnavailableError, resolveCanonicalReviewSource } from "./review-anchors.ts";
@@ -78,24 +79,34 @@ async function readGit(cwd: string, args: readonly string[], signal?: AbortSigna
 	try {
 		const configKeys = args[0] === "config" ? "" : await readGit(cwd, PR_REVIEW_GIT_CONFIG_ARGS, signal);
 		const argv = getPrReviewGitArgs(args, configKeys);
+		// Callers may dispose the checkout once validation settles, and on Windows a
+		// running Git process (including the one the git launcher spawns) holds its cwd.
+		// So never spawn after cancellation, and settle an aborted read only after its
+		// process tree exits; execFile's own signal option settles before exit.
+		signal?.throwIfAborted();
 		return await new Promise<string>((resolveResult, reject) => {
-			execFile(
+			const child = execFile(
 				"git",
 				argv,
 				{
 					cwd,
 					env: getPrReviewGitEnvironment("local"),
-					signal,
 					encoding: "utf8",
 					timeout: 5_000,
 					maxBuffer: 1024 * 1024,
 					windowsHide: true,
 				},
 				(error, stdout) => {
-					if (error) reject(error);
+					signal?.removeEventListener("abort", abort);
+					if (error) reject(signal?.aborted ? signal.reason : error);
 					else resolveResult(stdout);
 				},
 			);
+			function abort(): void {
+				if (child.pid) void terminateProcessTree(child.pid);
+				else child.kill();
+			}
+			signal?.addEventListener("abort", abort, { once: true });
 		});
 	} catch (cause) {
 		throw new PrReviewGitReadError(PR_CHECKOUT_UNAVAILABLE, { cause });
