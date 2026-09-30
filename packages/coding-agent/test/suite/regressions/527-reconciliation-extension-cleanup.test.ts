@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -9,7 +12,13 @@ import {
 } from "../../../src/core/agent-session-runtime.ts";
 import { createEventBus } from "../../../src/core/event-bus.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionError } from "../../../src/index.ts";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+	ExtensionContext,
+	ExtensionError,
+	ExtensionFactory,
+} from "../../../src/index.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
 describe("regression #527: extension cleanup after conversation authority loss", () => {
@@ -19,7 +28,10 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	async function createRuntimeForTest(extend?: (volt: ExtensionAPI, instance: number) => void) {
+	async function createRuntimeForTest(
+		extend?: (volt: ExtensionAPI, instance: number) => void,
+		otherExtensions: ExtensionFactory[] = [],
+	) {
 		const harness = await createHarness();
 		const eventBus = createEventBus();
 		cleanups.push(() => harness.cleanupAsync());
@@ -52,6 +64,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 								lifecycle.push(`${instance}:shutdown:${event.reason}`);
 							});
 						},
+						...otherExtensions,
 					],
 					noSkills: true,
 					noPromptTemplates: true,
@@ -95,7 +108,10 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		return { runtime, harness, lifecycle, resources, errors, shutdown, eventBus };
 	}
 
-	async function conflict(runtime: AgentSessionRuntime) {
+	async function conflict(
+		runtime: AgentSessionRuntime,
+		write: () => void = () => runtime.session.sessionManager.appendCustomEntry("stale-write", {}),
+	) {
 		const manager = runtime.session.sessionManager;
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session");
@@ -106,7 +122,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		} finally {
 			await other.closePersistence();
 		}
-		manager.appendCustomEntry("stale-write", {});
+		write();
 		await expect(manager.flush()).rejects.toThrow("Session revision changed");
 		expect(manager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 		return ref;
@@ -269,6 +285,147 @@ describe("regression #527: extension cleanup after conversation authority loss",
 				.getEntries()
 				.some((entry) => entry.type === "custom" && entry.customType === "bus-write"),
 		).toBe(true);
+	});
+
+	it.each(["before", "during"] as const)(
+		"allows process cleanup when authority is lost %s shutdown without restoring session access",
+		async (timing) => {
+			let firstResource: string;
+			let secondResource: string;
+			let cleanupScript: string;
+			const results: number[] = [];
+			const directories: string[] = [];
+			let firstVolt: ExtensionAPI;
+			const blocked: unknown[] = [];
+			const { runtime, harness, errors } = await createRuntimeForTest(
+				(volt, instance) => {
+					if (instance !== 1) return;
+					firstVolt = volt;
+					volt.on("session_shutdown", async () => {
+						if (timing === "during") await conflict(runtime, () => volt.appendEntry("shutdown-write", {}));
+						results.push((await volt.exec(process.execPath, [cleanupScript, firstResource])).code);
+					});
+				},
+				[
+					(volt) => {
+						volt.on("session_shutdown", async (_event, ctx) => {
+							directories.push(ctx.cwd);
+							for (const operation of [
+								() => volt.appendEntry("forbidden", {}),
+								() => volt.sendUserMessage("forbidden"),
+								() => ctx.sessionManager.getEntries(),
+								() => ctx.ui.notify("forbidden"),
+								() => firstVolt.exec(process.execPath, [cleanupScript, firstResource]),
+							]) {
+								try {
+									await operation();
+									blocked.push(undefined);
+								} catch (error) {
+									blocked.push(error);
+								}
+							}
+							results.push(
+								(await volt.exec(process.execPath, [cleanupScript, secondResource], { cwd: ctx.cwd })).code,
+							);
+						});
+					},
+				],
+			);
+			firstResource = join(harness.tempDir, "first-owned-resource");
+			secondResource = join(harness.tempDir, "second-owned-resource");
+			cleanupScript = join(harness.tempDir, "cleanup.mjs");
+			await writeFile(firstResource, "owned by the first extension");
+			await writeFile(secondResource, "owned by the second extension");
+			await writeFile(cleanupScript, 'import { unlink } from "node:fs/promises"; await unlink(process.argv[2]);');
+			if (timing === "before") await conflict(runtime);
+			await expect(runtime.dispose()).rejects.toThrow("Session revision changed");
+			expect(results).toEqual([0, 0]);
+			expect(directories).toEqual([harness.tempDir]);
+			expect(existsSync(firstResource)).toBe(false);
+			expect(existsSync(secondResource)).toBe(false);
+			expect(blocked).toHaveLength(5);
+			for (const error of blocked) expect(error).toMatchObject({ message: expect.stringContaining("stale") });
+			expect(errors).toEqual([]);
+		},
+	);
+
+	it("expires cleanup access per handler without opening concurrent or detached callbacks", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const secondEntered = Promise.withResolvers<void>();
+		const secondRelease = Promise.withResolvers<void>();
+		const detachedRelease = Promise.withResolvers<void>();
+		let oldVolt: ExtensionAPI;
+		let oldContext: ExtensionContext;
+		let detached: Promise<unknown[]> | undefined;
+		let synchronousDetached: Promise<unknown[]> | undefined;
+		let otherGenerationError: unknown;
+		const attempts = async () => {
+			const errors: unknown[] = [];
+			for (const operation of [() => oldContext.cwd, () => oldVolt.exec(process.execPath, ["--version"])]) {
+				try {
+					await operation();
+					errors.push(undefined);
+				} catch (error) {
+					errors.push(error);
+				}
+			}
+			return errors;
+		};
+		const { runtime } = await createRuntimeForTest((volt, instance) => {
+			if (instance !== 1) {
+				volt.on("session_shutdown", async () => {
+					try {
+						await oldVolt.exec(process.execPath, ["--version"]);
+					} catch (error) {
+						otherGenerationError = error;
+					}
+				});
+				return;
+			}
+			oldVolt = volt;
+			volt.on("session_shutdown", (_event, ctx) => {
+				oldContext = ctx;
+				synchronousDetached = Promise.resolve().then(attempts);
+			});
+			volt.on("session_shutdown", async (_event, ctx) => {
+				oldContext = ctx;
+				detached = detachedRelease.promise.then(attempts);
+				entered.resolve();
+				await release.promise;
+				throw new Error("cleanup failed");
+			});
+			volt.on("session_shutdown", async () => {
+				secondEntered.resolve();
+				await secondRelease.promise;
+			});
+		});
+		cleanups.push(async () => {
+			release.resolve();
+			secondRelease.resolve();
+			detachedRelease.resolve();
+			await detached;
+		});
+		const ref = await conflict(runtime);
+		const replacing = runtime.switchSession(ref);
+		await entered.promise;
+		const concurrentErrors = await attempts();
+		release.resolve();
+		await secondEntered.promise;
+		detachedRelease.resolve();
+		const detachedErrors = await detached;
+		secondRelease.resolve();
+		await replacing;
+		await runtime.dispose();
+		for (const error of [
+			...concurrentErrors,
+			...(detachedErrors ?? []),
+			...((await synchronousDetached) ?? []),
+			...(await attempts()),
+			otherGenerationError,
+		]) {
+			expect(error).toMatchObject({ message: expect.stringContaining("stale") });
+		}
 	});
 
 	it("revokes a shutdown handler that loses authority while awaiting cleanup", async () => {

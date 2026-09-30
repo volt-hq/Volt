@@ -12,6 +12,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { type Theme, theme } from "../theme/runtime.ts";
+import { hasShutdownCleanupScope, withShutdownCleanupScope } from "./shutdown-scope.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -610,7 +611,7 @@ export class ExtensionRunner {
 	 * pass values through unchanged, handlers never run, and errors never
 	 * reach listeners (which may be wired to a live transport). An admitted
 	 * session_shutdown may finish resource cleanup after authority loss invalidates
-	 * the runner; its captured APIs and contexts remain revoked throughout.
+	 * the runner; only its scoped cwd/exec cleanup access remains usable.
 	 */
 	private get isInert(): boolean {
 		return this.staleMessage !== undefined;
@@ -760,7 +761,7 @@ export class ExtensionRunner {
 				return runner.hasUI();
 			},
 			get cwd() {
-				runner.assertActive();
+				if (!hasShutdownCleanupScope(runner.runtime)) runner.assertActive();
 				return runner.cwd;
 			},
 			get sessionManager() {
@@ -903,10 +904,11 @@ export class ExtensionRunner {
 
 				for (const handler of handlers) {
 					try {
-						const handlerResult = await handler(
-							event,
-							this.createContext(event.type === "tool_execution_end" ? ext.path : undefined),
-						);
+						const ctx = this.createContext(event.type === "tool_execution_end" ? ext.path : undefined);
+						const handlerResult =
+							event.type === "session_shutdown"
+								? await withShutdownCleanupScope(this.runtime, ext.path, () => handler(event, ctx))
+								: await handler(event, ctx);
 
 						if (this.isSessionBeforeEvent(event) && handlerResult) {
 							result = cloneCanonicalData(
