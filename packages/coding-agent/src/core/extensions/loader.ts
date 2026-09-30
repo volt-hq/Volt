@@ -382,7 +382,24 @@ function createExtensionAPI(
 			runtime.unregisterProvider(name, extension.path);
 		},
 
-		events: eventBus,
+		events: {
+			emit(channel, data) {
+				runtime.assertActive();
+				eventBus.emit(channel, data);
+			},
+			on(channel, handler) {
+				runtime.assertActive();
+				return eventBus.on(channel, (data) => {
+					try {
+						runtime.assertActive();
+					} catch {
+						// Shared buses may outlive this extension generation.
+						return;
+					}
+					return handler(data);
+				});
+			},
+		},
 	} as ExtensionAPI;
 
 	return api;

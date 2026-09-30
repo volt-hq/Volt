@@ -7,6 +7,7 @@ import {
 	createAgentSessionRuntime,
 	createAgentSessionServices,
 } from "../../../src/core/agent-session-runtime.ts";
+import { createEventBus } from "../../../src/core/event-bus.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, ExtensionError } from "../../../src/index.ts";
 import { createHarness, getMessageText } from "../harness.ts";
@@ -20,6 +21,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 
 	async function createRuntimeForTest(extend?: (volt: ExtensionAPI, instance: number) => void) {
 		const harness = await createHarness();
+		const eventBus = createEventBus();
 		cleanups.push(() => harness.cleanupAsync());
 		const lifecycle: string[] = [];
 		const resources: AbortController[] = [];
@@ -32,6 +34,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 				authStorage: harness.authStorage,
 				modelRegistry: harness.session.modelRegistry,
 				resourceLoaderOptions: {
+					eventBus,
 					extensionFactories: [
 						(volt) => {
 							const instance = ++instances;
@@ -89,7 +92,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		});
 		await runtime.getRebindSession()?.(runtime.session);
 		await runtime.session.sessionManager.flush();
-		return { runtime, harness, lifecycle, resources, errors, shutdown };
+		return { runtime, harness, lifecycle, resources, errors, shutdown, eventBus };
 	}
 
 	async function conflict(runtime: AgentSessionRuntime) {
@@ -163,6 +166,8 @@ describe("regression #527: extension cleanup after conversation authority loss",
 				rejected(() => oldVolt!.sendUserMessage("forbidden")),
 				rejected(() => oldVolt!.setSessionName("forbidden")),
 				rejected(() => oldVolt!.registerProvider("forbidden", { baseUrl: "https://example.invalid" })),
+				rejected(() => oldVolt!.events.emit("forbidden", {})),
+				rejected(() => oldVolt!.events.on("forbidden", () => {})),
 				rejected(() => oldCommand!.newSession()),
 				rejected(() => oldCommand!.reload()),
 				rejected(() => oldCommand!.shutdown()),
@@ -201,7 +206,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		lateRelease.resolve();
 		const afterReplacement = await lateWork;
 		for (const outcomes of [duringCleanup, afterReplacement]) {
-			expect(outcomes).toHaveLength(8);
+			expect(outcomes).toHaveLength(10);
 			for (const error of outcomes ?? [])
 				expect(error).toMatchObject({ message: expect.stringContaining("stale after conversation authority") });
 		}
@@ -212,6 +217,58 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		expect(runtime.session.messages.map(getMessageText)).toEqual(["authoritative input"]);
 		expect(harness.faux.state.callCount).toBe(0);
 		expect(runtime.session.sessionName).toBeUndefined();
+	});
+
+	it("fences shared event buses while allowing owned subscriptions to be removed", async () => {
+		const release = Promise.withResolvers<void>();
+		const oldListener = vi.fn();
+		const ownedListener = vi.fn();
+		let oldEvents: ExtensionAPI["events"] | undefined;
+		let lateWork: Promise<unknown> | undefined;
+		const { runtime, eventBus } = await createRuntimeForTest((volt, instance) => {
+			if (instance === 1) {
+				oldEvents = volt.events;
+				volt.events.on("probe", oldListener);
+				const unsubscribe = volt.events.on("owned", ownedListener);
+				volt.on("session_shutdown", () => {
+					unsubscribe();
+					lateWork = release.promise
+						.then(() => volt.events.emit("mutate-new", {}))
+						.catch((error: unknown) => error);
+				});
+			} else {
+				volt.events.on("mutate-new", () => volt.appendEntry("bus-write", {}));
+			}
+		});
+		cleanups.push(async () => {
+			release.resolve();
+			await lateWork;
+		});
+		eventBus.emit("probe", {});
+		eventBus.emit("owned", {});
+		expect(oldListener).toHaveBeenCalledOnce();
+		expect(ownedListener).toHaveBeenCalledOnce();
+		const ref = await conflict(runtime);
+		await runtime.switchSession(ref);
+		eventBus.emit("probe", {});
+		eventBus.emit("owned", {});
+		expect(oldListener).toHaveBeenCalledOnce();
+		expect(ownedListener).toHaveBeenCalledOnce();
+		expect(() => oldEvents!.on("mutate-new", () => {})).toThrow(/stale/);
+		release.resolve();
+		expect(await lateWork).toMatchObject({ message: expect.stringContaining("stale after conversation authority") });
+		expect(
+			runtime.session.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === "bus-write"),
+		).toBe(false);
+		// Other owners of the same bus and the new generation remain usable.
+		eventBus.emit("mutate-new", {});
+		expect(
+			runtime.session.sessionManager
+				.getEntries()
+				.some((entry) => entry.type === "custom" && entry.customType === "bus-write"),
+		).toBe(true);
 	});
 
 	it("revokes a shutdown handler that loses authority while awaiting cleanup", async () => {
