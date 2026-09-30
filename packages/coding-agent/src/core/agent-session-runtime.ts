@@ -1069,7 +1069,15 @@ export class AgentSessionRuntime {
 					: () => {},
 			retainObservation: () => session.gitContextProvider.retainObservation(),
 			subscribeAuthorityLoss: (listener) =>
-				session.sessionManager.subscribeConversationAuthorityChanges((status) => listener(status.error)),
+				session.sessionManager.subscribeConversationAuthorityChanges((status) => {
+					// Reviews execute separately but still persist accounting and their final
+					// record through this session's manager. They cannot survive its retirement.
+					// Defer abort listeners so they cannot reenter the failing store write.
+					queueMicrotask(() => {
+						if (this.session === session) void this._reviewWorkflows?.abortAll().catch(() => undefined);
+					});
+					listener(status.error);
+				}),
 			subscribeGenerationChanges: (listener) =>
 				typeof sessionLike.subscribeConversationGenerationChanges === "function"
 					? sessionLike.subscribeConversationGenerationChanges(() => listener())
@@ -1320,7 +1328,8 @@ export class AgentSessionRuntime {
 	 * compaction, extension commands, detached reviews) is waited out rather than
 	 * failing the reload. Work that starts while the reload is queued defers it
 	 * again. A session that lost conversation authority cancels its own blocking
-	 * work (see AgentSession), so the wait ends once that cancellation settles.
+	 * work (see AgentSession), and this runtime cancels its detached reviews; the
+	 * wait ends once that cancellation settles.
 	 *
 	 * Triggered by external lease events, so it always queues behind in-flight
 	 * lifecycle work instead of running re-entrantly. Do not await it from inside a

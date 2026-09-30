@@ -843,27 +843,38 @@ async function executePreparedToolCall(
 ): Promise<ExecutedToolCallOutcome> {
 	const updateEvents: Promise<void>[] = [];
 	let acceptingUpdates = true;
+	let onAbort: (() => void) | undefined;
 
 	try {
-		const result = await prepared.tool.execute(
-			prepared.toolCall.id,
-			prepared.args as never,
-			signal,
-			(partialResult) => {
-				if (!acceptingUpdates) return;
-				updateEvents.push(
-					Promise.resolve(
-						emit({
-							type: "tool_execution_update",
-							toolCallId: prepared.toolCall.id,
-							toolName: prepared.toolCall.name,
-							args: prepared.toolCall.arguments,
-							partialResult,
-						}),
-					).then(() => {}),
-				);
-			},
-		);
+		const result = await new Promise<AgentToolResult<unknown>>((resolve, reject) => {
+			onAbort = () => {
+				// Fence updates synchronously, including callbacks from other abort listeners.
+				acceptingUpdates = false;
+				reject(new Error("Operation aborted"));
+			};
+			if (signal?.aborted) {
+				onAbort();
+				return;
+			}
+			signal?.addEventListener("abort", onAbort, { once: true });
+			// Observe late rejection even when an uncooperative execute() outlives its run.
+			void prepared.tool
+				.execute(prepared.toolCall.id, prepared.args as never, signal, (partialResult) => {
+					if (!acceptingUpdates) return;
+					updateEvents.push(
+						Promise.resolve(
+							emit({
+								type: "tool_execution_update",
+								toolCallId: prepared.toolCall.id,
+								toolName: prepared.toolCall.name,
+								args: prepared.toolCall.arguments,
+								partialResult,
+							}),
+						).then(() => {}),
+					);
+				})
+				.then(resolve, reject);
+		});
 		acceptingUpdates = false;
 		await Promise.all(updateEvents);
 		return { result, isError: result.isError === true };
@@ -876,6 +887,7 @@ async function executePreparedToolCall(
 		};
 	} finally {
 		acceptingUpdates = false;
+		if (onAbort) signal?.removeEventListener("abort", onAbort);
 	}
 }
 
