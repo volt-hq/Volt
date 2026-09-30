@@ -766,6 +766,12 @@ export class ExtensionRunner {
 		return guarded;
 	}
 
+	/** Host-only notification for tools whose conversation can no longer accept results. */
+	subscribeConversationAuthorityLoss(listener: (error: Error) => void): () => void {
+		this.assertActive();
+		return this.sessionManager.subscribeConversationAuthorityChanges((status) => listener(status.error));
+	}
+
 	/**
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
