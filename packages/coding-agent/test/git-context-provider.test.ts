@@ -1,14 +1,15 @@
 import { execFileSync } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, delimiter, join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { basename, delimiter, join, sep } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	detectGitOperation,
 	GitContextObservationBinding,
 	GitContextProvider,
 	parseGitStatusPorcelainV2,
 } from "../src/core/git-context-provider.ts";
+import { GitContextProviderPool } from "../src/core/git-context-provider-pool.ts";
 import { discoverGitWorktree, getGitRepositoryDisplayName } from "../src/core/git-repository.ts";
 
 const SHA1 = "0123456789abcdef0123456789abcdef01234567";
@@ -505,6 +506,129 @@ describe("GitContextProvider", () => {
 		});
 		expect(JSON.stringify(unsafeOverride.getSnapshot())).not.toContain("secret.example");
 		unsafeOverride.dispose();
+	});
+});
+
+describe("GitContextProvider refresh scheduling", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	function providerWithSpiedRefresh(label: string) {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const provider = new GitContextProvider(tempDirectory(label));
+		const refresh = vi.spyOn(provider, "refresh").mockResolvedValue({ status: "definitive", gitContext: null });
+		return { provider, refresh };
+	}
+
+	it("still scans within one second while requests keep arriving", () => {
+		const { provider, refresh } = providerWithSpiedRefresh("deferral-cap");
+		const start = Date.now();
+		const scannedAt: number[] = [];
+		refresh.mockImplementation(async () => {
+			scannedAt.push(Date.now() - start);
+			return { status: "definitive", gitContext: null };
+		});
+		// Every request lands inside the 100 ms debounce of the previous one.
+		for (let elapsed = 0; elapsed < 2500; elapsed += 50) {
+			provider.scheduleRefresh();
+			vi.advanceTimersByTime(50);
+		}
+		expect(scannedAt.length).toBeGreaterThanOrEqual(2);
+		expect(scannedAt[0]).toBeLessThanOrEqual(1000);
+		for (let index = 1; index < scannedAt.length; index++) {
+			expect(scannedAt[index] - scannedAt[index - 1]).toBeLessThanOrEqual(1050);
+		}
+		provider.dispose();
+	});
+
+	it("collapses a short burst into one scan after the debounce", () => {
+		const { provider, refresh } = providerWithSpiedRefresh("deferral-burst");
+		for (let index = 0; index < 5; index++) {
+			provider.scheduleRefresh();
+			vi.advanceTimersByTime(20);
+		}
+		expect(refresh).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(100);
+		expect(refresh).toHaveBeenCalledTimes(1);
+
+		// The cap restarts with the next request instead of firing it immediately.
+		provider.scheduleRefresh();
+		vi.advanceTimersByTime(99);
+		expect(refresh).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(1);
+		expect(refresh).toHaveBeenCalledTimes(2);
+
+		provider.scheduleRefresh();
+		provider.dispose();
+		vi.advanceTimersByTime(2000);
+		expect(refresh).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("GitContextProviderPool", () => {
+	it("shares one provider per cwd, workspace name, and base ref", () => {
+		const cwd = tempDirectory("pool-shared");
+		const pool = new GitContextProviderPool();
+		const first = pool.acquire({ cwd });
+		const second = pool.acquire({ cwd: `${cwd}${sep}` });
+		expect(second.provider).toBe(first.provider);
+
+		const distinct = [
+			pool.acquire({ cwd: tempDirectory("pool-other") }),
+			pool.acquire({ cwd, workspaceName: "workspace" }),
+			pool.acquire({ cwd, baseRef: "main" }),
+		];
+		const providers = new Set([first.provider, ...distinct.map((lease) => lease.provider)]);
+		expect(providers.size).toBe(4);
+		for (const lease of [first, second, ...distinct]) lease.release();
+	});
+
+	it("disposes a provider with its last lease and hands out a fresh one afterwards", () => {
+		const cwd = tempDirectory("pool-release");
+		const pool = new GitContextProviderPool();
+		const first = pool.acquire({ cwd });
+		const second = pool.acquire({ cwd });
+		first.release();
+		first.release();
+		expect(second.provider.isDisposed).toBe(false);
+		second.release();
+		expect(second.provider.isDisposed).toBe(true);
+
+		const next = pool.acquire({ cwd });
+		expect(next.provider).not.toBe(first.provider);
+		expect(next.provider.isDisposed).toBe(false);
+		next.release();
+	});
+
+	it("replaces a provider disposed outside the pool without letting its stale lease dispose the replacement", () => {
+		const cwd = tempDirectory("pool-replaced");
+		const pool = new GitContextProviderPool();
+		const stale = pool.acquire({ cwd });
+		stale.provider.dispose();
+		const replacement = pool.acquire({ cwd });
+		expect(replacement.provider).not.toBe(stale.provider);
+		stale.release();
+		expect(replacement.provider.isDisposed).toBe(false);
+		replacement.release();
+		expect(replacement.provider.isDisposed).toBe(true);
+	});
+
+	it("runs one scan when two holders request a refresh together", async () => {
+		const repository = createSyntheticWorktree("pool-scan");
+		const countFile = join(tempDirectory("pool-scan-count"), "calls");
+		installFakeGit("delayed-counted-status", countFile);
+		const pool = new GitContextProviderPool();
+		const parent = pool.acquire({ cwd: repository });
+		const subagent = pool.acquire({ cwd: repository });
+		parent.provider.scheduleRefresh();
+		subagent.provider.scheduleRefresh();
+		await waitFor(() => parent.provider.getSnapshot() !== null);
+		await waitFor(() => (parent.provider as unknown as { children: Set<unknown> }).children.size === 0);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(gitCallCount(countFile)).toBe(1);
+		subagent.release();
+		parent.release();
 	});
 });
 

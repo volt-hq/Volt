@@ -212,6 +212,11 @@ export {
 	type ParsedGitStatus,
 	parseGitStatusPorcelainV2,
 } from "./core/git-context-provider.ts";
+export {
+	type GitContextProviderLease,
+	GitContextProviderPool,
+	type GitContextProviderPoolAcquireOptions,
+} from "./core/git-context-provider-pool.ts";
 export type {
 	HostActionDecision,
 	HostActionDecisionKind,

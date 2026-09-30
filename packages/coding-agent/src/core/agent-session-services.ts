@@ -6,6 +6,7 @@ import { canonicalizePath, resolvePath } from "../utils/paths.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import type { SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
+import type { GitContextProviderPool } from "./git-context-provider-pool.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import type { LspServerPool } from "./lsp/server-pool.ts";
 import { ModelRegistry } from "./model-registry.ts";
@@ -57,6 +58,8 @@ export interface CreateAgentSessionServicesOptions {
 	workspaceName?: string;
 	/** Optional trusted local base ref for managed-worktree divergence. */
 	baseRef?: string;
+	/** Share the Git context provider with other sessions of the same runtime factory. */
+	gitContextProviderPool?: GitContextProviderPool;
 }
 
 /**
@@ -103,6 +106,8 @@ export interface AgentSessionServices {
 	modelRegistry: ModelRegistry;
 	resourceLoader: ResourceLoader;
 	gitContextProvider: GitContextProvider;
+	/** Give up these services' hold on the provider. Disposes it unless another session shares it. */
+	releaseGitContextProvider: () => void;
 	workspaceName?: string;
 	baseRef?: string;
 	diagnostics: AgentSessionRuntimeDiagnostic[];
@@ -181,10 +186,18 @@ export async function createAgentSessionServices(
 	await resourceLoader.reload(options.resourceLoaderReloadOptions);
 	// Fire-and-forget initial scan: session creation never waits for Git, and
 	// state reads serve null until the first scan lands.
-	const gitContextProvider = new GitContextProvider(cwd, {
+	const gitContextLease = options.gitContextProviderPool?.acquire({
+		cwd,
 		workspaceName: options.workspaceName,
 		baseRef: options.baseRef,
 	});
+	const gitContextProvider =
+		gitContextLease?.provider ??
+		new GitContextProvider(cwd, {
+			workspaceName: options.workspaceName,
+			baseRef: options.baseRef,
+		});
+	const releaseGitContextProvider = gitContextLease?.release ?? (() => gitContextProvider.dispose());
 	void gitContextProvider.refresh();
 
 	try {
@@ -214,13 +227,14 @@ export async function createAgentSessionServices(
 			modelRegistry,
 			resourceLoader,
 			gitContextProvider,
+			releaseGitContextProvider,
 			workspaceName: options.workspaceName,
 			baseRef: options.baseRef,
 			diagnostics,
 		};
 	} catch (error) {
 		try {
-			gitContextProvider.dispose();
+			releaseGitContextProvider();
 		} catch (cleanupError) {
 			throw new AggregateError(
 				[error, cleanupError],
@@ -254,6 +268,7 @@ export async function createAgentSessionFromServices(
 		modelRegistry: options.services.modelRegistry,
 		resourceLoader: options.services.resourceLoader,
 		gitContextProvider: options.services.gitContextProvider,
+		releaseGitContextProvider: options.services.releaseGitContextProvider,
 		sessionManager: options.sessionManager,
 		model: options.model,
 		thinkingLevel: options.thinkingLevel,

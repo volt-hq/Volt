@@ -148,6 +148,11 @@ export interface CreateAgentSessionOptions {
 	sessionManager?: SessionManager;
 	/** Shared cwd-bound Git context provider. A bounded provider is created when omitted. */
 	gitContextProvider?: GitContextProvider;
+	/**
+	 * Called instead of disposing the supplied `gitContextProvider` when the session is
+	 * disposed, e.g. to release a pooled provider. Ignored when no provider is supplied.
+	 */
+	releaseGitContextProvider?: () => void;
 
 	/** Settings profile to apply when creating the default SettingsManager. */
 	profile?: string;
@@ -651,6 +656,9 @@ async function createAgentSessionWithTrackedResources(
 		followUpMode: settingsManager.getFollowUpMode(),
 		settingsManager,
 		gitContextProvider,
+		...(options.gitContextProvider === undefined || options.releaseGitContextProvider === undefined
+			? {}
+			: { releaseGitContextProvider: options.releaseGitContextProvider }),
 		cwd,
 		projectCwd: lexicalProjectCwd,
 		agentDir,
