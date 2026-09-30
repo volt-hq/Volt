@@ -69,10 +69,14 @@ function describeLicense(declared) {
 
 function extractArchive(archive) {
 	const extracted = mkdtempSync(join(tmpdir(), "volt-candidate-"));
-	const extract = spawnSync("tar", ["-xf", archive, "-C", extracted], { encoding: "utf8" });
+	// GNU tar cannot read zip archives, so Windows zips go through unzip on every host (#532).
+	const [command, args] = archive.endsWith(".zip")
+		? ["unzip", ["-q", archive, "-d", extracted]]
+		: ["tar", ["-xf", archive, "-C", extracted]];
+	const extract = spawnSync(command, args, { encoding: "utf8" });
 	if (extract.status !== 0) {
 		rmSync(extracted, { force: true, recursive: true });
-		throw new Error(`extraction failed: ${extract.stderr}`);
+		throw new Error(`extraction failed: ${extract.error?.message ?? extract.stderr}`);
 	}
 	return extracted;
 }
