@@ -18,6 +18,7 @@ import type {
 	ExtensionContext,
 	ExtensionError,
 	ExtensionFactory,
+	ExtensionUIContext,
 } from "../../../src/index.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
@@ -31,6 +32,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 	async function createRuntimeForTest(
 		extend?: (volt: ExtensionAPI, instance: number) => void,
 		otherExtensions: ExtensionFactory[] = [],
+		uiOverrides?: Partial<ExtensionUIContext>,
 	) {
 		const harness = await createHarness();
 		const eventBus = createEventBus();
@@ -91,6 +93,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		const shutdown = vi.fn();
 		runtime.setRebindSession(async (session) => {
 			await session.bindExtensions({
+				uiContext: uiOverrides ? { ...session.extensionRunner.getUIContext(), ...uiOverrides } : undefined,
 				shutdownHandler: shutdown,
 				onError: (error) => errors.push(error),
 				commandContextActions: {
@@ -285,6 +288,99 @@ describe("regression #527: extension cleanup after conversation authority loss",
 				.getEntries()
 				.some((entry) => entry.type === "custom" && entry.customType === "bus-write"),
 		).toBe(true);
+	});
+
+	it("revokes captured UI objects and methods without losing the replacement draft", async () => {
+		let draft = "initial draft";
+		const notify = vi.fn();
+		const unsubscribe = vi.fn();
+		const contexts: ExtensionUIContext[] = [];
+		let capturedNotify: ExtensionUIContext["notify"];
+		let capturedInput: ExtensionUIContext["input"];
+		const input = vi.fn(async () => "answer");
+		const cleanupErrors: unknown[] = [];
+		const { runtime } = await createRuntimeForTest(
+			(volt, instance) => {
+				let removeListener: () => void;
+				volt.on("session_start", (_event, ctx) => {
+					contexts.push(ctx.ui);
+					if (instance !== 1) return;
+					capturedNotify = ctx.ui.notify;
+					capturedInput = ctx.ui.input;
+					removeListener = ctx.ui.onTerminalInput(() => undefined);
+				});
+				volt.on("session_shutdown", () => {
+					if (instance !== 1) return;
+					removeListener();
+					for (const operation of [
+						() => contexts[0].setEditorText("cleanup overwrote draft"),
+						() => capturedNotify("retired notification"),
+					]) {
+						try {
+							operation();
+							cleanupErrors.push(undefined);
+						} catch (error) {
+							cleanupErrors.push(error);
+						}
+					}
+				});
+			},
+			[],
+			{
+				setEditorText(text) {
+					draft = text;
+				},
+				getEditorText: () => draft,
+				notify,
+				input,
+				onTerminalInput: () => unsubscribe,
+			},
+		);
+		contexts[0].setEditorText("unsent draft");
+		expect(contexts[0].getEditorText()).toBe("unsent draft");
+		expect(contexts[0].notify).toBe(capturedNotify!);
+		capturedNotify!("active notification");
+		await expect(capturedInput!("active dialog")).resolves.toBe("answer");
+		const ref = await conflict(runtime);
+		await runtime.switchSession(ref);
+		expect(cleanupErrors).toHaveLength(2);
+		for (const error of cleanupErrors) expect(error).toMatchObject({ message: expect.stringContaining("stale") });
+		expect(unsubscribe).toHaveBeenCalledOnce();
+		expect(() => contexts[0].setEditorText("late callback overwrote draft")).toThrow(/stale/);
+		expect(() => capturedNotify!("late notification")).toThrow(/stale/);
+		await expect(Promise.resolve().then(() => capturedInput!("late dialog"))).rejects.toThrow(/stale/);
+		expect(draft).toBe("unsent draft");
+		expect(notify).toHaveBeenCalledExactlyOnceWith("active notification");
+		expect(input).toHaveBeenCalledExactlyOnceWith("active dialog");
+		contexts[1].setEditorText("new generation draft");
+		expect(draft).toBe("new generation draft");
+	});
+
+	it("revokes cached model and credential services while keeping the shared host services live", async () => {
+		let registry: ExtensionContext["modelRegistry"];
+		let credentials: ExtensionContext["modelRegistry"]["authStorage"];
+		const { runtime } = await createRuntimeForTest((volt, instance) => {
+			if (instance !== 1) return;
+			volt.on("session_start", (_event, ctx) => {
+				registry = ctx.modelRegistry;
+				credentials = registry.authStorage;
+			});
+		});
+		registry!.registerProvider("cleanup-probe", { name: "active name" });
+		credentials!.setRuntimeApiKey("cleanup-probe", "active test credential");
+		const capturedRegister = registry!.registerProvider.bind(registry!);
+		const capturedGetKey = credentials!.getApiKey.bind(credentials!);
+		await expect(capturedGetKey("cleanup-probe")).resolves.toBe("active test credential");
+		const ref = await conflict(runtime);
+		await runtime.switchSession(ref);
+		expect(() => registry!.registerProvider("cleanup-probe", { name: "retired name" })).toThrow(/stale/);
+		expect(() => credentials!.setRuntimeApiKey("cleanup-probe", "retired test credential")).toThrow(/stale/);
+		expect(() => capturedRegister("cleanup-probe", { name: "retired name" })).toThrow(/stale/);
+		await expect(Promise.resolve().then(() => capturedGetKey("cleanup-probe"))).rejects.toThrow(/stale/);
+		const liveRegistry = runtime.session.modelRegistry;
+		liveRegistry.registerProvider("cleanup-probe", { name: "live name" });
+		expect(liveRegistry.getProviderDisplayName("cleanup-probe")).toBe("live name");
+		await expect(liveRegistry.authStorage.getApiKey("cleanup-probe")).resolves.toBe("active test credential");
 	});
 
 	it.each(["before", "during"] as const)(

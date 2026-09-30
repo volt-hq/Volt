@@ -299,6 +299,7 @@ export class ExtensionRunner {
 	private extensions: Extension[];
 	private runtime: ExtensionRuntime;
 	private uiContext: ExtensionUIContext;
+	private guardedContextObjects = new WeakMap<object, object>();
 	private mode: ExtensionMode = "print";
 	private cwd: string;
 	private sessionManager: SessionManager;
@@ -735,6 +736,36 @@ export class ExtensionRunner {
 		this.shutdownHandler();
 	}
 
+	/** Fence captured host capabilities without revoking returned cleanup/unsubscribe functions. */
+	private guardContextObject<T extends object>(target: T): T {
+		const existing = this.guardedContextObjects.get(target);
+		if (existing) return existing as T;
+		const methods = new Map<PropertyKey, { method: unknown; invoke: (...args: unknown[]) => unknown }>();
+		const guarded = new Proxy(target, {
+			get: (object, key) => {
+				this.assertActive();
+				const value = Reflect.get(object, key, object);
+				if (value === this.modelRegistry.authStorage)
+					return this.guardContextObject(this.modelRegistry.authStorage);
+				if (typeof value !== "function") return value;
+				let cached = methods.get(key);
+				if (!cached || cached.method !== value) {
+					cached = {
+						method: value,
+						invoke: (...args) => {
+							this.assertActive();
+							return Reflect.apply(value, object, args);
+						},
+					};
+					methods.set(key, cached);
+				}
+				return cached.invoke;
+			},
+		});
+		this.guardedContextObjects.set(target, guarded);
+		return guarded;
+	}
+
 	/**
 	 * Create an ExtensionContext for use in event handlers and tool execution.
 	 * Context values are resolved at call time, so changes via bindCore/bindUI are reflected.
@@ -750,7 +781,7 @@ export class ExtensionRunner {
 			},
 			get ui() {
 				runner.assertActive();
-				return runner.uiContext;
+				return runner.guardContextObject(runner.uiContext);
 			},
 			get mode() {
 				runner.assertActive();
@@ -770,7 +801,7 @@ export class ExtensionRunner {
 			},
 			get modelRegistry() {
 				runner.assertActive();
-				return runner.modelRegistry;
+				return runner.guardContextObject(runner.modelRegistry);
 			},
 			get model() {
 				runner.assertActive();
