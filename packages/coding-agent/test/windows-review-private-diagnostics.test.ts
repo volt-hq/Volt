@@ -1,8 +1,8 @@
-import { Buffer } from "node:buffer";
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	createReviewPrivateDiagnostics,
@@ -11,6 +11,7 @@ import {
 } from "../src/core/review-private-diagnostics.ts";
 import { writeWindowsReviewDiagnostic } from "../src/core/windows-review-private-diagnostics.ts";
 
+const execFileAsync = promisify(execFile);
 const roots: string[] = [];
 
 function createRoot(): string {
@@ -19,56 +20,84 @@ function createRoot(): string {
 	return root;
 }
 
-function powershell(script: string, input: Record<string, string>): string {
+/**
+ * Run a native System32 tool. ACL fixtures use icacls and whoami rather than
+ * Windows PowerShell: PowerShell loads .NET on every start, and under parallel
+ * CI load a single cold start exceeded 10 s before any product code ran.
+ */
+async function runSystemTool(tool: "icacls.exe" | "whoami.exe", args: string[]): Promise<string> {
 	const systemRoot = process.env.SystemRoot;
 	if (!systemRoot) throw new Error("Expected Windows system directory");
-	const command = `$ErrorActionPreference = 'Stop'\n$ProgressPreference = 'SilentlyContinue'\n[Console]::InputEncoding = [Text.UTF8Encoding]::new($false)\n$request = ConvertFrom-Json ([Console]::In.ReadToEnd())\n${script}`;
-	return execFileSync(
-		join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe"),
-		[
-			"-NoLogo",
-			"-NoProfile",
-			"-NonInteractive",
-			"-EncodedCommand",
-			Buffer.from(command, "utf16le").toString("base64"),
-		],
-		{ input: JSON.stringify(input), encoding: "utf8", windowsHide: true, timeout: 10_000 },
-	).trim();
+	const { stdout } = await execFileAsync(join(systemRoot, "System32", tool), args, { windowsHide: true });
+	return stdout;
 }
 
-interface AclSnapshot {
-	currentSid: string;
-	owner: string;
+let currentSid: Promise<string> | undefined;
+
+function getCurrentSid(): Promise<string> {
+	currentSid ??= runSystemTool("whoami.exe", ["/user", "/fo", "csv", "/nh"]).then((output) => {
+		const sid = /"(S-1-[\d-]+)"/.exec(output)?.[1];
+		if (!sid) throw new Error("whoami did not report the current user SID");
+		return sid;
+	});
+	return currentSid;
+}
+
+/** The DACL of one file or directory as SDDL (`D:<flags>(ace)...`), read with `icacls /save`. */
+async function readDaclSddl(path: string): Promise<string> {
+	const scratch = mkdtempSync(join(tmpdir(), "volt-windows-acl-save-"));
+	try {
+		const saved = join(scratch, "acl.txt");
+		await runSystemTool("icacls.exe", [path, "/save", saved, "/q"]);
+		const bytes = readFileSync(saved);
+		// icacls writes the save file as UTF-16LE: an entry-name line, then the SDDL line.
+		const utf16 = (bytes[0] === 0xff && bytes[1] === 0xfe) || bytes[1] === 0;
+		const text = (utf16 ? bytes.toString("utf16le") : bytes.toString("utf8")).replace(/^\uFEFF/, "");
+		const sddl = text.split(/\r?\n/).find((line) => line.startsWith("D:"));
+		if (!sddl) throw new Error("icacls did not save a DACL");
+		// Keep only the DACL. SIDs are written "S-...", so "S:" can only start a SACL.
+		return sddl.replace(/S:.*$/, "");
+	} finally {
+		rmSync(scratch, { recursive: true, force: true });
+	}
+}
+
+interface DaclSnapshot {
 	protected: boolean;
-	rules: Array<{ sid: string; rights: string; type: string; inherited: boolean }>;
+	aces: Array<{ type: string; flags: string; rights: string; sid: string }>;
 }
 
-function readAcl(path: string): AclSnapshot {
-	return JSON.parse(
-		powershell(
-			`
-$acl = if ([IO.Directory]::Exists($request.path)) { [IO.Directory]::GetAccessControl($request.path) }
-       else { [IO.File]::GetAccessControl($request.path) }
-$rules = @($acl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier]) | ForEach-Object {
-    @{ sid = $_.IdentityReference.Value; rights = [string]$_.FileSystemRights;
-       type = [string]$_.AccessControlType; inherited = $_.IsInherited }
-})
-@{ currentSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value;
-   owner = $acl.GetOwner([Security.Principal.SecurityIdentifier]).Value;
-   protected = $acl.AreAccessRulesProtected; rules = $rules } | ConvertTo-Json -Depth 5 -Compress
-`,
-			{ path },
-		),
-	) as AclSnapshot;
+const SDDL_SID_ALIASES: Record<string, string> = { WD: "S-1-1-0", SY: "S-1-5-18", BA: "S-1-5-32-544" };
+
+/** Parse a DACL SDDL string, resolving the SID aliases these fixtures can produce. */
+function parseDacl(sddl: string, userSid: string): DaclSnapshot {
+	const domain = userSid.slice(0, userSid.lastIndexOf("-"));
+	const aliases: Record<string, string> = { ...SDDL_SID_ALIASES, LA: `${domain}-500`, LG: `${domain}-501` };
+	const controlFlags = /^D:([^(]*)/.exec(sddl)?.[1] ?? "";
+	return {
+		// DACL control flags combine P, AI, AR, and NO_ACCESS_CONTROL; only P contains "P".
+		protected: controlFlags.includes("P"),
+		aces: [...sddl.matchAll(/\(([^)]*)\)/g)].map((match) => {
+			const fields = (match[1] ?? "").split(";");
+			const sid = fields[5] ?? "";
+			return { type: fields[0] ?? "", flags: fields[1] ?? "", rights: fields[2] ?? "", sid: aliases[sid] ?? sid };
+		}),
+	};
 }
 
-function expectOwnerOnly(path: string): void {
-	const acl = readAcl(path);
-	expect(acl).toEqual({
-		currentSid: expect.any(String),
-		owner: acl.currentSid,
+async function readDacl(path: string): Promise<DaclSnapshot> {
+	return parseDacl(await readDaclSddl(path), await getCurrentSid());
+}
+
+/**
+ * Exactly one non-inherited FullControl ACE for the current user under a
+ * protected DACL. icacls cannot report owners; ownership is enforced by the
+ * native writer, which refuses to write unless the owner is the current user.
+ */
+async function expectUserOnlyAccess(path: string, kind: "directory" | "file"): Promise<void> {
+	expect(await readDacl(path)).toEqual({
 		protected: true,
-		rules: [{ sid: acl.currentSid, rights: "FullControl", type: "Allow", inherited: false }],
+		aces: [{ type: "A", flags: kind === "directory" ? "OICI" : "", rights: "FA", sid: await getCurrentSid() }],
 	});
 }
 
@@ -81,23 +110,11 @@ describe.skipIf(process.platform !== "win32")("Windows private review diagnostic
 	it("hardens a permissive diagnostic directory without changing its shared parent", async () => {
 		vi.stubEnv(REVIEW_PRIVATE_DIAGNOSTICS_ENV, "1");
 		const agentDir = createRoot();
-		powershell(
-			`
-$directory = [IO.DirectoryInfo]::new($request.path)
-$acl = $directory.GetAccessControl()
-$acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
-    [Security.Principal.SecurityIdentifier]::new('S-1-1-0'),
-    [Security.AccessControl.FileSystemRights]::FullControl,
-    [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
-    [Security.AccessControl.PropagationFlags]::None, [Security.AccessControl.AccessControlType]::Allow))
-$directory.SetAccessControl($acl)
-`,
-			{ path: agentDir },
-		);
+		await runSystemTool("icacls.exe", [agentDir, "/grant", "*S-1-1-0:(OI)(CI)F", "/q"]);
 		const directory = getReviewPrivateDiagnosticsDirectory(agentDir);
 		mkdirSync(directory);
-		const parentBefore = readAcl(agentDir);
-		expect(readAcl(directory).rules).toContainEqual(expect.objectContaining({ sid: "S-1-1-0" }));
+		const parentBefore = await readDaclSddl(agentDir);
+		expect((await readDacl(directory)).aces).toContainEqual(expect.objectContaining({ sid: "S-1-1-0" }));
 		const diagnostics = createReviewPrivateDiagnostics({
 			agentDir,
 			workflowId: "review:windows-acl",
@@ -107,9 +124,9 @@ $directory.SetAccessControl($acl)
 
 		const file = await diagnostics.flush();
 		expect(file).toBeDefined();
-		expectOwnerOnly(directory);
-		expectOwnerOnly(file!);
-		expect(readAcl(agentDir)).toEqual(parentBefore);
+		await expectUserOnlyAccess(directory, "directory");
+		await expectUserOnlyAccess(file!, "file");
+		expect(await readDaclSddl(agentDir)).toBe(parentBefore);
 		expect(readFileSync(file!, "utf8")).toContain("Private concern.");
 	});
 
@@ -119,7 +136,7 @@ $directory.SetAccessControl($acl)
 		await writeWindowsReviewDiagnostic(path, content);
 
 		expect(readFileSync(path, "utf8")).toBe(content);
-		expectOwnerOnly(path);
+		await expectUserOnlyAccess(path, "file");
 	});
 
 	it("does not replace an existing file", async () => {
@@ -136,13 +153,13 @@ $directory.SetAccessControl($acl)
 		const root = createRoot();
 		const target = join(root, "target");
 		if (targetExists) mkdirSync(target);
-		const targetBefore = targetExists ? readAcl(target) : undefined;
+		const targetBefore = targetExists ? await readDaclSddl(target) : undefined;
 		const junction = join(root, "review-link");
 		symlinkSync(target, junction, "junction");
 
 		await expect(writeWindowsReviewDiagnostic(join(junction, "record.jsonl"), "private")).rejects.toThrow();
 		expect(existsSync(join(target, "record.jsonl"))).toBe(false);
-		if (targetExists) expect(readAcl(target)).toEqual(targetBefore);
+		if (targetExists) expect(await readDaclSddl(target)).toBe(targetBefore);
 		else expect(existsSync(target)).toBe(false);
 	});
 
@@ -161,7 +178,7 @@ $directory.SetAccessControl($acl)
 		expect(file).toBeDefined();
 		expect(readFileSync(file!, "utf8")).toContain("private-content-marker");
 		vi.unstubAllEnvs();
-		expectOwnerOnly(file!);
+		await expectUserOnlyAccess(file!, "file");
 	});
 
 	it("secures concurrent writes into one newly created directory", async () => {
@@ -169,7 +186,7 @@ $directory.SetAccessControl($acl)
 		const paths = Array.from({ length: 16 }, (_, index) => join(directory, `record-${index}.jsonl`));
 		await Promise.all(paths.map((path, index) => writeWindowsReviewDiagnostic(path, `record ${index}\n`)));
 		for (const [index, path] of paths.entries()) expect(readFileSync(path, "utf8")).toBe(`record ${index}\n`);
-		expectOwnerOnly(directory);
-		expectOwnerOnly(paths[0]!);
+		await expectUserOnlyAccess(directory, "directory");
+		await expectUserOnlyAccess(paths[0]!, "file");
 	});
 });
