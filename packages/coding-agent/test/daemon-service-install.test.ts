@@ -8,6 +8,7 @@ import {
 	getLaunchdPlistPath,
 	getSystemdUnitPath,
 	installDaemonService,
+	isDaemonServiceProcess,
 	LAUNCHD_SERVICE_LABEL,
 	type RunServiceCommand,
 	renderLaunchdPlist,
@@ -143,5 +144,50 @@ describe("daemon service install (M9)", () => {
 
 		const unsupported = await installDaemonService({ platform: "win32", agentDir, home, runCommand: failing.run });
 		expect(unsupported.ok).toBe(false);
+	});
+
+	it("recognizes the daemon launchd is running by its pid", async () => {
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const launchctl =
+			(code: number, output: string): RunServiceCommand =>
+			async (command, args) => {
+				calls.push({ command, args });
+				return { code, output };
+			};
+		const running = `gui/501/${LAUNCHD_SERVICE_LABEL} = {\n\tstate = running\n\tpid = 4242\n}\n`;
+
+		expect(await isDaemonServiceProcess(4242, { platform: "darwin", runCommand: launchctl(0, running) })).toBe(true);
+		expect(calls[0]?.command).toBe("launchctl");
+		expect(calls[0]?.args[0]).toBe("print");
+		expect(calls[0]?.args[1]).toMatch(new RegExp(`^gui/\\d+/${LAUNCHD_SERVICE_LABEL}$`));
+		// A daemon started from a terminal has a different pid than the service's.
+		expect(await isDaemonServiceProcess(5151, { platform: "darwin", runCommand: launchctl(0, running) })).toBe(false);
+		const notRunning = `gui/501/${LAUNCHD_SERVICE_LABEL} = {\n\tstate = not running\n}\n`;
+		expect(await isDaemonServiceProcess(4242, { platform: "darwin", runCommand: launchctl(0, notRunning) })).toBe(
+			false,
+		);
+		expect(await isDaemonServiceProcess(4242, { platform: "darwin", runCommand: launchctl(113, "") })).toBe(false);
+	});
+
+	it("recognizes the daemon systemd is running by its main pid", async () => {
+		const calls: Array<{ command: string; args: string[] }> = [];
+		const systemctl =
+			(code: number, output: string): RunServiceCommand =>
+			async (command, args) => {
+				calls.push({ command, args });
+				return { code, output };
+			};
+
+		expect(await isDaemonServiceProcess(4242, { platform: "linux", runCommand: systemctl(0, "4242\n") })).toBe(true);
+		expect(calls[0]).toEqual({
+			command: "systemctl",
+			args: ["--user", "show", SYSTEMD_SERVICE_NAME, "--property=MainPID", "--value"],
+		});
+		expect(await isDaemonServiceProcess(4242, { platform: "linux", runCommand: systemctl(0, "0\n") })).toBe(false);
+		expect(await isDaemonServiceProcess(4242, { platform: "linux", runCommand: systemctl(1, "4242\n") })).toBe(false);
+
+		const unsupported = createCommandRecorder();
+		expect(await isDaemonServiceProcess(4242, { platform: "win32", runCommand: unsupported.run })).toBe(false);
+		expect(unsupported.calls).toEqual([]);
 	});
 });

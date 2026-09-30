@@ -3,6 +3,7 @@ import { tmpdir } from "os";
 import { delimiter, join } from "path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
+	createGlobalPackageLocator,
 	detectInstallMethod,
 	getPackageSourceOrDistDir,
 	getSelfUpdateCommand,
@@ -497,5 +498,72 @@ describe("detectInstallMethod", () => {
 		expect(getSelfUpdateUnavailableInstruction("@hansjm10/volt-coding-agent")).toContain(
 			"the install path is not writable",
 		);
+	});
+});
+
+describe("createGlobalPackageLocator", () => {
+	const packageName = "@hansjm10/volt-coding-agent";
+
+	function writePackageJson(packageDir: string, name: string): void {
+		mkdirSync(packageDir, { recursive: true });
+		writeFileSync(join(packageDir, "package.json"), JSON.stringify({ name }));
+	}
+
+	test("finds a renamed package in the npm prefix after the running package is removed", () => {
+		const { prefix, packageDir } = createNpmPrefixInstall();
+		writePackageJson(packageDir, packageName);
+
+		const locate = createGlobalPackageLocator(packageName);
+		rmSync(packageDir, { recursive: true, force: true });
+		const renamedDir = join(prefix, "lib", "node_modules", "@new-scope", "volt");
+		writePackageJson(renamedDir, "@new-scope/volt");
+
+		expect(locate("@new-scope/volt")).toBe(renamedDir);
+		expect(locate(packageName)).toBeUndefined();
+	});
+
+	test.runIf(process.platform !== "win32")("asks pnpm where a global package moved after an update", () => {
+		const temp = mkdtempSync(join(tmpdir(), "volt-pnpm11-locate-"));
+		tempDir = temp;
+		const binDir = join(temp, "bin");
+		const root = join(temp, "pnpm", "global", "v11");
+		const listPath = join(temp, "pnpm-list.json");
+		const oldGlobalDir = join(root, "11e9a", "node_modules", "@hansjm10", "volt-coding-agent");
+		const newGlobalDir = join(root, "22f0b", "node_modules", "@hansjm10", "volt-coding-agent");
+		const storeDir = join(temp, "pnpm", "store", "v11", "links", "@hansjm10", "volt-coding-agent", "0.75.0");
+		writePackageJson(oldGlobalDir, packageName);
+		mkdirSync(storeDir, { recursive: true });
+		mkdirSync(binDir, { recursive: true });
+		writeFileSync(
+			join(binDir, "pnpm"),
+			`#!/bin/sh\nif [ "$1" = "root" ] && [ "$2" = "-g" ]; then printf '%s\\n' '${root}'; exit 0; fi\nif [ "$1" = "list" ] && [ "$2" = "-g" ]; then cat '${listPath}'; exit 0; fi\nexit 1\n`,
+		);
+		chmodSync(join(binDir, "pnpm"), 0o755);
+		process.env[pathEnvKey] = `${binDir}${delimiter}${originalPath ?? ""}`;
+		process.env.VOLT_PACKAGE_DIR = storeDir;
+		process.argv[1] = join(oldGlobalDir, "dist", "cli.js");
+		setExecPath(join(storeDir, "dist", "cli.js"));
+
+		const locate = createGlobalPackageLocator(packageName);
+		// The update moves the package to a new hashed directory and prunes the old one.
+		rmSync(join(root, "11e9a"), { recursive: true, force: true });
+		rmSync(join(temp, "pnpm", "store"), { recursive: true, force: true });
+		writePackageJson(newGlobalDir, packageName);
+		writeFileSync(
+			listPath,
+			JSON.stringify([{ path: root, dependencies: { [packageName]: { path: newGlobalDir } } }]),
+		);
+
+		expect(locate(packageName)).toBe(newGlobalDir);
+
+		// A package outside the roots that held this installation is not this installation.
+		const elsewhereDir = join(temp, "elsewhere", "node_modules", "@hansjm10", "volt-coding-agent");
+		writePackageJson(elsewhereDir, packageName);
+		writeFileSync(
+			listPath,
+			JSON.stringify([{ path: root, dependencies: { [packageName]: { path: elsewhereDir } } }]),
+		);
+
+		expect(locate(packageName)).toBeUndefined();
 	});
 });

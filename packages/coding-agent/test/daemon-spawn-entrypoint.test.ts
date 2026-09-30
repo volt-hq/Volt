@@ -1,10 +1,20 @@
 import { spawnSync } from "node:child_process";
-import { copyFileSync, mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+	copyFileSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { resolveDaemonCliInvocation } from "../src/daemon/spawn.ts";
+import { ENV_AGENT_DIR } from "../src/config.ts";
+import { resolveDaemonCliInvocation, startInstalledDaemon } from "../src/daemon/spawn.ts";
 
 const originalPackageDir = process.env.VOLT_PACKAGE_DIR;
 let fixtureRoot: string | undefined;
@@ -50,6 +60,31 @@ describe("daemon CLI entrypoint resolution", () => {
 		createFile(modularEntry);
 
 		expect(resolveDaemonCliInvocation()).toEqual({ nodeArgs: ["--optimize-for-size"], entry: modularEntry });
+	});
+
+	it("starts the daemon from the given installation instead of the running one", async () => {
+		const fixture = join(createPackageDir(), "..", "..");
+		const updatedDir = join(fixture, "updated install");
+		const recordPath = join(fixture, "record.jsonl");
+		const agentDir = join(fixture, "agent");
+		// Exiting non-zero for install-service skips the wait for a service-started daemon.
+		createFile(
+			join(updatedDir, "dist", "core", "npm", "cli.js"),
+			`require("node:fs").appendFileSync(${JSON.stringify(recordPath)}, JSON.stringify({ args: process.argv.slice(2), agentDir: process.env[${JSON.stringify(ENV_AGENT_DIR)}] }) + "\\n");
+process.exit(process.argv.includes("install-service") ? 3 : 0);
+`,
+		);
+
+		expect(await startInstalledDaemon(agentDir, updatedDir, "terminal")).toBe(true);
+		expect(await startInstalledDaemon(agentDir, updatedDir, "service")).toBe(false);
+		const records = readFileSync(recordPath, "utf8")
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line) as unknown);
+		expect(records).toEqual([
+			{ args: ["daemon", "start"], agentDir },
+			{ args: ["daemon", "install-service"], agentDir },
+		]);
 	});
 
 	it("keeps source execution ahead of generated package entrypoints", () => {

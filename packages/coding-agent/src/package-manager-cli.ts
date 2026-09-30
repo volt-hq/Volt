@@ -4,6 +4,7 @@ import { selectConfig } from "./cli/config-selector.ts";
 import { createProjectTrustContext } from "./cli/project-trust.ts";
 import {
 	APP_NAME,
+	createGlobalPackageLocator,
 	detectInstallMethod,
 	getAgentDir,
 	getPackageDir,
@@ -20,7 +21,8 @@ import { DefaultResourceLoader } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { daemonStop, promptConfirm } from "./daemon/cli.ts";
-import { findRunningDaemon, startInstalledDaemon } from "./daemon/spawn.ts";
+import { isDaemonServiceProcess } from "./daemon/service-install.ts";
+import { type DaemonStarter, findRunningDaemon, startInstalledDaemon } from "./daemon/spawn.ts";
 import { spawnProcess } from "./utils/child-process.ts";
 import { getLatestVoltRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
@@ -376,6 +378,7 @@ function printSelfUpdateNote(note: string): void {
 }
 
 interface SelfUpdatePlan {
+	packageName: string;
 	packageSpec: string;
 	shouldRun: boolean;
 	note?: string;
@@ -395,7 +398,7 @@ function normalizeHostedPackageName(packageName: string | undefined): string | u
 
 async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 	if (force) {
-		return { packageSpec: LATEST_SELF_UPDATE_PACKAGE_SPEC, shouldRun: true };
+		return { packageName: PACKAGE_NAME, packageSpec: LATEST_SELF_UPDATE_PACKAGE_SPEC, shouldRun: true };
 	}
 
 	try {
@@ -408,14 +411,19 @@ async function getSelfUpdatePlan(force: boolean): Promise<SelfUpdatePlan> {
 			(hostedPackageName !== undefined && hostedPackageName !== PACKAGE_NAME) ||
 			isNewerPackageVersion(latestRelease.version, VERSION)
 		) {
-			return { packageSpec, shouldRun: true, ...(latestRelease?.note ? { note: latestRelease.note } : {}) };
+			return {
+				packageName: targetPackageName,
+				packageSpec,
+				shouldRun: true,
+				...(latestRelease?.note ? { note: latestRelease.note } : {}),
+			};
 		}
 	} catch {
-		return { packageSpec: LATEST_SELF_UPDATE_PACKAGE_SPEC, shouldRun: true };
+		return { packageName: PACKAGE_NAME, packageSpec: LATEST_SELF_UPDATE_PACKAGE_SPEC, shouldRun: true };
 	}
 
 	console.log(chalk.green(`${APP_NAME} is already up to date (v${VERSION})`));
-	return { packageSpec: LATEST_SELF_UPDATE_PACKAGE_SPEC, shouldRun: false };
+	return { packageName: PACKAGE_NAME, packageSpec: LATEST_SELF_UPDATE_PACKAGE_SPEC, shouldRun: false };
 }
 
 async function runSelfUpdateStep(step: Pick<SelfUpdateCommand, "command" | "args" | "display">): Promise<void> {
@@ -777,6 +785,9 @@ export async function handlePackageCommand(
 					// A running daemon holds this installation's native addons open, which can
 					// make the package manager fail halfway and leave volt unusable.
 					const runningDaemon = await findRunningDaemon(agentDir);
+					let daemonRestart:
+						| { starter: DaemonStarter; locatePackage: (packageName: string) => string | undefined }
+						| undefined;
 					if (runningDaemon) {
 						const daemonLabel = runningDaemon.pid === undefined ? "voltd" : `voltd (pid ${runningDaemon.pid})`;
 						console.error(
@@ -794,30 +805,48 @@ export async function handlePackageCommand(
 							process.exitCode = 1;
 							return true;
 						}
+						// Capture both before stopping and updating: the service pid disappears with the
+						// daemon, and the update can move or remove this package directory.
+						daemonRestart = {
+							starter:
+								runningDaemon.pid !== undefined && (await isDaemonServiceProcess(runningDaemon.pid))
+									? "service"
+									: "terminal",
+							locatePackage: createGlobalPackageLocator(PACKAGE_NAME, selfUpdateNpmCommand),
+						};
 						if (!(await daemonStop(agentDir))) {
 							console.error(chalk.red(`${APP_NAME} was not updated because voltd did not stop.`));
 							process.exitCode = 1;
 							return true;
 						}
 					}
+					let updated = false;
 					try {
 						if (installMethod === "npm") {
 							prepareWindowsNpmSelfUpdate();
 						}
 						await runSelfUpdate(selfUpdateCommand);
+						updated = true;
 						console.log(chalk.green(`Updated ${APP_NAME}`));
 					} catch (error: unknown) {
 						printSelfUpdateFailure(error, selfUpdateCommand);
 						process.exitCode = 1;
 					}
-					// Restart even after a failed update: the previous install may still be intact.
-					if (runningDaemon && !(await startInstalledDaemon(agentDir))) {
-						console.error(
-							chalk.red(
-								`voltd was stopped for the update and did not start again. Start it with \`${APP_NAME} daemon start\`.`,
-							),
-						);
-						process.exitCode = 1;
+					if (daemonRestart) {
+						// Restart even after a failed update: the previous install may still be intact.
+						const packageDir = daemonRestart.locatePackage(updated ? selfUpdatePlan.packageName : PACKAGE_NAME);
+						if (!packageDir) {
+							console.error(chalk.red(`Could not find the installed ${APP_NAME} package to start voltd from.`));
+						}
+						if (!packageDir || !(await startInstalledDaemon(agentDir, packageDir, daemonRestart.starter))) {
+							const startCommand = daemonRestart.starter === "service" ? "install-service" : "start";
+							console.error(
+								chalk.red(
+									`voltd was stopped for the update and did not start again. Start it with \`${APP_NAME} daemon ${startCommand}\`.`,
+								),
+							);
+							process.exitCode = 1;
+						}
 					}
 				}
 				return true;

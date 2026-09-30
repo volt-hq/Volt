@@ -130,8 +130,10 @@ export async function findRunningDaemon(agentDir: string = getAgentDir()): Promi
 	return undefined;
 }
 
-export function resolveDaemonCliInvocation(): { nodeArgs: string[]; entry: string } {
-	const packageDir = getPackageDir();
+export function resolveDaemonCliInvocation(packageDir: string = getPackageDir()): {
+	nodeArgs: string[];
+	entry: string;
+} {
 	const sourceEntry = join(packageDir, "src", "cli.ts");
 	const sourceRunner = join(packageDir, "..", "..", "scripts", "run-coding-agent-source.mjs");
 	if (existsSync(sourceEntry) && existsSync(sourceRunner)) {
@@ -150,14 +152,23 @@ export type SpawnDaemonResult =
 	| { ok: true; pid?: number; socketPath: string }
 	| { ok: false; state: "starting" | "not-running"; pid?: number; socketPath: string; error: string };
 
+/** Who started a daemon: a terminal command, or the login service from `volt daemon install-service`. */
+export type DaemonStarter = "terminal" | "service";
+
 /**
- * Run `volt daemon start` from the package files now on disk, so a daemon
- * stopped for a self-update starts with the updated code and protocol.
+ * Start the daemon from the installation at `packageDir`, so a daemon stopped for a
+ * self-update starts with the updated code and protocol. A daemon the login service
+ * ran is started by reinstalling the service from that installation: the service
+ * definition records the entrypoint path, which the update may have moved.
  */
-export async function startInstalledDaemon(agentDir: string = getAgentDir()): Promise<boolean> {
-	const { entry } = resolveDaemonCliInvocation();
-	return new Promise((resolve) => {
-		const child = spawn(process.execPath, [entry, "daemon", "start"], {
+export async function startInstalledDaemon(
+	agentDir: string,
+	packageDir: string,
+	starter: DaemonStarter,
+): Promise<boolean> {
+	const { entry } = resolveDaemonCliInvocation(packageDir);
+	const started = await new Promise<boolean>((resolve) => {
+		const child = spawn(process.execPath, [entry, "daemon", starter === "service" ? "install-service" : "start"], {
 			stdio: "inherit",
 			windowsHide: true,
 			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
@@ -165,6 +176,18 @@ export async function startInstalledDaemon(agentDir: string = getAgentDir()): Pr
 		child.once("error", () => resolve(false));
 		child.once("close", (code) => resolve(code === 0));
 	});
+	if (!started || starter === "terminal") {
+		return started;
+	}
+	// `daemon start` waits for readiness itself; the service manager starts voltd asynchronously.
+	const deadline = Date.now() + SPAWN_HEALTH_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (await findRunningDaemon(agentDir)) {
+			return true;
+		}
+		await new Promise((resolve) => setTimeout(resolve, SPAWN_HEALTH_POLL_MS));
+	}
+	return false;
 }
 
 export interface PublishedDaemonEndpoint {
