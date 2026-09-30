@@ -845,6 +845,7 @@ async function executePreparedToolCall(
 	let acceptingUpdates = true;
 
 	try {
+		if (signal?.aborted) throw new Error("Operation aborted");
 		const result = await prepared.tool.execute(
 			prepared.toolCall.id,
 			prepared.args as never,
