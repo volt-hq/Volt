@@ -56,7 +56,7 @@ const DEFAULT_VERIFIER_THINKING: ModelThinkingLevel = "high";
 const DEFAULT_WORKERS = 10;
 const MAX_WORKERS = 32;
 const MAX_DIFF_CHARS = 200_000;
-const MAX_UNTRACKED_LISTED = 100;
+const MAX_UNTRACKED_LISTED = 500;
 const MAX_OMITTED_LISTED = 50;
 const MAX_FINDINGS_PER_WORKER = 12;
 const GROUP_LINE_TOLERANCE = 3;
@@ -323,10 +323,16 @@ async function collectTarget(
 	base: string | undefined,
 	signal: AbortSignal,
 ): Promise<ReviewTarget | string> {
-	const top = await volt.exec("git", ["rev-parse", "--show-toplevel"], { cwd, signal });
+	// execCommand reports a process killed by the abort signal with code 0, so partial output must not pass as success.
+	const run = async (args: string[], dir: string) => {
+		const result = await volt.exec("git", args, { cwd: dir, signal });
+		if (result.killed || signal.aborted) throw new SwarmCancelled();
+		return result;
+	};
+	const top = await run(["rev-parse", "--show-toplevel"], cwd);
 	if (top.code !== 0) return "Swarm review needs a Git repository.";
 	const root = top.stdout.trim();
-	const git = (args: string[]) => volt.exec("git", ["-c", "core.quotepath=off", ...args], { cwd: root, signal });
+	const git = (args: string[]) => run(["-c", "core.quotepath=off", ...args], root);
 
 	if ((await git(["rev-parse", "--verify", "--quiet", "HEAD"])).code !== 0) {
 		return "Swarm review needs at least one commit.";
@@ -341,8 +347,8 @@ async function collectTarget(
 	}
 
 	const [diff, stat, untracked] = await Promise.all([
-		git(["diff", "--no-color", "--no-ext-diff", "--find-renames", from, "--"]),
-		git(["diff", "--no-color", "--stat=160", from, "--"]),
+		git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--find-renames", from, "--"]),
+		git(["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--stat=160", from, "--"]),
 		git(["ls-files", "--others", "--exclude-standard"]),
 	]);
 	const failed = [diff, stat, untracked].find((result) => result.code !== 0);
@@ -415,6 +421,7 @@ async function loadContextFiles(
 			cwd: target.root,
 			signal,
 		});
+		if (result.killed || signal.aborted) throw new SwarmCancelled();
 		return result.code === 0 ? result.stdout : undefined;
 	};
 	const relativeCwd = relative(target.root, resolvedCwd);
@@ -465,7 +472,9 @@ function changeSection(target: ReviewTarget): string {
 			...listed.map((file) => `- ${file}`),
 		);
 		if (target.untracked.length > listed.length) {
-			lines.push(`- ... and ${target.untracked.length - listed.length} more`);
+			lines.push(
+				`- ... and ${target.untracked.length - listed.length} more untracked files that are not listed and are not part of this review.`,
+			);
 		}
 	}
 	lines.push("", "## Diff");
@@ -1130,6 +1139,11 @@ function buildReport(
 			`The diff was truncated: changes to ${target.omittedFiles.length} file(s) were missing or incomplete in the prompt (${shown}${more}). Reviewers could read their current contents but not removed lines or deleted files.`,
 		);
 	}
+	if (target.untracked.length > MAX_UNTRACKED_LISTED) {
+		lines.push(
+			`${target.untracked.length - MAX_UNTRACKED_LISTED} of ${target.untracked.length} untracked files were not listed to reviewers and were not reviewed.`,
+		);
+	}
 
 	if (result.verificationError) {
 		lines.push(
@@ -1247,8 +1261,17 @@ export default function swarmReview(volt: ExtensionAPI) {
 			const onCommandAbort = (): void => controller.abort();
 			ctx.signal.addEventListener("abort", onCommandAbort, { once: true });
 			try {
-				const target = await collectTarget(volt, ctx.cwd, options.base, controller.signal);
-				if (typeof target === "string") return notify(target, "warning");
+				let target: ReviewTarget;
+				let contextFiles: Array<{ path: string; content: string }>;
+				try {
+					const collected = await collectTarget(volt, ctx.cwd, options.base, controller.signal);
+					if (typeof collected === "string") return notify(collected, "warning");
+					target = collected;
+					contextFiles = await loadContextFiles(volt, target, ctx.cwd, controller.signal);
+				} catch (error) {
+					if (error instanceof SwarmCancelled) return notify("Swarm review cancelled.", "info");
+					throw error;
+				}
 
 				const state: SwarmState = {
 					workers: Array.from({ length: options.workers }, (_, index) => ({
@@ -1273,7 +1296,7 @@ export default function swarmReview(volt: ExtensionAPI) {
 					verifierModel: verifier.model,
 					settingsManager,
 					modelRegistry: ctx.modelRegistry,
-					contextFiles: await loadContextFiles(volt, target, ctx.cwd, controller.signal),
+					contextFiles,
 					signal: controller.signal,
 					onProgress: () => {
 						// Custom TUI components replace the view, which hides widgets; render progress inside it instead.
