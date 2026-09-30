@@ -608,7 +608,9 @@ export class ExtensionRunner {
 	 * Whether this runner belongs to a dead generation (disposed session or
 	 * pre-reload runner). Inert runners must produce no side effects: emits
 	 * pass values through unchanged, handlers never run, and errors never
-	 * reach listeners (which may be wired to a live transport).
+	 * reach listeners (which may be wired to a live transport). An admitted
+	 * session_shutdown may finish resource cleanup after authority loss invalidates
+	 * the runner; its captured APIs and contexts remain revoked throughout.
 	 */
 	private get isInert(): boolean {
 		return this.staleMessage !== undefined;
@@ -879,45 +881,62 @@ export class ExtensionRunner {
 		if (this.isInert) {
 			return undefined as RunnerEmitResult<TEvent>;
 		}
+		// Cleanup still belongs to the outgoing instance after reconciliation.
+		// Subscribe before invoking any handler: this also covers authority lost
+		// while a shutdown handler is awaiting a write. Revocation is permanent and
+		// fences captured volt/command contexts, nested emits, and error listeners;
+		// only this already-admitted shutdown dispatch continues.
+		const unsubscribeAuthorityLoss =
+			event.type === "session_shutdown"
+				? this.sessionManager.subscribeConversationAuthorityChanges(() => {
+						this.invalidate(
+							"This extension ctx is stale after conversation authority was lost. Shutdown handlers may only clean up owned resources.",
+						);
+					})
+				: undefined;
 		let result: SessionBeforeEventResult | undefined;
 
-		for (const ext of this.extensions) {
-			const handlers = ext.handlers.get(event.type);
-			if (!handlers || handlers.length === 0) continue;
+		try {
+			for (const ext of this.extensions) {
+				const handlers = ext.handlers.get(event.type);
+				if (!handlers || handlers.length === 0) continue;
 
-			for (const handler of handlers) {
-				try {
-					const handlerResult = await handler(
-						event,
-						this.createContext(event.type === "tool_execution_end" ? ext.path : undefined),
-					);
+				for (const handler of handlers) {
+					try {
+						const handlerResult = await handler(
+							event,
+							this.createContext(event.type === "tool_execution_end" ? ext.path : undefined),
+						);
 
-					if (this.isSessionBeforeEvent(event) && handlerResult) {
-						result = cloneCanonicalData(
-							handlerResult,
-							`Extension ${event.type} output from ${ext.path}`,
-						) as SessionBeforeEventResult;
-						if (result.cancel) {
-							return result as RunnerEmitResult<TEvent>;
+						if (this.isSessionBeforeEvent(event) && handlerResult) {
+							result = cloneCanonicalData(
+								handlerResult,
+								`Extension ${event.type} output from ${ext.path}`,
+							) as SessionBeforeEventResult;
+							if (result.cancel) {
+								return result as RunnerEmitResult<TEvent>;
+							}
 						}
-					}
-				} catch (err) {
-					const message = err instanceof Error ? err.message : String(err);
-					const stack = err instanceof Error ? err.stack : undefined;
-					this.emitErrorContained({
-						extensionPath: ext.path,
-						event: event.type,
-						error: message,
-						...(stack === undefined ? {} : { stack }),
-					});
-					if (
-						err instanceof CanonicalDataError &&
-						(event.type === "session_before_compact" || event.type === "session_before_tree")
-					) {
-						throw err;
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						const stack = err instanceof Error ? err.stack : undefined;
+						this.emitErrorContained({
+							extensionPath: ext.path,
+							event: event.type,
+							error: message,
+							...(stack === undefined ? {} : { stack }),
+						});
+						if (
+							err instanceof CanonicalDataError &&
+							(event.type === "session_before_compact" || event.type === "session_before_tree")
+						) {
+							throw err;
+						}
 					}
 				}
 			}
+		} finally {
+			unsubscribeAuthorityLoss?.();
 		}
 
 		return result as RunnerEmitResult<TEvent>;
