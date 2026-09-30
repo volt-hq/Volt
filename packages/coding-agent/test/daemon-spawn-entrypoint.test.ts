@@ -12,9 +12,14 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { resolveDaemonCliInvocation, startInstalledDaemon } from "../src/daemon/spawn.ts";
+import {
+	type DaemonProbeResult,
+	type DaemonProbeState,
+	resolveDaemonCliInvocation,
+	startInstalledDaemon,
+} from "../src/daemon/spawn.ts";
 
 const originalPackageDir = process.env.VOLT_PACKAGE_DIR;
 let fixtureRoot: string | undefined;
@@ -85,6 +90,34 @@ process.exit(process.argv.includes("install-service") ? 3 : 0);
 			{ args: ["daemon", "start"], agentDir },
 			{ args: ["daemon", "install-service"], agentDir },
 		]);
+	});
+
+	it("waits until a service-started daemon accepts connections", async () => {
+		const fixture = join(createPackageDir(), "..", "..");
+		const updatedDir = join(fixture, "updated install");
+		const agentDir = join(fixture, "agent");
+		createFile(join(updatedDir, "dist", "core", "npm", "cli.js"), "process.exit(0);\n");
+		const probeSequence = (...states: DaemonProbeState[]) => {
+			const last = states[states.length - 1]!;
+			return vi.fn(async (): Promise<DaemonProbeResult> => {
+				const state = states.shift() ?? last;
+				return { healthy: state === "healthy", state, socketPath: join(agentDir, "voltd.sock") };
+			});
+		};
+
+		const becomesHealthy = probeSequence("not-running", "unresponsive", "auth-failed", "shutting-down", "healthy");
+		expect(await startInstalledDaemon(agentDir, updatedDir, "service", { probeDaemon: becomesHealthy })).toBe(true);
+		expect(becomesHealthy).toHaveBeenCalledTimes(5);
+
+		// The updated daemon may speak a newer protocol than this pre-update process.
+		const newerProtocol = probeSequence("protocol-mismatch");
+		expect(await startInstalledDaemon(agentDir, updatedDir, "service", { probeDaemon: newerProtocol })).toBe(true);
+
+		const neverReady = probeSequence("unresponsive");
+		expect(
+			await startInstalledDaemon(agentDir, updatedDir, "service", { probeDaemon: neverReady, readyTimeoutMs: 300 }),
+		).toBe(false);
+		expect(neverReady.mock.calls.length).toBeGreaterThan(1);
 	});
 
 	it("keeps source execution ahead of generated package entrypoints", () => {

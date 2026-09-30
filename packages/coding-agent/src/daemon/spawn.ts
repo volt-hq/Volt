@@ -155,6 +155,11 @@ export type SpawnDaemonResult =
 /** Who started a daemon: a terminal command, or the login service from `volt daemon install-service`. */
 export type DaemonStarter = "terminal" | "service";
 
+export interface StartInstalledDaemonDependencies {
+	readonly probeDaemon?: (agentDir: string, timeoutMs?: number) => Promise<DaemonProbeResult>;
+	readonly readyTimeoutMs?: number;
+}
+
 /**
  * Start the daemon from the installation at `packageDir`, so a daemon stopped for a
  * self-update starts with the updated code and protocol. A daemon the login service
@@ -165,6 +170,7 @@ export async function startInstalledDaemon(
 	agentDir: string,
 	packageDir: string,
 	starter: DaemonStarter,
+	dependencies: StartInstalledDaemonDependencies = {},
 ): Promise<boolean> {
 	const { entry } = resolveDaemonCliInvocation(packageDir);
 	const started = await new Promise<boolean>((resolve) => {
@@ -180,14 +186,21 @@ export async function startInstalledDaemon(
 		return started;
 	}
 	// `daemon start` waits for readiness itself; the service manager starts voltd asynchronously.
-	const deadline = Date.now() + SPAWN_HEALTH_TIMEOUT_MS;
-	while (Date.now() < deadline) {
-		if (await findRunningDaemon(agentDir)) {
+	const probeRunningDaemon = dependencies.probeDaemon ?? probeDaemon;
+	const deadline = Date.now() + (dependencies.readyTimeoutMs ?? SPAWN_HEALTH_TIMEOUT_MS);
+	while (true) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			return false;
+		}
+		const probe = await probeRunningDaemon(agentDir, Math.min(SPAWN_HEALTH_PROBE_TIMEOUT_MS, remainingMs));
+		// This process still runs the pre-update code. A newer daemon rejecting its protocol
+		// has already accepted the connection, so it is up and serving updated clients.
+		if (probe.healthy || probe.state === "protocol-mismatch") {
 			return true;
 		}
 		await new Promise((resolve) => setTimeout(resolve, SPAWN_HEALTH_POLL_MS));
 	}
-	return false;
 }
 
 export interface PublishedDaemonEndpoint {

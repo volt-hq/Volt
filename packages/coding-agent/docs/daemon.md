@@ -75,9 +75,10 @@ before replacing the installation. It asks first, and after the update it
 starts the daemon again from the updated installation. If the login service was
 running the daemon, `volt update` reinstalls the service from the updated
 installation and starts the daemon through it, so the daemon keeps the service
-environment. Without an interactive
-terminal, it does not update and prints the `volt daemon stop`, `volt update
---self`, `volt daemon start` sequence to run instead.
+environment. Without an interactive terminal, it does not update and prints the
+commands to run instead: `volt daemon stop`, `volt update --self`, then `volt
+daemon start`, or `volt daemon install-service` when the login service runs the
+daemon.
 
 ## Daemon environment
 

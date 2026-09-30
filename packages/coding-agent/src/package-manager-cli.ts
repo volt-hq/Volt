@@ -786,9 +786,21 @@ export async function handlePackageCommand(
 					// make the package manager fail halfway and leave volt unusable.
 					const runningDaemon = await findRunningDaemon(agentDir);
 					let daemonRestart:
-						| { starter: DaemonStarter; locatePackage: (packageName: string) => string | undefined }
+						| {
+								starter: DaemonStarter;
+								startCommand: string;
+								locatePackage: (packageName: string) => string | undefined;
+						  }
 						| undefined;
 					if (runningDaemon) {
+						// Decide before prompting: the manual steps depend on it, and the service pid
+						// disappears once the daemon stops.
+						const starter: DaemonStarter =
+							runningDaemon.pid !== undefined && (await isDaemonServiceProcess(runningDaemon.pid))
+								? "service"
+								: "terminal";
+						// Reinstalling the service rewrites its entrypoint, which the update may have moved.
+						const startCommand = `${APP_NAME} daemon ${starter === "service" ? "install-service" : "start"}`;
 						const daemonLabel = runningDaemon.pid === undefined ? "voltd" : `voltd (pid ${runningDaemon.pid})`;
 						console.error(
 							chalk.yellow(
@@ -799,19 +811,16 @@ export async function handlePackageCommand(
 							console.error(chalk.red(`${APP_NAME} was not updated because voltd is running.`));
 							console.error(
 								chalk.dim(
-									`Run \`${APP_NAME} daemon stop\`, then \`${APP_NAME} update --self\`, then \`${APP_NAME} daemon start\`.`,
+									`Run \`${APP_NAME} daemon stop\`, then \`${APP_NAME} update --self\`, then \`${startCommand}\`.`,
 								),
 							);
 							process.exitCode = 1;
 							return true;
 						}
-						// Capture both before stopping and updating: the service pid disappears with the
-						// daemon, and the update can move or remove this package directory.
+						// Capture before updating: the update can move or remove this package directory.
 						daemonRestart = {
-							starter:
-								runningDaemon.pid !== undefined && (await isDaemonServiceProcess(runningDaemon.pid))
-									? "service"
-									: "terminal",
+							starter,
+							startCommand,
 							locatePackage: createGlobalPackageLocator(PACKAGE_NAME, selfUpdateNpmCommand),
 						};
 						if (!(await daemonStop(agentDir))) {
@@ -839,10 +848,9 @@ export async function handlePackageCommand(
 							console.error(chalk.red(`Could not find the installed ${APP_NAME} package to start voltd from.`));
 						}
 						if (!packageDir || !(await startInstalledDaemon(agentDir, packageDir, daemonRestart.starter))) {
-							const startCommand = daemonRestart.starter === "service" ? "install-service" : "start";
 							console.error(
 								chalk.red(
-									`voltd was stopped for the update and did not start again. Start it with \`${APP_NAME} daemon ${startCommand}\`.`,
+									`voltd was stopped for the update and did not start again. Start it with \`${daemonRestart.startCommand}\`.`,
 								),
 							);
 							process.exitCode = 1;

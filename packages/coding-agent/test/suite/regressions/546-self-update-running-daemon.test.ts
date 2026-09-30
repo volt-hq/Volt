@@ -195,10 +195,23 @@ describe("#546 volt update with a running daemon", () => {
 
 		expect(readEvents()).toEqual([]);
 		expect(daemonStop).not.toHaveBeenCalled();
-		expect(isDaemonServiceProcess).not.toHaveBeenCalled();
 		expect(startInstalledDaemon).not.toHaveBeenCalled();
 		expect(stderr).toContain("voltd (pid 4242) is running");
 		expect(stderr).toContain("`volt daemon stop`, then `volt update --self`, then `volt daemon start`");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("tells the user to reinstall the service when the service daemon restart is not confirmed", async () => {
+		vi.mocked(isDaemonServiceProcess).mockResolvedValue(true);
+		vi.mocked(promptConfirm).mockResolvedValue(false);
+
+		const { stderr } = await runSelfUpdate();
+
+		expect(readEvents()).toEqual([]);
+		expect(daemonStop).not.toHaveBeenCalled();
+		expect(startInstalledDaemon).not.toHaveBeenCalled();
+		expect(stderr).toContain("`volt daemon stop`, then `volt update --self`, then `volt daemon install-service`");
+		expect(stderr).not.toContain("`volt daemon start`");
 		expect(process.exitCode).toBe(1);
 	});
 
