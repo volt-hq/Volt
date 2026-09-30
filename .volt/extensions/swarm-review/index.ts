@@ -11,7 +11,7 @@
  * With --base it reviews everything since the merge base with <ref>, including uncommitted changes.
  */
 
-import { constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -122,7 +122,7 @@ const VERIFICATION_SCHEMA = Type.Object({
 					"Candidate group IDs this finding confirms. Empty only for a new P0/P1 defect you found yourself.",
 			}),
 			title: Type.String({ description: "One-line summary of the verified defect" }),
-			file: Type.String({ description: "Repository-relative path" }),
+			file: Type.String({ description: "Repository-relative path of an existing file in the current working tree" }),
 			line: Type.Integer({ minimum: 1 }),
 			endLine: Type.Optional(Type.Integer({ minimum: 1 })),
 			priority: Type.Integer({
@@ -672,20 +672,34 @@ function pathArgument(params: unknown): string | undefined {
 		: undefined;
 }
 
-/** Mirrors the built-in tools' path handling (`@` prefix, `~`, file URLs) to reject escapes with a clear error. */
+const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
+
+/**
+ * Mirrors the built-in tools' resolveToCwd (normalizePath in packages/coding-agent/src/utils/paths.ts):
+ * Unicode spaces become ASCII spaces, then `@` is stripped, then `~`, `~/`, `~\` (Windows), and file URLs expand.
+ */
+function resolveLikeBuiltinTools(root: string, raw: string): string {
+	let path = raw.replace(UNICODE_SPACES, " ");
+	if (path.startsWith("@")) path = path.slice(1);
+	if (path === "~") path = homedir();
+	else if (path.startsWith("~/") || (process.platform === "win32" && path.startsWith("~\\"))) {
+		path = join(homedir(), path.slice(2));
+	} else if (path.startsWith("file://")) path = fileURLToPath(path);
+	return resolve(root, path);
+}
+
+/**
+ * Rejects `path` arguments that escape the repository with a clear error. Both the raw spelling and the built-in
+ * tools' normalized resolution are checked, so neither side of a normalization mismatch can escape.
+ */
 function confineTool<TParams extends TSchema, TDetails>(tool: ToolDefinition<TParams, TDetails>, root: string) {
 	return defineTool({
 		...tool,
 		async execute(toolCallId, params, signal, onUpdate, ctx) {
-			const raw = pathArgument(params)?.replace(/^@/, "");
+			const raw = pathArgument(params);
 			if (raw) {
-				const expanded =
-					raw === "~" || raw.startsWith("~/")
-						? join(homedir(), raw.slice(1))
-						: raw.startsWith("file://")
-							? fileURLToPath(raw)
-							: raw;
-				assertInsideRoot(root, resolve(root, expanded));
+				assertInsideRoot(root, resolve(root, raw));
+				assertInsideRoot(root, resolveLikeBuiltinTools(root, raw));
 			}
 			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
 		},
@@ -694,7 +708,8 @@ function confineTool<TParams extends TSchema, TDetails>(tool: ToolDefinition<TPa
 
 /**
  * Read-only inspection tools confined to the repository, so a prompt injection in the reviewed change cannot pull
- * host files into findings. read and grep also check the resolved paths they actually open.
+ * host files into findings. read, grep, and ls also check the resolved paths they actually open. find relies on
+ * confineTool alone: guarding its resolved path would require replacing the fd backend.
  */
 function createRepositoryTools(root: string) {
 	const guard = (path: string): string => {
@@ -721,7 +736,18 @@ function createRepositoryTools(root: string) {
 			root,
 		),
 		confineTool(createFindToolDefinition(root), root),
-		confineTool(createLsToolDefinition(root), root),
+		confineTool(
+			createLsToolDefinition(root, {
+				// Only the listed directory is guarded. ls stats each entry just for a "/" suffix and skips entries whose
+				// stat fails, so guarding stat would hide in-repository symlink entries without protecting anything.
+				operations: {
+					exists: (path) => existsSync(guard(path)),
+					stat: (path) => statSync(path),
+					readdir: (path) => readdirSync(guard(path)),
+				},
+			}),
+			root,
+		),
 	];
 }
 
@@ -752,7 +778,11 @@ function createFindingsTool(worker: WorkerState, root: string, onReport: () => v
 	});
 }
 
-function createVerificationTool(groups: CandidateGroup[], onReport: (verification: Verification) => void) {
+function createVerificationTool(
+	root: string,
+	groups: CandidateGroup[],
+	onReport: (verification: Verification) => void,
+) {
 	const known = new Set(groups.map((group) => group.id));
 	return defineTool({
 		name: "report_verification",
@@ -763,7 +793,15 @@ function createVerificationTool(groups: CandidateGroup[], onReport: (verificatio
 		async execute(_toolCallId, params) {
 			const errors: string[] = [];
 			const confirmed = new Set<string>();
+			const findings: Verification["findings"] = [];
 			for (const finding of params.findings) {
+				const file = normalizeFile(root, finding.file);
+				if (file) findings.push({ ...finding, file });
+				else {
+					errors.push(
+						`Finding "${finding.title}" is anchored to ${finding.file}, which is not an existing file in the repository.`,
+					);
+				}
 				for (const id of finding.groups) {
 					if (known.has(id)) confirmed.add(id);
 					else errors.push(`Finding "${finding.title}" references unknown group ${id}.`);
@@ -791,7 +829,7 @@ function createVerificationTool(groups: CandidateGroup[], onReport: (verificatio
 					isError: true,
 				};
 			}
-			onReport(params);
+			onReport({ ...params, findings });
 			return {
 				content: [{ type: "text", text: "Verification recorded." }],
 				details: { accepted: true },
@@ -913,7 +951,7 @@ async function runSwarm(setup: SwarmSetup, state: SwarmState): Promise<SwarmResu
 			model: setup.verifierModel,
 			thinking: options.verifierThinking,
 			systemPrompt: VERIFIER_SYSTEM_PROMPT,
-			reportTool: createVerificationTool(state.groups, (value) => {
+			reportTool: createVerificationTool(target.root, state.groups, (value) => {
 				verification = value;
 			}),
 			hasReport: () => verification !== undefined,
@@ -1069,7 +1107,7 @@ function buildReport(
 			}
 			return {
 				title: finding.title,
-				file: normalizeFile(target.root, finding.file) ?? finding.file,
+				file: finding.file,
 				line: finding.line,
 				...(finding.endLine !== undefined ? { endLine: finding.endLine } : {}),
 				priority: finding.priority,
