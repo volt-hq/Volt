@@ -66,13 +66,7 @@ node .volt/skills/release/verify-candidate.mjs /tmp/volt-candidate-<version> --c
 
 The verifier checks the nine-file layout, `source-commit.txt`, `SHA256SUMS`, `release-record.json`, each archive's build manifest against `compliance/standalone-runtime.json`, the copied Node license, the metafile checksum, every npm license file, the complete file manifest, prohibited files, and one attestation per file bound to the commit, `main`, the candidate workflow, and the run. It must end with `Problems: none`. `--previous` downloads the last release's archives and lists every bundled npm package added, removed, updated, or relicensed since then; review each entry, especially new licenses and `(undeclared)`. Windows archives must report `no certificate table (unsigned)`; the verifier fails if a Windows `volt.exe` has any certificate table.
 
-On a Linux host, GNU tar cannot read the Windows zips, so both Windows targets fail with `This does not look like a tar archive` (#532). Until that is fixed, put this `tar` shim in an empty directory and run the verifier with `PATH=<shim-dir>:$PATH`:
-
-```bash
-#!/usr/bin/env bash
-if [ "$1" = -xf ] && [[ "$2" == *.zip ]] && [ "$3" = -C ] && [ $# -eq 4 ]; then exec unzip -q "$2" -d "$4"; fi
-exec /usr/bin/tar "$@"
-```
+The verifier extracts the `.tar.gz` archives with `tar` and the Windows zips with `unzip`, so both must be on `PATH`.
 
 ## 4. Native smoke tests
 
