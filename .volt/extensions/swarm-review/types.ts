@@ -51,8 +51,12 @@ export interface ReviewTarget {
 	fileDiffs: Map<string, string>;
 	/** Whether a single shard holds the complete diff. */
 	complete: boolean;
+	/** Whether the diff changes submodule gitlinks, whose contents reviewers cannot inspect. */
+	submodules: boolean;
 	/** Git common directory; identifies the repository across worktrees. */
 	commonDir: string;
+	/** Materializes another private checkout of the reviewed state; the caller removes it. */
+	createCheckout(): Promise<string>;
 	dispose(): Promise<void>;
 }
 
@@ -144,6 +148,8 @@ export interface WaveSummary {
 	candidates: number;
 	newClusters: number;
 	clusteringFallback: boolean;
+	/** Every worker in the wave failed; the run stopped. */
+	failed?: boolean;
 }
 
 export interface SwarmState {

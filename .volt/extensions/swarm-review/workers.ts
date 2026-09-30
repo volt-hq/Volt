@@ -9,10 +9,11 @@ import { emptyUsage, errorText, lineRange, runPool } from "./util.ts";
 const MAX_FINDINGS_PER_WORKER = 12;
 const MAX_ALREADY_REPORTED = 60;
 const WORKER_TURNS = { wrapUp: 30, max: 45 };
-/** Straggler handling starts once this share of a wave has finished. */
+/** Straggler handling starts once this share of a wave (at most all but one worker) has finished. */
 const STRAGGLER_SHARE = 0.8;
 const MIN_STRAGGLER_GRACE_MS = 30_000;
 const MAX_STRAGGLER_GRACE_MS = 5 * 60_000;
+const MAX_STRAGGLER_CHECK_MS = 5_000;
 
 const FINDING_SCHEMA = Type.Object({
 	title: Type.String({ description: "One-line summary of the defect" }),
@@ -88,6 +89,11 @@ function shardNotes(target: ReviewTarget, shard: DiffShard): string[] {
 			`The diffs of these files were cut to fit: ${shard.partialFiles.join(", ")}. Read their current contents, and use read_base for their previous versions.`,
 		);
 	}
+	if (target.submodules) {
+		notes.push(
+			"This change updates submodule commits. Submodule contents are not available in the checkout, so review only how this repository uses them.",
+		);
+	}
 	return notes;
 }
 
@@ -124,38 +130,41 @@ function median(values: number[]): number {
 }
 
 /**
- * Runs one wave. Once most of the wave has finished, stragglers get a wrap-up message after a grace period and are
- * forced to report after another. The grace is half the median finished duration, clamped, unless configured.
+ * Runs one wave. Once most of the wave has finished (at least all but one worker for small waves), a running worker
+ * whose own elapsed time exceeds the median finished duration plus a grace period is told to wrap up, and after
+ * another grace it is forced to report. Measuring each worker's own elapsed time covers workers that start late
+ * (concurrency below the wave size). The grace is half the median, clamped, unless --straggler-grace sets it.
  */
 export async function runWave(setup: SwarmSetup, state: SwarmState, workers: WorkerState[]): Promise<void> {
 	const { options, signal, target } = setup;
 	const reported = state.clusters.filter((cluster) => cluster.outcome !== "suppressed");
 	const controls = new Map<number, PassControl>();
 	const durations: number[] = [];
-	const timers: Array<ReturnType<typeof setTimeout>> = [];
-	let stragglersHandled = false;
-	const running = (): WorkerState[] => workers.filter((worker) => worker.status === "running");
-	const handleStragglers = (): void => {
+	const wrapped = new Set<number>();
+	const threshold = Math.max(1, Math.min(workers.length - 1, Math.ceil(workers.length * STRAGGLER_SHARE)));
+	const graceMs = (): number =>
+		options.stragglerGrace !== undefined
+			? options.stragglerGrace * 1000
+			: Math.min(MAX_STRAGGLER_GRACE_MS, Math.max(MIN_STRAGGLER_GRACE_MS, median(durations) / 2));
+	const checkStragglers = (): void => {
 		const finished = workers.filter((worker) => worker.status !== "queued" && worker.status !== "running").length;
-		if (stragglersHandled || running().length === 0 || finished < Math.ceil(workers.length * STRAGGLER_SHARE)) {
-			return;
+		if (workers.length < 2 || finished < threshold) return;
+		const grace = graceMs();
+		const limit = median(durations) + grace;
+		for (const worker of workers) {
+			if (worker.status !== "running" || worker.startedAt === undefined) continue;
+			const elapsed = Date.now() - worker.startedAt;
+			if (elapsed >= limit + grace) controls.get(worker.index)?.finish();
+			else if (elapsed >= limit && !wrapped.has(worker.index)) {
+				wrapped.add(worker.index);
+				controls.get(worker.index)?.wrapUp();
+			}
 		}
-		stragglersHandled = true;
-		const grace =
-			options.stragglerGrace !== undefined
-				? options.stragglerGrace * 1000
-				: Math.min(MAX_STRAGGLER_GRACE_MS, Math.max(MIN_STRAGGLER_GRACE_MS, median(durations) / 2));
-		timers.push(
-			setTimeout(() => {
-				for (const worker of running()) controls.get(worker.index)?.wrapUp();
-				timers.push(
-					setTimeout(() => {
-						for (const worker of running()) controls.get(worker.index)?.finish();
-					}, grace),
-				);
-			}, grace),
-		);
 	};
+	const interval = setInterval(
+		checkStragglers,
+		Math.min(MAX_STRAGGLER_CHECK_MS, Math.max(250, (options.stragglerGrace ?? MIN_STRAGGLER_GRACE_MS / 1000) * 250)),
+	);
 	try {
 		await runPool(workers.length, options.concurrency, async (position) => {
 			const worker = workers[position];
@@ -189,14 +198,13 @@ export async function runWave(setup: SwarmSetup, state: SwarmState, workers: Wor
 				if (!signal.aborted) worker.error = errorText(error);
 			} finally {
 				controls.delete(worker.index);
-				if (worker.startedAt !== undefined && worker.finishedAt !== undefined) {
+				if (worker.status === "done" && worker.startedAt !== undefined && worker.finishedAt !== undefined) {
 					durations.push(worker.finishedAt - worker.startedAt);
 				}
-				handleStragglers();
 				setup.onProgress();
 			}
 		});
 	} finally {
-		for (const timer of timers) clearTimeout(timer);
+		clearInterval(interval);
 	}
 }

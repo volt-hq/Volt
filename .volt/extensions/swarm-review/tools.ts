@@ -93,9 +93,9 @@ function confineTool<TParams extends TSchema, TDetails>(
  * pull host files into findings. read, grep, and ls also check the resolved paths they actually open; find relies
  * on confineTool alone because guarding its resolved path would require replacing the fd backend.
  */
-export function createRepositoryTools(target: ReviewTarget) {
-	const cwd = target.checkout;
-	const roots = [target.checkout, target.repoRoot];
+export function createRepositoryTools(target: ReviewTarget, checkout: string) {
+	const cwd = checkout;
+	const roots = [checkout, target.repoRoot];
 	const guard = (path: string): string => {
 		assertInsideRoots(roots, path);
 		return path;

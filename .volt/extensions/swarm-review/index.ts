@@ -232,7 +232,17 @@ async function runSwarm(setup: SwarmSetup, state: SwarmState, dismissals: Dismis
 		setup.onProgress();
 		await runWave(setup, state, workers);
 		if (signal.aborted) return { status: "cancelled" };
-		if (!workers.some((worker) => worker.status === "done")) break;
+		if (!workers.some((worker) => worker.status === "done")) {
+			state.waves.push({
+				wave,
+				workers: count,
+				candidates: 0,
+				newClusters: 0,
+				clusteringFallback: false,
+				failed: true,
+			});
+			break;
+		}
 		state.phase = "clustering";
 		const candidates = workers.flatMap((worker) => worker.candidates);
 		const { newClusters, fallback } = await clusterWave(setup, state, candidates, dismissals, wave);
@@ -325,8 +335,19 @@ export default function swarmReview(volt: ExtensionAPI) {
 				if (typeof resolved === "string") return notify(resolved, "warning");
 				const target = resolved;
 				try {
-					const contextFiles = await loadContextFiles(target, ctx.cwd, controller.signal);
-					const dismissals = options.fresh ? [] : loadDismissals(target);
+					let contextFiles: Array<{ path: string; content: string }>;
+					try {
+						contextFiles = await loadContextFiles(target, ctx.cwd, controller.signal);
+					} catch (error) {
+						if (error instanceof SwarmCancelled) return notify("Swarm review cancelled.", "info");
+						throw error;
+					}
+					let dismissals: Dismissal[] = [];
+					try {
+						if (!options.fresh) dismissals = loadDismissals(target);
+					} catch {
+						// Unreadable memory must not block a review.
+					}
 					const state: SwarmState = {
 						workers: [],
 						clusters: [],

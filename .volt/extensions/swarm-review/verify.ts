@@ -1,3 +1,4 @@
+import { rm } from "node:fs/promises";
 import { StringEnum } from "@hansjm10/volt-ai";
 import { defineTool } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
@@ -149,7 +150,7 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 		);
 		cluster.verdicts = Array.from({ length: VERIFIERS_PER_CLUSTER }, () => undefined);
 	}
-	// Interleave slots so both verdicts of early clusters complete before later clusters start.
+	// Both verifiers of a cluster are queued together, so each cluster's verdicts arrive close together.
 	const jobs = pending.flatMap((cluster) =>
 		Array.from({ length: VERIFIERS_PER_CLUSTER }, (_, slot) => ({ cluster, slot })),
 	);
@@ -166,13 +167,18 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 		pass.status = "running";
 		setup.onProgress();
 		let verdict: Verdict | undefined;
+		// With --exec, commands can change files, so each verifier gets a private checkout.
+		let privateCheckout: string | undefined;
 		try {
+			if (options.exec) privateCheckout = await target.createCheckout();
+			const checkout = privateCheckout ?? target.checkout;
 			await runPass(setup, {
 				label: `Swarm review verifier ${cluster.id}.${slot + 1}`,
 				model: setup.verifierModel,
 				thinking: options.verifierThinking,
 				systemPrompt,
-				reportTool: createVerdictTool(target.checkout, (value) => {
+				checkout,
+				reportTool: createVerdictTool(checkout, (value) => {
 					verdict = value;
 				}),
 				hasReport: () => verdict !== undefined,
@@ -189,6 +195,7 @@ export async function verifyClusters(setup: SwarmSetup, state: SwarmState): Prom
 			pass.status = signal.aborted ? "cancelled" : "failed";
 			if (!signal.aborted) pass.error = errorText(error);
 		} finally {
+			if (privateCheckout) await rm(privateCheckout, { recursive: true, force: true });
 			setup.onProgress();
 		}
 	});

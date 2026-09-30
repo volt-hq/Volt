@@ -29,7 +29,57 @@ function effectiveKind(cluster: Cluster): string {
 export interface ReportedFinding extends VerifiedFinding {
 	cluster: string;
 	workers: number;
-	agreement: "both" | "single";
+	/** both: both verifiers reported it; one: only one did; single: the other verifier failed. */
+	agreement: "both" | "one" | "single";
+	priorities: number[];
+}
+
+/** Kept small: merging two distinct defects would hide one, while a near-duplicate is merely redundant. */
+const MATCH_LINE_TOLERANCE = 1;
+
+function sameDefect(a: VerifiedFinding, b: VerifiedFinding): boolean {
+	return (
+		a.file === b.file &&
+		a.line <= (b.endLine ?? b.line) + MATCH_LINE_TOLERANCE &&
+		b.line <= (a.endLine ?? a.line) + MATCH_LINE_TOLERANCE
+	);
+}
+
+/**
+ * Findings of a confirmed cluster from both verifiers. Findings both reported (same file, overlapping lines) are
+ * merged at the more severe priority; a finding only one verifier reported is kept and labelled as such.
+ */
+function clusterFindings(cluster: Cluster, workers: number): ReportedFinding[] {
+	const base = { cluster: cluster.id, workers };
+	if (cluster.outcome === "single") {
+		return (decidingVerdicts(cluster)[0]?.findings ?? []).map((finding) => ({
+			...finding,
+			...base,
+			agreement: "single" as const,
+			priorities: [finding.priority],
+		}));
+	}
+	const unmatched = [...(cluster.verdicts[1]?.findings ?? [])];
+	const results: ReportedFinding[] = [];
+	for (const finding of cluster.verdicts[0]?.findings ?? []) {
+		const index = unmatched.findIndex((other) => sameDefect(finding, other));
+		if (index === -1) {
+			results.push({ ...finding, ...base, agreement: "one", priorities: [finding.priority] });
+			continue;
+		}
+		const [other] = unmatched.splice(index, 1);
+		results.push({
+			...finding,
+			...base,
+			priority: Math.min(finding.priority, other.priority),
+			agreement: "both",
+			priorities: [finding.priority, other.priority],
+		});
+	}
+	for (const finding of unmatched) {
+		results.push({ ...finding, ...base, agreement: "one", priorities: [finding.priority] });
+	}
+	return results;
 }
 
 export function buildReport(
@@ -41,18 +91,10 @@ export function buildReport(
 	const { options, target } = setup;
 	const completedWorkers = state.workers.filter((worker) => worker.status === "done").length;
 	const byKind = (kind: string): Cluster[] => state.clusters.filter((cluster) => effectiveKind(cluster) === kind);
-	const confirmedClusters = byKind("confirmed");
-	const findings: ReportedFinding[] = confirmedClusters
-		.flatMap((cluster) => {
-			const workers = new Set(cluster.candidates.map((candidate) => candidate.worker)).size;
-			const agreement: ReportedFinding["agreement"] = cluster.outcome === "single" ? "single" : "both";
-			return (decidingVerdicts(cluster)[0]?.findings ?? []).map((finding) => ({
-				...finding,
-				cluster: cluster.id,
-				workers,
-				agreement,
-			}));
-		})
+	const findings: ReportedFinding[] = byKind("confirmed")
+		.flatMap((cluster) =>
+			clusterFindings(cluster, new Set(cluster.candidates.map((candidate) => candidate.worker)).size),
+		)
 		.sort((a, b) => a.priority - b.priority || b.workers - a.workers);
 
 	const waves = state.waves.length;
@@ -66,6 +108,15 @@ export function buildReport(
 	}
 	if (target.shards.length > 1) {
 		lines.push(`The diff was split into ${target.shards.length} parts across workers.`);
+	}
+	const failedWave = state.waves.find((summary) => summary.failed);
+	if (failedWave) lines.push(`Every worker in wave ${failedWave.wave} failed, so the run stopped early.`);
+	if (target.submodules) {
+		lines.push("The change updates submodule commits; submodule contents were not available to reviewers.");
+	}
+	const dropped = state.workers.reduce((sum, worker) => sum + worker.dropped, 0);
+	if (dropped > 0) {
+		lines.push(`${dropped} claim(s) were dropped because they cited files that do not exist in the checkout.`);
 	}
 	const fallbackWaves = state.waves.filter((summary) => summary.clusteringFallback).map((summary) => summary.wave);
 	if (fallbackWaves.length > 0) {
@@ -102,16 +153,15 @@ export function buildReport(
 	if (state.clusters.length === 0) lines.push("", "No claims. Nothing to verify.");
 
 	findings.forEach((finding, index) => {
-		const cluster = state.clusters.find((candidate) => candidate.id === finding.cluster);
-		const priorities = cluster
-			? decidingVerdicts(cluster).map((verdict) => Math.min(...verdict.findings.map((item) => item.priority)))
-			: [];
+		const [first, second] = finding.priorities;
 		const agreement =
 			finding.agreement === "single"
 				? "confirmed by 1 verifier (the other failed)"
-				: priorities.length === 2 && priorities[0] !== priorities[1]
-					? `both verifiers confirmed (P${priorities[0]} / P${priorities[1]})`
-					: "both verifiers confirmed";
+				: finding.agreement === "one"
+					? "reported by 1 of 2 verifiers (both confirmed a defect in this cluster)"
+					: second !== undefined && first !== second
+						? `both verifiers confirmed (P${first} / P${second})`
+						: "both verifiers confirmed";
 		lines.push(
 			"",
 			`### ${index + 1}. [P${finding.priority}] ${finding.title}`,
@@ -167,7 +217,10 @@ export function buildReport(
 	}
 	const suppressed = byKind("suppressed");
 	if (suppressed.length > 0) {
-		lines.push("", "### Suppressed (dismissed in an earlier review; the code is unchanged)");
+		lines.push(
+			"",
+			"### Suppressed (dismissed in an earlier review; the anchored code and its context are unchanged)",
+		);
 		for (const cluster of suppressed) {
 			lines.push(
 				`- ${cluster.title} (${cluster.candidates.length} claim(s)): ${cluster.suppressedBy?.reason ?? ""}`,

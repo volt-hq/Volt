@@ -64,18 +64,21 @@ export interface PassOptions {
 	inspect?: boolean;
 	/** Built-in tools to enable in addition, such as bash for --exec verifiers. */
 	extraTools?: string[];
+	/** Working checkout for this pass (default: the shared frozen checkout). */
+	checkout?: string;
 	onEvent?: (event: AgentSessionEvent) => void;
 	bindControl?: (control: PassControl) => void;
 }
 
 /** Runs one isolated, extension-free agent session until its report tool is called. Throws on failure. */
 export async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<void> {
-	const sessionManager = SessionManager.inMemory(setup.target.checkout);
+	const checkout = pass.checkout ?? setup.target.checkout;
+	const sessionManager = SessionManager.inMemory(checkout);
 	// A named session skips the automatic naming request.
 	sessionManager.appendSessionInfo(pass.label);
 	const inspect = pass.inspect ?? true;
 	const { session } = await createAgentSession({
-		cwd: setup.target.checkout,
+		cwd: checkout,
 		agentDir: getAgentDir(),
 		authStorage: setup.modelRegistry.authStorage,
 		modelRegistry: setup.modelRegistry,
@@ -84,7 +87,7 @@ export async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<voi
 		thinkingLevel: pass.thinking,
 		sessionManager,
 		resourceLoader: isolatedResourceLoader(pass.systemPrompt, setup.contextFiles),
-		customTools: [...(inspect ? createRepositoryTools(setup.target) : []), pass.reportTool],
+		customTools: [...(inspect ? createRepositoryTools(setup.target, checkout) : []), pass.reportTool],
 		tools: [...(inspect ? REPOSITORY_TOOL_NAMES : []), ...(pass.extraTools ?? []), pass.reportTool.name],
 		disableMcp: true,
 	});

@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { getAgentDir } from "@hansjm10/volt-coding-agent";
 import type { Cluster, ReviewTarget } from "./types.ts";
@@ -8,7 +8,12 @@ import type { Cluster, ReviewTarget } from "./types.ts";
 const MAX_ENTRIES_PER_REPOSITORY = 300;
 const MAX_PROMPT_ENTRIES = 100;
 const MAX_AGE_MS = 90 * 24 * 60 * 60 * 1000;
-const MAX_SNIPPET_LINES = 20;
+/** Lines of context on each side of the anchor, so a generic anchor line cannot match unrelated code. */
+const SNIPPET_CONTEXT = 5;
+const MAX_SNIPPET_LINES = 40;
+const LOCK_ATTEMPTS = 50;
+const LOCK_RETRY_MS = 100;
+const STALE_LOCK_MS = 30_000;
 
 interface StoredDismissal {
 	key: string;
@@ -85,7 +90,10 @@ function hashLines(lines: string[]): string {
 		.digest("hex");
 }
 
-/** The anchored lines, whitespace-trimmed, so a dismissal survives the code moving but not the code changing. */
+/**
+ * The anchored lines plus surrounding context, whitespace-trimmed, so a dismissal survives the code moving but not
+ * the code (or its immediate context) changing.
+ */
 function snippet(
 	checkout: string,
 	file: string,
@@ -94,8 +102,8 @@ function snippet(
 ): { hash: string; lines: number } | undefined {
 	const lines = fileLines(checkout, file);
 	if (!lines) return undefined;
-	const start = line - 1;
-	const end = Math.min(Math.max(endLine ?? line, line), line - 1 + MAX_SNIPPET_LINES, lines.length);
+	const start = Math.max(0, line - 1 - SNIPPET_CONTEXT);
+	const end = Math.min(Math.max(endLine ?? line, line) + SNIPPET_CONTEXT, start + MAX_SNIPPET_LINES, lines.length);
 	const selected = lines.slice(start, end);
 	if (selected.length === 0 || selected.every((text) => !text.trim())) return undefined;
 	return { hash: hashLines(selected), lines: selected.length };
@@ -113,7 +121,8 @@ function snippetPresent(checkout: string, entry: StoredDismissal): boolean {
 /** Recent dismissals for this repository whose anchored code is still present, newest first. */
 export function loadDismissals(target: ReviewTarget): Dismissal[] {
 	const cutoff = Date.now() - MAX_AGE_MS;
-	const entries: unknown[] = readStore().repositories[target.commonDir] ?? [];
+	const raw = readStore().repositories[target.commonDir];
+	const entries: unknown[] = Array.isArray(raw) ? raw : [];
 	return entries
 		.filter(isStoredDismissal)
 		.filter((entry) => Date.parse(entry.dismissedAt) >= cutoff && snippetPresent(target.checkout, entry))
@@ -144,16 +153,44 @@ export async function recordDismissals(target: ReviewTarget, clusters: Cluster[]
 		});
 	}
 	if (additions.length === 0) return 0;
-	const store = readStore();
-	const cutoff = Date.now() - MAX_AGE_MS;
-	const existing: unknown[] = store.repositories[target.commonDir] ?? [];
-	store.repositories[target.commonDir] = [...existing.filter(isStoredDismissal), ...additions]
-		.filter((entry) => Date.parse(entry.dismissedAt) >= cutoff)
-		.slice(-MAX_ENTRIES_PER_REPOSITORY);
 	const path = memoryPath();
 	await mkdir(dirname(path), { recursive: true });
-	const temporary = `${path}.${process.pid}.tmp`;
-	await writeFile(temporary, `${JSON.stringify(store, null, 2)}\n`);
-	await rename(temporary, path);
+	await withLock(`${path}.lock`, async () => {
+		// Re-read inside the lock so concurrent reviews do not drop each other's dismissals.
+		const store = readStore();
+		const cutoff = Date.now() - MAX_AGE_MS;
+		const raw = store.repositories[target.commonDir];
+		const existing: unknown[] = Array.isArray(raw) ? raw : [];
+		store.repositories[target.commonDir] = [...existing.filter(isStoredDismissal), ...additions]
+			.filter((entry) => Date.parse(entry.dismissedAt) >= cutoff)
+			.slice(-MAX_ENTRIES_PER_REPOSITORY);
+		const temporary = `${path}.${process.pid}.${randomUUID()}.tmp`;
+		await writeFile(temporary, `${JSON.stringify(store, null, 2)}\n`);
+		await rename(temporary, path);
+	});
 	return additions.length;
+}
+
+/** Runs `action` holding an exclusive lock file; a lock older than STALE_LOCK_MS is treated as abandoned. */
+async function withLock(lockPath: string, action: () => Promise<void>): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			const handle = await open(lockPath, "wx");
+			await handle.close();
+			break;
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST" || attempt >= LOCK_ATTEMPTS) throw error;
+			try {
+				if (Date.now() - statSync(lockPath).mtimeMs > STALE_LOCK_MS) await rm(lockPath, { force: true });
+			} catch {
+				// The holder released it between open and stat.
+			}
+			await new Promise((resolve) => setTimeout(resolve, LOCK_RETRY_MS));
+		}
+	}
+	try {
+		await action();
+	} finally {
+		await rm(lockPath, { force: true });
+	}
 }
