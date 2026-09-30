@@ -16,7 +16,7 @@ export const WORKER_SYSTEM_PROMPT = `<reviewer_prompt>
 </precision_rules>
 <workflow>
 1. Read the complete diff and the list of changed and untracked files.
-2. Use read, grep, find, and ls to inspect surrounding code, contracts, callers, configuration, and tests. Read untracked files in full.
+2. Use read, grep, find, and ls to inspect surrounding code, contracts, callers, configuration, and tests. Read untracked files in full. These tools only reach files inside the repository.
 3. Verify suspected behavior against the code before reporting it. You cannot modify files or run commands.
 4. Call report_findings exactly once with the complete report.
 </workflow>
@@ -33,7 +33,7 @@ export const VERIFIER_SYSTEM_PROMPT = `<review_verifier_prompt>
 - Mark a group uncertain only when settling it needs runtime information you cannot obtain statically, and state the concrete check that would settle it.
 - Report a new finding with no group IDs only for a P0 or P1 defect you discover while verifying.
 - Cover every candidate group: reference it from at least one finding, or list it exactly once as uncertain or rejected.
-- You cannot modify files or run commands.
+- You cannot modify files or run commands. Your read-only tools only reach files inside the repository.
 - Call report_verification exactly once. If it returns validation errors, fix them and call it again.
 </rules>
 </review_verifier_prompt>`;

@@ -11,8 +11,11 @@
  * With --base it reviews everything since the merge base with <ref>, including uncommitted changes.
  */
 
-import { existsSync, realpathSync } from "node:fs";
-import { isAbsolute, join, relative, sep } from "node:path";
+import { constants, existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { access, readFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Api, Model, ModelThinkingLevel } from "@hansjm10/volt-ai";
 import {
 	type AgentSession,
@@ -20,6 +23,10 @@ import {
 	BorderedLoader,
 	createAgentSession,
 	createExtensionRuntime,
+	createFindToolDefinition,
+	createGrepToolDefinition,
+	createLsToolDefinition,
+	createReadToolDefinition,
 	defineTool,
 	type ExtensionAPI,
 	type ExtensionCommandContext,
@@ -29,9 +36,10 @@ import {
 	SessionManager,
 	SettingsManager,
 	type Theme,
+	type ToolDefinition,
 } from "@hansjm10/volt-coding-agent";
 import { Container, Text } from "@hansjm10/volt-tui";
-import { type Static, Type } from "typebox";
+import { type Static, type TSchema, Type } from "typebox";
 import {
 	VERIFIER_REPAIR,
 	VERIFIER_SYSTEM_PROMPT,
@@ -49,6 +57,7 @@ const DEFAULT_WORKERS = 10;
 const MAX_WORKERS = 16;
 const MAX_DIFF_CHARS = 200_000;
 const MAX_UNTRACKED_LISTED = 100;
+const MAX_OMITTED_LISTED = 50;
 const MAX_FINDINGS_PER_WORKER = 12;
 const GROUP_LINE_TOLERANCE = 3;
 const WORKER_TURNS = { wrapUp: 40, max: 60 };
@@ -79,7 +88,8 @@ interface ReviewTarget {
 	base: string;
 	description: string;
 	diff: string;
-	diffTruncated: boolean;
+	/** Files whose diff sections were cut from the prompt; empty when the full diff fits. */
+	omittedFiles: string[];
 	stat: string;
 	untracked: string[];
 }
@@ -341,19 +351,43 @@ async function collectTarget(
 	const untrackedFiles = untracked.stdout.split("\n").filter(Boolean);
 	if (!diff.stdout.trim() && untrackedFiles.length === 0) return `No ${description} to review.`;
 
-	const diffTruncated = diff.stdout.length > MAX_DIFF_CHARS;
-	const diffText = diffTruncated
-		? diff.stdout.slice(0, diff.stdout.lastIndexOf("\n", MAX_DIFF_CHARS) + 1)
-		: diff.stdout;
+	const cut =
+		diff.stdout.length > MAX_DIFF_CHARS ? diff.stdout.lastIndexOf("\n", MAX_DIFF_CHARS) + 1 : diff.stdout.length;
 	return {
 		root,
 		base: from,
 		description,
-		diff: diffText,
-		diffTruncated,
+		diff: diff.stdout.slice(0, cut),
+		omittedFiles: omittedDiffFiles(diff.stdout, cut),
 		stat: stat.stdout.trimEnd(),
 		untracked: untrackedFiles,
 	};
+}
+
+/** Files whose `diff --git` sections are not entirely before `cut`. */
+function omittedDiffFiles(diff: string, cut: number): string[] {
+	const headers = [...diff.matchAll(/^diff --git a\/.* b\/(.*)$/gm)];
+	return headers
+		.filter((_, index) => (headers[index + 1]?.index ?? diff.length) > cut)
+		.map((header) => header[1] ?? "");
+}
+
+function insideRoot(root: string, path: string): boolean {
+	const rel = relative(root, path);
+	return rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+}
+
+/** Throws unless the path, with symlinks resolved when it exists, stays inside the repository under review. */
+function assertInsideRoot(root: string, absolutePath: string): void {
+	let target = absolutePath;
+	try {
+		target = realpathSync(absolutePath);
+	} catch {
+		// Nonexistent paths are checked lexically; the tool reports them as missing.
+	}
+	if (!insideRoot(root, target)) {
+		throw new Error(`Access outside the repository under review is not allowed: ${absolutePath}`);
+	}
 }
 
 const CONTEXT_FILE_NAMES = ["AGENTS.md", "AGENTS.MD", "CLAUDE.md", "CLAUDE.MD"];
@@ -369,13 +403,13 @@ async function loadContextFiles(
 	signal: AbortSignal,
 ): Promise<Array<{ path: string; content: string }>> {
 	const resolvedCwd = realpathSync(cwd);
-	const insideRepo = (path: string): boolean => {
-		const rel = relative(target.root, path);
-		return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
-	};
 	const files = loadProjectContextFiles({ cwd: resolvedCwd, agentDir: getAgentDir() }).filter(
-		(file) => !insideRepo(file.path),
+		(file) => !insideRoot(target.root, file.path),
 	);
+	const userReviewPolicy = join(getAgentDir(), "REVIEW.md");
+	if (existsSync(userReviewPolicy)) {
+		files.push({ path: userReviewPolicy, content: readFileSync(userReviewPolicy, "utf8") });
+	}
 	const readBase = async (path: string): Promise<string | undefined> => {
 		const result = await volt.exec("git", ["cat-file", "blob", `${target.base}:${path}`], {
 			cwd: target.root,
@@ -384,7 +418,7 @@ async function loadContextFiles(
 		return result.code === 0 ? result.stdout : undefined;
 	};
 	const relativeCwd = relative(target.root, resolvedCwd);
-	const segments = insideRepo(resolvedCwd) ? relativeCwd.split(sep).filter(Boolean) : [];
+	const segments = insideRoot(target.root, resolvedCwd) ? relativeCwd.split(sep).filter(Boolean) : [];
 	const directories = ["", ...segments.map((_, index) => segments.slice(0, index + 1).join("/"))];
 	const revision = target.base.slice(0, 10);
 	for (const directory of directories) {
@@ -435,7 +469,16 @@ function changeSection(target: ReviewTarget): string {
 		}
 	}
 	lines.push("", "## Diff");
-	if (target.diffTruncated) lines.push("The diff was truncated. Read the remaining changed files directly.");
+	if (target.omittedFiles.length > 0) {
+		const listed = target.omittedFiles.slice(0, MAX_OMITTED_LISTED);
+		const more = target.omittedFiles.length - listed.length;
+		lines.push(
+			"The diff was truncated to fit the prompt. Changes to these files are missing or incomplete below:",
+			...listed.map((file) => `- ${file}`),
+			...(more > 0 ? [`- ... and ${more} more`] : []),
+			"You can read their current contents, but not their previous versions, their removed lines, or deleted files. Do not assume the missing changes are correct.",
+		);
+	}
 	lines.push(`${fence}diff`, target.diff.trimEnd(), fence);
 	return lines.join("\n");
 }
@@ -566,7 +609,7 @@ async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<void> {
 		thinkingLevel: pass.thinking,
 		sessionManager,
 		resourceLoader: isolatedResourceLoader(pass.systemPrompt, setup.contextFiles),
-		customTools: [pass.reportTool],
+		customTools: [...createRepositoryTools(setup.target.root), pass.reportTool],
 		tools: [...READ_ONLY_TOOLS, pass.reportTool.name],
 		disableMcp: true,
 	});
@@ -616,12 +659,70 @@ async function runPass(setup: SwarmSetup, pass: PassOptions): Promise<void> {
 	}
 }
 
+/** Returns the repository-relative path of an existing file inside the root, or undefined. */
 function normalizeFile(root: string, raw: string): string | undefined {
-	let path = raw.trim().replace(/^@/, "");
-	if (isAbsolute(path)) path = relative(root, path);
-	path = path.replace(/\\/g, "/").replace(/^(\.\/)+/, "");
-	if (!path || path === ".." || path.startsWith("../")) return undefined;
-	return existsSync(join(root, path)) ? path : undefined;
+	const absolute = resolve(root, raw.trim().replace(/^@/, ""));
+	if (absolute === root || !insideRoot(root, absolute) || !existsSync(absolute)) return undefined;
+	return relative(root, absolute).split(sep).join("/");
+}
+
+function pathArgument(params: unknown): string | undefined {
+	return typeof params === "object" && params !== null && "path" in params && typeof params.path === "string"
+		? params.path
+		: undefined;
+}
+
+/** Mirrors the built-in tools' path handling (`@` prefix, `~`, file URLs) to reject escapes with a clear error. */
+function confineTool<TParams extends TSchema, TDetails>(tool: ToolDefinition<TParams, TDetails>, root: string) {
+	return defineTool({
+		...tool,
+		async execute(toolCallId, params, signal, onUpdate, ctx) {
+			const raw = pathArgument(params)?.replace(/^@/, "");
+			if (raw) {
+				const expanded =
+					raw === "~" || raw.startsWith("~/")
+						? join(homedir(), raw.slice(1))
+						: raw.startsWith("file://")
+							? fileURLToPath(raw)
+							: raw;
+				assertInsideRoot(root, resolve(root, expanded));
+			}
+			return tool.execute(toolCallId, params, signal, onUpdate, ctx);
+		},
+	});
+}
+
+/**
+ * Read-only inspection tools confined to the repository, so a prompt injection in the reviewed change cannot pull
+ * host files into findings. read and grep also check the resolved paths they actually open.
+ */
+function createRepositoryTools(root: string) {
+	const guard = (path: string): string => {
+		assertInsideRoot(root, path);
+		return path;
+	};
+	return [
+		confineTool(
+			createReadToolDefinition(root, {
+				operations: {
+					access: (path) => access(guard(path), constants.R_OK),
+					readFile: (path) => readFile(guard(path)),
+				},
+			}),
+			root,
+		),
+		confineTool(
+			createGrepToolDefinition(root, {
+				operations: {
+					isDirectory: (path) => statSync(guard(path)).isDirectory(),
+					readFile: (path) => readFileSync(guard(path), "utf8"),
+				},
+			}),
+			root,
+		),
+		confineTool(createFindToolDefinition(root), root),
+		confineTool(createLsToolDefinition(root), root),
+	];
 }
 
 function createFindingsTool(worker: WorkerState, root: string, onReport: () => void) {
@@ -753,16 +854,16 @@ async function runSwarm(setup: SwarmSetup, state: SwarmState): Promise<SwarmResu
 
 	await runPool(options.workers, options.concurrency, async (index) => {
 		const worker = state.workers[index];
-		if (index > 0) await warmup;
-		if (signal.aborted) {
-			worker.status = "cancelled";
-			setup.onProgress();
-			return;
-		}
-		worker.status = "running";
-		setup.onProgress();
 		let reported = false;
+		// Every exit path of worker 1 must release the others, including an abort before it starts.
 		try {
+			if (index > 0) await warmup;
+			if (signal.aborted) {
+				worker.status = "cancelled";
+				return;
+			}
+			worker.status = "running";
+			setup.onProgress();
 			await runPass(setup, {
 				label: `Swarm review worker ${index + 1}`,
 				model: setup.workerModel,
@@ -929,6 +1030,12 @@ class SwarmProgressView extends Container {
 	}
 }
 
+/** Distinct candidate titles of a proximity group, which may hold unrelated defects. */
+function groupTitles(group: CandidateGroup): string {
+	const titles = [...new Set(group.candidates.map((candidate) => candidate.title))];
+	return titles.length > 3 ? `${titles.slice(0, 3).join("; ")}; +${titles.length - 3} more` : titles.join("; ");
+}
+
 interface ConfirmedFinding {
 	title: string;
 	file: string;
@@ -978,8 +1085,13 @@ function buildReport(
 		`**Swarm review** · ${target.description}`,
 		`${completedWorkers}/${options.workers} workers (${modelRef(setup.workerModel)}, ${options.thinking}) → verifier ${modelRef(setup.verifierModel)} (${options.verifierThinking})`,
 	];
-	if (target.diffTruncated)
-		lines.push("The diff was truncated for the prompt; workers read the remaining files directly.");
+	if (target.omittedFiles.length > 0) {
+		const shown = target.omittedFiles.slice(0, 5).join(", ");
+		const more = target.omittedFiles.length > 5 ? `, +${target.omittedFiles.length - 5} more` : "";
+		lines.push(
+			`The diff was truncated: changes to ${target.omittedFiles.length} file(s) were missing or incomplete in the prompt (${shown}${more}). Reviewers could read their current contents but not removed lines or deleted files.`,
+		);
+	}
 
 	if (result.verificationError) {
 		lines.push(
@@ -988,10 +1100,17 @@ function buildReport(
 			`Showing ${state.groups.length} **unverified** candidate group(s):`,
 		);
 		for (const group of state.groups) {
-			const first = group.candidates[0];
 			lines.push(
-				`- **${group.id}** ${where(group.file, group.start, group.end)} ${first.title} (reported by ${group.candidates.length})`,
+				`- **${group.id}** ${where(group.file, group.start, group.end)} (${group.candidates.length} candidate(s))`,
 			);
+			const seen = new Set<string>();
+			for (const candidate of group.candidates) {
+				if (seen.has(candidate.title)) continue;
+				seen.add(candidate.title);
+				lines.push(
+					`  - [P${candidate.priority}] ${candidate.title}. Trigger: ${candidate.trigger} Impact: ${candidate.impact}`,
+				);
+			}
 		}
 	} else if (state.groups.length === 0) {
 		lines.push("", "No candidate findings. Nothing to verify.");
@@ -1018,9 +1137,7 @@ function buildReport(
 			lines.push("", "### Uncertain");
 			for (const entry of verification.uncertain) {
 				const group = groupsById.get(entry.group);
-				const label = group
-					? `${where(group.file, group.start, group.end)} ${group.candidates[0].title}`
-					: entry.group;
+				const label = group ? `${where(group.file, group.start, group.end)} ${groupTitles(group)}` : entry.group;
 				lines.push(`- ${label}: ${entry.reason}`);
 			}
 		}
@@ -1028,9 +1145,7 @@ function buildReport(
 			lines.push("", "### Rejected");
 			for (const entry of verification.rejected) {
 				const group = groupsById.get(entry.group);
-				const label = group
-					? `${where(group.file, group.start, group.end)} ${group.candidates[0].title}`
-					: entry.group;
+				const label = group ? `${where(group.file, group.start, group.end)} ${groupTitles(group)}` : entry.group;
 				lines.push(`- ${label}: ${entry.reason}`);
 			}
 		}
