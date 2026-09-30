@@ -811,7 +811,7 @@ export async function handlePackageCommand(
 							console.error(chalk.red(`${APP_NAME} was not updated because voltd is running.`));
 							console.error(
 								chalk.dim(
-									`Run \`${APP_NAME} daemon stop\`, then \`${APP_NAME} update --self\`, then \`${startCommand}\`.`,
+									`Run \`${APP_NAME} daemon stop\`, then \`${APP_NAME} update --self${options.force ? " --force" : ""}\`, then \`${startCommand}\`.`,
 								),
 							);
 							process.exitCode = 1;

@@ -197,7 +197,23 @@ describe("#546 volt update with a running daemon", () => {
 		expect(daemonStop).not.toHaveBeenCalled();
 		expect(startInstalledDaemon).not.toHaveBeenCalled();
 		expect(stderr).toContain("voltd (pid 4242) is running");
+		expect(stderr).toContain("`volt daemon stop`, then `volt update --self --force`, then `volt daemon start`");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("does not suggest --force when the declined update was not forced", async () => {
+		vi.mocked(promptConfirm).mockResolvedValue(false);
+		vi.stubEnv("VOLT_LATEST_VERSION_URL", "https://updates.example/latest-version");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => Response.json({ packageName: PACKAGE_NAME, version: "999.0.0" })),
+		);
+
+		const { stderr } = await runSelfUpdate(["update", "--self"]);
+
+		expect(readEvents()).toEqual([]);
 		expect(stderr).toContain("`volt daemon stop`, then `volt update --self`, then `volt daemon start`");
+		expect(stderr).not.toContain("--force");
 		expect(process.exitCode).toBe(1);
 	});
 
@@ -210,7 +226,9 @@ describe("#546 volt update with a running daemon", () => {
 		expect(readEvents()).toEqual([]);
 		expect(daemonStop).not.toHaveBeenCalled();
 		expect(startInstalledDaemon).not.toHaveBeenCalled();
-		expect(stderr).toContain("`volt daemon stop`, then `volt update --self`, then `volt daemon install-service`");
+		expect(stderr).toContain(
+			"`volt daemon stop`, then `volt update --self --force`, then `volt daemon install-service`",
+		);
 		expect(stderr).not.toContain("`volt daemon start`");
 		expect(process.exitCode).toBe(1);
 	});
