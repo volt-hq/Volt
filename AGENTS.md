@@ -90,7 +90,12 @@ When reviewing PRs:
 When creating issues:
 
 - Add `pkg:*` labels for affected packages (`pkg:agent`, `pkg:ai`, `pkg:coding-agent`, `pkg:tui`); use all that apply.
-- Label triaged issues `roadmap` to put them on the [Volt Roadmap](https://github.com/orgs/volt-hq/projects/1) project board; the board auto-adds `roadmap`-labeled issues. Only apply it to issues a maintainer has accepted.
+- Label `roadmap` every issue the maintainer files or tells an agent to file; the [Volt Roadmap](https://github.com/orgs/volt-hq/projects/1) project board auto-adds `roadmap`-labeled issues. Label other issues `roadmap` only after a maintainer accepts them.
+- Give every issue you put on the board a Priority (a board field; set it with `gh project item-edit` once the item appears). Use the priority the maintainer named, otherwise pick one and report it:
+  - P0: blocks a release or launch, or breaks Volt for most users.
+  - P1: breaks a core workflow without a reasonable workaround.
+  - P2: a bug with limited reach or a workaround, or a planned improvement.
+  - P3: nice to have, exploratory, or deferred.
 
 When starting work on an issue:
 
