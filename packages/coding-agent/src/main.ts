@@ -80,7 +80,7 @@ import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleStoreCommand } from "./store/store-cli.ts";
 import { canonicalizePath, isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
-import { cleanupWindowsSelfUpdateQuarantine } from "./utils/windows-self-update.ts";
+import { cleanupSelfUpdateQuarantine } from "./utils/self-update-native-quarantine.ts";
 
 /**
  * Read all content from piped stdin.
@@ -711,7 +711,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 
 	if (process.platform === "win32") {
-		cleanupWindowsSelfUpdateQuarantine(getPackageDir());
+		cleanupSelfUpdateQuarantine(getPackageDir());
 	}
 
 	const commandProfileArgs = stripCommandProfileArgs(args);

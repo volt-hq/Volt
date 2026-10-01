@@ -29,11 +29,8 @@ import {
 	startInstalledDaemon,
 } from "./daemon/spawn.ts";
 import { spawnProcess } from "./utils/child-process.ts";
+import { cleanupSelfUpdateQuarantine, quarantineNativeAddons } from "./utils/self-update-native-quarantine.ts";
 import { getLatestVoltRelease, isNewerPackageVersion } from "./utils/version-check.ts";
-import {
-	cleanupWindowsSelfUpdateQuarantine,
-	quarantineWindowsNativeDependencies,
-} from "./utils/windows-self-update.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -347,9 +344,19 @@ function printSelfUpdateUnavailable(npmCommand?: string[], updatePackageSpec = P
 /** The update failed, but the rollback step reinstalled the previous version. */
 class SelfUpdateRestoredError extends Error {}
 
+/** Preparing the update failed before the package manager ran, so nothing was installed. */
+class SelfUpdateNotStartedError extends Error {}
+
 function printSelfUpdateFailure(error: unknown, command: SelfUpdateCommand): void {
 	const message = error instanceof Error ? error.message : "Unknown package command error";
 	console.error(chalk.red(`Error: ${message}`));
+	if (error instanceof SelfUpdateNotStartedError) {
+		console.error(chalk.yellow(`Nothing was installed, so this ${APP_NAME} installation is unchanged.`));
+		console.error(
+			chalk.dim(`Close every ${APP_NAME} process, including voltd, then update with: ${command.display}`),
+		);
+		return;
+	}
 	if (error instanceof SelfUpdateRestoredError) {
 		console.error(chalk.dim(`If this keeps failing, run this command yourself: ${command.display}`));
 		return;
@@ -478,14 +485,17 @@ async function runSelfUpdate(command: SelfUpdateCommand): Promise<void> {
 	}
 }
 
-function prepareWindowsNpmSelfUpdate(): void {
-	if (process.platform !== "win32") {
-		return;
+/**
+ * Other volt processes can hold this installation's native addons open, which can make npm
+ * fail halfway and leave volt unusable. Move them out of the package before npm runs.
+ */
+function prepareNpmSelfUpdate(packageDir: string): void {
+	cleanupSelfUpdateQuarantine(packageDir);
+	try {
+		quarantineNativeAddons(packageDir);
+	} catch (error) {
+		throw new SelfUpdateNotStartedError(selfUpdateErrorMessage(error), { cause: error });
 	}
-
-	const packageDir = getPackageDir();
-	cleanupWindowsSelfUpdateQuarantine(packageDir);
-	quarantineWindowsNativeDependencies(packageDir);
 }
 
 export function parseProjectTrustOverride(args: readonly string[]): boolean | undefined {
@@ -832,9 +842,10 @@ export async function handlePackageCommand(
 						return true;
 					}
 					let updated = false;
+					const quarantinePackageDir = installMethod === "npm" ? getPackageDir() : undefined;
 					try {
-						if (installMethod === "npm") {
-							prepareWindowsNpmSelfUpdate();
+						if (quarantinePackageDir !== undefined) {
+							prepareNpmSelfUpdate(quarantinePackageDir);
 						}
 						await runSelfUpdate(selfUpdateCommand);
 						updated = true;
@@ -842,6 +853,10 @@ export async function handlePackageCommand(
 					} catch (error: unknown) {
 						printSelfUpdateFailure(error, selfUpdateCommand);
 						process.exitCode = 1;
+					}
+					if (quarantinePackageDir !== undefined) {
+						// Best effort: addons that other processes still hold stay until a later update.
+						cleanupSelfUpdateQuarantine(quarantinePackageDir);
 					}
 					if (daemonRestart) {
 						// Restart even after a failed update: the previous install may still be intact.
