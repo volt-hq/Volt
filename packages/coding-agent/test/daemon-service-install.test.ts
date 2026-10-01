@@ -1,4 +1,13 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -7,6 +16,7 @@ import {
 	type DaemonServiceInvocation,
 	getDaemonServiceInvocation,
 	getLaunchdPlistPath,
+	getServiceNodePath,
 	getSystemdUnitPath,
 	installDaemonService,
 	isDaemonServiceInstalled,
@@ -46,7 +56,7 @@ describe("daemon service install (M9)", () => {
 	it("renders a launchd plist that runs the daemon in the foreground with the agent dir pinned", () => {
 		expect(LAUNCHD_SERVICE_LABEL).toBe("com.github.hansjm10.voltd");
 		const invocation = getDaemonServiceInvocation(agentDir);
-		expect(invocation.programArguments[0]).toBe(process.execPath);
+		expect(realpathSync(invocation.programArguments[0] ?? "")).toBe(realpathSync(process.execPath));
 		expect(invocation.programArguments).toContain("--optimize-for-size");
 		// --service tells the daemon its inherited environment is the login session's.
 		expect(invocation.programArguments.slice(-4)).toEqual(["daemon", "run", "--foreground", "--service"]);
@@ -63,6 +73,41 @@ describe("daemon service install (M9)", () => {
 		// A graceful `volt daemon stop` must stay stopped: no KeepAlive restart.
 		expect(plist).toContain("<key>KeepAlive</key>\n\t<false/>");
 	});
+
+	// The service is darwin/Linux only, and Windows needs privileges to create symlinks.
+	it.skipIf(process.platform === "win32")(
+		"records Homebrew's opt link instead of the versioned Cellar path that brew upgrade removes",
+		() => {
+			const prefix = join(realpathSync(home), "homebrew");
+			const installNode = (formula: string, version: string): string => {
+				const node = join(prefix, "Cellar", formula, version, "bin", "node");
+				mkdirSync(dirname(node), { recursive: true });
+				writeFileSync(node, "");
+				return node;
+			};
+			const linkOpt = (formula: string, version: string): void => {
+				mkdirSync(join(prefix, "opt"), { recursive: true });
+				symlinkSync(join("..", "Cellar", formula, version), join(prefix, "opt", formula));
+			};
+
+			const current = installNode("node", "24.1.0");
+			linkOpt("node", "24.1.0");
+			expect(getServiceNodePath(current)).toBe(join(prefix, "opt", "node", "bin", "node"));
+
+			// Without an opt link there is no stable path; keep the one that runs.
+			const versioned = installNode("node@22", "22.16.0_1");
+			expect(getServiceNodePath(versioned)).toBe(versioned);
+			// Keg-only versioned formulae have an opt link too.
+			linkOpt("node@22", "22.16.0_1");
+			expect(getServiceNodePath(versioned)).toBe(join(prefix, "opt", "node@22", "bin", "node"));
+
+			// The opt link points at another version, so it would run a different Node.
+			const stale = installNode("node", "23.0.0");
+			expect(getServiceNodePath(stale)).toBe(stale);
+
+			expect(getServiceNodePath("/usr/bin/node")).toBe("/usr/bin/node");
+		},
+	);
 
 	it("escapes XML-special characters in launchd plist strings", () => {
 		const plist = renderLaunchdPlist({

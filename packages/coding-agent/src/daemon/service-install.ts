@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { ENV_AGENT_DIR, getAgentDir } from "../config.ts";
@@ -30,11 +30,30 @@ export interface DaemonServiceInvocation {
 	serviceLogPath: string;
 }
 
+/**
+ * The Node executable the login service runs. `process.execPath` has symlinks resolved, so
+ * Homebrew Node reports `<prefix>/Cellar/<formula>/<version>/bin/node`, which `brew upgrade`
+ * deletes. Record `<prefix>/opt/<formula>/bin/node` instead when it resolves to the same file:
+ * that link always points at the formula's current version.
+ */
+export function getServiceNodePath(execPath: string = process.execPath): string {
+	const match = /^(.+)\/Cellar\/([^/]+)\/[^/]+\/(.+)$/.exec(execPath);
+	if (!match) {
+		return execPath;
+	}
+	const optPath = `${match[1]}/opt/${match[2]}/${match[3]}`;
+	try {
+		return realpathSync(optPath) === realpathSync(execPath) ? optPath : execPath;
+	} catch {
+		return execPath;
+	}
+}
+
 export function getDaemonServiceInvocation(agentDir: string = getAgentDir()): DaemonServiceInvocation {
 	const { nodeArgs, entry } = resolveDaemonCliInvocation();
 	const paths = getDaemonPaths(agentDir);
 	return {
-		programArguments: [process.execPath, ...nodeArgs, entry, "daemon", "run", "--foreground", "--service"],
+		programArguments: [getServiceNodePath(), ...nodeArgs, entry, "daemon", "run", "--foreground", "--service"],
 		agentDir,
 		serviceLogPath: join(paths.daemonDir, "voltd.service.log"),
 	};
