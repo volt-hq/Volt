@@ -160,6 +160,28 @@ export interface StartInstalledDaemonDependencies {
 	readonly readyTimeoutMs?: number;
 }
 
+/** Run a `volt daemon` command from the installation at `packageDir`; resolves whether it exited 0. */
+function runInstalledDaemonCommand(agentDir: string, packageDir: string, command: string): Promise<boolean> {
+	const { entry } = resolveDaemonCliInvocation(packageDir);
+	return new Promise<boolean>((resolve) => {
+		const child = spawn(process.execPath, [entry, "daemon", command], {
+			stdio: "inherit",
+			windowsHide: true,
+			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
+		});
+		child.once("error", () => resolve(false));
+		child.once("close", (code) => resolve(code === 0));
+	});
+}
+
+/**
+ * Point an installed login service at the installation at `packageDir` without starting
+ * the daemon. That installation writes the definition, so it records its own entrypoint.
+ */
+export function refreshInstalledDaemonService(agentDir: string, packageDir: string): Promise<boolean> {
+	return runInstalledDaemonCommand(agentDir, packageDir, "refresh-service");
+}
+
 /**
  * Start the daemon from the installation at `packageDir`, so a daemon stopped for a
  * self-update starts with the updated code and protocol. A daemon the login service
@@ -172,16 +194,11 @@ export async function startInstalledDaemon(
 	starter: DaemonStarter,
 	dependencies: StartInstalledDaemonDependencies = {},
 ): Promise<boolean> {
-	const { entry } = resolveDaemonCliInvocation(packageDir);
-	const started = await new Promise<boolean>((resolve) => {
-		const child = spawn(process.execPath, [entry, "daemon", starter === "service" ? "install-service" : "start"], {
-			stdio: "inherit",
-			windowsHide: true,
-			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
-		});
-		child.once("error", () => resolve(false));
-		child.once("close", (code) => resolve(code === 0));
-	});
+	const started = await runInstalledDaemonCommand(
+		agentDir,
+		packageDir,
+		starter === "service" ? "install-service" : "start",
+	);
 	if (!started || starter === "terminal") {
 		return started;
 	}

@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR, PACKAGE_NAME } from "../../../src/config.ts";
 import { daemonStop, promptConfirm } from "../../../src/daemon/cli.ts";
-import { isDaemonServiceProcess } from "../../../src/daemon/service-install.ts";
+import { isDaemonServiceInstalled, isDaemonServiceProcess } from "../../../src/daemon/service-install.ts";
 import { findRunningDaemon, startInstalledDaemon } from "../../../src/daemon/spawn.ts";
 import { handlePackageCommand } from "../../../src/package-manager-cli.ts";
 import { createHarness, type Harness } from "../harness.ts";
@@ -25,7 +25,12 @@ vi.mock("../../../src/daemon/spawn.ts", async (importOriginal) => ({
 }));
 
 vi.mock("../../../src/daemon/service-install.ts", async (importOriginal) => ({
-	...(await importOriginal<{ isDaemonServiceProcess: typeof isDaemonServiceProcess }>()),
+	...(await importOriginal<{
+		isDaemonServiceInstalled: typeof isDaemonServiceInstalled;
+		isDaemonServiceProcess: typeof isDaemonServiceProcess;
+	}>()),
+	// Keep the user's real login service out of these updates.
+	isDaemonServiceInstalled: vi.fn(),
 	isDaemonServiceProcess: vi.fn(),
 }));
 
@@ -105,6 +110,7 @@ else if(process.env.FAKE_NPM_SKIP_INSTALL!=="1") { fs.mkdirSync(path.join(root,n
 	process.exitCode = undefined;
 
 	vi.mocked(findRunningDaemon).mockReset().mockResolvedValue({ pid: 4242 });
+	vi.mocked(isDaemonServiceInstalled).mockReset().mockReturnValue(false);
 	vi.mocked(isDaemonServiceProcess).mockReset().mockResolvedValue(false);
 	vi.mocked(promptConfirm).mockReset().mockResolvedValue(true);
 	vi.mocked(daemonStop)

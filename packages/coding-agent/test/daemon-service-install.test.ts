@@ -1,16 +1,19 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
 import {
+	type DaemonServiceInvocation,
 	getDaemonServiceInvocation,
 	getLaunchdPlistPath,
 	getSystemdUnitPath,
 	installDaemonService,
+	isDaemonServiceInstalled,
 	isDaemonServiceProcess,
 	LAUNCHD_SERVICE_LABEL,
 	type RunServiceCommand,
+	refreshDaemonService,
 	renderLaunchdPlist,
 	renderSystemdUnit,
 	SYSTEMD_SERVICE_NAME,
@@ -189,5 +192,119 @@ describe("daemon service install (M9)", () => {
 		const unsupported = createCommandRecorder();
 		expect(await isDaemonServiceProcess(4242, { platform: "win32", runCommand: unsupported.run })).toBe(false);
 		expect(unsupported.calls).toEqual([]);
+	});
+
+	describe("refresh after an update", () => {
+		// Differs from the agent dir the update runs with. Windows cannot create quotes or angle brackets.
+		const pinnedAgentDir = () =>
+			join(agentDir, process.platform === "win32" ? "pinned & dir" : 'pinned "a" \\ & <b>');
+
+		function writeInstalledDefinition(
+			definitionPath: string,
+			render: (invocation: DaemonServiceInvocation) => string,
+		): void {
+			const invocation = getDaemonServiceInvocation(pinnedAgentDir());
+			// The previous installation's entrypoint, which a package rename removed.
+			invocation.programArguments = [
+				process.execPath,
+				"/removed/volt/dist/cli.js",
+				"daemon",
+				"run",
+				"--foreground",
+				"--service",
+			];
+			mkdirSync(dirname(definitionPath), { recursive: true });
+			writeFileSync(definitionPath, render(invocation));
+		}
+
+		function createLaunchctl(printOutput: string, bootoutCode = 0) {
+			const calls: string[][] = [];
+			const run: RunServiceCommand = async (command, args) => {
+				calls.push([command, ...args]);
+				return args[0] === "print" ? { code: 0, output: printOutput } : { code: bootoutCode, output: "" };
+			};
+			return { calls, run };
+		}
+
+		it("does nothing when no service is installed", async () => {
+			const recorder = createCommandRecorder();
+
+			expect(isDaemonServiceInstalled({ platform: "linux", home })).toBe(false);
+			expect((await refreshDaemonService({ platform: "linux", home, runCommand: recorder.run })).status).toBe(
+				"not-installed",
+			);
+			expect((await refreshDaemonService({ platform: "win32", home, runCommand: recorder.run })).status).toBe(
+				"not-installed",
+			);
+			expect(recorder.calls).toEqual([]);
+		});
+
+		it("points a systemd unit at this installation, keeping its agent dir, without starting the daemon", async () => {
+			const unitPath = getSystemdUnitPath(home);
+			writeInstalledDefinition(unitPath, renderSystemdUnit);
+			expect(isDaemonServiceInstalled({ platform: "linux", home })).toBe(true);
+			const recorder = createCommandRecorder();
+
+			const result = await refreshDaemonService({ platform: "linux", home, runCommand: recorder.run });
+
+			expect(result.status).toBe("updated");
+			expect(readFileSync(unitPath, "utf8")).toBe(renderSystemdUnit(getDaemonServiceInvocation(pinnedAgentDir())));
+			expect(recorder.calls).toEqual([{ command: "systemctl", args: ["--user", "daemon-reload"] }]);
+
+			const again = await refreshDaemonService({ platform: "linux", home, runCommand: recorder.run });
+			expect(again.status).toBe("unchanged");
+			expect(recorder.calls).toHaveLength(1);
+		});
+
+		it("points a launchd plist at this installation and unloads the idle job instead of starting it", async () => {
+			const plistPath = getLaunchdPlistPath(home);
+			writeInstalledDefinition(plistPath, renderLaunchdPlist);
+			const launchctl = createLaunchctl(`gui/501/${LAUNCHD_SERVICE_LABEL} = {\n\tstate = not running\n}\n`);
+
+			const result = await refreshDaemonService({ platform: "darwin", home, runCommand: launchctl.run });
+
+			expect(result.status).toBe("updated");
+			expect(readFileSync(plistPath, "utf8")).toBe(renderLaunchdPlist(getDaemonServiceInvocation(pinnedAgentDir())));
+			expect(launchctl.calls.map((call) => call.slice(0, 2))).toEqual([
+				["launchctl", "print"],
+				["launchctl", "bootout"],
+			]);
+			expect(result.messages.join("\n")).toContain("volt daemon install-service");
+		});
+
+		it("leaves a launchd job that is running the daemon loaded", async () => {
+			writeInstalledDefinition(getLaunchdPlistPath(home), renderLaunchdPlist);
+			const launchctl = createLaunchctl(
+				`gui/501/${LAUNCHD_SERVICE_LABEL} = {\n\tstate = running\n\tpid = 4242\n}\n`,
+			);
+
+			const result = await refreshDaemonService({ platform: "darwin", home, runCommand: launchctl.run });
+
+			expect(result.status).toBe("updated");
+			expect(launchctl.calls.map((call) => call[1])).toEqual(["print"]);
+		});
+
+		it("reports failure when the service manager does not accept the change or the agent dir is unreadable", async () => {
+			writeInstalledDefinition(getSystemdUnitPath(home), renderSystemdUnit);
+			const failingSystemctl = createCommandRecorder(1);
+			expect(
+				(await refreshDaemonService({ platform: "linux", home, runCommand: failingSystemctl.run })).status,
+			).toBe("failed");
+
+			const plistPath = getLaunchdPlistPath(home);
+			writeInstalledDefinition(plistPath, renderLaunchdPlist);
+			const failingBootout = createLaunchctl(`gui/501/${LAUNCHD_SERVICE_LABEL} = {\n\tstate = not running\n}\n`, 5);
+			expect((await refreshDaemonService({ platform: "darwin", home, runCommand: failingBootout.run })).status).toBe(
+				"failed",
+			);
+
+			writeFileSync(plistPath, "<plist/>");
+			const recorder = createCommandRecorder();
+			expect((await refreshDaemonService({ platform: "darwin", home, runCommand: recorder.run })).status).toBe(
+				"failed",
+			);
+			expect(readFileSync(plistPath, "utf8")).toBe("<plist/>");
+			expect(recorder.calls).toEqual([]);
+		});
 	});
 });

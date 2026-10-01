@@ -14,7 +14,7 @@ import { type PidfileContents, readPidfile, runVoltDaemon } from "./main.ts";
 import { getDaemonPaths } from "./paths.ts";
 import { verifyPidfileProcess } from "./process-identity.ts";
 import { formatRelayAccessStatus, isRemoteAccessReady } from "./relay-access-status.ts";
-import { installDaemonService, uninstallDaemonService } from "./service-install.ts";
+import { installDaemonService, refreshDaemonService, uninstallDaemonService } from "./service-install.ts";
 import {
 	classifyPublishedDaemonGeneration,
 	DAEMON_SHUTDOWN_TIMEOUT_MS,
@@ -581,6 +581,17 @@ export async function handleDaemonCommand(args: string[], options: DaemonCommand
 				console.error(message);
 			}
 			if (!result.ok) {
+				process.exitCode = 1;
+			}
+			return true;
+		}
+		case "refresh-service": {
+			// Internal and unlisted: `volt update` runs it from the updated installation.
+			const result = await refreshDaemonService();
+			for (const message of result.messages) {
+				console.error(message);
+			}
+			if (result.status === "failed") {
 				process.exitCode = 1;
 			}
 			return true;

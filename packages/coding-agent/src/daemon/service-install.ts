@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { ENV_AGENT_DIR, getAgentDir } from "../config.ts";
@@ -140,6 +140,103 @@ export interface ServiceInstallOptions {
 	agentDir?: string;
 	home?: string;
 	runCommand?: RunServiceCommand;
+}
+
+function getDaemonServiceDefinitionPath(platform: NodeJS.Platform, home?: string): string | undefined {
+	if (platform === "darwin") {
+		return getLaunchdPlistPath(home);
+	}
+	return platform === "linux" ? getSystemdUnitPath(home) : undefined;
+}
+
+/** Whether a login service definition exists, whether or not the service manager has it loaded. */
+export function isDaemonServiceInstalled(options: Pick<ServiceInstallOptions, "platform" | "home"> = {}): boolean {
+	const definitionPath = getDaemonServiceDefinitionPath(options.platform ?? process.platform, options.home);
+	return definitionPath !== undefined && existsSync(definitionPath);
+}
+
+const XML_ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"' };
+
+/** The agent dir an installed definition pins, undoing the escaping its renderer applied. */
+function readServiceAgentDir(platform: NodeJS.Platform, definition: string): string | undefined {
+	if (platform === "darwin") {
+		const value = new RegExp(`<key>${ENV_AGENT_DIR}</key>\\s*<string>([^<]*)</string>`).exec(definition)?.[1];
+		return value?.replace(/&(amp|lt|gt|quot);/g, (entity, name: string) => XML_ENTITIES[name] ?? entity);
+	}
+	const value = new RegExp(`^Environment=${ENV_AGENT_DIR}=(.*)$`, "m").exec(definition)?.[1];
+	const quoted = value === undefined ? undefined : /^"(.*)"$/.exec(value)?.[1];
+	return quoted === undefined ? value : quoted.replace(/\\(["\\])/g, "$1");
+}
+
+export interface ServiceRefreshResult {
+	status: "not-installed" | "unchanged" | "updated" | "failed";
+	definitionPath: string;
+	messages: string[];
+}
+
+/**
+ * Point an installed login service at this installation without starting the daemon.
+ * `volt update` runs this from the updated installation, because a package rename or a
+ * pnpm global update moves the entrypoint the definition records. There is one service
+ * per user, so the definition keeps the agent dir it already pins.
+ */
+export async function refreshDaemonService(
+	options: Omit<ServiceInstallOptions, "agentDir"> = {},
+): Promise<ServiceRefreshResult> {
+	const platform = options.platform ?? process.platform;
+	const runCommand = options.runCommand ?? defaultRunCommand;
+	const definitionPath = getDaemonServiceDefinitionPath(platform, options.home);
+	if (definitionPath === undefined || !existsSync(definitionPath)) {
+		return { status: "not-installed", definitionPath: definitionPath ?? "", messages: [] };
+	}
+	const installed = readFileSync(definitionPath, "utf8");
+	const agentDir = readServiceAgentDir(platform, installed);
+	if (agentDir === undefined) {
+		return {
+			status: "failed",
+			definitionPath,
+			messages: [`Could not read the agent directory from ${definitionPath}.`],
+		};
+	}
+	const invocation = getDaemonServiceInvocation(agentDir);
+	const definition = platform === "darwin" ? renderLaunchdPlist(invocation) : renderSystemdUnit(invocation);
+	if (definition === installed) {
+		return { status: "unchanged", definitionPath, messages: [] };
+	}
+	writeFileSync(definitionPath, definition, { mode: 0o644 });
+	const messages = [`Updated ${definitionPath}`];
+
+	if (platform === "linux") {
+		// The unit stays enabled. Reloading replaces the manager's cached copy and starts nothing.
+		const reload = await runCommand("systemctl", ["--user", "daemon-reload"]);
+		if (reload.code !== 0) {
+			messages.push(`systemctl --user daemon-reload failed (${reload.output.trim() || "unknown error"}).`);
+			return { status: "failed", definitionPath, messages };
+		}
+		return { status: "updated", definitionPath, messages };
+	}
+
+	// launchd keeps the arguments it loaded, and loading this RunAtLoad job again would start
+	// the daemon. Unload an idle job so it cannot run the old path; the next login loads the file.
+	const uid = typeof process.getuid === "function" ? process.getuid() : 501;
+	const serviceTarget = `gui/${uid}/${LAUNCHD_SERVICE_LABEL}`;
+	const job = await runCommand("launchctl", ["print", serviceTarget]);
+	if (job.code !== 0) {
+		return { status: "updated", definitionPath, messages };
+	}
+	if (/^\s*pid = \d+\s*$/m.test(job.output)) {
+		messages.push("The launchd service is running voltd; it runs the updated installation after the next login.");
+		return { status: "updated", definitionPath, messages };
+	}
+	const bootout = await runCommand("launchctl", ["bootout", serviceTarget]);
+	if (bootout.code !== 0) {
+		messages.push(`launchctl bootout failed (${bootout.output.trim() || "unknown error"}).`);
+		return { status: "failed", definitionPath, messages };
+	}
+	messages.push(
+		"Unloaded the launchd service until the next login. To start it now, run: volt daemon install-service",
+	);
+	return { status: "updated", definitionPath, messages };
 }
 
 export async function installDaemonService(options: ServiceInstallOptions = {}): Promise<ServiceInstallResult> {

@@ -80,6 +80,14 @@ commands to run instead: `volt daemon stop`, `volt update --self`, then `volt
 daemon start`, or `volt daemon install-service` when the login service runs the
 daemon.
 
+The login service records the path of the installation it runs. When the
+service is installed but not running the daemon, `volt update` points it at
+the updated installation without starting the daemon, because an update can
+move that path (pnpm global installs, renamed packages). On macOS this also
+unloads the service until the next login; run `volt daemon install-service` to
+start it sooner. If the service cannot be updated, `volt update` says so and
+exits with an error; run `volt daemon install-service` to fix it.
+
 ## Daemon environment
 
 Headless conversation runtimes run inside the daemon process, so their bash
