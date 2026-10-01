@@ -1,11 +1,21 @@
-import { closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	closeSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	renameSync,
+	writeFileSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR, PACKAGE_NAME } from "../../../src/config.ts";
 import { isDaemonServiceInstalled } from "../../../src/daemon/service-install.ts";
 import { findRunningDaemon } from "../../../src/daemon/spawn.ts";
+import { main } from "../../../src/main.ts";
 import { handlePackageCommand } from "../../../src/package-manager-cli.ts";
-import { quarantineNativeAddons } from "../../../src/utils/self-update-native-quarantine.ts";
+import { NativeAddonRestoreError, quarantineNativeAddons } from "../../../src/utils/self-update-native-quarantine.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 // #555: processes that #546's daemon stop does not reach (a voltd for another agent
@@ -196,5 +206,44 @@ describe("#555 volt update while other processes hold native addons", () => {
 			expect(readFileSync(join(selfPackageDir, relativePath), "utf8")).toBe(`addon:${name}`);
 		}
 		expect(process.exitCode).toBe(1);
+	});
+
+	it("keeps an addon that could not be restored and reports the installation as changed", async () => {
+		const addonPath = join(selfPackageDir, ADDONS.iroh);
+		const quarantineRunDir = join(globalRoot, ".volt-native-quarantine", "failed-run");
+		const quarantinePath = join(quarantineRunDir, ADDONS.iroh);
+		vi.mocked(quarantineNativeAddons).mockImplementationOnce(() => {
+			// Where a failed copy back and a failed restore leave the addon.
+			mkdirSync(dirname(quarantinePath), { recursive: true });
+			renameSync(addonPath, quarantinePath);
+			throw new NativeAddonRestoreError(
+				`Could not copy native addon ${addonPath} back (ENOSPC: no space left on device, copyfile), and could not restore it from ${quarantinePath}: EPERM: operation not permitted, rename`,
+				{ addonPath, quarantinePath, quarantineRunDir },
+				{ cause: new Error("ENOSPC: no space left on device, copyfile") },
+			);
+		});
+
+		const { stdout, stderr } = await runSelfUpdate();
+
+		expect(readEvents()).toEqual([]);
+		expect(stdout).not.toContain("Updated volt");
+		expect(readFileSync(quarantinePath, "utf8")).toBe("addon:iroh");
+		expect(stderr).toContain("missing or incomplete native addon");
+		expect(stderr).toContain(`Copy ${quarantinePath} to ${addonPath} and delete ${quarantineRunDir}`);
+		expect(stderr).not.toContain("unchanged");
+		expect(process.exitCode).toBe(1);
+	});
+
+	it("removes a finished quarantine when volt starts", async () => {
+		quarantineNativeAddons(selfPackageDir);
+		expect(existsSync(join(globalRoot, ".volt-native-quarantine"))).toBe(true);
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		vi.spyOn(process, "exit").mockImplementation(() => {
+			throw new Error("process.exit");
+		});
+
+		await expect(main(["--version"])).rejects.toThrow("process.exit");
+
+		expect(existsSync(join(globalRoot, ".volt-native-quarantine"))).toBe(false);
 	});
 });

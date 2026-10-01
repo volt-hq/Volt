@@ -17,24 +17,46 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanupSelfUpdateQuarantine, quarantineNativeAddons } from "../src/utils/self-update-native-quarantine.ts";
+import {
+	cleanupSelfUpdateQuarantine,
+	NativeAddonRestoreError,
+	quarantineNativeAddons,
+} from "../src/utils/self-update-native-quarantine.ts";
 
-const copyFault = vi.hoisted(() => ({ failForSuffix: undefined as string | undefined }));
+/** Each hook runs before the real call and can throw to make it fail. */
+const fsHooks = vi.hoisted(() => ({
+	copyFileSync: undefined as ((source: string, destination: string) => void) | undefined,
+	renameSync: undefined as ((source: string, destination: string) => void) | undefined,
+	rmSync: undefined as ((path: string) => void) | undefined,
+}));
 vi.mock("node:fs", async (importOriginal) => {
 	const actual = await importOriginal<typeof fs>();
 	return {
 		...actual,
 		copyFileSync(...args: Parameters<typeof actual.copyFileSync>): void {
-			const [, destination] = args;
-			if (copyFault.failForSuffix !== undefined && String(destination).endsWith(copyFault.failForSuffix)) {
-				// A disk that fills up mid-copy leaves a truncated destination behind.
-				actual.writeFileSync(destination, "partial");
-				throw Object.assign(new Error("ENOSPC: no space left on device, copyfile"), { code: "ENOSPC" });
-			}
+			fsHooks.copyFileSync?.(String(args[0]), String(args[1]));
 			actual.copyFileSync(...args);
+		},
+		renameSync(...args: Parameters<typeof actual.renameSync>): void {
+			fsHooks.renameSync?.(String(args[0]), String(args[1]));
+			actual.renameSync(...args);
+		},
+		rmSync(...args: Parameters<typeof actual.rmSync>): void {
+			fsHooks.rmSync?.(String(args[0]));
+			actual.rmSync(...args);
 		},
 	};
 });
+
+function failCopyBack(relativePath: string): void {
+	fsHooks.copyFileSync = (_source, destination) => {
+		if (destination.endsWith(relativePath)) {
+			// A disk that fills up mid-copy leaves a truncated destination behind.
+			writeFileSync(destination, "partial");
+			throw Object.assign(new Error("ENOSPC: no space left on device, copyfile"), { code: "ENOSPC" });
+		}
+	};
+}
 
 const ADDONS = {
 	workspaceFs: join("native", "workspace-fs", "prebuilds", "linux-x64-gnu", "workspace-fs.node"),
@@ -87,7 +109,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-	copyFault.failForSuffix = undefined;
+	fsHooks.copyFileSync = undefined;
+	fsHooks.renameSync = undefined;
+	fsHooks.rmSync = undefined;
 	// Windows cannot remove directories that contain open files.
 	for (const fd of heldDescriptors) closeSync(fd);
 	rmSync(tempDir, { recursive: true, force: true });
@@ -139,7 +163,7 @@ describe("quarantineNativeAddons", () => {
 		const held = Object.fromEntries(
 			Object.entries(ADDONS).map(([name, relativePath]) => [name, hold(join(packageDir, relativePath))]),
 		);
-		copyFault.failForSuffix = ADDONS.iroh;
+		failCopyBack(ADDONS.iroh);
 
 		expect(() => quarantineNativeAddons(packageDir)).toThrow(
 			/^Could not copy native addon .*dep\.linux-x64-gnu\.node back: ENOSPC/,
@@ -152,6 +176,41 @@ describe("quarantineNativeAddons", () => {
 		for (const [name, relativePath] of Object.entries(ADDONS)) {
 			expect(readFileSync(join(packageDir, relativePath), "utf8")).toBe(`addon:${name}`);
 		}
+
+		// Every addon in the run is complete in the package too, so cleanup may remove the run.
+		for (const fd of heldDescriptors.splice(0)) closeSync(fd);
+		cleanupSelfUpdateQuarantine(packageDir);
+		expect(existsSync(quarantineRoot)).toBe(false);
+	});
+
+	it("keeps the only complete copy of an addon that can be neither copied back nor restored", () => {
+		const fd = hold(join(packageDir, ADDONS.iroh));
+		failCopyBack(ADDONS.iroh);
+		fsHooks.renameSync = (source, destination) => {
+			if (source.includes(".volt-native-quarantine") && destination.endsWith(ADDONS.iroh)) {
+				throw Object.assign(new Error("EPERM: operation not permitted, rename"), { code: "EPERM" });
+			}
+		};
+
+		let error: unknown;
+		try {
+			quarantineNativeAddons(packageDir);
+		} catch (caught) {
+			error = caught;
+		}
+
+		expect(error).toBeInstanceOf(NativeAddonRestoreError);
+		const restoreError = error as NativeAddonRestoreError;
+		expect(restoreError.message).toMatch(/could not restore it from .*: EPERM/);
+		expect(restoreError.addonPath).toBe(join(packageDir, ADDONS.iroh));
+		expect(existsSync(restoreError.addonPath)).toBe(false);
+		expect(quarantineRunDirs()).toEqual([restoreError.quarantineRunDir]);
+
+		// Later updates and volt starts must not delete it.
+		cleanupSelfUpdateQuarantine(packageDir);
+
+		expect(identity(restoreError.quarantinePath)).toBe(heldIdentity(fd));
+		expect(readFileSync(restoreError.quarantinePath, "utf8")).toBe("addon:iroh");
 	});
 });
 
@@ -166,5 +225,39 @@ describe("cleanupSelfUpdateQuarantine", () => {
 		for (const [name, relativePath] of Object.entries(ADDONS)) {
 			expect(readFileSync(join(packageDir, relativePath), "utf8")).toBe(`addon:${name}`);
 		}
+	});
+
+	it("does not remove a run that another process is still quarantining", () => {
+		const held = Object.fromEntries(
+			Object.entries(ADDONS).map(([name, relativePath]) => [name, hold(join(packageDir, relativePath))]),
+		);
+		// Another volt process starts while each addon is moved aside but not yet copied back.
+		fsHooks.copyFileSync = () => cleanupSelfUpdateQuarantine(packageDir);
+
+		quarantineNativeAddons(packageDir);
+
+		const runDirs = quarantineRunDirs();
+		expect(runDirs).toHaveLength(1);
+		for (const [name, relativePath] of Object.entries(ADDONS)) {
+			expect(readFileSync(join(packageDir, relativePath), "utf8")).toBe(`addon:${name}`);
+			expect(identity(join(runDirs[0], relativePath))).toBe(heldIdentity(held[name]));
+		}
+	});
+
+	it("removes a run that a held addon kept from being removed once the addon is released", () => {
+		quarantineNativeAddons(packageDir);
+		const [runDir] = quarantineRunDirs();
+		fsHooks.rmSync = (path) => {
+			if (path === join(runDir, "node_modules")) {
+				throw Object.assign(new Error("EPERM: operation not permitted, unlink"), { code: "EPERM" });
+			}
+		};
+
+		cleanupSelfUpdateQuarantine(packageDir);
+		expect(quarantineRunDirs()).toEqual([runDir]);
+
+		fsHooks.rmSync = undefined;
+		cleanupSelfUpdateQuarantine(packageDir);
+		expect(existsSync(quarantineRoot)).toBe(false);
 	});
 });

@@ -1,8 +1,40 @@
 import { randomUUID } from "node:crypto";
-import { copyFileSync, mkdirSync, readdirSync, renameSync, rmSync } from "node:fs";
+import {
+	copyFileSync,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	renameSync,
+	rmdirSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { basename, dirname, join, relative, resolve, toNamespacedPath } from "node:path";
 
 const QUARANTINE_DIR_NAME = ".volt-native-quarantine";
+/**
+ * Written to a quarantine run once every addon in it has a complete copy back in the package.
+ * Cleanup removes only runs that have it: any other run may hold the only copy of an addon.
+ */
+const RESTORED_MARKER = ".restored";
+
+/** An addon could not be copied back or restored, so its only complete copy is in the quarantine. */
+export class NativeAddonRestoreError extends Error {
+	readonly addonPath: string;
+	readonly quarantinePath: string;
+	readonly quarantineRunDir: string;
+
+	constructor(
+		message: string,
+		paths: { addonPath: string; quarantinePath: string; quarantineRunDir: string },
+		options: ErrorOptions,
+	) {
+		super(message, options);
+		this.addonPath = paths.addonPath;
+		this.quarantinePath = paths.quarantinePath;
+		this.quarantineRunDir = paths.quarantineRunDir;
+	}
+}
 
 function normalizePath(path: string): string {
 	return toNamespacedPath(resolve(path));
@@ -39,15 +71,47 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function markRunRestored(quarantineRunDir: string): void {
+	try {
+		writeFileSync(join(quarantineRunDir, RESTORED_MARKER), "");
+	} catch {
+		// The run is kept. Every addon is complete in the package, so only disk space is lost.
+	}
+}
+
+/** Removes every quarantine run whose addons all have complete copies back in the package. */
 export function cleanupSelfUpdateQuarantine(packageDir: string): void {
 	const quarantineRoot = getQuarantineRoot(packageDir);
 	if (!quarantineRoot) {
 		return;
 	}
+	let runNames: string[];
 	try {
-		rmSync(quarantineRoot, { recursive: true, force: true });
+		runNames = readdirSync(quarantineRoot);
 	} catch {
-		// A volt process may still hold a quarantined native addon.
+		return;
+	}
+	for (const runName of runNames) {
+		const runDir = join(quarantineRoot, runName);
+		try {
+			if (!existsSync(join(runDir, RESTORED_MARKER))) {
+				continue;
+			}
+			// The marker goes last, so a run that is only partly removed is still removed later.
+			for (const name of readdirSync(runDir)) {
+				if (name !== RESTORED_MARKER) {
+					rmSync(join(runDir, name), { recursive: true, force: true });
+				}
+			}
+			rmSync(runDir, { recursive: true, force: true });
+		} catch {
+			// A volt process may still hold a quarantined native addon.
+		}
+	}
+	try {
+		rmdirSync(quarantineRoot);
+	} catch {
+		// Runs remain.
 	}
 }
 
@@ -60,7 +124,7 @@ export function cleanupSelfUpdateQuarantine(packageDir: string): void {
  * open file works on all of them, so npm only ever deletes the copies.
  *
  * Throws if a file cannot be moved aside or copied back. Every file is then still complete at
- * its original path.
+ * its original path, unless the error is a {@link NativeAddonRestoreError}.
  */
 export function quarantineNativeAddons(packageDir: string): void {
 	const resolvedPackageDir = normalizePath(packageDir);
@@ -81,6 +145,7 @@ export function quarantineNativeAddons(packageDir: string): void {
 			mkdirSync(dirname(quarantinePath), { recursive: true });
 			renameSync(addon, quarantinePath);
 		} catch (error) {
+			markRunRestored(quarantineRunDir);
 			throw new Error(`Could not move native addon ${addon} aside: ${errorMessage(error)}`, { cause: error });
 		}
 		try {
@@ -90,14 +155,17 @@ export function quarantineNativeAddons(packageDir: string): void {
 				rmSync(addon, { force: true });
 				renameSync(quarantinePath, addon);
 			} catch (restoreError) {
-				throw new Error(
+				throw new NativeAddonRestoreError(
 					`Could not copy native addon ${addon} back (${errorMessage(copyError)}), and could not restore it from ${quarantinePath}: ${errorMessage(restoreError)}`,
+					{ addonPath: addon, quarantinePath, quarantineRunDir },
 					{ cause: copyError },
 				);
 			}
+			markRunRestored(quarantineRunDir);
 			throw new Error(`Could not copy native addon ${addon} back: ${errorMessage(copyError)}`, {
 				cause: copyError,
 			});
 		}
 	}
+	markRunRestored(quarantineRunDir);
 }

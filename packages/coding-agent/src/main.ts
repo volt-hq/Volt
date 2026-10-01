@@ -710,9 +710,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.env.VOLT_SKIP_VERSION_CHECK = "1";
 	}
 
-	if (process.platform === "win32") {
-		cleanupSelfUpdateQuarantine(getPackageDir());
-	}
+	cleanupSelfUpdateQuarantine(getPackageDir());
 
 	const commandProfileArgs = stripCommandProfileArgs(args);
 	if (commandProfileArgs.error) {

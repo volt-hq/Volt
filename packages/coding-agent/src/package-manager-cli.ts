@@ -29,7 +29,11 @@ import {
 	startInstalledDaemon,
 } from "./daemon/spawn.ts";
 import { spawnProcess } from "./utils/child-process.ts";
-import { cleanupSelfUpdateQuarantine, quarantineNativeAddons } from "./utils/self-update-native-quarantine.ts";
+import {
+	cleanupSelfUpdateQuarantine,
+	NativeAddonRestoreError,
+	quarantineNativeAddons,
+} from "./utils/self-update-native-quarantine.ts";
 import { getLatestVoltRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
@@ -350,6 +354,19 @@ class SelfUpdateNotStartedError extends Error {}
 function printSelfUpdateFailure(error: unknown, command: SelfUpdateCommand): void {
 	const message = error instanceof Error ? error.message : "Unknown package command error";
 	console.error(chalk.red(`Error: ${message}`));
+	if (error instanceof NativeAddonRestoreError) {
+		console.error(
+			chalk.yellow(
+				`Nothing was installed, but this ${APP_NAME} installation now has a missing or incomplete native addon.`,
+			),
+		);
+		console.error(
+			chalk.dim(
+				`Copy ${error.quarantinePath} to ${error.addonPath} and delete ${error.quarantineRunDir}, then update with: ${command.display}`,
+			),
+		);
+		return;
+	}
 	if (error instanceof SelfUpdateNotStartedError) {
 		console.error(chalk.yellow(`Nothing was installed, so this ${APP_NAME} installation is unchanged.`));
 		console.error(
@@ -494,6 +511,8 @@ function prepareNpmSelfUpdate(packageDir: string): void {
 	try {
 		quarantineNativeAddons(packageDir);
 	} catch (error) {
+		// The installation changed, so it must not be reported as unchanged.
+		if (error instanceof NativeAddonRestoreError) throw error;
 		throw new SelfUpdateNotStartedError(selfUpdateErrorMessage(error), { cause: error });
 	}
 }
