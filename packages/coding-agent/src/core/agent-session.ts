@@ -224,6 +224,7 @@ import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./subagents/tool-names.ts";
 import { type BuildSystemPromptOptions, buildSystemPrompt } from "./system-prompt.ts";
 import { getThemeByName, theme } from "./theme/runtime.ts";
+import { writeToolProgressCapture } from "./tool-progress-capture.ts";
 import { ToolProgressDiagnostics } from "./tool-progress-diagnostics.ts";
 import { withBackgroundJobs } from "./tools/background.ts";
 import { type BashOperations, createLocalBashOperations } from "./tools/bash.ts";
@@ -6745,6 +6746,21 @@ export class AgentSession {
 			thinkingBudgets: this._harness.getStreamOptions().thinkingBudgets,
 			retry: this._getSummarizationRetryOptions(),
 			customInstructions,
+			// Written before the error surfaces so the record exists when the user sees it.
+			onFailure: (report) =>
+				writeToolProgressCapture(
+					join(this._agentDir, "debug", "compaction-latest.json"),
+					JSON.stringify(
+						{
+							sessionId: this.sessionManager.getSessionId(),
+							capturedAt: Date.now(),
+							thinkingLevel: this.thinkingLevel,
+							...report,
+						},
+						null,
+						2,
+					),
+				),
 		});
 	}
 

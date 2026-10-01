@@ -40,6 +40,14 @@ export type CompactionRequestUsage = {
 	attempt: number;
 	provider: string;
 	model: string;
+	/** Dispatch time in epoch milliseconds. */
+	startedAt: number;
+	/** Milliseconds from dispatch to the first stream event. */
+	timeToFirstEventMs?: number;
+	/** Milliseconds from dispatch to the first summary text; reasoning usually precedes it. */
+	timeToFirstTextMs?: number;
+	/** Milliseconds from dispatch until the request settled. */
+	durationMs?: number;
 	/** Omitted when the request failed before a terminal provider response. */
 	stopReason?: AssistantMessage["stopReason"];
 	/** Provider-reported token counts; omitted when unavailable or invalid. */

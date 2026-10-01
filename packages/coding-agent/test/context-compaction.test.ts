@@ -10,7 +10,12 @@ import {
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CompactionPreparation } from "../src/core/compaction/compaction.ts";
-import { COMPACTION_TIMEOUT_MS, compactContext } from "../src/core/compaction/context-compaction.ts";
+import {
+	COMPACTION_REQUEST_TIMEOUT_MS,
+	COMPACTION_TOTAL_TIMEOUT_MS,
+	type CompactionFailureReport,
+	compactContext,
+} from "../src/core/compaction/context-compaction.ts";
 
 const model: Model<"anthropic-messages"> = {
 	id: "summary-test",
@@ -60,6 +65,41 @@ function streamResponse(
 	return stream;
 }
 const retry = { maxRetries: 3, baseDelayMs: 0, maxDelayMs: 30_000 };
+const MINUTE = 60_000;
+/** Timing for a request whose stream produced events but no text deltas. */
+const timing = {
+	startedAt: expect.any(Number),
+	timeToFirstEventMs: expect.any(Number),
+	durationMs: expect.any(Number),
+};
+/** Push a terminal response, optionally preceded by a text delta, after fake-clock delays. */
+function delayedResponse(
+	doneAfterMs: number,
+	response: AssistantMessage,
+	textAfterMs?: number,
+): ReturnType<typeof createAssistantMessageEventStream> {
+	const stream = createAssistantMessageEventStream();
+	if (textAfterMs !== undefined) {
+		setTimeout(
+			() =>
+				stream.push({
+					type: "text_delta",
+					seq: 1,
+					contentIndex: 0,
+					delta: "checkpoint",
+					snapshot: fauxAssistantMessage(""),
+					toolState: [],
+				}),
+			textAfterMs,
+		);
+	}
+	setTimeout(() => {
+		if (response.stopReason === "error" || response.stopReason === "aborted")
+			stream.push({ type: "error", seq: 2, reason: response.stopReason, error: response });
+		else stream.push({ type: "done", seq: 2, reason: response.stopReason, message: response });
+	}, doneAfterMs);
+	return stream;
+}
 const options = (streamFn: StreamFn, signal = new AbortController().signal) => ({
 	context: async () => context,
 	sourceMessageCount: context.messages.length,
@@ -113,6 +153,7 @@ describe("cache-preserving compaction", () => {
 				attempt: 1,
 				provider: model.provider,
 				model: model.id,
+				...timing,
 				stopReason: "stop",
 				usage: { input: 1000, output: 300, cacheRead: 68000, cacheWrite: 1000, totalTokens: 70300 },
 			},
@@ -317,7 +358,7 @@ describe("cache-preserving compaction", () => {
 		);
 		expect(result.summary).toContain("valid checkpoint");
 		expect(result.details.requests).toEqual([
-			{ strategy: "native", attempt: 1, provider: model.provider, model: model.id, stopReason: "stop" },
+			{ strategy: "native", attempt: 1, provider: model.provider, model: model.id, ...timing, stopReason: "stop" },
 		]);
 	});
 
@@ -349,16 +390,25 @@ describe("cache-preserving compaction", () => {
 				attempt: 1,
 				provider: model.provider,
 				model: model.id,
+				...timing,
 				stopReason: "error",
 				usage: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10 },
 				diagnostics: [{ type: "codex_request", timestamp: 1, details: { sseAttempts: 1 } }],
 			},
-			{ strategy: "native", attempt: 2, provider: model.provider, model: model.id },
+			{
+				strategy: "native",
+				attempt: 2,
+				provider: model.provider,
+				model: model.id,
+				startedAt: expect.any(Number),
+				durationMs: expect.any(Number),
+			},
 			{
 				strategy: "native",
 				attempt: 3,
 				provider: model.provider,
 				model: model.id,
+				...timing,
 				stopReason: "stop",
 				usage: { input: 20, output: 0, cacheRead: 80, cacheWrite: 0, totalTokens: 100 },
 				diagnostics: [{ type: "codex_request", timestamp: 3, details: { sseAttempts: 1 } }],
@@ -396,6 +446,7 @@ describe("cache-preserving compaction", () => {
 				attempt: index + 1,
 				provider: model.provider,
 				model: model.id,
+				...timing,
 				stopReason: index === 0 ? "error" : "stop",
 				usage: {
 					input: (index + 1) * 10,
@@ -658,31 +709,175 @@ describe("cache-preserving compaction", () => {
 		},
 	);
 
-	it.each(["provider", "context", "fallback"] as const)(
-		"bounds an uncooperative %s with the overall deadline",
-		async (stage) => {
-			vi.useFakeTimers();
-			let requestSignal: AbortSignal | undefined;
-			const stream = vi.fn((_model, _context, opts) => {
-				requestSignal = opts?.signal;
-				return createAssistantMessageEventStream();
-			});
-			const opts = options(stream);
-			const promise = compactContext(
-				preparation(),
-				stage === "fallback" ? { ...model, contextWindow: 16_384 } : model,
-				{
-					...opts,
-					context: stage === "context" ? () => new Promise<Context>(() => {}) : opts.context,
-				},
-			);
-			const assertion = expect(promise).rejects.toThrow("timed out after five minutes");
-			await vi.advanceTimersByTimeAsync(COMPACTION_TIMEOUT_MS + 1);
-			await assertion;
-			if (stage !== "context") expect(requestSignal?.aborted).toBe(true);
-			else expect(stream).not.toHaveBeenCalled();
+	it.each([
+		{
+			stage: "provider",
+			limit: COMPACTION_REQUEST_TIMEOUT_MS,
+			error: "Compaction native request 1 timed out after 10 minutes; original context was kept",
 		},
-	);
+		{
+			stage: "fallback",
+			limit: COMPACTION_REQUEST_TIMEOUT_MS,
+			error: "Compaction chunked request 1 timed out after 10 minutes; original context was kept",
+		},
+		{
+			stage: "context",
+			limit: COMPACTION_TOTAL_TIMEOUT_MS,
+			error: "Compaction timed out after 30 minutes (preparing context); original context was kept",
+		},
+	] as const)("bounds an uncooperative $stage at its deadline", async ({ stage, limit, error }) => {
+		vi.useFakeTimers();
+		let requestSignal: AbortSignal | undefined;
+		const stream = vi.fn((_model, _context, opts) => {
+			requestSignal = opts?.signal;
+			return createAssistantMessageEventStream();
+		});
+		const opts = options(stream);
+		const promise = compactContext(
+			preparation(),
+			stage === "fallback" ? { ...model, contextWindow: 16_384 } : model,
+			{
+				...opts,
+				context: stage === "context" ? () => new Promise<Context>(() => {}) : opts.context,
+			},
+		);
+		let settled = false;
+		promise.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		const assertion = expect(promise).rejects.toThrow(error);
+		await vi.advanceTimersByTimeAsync(limit - 1);
+		expect(settled).toBe(false);
+		await vi.advanceTimersByTimeAsync(1);
+		await assertion;
+		if (stage !== "context") expect(requestSignal?.aborted).toBe(true);
+		else expect(stream).not.toHaveBeenCalled();
+	});
+
+	it("gives each retry its own request deadline and records request timing", async () => {
+		vi.useFakeTimers();
+		const start = Date.now();
+		const onFailure = vi.fn(async () => {});
+		let calls = 0;
+		const promise = compactContext(preparation(), model, {
+			...options(() => {
+				calls++;
+				// Together these exceed a single request deadline; individually they do not.
+				return calls === 1
+					? delayedResponse(
+							9 * MINUTE,
+							fauxAssistantMessage("", { stopReason: "error", errorMessage: "service unavailable" }),
+						)
+					: delayedResponse(9 * MINUTE, fauxAssistantMessage("## Goal\nSlow checkpoint"), 7 * MINUTE);
+			}),
+			retry: { ...retry, baseDelayMs: 1000 },
+			onFailure,
+		});
+		await vi.advanceTimersByTimeAsync(18 * MINUTE + 1000);
+		const result = await promise;
+		expect(result.summary).toContain("Slow checkpoint");
+		expect(onFailure).not.toHaveBeenCalled();
+		expect(result.details.requests).toMatchObject([
+			{
+				attempt: 1,
+				stopReason: "error",
+				startedAt: start,
+				timeToFirstEventMs: 9 * MINUTE,
+				durationMs: 9 * MINUTE,
+			},
+			{
+				attempt: 2,
+				stopReason: "stop",
+				startedAt: start + 9 * MINUTE + 1000,
+				timeToFirstEventMs: 7 * MINUTE,
+				timeToFirstTextMs: 7 * MINUTE,
+				durationMs: 9 * MINUTE,
+			},
+		]);
+		expect(result.details.requests?.[0]).not.toHaveProperty("timeToFirstTextMs");
+	});
+
+	it("bounds sequential fallback requests with the overall deadline and reports the failure", async () => {
+		vi.useFakeTimers();
+		const start = Date.now();
+		const prepared = preparation();
+		prepared.messagesToSummarize = Array.from({ length: 3 }, (_, index) => ({
+			role: "user",
+			content: `${index}: ${"source".repeat(500)}`,
+			timestamp: index + 1,
+		}));
+		const reports: CompactionFailureReport[] = [];
+		let calls = 0;
+		const promise = compactContext(
+			prepared,
+			{ ...model, contextWindow: 16_384 },
+			{
+				...options(() => {
+					calls++;
+					return delayedResponse(
+						9 * MINUTE,
+						calls === 1
+							? fauxAssistantMessage("", { stopReason: "error", errorMessage: "service unavailable" })
+							: fauxAssistantMessage(`checkpoint ${calls}`),
+					);
+				}),
+				retry: { ...retry, baseDelayMs: 1000 },
+				onFailure: async (report) => {
+					reports.push(report);
+				},
+			},
+		);
+		const error = "Compaction timed out after 30 minutes (chunked request 4 in progress); original context was kept";
+		const assertion = expect(promise).rejects.toThrow(error);
+		await vi.advanceTimersByTimeAsync(COMPACTION_TOTAL_TIMEOUT_MS);
+		await assertion;
+		expect(calls).toBe(4);
+		expect(reports).toEqual([
+			{
+				error,
+				phase: "chunked request 4 in progress",
+				elapsedMs: COMPACTION_TOTAL_TIMEOUT_MS,
+				requestTimeoutMs: COMPACTION_REQUEST_TIMEOUT_MS,
+				totalTimeoutMs: COMPACTION_TOTAL_TIMEOUT_MS,
+				requests: [
+					expect.objectContaining({ attempt: 1, stopReason: "error", startedAt: start, durationMs: 9 * MINUTE }),
+					expect.objectContaining({ attempt: 2, stopReason: "stop", durationMs: 9 * MINUTE }),
+					expect.objectContaining({ attempt: 3, stopReason: "stop", durationMs: 9 * MINUTE }),
+					{
+						strategy: "chunked",
+						attempt: 4,
+						provider: model.provider,
+						model: model.id,
+						startedAt: start + 27 * MINUTE + 1000,
+						durationMs: 3 * MINUTE - 1000,
+					},
+				],
+			},
+		]);
+	});
+
+	it("keeps the compaction error when failure reporting fails", async () => {
+		const onFailure = vi.fn(async (_report: CompactionFailureReport) => {
+			throw new Error("diagnostic write failed");
+		});
+		await expect(
+			compactContext(preparation(), model, {
+				...options(() => streamResponse("", "error", "invalid request")),
+				onFailure,
+			}),
+		).rejects.toThrow("invalid request");
+		expect(onFailure).toHaveBeenCalledTimes(1);
+		expect(onFailure.mock.calls[0][0]).toMatchObject({
+			error: "Summarization failed: invalid request",
+			phase: "after native request 1 finished",
+			requests: [{ strategy: "native", attempt: 1, stopReason: "error", durationMs: expect.any(Number) }],
+		});
+	});
 
 	it("cancels a request and backoff without another attempt", async () => {
 		vi.useFakeTimers();
