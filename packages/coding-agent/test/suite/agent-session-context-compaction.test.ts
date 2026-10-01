@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
@@ -121,6 +121,10 @@ describe("AgentSession cache-preserving compaction", () => {
 				attempt: 1,
 				provider: harness.getModel().provider,
 				model: "large",
+				startedAt: expect.any(Number),
+				timeToFirstEventMs: expect.any(Number),
+				timeToFirstTextMs: expect.any(Number),
+				durationMs: expect.any(Number),
 				stopReason: "stop",
 				usage: {
 					input: expect.any(Number),
@@ -307,6 +311,13 @@ describe("AgentSession cache-preserving compaction", () => {
 						}),
 			]);
 			await expect(harness.session.compact()).rejects.toThrow();
+			const record = JSON.parse(await readFile(join(harness.tempDir, "debug", "compaction-latest.json"), "utf8"));
+			expect(record).toMatchObject({
+				sessionId: harness.sessionManager.getSessionId(),
+				error: expect.any(String),
+				phase: "after native request 1 finished",
+				requests: [{ strategy: "native", attempt: 1, durationMs: expect.any(Number) }],
+			});
 			expect(harness.sessionManager.getLeafId()).toBe(leaf);
 			expect(harness.sessionManager.getEntries()).toEqual(entries);
 			expect(harness.eventsOfType("tool_execution_start")).toHaveLength(0);

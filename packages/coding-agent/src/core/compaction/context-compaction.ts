@@ -25,7 +25,10 @@ import {
 } from "./compaction.ts";
 import { computeFileLists, formatFileOperations, serializeConversation } from "./utils.ts";
 
-export const COMPACTION_TIMEOUT_MS = 5 * 60_000;
+/** Each summarization request, including retries and fallback chunks, has its own deadline. */
+export const COMPACTION_REQUEST_TIMEOUT_MS = 10 * 60_000;
+/** Bounds the whole operation: context conversion, every request, retry delays and any fallback. */
+export const COMPACTION_TOTAL_TIMEOUT_MS = 30 * 60_000;
 export const COMPACTION_SUMMARY_TOKENS = 4096;
 const MAX_SUMMARY_CHARS = 16_384;
 
@@ -50,8 +53,20 @@ function cancelled(): Error {
 	return error;
 }
 
-function timedOut(): Error {
-	return new Error("Compaction timed out after five minutes; original context was kept");
+function timedOut(phase: string): Error {
+	return new Error(
+		`Compaction timed out after ${COMPACTION_TOTAL_TIMEOUT_MS / 60_000} minutes (${phase}); original context was kept`,
+	);
+}
+
+function requestTimedOut(request: string): Error {
+	return new Error(
+		`Compaction ${request} timed out after ${COMPACTION_REQUEST_TIMEOUT_MS / 60_000} minutes; original context was kept`,
+	);
+}
+
+function elapsedSince(time: number): number {
+	return Math.max(0, Date.now() - time);
 }
 
 /** Own the wait without trusting a provider/converter to settle on cancellation. */
@@ -81,6 +96,17 @@ function summaryText(response: AssistantMessage): string {
 	return text;
 }
 
+/** Diagnostics for a failed built-in compaction. Never persisted to the session. */
+export interface CompactionFailureReport {
+	error: string;
+	/** Step that was active when the compaction stopped. */
+	phase: string;
+	elapsedMs: number;
+	requestTimeoutMs: number;
+	totalTimeoutMs: number;
+	requests: CompactionRequestUsage[];
+}
+
 interface ContextCompactionOptions {
 	/** Full conversation through the normal context/conversion pipeline. */
 	context: (signal: AbortSignal) => Promise<Context>;
@@ -93,6 +119,8 @@ interface ContextCompactionOptions {
 	thinkingBudgets?: ThinkingBudgets;
 	retry: SummarizationRetryOptions;
 	customInstructions?: string;
+	/** Awaited before a failure (including cancellation) is rethrown; its own errors are ignored. */
+	onFailure?: (report: CompactionFailureReport) => Promise<void>;
 }
 
 /** Built-in session compaction. No persistence or tool execution occurs here. */
@@ -107,8 +135,19 @@ export async function compactContext(
 	const abort = (): void => controller.abort(cancelled());
 	if (options.signal.aborted) abort();
 	else options.signal.addEventListener("abort", abort, { once: true });
-	const deadline = Date.now() + COMPACTION_TIMEOUT_MS;
-	const timer = setTimeout(() => controller.abort(timedOut()), COMPACTION_TIMEOUT_MS);
+	const startedAt = Date.now();
+	const deadline = startedAt + COMPACTION_TOTAL_TIMEOUT_MS;
+	// Names the active step in timeout errors and failure reports.
+	let phase = "preparing context";
+	let stoppedPhase: string | undefined;
+	signal.addEventListener(
+		"abort",
+		() => {
+			stoppedPhase = phase;
+		},
+		{ once: true },
+	);
+	const timer = setTimeout(() => controller.abort(timedOut(phase)), COMPACTION_TOTAL_TIMEOUT_MS);
 	const retry = {
 		maxRetries: Number.isFinite(options.retry.maxRetries)
 			? Math.min(2, Math.max(0, Math.floor(options.retry.maxRetries)))
@@ -128,10 +167,12 @@ export async function compactContext(
 		const requestAbort = new AbortController();
 		const requestSignal = AbortSignal.any([signal, requestOptions?.signal ?? signal, requestAbort.signal]);
 		void (async () => {
+			let dispatched: CompactionRequestUsage | undefined;
+			let requestTimer: ReturnType<typeof setTimeout> | undefined;
 			try {
 				requestSignal.throwIfAborted();
 				if (Date.now() >= deadline) {
-					controller.abort(timedOut());
+					controller.abort(timedOut(phase));
 					signal.throwIfAborted();
 				}
 				const requestUsage: CompactionRequestUsage = {
@@ -139,8 +180,18 @@ export async function compactContext(
 					attempt: requests.length + 1,
 					provider: requestModel.provider,
 					model: requestModel.id,
+					startedAt: Date.now(),
 				};
 				requests.push(requestUsage);
+				dispatched = requestUsage;
+				const requestName = `${strategy} request ${requestUsage.attempt}`;
+				phase = `${requestName} in progress`;
+				// Slow but progressing requests each get a full clock. A request timeout
+				// ends the compaction: retrying the same slow request would only repeat it.
+				requestTimer = setTimeout(
+					() => controller.abort(requestTimedOut(requestName)),
+					COMPACTION_REQUEST_TIMEOUT_MS,
+				);
 				const stream = await waitFor(
 					Promise.resolve(
 						options.streamFn(requestModel, context, {
@@ -163,6 +214,7 @@ export async function compactContext(
 						const next = await waitFor(iterator.next(), requestSignal);
 						if (next.done) break;
 						const event = next.value;
+						requestUsage.timeToFirstEventMs ??= elapsedSince(requestUsage.startedAt);
 						if (
 							event.type === "toolcall_start" ||
 							event.type === "toolcall_delta" ||
@@ -171,6 +223,7 @@ export async function compactContext(
 							throw new Error("Compaction returned a tool call instead of a summary");
 						}
 						if (event.type === "text_delta") {
+							requestUsage.timeToFirstTextMs ??= elapsedSince(requestUsage.startedAt);
 							textChars += event.delta.length;
 							if (textChars > MAX_SUMMARY_CHARS)
 								throw new Error("Compaction summary exceeded the character limit");
@@ -242,6 +295,12 @@ export async function compactContext(
 			} catch (error) {
 				requestAbort.abort();
 				result.fail(requestSignal.aborted && signal.aborted ? signal.reason : error);
+			} finally {
+				clearTimeout(requestTimer);
+				if (dispatched) {
+					dispatched.durationMs = elapsedSince(dispatched.startedAt);
+					phase = `after ${dispatched.strategy} request ${dispatched.attempt} finished`;
+				}
 			}
 		})();
 		return result;
@@ -327,6 +386,7 @@ export async function compactContext(
 						if (attempt === 0) throw error;
 						throw new Error(`Summarization failed after ${attempt + 1} attempts: ${message}`, { cause: error });
 					}
+					phase = `retry wait after native request ${requests.length}`;
 					await waitFor(sleep(Math.min(retry.maxDelayMs, retry.baseDelayMs * 2 ** attempt), signal), signal);
 				}
 			}
@@ -350,6 +410,26 @@ export async function compactContext(
 			signal,
 		);
 		return { ...result, details: { ...result.details, requests } };
+	} catch (error) {
+		if (options.onFailure) {
+			try {
+				await options.onFailure({
+					error: error instanceof Error ? error.message : String(error),
+					phase: stoppedPhase ?? phase,
+					elapsedMs: elapsedSince(startedAt),
+					requestTimeoutMs: COMPACTION_REQUEST_TIMEOUT_MS,
+					totalTimeoutMs: COMPACTION_TOTAL_TIMEOUT_MS,
+					// A request interrupted by this failure may not have recorded its own end yet.
+					requests: requests.map((request) => ({
+						...request,
+						durationMs: request.durationMs ?? elapsedSince(request.startedAt),
+					})),
+				});
+			} catch {
+				// Failure diagnostics must never replace the compaction error.
+			}
+		}
+		throw error;
 	} finally {
 		clearTimeout(timer);
 		options.signal.removeEventListener("abort", abort);
