@@ -21,8 +21,13 @@ import { DefaultResourceLoader } from "./core/resource-loader.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "./core/trust-manager.ts";
 import { daemonStop, promptConfirm } from "./daemon/cli.ts";
-import { isDaemonServiceProcess } from "./daemon/service-install.ts";
-import { type DaemonStarter, findRunningDaemon, startInstalledDaemon } from "./daemon/spawn.ts";
+import { isDaemonServiceInstalled, isDaemonServiceProcess } from "./daemon/service-install.ts";
+import {
+	type DaemonStarter,
+	findRunningDaemon,
+	refreshInstalledDaemonService,
+	startInstalledDaemon,
+} from "./daemon/spawn.ts";
 import { spawnProcess } from "./utils/child-process.ts";
 import { getLatestVoltRelease, isNewerPackageVersion } from "./utils/version-check.ts";
 import {
@@ -785,13 +790,7 @@ export async function handlePackageCommand(
 					// A running daemon holds this installation's native addons open, which can
 					// make the package manager fail halfway and leave volt unusable.
 					const runningDaemon = await findRunningDaemon(agentDir);
-					let daemonRestart:
-						| {
-								starter: DaemonStarter;
-								startCommand: string;
-								locatePackage: (packageName: string) => string | undefined;
-						  }
-						| undefined;
+					let daemonRestart: { starter: DaemonStarter; startCommand: string } | undefined;
 					if (runningDaemon) {
 						// Decide before prompting: the manual steps depend on it, and the service pid
 						// disappears once the daemon stops.
@@ -817,17 +816,20 @@ export async function handlePackageCommand(
 							process.exitCode = 1;
 							return true;
 						}
-						// Capture before updating: the update can move or remove this package directory.
-						daemonRestart = {
-							starter,
-							startCommand,
-							locatePackage: createGlobalPackageLocator(PACKAGE_NAME, selfUpdateNpmCommand),
-						};
-						if (!(await daemonStop(agentDir))) {
-							console.error(chalk.red(`${APP_NAME} was not updated because voltd did not stop.`));
-							process.exitCode = 1;
-							return true;
-						}
+						daemonRestart = { starter, startCommand };
+					}
+					// The service records this installation's entrypoint, which the update can move.
+					// Reinstalling the service to restart its daemon already rewrites it.
+					const refreshService = daemonRestart?.starter !== "service" && isDaemonServiceInstalled();
+					// Capture before updating: the update can move or remove this package directory.
+					const locatePackage =
+						daemonRestart || refreshService
+							? createGlobalPackageLocator(PACKAGE_NAME, selfUpdateNpmCommand)
+							: undefined;
+					if (daemonRestart && !(await daemonStop(agentDir))) {
+						console.error(chalk.red(`${APP_NAME} was not updated because voltd did not stop.`));
+						process.exitCode = 1;
+						return true;
 					}
 					let updated = false;
 					try {
@@ -843,7 +845,7 @@ export async function handlePackageCommand(
 					}
 					if (daemonRestart) {
 						// Restart even after a failed update: the previous install may still be intact.
-						const packageDir = daemonRestart.locatePackage(updated ? selfUpdatePlan.packageName : PACKAGE_NAME);
+						const packageDir = locatePackage?.(updated ? selfUpdatePlan.packageName : PACKAGE_NAME);
 						if (!packageDir) {
 							console.error(chalk.red(`Could not find the installed ${APP_NAME} package to start voltd from.`));
 						}
@@ -851,6 +853,22 @@ export async function handlePackageCommand(
 							console.error(
 								chalk.red(
 									`voltd was stopped for the update and did not start again. Start it with \`${daemonRestart.startCommand}\`.`,
+								),
+							);
+							process.exitCode = 1;
+						}
+					}
+					if (updated && refreshService) {
+						const packageDir = locatePackage?.(selfUpdatePlan.packageName);
+						if (!packageDir) {
+							console.error(
+								chalk.red(`Could not find the installed ${APP_NAME} package to update the login service from.`),
+							);
+						}
+						if (!packageDir || !(await refreshInstalledDaemonService(agentDir, packageDir))) {
+							console.error(
+								chalk.red(
+									`The login service may still point at the previous installation. Update it with \`${APP_NAME} daemon install-service\`, which also starts voltd.`,
 								),
 							);
 							process.exitCode = 1;

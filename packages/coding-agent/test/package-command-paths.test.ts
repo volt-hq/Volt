@@ -8,6 +8,12 @@ import { ProjectTrustStore } from "../src/core/trust-manager.ts";
 import { main } from "../src/main.ts";
 import { handlePackageCommand } from "../src/package-manager-cli.ts";
 
+// Self-updates here must not rewrite the login service of the user running the tests.
+vi.mock("../src/daemon/service-install.ts", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	isDaemonServiceInstalled: () => false,
+}));
+
 interface ConfiguredUpdateSourceForTest {
 	source: string;
 	scope: "user" | "project";
