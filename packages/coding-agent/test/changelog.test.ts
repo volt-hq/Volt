@@ -27,11 +27,11 @@ describe("normalizeChangelogLinks", () => {
 		);
 	});
 
-	test("canonicalizes old repository URLs without changing external links", () => {
+	test("pins floating repository URLs to the release tag without changing other links", () => {
 		const markdown = [
-			"[#5167](https://github.com/earendil-works/volt/pull/5167)",
-			"[#4163](https://github.com/badlogic/volt/issues/4163)",
-			"[Agent README](https://github.com/badlogic/volt/blob/main/packages/agent/README.md)",
+			"[#5167](https://github.com/volt-hq/Volt/pull/5167)",
+			"[Agent README](https://github.com/volt-hq/Volt/blob/main/packages/agent/README.md)",
+			"[Examples](https://github.com/volt-hq/Volt/tree/master/packages/coding-agent/examples)",
 			"[External](https://example.com/docs)",
 			"[Local anchor](#settings)",
 		].join("\n");
@@ -39,8 +39,8 @@ describe("normalizeChangelogLinks", () => {
 		expect(normalizeChangelogLinks(markdown, "0.79.0")).toBe(
 			[
 				"[#5167](https://github.com/volt-hq/Volt/pull/5167)",
-				"[#4163](https://github.com/volt-hq/Volt/issues/4163)",
 				"[Agent README](https://github.com/volt-hq/Volt/blob/v0.79.0/packages/agent/README.md)",
+				"[Examples](https://github.com/volt-hq/Volt/tree/v0.79.0/packages/coding-agent/examples)",
 				"[External](https://example.com/docs)",
 				"[Local anchor](#settings)",
 			].join("\n"),
