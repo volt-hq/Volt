@@ -25,10 +25,8 @@ PNG, JPEG, GIF, and BMP. WebP can be sent through when it already fits the
 inline limits, but this beta does not locally resize WebP or convert it to PNG
 for Kitty-protocol terminal previews.
 
-The repository-only `examples/extensions/doom-overlay` example and the Iroh
-remote demo are excluded from standalone archives. See `THIRD-PARTY-NOTICES.md`
-and the archive's generated `binary-license-manifest.json` for the exact
-embedded runtime and JavaScript license inventory. Rust notices are under
-`LICENSES/workspace-fs-rust/`. `standalone-file-manifest.json` records the
-checksum, size, and mode of every other staged archive file, including the
-matching native addon and notices.
+See `THIRD-PARTY-NOTICES.md` and the archive's generated
+`binary-license-manifest.json` for the exact embedded runtime and JavaScript
+license inventory. Rust notices are under `LICENSES/workspace-fs-rust/`.
+`standalone-file-manifest.json` records the checksum, size, and mode of every
+other staged archive file, including the matching native addon and notices.

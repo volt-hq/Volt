@@ -12,19 +12,11 @@ Example extensions demonstrating:
 - Lifecycle event handlers (tool interception, safety gates, context modifications)
 - Custom tools (todo lists, questions, subagents, output truncation)
 - Commands and keyboard shortcuts
-- Custom UI (footers, headers, editors, overlays)
+- Custom UI (footers, headers, editors, widgets)
 - Git integration (checkpoints, auto-commit)
 - System prompt modifications and custom compaction
 - External integrations (SSH, file watchers, system theme sync)
 - Custom providers (Anthropic with custom streaming, GitLab Duo)
-
-## Not Included
-
-The Iroh remote demo clients are available in Node.js package installs and source checkouts, but are not included in standalone Node SEA archives because they require the optional native `@hansjm10/volt-iroh` adapter.
-
-The Doom overlay example is also repository-only and is excluded from
-standalone archives because its prebuilt artifacts are outside the verified
-standalone-release license inventory.
 
 ## Documentation
 

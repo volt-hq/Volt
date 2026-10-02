@@ -65,12 +65,12 @@ license and third-party notices, and the copied license files recorded by that
 manifest. Verify the downloaded archive against the release `SHA256SUMS` before
 running it.
 
-Standalone builds intentionally exclude the native Iroh adapter and the
-source-repository Doom overlay example. The official Linux runtime requires
-glibc 2.28 or newer and does not support Alpine/musl. Windows executables
-are not Authenticode-signed, so Windows may show an unknown-publisher warning;
-the published SHA-256 checksum is the release authenticity check. macOS
-executables are ad-hoc signed after SEA injection, not Developer ID notarized.
+Standalone builds intentionally exclude the native Iroh adapter. The official
+Linux runtime requires glibc 2.28 or newer and does not support Alpine/musl.
+Windows executables are not Authenticode-signed, so Windows may show an
+unknown-publisher warning; the published SHA-256 checksum is the release
+authenticity check. macOS executables are ad-hoc signed after SEA injection,
+not Developer ID notarized.
 See [Standalone Binary Capabilities](../BINARY-CAPABILITIES.md) and
 [Third-Party Notices](../THIRD-PARTY-NOTICES.md).
 
