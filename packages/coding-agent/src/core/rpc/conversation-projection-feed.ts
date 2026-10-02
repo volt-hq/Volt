@@ -70,6 +70,13 @@ export interface ConversationProjectionSource {
 	subscribeAuthorityLoss?(listener: (error: Error) => void): () => void;
 	/** Optional atomic source-generation hook for navigation and other rebases. */
 	subscribeGenerationChanges?(listener: () => void): () => void;
+	/**
+	 * Newest log ordinal reflected by a snapshot built now. Transcript commits
+	 * publish after their store transaction, so a snapshot can already contain
+	 * an entry whose commit is still pending; commits at or below this ordinal
+	 * are part of the snapshot and are never repeated as tail frames.
+	 */
+	snapshotOrdinal?(): number;
 }
 
 export type ConversationProjectionSnapshot = Pick<
@@ -193,6 +200,8 @@ interface ConversationProjectionSubscriber {
 	attaching: boolean;
 	subscriptionId: string;
 	nextCursor: number;
+	/** Ordinal cut of this subscriber's latest snapshot. */
+	snapshotOrdinal: number;
 	projector: StreamProjector;
 	readonly options: ConversationProjectionSubscriberOptions;
 	readonly bounds: ConversationProjectionQueueBounds;
@@ -914,6 +923,7 @@ export class ConversationProjectionFeed {
 			attaching: true,
 			subscriptionId: this.mintId("subscriptionId"),
 			nextCursor: 1,
+			snapshotOrdinal: 0,
 			projector: this.createProjector(options),
 			options,
 			bounds: {
@@ -1136,8 +1146,12 @@ export class ConversationProjectionFeed {
 		if (this.sourceRebindPending) {
 			return;
 		}
+		const value = canonicalEvent.value as Record<string, unknown>;
+		const transcriptOrdinal =
+			value.type === "conversation_transcript_committed" && isRecord(value.entry) ? value.entry.ordinal : undefined;
 		for (const subscriber of [...this.subscribers]) {
 			if (!subscriber.active || subscriber.fenced) continue;
+			if (isPositiveCommitOrdinal(transcriptOrdinal) && transcriptOrdinal <= subscriber.snapshotOrdinal) continue;
 			try {
 				const projected = subscriber.options.projectExternal
 					? subscriber.options.projectExternal(canonicalEvent.value)
@@ -1462,6 +1476,7 @@ export class ConversationProjectionFeed {
 		};
 		const snapshot = subscriber.options.buildSnapshot(context);
 		this.assertSubscriberGeneration(subscriber, subscriptionId, branchEpoch);
+		subscriber.snapshotOrdinal = this.source.snapshotOrdinal?.() ?? 0;
 		this.registerTranscriptCursor(snapshot.transcript.nextBeforeEntryId);
 		return Object.freeze({
 			type: "conversation_bootstrap",

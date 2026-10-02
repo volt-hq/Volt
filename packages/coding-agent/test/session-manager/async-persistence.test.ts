@@ -49,8 +49,9 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		const watermark = manager.flush();
 
 		expect(manager.flush()).toBe(watermark);
-		expect(observed).toEqual([first, second, third]);
+		expect(observed).toEqual([]);
 		await watermark;
+		expect(observed).toEqual([first, second, third]);
 
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");

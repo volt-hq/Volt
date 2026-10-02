@@ -849,24 +849,31 @@ export function createRemoteConversationTranscriptPage(
 	return { ...fixedFields, ...page };
 }
 
-/** Project one committed entry with the same authorization rules as transcript pages. */
+/**
+ * Project one committed entry with the same authorization rules as transcript pages.
+ * Commits publish after their store transaction, when later appends may already
+ * have moved the leaf, so tool calls resolve from the entry's own ancestry.
+ */
 export function createRemoteConversationTranscriptEntry(
 	entry: SessionEntry,
 	authorization: IrohRemoteClientAuthorizationSuccess,
 	runtime: ConversationCommandRuntime,
 ): RemoteTranscriptItem | undefined {
-	const window = runtime.session.sessionManager.getBranchWindow({
-		maxEntries: 1,
-		lookbackEntries: REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
+	const sessionManager = runtime.session.sessionManager;
+	const ancestors = sessionManager.getBranchWindow({
+		beforeEntryId: entry.id,
+		maxEntries: REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES,
 	});
-	const isCurrentCommit = window?.entries.at(-1)?.id === entry.id;
-	const toolCall = isCurrentCommit
-		? resolveSessionToolCallsByResultEntryId([...(window?.lookback ?? []), ...(window?.entries ?? [])]).get(entry.id)
+	const toolCall = ancestors
+		? resolveSessionToolCallsByResultEntryId([...ancestors.entries, entry]).get(entry.id)
 		: undefined;
+	// As on head pages, only the branch-latest assistant message ships complete.
 	const finalAssistantEntry =
-		isCurrentCommit &&
 		entry.type === "message" &&
-		(entry.message as unknown as Record<string, unknown>)?.role === "assistant";
+		(entry.message as unknown as Record<string, unknown>)?.role === "assistant" &&
+		findLatestAssistantMessageEntryId(
+			sessionManager.getBranchWindow({ maxEntries: REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES })?.entries ?? [],
+		) === entry.id;
 	return projectRemoteTranscriptEntry(entry, authorization, toolCall, finalAssistantEntry);
 }
 

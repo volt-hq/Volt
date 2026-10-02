@@ -22,6 +22,8 @@ export type {
 	SessionStoreJsonValue,
 	SessionStoreListOptions,
 	SessionStoreOrigin,
+	SessionStoreReadEntriesInput,
+	SessionStoreReadEntriesResult,
 	SessionStoreReconcileCommitInput,
 	SessionStoreRegisterReviewAnchorInput,
 	SessionStoreResetReviewDiscussionInput,
@@ -45,6 +47,7 @@ export type {
 export {
 	SESSION_STORE_BUSY_TIMEOUT_MS,
 	SESSION_STORE_DATABASE_FILENAME,
+	SESSION_STORE_READ_ENTRIES_MAX,
 	SESSION_STORE_REVIEW_CONTEXT_MAX_BYTES,
 	SESSION_STORE_REVIEW_LIST_MAX,
 	SESSION_STORE_SCHEMA_VERSION,

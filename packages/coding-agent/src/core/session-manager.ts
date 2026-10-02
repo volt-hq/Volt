@@ -51,6 +51,7 @@ import {
 	acquireSharedSQLiteSessionStore,
 	digestSessionStoreTransactionPayload,
 	SESSION_STORE_DATABASE_FILENAME,
+	SESSION_STORE_READ_ENTRIES_MAX,
 	type SessionStoreApplyTransactionInput,
 	type SessionStoreEntryWrite,
 	type SessionStoreJsonValue,
@@ -328,7 +329,7 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
-	/** Monotonic commit order assigned when the entry is persisted. */
+	/** Contiguous log position assigned at append; listeners and readers always receive it. */
 	ordinal?: number;
 }
 
@@ -631,7 +632,17 @@ export function createClientInputSemanticDigest(command: ClientInputCommand, inp
 	return digestClientInputPayload(command, normalizeClientInputPayload(command, input));
 }
 
-export type SessionEntryListener = (entry: SessionEntry) => void;
+/** An entry with its log position, as delivered to listeners and returned by readEntries(). */
+export type CommittedSessionEntry = SessionEntry & { ordinal: number };
+
+export type SessionEntryListener = (entry: CommittedSessionEntry) => void;
+
+/** One ordinal-ordered page of committed entries, host-only records included. */
+export interface SessionEntryPage {
+	readonly entries: CommittedSessionEntry[];
+	/** Ordinal of the newest committed entry in this session's log. */
+	readonly lastOrdinal: number;
+}
 
 export interface SessionBranchChange {
 	previousLeafId: string | null;
@@ -1251,6 +1262,8 @@ export class SessionManager {
 	private sessionStoreLease: SQLiteSessionStoreLease | undefined;
 	private storeId: string | undefined;
 	private storeRevision = 0;
+	/** Newest ordinal whose commit completed; listeners have observed every public entry up to it. */
+	private committedOrdinal = 0;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private derivedState!: SessionDerivedState;
@@ -1291,7 +1304,7 @@ export class SessionManager {
 	private readonly branchListeners = new Set<SessionBranchListener>();
 	private readonly conversationAuthorityListeners = new Set<SessionConversationAuthorityListener>();
 	/** Entries staged by appendAtomically before one persistence operation is accepted. */
-	private atomicAppendEntries: SessionEntry[] | undefined;
+	private atomicAppendEntries: CommittedSessionEntry[] | undefined;
 	/** Fences unrelated writers while an atomic replacement is settling. */
 	private atomicAppendInFlight = false;
 	/** Accepted host-only edges waiting for the current atomic projection to settle. */
@@ -1364,6 +1377,7 @@ export class SessionManager {
 		this.acceptsStartingGitContext = false;
 		this._buildIndex();
 		this._verifyStoreProjections(snapshot);
+		this.committedOrdinal = this.nextOrdinal - 1;
 	}
 
 	newSession(options?: NewSessionOptions): SessionReference | undefined {
@@ -1400,6 +1414,7 @@ export class SessionManager {
 		this.byId.clear();
 		this.derivedState = createSessionDerivedState(header);
 		this.storeRevision = 0;
+		this.committedOrdinal = 0;
 		this.acceptsStartingGitContext = true;
 
 		if (this.persist) {
@@ -1661,8 +1676,12 @@ export class SessionManager {
 		}
 	}
 
-	_persist(entry: SessionEntry): void {
-		if (!this.persist) return;
+	/** Commit one ordinary append, then publish it. In-memory sessions commit at the append itself. */
+	private _commitThenPublish(entry: CommittedSessionEntry): void {
+		if (!this.persist) {
+			this._publishCommittedEntry(entry);
+			return;
+		}
 		const payload = this._storePayload([entry]);
 		this._enqueuePersistence(async () => {
 			try {
@@ -1671,7 +1690,16 @@ export class SessionManager {
 				this._requireConversationReconciliation(error instanceof Error ? error : new Error(String(error)));
 				throw error;
 			}
+			this._publishCommittedEntry(entry);
 		});
+	}
+
+	/** The serialized persistence lane commits ordinary appends one at a time, so this runs in ordinal order. */
+	private _publishCommittedEntry(entry: CommittedSessionEntry): void {
+		this.committedOrdinal = entry.ordinal;
+		// _setBranchLeaf appends a leaf entry as a child of the leaf it replaces.
+		if (entry.type === "leaf") this._notifyBranchListeners(entry.parentId, entry.targetId);
+		else this._notifyEntryListeners(entry);
 	}
 
 	private _appendEntry(entry: SessionEntry): void {
@@ -1687,15 +1715,15 @@ export class SessionManager {
 		const canonicalEntry = parseSessionEntryForAdmission(entry, `Session ${entry.type} entry`);
 		validateSessionEntryAdmissionReferences(canonicalEntry, this.byId, this.nextOrdinal);
 		canonicalEntry.ordinal = this.nextOrdinal;
-		applySessionEntry(this.derivedState, canonicalEntry as SessionEntry & { ordinal: number });
-		this.fileEntries.push(canonicalEntry);
-		this.byId.set(canonicalEntry.id, canonicalEntry);
-		if (!this.atomicAppendEntries) this._persist(canonicalEntry);
+		const indexedEntry = canonicalEntry as CommittedSessionEntry;
+		applySessionEntry(this.derivedState, indexedEntry);
+		this.fileEntries.push(indexedEntry);
+		this.byId.set(indexedEntry.id, indexedEntry);
 		if (this.atomicAppendEntries) {
-			this.atomicAppendEntries.push(canonicalEntry);
+			this.atomicAppendEntries.push(indexedEntry);
 			return;
 		}
-		this._notifyEntryListeners(canonicalEntry);
+		this._commitThenPublish(indexedEntry);
 	}
 
 	/** Release the atomic fence only after its projection and authority are final. */
@@ -1723,7 +1751,7 @@ export class SessionManager {
 		deferred.settle(this.persistenceWatermark);
 	}
 
-	private _notifyEntryListeners(entry: SessionEntry): void {
+	private _notifyEntryListeners(entry: CommittedSessionEntry): void {
 		if (isHostOnlySessionEntry(entry)) return;
 		for (const listener of this.entryListeners) {
 			try {
@@ -1914,7 +1942,7 @@ export class SessionManager {
 			);
 		}
 
-		const entries: SessionEntry[] = [];
+		const entries: CommittedSessionEntry[] = [];
 		this.atomicAppendEntries = entries;
 		try {
 			append();
@@ -1971,6 +1999,7 @@ export class SessionManager {
 		this.fileEntries = staged.fileEntries;
 		this.byId = staged.byId;
 		this.derivedState = staged.derivedState;
+		this.committedOrdinal = this.nextOrdinal - 1;
 		try {
 			beforePublish();
 		} catch (error) {
@@ -2466,13 +2495,53 @@ export class SessionManager {
 		return cloneClientInputRecord(this.clientInputsById.get(clientMessageId)!);
 	}
 
+	/** The log position: ordinal of the newest committed entry. */
+	getCommittedOrdinal(): number {
+		this.assertConversationAuthorityAvailable();
+		return this.committedOrdinal;
+	}
+
+	/** Ordinal of the newest indexed entry, including ordinary appends whose commit is still pending. */
+	getIndexedOrdinal(): number {
+		this.assertConversationAuthorityAvailable();
+		return this.nextOrdinal - 1;
+	}
+
+	/** Read committed entries with ordinal > afterOrdinal in ordinal order, at most `limit` of them. */
+	async readEntries(afterOrdinal: number, limit: number): Promise<SessionEntryPage> {
+		this.assertConversationAuthorityAvailable();
+		if (!Number.isSafeInteger(afterOrdinal) || afterOrdinal < 0) {
+			throw new Error("afterOrdinal must be a non-negative safe integer");
+		}
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > SESSION_STORE_READ_ENTRIES_MAX) {
+			throw new Error(`limit must be a safe integer from 1 to ${SESSION_STORE_READ_ENTRIES_MAX}`);
+		}
+		if (!this.persist) {
+			// fileEntries[0] is the header; entry ordinals are their contiguous indexes.
+			const end = Math.min(afterOrdinal + limit, this.committedOrdinal) + 1;
+			const entries = this.fileEntries.slice(afterOrdinal + 1, end) as CommittedSessionEntry[];
+			return { entries: cloneCanonicalData(entries, "Session entry page"), lastOrdinal: this.committedOrdinal };
+		}
+		const store = this.sessionStoreLease?.client;
+		if (!store) throw new Error("Persisted session requires an initialized session store lease");
+		const page = await store.readEntries({
+			sessionId: this.sessionId,
+			sessionGeneration: this.sessionGeneration,
+			afterOrdinal,
+			limit,
+		});
+		if (!page) throw new Error(`Session not found: ${this.sessionId}`);
+		return { entries: page.entries.map((entry) => decodeStoredSessionEntry(entry)), lastOrdinal: page.lastOrdinal };
+	}
+
 	/**
-	 * Observe public conversation entries after they are indexed and accepted
-	 * into the ordered persistence lane. Host-only sidecar records (admission
-	 * WAL, subagent spawn edges) are intentionally excluded. The callback runs
-	 * synchronously at the in-memory
-	 * commit boundary so ordered projections stay in the same causal lane as live
-	 * events; callers that require disk durability must await flush().
+	 * Observe public conversation entries in ordinal order, each only after its
+	 * store transaction commits; an entry whose commit fails is never delivered.
+	 * In-memory sessions deliver at the append itself. Persisted sessions deliver
+	 * asynchronously relative to the synchronous append API, so live events may
+	 * precede the commit; await flush() to wait for delivery of accepted appends.
+	 * Host-only sidecar records (admission WAL, subagent spawn edges) are
+	 * intentionally excluded.
 	 */
 	subscribeEntries(listener: SessionEntryListener): () => void {
 		this.assertConversationAuthorityAvailable();
@@ -2483,9 +2552,10 @@ export class SessionManager {
 	}
 
 	/**
-	 * Observe the low-level active-leaf mutation before any later child append.
-	 * This is not an Agent context commit boundary; consumers that require the
-	 * rebuilt message state must observe AgentSession's conversation generation.
+	 * Observe a low-level active-leaf move after its leaf entry commits, ordered
+	 * with subscribeEntries() by ordinal. This is not an Agent context commit
+	 * boundary; consumers that require the rebuilt message state must observe
+	 * AgentSession's conversation generation.
 	 */
 	subscribeBranchChanges(listener: SessionBranchListener): () => void {
 		this.assertConversationAuthorityAvailable();
@@ -2509,8 +2579,6 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			targetId: nextLeafId,
 		});
-		if (this.atomicAppendEntries) return;
-		this._notifyBranchListeners(previousLeafId, nextLeafId);
 	}
 
 	private _notifyBranchListeners(previousLeafId: string | null, nextLeafId: string | null): void {

@@ -44,6 +44,8 @@ import {
 	SessionStoreError,
 	type SessionStoreForeignKeyVerificationResult,
 	type SessionStoreInfo,
+	type SessionStoreReadEntriesInput,
+	type SessionStoreReadEntriesResult,
 	type SessionStoreRegisterReviewAnchorInput,
 	type SessionStoreReplaceReviewGeneralInput,
 	type SessionStoreResetReviewDiscussionInput,
@@ -987,6 +989,21 @@ function projectionIntegrityError(
 	);
 }
 
+const ENTRY_COLUMNS = `entry_id AS id, parent_entry_id AS parentId, entry_type AS type, timestamp, ordinal,
+	is_host_only AS isHostOnly, payload_json AS payloadJson`;
+
+function storedEntriesFromRows(rows: readonly Record<string, unknown>[]): SessionStoreEntry[] {
+	try {
+		return rows.map(entryFromRow);
+	} catch (error) {
+		throw new SessionStoreError(
+			"session_store_entry_integrity",
+			"Session store canonical entries are invalid or inconsistent",
+			{ cause: error },
+		);
+	}
+}
+
 function loadSession(sessionId: string, sessionGeneration: string): SessionStoreSnapshot | null {
 	const db = requireDatabase();
 	return withDeferredReadTransaction(db, () => {
@@ -999,23 +1016,9 @@ function loadSession(sessionId: string, sessionGeneration: string): SessionStore
 		} catch (error) {
 			throw projectionIntegrityError("summary", error);
 		}
-		const entryRows = db
-			.prepare(
-				`SELECT entry_id AS id, parent_entry_id AS parentId, entry_type AS type, timestamp, ordinal,
-				is_host_only AS isHostOnly, payload_json AS payloadJson
-			FROM entries WHERE session_id = ? ORDER BY ordinal`,
-			)
-			.all(sessionId);
-		let entries: SessionStoreEntry[];
-		try {
-			entries = entryRows.map(entryFromRow);
-		} catch (error) {
-			throw new SessionStoreError(
-				"session_store_entry_integrity",
-				"Session store canonical entries are invalid or inconsistent",
-				{ cause: error },
-			);
-		}
+		const entries = storedEntriesFromRows(
+			db.prepare(`SELECT ${ENTRY_COLUMNS} FROM entries WHERE session_id = ? ORDER BY ordinal`).all(sessionId),
+		);
 		let clientInputs: SessionStoreClientInput[];
 		try {
 			clientInputs = db
@@ -1043,6 +1046,22 @@ function loadSession(sessionId: string, sessionGeneration: string): SessionStore
 			throw projectionIntegrityError("search_chunks", error);
 		}
 		return { session, entries, clientInputs, searchChunks };
+	});
+}
+
+/** One bounded page over the (session_id, ordinal) unique index, read in one snapshot with its end. */
+function readEntries(input: SessionStoreReadEntriesInput): SessionStoreReadEntriesResult | null {
+	const db = requireDatabase();
+	return withDeferredReadTransaction(db, () => {
+		if (!findSummaryRow(db, input.sessionId, input.sessionGeneration)) return null;
+		const entries = storedEntriesFromRows(
+			db
+				.prepare(
+					`SELECT ${ENTRY_COLUMNS} FROM entries WHERE session_id = ? AND ordinal > ? ORDER BY ordinal LIMIT ?`,
+				)
+				.all(input.sessionId, input.afterOrdinal, input.limit),
+		);
+		return { entries, lastOrdinal: nextEntryOrdinal(db, input.sessionId) - 1 };
 	});
 }
 
@@ -1546,6 +1565,8 @@ function execute(operation: SessionStoreWorkerOperation): unknown {
 			return createSession(operation.input);
 		case "load_session":
 			return loadSession(operation.sessionId, operation.sessionGeneration);
+		case "read_entries":
+			return readEntries(operation.input);
 		case "find_continuation_session":
 			return findContinuationSession(operation.cwd);
 		case "list_sessions":
