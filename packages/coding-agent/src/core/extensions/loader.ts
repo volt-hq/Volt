@@ -57,16 +57,6 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@hansjm10/volt-ai": _bundledVoltAi,
 	"@hansjm10/volt-ai/oauth": _bundledVoltAiOauth,
 	"@hansjm10/volt-coding-agent": _bundledVoltCodingAgent,
-	"@earendil-works/pi-agent-core": _bundledVoltAgentCore,
-	"@earendil-works/pi-tui": _bundledVoltTui,
-	"@earendil-works/pi-ai": _bundledVoltAi,
-	"@earendil-works/pi-ai/oauth": _bundledVoltAiOauth,
-	"@earendil-works/pi-coding-agent": _bundledVoltCodingAgent,
-	"@mariozechner/pi-agent-core": _bundledVoltAgentCore,
-	"@mariozechner/pi-tui": _bundledVoltTui,
-	"@mariozechner/pi-ai": _bundledVoltAi,
-	"@mariozechner/pi-ai/oauth": _bundledVoltAiOauth,
-	"@mariozechner/pi-coding-agent": _bundledVoltCodingAgent,
 };
 
 const moduleUrl: string | undefined = import.meta.url;
@@ -141,16 +131,6 @@ function getAliases(): Record<string, string> {
 		"@hansjm10/volt-tui": voltTuiEntry,
 		"@hansjm10/volt-ai": voltAiEntry,
 		"@hansjm10/volt-ai/oauth": voltAiOauthEntry,
-		"@earendil-works/pi-coding-agent": voltCodingAgentEntry,
-		"@earendil-works/pi-agent-core": voltAgentCoreEntry,
-		"@earendil-works/pi-tui": voltTuiEntry,
-		"@earendil-works/pi-ai": voltAiEntry,
-		"@earendil-works/pi-ai/oauth": voltAiOauthEntry,
-		"@mariozechner/pi-coding-agent": voltCodingAgentEntry,
-		"@mariozechner/pi-agent-core": voltAgentCoreEntry,
-		"@mariozechner/pi-tui": voltTuiEntry,
-		"@mariozechner/pi-ai": voltAiEntry,
-		"@mariozechner/pi-ai/oauth": voltAiOauthEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
 		"typebox/value": typeboxValueEntry,
@@ -532,12 +512,9 @@ interface VoltManifest {
 function readVoltManifest(packageJsonPath: string): VoltManifest | null {
 	try {
 		const content = fs.readFileSync(packageJsonPath, "utf-8");
-		const pkg = JSON.parse(content) as { volt?: unknown; pi?: unknown };
+		const pkg = JSON.parse(content) as { volt?: unknown };
 		if (pkg.volt && typeof pkg.volt === "object") {
 			return pkg.volt as VoltManifest;
-		}
-		if (pkg.pi && typeof pkg.pi === "object") {
-			return pkg.pi as VoltManifest;
 		}
 		return null;
 	} catch {
@@ -553,13 +530,13 @@ function isExtensionFile(name: string): boolean {
  * Resolve extension entry points from a directory.
  *
  * Checks for:
- * 1. package.json with "volt.extensions" or compatible "pi.extensions" field -> returns declared paths
+ * 1. package.json with "volt.extensions" field -> returns declared paths
  * 2. index.ts or index.js -> returns the index file
  *
  * Returns resolved paths or null if no entry points found.
  */
 function resolveExtensionEntries(dir: string): string[] | null {
-	// Check for package.json with "volt" field first, then Pi-compatible "pi" field
+	// Check for package.json with a "volt" field
 	const packageJsonPath = path.join(dir, "package.json");
 	if (fs.existsSync(packageJsonPath)) {
 		const manifest = readVoltManifest(packageJsonPath);
@@ -596,7 +573,7 @@ function resolveExtensionEntries(dir: string): string[] | null {
  * Discovery rules:
  * 1. Direct files: `extensions/*.ts` or `*.js` → load
  * 2. Subdirectory with index: `extensions/* /index.ts` or `index.js` → load
- * 3. Subdirectory with package.json: `extensions/* /package.json` with "volt" or compatible "pi" field → load what it declares
+ * 3. Subdirectory with package.json: `extensions/* /package.json` with a "volt" field → load what it declares
  *
  * No recursion beyond one level. Complex packages must use package.json manifest.
  */
@@ -670,7 +647,7 @@ export async function discoverAndLoadExtensions(
 	for (const p of configuredPaths) {
 		const resolved = resolvePath(p, resolvedCwd, { normalizeUnicodeSpaces: true });
 		if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
-			// Check for package.json with volt/pi manifest or index.ts
+			// Check for package.json with a volt manifest or index.ts
 			const entries = resolveExtensionEntries(resolved);
 			if (entries) {
 				addPaths(entries);
