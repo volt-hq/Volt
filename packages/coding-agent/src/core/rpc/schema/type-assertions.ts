@@ -14,7 +14,6 @@
  */
 
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { AssistantMessage } from "@hansjm10/volt-ai";
 import type { Static } from "typebox";
 import type { SessionStats } from "../../agent-session.ts";
 import type { BashResult } from "../../bash-executor.ts";
@@ -37,7 +36,6 @@ import type {
 import type { PromptCacheStatus } from "../../prompt-cache-status.ts";
 import type { ReviewCoverage, ReviewFinding } from "../../review.ts";
 import type { SourceInfo } from "../../source-info.ts";
-import type { StoredAssistantMessageSchema } from "../../stored-assistant-message-schema.ts";
 import type { SubscriptionUsageReport } from "../../subscription-usage.ts";
 import type {
 	ProjectedMessageEndFrame,
@@ -71,9 +69,6 @@ import type { RpcReviewCoverageSchema, RpcReviewFindingSchema } from "./projecti
 import type { RpcBashResultSchema, RpcCompactionResultSchema, RpcSessionStatsSchema } from "./responses.ts";
 import type { RpcPromptCacheStatusSchema } from "./session.ts";
 import type { RpcSubscriptionUsageReportSchema } from "./subscription-usage.ts";
-
-// Session codec's copy of volt-ai's assistant message schema (JSON equality is tested)
-type _storedAssistantMessage = Assert<MutualExtends<Static<typeof StoredAssistantMessageSchema>, AssistantMessage>>;
 
 // volt-agent-core
 type _thinkingLevel = Assert<MutualExtends<Static<typeof RpcThinkingLevelSchema>, ThinkingLevel>>;

@@ -3,7 +3,8 @@
  * the payload shapes of the state-oriented responses.
  */
 
-import { type Api, type Model, ModelSchema } from "@hansjm10/volt-ai";
+import type { Api, Model } from "@hansjm10/volt-ai";
+import { ModelSchema } from "@hansjm10/volt-ai/schemas";
 import { Type } from "typebox";
 import {
 	RPC_WORK_BRANCH_MAX_CHARS,

@@ -8,7 +8,12 @@
  * where the constructing type does not, so the artifact matches the wire.
  */
 
-import { ActiveToolCallStateSchema, AssistantMessageSchema, StopReasonSchema, ToolCallSchema } from "@hansjm10/volt-ai";
+import {
+	ActiveToolCallStateSchema,
+	AssistantMessageSchema,
+	StopReasonSchema,
+	ToolCallSchema,
+} from "@hansjm10/volt-ai/schemas";
 import { Type } from "typebox";
 import { readonlyArrayOf, stringEnum } from "./helpers.ts";
 import { RpcAssistantStreamPositionSchema, RpcConversationBootstrapReasonSchema } from "./primitives.ts";

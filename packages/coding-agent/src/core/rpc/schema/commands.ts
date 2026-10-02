@@ -7,13 +7,7 @@
  * remain the dispatcher's business — see rpc-command-validation.ts.
  */
 
-import { ImageContentSchema } from "@hansjm10/volt-ai";
 import { type TLiteral, type TObject, type TOptional, type TProperties, type TString, Type } from "typebox";
-import {
-	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_MAX_IMAGES,
-} from "../wire-limits.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
 import { RpcPreparePrReviewCommandSchema, RpcResolvePrReviewCommandSchema } from "./pr-review.ts";
@@ -24,6 +18,7 @@ import {
 	RpcConversationAuthoritySchema,
 	RpcConversationDiscontinuityReasonSchema,
 	RpcConversationIdentifierSchema,
+	RpcConversationInputImagesSchema,
 	RpcQueueModeSchema,
 	RpcRegisterPushTargetArgsSchema,
 	RpcSafeNonNegativeIntegerSchema,
@@ -31,25 +26,6 @@ import {
 	RpcThinkingLevelSchema,
 	RpcUiActionListScopeSchema,
 } from "./primitives.ts";
-
-/** volt-ai's ImageContent annotated with the conversation-input byte limits. */
-export const RpcImageContentSchema = Type.Object(
-	{
-		...ImageContentSchema.properties,
-		data: Type.Options(ImageContentSchema.properties.data, {
-			"x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
-		}),
-		mimeType: Type.Options(ImageContentSchema.properties.mimeType, {
-			"x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
-		}),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcConversationInputImagesSchema = Type.Array(RpcImageContentSchema, {
-	"x-volt-max-items": RPC_CONVERSATION_INPUT_MAX_IMAGES,
-	"x-volt-expected": "be an array of image objects",
-});
 
 export const RpcClientCapabilityFeatureSchema = openStringEnum(["host_action_requests.v1", "planning_state.v1"]);
 export const RpcMcpAuthFlowSchema = stringEnum(["browser", "device"]);

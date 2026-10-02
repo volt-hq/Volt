@@ -1121,7 +1121,7 @@ const continuation = await complete(newModel, restored);
 
 ### Message and Model Schemas
 
-TypeBox schemas for the data model are exported alongside the types: `MessageSchema` (and `UserMessageSchema`, `AssistantMessageSchema`, `ToolResultMessageSchema`), the content block schemas, `UsageSchema`, `StopReasonSchema`, `AssistantMessageDiagnosticSchema`, `ActiveToolCallStateSchema`, and `ModelSchema`. Object schemas reject unknown fields. `AI_SCHEMA_VERSION` changes whenever any schema changes shape.
+TypeBox schemas for the data model are exported alongside the types: `MessageSchema` (and `UserMessageSchema`, `AssistantMessageSchema`, `ToolResultMessageSchema`), the content block schemas, `UsageSchema`, `StopReasonSchema`, `AssistantMessageDiagnosticSchema`, `ActiveToolCallStateSchema`, and `ModelSchema`. Object schemas reject unknown fields. `AI_SCHEMA_VERSION` changes whenever any schema changes shape. The `@hansjm10/volt-ai/schemas` subpath exports the same schemas and loads only TypeBox, for workers and other contexts that should not load the whole package.
 
 ```typescript
 import { MessageSchema } from '@hansjm10/volt-ai';

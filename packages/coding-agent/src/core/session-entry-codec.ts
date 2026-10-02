@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@hansjm10/volt-ai";
+import { AssistantMessageSchema } from "@hansjm10/volt-ai/schemas";
 import { Check } from "typebox/value";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { parsePlanningState } from "./planning.ts";
@@ -27,7 +28,6 @@ import type {
 	SessionReference,
 	SessionSnapshotHeader,
 } from "./session-manager.ts";
-import { StoredAssistantMessageSchema } from "./stored-assistant-message-schema.ts";
 
 export const SESSION_ID_MAX_CHARACTERS = 512;
 const ENTRY_ID_MAX_CHARACTERS = SESSION_ID_MAX_CHARACTERS;
@@ -180,7 +180,7 @@ function validateAgentMessage(value: unknown, path: string): asserts value is Ag
 		return;
 	}
 	if (role === "assistant") {
-		if (!Check(StoredAssistantMessageSchema, message)) fail(path, "invalid assistant message");
+		if (!Check(AssistantMessageSchema, message)) fail(path, "invalid assistant message");
 		const assistant = message as unknown as AssistantMessage;
 		nonEmptyString(assistant.api, `${path}.api`);
 		nonEmptyString(assistant.provider, `${path}.provider`);
