@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { AgentHarness, type SessionMutationReceipt } from "@hansjm10/volt-agent-core";
-import { NodeExecutionEnv } from "@hansjm10/volt-agent-core/node";
 import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -273,7 +272,6 @@ describe("SessionManager Harness adapter", () => {
 		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("done")]);
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: "/workspace" }),
 			session: createSessionManagerHarnessSession(manager, () => false, storage),
 			model: registration.getModel(),
 			persistActiveToolChanges: false,
@@ -292,8 +290,12 @@ describe("SessionManager Harness adapter", () => {
 			},
 		});
 
-		await harness.setActiveTools([]);
-		await harness.runPrompt("durable input");
+		await harness.setTools([], []);
+		await harness.runReserved(harness.reserveRun(), {
+			role: "user",
+			content: [{ type: "text", text: "durable input" }],
+			timestamp: Date.now(),
+		});
 
 		const messages = manager.getEntries().filter((entry) => entry.type === "message");
 		expect(messages.map((entry) => entry.message.role)).toEqual(["user", "assistant"]);

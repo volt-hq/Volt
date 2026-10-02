@@ -135,13 +135,8 @@ export function createAgentSessionTestControl(session: AgentSession) {
 		}
 	};
 	return {
-		onBeforeProviderRequest: (handler: () => Promise<void>) =>
-			harness.on("before_provider_request", async () => {
-				await handler();
-				return undefined;
-			}),
-		appendHarnessMessage: (message: AgentMessage) => harness.appendMessage(message),
-		run: (input: AgentMessage | readonly AgentMessage[]) => harness.run(input),
+		run: async (input: AgentMessage | readonly AgentMessage[]) =>
+			await harness.runReserved(harness.reserveRun(), input),
 		continue: (options?: { drainFollowUps?: boolean; context?: readonly AgentMessage[] }) =>
 			harness.continue(options),
 		queueSteer: (message: AgentMessage) => harness.queueSteer(message),
@@ -163,9 +158,7 @@ export function createAgentSessionTestControl(session: AgentSession) {
 		},
 		hasQueuedMessages: () => harness.hasQueuedMessages(),
 		hasPendingPrompt: () => harness.hasPendingPrompt(),
-		clearSteeringQueue: () => harness.clearSteeringQueue(),
-		clearFollowUpQueue: () => harness.clearFollowUpQueue(),
-		discardPendingPrompt: () => harness.discardPendingPrompt(),
+		revokeAllQueues: () => harness.revokeAllQueues(),
 		getStreamFn: () => sessionInternals._streamFn,
 		setStreamFn: (streamFn: StreamFn) => {
 			sessionInternals._streamFn = streamFn;

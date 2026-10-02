@@ -13,19 +13,14 @@ npm install @hansjm10/volt-agent-core
 
 ## Quick start
 
-`AgentHarness` is the public stateful orchestrator. Node applications also import `NodeExecutionEnv` from the package's `node` entry point.
+`AgentHarness` is the public stateful orchestrator. The host supplies a `Session` backed by its own `SessionStorage` (see [Session storage](#session-storage)).
 
 ```typescript
-import {
-  AgentHarness,
-  InMemorySessionRepo,
-} from "@hansjm10/volt-agent-core";
-import { NodeExecutionEnv } from "@hansjm10/volt-agent-core/node";
+import { AgentHarness, Session } from "@hansjm10/volt-agent-core";
 import { getModel } from "@hansjm10/volt-ai";
 
-const session = await new InMemorySessionRepo().create();
+const session = new Session(hostSessionStorage);
 const harness = new AgentHarness({
-  env: new NodeExecutionEnv({ cwd: process.cwd() }),
   session,
   model: getModel("anthropic", "claude-sonnet-4-5"),
   systemPrompt: "You are a helpful assistant.",
@@ -37,11 +32,17 @@ harness.subscribe((event) => {
   }
 });
 
-const response = await harness.prompt("Hello!");
-console.log(response.stopReason);
+const result = await harness.runReserved(harness.reserveRun(), {
+  role: "user",
+  content: "Hello!",
+  timestamp: Date.now(),
+});
+console.log(result.status);
 ```
 
-`prompt()` is a convenience API that requires an assistant response. Use `run()` or `runPrompt()` when the caller needs the bounded `AgentRunResult`, including delivery outcomes.
+`reserveRun()` synchronously claims the harness before host preflight awaits; `runReserved()` admits the input and returns the bounded `AgentRunResult`, including delivery outcomes. `cancelReservedRun()` releases a reservation that was never run.
+
+`systemPrompt` is a string or a function that receives the active operation's `AbortSignal` and returns the prompt for each request snapshot.
 
 ## Ownership model
 
@@ -72,7 +73,6 @@ Before each provider request, Harness applies context hooks and converts `AgentM
 
 ```typescript
 const harness = new AgentHarness({
-  env,
   session,
   model,
   convertToLlm: (messages) =>
@@ -84,7 +84,7 @@ const harness = new AgentHarness({
 });
 ```
 
-A turn snapshot fixes the model, thinking level, active tools, resources, system prompt, stream options, and session context used by one provider request. Runtime setters affect future snapshots, not an in-flight request.
+A turn snapshot fixes the model, thinking level, active tools, system prompt, stream options, and session context used by one provider request. Runtime setters affect future snapshots, not an in-flight request.
 
 ## Transactional delivery
 
@@ -126,7 +126,7 @@ const deliveryOwner = {
   finish: ({ outcome }) => updateHostProjection(outcome),
 } satisfies AgentDeliveryOwner;
 
-const harness = new AgentHarness({ env, session, model, deliveryOwner });
+const harness = new AgentHarness({ session, model, deliveryOwner });
 ```
 
 `prepareLogical()` is side-effect-free. One successful immutable preparation is cached for the logical delivery; a retained retry receives a fresh attempt ID without rerunning it. Preparation failure is retained only when the owner explicitly returns `retained`; thrown failures and unsafe effects are terminal.
@@ -143,7 +143,7 @@ Delivery outcomes are:
 A supplied owner owns canonical persistence for that delivery. Harness does not append the prepared delivery messages again. Without a custom owner, Harness uses its built-in owner and the supplied session's guarded batch API.
 
 ```typescript
-const result = await harness.runPrompt("Apply the change");
+const result = await harness.runReserved(harness.reserveRun(), userMessage);
 if (result.status === "delivery_failed") {
   console.error(result.failure.phase, result.failure.error.message);
 }
@@ -167,29 +167,21 @@ Useful lifecycle projections include:
 - `activeRunSnapshot`
 - `waitForIdle()`
 
-Queue revocation is explicit:
+Queue revocation is explicit. `revokeAllQueues()` synchronously revokes queued steering and follow-up deliveries that have not started commitment and returns their IDs:
 
 ```typescript
-await harness.clearSteeringQueue();
-await harness.clearFollowUpQueue();
-await harness.clearAllQueues();
-await harness.discardPendingPrompt();
+const revokedIds = harness.revokeAllQueues();
 ```
 
 `requestClose()` is the terminal synchronous fence. It rejects new admission and mutations, aborts an open operation, revokes work that has not crossed its commit boundary, and makes late callbacks inert. `dispose()` is its fence-only conventional alias and returns `void`; use `waitForClosed()` from external lifecycle code to join the active operation, delivery settlement, notifications, and persistence drain. Owner callbacks may request close but must not join closure from inside themselves.
 
-## Prompting and queues
+## Runs and queues
 
 ```typescript
-await harness.prompt("Hello");
-await harness.run({ role: "user", content: "Structured input", timestamp: Date.now() });
+const reservation = harness.reserveRun();
+await harness.runReserved(reservation, { role: "user", content: "Structured input", timestamp: Date.now() });
 
-// During a run:
-await harness.steer("Change direction");
-await harness.followUp("Also summarize the result");
-await harness.nextTurn("Include this with the next user-initiated turn");
-
-// Admit already-structured queue messages synchronously:
+// During a run, admit structured queue messages synchronously:
 const steerId = harness.queueSteer(userMessage);
 const followUpId = harness.queueFollowUp(otherUserMessage);
 
@@ -197,9 +189,9 @@ const followUpId = harness.queueFollowUp(otherUserMessage);
 await harness.continue();
 ```
 
-Harness owns deep snapshots of `run()`, `runPrompt()`, and `prompt()` messages, explicit context, images, and options before any asynchronous preflight. `continue()` similarly owns explicit context and dispatch options, and `promptFromTemplate()` owns its argument array before resolving runtime context. Later caller mutation cannot change admission, retries, or provider context.
+Harness owns deep snapshots of `runReserved()` messages, explicit context, and options before any asynchronous preflight. `continue()` similarly owns explicit context and dispatch options. Later caller mutation cannot change admission, retries, or provider context.
 
-`queueSteer()` and `queueFollowUp()` synchronously return after admission. Their async text counterparts, `steer()` and `followUp()`, wait for passive `queue_update` publication before resolving. Steering and follow-up modes are `"one-at-a-time"` or `"all"` and can be changed with their corresponding getters and setters.
+`queueSteer()` and `queueFollowUp()` synchronously return the delivery ID after admission and publish `queue_update` passively. Steering and follow-up modes are `"one-at-a-time"` or `"all"` and can be changed with their corresponding getters and setters.
 
 ## Tools
 
@@ -225,11 +217,10 @@ const readFileTool = {
 } satisfies AgentTool;
 ```
 
-Configure all tools and the active subset separately:
+Configure all tools and the active subset together:
 
 ```typescript
 await harness.setTools([readFileTool], ["read_file"]);
-await harness.setActiveTools(["read_file"]);
 ```
 
 Thrown tool errors become failed tool results. Return `isError: true` to preserve structured failure details. A successful result may request `disposition: "stop"` or one bounded tool-free `disposition: "final_response"`.
@@ -263,7 +254,7 @@ Important loop events include:
 - `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
 - `queue_update`
 
-Provider hooks are `before_provider_request`, `before_provider_payload`, and `after_provider_response`. Request options include transport, retry limits, timeouts, WebSocket connect timeout, inference speed, thinking budgets, environment, headers, metadata, and cache retention.
+Provider hooks are `before_provider_payload` and `after_provider_response`. Stream options include transport, retry limits, timeouts, WebSocket connect timeout, inference speed, thinking budgets, environment, headers, metadata, and cache retention.
 
 Scoped next-action policy is available for bounded host policy such as subagent budgets:
 
@@ -277,16 +268,11 @@ Return `undefined` to leave the suggested action unchanged. Returning `{ type: "
 
 Harness emits `next_action_resolved` after all hooks and scoped policies, with the authority-normalized `action` and `requestAuthority`. Stop actions include `stopReason`: `completion`, `policy`, or `tool`. An awaited `on("next_action_resolved", ...)` handler can fence host-owned background continuations before the run settles, without changing the decision. Ordinary completion does not revoke independently authorized work. `subscribe()` receives the same finalized decision as a passive cloned projection.
 
-## Session repositories
+## Session storage
 
-The package includes in-memory and JSONL repositories. Repositories create/open sessions; Harness receives one session instance.
+The package does not ship session storage. Harness receives one `Session` that wraps a host `SessionStorage`.
 
-```typescript
-const repo = new InMemorySessionRepo();
-const session = await repo.create({ id: "session-1" });
-```
-
-A custom `SessionStorage` must provide atomic branch snapshots and guarded declarative `commitBatch()` operations. Runtime storage exposes no imperative append or leaf setter; append, move, summary, and label effects all cross the guarded batch seam. The store issues opaque `ProjectionCursor` and `SessionMutationReceipt` capabilities, verifies receipt ownership, preserves parent/leaf ordering, and classifies every batch as `committed`, `rolled_back`, or `uncertain`. Exact guards are compare-and-swap; descendant guards may tail-append only while the cursor branch remains an ancestor. An uncertain authority must reject later canonical work until reopened or reconciled.
+A `SessionStorage` must provide atomic branch snapshots and guarded declarative `commitBatch()` operations. Runtime storage exposes no imperative append or leaf setter; append, move, summary, and label effects all cross the guarded batch seam. The store issues opaque `ProjectionCursor` and `SessionMutationReceipt` capabilities, verifies receipt ownership, preserves parent/leaf ordering, and classifies every batch as `committed`, `rolled_back`, or `uncertain`. Exact guards are compare-and-swap; descendant guards may tail-append only while the cursor branch remains an ancestor. An uncertain authority must reject later canonical work until reopened or reconciled.
 
 ## Low-level loop
 

@@ -1,11 +1,11 @@
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
 import type { AgentMessage } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
+import { prompt, runPrompt } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 const registrations: Array<{ unregister(): void }> = [];
 
@@ -15,7 +15,7 @@ afterEach(() => {
 
 function createHarness(
 	registration: ReturnType<typeof registerFauxProvider>,
-	options: Omit<ConstructorParameters<typeof AgentHarness>[0], "env" | "session" | "model"> & {
+	options: Omit<ConstructorParameters<typeof AgentHarness>[0], "session" | "model"> & {
 		session?: Session;
 	} = {},
 ): { harness: AgentHarness; session: Session } {
@@ -23,7 +23,6 @@ function createHarness(
 	const { session: _session, ...harnessOptions } = options;
 	return {
 		harness: new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 			...harnessOptions,
@@ -113,16 +112,9 @@ describe("AgentHarness continuation state", () => {
 		const { harness } = createHarness(registration, { session });
 		await harness.rebaseContinuationContext({ source: "explicit" });
 
-		await expect(
-			harness.appendMessage({
-				role: "custom",
-				customType: "uncloneable",
-				content: "persisted canonically",
-				display: false,
-				details: { callback: () => undefined } as never,
-				timestamp: Date.now(),
-			}),
-		).rejects.toThrow("Failed to materialize canonical mutation batch");
+		await expect(harness.appendCustomEntry("uncloneable", { callback: () => undefined } as never)).rejects.toThrow(
+			"Failed to materialize canonical mutation batch",
+		);
 		expect((await session.buildContext()).messages.map(messageText)).toEqual(["canonical"]);
 		expect(registration.state.callCount).toBe(0);
 	});
@@ -138,7 +130,8 @@ describe("AgentHarness continuation state", () => {
 		]);
 		const storage = new InMemorySessionStorage();
 		const session = new Session(storage);
-		const { harness } = createHarness(registration, { session, tools: [calculateTool] });
+		const { harness } = createHarness(registration, { session });
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		let movedBranch = false;
 		harness.subscribe(async (event) => {
 			if (event.type !== "tool_execution_end" || movedBranch) return;
@@ -146,7 +139,7 @@ describe("AgentHarness continuation state", () => {
 			await session.moveTo(null);
 		});
 
-		const response = await harness.prompt("change branches between requests");
+		const response = await prompt(harness, "change branches between requests");
 
 		expect(response).toMatchObject({ stopReason: "stop" });
 		expect(registration.state.callCount).toBe(2);
@@ -170,13 +163,15 @@ describe("AgentHarness continuation state", () => {
 				return fauxAssistantMessage("done");
 			},
 		]);
-		const { harness } = createHarness(registration, { session, tools: [calculateTool] });
+		const { harness } = createHarness(registration, { session });
+		await harness.setTools([calculateTool], [calculateTool.name]);
 
-		await expect(harness.runPrompt("continue after naming")).resolves.toMatchObject({ status: "completed" });
+		await expect(runPrompt(harness, "continue after naming")).resolves.toMatchObject({ status: "completed" });
 
 		expect(registration.state.callCount).toBe(2);
 		expect(requestRoles).toEqual([["user"], ["user", "assistant", "toolResult"]]);
 		expect((await session.getBranch()).map((entry) => entry.type)).toEqual([
+			"active_tools_change",
 			"message",
 			"session_info",
 			"message",
@@ -198,9 +193,10 @@ describe("AgentHarness continuation state", () => {
 			},
 			fauxAssistantMessage("must not run"),
 		]);
-		const { harness } = createHarness(registration, { session, tools: [calculateTool] });
+		const { harness } = createHarness(registration, { session });
+		await harness.setTools([calculateTool], [calculateTool.name]);
 
-		const response = await harness.prompt("reject external context");
+		const response = await prompt(harness, "reject external context");
 
 		expect(response).toMatchObject({ stopReason: "stop" });
 		expect(registration.state.callCount).toBe(2);
@@ -271,7 +267,8 @@ describe("AgentHarness continuation state", () => {
 				return fauxAssistantMessage("done");
 			},
 		]);
-		const { harness } = createHarness(registration, { session, tools: [calculateTool] });
+		const { harness } = createHarness(registration, { session });
+		await harness.setTools([calculateTool], [calculateTool.name]);
 
 		await expect(harness.continue({ context: [canonicalUser] })).resolves.toMatchObject({ status: "completed" });
 
@@ -333,7 +330,7 @@ describe("AgentHarness continuation state", () => {
 			},
 		}).harness;
 
-		await harness.runPrompt("use current configuration");
+		await runPrompt(harness, "use current configuration");
 
 		expect(captured).toEqual([{ modelId: "second", reasoning: "high", tools: ["calculate"] }]);
 	});
@@ -355,7 +352,8 @@ describe("AgentHarness continuation state", () => {
 				return fauxAssistantMessage("final answer");
 			},
 		]);
-		const { harness } = createHarness(registration, { tools: [calculateTool] });
+		const { harness } = createHarness(registration);
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		harness.on("tool_result", () => ({ disposition: "final_response" }));
 		let finalDecisions = 0;
 		harness.on("next_action", (event) => {
@@ -364,7 +362,7 @@ describe("AgentHarness continuation state", () => {
 			return finalDecisions === 1 ? { type: "pause" } : { type: "stop" };
 		});
 
-		await expect(harness.runPrompt("finish the work")).resolves.toMatchObject({ status: "completed" });
+		await expect(runPrompt(harness, "finish the work")).resolves.toMatchObject({ status: "completed" });
 		expect(registration.state.callCount).toBe(1);
 		await expect(harness.continue()).resolves.toMatchObject({ status: "completed" });
 
@@ -401,10 +399,11 @@ describe("AgentHarness continuation state", () => {
 				return fauxAssistantMessage("recovered final");
 			},
 		]);
-		const { harness } = createHarness(registration, { tools: [calculateTool] });
+		const { harness } = createHarness(registration);
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		harness.on("tool_result", () => ({ disposition: "final_response" }));
 
-		await expect(harness.runPrompt("finish despite retry")).resolves.toMatchObject({ status: "completed" });
+		await expect(runPrompt(harness, "finish despite retry")).resolves.toMatchObject({ status: "completed" });
 		await harness.rebaseContinuationContext({
 			source: "retry",
 			project: (messages) =>
@@ -426,7 +425,6 @@ describe("AgentHarness continuation state", () => {
 			const session = new Session(new InMemorySessionStorage());
 			await session.appendMessage(fauxAssistantMessage("already complete"));
 			const harness = new AgentHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session,
 				...(model === undefined ? {} : { model }),
 				systemPrompt: () => {
