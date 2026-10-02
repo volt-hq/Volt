@@ -685,7 +685,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "error",
-			errorMessage: "prompt is too long",
+			error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
 			timestamp: Date.now(),
 		};
 
@@ -818,7 +818,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "error",
-			errorMessage: "529 overloaded",
+			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now() + 1000,
 		};
 
@@ -875,7 +875,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "error",
-			errorMessage: "529 overloaded",
+			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now(),
 		};
 
@@ -955,7 +955,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "error",
-			errorMessage: "529 overloaded",
+			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now(),
 		};
 

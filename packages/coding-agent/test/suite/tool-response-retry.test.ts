@@ -1,5 +1,5 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { type FauxResponseFactory, fauxAssistantMessage, fauxToolCall, type ProviderError } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantStreamNormalizer } from "../../../ai/src/stream/normalizer.ts";
@@ -11,7 +11,9 @@ import {
 import { SubagentManager } from "../../src/core/subagents/index.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
-function interruptedResponse(errorMessage = "WebSocket error"): FauxResponseFactory {
+function interruptedResponse(
+	error: ProviderError = { kind: "network", retryable: true, message: "WebSocket error" },
+): FauxResponseFactory {
 	return async (_context, _options, _state, model) => {
 		const normalizer = new AssistantStreamNormalizer();
 		normalizer.push({
@@ -24,7 +26,7 @@ function interruptedResponse(errorMessage = "WebSocket error"): FauxResponseFact
 		normalizer.push({ type: "toolcall_end", contentIndex: 0 });
 		normalizer.push({ type: "toolcall_start", contentIndex: 1, id: "failed-partial", name: "echo" });
 		normalizer.push({ type: "toolcall_delta", contentIndex: 1, argsTextDelta: '{"text":"unfinished' });
-		normalizer.push({ type: "error", reason: "error", errorMessage });
+		normalizer.push({ type: "error", reason: "error", error });
 		normalizer.end();
 		return normalizer.stream.result();
 	};
@@ -58,16 +60,20 @@ describe("tool response transport recovery", () => {
 		return { harness, execute };
 	}
 
-	it.each(["WebSocket error", "fetch failed", "HTTP status 503: connection timeout"])(
+	it.each([
+		["WebSocket error", "network"],
+		["fetch failed", "network"],
+		["HTTP status 503: connection timeout", "overloaded"],
+	] as const)(
 		"retries %s without replaying successful tools or sending the failed response",
-		async (errorMessage) => {
+		async (errorMessage, kind) => {
 			const { harness, execute } = await setup();
 			const sessionId = harness.session.sessionId;
 			harness.setResponses([
 				fauxAssistantMessage(fauxToolCall("echo", { text: "previous result" }, { id: "previous" }), {
 					stopReason: "toolUse",
 				}),
-				interruptedResponse(errorMessage),
+				interruptedResponse({ kind, retryable: true, message: errorMessage }),
 				(context, options) => {
 					expect(options?.sessionId).toBe(sessionId);
 					expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant", "toolResult"]);
@@ -89,7 +95,12 @@ describe("tool response transport recovery", () => {
 			expect(harness.eventsOfType("auto_retry_end")).toMatchObject([{ success: true }]);
 			expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 			expect(harness.sessionManager.getEntries()).toContainEqual(
-				expect.objectContaining({ message: expect.objectContaining({ stopReason: "error", errorMessage }) }),
+				expect.objectContaining({
+					message: expect.objectContaining({
+						stopReason: "error",
+						error: { kind, retryable: true, message: errorMessage },
+					}),
+				}),
 			);
 			expect(harness.session.messages.at(-1)).toMatchObject({ stopReason: "stop" });
 		},
@@ -119,17 +130,22 @@ describe("tool response transport recovery", () => {
 		expect(harness.eventsOfType("agent_settled")).toHaveLength(1);
 	});
 
-	it.each(["invalid_api_key", "insufficient_quota", "HTTP status 400: bad request", "An unknown error occurred"])(
-		"does not retry a non-transient provider failure: %s",
-		async (errorMessage) => {
-			const { harness, execute } = await setup();
-			harness.setResponses([interruptedResponse(errorMessage), fauxAssistantMessage("unused")]);
-			await harness.session.prompt("finish the review");
-			expect(execute).not.toHaveBeenCalled();
-			expect(harness.faux.state.callCount).toBe(1);
-			expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
-		},
-	);
+	it.each([
+		["invalid_api_key", "auth"],
+		["insufficient_quota", "quota"],
+		["HTTP status 400: bad request", "invalid_request"],
+		["An unknown error occurred", "unknown"],
+	] as const)("does not retry a non-transient provider failure: %s", async (errorMessage, kind) => {
+		const { harness, execute } = await setup();
+		harness.setResponses([
+			interruptedResponse({ kind, retryable: false, message: errorMessage }),
+			fauxAssistantMessage("unused"),
+		]);
+		await harness.session.prompt("finish the review");
+		expect(execute).not.toHaveBeenCalled();
+		expect(harness.faux.state.callCount).toBe(1);
+		expect(harness.eventsOfType("auto_retry_start")).toHaveLength(0);
+	});
 
 	it.each([
 		{ label: "tool_argument_generation_limit", types: ["tool_argument_generation_limit"] },

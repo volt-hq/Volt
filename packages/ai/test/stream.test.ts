@@ -59,7 +59,7 @@ async function basicTextGeneration<TApi extends Api>(model: Model<TApi>, options
 	expect(response.content).toBeTruthy();
 	expect(response.usage.input + response.usage.cacheRead).toBeGreaterThan(0);
 	expect(response.usage.output).toBeGreaterThan(0);
-	expect(response.errorMessage).toBeFalsy();
+	expect(response.error?.message).toBeFalsy();
 	expect(response.content.map((b) => (b.type === "text" ? b.text : "")).join("")).toContain("Hello test successful");
 
 	context.messages.push(response);
@@ -71,7 +71,7 @@ async function basicTextGeneration<TApi extends Api>(model: Model<TApi>, options
 	expect(secondResponse.content).toBeTruthy();
 	expect(secondResponse.usage.input + secondResponse.usage.cacheRead).toBeGreaterThan(0);
 	expect(secondResponse.usage.output).toBeGreaterThan(0);
-	expect(secondResponse.errorMessage).toBeFalsy();
+	expect(secondResponse.error?.message).toBeFalsy();
 	expect(secondResponse.content.map((b) => (b.type === "text" ? b.text : "")).join("")).toContain(
 		"Goodbye test successful",
 	);
@@ -215,7 +215,7 @@ async function handleThinking<TApi extends Api>(model: Model<TApi>, options?: St
 
 	const response = await s.result();
 
-	expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("stop");
+	expect(response.stopReason, `Error: ${response.error?.message}`).toBe("stop");
 	expect(thinkingStarted).toBe(true);
 	expect(thinkingChunks.length).toBeGreaterThan(0);
 	expect(thinkingCompleted).toBe(true);
@@ -339,7 +339,7 @@ async function multiTurn<TApi extends Api>(model: Model<TApi>, options?: StreamO
 		context.messages.push(...results);
 
 		// If we got a stop response with text content, we're likely done
-		expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
+		expect(response.stopReason, `Error: ${response.error?.message}`).not.toBe("error");
 		if (response.stopReason === "stop") {
 			break;
 		}
@@ -1464,7 +1464,7 @@ describe("Generate E2E Tests", () => {
 				},
 			);
 
-			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
+			expect(response.stopReason, `Error: ${response.error?.message}`).not.toBe("error");
 			expect(capturedPayload).toBeTruthy();
 
 			const payload = capturedPayload as {
@@ -1506,7 +1506,7 @@ describe("Generate E2E Tests", () => {
 				},
 			);
 
-			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
+			expect(response.stopReason, `Error: ${response.error?.message}`).not.toBe("error");
 			expect(capturedPayload).toBeTruthy();
 			expect((capturedPayload as { requestMetadata?: unknown }).requestMetadata).toEqual(metadata);
 		});
@@ -1532,7 +1532,7 @@ describe("Generate E2E Tests", () => {
 				},
 			);
 
-			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
+			expect(response.stopReason, `Error: ${response.error?.message}`).not.toBe("error");
 			expect(capturedPayload).toBeTruthy();
 			expect("requestMetadata" in (capturedPayload as object)).toBe(false);
 		});

@@ -110,7 +110,7 @@ describe("Codex SSE terminal normalization", () => {
 
 		expect(events.at(-1)?.type).toBe("error");
 		expect(message.stopReason).toBe("error");
-		expect(message.errorMessage).toBe("Codex stream ended before response.completed");
+		expect(message.error?.message).toBe("Codex stream ended before response.completed");
 		expect(message.content).toContainEqual(expect.objectContaining({ type: "text", text: "partial" }));
 	});
 
@@ -145,7 +145,7 @@ describe("Codex SSE terminal normalization", () => {
 		]);
 
 		expect(events.at(-1)?.type).toBe("error");
-		expect(message.errorMessage).toBe("provider failed");
+		expect(message.error?.message).toBe("provider failed");
 	});
 
 	it("preserves explicit protocol error events", async () => {
@@ -154,6 +154,6 @@ describe("Codex SSE terminal normalization", () => {
 		]);
 
 		expect(events.at(-1)?.type).toBe("error");
-		expect(message.errorMessage).toBe("Codex error: invalid request");
+		expect(message.error?.message).toBe("Codex error: invalid request");
 	});
 });

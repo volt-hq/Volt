@@ -19,7 +19,10 @@ describe("issue #3317 network connection lost retry", () => {
 		});
 		harnesses.push(harness);
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "Network connection lost." }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "network", retryable: true, message: "Network connection lost." },
+			}),
 			fauxAssistantMessage("recovered after reconnect"),
 		]);
 

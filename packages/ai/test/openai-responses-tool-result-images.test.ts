@@ -73,7 +73,7 @@ async function verifyToolResultImagesStayInFunctionCallOutput<TApi extends Api>(
 	};
 
 	const firstResponse = await complete(model, context, options);
-	expect(firstResponse.stopReason, `Error: ${firstResponse.errorMessage}`).toBe("toolUse");
+	expect(firstResponse.stopReason, `Error: ${firstResponse.error?.message}`).toBe("toolUse");
 
 	const toolCall = firstResponse.content.find((block) => block.type === "toolCall");
 	expect(toolCall).toBeTruthy();
@@ -102,8 +102,8 @@ async function verifyToolResultImagesStayInFunctionCallOutput<TApi extends Api>(
 		},
 	});
 
-	expect(secondResponse.stopReason, `Error: ${secondResponse.errorMessage}`).toBe("stop");
-	expect(secondResponse.errorMessage).toBeFalsy();
+	expect(secondResponse.stopReason, `Error: ${secondResponse.error?.message}`).toBe("stop");
+	expect(secondResponse.error?.message).toBeFalsy();
 
 	expect(isResponsePayload(capturedPayload)).toBe(true);
 	if (!isResponsePayload(capturedPayload)) {

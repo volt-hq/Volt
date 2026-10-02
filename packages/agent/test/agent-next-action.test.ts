@@ -580,7 +580,7 @@ describe("agent loop next-action protocol", () => {
 			content: [{ type: "text", text: "" }],
 			model: "mock",
 			stopReason: "aborted",
-			errorMessage: "Request was aborted",
+			error: { kind: "aborted", retryable: false, message: "Request was aborted" },
 		});
 		expect(events.at(-1)).toEqual({ type: "agent_end", messages });
 	});
@@ -639,7 +639,7 @@ describe("agent loop next-action protocol", () => {
 					return {
 						...event.message,
 						content: [{ type: "text", text: "rewritten abort" }],
-						errorMessage: "rewritten abort error",
+						error: { kind: "aborted" as const, retryable: false, message: "rewritten abort error" },
 					};
 				}
 				return undefined;
@@ -680,7 +680,7 @@ describe("agent loop next-action protocol", () => {
 			provider: activeModel.provider,
 			model: activeModel.id,
 			stopReason: "aborted",
-			errorMessage: "rewritten abort error",
+			error: { kind: "aborted", message: "rewritten abort error" },
 		});
 		expect(preparedContext?.messages).toEqual(messages);
 		expect(events.at(-1)).toEqual({ type: "agent_end", messages });
@@ -739,7 +739,7 @@ describe("agent loop next-action protocol", () => {
 					return {
 						...event.message,
 						content: [{ type: "text", text: "rewritten abort" }],
-						errorMessage: "rewritten abort error",
+						error: { kind: "aborted" as const, retryable: false, message: "rewritten abort error" },
 					};
 				}
 				return undefined;
@@ -784,7 +784,7 @@ describe("agent loop next-action protocol", () => {
 				provider: activeModel.provider,
 				model: activeModel.id,
 				stopReason: "aborted",
-				errorMessage: "Request was aborted",
+				error: { kind: "aborted", retryable: false, message: "Request was aborted" },
 				usage: {
 					input: 0,
 					output: 0,
@@ -803,7 +803,7 @@ describe("agent loop next-action protocol", () => {
 			provider: activeModel.provider,
 			model: activeModel.id,
 			stopReason: "aborted",
-			errorMessage: "rewritten abort error",
+			error: { kind: "aborted", message: "rewritten abort error" },
 			usage: {
 				input: 0,
 				output: 0,

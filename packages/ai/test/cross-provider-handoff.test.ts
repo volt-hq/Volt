@@ -250,10 +250,10 @@ async function generateContext(
 	}
 
 	if (assistantResponse.stopReason === "error") {
-		console.log(`  Initial request error: ${assistantResponse.errorMessage}`);
+		console.log(`  Initial request error: ${assistantResponse.error?.message}`);
 		dumpFailurePayload({
 			label: `${pair.label}-initial`,
-			error: assistantResponse.errorMessage || "Unknown error",
+			error: assistantResponse.error?.message || "Unknown error",
 			payload: lastPayload,
 			messages: [userMessage],
 		});
@@ -312,10 +312,10 @@ async function generateContext(
 	}
 
 	if (finalResponse.stopReason === "error") {
-		console.log(`  Final request error: ${finalResponse.errorMessage}`);
+		console.log(`  Final request error: ${finalResponse.error?.message}`);
 		dumpFailurePayload({
 			label: `${pair.label}-final`,
-			error: finalResponse.errorMessage || "Unknown error",
+			error: finalResponse.error?.message || "Unknown error",
 			payload: lastPayload,
 			messages: messagesForFinal,
 		});
@@ -454,14 +454,14 @@ describe.skipIf(!hasAnyApiKey())("Cross-Provider Handoff", () => {
 					);
 
 					if (response.stopReason === "error") {
-						console.log(`[Target: ${targetPair.label}] FAILED: ${response.errorMessage}`);
+						console.log(`[Target: ${targetPair.label}] FAILED: ${response.error?.message}`);
 						dumpFailurePayload({
 							label: targetPair.label,
-							error: response.errorMessage || "Unknown error",
+							error: response.error?.message || "Unknown error",
 							payload: lastPayload,
 							messages: allMessages,
 						});
-						results.push({ target: targetPair.label, success: false, error: response.errorMessage });
+						results.push({ target: targetPair.label, success: false, error: response.error?.message });
 					} else {
 						const text = response.content
 							.filter((c) => c.type === "text")

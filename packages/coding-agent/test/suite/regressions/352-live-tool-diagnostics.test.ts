@@ -98,7 +98,14 @@ describe("regression #352: active debug capture", () => {
 			{
 				...fauxAssistantMessage(
 					fauxToolCall("edit", { path: "never.ts", newText: "not applied" }, { id: "guarded" }),
-					{ stopReason: "error", errorMessage: "Tool argument safeguard stopped generation" },
+					{
+						stopReason: "error",
+						error: {
+							kind: "stream_limit",
+							retryable: false,
+							message: "Tool argument safeguard stopped generation",
+						},
+					},
 				),
 				diagnostics: [
 					{

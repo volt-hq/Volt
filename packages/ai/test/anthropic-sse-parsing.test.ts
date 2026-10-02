@@ -199,6 +199,7 @@ describe("Anthropic raw SSE parsing", () => {
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("error");
+		expect(result.error).toMatchObject({ kind: "invalid_tool_call", retryable: false });
 		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
 	});
 
@@ -218,7 +219,7 @@ describe("Anthropic raw SSE parsing", () => {
 			{ client: createFakeAnthropicClient(response) },
 		).result();
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).not.toContain("sensitive");
+		expect(result.error?.message).not.toContain("sensitive");
 		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
 	});
 
@@ -300,7 +301,12 @@ describe("Anthropic raw SSE parsing", () => {
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe(explanation);
+		expect(result.error).toEqual({
+			kind: "refusal",
+			retryable: false,
+			providerCode: "refusal",
+			message: explanation,
+		});
 	});
 
 	it("ignores unknown SSE events after message_stop", async () => {
@@ -320,7 +326,38 @@ describe("Anthropic raw SSE parsing", () => {
 		const result = await stream.result();
 
 		expect(result.stopReason).toBe("stop");
-		expect(result.errorMessage).toBeUndefined();
+		expect(result.error?.message).toBeUndefined();
 		expect(result.content).toEqual([{ type: "text", text: "Hello" }]);
+	});
+	it.each([
+		["overloaded_error", "overloaded", true],
+		["rate_limit_error", "rate_limit", true],
+		["invalid_request_error", "invalid_request", false],
+	] as const)("classifies a mid-stream %s error event", async (type, kind, retryable) => {
+		const data = JSON.stringify({ type: "error", error: { type, message: "upstream says no" } });
+		const response = createSseResponse([minimalAnthropicEvents[0], { event: "error", data }]);
+		const result = await streamAnthropic(
+			getModel("anthropic", "claude-haiku-4-5"),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{ client: createFakeAnthropicClient(response) },
+		).result();
+		expect(result).toMatchObject({
+			stopReason: "error",
+			error: { kind, retryable, providerCode: type, message: data },
+		});
+	});
+
+	it("classifies a stream that ends before message_stop as a retryable network failure", async () => {
+		const response = createSseResponse(minimalAnthropicEvents.slice(0, 3));
+		const result = await streamAnthropic(
+			getModel("anthropic", "claude-haiku-4-5"),
+			{ messages: [{ role: "user", content: "hi", timestamp: 0 }] },
+			{ client: createFakeAnthropicClient(response) },
+		).result();
+		expect(result.error).toEqual({
+			kind: "network",
+			retryable: true,
+			message: "Anthropic stream ended before message_stop",
+		});
 	});
 });

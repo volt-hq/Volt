@@ -88,7 +88,7 @@ async function assertSecondToolCallWithInterleavedThinking<TApi extends Api>(
 
 	const firstResponse = await completeSimple(llm, context, { reasoning });
 
-	expect(firstResponse.stopReason, `Error: ${firstResponse.errorMessage}`).toBe("toolUse" satisfies StopReason);
+	expect(firstResponse.stopReason, `Error: ${firstResponse.error?.message}`).toBe("toolUse" satisfies StopReason);
 	expect(firstResponse.content.some((block) => block.type === "thinking")).toBe(true);
 	expect(firstResponse.content.some((block) => block.type === "toolCall")).toBe(true);
 
@@ -113,7 +113,7 @@ async function assertSecondToolCallWithInterleavedThinking<TApi extends Api>(
 
 	const secondResponse = await completeSimple(llm, context, { reasoning });
 
-	expect(secondResponse.stopReason, `Error: ${secondResponse.errorMessage}`).toBe("stop" satisfies StopReason);
+	expect(secondResponse.stopReason, `Error: ${secondResponse.error?.message}`).toBe("stop" satisfies StopReason);
 	expect(secondResponse.content.some((block) => block.type === "thinking")).toBe(true);
 	expect(secondResponse.content.some((block) => block.type === "text")).toBe(true);
 }

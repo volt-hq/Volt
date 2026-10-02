@@ -2,8 +2,10 @@ import {
 	type AssistantMessage,
 	type AssistantMessageDiagnostic,
 	type Context,
+	classifyProviderError,
 	createAssistantMessageDiagnostic,
 	createAssistantMessageEventStream,
+	createProviderError,
 	type JsonValue,
 	type Message,
 	type Model,
@@ -155,7 +157,9 @@ function createFailureMessage(model: Model<any>, error: unknown, aborted: boolea
 		provider: model.provider,
 		model: model.id,
 		stopReason: aborted ? "aborted" : "error",
-		errorMessage: error instanceof Error ? error.message : String(error),
+		error: aborted
+			? createProviderError("aborted", error instanceof Error ? error.message : String(error))
+			: classifyProviderError(error),
 		timestamp: Date.now(),
 		usage: {
 			input: 0,

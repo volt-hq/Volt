@@ -407,7 +407,12 @@ describe("project producer transition table", () => {
 		const events: AssistantMessageEvent[] = [
 			{ type: "start", seq: 0, snapshot: message, toolState: [] },
 			{ type: "done", seq: 1, reason: "stop", message },
-			{ type: "error", seq: 1, reason: "error", error: { ...message, stopReason: "error", errorMessage: "x" } },
+			{
+				type: "error",
+				seq: 1,
+				reason: "error",
+				error: { ...message, stopReason: "error", error: { kind: "unknown", retryable: false, message: "x" } },
+			},
 		];
 		for (const event of events) {
 			const result = project(state, { kind: "event", event });
@@ -1006,7 +1011,7 @@ describe("sanitizer-mode projection", () => {
 			{ type: "toolcall_delta", contentIndex: 1, argsTextDelta: argsText.slice(0, splitAt) },
 			{ type: "toolcall_delta", contentIndex: 1, argsTextDelta: argsText.slice(splitAt) },
 			{ type: "toolcall_end", contentIndex: 1, toolCall: toolCall("opaque-id", "read", args) },
-			{ type: "error", reason: "error", errorMessage: `failed at ${path}` },
+			{ type: "error", reason: "error", error: { kind: "unknown", retryable: false, message: `failed at ${path}` } },
 		]);
 
 		const projector = new StreamProjector({ sanitizer: testSanitizer }, "idle");
@@ -1173,7 +1178,7 @@ function generatedTurnFragments(value: GeneratedTurn): AssistantStreamFragment[]
 			: {
 					type: "error",
 					reason: "aborted",
-					errorMessage: "generated abort",
+					error: { kind: "aborted", retryable: false, message: "generated abort" },
 				},
 	);
 	return fragments;
@@ -1322,7 +1327,7 @@ describe("stateful projection properties", () => {
 						{
 							type: "error",
 							reason: "error",
-							errorMessage: `failed at ${path}`,
+							error: { kind: "unknown", retryable: false, message: `failed at ${path}` },
 							diagnostics: [
 								{
 									type: "generated_terminal",
@@ -1438,7 +1443,11 @@ describe("stateful projection properties", () => {
 							{ type: "text_delta", contentIndex: 0, delta: text },
 							{ type: "text_end", contentIndex: 0, content: text },
 							runIndex % 2 === 0
-								? { type: "error", reason: "aborted", errorMessage: "abort then continue" }
+								? {
+										type: "error",
+										reason: "aborted",
+										error: { kind: "aborted", retryable: false, message: "abort then continue" },
+									}
 								: { type: "done", reason: "stop" },
 						]);
 						let terminal: AssistantMessage | undefined;

@@ -538,9 +538,13 @@ describe("AgentHarness", () => {
 		const entries = await session.getEntries();
 		const messages = entries.flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
 		expect(response.stopReason).toBe("error");
-		expect(response.errorMessage).toBe("context exploded");
+		expect(response.error?.message).toBe("context exploded");
 		expect(messages[0]?.role).toBe("user");
-		expect(messages[1]).toMatchObject({ role: "assistant", stopReason: "error", errorMessage: "context exploded" });
+		expect(messages[1]).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			error: { kind: "unknown", message: "context exploded" },
+		});
 		expect(events).toContain("agent_end");
 		expect(events).toContain("settled");
 	});

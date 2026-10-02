@@ -475,7 +475,7 @@ describe("prepareCompaction context budget", () => {
 		const overflow = createMessageEntry({
 			...createAssistantMessage("", createMockUsage(0, 0)),
 			stopReason: "error",
-			errorMessage: "prompt is too long",
+			error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
 		});
 		const settings: CompactionSettings = {
 			...DEFAULT_COMPACTION_SETTINGS,

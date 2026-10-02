@@ -23,8 +23,8 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("openai responses cache affinity e2
 			sessionId,
 		});
 
-		expect(response.stopReason, response.errorMessage).not.toBe("error");
-		expect(response.errorMessage).toBeUndefined();
+		expect(response.stopReason, response.error?.message).not.toBe("error");
+		expect(response.error?.message).toBeUndefined();
 		expect(response.content.map((block) => (block.type === "text" ? block.text : "")).join("")).toContain(
 			"openai cache affinity e2e success",
 		);

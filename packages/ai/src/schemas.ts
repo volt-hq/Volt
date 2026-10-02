@@ -1,6 +1,6 @@
 /**
  * Runtime schemas for the ai data model: messages, content blocks, usage, stop
- * reasons, assistant diagnostics, stream tool state, and model metadata. Every
+ * reasons, provider errors, assistant diagnostics, stream tool state, and model metadata. Every
  * object schema is closed. The hand-written types are pinned to these schemas
  * by the exact-equality assertions at the end of this module, so changing a
  * type fails typecheck until its schema follows (and the version is bumped).
@@ -15,6 +15,8 @@ import type {
 	KnownApi,
 	Message,
 	Model,
+	ProviderError,
+	ProviderErrorKind,
 	StopReason,
 	TextContent,
 	ThinkingContent,
@@ -28,7 +30,7 @@ import type { JsonObject } from "./utils/json-value.ts";
 import { StringEnum } from "./utils/typebox-helpers.ts";
 
 /** Version of the schemas in this module. Bump it whenever any of them changes shape. */
-export const AI_SCHEMA_VERSION = 1;
+export const AI_SCHEMA_VERSION = 2;
 
 const KNOWN_APIS = [
 	"openai-completions",
@@ -155,6 +157,33 @@ export const AssistantMessageDiagnosticSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export const ProviderErrorKindSchema = StringEnum([
+	"rate_limit",
+	"overloaded",
+	"server",
+	"network",
+	"timeout",
+	"quota",
+	"auth",
+	"invalid_request",
+	"context_overflow",
+	"refusal",
+	"invalid_tool_call",
+	"stream_limit",
+	"aborted",
+	"unknown",
+] as const);
+
+export const ProviderErrorSchema = Type.Object(
+	{
+		kind: ProviderErrorKindSchema,
+		retryable: Type.Boolean(),
+		providerCode: Type.Optional(Type.String()),
+		message: Type.String(),
+	},
+	{ additionalProperties: false },
+);
+
 // ============================================================================
 // Messages
 // ============================================================================
@@ -181,7 +210,7 @@ export const AssistantMessageSchema = Type.Object(
 		diagnostics: Type.Optional(Type.Array(AssistantMessageDiagnosticSchema)),
 		usage: UsageSchema,
 		stopReason: StopReasonSchema,
-		errorMessage: Type.Optional(Type.String()),
+		error: Type.Optional(ProviderErrorSchema),
 		timestamp: Type.Number(),
 	},
 	{ additionalProperties: false },
@@ -301,6 +330,8 @@ type _imageContent = Assert<Equals<Static<typeof ImageContentSchema>, ImageConte
 type _toolCall = Assert<Equals<Static<typeof ToolCallSchema>, ToolCall>>;
 type _assistantContent = Assert<Equals<Static<typeof AssistantContentSchema>, AssistantMessage["content"][number]>>;
 type _usage = Assert<Equals<Static<typeof UsageSchema>, Usage>>;
+type _providerErrorKind = Assert<Equals<Static<typeof ProviderErrorKindSchema>, ProviderErrorKind>>;
+type _providerError = Assert<Equals<Static<typeof ProviderErrorSchema>, ProviderError>>;
 type _diagnosticErrorInfo = Assert<Equals<Static<typeof DiagnosticErrorInfoSchema>, DiagnosticErrorInfo>>;
 type _assistantMessageDiagnostic = Assert<
 	Equals<Static<typeof AssistantMessageDiagnosticSchema>, AssistantMessageDiagnostic>

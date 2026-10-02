@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import type { AssistantStreamFragment } from "../src/stream/fragments.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
+import { createProviderError } from "../src/stream/provider-errors.ts";
 import { parseStreamingJson } from "../src/utils/json-parse.ts";
 import { streamResponsesEvents } from "./responses-stream.ts";
 
@@ -73,7 +74,11 @@ describe("strict tool argument completion", () => {
 		]);
 		expect(result).toMatchObject({
 			stopReason: "error",
-			errorMessage: `Tool arguments contained ${cause} inside a JSON string; encode it as ${encoded}. No tools were executed.`,
+			error: {
+				kind: "invalid_tool_call",
+				retryable: false,
+				message: `Tool arguments contained ${cause} inside a JSON string; encode it as ${encoded}. No tools were executed.`,
+			},
 		});
 		expect(result.diagnostics).toContainEqual(
 			expect.objectContaining({
@@ -81,7 +86,7 @@ describe("strict tool argument completion", () => {
 				details: { code: "invalid_json", contentIndex: 0, reason: "unescaped_control_character", codePoint },
 			}),
 		);
-		expect(`${result.errorMessage} ${JSON.stringify(result.diagnostics)}`).not.toContain("private");
+		expect(`${result.error?.message} ${JSON.stringify(result.diagnostics)}`).not.toContain("private");
 	});
 
 	it("admits escaped tabs inside JSON strings", async () => {
@@ -112,11 +117,16 @@ describe("strict tool argument completion", () => {
 		const { events, result } = await normalize([
 			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: completed ? '{"text":"done"}' : '{"text":"partial' },
 			...(completed ? [{ type: "toolcall_end" as const, contentIndex: 0 }] : []),
-			{ type: "error", reason: "error", errorMessage: "WebSocket error", diagnostics: [diagnostic] },
+			{
+				type: "error",
+				reason: "error",
+				error: createProviderError("network", "WebSocket error"),
+				diagnostics: [diagnostic],
+			},
 		]);
 		expect(result).toMatchObject({
 			stopReason: "error",
-			errorMessage: "WebSocket error",
+			error: { kind: "network", retryable: true, message: "WebSocket error" },
 			diagnostics: [diagnostic],
 		});
 		expect(events.at(-1)?.type).toBe("error");
@@ -127,11 +137,14 @@ describe("strict tool argument completion", () => {
 		const { result } = await normalize([
 			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"text":"unfinished' },
 			{ type: "toolcall_end", contentIndex: 0 },
-			{ type: "error", reason: "error", errorMessage: "WebSocket error" },
+			{ type: "error", reason: "error", error: createProviderError("network", "WebSocket error") },
 		]);
 		expect(result).toMatchObject({
 			stopReason: "error",
-			errorMessage: "Tool arguments must be a complete, valid JSON object. No tools were executed.",
+			error: {
+				kind: "invalid_tool_call",
+				message: "Tool arguments must be a complete, valid JSON object. No tools were executed.",
+			},
 		});
 		expect(result.diagnostics).toContainEqual(
 			expect.objectContaining({

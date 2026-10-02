@@ -182,7 +182,7 @@ describe("generateSummary reasoning options", () => {
 			.mockResolvedValueOnce({
 				...mockSummaryResponse,
 				stopReason: "error",
-				errorMessage: "server is overloaded request-id=req_retry",
+				error: { kind: "overloaded", retryable: true, message: "server is overloaded request-id=req_retry" },
 			})
 			.mockResolvedValueOnce(mockSummaryResponse);
 
@@ -208,7 +208,7 @@ describe("generateSummary reasoning options", () => {
 		completeSimpleMock.mockResolvedValue({
 			...mockSummaryResponse,
 			stopReason: "error",
-			errorMessage: "insufficient_quota",
+			error: { kind: "quota", retryable: false, message: "insufficient_quota" },
 		});
 
 		await expect(
@@ -231,15 +231,15 @@ describe("generateSummary reasoning options", () => {
 	});
 
 	it.each([
-		"server error: Your input exceeds the context window of this model",
-		"maximum context is 128000; requested 150000 tokens",
-		"request too large for 1050000 context window",
-		"invalid value: 5000",
-	])("does not retry deterministic summarization failure: %s", async (errorMessage) => {
+		["server error: Your input exceeds the context window of this model", "context_overflow"],
+		["maximum context is 128000; requested 150000 tokens", "context_overflow"],
+		["request too large for 1050000 context window", "context_overflow"],
+		["invalid value: 5000", "invalid_request"],
+	] as const)("does not retry deterministic summarization failure: %s", async (errorMessage, kind) => {
 		completeSimpleMock.mockResolvedValue({
 			...mockSummaryResponse,
 			stopReason: "error",
-			errorMessage,
+			error: { kind, retryable: false, message: errorMessage },
 		});
 
 		await expect(
@@ -267,7 +267,7 @@ describe("generateSummary reasoning options", () => {
 		completeSimpleMock.mockResolvedValue({
 			...mockSummaryResponse,
 			stopReason: "error",
-			errorMessage: "service unavailable",
+			error: { kind: "overloaded", retryable: true, message: "service unavailable" },
 		});
 
 		const summary = generateSummary(
@@ -383,7 +383,7 @@ describe("generateSummary reasoning options", () => {
 					return {
 						...mockSummaryResponse,
 						stopReason: "error",
-						errorMessage: "service unavailable",
+						error: { kind: "overloaded", retryable: true, message: "service unavailable" },
 					};
 				}
 				return { ...mockSummaryResponse, content: [{ type: "text", text: "prefix recovered" }] };
@@ -422,7 +422,11 @@ describe("generateSummary reasoning options", () => {
 		const prompts: string[] = [];
 		completeSimpleMock.mockImplementation(async (_model, context) => {
 			prompts.push(context.messages[0].content[0].text as string);
-			return { ...mockSummaryResponse, stopReason: "error", errorMessage: "insufficient_quota" };
+			return {
+				...mockSummaryResponse,
+				stopReason: "error",
+				error: { kind: "quota", retryable: false, message: "insufficient_quota" },
+			};
 		});
 
 		await expect(

@@ -7,7 +7,12 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, Context, JsonValue, Model, SimpleStreamOptions, Tool, Usage } from "@hansjm10/volt-ai";
-import { completeSimple, drainEventStream, estimateToolDefinitionTokens, isContextOverflow } from "@hansjm10/volt-ai";
+import {
+	classifyProviderError,
+	completeSimple,
+	drainEventStream,
+	estimateToolDefinitionTokens,
+} from "@hansjm10/volt-ai";
 import { sleep } from "../../utils/sleep.ts";
 import {
 	convertToLlm,
@@ -15,7 +20,6 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import { isTransientProviderError } from "../provider-errors.ts";
 import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
 import {
 	computeFileLists,
@@ -634,7 +638,7 @@ async function completeSummarization(
 
 function getSummarizationText(response: AssistantMessage, operation: string): string {
 	if (response.stopReason === "error") {
-		throw new Error(`${operation} failed: ${response.errorMessage || "Unknown error"}`);
+		throw new Error(`${operation} failed: ${response.error?.message || "Unknown error"}`);
 	}
 	if (response.stopReason === "aborted") {
 		const error = new Error(`${operation} cancelled`);
@@ -677,12 +681,12 @@ async function completeSummarizationText(
 				throw createSummarizationAbortError(operation);
 			}
 			const errorMessage = error instanceof Error ? error.message : String(error);
-			const contextOverflow = response !== undefined && isContextOverflow(response, model.contextWindow);
-			if (
-				retryCount >= maxRetries ||
-				contextOverflow ||
-				!isTransientProviderError(errorMessage, response?.diagnostics)
-			) {
+			// Only a failure the provider classified as retryable is worth repeating.
+			const retryable =
+				response === undefined
+					? classifyProviderError(error).retryable
+					: response.stopReason === "error" && response.error?.retryable === true;
+			if (retryCount >= maxRetries || !retryable) {
 				if (retryCount === 0) {
 					throw error;
 				}

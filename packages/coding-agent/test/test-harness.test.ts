@@ -77,7 +77,7 @@ describe("test harness", () => {
 
 	it("error response", async () => {
 		harness = createHarness({
-			responses: [{ error: "something broke" }],
+			responses: [{ error: { kind: "unknown", retryable: false, message: "something broke" } }],
 		});
 
 		await harness.session.prompt("hi");
@@ -85,12 +85,12 @@ describe("test harness", () => {
 		const assistantMessages = harness.session.messages.filter((m): m is AssistantMessage => m.role === "assistant");
 		expect(assistantMessages).toHaveLength(1);
 		expect(assistantMessages[0].stopReason).toBe("error");
-		expect(assistantMessages[0].errorMessage).toBe("something broke");
+		expect(assistantMessages[0].error?.message).toBe("something broke");
 	});
 
 	it("retry on transient error", async () => {
 		harness = createHarness({
-			responses: [{ error: "overloaded_error" }, "recovered"],
+			responses: [{ error: { kind: "overloaded", retryable: true, message: "overloaded_error" } }, "recovered"],
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
 

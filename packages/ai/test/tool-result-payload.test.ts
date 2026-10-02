@@ -88,7 +88,7 @@ async function capture(model: Model<KnownApi>, context: Context) {
 		},
 	}).result();
 	expect(response.stopReason).toBe("error");
-	expect(response.errorMessage).toContain("payload captured before request");
+	expect(response.error?.message).toContain("payload captured before request");
 	expect(payload).toBeDefined();
 	expect(metadata).toBeDefined();
 	return { payload, metadata: metadata! };

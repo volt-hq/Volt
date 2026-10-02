@@ -51,7 +51,7 @@ describe("Amazon Bedrock Models", () => {
 				expect(response.content.length).toBeGreaterThan(0);
 				expect(response.usage.input + response.usage.cacheRead).toBeGreaterThan(0);
 				expect(response.usage.output).toBeGreaterThan(0);
-				expect(response.errorMessage).toBeFalsy();
+				expect(response.error?.message).toBeFalsy();
 
 				const textContent = response.content
 					.filter((b) => b.type === "text")

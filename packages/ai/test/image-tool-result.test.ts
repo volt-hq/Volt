@@ -95,7 +95,7 @@ async function handleToolWithImageResult<TApi extends Api>(model: Model<TApi>, o
 	// Second request - LLM should describe the image from the tool result
 	const secondResponse = await complete(model, context, options);
 	expect(secondResponse.stopReason).toBe("stop");
-	expect(secondResponse.errorMessage).toBeFalsy();
+	expect(secondResponse.error?.message).toBeFalsy();
 
 	// Verify the LLM can see and describe the image
 	const textContent = secondResponse.content.find((b) => b.type === "text");
@@ -191,7 +191,7 @@ async function handleToolWithTextAndImageResult<TApi extends Api>(
 	// Second request - LLM should describe both the text and image from the tool result
 	const secondResponse = await complete(model, context, options);
 	expect(secondResponse.stopReason).toBe("stop");
-	expect(secondResponse.errorMessage).toBeFalsy();
+	expect(secondResponse.error?.message).toBeFalsy();
 
 	// Verify the LLM can see both text and image
 	const textContent = secondResponse.content.find((b) => b.type === "text");

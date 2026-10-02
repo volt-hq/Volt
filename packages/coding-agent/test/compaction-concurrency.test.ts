@@ -140,7 +140,10 @@ describe("split-turn compaction requests", () => {
 		faux.setSimpleResponses([
 			(context) => {
 				record(context);
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "Network connection lost." });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "network", retryable: true, message: "Network connection lost." },
+				});
 			},
 			(context) => {
 				record(context);

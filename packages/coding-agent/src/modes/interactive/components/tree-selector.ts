@@ -780,14 +780,14 @@ class TreeList implements Component {
 					const content = normalize(this.extractContent(msgWithContent.content));
 					result = theme.fg("accent", "user: ") + content;
 				} else if (role === "assistant") {
-					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
+					const msgWithContent = msg as { content?: unknown; stopReason?: string; error?: { message?: string } };
 					const textContent = normalize(this.extractContent(msgWithContent.content));
 					if (textContent) {
 						result = theme.fg("success", "assistant: ") + textContent;
 					} else if (msgWithContent.stopReason === "aborted") {
 						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(aborted)");
-					} else if (msgWithContent.errorMessage) {
-						const errMsg = normalize(msgWithContent.errorMessage).slice(0, 80);
+					} else if (msgWithContent.error?.message) {
+						const errMsg = normalize(msgWithContent.error.message).slice(0, 80);
 						result = theme.fg("success", "assistant: ") + theme.fg("error", errMsg);
 					} else {
 						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(no content)");

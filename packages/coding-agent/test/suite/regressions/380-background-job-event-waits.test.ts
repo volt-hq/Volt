@@ -349,7 +349,9 @@ describe("multi-job presentation and collection", () => {
 					),
 				fauxAssistantMessage(
 					"Received",
-					variant === "model-error" ? { stopReason: "error", errorMessage: "fixture error" } : {},
+					variant === "model-error"
+						? { stopReason: "error", error: { kind: "unknown", retryable: false, message: "fixture error" } }
+						: {},
 				),
 			]);
 			const prompting = harness.session.prompt("Collect the jobs");

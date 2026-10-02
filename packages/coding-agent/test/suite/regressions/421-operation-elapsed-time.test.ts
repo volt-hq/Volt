@@ -143,7 +143,10 @@ describe("#421 operation elapsed timing", () => {
 			harness.setResponses([
 				() =>
 					kind === "overflow"
-						? fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" })
+						? fauxAssistantMessage("", {
+								stopReason: "error",
+								error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+							})
 						: kind === "threshold"
 							? fauxAssistantMessage("", { stopReason: "length", usage: usage(190_000) })
 							: fauxAssistantMessage(fauxToolCall("echo", {}), { stopReason: "toolUse", usage: usage(190_000) }),
@@ -199,7 +202,11 @@ describe("#421 operation elapsed timing", () => {
 			harness.session.subscribe((event) => {
 				if (event.type === "auto_retry_start") now += 10_000;
 			});
-			const error = () => fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" });
+			const error = () =>
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				});
 			harness.setResponses([error, error, outcome === "success" ? fauxAssistantMessage("recovered") : error]);
 			await harness.session.prompt("Retry this operation");
 			expectOneOperation(harness, states, 3);
@@ -230,7 +237,12 @@ describe("#421 operation elapsed timing", () => {
 		harness.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") retry.resolve();
 		});
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })]);
+		harness.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+			}),
+		]);
 		const prompt = harness.session.prompt("Start");
 		await retry.promise;
 		expect(harness.session.activeAgentRun).toBeDefined();
@@ -263,7 +275,12 @@ describe("#421 operation elapsed timing", () => {
 				},
 			],
 		});
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" })]);
+		harness.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+			}),
+		]);
 		const prompt = harness.session.prompt("Start");
 		const result = prompt.then(
 			() => undefined,
@@ -333,7 +350,10 @@ describe("#421 operation elapsed timing", () => {
 			});
 			harness.sessionManager.appendMessage({ role: "user", content: "previous task", timestamp: now - 1 });
 			harness.sessionManager.appendMessage(
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+				}),
 			);
 			const states = observe(harness);
 			harness.session.subscribe((event) => {
@@ -345,7 +365,10 @@ describe("#421 operation elapsed timing", () => {
 					new Error("preflight failed"),
 				);
 			harness.setResponses([
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				}),
 				fauxAssistantMessage("new response", { usage: usage(10) }),
 			]);
 			const result = harness.session.prompt("new input").then(

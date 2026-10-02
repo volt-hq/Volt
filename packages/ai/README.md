@@ -637,7 +637,7 @@ for await (const event of stream) {
   if (event.type === 'error') {
     // event.reason is either "error" or "aborted"
     // event.error is the AssistantMessage with partial content
-    console.error(`Error (${event.reason}):`, event.error.errorMessage);
+    console.error(`Error (${event.reason}):`, event.error.error?.message);
     console.log('Partial content:', event.error.content);
   }
 }
@@ -645,11 +645,18 @@ for await (const event of stream) {
 // The final message will have the error details
 const message = await stream.result();
 if (message.stopReason === 'error' || message.stopReason === 'aborted') {
-  console.error('Request failed:', message.errorMessage);
+  console.error('Request failed:', message.error?.message);
   // message.content contains any partial content received before the error
   // message.usage contains partial token counts and costs
 }
 ```
+
+Every failed message carries a typed `error`: `{ kind, retryable, providerCode?, message }`. Providers set `kind` and `retryable` from HTTP status codes and provider error types, so callers can decide what to do without parsing text:
+
+- `rate_limit`, `overloaded`, `server`, `network`, `timeout` are transient and `retryable`.
+- `quota` (usage, billing, or credit limits), `auth`, `invalid_request`, `refusal`, and `unknown` are not.
+- `context_overflow` means the request exceeds the context window; `isContextOverflow(message)` reports it, together with providers that overflow silently.
+- `invalid_tool_call` means the response's tool calls were rejected before execution; `stream_limit` means a local stream limit or processing failure stopped it; `aborted` means the caller aborted.
 
 ### Aborting Requests
 
@@ -675,14 +682,14 @@ for await (const event of s) {
     process.stdout.write(event.delta);
   } else if (event.type === 'error') {
     // event.reason tells you if it was "error" or "aborted"
-    console.log(`${event.reason === 'aborted' ? 'Aborted' : 'Error'}:`, event.error.errorMessage);
+    console.log(`${event.reason === 'aborted' ? 'Aborted' : 'Error'}:`, event.error.error?.message);
   }
 }
 
 // Get results (may be partial if aborted)
 const response = await s.result();
 if (response.stopReason === 'aborted') {
-  console.log('Request was aborted:', response.errorMessage);
+  console.log('Request was aborted:', response.error?.message);
   console.log('Partial content received:', response.content);
   console.log('Tokens used:', response.usage);
 }
@@ -817,7 +824,7 @@ multiModel.unregister();
 
 Notes:
 - Responses are consumed from a queue in request start order.
-- If the queue is empty, the faux provider returns an assistant error message with `errorMessage: "No more faux responses queued"`.
+- If the queue is empty, the faux provider returns an assistant error message whose `error.message` is `"No more faux responses queued"`.
 - Use `registration.setResponses([...])` to replace the remaining queue and `registration.appendResponses([...])` to add more responses.
 - `registration.models` exposes all registered faux models. `registration.getModel()` returns the first one, and `registration.getModel(id)` returns a specific one.
 - Use `fauxAssistantMessage(...)` for scripted assistant replies. Use `fauxText(...)`, `fauxThinking(...)`, and `fauxToolCall(...)` to build content blocks without filling in low-level fields manually.
@@ -1121,7 +1128,7 @@ const continuation = await complete(newModel, restored);
 
 ### Message and Model Schemas
 
-TypeBox schemas for the data model are exported alongside the types: `MessageSchema` (and `UserMessageSchema`, `AssistantMessageSchema`, `ToolResultMessageSchema`), the content block schemas, `UsageSchema`, `StopReasonSchema`, `AssistantMessageDiagnosticSchema`, `ActiveToolCallStateSchema`, and `ModelSchema`. Object schemas reject unknown fields. `AI_SCHEMA_VERSION` changes whenever any schema changes shape. The `@hansjm10/volt-ai/schemas` subpath exports the same schemas and loads only TypeBox, for workers and other contexts that should not load the whole package.
+TypeBox schemas for the data model are exported alongside the types: `MessageSchema` (and `UserMessageSchema`, `AssistantMessageSchema`, `ToolResultMessageSchema`), the content block schemas, `UsageSchema`, `StopReasonSchema`, `ProviderErrorSchema` (and `ProviderErrorKindSchema`), `AssistantMessageDiagnosticSchema`, `ActiveToolCallStateSchema`, and `ModelSchema`. Object schemas reject unknown fields. `AI_SCHEMA_VERSION` changes whenever any schema changes shape. The `@hansjm10/volt-ai/schemas` subpath exports the same schemas and loads only TypeBox, for workers and other contexts that should not load the whole package.
 
 ```typescript
 import { MessageSchema } from '@hansjm10/volt-ai';

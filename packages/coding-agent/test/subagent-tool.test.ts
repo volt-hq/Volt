@@ -203,7 +203,9 @@ function createSubagentResult(options: {
 }): SubagentResult {
 	const message = fauxAssistantMessage(options.text, {
 		...(options.stopReason ? { stopReason: options.stopReason } : {}),
-		...(options.errorMessage ? { errorMessage: options.errorMessage } : {}),
+		...(options.errorMessage
+			? { error: { kind: "unknown" as const, retryable: false, message: options.errorMessage } }
+			: {}),
 	}) as AgentMessage;
 	const status =
 		options.status ??
@@ -1009,7 +1011,12 @@ describe("subagent tool", () => {
 	it("keeps a post-admission child failure distinct from admission rejection", async () => {
 		const manager = await createRealManager({
 			definitions: [createDefinition("scout", { source: "project" })],
-			responses: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "provider child failed" })],
+			responses: [
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "unknown", retryable: false, message: "provider child failed" },
+				}),
+			],
 		});
 		const tool = createSubagentTool(process.cwd(), { manager, getAllowedTools: () => [] });
 		const preflight = await tool.execute("failed-child-preflight", { agent: "scout", task: "fail after start" });
@@ -1052,7 +1059,12 @@ describe("subagent tool", () => {
 		let childHandle: SubagentHandle | undefined;
 		const manager = await createRealManager({
 			definitions: [createDefinition("scout", { source: "project" })],
-			responses: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })],
+			responses: [
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				}),
+			],
 			settings: {
 				compaction: { enabled: false },
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
@@ -1106,7 +1118,7 @@ describe("subagent tool", () => {
 		expect(childAgentEnds.at(-1)?.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "error",
-			errorMessage: "overloaded_error",
+			error: { message: "overloaded_error" },
 		});
 		const registryRecord = manager.listDelegations().find((candidate) => candidate.id === runningHandle.id);
 		expect(registryRecord).toMatchObject({ status: "aborted" });
@@ -1121,7 +1133,10 @@ describe("subagent tool", () => {
 			definitions: [createDefinition("good"), createDefinition("bad"), createDefinition("skipped")],
 			responses: [
 				fauxAssistantMessage("seed"),
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "bad failed" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "unknown", retryable: false, message: "bad failed" },
+				}),
 			],
 			subagentContext: {
 				depth: 1,
@@ -1184,7 +1199,10 @@ describe("subagent tool", () => {
 		const manager = await createRealManager({
 			definitions: [createDefinition("scout", { source: "project" })],
 			responses: [
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+				}),
 				fauxAssistantMessage("compacted child context"),
 				async () => {
 					continuationStarted.resolve(undefined);
@@ -1240,7 +1258,7 @@ describe("subagent tool", () => {
 			expect(childAgentEnds[0]?.messages.at(-1)).toMatchObject({
 				role: "assistant",
 				stopReason: "error",
-				errorMessage: "prompt is too long",
+				error: { kind: "context_overflow", message: "prompt is too long" },
 			});
 			if (!childSessionManager) {
 				throw new Error("expected child session manager");
@@ -2910,7 +2928,10 @@ describe("subagent tool", () => {
 
 	it("disposes the child after terminal failure details are returned", async () => {
 		let disposeCalled = false;
-		const message = fauxAssistantMessage("", { stopReason: "error", errorMessage: "child failed" }) as AgentMessage;
+		const message = fauxAssistantMessage("", {
+			stopReason: "error",
+			error: { kind: "unknown", retryable: false, message: "child failed" },
+		}) as AgentMessage;
 		const result = {
 			id: "sa_failed",
 			sessionId: "session_failed",

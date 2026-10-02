@@ -21,7 +21,7 @@ import type { Static, TSchema } from "typebox";
  * - Must not throw or return a rejected promise for request/model/runtime failures.
  * - Must return an AssistantMessageEventStream.
  * - Failures must be encoded in the returned stream via protocol events and a
- *   final AssistantMessage with stopReason "error" or "aborted" and errorMessage.
+ *   final AssistantMessage with stopReason "error" or "aborted" and a typed `error`.
  */
 export type StreamFn = (
 	...args: Parameters<typeof streamSimple>

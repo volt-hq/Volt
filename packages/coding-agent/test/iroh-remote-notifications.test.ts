@@ -729,7 +729,10 @@ describe("Iroh remote notification requests", () => {
 				options?.preflightResult?.({ success: true, outcome: "admitted" });
 				session.leafId = "conversation-run";
 				session.messages = [
-					createAssistantMessage({ stopReason: "error", errorMessage: "No API key for provider: openai-codex" }),
+					createAssistantMessage({
+						stopReason: "error",
+						error: { kind: "auth", retryable: false, message: "No API key for provider: openai-codex" },
+					}),
 				];
 			},
 		);

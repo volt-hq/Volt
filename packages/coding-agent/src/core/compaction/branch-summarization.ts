@@ -369,7 +369,7 @@ export async function generateBranchSummary(
 		return { aborted: true };
 	}
 	if (response.stopReason === "error") {
-		return { error: response.errorMessage || "Summarization failed" };
+		return { error: response.error?.message || "Summarization failed" };
 	}
 
 	let summary = response.content

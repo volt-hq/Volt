@@ -6,6 +6,7 @@
 import {
 	type AssistantMessage,
 	type Context,
+	createProviderError,
 	EventStream,
 	type JsonObject,
 	streamSimple,
@@ -301,7 +302,7 @@ async function runDispatchedLoop(
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				},
 				stopReason: "aborted",
-				errorMessage: "Request was aborted",
+				error: createProviderError("aborted", "Request was aborted"),
 				timestamp: Date.now(),
 			} satisfies AssistantMessage;
 			currentContext.messages.push(preflightAbortedMessage);
@@ -399,7 +400,7 @@ async function emitBoundaryAbort(
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "aborted",
-		errorMessage: "Request was aborted",
+		error: createProviderError("aborted", "Request was aborted"),
 		timestamp: Date.now(),
 	} satisfies AssistantMessage;
 	await emit({ type: "turn_start" });

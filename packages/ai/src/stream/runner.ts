@@ -15,7 +15,12 @@ import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import type { JsonObject } from "../utils/json-value.ts";
 import type { AssistantMessageInit, AssistantStreamFragment } from "./fragments.ts";
 import { AssistantStreamNormalizer } from "./normalizer.ts";
-import { classifyProviderError, ProviderStreamError, readRetryAfterMs } from "./provider-errors.ts";
+import {
+	classifyProviderError,
+	createProviderError,
+	ProviderStreamError,
+	readRetryAfterMs,
+} from "./provider-errors.ts";
 
 /** Default cap on a server-requested retry delay. */
 export const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
@@ -214,7 +219,7 @@ async function runProviderStream<TApi extends Api, TOptions extends StreamOption
 		const mapping = provider.mapStopReason(stop, ctx);
 		ensureStarted();
 		if (mapping.stopReason === "error" || mapping.stopReason === "aborted") {
-			normalizer.push({ type: "error", reason: mapping.stopReason, errorMessage: mapping.error.message });
+			normalizer.push({ type: "error", reason: mapping.stopReason, error: mapping.error });
 		} else {
 			normalizer.push({ type: "done", reason: mapping.stopReason });
 		}
@@ -226,13 +231,13 @@ async function runProviderStream<TApi extends Api, TOptions extends StreamOption
 		}
 		ensureStarted();
 		if (signal.aborted) {
-			normalizer.push({ type: "error", reason: "aborted", errorMessage: ABORT_MESSAGE });
+			normalizer.push({ type: "error", reason: "aborted", error: createProviderError("aborted", ABORT_MESSAGE) });
 		} else {
 			const failure = describeFailure(error);
 			normalizer.push({
 				type: "error",
 				reason: "error",
-				errorMessage: failure.error.message,
+				error: failure.error,
 				...(failure.diagnostics === undefined ? {} : { diagnostics: failure.diagnostics }),
 			});
 		}

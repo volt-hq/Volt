@@ -72,7 +72,7 @@ describe("AssistantMessageComponent", () => {
 
 		const message = createAssistantMessage([{ type: "text", text: "Partial response" }]);
 		message.stopReason = "error";
-		message.errorMessage = "Provider disconnected";
+		message.error = { kind: "network", retryable: true, message: "Provider disconnected" };
 		const rendered = new AssistantMessageComponent(message).render(60).lines.join("\n");
 
 		expect(rendered).toContain("[failure] Provider disconnected");

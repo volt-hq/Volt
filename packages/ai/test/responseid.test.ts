@@ -18,7 +18,7 @@ async function expectResponseId<TApi extends Api>(model: Model<TApi>, options: S
 
 	const response = await complete(model, context, options);
 
-	expect(response.stopReason, response.errorMessage).not.toBe("error");
+	expect(response.stopReason, response.error?.message).not.toBe("error");
 	expect(response.responseId).toBeTruthy();
 	expect(typeof response.responseId).toBe("string");
 }

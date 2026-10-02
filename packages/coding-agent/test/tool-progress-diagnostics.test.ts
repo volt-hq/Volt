@@ -145,7 +145,7 @@ describe("bounded tool diagnostics", () => {
 				...message,
 				stopReason: "error",
 				content: [{ type: "thinking", thinking: "hidden-thought-secret" }],
-				errorMessage: "provider-secret",
+				error: { kind: "unknown", retryable: false, message: "provider-secret" },
 				diagnostics: [
 					{
 						type: "tool_argument_generation_limit",

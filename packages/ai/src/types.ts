@@ -275,7 +275,7 @@ export interface SimpleStreamOptions extends StreamOptions {
 // - Once invoked, request/model/runtime failures should be encoded in the
 //   returned stream, not thrown.
 // - Error termination must produce an AssistantMessage with stopReason
-//   "error" or "aborted" and errorMessage, emitted via the stream protocol.
+//   "error" or "aborted" and a typed `error`, emitted via the stream protocol.
 export type StreamFunction<TApi extends Api = Api, TOptions extends StreamOptions = StreamOptions> = (
 	model: Model<TApi>,
 	context: Context,
@@ -452,7 +452,8 @@ export interface AssistantMessage {
 	diagnostics?: AssistantMessageDiagnostic[]; // Redacted provider/runtime diagnostics for failures and recoveries.
 	usage: Usage;
 	stopReason: StopReason;
-	errorMessage?: string;
+	/** Why the response failed. Set when `stopReason` is "error" or "aborted". */
+	error?: ProviderError;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
@@ -515,7 +516,7 @@ export interface ActiveToolCallState {
  * Streams should emit `start` before partial updates, then terminate with either:
  * - `done` carrying the final successful AssistantMessage, or
  * - `error` carrying the final AssistantMessage with stopReason "error" or "aborted"
- *   and errorMessage.
+ *   and its typed `error`.
  */
 export type AssistantMessageEvent =
 	| {

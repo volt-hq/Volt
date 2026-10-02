@@ -877,7 +877,7 @@ describe("review pipeline", () => {
 									if (status === "cancelled") controller.abort();
 									return fauxAssistantMessage("", {
 										stopReason: "error",
-										errorMessage: "Review provider failed.",
+										error: { kind: "unknown", retryable: false, message: "Review provider failed." },
 									});
 								},
 							]
@@ -1820,8 +1820,14 @@ describe("review pipeline", () => {
 		const privateDiagnostic =
 			"Provider request to https://private-llm.internal/v1 failed while reading C:\\Users\\reviewer\\private-provider.json";
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: privateDiagnostic }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: privateDiagnostic }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: privateDiagnostic },
+			}),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: privateDiagnostic },
+			}),
 		]);
 		const sessionManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "remote-sessions"));
 		const remoteOutcome = await executeReviewWorkflow({

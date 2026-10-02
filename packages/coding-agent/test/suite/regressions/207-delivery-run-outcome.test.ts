@@ -105,7 +105,10 @@ describe("regression #207: delivery run outcomes", () => {
 			}),
 		});
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+			}),
 			fauxAssistantMessage("explicit retry completed"),
 		]);
 		harness.session.subscribe((event) => {

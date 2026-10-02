@@ -120,7 +120,7 @@ async function testEmojiInToolResults<TApi extends Api>(llm: Model<TApi>, option
 	const response = await complete(llm, context, options);
 
 	expect(response.stopReason).not.toBe("error");
-	expect(response.errorMessage).toBeFalsy();
+	expect(response.error?.message).toBeFalsy();
 	expect(response.content.length).toBeGreaterThan(0);
 }
 
@@ -209,7 +209,7 @@ Unanswered Comments: 2
 	const response = await complete(llm, context, options);
 
 	expect(response.stopReason).not.toBe("error");
-	expect(response.errorMessage).toBeFalsy();
+	expect(response.error?.message).toBeFalsy();
 	expect(response.content.some((b) => b.type === "text")).toBe(true);
 }
 
@@ -283,7 +283,7 @@ async function testUnpairedHighSurrogate<TApi extends Api>(llm: Model<TApi>, opt
 	const response = await complete(llm, context, options);
 
 	expect(response.stopReason).not.toBe("error");
-	expect(response.errorMessage).toBeFalsy();
+	expect(response.error?.message).toBeFalsy();
 	expect(response.content.length).toBeGreaterThan(0);
 }
 

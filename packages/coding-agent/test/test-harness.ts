@@ -17,6 +17,7 @@ import type {
 	Context,
 	JsonObject,
 	Model,
+	ProviderError,
 	SimpleStreamOptions,
 	StopReason,
 	TextContent,
@@ -24,7 +25,7 @@ import type {
 	ToolCall,
 	Usage,
 } from "@hansjm10/volt-ai";
-import { AssistantStreamNormalizer } from "@hansjm10/volt-ai";
+import { AssistantStreamNormalizer, createProviderError } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { convertToLlm } from "../src/core/messages.ts";
@@ -75,8 +76,8 @@ export interface FauxResponse {
 	thinking?: string;
 	/** Stop reason. Defaults to "stop", or "toolUse" if toolCalls are present, or "error" if error is set. */
 	stopReason?: StopReason;
-	/** Error message. Sets stopReason to "error" if not explicitly set. */
-	error?: string;
+	/** Typed provider error. Sets stopReason to "error" if not explicitly set. */
+	error?: ProviderError;
 	/** Usage numbers. Merged with defaults (input: 100, output: 50). */
 	usage?: Partial<Usage>;
 	/** Delay in ms before the response starts. */
@@ -160,7 +161,7 @@ function buildAssistantMessage(resp: FauxResponse): AssistantMessage {
 		model: resp.model?.id ?? FAUX_MODEL_ID,
 		usage: buildUsage(resp.usage),
 		stopReason,
-		errorMessage: resp.error,
+		...(resp.error === undefined ? {} : { error: resp.error }),
 		timestamp: Date.now(),
 	};
 }
@@ -250,7 +251,7 @@ function streamWithDeltas(normalizer: AssistantStreamNormalizer, message: Assist
 		normalizer.push({
 			type: "error",
 			reason: message.stopReason,
-			errorMessage: message.errorMessage ?? `Request ${message.stopReason}`,
+			error: message.error ?? createProviderError("unknown", `Request ${message.stopReason}`),
 		});
 	} else {
 		normalizer.push({ type: "done", reason: message.stopReason, usage: message.usage });

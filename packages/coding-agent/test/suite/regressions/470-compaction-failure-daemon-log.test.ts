@@ -67,7 +67,10 @@ function createReplaceableRuntime(initial: AgentSession) {
 }
 
 function summaryProviderError(errorMessage: string) {
-	return fauxAssistantMessage("", { stopReason: "error", errorMessage });
+	return fauxAssistantMessage("", {
+		stopReason: "error",
+		error: { kind: "unknown", retryable: false, message: errorMessage },
+	});
 }
 
 async function createCompactableHarness(extensionFactories?: ExtensionFactory[]): Promise<Harness> {

@@ -64,7 +64,7 @@ async function expectNormalizedLazyLoadError(stream: AssistantMessageEventStream
 		error: {
 			content: [],
 			stopReason: "error",
-			errorMessage: "simulated lazy module failure",
+			error: { kind: "unknown", retryable: false, message: "simulated lazy module failure" },
 		},
 	});
 	expect(result).toMatchObject({
@@ -73,9 +73,9 @@ async function expectNormalizedLazyLoadError(stream: AssistantMessageEventStream
 		model: "test-google-model",
 		content: [],
 		stopReason: "error",
-		errorMessage: "simulated lazy module failure",
+		error: { kind: "unknown", retryable: false, message: "simulated lazy module failure" },
 	});
-	expect(events[0]?.type === "start" ? events[0].snapshot.errorMessage : "not-start").toBeUndefined();
+	expect(events[0]?.type === "start" ? events[0].snapshot.error : "not-start").toBeUndefined();
 	expect(Object.isFrozen(events[0])).toBe(true);
 	expect(Object.isFrozen(events[1])).toBe(true);
 	expect(Object.isFrozen(result)).toBe(true);

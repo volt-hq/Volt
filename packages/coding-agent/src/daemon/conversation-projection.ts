@@ -93,9 +93,13 @@ function projectAssistantMessage(message: AssistantMessage): {
 			? undefined
 			: projectRpcBoundedString(message.responseId, REMOTE_ACTIVE_ASSISTANT_METADATA_STRING_MAX_UTF8_BYTES);
 	const errorMessage =
-		message.errorMessage === undefined
+		message.error === undefined
 			? undefined
-			: projectRpcBoundedString(message.errorMessage, REMOTE_ACTIVE_ASSISTANT_METADATA_STRING_MAX_UTF8_BYTES);
+			: projectRpcBoundedString(message.error.message, REMOTE_ACTIVE_ASSISTANT_METADATA_STRING_MAX_UTF8_BYTES);
+	const providerCode =
+		message.error?.providerCode === undefined
+			? undefined
+			: projectRpcBoundedString(message.error.providerCode, REMOTE_ACTIVE_ASSISTANT_METADATA_STRING_MAX_UTF8_BYTES);
 	const value: AssistantMessage = {
 		role: "assistant",
 		content: message.content,
@@ -106,14 +110,24 @@ function projectAssistantMessage(message: AssistantMessage): {
 		...(responseId === undefined ? {} : { responseId: responseId.value }),
 		usage: message.usage,
 		stopReason: message.stopReason,
-		...(errorMessage === undefined ? {} : { errorMessage: errorMessage.value }),
+		...(message.error === undefined || errorMessage === undefined
+			? {}
+			: {
+					error: {
+						kind: message.error.kind,
+						retryable: message.error.retryable,
+						...(providerCode === undefined ? {} : { providerCode: providerCode.value }),
+						message: errorMessage.value,
+					},
+				}),
 		timestamp: message.timestamp,
 	};
 	const fields: Record<string, RpcProjectionTruncation> = {};
 	if (model.projection) fields.model = model.projection;
 	if (responseModel?.projection) fields.responseModel = responseModel.projection;
 	if (responseId?.projection) fields.responseId = responseId.projection;
-	if (errorMessage?.projection) fields.errorMessage = errorMessage.projection;
+	if (errorMessage?.projection) fields["error.message"] = errorMessage.projection;
+	if (providerCode?.projection) fields["error.providerCode"] = providerCode.projection;
 	if (message.diagnostics !== undefined) {
 		fields.diagnostics = {
 			truncated: true,

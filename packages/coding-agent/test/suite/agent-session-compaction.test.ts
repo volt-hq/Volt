@@ -5,6 +5,7 @@ import {
 	estimateToolDefinitionTokens,
 	fauxAssistantMessage,
 	fauxToolCall,
+	type ProviderError,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { estimateMessagesTokens } from "../../src/core/compaction/index.ts";
@@ -36,7 +37,7 @@ function createAssistant(
 	harness: Harness,
 	options: {
 		stopReason?: AssistantMessage["stopReason"];
-		errorMessage?: string;
+		error?: ProviderError;
 		totalTokens?: number;
 		timestamp?: number;
 	},
@@ -45,7 +46,7 @@ function createAssistant(
 	return {
 		...fauxAssistantMessage("", {
 			stopReason: options.stopReason,
-			errorMessage: options.errorMessage,
+			error: options.error,
 			timestamp: options.timestamp,
 		}),
 		api: model.api,
@@ -390,7 +391,7 @@ describe("AgentSession compaction characterization", () => {
 		const getCallCount = useSummaryResponses(harness, [
 			fauxAssistantMessage("", {
 				stopReason: "error",
-				errorMessage: "service unavailable request-id=req_first",
+				error: { kind: "overloaded", retryable: true, message: "service unavailable request-id=req_first" },
 			}),
 			fauxAssistantMessage("summary after retry"),
 		]);
@@ -412,7 +413,7 @@ describe("AgentSession compaction characterization", () => {
 		const getCallCount = useSummaryResponses(harness, [
 			fauxAssistantMessage("", {
 				stopReason: "error",
-				errorMessage: "server is overloaded request-id=req_last",
+				error: { kind: "overloaded", retryable: true, message: "server is overloaded request-id=req_last" },
 			}),
 		]);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
@@ -439,7 +440,7 @@ describe("AgentSession compaction characterization", () => {
 		useSummaryResponses(harness, [
 			fauxAssistantMessage("", {
 				stopReason: "error",
-				errorMessage: "service unavailable",
+				error: { kind: "overloaded", retryable: true, message: "service unavailable" },
 			}),
 		]);
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
@@ -489,7 +490,7 @@ describe("AgentSession compaction characterization", () => {
 		harness.sessionManager.appendMessage({
 			...createAssistant(harness, {
 				stopReason: "error",
-				errorMessage: "prompt is too long",
+				error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
 				timestamp: Date.now(),
 			}),
 			content: [{ type: "text", text: "partial output ".repeat(50) }],
@@ -660,7 +661,7 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const overflowMessage = createAssistant(harness, {
 			stopReason: "error",
-			errorMessage: "prompt is too long",
+			error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
 			timestamp: Date.now(),
 		});
 		const runAutoCompactionSpy = vi.spyOn(sessionInternals, "_runAutoCompaction").mockResolvedValue(false);
@@ -729,7 +730,7 @@ describe("AgentSession compaction characterization", () => {
 		});
 		const errorAssistant = createAssistant(harness, {
 			stopReason: "error",
-			errorMessage: "529 overloaded",
+			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now() + 1000,
 		});
 		appendMessages(harness, [
@@ -752,7 +753,7 @@ describe("AgentSession compaction characterization", () => {
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 		const errorAssistant = createAssistant(harness, {
 			stopReason: "error",
-			errorMessage: "529 overloaded",
+			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now(),
 		});
 		appendMessages(harness, [
@@ -795,7 +796,7 @@ describe("AgentSession compaction characterization", () => {
 
 		const errorAssistant = createAssistant(harness, {
 			stopReason: "error",
-			errorMessage: "529 overloaded",
+			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now(),
 		});
 		appendMessages(harness, [

@@ -27,8 +27,8 @@ describe("openai-codex cache affinity e2e", () => {
 			transport: "sse",
 		});
 
-		expect(response.stopReason, response.errorMessage).not.toBe("error");
-		expect(response.errorMessage).toBeUndefined();
+		expect(response.stopReason, response.error?.message).not.toBe("error");
+		expect(response.error?.message).toBeUndefined();
 		expect(response.content.map((block) => (block.type === "text" ? block.text : "")).join("")).toContain(
 			"cache affinity e2e success",
 		);

@@ -72,7 +72,7 @@ describe("AgentSession retry", () => {
 		failCount?: number;
 		maxRetries?: number;
 		delayAssistantMessageEndMs?: number;
-		failure?: Pick<AssistantMessage, "errorMessage" | "diagnostics">;
+		failure?: Pick<AssistantMessage, "error" | "diagnostics">;
 	}) {
 		const failCount = options?.failCount ?? 1;
 		const maxRetries = options?.maxRetries ?? 3;
@@ -89,7 +89,7 @@ describe("AgentSession retry", () => {
 					if (callCount <= failCount) {
 						const msg = createAssistantMessage("", {
 							stopReason: "error",
-							errorMessage: "overloaded_error",
+							error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
 							...options?.failure,
 						});
 						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
@@ -154,7 +154,7 @@ describe("AgentSession retry", () => {
 		async (type) => {
 			const created = createSession({
 				failure: {
-					errorMessage: "HTTP status 503: connection timeout",
+					error: { kind: "overloaded", retryable: true, message: "HTTP status 503: connection timeout" },
 					diagnostics: [{ type, timestamp: 0, details: {} }],
 				},
 			});
@@ -171,10 +171,23 @@ describe("AgentSession retry", () => {
 	);
 
 	it("continues to retry an ordinary 503 without a local processing diagnostic", async () => {
-		const created = createSession({ failure: { errorMessage: "HTTP status 503: connection timeout" } });
+		const created = createSession({
+			failure: { error: { kind: "overloaded", retryable: true, message: "HTTP status 503: connection timeout" } },
+		});
 		await created.session.prompt("Test");
 		expect(created.getCallCount()).toBe(2);
 		expect(created.session.messages.at(-1)).toMatchObject({ stopReason: "stop" });
+	});
+
+	it.each([
+		[{ kind: "rate_limit", retryable: true, message: "opaque provider failure" }, 2],
+		[{ kind: "unknown", retryable: false, message: "overloaded_error: service unavailable, rate limit" }, 1],
+		[{ kind: "quota", retryable: false, message: "HTTP status 429: too many requests" }, 1],
+		[{ kind: "context_overflow", retryable: false, message: "overloaded_error" }, 1],
+	] as const)("decides retries from the typed error, not its text: %j", async (error, calls) => {
+		const created = createSession({ failure: { error } });
+		await created.session.prompt("Test");
+		expect(created.getCallCount()).toBe(calls);
 	});
 
 	it("exhausts max retries and emits failure", async () => {
@@ -213,7 +226,7 @@ describe("AgentSession retry", () => {
 				if (callCount === 1) {
 					const msg = createAssistantMessage("", {
 						stopReason: "error",
-						errorMessage: "Provider finish_reason: network_error",
+						error: { kind: "network", retryable: true, message: "Provider finish_reason: network_error" },
 					});
 					stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
 					stream.push({ type: "error", seq: 1, reason: "error", error: msg });
@@ -287,7 +300,7 @@ describe("AgentSession retry", () => {
 						// First call: overloaded error
 						const msg = createAssistantMessage("", {
 							stopReason: "error",
-							errorMessage: "overloaded_error",
+							error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
 						});
 						stream.push({ type: "start", seq: 0, snapshot: msg, toolState: [] });
 						stream.push({ type: "error", seq: 1, reason: "error", error: msg });

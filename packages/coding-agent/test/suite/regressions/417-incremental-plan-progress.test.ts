@@ -100,7 +100,10 @@ describe("regression #417: incremental approved plan progress", () => {
 			),
 			...(compact
 				? [
-						fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+						fauxAssistantMessage("", {
+							stopReason: "error",
+							error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+						}),
 						fauxAssistantMessage("First outcome verified; related outcomes remain open."),
 					]
 				: []),

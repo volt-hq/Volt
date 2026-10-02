@@ -12,10 +12,22 @@ describe("issue #124: transient outage retry budget", () => {
 	it("recovers after four consecutive transient failures with default max retries", async () => {
 		harness = await createHarness({ settings: { retry: { baseDelayMs: 1 } } });
 		harness.setResponses([
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed" }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed" }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed" }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "fetch failed" }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "network", retryable: true, message: "fetch failed" },
+			}),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "network", retryable: true, message: "fetch failed" },
+			}),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "network", retryable: true, message: "fetch failed" },
+			}),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "network", retryable: true, message: "fetch failed" },
+			}),
 			fauxAssistantMessage("recovered"),
 		]);
 

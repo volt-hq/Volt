@@ -2,6 +2,7 @@ import type {
 	ActiveToolCallState,
 	AssistantMessage,
 	AssistantMessageEvent,
+	ProviderError,
 	StreamOptions,
 	ToolCall,
 	Usage,
@@ -16,6 +17,7 @@ import {
 	findUnescapedControlCharacter,
 	type UnescapedControlCharacter,
 } from "./invalid-tool-arguments.ts";
+import { createProviderError } from "./provider-errors.ts";
 import { ToolArgumentCoalescer } from "./tool-argument-coalescer.ts";
 import { ToolArgumentGuard, type ToolArgumentLimitFailure } from "./tool-argument-guard.ts";
 
@@ -65,7 +67,7 @@ export class AssistantStreamNormalizer {
 	private terminal = false;
 	private readonly blocks = new Map<number, StreamBlockState>();
 	private readonly toolArgsText = new Map<number, string>();
-	private toolArgumentFailure: string | undefined;
+	private toolArgumentFailure: ProviderError | undefined;
 	private readonly toolArgumentCoalescer = new ToolArgumentCoalescer(
 		(fragment) => this.pushImmediately(fragment),
 		(error) => this.failProcessing(error),
@@ -157,7 +159,7 @@ export class AssistantStreamNormalizer {
 				this.finishSuccess(fragment.reason, fragment.usage);
 				break;
 			case "error":
-				this.finishError(fragment.reason, fragment.errorMessage, fragment.diagnostics, fragment.usage);
+				this.finishError(fragment.reason, fragment.error, fragment.diagnostics, fragment.usage);
 				break;
 		}
 	}
@@ -198,7 +200,11 @@ export class AssistantStreamNormalizer {
 		if (this.terminal) {
 			return;
 		}
-		this.push({ type: "error", reason: "error", errorMessage: "Assistant stream ended without a terminal fragment" });
+		this.push({
+			type: "error",
+			reason: "error",
+			error: createProviderError("network", "Assistant stream ended without a terminal fragment"),
+		});
 	}
 
 	private failProcessing(error: unknown): void {
@@ -226,10 +232,14 @@ export class AssistantStreamNormalizer {
 			usage: this.message?.usage ?? cloneAndFreeze(EMPTY_USAGE),
 			content: cloneAndFreeze<AssistantMessage["content"]>([]),
 			stopReason: "error",
-			errorMessage:
-				error instanceof EventStreamOverflowError
-					? error.message
-					: "Assistant stream processing failed. No tools from this response were executed. Retry explicitly.",
+			error: Object.freeze(
+				createProviderError(
+					"stream_limit",
+					error instanceof EventStreamOverflowError
+						? error.message
+						: "Assistant stream processing failed. No tools from this response were executed. Retry explicitly.",
+				),
+			),
 			diagnostics: freezeDiagnostics([
 				{
 					type:
@@ -579,7 +589,7 @@ export class AssistantStreamNormalizer {
 
 	private finishError(
 		reason: "aborted" | "error",
-		errorMessage: string,
+		error: ProviderError,
 		diagnostics?: AssistantMessageDiagnostic[],
 		usage?: Usage,
 	): void {
@@ -598,10 +608,13 @@ export class AssistantStreamNormalizer {
 			this.applyMeta({ ...(usage === undefined ? {} : { usage }), diagnostics });
 		}
 		const message = this.requireMessage();
+		// A rejected tool call explains a failed response, but an abort or a generation limit
+		// remains the cause of its own terminal.
+		const cause = reason === "aborted" || hasGenerationLimit ? error : (this.toolArgumentFailure ?? error);
 		this.message = Object.freeze({
 			...message,
 			stopReason: reason,
-			errorMessage: hasGenerationLimit ? errorMessage : (this.toolArgumentFailure ?? errorMessage),
+			error: Object.freeze({ ...cause }),
 		});
 		this.terminal = true;
 		this.cleanup();
@@ -623,7 +636,7 @@ export class AssistantStreamNormalizer {
 		}
 		this.toolArgsText.clear();
 		try {
-			this.finishError("error", failure.message, [failure.diagnostic]);
+			this.finishError("error", createProviderError("stream_limit", failure.message), [failure.diagnostic]);
 		} catch (error) {
 			// A deadline may fire while the consumer queue is already full. Its
 			// overflow factory installed the terminal; never throw out of the timer.
@@ -665,13 +678,16 @@ export class AssistantStreamNormalizer {
 		cause?: UnescapedControlCharacter,
 	): void {
 		if (this.toolArgumentFailure) return;
-		this.toolArgumentFailure = cause
-			? `Tool arguments contained ${describeUnescapedControlCharacter(cause.codePoint)}. No tools were executed.`
-			: code === "invalid_json"
-				? "Tool arguments must be a complete, valid JSON object. No tools were executed."
-				: code === "length_limit"
-					? "The response reached its length limit while generating tool calls. No tools were executed."
-					: "The provider did not complete its tool-call response. No tools were executed.";
+		this.toolArgumentFailure = createProviderError(
+			"invalid_tool_call",
+			cause
+				? `Tool arguments contained ${describeUnescapedControlCharacter(cause.codePoint)}. No tools were executed.`
+				: code === "invalid_json"
+					? "Tool arguments must be a complete, valid JSON object. No tools were executed."
+					: code === "length_limit"
+						? "The response reached its length limit while generating tool calls. No tools were executed."
+						: "The provider did not complete its tool-call response. No tools were executed.",
+		);
 		this.applyMeta({
 			diagnostics: [
 				{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code, contentIndex, ...cause } },

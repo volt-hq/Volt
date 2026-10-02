@@ -99,7 +99,11 @@ describe("proxy stream normalization", () => {
 
 		expect(events.at(-1)?.type).toBe("error");
 		expect(message.stopReason).toBe("error");
-		expect(message.errorMessage).toBe("Assistant stream ended without a terminal fragment");
+		expect(message.error).toEqual({
+			kind: "network",
+			retryable: true,
+			message: "Assistant stream ended without a terminal fragment",
+		});
 		expect(getText(message)).toBe("partial");
 	});
 
@@ -110,6 +114,6 @@ describe("proxy stream normalization", () => {
 
 		expect(events.at(-1)?.type).toBe("error");
 		expect(message.stopReason).toBe("aborted");
-		expect(message.errorMessage).toBe("Request aborted by user");
+		expect(message.error).toEqual({ kind: "aborted", retryable: false, message: "Request aborted by user" });
 	});
 });

@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, Provider, StopReason, ToolCall, Usage } from "../types.ts";
+import type { Api, AssistantMessage, Provider, ProviderError, StopReason, ToolCall, Usage } from "../types.ts";
 import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 
 export interface AssistantMessageInit {
@@ -58,7 +58,7 @@ export type AssistantStreamFragment =
 	| {
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
-			errorMessage: string;
+			error: ProviderError;
 			diagnostics?: AssistantMessageDiagnostic[];
 			usage?: AssistantMessage["usage"];
 	  };

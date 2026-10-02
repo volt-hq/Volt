@@ -63,8 +63,8 @@ const assistant: AssistantMessage = {
 		cost: { input: 0.1, output: 0.2, cacheRead: 0.01, cacheWrite: 0.02, total: 0.33, priceVersion: "0a1b2c3d" },
 		serviceTier: { requested: "priority", effective: "default" },
 	},
-	stopReason: "toolUse",
-	errorMessage: "partial failure",
+	stopReason: "error",
+	error: { kind: "rate_limit", retryable: true, providerCode: "429", message: "partial failure" },
 	timestamp: 4,
 };
 

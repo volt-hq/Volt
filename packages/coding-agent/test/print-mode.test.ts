@@ -37,7 +37,7 @@ type FakeRuntimeHost = {
 function createAssistantMessage(options?: {
 	text?: string;
 	stopReason?: AssistantMessage["stopReason"];
-	errorMessage?: string;
+	error?: AssistantMessage["error"];
 }): AssistantMessage {
 	return {
 		role: "assistant",
@@ -54,7 +54,7 @@ function createAssistantMessage(options?: {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: options?.stopReason ?? "stop",
-		errorMessage: options?.errorMessage,
+		...(options?.error === undefined ? {} : { error: options.error }),
 		timestamp: Date.now(),
 	};
 }
@@ -132,7 +132,10 @@ describe("runPrintMode", () => {
 
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {
 		const runtimeHost = createRuntimeHost(
-			createAssistantMessage({ stopReason: "error", errorMessage: "provider failure" }),
+			createAssistantMessage({
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: "provider failure" },
+			}),
 		);
 		const { session } = runtimeHost;
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});

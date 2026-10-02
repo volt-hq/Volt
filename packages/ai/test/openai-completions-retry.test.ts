@@ -102,7 +102,10 @@ describe("openai-completions provider retries", () => {
 	it("does not retry a rejected request", async () => {
 		mockState.failures = [Object.assign(new Error("400 bad request"), { status: 400 })];
 		const result = await consume({ maxRetries: 2 });
-		expect(result).toMatchObject({ stopReason: "error", errorMessage: "400 bad request" });
+		expect(result).toMatchObject({
+			stopReason: "error",
+			error: { kind: "invalid_request", retryable: false, providerCode: "400", message: "400 bad request" },
+		});
 		expect(mockState.requestOptions).toHaveLength(1);
 	});
 });

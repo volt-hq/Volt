@@ -664,8 +664,8 @@
               if (msg.stopReason === 'aborted') {
                 return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(aborted)</span>`;
               }
-              if (msg.errorMessage) {
-                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(truncate(msg.errorMessage))}</span>`;
+              if (msg.error?.message) {
+                return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-error">${escapeHtml(truncate(msg.error.message))}</span>`;
               }
               return labelHtml + `<span class="tree-role-assistant">assistant:</span> <span class="tree-muted">(no text)</span>`;
             }
@@ -1263,7 +1263,7 @@
             if (msg.stopReason === 'aborted') {
               html += '<div class="error-text">Aborted</div>';
             } else if (msg.stopReason === 'error') {
-              html += `<div class="error-text">Error: ${escapeHtml(msg.errorMessage || 'Unknown error')}</div>`;
+              html += `<div class="error-text">Error: ${escapeHtml(msg.error?.message || 'Unknown error')}</div>`;
             }
 
             html += '</div>';

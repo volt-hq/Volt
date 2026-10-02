@@ -72,7 +72,7 @@ async function testContextOverflow(model: Model<any>, apiKey: string): Promise<O
 		model: model.id,
 		contextWindow: model.contextWindow,
 		stopReason: response.stopReason,
-		errorMessage: response.errorMessage,
+		errorMessage: response.error?.message,
 		usage: response.usage,
 		hasUsageData,
 		response,

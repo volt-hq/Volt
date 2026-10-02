@@ -4,6 +4,7 @@ import {
 	type AssistantMessage,
 	type Context,
 	clampThinkingLevel,
+	classifyProviderError,
 	createAssistantMessageEventStream,
 	estimateToolDefinitionTokens,
 	isContextOverflow,
@@ -13,7 +14,6 @@ import {
 } from "@hansjm10/volt-ai";
 import { sleep } from "../../utils/sleep.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
-import { isTransientProviderError } from "../provider-errors.ts";
 import {
 	type CompactionDetails,
 	type CompactionPreparation,
@@ -81,7 +81,7 @@ function waitFor<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 function summaryText(response: AssistantMessage): string {
 	if (response.stopReason === "error")
-		throw new Error(`Summarization failed: ${response.errorMessage || "Unknown error"}`);
+		throw new Error(`Summarization failed: ${response.error?.message || "Unknown error"}`);
 	if (response.stopReason === "aborted") throw cancelled();
 	if (response.stopReason === "length") throw new Error("Compaction summary was truncated; original context was kept");
 	if (response.stopReason === "toolUse" || response.content.some((block) => block.type === "toolCall")) {
@@ -366,8 +366,9 @@ export async function compactContext(
 			};
 			for (let attempt = 0; ; attempt++) {
 				signal.throwIfAborted();
+				let response: AssistantMessage | undefined;
 				try {
-					const response = await (await boundedStream(model, request, requestOptions, "native")).result();
+					response = await (await boundedStream(model, request, requestOptions, "native")).result();
 					// Classify overflow before validating a candidate summary, including zero-output length stops.
 					if (isContextOverflow(response, model.contextWindow)) break;
 					const summary = summaryText(response);
@@ -382,7 +383,12 @@ export async function compactContext(
 					if (signal.aborted) throw signal.reason;
 					if (error instanceof Error && error.name === "AbortError") throw error;
 					const message = error instanceof Error ? error.message : String(error);
-					if (!isTransientProviderError(message) || attempt >= retry.maxRetries) {
+					// Only a failure the provider classified as retryable is worth repeating.
+					const retryable =
+						response === undefined
+							? classifyProviderError(error).retryable
+							: response.stopReason === "error" && response.error?.retryable === true;
+					if (!retryable || attempt >= retry.maxRetries) {
 						if (attempt === 0) throw error;
 						throw new Error(`Summarization failed after ${attempt + 1} attempts: ${message}`, { cause: error });
 					}

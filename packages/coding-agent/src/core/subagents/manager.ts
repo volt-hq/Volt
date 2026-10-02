@@ -372,14 +372,14 @@ function resolveTerminalResult(
 		if (!message || message.role !== "assistant") {
 			continue;
 		}
-		const assistant = message as { stopReason?: unknown; errorMessage?: unknown };
+		const assistant = message as { stopReason?: unknown; error?: { message?: unknown } };
 		if (assistant.stopReason === "aborted") {
 			return { status: "aborted" };
 		}
 		if (assistant.stopReason === "error") {
 			return {
 				status: "failed",
-				...(typeof assistant.errorMessage === "string" ? { error: assistant.errorMessage } : {}),
+				...(typeof assistant.error?.message === "string" ? { error: assistant.error.message } : {}),
 			};
 		}
 		return { status: "completed" };
@@ -509,7 +509,7 @@ function deriveHydratedChildState(child: SessionManager, fallbackTime: number): 
 			return {
 				status: "failed",
 				...(task !== undefined ? { task } : {}),
-				error: assistant.errorMessage || "The run failed before producing a result.",
+				error: assistant.error?.message || "The run failed before producing a result.",
 				finishedAt,
 			};
 		}

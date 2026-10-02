@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import type { AssistantStreamFragment } from "../src/stream/fragments.ts";
+import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import {
 	classifyHttpStatus,
 	classifyProviderCode,
@@ -140,5 +142,66 @@ describe("retry-after parsing", () => {
 		expect(readRetryAfterMs({ headers: { "retry-after-ms": "250" } })).toBe(250);
 		expect(readRetryAfterMs(new ProviderStreamError("rate_limit", "x", { retryAfterMs: 10 }))).toBe(10);
 		expect(readRetryAfterMs(new Error("no headers"))).toBeUndefined();
+	});
+});
+
+describe("typed errors on normalized assistant messages", () => {
+	const init = { api: "test", provider: "test", model: "test", timestamp: 0 };
+
+	async function finish(
+		fragments: AssistantStreamFragment[],
+		options?: ConstructorParameters<typeof AssistantStreamNormalizer>[0],
+	) {
+		const normalizer = new AssistantStreamNormalizer(options);
+		normalizer.push({ type: "start", init });
+		for (const fragment of fragments) normalizer.push(fragment);
+		normalizer.end();
+		return normalizer.stream.result();
+	}
+
+	it("reports rejected tool arguments as a non-retryable invalid tool call", async () => {
+		const result = await finish([
+			{ type: "toolcall_start", contentIndex: 0, id: "call", name: "edit" },
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"text":"unfinished' },
+			{ type: "toolcall_end", contentIndex: 0 },
+			{ type: "done", reason: "toolUse" },
+		]);
+		expect(result.error).toEqual({
+			kind: "invalid_tool_call",
+			retryable: false,
+			message: "Tool arguments must be a complete, valid JSON object. No tools were executed.",
+		});
+		expect(Object.isFrozen(result.error)).toBe(true);
+	});
+
+	it("keeps the abort as the cause after rejected tool arguments", async () => {
+		const result = await finish([
+			{ type: "toolcall_start", contentIndex: 0, id: "call", name: "edit" },
+			{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"text":"unfinished' },
+			{ type: "toolcall_end", contentIndex: 0 },
+			{ type: "error", reason: "aborted", error: createProviderError("aborted", "Request was aborted") },
+		]);
+		expect(result).toMatchObject({ stopReason: "aborted", error: { kind: "aborted" } });
+	});
+
+	it("reports a tool argument limit as a non-retryable stream limit", async () => {
+		const result = await finish(
+			[
+				{ type: "toolcall_start", contentIndex: 0, id: "call", name: "edit" },
+				{ type: "toolcall_delta", contentIndex: 0, argsTextDelta: '{"text":"far too long for the limit"}' },
+			],
+			{ toolArgumentLimits: { maxBytes: 8 } },
+		);
+		expect(result.error).toMatchObject({ kind: "stream_limit", retryable: false });
+		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "tool_argument_generation_limit" }));
+	});
+
+	it("reports a fragment source that ended without a terminal as a retryable network failure", async () => {
+		const result = await finish([{ type: "text_start", contentIndex: 0 }]);
+		expect(result.error).toEqual({
+			kind: "network",
+			retryable: true,
+			message: "Assistant stream ended without a terminal fragment",
+		});
 	});
 });

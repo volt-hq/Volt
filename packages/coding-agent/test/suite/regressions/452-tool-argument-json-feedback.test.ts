@@ -126,7 +126,7 @@ describe("issue #452 tool argument JSON feedback", () => {
 			(message) => message.role === "assistant" && message.stopReason === "error",
 		);
 		if (failure?.role !== "assistant") throw new Error("Expected persisted assistant failure");
-		expect(failure.errorMessage).toBe(
+		expect(failure.error?.message).toBe(
 			"Tool arguments contained an unescaped tab (U+0009) inside a JSON string; encode it as \\t. No tools were executed.",
 		);
 		expect(failure.diagnostics).toContainEqual(

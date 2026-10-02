@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
+import { createProviderError } from "../src/stream/provider-errors.ts";
 import type { AssistantMessageEvent, StreamOptions } from "../src/types.ts";
 
 afterEach(() => vi.useRealTimers());
@@ -78,7 +79,7 @@ describe("tool generation limits in the provider stream", () => {
 		}
 		vi.advanceTimersByTime(10);
 		// Late adapter cancellation and terminal fragments cannot replace the diagnostic.
-		normalizer.push({ type: "error", reason: "aborted", errorMessage: "Request aborted" });
+		normalizer.push({ type: "error", reason: "aborted", error: createProviderError("aborted", "Request aborted") });
 		normalizer.push({ type: "done", reason: "toolUse" });
 		const { events, message } = await collect(normalizer);
 		expect(abort).toHaveBeenCalledOnce();
@@ -165,7 +166,7 @@ describe("tool generation limits in the provider stream", () => {
 		controller.abort("user-request");
 		expect(normalizer.signal.reason).toBe("user-request");
 		expect(vi.getTimerCount()).toBe(0);
-		normalizer.push({ type: "error", reason: "aborted", errorMessage: "user cancelled" });
+		normalizer.push({ type: "error", reason: "aborted", error: createProviderError("aborted", "user cancelled") });
 		const { message, events } = await collect(normalizer);
 		expect(message.stopReason).toBe("aborted");
 		expect(message.diagnostics).toBeUndefined();
@@ -209,11 +210,11 @@ describe("tool generation limits in the provider stream", () => {
 		normalizer.push({
 			type: "error",
 			reason: "error",
-			errorMessage,
+			error: createProviderError("stream_limit", errorMessage),
 			...(source === "error" ? { diagnostics: [diagnostic] } : {}),
 		});
 		const { message } = await collect(normalizer);
-		expect(message.errorMessage).toBe(errorMessage);
+		expect(message.error?.message).toBe(errorMessage);
 		expect(message.diagnostics).toEqual([diagnostic]);
 	});
 });

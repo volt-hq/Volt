@@ -74,7 +74,7 @@ async function main() {
 		else if (event.type === "thinking_delta") process.stdout.write(event.delta);
 		else if (event.type === "thinking_end") console.log("\n[/Thinking]\n");
 		else if (event.type === "text_delta") process.stdout.write(event.delta);
-		else if (event.type === "error") console.error("\nError:", event.error.errorMessage);
+		else if (event.type === "error") console.error("\nError:", event.error.error?.message);
 		else if (event.type === "done") console.log("\n\nDone!", event.reason, event.message.usage);
 	}
 }

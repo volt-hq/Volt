@@ -667,7 +667,10 @@ describe("SubagentManager", () => {
 		let childSessionManager: SessionManager | undefined;
 		const { manager, getDisposedSessionCount } = await createTestManager({
 			responses: [
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+				}),
 				async () => {
 					compactionStarted.resolve();
 					await finishCompaction.promise;
@@ -737,7 +740,10 @@ describe("SubagentManager", () => {
 		const lifecycle: string[] = [];
 		const { manager } = await createTestManager({
 			responses: [
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+				}),
 				fauxAssistantMessage("continued after compaction"),
 			],
 			simpleResponses: [fauxAssistantMessage("compacted context")],
@@ -837,7 +843,10 @@ describe("SubagentManager", () => {
 			timestamp: Date.now() - 1,
 		});
 		resumedSession.appendMessage(
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+			}),
 		);
 		const { manager } = await createTestManager({
 			responses: [
@@ -894,7 +903,12 @@ describe("SubagentManager", () => {
 		const compactionErrors: string[] = [];
 		let childSessionManager: SessionManager | undefined;
 		const { manager } = await createTestManager({
-			responses: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" })],
+			responses: [
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+				}),
+			],
 			simpleResponses: [
 				() => {
 					throw new Error("summary unavailable");
@@ -924,7 +938,7 @@ describe("SubagentManager", () => {
 		expect(result.event.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "error",
-			errorMessage: "prompt is too long",
+			error: { kind: "context_overflow", message: "prompt is too long" },
 		});
 		expect(compactionErrors).toHaveLength(1);
 		expect(compactionErrors[0]).toContain("Context overflow recovery failed");
@@ -940,7 +954,10 @@ describe("SubagentManager", () => {
 		const agentEnds: SubagentEndEvent[] = [];
 		const { manager } = await createTestManager({
 			responses: [
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				}),
 				async () => {
 					retryResponseStarted.resolve();
 					await finishRetryResponse.promise;
@@ -994,7 +1011,12 @@ describe("SubagentManager", () => {
 		const retryStarted = createDeferred();
 		const agentEnds: SubagentEndEvent[] = [];
 		const { manager } = await createTestManager({
-			responses: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })],
+			responses: [
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				}),
+			],
 			settings: {
 				compaction: { enabled: false },
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
@@ -1027,7 +1049,7 @@ describe("SubagentManager", () => {
 		expect(result.event.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "error",
-			errorMessage: "overloaded_error",
+			error: { kind: "overloaded", message: "overloaded_error" },
 		});
 
 		const activity = manager.listActivities().find((candidate) => candidate.id === handle.id);
@@ -1046,7 +1068,12 @@ describe("SubagentManager", () => {
 		const scope = new SubagentDelegationScope({ signal: externalAbort.signal });
 		cleanups.push(() => scope.dispose());
 		const { manager } = await createTestManager({
-			responses: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" })],
+			responses: [
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				}),
+			],
 			settings: {
 				compaction: { enabled: false },
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
@@ -1076,7 +1103,7 @@ describe("SubagentManager", () => {
 		expect(result.event.messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "error",
-			errorMessage: "overloaded_error",
+			error: { kind: "overloaded", message: "overloaded_error" },
 		});
 
 		const activity = manager.listActivities().find((candidate) => candidate.id === handle.id);
@@ -2966,7 +2993,10 @@ describe("SubagentManager", () => {
 		const settlementIdleCompleted = createDeferred();
 		const { manager, getDisposedSessionCount } = await createTestManager({
 			responses: [
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				}),
 				async () => {
 					retryResponseStarted.resolve();
 					await finishRetryResponse.promise;
