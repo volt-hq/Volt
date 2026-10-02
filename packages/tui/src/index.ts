@@ -9,14 +9,46 @@ export {
 	type SlashCommand,
 } from "./autocomplete.ts";
 // Components
+export { ActionBar, type ActionBarProps, type ActionItem } from "./components/action-bar.ts";
 export { Box } from "./components/box.ts";
 export { CancellableLoader } from "./components/cancellable-loader.ts";
+export { Card, type CardBadge, type CardProps, type CardSection } from "./components/card.ts";
+export { type DiffLine, type DiffLineKind, DiffView, type DiffViewProps } from "./components/diff-view.ts";
 export { Editor, type EditorOptions, type EditorTheme } from "./components/editor.ts";
+export {
+	type BooleanFormField,
+	type EnumFormField,
+	type EnumFormOption,
+	Form,
+	type FormErrors,
+	type FormField,
+	type FormProps,
+	type FormValue,
+	type FormValues,
+	type IntegerFormField,
+	type StringFormField,
+} from "./components/form.ts";
 export { HStack } from "./components/h-stack.ts";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts";
 export { Input } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
 export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.ts";
+export { type MultiSelectItem, MultiSelectList, type MultiSelectListProps } from "./components/multi-select-list.ts";
+export {
+	type Notification,
+	type NotificationLevel,
+	NotificationStack,
+	type NotificationStackOptions,
+	type NotificationStackProps,
+} from "./components/notification-stack.ts";
+export {
+	ProgressBar,
+	type ProgressBarProps,
+	type ProgressStep,
+	type ProgressStepStatus,
+	StepProgress,
+	type StepProgressProps,
+} from "./components/progress.ts";
 export {
 	ScrollView,
 	type ScrollViewOptions,
@@ -32,7 +64,11 @@ export {
 } from "./components/select-list.ts";
 export { type SettingItem, SettingsList, type SettingsListTheme } from "./components/settings-list.ts";
 export { Spacer } from "./components/spacer.ts";
+export { Table, type TableColumn, type TableProps } from "./components/table.ts";
+export { type TabItem, Tabs, type TabsProps } from "./components/tabs.ts";
+export { TerminalOutput, type TerminalOutputProps } from "./components/terminal-output.ts";
 export { Text } from "./components/text.ts";
+export { type TreeItem, TreeView, type TreeViewProps } from "./components/tree-view.ts";
 export { TruncatedText } from "./components/truncated-text.ts";
 export {
 	type StackChild,
