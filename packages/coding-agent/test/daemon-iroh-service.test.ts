@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider } from "@hansjm10/volt-ai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import {
 	type IrohRemoteHandshakeSuccess,
@@ -1250,7 +1250,7 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 		await Promise.all([sourceSession.materialize(), replacementSession.materialize()]);
 		await Promise.all([sourceSession.closePersistence(), replacementSession.closePersistence()]);
 
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		const model = faux.getModel();
 		writeFileSync(
 			join(agentDir, "models.json"),
@@ -1519,7 +1519,6 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 			}
 			await tui?.close();
 			await control?.close();
-			faux.unregister();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	}, 60_000);
@@ -1768,7 +1767,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-live-unregister-"));
 		const workspaceDir = join(agentDir, "ws");
 		mkdirSync(workspaceDir, { recursive: true });
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		const model = faux.getModel();
 		writeFileSync(
 			join(agentDir, "models.json"),
@@ -2035,7 +2034,6 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 				daemonStopped = true;
 			}
 			await control?.close();
-			faux.unregister();
 			rmSync(agentDir, { recursive: true, force: true });
 		}
 	}, 30_000);

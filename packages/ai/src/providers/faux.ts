@@ -1,4 +1,4 @@
-import { registerApiProvider, unregisterApiProviders } from "../api-registry.ts";
+import type { ApiProvider } from "../client.ts";
 import { classifyProviderError, createProviderError } from "../stream/provider-errors.ts";
 import { createProviderStream, type ProviderStreamSink, type StopReasonMapping } from "../stream/runner.ts";
 import type {
@@ -128,7 +128,7 @@ export type FauxResponseFactory = (
 
 export type FauxResponseStep = AssistantMessage | FauxResponseFactory;
 
-export interface RegisterFauxProviderOptions {
+export interface FauxProviderOptions {
 	api?: string;
 	provider?: string;
 	models?: FauxModelDefinition[];
@@ -138,16 +138,20 @@ export interface RegisterFauxProviderOptions {
 		max?: number;
 	};
 	/**
-	 * Register a prompt-cache refresh. `true` reports a read of the prompt this session last
+	 * Implement a prompt-cache refresh. `true` reports a read of the prompt this session last
 	 * cached (or a write when it differs); a function supplies the outcome.
 	 */
 	refreshPromptCache?: true | FauxPromptCacheRefresh;
-	/** Which request options the registered refresh supports; omitted means all of them. */
+	/** Which request options the refresh supports; omitted means all of them. */
 	canRefreshPromptCache?: PromptCacheRefreshCheck;
 }
 
-export interface FauxProviderRegistration {
-	api: string;
+/**
+ * A scripted in-memory API implementation for tests and demos. Register it on a client like any
+ * other provider, e.g. `createAiClient({ providers: [faux], models: faux.models })`.
+ */
+export interface FauxProvider extends ApiProvider<string> {
+	readonly api: string;
 	models: [Model<string>, ...Model<string>[]];
 	getModel(): Model<string>;
 	getModel(modelId: string): Model<string> | undefined;
@@ -165,7 +169,6 @@ export interface FauxProviderRegistration {
 	setSimpleResponses: (responses: FauxResponseStep[]) => void;
 	appendSimpleResponses: (responses: FauxResponseStep[]) => void;
 	getPendingSimpleResponseCount: () => number;
-	unregister: () => void;
 }
 
 function estimateTokens(text: string): number {
@@ -478,10 +481,9 @@ function mapFauxStopReason(message: AssistantMessage | undefined): StopReasonMap
 	return { stopReason: message.stopReason };
 }
 
-export function registerFauxProvider(options: RegisterFauxProviderOptions = {}): FauxProviderRegistration {
+export function createFauxProvider(options: FauxProviderOptions = {}): FauxProvider {
 	const api = options.api ?? randomId(DEFAULT_API);
 	const provider = options.provider ?? DEFAULT_PROVIDER;
-	const sourceId = randomId("faux-provider");
 	const minTokenSize = Math.max(
 		1,
 		Math.min(options.tokenSize?.min ?? DEFAULT_MIN_TOKEN_SIZE, options.tokenSize?.max ?? DEFAULT_MAX_TOKEN_SIZE),
@@ -586,17 +588,6 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 			}
 		: undefined;
 
-	registerApiProvider(
-		{
-			api,
-			stream,
-			streamSimple,
-			...(refreshPromptCache ? { refreshPromptCache } : {}),
-			...(options.canRefreshPromptCache ? { canRefreshPromptCache: options.canRefreshPromptCache } : {}),
-		},
-		sourceId,
-	);
-
 	function getModel(): Model<string>;
 	function getModel(requestedModelId: string): Model<string> | undefined;
 	function getModel(requestedModelId?: string): Model<string> | undefined {
@@ -608,6 +599,10 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 
 	return {
 		api,
+		stream,
+		streamSimple,
+		...(refreshPromptCache ? { refreshPromptCache } : {}),
+		...(options.canRefreshPromptCache ? { canRefreshPromptCache: options.canRefreshPromptCache } : {}),
 		models,
 		getModel,
 		state,
@@ -628,9 +623,6 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 		},
 		getPendingSimpleResponseCount() {
 			return pendingSimpleResponses.length;
-		},
-		unregister() {
-			unregisterApiProviders(sourceId);
 		},
 	};
 }

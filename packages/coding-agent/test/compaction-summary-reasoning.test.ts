@@ -1,19 +1,21 @@
-import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import type { AssistantMessage, Model } from "@hansjm10/volt-ai";
+import type { AgentMessage, StreamFn } from "@hansjm10/volt-agent-core";
+import { type AssistantMessage, createAssistantMessageEventStream, type Model } from "@hansjm10/volt-ai";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { type CompactionPreparation, compact, generateSummary } from "../src/core/compaction/index.ts";
 
-const { completeSimpleMock } = vi.hoisted(() => ({
-	completeSimpleMock: vi.fn(),
-}));
+const summaryRequestMock = vi.fn();
 
-vi.mock("@hansjm10/volt-ai", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("@hansjm10/volt-ai")>();
-	return {
-		...actual,
-		completeSimple: completeSimpleMock,
-	};
-});
+/** Streams each summary request's mocked final message. */
+const streamFn: StreamFn = async (model, context, options) => {
+	const message: AssistantMessage = await summaryRequestMock(model, context, options);
+	const stream = createAssistantMessageEventStream();
+	stream.push(
+		message.stopReason === "error" || message.stopReason === "aborted"
+			? { type: "error", seq: 0, reason: message.stopReason, error: message }
+			: { type: "done", seq: 0, reason: message.stopReason, message },
+	);
+	return stream;
+};
 
 function createModel(reasoning: boolean, maxTokens = 8192, contextWindow = 200000): Model<"anthropic-messages"> {
 	return {
@@ -52,68 +54,29 @@ const messages: AgentMessage[] = [{ role: "user", content: "Summarize this.", ti
 
 describe("generateSummary reasoning options", () => {
 	beforeEach(() => {
-		completeSimpleMock.mockReset();
-		completeSimpleMock.mockResolvedValue(mockSummaryResponse);
+		summaryRequestMock.mockReset();
+		summaryRequestMock.mockResolvedValue(mockSummaryResponse);
 	});
 
 	it("uses the provided thinking level for reasoning-capable models", async () => {
-		await generateSummary(
-			messages,
-			createModel(true),
-			2000,
-			"test-key",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			"medium",
-		);
+		await generateSummary(messages, createModel(true), 2000, streamFn, undefined, undefined, undefined, "medium");
 
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
-			reasoning: "medium",
-			apiKey: "test-key",
-		});
+		expect(summaryRequestMock).toHaveBeenCalledTimes(1);
+		expect(summaryRequestMock.mock.calls[0][2]).toMatchObject({ reasoning: "medium" });
 	});
 
 	it("does not set reasoning when thinking is off", async () => {
-		await generateSummary(
-			messages,
-			createModel(true),
-			2000,
-			"test-key",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			"off",
-		);
+		await generateSummary(messages, createModel(true), 2000, streamFn, undefined, undefined, undefined, "off");
 
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
-			apiKey: "test-key",
-		});
-		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
+		expect(summaryRequestMock).toHaveBeenCalledTimes(1);
+		expect(summaryRequestMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
 	});
 
 	it("does not set reasoning for non-reasoning models", async () => {
-		await generateSummary(
-			messages,
-			createModel(false),
-			2000,
-			"test-key",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			"medium",
-		);
+		await generateSummary(messages, createModel(false), 2000, streamFn, undefined, undefined, undefined, "medium");
 
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
-		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({
-			apiKey: "test-key",
-		});
-		expect(completeSimpleMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
+		expect(summaryRequestMock).toHaveBeenCalledTimes(1);
+		expect(summaryRequestMock.mock.calls[0][2]).not.toHaveProperty("reasoning");
 	});
 
 	it("bounds serialized summary input to the selected model context", async () => {
@@ -123,10 +86,10 @@ describe("generateSummary reasoning options", () => {
 			[{ role: "user", content: "x".repeat(200_000), timestamp: Date.now() }],
 			createModel(false, maxOutputTokens, contextWindow),
 			2_500,
-			"test-key",
+			streamFn,
 		);
 
-		const requestContext = completeSimpleMock.mock.calls[0][1];
+		const requestContext = summaryRequestMock.mock.calls[0][1];
 		const userContent = requestContext.messages[0].content[0].text as string;
 		expect(userContent).toContain("characters truncated");
 		expect(requestContext.systemPrompt.length + userContent.length).toBeLessThanOrEqual(
@@ -139,13 +102,13 @@ describe("generateSummary reasoning options", () => {
 			[{ role: "user", content: "SOURCE ".repeat(10_000), timestamp: Date.now() }],
 			createModel(false, 8_192, 8_192),
 			16_384,
-			"test-key",
+			streamFn,
 		);
 
-		const requestContext = completeSimpleMock.mock.calls[0][1];
+		const requestContext = summaryRequestMock.mock.calls[0][1];
 		const userContent = requestContext.messages[0].content[0].text as string;
 		expect(userContent).toContain("[User]: SOURCE");
-		expect(completeSimpleMock.mock.calls[0][2]?.maxTokens).toBeLessThan(8_192);
+		expect(summaryRequestMock.mock.calls[0][2]?.maxTokens).toBeLessThan(8_192);
 	});
 
 	it("reduces text output to preserve constrained reasoning", async () => {
@@ -153,32 +116,31 @@ describe("generateSummary reasoning options", () => {
 			messages,
 			createModel(true, 16_384, 16_384),
 			16_384,
-			"test-key",
-			undefined,
+			streamFn,
 			undefined,
 			undefined,
 			undefined,
 			"medium",
 		);
 
-		expect(completeSimpleMock.mock.calls[0][2]).toMatchObject({ reasoning: "medium" });
-		expect(completeSimpleMock.mock.calls[0][2]?.maxTokens).toBeLessThan(8_192);
+		expect(summaryRequestMock.mock.calls[0][2]).toMatchObject({ reasoning: "medium" });
+		expect(summaryRequestMock.mock.calls[0][2]?.maxTokens).toBeLessThan(8_192);
 	});
 
 	it("rejects an aborted history summary instead of returning partial text", async () => {
-		completeSimpleMock.mockResolvedValue({
+		summaryRequestMock.mockResolvedValue({
 			...mockSummaryResponse,
 			content: [{ type: "text", text: "partial summary" }],
 			stopReason: "aborted",
 		});
 
-		const summary = generateSummary(messages, createModel(false), 2_000, "test-key");
+		const summary = generateSummary(messages, createModel(false), 2_000, streamFn);
 
 		await expect(summary).rejects.toMatchObject({ name: "AbortError", message: "Summarization cancelled" });
 	});
 
 	it("retries only transient summarization failures", async () => {
-		completeSimpleMock
+		summaryRequestMock
 			.mockResolvedValueOnce({
 				...mockSummaryResponse,
 				stopReason: "error",
@@ -187,47 +149,29 @@ describe("generateSummary reasoning options", () => {
 			.mockResolvedValueOnce(mockSummaryResponse);
 
 		await expect(
-			generateSummary(
-				messages,
-				createModel(false),
-				2_000,
-				"test-key",
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				{ maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 },
-			),
+			generateSummary(messages, createModel(false), 2_000, streamFn, undefined, undefined, undefined, undefined, {
+				maxRetries: 2,
+				baseDelayMs: 1,
+				maxDelayMs: 1,
+			}),
 		).resolves.toContain("Test summary");
-		expect(completeSimpleMock).toHaveBeenCalledTimes(2);
+		expect(summaryRequestMock).toHaveBeenCalledTimes(2);
 
-		completeSimpleMock.mockReset();
-		completeSimpleMock.mockResolvedValue({
+		summaryRequestMock.mockReset();
+		summaryRequestMock.mockResolvedValue({
 			...mockSummaryResponse,
 			stopReason: "error",
 			error: { kind: "quota", retryable: false, message: "insufficient_quota" },
 		});
 
 		await expect(
-			generateSummary(
-				messages,
-				createModel(false),
-				2_000,
-				"test-key",
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				{ maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 },
-			),
+			generateSummary(messages, createModel(false), 2_000, streamFn, undefined, undefined, undefined, undefined, {
+				maxRetries: 2,
+				baseDelayMs: 1,
+				maxDelayMs: 1,
+			}),
 		).rejects.toThrow("insufficient_quota");
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(summaryRequestMock).toHaveBeenCalledTimes(1);
 	});
 
 	it.each([
@@ -236,35 +180,26 @@ describe("generateSummary reasoning options", () => {
 		["request too large for 1050000 context window", "context_overflow"],
 		["invalid value: 5000", "invalid_request"],
 	] as const)("does not retry deterministic summarization failure: %s", async (errorMessage, kind) => {
-		completeSimpleMock.mockResolvedValue({
+		summaryRequestMock.mockResolvedValue({
 			...mockSummaryResponse,
 			stopReason: "error",
 			error: { kind, retryable: false, message: errorMessage },
 		});
 
 		await expect(
-			generateSummary(
-				messages,
-				createModel(false),
-				2_000,
-				"test-key",
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				{ maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 },
-			),
+			generateSummary(messages, createModel(false), 2_000, streamFn, undefined, undefined, undefined, undefined, {
+				maxRetries: 2,
+				baseDelayMs: 1,
+				maxDelayMs: 1,
+			}),
 		).rejects.toThrow(errorMessage);
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(summaryRequestMock).toHaveBeenCalledTimes(1);
 	});
 
 	it("aborts compaction retry backoff without issuing another request", async () => {
 		vi.useFakeTimers();
 		const abortController = new AbortController();
-		completeSimpleMock.mockResolvedValue({
+		summaryRequestMock.mockResolvedValue({
 			...mockSummaryResponse,
 			stopReason: "error",
 			error: { kind: "overloaded", retryable: true, message: "service unavailable" },
@@ -274,26 +209,23 @@ describe("generateSummary reasoning options", () => {
 			messages,
 			createModel(false),
 			2_000,
-			"test-key",
-			undefined,
+			streamFn,
 			abortController.signal,
-			undefined,
-			undefined,
 			undefined,
 			undefined,
 			undefined,
 			{ maxRetries: 2, baseDelayMs: 60_000, maxDelayMs: 60_000 },
 		);
-		await vi.waitFor(() => expect(completeSimpleMock).toHaveBeenCalledTimes(1));
+		await vi.waitFor(() => expect(summaryRequestMock).toHaveBeenCalledTimes(1));
 		abortController.abort();
 
 		await expect(summary).rejects.toMatchObject({ name: "AbortError", message: "Summarization cancelled" });
-		expect(completeSimpleMock).toHaveBeenCalledTimes(1);
+		expect(summaryRequestMock).toHaveBeenCalledTimes(1);
 		vi.useRealTimers();
 	});
 
 	it("rejects an aborted turn-prefix summary instead of compacting with partial text", async () => {
-		completeSimpleMock.mockResolvedValue({
+		summaryRequestMock.mockResolvedValue({
 			...mockSummaryResponse,
 			content: [{ type: "text", text: "partial turn prefix" }],
 			stopReason: "aborted",
@@ -308,7 +240,7 @@ describe("generateSummary reasoning options", () => {
 			settings: { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 },
 		};
 
-		const result = compact(preparation, createModel(false), "test-key");
+		const result = compact(preparation, createModel(false), streamFn);
 
 		await expect(result).rejects.toMatchObject({
 			name: "AbortError",
@@ -327,9 +259,9 @@ describe("generateSummary reasoning options", () => {
 			settings: { enabled: true, reserveTokens: 500000, keepRecentTokens: 20000 },
 		};
 
-		await compact(preparation, createModel(false, 128000), "test-key");
+		await compact(preparation, createModel(false, 128000), streamFn);
 
-		expect(completeSimpleMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
+		expect(summaryRequestMock.mock.calls.map((call) => call[2]?.maxTokens)).toEqual([128000, 128000]);
 	});
 
 	it("chunks a long turn prefix chronologically", async () => {
@@ -348,15 +280,15 @@ describe("generateSummary reasoning options", () => {
 			settings: { enabled: true, reserveTokens: 16_384, keepRecentTokens: 20_000 },
 		};
 		let responseIndex = 0;
-		completeSimpleMock.mockImplementation(async () => ({
+		summaryRequestMock.mockImplementation(async () => ({
 			...mockSummaryResponse,
 			content: [{ type: "text", text: `prefix summary ${responseIndex++}` }],
 		}));
 
-		await compact(preparation, createModel(false, 128_000, 272_000), "test-key");
+		await compact(preparation, createModel(false, 128_000, 272_000), streamFn);
 
-		expect(completeSimpleMock.mock.calls.length).toBeGreaterThan(1);
-		const prompts = completeSimpleMock.mock.calls.map((call) => call[1].messages[0].content[0].text as string);
+		expect(summaryRequestMock.mock.calls.length).toBeGreaterThan(1);
+		const prompts = summaryRequestMock.mock.calls.map((call) => call[1].messages[0].content[0].text as string);
 		expect(prompts[0]).toContain("prefix-0");
 		expect(prompts.at(-1)).toContain("prefix-89");
 		expect(prompts.slice(1).every((prompt) => prompt.includes("<previous-summary>"))).toBe(true);
@@ -375,7 +307,7 @@ describe("generateSummary reasoning options", () => {
 		};
 		let historyAttempts = 0;
 		let prefixAttempts = 0;
-		completeSimpleMock.mockImplementation(async (_model, context) => {
+		summaryRequestMock.mockImplementation(async (_model, context) => {
 			const prompt = context.messages[0].content[0].text as string;
 			if (prompt.includes("PREFIX of a turn")) {
 				prefixAttempts += 1;
@@ -392,18 +324,11 @@ describe("generateSummary reasoning options", () => {
 			return mockSummaryResponse;
 		});
 
-		await compact(
-			preparation,
-			createModel(false),
-			"test-key",
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			undefined,
-			{ maxRetries: 1, baseDelayMs: 1, maxDelayMs: 1 },
-		);
+		await compact(preparation, createModel(false), streamFn, undefined, undefined, undefined, {
+			maxRetries: 1,
+			baseDelayMs: 1,
+			maxDelayMs: 1,
+		});
 
 		expect(historyAttempts).toBe(1);
 		expect(prefixAttempts).toBe(2);
@@ -420,7 +345,7 @@ describe("generateSummary reasoning options", () => {
 			settings: { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 },
 		};
 		const prompts: string[] = [];
-		completeSimpleMock.mockImplementation(async (_model, context) => {
+		summaryRequestMock.mockImplementation(async (_model, context) => {
 			prompts.push(context.messages[0].content[0].text as string);
 			return {
 				...mockSummaryResponse,
@@ -430,18 +355,11 @@ describe("generateSummary reasoning options", () => {
 		});
 
 		await expect(
-			compact(
-				preparation,
-				createModel(false),
-				"test-key",
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				undefined,
-				{ maxRetries: 2, baseDelayMs: 1, maxDelayMs: 1 },
-			),
+			compact(preparation, createModel(false), streamFn, undefined, undefined, undefined, {
+				maxRetries: 2,
+				baseDelayMs: 1,
+				maxDelayMs: 1,
+			}),
 		).rejects.toThrow("insufficient_quota");
 		expect(prompts).toHaveLength(1);
 		expect(prompts[0]).not.toContain("PREFIX of a turn");

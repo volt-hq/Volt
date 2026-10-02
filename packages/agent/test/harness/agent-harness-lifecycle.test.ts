@@ -1,8 +1,16 @@
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import {
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
+	fauxAssistantMessage,
+	fauxToolCall,
+} from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { Session } from "../../src/harness/session/session.ts";
+import type { AgentHarnessOptions } from "../../src/harness/types.ts";
 import type { AgentMessage, AgentTool } from "../../src/types.ts";
 import { prompt, runPrompt, userMessage } from "./harness-test-utils.ts";
 import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
@@ -28,10 +36,18 @@ type TestPreparation = {
 	};
 };
 
-const registrations: Array<{ unregister(): void }> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 
 afterEach(() => {
-	for (const registration of registrations.splice(0)) registration.unregister();
+	for (const api of registeredApis.splice(0)) client.unregisterProvider(api);
 });
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -43,13 +59,13 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 }
 
 function createHarness(
-	options: Omit<ConstructorParameters<typeof AgentHarness>[0], "session" | "model"> & {
-		session?: Session;
-		prepareLogicalDelivery?: (delivery: TestDelivery) => TestPreparation | Promise<TestPreparation>;
-	} = {},
+	options: Omit<AgentHarnessOptions, "session" | "model" | "streamFn"> &
+		Partial<Pick<AgentHarnessOptions, "streamFn">> & {
+			session?: Session;
+			prepareLogicalDelivery?: (delivery: TestDelivery) => TestPreparation | Promise<TestPreparation>;
+		} = {},
 ): { harness: AgentHarness; registration: ReturnType<typeof registerFauxProvider>; session: Session } {
 	const registration = registerFauxProvider();
-	registrations.push(registration);
 	const session = options.session ?? new Session(new InMemorySessionStorage());
 	const { session: _session, prepareLogicalDelivery, ...harnessOptions } = options;
 	let harness!: AgentHarness;
@@ -108,6 +124,7 @@ function createHarness(
 			}
 		: undefined;
 	harness = new AgentHarness({
+		streamFn: client.streamSimple,
 		session,
 		model: registration.getModel(),
 		...harnessOptions,

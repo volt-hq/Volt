@@ -1,4 +1,12 @@
-import { complete, createAssistantMessageEventStream, getModel, getProviders, Type } from "@hansjm10/volt-ai";
+import {
+	builtInModels,
+	builtInProviders,
+	createAiClient,
+	createAssistantMessageEventStream,
+	getModel,
+	getProviders,
+	Type,
+} from "@hansjm10/volt-ai";
 import {
 	AgentHarness,
 	bashExecutionToText,
@@ -13,6 +21,7 @@ import {
 // Keep this entry browser-safe. It is bundled by scripts/check-browser-smoke.mjs
 // to catch accidental Node-only runtime imports in browser-facing package exports.
 const model = getModel("google", "gemini-2.5-flash");
+const client = createAiClient({ providers: builtInProviders(), models: builtInModels() });
 const schema = Type.Object({ prompt: Type.String() });
 const stream = createAssistantMessageEventStream();
 
@@ -22,7 +31,7 @@ const llmMessages = convertToLlm([customMessage]);
 console.log(
 	model.id,
 	getProviders().length,
-	typeof complete,
+	typeof client.complete,
 	schema.type,
 	typeof stream.push,
 	typeof AgentHarness,

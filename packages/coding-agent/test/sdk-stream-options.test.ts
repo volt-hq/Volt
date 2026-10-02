@@ -113,8 +113,17 @@ describe("createAgentSession stream options", () => {
 		});
 
 		try {
-			if (startupLimits) await session.prompt("hello");
-			else await createAgentSessionTestControl(session).getStreamFn()(model, { messages: [] }, requestOptions);
+			if (startupLimits) {
+				await session.prompt("hello");
+			} else {
+				const stream = await createAgentSessionTestControl(session).getStreamFn()(
+					model,
+					{ messages: [] },
+					requestOptions,
+				);
+				// The registry's client calls the provider once the request's credentials resolve.
+				await stream.result();
+			}
 			return capturedOptions;
 		} finally {
 			session.dispose();

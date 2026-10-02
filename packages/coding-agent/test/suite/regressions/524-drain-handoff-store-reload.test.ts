@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type AgentSessionRuntime,
@@ -32,7 +32,7 @@ describe("regression #524: reloading the current session after another owner wro
 		const tempDir = join(tmpdir(), `volt-524-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
+		const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
 		faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -49,6 +49,7 @@ describe("regression #524: reloading the current session after another owner wro
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
 								api: faux.api,
+								streamSimple: faux.streamSimple,
 								models: faux.models.map((registeredModel) => ({
 									id: registeredModel.id,
 									name: registeredModel.name,
@@ -94,7 +95,6 @@ describe("regression #524: reloading the current session after another owner wro
 
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

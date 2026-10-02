@@ -7,7 +7,7 @@
 
 import type { AgentMessage, StreamFn } from "@hansjm10/volt-agent-core";
 import type { Model, SimpleStreamOptions } from "@hansjm10/volt-ai";
-import { completeSimple, drainEventStream } from "@hansjm10/volt-ai";
+import { drainEventStream } from "@hansjm10/volt-ai";
 import {
 	convertToLlm,
 	createBranchSummaryMessage,
@@ -67,12 +67,6 @@ export interface CollectEntriesResult {
 export interface GenerateBranchSummaryOptions {
 	/** Model to use for summarization */
 	model: Model<any>;
-	/** API key for the model */
-	apiKey?: string;
-	/** Request headers for the model */
-	headers?: Record<string, string>;
-	/** Provider-scoped environment values for the model */
-	env?: Record<string, string>;
 	/** Abort signal for cancellation */
 	signal: AbortSignal;
 	/** Optional custom instructions for summarization */
@@ -81,8 +75,11 @@ export interface GenerateBranchSummaryOptions {
 	replaceInstructions?: boolean;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
-	/** Optional session stream function. Used to preserve SDK request behavior without mutating agent state. */
-	streamFn?: StreamFn;
+	/**
+	 * Stream function that sends the summary request, such as the session's stream function or an
+	 * `AiClient`'s `streamSimple`. The session's preserves SDK request behavior without mutating agent state.
+	 */
+	streamFn: StreamFn;
 }
 
 // ============================================================================
@@ -291,17 +288,7 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const {
-		model,
-		apiKey,
-		headers,
-		env,
-		signal,
-		customInstructions,
-		replaceInstructions,
-		reserveTokens = 16384,
-		streamFn,
-	} = options;
+	const { model, signal, customInstructions, replaceInstructions, reserveTokens = 16384, streamFn } = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
@@ -349,20 +336,11 @@ export async function generateBranchSummary(
 		},
 	];
 
-	// Call LLM for summarization. Prefer the session stream function so SDK
-	// request behavior (timeouts, retries, attribution headers) stays consistent
-	// without running through agent state/events.
+	// Call LLM for summarization through the caller's stream function, which owns credentials and SDK
+	// request behavior (timeouts, retries, attribution headers) without running through agent state/events.
 	const context = { systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages };
-	const requestOptions: SimpleStreamOptions = {
-		...(apiKey === undefined ? {} : { apiKey }),
-		...(headers === undefined ? {} : { headers }),
-		...(env === undefined ? {} : { env }),
-		signal,
-		maxTokens: maxOutputTokens,
-	};
-	const response = streamFn
-		? await drainEventStream(await streamFn(model, context, requestOptions))
-		: await completeSimple(model, context, requestOptions);
+	const requestOptions: SimpleStreamOptions = { signal, maxTokens: maxOutputTokens };
+	const response = await drainEventStream(await streamFn(model, context, requestOptions));
 
 	// Check if aborted or errored
 	if (response.stopReason === "aborted") {

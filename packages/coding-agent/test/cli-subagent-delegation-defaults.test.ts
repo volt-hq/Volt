@@ -1,12 +1,13 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { restoreStdout } from "../src/core/output-guard.ts";
 import { DEFAULT_SUBAGENT_TURN_LIMITS, SubagentManager } from "../src/core/subagents/index.ts";
 import { main } from "../src/main.ts";
+import { registerOnCreatedModelRegistries } from "./utilities.ts";
 
 const ENV_KEYS = [
 	"HOME",
@@ -67,7 +68,7 @@ it("uses per-runtime CLI turn defaults while leaving aggregate consumption budge
 		string | undefined
 	>;
 	const stdinIsTTYDescriptor = Object.getOwnPropertyDescriptor(process.stdin, "isTTY");
-	const faux = registerFauxProvider();
+	const faux = createFauxProvider();
 	const model = faux.getModel();
 	faux.setResponses([fauxAssistantMessage("")]);
 	writeFileSync(
@@ -83,6 +84,8 @@ it("uses per-runtime CLI turn defaults while leaving aggregate consumption budge
 			},
 		})}\n`,
 	);
+	// The CLI builds its own registry; stream the faux models through it.
+	registerOnCreatedModelRegistries(faux);
 	let inspectedManager = false;
 	const disposeSubagentToolManager = AgentSession.prototype.disposeSubagentToolManager;
 	vi.spyOn(AgentSession.prototype, "disposeSubagentToolManager").mockImplementation(async function (
@@ -142,7 +145,6 @@ it("uses per-runtime CLI turn defaults while leaving aggregate consumption budge
 			Reflect.deleteProperty(process.stdin, "isTTY");
 		}
 		vi.restoreAllMocks();
-		faux.unregister();
 		rmSync(tempDir, { recursive: true, force: true });
 	}
 });

@@ -1,11 +1,8 @@
 export type { Static, TSchema } from "typebox";
 export { Type } from "typebox";
 
-export * from "./api-registry.ts";
-export * from "./env-api-keys.ts";
+export * from "./client.ts";
 export * from "./image-models.ts";
-export * from "./images.ts";
-export * from "./images-api-registry.ts";
 export * from "./models.ts";
 export type { BedrockOptions, BedrockThinkingDisplay } from "./providers/amazon-bedrock.ts";
 export type { AnthropicEffort, AnthropicOptions, AnthropicThinkingDisplay } from "./providers/anthropic.ts";
@@ -51,7 +48,6 @@ export {
 	type StopReasonMapping,
 	type StreamProvider,
 } from "./stream/runner.ts";
-export * from "./stream.ts";
 export * from "./types.ts";
 export * from "./utils/diagnostics.ts";
 export * from "./utils/event-stream.ts";
@@ -71,7 +67,6 @@ export type {
 	OAuthPrompt,
 	OAuthProvider,
 	OAuthProviderId,
-	OAuthProviderInfo,
 	OAuthProviderInterface,
 	OAuthSelectOption,
 	OAuthSelectPrompt,

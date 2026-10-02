@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { complete } from "../src/stream.ts";
 import type { Api, AssistantMessage, Context, Model, StreamOptions, UserMessage } from "../src/types.ts";
+import { complete } from "./test-client.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 

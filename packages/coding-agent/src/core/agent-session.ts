@@ -58,8 +58,7 @@ import type {
 	JsonValue,
 	Message,
 	Model,
-	PromptCacheRefreshFunction,
-	SimpleStreamOptions,
+	PromptCacheRefresher,
 	TextContent,
 	ToolCall,
 	ToolResultMessage,
@@ -67,14 +66,12 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
-	completeSimple,
 	createRejectedToolCallFeedback,
 	estimateToolDefinitionTokens,
 	getSupportedThinkingLevels,
 	isContextOverflow,
 	modelsAreEqual,
 	resolvePromptCacheRetention,
-	streamSimple,
 	validateToolArguments,
 } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
@@ -432,8 +429,8 @@ export interface AgentSessionConfig {
 	model?: Model<any>;
 	thinkingLevel: ThinkingLevel;
 	streamFn: StreamFn;
-	/** No-output replay of a `streamFn` request; enables prompt-cache keepalive when the model supports it. */
-	refreshPromptCacheFn?: PromptCacheRefreshFunction;
+	/** No-output replay of `streamFn` requests; enables prompt-cache keepalive when the model supports it. */
+	promptCacheRefresh?: PromptCacheRefresher;
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	streamOptions?: AgentHarnessStreamOptions;
 	/** Optional managed extension-work limits; may only tighten the host ceilings. */
@@ -1022,7 +1019,7 @@ export class AgentSession {
 			),
 			...(config.model === undefined ? {} : { model: config.model }),
 			thinkingLevel: config.thinkingLevel,
-			...(config.refreshPromptCacheFn === undefined ? {} : { refreshPromptCacheFn: config.refreshPromptCacheFn }),
+			...(config.promptCacheRefresh === undefined ? {} : { promptCacheRefresh: config.promptCacheRefresh }),
 			streamFn: async (model, context, options) => {
 				if (this._backgroundContinuationJobIds) {
 					if (
@@ -1124,7 +1121,7 @@ export class AgentSession {
 				}
 				let stream: Awaited<ReturnType<StreamFn>>;
 				try {
-					stream = await config.streamFn(model, context, requestOptions);
+					stream = await this._streamFn(model, context, requestOptions);
 				} catch (error) {
 					if (requestId) this._recordBackgroundDiagnostic({ kind: "request_end", ...identity, isError: true });
 					throw error;
@@ -1407,46 +1404,6 @@ export class AgentSession {
 	restartLspServers(): number {
 		this._assertConversationAuthorityAvailable();
 		return this._lspManager?.restart() ?? 0;
-	}
-
-	private async _getRequiredRequestAuth(model: Model<any>): Promise<{
-		apiKey: string;
-		headers?: Record<string, string>;
-		env?: Record<string, string>;
-	}> {
-		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
-		if (!result.ok) {
-			if (result.error.startsWith("No API key found")) {
-				throw new Error(formatNoApiKeyFoundMessage(model.provider));
-			}
-			throw new Error(result.error);
-		}
-		if (result.apiKey) {
-			return { apiKey: result.apiKey, headers: result.headers, env: result.env };
-		}
-
-		const isOAuth = this._modelRegistry.isUsingOAuth(model);
-		if (isOAuth) {
-			throw new Error(
-				`Authentication failed for "${model.provider}". ` +
-					`Credentials may have expired or network is unavailable. ` +
-					`Run '/login ${model.provider}' to re-authenticate.`,
-			);
-		}
-		throw new Error(formatNoApiKeyFoundMessage(model.provider));
-	}
-
-	private async _getCompactionRequestAuth(model: Model<any>): Promise<{
-		apiKey?: string;
-		headers?: Record<string, string>;
-		env?: Record<string, string>;
-	}> {
-		if (this._streamFn === streamSimple) {
-			return this._getRequiredRequestAuth(model);
-		}
-
-		const result = await this._modelRegistry.getApiKeyAndHeaders(model);
-		return result.ok ? { apiKey: result.apiKey, headers: result.headers, env: result.env } : {};
 	}
 
 	private _applyHarnessMutation(mutation: Promise<void>): void {
@@ -8513,19 +8470,17 @@ export class AgentSession {
 		this._sessionNameGenerationInFlight = true;
 		void (async () => {
 			try {
-				const { apiKey, headers, env } = await this._getCompactionRequestAuth(model);
 				const promptText =
 					`Write a short title (3-6 words, plain text, no quotes, no trailing punctuation) ` +
 					`for a coding session that starts with this request:\n\n<request>\n${request.slice(0, 2000)}\n</request>\n\n` +
 					`Reply with only the title.`;
-				const options: SimpleStreamOptions = { maxTokens: 64, apiKey, headers, env };
-				const response = await completeSimple(
+				const response = await this._modelRegistry.client.completeSimple(
 					model,
 					{
 						systemPrompt: "You title coding assistant sessions.",
 						messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
 					},
-					options,
+					{ maxTokens: 64 },
 				);
 				if (response.stopReason === "error") {
 					return;

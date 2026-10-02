@@ -22,7 +22,7 @@ import * as nativeTools from "../../src/core/tools/index.ts";
 import { getBackgroundJobResultSnapshots } from "../../src/core/tools/jobs.ts";
 import { createSubagentTool } from "../../src/core/tools/subagent.ts";
 import { createTestResourceLoader } from "../utilities.ts";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createFauxModelRegistry, createHarness, getMessageText, type Harness } from "./harness.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -100,6 +100,7 @@ async function setup(
 				noContextFiles: true,
 			},
 		});
+		services.modelRegistry.client.registerProvider(child.faux);
 		services.settingsManager.applyOverrides({ lsp: { enabled: false }, retry: { enabled: false } });
 		const created = await createAgentSessionFromServices({
 			services,
@@ -130,6 +131,7 @@ async function setup(
 		sessionManager: parentManager,
 		model: parentFixture.getModel(),
 		authStorage: parentFixture.authStorage,
+		modelRegistry: createFauxModelRegistry(parentFixture),
 		settingsManager: parentFixture.settingsManager,
 		subagentToolManager: manager,
 		disableMcp: true,

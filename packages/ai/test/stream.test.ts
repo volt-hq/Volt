@@ -5,8 +5,8 @@ import { Type } from "typebox";
 import { fileURLToPath } from "url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { complete, stream } from "../src/stream.ts";
 import type { Api, Context, ImageContent, Model, StreamOptions, Tool, ToolResultMessage } from "../src/types.ts";
+import { complete, stream } from "./test-client.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 

@@ -57,9 +57,6 @@
 			"import": "./dist/bedrock-provider.js"
 		}
 	},
-	"bin": {
-		"volt-ai": "./dist/cli.js"
-	},
 	"files": [
 		"dist",
 		"README.md",

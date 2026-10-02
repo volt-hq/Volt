@@ -1,4 +1,4 @@
-import { getOAuthProviders, type OAuthDeviceCodeInfo } from "@hansjm10/volt-ai/oauth";
+import type { OAuthDeviceCodeInfo } from "@hansjm10/volt-ai/oauth";
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@hansjm10/volt-tui";
 import { theme } from "../../../core/theme/runtime.ts";
 import { openBrowser } from "../../../utils/open-browser.ts";
@@ -38,8 +38,7 @@ export class LoginDialogComponent extends Container implements Focusable {
 		this.tui = tui;
 		this.onComplete = onComplete;
 
-		const providerInfo = getOAuthProviders().find((p) => p.id === providerId);
-		const providerName = providerNameOverride || providerInfo?.name || providerId;
+		const providerName = providerNameOverride || providerId;
 		const title = titleOverride ?? `Login to ${providerName}`;
 
 		// Top border

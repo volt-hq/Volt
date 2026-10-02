@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
@@ -48,7 +48,7 @@ describe("AgentSession conversation generation commits", () => {
 			`volt-conversation-generation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
@@ -62,6 +62,7 @@ describe("AgentSession conversation generation commits", () => {
 				},
 				cwd,
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -83,7 +84,6 @@ describe("AgentSession conversation generation commits", () => {
 		cleanups.push(async () => {
 			subscription?.detach();
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -209,7 +209,7 @@ describe("AgentSession conversation generation commits", () => {
 			`volt-navigation-stream-race-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		faux.setResponses([fauxAssistantMessage("streamed answer")]);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -224,6 +224,7 @@ describe("AgentSession conversation generation commits", () => {
 				},
 				cwd,
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -243,7 +244,6 @@ describe("AgentSession conversation generation commits", () => {
 		});
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -326,7 +326,7 @@ describe("AgentSession conversation generation commits", () => {
 			`volt-local-prompt-generation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		faux.setResponses([fauxAssistantMessage("must not persist")]);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -341,6 +341,7 @@ describe("AgentSession conversation generation commits", () => {
 				},
 				cwd,
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -360,7 +361,6 @@ describe("AgentSession conversation generation commits", () => {
 		});
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -413,7 +413,7 @@ describe("AgentSession conversation generation commits", () => {
 				`volt-conversation-authority-race-${boundary}-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 			);
 			mkdirSync(tempDir, { recursive: true });
-			const faux = registerFauxProvider();
+			const faux = createFauxProvider();
 			const authStorage = AuthStorage.inMemory();
 			authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 			const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
@@ -427,6 +427,7 @@ describe("AgentSession conversation generation commits", () => {
 					},
 					cwd,
 				});
+				services.modelRegistry.client.registerProvider(faux);
 				return {
 					...(await createAgentSessionFromServices({
 						services,
@@ -449,7 +450,6 @@ describe("AgentSession conversation generation commits", () => {
 				endMode?.();
 				await modePromise;
 				await runtime.dispose();
-				faux.unregister();
 				if (existsSync(tempDir)) {
 					rmSync(tempDir, { recursive: true, force: true });
 				}
@@ -556,7 +556,7 @@ describe("AgentSession conversation generation commits", () => {
 			`volt-structural-authority-race-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
@@ -570,6 +570,7 @@ describe("AgentSession conversation generation commits", () => {
 				},
 				cwd,
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -598,7 +599,6 @@ describe("AgentSession conversation generation commits", () => {
 			await modePromise;
 			await runtime.dispose();
 			await targetManager.closePersistence();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -693,7 +693,7 @@ describe("AgentSession conversation generation commits", () => {
 				`volt-compaction-authority-race-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 			);
 			mkdirSync(tempDir, { recursive: true });
-			const faux = registerFauxProvider();
+			const faux = createFauxProvider();
 			const authStorage = AuthStorage.inMemory();
 			authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 			const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
@@ -707,6 +707,7 @@ describe("AgentSession conversation generation commits", () => {
 					},
 					cwd,
 				});
+				services.modelRegistry.client.registerProvider(faux);
 				return {
 					...(await createAgentSessionFromServices({
 						services,
@@ -730,7 +731,6 @@ describe("AgentSession conversation generation commits", () => {
 				endMode?.();
 				await modePromise;
 				await runtime.dispose();
-				faux.unregister();
 				if (existsSync(tempDir)) {
 					rmSync(tempDir, { recursive: true, force: true });
 				}

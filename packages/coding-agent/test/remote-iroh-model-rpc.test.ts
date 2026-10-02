@@ -1,9 +1,9 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { Api, Model, SubscriptionUsageResult } from "@hansjm10/volt-ai";
-import { registerOAuthProvider, unregisterOAuthProvider } from "@hansjm10/volt-ai/oauth";
 import { describe, expect, test, vi } from "vitest";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
 import {
 	createTestModel,
 	createTestSession,
@@ -281,7 +281,16 @@ describe("Iroh remote model RPC", () => {
 		Object.assign(providerResult.snapshot, { accountEmail: "private@example.com" });
 		Object.assign(providerResult.snapshot.limits[0], { rawProviderWindow: { secret: true } });
 		const fetchSubscriptionUsage = vi.fn(async () => providerResult);
-		registerOAuthProvider({
+		const authStorage = AuthStorage.inMemory({
+			[providerId]: {
+				type: "oauth",
+				access: "access-token",
+				refresh: "refresh-token",
+				expires: 1_900_000_000_000,
+			},
+		});
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		modelRegistry.client.registerOAuthProvider({
 			id: providerId,
 			name: "Remote Usage",
 			async login() {
@@ -295,19 +304,10 @@ describe("Iroh remote model RPC", () => {
 			},
 			fetchSubscriptionUsage,
 		});
-
-		const authStorage = AuthStorage.inMemory({
-			[providerId]: {
-				type: "oauth",
-				access: "access-token",
-				refresh: "refresh-token",
-				expires: 1_900_000_000_000,
-			},
-		});
 		const session = {
 			...createTestSession("session-usage", null),
 			model: createTestModel("usage-model", { provider: providerId }),
-			modelRegistry: { authStorage },
+			modelRegistry,
 		};
 		const runtimeHost = {
 			...createStableSessionRunner(() => session),
@@ -367,7 +367,6 @@ describe("Iroh remote model RPC", () => {
 		} finally {
 			recv.end();
 			await modePromise;
-			unregisterOAuthProvider(providerId);
 		}
 	});
 });

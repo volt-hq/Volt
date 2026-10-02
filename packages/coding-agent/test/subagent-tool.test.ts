@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage, AgentToolResult } from "@hansjm10/volt-agent-core";
-import { type FauxResponseStep, fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, type FauxResponseStep, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SessionStats } from "../src/core/agent-session.ts";
 import {
@@ -382,7 +382,7 @@ describe("subagent tool", () => {
 	}) {
 		const tempDir = join(tmpdir(), `subagent-tool-session-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		faux.setResponses(options.responses ?? [fauxAssistantMessage("done")]);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -398,6 +398,7 @@ describe("subagent tool", () => {
 				noContextFiles: true,
 			},
 		});
+		services.modelRegistry.client.registerProvider(faux);
 		const sessionManager = SessionManager.inMemory(tempDir);
 		const manager =
 			options.manager === false
@@ -421,7 +422,6 @@ describe("subagent tool", () => {
 		cleanups.push({
 			cleanup: () => {
 				created.session.dispose();
-				faux.unregister();
 				if (existsSync(tempDir)) {
 					rmSync(tempDir, { recursive: true, force: true });
 				}
@@ -440,7 +440,7 @@ describe("subagent tool", () => {
 	}) {
 		const tempDir = join(tmpdir(), `subagent-tool-manager-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		faux.setResponses(options.responses);
 		if (options.simpleResponses) {
 			faux.setSimpleResponses(options.simpleResponses);
@@ -462,6 +462,7 @@ describe("subagent tool", () => {
 					noContextFiles: true,
 				},
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			if (options.settings) {
 				services.settingsManager.applyOverrides(options.settings);
 			}
@@ -487,7 +488,6 @@ describe("subagent tool", () => {
 		cleanups.push({
 			cleanup: async () => {
 				await manager.dispose();
-				faux.unregister();
 				if (existsSync(tempDir)) {
 					rmSync(tempDir, { recursive: true, force: true });
 				}

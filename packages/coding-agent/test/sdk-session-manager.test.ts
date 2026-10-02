@@ -2,7 +2,7 @@ import { Buffer } from "node:buffer";
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type FauxProviderRegistration, getModel, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, getModel } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -38,7 +38,6 @@ describe("createAgentSession session manager defaults", () => {
 	let cwd: string;
 	let agentDir: string;
 	const sessions: AgentSession[] = [];
-	const fauxProviders: FauxProviderRegistration[] = [];
 	const managerOwner = createSessionManagerTestOwner();
 
 	beforeEach(() => {
@@ -59,7 +58,6 @@ describe("createAgentSession session manager defaults", () => {
 		}
 		await managerOwner.drain();
 		vi.restoreAllMocks();
-		while (fauxProviders.length > 0) fauxProviders.pop()?.unregister();
 		if (tempDir && existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
@@ -349,13 +347,12 @@ describe("createAgentSession session manager defaults", () => {
 	});
 
 	it("persists a model policy when Fast mode is pre-seeded for a new session", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "default-model", reasoning: true },
 				{ id: "later-default", reasoning: true },
 			],
 		});
-		fauxProviders.push(faux);
 		const model = faux.getModel("default-model")!;
 		const laterDefault = faux.getModel("later-default")!;
 		const authStorage = AuthStorage.inMemory();
@@ -417,13 +414,12 @@ describe("createAgentSession session manager defaults", () => {
 	});
 
 	it("uses scoped-model bootstrap when Fast mode is pre-seeded for a new session", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "default-model", reasoning: true },
 				{ id: "scoped-model", reasoning: true },
 			],
 		});
-		fauxProviders.push(faux);
 		const defaultModel = faux.getModel("default-model")!;
 		const scopedModel = faux.getModel("scoped-model")!;
 		const authStorage = AuthStorage.inMemory();

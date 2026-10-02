@@ -26,11 +26,11 @@ import { writeFileSync } from "fs";
 import { Type } from "typebox";
 import { beforeAll, describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { completeSimple, getEnvApiKey } from "../src/stream.ts";
 import type { Api, AssistantMessage, Message, Model, Tool, ToolResultMessage } from "../src/types.ts";
 import { hasAzureOpenAICredentials } from "./azure-utils.ts";
 import { hasCloudflareAiGatewayCredentials, hasCloudflareWorkersAICredentials } from "./cloudflare-utils.ts";
 import { resolveApiKey } from "./oauth.ts";
+import { completeSimple, getEnvApiKey } from "./test-client.ts";
 
 // Simple tool for testing
 const testToolSchema = Type.Object({

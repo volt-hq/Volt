@@ -13,6 +13,7 @@ under the MIT License.
 - [Supported Providers](#supported-providers)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
+- [Clients and Credentials](#clients-and-credentials)
 - [Tools](#tools)
   - [Defining Tools](#defining-tools)
   - [Handling Tool Calls](#handling-tool-calls)
@@ -43,12 +44,10 @@ under the MIT License.
   - [Message and Model Schemas](#message-and-model-schemas)
 - [Browser Usage](#browser-usage)
   - [Browser Compatibility Notes](#browser-compatibility-notes)
-  - [Environment Variables](#environment-variables-nodejs-only)
+  - [API Keys](#api-keys)
   - [Provider-Scoped Environment Overrides](#provider-scoped-environment-overrides)
-  - [Checking Environment Variables](#checking-environment-variables)
 - [OAuth Providers](#oauth-providers)
   - [Vertex AI](#vertex-ai)
-  - [CLI Login](#cli-login)
   - [Programmatic OAuth](#programmatic-oauth)
   - [Login Flow Example](#login-flow-example)
   - [Using OAuth Tokens](#using-oauth-tokens)
@@ -98,7 +97,23 @@ TypeBox exports are re-exported from `@hansjm10/volt-ai`: `Type`, `Static`, and 
 ## Quick Start
 
 ```typescript
-import { Type, getModel, stream, complete, Context, Tool, StringEnum } from '@hansjm10/volt-ai';
+import {
+  builtInModels,
+  builtInProviders,
+  Context,
+  createAiClient,
+  getModel,
+  StringEnum,
+  Tool,
+  Type,
+} from '@hansjm10/volt-ai';
+
+// A client streams through the API implementations it is given
+const client = createAiClient({
+  providers: builtInProviders(),
+  models: builtInModels(),
+  credentials: { resolve: async () => ({ apiKey: process.env.OPENAI_API_KEY }) },
+});
 
 // Fully typed with auto-complete support for both providers and models
 const model = getModel('openai', 'gpt-4o-mini');
@@ -120,7 +135,7 @@ const context: Context = {
 };
 
 // Option 1: Streaming with all event types
-const s = stream(model, context);
+const s = client.stream(model, context);
 
 for await (const event of s) {
   switch (event.type) {
@@ -197,7 +212,7 @@ for (const call of toolCalls) {
 
 // Continue if there were tool calls
 if (toolCalls.length > 0) {
-  const continuation = await complete(model, context);
+  const continuation = await client.complete(model, context);
   context.messages.push(continuation);
   console.log('After tool execution:', continuation.content);
 }
@@ -206,7 +221,7 @@ console.log(`Total tokens: ${finalMessage.usage.input} in, ${finalMessage.usage.
 console.log(`Cost: $${finalMessage.usage.cost.total.toFixed(4)}`);
 
 // Option 2: Get complete response without streaming
-const response = await complete(model, context);
+const response = await client.complete(model, context);
 
 for (const block of response.content) {
   if (block.type === 'text') {
@@ -216,6 +231,37 @@ for (const block of response.content) {
   }
 }
 ```
+
+## Clients and Credentials
+
+`createAiClient()` returns a client that owns its API-provider registry, model catalog, OAuth-provider registry, and image-provider registry. Clients share no state, and nothing is registered as an import side effect: pass the built-ins explicitly.
+
+```typescript
+import { builtInImagesProviders, builtInModels, builtInProviders, createAiClient } from '@hansjm10/volt-ai';
+import { builtInOAuthProviders } from '@hansjm10/volt-ai/oauth';
+
+const client = createAiClient({
+  providers: builtInProviders(),          // API implementations, keyed by model.api
+  models: builtInModels(),                // the generated model catalog
+  oauthProviders: builtInOAuthProviders(),
+  imagesProviders: builtInImagesProviders(),
+  credentials: {
+    // Consulted before each request. Reject to fail the request with an `auth` error.
+    async resolve({ model, signal }) {
+      return { apiKey: await lookUpKey(model.provider, signal) };
+    },
+  },
+});
+
+client.stream(model, context);           // also complete, streamSimple, completeSimple
+client.getModel('openai', 'gpt-4o-mini'); // catalog lookup; getModels(provider?), setModels(models)
+client.registerProvider(myApiProvider);  // replaces any provider registered for the same api
+client.unregisterProvider('my-api');
+```
+
+The client methods are bound, so `client.streamSimple` can be passed as a stream function. Request options take precedence over resolved credentials: a resolved `apiKey` fills a request that has none, and resolved `headers` and `env` merge under the request's own per key. Without a credential source, a request uses only the `apiKey` in its options.
+
+The examples below use the `client` from [Quick Start](#quick-start).
 
 ## Tools
 
@@ -263,7 +309,7 @@ const context: Context = {
   tools: [weatherTool]
 };
 
-const response = await complete(model, context);
+const response = await client.complete(model, context);
 
 // Check for tool calls in the response
 for (const block of response.content) {
@@ -304,7 +350,7 @@ context.messages.push({
 During streaming, tool call arguments are progressively parsed as they arrive. This enables real-time UI updates before the complete arguments are available:
 
 ```typescript
-const s = stream(model, context);
+const s = client.stream(model, context);
 
 for await (const event of s) {
   if (event.type === 'toolcall_delta') {
@@ -350,10 +396,10 @@ When using `agentLoop`, tool arguments are automatically validated against your 
 When implementing your own tool execution loop with `stream()` or `complete()`, use `validateToolCall` to validate arguments before passing them to your tools:
 
 ```typescript
-import { stream, validateToolCall, Tool } from '@hansjm10/volt-ai';
+import { validateToolCall, Tool } from '@hansjm10/volt-ai';
 
 const tools: Tool[] = [weatherTool, calculatorTool];
-const s = stream(model, { messages, tools });
+const s = client.stream(model, { messages, tools });
 
 for await (const event of s) {
   if (event.type === 'toolcall_end') {
@@ -406,7 +452,7 @@ Models with vision capabilities can process images. You can check if a model sup
 
 ```typescript
 import { readFileSync } from 'fs';
-import { getModel, complete } from '@hansjm10/volt-ai';
+import { getModel } from '@hansjm10/volt-ai';
 
 const model = getModel('openai', 'gpt-4o-mini');
 
@@ -418,7 +464,7 @@ if (model.input.includes('image')) {
 const imageBuffer = readFileSync('image.png');
 const base64Image = imageBuffer.toString('base64');
 
-const response = await complete(model, {
+const response = await client.complete(model, {
   messages: [{
     role: 'user',
     content: [
@@ -445,11 +491,11 @@ Do not use `stream()` or `complete()` for image generation. Image generation is 
 ### Basic Image Generation
 
 ```typescript
-import { getImageModel, generateImages } from '@hansjm10/volt-ai';
+import { getImageModel } from '@hansjm10/volt-ai';
 
 const model = getImageModel('openrouter', 'google/gemini-2.5-flash-image');
 
-const result = await generateImages(model, {
+const result = await client.generateImages(model, {
   input: [{ type: 'text', text: 'Generate a red circle on a plain white background.' }]
 }, {
   apiKey: process.env.OPENROUTER_API_KEY
@@ -471,7 +517,7 @@ Some models also support image input:
 import { readFileSync } from 'fs';
 
 const imageBuffer = readFileSync('input.png');
-const result = await generateImages(model, {
+const result = await client.generateImages(model, {
   input: [
     { type: 'text', text: 'Create a variation of this image with a blue background.' },
     { type: 'image', data: imageBuffer.toString('base64'), mimeType: 'image/png' }
@@ -507,7 +553,7 @@ Many models support thinking/reasoning capabilities where they can show their in
 ### Unified Interface (streamSimple/completeSimple)
 
 ```typescript
-import { getModel, streamSimple, completeSimple } from '@hansjm10/volt-ai';
+import { getModel } from '@hansjm10/volt-ai';
 
 // Many models across providers support thinking/reasoning
 const model = getModel('anthropic', 'claude-sonnet-4-20250514');
@@ -524,7 +570,7 @@ if (model.reasoning) {
 }
 
 // Use the simplified reasoning option
-const response = await completeSimple(model, {
+const response = await client.completeSimple(model, {
   messages: [{ role: 'user', content: 'Solve: 2x + 5 = 13' }]
 }, {
   reasoning: 'medium'  // 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max'
@@ -545,25 +591,25 @@ for (const block of response.content) {
 For fine-grained control, use the provider-specific options:
 
 ```typescript
-import { getModel, complete } from '@hansjm10/volt-ai';
+import { getModel } from '@hansjm10/volt-ai';
 
 // OpenAI Reasoning (o1, o3, gpt-5)
 const openaiModel = getModel('openai', 'gpt-5-mini');
-await complete(openaiModel, context, {
+await client.complete(openaiModel, context, {
   reasoningEffort: 'medium',
   reasoningSummary: 'detailed'  // OpenAI Responses API only
 });
 
 // Anthropic Thinking (Claude Sonnet 4)
 const anthropicModel = getModel('anthropic', 'claude-sonnet-4-20250514');
-await complete(anthropicModel, context, {
+await client.complete(anthropicModel, context, {
   thinkingEnabled: true,
   thinkingBudgetTokens: 8192  // Optional token limit
 });
 
 // Google Gemini Thinking
 const googleModel = getModel('google', 'gemini-2.5-flash');
-await complete(googleModel, context, {
+await client.complete(googleModel, context, {
   thinking: {
     enabled: true,
     budgetTokens: 8192  // -1 for dynamic, 0 to disable
@@ -576,7 +622,7 @@ await complete(googleModel, context, {
 When streaming, thinking content is delivered through specific events:
 
 ```typescript
-const s = streamSimple(model, context, { reasoning: 'high' });
+const s = client.streamSimple(model, context, { reasoning: 'high' });
 
 for await (const event of s) {
   switch (event.type) {
@@ -598,11 +644,11 @@ for await (const event of s) {
 `streamSimple()` and `completeSimple()` accept `inferenceSpeed: "standard" | "fast"`. Use `supportsFastInference(model)` to decide whether to expose the control for a selected model.
 
 ```typescript
-import { completeSimple, getModel, supportsFastInference } from '@hansjm10/volt-ai';
+import { getModel, supportsFastInference } from '@hansjm10/volt-ai';
 
 const model = getModel('openai', 'gpt-5.4');
 if (supportsFastInference(model)) {
-  const response = await completeSimple(model, context, {
+  const response = await client.completeSimple(model, context, {
     inferenceSpeed: 'fast'
   });
 
@@ -663,7 +709,7 @@ Every failed message carries a typed `error`: `{ kind, retryable, providerCode?,
 The abort signal allows you to cancel in-progress requests. Aborted requests have `stopReason === 'aborted'`:
 
 ```typescript
-import { getModel, stream } from '@hansjm10/volt-ai';
+import { getModel } from '@hansjm10/volt-ai';
 
 const model = getModel('openai', 'gpt-4o-mini');
 const controller = new AbortController();
@@ -671,7 +717,7 @@ const controller = new AbortController();
 // Abort after 2 seconds
 setTimeout(() => controller.abort(), 2000);
 
-const s = stream(model, {
+const s = client.stream(model, {
   messages: [{ role: 'user', content: 'Write a long story' }]
 }, {
   signal: controller.signal
@@ -710,14 +756,14 @@ const context = {
 const controller1 = new AbortController();
 setTimeout(() => controller1.abort(), 2000);
 
-const partial = await complete(model, context, { signal: controller1.signal });
+const partial = await client.complete(model, context, { signal: controller1.signal });
 
 // Add the partial response to context
 context.messages.push(partial);
 context.messages.push({ role: 'user', content: 'Please continue' });
 
 // Continue the conversation
-const continuation = await complete(model, context);
+const continuation = await client.complete(model, context);
 ```
 
 ### Debugging Provider Payloads
@@ -725,7 +771,7 @@ const continuation = await complete(model, context);
 Use the `onPayload` callback to inspect the request payload sent to the provider. This is useful for debugging request formatting issues or provider validation errors.
 
 ```typescript
-const response = await complete(model, context, {
+const response = await client.complete(model, context, {
   onPayload: (payload) => {
     console.log('Provider payload:', JSON.stringify(payload, null, 2));
   }
@@ -736,7 +782,7 @@ The callback is supported by `stream`, `complete`, `streamSimple`, and `complete
 
 ## APIs, Models, and Providers
 
-The library uses a registry of API implementations. Built-in APIs include:
+Each client keeps a registry of API implementations. `builtInProviders()` supplies these built-in APIs:
 
 - **`anthropic-messages`**: Anthropic Messages API (`streamAnthropic`, `AnthropicOptions`)
 - **`google-generative-ai`**: Google Generative AI API (`streamGoogle`, `GoogleOptions`)
@@ -750,36 +796,36 @@ The library uses a registry of API implementations. Built-in APIs include:
 
 ### Faux provider for tests
 
-`registerFauxProvider()` registers a temporary in-memory provider for tests and demos. It is opt-in and not part of the built-in provider set.
+`createFauxProvider()` creates a scripted in-memory API implementation for tests and demos. It is opt-in and not part of the built-in provider set: register it on a client like any other provider.
 
 ```typescript
 import {
-  complete,
+  createAiClient,
+  createFauxProvider,
   fauxAssistantMessage,
   fauxText,
   fauxThinking,
   fauxToolCall,
-  registerFauxProvider,
-  stream,
 } from '@hansjm10/volt-ai';
 
-const registration = registerFauxProvider({
+const faux = createFauxProvider({
   tokensPerSecond: 50 // optional
 });
+const client = createAiClient({ providers: [faux], models: faux.models });
 
-const model = registration.getModel();
+const model = faux.getModel();
 const context = {
   messages: [{ role: 'user', content: 'Summarize package.json and then call echo', timestamp: Date.now() }]
 };
 
-registration.setResponses([
+faux.setResponses([
   fauxAssistantMessage([
     fauxThinking('Need to inspect package metadata first.'),
     fauxToolCall('echo', { text: 'package.json' })
   ], { stopReason: 'toolUse' })
 ]);
 
-const first = await complete(model, context, {
+const first = await client.complete(model, context, {
   sessionId: 'session-1',
   cacheRetention: 'short'
 });
@@ -794,45 +840,45 @@ context.messages.push({
   timestamp: Date.now()
 });
 
-registration.setResponses([
+faux.setResponses([
   fauxAssistantMessage([
     fauxThinking('Now I can summarize the tool output.'),
     fauxText('Here is the summary.')
   ])
 ]);
 
-const s = stream(model, context);
+const s = client.stream(model, context);
 for await (const event of s) {
   console.log(event.type);
 }
 
-// Optional: register multiple faux models for model-switching tests
-const multiModel = registerFauxProvider({
+// Optional: multiple faux models for model-switching tests
+const multiModel = createFauxProvider({
   models: [
     { id: 'faux-fast', reasoning: false },
     { id: 'faux-thinker', reasoning: true }
   ]
 });
+client.registerProvider(multiModel);
 const thinker = multiModel.getModel('faux-thinker');
 
 console.log(thinker?.reasoning);
-console.log(registration.getPendingResponseCount());
-console.log(registration.state.callCount);
-registration.unregister();
-multiModel.unregister();
+console.log(faux.getPendingResponseCount());
+console.log(faux.state.callCount);
+client.unregisterProvider(multiModel.api);
 ```
 
 Notes:
 - Responses are consumed from a queue in request start order.
 - If the queue is empty, the faux provider returns an assistant error message whose `error.message` is `"No more faux responses queued"`.
-- Use `registration.setResponses([...])` to replace the remaining queue and `registration.appendResponses([...])` to add more responses.
-- `registration.models` exposes all registered faux models. `registration.getModel()` returns the first one, and `registration.getModel(id)` returns a specific one.
+- Use `faux.setResponses([...])` to replace the remaining queue and `faux.appendResponses([...])` to add more responses.
+- `faux.models` exposes all faux models. `faux.getModel()` returns the first one, and `faux.getModel(id)` returns a specific one.
 - Use `fauxAssistantMessage(...)` for scripted assistant replies. Use `fauxText(...)`, `fauxThinking(...)`, and `fauxToolCall(...)` to build content blocks without filling in low-level fields manually.
-- `registration.unregister()` removes the temporary provider from the global API registry.
+- Each faux provider has a unique random `api` unless `api` is given, so separate fauxes never replace each other on a client.
 - Usage is estimated at roughly 1 token per 4 characters. When `sessionId` is present and `cacheRetention` is not `"none"`, prompt cache reads and writes are simulated automatically.
 - Tool call arguments stream incrementally via `toolcall_delta` chunks.
 - By default, each streamed chunk is emitted on its own microtask. Set `tokensPerSecond` to pace chunk delivery in real time.
-- The intended use is one deterministic scripted flow per registration. If you need independent concurrent flows, register separate faux providers.
+- The intended use is one deterministic scripted flow per faux provider. If you need independent concurrent flows, create separate faux providers.
 
 ### Providers and Models
 
@@ -872,7 +918,7 @@ console.log(`Using ${model.name} via ${model.api} API`);
 You can create custom models for local inference servers or custom endpoints:
 
 ```typescript
-import { Model, stream } from '@hansjm10/volt-ai';
+import { Model } from '@hansjm10/volt-ai';
 
 // Example: Ollama using OpenAI-compatible API
 const ollamaModel: Model<'openai-completions'> = {
@@ -924,7 +970,7 @@ const proxyModel: Model<'anthropic-messages'> = {
 };
 
 // Use the custom model
-const response = await stream(ollamaModel, context, {
+const response = await client.stream(ollamaModel, context, {
   apiKey: 'dummy' // Ollama doesn't need a real key
 });
 ```
@@ -1049,7 +1095,7 @@ When messages from one provider are sent to a different provider, the library au
 ### Example: Multi-Provider Conversation
 
 ```typescript
-import { getModel, complete, Context } from '@hansjm10/volt-ai';
+import { getModel, Context } from '@hansjm10/volt-ai';
 
 // Start with Claude
 const claude = getModel('anthropic', 'claude-sonnet-4-20250514');
@@ -1058,7 +1104,7 @@ const context: Context = {
 };
 
 context.messages.push({ role: 'user', content: 'What is 25 * 18?' });
-const claudeResponse = await complete(claude, context, {
+const claudeResponse = await client.complete(claude, context, {
   thinkingEnabled: true
 });
 context.messages.push(claudeResponse);
@@ -1066,13 +1112,13 @@ context.messages.push(claudeResponse);
 // Switch to GPT-5 - it will see Claude's thinking as <thinking> tagged text
 const gpt5 = getModel('openai', 'gpt-5-mini');
 context.messages.push({ role: 'user', content: 'Is that calculation correct?' });
-const gptResponse = await complete(gpt5, context);
+const gptResponse = await client.complete(gpt5, context);
 context.messages.push(gptResponse);
 
 // Switch to Gemini
 const gemini = getModel('google', 'gemini-2.5-flash');
 context.messages.push({ role: 'user', content: 'What was the original question?' });
-const geminiResponse = await complete(gemini, context);
+const geminiResponse = await client.complete(gemini, context);
 ```
 
 ### Provider Compatibility
@@ -1094,7 +1140,7 @@ This enables flexible workflows where you can:
 The `Context` object can be easily serialized and deserialized using standard JSON methods, making it simple to persist conversations, implement chat history, or transfer contexts between services:
 
 ```typescript
-import { Context, getModel, complete } from '@hansjm10/volt-ai';
+import { Context, getModel } from '@hansjm10/volt-ai';
 
 // Create and use a context
 const context: Context = {
@@ -1105,7 +1151,7 @@ const context: Context = {
 };
 
 const model = getModel('openai', 'gpt-4o-mini');
-const response = await complete(model, context);
+const response = await client.complete(model, context);
 context.messages.push(response);
 
 // Serialize the entire context
@@ -1121,7 +1167,7 @@ restored.messages.push({ role: 'user', content: 'Tell me more about its type sys
 
 // Continue with any model
 const newModel = getModel('anthropic', 'claude-3-5-haiku-20241022');
-const continuation = await complete(newModel, restored);
+const continuation = await client.complete(newModel, restored);
 ```
 
 > **Note**: If the context contains images (encoded as base64 as shown in the Image Input section), those will also be serialized.
@@ -1141,15 +1187,15 @@ Messages are not modified after they are produced. `usage.cost` is derived from 
 
 ## Browser Usage
 
-The library supports browser environments. You must pass the API key explicitly since environment variables are not available in browsers:
+The library supports browser environments. Pass the API key in the request options or from your credential source:
 
 ```typescript
-import { getModel, complete } from '@hansjm10/volt-ai';
+import { getModel } from '@hansjm10/volt-ai';
 
 // API key must be passed explicitly in browser
 const model = getModel('anthropic', 'claude-3-5-haiku-20241022');
 
-const response = await complete(model, {
+const response = await client.complete(model, {
   messages: [{ role: 'user', content: 'Hello!' }]
 }, {
   apiKey: 'your-api-key'
@@ -1165,64 +1211,29 @@ const response = await complete(model, {
 - In browser builds, Bedrock can still appear in model lists. Calls to Bedrock models fail at runtime.
 - Use a server-side proxy or backend service if you need Bedrock or OAuth-based auth from a web app.
 
-### Environment Variables (Node.js only)
+### API Keys
 
-In Node.js environments, you can set environment variables to avoid passing API keys:
-
-| Provider | Environment Variable(s) |
-|----------|------------------------|
-| OpenAI | `OPENAI_API_KEY` |
-| Ant Ling | `ANT_LING_API_KEY` |
-| Azure OpenAI | `AZURE_OPENAI_API_KEY` + `AZURE_OPENAI_BASE_URL` (e.g. `https://{resource}.openai.azure.com`) or `AZURE_OPENAI_RESOURCE_NAME`. Supports `*.openai.azure.com` and `*.cognitiveservices.azure.com`; root endpoints auto-normalize to `/openai/v1`. Optional: `AZURE_OPENAI_API_VERSION` (default `v1`), `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`. |
-| Anthropic | `ANTHROPIC_API_KEY` or `ANTHROPIC_OAUTH_TOKEN` |
-| DeepSeek | `DEEPSEEK_API_KEY` |
-| NVIDIA NIM | `NVIDIA_API_KEY` |
-| Google | `GEMINI_API_KEY` |
-| Vertex AI | `GOOGLE_CLOUD_API_KEY` or `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) + `GOOGLE_CLOUD_LOCATION` + ADC |
-| Mistral | `MISTRAL_API_KEY` |
-| Groq | `GROQ_API_KEY` |
-| Cerebras | `CEREBRAS_API_KEY` |
-| Cloudflare AI Gateway | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` + `CLOUDFLARE_GATEWAY_ID` |
-| Cloudflare Workers AI | `CLOUDFLARE_API_KEY` + `CLOUDFLARE_ACCOUNT_ID` |
-| xAI | `XAI_API_KEY` |
-| Fireworks | `FIREWORKS_API_KEY` |
-| Together AI | `TOGETHER_API_KEY` |
-| OpenRouter | `OPENROUTER_API_KEY` |
-| Vercel AI Gateway | `AI_GATEWAY_API_KEY` |
-| zAI | `ZAI_API_KEY` |
-| ZAI Coding Plan (China) | `ZAI_CODING_CN_API_KEY` |
-| MiniMax | `MINIMAX_API_KEY` |
-| OpenCode Zen / OpenCode Go | `OPENCODE_API_KEY` |
-| Kimi For Coding | `KIMI_API_KEY` |
-| Xiaomi MiMo (API billing) | `XIAOMI_API_KEY` |
-| Xiaomi MiMo Token Plan (China) | `XIAOMI_TOKEN_PLAN_CN_API_KEY` |
-| Xiaomi MiMo Token Plan (Amsterdam) | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` |
-| Xiaomi MiMo Token Plan (Singapore) | `XIAOMI_TOKEN_PLAN_SGP_API_KEY` |
-| GitHub Copilot | `COPILOT_GITHUB_TOKEN` |
-
-When set, the library automatically uses these keys:
+The library reads no API key environment variables. A request uses the `apiKey` in its options, or the key the client's [credential source](#clients-and-credentials) resolves:
 
 ```typescript
-// Uses OPENAI_API_KEY from environment
 const model = getModel('openai', 'gpt-4o-mini');
-const response = await complete(model, context);
-
-// Or override with explicit key
-const response = await complete(model, context, {
-  apiKey: 'sk-different-key'
+const response = await client.complete(model, context, {
+  apiKey: 'sk-...'
 });
 ```
 
+Providers still read their own non-secret configuration from the environment in Node.js, such as `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME` (plus optional `AZURE_OPENAI_API_VERSION` and `AZURE_OPENAI_DEPLOYMENT_NAME_MAP`), `CLOUDFLARE_ACCOUNT_ID` and `CLOUDFLARE_GATEWAY_ID`, Vertex AI's `GOOGLE_CLOUD_PROJECT` and `GOOGLE_CLOUD_LOCATION`, and the AWS credential chain for Bedrock. Volt's coding agent maps provider environment variables such as `OPENAI_API_KEY` to API keys in its own credential source.
+
 ### Provider-Scoped Environment Overrides
 
-Pass `env` in stream options to scope provider configuration to a request. Values in `env` are used before process environment variables for API key discovery and provider configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings, `VOLT_CACHE_RETENTION`, and `HTTP_PROXY`/`HTTPS_PROXY`.
+Pass `env` in stream options to scope provider configuration to a request. Values in `env` are used before process environment variables for provider configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings, `VOLT_CACHE_RETENTION`, and `HTTP_PROXY`/`HTTPS_PROXY`.
 
 ```typescript
 const model = getModel('cloudflare-ai-gateway', 'workers-ai/@cf/moonshotai/kimi-k2.6');
 
-const response = await complete(model, context, {
+const response = await client.complete(model, context, {
+  apiKey: '...',
   env: {
-    CLOUDFLARE_API_KEY: '...',
     CLOUDFLARE_ACCOUNT_ID: 'account-id',
     CLOUDFLARE_GATEWAY_ID: 'gateway-id'
   }
@@ -1230,15 +1241,6 @@ const response = await complete(model, context, {
 ```
 
 Use this when one process needs different provider settings per request, or when ambient environment variables should not leak into a provider call.
-
-### Checking Environment Variables
-
-```typescript
-import { getEnvApiKey } from '@hansjm10/volt-ai';
-
-// Check if an API key is set in environment variables
-const key = getEnvApiKey('openai');  // checks OPENAI_API_KEY
-```
 
 ## OAuth Providers
 
@@ -1254,11 +1256,11 @@ For paid Cloud Code Assist subscriptions, set `GOOGLE_CLOUD_PROJECT` or `GOOGLE_
 
 Vertex AI models support either a Google Cloud API key or Application Default Credentials (ADC):
 
-- **API key**: Set `GOOGLE_CLOUD_API_KEY` or pass `apiKey` in the call options.
+- **API key**: Pass `apiKey` in the call options or resolve it from your credential source.
 - **Local development (ADC)**: Run `gcloud auth application-default login`
 - **CI/Production (ADC)**: Set `GOOGLE_APPLICATION_CREDENTIALS` to point to a service account JSON key file
 
-When using ADC, also set `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) and `GOOGLE_CLOUD_LOCATION`. You can also pass `project`/`location` in the call options. When using `GOOGLE_CLOUD_API_KEY`, `project` and `location` are not required.
+When using ADC, also set `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) and `GOOGLE_CLOUD_LOCATION`. You can also pass `project`/`location` in the call options. With an API key, `project` and `location` are not required.
 
 Example:
 
@@ -1273,11 +1275,11 @@ export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
 ```
 
 ```typescript
-import { getModel, complete } from '@hansjm10/volt-ai';
+import { getModel } from '@hansjm10/volt-ai';
 
 (async () => {
   const model = getModel('google-vertex', 'gemini-2.5-flash');
-  const response = await complete(model, {
+  const response = await client.complete(model, {
     messages: [{ role: 'user', content: 'Hello from Vertex AI' }]
   }, {
     apiKey: process.env.GOOGLE_CLOUD_API_KEY,
@@ -1291,37 +1293,26 @@ import { getModel, complete } from '@hansjm10/volt-ai';
 
 Official docs: [Application Default Credentials](https://cloud.google.com/docs/authentication/application-default-credentials)
 
-### CLI Login
-
-The quickest way to authenticate:
-
-```bash
-npx @hansjm10/volt-ai login              # interactive provider selection
-npx @hansjm10/volt-ai login anthropic    # login to specific provider
-npx @hansjm10/volt-ai list               # list available providers
-```
-
-Credentials are saved to `auth.json` in the current directory.
-
 ### Programmatic OAuth
 
 The library provides login and token refresh functions via the `@hansjm10/volt-ai/oauth` entry point. Credential storage is the caller's responsibility.
 
 ```typescript
 import {
+  // OAuth implementations: login, refreshToken, getApiKey, and optional fetchSubscriptionUsage
+  anthropicOAuthProvider,
+  githubCopilotOAuthProvider,
+  openaiCodexOAuthProvider,
+  builtInOAuthProviders, // all of the above, for createAiClient({ oauthProviders })
+
   // Login functions (return credentials, do not store)
   loginAnthropic,
   loginOpenAICodex,
   loginGitHubCopilot,
-  loginGeminiCli,
-
-  // Token management
-  refreshOAuthToken,   // (provider, credentials) => new credentials
-  getOAuthApiKey,      // (provider, credentialsMap) => { newCredentials, apiKey } | null
 
   // Types
-  type OAuthProvider,
   type OAuthCredentials,
+  type OAuthProviderInterface,
 } from '@hansjm10/volt-ai/oauth';
 ```
 
@@ -1349,29 +1340,35 @@ writeFileSync('auth.json', JSON.stringify(auth, null, 2));
 
 ### Using OAuth Tokens
 
-Use `getOAuthApiKey()` to get an API key, automatically refreshing if expired:
+Refresh expired credentials with the provider's `refreshToken()`, persist them, and convert them to an API key with `getApiKey()`. A credential source can do this per request:
 
 ```typescript
-import { getModel, complete } from '@hansjm10/volt-ai';
-import { getOAuthApiKey } from '@hansjm10/volt-ai/oauth';
+import { builtInProviders, createAiClient, getModel } from '@hansjm10/volt-ai';
+import { githubCopilotOAuthProvider } from '@hansjm10/volt-ai/oauth';
 import { readFileSync, writeFileSync } from 'fs';
 
-// Load your stored credentials
-const auth = JSON.parse(readFileSync('auth.json', 'utf-8'));
+const client = createAiClient({
+  providers: builtInProviders(),
+  credentials: {
+    async resolve({ model }) {
+      if (model.provider !== 'github-copilot') return undefined;
+      const auth = JSON.parse(readFileSync('auth.json', 'utf-8'));
+      let credentials = auth['github-copilot'];
+      if (!credentials) throw new Error('Not logged in');
+      if (Date.now() >= credentials.expires) {
+        credentials = await githubCopilotOAuthProvider.refreshToken(credentials);
+        auth['github-copilot'] = { type: 'oauth', ...credentials };
+        writeFileSync('auth.json', JSON.stringify(auth, null, 2));
+      }
+      return { apiKey: githubCopilotOAuthProvider.getApiKey(credentials) };
+    },
+  },
+});
 
-// Get API key (refreshes if expired)
-const result = await getOAuthApiKey('github-copilot', auth);
-if (!result) throw new Error('Not logged in');
-
-// Save refreshed credentials
-auth['github-copilot'] = { type: 'oauth', ...result.newCredentials };
-writeFileSync('auth.json', JSON.stringify(auth, null, 2));
-
-// Use the API key
 const model = getModel('github-copilot', 'gpt-4o');
-const response = await complete(model, {
+const response = await client.complete(model, {
   messages: [{ role: 'user', content: 'Hello!' }]
-}, { apiKey: result.apiKey });
+});
 ```
 
 ### Subscription Usage
@@ -1379,10 +1376,10 @@ const response = await complete(model, {
 OAuth providers can optionally expose normalized subscription quota usage through `fetchSubscriptionUsage`. Anthropic Claude and OpenAI ChatGPT/Codex implement this capability; GitHub Copilot does not currently expose it.
 
 ```typescript
-import { getOAuthProvider } from '@hansjm10/volt-ai/oauth';
+import { anthropicOAuthProvider } from '@hansjm10/volt-ai/oauth';
 
-const provider = getOAuthProvider('anthropic');
-if (!provider?.fetchSubscriptionUsage) {
+const provider = anthropicOAuthProvider;
+if (!provider.fetchSubscriptionUsage) {
   throw new Error('Subscription usage is not supported');
 }
 
@@ -1406,7 +1403,7 @@ The result contains only provider-neutral quota fields. `fetchedAt` and `resetsA
 
 **OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity.
 
-**Azure OpenAI (Responses)**: Uses the Responses API only. Set `AZURE_OPENAI_API_KEY` and either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
+**Azure OpenAI (Responses)**: Uses the Responses API only. Pass the Azure API key as `apiKey` and set either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
 
 **GitHub Copilot**: If you get "The requested model is not supported" error, enable the model manually in VS Code: open Copilot Chat, click the model selector, select the model (warning icon), and click "Enable".
 
@@ -1440,14 +1437,13 @@ The `StreamProvider` definition supplies only request building and fragment pars
 
 The shared runner owns the event stream and normalizer lifecycle, the `onPayload` and `onResponse` hooks, abort mapping, and the retry policy. Only a failed `send` retries, when its error is retryable, up to `maxRetries` (default 0); each retry waits the server-requested delay or 1s doubling per attempt, and a requested delay above `maxRetryDelayMs` fails immediately.
 
-#### 3. API Registry Integration (`src/providers/register-builtins.ts`)
+#### 3. Built-in Provider List (`src/providers/register-builtins.ts`)
 
-- Register the API with `registerApiProvider()`
+- Add the API to the list `builtInProviders()` returns
 - Add a package subpath export in `package.json` for the provider module (`./dist/providers/<provider>.js`)
 - Add lazy loader wrappers in `src/providers/register-builtins.ts`, do not statically import provider implementation modules there
 - Add any root-level `export type` re-exports in `src/index.ts` that should remain available from `@hansjm10/volt-ai`
-- Add credential detection in `env-api-keys.ts` for the new provider
-- Ensure `streamSimple` handles auth lookup via `getEnvApiKey()` or provider-specific auth
+- Read the API key from `options.apiKey`; providers never look up API keys in the environment
 
 #### 4. Model Generation (`scripts/generate-models.ts`, `scripts/generate-image-models.ts`)
 
@@ -1482,6 +1478,10 @@ Update `src/core/model-resolver.ts`:
 
 - Add a default model ID for the provider in `DEFAULT_MODELS`
 
+Update `src/core/env-api-keys.ts`:
+
+- Add the provider's API key environment variable
+
 Update `src/cli/args.ts`:
 
 - Add environment variable documentation in the help text
@@ -1496,7 +1496,6 @@ Update `packages/ai/README.md`:
 
 - Add to the Supported Providers table
 - Document any provider-specific options or authentication requirements
-- Add environment variable to the Environment Variables section
 
 #### 8. Changelog
 

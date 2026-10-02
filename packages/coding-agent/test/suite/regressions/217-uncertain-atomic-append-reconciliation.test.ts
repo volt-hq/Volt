@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
 import {
@@ -188,11 +188,11 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		replacementHook: (event: SessionBeforeSwitchEvent | SessionShutdownEvent) => void = () => {},
 	): Promise<{
 		runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
-		faux: ReturnType<typeof registerFauxProvider>;
+		faux: FauxProvider;
 	}> {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-217-runtime-"));
 		tempDirs.push(tempDir);
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		faux.setResponses([fauxAssistantMessage("must remain unused")]);
 		const model = faux.getModel();
 		const authStorage = AuthStorage.inMemory();
@@ -208,6 +208,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 							baseUrl: model.baseUrl,
 							apiKey: "faux-key",
 							api: faux.api,
+							streamSimple: faux.streamSimple,
 							models: faux.models.map((registeredModel) => ({
 								id: registeredModel.id,
 								name: registeredModel.name,
@@ -249,7 +250,6 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		await runtime.session.bindExtensions({});
 		runtimeCleanups.push(async () => {
 			await runtime.dispose().catch(() => {});
-			faux.unregister();
 		});
 		return { runtime, faux };
 	}

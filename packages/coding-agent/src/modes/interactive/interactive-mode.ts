@@ -15,7 +15,6 @@ import {
 	type Message,
 	type Model,
 	modelsAreEqual,
-	type OAuthProviderId,
 	type OAuthSelectPrompt,
 	type SubscriptionUsageError,
 } from "@hansjm10/volt-ai";
@@ -8028,8 +8027,7 @@ export class InteractiveMode {
 	}
 
 	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {
-		const authStorage = this.session.modelRegistry.authStorage;
-		const oauthProviders = authStorage.getOAuthProviders();
+		const oauthProviders = this.session.modelRegistry.client.getOAuthProviders();
 		const oauthProviderIds = new Set(oauthProviders.map((provider) => provider.id));
 		const options: AuthSelectorProvider[] = oauthProviders.map((provider) => ({
 			id: provider.id,
@@ -8320,9 +8318,7 @@ export class InteractiveMode {
 	private async showLoginDialog(providerId: string, providerName: string): Promise<void> {
 		const previousView = this.activeView;
 		const previousFocus = this.ui.getFocusedComponent();
-		const providerInfo = this.session.modelRegistry.authStorage
-			.getOAuthProviders()
-			.find((provider) => provider.id === providerId);
+		const providerInfo = this.session.modelRegistry.client.getOAuthProvider(providerId);
 		const previousModel = this.session.model;
 
 		// Providers that use callback servers (can paste redirect URL)
@@ -8352,7 +8348,7 @@ export class InteractiveMode {
 		const restoreEditor = () => this.activateView(previousView, previousFocus ?? this.editor);
 
 		try {
-			await this.session.modelRegistry.authStorage.login(providerId as OAuthProviderId, {
+			await this.session.modelRegistry.login(providerId, {
 				onAuth: (info: { url: string; instructions?: string }) => {
 					dialog.showAuth(info.url, info.instructions);
 
@@ -8859,7 +8855,7 @@ export class InteractiveMode {
 
 	private async handleUsageCommand(): Promise<void> {
 		const report = await this.subscriptionUsageService.fetch(
-			this.session.modelRegistry.authStorage,
+			this.session.modelRegistry,
 			this.session.model?.provider,
 		);
 		if (report.status === "no_subscription") {

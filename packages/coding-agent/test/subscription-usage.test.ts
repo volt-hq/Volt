@@ -1,10 +1,17 @@
 import type { OAuthCredentials, OAuthProviderInterface, SubscriptionUsageResult } from "@hansjm10/volt-ai";
-import { registerOAuthProvider, unregisterOAuthProvider } from "@hansjm10/volt-ai/oauth";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SubscriptionUsageService } from "../src/core/subscription-usage.ts";
 
-const registeredProviderIds: string[] = [];
+const usageProviders: OAuthProviderInterface[] = [];
+
+/** A registry over `authStorage` whose client has the usage providers registered in this test. */
+function registryFor(authStorage: AuthStorage): ModelRegistry {
+	const registry = ModelRegistry.inMemory(authStorage);
+	for (const provider of usageProviders) registry.client.registerOAuthProvider(provider);
+	return registry;
+}
 
 function oauthCredential(access = "access-token") {
 	return {
@@ -36,8 +43,7 @@ function registerUsageProvider(
 		},
 		...(fetchSubscriptionUsage ? { fetchSubscriptionUsage } : {}),
 	};
-	registerOAuthProvider(provider);
-	registeredProviderIds.push(id);
+	usageProviders.push(provider);
 	return provider;
 }
 
@@ -54,9 +60,7 @@ function successfulResult(providerId: string, fetchedAt = 1_800_000_000_000): Su
 
 describe("SubscriptionUsageService", () => {
 	afterEach(() => {
-		for (const providerId of registeredProviderIds.splice(0)) {
-			unregisterOAuthProvider(providerId);
-		}
+		usageProviders.splice(0);
 		vi.restoreAllMocks();
 	});
 
@@ -67,11 +71,13 @@ describe("SubscriptionUsageService", () => {
 
 		expect(
 			await service.fetch(
-				AuthStorage.inMemory({ [unsupportedId]: { type: "api_key", key: "api-key" } }),
+				registryFor(AuthStorage.inMemory({ [unsupportedId]: { type: "api_key", key: "api-key" } })),
 				unsupportedId,
 			),
 		).toEqual({ status: "no_subscription" });
-		expect(await service.fetch(AuthStorage.inMemory({ [unsupportedId]: oauthCredential() }), unsupportedId)).toEqual({
+		expect(
+			await service.fetch(registryFor(AuthStorage.inMemory({ [unsupportedId]: oauthCredential() })), unsupportedId),
+		).toEqual({
 			status: "unsupported",
 		});
 	});
@@ -85,7 +91,7 @@ describe("SubscriptionUsageService", () => {
 		registerUsageProvider(unconfiguredId, unconfiguredFetch);
 		const authStorage = AuthStorage.inMemory({ [configuredId]: oauthCredential() });
 
-		const report = await new SubscriptionUsageService().fetch(authStorage, unconfiguredId);
+		const report = await new SubscriptionUsageService().fetch(registryFor(authStorage), unconfiguredId);
 
 		expect(report).toMatchObject({
 			status: "providers",
@@ -108,7 +114,7 @@ describe("SubscriptionUsageService", () => {
 			[zetaId]: oauthCredential("zeta-token"),
 		});
 
-		const report = await new SubscriptionUsageService().fetch(authStorage, zetaId);
+		const report = await new SubscriptionUsageService().fetch(registryFor(authStorage), zetaId);
 
 		expect(report.status).toBe("providers");
 		if (report.status !== "providers") throw new Error("Expected provider usage report");
@@ -125,17 +131,17 @@ describe("SubscriptionUsageService", () => {
 		const authStorage = AuthStorage.inMemory({ [providerId]: oauthCredential("first-token") });
 		const service = new SubscriptionUsageService({ now: () => now });
 
-		await service.fetch(authStorage, providerId);
+		await service.fetch(registryFor(authStorage), providerId);
 		now += 59_000;
-		await service.fetch(authStorage, providerId);
+		await service.fetch(registryFor(authStorage), providerId);
 		expect(fetchSubscriptionUsage).toHaveBeenCalledTimes(1);
 
 		authStorage.set(providerId, oauthCredential("second-token"));
-		await service.fetch(authStorage, providerId);
+		await service.fetch(registryFor(authStorage), providerId);
 		expect(fetchSubscriptionUsage).toHaveBeenCalledTimes(2);
 
 		now += 60_001;
-		await service.fetch(authStorage, providerId);
+		await service.fetch(registryFor(authStorage), providerId);
 		expect(fetchSubscriptionUsage).toHaveBeenCalledTimes(3);
 	});
 
@@ -145,7 +151,7 @@ describe("SubscriptionUsageService", () => {
 		const authStorage = AuthStorage.inMemory({ [providerId]: oauthCredential() });
 		const service = new SubscriptionUsageService({ timeoutMs: 5 });
 
-		const report = await service.fetch(authStorage, providerId);
+		const report = await service.fetch(registryFor(authStorage), providerId);
 
 		expect(report).toMatchObject({
 			status: "providers",

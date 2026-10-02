@@ -67,6 +67,7 @@ describe("#393 subagent policy stops fence background wakes", () => {
 						noContextFiles: true,
 					},
 				});
+				services.modelRegistry.client.registerProvider(fixture.faux);
 				services.settingsManager.applyOverrides({
 					lsp: { enabled: false },
 					retry: { enabled: false },

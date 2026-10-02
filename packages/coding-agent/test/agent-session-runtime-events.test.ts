@@ -2,7 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import {
@@ -57,7 +57,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		mkdirSync(tempDir, { recursive: true });
 		tempDirs.push(tempDir);
 
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		faux.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two"), fauxAssistantMessage("three")]);
 
 		const authStorage = AuthStorage.inMemory();
@@ -79,6 +79,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				...runtimeOptions,
 				cwd,
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			return {
 				...(await createAgentSessionFromServices({
 					services,
@@ -99,7 +100,6 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		cleanups.push(async () => {
 			await runtimeHost.dispose();
-			faux.unregister();
 		});
 
 		return { runtimeHost, faux };

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
@@ -56,7 +56,7 @@ describe("AgentSessionRuntime characterization", () => {
 			options?.cwd ?? join(tmpdir(), `volt-runtime-suite-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "faux-1", reasoning: true },
 				{ id: "faux-2", reasoning: false },
@@ -79,6 +79,7 @@ describe("AgentSessionRuntime characterization", () => {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
 							api: faux.api,
+							streamSimple: faux.streamSimple,
 							models: faux.models.map((registeredModel) => ({
 								id: registeredModel.id,
 								name: registeredModel.name,
@@ -125,7 +126,6 @@ describe("AgentSessionRuntime characterization", () => {
 
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -933,7 +933,7 @@ describe("AgentSessionRuntime characterization", () => {
 		);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "faux-1", reasoning: true },
 				{ id: "faux-2", reasoning: false },
@@ -955,6 +955,7 @@ describe("AgentSessionRuntime characterization", () => {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
 							api: faux.api,
+							streamSimple: faux.streamSimple,
 							models: faux.models.map((registeredModel) => ({
 								id: registeredModel.id,
 								name: registeredModel.name,
@@ -997,7 +998,6 @@ describe("AgentSessionRuntime characterization", () => {
 		await runtime.session.bindExtensions({});
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -1064,6 +1064,7 @@ describe("AgentSessionRuntime characterization", () => {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
 							api: faux.api,
+							streamSimple: faux.streamSimple,
 							models: faux.models.map((registeredModel) => ({
 								id: registeredModel.id,
 								name: registeredModel.name,
@@ -1138,6 +1139,7 @@ describe("AgentSessionRuntime characterization", () => {
 							baseUrl: faux.getModel().baseUrl,
 							apiKey: "faux-key",
 							api: faux.api,
+							streamSimple: faux.streamSimple,
 							models: faux.models.map((registeredModel) => ({
 								id: registeredModel.id,
 								name: registeredModel.name,

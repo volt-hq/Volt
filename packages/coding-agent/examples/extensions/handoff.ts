@@ -13,7 +13,7 @@
  */
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import { complete, type Message } from "@hansjm10/volt-ai";
+import type { Message } from "@hansjm10/volt-ai";
 import type { ExtensionAPI, SessionEntry } from "@hansjm10/volt-coding-agent";
 import { BorderedLoader, convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
 
@@ -117,11 +117,6 @@ export default function (volt: ExtensionAPI) {
 				loader.onAbort = () => done(null);
 
 				const doGenerate = async () => {
-					const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-					if (!auth.ok || !auth.apiKey) {
-						throw new Error(auth.ok ? `No API key for ${ctx.model!.provider}` : auth.error);
-					}
-
 					const userMessage: Message = {
 						role: "user",
 						content: [
@@ -133,14 +128,18 @@ export default function (volt: ExtensionAPI) {
 						timestamp: Date.now(),
 					};
 
-					const response = await complete(
+					// The registry's client resolves the model's credentials.
+					const response = await ctx.modelRegistry.client.complete(
 						ctx.model!,
 						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
+						{ signal: loader.signal },
 					);
 
 					if (response.stopReason === "aborted") {
 						return null;
+					}
+					if (response.stopReason === "error") {
+						throw new Error(response.error?.message ?? "Handoff generation failed");
 					}
 
 					return response.content

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { clampThinkingLevel, getModel, getModels, getProviders, getSupportedThinkingLevels } from "../src/models.ts";
-import { streamSimple } from "../src/stream.ts";
 import type { Api, Model, SimpleStreamOptions } from "../src/types.ts";
+import { streamSimple } from "./test-client.ts";
 
 interface RequestPayload {
 	model?: string;

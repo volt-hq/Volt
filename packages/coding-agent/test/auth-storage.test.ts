@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerOAuthProvider, unregisterOAuthProvider } from "@hansjm10/volt-ai/oauth";
+import type { OAuthCredentials, OAuthProviderInterface } from "@hansjm10/volt-ai";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -467,7 +467,7 @@ describe("AuthStorage", () => {
 				status: "error" as const,
 				error: { code: "unavailable" as const, message: "should not run" },
 			}));
-			registerOAuthProvider({
+			const provider: OAuthProviderInterface = {
 				id: providerId,
 				name: "Usage API Key Provider",
 				async login() {
@@ -480,30 +480,26 @@ describe("AuthStorage", () => {
 					return credentials.access;
 				},
 				fetchSubscriptionUsage,
+			};
+
+			authStorage = AuthStorage.inMemory({
+				[providerId]: { type: "api_key", key: "stored-api-key" },
 			});
+			authStorage.setRuntimeApiKey(providerId, "runtime-api-key");
+			authStorage.setFallbackResolver(() => "fallback-api-key");
 
-			try {
-				authStorage = AuthStorage.inMemory({
-					[providerId]: { type: "api_key", key: "stored-api-key" },
-				});
-				authStorage.setRuntimeApiKey(providerId, "runtime-api-key");
-				authStorage.setFallbackResolver(() => "fallback-api-key");
-
-				expect(await authStorage.fetchSubscriptionUsage(providerId)).toBeUndefined();
-				expect(fetchSubscriptionUsage).not.toHaveBeenCalled();
-			} finally {
-				unregisterOAuthProvider(providerId);
-			}
+			expect(await authStorage.fetchSubscriptionUsage(provider)).toBeUndefined();
+			expect(fetchSubscriptionUsage).not.toHaveBeenCalled();
 		});
 
 		test("refreshes expired OAuth credentials under lock and persists them before fetching usage", async () => {
 			const providerId = `usage-oauth-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-			const refreshToken = vi.fn(async (credentials) => ({
+			const refreshToken = vi.fn(async (credentials: OAuthCredentials) => ({
 				...credentials,
 				access: "refreshed-access-token",
 				expires: Date.now() + 60_000,
 			}));
-			const fetchSubscriptionUsage = vi.fn(async (_credentials) => ({
+			const fetchSubscriptionUsage = vi.fn(async (_credentials: OAuthCredentials) => ({
 				status: "success" as const,
 				snapshot: {
 					providerId,
@@ -511,7 +507,7 @@ describe("AuthStorage", () => {
 					limits: [{ id: "session", label: "Session", usedPercent: 25 }],
 				},
 			}));
-			registerOAuthProvider({
+			const provider: OAuthProviderInterface = {
 				id: providerId,
 				name: "Usage OAuth Provider",
 				async login() {
@@ -522,7 +518,7 @@ describe("AuthStorage", () => {
 					return credentials.access;
 				},
 				fetchSubscriptionUsage,
-			});
+			};
 			writeAuthJson({
 				[providerId]: {
 					type: "oauth",
@@ -532,34 +528,86 @@ describe("AuthStorage", () => {
 				},
 			});
 
-			try {
-				authStorage = AuthStorage.create(authJsonPath);
-				const result = await authStorage.fetchSubscriptionUsage(providerId);
+			authStorage = AuthStorage.create(authJsonPath);
+			const result = await authStorage.fetchSubscriptionUsage(provider);
 
-				expect(result).toMatchObject({ status: "success", snapshot: { providerId } });
-				expect(refreshToken).toHaveBeenCalledOnce();
-				expect(fetchSubscriptionUsage).toHaveBeenCalledWith(
-					expect.objectContaining({ access: "refreshed-access-token" }),
-					{},
-				);
-				const persisted = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<
-					string,
-					{ access: string; type: string }
-				>;
-				expect(persisted[providerId]).toMatchObject({
-					type: "oauth",
-					access: "refreshed-access-token",
-				});
-			} finally {
-				unregisterOAuthProvider(providerId);
-			}
+			expect(result).toMatchObject({ status: "success", snapshot: { providerId } });
+			expect(refreshToken).toHaveBeenCalledOnce();
+			expect(fetchSubscriptionUsage).toHaveBeenCalledWith(
+				expect.objectContaining({ access: "refreshed-access-token" }),
+				{},
+			);
+			const persisted = JSON.parse(readFileSync(authJsonPath, "utf-8")) as Record<
+				string,
+				{ access: string; type: string }
+			>;
+			expect(persisted[providerId]).toMatchObject({
+				type: "oauth",
+				access: "refreshed-access-token",
+			});
+		});
+	});
+
+	describe("oauth providers", () => {
+		test("resolves an OAuth API key only through the caller's OAuth provider", async () => {
+			authStorage = AuthStorage.inMemory({
+				"custom-oauth": { type: "oauth", access: "access", refresh: "refresh", expires: Date.now() + 60_000 },
+			});
+			const oauthProvider: OAuthProviderInterface = {
+				id: "custom-oauth",
+				name: "Custom OAuth",
+				async login() {
+					throw new Error("Not used in this test");
+				},
+				async refreshToken(credentials) {
+					return credentials;
+				},
+				getApiKey(credentials) {
+					return `key-${credentials.access}`;
+				},
+			};
+
+			expect(await authStorage.getApiKey("custom-oauth")).toBeUndefined();
+			expect(await authStorage.getApiKey("custom-oauth", { oauthProvider })).toBe("key-access");
+		});
+
+		test("login stores credentials under the provider id", async () => {
+			authStorage = AuthStorage.inMemory();
+			await authStorage.login(
+				{
+					id: "custom-oauth",
+					name: "Custom OAuth",
+					async login() {
+						return { access: "access", refresh: "refresh", expires: 1 };
+					},
+					async refreshToken(credentials) {
+						return credentials;
+					},
+					getApiKey(credentials) {
+						return credentials.access;
+					},
+				},
+				{
+					onAuth: () => {},
+					onDeviceCode: () => {},
+					onPrompt: async () => "",
+					onSelect: async () => undefined,
+				},
+			);
+
+			expect(authStorage.get("custom-oauth")).toEqual({
+				type: "oauth",
+				access: "access",
+				refresh: "refresh",
+				expires: 1,
+			});
 		});
 	});
 
 	describe("oauth lock compromise handling", () => {
 		test("returns undefined on compromised lock and allows a later retry", async () => {
 			const providerId = `test-oauth-provider-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-			registerOAuthProvider({
+			const oauthProvider: OAuthProviderInterface = {
 				id: providerId,
 				name: "Test OAuth Provider",
 				async login() {
@@ -575,7 +623,7 @@ describe("AuthStorage", () => {
 				getApiKey(credentials) {
 					return `Bearer ${credentials.access}`;
 				},
-			});
+			};
 
 			writeAuthJson({
 				[providerId]: {
@@ -595,12 +643,12 @@ describe("AuthStorage", () => {
 				return realLock(file, options);
 			});
 
-			const firstTry = await authStorage.getApiKey(providerId);
+			const firstTry = await authStorage.getApiKey(providerId, { oauthProvider });
 			expect(firstTry).toBeUndefined();
 
 			lockSpy.mockRestore();
 
-			const secondTry = await authStorage.getApiKey(providerId);
+			const secondTry = await authStorage.getApiKey(providerId, { oauthProvider });
 			expect(secondTry).toBe("Bearer refreshed-access-token");
 		});
 	});

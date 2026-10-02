@@ -18,9 +18,9 @@
 
 import { describe, expect, it } from "vitest";
 import { getModels } from "../src/models.ts";
-import { complete } from "../src/stream.ts";
 import type { Context } from "../src/types.ts";
 import { hasBedrockCredentials } from "./bedrock-utils.ts";
+import { complete } from "./test-client.ts";
 
 describe("Amazon Bedrock Models", () => {
 	const models = getModels("amazon-bedrock");

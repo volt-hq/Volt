@@ -78,6 +78,7 @@ async function createTestContext(options: {
 				noContextFiles: true,
 			},
 		});
+		services.modelRegistry.client.registerProvider(child.faux);
 		services.settingsManager.applyOverrides({ retry: { enabled: false } });
 		const created = await createAgentSessionFromServices({
 			services,

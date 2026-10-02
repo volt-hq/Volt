@@ -3,7 +3,7 @@
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../../src/core/auth-storage.ts";
@@ -23,7 +23,7 @@ describe("regression #5596: missing configured theme export", () => {
 
 	it("exports with the active fallback theme when the configured theme is missing", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-5596-"));
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [{ id: "faux-1", reasoning: false }],
 		});
 		faux.setResponses([fauxAssistantMessage("hello")]);
@@ -36,6 +36,7 @@ describe("regression #5596: missing configured theme export", () => {
 			baseUrl: model.baseUrl,
 			apiKey: "faux-key",
 			api: faux.api,
+			streamSimple: faux.streamSimple,
 			models: faux.models.map((registeredModel) => ({
 				id: registeredModel.id,
 				name: registeredModel.name,
@@ -52,7 +53,7 @@ describe("regression #5596: missing configured theme export", () => {
 		const settingsManager = SettingsManager.inMemory({ theme: "missing-theme" });
 		const sessionManager = await SessionManager.create(tempDir, join(tempDir, "sessions"));
 		const session = new AgentSession({
-			...createTestAgentSessionRuntimeConfig({ model, apiKey: "faux-key" }),
+			...createTestAgentSessionRuntimeConfig({ model, streamFn: modelRegistry.client.streamSimple }),
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
@@ -62,7 +63,6 @@ describe("regression #5596: missing configured theme export", () => {
 		cleanups.push(async () => {
 			session.dispose();
 			await session.waitForClosed();
-			faux.unregister();
 			if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 		});
 

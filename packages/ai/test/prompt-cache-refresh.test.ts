@@ -1,6 +1,11 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { type FauxProviderRegistration, fauxAssistantMessage, registerFauxProvider } from "../src/providers/faux.ts";
-import { completeSimple, refreshPromptCache, supportsPromptCacheRefresh } from "../src/stream.ts";
+import { describe, expect, it } from "vitest";
+import { createAiClient } from "../src/client.ts";
+import {
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
+	fauxAssistantMessage,
+} from "../src/providers/faux.ts";
 import type { Context, PromptCacheMetadata } from "../src/types.ts";
 
 const renewing: PromptCacheMetadata = {
@@ -14,16 +19,13 @@ const context: Context = {
 	tools: [],
 };
 
-let registrations: FauxProviderRegistration[] = [];
-afterEach(() => {
-	for (const registration of registrations) registration.unregister();
-	registrations = [];
-});
+const client = createAiClient();
+const { completeSimple, refreshPromptCache, supportsPromptCacheRefresh } = client;
 
-function register(options: Parameters<typeof registerFauxProvider>[0]): FauxProviderRegistration {
-	const registration = registerFauxProvider(options);
-	registrations.push(registration);
-	return registration;
+function register(options: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	return faux;
 }
 
 describe("refreshPromptCache", () => {

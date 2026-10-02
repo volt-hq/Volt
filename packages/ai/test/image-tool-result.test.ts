@@ -3,8 +3,9 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import type { Api, Context, Model, Tool, ToolResultMessage } from "../src/index.ts";
-import { complete, getModel } from "../src/index.ts";
+import { getModel } from "../src/index.ts";
 import type { StreamOptions } from "../src/types.ts";
+import { complete } from "./test-client.ts";
 
 type StreamOptionsWithExtras = StreamOptions & Record<string, unknown>;
 

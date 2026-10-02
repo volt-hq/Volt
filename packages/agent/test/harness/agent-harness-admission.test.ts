@@ -1,4 +1,10 @@
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import {
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
+	fauxAssistantMessage,
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHarnessAdmissionGate } from "../../src/harness/admission-gate.ts";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
@@ -8,7 +14,15 @@ import type { AgentMessage } from "../../src/types.ts";
 import { runPrompt } from "./harness-test-utils.ts";
 import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
-const registrations: Array<ReturnType<typeof registerFauxProvider>> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 const harnesses: AgentHarness[] = [];
 const barriers: Array<() => void> = [];
 const suspendedError = { code: "busy", message: "Operation admission is suspended" };
@@ -18,7 +32,7 @@ afterEach(async () => {
 	const closing = harnesses.splice(0);
 	for (const harness of closing) harness.requestClose();
 	await Promise.all(closing.map((harness) => harness.waitForClosed()));
-	for (const registration of registrations.splice(0)) registration.unregister();
+	for (const api of registeredApis.splice(0)) client.unregisterProvider(api);
 	vi.restoreAllMocks();
 });
 
@@ -38,13 +52,16 @@ function observe<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>> {
 	);
 }
 
-function createHarness(options: Omit<AgentHarnessOptions, "session" | "model"> = {}) {
+function createHarness(
+	options: Omit<AgentHarnessOptions, "session" | "model" | "streamFn"> &
+		Partial<Pick<AgentHarnessOptions, "streamFn">> = {},
+) {
 	const registration = registerFauxProvider({
 		models: [{ id: "admission-test", contextWindow: 6000, maxTokens: 1000 }],
 	});
-	registrations.push(registration);
 	const session = new Session(new InMemorySessionStorage());
 	const harness = new AgentHarness({
+		streamFn: client.streamSimple,
 		session,
 		model: registration.getModel(),
 		...options,

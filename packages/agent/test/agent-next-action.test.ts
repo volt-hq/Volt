@@ -475,7 +475,6 @@ describe("agent loop next-action protocol", () => {
 		const abortController = new AbortController();
 		let transformCalls = 0;
 		let conversionCalls = 0;
-		let credentialCalls = 0;
 		let providerCalls = 0;
 		const events: AgentEvent[] = [];
 		await runAgentLoop(
@@ -490,10 +489,6 @@ describe("agent loop next-action protocol", () => {
 				convertToLlm: (messages) => {
 					conversionCalls++;
 					return convertToLlm(messages);
-				},
-				getApiKey: () => {
-					credentialCalls++;
-					return "unused";
 				},
 				prepareRequest: () => undefined,
 			},
@@ -510,7 +505,6 @@ describe("agent loop next-action protocol", () => {
 
 		expect(transformCalls).toBe(0);
 		expect(conversionCalls).toBe(0);
-		expect(credentialCalls).toBe(0);
 		expect(providerCalls).toBe(0);
 		expect(events.at(-1)?.type).toBe("agent_end");
 	});
@@ -521,7 +515,6 @@ describe("agent loop next-action protocol", () => {
 		let preparationCalls = 0;
 		let transformCalls = 0;
 		let conversionCalls = 0;
-		let credentialCalls = 0;
 		let providerCalls = 0;
 		const events: AgentEvent[] = [];
 		const messages = await runAgentLoop(
@@ -536,10 +529,6 @@ describe("agent loop next-action protocol", () => {
 				convertToLlm: (contextMessages) => {
 					conversionCalls++;
 					return convertToLlm(contextMessages);
-				},
-				getApiKey: () => {
-					credentialCalls++;
-					return "unused";
 				},
 				prepareRequest: () => {
 					preparationCalls++;
@@ -560,7 +549,6 @@ describe("agent loop next-action protocol", () => {
 		expect(preparationCalls).toBe(0);
 		expect(transformCalls).toBe(0);
 		expect(conversionCalls).toBe(0);
-		expect(credentialCalls).toBe(0);
 		expect(providerCalls).toBe(0);
 		expect(events.map((event) => event.type)).toEqual([
 			"agent_start",
@@ -591,7 +579,6 @@ describe("agent loop next-action protocol", () => {
 		const activeModel = { ...createModel(), id: "prepared-model" };
 		let transformCalls = 0;
 		let conversionCalls = 0;
-		let credentialCalls = 0;
 		let providerCalls = 0;
 		let preparedContext: { systemPrompt: string; messages: AgentMessage[] } | undefined;
 		let markPreparationStarted: (() => void) | undefined;
@@ -615,10 +602,6 @@ describe("agent loop next-action protocol", () => {
 				convertToLlm: (contextMessages) => {
 					conversionCalls++;
 					return convertToLlm(contextMessages);
-				},
-				getApiKey: () => {
-					credentialCalls++;
-					return "unused";
 				},
 				prepareRequest: async ({ context }) => {
 					preparedContext = { systemPrompt: "prepared", messages: [...context.messages] };
@@ -658,7 +641,6 @@ describe("agent loop next-action protocol", () => {
 
 		expect(transformCalls).toBe(0);
 		expect(conversionCalls).toBe(0);
-		expect(credentialCalls).toBe(0);
 		expect(providerCalls).toBe(0);
 		expect(events.map((event) => event.type)).toEqual([
 			"agent_start",
@@ -691,7 +673,6 @@ describe("agent loop next-action protocol", () => {
 		const activeModel = { ...createModel(), id: "active-model" };
 		let transformCalls = 0;
 		let conversionCalls = 0;
-		let credentialCalls = 0;
 		let providerCalls = 0;
 		let preparedMessages: AgentMessage[] | undefined;
 		let markTransformStarted: (() => void) | undefined;
@@ -717,10 +698,6 @@ describe("agent loop next-action protocol", () => {
 				convertToLlm: (messages) => {
 					conversionCalls++;
 					return convertToLlm(messages);
-				},
-				getApiKey: () => {
-					credentialCalls++;
-					return "unused";
 				},
 				prepareRequest: ({ context }) => {
 					preparedMessages = [...context.messages];
@@ -758,7 +735,6 @@ describe("agent loop next-action protocol", () => {
 
 		expect(transformCalls).toBe(1);
 		expect(conversionCalls).toBe(0);
-		expect(credentialCalls).toBe(0);
 		expect(providerCalls).toBe(0);
 		expect(events.map((event) => event.type)).toEqual([
 			"agent_start",

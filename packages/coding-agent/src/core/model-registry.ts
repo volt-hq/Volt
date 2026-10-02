@@ -1,25 +1,33 @@
 /**
- * Model registry - manages built-in and custom models, provides API key resolution.
+ * Model registry - manages built-in and custom models, provides API key resolution, and owns the
+ * AI client that streams them.
  */
 
 import {
+	type AiClient,
 	type AnthropicMessagesCompat,
 	type Api,
 	type AssistantMessageEventStream,
+	builtInImagesProviders,
+	builtInProviders,
 	type Context,
+	type CredentialRequest,
+	type Credentials,
+	createAiClient,
 	getModels,
 	getProviders,
 	type KnownProvider,
 	type Model,
+	type OAuthLoginCallbacks,
 	type OAuthProviderInterface,
 	type OpenAICompletionsCompat,
 	type OpenAIResponsesCompat,
 	type PromptCacheMetadata,
-	registerApiProvider,
-	resetApiProviders,
 	type SimpleStreamOptions,
+	type SubscriptionUsageFetchOptions,
+	type SubscriptionUsageResult,
 } from "@hansjm10/volt-ai";
-import { registerOAuthProvider, resetOAuthProviders } from "@hansjm10/volt-ai/oauth";
+import { builtInOAuthProviders } from "@hansjm10/volt-ai/oauth";
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
 import { type Static, Type } from "typebox";
@@ -352,9 +360,13 @@ export const clearApiKeyCache = clearConfigValueCache;
 
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
+ *
+ * Owns one AI client: its model catalog is this registry's models, its providers are the built-ins
+ * plus those registered here, and it resolves each request's credentials through this registry.
  */
 export class ModelRegistry {
-	private models: Model<Api>[] = [];
+	/** The AI client for this registry's models. Sessions using this registry stream through it. */
+	readonly client: AiClient;
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
@@ -365,6 +377,12 @@ export class ModelRegistry {
 	private constructor(authStorage: AuthStorage, modelsJsonPath: string | undefined) {
 		this.authStorage = authStorage;
 		this.modelsJsonPath = modelsJsonPath ? normalizePath(modelsJsonPath) : undefined;
+		this.client = createAiClient({
+			providers: builtInProviders(),
+			oauthProviders: builtInOAuthProviders(),
+			imagesProviders: builtInImagesProviders(),
+			credentials: { resolve: (request) => this.resolveCredentials(request) },
+		});
 		this.loadModels();
 	}
 
@@ -384,9 +402,11 @@ export class ModelRegistry {
 		this.modelRequestHeaders.clear();
 		this.loadError = undefined;
 
-		// Ensure dynamic API/OAuth registrations are rebuilt from current provider state.
-		resetApiProviders();
-		resetOAuthProviders();
+		// Rebuild the client's API and OAuth registrations from current provider state.
+		for (const provider of this.client.getProviders()) this.client.unregisterProvider(provider.api);
+		for (const provider of builtInProviders()) this.client.registerProvider(provider);
+		for (const provider of this.client.getOAuthProviders()) this.client.unregisterOAuthProvider(provider.id);
+		for (const provider of builtInOAuthProviders()) this.client.registerOAuthProvider(provider);
 
 		this.loadModels();
 
@@ -431,14 +451,14 @@ export class ModelRegistry {
 		let combined = this.mergeCustomModels(builtInModels, customModels);
 
 		// Let OAuth providers modify their models (e.g., update baseUrl)
-		for (const oauthProvider of this.authStorage.getOAuthProviders()) {
+		for (const oauthProvider of this.client.getOAuthProviders()) {
 			const cred = this.authStorage.get(oauthProvider.id);
 			if (cred?.type === "oauth" && oauthProvider.modifyModels) {
 				combined = oauthProvider.modifyModels(combined, cred);
 			}
 		}
 
-		this.models = combined;
+		this.client.setModels(combined);
 	}
 
 	/** Load built-in models and apply provider/model overrides */
@@ -663,7 +683,7 @@ export class ModelRegistry {
 	 * If models.json had errors, returns only built-in models.
 	 */
 	getAll(): Model<Api>[] {
-		return this.models;
+		return this.client.getModels();
 	}
 
 	/**
@@ -671,14 +691,14 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.models.filter((m) => this.hasConfiguredAuth(m));
+		return this.getAll().filter((m) => this.hasConfiguredAuth(m));
 	}
 
 	/**
 	 * Find a model by provider and ID.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
-		return this.models.find((m) => m.provider === provider && m.id === modelId);
+		return this.client.getModel(provider, modelId);
 	}
 
 	/**
@@ -725,13 +745,16 @@ export class ModelRegistry {
 	}
 
 	/**
-	 * Get API key and request headers for a model.
+	 * Get API key and request headers for a model. The client resolves every request through this.
 	 */
-	async getApiKeyAndHeaders(model: Model<Api>): Promise<ResolvedRequestAuth> {
+	async getApiKeyAndHeaders(model: Pick<Model<Api>, "provider" | "id" | "headers">): Promise<ResolvedRequestAuth> {
 		try {
 			const providerConfig = this.providerRequestConfigs.get(model.provider);
 			const providerEnv = this.authStorage.getProviderEnv(model.provider);
-			const apiKeyFromAuthStorage = await this.authStorage.getApiKey(model.provider, { includeFallback: false });
+			const apiKeyFromAuthStorage = await this.authStorage.getApiKey(model.provider, {
+				includeFallback: false,
+				oauthProvider: this.client.getOAuthProvider(model.provider),
+			});
 			const apiKey =
 				apiKeyFromAuthStorage ??
 				(providerConfig?.apiKey
@@ -780,6 +803,31 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Names of the request headers this registry configures for a model (model, provider, and
+	 * per-model headers, and `Authorization` for `authHeader` providers), without resolving values.
+	 */
+	getConfiguredHeaderNames(model: Pick<Model<Api>, "provider" | "id" | "headers">): string[] {
+		const providerConfig = this.providerRequestConfigs.get(model.provider);
+		return [
+			...Object.keys(model.headers ?? {}),
+			...Object.keys(providerConfig?.headers ?? {}),
+			...Object.keys(this.modelRequestHeaders.get(this.getModelRequestKey(model.provider, model.id)) ?? {}),
+			...(providerConfig?.authHeader ? ["Authorization"] : []),
+		];
+	}
+
+	/** The client's credential source: a request fails with an `auth` error when resolution fails. */
+	private async resolveCredentials(request: CredentialRequest): Promise<Credentials> {
+		const auth = await this.getApiKeyAndHeaders(request.model);
+		if (!auth.ok) throw new Error(auth.error);
+		return {
+			...(auth.apiKey === undefined ? {} : { apiKey: auth.apiKey }),
+			...(auth.headers === undefined ? {} : { headers: auth.headers }),
+			...(auth.env === undefined ? {} : { env: auth.env }),
+		};
+	}
+
+	/**
 	 * Return auth status for a provider, including request auth configured in models.json.
 	 * This intentionally does not execute command-backed config values.
 	 */
@@ -813,7 +861,7 @@ export class ModelRegistry {
 	 */
 	getProviderDisplayName(provider: string): string {
 		const registeredProvider = this.registeredProviders.get(provider);
-		const oauthProvider = this.authStorage.getOAuthProviders().find((p) => p.id === provider);
+		const oauthProvider = this.client.getOAuthProvider(provider);
 
 		return (
 			registeredProvider?.name ??
@@ -828,7 +876,10 @@ export class ModelRegistry {
 	 * Get API key for a provider.
 	 */
 	async getApiKeyForProvider(provider: string): Promise<string | undefined> {
-		const apiKey = await this.authStorage.getApiKey(provider, { includeFallback: false });
+		const apiKey = await this.authStorage.getApiKey(provider, {
+			includeFallback: false,
+			oauthProvider: this.client.getOAuthProvider(provider),
+		});
 		if (apiKey !== undefined) {
 			return apiKey;
 		}
@@ -837,6 +888,29 @@ export class ModelRegistry {
 		return providerApiKey
 			? resolveConfigValueUncached(providerApiKey, this.authStorage.getProviderEnv(provider))
 			: undefined;
+	}
+
+	/**
+	 * Log in to an OAuth provider registered on this registry's client and store its credentials.
+	 */
+	async login(providerId: string, callbacks: OAuthLoginCallbacks): Promise<void> {
+		const provider = this.client.getOAuthProvider(providerId);
+		if (!provider) {
+			throw new Error(`Unknown OAuth provider: ${providerId}`);
+		}
+		await this.authStorage.login(provider, callbacks);
+	}
+
+	/**
+	 * Fetch subscription usage with a provider's stored OAuth credentials. Returns undefined when the
+	 * provider is not registered here, has no stored OAuth credential, or reports no usage.
+	 */
+	async fetchSubscriptionUsage(
+		providerId: string,
+		options?: SubscriptionUsageFetchOptions,
+	): Promise<SubscriptionUsageResult | undefined> {
+		const provider = this.client.getOAuthProvider(providerId);
+		return provider ? await this.authStorage.fetchSubscriptionUsage(provider, options) : undefined;
 	}
 
 	/**
@@ -865,7 +939,7 @@ export class ModelRegistry {
 	 *
 	 * Removes the provider from the registry and reloads models from disk so that
 	 * built-in models overridden by this provider are restored to their original state.
-	 * Also resets dynamic OAuth and API stream registrations before reapplying
+	 * Also resets the client's OAuth and API registrations before reapplying
 	 * remaining dynamic providers.
 	 * Has no effect if the provider was never registered.
 	 */
@@ -934,33 +1008,30 @@ export class ModelRegistry {
 				...config.oauth,
 				id: providerName,
 			};
-			registerOAuthProvider(oauthProvider);
+			this.client.registerOAuthProvider(oauthProvider);
 		}
 
 		if (config.streamSimple) {
 			const streamSimple = config.streamSimple;
-			registerApiProvider(
-				{
-					api: config.api!,
-					stream: (model, context, options) => streamSimple(model, context, options as SimpleStreamOptions),
-					streamSimple,
-				},
-				`provider:${providerName}`,
-			);
+			this.client.registerProvider({
+				api: config.api!,
+				stream: (model, context, options) => streamSimple(model, context, options as SimpleStreamOptions),
+				streamSimple,
+			});
 		}
 
 		this.storeProviderRequestConfig(providerName, config);
 
 		if (config.models && config.models.length > 0) {
 			// Full replacement: remove existing models for this provider
-			this.models = this.models.filter((m) => m.provider !== providerName);
+			let models = this.getAll().filter((m) => m.provider !== providerName);
 
 			// Parse and add new models
 			for (const modelDef of config.models) {
 				const api = modelDef.api || config.api;
 				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
 
-				this.models.push({
+				models.push({
 					id: modelDef.id,
 					name: modelDef.name,
 					api: api as Api,
@@ -982,12 +1053,13 @@ export class ModelRegistry {
 			if (config.oauth?.modifyModels) {
 				const cred = this.authStorage.get(providerName);
 				if (cred?.type === "oauth") {
-					this.models = config.oauth.modifyModels(this.models, cred);
+					models = config.oauth.modifyModels(models, cred);
 				}
 			}
+			this.client.setModels(models);
 		} else if (config.baseUrl || config.headers || config.promptCache !== undefined) {
 			// Override-only: update provider defaults. Request headers are resolved per request.
-			this.models = this.models.map((m) => {
+			const models = this.getAll().map((m) => {
 				if (m.provider !== providerName) return m;
 				return {
 					...m,
@@ -995,6 +1067,7 @@ export class ModelRegistry {
 					promptCache: config.promptCache === undefined ? m.promptCache : (config.promptCache ?? undefined),
 				};
 			});
+			this.client.setModels(models);
 		}
 	}
 }

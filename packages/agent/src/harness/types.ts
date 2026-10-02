@@ -6,7 +6,7 @@ import type {
 	JsonValue,
 	Message,
 	Model,
-	PromptCacheRefreshFunction,
+	PromptCacheRefresher,
 	PromptCacheRefreshResult,
 	ProviderEnv,
 	SimpleStreamOptions,
@@ -588,13 +588,13 @@ export interface AgentHarnessOptions {
 	admissionGate?: AgentHarnessAdmissionGate;
 	/** System prompt, or a provider resolved with the active operation's signal for each request snapshot. */
 	systemPrompt?: string | ((signal: AbortSignal) => string | Promise<string>);
-	/** Base provider stream implementation wrapped by Harness lifecycle policy. */
-	streamFn?: StreamFn;
+	/** Base provider stream implementation wrapped by Harness lifecycle policy, such as an `AiClient`'s `streamSimple`. */
+	streamFn: StreamFn;
 	/**
-	 * No-output replay used by `refreshPromptCache`. Defaults to the provider refresh only when
-	 * `streamFn` is omitted; a custom `streamFn` must supply a matching refresh or refresh is unavailable.
+	 * No-output replay of `streamFn` requests used by `refreshPromptCache`, such as the `AiClient`
+	 * that `streamFn` streams through. Refresh is unavailable when omitted.
 	 */
-	refreshPromptCacheFn?: PromptCacheRefreshFunction;
+	promptCacheRefresh?: PromptCacheRefresher;
 	/** Append optional request-local messages after context reconciliation; never writes canonical history. */
 	requestBoundary?: (
 		boundary: AgentHarnessRequestBoundary,

@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { streamSimple } from "../src/stream.ts";
 import type {
 	AssistantMessage,
 	Context,
@@ -8,6 +7,7 @@ import type {
 	ProviderPayloadMetadata,
 	ToolResultMessage,
 } from "../src/types.ts";
+import { streamSimple } from "./test-client.ts";
 
 const apis: KnownApi[] = [
 	"openai-completions",

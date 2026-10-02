@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { clampThinkingLevel, getModel, getSupportedThinkingLevels } from "../src/models.ts";
 import { getOpenAIPriorityCost, supportsFastInference } from "../src/providers/openai-fast-inference.ts";
-import { streamSimple } from "../src/stream.ts";
 import type { SimpleStreamOptions, Usage } from "../src/types.ts";
+import { streamSimple } from "./test-client.ts";
 
 const models = [
 	{ id: "gpt-6-sol", name: "GPT-6 Sol", cost: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 } },

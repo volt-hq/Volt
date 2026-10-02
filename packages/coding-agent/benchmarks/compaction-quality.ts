@@ -8,17 +8,18 @@ import type { StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import {
 	type Api,
 	type AssistantMessage,
+	builtInProviders,
 	type Context,
 	clampThinkingLevel,
+	createAiClient,
 	createAssistantMessageEventStream,
 	getModels,
 	type Model,
-	streamSimple,
 	type Usage,
 } from "@hansjm10/volt-ai";
-import { getOAuthProvider } from "@hansjm10/volt-ai/oauth";
+import { openaiCodexOAuthProvider } from "@hansjm10/volt-ai/oauth";
+import { createAiClient as createSourceAiClient } from "../../ai/src/client.ts";
 import { getModels as getSourceModels } from "../../ai/src/models.ts";
-import { streamSimple as sourceStreamSimple } from "../../ai/src/stream.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import {
 	compact,
@@ -321,13 +322,10 @@ export async function runPilotCase(
 								settings: { ...preparation.settings, reserveTokens: COMPACTION_SUMMARY_TOKENS / 0.8 },
 							},
 							options.model,
-							undefined,
-							undefined,
+							trackedStream,
 							undefined,
 							signal,
 							clampThinkingLevel(options.model, "minimal"),
-							trackedStream,
-							undefined,
 							RETRY,
 						);
 			if (condition === "native")
@@ -438,16 +436,14 @@ export function getPilotSubscriptionKey(auth: Pick<AuthStorage, "get">): string 
 	const credential = auth.get("openai-codex");
 	if (credential?.type !== "oauth") throw new PilotFailure("auth-unavailable");
 	if (!Number.isFinite(credential.expires) || credential.expires <= Date.now()) throw new PilotFailure("auth-expired");
-	const provider = getOAuthProvider("openai-codex");
-	if (!provider) throw new PilotFailure("auth-unavailable");
-	const apiKey = provider.getApiKey(credential);
+	const apiKey = openaiCodexOAuthProvider.getApiKey(credential);
 	if (!apiKey) throw new PilotFailure("auth-unavailable");
 	return apiKey;
 }
 
 async function main(): Promise<void> {
 	const args = parsePilotArgs(process.argv.slice(2));
-	if (getModels !== getSourceModels || streamSimple !== sourceStreamSimple) {
+	if (getModels !== getSourceModels || createAiClient !== createSourceAiClient) {
 		throw new Error("The pilot must use scripts/run-compaction-quality.mjs to resolve the source runtime");
 	}
 	const model = getModels("openai-codex").find((candidate) => candidate.id === args.modelId);
@@ -469,6 +465,7 @@ async function main(): Promise<void> {
 	const auth = AuthStorage.create(args.authFile);
 	getPilotSubscriptionKey(auth);
 	const getApiKey = async () => getPilotSubscriptionKey(auth);
+	const client = createAiClient({ providers: builtInProviders() });
 	const repoRoot = fileURLToPath(new URL("../../../", import.meta.url));
 	const out = await createPilotDirectory(args.out, repoRoot);
 	const sourcePaths = [
@@ -569,7 +566,8 @@ async function main(): Promise<void> {
 					const result = await runPilotCase(fixture, condition, trial, {
 						model,
 						thinking: args.thinking,
-						streamFn: streamSimple,
+						// Requests carry the snapshot key explicitly; the client has no credential source.
+						streamFn: client.streamSimple,
 						getApiKey,
 						signal: controller.signal,
 					});

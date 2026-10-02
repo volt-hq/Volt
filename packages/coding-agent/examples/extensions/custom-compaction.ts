@@ -13,7 +13,6 @@
  *   volt --extension examples/extensions/custom-compaction.ts
  */
 
-import { complete } from "@hansjm10/volt-ai";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
 
@@ -31,13 +30,7 @@ export default function (volt: ExtensionAPI) {
 			return;
 		}
 
-		// Resolve request auth for the summarization model
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) {
-			ctx.ui.notify(`Compaction auth failed: ${auth.error}`, "warning");
-			return;
-		}
-		if (!auth.apiKey) {
+		if (!ctx.modelRegistry.hasConfiguredAuth(model)) {
 			ctx.ui.notify(`No API key for ${model.provider}, using default compaction`, "warning");
 			return;
 		}
@@ -86,17 +79,17 @@ ${conversationText}
 		];
 
 		try {
-			// Pass signal to honor abort requests (e.g., user cancels compaction)
-			const response = await complete(
+			// The registry's client resolves the model's credentials. Pass signal to honor
+			// abort requests (e.g., user cancels compaction).
+			const response = await ctx.modelRegistry.client.complete(
 				model,
 				{ messages: summaryMessages },
-				{
-					apiKey: auth.apiKey,
-					headers: auth.headers,
-					maxTokens: 8192,
-					signal,
-				},
+				{ maxTokens: 8192, signal },
 			);
+			if (response.stopReason === "error") {
+				ctx.ui.notify(`Compaction request failed: ${response.error?.message}, using default compaction`, "warning");
+				return;
+			}
 
 			const summary = response.content
 				.filter((c): c is { type: "text"; text: string } => c.type === "text")

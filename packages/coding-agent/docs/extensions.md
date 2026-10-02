@@ -971,7 +971,13 @@ ctx.sessionManager.getLeafId()        // Current leaf entry ID
 
 ### ctx.modelRegistry / ctx.model
 
-Access to models and API keys.
+Access to models and API keys. Make model calls through `ctx.modelRegistry.client`, which resolves each request's credentials:
+
+```typescript
+const response = await ctx.modelRegistry.client.complete(ctx.model!, {
+  messages: [{ role: "user", content: "Summarize this", timestamp: Date.now() }],
+}, { signal: ctx.signal });
+```
 
 ### ctx.signal
 

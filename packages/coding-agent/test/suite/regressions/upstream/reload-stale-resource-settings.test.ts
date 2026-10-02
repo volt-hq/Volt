@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
 	type CreateAgentSessionRuntimeFactory,
@@ -30,7 +30,7 @@ describe("issue #2753 reload stale resource settings", () => {
 		mkdirSync(promptsDir, { recursive: true });
 		writeFileSync(join(promptsDir, "test.md"), "Echo test prompt\n");
 
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [{ id: "faux-1", reasoning: false }],
 		});
 		const authStorage = AuthStorage.inMemory();
@@ -48,6 +48,7 @@ describe("issue #2753 reload stale resource settings", () => {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
 								api: faux.api,
+								streamSimple: faux.streamSimple,
 								models: faux.models.map((registeredModel) => ({
 									id: registeredModel.id,
 									name: registeredModel.name,
@@ -84,7 +85,6 @@ describe("issue #2753 reload stale resource settings", () => {
 
 		cleanups.push(() => {
 			runtime.session.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

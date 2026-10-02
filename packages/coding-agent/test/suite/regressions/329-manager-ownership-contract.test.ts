@@ -17,7 +17,7 @@ import { SubagentManager } from "../../../src/core/subagents/index.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
 import { main } from "../../../src/main.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { createTestResourceLoader } from "../../utilities.ts";
+import { createTestResourceLoader, registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const ENVIRONMENT_KEYS = [
@@ -115,6 +115,8 @@ describe("PR #329 manager ownership contract", () => {
 				},
 			})}\n`,
 		);
+		// The CLI builds its own registry; stream the faux models through it (restored with all mocks).
+		registerOnCreatedModelRegistries(harness.faux);
 		process.chdir(workspace);
 		process.env[ENV_AGENT_DIR] = agentDir;
 		process.env[ENV_SESSION_DIR] = join(harness.tempDir, `${mode}-sessions`);

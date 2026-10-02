@@ -9,11 +9,8 @@ import {
 	type JsonValue,
 	type Message,
 	type Model,
-	type PromptCacheRefreshFunction,
-	refreshPromptCache,
+	type PromptCacheRefresher,
 	type SimpleStreamOptions,
-	streamSimple,
-	supportsPromptCacheRefresh,
 	type UserMessage,
 } from "@hansjm10/volt-ai";
 import { runAgentLoop } from "../agent-loop.ts";
@@ -346,7 +343,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 	private releaseProviderAdmission: (() => void) | undefined;
 	private readonly persistActiveToolChanges: boolean;
 	private readonly streamFn: StreamFn;
-	private readonly refreshPromptCacheFn: PromptCacheRefreshFunction | undefined;
+	private readonly promptCacheRefresh: PromptCacheRefresher | undefined;
 	/** Latest admitted conversation request, replayed verbatim by refreshPromptCache. */
 	private lastTurnProviderRequest:
 		| {
@@ -391,8 +388,8 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 		this.operations = new HarnessOperationCoordinator(options.admissionGate);
 		this.streamOptions = cloneStreamOptions(options.streamOptions);
 		this.systemPrompt = options.systemPrompt;
-		this.streamFn = options.streamFn ?? streamSimple;
-		this.refreshPromptCacheFn = options.refreshPromptCacheFn ?? (options.streamFn ? undefined : refreshPromptCache);
+		this.streamFn = options.streamFn;
+		this.promptCacheRefresh = options.promptCacheRefresh;
 		this.convertMessages = options.convertToLlm ?? defaultConvertToLlm;
 		this.requestBoundary = options.requestBoundary;
 		this.defaultDeliveryOwner = options.deliveryOwner ?? this.createDefaultDeliveryOwner();
@@ -2425,10 +2422,10 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 	canRefreshPromptCache(): boolean {
 		const target = this.lastTurnProviderRequest;
 		return (
-			this.refreshPromptCacheFn !== undefined &&
+			this.promptCacheRefresh !== undefined &&
 			target !== undefined &&
 			target.configurationEpoch === this.runtimeConfigurationEpoch &&
-			supportsPromptCacheRefresh(target.model, target.options)
+			this.promptCacheRefresh.supportsPromptCacheRefresh(target.model, target.options)
 		);
 	}
 
@@ -2440,7 +2437,8 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 	 */
 	async refreshPromptCache(signal?: AbortSignal): Promise<AgentHarnessPromptCacheRefreshResult> {
 		this.assertNotDisposed();
-		if (!this.refreshPromptCacheFn) return { status: "unavailable", reason: "no_refresh_function" };
+		const refresher = this.promptCacheRefresh;
+		if (!refresher) return { status: "unavailable", reason: "no_refresh_function" };
 		const target = this.lastTurnProviderRequest;
 		if (!target) return { status: "unavailable", reason: "no_request" };
 		if (target.configurationEpoch !== this.runtimeConfigurationEpoch) {
@@ -2456,7 +2454,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 			return { status: "unavailable", reason: "branch_changed" };
 		}
 		signal?.throwIfAborted();
-		const result = await this.refreshPromptCacheFn(target.model, target.context, {
+		const result = await refresher.refreshPromptCache(target.model, target.context, {
 			...target.options,
 			onPayload: async (payload) => await this.emitBeforeProviderPayload(target.model, payload),
 			...(signal === undefined ? {} : { signal }),

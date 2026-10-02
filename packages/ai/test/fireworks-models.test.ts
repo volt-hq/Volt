@@ -1,21 +1,10 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
-import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
+import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { streamAnthropic } from "../src/providers/anthropic.ts";
 import type { Context, Model, Tool } from "../src/types.ts";
-
-const originalFireworksApiKey = process.env.FIREWORKS_API_KEY;
-
-afterEach(() => {
-	if (originalFireworksApiKey === undefined) {
-		delete process.env.FIREWORKS_API_KEY;
-	} else {
-		process.env.FIREWORKS_API_KEY = originalFireworksApiKey;
-	}
-});
 
 describe("Fireworks models", () => {
 	it("registers the default DeepSeek V4.1 Flash model via Anthropic-compatible Messages API", () => {
@@ -44,13 +33,6 @@ describe("Fireworks models", () => {
 		expect(model.api).toBe("anthropic-messages");
 		expect(model.baseUrl).toBe("https://api.fireworks.ai/inference");
 		expect(model.input).toEqual(["text", "image"]);
-	});
-
-	it("resolves FIREWORKS_API_KEY from the environment", () => {
-		process.env.FIREWORKS_API_KEY = "test-fireworks-key";
-
-		expect(findEnvKeys("fireworks")).toEqual(["FIREWORKS_API_KEY"]);
-		expect(getEnvApiKey("fireworks")).toBe("test-fireworks-key");
 	});
 
 	it("sets Fireworks-specific compat for session affinity and unsupported tool fields", () => {

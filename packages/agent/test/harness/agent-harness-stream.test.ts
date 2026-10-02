@@ -1,29 +1,42 @@
 import {
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
 	fauxAssistantMessage,
 	fauxToolCall,
-	registerFauxProvider,
 	type SimpleStreamOptions as StreamOptions,
-	streamSimple,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { convertToLlm } from "../../src/harness/messages.ts";
 import { Session } from "../../src/harness/session/session.ts";
+import type { AgentHarnessOptions } from "../../src/harness/types.ts";
 import type { StreamFn } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import { prompt } from "./harness-test-utils.ts";
 import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
-const registrations: Array<{ unregister(): void }> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 
 afterEach(() => {
-	for (const registration of registrations.splice(0)) {
-		registration.unregister();
+	for (const api of registeredApis.splice(0)) {
+		client.unregisterProvider(api);
 	}
 });
 
-function createHarness(options: ConstructorParameters<typeof AgentHarness>[0]): AgentHarness {
-	return new AgentHarness(options);
+function createHarness(
+	options: Omit<AgentHarnessOptions, "streamFn"> & Partial<Pick<AgentHarnessOptions, "streamFn">>,
+): AgentHarness {
+	return new AgentHarness({ streamFn: client.streamSimple, ...options });
 }
 
 function captureOptions(options: StreamOptions | undefined): StreamOptions {
@@ -38,7 +51,6 @@ function captureOptions(options: StreamOptions | undefined): StreamOptions {
 describe("AgentHarness stream configuration", () => {
 	it("uses configurable base stream and message converter functions", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("ok")]);
 		let streamCalls = 0;
 		let converterCalls = 0;
@@ -47,7 +59,7 @@ describe("AgentHarness stream configuration", () => {
 			model: registration.getModel(),
 			streamFn: async (model, context, options) => {
 				streamCalls++;
-				return streamSimple(model, context, options);
+				return client.streamSimple(model, context, options);
 			},
 			convertToLlm: async (messages) => {
 				converterCalls++;
@@ -64,7 +76,6 @@ describe("AgentHarness stream configuration", () => {
 	it("forwards snapshotted stream options and notifies response hooks", async () => {
 		let capturedOptions: StreamOptions | undefined;
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([
 			(_context, options) => {
 				capturedOptions = options;
@@ -121,7 +132,6 @@ describe("AgentHarness stream configuration", () => {
 	it("uses updated stream options for save-point snapshots without mutating the active request", async () => {
 		const capturedOptions: StreamOptions[] = [];
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([
 			(_context, options) => {
 				capturedOptions.push(captureOptions(options));
@@ -161,7 +171,6 @@ describe("AgentHarness stream configuration", () => {
 		const seenPayloads: unknown[] = [];
 		let finalPayload: unknown;
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([
 			async (_context, options, _state, model) => {
 				finalPayload = await options?.onPayload?.({ steps: ["provider"] }, model);
@@ -191,7 +200,6 @@ describe("AgentHarness stream configuration", () => {
 
 	it("routes structural requests through snapshotted provider policy and lifecycle hooks", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("branch summary")]);
 		const session = new Session(new InMemorySessionStorage({ metadata: { id: "branch-session", createdAt: "now" } }));
 		let capturedOptions: StreamOptions | undefined;
@@ -200,7 +208,7 @@ describe("AgentHarness stream configuration", () => {
 		const streamFn: StreamFn = async (model, context, options) => {
 			capturedOptions = captureOptions(options);
 			await options?.onPayload?.({ structural: true }, model);
-			return streamSimple(model, context, options);
+			return client.streamSimple(model, context, options);
 		};
 		const harness = createHarness({
 			session,
@@ -240,7 +248,6 @@ describe("AgentHarness stream configuration", () => {
 
 	it("preserves operation-requested reasoning for structural provider work", async () => {
 		const registration = registerFauxProvider({ models: [{ id: "reasoning", reasoning: true }] });
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("summary")]);
 		let capturedReasoning: unknown;
 		const harness = createHarness({
@@ -249,7 +256,7 @@ describe("AgentHarness stream configuration", () => {
 			thinkingLevel: "xhigh",
 			streamFn: (model, context, options) => {
 				capturedReasoning = options?.reasoning;
-				return streamSimple(model, context, options);
+				return client.streamSimple(model, context, options);
 			},
 		});
 
@@ -269,7 +276,6 @@ describe("AgentHarness stream configuration", () => {
 
 	it("snapshots tool argument limits and applies replacement and clearing", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const seen: Array<StreamOptions["toolArgumentLimits"]> = [];
 		registration.setResponses(
 			Array.from({ length: 3 }, () => (_context, options) => {

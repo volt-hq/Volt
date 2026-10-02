@@ -30,6 +30,7 @@ import * as themeRuntime from "../../../src/core/theme/runtime.ts";
 import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
 import { main } from "../../../src/main.ts";
 import { createDirectorySymlinkSync } from "../../symlink-utils.ts";
+import { registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -210,6 +211,8 @@ async function runPrintCli(options: {
 	// process-global theme writes so an existing theme instance/watcher is untouched.
 	const initThemeSpy = vi.spyOn(themeRuntime, "initTheme").mockImplementation(() => undefined);
 	const stopThemeWatcherSpy = vi.spyOn(themeRuntime, "stopThemeWatcher").mockImplementation(() => undefined);
+	// The CLI builds its own registry; stream the faux models through it.
+	const registrySpy = registerOnCreatedModelRegistries(fauxHarness.faux);
 	try {
 		process.chdir(options.cwd);
 		process.exitCode = undefined;
@@ -249,6 +252,7 @@ async function runPrintCli(options: {
 		exitSpy.mockRestore();
 		initThemeSpy.mockRestore();
 		stopThemeWatcherSpy.mockRestore();
+		registrySpy.mockRestore();
 		restoreStdout();
 		cliStdin.destroy();
 		process.chdir(previousCwd);
