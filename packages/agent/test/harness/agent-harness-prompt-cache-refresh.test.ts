@@ -9,10 +9,10 @@ import {
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
 import type { AgentHarnessOptions } from "../../src/harness/types.ts";
+import { prompt } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 const renewing: PromptCacheMetadata = {
 	modes: ["explicit"],
@@ -31,7 +31,7 @@ afterEach(async () => {
 });
 
 function createHarness(
-	options: Omit<AgentHarnessOptions, "env" | "session" | "model"> = {},
+	options: Omit<AgentHarnessOptions, "session" | "model"> = {},
 	canRefreshPromptCache?: PromptCacheRefreshCheck,
 ) {
 	const refreshes: Array<{ context: Context; options: SimpleStreamOptions | undefined }> = [];
@@ -62,14 +62,11 @@ function createHarness(
 			return fauxAssistantMessage("first");
 		},
 	]);
-	let credential = 0;
 	const session = new Session(new InMemorySessionStorage());
 	const harness = new AgentHarness({
-		env: new NodeExecutionEnv({ cwd: process.cwd() }),
 		session,
 		model: registration.getModel(),
 		systemPrompt: "system prompt",
-		getApiKeyAndHeaders: async () => ({ apiKey: `key-${++credential}` }),
 		...options,
 	});
 	harnesses.push(harness);
@@ -77,9 +74,9 @@ function createHarness(
 }
 
 describe("AgentHarness.refreshPromptCache", () => {
-	it("replays the latest conversation request with a re-resolved credential", async () => {
+	it("replays the latest conversation request", async () => {
 		const { harness, registration, refreshes, requests } = createHarness();
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		const result = await harness.refreshPromptCache();
 
@@ -87,7 +84,6 @@ describe("AgentHarness.refreshPromptCache", () => {
 		expect(result.status === "refreshed" && result.model.id).toBe("cache-test");
 		expect(refreshes).toHaveLength(1);
 		expect(refreshes[0]!.context).toEqual(requests[0]);
-		expect(refreshes[0]!.options?.apiKey).toBe("key-2");
 		expect(refreshes[0]!.options?.sessionId).toBeTruthy();
 		expect(registration.state).toMatchObject({ callCount: 1, refreshCount: 1 });
 	});
@@ -101,7 +97,7 @@ describe("AgentHarness.refreshPromptCache", () => {
 
 	it("is unavailable when a custom stream function has no matching refresh", async () => {
 		const { harness, registration } = createHarness({ streamFn: streamSimple });
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		expect(await harness.refreshPromptCache()).toEqual({ status: "unavailable", reason: "no_refresh_function" });
 		expect(registration.state.refreshCount).toBe(0);
@@ -109,18 +105,17 @@ describe("AgentHarness.refreshPromptCache", () => {
 
 	it("sends nothing after the thinking level changes", async () => {
 		const { harness, registration } = createHarness();
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 		await harness.setThinkingLevel("high");
 
 		expect(await harness.refreshPromptCache()).toEqual({ status: "unavailable", reason: "configuration_changed" });
 		expect(registration.state.refreshCount).toBe(0);
 	});
 
-	it("sends nothing after compaction rewrites the branch", async () => {
-		const { harness, registration } = createHarness();
-		await harness.prompt("hello");
-		registration.setSimpleResponses([fauxAssistantMessage("summary")]);
-		await harness.compact();
+	it("sends nothing after the branch is rewritten", async () => {
+		const { harness, session, registration } = createHarness();
+		await prompt(harness, "hello");
+		await session.moveTo(null);
 
 		expect(await harness.refreshPromptCache()).toEqual({ status: "unavailable", reason: "branch_changed" });
 		expect(registration.state.refreshCount).toBe(0);
@@ -143,7 +138,7 @@ describe("AgentHarness.refreshPromptCache", () => {
 				return fauxAssistantMessage("done");
 			},
 		]);
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 		await queued;
 
 		expect(visibleDuringRun).toBe(false);
@@ -156,7 +151,7 @@ describe("AgentHarness.refreshPromptCache", () => {
 		const { harness, registration } = createHarness();
 		expect(harness.canRefreshPromptCache()).toBe(false);
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 		expect(harness.canRefreshPromptCache()).toBe(true);
 
 		await harness.setThinkingLevel("high");
@@ -169,16 +164,16 @@ describe("AgentHarness.refreshPromptCache", () => {
 			{ thinkingLevel: "high" },
 			(_model, options) => options?.reasoning === undefined,
 		);
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		expect(harness.canRefreshPromptCache()).toBe(false);
 		expect(registration.state.refreshCount).toBe(0);
 	});
 
 	it("stays valid while the branch only grows", async () => {
-		const { harness, registration } = createHarness();
-		await harness.prompt("hello");
-		await harness.appendMessage({ role: "user", content: "appended later", timestamp: 2 });
+		const { harness, session, registration } = createHarness();
+		await prompt(harness, "hello");
+		await session.appendMessage({ role: "user", content: "appended later", timestamp: 2 });
 
 		expect((await harness.refreshPromptCache()).status).toBe("refreshed");
 		expect(registration.state.refreshCount).toBe(1);

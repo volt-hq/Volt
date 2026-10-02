@@ -10,10 +10,6 @@
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
 		},
-		"./node": {
-			"types": "./dist/node.d.ts",
-			"import": "./dist/node.js"
-		},
 		"./package.json": "./package.json"
 	},
 	"files": [
@@ -35,9 +31,7 @@
 	},
 	"dependencies": {
 		"@hansjm10/volt-ai": "^0.2.3",
-		"ignore": "7.0.5",
-		"typebox": "1.1.38",
-		"yaml": "2.9.0"
+		"typebox": "1.1.38"
 	},
 	"keywords": [
 		"ai",

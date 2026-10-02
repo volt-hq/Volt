@@ -8,11 +8,11 @@ import {
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
-import { type AgentHarnessOptions, type AgentHarnessRequestBoundary, SessionError } from "../../src/harness/types.ts";
+import type { AgentHarnessOptions, AgentHarnessRequestBoundary } from "../../src/harness/types.ts";
 import type { AgentDeliveryOwner, AgentTool } from "../../src/types.ts";
+import { runPrompt, userMessage } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -31,7 +31,6 @@ function setup(options: Partial<AgentHarnessOptions> = {}) {
 	const faux = registerFauxProvider();
 	const session = options.session ?? new Session(new InMemorySessionStorage());
 	const harness = new AgentHarness({
-		env: new NodeExecutionEnv({ cwd: process.cwd() }),
 		session,
 		model: faux.getModel(),
 		...options,
@@ -52,27 +51,18 @@ function optionalContext(messages = suffix) {
 		authorization: { isCurrent: vi.fn(() => true), settle: vi.fn<(admitted: boolean) => void>() },
 	};
 }
-function pauseFinalAdmission(session: Session, phase: "snapshot" | "hook commit") {
+function pauseFinalAdmission(session: Session) {
 	const entered = deferred();
 	const release = deferred();
 	let armed = false;
 	const getSnapshot = session.getBranchSnapshot.bind(session);
-	const commitBatch = session.commitBatch.bind(session);
 	vi.spyOn(session, "getBranchSnapshot").mockImplementation(async (...args) => {
-		if (armed && phase === "snapshot") {
+		if (armed) {
 			armed = false;
 			entered.resolve();
 			await release.promise;
 		}
 		return getSnapshot(...args);
-	});
-	vi.spyOn(session, "commitBatch").mockImplementation(async (...args) => {
-		if (armed && phase === "hook commit") {
-			armed = false;
-			entered.resolve();
-			await release.promise;
-		}
-		return commitBatch(...args);
 	});
 	return {
 		entered: entered.promise,
@@ -135,7 +125,7 @@ describe("AgentHarness post-durability request boundary", () => {
 				return fauxAssistantMessage("done");
 			},
 		]);
-		const run = harness.runPrompt("request");
+		const run = runPrompt(harness, "request");
 		await committed.promise;
 		expect(boundaries).toHaveLength(0);
 		expect(faux.state.callCount).toBe(0);
@@ -153,24 +143,18 @@ describe("AgentHarness post-durability request boundary", () => {
 		expect(JSON.stringify((await session.buildContext()).messages)).not.toContain("optional evidence");
 	});
 
-	describe.each(["snapshot", "hook commit"] as const)("final %s await", (phase) => {
+	describe("final snapshot await", () => {
 		it.each(["revoked", "unchanged", "abort", "batch mismatch"] as const)(
 			"settles %s optional context exactly once without recollecting",
 			async (change) => {
 				const session = new Session(new InMemorySessionStorage());
-				const pause = pauseFinalAdmission(session, phase);
+				const pause = pauseFinalAdmission(session);
 				const candidate = optionalContext(structuredClone(suffix));
 				const requestBoundary = vi.fn(async () => {
 					pause.arm();
 					return candidate;
 				});
 				const { harness, faux } = setup({ session, requestBoundary });
-				if (phase === "hook commit") {
-					harness.on("before_provider_request", async () => {
-						await harness.appendMessage({ role: "user", content: "hook canonical", timestamp: 2 });
-						return undefined;
-					});
-				}
 				let providerContext: Context | undefined;
 				faux.setResponses([
 					(context) => {
@@ -178,7 +162,7 @@ describe("AgentHarness post-durability request boundary", () => {
 						return fauxAssistantMessage("done");
 					},
 				]);
-				const run = harness.runPrompt("mandatory request");
+				const run = runPrompt(harness, "mandatory request");
 				await pause.entered;
 				expect(candidate.authorization.isCurrent).not.toHaveBeenCalled();
 				expect(candidate.authorization.settle).not.toHaveBeenCalled();
@@ -196,8 +180,6 @@ describe("AgentHarness post-durability request boundary", () => {
 					expect(providerContext?.messages.includes(candidate.messages[0]!)).toBe(false);
 					if (change === "unchanged") expect(providerContext?.messages.at(-1)).toEqual(suffix[0]);
 					else expect(JSON.stringify(providerContext?.messages)).not.toContain("optional evidence");
-					if (phase === "hook commit")
-						expect(JSON.stringify(providerContext?.messages)).toContain("hook canonical");
 				}
 				expect(JSON.stringify((await session.buildContext()).messages)).not.toContain("optional evidence");
 			},
@@ -206,7 +188,7 @@ describe("AgentHarness post-durability request boundary", () => {
 
 	it.each(["configuration", "cursor"] as const)("settles discarded candidates on %s retry", async (change) => {
 		const session = new Session(new InMemorySessionStorage());
-		const pause = pauseFinalAdmission(session, "snapshot");
+		const pause = pauseFinalAdmission(session);
 		const candidates = [optionalContext(), optionalContext()];
 		const requestBoundary = vi.fn(async () => {
 			if (requestBoundary.mock.calls.length === 1) pause.arm();
@@ -214,7 +196,7 @@ describe("AgentHarness post-durability request boundary", () => {
 		});
 		const { harness, faux } = setup({ session, requestBoundary });
 		faux.setResponses([fauxAssistantMessage("done")]);
-		const run = harness.runPrompt("request");
+		const run = runPrompt(harness, "request");
 		await pause.entered;
 		if (change === "configuration") await harness.setStreamOptions({ maxRetries: 2 });
 		else await session.appendMessage({ role: "user", content: "late canonical", timestamp: 2 });
@@ -226,77 +208,40 @@ describe("AgentHarness post-durability request boundary", () => {
 		expect(faux.state.callCount).toBe(1);
 	});
 
-	it("settles a rolled-back hook commit candidate before retrying", async () => {
+	it.each(["snapshot", "authorization", "stream"] as const)("settles a candidate when %s throws", async (phase) => {
 		const session = new Session(new InMemorySessionStorage());
-		const commit = session.commitBatch.bind(session);
-		const candidates = [optionalContext(), optionalContext()];
+		const candidate = optionalContext();
+		const error = new Error("admission failed");
 		const requestBoundary = vi.fn(async () => {
-			if (requestBoundary.mock.calls.length === 1) {
-				vi.spyOn(session, "commitBatch")
-					.mockImplementationOnce(async (batch) => ({
-						outcome: "rolled_back",
-						cursor: batch.guard.cursor,
-						error: new SessionError("conflict", "retry"),
-					}))
-					.mockImplementation(commit);
-			}
-			return candidates[requestBoundary.mock.calls.length - 1];
+			if (phase === "snapshot") vi.spyOn(session, "getBranchSnapshot").mockRejectedValueOnce(error);
+			return candidate;
 		});
-		const { harness, faux } = setup({ session, requestBoundary });
-		harness.on("before_provider_request", async () => {
-			await harness.appendMessage({ role: "user", content: "hook canonical", timestamp: 2 });
-			return undefined;
+		if (phase === "authorization")
+			candidate.authorization.isCurrent.mockImplementation(() => {
+				throw error;
+			});
+		const { harness, faux } = setup({
+			session,
+			requestBoundary,
+			...(phase === "stream"
+				? {
+						streamFn: () => {
+							throw error;
+						},
+					}
+				: {}),
 		});
-		faux.setResponses([fauxAssistantMessage("done")]);
-		await harness.runPrompt("request");
-		expect(requestBoundary).toHaveBeenCalledTimes(2);
-		expect(candidates.map((candidate) => candidate.authorization.settle.mock.calls)).toEqual([[[false]], [[true]]]);
-		expect(faux.state.callCount).toBe(1);
+		await runPrompt(harness, "request");
+		expect(requestBoundary).toHaveBeenCalledTimes(1);
+		// Even a synchronous provider failure follows the context handoff.
+		expect(candidate.authorization.settle.mock.calls).toEqual([[phase === "stream"]]);
+		expect(faux.state.callCount).toBe(0);
+		expect((await session.buildContext()).messages.at(-1)).toMatchObject({
+			role: "assistant",
+			stopReason: "error",
+			errorMessage: "admission failed",
+		});
 	});
-
-	it.each(["snapshot", "hook commit", "authorization", "stream"] as const)(
-		"settles a candidate when %s throws",
-		async (phase) => {
-			const session = new Session(new InMemorySessionStorage());
-			const candidate = optionalContext();
-			const error = new Error("admission failed");
-			const requestBoundary = vi.fn(async () => {
-				if (phase === "snapshot") vi.spyOn(session, "getBranchSnapshot").mockRejectedValueOnce(error);
-				if (phase === "hook commit") vi.spyOn(session, "commitBatch").mockRejectedValueOnce(error);
-				return candidate;
-			});
-			if (phase === "authorization")
-				candidate.authorization.isCurrent.mockImplementation(() => {
-					throw error;
-				});
-			const { harness, faux } = setup({
-				session,
-				requestBoundary,
-				...(phase === "stream"
-					? {
-							streamFn: () => {
-								throw error;
-							},
-						}
-					: {}),
-			});
-			if (phase === "hook commit")
-				harness.on("before_provider_request", async () => {
-					await harness.appendMessage({ role: "user", content: "hook canonical", timestamp: 2 });
-					return undefined;
-				});
-			await harness.runPrompt("request");
-			expect(requestBoundary).toHaveBeenCalledTimes(1);
-			// Even a synchronous provider failure follows the context handoff.
-			expect(candidate.authorization.settle.mock.calls).toEqual([[phase === "stream"]]);
-			expect(faux.state.callCount).toBe(0);
-			expect((await session.buildContext()).messages.at(-1)).toMatchObject({
-				role: "assistant",
-				stopReason: "error",
-				errorMessage: "admission failed",
-			});
-		},
-	);
 
 	it("does not yield between final authorization and provider invocation", async () => {
 		let current = true;
@@ -316,7 +261,7 @@ describe("AgentHarness post-durability request boundary", () => {
 			},
 		});
 		faux.setResponses([fauxAssistantMessage("done")]);
-		await harness.runPrompt("request");
+		await runPrompt(harness, "request");
 		expect(invoked.mock.calls).toEqual([[true, [[true]]]]);
 		expect(candidate.authorization.settle.mock.calls).toEqual([[true]]);
 	});
@@ -325,7 +270,7 @@ describe("AgentHarness post-durability request boundary", () => {
 		const candidate = optionalContext([]);
 		const { harness, faux } = setup({ requestBoundary: async () => candidate });
 		faux.setResponses([fauxAssistantMessage("done")]);
-		await harness.runPrompt("request");
+		await runPrompt(harness, "request");
 		expect(candidate.authorization.settle.mock.calls).toEqual([[false]]);
 		expect(faux.state.callCount).toBe(1);
 	});
@@ -333,18 +278,18 @@ describe("AgentHarness post-durability request boundary", () => {
 	it("retains batch identity over tool turns and explicit retry projections", async () => {
 		const boundaries: AgentHarnessRequestBoundary[] = [];
 		const { harness, faux } = setup({
-			tools: [tool],
 			requestBoundary: async (boundary) => {
 				boundaries.push(boundary);
 				return undefined;
 			},
 		});
+		await harness.setTools([tool], [tool.name]);
 		faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("inspect", {})], { stopReason: "toolUse" }),
 			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" }),
 			fauxAssistantMessage("retried"),
 		]);
-		await harness.runPrompt("request");
+		await runPrompt(harness, "request");
 		await harness.rebaseContinuationContext({ source: "retry", project: (messages) => messages.slice(0, -1) });
 		await harness.continue();
 		expect(boundaries.map((boundary) => boundary.cause)).toEqual(["input", "tools", "retry"]);
@@ -373,10 +318,10 @@ describe("AgentHarness post-durability request boundary", () => {
 			fauxAssistantMessage("steered"),
 			fauxAssistantMessage("followed"),
 		]);
-		const run = harness.runPrompt("same");
+		const run = runPrompt(harness, "same");
 		await entered.promise;
-		const steering = [await harness.steer("same"), await harness.steer("same")];
-		const followUps = [await harness.followUp("same"), await harness.followUp("same")];
+		const steering = [harness.queueSteer(userMessage("same")), harness.queueSteer(userMessage("same"))];
+		const followUps = [harness.queueFollowUp(userMessage("same")), harness.queueFollowUp(userMessage("same"))];
 		expect(boundaries).toHaveLength(1);
 		release.resolve();
 		await run;
@@ -397,14 +342,14 @@ describe("AgentHarness post-durability request boundary", () => {
 			requestBoundary: async () => {
 				boundaryCount++;
 				if (boundaryCount === 1)
-					await harness.appendMessage({ role: "user", content: "late canonical", timestamp: 2 });
+					await session.appendMessage({ role: "user", content: "late canonical", timestamp: 2 });
 				const candidate = optionalContext([{ role: "user", content: `suffix-${boundaryCount}`, timestamp: 3 }]);
 				candidates.push(candidate);
 				return candidate;
 			},
 		});
 		harness.on("context", async () => {
-			await harness.appendMessage({ role: "user", content: "hook canonical", timestamp: 2 });
+			await session.appendMessage({ role: "user", content: "hook canonical", timestamp: 2 });
 			return { messages: [{ role: "user", content: "transformed", timestamp: 2 }] };
 		});
 		let providerContext: Context | undefined;
@@ -414,7 +359,7 @@ describe("AgentHarness post-durability request boundary", () => {
 				return fauxAssistantMessage("done");
 			},
 		]);
-		await harness.runPrompt("request");
+		await runPrompt(harness, "request");
 		expect(JSON.stringify(providerContext?.messages)).toContain("late canonical");
 		expect(JSON.stringify(providerContext?.messages)).not.toContain("suffix-1");
 		expect(providerContext?.messages.at(-1)).toMatchObject({ content: "suffix-2" });
@@ -426,21 +371,25 @@ describe("AgentHarness post-durability request boundary", () => {
 	it("excludes structural requests and marks final-response admission", async () => {
 		const boundaries: AgentHarnessRequestBoundary[] = [];
 		const { harness, faux } = setup({
-			tools: [{ ...tool, execute: async () => ({ content: [], disposition: "final_response" }) }],
 			requestBoundary: async (boundary) => {
 				boundaries.push(boundary);
 				return optionalContext();
 			},
 		});
+		const finalTool: AgentTool = { ...tool, execute: async () => ({ content: [], disposition: "final_response" }) };
+		await harness.setTools([finalTool], [finalTool.name]);
 		faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("inspect", {})], { stopReason: "toolUse" }),
 			fauxAssistantMessage("final"),
 			fauxAssistantMessage("summary"),
 			fauxAssistantMessage("tree"),
 		]);
-		await harness.runPrompt("request");
+		await runPrompt(harness, "request");
 		expect(boundaries[1]?.requestAuthority).toBe("final_response");
-		for (const structural of [harness.runCompactionOperation.bind(harness), harness.runTreeOperation.bind(harness)]) {
+		for (const structural of [
+			harness.runCompactionOperation.bind(harness),
+			harness.requestTreeOperation.bind(harness),
+		]) {
 			await structural(async ({ streamFn, signal }) => {
 				const stream = await streamFn(
 					faux.getModel(),
@@ -463,7 +412,7 @@ describe("AgentHarness post-durability request boundary", () => {
 				return candidate;
 			},
 		});
-		await harness.runPrompt("committed");
+		await runPrompt(harness, "committed");
 		expect(count).toBe(1);
 		expect(candidate.authorization.settle.mock.calls).toEqual([[false]]);
 		expect(candidate.authorization.isCurrent).not.toHaveBeenCalled();
@@ -483,7 +432,7 @@ describe("AgentHarness post-durability request boundary", () => {
 				return undefined;
 			},
 		});
-		expect(await failed.harness.runPrompt("rejected")).toMatchObject({ status: "delivery_failed" });
+		expect(await runPrompt(failed.harness, "rejected")).toMatchObject({ status: "delivery_failed" });
 		expect(failed.faux.state.callCount).toBe(0);
 		expect(failedBoundaries).toBe(0);
 	});

@@ -4,17 +4,10 @@ import {
 	bashExecutionToText,
 	convertToLlm,
 	createCustomMessage,
-	FileError,
-	formatPromptTemplateInvocation,
-	formatSkillInvocation,
-	formatSkillsForSystemPrompt,
-	getOrThrow,
-	InMemorySessionRepo,
-	ok,
-	parseCommandArgs,
+	createSessionId,
+	Session,
 	streamProxy,
 	toError,
-	truncateHead,
 } from "@hansjm10/volt-agent-core";
 
 // Keep this entry browser-safe. It is bundled by scripts/check-browser-smoke.mjs
@@ -23,11 +16,8 @@ const model = getModel("google", "gemini-2.5-flash");
 const schema = Type.Object({ prompt: Type.String() });
 const stream = createAssistantMessageEventStream();
 
-const repo = new InMemorySessionRepo();
-const result = getOrThrow(ok({ value: 1 }));
 const customMessage = createCustomMessage("note", "hello", true, undefined, "2026-01-01T00:00:00.000Z");
 const llmMessages = convertToLlm([customMessage]);
-const skill = { name: "browser-safe", description: "Smoke test", content: "Use browser APIs.", filePath: "/skills/browser-safe/SKILL.md" };
 
 console.log(
 	model.id,
@@ -36,8 +26,8 @@ console.log(
 	schema.type,
 	typeof stream.push,
 	typeof AgentHarness,
-	typeof repo.create,
-	result.value,
+	typeof Session,
+	createSessionId().length,
 	llmMessages.length,
 	bashExecutionToText({
 		role: "bashExecution",
@@ -48,11 +38,6 @@ console.log(
 		truncated: false,
 		timestamp: 0,
 	}),
-	formatSkillsForSystemPrompt([skill]).length,
-	formatSkillInvocation(skill).length,
-	formatPromptTemplateInvocation({ name: "example", content: "$1 $@" }, parseCommandArgs('one "two three"')),
-	truncateHead("a\nb", { maxLines: 1 }).content,
-	new FileError("not_found", "missing").code,
 	toError("boom").message,
 	typeof streamProxy,
 );

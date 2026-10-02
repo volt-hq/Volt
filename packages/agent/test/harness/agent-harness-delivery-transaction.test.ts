@@ -1,8 +1,6 @@
 import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
 import type {
 	AgentDeliveryCommitContext,
@@ -10,6 +8,8 @@ import type {
 	AgentDeliveryPreparationOutcome,
 	AgentMessage,
 } from "../../src/types.ts";
+import { runPrompt } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 const registrations: Array<{ unregister(): void }> = [];
 
@@ -39,7 +39,6 @@ function createHarness(options: { session?: Session; deliveryOwner?: AgentDelive
 	const session = options.session ?? new Session(new InMemorySessionStorage());
 	return {
 		harness: new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 			...(options.deliveryOwner === undefined ? {} : { deliveryOwner: options.deliveryOwner }),
@@ -128,13 +127,12 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration } = createHarness({ session, deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("done")]);
 
-		const running = harness.runPrompt("transactional prompt");
+		const running = runPrompt(harness, "transactional prompt");
 		await preparationStarted.promise;
 		expect(registration.state.callCount).toBe(0);
 		expect((await session.buildContext()).messages).toEqual([]);
 		releasePreparation.resolve();
 		await commitStarted.promise;
-		expect(await harness.discardPendingPrompt()).toEqual([]);
 		expect(registration.state.callCount).toBe(0);
 		releaseCommit.resolve();
 
@@ -171,7 +169,7 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration } = createHarness({ session, deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("retried")]);
 
-		await expect(harness.runPrompt("retry me")).resolves.toMatchObject({
+		await expect(runPrompt(harness, "retry me")).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: { outcome: "retained" },
 		});
@@ -208,7 +206,7 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration } = createHarness({ session, deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("resumed")]);
 
-		const running = harness.runPrompt("rollback me");
+		const running = runPrompt(harness, "rollback me");
 		await preparationStarted.promise;
 		harness.abort("remote_request");
 		releasePreparation.resolve();
@@ -223,7 +221,7 @@ describe("AgentHarness delivery ownership", () => {
 		expect(registration.state.callCount).toBe(1);
 	});
 
-	it("serializes discard behind an in-flight retained rollback finalizer", async () => {
+	it("serializes revocation behind an in-flight retained rollback finalizer", async () => {
 		const preparationStarted = deferred();
 		const releasePreparation = deferred();
 		const retainedFinishStarted = deferred();
@@ -247,19 +245,19 @@ describe("AgentHarness delivery ownership", () => {
 				}
 			},
 		});
-		const { harness } = createHarness({ session, deliveryOwner: owner });
+		const { harness } = createHarness({ session });
+		harness.queueSteer({ role: "user", content: "revoke rollback", timestamp: 1 }, owner);
 
-		const running = harness.runPrompt("discard rollback");
+		const running = harness.continue();
 		await preparationStarted.promise;
 		harness.abort("remote_request");
 		releasePreparation.resolve();
 		await retainedFinishStarted.promise;
 
-		const discarding = harness.discardPendingPrompt();
+		expect(harness.revokeAllQueues()).toHaveLength(1);
 		await Promise.resolve();
 		expect(finishCalls).toEqual([{ attemptId: expect.any(String), outcome: "retained" }]);
 		releaseRetainedFinish.resolve();
-		await expect(discarding).resolves.toHaveLength(1);
 		await revokedFinishCompleted.promise;
 		await running;
 
@@ -267,7 +265,7 @@ describe("AgentHarness delivery ownership", () => {
 			{ attemptId: expect.any(String), outcome: "retained" },
 			{ attemptId: undefined, outcome: "revoked" },
 		]);
-		expect(harness.hasPendingPrompt()).toBe(false);
+		expect(harness.hasQueuedMessages()).toBe(false);
 	});
 
 	it("coerces retained preparation to terminal when owner finalization fails", async () => {
@@ -283,7 +281,7 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration } = createHarness({ deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("unexpected")]);
 
-		await expect(harness.runPrompt("cannot retain")).resolves.toMatchObject({
+		await expect(runPrompt(harness, "cannot retain")).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: {
 				outcome: "terminally_failed",
@@ -312,7 +310,7 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration } = createHarness({ deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("unexpected")]);
 
-		await expect(harness.runPrompt("unsafe")).resolves.toMatchObject({
+		await expect(runPrompt(harness, "unsafe")).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: { outcome: "terminally_failed", phase: "preparation" },
 		});
@@ -334,7 +332,7 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration, session } = createHarness({ deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("unexpected")]);
 
-		await expect(harness.runPrompt("uncertain")).resolves.toMatchObject({
+		await expect(runPrompt(harness, "uncertain")).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: { outcome: "terminally_failed", phase: "settlement" },
 		});
@@ -342,7 +340,7 @@ describe("AgentHarness delivery ownership", () => {
 
 		expect(registration.state.callCount).toBe(0);
 		expect((await session.buildContext()).messages).toEqual([]);
-		await expect(harness.runPrompt("late")).rejects.toThrow("AgentHarness is disposed");
+		await expect(runPrompt(harness, "late")).rejects.toThrow("AgentHarness is disposed");
 	});
 
 	it("fault-closes after committed durability when owner finalization fails", async () => {
@@ -355,7 +353,7 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration } = createHarness({ session, deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("must not run")]);
 
-		await expect(harness.runPrompt("durable input")).resolves.toMatchObject({
+		await expect(runPrompt(harness, "durable input")).resolves.toMatchObject({
 			deliveries: [{ outcome: "committed" }],
 		});
 		await expect(harness.waitForClosed()).rejects.toThrow("AgentHarness close drains failed");
@@ -396,7 +394,7 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness, registration } = createHarness({ session, deliveryOwner: owner });
 		registration.setResponses([() => fauxAssistantMessage("must not run")]);
 
-		await expect(harness.runPrompt("malicious receipt")).resolves.toMatchObject({
+		await expect(runPrompt(harness, "malicious receipt")).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: { outcome: "terminally_failed", phase: "settlement" },
 		});
@@ -423,16 +421,16 @@ describe("AgentHarness delivery ownership", () => {
 				finishOutcome = context.outcome;
 			},
 		};
-		const { harness, registration } = createHarness({ deliveryOwner: owner });
+		const { harness, registration } = createHarness();
 		registration.setResponses([() => fauxAssistantMessage("unexpected")]);
+		harness.queueSteer({ role: "user", content: "revoke me", timestamp: 1 }, owner);
 
-		const running = harness.runPrompt("revoke me");
+		const running = harness.continue();
 		await preparationStarted.promise;
-		const discarding = harness.discardPendingPrompt();
+		expect(harness.revokeAllQueues()).toHaveLength(1);
 		await Promise.resolve();
 		expect(finishOutcome).toBe("");
 		releasePreparation.resolve();
-		await expect(discarding).resolves.toHaveLength(1);
 		await expect(running).resolves.toMatchObject({ deliveries: [{ outcome: "revoked" }] });
 		expect(finishOutcome).toBe("revoked");
 		expect(commitCalls).toBe(0);
@@ -452,10 +450,12 @@ describe("AgentHarness delivery ownership", () => {
 		const { harness } = createHarness();
 		harness.queueSteer({ role: "user", content: "revoke", timestamp: 1 }, owner);
 
-		await expect(harness.clearSteeringQueue()).rejects.toThrow("revocation cleanup failed");
+		expect(harness.revokeAllQueues()).toHaveLength(1);
+		// Revocation finalization is detached; let it fault-close before joining closure.
+		await new Promise((resolve) => setTimeout(resolve, 0));
 
 		await expect(harness.waitForClosed()).rejects.toThrow("AgentHarness close drains failed");
-		await expect(harness.runPrompt("late")).rejects.toThrow("AgentHarness is disposed");
+		await expect(runPrompt(harness, "late")).rejects.toThrow("AgentHarness is disposed");
 	});
 
 	it("preserves a committed FIFO prefix when the next delivery retains", async () => {

@@ -1,12 +1,12 @@
 import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
 import type { NextActionResolvedEvent } from "../../src/harness/types.ts";
 import type { AgentLoopNextActionContext, AgentMessage, AgentTool } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
+import { prompt, runPrompt } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 const registrations: Array<{ unregister(): void }> = [];
 
@@ -39,7 +39,6 @@ describe("AgentHarness finalized next-action policy", () => {
 			},
 		]);
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
@@ -73,15 +72,11 @@ describe("AgentHarness finalized next-action policy", () => {
 			order.push(`resolved:${event.action.type}`);
 			return undefined;
 		});
-		harness.on("before_provider_request", () => {
-			order.push("before-provider");
-			return undefined;
-		});
 		harness.subscribe((event) => {
 			if (event.type === "settled") order.push("settled");
 		});
 
-		await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+		await expect(runPrompt(harness, "hello")).resolves.toMatchObject({ status: "completed" });
 
 		expect(order).toEqual([
 			"hook-first:request",
@@ -90,7 +85,6 @@ describe("AgentHarness finalized next-action policy", () => {
 			"policy-first:end:stop",
 			"policy-second:request",
 			"resolved:request",
-			"before-provider",
 			"provider",
 			"hook-first:stop",
 			"hook-second:stop",
@@ -123,7 +117,6 @@ describe("AgentHarness finalized next-action policy", () => {
 			registrations.push(registration);
 			registration.setResponses([() => fauxAssistantMessage("done")]);
 			const harness = createHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session: new Session(new InMemorySessionStorage()),
 				model: registration.getModel(),
 			});
@@ -142,7 +135,7 @@ describe("AgentHarness finalized next-action policy", () => {
 				return undefined;
 			});
 
-			await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+			await expect(runPrompt(harness, "hello")).resolves.toMatchObject({ status: "completed" });
 
 			expect(resolved).toHaveLength(2);
 			expect(resolved.at(-1)).toEqual({
@@ -162,7 +155,6 @@ describe("AgentHarness finalized next-action policy", () => {
 			registrations.push(registration);
 			registration.setResponses([() => fauxAssistantMessage("must not run")]);
 			const harness = createHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session: new Session(new InMemorySessionStorage()),
 				model: registration.getModel(),
 			});
@@ -180,7 +172,7 @@ describe("AgentHarness finalized next-action policy", () => {
 				if (event.type === "settled") order.push("settled");
 			});
 
-			await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+			await expect(runPrompt(harness, "hello")).resolves.toMatchObject({ status: "completed" });
 
 			expect(resolved).toEqual([
 				{
@@ -207,11 +199,10 @@ describe("AgentHarness finalized next-action policy", () => {
 					}),
 			]);
 			const harness = createHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session: new Session(new InMemorySessionStorage()),
 				model: registration.getModel(),
-				tools: [calculateTool],
 			});
+			await harness.setTools([calculateTool], [calculateTool.name]);
 			harness.on("tool_result", () => ({ disposition: "stop" }));
 			harness.on("next_action", () => undefined);
 			harness.registerNextActionPolicy(async (context) => {
@@ -227,7 +218,7 @@ describe("AgentHarness finalized next-action policy", () => {
 				return undefined;
 			});
 
-			await expect(harness.runPrompt("calculate")).resolves.toMatchObject({ status: "completed" });
+			await expect(runPrompt(harness, "calculate")).resolves.toMatchObject({ status: "completed" });
 
 			expect(registration.state.callCount).toBe(1);
 			expect(resolved).toHaveLength(2);
@@ -262,11 +253,10 @@ describe("AgentHarness finalized next-action policy", () => {
 				},
 			]);
 			const harness = createHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session: new Session(new InMemorySessionStorage()),
 				model: registration.getModel(),
-				tools: [calculateTool],
 			});
+			await harness.setTools([calculateTool], [calculateTool.name]);
 			const stop = (context: AgentLoopNextActionContext) =>
 				context.completedTurn?.toolResults.length ? { type: "stop" as const } : undefined;
 			if (source === "hook") harness.on("next_action", stop);
@@ -288,7 +278,7 @@ describe("AgentHarness finalized next-action policy", () => {
 				return undefined;
 			});
 
-			await expect(harness.runPrompt("calculate")).resolves.toMatchObject({ status: "completed" });
+			await expect(runPrompt(harness, "calculate")).resolves.toMatchObject({ status: "completed" });
 
 			expect(resolved[1]).toEqual({
 				type: "next_action_resolved",
@@ -326,7 +316,6 @@ describe("AgentHarness finalized next-action policy", () => {
 		]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 		});
@@ -368,7 +357,7 @@ describe("AgentHarness finalized next-action policy", () => {
 			if (event.type === "next_action_resolved") subscriberEvents.push(event);
 		});
 
-		await expect(harness.runPrompt("hello")).resolves.toMatchObject({ status: "completed" });
+		await expect(runPrompt(harness, "hello")).resolves.toMatchObject({ status: "completed" });
 
 		const expected: NextActionResolvedEvent[] = [
 			{
@@ -415,11 +404,10 @@ describe("AgentHarness finalized next-action policy", () => {
 				},
 			]);
 			const harness = createHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session: new Session(new InMemorySessionStorage()),
 				model: registration.getModel(),
-				tools: [calculateTool],
 			});
+			await harness.setTools([calculateTool], [calculateTool.name]);
 			harness.on("tool_result", () => ({ disposition: "final_response" }));
 			let finalDecisions = 0;
 			harness.on("next_action", (event) =>
@@ -447,7 +435,7 @@ describe("AgentHarness finalized next-action policy", () => {
 				return undefined;
 			});
 
-			await expect(harness.runPrompt("calculate")).resolves.toMatchObject({ status: "completed" });
+			await expect(runPrompt(harness, "calculate")).resolves.toMatchObject({ status: "completed" });
 
 			if (decision === "pause") {
 				expect(registration.state.callCount).toBe(1);
@@ -486,12 +474,11 @@ describe("AgentHarness host policy", () => {
 		registration.setResponses([() => fauxAssistantMessage("ok")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 		});
 
 		expect(harness.getModel()).toBeUndefined();
-		await expect(harness.runPrompt("not yet")).rejects.toMatchObject({
+		await expect(runPrompt(harness, "not yet")).rejects.toMatchObject({
 			code: "invalid_state",
 			message: "No model set for AgentHarness run",
 		});
@@ -499,7 +486,7 @@ describe("AgentHarness host policy", () => {
 		expect((await session.buildContext()).messages).toEqual([]);
 
 		await harness.setModel(registration.getModel());
-		await expect(harness.runPrompt("ready")).resolves.toMatchObject({ status: "completed" });
+		await expect(runPrompt(harness, "ready")).resolves.toMatchObject({ status: "completed" });
 		expect(registration.state.callCount).toBe(1);
 	});
 
@@ -516,7 +503,6 @@ describe("AgentHarness host policy", () => {
 			},
 		]);
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 			systemPrompt: "configured",
@@ -540,7 +526,7 @@ describe("AgentHarness host policy", () => {
 		});
 
 		const message = { role: "user", content: "structured", timestamp: Date.now() } as const;
-		await harness.run(message, { systemPrompt: "per-run" });
+		await harness.runReserved(harness.reserveRun(), message, { systemPrompt: "per-run" });
 
 		expect(order).toEqual(["first", "first replacement"]);
 		expect(providerSystemPrompt).toBe("per-run");
@@ -553,7 +539,6 @@ describe("AgentHarness host policy", () => {
 		registration.setResponses([() => fauxAssistantMessage("provider")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 		});
@@ -577,7 +562,7 @@ describe("AgentHarness host policy", () => {
 			throw new Error("passive subscriber failure");
 		});
 
-		const response = await harness.prompt("hello");
+		const response = await prompt(harness, "hello");
 		const persisted = (await session.buildContext()).messages.at(-1);
 
 		expect(reducerInputs).toEqual(["provider", "first"]);
@@ -605,11 +590,10 @@ describe("AgentHarness host policy", () => {
 			},
 		]);
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
-			tools: [calculateTool],
 		});
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		const order: string[] = [];
 		harness.on("tool_call", () => {
 			order.push("tool-call-first");
@@ -629,7 +613,7 @@ describe("AgentHarness host policy", () => {
 			return { content: [{ type: "text", text: "final result" }] };
 		});
 
-		await harness.prompt("calculate", { systemPrompt: "per-run" });
+		await prompt(harness, "calculate", { systemPrompt: "per-run" });
 
 		expect(order).toEqual(["tool-call-first", "tool-call-second"]);
 		expect(providerSystemPrompts).toEqual(["per-run", "per-run"]);
@@ -661,13 +645,12 @@ describe("AgentHarness host policy", () => {
 		};
 		const session = new Session(new InMemorySessionStorage());
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
-			tools: [tool],
 		});
+		await harness.setTools([tool], [tool.name]);
 
-		const response = await harness.prompt("run the tool");
+		const response = await prompt(harness, "run the tool");
 		const persistedToolResult = (await session.getEntries()).find(
 			(entry) => entry.type === "message" && entry.message.role === "toolResult",
 		);
@@ -689,11 +672,10 @@ describe("AgentHarness host policy", () => {
 			},
 		]);
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
-		await harness.prompt("first");
+		await prompt(harness, "first");
 
 		const decisions: string[] = [];
 		let delivered = false;
@@ -734,11 +716,10 @@ describe("AgentHarness host policy", () => {
 			},
 		]);
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
-			tools: [calculateTool],
 		});
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		let mutatingHandlerCalls = 0;
 		let observingHandlerCalls = 0;
 		let observingPolicyCalls = 0;
@@ -810,7 +791,7 @@ describe("AgentHarness host policy", () => {
 			return undefined;
 		});
 
-		await harness.prompt("calculate");
+		await prompt(harness, "calculate");
 
 		expect(mutatingHandlerCalls).toBe(1);
 		expect(observingHandlerCalls).toBe(1);
@@ -825,7 +806,6 @@ describe("AgentHarness host policy", () => {
 		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("one"), () => fauxAssistantMessage("two")]);
 		const harness = createHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
@@ -840,9 +820,9 @@ describe("AgentHarness host policy", () => {
 			return undefined;
 		});
 
-		await harness.prompt("first");
+		await prompt(harness, "first");
 		unregister();
-		await harness.prompt("second");
+		await prompt(harness, "second");
 
 		expect(order.slice(0, 4)).toEqual(["event:request", "scoped:request", "event:stop", "scoped:stop"]);
 		expect(order.slice(4)).toEqual(["event:request", "event:stop"]);

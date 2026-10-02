@@ -277,7 +277,7 @@ const cases = (["host", "tool_call", "tool_result"] as const).flatMap((layer) =>
 	})),
 );
 
-describe.each(["collection", "snapshot", "commit"] as const)("#433 policy authorization during %s", (phase) => {
+describe.each(["collection", "snapshot"] as const)("#433 policy authorization during %s", (phase) => {
 	it.each(cases)("$layer $action", async ({ layer, action }) => {
 		const entered = deferred();
 		const release = deferred();
@@ -292,7 +292,6 @@ describe.each(["collection", "snapshot", "commit"] as const)("#433 policy author
 		let boundaries = 0;
 		const validations: string[] = [];
 		const snapshot = SessionManagerHarnessStorage.prototype.getBranchSnapshot;
-		const commit = SessionManagerHarnessStorage.prototype.commitBatch;
 		const pause = async () => {
 			paused = true;
 			entered.resolve();
@@ -304,14 +303,6 @@ describe.each(["collection", "snapshot", "commit"] as const)("#433 policy author
 		) {
 			const result = await snapshot.apply(this, args);
 			if (phase === "snapshot" && validationsCompleted === 3 && !paused) await pause();
-			return result;
-		});
-		vi.spyOn(SessionManagerHarnessStorage.prototype, "commitBatch").mockImplementation(async function (
-			this: SessionManagerHarnessStorage,
-			...args
-		) {
-			const result = await commit.apply(this, args);
-			if (phase === "commit" && validationsCompleted === 3 && !paused) await pause();
 			return result;
 		});
 		const harness = await createHarness({
@@ -437,14 +428,6 @@ describe.each(["collection", "snapshot", "commit"] as const)("#433 policy author
 						},
 					);
 			}
-			if (phase === "commit")
-				harness.control.onBeforeProviderRequest(async () => {
-					await harness.control.appendHarnessMessage({
-						role: "user",
-						content: "mandatory hook context",
-						timestamp: 1,
-					});
-				});
 			for (const key of ["a", "b", "c"])
 				await writeFile(join(harness.tempDir, `${key}.txt`), `prepared source ${key}`);
 			harness.setResponses([
@@ -468,7 +451,6 @@ describe.each(["collection", "snapshot", "commit"] as const)("#433 policy author
 			expect(providerContext).toBeDefined();
 			const text = providerContext!.messages.map(getMessageText).join("\n");
 			expect(text).toContain("mandatory request");
-			if (phase === "commit") expect(text).toContain("mandatory hook context");
 			for (const key of ["a", "b", "c"]) {
 				if (action === "unchanged") expect(text).toContain(`prepared source ${key}`);
 				else expect(text).not.toContain(`prepared source ${key}`);

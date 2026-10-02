@@ -85,9 +85,8 @@ describe("regression #199: approved plan finalization", () => {
 
 		const firstRun = harness.control.continue();
 		await preparationStarted.promise;
-		const clearing = harness.control.clearSteeringQueue();
+		expect(harness.control.revokeAllQueues()).toHaveLength(1);
 		releasePreparation.resolve();
-		expect(await clearing).toHaveLength(1);
 		await firstRun;
 
 		expect(harness.session.planningState.plan?.phase).toBe("ready");
@@ -327,7 +326,7 @@ describe("regression #199: approved plan finalization", () => {
 				retriedRequestContainedQueuedInput = JSON.stringify(context.messages).includes(
 					"queued during final-response retry",
 				);
-				clearedQueuedDeliveries = (await harness.control.clearFollowUpQueue()).length;
+				clearedQueuedDeliveries = harness.control.revokeAllQueues().length;
 				return fauxAssistantMessage("Final response after retry");
 			},
 			(context) => {
@@ -415,7 +414,7 @@ describe("regression #199: approved plan finalization", () => {
 				compactedRequestContainedQueuedInput = JSON.stringify(context.messages).includes(
 					"queued during final-response compaction",
 				);
-				clearedQueuedDeliveries = (await harness.control.clearFollowUpQueue()).length;
+				clearedQueuedDeliveries = harness.control.revokeAllQueues().length;
 				return fauxAssistantMessage("Final response after compaction");
 			},
 		]);

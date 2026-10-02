@@ -5,7 +5,7 @@
 ## Ownership boundary
 
 - `agent-loop.ts` is the stateless execution kernel. It executes one dispatched run against an explicit context and callback configuration.
-- `AgentHarness` owns reusable state: session access, delivery queues, one exclusive operation coordinator, runtime configuration, resources, hooks, provider settings, and persistence ordering.
+- `AgentHarness` owns reusable state: session access, delivery queues, one exclusive operation coordinator, runtime configuration, hooks, provider settings, and persistence ordering.
 - Applications own product policy. For example, Coding Agent's `AgentSession` privately hosts an `AgentHarness` while retaining planning, durable client-input admission, retries, compaction policy, extensions, RPC, and UI projections.
 
 There is no second stateful core runtime. Hosts should use `AgentHarness` or intentionally own the complete low-level loop contract themselves.
@@ -21,9 +21,8 @@ The latest application configuration includes:
 - optional model
 - thinking level
 - all tools and active tool names
-- resources
 - system prompt or system-prompt provider
-- stream options and provider auth resolver
+- stream options
 - steering and follow-up modes
 
 Getters return current configuration. Setters affect future turn snapshots and do not mutate an in-flight provider request.
@@ -35,7 +34,6 @@ A model may be unset during construction. Prompt and continuation preflight reje
 `createTurnState()` resolves one concrete request snapshot:
 
 - persisted session context or an explicit run context override
-- resources
 - system prompt
 - model and thinking level
 - all tools and the active subset
@@ -70,7 +68,7 @@ Prompt, steering, and follow-up deliveries share one inbox with stable IDs. The 
 - ordered delivery outcomes
 - terminal event settlement
 
-Operation ownership starts synchronously before turn snapshot construction, the configured `systemPrompt` callback, and `before_agent_start` preflight. Both callbacks receive the operation's `AbortSignal`. The abort gate remains open through intermediate delivery and tool commits and seals only immediately before the terminal assistant commit. `activeRunSnapshot` is immutable.
+Operation ownership starts synchronously before turn snapshot construction and the configured `systemPrompt` callback, which receives the operation's `AbortSignal`. The abort gate remains open through intermediate delivery and tool commits and seals only immediately before the terminal assistant commit. `activeRunSnapshot` is immutable.
 
 ### Continuation
 
@@ -103,16 +101,14 @@ Preparation, owner, committed-delivery, and subscriber payloads are cloned. Ever
 
 ## Bounded runs
 
-`run()` accepts one structured message or an ordered message array. `runPrompt()` is the text convenience form. Both return `AgentRunResult`:
+`reserveRun()` synchronously claims the next bounded run before host preflight awaits. `runReserved()` accepts one structured message or an ordered message array and returns `AgentRunResult`:
 
 - `completed`: the run settled without a retained or terminal delivery failure.
 - `delivery_failed`: includes the first failure and all ordered delivery outcomes observed in the bounded run.
 
 Committed and revoked prefixes remain visible even if a later delivery retains or fails terminally.
 
-`prompt()` returns the required assistant response and is convenient when the caller does not need the delivery outcome surface.
-
-A canceled-preflight or retained prompt remains pending until `continue()` retries it or `discardPendingPrompt()` revokes it. Its effective context and system-prompt projection, including any committed delivery prefix, carry into bare `continue()` so retry does not fall back to canonical/default state. Continuations may also supply an explicit context override, allowing hosts to keep canonical error messages persisted while omitting them from the next provider request.
+A canceled-preflight or retained prompt remains pending until `continue()` retries it or close revokes it. Its effective context and system-prompt projection, including any committed delivery prefix, carry into bare `continue()` so retry does not fall back to canonical/default state. Continuations may also supply an explicit context override, allowing hosts to keep canonical error messages persisted while omitting them from the next provider request.
 
 ## Abort and teardown
 
@@ -125,7 +121,7 @@ Rules:
 - queued steer/follow-up work is not implicitly cleared
 - explicit revocation remains separate
 - runtime-abort diagnostics are applied after message replacement so hooks cannot erase provenance
-- system-prompt and `before_agent_start` preflight receive the active signal
+- system-prompt preflight receives the active signal
 - `waitForIdle()` covers preflight callbacks, terminal listener settlement, and failure cleanup
 
 ### Shared host admission
@@ -147,7 +143,7 @@ Terminal teardown should:
 3. await `waitForClosed()` from external lifecycle code
 4. release remaining host resources after their producer drains
 
-Close rejects new admissions and canonical mutations, revokes only deliveries that have not started commitment, and waits for any commit that already crossed its boundary. Queue APIs include awaited `clearSteeringQueue()`, `clearFollowUpQueue()`, `clearAllQueues()`, and `discardPendingPrompt()`. Callback code may call `requestClose()` but must not join `waitForClosed()` from the operation that closure is waiting on.
+Close rejects new admissions and canonical mutations, revokes only deliveries that have not started commitment, and waits for any commit that already crossed its boundary. `revokeAllQueues()` synchronously revokes queued steering and follow-up deliveries that have not started commitment. Callback code may call `requestClose()` but must not join `waitForClosed()` from the operation that closure is waiting on.
 
 ## Dispatcher and continuation authority
 
@@ -174,15 +170,12 @@ Harness persists ordinary finalized messages exactly once. For an owner-managed 
 Before each provider request Harness:
 
 1. settles selected delivery transactions and awaits durability
-2. awaits a stable runtime-configuration epoch and resolves auth for that model
-3. applies ordered hooks outside the canonical mutation lane
-4. discards that attempt's patches if a hook changes the configuration epoch, retains one staged logical set of Harness-owned appends, and retries the hook against the new epoch
-5. reconciles the projection cursor, converts messages, and verifies the epoch again
-6. begins the configured `StreamFn` synchronously and releases the provider-admission barrier
+2. awaits a stable runtime-configuration epoch
+3. reconciles the projection cursor, converts messages, and collects the request boundary
+4. retries from step 2 if the configuration epoch or canonical cursor changed
+5. begins the configured `StreamFn` synchronously and releases the provider-admission barrier
 
-`before_provider_request` handlers may replay when they change runtime configuration. They must be replay-safe. Same-value configuration setters are no-ops during replay, so an unconditional hook that selects its desired model or thinking level stabilizes. Patches come only from the final authorized attempt. Harness-owned appends remain staged through conversion and must be structurally identical on every replay; Harness commits that logical set exactly once under the final provider-admission fence and closes on a mismatch.
-
-After a successful turn, message and tool-result persistence completes before the next action is leased. Save-point refresh lets changes to model, thinking level, tools, resources, system prompt, and stream options affect a later request in the same run.
+After a successful turn, message and tool-result persistence completes before the next action is leased. Save-point refresh lets changes to model, thinking level, tools, system prompt, and stream options affect a later request in the same run.
 
 ## Hooks and finalized observation
 
@@ -191,7 +184,7 @@ After a successful turn, message and tool-result persistence completes before th
 - context and message hooks replace the current value
 - tool-call hooks reduce block/reason decisions
 - tool-result hooks reduce content, details, error state, and disposition
-- provider-request and provider-payload hooks transform the evolving request
+- provider-payload hooks transform the evolving payload
 - next-action policies reduce the evolving suggested action
 
 Handlers receive cloned input and run in registration order. Hook failures are normalized to Harness errors and settle through the run's failure path.
@@ -204,7 +197,7 @@ Provider transport streaming remains decoupled from downstream event settlement 
 
 ## Provider seams
 
-Harness accepts a configurable `StreamFn`, message converter, auth resolver, and stream options. Request snapshots preserve:
+Harness accepts a configurable `StreamFn`, message converter, and stream options. Request snapshots preserve:
 
 - transport
 - timeout and WebSocket connect timeout
@@ -216,7 +209,7 @@ Harness accepts a configurable `StreamFn`, message converter, auth resolver, and
 - headers
 - metadata
 
-Auth headers/environment are resolved per provider request and merged with snapshotted options. Ordered provider hooks run before request, payload, and response use.
+Credentials are the `StreamFn`'s responsibility. Ordered provider hooks run before payload and response use.
 
 ## Tools
 
@@ -237,7 +230,7 @@ Active tool executions are exposed through finalized runtime events; application
 
 Compaction and tree navigation use the same exclusive `HarnessOperationCoordinator` as runs. Expensive summarization and hooks remain abortable and execute outside the canonical mutation lane. Immediately before the one structural commit, Harness checks lifecycle, operation ownership, signal, and expected projection cursor, seals the abort gate, and submits a noncancelable guarded batch. Close after that seal waits for the structural commit and suppresses passive events.
 
-Manual compaction reserves the next operation, aborts an open run, and promotes after it settles; close cancels the handoff. Tree navigation remains fail-fast while busy. Applications may retain their own summarization and tree policy, but Harness owns operation admission, abort, seal, and commit ordering. Successful compaction installs a replacement continuation overlay; tree navigation clears it because the active branch changed.
+Manual compaction reserves the next operation, aborts an open run, and promotes after it settles; close cancels the handoff. Tree navigation remains fail-fast while busy. Applications supply summarization and tree policy through `runCompactionOperation()`, `requestCompaction()`, `runCompactionBeforeReserved()`, and `requestTreeOperation()`; Harness owns operation admission, abort, seal, and commit ordering. Successful compaction installs a replacement continuation overlay; tree navigation clears it because the active branch changed.
 
 ## Low-level loop contract
 
