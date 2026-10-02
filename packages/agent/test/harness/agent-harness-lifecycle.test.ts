@@ -2,10 +2,10 @@ import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansj
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
 import type { AgentMessage, AgentTool } from "../../src/types.ts";
+import { prompt, runPrompt, userMessage } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 type TestDelivery = {
 	readonly deliveryId: string;
@@ -43,7 +43,7 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 }
 
 function createHarness(
-	options: Omit<ConstructorParameters<typeof AgentHarness>[0], "env" | "session" | "model"> & {
+	options: Omit<ConstructorParameters<typeof AgentHarness>[0], "session" | "model"> & {
 		session?: Session;
 		prepareLogicalDelivery?: (delivery: TestDelivery) => TestPreparation | Promise<TestPreparation>;
 	} = {},
@@ -108,7 +108,6 @@ function createHarness(
 			}
 		: undefined;
 	harness = new AgentHarness({
-		env: new NodeExecutionEnv({ cwd: process.cwd() }),
 		session,
 		model: registration.getModel(),
 		...harnessOptions,
@@ -153,14 +152,12 @@ describe("AgentHarness lifecycle and abort", () => {
 
 		const message: AgentMessage = { role: "user", content: "late", timestamp: Date.now() };
 		expect(() => harness.queueSteer(message)).toThrow("AgentHarness is disposed");
-		await expect(harness.nextTurn("late")).rejects.toThrow("AgentHarness is disposed");
-		await expect(harness.clearAllQueues()).rejects.toThrow("AgentHarness is disposed");
-		await expect(harness.run(message)).rejects.toThrow("AgentHarness is disposed");
-		await expect(harness.runPrompt("late")).rejects.toThrow("AgentHarness is disposed");
-		await expect(harness.prompt("late")).rejects.toThrow("AgentHarness is disposed");
+		expect(() => harness.queueFollowUp(message)).toThrow("AgentHarness is disposed");
+		expect(() => harness.revokeAllQueues()).toThrow("AgentHarness is disposed");
+		expect(() => harness.reserveRun()).toThrow("AgentHarness is disposed");
 		await expect(harness.continue()).rejects.toThrow("AgentHarness is disposed");
-		await expect(harness.appendMessage(message)).rejects.toThrow("AgentHarness is disposed");
-		await expect(harness.compact()).rejects.toThrow("AgentHarness is disposed");
+		await expect(harness.appendCustomEntry("late")).rejects.toThrow("AgentHarness is disposed");
+		await expect(harness.runCompactionOperation(() => undefined)).rejects.toThrow("AgentHarness is disposed");
 	});
 
 	it("joins passive publications that began before close", async () => {
@@ -194,11 +191,11 @@ describe("AgentHarness lifecycle and abort", () => {
 		const configStarted = deferred();
 		const releaseConfig = deferred();
 		const { harness, session } = createHarness();
-		const appendMessage = session.appendMessage.bind(session);
-		vi.spyOn(session, "appendMessage").mockImplementation(async (message) => {
+		const appendCustomEntry = session.appendCustomEntry.bind(session);
+		vi.spyOn(session, "appendCustomEntry").mockImplementation(async (customType, data) => {
 			appendStarted.resolve();
 			await releaseAppend.promise;
-			return await appendMessage(message);
+			return await appendCustomEntry(customType, data);
 		});
 		const appendThinkingLevelChange = session.appendThinkingLevelChange.bind(session);
 		vi.spyOn(session, "appendThinkingLevelChange").mockImplementation(async (level) => {
@@ -207,7 +204,7 @@ describe("AgentHarness lifecycle and abort", () => {
 			return await appendThinkingLevelChange(level);
 		});
 
-		const appending = harness.appendMessage({ role: "user", content: "admitted", timestamp: 1 });
+		const appending = harness.appendCustomEntry("admitted", { admitted: true });
 		const configuring = harness.setThinkingLevel("high");
 		await Promise.all([appendStarted.promise, configStarted.promise]);
 		harness.requestClose();
@@ -240,47 +237,7 @@ describe("AgentHarness lifecycle and abort", () => {
 		expect(followUpId).toEqual(expect.any(String));
 		expect(publicationCalls).toBe(2);
 		publicationGate.resolve();
-		await harness.clearAllQueues();
-	});
-
-	it.each(["steer", "followUp"] as const)("awaits %s queue publication before resolving", async (operation) => {
-		const requestStarted = deferred();
-		const releaseRequest = deferred();
-		const publicationStarted = deferred();
-		const releasePublication = deferred();
-		const { harness, registration } = createHarness();
-		registration.setResponses([
-			async () => {
-				requestStarted.resolve();
-				await releaseRequest.promise;
-				return fauxAssistantMessage("late");
-			},
-			() => fauxAssistantMessage("done"),
-		]);
-		harness.subscribe(async (event) => {
-			if (event.type !== "queue_update") return;
-			publicationStarted.resolve();
-			await releasePublication.promise;
-		});
-
-		const running = harness.runPrompt("start");
-		await requestStarted.promise;
-		let settled = false;
-		const queued = harness[operation]("queued").then((deliveryId) => {
-			settled = true;
-			return deliveryId;
-		});
-		await publicationStarted.promise;
-		await Promise.resolve();
-		expect(settled).toBe(false);
-
-		releasePublication.resolve();
-		await expect(queued).resolves.toEqual(expect.any(String));
-		expect(settled).toBe(true);
-		harness.abort("host_action");
-		releaseRequest.resolve();
-		await running;
-		await harness.clearAllQueues();
+		expect(harness.revokeAllQueues()).toEqual([steerId, followUpId]);
 	});
 
 	it("accepts abort synchronously, preserves the first source, and exposes immutable run state", async () => {
@@ -295,7 +252,7 @@ describe("AgentHarness lifecycle and abort", () => {
 			},
 		]);
 
-		const running = harness.runPrompt("abort me");
+		const running = runPrompt(harness, "abort me");
 		await requestStarted.promise;
 		const beforeAbort = harness.activeRunSnapshot;
 		expect(beforeAbort).toMatchObject({ requestAccepted: true, phase: "open" });
@@ -368,7 +325,7 @@ describe("AgentHarness lifecycle and abort", () => {
 		const context = [contextMessage];
 		const options = { systemPrompt: "owned system", context };
 
-		const running = harness.run(input, options);
+		const running = harness.runReserved(harness.reserveRun(), input, options);
 		await callbackStarted.promise;
 		if (inputMessage.role !== "user" || typeof inputMessage.content === "string") {
 			throw new Error("Expected structured user input");
@@ -404,54 +361,6 @@ describe("AgentHarness lifecycle and abort", () => {
 		});
 	});
 
-	it.each(["runPrompt", "prompt"] as const)(
-		"owns %s images and structured options before its first await",
-		async (operation) => {
-			const callbackStarted = deferred();
-			const releaseCallback = deferred();
-			let providerMessages: AgentMessage[] = [];
-			let providerSystemPrompt = "";
-			const { harness, registration, session } = createHarness();
-			const buildContext = session.buildContext.bind(session);
-			vi.spyOn(session, "buildContext").mockImplementation(async () => {
-				callbackStarted.resolve();
-				await releaseCallback.promise;
-				return await buildContext();
-			});
-			registration.setResponses([
-				(context) => {
-					providerMessages = context.messages as AgentMessage[];
-					providerSystemPrompt = context.systemPrompt ?? "";
-					return fauxAssistantMessage("owned");
-				},
-			]);
-			const image = { type: "image" as const, mimeType: "image/png", data: "owned-image" };
-			const explicitContext: AgentMessage[] = [{ role: "user", content: "owned context", timestamp: 1 }];
-			const options = { images: [image], context: explicitContext, systemPrompt: "owned system" };
-
-			const running = harness[operation]("owned prompt", options);
-			await callbackStarted.promise;
-			image.data = "mutated-image";
-			options.images.push({ type: "image", mimeType: "image/png", data: "late-image" });
-			explicitContext[0] = { role: "user", content: "mutated context", timestamp: 2 };
-			options.context = [{ role: "user", content: "replacement context", timestamp: 3 }];
-			options.systemPrompt = "mutated system";
-			releaseCallback.resolve();
-			await running;
-
-			expect(getUserTexts(providerMessages)).toEqual(["owned context", "owned prompt"]);
-			expect(providerSystemPrompt).toBe("owned system");
-			const promptMessage = providerMessages.find(
-				(message) => message.role === "user" && getUserTexts([message]).includes("owned prompt"),
-			);
-			expect(
-				promptMessage?.role === "user" && typeof promptMessage.content !== "string"
-					? promptMessage.content.filter((part) => part.type === "image")
-					: [],
-			).toEqual([{ type: "image", mimeType: "image/png", data: "owned-image" }]);
-		},
-	);
-
 	it("owns async system-prompt preflight and retains canceled input for explicit continuation", async () => {
 		const callbackStarted = deferred();
 		const releaseCallback = deferred();
@@ -459,7 +368,7 @@ describe("AgentHarness lifecycle and abort", () => {
 		let systemPromptCalls = 0;
 		let providerSystemPrompt = "";
 		const { harness, registration } = createHarness({
-			systemPrompt: async ({ signal }) => {
+			systemPrompt: async (signal) => {
 				systemPromptCalls++;
 				if (systemPromptCalls === 1) {
 					callbackSignal = signal;
@@ -477,7 +386,7 @@ describe("AgentHarness lifecycle and abort", () => {
 			},
 		]);
 
-		const running = harness.runPrompt("cancel system preflight");
+		const running = runPrompt(harness, "cancel system preflight");
 		await callbackStarted.promise;
 		expect(callbackSignal).toBe(harness.signal);
 		expect(harness.getPhase()).toBe("turn");
@@ -507,72 +416,14 @@ describe("AgentHarness lifecycle and abort", () => {
 		expect(harness.hasPendingPrompt()).toBe(false);
 	});
 
-	it("passes the active signal through before_agent_start and retains its completed payload on cancel", async () => {
-		const hookStarted = deferred();
-		const releaseHook = deferred();
-		let hookSignal: AbortSignal | undefined;
-		let hookCalls = 0;
-		let providerTexts: string[] = [];
-		let providerSystemPrompt = "";
-		const { harness, registration } = createHarness();
-		harness.on("before_agent_start", async (event) => {
-			hookCalls++;
-			hookSignal = event.signal;
-			hookStarted.resolve();
-			await releaseHook.promise;
-			return {
-				messages: [{ role: "user", content: "hook payload", timestamp: Date.now() }],
-				systemPrompt: "hook system prompt",
-			};
-		});
-		registration.setResponses([
-			(context) => {
-				providerTexts = getUserTexts(context.messages as AgentMessage[]);
-				providerSystemPrompt = context.systemPrompt ?? "";
-				return fauxAssistantMessage("resumed");
-			},
-		]);
-
-		const running = harness.runPrompt("cancel hook preflight");
-		await hookStarted.promise;
-		expect(hookSignal).toBe(harness.signal);
-		expect(harness.activeRunSnapshot).toMatchObject({ requestAccepted: false, phase: "open" });
-		let idleSettled = false;
-		const waiting = harness.waitForIdle().then(() => {
-			idleSettled = true;
-		});
-		const first = harness.abort("remote_request");
-		expect(first).toMatchObject({ accepted: true, source: "remote_request", runId: expect.any(String) });
-		expect(harness.abort("disposal")).toMatchObject({
-			accepted: false,
-			source: "remote_request",
-			runId: first.runId,
-		});
-		expect(hookSignal?.aborted).toBe(true);
-		await Promise.resolve();
-		expect(idleSettled).toBe(false);
-
-		releaseHook.resolve();
-		await Promise.all([running, waiting]);
-		expect(registration.state.callCount).toBe(0);
-		expect(harness.hasPendingPrompt()).toBe(true);
-
-		await harness.continue();
-		expect(registration.state.callCount).toBe(1);
-		expect(hookCalls).toBe(1);
-		expect(providerTexts).toEqual(["cancel hook preflight", "hook payload"]);
-		expect(providerSystemPrompt).toBe("hook system prompt");
-		expect(harness.hasPendingPrompt()).toBe(false);
-	});
-
-	it("retains one prompt identity when before_agent_start rejects after system-prompt preparation", async () => {
+	it("retains one prompt identity when system-prompt preflight rejects", async () => {
 		let systemPromptCalls = 0;
-		let beforeStartCalls = 0;
 		let settlementCalls = 0;
 		const deliveryIds: string[] = [];
 		const { harness, registration } = createHarness({
 			systemPrompt: async () => {
 				systemPromptCalls++;
+				if (systemPromptCalls === 1) throw new Error("preflight rejected");
 				return "cached system prompt";
 			},
 			prepareLogicalDelivery: (delivery) => {
@@ -590,16 +441,9 @@ describe("AgentHarness lifecycle and abort", () => {
 				};
 			},
 		});
-		harness.on("before_agent_start", () => {
-			beforeStartCalls++;
-			if (beforeStartCalls === 1) throw new Error("preflight rejected");
-			return {
-				messages: [{ role: "user", content: "prepared after rejection", timestamp: Date.now() }],
-			};
-		});
 		registration.setResponses([() => fauxAssistantMessage("resumed")]);
 
-		await expect(harness.runPrompt("retained before preflight")).rejects.toThrow("preflight rejected");
+		await expect(runPrompt(harness, "retained before preflight")).rejects.toThrow("preflight rejected");
 		expect(harness.hasPendingPrompt()).toBe(true);
 		await expect(harness.continue()).resolves.toMatchObject({
 			status: "delivery_failed",
@@ -607,8 +451,7 @@ describe("AgentHarness lifecycle and abort", () => {
 		});
 		await expect(harness.continue()).resolves.toMatchObject({ status: "completed" });
 
-		expect(systemPromptCalls).toBe(1);
-		expect(beforeStartCalls).toBe(2);
+		expect(systemPromptCalls).toBe(2);
 		expect(new Set(deliveryIds)).toHaveLength(1);
 		expect(settlementCalls).toBe(2);
 		expect(registration.state.callCount).toBe(1);
@@ -638,7 +481,7 @@ describe("AgentHarness lifecycle and abort", () => {
 			return undefined;
 		});
 
-		const running = harness.prompt("race replacement");
+		const running = prompt(harness, "race replacement");
 		await terminalHookStarted.promise;
 		expect(harness.abort("host_action")).toMatchObject({ accepted: true, source: "host_action" });
 		expect(harness.abort("disposal")).toMatchObject({ accepted: false, source: "host_action" });
@@ -651,7 +494,7 @@ describe("AgentHarness lifecycle and abort", () => {
 		expect(runtimeAbortSources(persisted as AgentMessage[])).toEqual(["host_action"]);
 	});
 
-	it("retains revocable queues on abort until an explicit clear", async () => {
+	it("retains revocable queues on abort until explicit revocation", async () => {
 		const requestStarted = deferred();
 		const releaseRequest = deferred();
 		const { harness, registration } = createHarness();
@@ -663,17 +506,17 @@ describe("AgentHarness lifecycle and abort", () => {
 			},
 		]);
 
-		const running = harness.runPrompt("initial");
+		const running = runPrompt(harness, "initial");
 		await requestStarted.promise;
-		const steerId = await harness.steer("steer after abort");
-		const followUpId = await harness.followUp("follow after abort");
+		const steerId = harness.queueSteer(userMessage("steer after abort"));
+		const followUpId = harness.queueFollowUp(userMessage("follow after abort"));
 		harness.abort("remote_request");
 		expect(harness.hasQueuedMessages()).toBe(true);
 		releaseRequest.resolve();
 		await running;
 		expect(harness.hasQueuedMessages()).toBe(true);
 
-		expect(await harness.clearAllQueues()).toEqual([steerId, followUpId]);
+		expect(harness.revokeAllQueues()).toEqual([steerId, followUpId]);
 		expect(harness.hasQueuedMessages()).toBe(false);
 	});
 
@@ -693,7 +536,7 @@ describe("AgentHarness lifecycle and abort", () => {
 		});
 		registration.setResponses([() => fauxAssistantMessage("resumed")]);
 
-		const running = harness.runPrompt("retain before begin");
+		const running = runPrompt(harness, "retain before begin");
 		await preparationStarted.promise;
 		expect(harness.abort("remote_request")).toMatchObject({ accepted: true, source: "remote_request" });
 		releasePreparation.resolve();
@@ -722,12 +565,12 @@ describe("AgentHarness lifecycle and abort", () => {
 			if (event.type === "agent_end") laterTerminalCount++;
 		});
 
-		const running = harness.runPrompt("settle listeners");
+		const running = runPrompt(harness, "settle listeners");
 		await terminalStarted.promise;
 		expect(harness.getPhase()).toBe("turn");
 		expect(harness.activeRunSnapshot).toMatchObject({ phase: "settled" });
 		expect(harness.abort("remote_request")).toMatchObject({ accepted: false });
-		await expect(harness.runPrompt("overlap terminal settlement")).rejects.toMatchObject({ code: "busy" });
+		await expect(runPrompt(harness, "overlap terminal settlement")).rejects.toMatchObject({ code: "busy" });
 		let idle = false;
 		const waiting = harness.waitForIdle().then(() => {
 			idle = true;
@@ -750,13 +593,14 @@ describe("AgentHarness lifecycle and abort", () => {
 			description: "Queues work and aborts",
 			parameters: Type.Object({}),
 			async execute() {
-				await harness.steer("queued steering");
+				harness.queueSteer(userMessage("queued steering"));
 				harness.abort("host_action");
 				return { content: [{ type: "text", text: "stopped" }] };
 			},
 		};
-		const created = createHarness({ tools: [tool] });
+		const created = createHarness();
 		harness = created.harness;
+		await harness.setTools([tool], [tool.name]);
 		created.registration.setResponses([
 			() =>
 				fauxAssistantMessage(fauxToolCall("stop_tool", {}, { id: "call-1" }), {
@@ -765,7 +609,7 @@ describe("AgentHarness lifecycle and abort", () => {
 			() => fauxAssistantMessage("resumed"),
 		]);
 
-		await harness.runPrompt("run tool");
+		await runPrompt(harness, "run tool");
 		expect(created.registration.state.callCount).toBe(1);
 		expect(harness.hasQueuedMessages()).toBe(true);
 
@@ -785,7 +629,7 @@ describe("AgentHarness lifecycle and abort", () => {
 		});
 		registration.setResponses([() => fauxAssistantMessage("retried")]);
 
-		await expect(harness.runPrompt("fail preparation")).resolves.toMatchObject({
+		await expect(runPrompt(harness, "fail preparation")).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: { outcome: "terminally_failed", phase: "preparation" },
 		});

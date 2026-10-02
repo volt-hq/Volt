@@ -2,11 +2,11 @@ import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHarnessAdmissionGate } from "../../src/harness/admission-gate.ts";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
 import type { AgentHarnessOptions } from "../../src/harness/types.ts";
 import type { AgentMessage } from "../../src/types.ts";
+import { runPrompt } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 const registrations: Array<ReturnType<typeof registerFauxProvider>> = [];
 const harnesses: AgentHarness[] = [];
@@ -38,14 +38,13 @@ function observe<T>(promise: Promise<T>): Promise<PromiseSettledResult<T>> {
 	);
 }
 
-function createHarness(options: Omit<AgentHarnessOptions, "env" | "session" | "model"> = {}) {
+function createHarness(options: Omit<AgentHarnessOptions, "session" | "model"> = {}) {
 	const registration = registerFauxProvider({
 		models: [{ id: "admission-test", contextWindow: 6000, maxTokens: 1000 }],
 	});
 	registrations.push(registration);
 	const session = new Session(new InMemorySessionStorage());
 	const harness = new AgentHarness({
-		env: new NodeExecutionEnv({ cwd: process.cwd() }),
 		session,
 		model: registration.getModel(),
 		...options,
@@ -68,39 +67,17 @@ function userTexts(messages: readonly AgentMessage[]): string[] {
 }
 
 describe("AgentHarness shared admission", () => {
-	it.each([
-		"run",
-		"run-array",
-		"runPrompt",
-		"prompt",
-		"skill",
-		"promptFromTemplate",
-		"continue",
-		"continue-context",
-	] as const)(
+	it.each(["run", "run-array", "continue", "continue-context"] as const)(
 		"rejects idle %s before hooks, provider work, or transcript changes and recovers after release",
 		async (operation) => {
 			const admissionGate = new AgentHarnessAdmissionGate();
 			const systemPrompt = vi.fn(() => "test system prompt");
-			const { harness, registration, session } = createHarness({
-				admissionGate,
-				systemPrompt,
-				resources: {
-					skills: [
-						{ name: "test", description: "Test skill", content: "Skill input", filePath: "/test/SKILL.md" },
-					],
-					promptTemplates: [{ name: "test", content: "Template input" }],
-				},
-			});
+			const { harness, registration, session } = createHarness({ admissionGate, systemPrompt });
 			await session.appendMessage(userMessage("canonical input"));
 			const before = await session.getEntries();
-			const beforeStart = vi.fn(() => undefined);
-			const beforeProvider = vi.fn(() => undefined);
 			const contextHook = vi.fn(() => undefined);
 			const messageHook = vi.fn(() => undefined);
 			const subscriber = vi.fn();
-			harness.on("before_agent_start", beforeStart);
-			harness.on("before_provider_request", beforeProvider);
 			harness.on("context", contextHook);
 			harness.on("message_end", messageHook);
 			harness.subscribe(subscriber);
@@ -109,12 +86,9 @@ describe("AgentHarness shared admission", () => {
 			const commitBatch = vi.spyOn(session, "commitBatch");
 			registration.setResponses([fauxAssistantMessage("recovered")]);
 			const invoke = {
-				run: () => harness.run(userMessage("new input")),
-				"run-array": () => harness.run([userMessage("new input"), userMessage("second input")]),
-				runPrompt: () => harness.runPrompt("new input"),
-				prompt: () => harness.prompt("new input"),
-				skill: () => harness.skill("test"),
-				promptFromTemplate: () => harness.promptFromTemplate("test"),
+				run: async () => await harness.runReserved(harness.reserveRun(), userMessage("new input")),
+				"run-array": async () =>
+					await harness.runReserved(harness.reserveRun(), [userMessage("new input"), userMessage("second input")]),
 				continue: () => harness.continue(),
 				"continue-context": () => harness.continue({ context: [userMessage("explicit context")] }),
 			}[operation];
@@ -122,7 +96,7 @@ describe("AgentHarness shared admission", () => {
 			const release = admissionGate.suspend();
 			await expect(invoke()).rejects.toMatchObject(suspendedError);
 			expect(registration.state.callCount).toBe(0);
-			for (const hook of [systemPrompt, beforeStart, beforeProvider, contextHook, messageHook, subscriber]) {
+			for (const hook of [systemPrompt, contextHook, messageHook, subscriber]) {
 				expect(hook).not.toHaveBeenCalled();
 			}
 			expect(buildContext).not.toHaveBeenCalled();
@@ -137,7 +111,7 @@ describe("AgentHarness shared admission", () => {
 			release();
 			await expect(invoke()).resolves.toBeDefined();
 			expect(registration.state.callCount).toBe(1);
-			expect(beforeProvider).toHaveBeenCalledTimes(1);
+			expect(contextHook).toHaveBeenCalledTimes(1);
 			expect(harness.getPhase()).toBe("idle");
 		},
 	);
@@ -160,7 +134,7 @@ describe("AgentHarness shared admission", () => {
 		expect(registration.state.callCount).toBe(0);
 	});
 
-	it.each(["runCompactionOperation", "requestCompaction", "runTreeOperation", "requestTreeOperation"] as const)(
+	it.each(["runCompactionOperation", "requestCompaction", "requestTreeOperation"] as const)(
 		"rejects idle %s before strategy execution and recovers after release",
 		async (operation) => {
 			const admissionGate = new AgentHarnessAdmissionGate();
@@ -181,42 +155,6 @@ describe("AgentHarness shared admission", () => {
 		},
 	);
 
-	it.each(["compact", "navigateTree"] as const)(
-		"rejects idle %s before structural hooks and canonical work and recovers after release",
-		async (operation) => {
-			const admissionGate = new AgentHarnessAdmissionGate();
-			const { harness, session, registration } = createHarness({ admissionGate });
-			const target = await session.appendMessage(userMessage("branch target"));
-			for (let index = 0; index < 5; index++) {
-				await session.appendMessage(userMessage(String(index).repeat(4000)));
-			}
-			const before = await session.getBranchSnapshot();
-			const beforeCompact = vi.fn(() => undefined);
-			const beforeTree = vi.fn(() => undefined);
-			const beforeProvider = vi.fn(() => undefined);
-			harness.on("session_before_compact", beforeCompact);
-			harness.on("session_before_tree", beforeTree);
-			harness.on("before_provider_request", beforeProvider);
-			const getBranchSnapshot = vi.spyOn(session, "getBranchSnapshot");
-			const commitBatch = vi.spyOn(session, "commitBatch");
-			registration.setSimpleResponses([fauxAssistantMessage("summary")]);
-			const invoke = () =>
-				operation === "compact" ? harness.compact() : harness.navigateTree(target, { summarize: true });
-			const release = admissionGate.suspend();
-			await expect(invoke()).rejects.toMatchObject(suspendedError);
-			for (const hook of [beforeCompact, beforeTree, beforeProvider]) expect(hook).not.toHaveBeenCalled();
-			expect(getBranchSnapshot).not.toHaveBeenCalled();
-			expect(commitBatch).not.toHaveBeenCalled();
-			expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 0, refreshCount: 0 });
-			expect(await session.getBranchSnapshot()).toEqual(before);
-			await harness.waitForIdle();
-			release();
-			await expect(invoke()).resolves.toBeDefined();
-			expect(beforeProvider).toHaveBeenCalledTimes(1);
-			expect(registration.state).toEqual({ callCount: 0, simpleCallCount: 1, refreshCount: 0 });
-		},
-	);
-
 	it("shares host holds across harnesses without affecting independent or default gates", async () => {
 		const admissionGate = new AgentHarnessAdmissionGate();
 		const shared = [createHarness({ admissionGate }), createHarness({ admissionGate })];
@@ -228,17 +166,17 @@ describe("AgentHarness shared admission", () => {
 		const outer = admissionGate.suspend();
 		const inner = admissionGate.suspend();
 		for (const { harness } of shared)
-			await expect(harness.runPrompt("blocked")).rejects.toMatchObject(suspendedError);
+			await expect(runPrompt(harness, "blocked")).rejects.toMatchObject(suspendedError);
 		for (const { harness } of [independent, ...defaults]) {
-			await expect(harness.runPrompt("independent")).resolves.toMatchObject({ status: "completed" });
+			await expect(runPrompt(harness, "independent")).resolves.toMatchObject({ status: "completed" });
 		}
 		outer();
 		outer();
 		for (const { harness } of shared)
-			await expect(harness.runPrompt("still blocked")).rejects.toMatchObject(suspendedError);
+			await expect(runPrompt(harness, "still blocked")).rejects.toMatchObject(suspendedError);
 		inner();
 		for (const { harness, registration } of shared) {
-			await expect(harness.runPrompt("reopened")).resolves.toMatchObject({ status: "completed" });
+			await expect(runPrompt(harness, "reopened")).resolves.toMatchObject({ status: "completed" });
 			expect(registration.state.callCount).toBe(1);
 		}
 	});
@@ -278,25 +216,26 @@ describe("AgentHarness shared admission", () => {
 		expect(harness.hasQueuedMessages()).toBe(false);
 	});
 
-	it("keeps queue, messaging, and configuration APIs usable while suspended", async () => {
+	it("keeps queue, custom-entry, and configuration APIs usable while suspended", async () => {
 		const admissionGate = new AgentHarnessAdmissionGate();
 		const { harness, registration, session } = createHarness({ admissionGate });
 		const release = admissionGate.suspend();
-		await harness.appendMessage(userMessage("host message"));
+		await harness.appendCustomEntry("host-entry", { note: "host" });
 		await harness.setModelAndThinkingLevel(registration.getModel(), "high");
 		await harness.setStreamOptions({ maxRetries: 0 });
-		await harness.setResources({ promptTemplates: [{ name: "new", content: "new template" }] });
 		await harness.setSteeringMode("all");
 		await harness.setFollowUpMode("all");
 		const steer = harness.queueSteer(userMessage("clear steer"));
 		const followUp = harness.queueFollowUp(userMessage("clear follow-up"));
-		await expect(harness.clearAllQueues()).resolves.toEqual([steer, followUp]);
-		await harness.nextTurn("next-turn payload");
+		expect(harness.revokeAllQueues()).toEqual([steer, followUp]);
 		expect(harness.getThinkingLevel()).toBe("high");
 		expect(harness.getStreamOptions()).toEqual({ maxRetries: 0 });
 		expect((await session.buildContext()).thinkingLevel).toBe("high");
-		await expect(harness.runPrompt("blocked")).rejects.toMatchObject(suspendedError);
-		expect(userTexts((await session.buildContext()).messages)).toEqual(["host message"]);
+		expect((await session.getEntries()).filter((entry) => entry.type === "custom")).toMatchObject([
+			{ customType: "host-entry", data: { note: "host" } },
+		]);
+		await expect(runPrompt(harness, "blocked")).rejects.toMatchObject(suspendedError);
+		expect(userTexts((await session.buildContext()).messages)).toEqual([]);
 		let received: string[] = [];
 		registration.setResponses([
 			(context) => {
@@ -305,8 +244,8 @@ describe("AgentHarness shared admission", () => {
 			},
 		]);
 		release();
-		await harness.runPrompt("accepted");
-		expect(received).toEqual(["host message", "next-turn payload", "accepted"]);
+		await runPrompt(harness, "accepted");
+		expect(received).toEqual(["accepted"]);
 	});
 });
 
@@ -324,10 +263,8 @@ describe("AgentHarness reserved admission invalidation", () => {
 		await session.appendMessage(userMessage("canonical input"));
 		const before = await session.getEntries();
 		const strategy = vi.fn(() => "must not compact");
-		const beforeStart = vi.fn(() => undefined);
-		const beforeProvider = vi.fn(() => undefined);
-		harness.on("before_agent_start", beforeStart);
-		harness.on("before_provider_request", beforeProvider);
+		const contextHook = vi.fn(() => undefined);
+		harness.on("context", contextHook);
 		const reservation = harness.reserveRun();
 		const idle = harness.waitForIdle();
 		const release = admissionGate.suspend();
@@ -344,8 +281,7 @@ describe("AgentHarness reserved admission invalidation", () => {
 		expect(harness.hasPendingPrompt()).toBe(false);
 		expect(harness.cancelReservedRun(reservation)).toBe(false);
 		expect(strategy).not.toHaveBeenCalled();
-		expect(beforeStart).not.toHaveBeenCalled();
-		expect(beforeProvider).not.toHaveBeenCalled();
+		expect(contextHook).not.toHaveBeenCalled();
 		expect(registration.state.callCount).toBe(0);
 		expect(await session.getEntries()).toEqual(before);
 		release();
@@ -409,7 +345,7 @@ describe("AgentHarness reserved admission invalidation", () => {
 		expect(await session.getEntries()).toEqual([]);
 		release();
 		registration.setResponses([fauxAssistantMessage("fresh")]);
-		await harness.runPrompt("fresh after invalid handoff");
+		await runPrompt(harness, "fresh after invalid handoff");
 	});
 });
 
@@ -448,15 +384,21 @@ describe("AgentHarness successor admission and teardown", () => {
 		["requestTreeOperation", true],
 	] as const)("rejects pending %s without executing it, reopened=%s", async (operation, reopen) => {
 		const admissionGate = new AgentHarnessAdmissionGate();
-		const { harness, session, registration } = createHarness({ admissionGate });
 		const entered = deferred();
 		const barrier = deferred();
-		harness.on("before_agent_start", async () => {
-			entered.resolve();
-			await barrier.promise;
-			return undefined;
+		let blockPreflight = true;
+		const { harness, session, registration } = createHarness({
+			admissionGate,
+			systemPrompt: async () => {
+				if (blockPreflight) {
+					blockPreflight = false;
+					entered.resolve();
+					await barrier.promise;
+				}
+				return "system prompt";
+			},
 		});
-		const running = harness.runPrompt("preflight input");
+		const running = runPrompt(harness, "preflight input");
 		await entered.promise;
 		const strategy = vi.fn(() => "must not execute");
 		const successor = observe(harness[operation](strategy));
@@ -549,7 +491,7 @@ describe("AgentHarness successor admission and teardown", () => {
 				return fauxAssistantMessage("existing response");
 			},
 		]);
-		const running = harness.runPrompt("existing prompt");
+		const running = runPrompt(harness, "existing prompt");
 		await entered.promise;
 		const release = admissionGate.suspend();
 		expect(harness.signal?.aborted).toBe(false);
@@ -558,7 +500,7 @@ describe("AgentHarness successor admission and teardown", () => {
 		await harness.waitForIdle();
 		expect((await session.buildContext()).messages.at(-1)).toMatchObject({ stopReason: "stop" });
 		expect(registration.state.callCount).toBe(1);
-		await expect(harness.runPrompt("new prompt")).rejects.toMatchObject(suspendedError);
+		await expect(runPrompt(harness, "new prompt")).rejects.toMatchObject(suspendedError);
 		release();
 	});
 
@@ -574,11 +516,11 @@ describe("AgentHarness successor admission and teardown", () => {
 				return fauxAssistantMessage("late response");
 			},
 		]);
-		const running = harness.runPrompt("abort me");
+		const running = runPrompt(harness, "abort me");
 		await entered.promise;
 		const release = admissionGate.suspend();
-		const steer = await harness.steer("retained steer");
-		const followUp = await harness.followUp("retained follow-up");
+		const steer = harness.queueSteer(userMessage("retained steer"));
+		const followUp = harness.queueFollowUp(userMessage("retained follow-up"));
 		expect(harness.abort("host_action")).toMatchObject({ accepted: true, source: "host_action" });
 		expect(harness.abort("disposal")).toMatchObject({ accepted: false, source: "host_action" });
 		expect(harness.signal?.aborted).toBe(true);
@@ -586,7 +528,7 @@ describe("AgentHarness successor admission and teardown", () => {
 		await running;
 		await harness.waitForIdle();
 		expect(harness.hasQueuedMessages()).toBe(true);
-		await expect(harness.clearAllQueues()).resolves.toEqual([steer, followUp]);
+		expect(harness.revokeAllQueues()).toEqual([steer, followUp]);
 		const response = (await session.buildContext()).messages.at(-1);
 		expect(response).toMatchObject({
 			role: "assistant",
@@ -616,7 +558,7 @@ describe("AgentHarness successor admission and teardown", () => {
 			if (operation === "requestClose" || operation === "dispose") {
 				await harness.waitForClosed();
 				release();
-				await expect(harness.runPrompt("terminal")).rejects.toMatchObject({ code: "invalid_state" });
+				await expect(runPrompt(harness, "terminal")).rejects.toMatchObject({ code: "invalid_state" });
 			} else release();
 		},
 	);
@@ -651,6 +593,6 @@ describe("AgentHarness successor admission and teardown", () => {
 		expect(treeStrategy).not.toHaveBeenCalled();
 		expect(admissionGate.isOpen).toBe(false);
 		release();
-		await expect(harness.runPrompt("closed")).rejects.toMatchObject({ code: "invalid_state" });
+		await expect(runPrompt(harness, "closed")).rejects.toMatchObject({ code: "invalid_state" });
 	});
 });

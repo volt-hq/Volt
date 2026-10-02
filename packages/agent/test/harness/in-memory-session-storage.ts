@@ -1,3 +1,4 @@
+import { uuidv7 } from "../../src/harness/session/uuid.ts";
 import {
 	type LeafEntry,
 	type ProjectionCursor,
@@ -10,8 +11,7 @@ import {
 	type SessionStorageBranchSnapshot,
 	type SessionStorageCommitResult,
 	type SessionTreeEntry,
-} from "../types.ts";
-import { uuidv7 } from "./uuid.ts";
+} from "../../src/harness/types.ts";
 
 function updateLabelCache(labelsById: Map<string, string>, entry: SessionTreeEntry): void {
 	if (entry.type !== "label") return;
@@ -21,12 +21,6 @@ function updateLabelCache(labelsById: Map<string, string>, entry: SessionTreeEnt
 	} else {
 		labelsById.delete(entry.targetId);
 	}
-}
-
-function buildLabelsById(entries: readonly SessionTreeEntry[]): Map<string, string> {
-	const labelsById = new Map<string, string>();
-	for (const entry of entries) updateLabelCache(labelsById, entry);
-	return labelsById;
 }
 
 function generateEntryId(byId: { has(id: string): boolean }): string {
@@ -55,31 +49,21 @@ function cloneReceiptRecord(record: SessionMutationReceiptRecord): SessionMutati
 	};
 }
 
-export class InMemorySessionStorage<TMetadata extends SessionMetadata = SessionMetadata>
-	implements SessionStorage<TMetadata>
-{
-	private readonly metadata: TMetadata;
+/** In-memory `SessionStorage` test fixture implementing the guarded batch and receipt contract. */
+export class InMemorySessionStorage implements SessionStorage {
+	private readonly metadata: SessionMetadata;
 	private readonly authorityGeneration = uuidv7();
-	private entries: SessionTreeEntry[];
-	private byId: Map<string, SessionTreeEntry>;
-	private labelsById: Map<string, string>;
-	private leafId: string | null;
-	private revision: number;
+	private entries: SessionTreeEntry[] = [];
+	private byId = new Map<string, SessionTreeEntry>();
+	private labelsById = new Map<string, string>();
+	private leafId: string | null = null;
+	private revision = 0;
 	private mutationTail: Promise<void> = Promise.resolve();
 	private readonly issuedCursors = new WeakSet<object>();
 	private readonly receiptRecords = new WeakMap<object, SessionMutationReceiptRecord>();
 
-	constructor(options?: { entries?: SessionTreeEntry[]; metadata?: TMetadata }) {
-		this.entries = options?.entries ? cloneEntries(options.entries) : [];
-		this.byId = new Map(this.entries.map((entry) => [entry.id, entry]));
-		this.labelsById = buildLabelsById(this.entries);
-		this.leafId = null;
-		for (const entry of this.entries) this.leafId = leafIdAfterEntry(entry);
-		if (this.leafId !== null && !this.byId.has(this.leafId)) {
-			throw new SessionError("invalid_session", `Entry ${this.leafId} not found`);
-		}
-		this.revision = this.entries.length;
-		this.metadata = options?.metadata ?? ({ id: uuidv7(), createdAt: new Date().toISOString() } as TMetadata);
+	constructor(options?: { metadata?: SessionMetadata }) {
+		this.metadata = options?.metadata ?? { id: uuidv7(), createdAt: new Date().toISOString() };
 	}
 
 	private async inMutationLane<T>(operation: () => Promise<T> | T): Promise<T> {
@@ -243,7 +227,7 @@ export class InMemorySessionStorage<TMetadata extends SessionMetadata = SessionM
 		this.revision += entries.length;
 	}
 
-	async getMetadata(): Promise<TMetadata> {
+	async getMetadata(): Promise<SessionMetadata> {
 		return this.metadata;
 	}
 

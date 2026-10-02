@@ -1,18 +1,10 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { JsonlSessionStorage } from "../../src/harness/session/jsonl-storage.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
 import type { SessionStorage } from "../../src/harness/types.ts";
-import { createAssistantMessage, createTempDir, createUserMessage, getLatestTempDir } from "./session-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
+import { createAssistantMessage, createUserMessage } from "./session-test-utils.ts";
 
-async function runSessionSuite(
-	name: string,
-	createStorage: () => SessionStorage | Promise<SessionStorage>,
-	inspect?: () => void,
-) {
+async function runSessionSuite(name: string, createStorage: () => SessionStorage | Promise<SessionStorage>) {
 	describe(name, () => {
 		it("commits guarded batches and resolves only store-issued receipts", async () => {
 			const session = new Session(await createStorage());
@@ -262,33 +254,8 @@ async function runSessionSuite(
 			expect(context.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 			expect(await session2.getLabel(user1)).toBe("checkpoint");
 			expect(await session2.getSessionName()).toBe("name");
-			inspect?.();
 		});
 	});
 }
 
 runSessionSuite("Session with in-memory storage", () => new InMemorySessionStorage());
-
-runSessionSuite(
-	"Session with JSONL storage",
-	async () => {
-		const dir = createTempDir();
-		const env = new NodeExecutionEnv({ cwd: dir });
-		return await JsonlSessionStorage.create(env, join(dir, "session.jsonl"), { cwd: dir, sessionId: "session-1" });
-	},
-	() => {
-		const dir = getLatestTempDir();
-		const filePath = join(dir, "session.jsonl");
-		const lines = readFileSync(filePath, "utf8").trim().split("\n");
-		expect(lines.length).toBeGreaterThan(1);
-		const header = JSON.parse(lines[0]!);
-		expect(header.type).toBe("session");
-		expect(header.version).toBe(3);
-		const entries = lines.slice(1).map((line) => JSON.parse(line));
-		expect(entries.some((entry) => entry.type === "leaf")).toBe(true);
-		for (const entry of entries) {
-			expect(entry.type).not.toBe("entry");
-			expect(typeof entry.id).toBe("string");
-		}
-	},
-);

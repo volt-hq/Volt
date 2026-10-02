@@ -48,7 +48,6 @@ import type {
 	ToolCallResult,
 } from "@hansjm10/volt-agent-core";
 import { AgentHarness, AgentHarnessAdmissionGate } from "@hansjm10/volt-agent-core";
-import { NodeExecutionEnv } from "@hansjm10/volt-agent-core/node";
 import type {
 	Api,
 	AssistantMessage,
@@ -993,7 +992,6 @@ export class AgentSession {
 		);
 		this._harness = new AgentHarness({
 			admissionGate: this._admissionGate,
-			env: new NodeExecutionEnv({ cwd: config.cwd }),
 			session: createSessionManagerHarnessSession(
 				config.sessionManager,
 				() => this._canonicalProducerRetired,

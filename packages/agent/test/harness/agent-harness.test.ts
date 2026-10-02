@@ -1,28 +1,12 @@
-import {
-	estimateToolDefinitionTokens,
-	fauxAssistantMessage,
-	fauxToolCall,
-	getModel,
-	registerFauxProvider,
-} from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { fauxAssistantMessage, fauxToolCall, getModel, registerFauxProvider } from "@hansjm10/volt-ai";
+import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
-import { estimateMessagesTokens } from "../../src/harness/compaction/compaction.ts";
-import { NodeExecutionEnv } from "../../src/harness/env/nodejs.ts";
-import { InMemorySessionStorage } from "../../src/harness/session/memory-storage.ts";
 import { Session } from "../../src/harness/session/session.ts";
-import type { PromptTemplate, Skill } from "../../src/harness/types.ts";
 import type { AgentMessage, AgentTool } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import { getCurrentTimeTool } from "../utils/get-current-time.ts";
-
-interface AppSkill extends Skill {
-	source: "project" | "user";
-}
-
-interface AppPromptTemplate extends PromptTemplate {
-	source: "project" | "user";
-}
+import { prompt, runPrompt, userMessage } from "./harness-test-utils.ts";
+import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
 const registrations: Array<{ unregister(): void }> = [];
 
@@ -36,12 +20,6 @@ function textFromUserMessages(messages: readonly AgentMessage[]): string[] {
 			return "text" in part && typeof part.text === "string" ? [part.text] : [];
 		});
 	});
-}
-
-function messageText(message: AgentMessage): string {
-	if (!("content" in message)) return "";
-	if (typeof message.content === "string") return message.content;
-	return message.content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void } {
@@ -66,10 +44,8 @@ afterEach(() => {
 describe("AgentHarness", () => {
 	it("constructs directly and exposes queue modes", () => {
 		const session = new Session(new InMemorySessionStorage());
-		const env = new NodeExecutionEnv({ cwd: process.cwd() });
 		const initialModel = getModel("anthropic", "claude-sonnet-4-5");
 		const harness = new AgentHarness({
-			env,
 			session,
 			model: initialModel,
 			thinkingLevel: "high",
@@ -77,7 +53,6 @@ describe("AgentHarness", () => {
 			steeringMode: "all",
 			followUpMode: "all",
 		});
-		expect(harness.env).toBe(env);
 		expect(harness.getModel()).toBe(initialModel);
 		expect(harness.getThinkingLevel()).toBe("high");
 		expect(harness.getSteeringMode()).toBe("all");
@@ -107,7 +82,6 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 			steeringMode: "one-at-a-time",
@@ -120,12 +94,12 @@ describe("AgentHarness", () => {
 			}
 			if (event.type === "message_start" && event.message.role === "assistant" && !queued) {
 				queued = true;
-				harness.steer("one");
-				harness.steer("two");
+				harness.queueSteer(userMessage("one"));
+				harness.queueSteer(userMessage("two"));
 			}
 		});
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		expect(userCounts).toEqual([1, 2, 3]);
 		expect(steerQueueLengths).toEqual([1, 2, 1, 0]);
@@ -161,21 +135,20 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
-			tools: [calculateTool],
 		});
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		let queued = false;
 		harness.subscribe((event) => {
 			if (event.type === "message_start" && event.message.role === "assistant" && !queued) {
 				queued = true;
-				void harness.steer("queued steering");
+				harness.queueSteer(userMessage("queued steering"));
 			}
 		});
 		harness.on("tool_result", () => ({ disposition: "final_response" }));
 
-		const response = await harness.prompt("complete and summarize");
+		const response = await prompt(harness, "complete and summarize");
 
 		expect(response.content).toEqual([{ type: "text", text: "handled queued steering" }]);
 		expect(requestSnapshots).toEqual([
@@ -197,7 +170,6 @@ describe("AgentHarness", () => {
 		]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 		});
@@ -207,14 +179,14 @@ describe("AgentHarness", () => {
 		harness.subscribe(async (event) => {
 			if (event.type === "message_start" && event.message.role === "assistant" && !queued) {
 				queued = true;
-				await harness.steer("committed before abort");
+				harness.queueSteer(userMessage("committed before abort"));
 			}
 			if (event.type === "turn_start" && ++turnStarts === 2) {
 				abortResult = harness.abort();
 			}
 		});
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 		const persistedMessages = (await session.buildContext()).messages as AgentMessage[];
 
 		expect(providerCalls).toBe(1);
@@ -233,7 +205,6 @@ describe("AgentHarness", () => {
 			registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 			const session = new Session(new InMemorySessionStorage());
 			const harness = new AgentHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session,
 				model: registration.getModel(),
 			});
@@ -255,7 +226,7 @@ describe("AgentHarness", () => {
 				}
 				if (event.type === "agent_start" && !queued) {
 					queued = true;
-					await harness.steer("committed delivery");
+					harness.queueSteer(userMessage("committed delivery"));
 				}
 				if (event.type === "queue_update") {
 					steerQueueSnapshots.push(textFromUserMessages(event.steer));
@@ -270,7 +241,7 @@ describe("AgentHarness", () => {
 				if (event.type === "agent_end") terminalMessages = event.messages;
 			});
 
-			const response = await harness.prompt("initial prompt");
+			const response = await prompt(harness, "initial prompt");
 			const persistedMessages = (await session.buildContext()).messages as AgentMessage[];
 			unsubscribe();
 			const abortResult = harness.abort();
@@ -298,7 +269,6 @@ describe("AgentHarness", () => {
 		registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 		});
@@ -309,7 +279,7 @@ describe("AgentHarness", () => {
 			if (event.type === "agent_start") abortResult = harness.abort();
 		});
 
-		const result = await harness.runPrompt("preserve this prompt");
+		const result = await runPrompt(harness, "preserve this prompt");
 
 		expect(abortResult).toMatchObject({ accepted: true });
 		expect(result).toEqual({ status: "completed", deliveries: [] });
@@ -327,7 +297,6 @@ describe("AgentHarness", () => {
 			registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 			const session = new Session(new InMemorySessionStorage());
 			const harness = new AgentHarness({
-				env: new NodeExecutionEnv({ cwd: process.cwd() }),
 				session,
 				model: registration.getModel(),
 			});
@@ -350,7 +319,7 @@ describe("AgentHarness", () => {
 				if (event.type === "agent_end") terminalMessages = event.messages;
 			});
 
-			const response = await harness.prompt("preserve this initial delivery");
+			const response = await prompt(harness, "preserve this initial delivery");
 			const persistedMessages = (await session.buildContext()).messages as AgentMessage[];
 
 			expect(registration.state.callCount).toBe(1);
@@ -388,11 +357,10 @@ describe("AgentHarness", () => {
 		]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
-			systemPrompt: async ({ session: currentSession }) => {
-				const current = await currentSession.buildContext();
+			systemPrompt: async () => {
+				const current = await session.buildContext();
 				return `users:${textFromUserMessages(current.messages as AgentMessage[]).join("|")}`;
 			},
 		});
@@ -400,48 +368,16 @@ describe("AgentHarness", () => {
 		harness.subscribe((event) => {
 			if (event.type === "message_start" && event.message.role === "assistant" && !queued) {
 				queued = true;
-				void harness.steer("steer");
+				harness.queueSteer(userMessage("steer"));
 			}
 		});
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		expect(requestPrompts).toEqual(["users:hello", "users:hello|steer"]);
 	});
 
-	it("appends before_agent_start messages and persists them", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		let requestText: string[] = [];
-		registration.setResponses([
-			(context) => {
-				requestText = textFromUserMessages(context.messages);
-				return fauxAssistantMessage("ok");
-			},
-		]);
-		const session = new Session(new InMemorySessionStorage());
-		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
-			session,
-			model: registration.getModel(),
-		});
-		harness.on("before_agent_start", () => ({
-			messages: [{ role: "user", content: [{ type: "text", text: "hook" }], timestamp: Date.now() }],
-		}));
-
-		await harness.prompt("hello");
-
-		const persistedText = (await session.getEntries()).flatMap((entry) => {
-			if (entry.type !== "message" || entry.message.role !== "user") return [];
-			const content = entry.message.content;
-			if (typeof content === "string") return [content];
-			return content.flatMap((part) => (part.type === "text" ? [part.text] : []));
-		});
-		expect(requestText).toEqual(["hello", "hook"]);
-		expect(persistedText).toEqual(["hello", "hook"]);
-	});
-
-	it("abort retains steer and follow-up queues while explicit clear preserves next-turn messages", async () => {
+	it("abort retains steer and follow-up queues until explicit revocation", async () => {
 		const registration = registerFauxProvider();
 		registrations.push(registration);
 		let releaseFirstResponse: (() => void) | undefined;
@@ -462,38 +398,36 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
-		const queueUpdates: Array<{ steer: number; followUp: number; nextTurn: number }> = [];
+		const queueUpdates: Array<{ steer: number; followUp: number }> = [];
 		harness.subscribe((event) => {
 			if (event.type === "queue_update") {
-				queueUpdates.push({
-					steer: event.steer.length,
-					followUp: event.followUp.length,
-					nextTurn: event.nextTurn.length,
-				});
+				queueUpdates.push({ steer: event.steer.length, followUp: event.followUp.length });
 			}
 		});
 
-		const firstPrompt = harness.prompt("first");
+		const firstPrompt = prompt(harness, "first");
 		await new Promise((resolve) => setTimeout(resolve, 0));
-		const steerId = await harness.steer("steer");
-		const followUpId = await harness.followUp("follow");
-		await harness.nextTurn("next");
+		const steerId = harness.queueSteer(userMessage("steer"));
+		const followUpId = harness.queueFollowUp(userMessage("follow"));
 		const abortResult = harness.abort();
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(abortedSignal?.aborted).toBe(true);
 		releaseFirstResponse?.();
 		await firstPrompt;
 		expect(harness.hasQueuedMessages()).toBe(true);
-		expect(await harness.clearAllQueues()).toEqual([steerId, followUpId]);
-		await harness.prompt("second");
+		expect(harness.revokeAllQueues()).toEqual([steerId, followUpId]);
+		await prompt(harness, "second");
 
 		expect(abortResult).toMatchObject({ accepted: true });
-		expect(queueUpdates).toContainEqual({ steer: 0, followUp: 0, nextTurn: 1 });
-		expect(secondRequestText).toEqual(["first", "next", "second"]);
+		expect(queueUpdates).toEqual([
+			{ steer: 1, followUp: 0 },
+			{ steer: 1, followUp: 1 },
+			{ steer: 0, followUp: 0 },
+		]);
+		expect(secondRequestText).toEqual(["first", "second"]);
 	});
 
 	it("settles with an aborted assistant when context preflight is aborted", async () => {
@@ -501,7 +435,6 @@ describe("AgentHarness", () => {
 		registrations.push(registration);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 		});
@@ -525,7 +458,7 @@ describe("AgentHarness", () => {
 			}
 		});
 
-		const promptPromise = harness.prompt("hello");
+		const promptPromise = prompt(harness, "hello");
 		await contextStarted.promise;
 		const abortPromise = harness.abort();
 		releaseContext.resolve();
@@ -559,7 +492,6 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 			followUpMode: "one-at-a-time",
@@ -572,12 +504,12 @@ describe("AgentHarness", () => {
 			}
 			if (event.type === "message_start" && event.message.role === "assistant" && !queued) {
 				queued = true;
-				harness.followUp("one");
-				harness.followUp("two");
+				harness.queueFollowUp(userMessage("one"));
+				harness.queueFollowUp(userMessage("two"));
 			}
 		});
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		expect(userCounts).toEqual([1, 2, 3]);
 		expect(followUpQueueLengths).toEqual([1, 2, 1, 0]);
@@ -589,7 +521,6 @@ describe("AgentHarness", () => {
 		registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 		});
@@ -601,8 +532,8 @@ describe("AgentHarness", () => {
 			throw new Error("context exploded");
 		});
 
-		const response = await harness.prompt("hello");
-		await expect(harness.prompt("after failure")).resolves.toMatchObject({ role: "assistant" });
+		const response = await prompt(harness, "hello");
+		await expect(prompt(harness, "after failure")).resolves.toMatchObject({ role: "assistant" });
 
 		const entries = await session.getEntries();
 		const messages = entries.flatMap((entry) => (entry.type === "message" ? [entry.message] : []));
@@ -614,7 +545,7 @@ describe("AgentHarness", () => {
 		expect(events).toContain("settled");
 	});
 
-	it("refreshes model, thinking level, resources, system prompt, and active tools at save points", async () => {
+	it("refreshes model, thinking level, system prompt, and active tools at save points", async () => {
 		const registration = registerFauxProvider({
 			models: [
 				{ id: "first", reasoning: true },
@@ -647,31 +578,24 @@ describe("AgentHarness", () => {
 				return fauxAssistantMessage("done");
 			},
 		]);
-		const harness = new AgentHarness<Skill, PromptTemplate, AgentTool>({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
+		let systemPrompt = "first prompt";
+		const harness = new AgentHarness({
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 			thinkingLevel: "off",
-			resources: {
-				skills: [{ name: "prompt", description: "prompt", content: "first prompt", filePath: "/skills/prompt" }],
-			},
-			systemPrompt: ({ resources }) => resources.skills?.[0]?.content ?? "missing prompt",
-			tools: [calculateTool],
+			systemPrompt: () => systemPrompt,
 		});
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		harness.subscribe((event) => {
 			if (event.type === "tool_execution_start") {
 				void harness.setModel(secondModel);
 				void harness.setThinkingLevel("high");
-				void harness.setResources({
-					skills: [
-						{ name: "prompt", description: "prompt", content: "second prompt", filePath: "/skills/prompt" },
-					],
-				});
+				systemPrompt = "second prompt";
 				void harness.setTools([calculateTool, getCurrentTimeTool], [getCurrentTimeTool.name]);
 			}
 		});
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		expect(captured).toEqual([
 			{ modelId: "first", reasoning: undefined, systemPrompt: "first prompt", tools: ["calculate"] },
@@ -685,7 +609,6 @@ describe("AgentHarness", () => {
 		registration.setResponses([() => fauxAssistantMessage("ok")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
 		});
@@ -693,62 +616,18 @@ describe("AgentHarness", () => {
 		harness.subscribe(async (event) => {
 			if (event.type === "message_end" && event.message.role === "assistant" && !wrotePendingMessage) {
 				wrotePendingMessage = true;
-				await harness.appendMessage({
-					role: "custom",
-					customType: "listener",
-					content: "listener write",
-					display: true,
-					timestamp: Date.now(),
-				} as AgentMessage);
+				await harness.appendCustomEntry("listener", { text: "listener write" });
 			}
 		});
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		const entries = await session.getEntries();
-		const roles = entries.flatMap((entry) => (entry.type === "message" ? [entry.message.role] : []));
-		expect(roles).toEqual(["user", "assistant", "custom"]);
-	});
-
-	it("includes a flushed Harness append in the next provider request exactly once", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		const requestTexts: string[][] = [];
-		registration.setResponses([
-			(context) => {
-				requestTexts.push((context.messages as AgentMessage[]).map(messageText));
-				return fauxAssistantMessage(fauxToolCall("calculate", { expression: "2 + 2" }, { id: "call-1" }), {
-					stopReason: "toolUse",
-				});
-			},
-			(context) => {
-				requestTexts.push((context.messages as AgentMessage[]).map(messageText));
-				return fauxAssistantMessage("done");
-			},
+		expect(entries.map((entry) => (entry.type === "message" ? entry.message.role : entry.type))).toEqual([
+			"user",
+			"assistant",
+			"custom",
 		]);
-		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
-			session: new Session(new InMemorySessionStorage()),
-			model: registration.getModel(),
-			tools: [calculateTool],
-		});
-		let appended = false;
-		harness.subscribe(async (event) => {
-			if (event.type !== "tool_execution_end" || appended) return;
-			appended = true;
-			await harness.appendMessage({
-				role: "custom",
-				customType: "host_append",
-				content: "host append",
-				display: false,
-				timestamp: Date.now(),
-			});
-		});
-
-		await harness.prompt("start");
-
-		expect(requestTexts).toHaveLength(2);
-		expect(requestTexts[1]?.filter((text) => text === "host append")).toHaveLength(1);
 	});
 
 	it("waitForIdle waits for external run settlement and awaited listeners", async () => {
@@ -757,7 +636,6 @@ describe("AgentHarness", () => {
 		registration.setResponses([() => fauxAssistantMessage("ok")]);
 		const barrier = deferred();
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
@@ -769,7 +647,7 @@ describe("AgentHarness", () => {
 			}
 		});
 
-		const promptPromise = harness.prompt("hello");
+		const promptPromise = prompt(harness, "hello");
 		let idleResolved = false;
 		const idlePromise = harness.waitForIdle().then(() => {
 			idleResolved = true;
@@ -794,11 +672,10 @@ describe("AgentHarness", () => {
 		]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
 			session,
 			model: registration.getModel(),
-			tools: [calculateTool],
 		});
+		await harness.setTools([calculateTool], [calculateTool.name]);
 		const seenToolCalls: Array<{ id: string; name: string; expression: unknown }> = [];
 		harness.on("tool_call", (event) => {
 			seenToolCalls.push({ id: event.toolCallId, name: event.toolName, expression: event.input["expression"] });
@@ -814,7 +691,7 @@ describe("AgentHarness", () => {
 			};
 		});
 
-		await harness.prompt("hello");
+		await prompt(harness, "hello");
 
 		const toolResult = (await session.getEntries()).find(
 			(entry) => entry.type === "message" && entry.message.role === "toolResult",
@@ -830,20 +707,14 @@ describe("AgentHarness", () => {
 		});
 	});
 
-	it("preserves app tool types for getters and update events", async () => {
+	it("preserves app tool types for active tools and update events", async () => {
 		const session = new Session(new InMemorySessionStorage());
-		const env = new NodeExecutionEnv({ cwd: process.cwd() });
 		const model = getModel("anthropic", "claude-sonnet-4-5");
 		type AppTool = AgentTool<typeof calculateTool.parameters> & { source: "builtin" | "extension" };
 		const inspectTool: AppTool = { ...calculateTool, name: "inspect", source: "builtin" };
 		const searchTool: AppTool = { ...calculateTool, name: "search", source: "extension" };
-		const harness = new AgentHarness<AppSkill, AppPromptTemplate, AppTool>({
-			env,
-			session,
-			model,
-			tools: [inspectTool, searchTool],
-			activeToolNames: ["inspect"],
-		});
+		const harness = new AgentHarness<AppTool>({ session, model });
+		await harness.setTools([inspectTool, searchTool], ["inspect"]);
 		const updates: Array<{
 			toolNames: string[];
 			previousToolNames: string[];
@@ -864,17 +735,16 @@ describe("AgentHarness", () => {
 			}
 		});
 
-		const tools = harness.getTools();
 		const activeTools = harness.getActiveTools();
-		tools.pop();
 		activeTools.pop();
-		expect(harness.getTools().map((tool) => tool.name)).toEqual(["inspect", "search"]);
 		expect(harness.getActiveTools().map((tool) => tool.source)).toEqual(["builtin"]);
 
-		await harness.setActiveTools(["search"]);
+		await harness.setTools([inspectTool, searchTool], ["search"]);
 		await harness.setTools([searchTool], ["search"]);
-		await expect(harness.setActiveTools(["missing"])).rejects.toMatchObject({ code: "invalid_argument" });
-		await expect(harness.setActiveTools(["search", "search"])).rejects.toMatchObject({ code: "invalid_argument" });
+		await expect(harness.setTools([searchTool], ["missing"])).rejects.toMatchObject({ code: "invalid_argument" });
+		await expect(harness.setTools([searchTool], ["search", "search"])).rejects.toMatchObject({
+			code: "invalid_argument",
+		});
 		await expect(harness.setTools([inspectTool])).rejects.toMatchObject({ code: "invalid_argument" });
 		await expect(harness.setTools([inspectTool, inspectTool], ["inspect"])).rejects.toMatchObject({
 			code: "invalid_argument",
@@ -896,195 +766,7 @@ describe("AgentHarness", () => {
 				source: "set",
 			},
 		]);
-		expect(harness.getTools().map((tool) => tool.source)).toEqual(["extension"]);
-		expect(harness.getActiveTools().map((tool) => tool.name)).toEqual(["search"]);
+		expect(harness.getActiveTools().map((tool) => tool.source)).toEqual(["extension"]);
 		expect((await session.buildContext()).activeToolNames).toEqual(["search"]);
-	});
-
-	it("includes active definitions in manual compaction preparation and rebuilt estimates", async () => {
-		const registration = registerFauxProvider({
-			models: [{ id: "compact", contextWindow: 6000, maxTokens: 1000 }],
-		});
-		registrations.push(registration);
-		registration.setSimpleResponses([fauxAssistantMessage("summary")]);
-		const session = new Session(new InMemorySessionStorage());
-		for (let index = 0; index < 5; index++) {
-			await session.appendMessage({
-				role: "user",
-				content: [{ type: "text", text: String(index).repeat(4000) }],
-				timestamp: Date.now() + index,
-			});
-		}
-		const largeTool: AgentTool = {
-			...calculateTool,
-			name: "large_tool",
-			description: "x".repeat(16_000),
-		};
-		const messagesBefore = (await session.buildContext()).messages as AgentMessage[];
-		let preparationTokens = 0;
-		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
-			session,
-			model: registration.getModel(),
-			tools: [largeTool],
-			getApiKeyAndHeaders: async () => ({ apiKey: "test-key" }),
-		});
-		harness.on("session_before_compact", (event) => {
-			preparationTokens = event.preparation.tokensBefore;
-			return undefined;
-		});
-
-		const result = await harness.compact();
-		const rebuiltMessages = (await session.buildContext()).messages as AgentMessage[];
-
-		expect(preparationTokens).toBe(
-			estimateMessagesTokens(messagesBefore) + estimateToolDefinitionTokens([largeTool]),
-		);
-		expect(result.estimatedTokensAfter).toBe(
-			estimateMessagesTokens(rebuiltMessages) + estimateToolDefinitionTokens([largeTool]),
-		);
-	});
-
-	it("does not install a dormant projection after compaction without continuation work", async () => {
-		const registration = registerFauxProvider({
-			models: [{ id: "compact", contextWindow: 6000, maxTokens: 1000 }],
-		});
-		registrations.push(registration);
-		registration.setSimpleResponses([fauxAssistantMessage("summary")]);
-		const session = new Session(new InMemorySessionStorage());
-		for (let index = 0; index < 5; index++) {
-			await session.appendMessage({
-				role: "user",
-				content: [{ type: "text", text: String(index).repeat(4000) }],
-				timestamp: Date.now() + index,
-			});
-		}
-		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
-			session,
-			model: registration.getModel(),
-			getApiKeyAndHeaders: async () => ({ apiKey: "test-key" }),
-		});
-
-		await harness.compact();
-		await session.appendMessage({ role: "user", content: "after compaction", timestamp: Date.now() });
-		let requestTexts: string[] = [];
-		registration.setResponses([
-			(context) => {
-				requestTexts = (context.messages as AgentMessage[]).map(messageText);
-				return fauxAssistantMessage("continued");
-			},
-		]);
-
-		await expect(harness.continue()).resolves.toMatchObject({ status: "completed" });
-		expect(requestTexts).toContain("after compaction");
-	});
-
-	it("validates constructor tool names", () => {
-		const session = new Session(new InMemorySessionStorage());
-		const env = new NodeExecutionEnv({ cwd: process.cwd() });
-		const model = getModel("anthropic", "claude-sonnet-4-5");
-		expect(
-			() => new AgentHarness({ env, session, model, tools: [calculateTool], activeToolNames: ["missing"] }),
-		).toThrow(/Unknown tool/);
-		expect(
-			() =>
-				new AgentHarness({
-					env,
-					session,
-					model,
-					tools: [calculateTool, calculateTool],
-					activeToolNames: [calculateTool.name],
-				}),
-		).toThrow(/Duplicate tool/);
-		expect(
-			() =>
-				new AgentHarness({
-					env,
-					session,
-					model,
-					tools: [calculateTool],
-					activeToolNames: [calculateTool.name, calculateTool.name],
-				}),
-		).toThrow(/Duplicate active tool/);
-	});
-
-	it("owns prompt-template arguments before blocked canonical context resolution", async () => {
-		const registration = registerFauxProvider();
-		registrations.push(registration);
-		const session = new Session(new InMemorySessionStorage());
-		const contextStarted = deferred();
-		const releaseContext = deferred();
-		const buildContext = session.buildContext.bind(session);
-		vi.spyOn(session, "buildContext").mockImplementation(async () => {
-			contextStarted.resolve();
-			await releaseContext.promise;
-			return await buildContext();
-		});
-		let providerTexts: string[] = [];
-		registration.setResponses([
-			(context) => {
-				providerTexts = textFromUserMessages(context.messages as AgentMessage[]);
-				return fauxAssistantMessage("done");
-			},
-		]);
-		const template: PromptTemplate = { name: "review", content: "Review $1 with $2" };
-		const harness = new AgentHarness({
-			env: new NodeExecutionEnv({ cwd: process.cwd() }),
-			session,
-			model: registration.getModel(),
-			resources: { promptTemplates: [template] },
-		});
-		const args = ["original.ts", "original guidance"];
-
-		const invocation = harness.promptFromTemplate("review", args);
-		await contextStarted.promise;
-		args[0] = "mutated.ts";
-		args[1] = "mutated guidance";
-		args.push("late argument");
-		releaseContext.resolve();
-
-		await invocation;
-		expect(providerTexts).toEqual(["Review original.ts with original guidance"]);
-	});
-
-	it("preserves app resource types for getters and update events", async () => {
-		const session = new Session(new InMemorySessionStorage());
-		const env = new NodeExecutionEnv({ cwd: process.cwd() });
-		const model = getModel("anthropic", "claude-sonnet-4-5");
-		const harness = new AgentHarness<AppSkill, AppPromptTemplate, AgentTool>({ env, session, model });
-		const skill: AppSkill = {
-			name: "inspect",
-			description: "Inspect things",
-			content: "Use inspection tools.",
-			filePath: "/skills/inspect/SKILL.md",
-			source: "project",
-		};
-		const promptTemplate: AppPromptTemplate = { name: "review", content: "Review $1", source: "user" };
-		const resources = { skills: [skill], promptTemplates: [promptTemplate] };
-		const updates: Array<{ resourcesSource?: string; previousSource?: string }> = [];
-		harness.subscribe((event) => {
-			if (event.type === "resources_update") {
-				const resourcesSource = event.resources.skills?.[0]?.source;
-				const previousSource = event.previousResources.skills?.[0]?.source;
-				updates.push({
-					...(resourcesSource === undefined ? {} : { resourcesSource }),
-					...(previousSource === undefined ? {} : { previousSource }),
-				});
-			}
-		});
-
-		await harness.setResources(resources);
-		await harness.setResources(resources);
-		const resolved = harness.getResources();
-
-		expect(updates).toEqual([
-			{ resourcesSource: "project", previousSource: undefined },
-			{ resourcesSource: "project", previousSource: "project" },
-		]);
-		expect(resolved.skills?.[0]?.source).toBe("project");
-		expect(resolved.promptTemplates?.[0]?.source).toBe("user");
-		expect(resolved.skills).not.toBe(resources.skills);
-		expect(resolved.promptTemplates).not.toBe(resources.promptTemplates);
 	});
 });
