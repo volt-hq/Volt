@@ -373,12 +373,15 @@ export interface Usage {
 	/** Subset of `cacheWrite` written with 1h retention. Only Anthropic reports this split. */
 	cacheWrite1h?: number;
 	totalTokens: number;
+	/** Derived from the token counts, normally by `calculateCost`; replaced, never updated in place. */
 	cost: {
 		input: number;
 		output: number;
 		cacheRead: number;
 		cacheWrite: number;
 		total: number;
+		/** `getPriceVersion` of the price table this cost was derived from. Absent for costs not derived by ai. */
+		priceVersion?: string;
 	};
 	/** Requested and actual provider service tiers, when the provider reports tiered processing. */
 	serviceTier?: {

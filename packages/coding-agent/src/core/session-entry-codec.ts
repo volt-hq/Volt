@@ -2,11 +2,10 @@ import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import type { AssistantMessage, ImageContent, TextContent } from "@hansjm10/volt-ai";
+import { type AssistantMessage, AssistantMessageSchema, type ImageContent, type TextContent } from "@hansjm10/volt-ai";
 import { Check } from "typebox/value";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { parsePlanningState } from "./planning.ts";
-import { RpcAssistantMessageSchema } from "./rpc/schema/external.ts";
 import { RpcGitContextSchema } from "./rpc/schema/git-context.ts";
 import { RpcThinkingLevelSchema } from "./rpc/schema/primitives.ts";
 import {
@@ -180,7 +179,7 @@ function validateAgentMessage(value: unknown, path: string): asserts value is Ag
 		return;
 	}
 	if (role === "assistant") {
-		if (!Check(RpcAssistantMessageSchema, message)) fail(path, "invalid assistant message");
+		if (!Check(AssistantMessageSchema, message)) fail(path, "invalid assistant message");
 		const assistant = message as unknown as AssistantMessage;
 		nonEmptyString(assistant.api, `${path}.api`);
 		nonEmptyString(assistant.provider, `${path}.provider`);

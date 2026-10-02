@@ -14,7 +14,6 @@ import { RpcAgentOptionsSchema } from "./agent-options.ts";
 import { RpcCancelJobResponseSchema, RpcListJobsResponseSchema, RpcReadJobResponseSchema } from "./background-jobs.ts";
 import { RpcSessionTreePageSchema } from "./conversation.ts";
 import { RpcPendingHostActionsResponseSchema } from "./events.ts";
-import { RpcModelSchema } from "./external.ts";
 import { opaque, openStringEnum } from "./helpers.ts";
 import {
 	RpcMcpAuthResponseSchema,
@@ -49,6 +48,7 @@ import {
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
 	RpcListSubagentsResponseSchema,
+	RpcModelSchema,
 	RpcPromptResponseSchema,
 	RpcRegisterPushTargetResponseSchema,
 	RpcSessionContextSchema,

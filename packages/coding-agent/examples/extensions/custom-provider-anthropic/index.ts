@@ -330,6 +330,15 @@ function mapStopReason(reason: string): StopReason {
 	}
 }
 
+/** Anthropic reports no total; derive it and a fresh cost from the token counts. */
+function withTotalsAndCost(model: Model<Api>, usage: Usage): Usage {
+	return {
+		...usage,
+		totalTokens: usage.input + usage.output + usage.cacheRead + usage.cacheWrite,
+		cost: calculateCost(model, usage),
+	};
+}
+
 function streamCustomAnthropic(
 	model: Model<Api>,
 	context: Context,
@@ -459,15 +468,13 @@ function streamCustomAnthropic(
 
 			for await (const event of anthropicStream) {
 				if (event.type === "message_start") {
-					usage = {
+					usage = withTotalsAndCost(model, {
 						...usage,
 						input: event.message.usage.input_tokens || 0,
 						output: event.message.usage.output_tokens || 0,
 						cacheRead: event.message.usage.cache_read_input_tokens || 0,
 						cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
-					};
-					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-					calculateCost(model, usage);
+					});
 					normalizer.push({ type: "meta", patch: { responseId: event.message.id, usage } });
 				} else if (event.type === "content_block_start") {
 					if (event.content_block.type === "text") {
@@ -536,20 +543,13 @@ function streamCustomAnthropic(
 					if (event.delta.stop_reason) {
 						stopReason = mapStopReason(event.delta.stop_reason);
 					}
-					if (event.usage.input_tokens != null) {
-						usage.input = event.usage.input_tokens;
-					}
-					if (event.usage.output_tokens != null) {
-						usage.output = event.usage.output_tokens;
-					}
-					if (event.usage.cache_read_input_tokens != null) {
-						usage.cacheRead = event.usage.cache_read_input_tokens;
-					}
-					if (event.usage.cache_creation_input_tokens != null) {
-						usage.cacheWrite = event.usage.cache_creation_input_tokens;
-					}
-					usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-					calculateCost(model, usage);
+					usage = withTotalsAndCost(model, {
+						...usage,
+						input: event.usage.input_tokens ?? usage.input,
+						output: event.usage.output_tokens ?? usage.output,
+						cacheRead: event.usage.cache_read_input_tokens ?? usage.cacheRead,
+						cacheWrite: event.usage.cache_creation_input_tokens ?? usage.cacheWrite,
+					});
 					normalizer.push({ type: "meta", patch: { usage } });
 				}
 			}

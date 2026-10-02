@@ -551,18 +551,14 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						].some((value) => typeof value === "number")
 					) {
 						hasReportedInput = typeof event.message.usage.input_tokens === "number";
-						usage = {
-							...usage,
+						usage = anthropicUsage(model, {
 							availability: "partial",
 							input: event.message.usage.input_tokens || 0,
 							output: event.message.usage.output_tokens || 0,
 							cacheRead: event.message.usage.cache_read_input_tokens || 0,
 							cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
 							cacheWrite1h: event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0,
-						};
-						// Anthropic doesn't provide total_tokens, compute from components
-						usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-						calculateCost(model, usage);
+						});
 					}
 					normalizer.push({ type: "meta", patch: { responseId: event.message.id, usage } });
 				} else if (event.type === "content_block_start") {
@@ -655,25 +651,17 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 						].some((value) => typeof value === "number")
 					) {
 						hasReportedInput ||= typeof event.usage.input_tokens === "number";
-						usage.availability =
-							event.delta.stop_reason && hasReportedInput && typeof event.usage.output_tokens === "number"
-								? "complete"
-								: "partial";
-						if (event.usage.input_tokens != null) {
-							usage.input = event.usage.input_tokens;
-						}
-						if (event.usage.output_tokens != null) {
-							usage.output = event.usage.output_tokens;
-						}
-						if (event.usage.cache_read_input_tokens != null) {
-							usage.cacheRead = event.usage.cache_read_input_tokens;
-						}
-						if (event.usage.cache_creation_input_tokens != null) {
-							usage.cacheWrite = event.usage.cache_creation_input_tokens;
-						}
-						// Anthropic doesn't provide total_tokens, compute from components
-						usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-						calculateCost(model, usage);
+						usage = anthropicUsage(model, {
+							...usage,
+							availability:
+								event.delta.stop_reason && hasReportedInput && typeof event.usage.output_tokens === "number"
+									? "complete"
+									: "partial",
+							input: event.usage.input_tokens ?? usage.input,
+							output: event.usage.output_tokens ?? usage.output,
+							cacheRead: event.usage.cache_read_input_tokens ?? usage.cacheRead,
+							cacheWrite: event.usage.cache_creation_input_tokens ?? usage.cacheWrite,
+						});
 						normalizer.push({ type: "meta", patch: { usage } });
 					}
 				}
@@ -825,20 +813,25 @@ export const refreshPromptCacheAnthropic: PromptCacheRefreshFunction<"anthropic-
 		)
 		.withResponse();
 	await options.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-	const usage: Usage = {
+	const usage = anthropicUsage(model, {
 		availability: "complete",
 		input: data.usage.input_tokens ?? 0,
 		output: data.usage.output_tokens ?? 0,
 		cacheRead: data.usage.cache_read_input_tokens ?? 0,
 		cacheWrite: data.usage.cache_creation_input_tokens ?? 0,
 		cacheWrite1h: data.usage.cache_creation?.ephemeral_1h_input_tokens ?? 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-	calculateCost(model, usage);
+	});
 	return { status: "refreshed", usage };
 };
+
+/** Anthropic reports no total, so the total and the cost both derive from the component counts. */
+function anthropicUsage(model: Model<"anthropic-messages">, counts: Omit<Usage, "totalTokens" | "cost">): Usage {
+	return {
+		...counts,
+		totalTokens: counts.input + counts.output + counts.cacheRead + counts.cacheWrite,
+		cost: calculateCost(model, counts),
+	};
+}
 
 function isOAuthToken(apiKey: string): boolean {
 	return apiKey.includes("sk-ant-oat");

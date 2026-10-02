@@ -2254,6 +2254,8 @@ Source files:
 }
 ```
 
+Optional model fields are `thinkingLevelMap`, `promptCache` (supported prompt-cache modes and documented retention), `headers`, and `compat` (opaque provider tuning).
+
 ### UserMessage
 
 ```json
@@ -2285,7 +2287,7 @@ The `content` field can be a string or an array of `TextContent`/`ImageContent` 
     "output": 50,
     "cacheRead": 0,
     "cacheWrite": 0,
-    "cost": {"input": 0.0003, "output": 0.00075, "cacheRead": 0, "cacheWrite": 0, "total": 0.00105},
+    "cost": {"input": 0.0003, "output": 0.00075, "cacheRead": 0, "cacheWrite": 0, "total": 0.00105, "priceVersion": "5d3c1b2a"},
     "serviceTier": {"requested": "priority", "effective": "priority"}
   },
   "stopReason": "stop",
@@ -2296,6 +2298,8 @@ The `content` field can be a string or an array of `TextContent`/`ImageContent` 
 Stop reasons: `"stop"`, `"length"`, `"toolUse"`, `"error"`, `"aborted"`
 
 Optional `usage.availability` identifies complete provider-reported counts, partial/interim counts, or unavailable reporting. Omission means unknown availability (for example, historical/custom-provider data), not a zero-cost response. Built-in adapters retain observed partial counts on interruption.
+
+`usage.cost` is derived from the token counts and the model's price table. Optional `usage.cost.priceVersion` identifies that price table; it changes when any of the model's rates change and is absent for costs a custom provider computed itself.
 
 For OpenAI Responses and OpenAI Codex responses, optional `usage.serviceTier` records the requested and effective upstream service tier. The effective value can be `"default"` when a Priority request is downgraded.
 

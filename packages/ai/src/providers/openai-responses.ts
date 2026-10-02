@@ -16,9 +16,14 @@ import type {
 import { headersToRecord } from "../utils/headers.ts";
 import { isCloudflareProvider, resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
-import { applyOpenAIPriorityPricing, getFastInferenceServiceTier } from "./openai-fast-inference.ts";
+import { getFastInferenceServiceTier, getOpenAIPriorityCost } from "./openai-fast-inference.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	processResponsesStream,
+	scaleCost,
+} from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
@@ -122,7 +127,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIRes
 
 			const result = await processResponsesStream(openaiStream, normalizer, model, {
 				serviceTier: options?.serviceTier,
-				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				priceServiceTier: (usage, serviceTier) => priceServiceTier(usage, serviceTier, model),
 			});
 
 			if (options?.signal?.aborted) {
@@ -288,20 +293,11 @@ function getServiceTierCostMultiplier(
 	}
 }
 
-function applyServiceTierPricing(
+function priceServiceTier(
 	usage: Usage,
 	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	model: Pick<Model<"openai-responses">, "api" | "provider" | "baseUrl" | "id">,
-) {
-	if (serviceTier === "priority" && applyOpenAIPriorityPricing(usage, model)) {
-		return;
-	}
-	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
-	if (multiplier === 1) return;
-
-	usage.cost.input *= multiplier;
-	usage.cost.output *= multiplier;
-	usage.cost.cacheRead *= multiplier;
-	usage.cost.cacheWrite *= multiplier;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
+): Usage["cost"] {
+	const priorityCost = serviceTier === "priority" ? getOpenAIPriorityCost(usage, model) : undefined;
+	return priorityCost ?? scaleCost(usage.cost, getServiceTierCostMultiplier(model, serviceTier));
 }

@@ -47,15 +47,7 @@ export const PROMPT_CACHE_REFRESH_MIN_MARGIN_MS = PROMPT_CACHE_REFRESH_LEAD_MS /
 const PRICING_TOKENS = 1_000_000;
 
 function price(model: Model<Api>, tokens: Partial<Pick<Usage, "input" | "cacheRead" | "cacheWrite" | "cacheWrite1h">>) {
-	return calculateCost(model, {
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		...tokens,
-	}).total;
+	return calculateCost(model, { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, ...tokens }).total;
 }
 
 /**

@@ -3,6 +3,7 @@
  * the payload shapes of the state-oriented responses.
  */
 
+import { type Api, type Model, ModelSchema } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import {
 	RPC_WORK_BRANCH_MAX_CHARS,
@@ -12,9 +13,8 @@ import {
 	RPC_WORK_REPOSITORY_MAX_CHARS,
 } from "../wire-limits.ts";
 import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
-import { RpcModelSchema, rpcModelProperties } from "./external.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
-import { readonlyArrayOf, stringEnum } from "./helpers.ts";
+import { opaque, readonlyArrayOf, stringEnum } from "./helpers.ts";
 import { RpcPlanningStateSchema } from "./planning.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
 import { RpcProjectionCollectionTruncationSchema, RpcProjectionTruncationSchema } from "./projections.ts";
@@ -177,6 +177,17 @@ export const RpcSessionStateProjectionSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+/** volt-ai model metadata with `compat` opaque: provider tuning that clients never interpret. */
+export const RpcModelSchema = Type.Object(
+	{
+		...ModelSchema.properties,
+		compat: Type.Optional(
+			opaque<NonNullable<Model<Api>["compat"]>>("provider compatibility tuning; clients never interpret this"),
+		),
+	},
+	{ additionalProperties: false },
+);
+
 export const RpcSessionStateSchema = Type.Object(
 	{
 		reviewDiscussion: Type.Optional(RpcReviewDiscussionLinkSchema),
@@ -222,7 +233,7 @@ export const RpcSessionStateSchema = Type.Object(
 /** A model as reported to clients with host-owned selectable capabilities. */
 export const RpcCatalogModelSchema = Type.Object(
 	{
-		...rpcModelProperties,
+		...RpcModelSchema.properties,
 		availableThinkingLevels: Type.Array(RpcThinkingLevelSchema),
 		supportsFastMode: Type.Boolean(),
 	},

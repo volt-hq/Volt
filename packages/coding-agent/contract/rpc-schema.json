@@ -722,6 +722,56 @@
 						]
 					}
 				},
+				"promptCache": {
+					"type": "object",
+					"required": [
+						"modes",
+						"retention"
+					],
+					"properties": {
+						"modes": {
+							"type": "array",
+							"items": {
+								"type": "string",
+								"enum": [
+									"implicit",
+									"explicit"
+								]
+							}
+						},
+						"retention": {
+							"type": "object",
+							"required": [
+								"short"
+							],
+							"properties": {
+								"short": {
+									"type": "object",
+									"properties": {
+										"ttlSeconds": {
+											"type": "number"
+										}
+									},
+									"additionalProperties": false
+								},
+								"long": {
+									"type": "object",
+									"properties": {
+										"ttlSeconds": {
+											"type": "number"
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						},
+						"refreshesOnHit": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
 				"cost": {
 					"type": "object",
 					"required": [
@@ -6479,6 +6529,56 @@
 							"image"
 						]
 					}
+				},
+				"promptCache": {
+					"type": "object",
+					"required": [
+						"modes",
+						"retention"
+					],
+					"properties": {
+						"modes": {
+							"type": "array",
+							"items": {
+								"type": "string",
+								"enum": [
+									"implicit",
+									"explicit"
+								]
+							}
+						},
+						"retention": {
+							"type": "object",
+							"required": [
+								"short"
+							],
+							"properties": {
+								"short": {
+									"type": "object",
+									"properties": {
+										"ttlSeconds": {
+											"type": "number"
+										}
+									},
+									"additionalProperties": false
+								},
+								"long": {
+									"type": "object",
+									"properties": {
+										"ttlSeconds": {
+											"type": "number"
+										}
+									},
+									"additionalProperties": false
+								}
+							},
+							"additionalProperties": false
+						},
+						"refreshesOnHit": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
 				},
 				"cost": {
 					"type": "object",
@@ -14904,6 +15004,9 @@
 						},
 						"total": {
 							"type": "number"
+						},
+						"priceVersion": {
+							"type": "string"
 						}
 					},
 					"additionalProperties": false
