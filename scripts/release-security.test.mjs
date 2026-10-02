@@ -962,11 +962,8 @@ test("shipped packages and standalone archives contain no development workflow t
 			"!docs/*-design.md",
 			"!docs/tla",
 			"!docs/tla/**",
-			"!docs/images/doom-extension.png",
 			"examples",
 			"!examples/README.binary.md",
-			"!examples/extensions/doom-overlay",
-			"!examples/extensions/doom-overlay/**",
 			"!examples/**/node_modules",
 			"!examples/**/node_modules/**",
 			"containerization.md",
@@ -1915,10 +1912,7 @@ test("published packages and binary build include the repository license and not
 		assert.match(standaloneBuild, new RegExp(`"${file.replaceAll(".", "\\.")}"`));
 	}
 	const codingAgentManifest = JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8"));
-	assert.ok(codingAgentManifest.files.includes("!docs/images/doom-extension.png"));
 	assert.ok(codingAgentManifest.files.includes("!examples/**/node_modules/**"));
-	assert.ok(codingAgentManifest.files.includes("!examples/extensions/doom-overlay"));
-	assert.ok(codingAgentManifest.files.includes("!examples/extensions/doom-overlay/**"));
 	const packCache = mkdtempSync(join(tmpdir(), "volt-npm-pack-cache-"));
 	try {
 		const packResult = JSON.parse(
@@ -1929,15 +1923,6 @@ test("published packages and binary build include the repository license and not
 			}),
 		);
 		assert.equal(packResult.length, 1);
-		assert.equal(
-			packResult[0].files.some(
-				({ path }) =>
-					path === "docs/images/doom-extension.png" ||
-					path === "examples/extensions/doom-overlay" ||
-					path.startsWith("examples/extensions/doom-overlay/"),
-			),
-			false,
-		);
 		const packedPaths = new Set(packResult[0].files.map(({ path }) => path));
 		const nativeRoot = "packages/coding-agent/native/workspace-fs";
 		const manifest = JSON.parse(readFileSync(`${nativeRoot}/prebuilds/manifest.json`, "utf8"));
@@ -2015,8 +2000,6 @@ test("published packages and binary build include the repository license and not
 		}
 	}
 	assert.match(standaloneBuild, /remote\/firebase-push-relay\/functions\/node_modules/);
-	assert.match(standaloneBuild, /extensions\/doom-overlay/);
-	assert.match(standaloneBuild, /Doom overlay must not be present in standalone release staging/);
 	assert.match(standaloneBuild, /Standalone staging contains unexpected WASM files/);
 	assert.match(standaloneBuild, /Standalone staging contains unexpected binary files/);
 	assert.match(standaloneBuild, /copyWorkspaceFsAssets/);
@@ -2027,7 +2010,6 @@ test("published packages and binary build include the repository license and not
 	assert.match(standaloneBuild, /Workspace filesystem Rust license tree does not exactly match inventory\.json/);
 	assert.match(standaloneBuild, /Standalone workspace filesystem addon fingerprint does not match its manifest/);
 	assert.match(standaloneBuild, /git.*ls-files/);
-	assert.match(standaloneBuild, /images\/doom-extension\.png/);
 	assert.match(standaloneBuild, /binary-metafile\.json/);
 	assert.match(standaloneBuild, /binary-license-manifest\.json/);
 	assert.match(standaloneBuild, /standalone-file-manifest\.json/);
@@ -2074,19 +2056,20 @@ test("published packages and binary build include the repository license and not
 		readFileSync("packages/coding-agent/THIRD-PARTY-NOTICES.md", "utf8"),
 		/@silvia-odwyer|photon_rs|Photon/,
 	);
-	for (const generatedDoomArtifact of [
-		"packages/coding-agent/docs/images/doom-extension.png",
-		"packages/coding-agent/examples/extensions/doom-overlay/doom/build/doom.js",
-		"packages/coding-agent/examples/extensions/doom-overlay/doom/build/doom.wasm",
-	]) {
-		assert.equal(existsSync(generatedDoomArtifact), false, generatedDoomArtifact);
-	}
-	const doomBuild = readFileSync("packages/coding-agent/examples/extensions/doom-overlay/doom/build.sh", "utf8");
-	assert.match(doomBuild, /DOOMGENERIC_COMMIT="[0-9a-f]{40}"/);
-	assert.match(doomBuild, /git -C doomgeneric checkout --detach "\$DOOMGENERIC_COMMIT"/);
-	const doomIgnore = readFileSync("packages/coding-agent/examples/extensions/doom-overlay/.gitignore", "utf8");
-	assert.match(doomIgnore, /doom\/build\//);
-	assert.match(doomIgnore, /doom\/doomgeneric\//);
+	assert.equal(
+		execFileSync(
+			"git",
+			[
+				"ls-files",
+				"--",
+				"packages/coding-agent/docs/images/doom-extension.png",
+				"packages/coding-agent/examples/extensions/doom-overlay",
+			],
+			{ encoding: "utf8" },
+		),
+		"",
+		"the removed Doom demo and its artwork must not be tracked",
+	);
 	assert.doesNotMatch(buildScript, /@mariozechner\/clipboard|clipboard_native_package/);
 
 	const betaReadiness = readFileSync("BETA-READINESS.md", "utf8");
@@ -2097,6 +2080,7 @@ test("published packages and binary build include the repository license and not
 	assert.match(betaReadiness, /glibc 2\.28/);
 	assert.match(betaReadiness, /Windows executables are not\s+Authenticode-signed/);
 	assert.match(betaReadiness, /Resolve Doom source-archive provenance/);
+	assert.match(betaReadiness, /source-only Doom demo has since been removed/);
 });
 
 test("release archive creation is deterministic and rejects symlinks", () => {

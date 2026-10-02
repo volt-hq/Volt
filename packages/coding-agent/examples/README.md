@@ -12,14 +12,11 @@ Example extensions demonstrating:
 - Lifecycle event handlers (tool interception, safety gates, context modifications)
 - Custom tools (todo lists, questions, output truncation)
 - Commands and keyboard shortcuts
-- Custom UI (footers, headers, editors, overlays)
+- Custom UI (footers, headers, editors, widgets)
 - Git integration (checkpoints, auto-commit)
 - System prompt modifications and custom compaction
 - External integrations (SSH, file watchers, system theme sync)
 - Custom providers (Anthropic with custom streaming, GitLab Duo)
-
-### [remote/iroh-sidecar/](remote/iroh-sidecar/)
-Demo clients and fake-RPC fixtures for tunneling Volt RPC JSONL over the product `volt remote host` Iroh adapter.
 
 ## Documentation
 
