@@ -9,7 +9,7 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, dirname, join, relative, resolve, toNamespacedPath } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 
 const QUARANTINE_DIR_NAME = ".volt-native-quarantine";
 /**
@@ -34,10 +34,6 @@ export class NativeAddonRestoreError extends Error {
 		this.quarantinePath = paths.quarantinePath;
 		this.quarantineRunDir = paths.quarantineRunDir;
 	}
-}
-
-function normalizePath(path: string): string {
-	return toNamespacedPath(resolve(path));
 }
 
 function getQuarantineRoot(packageDir: string): string | undefined {
@@ -127,7 +123,8 @@ export function cleanupSelfUpdateQuarantine(packageDir: string): void {
  * its original path, unless the error is a {@link NativeAddonRestoreError}.
  */
 export function quarantineNativeAddons(packageDir: string): void {
-	const resolvedPackageDir = normalizePath(packageDir);
+	// Not namespaced: these paths reach the user in NativeAddonRestoreError recovery instructions.
+	const resolvedPackageDir = resolve(packageDir);
 	const quarantineRoot = getQuarantineRoot(resolvedPackageDir);
 	if (!quarantineRoot) {
 		return;
