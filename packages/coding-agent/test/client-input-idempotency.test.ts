@@ -1560,6 +1560,8 @@ describe("durable client input idempotency", () => {
 			clientMessageId: "private-wal",
 			timestamp: Date.now(),
 		});
+		expect(observedEntryTypes).toEqual([]);
+		await manager.flush();
 		expect(observedEntryTypes).toEqual(["message"]);
 		expect(manager.getEntries()).toHaveLength(1);
 		expect(manager.getBranch()).toHaveLength(1);

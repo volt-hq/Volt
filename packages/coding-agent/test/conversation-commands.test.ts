@@ -96,8 +96,9 @@ function createSessionManager(branch: SessionEntry[]): ConversationCommandRuntim
 			return leaf === undefined || leaf.ordinal !== undefined ? leaf : { ...leaf, ordinal: branch.length };
 		},
 		getBranchWindow: ({ beforeEntryId, maxEntries, lookbackEntries = 0 }) => {
+			// Search from the head so recent anchors stay bounded, like SessionManager's id index.
 			const endIndex =
-				beforeEntryId === undefined ? branch.length : branch.findIndex((entry) => entry.id === beforeEntryId);
+				beforeEntryId === undefined ? branch.length : branch.findLastIndex((entry) => entry.id === beforeEntryId);
 			if (endIndex < 0) return undefined;
 			const entryStart = Math.max(0, endIndex - maxEntries);
 			const lookbackStart = Math.max(0, entryStart - lookbackEntries);
@@ -910,6 +911,44 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		const item = createRemoteConversationTranscriptEntry(storedBranch.at(-1)!, createAuthorization(), runtime);
 		expect(item).toMatchObject({ role: "tool", toolName: "read", path: "/workspace/file" });
 		expect(entryReads).toBeLessThanOrEqual(REMOTE_TRANSCRIPT_TOOL_CALL_LOOKBACK_ENTRIES + 4);
+	});
+
+	it("resolves tool metadata for a commit published after later appends moved the leaf", () => {
+		const manager = SessionManager.inMemory("/tmp/ws");
+		manager.appendMessage({
+			role: "assistant",
+			content: [{ type: "toolCall", id: "tc-late", name: "read", arguments: { path: "/tmp/ws/file" } }],
+			api: "faux",
+			provider: "faux",
+			model: "faux-1",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 1,
+		});
+		const resultId = manager.appendMessage({
+			role: "toolResult",
+			toolCallId: "tc-late",
+			toolName: "read",
+			content: [{ type: "text", text: "contents" }],
+			isError: false,
+			timestamp: 2,
+		});
+		manager.appendMessage({ role: "user", content: "next prompt", timestamp: 3 });
+		const runtime: ConversationCommandRuntime = {
+			session: { sessionId: "s-late-commit", sessionManager: manager },
+			listSessions: async () => [],
+		};
+
+		expect(
+			createRemoteConversationTranscriptEntry(manager.getEntry(resultId)!, createAuthorization(), runtime),
+		).toMatchObject({ entryId: resultId, role: "tool", toolName: "read", path: "/workspace/file" });
 	});
 
 	it("projects standard subagent registry tool metadata for integrated Iroh transcripts", async () => {

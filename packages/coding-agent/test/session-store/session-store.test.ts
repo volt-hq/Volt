@@ -25,6 +25,7 @@ import {
 	digestSessionStoreTransactionPayload,
 	SESSION_STORE_BUSY_TIMEOUT_MS,
 	SESSION_STORE_DATABASE_FILENAME,
+	SESSION_STORE_READ_ENTRIES_MAX,
 	SESSION_STORE_SCHEMA_VERSION,
 	type SessionStoreApplyTransactionInput,
 	type SessionStoreCreateSessionInput,
@@ -1394,6 +1395,86 @@ describe("SQLite session store", () => {
 			} while (!writerFinished);
 		})();
 		await Promise.all([writeTransactions, readSnapshots]);
+	});
+
+	it("pages committed entries strictly after an ordinal cursor", async () => {
+		const sessionDirectory = makeSessionDirectory();
+		const client = await openStore(sessionDirectory);
+		const sessionId = "paged-session";
+		const sessionGeneration = generationFor(sessionId);
+		await client.createHiddenSession(createInput(sessionId));
+		for (let revision = 0; revision < 9; revision += 1) {
+			const entryId = `entry-${revision + 1}`;
+			const payload: SessionStoreTransactionPayload = {
+				...emptyPayload({
+					updatedAt: UPDATED_AT,
+					visible: true,
+					leafId: entryId,
+					messageCount: revision + 1,
+					firstMessage: "entry-1",
+				}),
+				entries: [userMessageEntry(entryId, revision + 1, UPDATED_AT, entryId)],
+				searchChunks: [{ chunkIndex: revision, entryId, text: entryId }],
+			};
+			expect(
+				(await client.applyTransaction(transaction(sessionId, revision, `page-commit-${revision + 1}`, payload)))
+					.status,
+			).toBe("committed");
+		}
+		const snapshot = await client.loadSession(sessionId, sessionGeneration);
+		const all = await client.readEntries({
+			sessionId,
+			sessionGeneration,
+			afterOrdinal: 0,
+			limit: SESSION_STORE_READ_ENTRIES_MAX,
+		});
+		expect(all).toEqual({ entries: snapshot?.entries, lastOrdinal: 9 });
+
+		await fc.assert(
+			fc.asyncProperty(fc.integer({ min: 0, max: 11 }), fc.integer({ min: 1, max: 11 }), async (after, limit) => {
+				const page = await client.readEntries({ sessionId, sessionGeneration, afterOrdinal: after, limit });
+				expect(page).toEqual({ entries: all?.entries.slice(after, after + limit), lastOrdinal: 9 });
+			}),
+			{ seed: 585_001, numRuns: 40 },
+		);
+		const cursorPages: string[][] = [];
+		for (let cursor = 0; ; ) {
+			const page = await client.readEntries({ sessionId, afterOrdinal: cursor, limit: 4 });
+			if (!page || page.entries.length === 0) break;
+			cursorPages.push(page.entries.map((entry) => entry.id));
+			cursor = page.entries.at(-1)!.ordinal;
+		}
+		expect(cursorPages).toEqual([
+			["entry-1", "entry-2", "entry-3", "entry-4"],
+			["entry-5", "entry-6", "entry-7", "entry-8"],
+			["entry-9"],
+		]);
+
+		expect(
+			await client.readEntries({ sessionId, sessionGeneration: "generation:stale", afterOrdinal: 0, limit: 1 }),
+		).toBeNull();
+		expect(await client.readEntries({ sessionId: "missing-session", afterOrdinal: 0, limit: 1 })).toBeNull();
+		for (const invalid of [
+			{ sessionId, afterOrdinal: 0, limit: 0 },
+			{ sessionId, afterOrdinal: 0, limit: SESSION_STORE_READ_ENTRIES_MAX + 1 },
+			{ sessionId, afterOrdinal: -1, limit: 1 },
+			{ sessionId, afterOrdinal: 0.5, limit: 1 },
+		]) {
+			await expect(client.readEntries(invalid)).rejects.toMatchObject({ code: "invalid_request" });
+		}
+
+		const database = new DatabaseSync(join(sessionDirectory, SESSION_STORE_DATABASE_FILENAME), { readOnly: true });
+		try {
+			const plan = database
+				.prepare(
+					"EXPLAIN QUERY PLAN SELECT payload_json FROM entries WHERE session_id = ? AND ordinal > ? ORDER BY ordinal LIMIT ?",
+				)
+				.all(sessionId, 0, 1)
+				.map((row) => String(row.detail));
+			expect(plan).toEqual([expect.stringMatching(/USING INDEX \S+ \(session_id=\? AND ordinal>\?\)/)]);
+		} finally {
+			database.close();
+		}
 	});
 
 	it("retains durable commit evidence across later revisions and reconciles idempotent retries", async () => {

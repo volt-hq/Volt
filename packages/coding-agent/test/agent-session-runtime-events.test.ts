@@ -1514,10 +1514,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		manager.reserveClientInput("runtime-private-wal", "prompt", { message: "runtime private WAL" });
 		manager.transitionClientInput("runtime-private-wal", "started");
+		await manager.flush();
 		await subscription.flush();
 		expect(writes).toHaveLength(bootstrapCount);
 
 		manager.appendPlanningState({ mode: "plan", plan: null });
+		await manager.flush();
 		await subscription.flush();
 		expect(writes).toHaveLength(bootstrapCount);
 
@@ -1527,6 +1529,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			clientMessageId: "runtime-private-wal",
 			timestamp: Date.now(),
 		});
+		// Transcript commits publish after the store transaction commits.
+		await manager.flush();
 		await subscription.flush();
 		expect(writes.at(-1)).toMatchObject({
 			type: "visible-transcript-commit",

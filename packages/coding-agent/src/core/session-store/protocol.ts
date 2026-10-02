@@ -5,6 +5,7 @@ import {
 } from "../session-entry-codec.ts";
 import { cloneCanonicalSessionStoreJson, isSessionStoreCommitDigest } from "./canonical-json.ts";
 import {
+	SESSION_STORE_READ_ENTRIES_MAX,
 	SESSION_STORE_REVIEW_CONTEXT_MAX_BYTES,
 	SESSION_STORE_REVIEW_LIST_MAX,
 	SESSION_STORE_SCHEMA_VERSION,
@@ -27,6 +28,8 @@ import {
 	type SessionStoreInfo,
 	type SessionStoreJsonValue,
 	type SessionStoreOrigin,
+	type SessionStoreReadEntriesInput,
+	type SessionStoreReadEntriesResult,
 	type SessionStoreReconcileCommitInput,
 	type SessionStoreRegisterReviewAnchorInput,
 	type SessionStoreReplaceReviewGeneralInput,
@@ -85,6 +88,7 @@ export type SessionStoreWorkerOperation =
 	| { readonly kind: "verify_foreign_keys" }
 	| { readonly kind: "create_session"; readonly input: SessionStoreCreateSessionInput }
 	| { readonly kind: "load_session"; readonly sessionId: string; readonly sessionGeneration: string }
+	| { readonly kind: "read_entries"; readonly input: SessionStoreReadEntriesInput }
 	| { readonly kind: "find_continuation_session"; readonly cwd: string | null }
 	| {
 			readonly kind: "list_sessions";
@@ -443,6 +447,21 @@ function parseDeleteInput(value: unknown, path: string): SessionStoreDeleteSessi
 	};
 }
 
+function parseReadEntriesInput(value: unknown, path: string): SessionStoreReadEntriesInput {
+	const input = record(value, path);
+	exactKeys(input, path, ["sessionId", "afterOrdinal", "limit"], ["sessionGeneration"]);
+	const limit = safeInteger(input.limit, `${path}.limit`, 1);
+	if (limit > SESSION_STORE_READ_ENTRIES_MAX) fail(`${path}.limit`, "read entries limit exceeds maximum");
+	return {
+		sessionId: idValue(input.sessionId, `${path}.sessionId`),
+		...(input.sessionGeneration === undefined
+			? {}
+			: { sessionGeneration: idValue(input.sessionGeneration, `${path}.sessionGeneration`) }),
+		afterOrdinal: safeInteger(input.afterOrdinal, `${path}.afterOrdinal`),
+		limit,
+	};
+}
+
 function parseIdentity(value: unknown, path: string): SessionStoreSessionIdentity {
 	const input = record(value, path);
 	exactKeys(input, path, ["sessionId", "sessionGeneration"]);
@@ -705,6 +724,9 @@ export function parseSessionStoreWorkerOperation(value: unknown): SessionStoreWo
 		case "find_session_by_id":
 			exactKeys(input, "$operation", ["kind", "sessionId"]);
 			return { kind, sessionId: idValue(input.sessionId, "$operation.sessionId") };
+		case "read_entries":
+			exactKeys(input, "$operation", ["kind", "input"]);
+			return { kind, input: parseReadEntriesInput(input.input, "$operation.input") };
 		case "delete_session":
 			exactKeys(input, "$operation", ["kind", "input"]);
 			return { kind, input: parseDeleteInput(input.input, "$operation.input") };
@@ -986,6 +1008,23 @@ function parseSnapshot(value: unknown, path: string): SessionStoreSnapshot {
 	};
 }
 
+function parseReadEntriesResult(value: unknown, path: string): SessionStoreReadEntriesResult {
+	const input = record(value, path);
+	exactKeys(input, path, ["entries", "lastOrdinal"]);
+	if (!Array.isArray(input.entries) || input.entries.length > SESSION_STORE_READ_ENTRIES_MAX) {
+		fail(`${path}.entries`, "unbounded entry page");
+	}
+	const lastOrdinal = safeInteger(input.lastOrdinal, `${path}.lastOrdinal`);
+	const entries = arrayValue(input.entries, `${path}.entries`, parseEntry);
+	for (const [index, entry] of entries.entries()) {
+		const previous = entries[index - 1];
+		if ((previous !== undefined && entry.ordinal !== previous.ordinal + 1) || entry.ordinal > lastOrdinal) {
+			fail(`${path}.entries[${index}].ordinal`, "entry page must be contiguous and committed");
+		}
+	}
+	return { entries, lastOrdinal };
+}
+
 export function parseSessionStoreOperationResult(
 	kind: SessionStoreWorkerOperation["kind"],
 	value: unknown,
@@ -1002,6 +1041,7 @@ export function parseSessionStoreOperationResult(
 	| SessionStoreSessionSummary[]
 	| SessionStoreSearchResult[]
 	| SessionStoreSnapshot
+	| SessionStoreReadEntriesResult
 	| SessionStoreTransactionResult
 	| SessionStoreCommitReconciliation
 	| SessionStoreDeleteSessionResult
@@ -1051,6 +1091,8 @@ export function parseSessionStoreOperationResult(
 			return parseSummary(value, "$result");
 		case "load_session":
 			return value === null ? null : parseSnapshot(value, "$result");
+		case "read_entries":
+			return value === null ? null : parseReadEntriesResult(value, "$result");
 		case "list_sessions":
 			return arrayValue(value, "$result", parseSummary);
 		case "search_sessions":

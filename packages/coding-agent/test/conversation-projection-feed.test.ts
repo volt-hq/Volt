@@ -1194,6 +1194,60 @@ describe("ConversationProjectionFeed", () => {
 		feed.dispose();
 	});
 
+	it("does not repeat transcript commits already reflected by a subscriber snapshot", async () => {
+		class IndexedLogSource extends TestSource {
+			indexedOrdinal = 0;
+			snapshotOrdinal(): number {
+				return this.indexedOrdinal;
+			}
+		}
+		const source = new IndexedLogSource();
+		const feed = new ConversationProjectionFeed(source, { createId: makeIds("snapshot-ordinal") });
+		const writes: object[] = [];
+		const commit = (ordinal: number): void =>
+			feed.publishExternal({
+				type: "conversation_transcript_committed",
+				entry: {
+					type: "custom",
+					id: `entry-${ordinal}`,
+					parentId: null,
+					timestamp: "2026-07-17T00:00:00.000Z",
+					ordinal,
+					customType: "test",
+				},
+			});
+		// The snapshot reads entries 1-2 from the in-memory index before their commits publish.
+		source.indexedOrdinal = 2;
+		const subscription = feed.attach({
+			write: (value) => {
+				writes.push(value);
+			},
+			buildSnapshot: snapshotBuilder(source),
+			projectExternal: (event) => ({ type: "transcript_entry", entry: (event as { entry: object }).entry }),
+		});
+		await subscription.ready;
+		commit(1);
+		commit(2);
+		commit(3);
+		await subscription.flush();
+		expect(writes).toMatchObject([
+			{ type: "conversation_bootstrap", delivery: { cursor: 0 } },
+			{ type: "transcript_entry", entry: { ordinal: 3 }, delivery: { cursor: 1 } },
+		]);
+
+		source.indexedOrdinal = 5;
+		subscription.requestCheckpoint(recoveryRequest("snapshot-ordinal-checkpoint", 1));
+		commit(4);
+		commit(5);
+		commit(6);
+		await subscription.flush();
+		expect(writes.slice(2)).toMatchObject([
+			{ type: "conversation_bootstrap", reason: "resync", delivery: { cursor: 2 } },
+			{ type: "transcript_entry", entry: { ordinal: 6 }, delivery: { cursor: 3 } },
+		]);
+		feed.dispose();
+	});
+
 	it("materializes raw active workflows for bootstrap and recovery", async () => {
 		const source = new TestSource();
 		const feed = new ConversationProjectionFeed(source, { createId: makeIds("workflow") });

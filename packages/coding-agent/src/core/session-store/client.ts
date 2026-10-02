@@ -23,6 +23,8 @@ import {
 	type SessionStoreForeignKeyVerificationResult,
 	type SessionStoreInfo,
 	type SessionStoreListOptions,
+	type SessionStoreReadEntriesInput,
+	type SessionStoreReadEntriesResult,
 	type SessionStoreReconcileCommitInput,
 	type SessionStoreRegisterReviewAnchorInput,
 	type SessionStoreReplaceReviewGeneralInput,
@@ -345,6 +347,22 @@ export class SQLiteSessionStoreClient {
 
 	async loadSession(sessionId: string, sessionGeneration: string): Promise<SessionStoreSnapshot | null> {
 		return (await this.call({ kind: "load_session", sessionId, sessionGeneration })) as SessionStoreSnapshot | null;
+	}
+
+	/** Read one ordinal page of committed entries; null when the session incarnation does not exist. */
+	async readEntries(input: SessionStoreReadEntriesInput): Promise<SessionStoreReadEntriesResult | null> {
+		const result = (await this.call({ kind: "read_entries", input })) as SessionStoreReadEntriesResult | null;
+		if (result === null) return null;
+		const first = result.entries[0];
+		const end = result.entries.at(-1)?.ordinal ?? input.afterOrdinal;
+		if (
+			result.entries.length > input.limit ||
+			(first !== undefined && first.ordinal !== input.afterOrdinal + 1) ||
+			(result.entries.length < input.limit && end < result.lastOrdinal)
+		) {
+			throw new SessionStoreError("invalid_response", "Session store returned an entry page outside its cursor");
+		}
+		return result;
 	}
 
 	async findContinuationSession(cwd?: string): Promise<SessionStoreSessionSummary | null> {

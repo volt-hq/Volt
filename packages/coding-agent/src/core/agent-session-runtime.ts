@@ -45,12 +45,12 @@ import { assertSessionCwdExists, MissingSessionCwdError } from "./session-cwd.ts
 import {
 	assertCurrentSessionSnapshot,
 	assertValidSessionId,
+	type CommittedSessionEntry,
 	findSessionInfoById,
 	getDefaultSessionDir,
 	importSessionFromJsonlInMemory,
 	isHostOnlySessionEntry,
 	loadEntriesFromFile,
-	type SessionEntry,
 	type SessionInfo,
 	SessionManager,
 	type SessionOrigin,
@@ -162,10 +162,10 @@ interface AgentSessionLifecycleLease {
 	readonly children: Set<Promise<void>>;
 }
 
-/** Canonical persistence commit consumed by subscriber-local transcript projectors. */
+/** Canonical persistence commit, published after its store transaction, positioned by `entry.ordinal`. */
 export interface ConversationTranscriptCommittedEvent {
 	type: "conversation_transcript_committed";
-	entry: SessionEntry;
+	entry: CommittedSessionEntry;
 }
 
 export function isConversationTranscriptCommittedEvent(value: object): value is ConversationTranscriptCommittedEvent {
@@ -174,7 +174,9 @@ export function isConversationTranscriptCommittedEvent(value: object): value is 
 		value.type === "conversation_transcript_committed" &&
 		"entry" in value &&
 		typeof value.entry === "object" &&
-		value.entry !== null
+		value.entry !== null &&
+		"ordinal" in value.entry &&
+		Number.isSafeInteger(value.entry.ordinal)
 	);
 }
 
@@ -1080,6 +1082,11 @@ export class AgentSessionRuntime {
 				typeof sessionLike.subscribeConversationGenerationChanges === "function"
 					? sessionLike.subscribeConversationGenerationChanges(() => listener())
 					: () => {},
+			// Snapshots read the in-memory index, which can lead the committed log.
+			snapshotOrdinal: () =>
+				typeof session.sessionManager?.getIndexedOrdinal === "function"
+					? session.sessionManager.getIndexedOrdinal()
+					: 0,
 		};
 	}
 

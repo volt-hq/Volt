@@ -2,6 +2,7 @@ export const SESSION_STORE_DATABASE_FILENAME = "sessions.sqlite";
 export const SESSION_STORE_SCHEMA_VERSION = 2;
 export const SESSION_STORE_REVIEW_CONTEXT_MAX_BYTES = 65_536;
 export const SESSION_STORE_REVIEW_LIST_MAX = 100;
+export const SESSION_STORE_READ_ENTRIES_MAX = 1_000;
 export const SESSION_STORE_BUSY_TIMEOUT_MS = 5_000;
 
 export type SessionStoreJsonPrimitive = null | boolean | number | string;
@@ -189,6 +190,20 @@ export interface SessionStoreSnapshot {
 	readonly entries: readonly SessionStoreEntry[];
 	readonly clientInputs: readonly SessionStoreClientInput[];
 	readonly searchChunks: readonly SessionStoreSearchChunk[];
+}
+
+/** Incremental log read; omitting the generation reads the session id's current incarnation. */
+export interface SessionStoreReadEntriesInput {
+	readonly sessionId: string;
+	readonly sessionGeneration?: string;
+	readonly afterOrdinal: number;
+	readonly limit: number;
+}
+
+/** Committed entries with ordinal > afterOrdinal in ordinal order, plus the log's last committed ordinal. */
+export interface SessionStoreReadEntriesResult {
+	readonly entries: readonly SessionStoreEntry[];
+	readonly lastOrdinal: number;
 }
 
 export interface SessionStoreListOptions {
