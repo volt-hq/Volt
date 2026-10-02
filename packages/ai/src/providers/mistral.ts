@@ -5,9 +5,11 @@ import type {
 	CompletionEvent,
 	ContentChunk,
 	FunctionTool,
+	UsageInfo,
 } from "@mistralai/mistralai/models/components";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import { classifyProviderError, createProviderError, missingApiKeyError } from "../stream/provider-errors.ts";
+import { createProviderStream, type ProviderFragmentSink, type ProviderStreamSink } from "../stream/runner.ts";
 import type {
 	Context,
 	Message,
@@ -46,87 +48,53 @@ export interface MistralOptions extends StreamOptions {
 /**
  * Stream responses from Mistral using `chat.stream`.
  */
-export const streamMistral: StreamFunction<"mistral-conversations", MistralOptions> = (
-	model: Model<"mistral-conversations">,
-	context: Context,
-	options?: MistralOptions,
-): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer(options);
-	if (
-		!normalizer.validateConfiguration({
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		})
-	)
-		return normalizer.stream;
-	options = { ...options, signal: normalizer.signal };
-	normalizer.push({
-		type: "start",
-		init: {
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		},
-	});
+export const streamMistral: StreamFunction<"mistral-conversations", MistralOptions> = createProviderStream<
+	"mistral-conversations",
+	MistralOptions,
+	ChatCompletionStreamRequest,
+	AsyncIterable<CompletionEvent>,
+	MistralStop,
+	MistralUsageReport
+>({
+	buildRequest({ model, context, options }) {
+		const apiKey = options.apiKey;
+		if (!apiKey) throw missingApiKeyError(model.provider);
 
-	(async () => {
-		const streamState = createMistralStreamState();
+		// Intentionally per-request: avoids shared SDK mutable state across concurrent consumers.
+		const mistral = new Mistral({
+			apiKey,
+			serverURL: model.baseUrl,
+		});
 
-		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
+		const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
+		const toolResultPayload = new ToolResultPayloadTracker();
+		const transformedMessages = transformMessages(
+			context.messages,
+			model,
+			(id) => normalizeMistralToolCallId(id),
+			toolResultPayload,
+		);
 
-			// Intentionally per-request: avoids shared SDK mutable state across concurrent consumers.
-			const mistral = new Mistral({
-				apiKey,
-				serverURL: model.baseUrl,
-			});
-
-			const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
-			const toolResultPayload = new ToolResultPayloadTracker();
-			const transformedMessages = transformMessages(
-				context.messages,
-				model,
-				(id) => normalizeMistralToolCallId(id),
-				toolResultPayload,
-			);
-
-			let payload = buildChatPayload(model, context, transformedMessages, options, toolResultPayload);
-			const nextPayload = await options?.onPayload?.(payload, model, toolResultPayload.metadata);
-			if (nextPayload !== undefined) {
-				payload = nextPayload as ChatCompletionStreamRequest;
-			}
-			const mistralStream = await mistral.chat.stream(payload, buildRequestOptions(model, options));
-			await consumeChatStream(model, normalizer, mistralStream, streamState);
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (streamState.stopReason === "aborted" || streamState.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			normalizer.push({ type: "done", reason: streamState.stopReason, usage: streamState.usage });
-		} catch (error) {
-			normalizer.push({
-				type: "error",
-				reason: options?.signal?.aborted ? "aborted" : "error",
-				errorMessage: formatMistralError(error),
-				usage: streamState.usage,
-			});
-		} finally {
-			normalizer.end();
-		}
-	})();
-
-	return normalizer.stream;
-};
+		const payload = buildChatPayload(model, context, transformedMessages, options, toolResultPayload);
+		return {
+			payload,
+			metadata: toolResultPayload.metadata,
+			send: async (chatPayload) => ({
+				body: await mistral.chat.stream(chatPayload, buildRequestOptions(model, options)),
+			}),
+		};
+	},
+	parse: (mistralStream, sink) => consumeChatStream(sink, mistralStream),
+	mapStopReason: (stop) =>
+		stop === "error"
+			? {
+					stopReason: "error",
+					error: createProviderError("unknown", "An unknown error occurred", { providerCode: "error" }),
+				}
+			: { stopReason: stop ?? "stop" },
+	mapUsage: (report, { model }) => mapMistralUsage(report, model),
+	mapError: (error) => classifyProviderError(error, { message: formatMistralError(error) }),
+});
 
 /**
  * Maps provider-agnostic `SimpleStreamOptions` to Mistral options.
@@ -137,9 +105,7 @@ export const streamSimpleMistral: StreamFunction<"mistral-conversations", Simple
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
+	if (!apiKey) throw missingApiKeyError(model.provider);
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
@@ -285,39 +251,42 @@ interface MistralToolBlockState {
 }
 
 interface MistralStreamState {
-	usage: Usage;
-	stopReason: StopReason;
 	responseId?: string;
 	nextContentIndex: number;
 	currentBlock: MistralContentBlockState | null;
 	toolBlocksByKey: Map<string, MistralToolBlockState>;
 }
 
-function createMistralStreamState(): MistralStreamState {
-	return {
-		usage: {
-			availability: "unavailable",
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		nextContentIndex: 0,
-		currentBlock: null,
-		toolBlocksByKey: new Map(),
-	};
+type MistralStop = ReturnType<typeof mapChatStopReason>;
+
+interface MistralUsageReport {
+	usage: UsageInfo;
+	hasFinishReason: boolean;
+}
+
+function mapMistralUsage(report: MistralUsageReport, model: Model<"mistral-conversations">): Usage {
+	const { usage, hasFinishReason } = report;
+	const counts = {
+		availability:
+			hasFinishReason && typeof usage.promptTokens === "number" && typeof usage.completionTokens === "number"
+				? "complete"
+				: "partial",
+		input: usage.promptTokens || 0,
+		output: usage.completionTokens || 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: usage.totalTokens || (usage.promptTokens || 0) + (usage.completionTokens || 0),
+	} satisfies Omit<Usage, "cost">;
+	return { ...counts, cost: calculateCost(model, counts) };
 }
 
 async function consumeChatStream(
-	model: Model<"mistral-conversations">,
-	normalizer: AssistantStreamNormalizer,
+	normalizer: ProviderStreamSink<MistralStop, MistralUsageReport>,
 	mistralStream: AsyncIterable<CompletionEvent>,
-	state: MistralStreamState,
 ): Promise<void> {
+	const state: MistralStreamState = { nextContentIndex: 0, currentBlock: null, toolBlocksByKey: new Map() };
 	let hasFinishReason = false;
+	let stopReason: MistralStop = "stop";
 	for await (const event of mistralStream) {
 		const chunk = event.data;
 		// Mistral's streamed CompletionChunk carries an id field. Keep the first non-empty one,
@@ -333,22 +302,10 @@ async function consumeChatStream(
 				(value) => typeof value === "number",
 			)
 		) {
-			const counts = {
-				availability:
-					(hasFinishReason || chunk.choices.length === 0 || chunk.choices[0]?.finishReason) &&
-					typeof chunk.usage.promptTokens === "number" &&
-					typeof chunk.usage.completionTokens === "number"
-						? "complete"
-						: "partial",
-				input: chunk.usage.promptTokens || 0,
-				output: chunk.usage.completionTokens || 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens:
-					chunk.usage.totalTokens || (chunk.usage.promptTokens || 0) + (chunk.usage.completionTokens || 0),
-			} satisfies Omit<Usage, "cost">;
-			state.usage = { ...counts, cost: calculateCost(model, counts) };
-			normalizer.push({ type: "meta", patch: { usage: state.usage } });
+			normalizer.usage({
+				usage: chunk.usage,
+				hasFinishReason: Boolean(hasFinishReason || chunk.choices.length === 0 || chunk.choices[0]?.finishReason),
+			});
 		}
 
 		const choice = chunk.choices[0];
@@ -356,7 +313,8 @@ async function consumeChatStream(
 
 		if (choice.finishReason) {
 			hasFinishReason = true;
-			state.stopReason = mapChatStopReason(choice.finishReason);
+			stopReason = mapChatStopReason(choice.finishReason);
+			normalizer.stop(stopReason);
 		}
 
 		const delta = choice.delta;
@@ -435,7 +393,7 @@ async function consumeChatStream(
 	}
 
 	finishMistralContentBlock(normalizer, state);
-	if (!hasFinishReason || (state.stopReason !== "stop" && state.stopReason !== "toolUse")) return;
+	if (!hasFinishReason || (stopReason !== "stop" && stopReason !== "toolUse")) return;
 	for (const block of state.toolBlocksByKey.values()) {
 		normalizer.push({
 			type: "toolcall_end",
@@ -454,7 +412,7 @@ async function consumeChatStream(
 	}
 }
 
-function emitMistralTextDelta(normalizer: AssistantStreamNormalizer, state: MistralStreamState, delta: string): void {
+function emitMistralTextDelta(normalizer: ProviderFragmentSink, state: MistralStreamState, delta: string): void {
 	if (state.currentBlock?.kind !== "text") {
 		finishMistralContentBlock(normalizer, state);
 		state.currentBlock = { kind: "text", contentIndex: state.nextContentIndex };
@@ -464,11 +422,7 @@ function emitMistralTextDelta(normalizer: AssistantStreamNormalizer, state: Mist
 	normalizer.push({ type: "text_delta", contentIndex: state.currentBlock.contentIndex, delta });
 }
 
-function emitMistralThinkingDelta(
-	normalizer: AssistantStreamNormalizer,
-	state: MistralStreamState,
-	delta: string,
-): void {
+function emitMistralThinkingDelta(normalizer: ProviderFragmentSink, state: MistralStreamState, delta: string): void {
 	if (state.currentBlock?.kind !== "thinking") {
 		finishMistralContentBlock(normalizer, state);
 		state.currentBlock = { kind: "thinking", contentIndex: state.nextContentIndex };
@@ -478,7 +432,7 @@ function emitMistralThinkingDelta(
 	normalizer.push({ type: "thinking_delta", contentIndex: state.currentBlock.contentIndex, delta });
 }
 
-function finishMistralContentBlock(normalizer: AssistantStreamNormalizer, state: MistralStreamState): void {
+function finishMistralContentBlock(normalizer: ProviderFragmentSink, state: MistralStreamState): void {
 	const block = state.currentBlock;
 	if (!block) return;
 	if (block.kind === "text") {
@@ -665,7 +619,7 @@ function mapToolChoice(
 	};
 }
 
-function mapChatStopReason(reason: string | null): StopReason {
+function mapChatStopReason(reason: string | null): Extract<StopReason, "stop" | "length" | "toolUse" | "error"> {
 	if (reason === null) return "stop";
 	switch (reason) {
 		case "stop":

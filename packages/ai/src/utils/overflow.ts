@@ -73,6 +73,11 @@ const NON_OVERFLOW_PATTERNS = [
 	/too many requests/i, // Generic HTTP 429 style
 ];
 
+/** Whether provider error text reports a context overflow. Used by provider error mapping only. */
+export function isContextOverflowText(text: string): boolean {
+	return !NON_OVERFLOW_PATTERNS.some((p) => p.test(text)) && OVERFLOW_PATTERNS.some((p) => p.test(text));
+}
+
 /**
  * Check if an assistant message represents a context overflow error.
  *

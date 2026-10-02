@@ -30,6 +30,27 @@ export * from "./session-resources.ts";
 export * from "./stream/fragments.ts";
 export { createRejectedToolCallFeedback } from "./stream/invalid-tool-arguments.ts";
 export * from "./stream/normalizer.ts";
+export {
+	classifyHttpStatus,
+	classifyProviderCode,
+	classifyProviderError,
+	createProviderError,
+	ProviderStreamError,
+} from "./stream/provider-errors.ts";
+export {
+	createProviderStream,
+	DEFAULT_MAX_RETRY_DELAY_MS,
+	type ProviderContentFragment,
+	type ProviderFragmentSink,
+	type ProviderRequest,
+	type ProviderSendAttempt,
+	type ProviderSendResult,
+	type ProviderStreamContext,
+	type ProviderStreamSink,
+	RETRY_BASE_DELAY_MS,
+	type StopReasonMapping,
+	type StreamProvider,
+} from "./stream/runner.ts";
 export * from "./stream.ts";
 export * from "./types.ts";
 export * from "./utils/diagnostics.ts";

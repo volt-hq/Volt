@@ -1,9 +1,8 @@
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
-import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import type { AssistantMessageEvent } from "../src/types.ts";
+import { streamResponsesEvents } from "./responses-stream.ts";
 
 describe("completed Responses tool argument retention (#350)", () => {
 	it.each([
@@ -13,11 +12,6 @@ describe("completed Responses tool argument retention (#350)", () => {
 		"function_call_arguments.delta",
 		"function_call_arguments.done",
 	])("ignores late %s before retaining arguments or changing call identity", async (lateEvent) => {
-		const normalizer = new AssistantStreamNormalizer({ toolArgumentLimits: { maxBytes: 16, maxTotalBytes: 32 } });
-		normalizer.push({
-			type: "start",
-			init: { api: "openai-responses", provider: "openai", model: "gpt-4o", timestamp: 0 },
-		});
 		const item = { type: "function_call", call_id: "call_edit", name: "edit", arguments: "{}", status: "completed" };
 		const oversized = JSON.stringify({ newText: "private".repeat(16_384) });
 		async function* frames(): AsyncGenerator<ResponseStreamEvent> {
@@ -67,11 +61,13 @@ describe("completed Responses tool argument retention (#350)", () => {
 			} as ResponseStreamEvent;
 			yield { type: "response.completed", response: { id: "response", status: "completed" } } as ResponseStreamEvent;
 		}
-		const response = await processResponsesStream(frames(), normalizer, getModel("openai", "gpt-4o"));
-		normalizer.push({ type: "done", reason: "toolUse" });
+		const { stream, parsed } = streamResponsesEvents(frames(), getModel("openai", "gpt-4o"), {
+			toolArgumentLimits: { maxBytes: 16, maxTotalBytes: 32 },
+		});
 		const events: AssistantMessageEvent[] = [];
-		for await (const event of normalizer.stream) events.push(event);
-		const message = await normalizer.stream.result();
+		for await (const event of stream) events.push(event);
+		const message = await stream.result();
+		const response = parsed.result!;
 		expect(message).toMatchObject({
 			stopReason: "toolUse",
 			content: [
@@ -80,7 +76,7 @@ describe("completed Responses tool argument retention (#350)", () => {
 			],
 		});
 		expect(message.diagnostics).toBeUndefined();
-		expect(normalizer.signal.aborted).toBe(false);
+		expect(parsed.signal?.aborted).toBe(false);
 		expect(events.filter((event) => event.type === "toolcall_start")).toHaveLength(2);
 		expect(events.filter((event) => event.type === "toolcall_end")).toHaveLength(2);
 		expect(response.responseItems).toEqual([

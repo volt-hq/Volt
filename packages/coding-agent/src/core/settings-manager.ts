@@ -31,7 +31,7 @@ export interface BranchSummarySettings {
 
 export interface ProviderRetrySettings {
 	timeoutMs?: number; // SDK/provider request timeout in milliseconds
-	maxRetries?: number; // SDK/provider retry attempts
+	maxRetries?: number; // provider-level retries of a rejected request (default: 0)
 	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
 }
 

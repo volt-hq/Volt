@@ -1,7 +1,8 @@
-import OpenAI from "openai";
-import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import OpenAI, { APIConnectionError, APIConnectionTimeoutError } from "openai";
+import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import { classifyProviderError, createProviderError, missingApiKeyError } from "../stream/provider-errors.ts";
+import { createProviderStream } from "../stream/runner.ts";
 import type {
 	CacheRetention,
 	Context,
@@ -21,7 +22,11 @@ import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import {
 	convertResponsesMessages,
 	convertResponsesTools,
+	mapResponsesStopReason,
+	mapResponsesUsage,
 	processResponsesStream,
+	type ResponsesStop,
+	type ResponsesUsageReport,
 	scaleCost,
 } from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
@@ -67,92 +72,57 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 /**
  * Generate function for OpenAI Responses API
  */
-export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
-	model: Model<"openai-responses">,
-	context: Context,
-	options?: OpenAIResponsesOptions,
-) => {
-	const normalizer = new AssistantStreamNormalizer(options);
-	if (
-		!normalizer.validateConfiguration({
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		})
-	)
-		return normalizer.stream;
-	options = { ...options, signal: normalizer.signal };
-	const timestamp = Date.now();
-	let started = false;
-	const start = () => {
-		if (started) return;
-		started = true;
-		normalizer.push({
-			type: "start",
-			init: {
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				timestamp,
+export const streamOpenAIResponses: StreamFunction<"openai-responses", OpenAIResponsesOptions> = createProviderStream<
+	"openai-responses",
+	OpenAIResponsesOptions,
+	ResponseCreateParamsStreaming,
+	AsyncIterable<ResponseStreamEvent>,
+	ResponsesStop,
+	ResponsesUsageReport
+>({
+	buildRequest({ model, context, options }) {
+		const apiKey = options.apiKey;
+		if (!apiKey) throw missingApiKeyError(model.provider);
+		const cacheRetention = resolvePromptCacheRetention(model, options.cacheRetention, options.env);
+		const cacheSessionId = cacheRetention === "none" ? undefined : options.sessionId;
+		const client = createClient(model, context, apiKey, options.headers, cacheSessionId, options.env);
+		const toolResultPayload = new ToolResultPayloadTracker();
+		const payload = buildParams(model, context, options, toolResultPayload);
+		return {
+			payload,
+			metadata: toolResultPayload.metadata,
+			async send(params, { signal }) {
+				const { data, response } = await client.responses
+					.create(params, {
+						signal,
+						...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+						maxRetries: 0,
+					})
+					.withResponse();
+				return { response: { status: response.status, headers: headersToRecord(response.headers) }, body: data };
 			},
-		});
-	};
+		};
+	},
 
-	// Start async processing
-	(async () => {
-		try {
-			// Create OpenAI client
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
-			const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
-			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, options?.env);
-			const toolResultPayload = new ToolResultPayloadTracker();
-			let params = buildParams(model, context, options, toolResultPayload);
-			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
-			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
-			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			start();
+	async parse(openaiStream, sink) {
+		await processResponsesStream(openaiStream, sink);
+	},
 
-			const result = await processResponsesStream(openaiStream, normalizer, model, {
-				serviceTier: options?.serviceTier,
-				priceServiceTier: (usage, serviceTier) => priceServiceTier(usage, serviceTier, model),
-			});
+	mapStopReason: mapResponsesStopReason,
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
+	mapUsage: (report, { model, options }) =>
+		mapResponsesUsage(report, model, {
+			serviceTier: options.serviceTier,
+			priceServiceTier: (usage, serviceTier) => priceServiceTier(usage, serviceTier, model),
+		}),
 
-			if (result.stopReason === "aborted" || result.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			normalizer.push({ type: "done", reason: result.stopReason });
-		} catch (error) {
-			start();
-			normalizer.push({
-				type: "error",
-				reason: options?.signal?.aborted ? "aborted" : "error",
-				errorMessage: formatOpenAIResponsesError(error),
-			});
-		} finally {
-			normalizer.end();
-		}
-	})();
-
-	return normalizer.stream;
-};
+	mapError(error) {
+		const message = formatOpenAIResponsesError(error);
+		if (error instanceof APIConnectionTimeoutError) return createProviderError("timeout", message);
+		if (error instanceof APIConnectionError) return createProviderError("network", message);
+		return classifyProviderError(error, { message });
+	},
+});
 
 export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", SimpleStreamOptions> = (
 	model: Model<"openai-responses">,
@@ -160,9 +130,7 @@ export const streamSimpleOpenAIResponses: StreamFunction<"openai-responses", Sim
 	options?: SimpleStreamOptions,
 ) => {
 	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
+	if (!apiKey) throw missingApiKeyError(model.provider);
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
