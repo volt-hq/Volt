@@ -1,3 +1,5 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/2753
+
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,9 +10,9 @@ import {
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
-import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
+} from "../../../../src/core/agent-session-runtime.ts";
+import { AuthStorage } from "../../../../src/core/auth-storage.ts";
+import { SessionManager } from "../../../../src/core/session-manager.ts";
 
 describe("issue #2753 reload stale resource settings", () => {
 	const cleanups: Array<() => void> = [];

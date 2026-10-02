@@ -1,8 +1,11 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/1717
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/2113
+
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, type Harness } from "../harness.ts";
+import { createHarness, type Harness } from "../../harness.ts";
 
 function createEchoTool(): AgentTool {
 	return {

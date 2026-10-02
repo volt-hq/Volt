@@ -13,4 +13,6 @@ Organization:
 - Put broad lifecycle and characterization tests directly under `test/suite/`
 - Put issue-specific regression tests under `test/suite/regressions/`
 - Name regression tests as `<issue-number>-<short-slug>.test.ts`
-- Example: `test/suite/regressions/2023-queued-slash-command-followup.test.ts`
+- Example: `test/suite/regressions/474-started-input-terminalization.test.ts`
+- Put regressions ported from upstream Pi under `test/suite/regressions/upstream/` as `<short-slug>.test.ts`, with a first-line header comment linking the upstream issue: `// Upstream Pi regression: https://github.com/earendil-works/pi/issues/<n>`
+- Example: `test/suite/regressions/upstream/queued-slash-command-followup.test.ts`

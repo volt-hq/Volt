@@ -1,6 +1,8 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/3982
+
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, type Harness } from "../harness.ts";
+import { createHarness, type Harness } from "../../harness.ts";
 
 describe("regression #3982: message_end cost override", () => {
 	const harnesses: Harness[] = [];

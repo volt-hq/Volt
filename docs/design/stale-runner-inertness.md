@@ -265,8 +265,8 @@ Regression: `test/suite/regressions/<id>-stale-runner-inertness.test.ts`
    session still streams normally (no false invalidation) — covers the
    distinct-runtime guard.
 6. **Existing suites stay green**, especially
-   `regressions/2860-replaced-session-context`,
-   `2753-reload-stale-resource-settings`, `agent-session-runtime`,
+   `regressions/upstream/replaced-session-context`,
+   `regressions/upstream/reload-stale-resource-settings`, `agent-session-runtime`,
    `agent-session-queue`, `agent-session-compaction`.
 
 Run: `bun run test` in `packages/coding-agent` and `packages/agent`.
