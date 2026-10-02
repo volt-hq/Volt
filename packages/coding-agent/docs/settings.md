@@ -237,8 +237,8 @@ Compaction runs at the next safe turn boundary when usage reaches the configured
 | `retry.maxRetries` | number | `6` | Maximum agent-level retry attempts |
 | `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s, 16s, 32s, 64s by default) |
 | `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
-| `retry.provider.maxRetries` | number | `0` | Provider/SDK retry attempts |
-| `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
+| `retry.provider.maxRetries` | number | `0` | Provider-level retries of a rejected request, before any response streams |
+| `retry.provider.maxRetryDelayMs` | number | `60000` | Max provider-level retry delay; a longer server-requested delay fails immediately (60s) |
 
 With the defaults, agent-level retries wait for up to 126 seconds in total across six attempts. In interactive mode, press the configured interrupt key (Escape by default) during the retry countdown to stop retrying.
 
@@ -246,7 +246,7 @@ When a response is rejected because its tool-call arguments are not complete, va
 
 When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
 
-Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Volt sees them, which may block the agent until the provider quota resets in some circumstances.
+Provider-level retries apply the same policy to every provider: only rate-limit, overload, server, network, and timeout failures retry, never quota or billing limits, and never once a response has started streaming. Each retry waits the server-requested delay, or 1s doubling per attempt. Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed; agent-level retries already cover transient failures with visible progress.
 
 ```json
 {

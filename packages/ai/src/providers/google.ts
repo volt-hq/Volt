@@ -1,34 +1,34 @@
 import {
 	type GenerateContentConfig,
 	type GenerateContentParameters,
+	type GenerateContentResponse,
 	GoogleGenAI,
 	type ThinkingConfig,
 } from "@google/genai";
-import { calculateCost, clampThinkingLevel } from "../models.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import { clampThinkingLevel } from "../models.ts";
+import { missingApiKeyError } from "../stream/provider-errors.ts";
+import { createProviderStream } from "../stream/runner.ts";
 import type {
 	Context,
 	Model,
 	SimpleStreamOptions,
-	StopReason,
 	StreamFunction,
 	StreamOptions,
 	ThinkingBudgets,
 	ThinkingLevel,
-	ToolCall,
-	Usage,
 } from "../types.ts";
 import type { AssistantMessageEventStream } from "../utils/event-stream.ts";
-import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { GoogleThinkingLevel } from "./google-shared.ts";
 import {
 	convertMessages,
 	convertTools,
-	isThinkingPart,
-	mapStopReason,
+	type GoogleStreamStop,
+	type GoogleUsageReport,
+	mapGoogleStopReason,
+	mapGoogleUsage,
 	mapToolChoice,
-	retainThoughtSignature,
+	parseGoogleStream,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
@@ -42,213 +42,30 @@ export interface GoogleOptions extends StreamOptions {
 	};
 }
 
-// Counter for generating unique tool call IDs
-let toolCallCounter = 0;
-
-export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions> = (
-	model: Model<"google-generative-ai">,
-	context: Context,
-	options?: GoogleOptions,
-): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer(options);
-	if (
-		!normalizer.validateConfiguration({
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		})
-	)
-		return normalizer.stream;
-	options = { ...options, signal: normalizer.signal };
-	normalizer.push({
-		type: "start",
-		init: { api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() },
-	});
-
-	void (async () => {
-		let usage = createEmptyUsage();
-		let stopReason: StopReason = "stop";
-		let responseId: string | undefined;
-		let nextContentIndex = 0;
-		let currentBlock: { type: "text" | "thinking"; contentIndex: number; signature?: string } | undefined;
-		const toolCallIds = new Set<string>();
-		let hasToolCalls = false;
-		let hasFinishReason = false;
-
-		const closeCurrentBlock = () => {
-			if (!currentBlock) {
-				return;
-			}
-			if (currentBlock.type === "text") {
-				normalizer.push({
-					type: "text_end",
-					contentIndex: currentBlock.contentIndex,
-					textSignature: currentBlock.signature,
-				});
-			} else {
-				normalizer.push({
-					type: "thinking_end",
-					contentIndex: currentBlock.contentIndex,
-					thinkingSignature: currentBlock.signature,
-				});
-			}
-			currentBlock = undefined;
+export const streamGoogle: StreamFunction<"google-generative-ai", GoogleOptions> = createProviderStream<
+	"google-generative-ai",
+	GoogleOptions,
+	GenerateContentParameters,
+	AsyncIterable<GenerateContentResponse>,
+	GoogleStreamStop,
+	GoogleUsageReport
+>({
+	buildRequest({ model, context, options }) {
+		const apiKey = options.apiKey;
+		if (!apiKey) throw missingApiKeyError(model.provider);
+		const client = createClient(model, apiKey, options.headers);
+		const toolResultPayload = new ToolResultPayloadTracker();
+		const payload = buildParams(model, context, options, toolResultPayload);
+		return {
+			payload,
+			metadata: toolResultPayload.metadata,
+			send: async (params) => ({ body: await client.models.generateContentStream(params) }),
 		};
-
-		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
-			const client = createClient(model, apiKey, options?.headers);
-			const toolResultPayload = new ToolResultPayloadTracker();
-			let params = buildParams(model, context, options, toolResultPayload);
-			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
-			if (nextParams !== undefined) {
-				params = nextParams as GenerateContentParameters;
-			}
-			const googleStream = await client.models.generateContentStream(params);
-
-			for await (const chunk of googleStream) {
-				// @google/genai documents GenerateContentResponse.responseId as an output-only field
-				// used to identify each response. Keep the first non-empty one from the stream.
-				if (!responseId && chunk.responseId) {
-					responseId = chunk.responseId;
-					normalizer.push({ type: "meta", patch: { responseId } });
-				}
-				const candidate = chunk.candidates?.[0];
-				if (candidate?.content?.parts) {
-					for (const part of candidate.content.parts) {
-						if (part.text !== undefined) {
-							const isThinking = isThinkingPart(part);
-							const blockType = isThinking ? "thinking" : "text";
-							if (!currentBlock || currentBlock.type !== blockType) {
-								closeCurrentBlock();
-								currentBlock = { type: blockType, contentIndex: nextContentIndex++ };
-								normalizer.push({ type: `${blockType}_start`, contentIndex: currentBlock.contentIndex });
-							}
-							currentBlock.signature = retainThoughtSignature(currentBlock.signature, part.thoughtSignature);
-							normalizer.push({
-								type: `${blockType}_delta`,
-								contentIndex: currentBlock.contentIndex,
-								delta: part.text,
-							});
-						}
-
-						if (part.functionCall) {
-							closeCurrentBlock();
-
-							// Generate unique ID if not provided or if it's a duplicate
-							const providedId = part.functionCall.id;
-							const needsNewId = !providedId || toolCallIds.has(providedId);
-							const toolCallId = needsNewId
-								? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
-								: providedId;
-							toolCallIds.add(toolCallId);
-							hasToolCalls = true;
-							const contentIndex = nextContentIndex++;
-							const args = (part.functionCall.args === undefined ? {} : part.functionCall.args) as JsonObject;
-							const toolCall: ToolCall = {
-								type: "toolCall",
-								id: toolCallId,
-								name: part.functionCall.name || "",
-								arguments: args,
-								...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
-							};
-							normalizer.push({
-								type: "toolcall_start",
-								contentIndex,
-								id: toolCall.id,
-								name: toolCall.name,
-							});
-							if (!normalizer.checkToolArgumentsObject(contentIndex, args)) return;
-							normalizer.push({
-								type: "toolcall_delta",
-								contentIndex,
-								argsTextDelta: JSON.stringify(args),
-							});
-							normalizer.push({ type: "toolcall_end", contentIndex, toolCall });
-						}
-					}
-				}
-
-				if (candidate?.finishReason) {
-					hasFinishReason = true;
-					stopReason = mapStopReason(candidate.finishReason);
-					if (hasToolCalls && stopReason === "stop") stopReason = "toolUse";
-				}
-
-				if (
-					chunk.usageMetadata &&
-					[
-						chunk.usageMetadata.promptTokenCount,
-						chunk.usageMetadata.candidatesTokenCount,
-						chunk.usageMetadata.thoughtsTokenCount,
-						chunk.usageMetadata.cachedContentTokenCount,
-						chunk.usageMetadata.totalTokenCount,
-					].some((value) => typeof value === "number")
-				) {
-					const counts = {
-						availability:
-							hasFinishReason &&
-							typeof chunk.usageMetadata.promptTokenCount === "number" &&
-							typeof chunk.usageMetadata.candidatesTokenCount === "number"
-								? "complete"
-								: "partial",
-						input:
-							(chunk.usageMetadata.promptTokenCount || 0) - (chunk.usageMetadata.cachedContentTokenCount || 0),
-						output:
-							(chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
-						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
-						cacheWrite: 0,
-						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-					} satisfies Omit<Usage, "cost">;
-					usage = { ...counts, cost: calculateCost(model, counts) };
-					normalizer.push({ type: "meta", patch: { usage } });
-				}
-			}
-
-			closeCurrentBlock();
-			if (hasToolCalls && !hasFinishReason) {
-				throw new Error("Google stream ended without finishReason");
-			}
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (stopReason === "aborted" || stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
-
-			normalizer.push({ type: "done", reason: stopReason, usage });
-		} catch (error) {
-			normalizer.push({
-				type: "error",
-				reason: options?.signal?.aborted ? "aborted" : "error",
-				errorMessage: error instanceof Error ? error.message : JSON.stringify(error),
-				usage,
-			});
-		} finally {
-			normalizer.end();
-		}
-	})();
-
-	return normalizer.stream;
-};
-
-function createEmptyUsage(): Usage {
-	return {
-		availability: "unavailable",
-		input: 0,
-		output: 0,
-		cacheRead: 0,
-		cacheWrite: 0,
-		totalTokens: 0,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-}
+	},
+	parse: (googleStream, sink) => parseGoogleStream(googleStream, sink),
+	mapStopReason: (stop) => mapGoogleStopReason(stop, "Google"),
+	mapUsage: (report, { model }) => mapGoogleUsage(report, model),
+});
 
 export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleStreamOptions> = (
 	model: Model<"google-generative-ai">,
@@ -256,9 +73,7 @@ export const streamSimpleGoogle: StreamFunction<"google-generative-ai", SimpleSt
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
+	if (!apiKey) throw missingApiKeyError(model.provider);
 
 	const base = buildBaseOptions(model, options, apiKey);
 	if (!options?.reasoning) {

@@ -4,6 +4,7 @@ import type { Context, Model } from "../src/types.ts";
 
 const mockState = vi.hoisted(() => ({
 	requestOptions: [] as unknown[],
+	failures: [] as unknown[],
 }));
 
 vi.mock("openai", () => {
@@ -12,6 +13,12 @@ vi.mock("openai", () => {
 			completions: {
 				create: (_params: unknown, options: unknown) => {
 					mockState.requestOptions.push(options);
+					const failure = mockState.failures.shift();
+					if (failure !== undefined) {
+						const rejected = Promise.reject(failure);
+						rejected.catch(() => {});
+						return Object.assign(rejected, { withResponse: () => rejected });
+					}
 					const stream = {
 						async *[Symbol.asyncIterator]() {
 							yield {
@@ -72,6 +79,7 @@ async function consume(options?: { maxRetries?: number }) {
 describe("openai-completions provider retries", () => {
 	beforeEach(() => {
 		mockState.requestOptions = [];
+		mockState.failures = [];
 	});
 
 	it("disables SDK retries by default", async () => {
@@ -79,8 +87,22 @@ describe("openai-completions provider retries", () => {
 		expect(mockState.requestOptions).toEqual([expect.objectContaining({ maxRetries: 0 })]);
 	});
 
-	it("honors explicit provider retry settings", async () => {
-		await consume({ maxRetries: 2 });
-		expect(mockState.requestOptions).toEqual([expect.objectContaining({ maxRetries: 2 })]);
+	it("leaves explicit retries to the stream runner instead of the SDK", async () => {
+		mockState.failures = [
+			Object.assign(new Error("429 rate limited"), { status: 429, headers: { "retry-after-ms": "0" } }),
+		];
+		const result = await consume({ maxRetries: 2 });
+		expect(result.stopReason).toBe("stop");
+		expect(mockState.requestOptions).toEqual([
+			expect.objectContaining({ maxRetries: 0 }),
+			expect.objectContaining({ maxRetries: 0 }),
+		]);
+	});
+
+	it("does not retry a rejected request", async () => {
+		mockState.failures = [Object.assign(new Error("400 bad request"), { status: 400 })];
+		const result = await consume({ maxRetries: 2 });
+		expect(result).toMatchObject({ stopReason: "error", errorMessage: "400 bad request" });
+		expect(mockState.requestOptions).toHaveLength(1);
 	});
 });

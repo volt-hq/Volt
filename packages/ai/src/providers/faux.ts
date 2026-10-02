@@ -1,5 +1,6 @@
 import { registerApiProvider, unregisterApiProviders } from "../api-registry.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import { createProviderError } from "../stream/provider-errors.ts";
+import { createProviderStream, type ProviderStreamSink, type StopReasonMapping } from "../stream/runner.ts";
 import type {
 	AssistantMessage,
 	Context,
@@ -369,14 +370,14 @@ function scheduleChunk(chunk: string, tokensPerSecond: number | undefined, signa
 }
 
 async function streamWithDeltas(
-	normalizer: AssistantStreamNormalizer,
+	sink: ProviderStreamSink<AssistantMessage, Usage>,
 	message: AssistantMessage,
 	minTokenSize: number,
 	maxTokenSize: number,
 	tokensPerSecond: number | undefined,
-	signal: AbortSignal | undefined,
+	signal: AbortSignal,
 ): Promise<void> {
-	normalizer.push({
+	sink.push({
 		type: "start",
 		init: {
 			api: message.api,
@@ -390,26 +391,13 @@ async function streamWithDeltas(
 		},
 	});
 
-	if (signal?.aborted) {
-		normalizer.push({ type: "error", reason: "aborted", errorMessage: "Request was aborted", usage: message.usage });
-		return;
-	}
-
 	for (let index = 0; index < message.content.length; index++) {
-		if (signal?.aborted) {
-			normalizer.push({
-				type: "error",
-				reason: "aborted",
-				errorMessage: "Request was aborted",
-				usage: message.usage,
-			});
-			return;
-		}
+		if (signal.aborted) return;
 
 		const block = message.content[index];
 
 		if (block.type === "thinking") {
-			normalizer.push({
+			sink.push({
 				type: "thinking_start",
 				contentIndex: index,
 				...(block.redacted
@@ -421,7 +409,7 @@ async function streamWithDeltas(
 					: {}),
 			});
 			if (block.redacted) {
-				normalizer.push({
+				sink.push({
 					type: "thinking_end",
 					contentIndex: index,
 					content: block.thinking,
@@ -432,18 +420,10 @@ async function streamWithDeltas(
 			}
 			for (const chunk of splitStringByTokenSize(block.thinking, minTokenSize, maxTokenSize)) {
 				await scheduleChunk(chunk, tokensPerSecond, signal);
-				if (signal?.aborted) {
-					normalizer.push({
-						type: "error",
-						reason: "aborted",
-						errorMessage: "Request was aborted",
-						usage: message.usage,
-					});
-					return;
-				}
-				normalizer.push({ type: "thinking_delta", contentIndex: index, delta: chunk });
+				if (signal.aborted) return;
+				sink.push({ type: "thinking_delta", contentIndex: index, delta: chunk });
 			}
-			normalizer.push({
+			sink.push({
 				type: "thinking_end",
 				contentIndex: index,
 				content: block.thinking,
@@ -454,21 +434,13 @@ async function streamWithDeltas(
 		}
 
 		if (block.type === "text") {
-			normalizer.push({ type: "text_start", contentIndex: index });
+			sink.push({ type: "text_start", contentIndex: index });
 			for (const chunk of splitStringByTokenSize(block.text, minTokenSize, maxTokenSize)) {
 				await scheduleChunk(chunk, tokensPerSecond, signal);
-				if (signal?.aborted) {
-					normalizer.push({
-						type: "error",
-						reason: "aborted",
-						errorMessage: "Request was aborted",
-						usage: message.usage,
-					});
-					return;
-				}
-				normalizer.push({ type: "text_delta", contentIndex: index, delta: chunk });
+				if (signal.aborted) return;
+				sink.push({ type: "text_delta", contentIndex: index, delta: chunk });
 			}
-			normalizer.push({
+			sink.push({
 				type: "text_end",
 				contentIndex: index,
 				content: block.text,
@@ -477,35 +449,29 @@ async function streamWithDeltas(
 			continue;
 		}
 
-		normalizer.push({ type: "toolcall_start", contentIndex: index, id: block.id, name: block.name });
-		if (!normalizer.checkToolArgumentsObject(index, block.arguments)) return;
+		sink.push({ type: "toolcall_start", contentIndex: index, id: block.id, name: block.name });
+		if (!sink.checkToolArgumentsObject(index, block.arguments)) return;
 		for (const chunk of splitStringByTokenSize(JSON.stringify(block.arguments), minTokenSize, maxTokenSize)) {
 			await scheduleChunk(chunk, tokensPerSecond, signal);
-			if (signal?.aborted) {
-				normalizer.push({
-					type: "error",
-					reason: "aborted",
-					errorMessage: "Request was aborted",
-					usage: message.usage,
-				});
-				return;
-			}
-			normalizer.push({ type: "toolcall_delta", contentIndex: index, argsTextDelta: chunk });
+			if (signal.aborted) return;
+			sink.push({ type: "toolcall_delta", contentIndex: index, argsTextDelta: chunk });
 		}
-		normalizer.push({ type: "toolcall_end", contentIndex: index, toolCall: block });
+		sink.push({ type: "toolcall_end", contentIndex: index, toolCall: block });
 	}
 
+	sink.stop(message);
+}
+
+/** A scripted message's own terminal: its stop reason, and its error for error and aborted stops. */
+function mapFauxStopReason(message: AssistantMessage | undefined): StopReasonMapping {
+	if (!message) return { stopReason: "stop" };
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
-		normalizer.push({
-			type: "error",
-			reason: message.stopReason,
-			errorMessage: message.errorMessage ?? "An unknown error occurred",
-			usage: message.usage,
-		});
-		return;
+		return {
+			stopReason: message.stopReason,
+			error: createProviderError("unknown", message.errorMessage ?? "An unknown error occurred"),
+		};
 	}
-
-	normalizer.push({ type: "done", reason: message.stopReason, usage: message.usage });
+	return { stopReason: message.stopReason };
 }
 
 export function registerFauxProvider(options: RegisterFauxProviderOptions = {}): FauxProviderRegistration {
@@ -553,85 +519,36 @@ export function registerFauxProvider(options: RegisterFauxProviderOptions = {}):
 	if (!firstModel) throw new Error("Faux provider requires at least one model");
 	const models: [Model<string>, ...Model<string>[]] = [firstModel, ...mappedModels.slice(1)];
 
-	const createQueueStream =
-		(takeStep: () => FauxResponseStep | undefined, recordCall: () => void): StreamFunction<string, StreamOptions> =>
-		(requestModel, context, streamOptions) => {
-			const normalizer = new AssistantStreamNormalizer(streamOptions);
-			if (
-				!normalizer.validateConfiguration({
-					api: requestModel.api,
-					provider: requestModel.provider,
-					model: requestModel.id,
-					timestamp: Date.now(),
-				})
-			)
-				return normalizer.stream;
-			streamOptions = { ...streamOptions, signal: normalizer.signal };
-			const step = takeStep();
-			recordCall();
-
-			queueMicrotask(async () => {
-				try {
-					await streamOptions?.onResponse?.({ status: 200, headers: {} }, requestModel);
-					if (!step) {
-						const message = createErrorMessage(
-							new Error("No more faux responses queued"),
-							api,
-							provider,
-							requestModel.id,
-						);
-						await streamWithDeltas(
-							normalizer,
-							message,
-							minTokenSize,
-							maxTokenSize,
-							tokensPerSecond,
-							streamOptions?.signal,
-						);
-						return;
-					}
-
-					const resolved =
-						typeof step === "function" ? await step(context, streamOptions, state, requestModel) : step;
-					const message = cloneMessage(
-						withUsageEstimate(resolved, context, requestModel, streamOptions, promptCache),
-						api,
-						provider,
-						requestModel.id,
-					);
-					await streamWithDeltas(
-						normalizer,
-						message,
-						minTokenSize,
-						maxTokenSize,
-						tokensPerSecond,
-						streamOptions?.signal,
-					);
-				} catch (error) {
-					const message = createErrorMessage(error, api, provider, requestModel.id);
-					normalizer.push({
-						type: "start",
-						init: {
-							api: message.api,
-							provider: message.provider,
-							model: message.model,
-							timestamp: message.timestamp,
-							usage: message.usage,
-						},
-					});
-					normalizer.push({
-						type: "error",
-						reason: "error",
-						errorMessage: message.errorMessage ?? "An unknown error occurred",
-						usage: message.usage,
-					});
-				} finally {
-					normalizer.end();
-				}
-			});
-
-			return normalizer.stream;
-		};
+	const createQueueStream = (
+		takeStep: () => FauxResponseStep | undefined,
+		recordCall: () => void,
+	): StreamFunction<string, StreamOptions> =>
+		createProviderStream<string, StreamOptions, undefined, FauxResponseStep | undefined, AssistantMessage, Usage>({
+			buildRequest() {
+				const step = takeStep();
+				recordCall();
+				return {
+					payload: undefined,
+					send: async () => ({ response: { status: 200, headers: {} }, body: step }),
+				};
+			},
+			async parse(step, sink, { model: requestModel, context, options: streamOptions }) {
+				const resolved = !step
+					? createErrorMessage(new Error("No more faux responses queued"), api, provider, requestModel.id)
+					: typeof step === "function"
+						? await step(context, streamOptions, state, requestModel)
+						: step;
+				const message = cloneMessage(
+					step ? withUsageEstimate(resolved, context, requestModel, streamOptions, promptCache) : resolved,
+					api,
+					provider,
+					requestModel.id,
+				);
+				await streamWithDeltas(sink, message, minTokenSize, maxTokenSize, tokensPerSecond, streamOptions.signal);
+			},
+			mapStopReason: mapFauxStopReason,
+			mapUsage: (usage) => usage,
+		});
 
 	const stream = createQueueStream(
 		() => pendingResponses.shift(),

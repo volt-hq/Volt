@@ -1,10 +1,10 @@
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
-import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
 import type { AssistantStreamFragment } from "../src/stream/fragments.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import { parseStreamingJson } from "../src/utils/json-parse.ts";
+import { streamResponsesEvents } from "./responses-stream.ts";
 
 const init = { api: "test", provider: "test", model: "test", timestamp: 0 };
 
@@ -207,8 +207,6 @@ async function responses(
 		| "incomplete_without_status"
 		| "queued",
 ) {
-	const normalizer = new AssistantStreamNormalizer();
-	normalizer.push({ type: "start", init });
 	const item = { type: "function_call", id: "fc_1", call_id: "call-1", name: "edit", arguments: "" };
 	const events: unknown[] = [
 		{ type: "response.output_item.added", output_index: 0, item },
@@ -245,24 +243,12 @@ async function responses(
 			},
 		});
 	}
-	try {
-		const result = await processResponsesStream(
-			(async function* () {
-				for (const event of events) yield event as ResponseStreamEvent;
-			})(),
-			normalizer,
-			getModel("openai", "gpt-4o"),
-		);
-		if (result.stopReason === "stop" || result.stopReason === "length" || result.stopReason === "toolUse") {
-			normalizer.push({ type: "done", reason: result.stopReason });
-		} else {
-			normalizer.push({ type: "error", reason: "error", errorMessage: "Provider response failed" });
-		}
-	} catch (error) {
-		normalizer.push({ type: "error", reason: "error", errorMessage: String(error) });
-	}
-	normalizer.end();
-	return normalizer.stream.result();
+	return streamResponsesEvents(
+		(async function* () {
+			for (const event of events) yield event as ResponseStreamEvent;
+		})(),
+		getModel("openai", "gpt-4o"),
+	).stream.result();
 }
 
 describe("Responses authoritative tool arguments", () => {

@@ -1,4 +1,4 @@
-import OpenAI from "openai";
+import OpenAI, { APIConnectionError, APIConnectionTimeoutError } from "openai";
 import type {
 	ChatCompletionAssistantMessageParam,
 	ChatCompletionChunk,
@@ -11,7 +11,14 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions.js";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import {
+	classifyProviderCode,
+	classifyProviderError,
+	createProviderError,
+	formatProviderErrorMessage,
+	missingApiKeyError,
+} from "../stream/provider-errors.ts";
+import { createProviderStream, type StopReasonMapping } from "../stream/runner.ts";
 import type {
 	CacheRetention,
 	Context,
@@ -21,7 +28,6 @@ import type {
 	OpenAICompletionsCompat,
 	ProviderEnv,
 	SimpleStreamOptions,
-	StopReason,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -104,80 +110,57 @@ type ChatCompletionToolWithCacheControl = OpenAI.Chat.Completions.ChatCompletion
 	cache_control?: OpenAICompatCacheControl;
 };
 
-export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenAICompletionsOptions> = (
-	model: Model<"openai-completions">,
-	context: Context,
-	options?: OpenAICompletionsOptions,
-) => {
-	const normalizer = new AssistantStreamNormalizer(options);
-	if (
-		!normalizer.validateConfiguration({
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		})
-	)
-		return normalizer.stream;
-	options = { ...options, signal: normalizer.signal };
-	const timestamp = Date.now();
-	let started = false;
-	const start = () => {
-		if (started) return;
-		started = true;
-		normalizer.push({
-			type: "start",
-			init: {
-				api: model.api,
-				provider: model.provider,
-				model: model.id,
-				timestamp,
-			},
-		});
-	};
+type ChunkUsage = Parameters<typeof parseChunkUsage>[0];
 
-	(async () => {
-		try {
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
+interface StreamingToolCallState {
+	contentIndex: number;
+	streamIndex?: number;
+	id: string;
+	name: string;
+	thoughtSignature?: string;
+}
+
+type StreamingToolCallDelta = NonNullable<ChatCompletionChunk.Choice.Delta["tool_calls"]>[number];
+
+export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenAICompletionsOptions> =
+	createProviderStream<
+		"openai-completions",
+		OpenAICompletionsOptions,
+		OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming,
+		AsyncIterable<ChatCompletionChunk>,
+		string,
+		{ usage: ChunkUsage; availability: "partial" | "complete" }
+	>({
+		buildRequest({ model, context, options }) {
+			const apiKey = options.apiKey;
+			if (!apiKey) throw missingApiKeyError(model.provider);
 			const compat = getCompat(model);
-			const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
-			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId, compat, options?.env);
+			const cacheRetention = resolvePromptCacheRetention(model, options.cacheRetention, options.env);
+			const cacheSessionId = cacheRetention === "none" ? undefined : options.sessionId;
+			const client = createClient(model, context, apiKey, options.headers, cacheSessionId, compat, options.env);
 			const toolResultPayload = new ToolResultPayloadTracker();
-			let params = buildParams(model, context, options, compat, cacheRetention, toolResultPayload);
-			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
-			if (nextParams !== undefined) {
-				params = nextParams as OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+			const payload = buildParams(model, context, options, compat, cacheRetention, toolResultPayload);
+			return {
+				payload,
+				metadata: toolResultPayload.metadata,
+				async send(params, { signal }) {
+					const { data, response } = await client.chat.completions
+						.create(params, {
+							signal,
+							...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+							maxRetries: 0,
+						})
+						.withResponse();
+					return { response: { status: response.status, headers: headersToRecord(response.headers) }, body: data };
+				},
 			};
-			const { data: openaiStream, response } = await client.chat.completions
-				.create(params, requestOptions)
-				.withResponse();
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			start();
+		},
 
-			interface StreamingToolCallState {
-				contentIndex: number;
-				streamIndex?: number;
-				id: string;
-				name: string;
-				thoughtSignature?: string;
-			}
-			type StreamingToolCallDelta = NonNullable<ChatCompletionChunk.Choice.Delta["tool_calls"]>[number];
-
+		async parse(openaiStream, sink, { model }) {
 			let nextContentIndex = 0;
 			let textContentIndex: number | undefined;
 			let thinkingContentIndex: number | undefined;
-			let hasFinishReason = false;
-			let stopReason: StopReason = "stop";
-			let stopErrorMessage: string | undefined;
+			let finishReason: string | undefined;
 			let responseId: string | undefined;
 			let responseModel: string | undefined;
 			const toolCallStates: StreamingToolCallState[] = [];
@@ -186,14 +169,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			const ensureTextBlock = (): number => {
 				if (textContentIndex === undefined) {
 					textContentIndex = nextContentIndex++;
-					normalizer.push({ type: "text_start", contentIndex: textContentIndex });
+					sink.push({ type: "text_start", contentIndex: textContentIndex });
 				}
 				return textContentIndex;
 			};
 			const ensureThinkingBlock = (thinkingSignature: string): number => {
 				if (thinkingContentIndex === undefined) {
 					thinkingContentIndex = nextContentIndex++;
-					normalizer.push({
+					sink.push({
 						type: "thinking_start",
 						contentIndex: thinkingContentIndex,
 						thinkingSignature,
@@ -221,7 +204,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (toolCall.id) {
 						toolCallStatesById.set(toolCall.id, state);
 					}
-					normalizer.push({
+					sink.push({
 						type: "toolcall_start",
 						contentIndex: state.contentIndex,
 						id: state.id,
@@ -251,7 +234,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// and each chunk in a streamed completion carries the same id.
 				if (!responseId && chunk.id) {
 					responseId = chunk.id;
-					normalizer.push({ type: "meta", patch: { responseId } });
+					sink.push({ type: "meta", patch: { responseId } });
 				}
 				if (
 					!responseModel &&
@@ -260,16 +243,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					chunk.model !== model.id
 				) {
 					responseModel = chunk.model;
-					normalizer.push({ type: "meta", patch: { responseModel } });
+					sink.push({ type: "meta", patch: { responseModel } });
 				}
 				const choice = Array.isArray(chunk.choices) ? chunk.choices[0] : undefined;
-				const usageAvailability =
-					hasFinishReason || choice?.finish_reason || chunk.choices?.length === 0 ? "complete" : "partial";
+				const availability =
+					finishReason !== undefined || choice?.finish_reason || chunk.choices?.length === 0
+						? "complete"
+						: "partial";
 				if (chunk.usage) {
-					normalizer.push({
-						type: "meta",
-						patch: { usage: parseChunkUsage(chunk.usage, model, usageAvailability) },
-					});
+					sink.usage({ usage: chunk.usage, availability });
 				}
 
 				if (!choice) continue;
@@ -278,17 +260,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				// in choice.usage instead of the standard chunk.usage
 				const choiceUsage = (choice as ChatCompletionChoiceWithUsage).usage;
 				if (!chunk.usage && choiceUsage) {
-					normalizer.push({
-						type: "meta",
-						patch: { usage: parseChunkUsage(choiceUsage, model, usageAvailability) },
-					});
+					sink.usage({ usage: choiceUsage, availability });
 				}
 
 				if (choice.finish_reason) {
-					const finishReasonResult = mapStopReason(choice.finish_reason);
-					stopReason = finishReasonResult.stopReason;
-					stopErrorMessage = finishReasonResult.errorMessage;
-					hasFinishReason = true;
+					finishReason = choice.finish_reason;
+					sink.stop(choice.finish_reason);
 				}
 
 				if (choice.delta) {
@@ -298,7 +275,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 						choice.delta.content.length > 0
 					) {
 						const contentIndex = ensureTextBlock();
-						normalizer.push({
+						sink.push({
 							type: "text_delta",
 							contentIndex,
 							delta: choice.delta.content,
@@ -328,7 +305,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 									? "reasoning_content"
 									: foundReasoningField;
 							const contentIndex = ensureThinkingBlock(thinkingSignature);
-							normalizer.push({
+							sink.push({
 								type: "thinking_delta",
 								contentIndex,
 								delta,
@@ -339,7 +316,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 					if (choice?.delta?.tool_calls) {
 						for (const toolCall of choice.delta.tool_calls) {
 							const state = ensureToolCallState(toolCall);
-							normalizer.push({
+							sink.push({
 								type: "toolcall_delta",
 								contentIndex: state.contentIndex,
 								argsTextDelta: toolCall.function?.arguments || "",
@@ -363,6 +340,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 				}
 			}
 
+			const stopReason = finishReason === undefined ? undefined : mapStopReason(finishReason).stopReason;
 			const endings: Array<
 				| { kind: "text"; contentIndex: number }
 				| { kind: "thinking"; contentIndex: number }
@@ -381,50 +359,36 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions", OpenA
 			});
 			for (const ending of endings) {
 				if (ending.kind === "text") {
-					normalizer.push({ type: "text_end", contentIndex: ending.contentIndex });
+					sink.push({ type: "text_end", contentIndex: ending.contentIndex });
 				} else if (ending.kind === "thinking") {
-					normalizer.push({ type: "thinking_end", contentIndex: ending.contentIndex });
-				} else if (hasFinishReason && (stopReason === "stop" || stopReason === "toolUse")) {
-					normalizer.push({
+					sink.push({ type: "thinking_end", contentIndex: ending.contentIndex });
+				} else if (stopReason === "stop" || stopReason === "toolUse") {
+					sink.push({
 						type: "toolcall_end",
 						contentIndex: ending.state.contentIndex,
 						thoughtSignature: ending.state.thoughtSignature,
 					});
 				}
 			}
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
+		},
 
-			if (stopReason === "aborted") {
-				throw new Error("Request was aborted");
-			}
-			if (stopReason === "error") {
-				throw new Error(stopErrorMessage || "Provider returned an error stop reason");
-			}
-			if (!hasFinishReason) {
-				throw new Error("Stream ended without finish_reason");
-			}
+		mapStopReason: (finishReason) =>
+			finishReason === undefined
+				? { stopReason: "error", error: createProviderError("network", "Stream ended without finish_reason") }
+				: mapStopReason(finishReason),
 
-			normalizer.push({ type: "done", reason: stopReason });
-		} catch (error) {
-			start();
-			let errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+		mapUsage: ({ usage, availability }, { model }) => parseChunkUsage(usage, model, availability),
+
+		mapError(error) {
+			let message = formatProviderErrorMessage(error);
 			// Some providers via OpenRouter give additional information in this field.
-			const rawMetadata = (error as any)?.error?.metadata?.raw;
-			if (rawMetadata) errorMessage += `\n${rawMetadata}`;
-			normalizer.push({
-				type: "error",
-				reason: options?.signal?.aborted ? "aborted" : "error",
-				errorMessage,
-			});
-		} finally {
-			normalizer.end();
-		}
-	})();
-
-	return normalizer.stream;
-};
+			const rawMetadata = (error as { error?: { metadata?: { raw?: unknown } } } | undefined)?.error?.metadata?.raw;
+			if (rawMetadata) message += `\n${rawMetadata}`;
+			if (error instanceof APIConnectionTimeoutError) return createProviderError("timeout", message);
+			if (error instanceof APIConnectionError) return createProviderError("network", message);
+			return classifyProviderError(error, { message });
+		},
+	});
 
 export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions", SimpleStreamOptions> = (
 	model: Model<"openai-completions">,
@@ -432,9 +396,7 @@ export const streamSimpleOpenAICompletions: StreamFunction<"openai-completions",
 	options?: SimpleStreamOptions,
 ) => {
 	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
+	if (!apiKey) throw missingApiKeyError(model.provider);
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
@@ -1087,10 +1049,7 @@ function parseChunkUsage(
 	return { ...counts, cost: calculateCost(model, counts) };
 }
 
-function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {
-	stopReason: StopReason;
-	errorMessage?: string;
-} {
+function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): StopReasonMapping {
 	if (reason === null) return { stopReason: "stop" };
 	switch (reason) {
 		case "stop":
@@ -1102,14 +1061,17 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | str
 		case "tool_calls":
 			return { stopReason: "toolUse" };
 		case "content_filter":
-			return { stopReason: "error", errorMessage: "Provider finish_reason: content_filter" };
-		case "network_error":
-			return { stopReason: "error", errorMessage: "Provider finish_reason: network_error" };
-		default:
 			return {
 				stopReason: "error",
-				errorMessage: `Provider finish_reason: ${reason}`,
+				error: createProviderError("refusal", "Provider finish_reason: content_filter", { providerCode: reason }),
 			};
+		case "network_error":
+			return {
+				stopReason: "error",
+				error: createProviderError("network", "Provider finish_reason: network_error", { providerCode: reason }),
+			};
+		default:
+			return { stopReason: "error", error: classifyProviderCode(reason, `Provider finish_reason: ${reason}`) };
 	}
 }
 

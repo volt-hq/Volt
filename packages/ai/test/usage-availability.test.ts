@@ -8,11 +8,11 @@ import { streamGoogle } from "../src/providers/google.ts";
 import { streamGoogleVertex } from "../src/providers/google-vertex.ts";
 import { streamMistral } from "../src/providers/mistral.ts";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
-import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import { stream } from "../src/stream.ts";
 import type { AssistantMessageEvent, Context, Usage } from "../src/types.ts";
 import { drainEventStream } from "../src/utils/event-stream.ts";
+import { streamResponsesEvents } from "./responses-stream.ts";
 
 const mock = vi.hoisted(() => ({ chunks: [] as unknown[] }));
 
@@ -155,27 +155,12 @@ function run(provider: Provider, signal?: AbortSignal) {
 			return streamAnthropic({ ...base, api: "anthropic-messages", provider }, context, options);
 		case "bedrock":
 			return streamBedrock({ ...base, api: "bedrock-converse-stream", provider }, context, options);
-		case "responses": {
-			const normalizer = new AssistantStreamNormalizer(options);
-			normalizer.push({ type: "start", init });
-			void (async () => {
-				try {
-					const result = await processResponsesStream(chunks() as AsyncIterable<ResponseStreamEvent>, normalizer, {
-						...base,
-						api: "openai-responses",
-						provider,
-					});
-					normalizer.push({ type: "done", reason: result.stopReason as "stop" });
-				} catch (error) {
-					normalizer.push({
-						type: "error",
-						reason: signal?.aborted ? "aborted" : "error",
-						errorMessage: String(error),
-					});
-				}
-			})();
-			return normalizer.stream;
-		}
+		case "responses":
+			return streamResponsesEvents(
+				chunks() as AsyncIterable<ResponseStreamEvent>,
+				{ ...base, api: "openai-responses", provider },
+				options,
+			).stream;
 	}
 }
 
@@ -298,21 +283,15 @@ describe.each<Provider>(["openai", "mistral", "google", "vertex", "anthropic", "
 describe("provider-specific usage events", () => {
 	it("does not present a requested Responses tier as provider-confirmed while preserving pricing fallback", async () => {
 		mock.chunks = [usageEvent("responses", 3, true)];
-		const normalizer = new AssistantStreamNormalizer();
-		normalizer.push({ type: "start", init });
 		const priceServiceTier = vi.fn((usage: Usage) => usage.cost);
-		await processResponsesStream(
-			chunks() as AsyncIterable<ResponseStreamEvent>,
-			normalizer,
-			{
-				...base,
-				api: "openai-responses",
-				provider: "openai",
-			},
-			{ serviceTier: "priority", priceServiceTier },
+		const result = await drainEventStream(
+			streamResponsesEvents(
+				chunks() as AsyncIterable<ResponseStreamEvent>,
+				{ ...base, api: "openai-responses", provider: "openai" },
+				undefined,
+				{ serviceTier: "priority", priceServiceTier },
+			).stream,
 		);
-		normalizer.push({ type: "done", reason: "stop" });
-		const result = await drainEventStream(normalizer.stream);
 		expect(result.usage.serviceTier).toEqual({ requested: "priority" });
 		expect(priceServiceTier).toHaveBeenCalledWith(expect.anything(), "priority");
 	});

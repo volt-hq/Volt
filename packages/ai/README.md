@@ -1419,12 +1419,19 @@ Adding a new LLM provider requires changes across multiple files. This checklist
 
 Create a new provider file (for example `amazon-bedrock.ts`) that exports:
 
-- `stream<Provider>()` function returning `AssistantMessageEventStream`
+- `stream<Provider>()`, built with `createProviderStream()` from a `StreamProvider` definition
 - `streamSimple<Provider>()` for `SimpleStreamOptions` mapping
 - Provider-specific options interface
 - Message conversion functions to transform `Context` to provider format
 - Tool conversion if the provider supports tools
-- Response parsing to emit standardized events (`text`, `tool_call`, `thinking`, `usage`, `stop`)
+
+The `StreamProvider` definition supplies only request building and fragment parsing:
+
+- `buildRequest()` builds the wire payload and a `send()` that performs one attempt
+- `parse()` turns the accepted response into fragments and reports the raw stop reason and usage
+- `mapStopReason()`, `mapUsage()`, and optionally `mapError()` map provider stop reasons, usage, and failures
+
+The shared runner owns the event stream and normalizer lifecycle, the `onPayload` and `onResponse` hooks, abort mapping, and the retry policy. Only a failed `send` retries, when its error is retryable, up to `maxRetries` (default 0); each retry waits the server-requested delay or 1s doubling per attempt, and a requested delay above `maxRetryDelayMs` fails immediately.
 
 #### 3. API Registry Integration (`src/providers/register-builtins.ts`)
 

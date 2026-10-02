@@ -2,8 +2,29 @@
  * Shared utilities for Google Generative AI and Google Vertex providers.
  */
 
-import { type Content, FinishReason, FunctionCallingConfigMode, type Part } from "@google/genai";
-import type { Context, ImageContent, Model, StopReason, TextContent, Tool } from "../types.ts";
+import {
+	type Content,
+	FinishReason,
+	FunctionCallingConfigMode,
+	type GenerateContentResponse,
+	type GenerateContentResponseUsageMetadata,
+	type Part,
+} from "@google/genai";
+import { calculateCost } from "../models.ts";
+import { createProviderError } from "../stream/provider-errors.ts";
+import type { ProviderStreamSink, StopReasonMapping } from "../stream/runner.ts";
+import type {
+	Context,
+	ImageContent,
+	Model,
+	ProviderErrorKind,
+	StopReason,
+	TextContent,
+	Tool,
+	ToolCall,
+	Usage,
+} from "../types.ts";
+import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
@@ -313,7 +334,7 @@ export function mapToolChoice(choice: string): FunctionCallingConfigMode {
 /**
  * Map Gemini FinishReason to our StopReason.
  */
-export function mapStopReason(reason: FinishReason): StopReason {
+export function mapStopReason(reason: FinishReason): Extract<StopReason, "stop" | "length" | "error"> {
 	switch (reason) {
 		case FinishReason.STOP:
 			return "stop";
@@ -354,4 +375,193 @@ export function mapStopReasonString(reason: string): StopReason {
 		default:
 			return "error";
 	}
+}
+
+/** Terminal evidence of a Gemini stream, mapped by `mapGoogleStopReason`. */
+export interface GoogleStreamStop {
+	finishReason: FinishReason | undefined;
+	hasToolCalls: boolean;
+}
+
+/** Usage evidence of a Gemini stream, mapped by `mapGoogleUsage`. */
+export interface GoogleUsageReport {
+	usageMetadata: GenerateContentResponseUsageMetadata;
+	hasFinishReason: boolean;
+}
+
+// Counter for generating unique tool call IDs
+let toolCallCounter = 0;
+
+/** Parse a Gemini or Vertex content stream into fragments. */
+export async function parseGoogleStream(
+	googleStream: AsyncIterable<GenerateContentResponse>,
+	sink: ProviderStreamSink<GoogleStreamStop, GoogleUsageReport>,
+): Promise<void> {
+	let responseId: string | undefined;
+	let nextContentIndex = 0;
+	let currentBlock: { type: "text" | "thinking"; contentIndex: number; signature?: string } | undefined;
+	const toolCallIds = new Set<string>();
+	let hasToolCalls = false;
+	let finishReason: FinishReason | undefined;
+
+	const closeCurrentBlock = () => {
+		if (!currentBlock) {
+			return;
+		}
+		if (currentBlock.type === "text") {
+			sink.push({
+				type: "text_end",
+				contentIndex: currentBlock.contentIndex,
+				textSignature: currentBlock.signature,
+			});
+		} else {
+			sink.push({
+				type: "thinking_end",
+				contentIndex: currentBlock.contentIndex,
+				thinkingSignature: currentBlock.signature,
+			});
+		}
+		currentBlock = undefined;
+	};
+
+	for await (const chunk of googleStream) {
+		// @google/genai documents GenerateContentResponse.responseId as an output-only field
+		// used to identify each response. Keep the first non-empty one from the stream.
+		if (!responseId && chunk.responseId) {
+			responseId = chunk.responseId;
+			sink.push({ type: "meta", patch: { responseId } });
+		}
+		const candidate = chunk.candidates?.[0];
+		if (candidate?.content?.parts) {
+			for (const part of candidate.content.parts) {
+				if (part.text !== undefined) {
+					const isThinking = isThinkingPart(part);
+					const blockType = isThinking ? "thinking" : "text";
+					if (!currentBlock || currentBlock.type !== blockType) {
+						closeCurrentBlock();
+						currentBlock = { type: blockType, contentIndex: nextContentIndex++ };
+						sink.push({ type: `${blockType}_start`, contentIndex: currentBlock.contentIndex });
+					}
+					currentBlock.signature = retainThoughtSignature(currentBlock.signature, part.thoughtSignature);
+					sink.push({
+						type: `${blockType}_delta`,
+						contentIndex: currentBlock.contentIndex,
+						delta: part.text,
+					});
+				}
+
+				if (part.functionCall) {
+					closeCurrentBlock();
+
+					// Generate unique ID if not provided or if it's a duplicate
+					const providedId = part.functionCall.id;
+					const needsNewId = !providedId || toolCallIds.has(providedId);
+					const toolCallId = needsNewId
+						? `${part.functionCall.name}_${Date.now()}_${++toolCallCounter}`
+						: providedId;
+					toolCallIds.add(toolCallId);
+					hasToolCalls = true;
+					const contentIndex = nextContentIndex++;
+					const args = (part.functionCall.args === undefined ? {} : part.functionCall.args) as JsonObject;
+					const toolCall: ToolCall = {
+						type: "toolCall",
+						id: toolCallId,
+						name: part.functionCall.name || "",
+						arguments: args,
+						...(part.thoughtSignature && { thoughtSignature: part.thoughtSignature }),
+					};
+					sink.push({
+						type: "toolcall_start",
+						contentIndex,
+						id: toolCall.id,
+						name: toolCall.name,
+					});
+					if (!sink.checkToolArgumentsObject(contentIndex, args)) return;
+					sink.push({
+						type: "toolcall_delta",
+						contentIndex,
+						argsTextDelta: JSON.stringify(args),
+					});
+					sink.push({ type: "toolcall_end", contentIndex, toolCall });
+				}
+			}
+		}
+
+		if (candidate?.finishReason) {
+			finishReason = candidate.finishReason;
+		}
+
+		if (
+			chunk.usageMetadata &&
+			[
+				chunk.usageMetadata.promptTokenCount,
+				chunk.usageMetadata.candidatesTokenCount,
+				chunk.usageMetadata.thoughtsTokenCount,
+				chunk.usageMetadata.cachedContentTokenCount,
+				chunk.usageMetadata.totalTokenCount,
+			].some((value) => typeof value === "number")
+		) {
+			sink.usage({ usageMetadata: chunk.usageMetadata, hasFinishReason: finishReason !== undefined });
+		}
+	}
+
+	closeCurrentBlock();
+	sink.stop({ finishReason, hasToolCalls });
+}
+
+/** Map a Gemini stream's finish reason. `label` names the provider in the missing-finish-reason error. */
+export function mapGoogleStopReason(stop: GoogleStreamStop | undefined, label: string): StopReasonMapping {
+	if (!stop?.finishReason) {
+		return stop?.hasToolCalls
+			? { stopReason: "error", error: createProviderError("network", `${label} stream ended without finishReason`) }
+			: { stopReason: "stop" };
+	}
+	const stopReason = mapStopReason(stop.finishReason);
+	if (stopReason === "error") {
+		return {
+			stopReason: "error",
+			error: createProviderError(finishReasonErrorKind(stop.finishReason), "An unknown error occurred", {
+				providerCode: stop.finishReason,
+			}),
+		};
+	}
+	return { stopReason: stop.hasToolCalls && stopReason === "stop" ? "toolUse" : stopReason };
+}
+
+function finishReasonErrorKind(reason: FinishReason): ProviderErrorKind {
+	switch (reason) {
+		case FinishReason.BLOCKLIST:
+		case FinishReason.PROHIBITED_CONTENT:
+		case FinishReason.SPII:
+		case FinishReason.SAFETY:
+		case FinishReason.IMAGE_SAFETY:
+		case FinishReason.IMAGE_PROHIBITED_CONTENT:
+		case FinishReason.IMAGE_RECITATION:
+		case FinishReason.RECITATION:
+			return "refusal";
+		case FinishReason.MALFORMED_FUNCTION_CALL:
+		case FinishReason.UNEXPECTED_TOOL_CALL:
+			return "invalid_tool_call";
+		default:
+			return "unknown";
+	}
+}
+
+/** Map Gemini usage metadata; thoughts count as output and cached content as cache reads. */
+export function mapGoogleUsage<T extends GoogleApiType>(report: GoogleUsageReport, model: Model<T>): Usage {
+	const { usageMetadata, hasFinishReason } = report;
+	const counts = {
+		availability:
+			hasFinishReason &&
+			typeof usageMetadata.promptTokenCount === "number" &&
+			typeof usageMetadata.candidatesTokenCount === "number"
+				? "complete"
+				: "partial",
+		input: (usageMetadata.promptTokenCount || 0) - (usageMetadata.cachedContentTokenCount || 0),
+		output: (usageMetadata.candidatesTokenCount || 0) + (usageMetadata.thoughtsTokenCount || 0),
+		cacheRead: usageMetadata.cachedContentTokenCount || 0,
+		cacheWrite: 0,
+		totalTokens: usageMetadata.totalTokenCount || 0,
+	} satisfies Omit<Usage, "cost">;
+	return { ...counts, cost: calculateCost(model, counts) };
 }

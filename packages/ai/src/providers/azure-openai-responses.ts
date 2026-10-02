@@ -1,12 +1,21 @@
-import { AzureOpenAI } from "openai";
-import type { ResponseCreateParamsStreaming } from "openai/resources/responses/responses.js";
+import { APIConnectionError, APIConnectionTimeoutError, AzureOpenAI } from "openai";
+import type { ResponseCreateParamsStreaming, ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { clampThinkingLevel } from "../models.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import { classifyProviderError, createProviderError, missingApiKeyError } from "../stream/provider-errors.ts";
+import { createProviderStream } from "../stream/runner.ts";
 import type { Context, Model, SimpleStreamOptions, StreamFunction, StreamOptions } from "../types.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
-import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
+import {
+	convertResponsesMessages,
+	convertResponsesTools,
+	mapResponsesStopReason,
+	mapResponsesUsage,
+	processResponsesStream,
+	type ResponsesStop,
+	type ResponsesUsageReport,
+} from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
 import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
@@ -66,88 +75,53 @@ export interface AzureOpenAIResponsesOptions extends StreamOptions {
 /**
  * Generate function for Azure OpenAI Responses API
  */
-export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> = (
-	model: Model<"azure-openai-responses">,
-	context: Context,
-	options?: AzureOpenAIResponsesOptions,
-) => {
-	const normalizer = new AssistantStreamNormalizer(options);
-	if (
-		!normalizer.validateConfiguration({
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		})
-	)
-		return normalizer.stream;
-	options = { ...options, signal: normalizer.signal };
-	const timestamp = Date.now();
-	let started = false;
-	const start = () => {
-		if (started) return;
-		started = true;
-		normalizer.push({
-			type: "start",
-			init: {
-				api: "azure-openai-responses",
-				provider: model.provider,
-				model: model.id,
-				timestamp,
-			},
-		});
-	};
-
-	// Start async processing
-	(async () => {
-		try {
+export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions> =
+	createProviderStream<
+		"azure-openai-responses",
+		AzureOpenAIResponsesOptions,
+		ResponseCreateParamsStreaming,
+		AsyncIterable<ResponseStreamEvent>,
+		ResponsesStop,
+		ResponsesUsageReport
+	>({
+		buildRequest({ model, context, options }) {
 			const deploymentName = resolveDeploymentName(model, options);
-			// Create Azure OpenAI client
-			const apiKey = options?.apiKey;
-			if (!apiKey) {
-				throw new Error(`No API key for provider: ${model.provider}`);
-			}
+			const apiKey = options.apiKey;
+			if (!apiKey) throw missingApiKeyError(model.provider);
 			const client = createClient(model, apiKey, options);
 			const toolResultPayload = new ToolResultPayloadTracker();
-			let params = buildParams(model, context, options, deploymentName, toolResultPayload);
-			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
-			if (nextParams !== undefined) {
-				params = nextParams as ResponseCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+			const payload = buildParams(model, context, options, deploymentName, toolResultPayload);
+			return {
+				payload,
+				metadata: toolResultPayload.metadata,
+				async send(params, { signal }) {
+					const { data, response } = await client.responses
+						.create(params, {
+							signal,
+							...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+							maxRetries: 0,
+						})
+						.withResponse();
+					return { response: { status: response.status, headers: headersToRecord(response.headers) }, body: data };
+				},
 			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-			start();
+		},
 
-			const result = await processResponsesStream(openaiStream, normalizer, model);
+		async parse(openaiStream, sink) {
+			await processResponsesStream(openaiStream, sink);
+		},
 
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
+		mapStopReason: mapResponsesStopReason,
 
-			if (result.stopReason === "aborted" || result.stopReason === "error") {
-				throw new Error("An unknown error occurred");
-			}
+		mapUsage: (report, { model }) => mapResponsesUsage(report, model),
 
-			normalizer.push({ type: "done", reason: result.stopReason });
-		} catch (error) {
-			start();
-			normalizer.push({
-				type: "error",
-				reason: options?.signal?.aborted ? "aborted" : "error",
-				errorMessage: formatAzureOpenAIError(error),
-			});
-		} finally {
-			normalizer.end();
-		}
-	})();
-
-	return normalizer.stream;
-};
+		mapError(error) {
+			const message = formatAzureOpenAIError(error);
+			if (error instanceof APIConnectionTimeoutError) return createProviderError("timeout", message);
+			if (error instanceof APIConnectionError) return createProviderError("network", message);
+			return classifyProviderError(error, { message });
+		},
+	});
 
 export const streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-responses", SimpleStreamOptions> = (
 	model: Model<"azure-openai-responses">,
@@ -155,9 +129,7 @@ export const streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-resp
 	options?: SimpleStreamOptions,
 ) => {
 	const apiKey = options?.apiKey;
-	if (!apiKey) {
-		throw new Error(`No API key for provider: ${model.provider}`);
-	}
+	if (!apiKey) throw missingApiKeyError(model.provider);
 
 	const base = buildBaseOptions(model, options, apiKey);
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;

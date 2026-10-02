@@ -188,15 +188,16 @@ export interface StreamOptions {
 	 */
 	websocketConnectTimeoutMs?: number;
 	/**
-	 * Maximum retry attempts for providers/SDKs that support client-side retries.
-	 * For example, OpenAI and Anthropic SDK clients default to 2.
+	 * Maximum retries of a request the provider rejected before streaming any of its response.
+	 * Only retryable failures (rate limits, overload, server, network, and timeout errors) retry.
+	 * Default: 0.
 	 */
 	maxRetries?: number;
 	/**
-	 * Maximum delay in milliseconds to wait for a retry when the server requests a long wait.
-	 * If the server's requested delay exceeds this value, the request fails immediately
-	 * with an error containing the requested delay, allowing higher-level retry logic
-	 * to handle it with user visibility.
+	 * Maximum delay in milliseconds to wait for a retry. Caps exponential backoff; if the
+	 * server's requested delay exceeds this value, the request fails immediately with an
+	 * error containing the requested delay, allowing higher-level retry logic to handle it
+	 * with user visibility.
 	 * Default: 60000 (60 seconds). Set to 0 to disable the cap.
 	 */
 	maxRetryDelayMs?: number;
@@ -391,6 +392,46 @@ export interface Usage {
 }
 
 export type StopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
+
+/**
+ * Closed failure categories of a failed assistant message.
+ *
+ * - `rate_limit`, `overloaded`, `server`, `network`, `timeout`: transient provider or transport failures.
+ * - `quota`: a usage, billing, or credit limit that a retry cannot clear.
+ * - `auth`: missing or rejected credentials.
+ * - `invalid_request`: the provider rejected the request itself.
+ * - `context_overflow`: the request exceeds the model's context window.
+ * - `refusal`: the model refused, or a safety or content filter stopped the response.
+ * - `invalid_tool_call`: the response's tool calls were rejected before execution.
+ * - `stream_limit`: a local stream limit or processing failure stopped the response.
+ * - `aborted`: the caller aborted the request.
+ * - `unknown`: anything else.
+ */
+export type ProviderErrorKind =
+	| "rate_limit"
+	| "overloaded"
+	| "server"
+	| "network"
+	| "timeout"
+	| "quota"
+	| "auth"
+	| "invalid_request"
+	| "context_overflow"
+	| "refusal"
+	| "invalid_tool_call"
+	| "stream_limit"
+	| "aborted"
+	| "unknown";
+
+/** Structured failure of an assistant response, classified by the provider that reported it. */
+export interface ProviderError {
+	kind: ProviderErrorKind;
+	/** Whether repeating the identical request may succeed. Set from provider status codes and error types. */
+	retryable: boolean;
+	/** Provider error code or type (e.g. `overloaded_error`, `insufficient_quota`), or the HTTP status. */
+	providerCode?: string;
+	message: string;
+}
 
 export interface UserMessage {
 	role: "user";

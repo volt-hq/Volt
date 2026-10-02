@@ -1,4 +1,4 @@
-import Anthropic from "@anthropic-ai/sdk";
+import Anthropic, { APIConnectionError, APIConnectionTimeoutError } from "@anthropic-ai/sdk";
 import type {
 	CacheControlEphemeral,
 	ContentBlockParam,
@@ -8,7 +8,13 @@ import type {
 	RefusalStopDetails,
 } from "@anthropic-ai/sdk/resources/messages.js";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import {
+	classifyProviderCode,
+	classifyProviderError,
+	createProviderError,
+	ProviderStreamError,
+} from "../stream/provider-errors.ts";
+import { createProviderStream, type StopReasonMapping } from "../stream/runner.ts";
 import type {
 	AnthropicMessagesCompat,
 	CacheRetention,
@@ -19,7 +25,6 @@ import type {
 	PromptCacheRefreshFunction,
 	ProviderEnv,
 	SimpleStreamOptions,
-	StopReason,
 	StreamFunction,
 	StreamOptions,
 	TextContent,
@@ -402,10 +407,27 @@ async function* iterateSseMessages(
 	}
 }
 
-class InvalidAnthropicToolInputError extends Error {
-	constructor() {
-		super("Anthropic returned malformed JSON for tool arguments. No tools were executed.");
+function invalidToolInputError(): ProviderStreamError {
+	return new ProviderStreamError(
+		"invalid_tool_call",
+		"Anthropic returned malformed JSON for tool arguments. No tools were executed.",
+		{ diagnostics: [{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code: "invalid_json" } }] },
+	);
+}
+
+/** Classify an SSE `error` event, whose data is the provider's JSON error body. */
+function anthropicStreamError(data: string): ProviderStreamError {
+	let type: string | undefined;
+	try {
+		const body = JSON.parse(data) as { error?: { type?: unknown } };
+		if (typeof body.error?.type === "string") type = body.error.type;
+	} catch {
+		// Unparseable bodies keep the raw data as their message.
 	}
+	const error = classifyProviderCode(type, data);
+	return new ProviderStreamError(error.kind, data, {
+		...(error.providerCode === undefined ? {} : { providerCode: error.providerCode }),
+	});
 }
 
 async function* iterateAnthropicEvents(
@@ -421,7 +443,7 @@ async function* iterateAnthropicEvents(
 
 	for await (const sse of iterateSseMessages(response.body, signal)) {
 		if (sse.event === "error") {
-			throw new Error(sse.data);
+			throw anthropicStreamError(sse.data);
 		}
 
 		if (!ANTHROPIC_MESSAGE_EVENTS.has(sse.event ?? "")) {
@@ -438,7 +460,7 @@ async function* iterateAnthropicEvents(
 				try {
 					JSON.parse(sse.data);
 				} catch {
-					throw new InvalidAnthropicToolInputError();
+					throw invalidToolInputError();
 				}
 			}
 			if (event.type === "message_start") {
@@ -448,12 +470,12 @@ async function* iterateAnthropicEvents(
 			}
 			yield event;
 		} catch (error) {
-			if (error instanceof InvalidAnthropicToolInputError) throw error;
+			if (error instanceof ProviderStreamError) throw error;
 			// If decoding failed before the block type became available, a content
 			// event may still contain tool input. Fail closed without echoing its raw
 			// payload or allowing argument text to influence retry classification.
 			if (sse.event === "content_block_start" || sse.event === "content_block_delta") {
-				throw new InvalidAnthropicToolInputError();
+				throw invalidToolInputError();
 			}
 			const message = error instanceof Error ? error.message : String(error);
 			throw new Error(
@@ -463,51 +485,63 @@ async function* iterateAnthropicEvents(
 	}
 
 	if (sawMessageStart && !sawMessageEnd) {
-		throw new Error("Anthropic stream ended before message_stop");
+		throw new ProviderStreamError("network", "Anthropic stream ended before message_stop");
 	}
 }
 
-export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOptions> = (
-	model: Model<"anthropic-messages">,
-	context: Context,
-	options?: AnthropicOptions,
-): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer(options);
-	if (
-		!normalizer.validateConfiguration({
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		})
-	)
-		return normalizer.stream;
-	options = { ...options, signal: normalizer.signal };
-	normalizer.push({
-		type: "start",
-		init: {
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		},
-	});
+interface AnthropicStop {
+	reason: Anthropic.Messages.StopReason | string;
+	details?: RefusalStopDetails | null;
+}
 
-	(async () => {
-		let usage: Usage = {
+type AnthropicUsageCounts = Omit<Usage, "totalTokens" | "cost">;
+
+type AnthropicBlockKind = "text" | "thinking" | "toolCall";
+
+export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOptions> = createProviderStream<
+	"anthropic-messages",
+	AnthropicOptions,
+	MessageCreateParamsStreaming,
+	{ response: Response; isOAuth: boolean },
+	AnthropicStop,
+	AnthropicUsageCounts
+>({
+	buildRequest({ model, context, options }) {
+		const { client, isOAuthToken: isOAuth } = createRequestClient(model, context, options);
+		const toolResultPayload = new ToolResultPayloadTracker();
+		const payload = buildParams(model, context, isOAuth, options, toolResultPayload);
+		return {
+			payload,
+			metadata: toolResultPayload.metadata,
+			async send(params, { signal }) {
+				const response = await client.messages
+					.create(
+						{ ...params, stream: true },
+						{
+							signal,
+							...(options.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
+							maxRetries: 0,
+						},
+					)
+					.asResponse();
+				return {
+					response: { status: response.status, headers: headersToRecord(response.headers) },
+					body: { response, isOAuth },
+				};
+			},
+		};
+	},
+
+	async parse({ response, isOAuth }, sink, { context, options }) {
+		let hasReportedInput = false;
+		let usage: AnthropicUsageCounts = {
 			availability: "unavailable",
 			input: 0,
 			output: 0,
 			cacheRead: 0,
 			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
-		let hasReportedInput = false;
-		let stopReason: StopReason = "stop";
-		let stopErrorMessage: string | undefined;
 		let nextContentIndex = 0;
-		type AnthropicBlockKind = "text" | "thinking" | "toolCall";
 		const blocksByRawIndex = new Map<number, { contentIndex: number; kind: AnthropicBlockKind }>();
 		const toolArgumentSeeds = new Map<number, string>();
 		const registerBlock = (rawIndex: number, kind: AnthropicBlockKind) => {
@@ -521,182 +555,146 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 			return block?.contentIndex ?? registerBlock(rawIndex, kind);
 		};
 
-		try {
-			const { client, isOAuthToken: isOAuth } = createRequestClient(model, context, options);
-			const toolResultPayload = new ToolResultPayloadTracker();
-			let params = buildParams(model, context, isOAuth, options, toolResultPayload);
-			const nextParams = await options?.onPayload?.(params, model, toolResultPayload.metadata);
-			if (nextParams !== undefined) {
-				params = nextParams as MessageCreateParamsStreaming;
-			}
-			const requestOptions = {
-				...(options?.signal ? { signal: options.signal } : {}),
-				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
-			};
-			const response = await client.messages.create({ ...params, stream: true }, requestOptions).asResponse();
-			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
-
-			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
-				if (event.type === "message_start") {
-					// Capture initial token usage from message_start event
-					// This ensures we have input token counts even if the stream is aborted early
-					if (
-						event.message.usage &&
-						[
-							event.message.usage.input_tokens,
-							event.message.usage.output_tokens,
-							event.message.usage.cache_read_input_tokens,
-							event.message.usage.cache_creation_input_tokens,
-						].some((value) => typeof value === "number")
-					) {
-						hasReportedInput = typeof event.message.usage.input_tokens === "number";
-						usage = anthropicUsage(model, {
-							availability: "partial",
-							input: event.message.usage.input_tokens || 0,
-							output: event.message.usage.output_tokens || 0,
-							cacheRead: event.message.usage.cache_read_input_tokens || 0,
-							cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
-							cacheWrite1h: event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0,
-						});
-					}
-					normalizer.push({ type: "meta", patch: { responseId: event.message.id, usage } });
-				} else if (event.type === "content_block_start") {
-					if (event.content_block.type === "text") {
-						const contentIndex = registerBlock(event.index, "text");
-						normalizer.push({ type: "text_start", contentIndex });
-					} else if (event.content_block.type === "thinking") {
-						const contentIndex = registerBlock(event.index, "thinking");
-						normalizer.push({ type: "thinking_start", contentIndex });
-					} else if (event.content_block.type === "redacted_thinking") {
-						const contentIndex = registerBlock(event.index, "thinking");
-						normalizer.push({
-							type: "thinking_start",
-							contentIndex,
-							content: "[Reasoning redacted]",
-							thinkingSignature: event.content_block.data,
-							redacted: true,
-						});
-					} else if (event.content_block.type === "tool_use") {
-						const contentIndex = registerBlock(event.index, "toolCall");
-						normalizer.push({
-							type: "toolcall_start",
-							contentIndex,
-							id: event.content_block.id,
-							name: isOAuth
-								? fromClaudeCodeName(event.content_block.name, context.tools)
-								: event.content_block.name,
-						});
-						const seededInput = event.content_block.input as JsonObject;
-						if (!normalizer.checkToolArgumentsObject(contentIndex, seededInput)) return;
-						const seededArgs = JSON.stringify(seededInput) ?? "";
-						toolArgumentSeeds.set(contentIndex, seededArgs);
-						if (seededArgs !== "{}") {
-							normalizer.push({ type: "toolcall_delta", contentIndex, argsTextDelta: seededArgs });
-						}
-					}
-				} else if (event.type === "content_block_delta") {
-					if (event.delta.type === "text_delta") {
-						const contentIndex = resolveBlock(event.index, "text");
-						normalizer.push({ type: "text_delta", contentIndex, delta: event.delta.text });
-					} else if (event.delta.type === "thinking_delta") {
-						const contentIndex = resolveBlock(event.index, "thinking");
-						normalizer.push({ type: "thinking_delta", contentIndex, delta: event.delta.thinking });
-					} else if (event.delta.type === "input_json_delta") {
-						const contentIndex = resolveBlock(event.index, "toolCall");
-						if (event.delta.partial_json.length > 0) toolArgumentSeeds.delete(contentIndex);
-						normalizer.push({
-							type: "toolcall_delta",
-							contentIndex,
-							argsTextDelta: event.delta.partial_json,
-						});
-					} else if (event.delta.type === "signature_delta") {
-						const contentIndex = resolveBlock(event.index, "thinking");
-						normalizer.push({
-							type: "thinking_delta",
-							contentIndex,
-							delta: "",
-							signatureDelta: event.delta.signature,
-						});
-					}
-				} else if (event.type === "content_block_stop") {
-					const block = blocksByRawIndex.get(event.index);
-					if (block?.kind === "text") {
-						normalizer.push({ type: "text_end", contentIndex: block.contentIndex });
-					} else if (block?.kind === "thinking") {
-						normalizer.push({ type: "thinking_end", contentIndex: block.contentIndex });
-					} else if (block?.kind === "toolCall") {
-						normalizer.push({
-							type: "toolcall_end",
-							contentIndex: block.contentIndex,
-							argumentsText: toolArgumentSeeds.get(block.contentIndex),
-						});
-						toolArgumentSeeds.delete(block.contentIndex);
-					}
-				} else if (event.type === "message_delta") {
-					if (event.delta.stop_reason) {
-						const stopReasonResult = mapStopReason(event.delta.stop_reason, event.delta.stop_details);
-						stopReason = stopReasonResult.stopReason;
-						stopErrorMessage = stopReasonResult.errorMessage;
-					}
-					// Only update usage fields if present (not null).
-					// Preserves input_tokens from message_start when proxies omit it in message_delta.
-					if (
-						event.usage &&
-						[
-							event.usage.input_tokens,
-							event.usage.output_tokens,
-							event.usage.cache_read_input_tokens,
-							event.usage.cache_creation_input_tokens,
-						].some((value) => typeof value === "number")
-					) {
-						hasReportedInput ||= typeof event.usage.input_tokens === "number";
-						usage = anthropicUsage(model, {
-							...usage,
-							availability:
-								event.delta.stop_reason && hasReportedInput && typeof event.usage.output_tokens === "number"
-									? "complete"
-									: "partial",
-							input: event.usage.input_tokens ?? usage.input,
-							output: event.usage.output_tokens ?? usage.output,
-							cacheRead: event.usage.cache_read_input_tokens ?? usage.cacheRead,
-							cacheWrite: event.usage.cache_creation_input_tokens ?? usage.cacheWrite,
-						});
-						normalizer.push({ type: "meta", patch: { usage } });
+		for await (const event of iterateAnthropicEvents(response, options.signal)) {
+			if (event.type === "message_start") {
+				sink.push({ type: "meta", patch: { responseId: event.message.id } });
+				// Capture initial token usage from message_start event
+				// This ensures we have input token counts even if the stream is aborted early
+				if (
+					event.message.usage &&
+					[
+						event.message.usage.input_tokens,
+						event.message.usage.output_tokens,
+						event.message.usage.cache_read_input_tokens,
+						event.message.usage.cache_creation_input_tokens,
+					].some((value) => typeof value === "number")
+				) {
+					hasReportedInput = typeof event.message.usage.input_tokens === "number";
+					usage = {
+						availability: "partial",
+						input: event.message.usage.input_tokens || 0,
+						output: event.message.usage.output_tokens || 0,
+						cacheRead: event.message.usage.cache_read_input_tokens || 0,
+						cacheWrite: event.message.usage.cache_creation_input_tokens || 0,
+						cacheWrite1h: event.message.usage.cache_creation?.ephemeral_1h_input_tokens || 0,
+					};
+					sink.usage(usage);
+				}
+			} else if (event.type === "content_block_start") {
+				if (event.content_block.type === "text") {
+					const contentIndex = registerBlock(event.index, "text");
+					sink.push({ type: "text_start", contentIndex });
+				} else if (event.content_block.type === "thinking") {
+					const contentIndex = registerBlock(event.index, "thinking");
+					sink.push({ type: "thinking_start", contentIndex });
+				} else if (event.content_block.type === "redacted_thinking") {
+					const contentIndex = registerBlock(event.index, "thinking");
+					sink.push({
+						type: "thinking_start",
+						contentIndex,
+						content: "[Reasoning redacted]",
+						thinkingSignature: event.content_block.data,
+						redacted: true,
+					});
+				} else if (event.content_block.type === "tool_use") {
+					const contentIndex = registerBlock(event.index, "toolCall");
+					sink.push({
+						type: "toolcall_start",
+						contentIndex,
+						id: event.content_block.id,
+						name: isOAuth
+							? fromClaudeCodeName(event.content_block.name, context.tools)
+							: event.content_block.name,
+					});
+					const seededInput = event.content_block.input as JsonObject;
+					if (!sink.checkToolArgumentsObject(contentIndex, seededInput)) return;
+					const seededArgs = JSON.stringify(seededInput) ?? "";
+					toolArgumentSeeds.set(contentIndex, seededArgs);
+					if (seededArgs !== "{}") {
+						sink.push({ type: "toolcall_delta", contentIndex, argsTextDelta: seededArgs });
 					}
 				}
+			} else if (event.type === "content_block_delta") {
+				if (event.delta.type === "text_delta") {
+					const contentIndex = resolveBlock(event.index, "text");
+					sink.push({ type: "text_delta", contentIndex, delta: event.delta.text });
+				} else if (event.delta.type === "thinking_delta") {
+					const contentIndex = resolveBlock(event.index, "thinking");
+					sink.push({ type: "thinking_delta", contentIndex, delta: event.delta.thinking });
+				} else if (event.delta.type === "input_json_delta") {
+					const contentIndex = resolveBlock(event.index, "toolCall");
+					if (event.delta.partial_json.length > 0) toolArgumentSeeds.delete(contentIndex);
+					sink.push({
+						type: "toolcall_delta",
+						contentIndex,
+						argsTextDelta: event.delta.partial_json,
+					});
+				} else if (event.delta.type === "signature_delta") {
+					const contentIndex = resolveBlock(event.index, "thinking");
+					sink.push({
+						type: "thinking_delta",
+						contentIndex,
+						delta: "",
+						signatureDelta: event.delta.signature,
+					});
+				}
+			} else if (event.type === "content_block_stop") {
+				const block = blocksByRawIndex.get(event.index);
+				if (block?.kind === "text") {
+					sink.push({ type: "text_end", contentIndex: block.contentIndex });
+				} else if (block?.kind === "thinking") {
+					sink.push({ type: "thinking_end", contentIndex: block.contentIndex });
+				} else if (block?.kind === "toolCall") {
+					sink.push({
+						type: "toolcall_end",
+						contentIndex: block.contentIndex,
+						argumentsText: toolArgumentSeeds.get(block.contentIndex),
+					});
+					toolArgumentSeeds.delete(block.contentIndex);
+				}
+			} else if (event.type === "message_delta") {
+				if (event.delta.stop_reason) {
+					sink.stop({ reason: event.delta.stop_reason, details: event.delta.stop_details });
+				}
+				// Only update usage fields if present (not null).
+				// Preserves input_tokens from message_start when proxies omit it in message_delta.
+				if (
+					event.usage &&
+					[
+						event.usage.input_tokens,
+						event.usage.output_tokens,
+						event.usage.cache_read_input_tokens,
+						event.usage.cache_creation_input_tokens,
+					].some((value) => typeof value === "number")
+				) {
+					hasReportedInput ||= typeof event.usage.input_tokens === "number";
+					usage = {
+						...usage,
+						availability:
+							event.delta.stop_reason && hasReportedInput && typeof event.usage.output_tokens === "number"
+								? "complete"
+								: "partial",
+						input: event.usage.input_tokens ?? usage.input,
+						output: event.usage.output_tokens ?? usage.output,
+						cacheRead: event.usage.cache_read_input_tokens ?? usage.cacheRead,
+						cacheWrite: event.usage.cache_creation_input_tokens ?? usage.cacheWrite,
+					};
+					sink.usage(usage);
+				}
 			}
-
-			if (options?.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (stopReason === "aborted" || stopReason === "error") {
-				throw new Error(stopErrorMessage || "An unknown error occurred");
-			}
-
-			normalizer.push({ type: "done", reason: stopReason, usage });
-		} catch (error) {
-			normalizer.push({
-				type: "error",
-				reason: options?.signal?.aborted ? "aborted" : "error",
-				errorMessage: error instanceof Error ? error.message : JSON.stringify(error),
-				...(error instanceof InvalidAnthropicToolInputError
-					? {
-							diagnostics: [
-								{ type: "invalid_tool_arguments", timestamp: Date.now(), details: { code: "invalid_json" } },
-							],
-						}
-					: {}),
-				usage,
-			});
-		} finally {
-			normalizer.end();
 		}
-	})();
+	},
 
-	return normalizer.stream;
-};
+	mapStopReason: (stop) => mapStopReason(stop?.reason ?? "end_turn", stop?.details),
+
+	mapUsage: (counts, { model }) => anthropicUsage(model, counts),
+
+	mapError(error) {
+		if (error instanceof APIConnectionTimeoutError) return createProviderError("timeout", error.message);
+		if (error instanceof APIConnectionError) return createProviderError("network", error.message);
+		return classifyProviderError(error);
+	},
+});
 
 /**
  * Map ThinkingLevel to Anthropic effort levels for adaptive thinking.
@@ -1316,7 +1314,7 @@ function convertTools(
 function mapStopReason(
 	reason: Anthropic.Messages.StopReason | string,
 	stopDetails?: RefusalStopDetails | null,
-): { stopReason: StopReason; errorMessage?: string } {
+): StopReasonMapping {
 	switch (reason) {
 		case "end_turn":
 			return { stopReason: "stop" };
@@ -1327,16 +1325,28 @@ function mapStopReason(
 		case "refusal":
 			return {
 				stopReason: "error",
-				errorMessage: stopDetails?.explanation || `The model refused to complete the request`,
+				error: createProviderError(
+					"refusal",
+					stopDetails?.explanation || `The model refused to complete the request`,
+					{ providerCode: reason },
+				),
 			};
 		case "pause_turn": // Stop is good enough -> resubmit
 			return { stopReason: "stop" };
 		case "stop_sequence":
 			return { stopReason: "stop" }; // We don't supply stop sequences, so this should never happen
 		case "sensitive": // Content flagged by safety filters (not yet in SDK types)
-			return { stopReason: "error" };
+			return {
+				stopReason: "error",
+				error: createProviderError("refusal", "The response was flagged by safety filters", {
+					providerCode: reason,
+				}),
+			};
 		default:
 			// Handle unknown stop reasons gracefully (API may add new values)
-			throw new Error(`Unhandled stop reason: ${reason}`);
+			return {
+				stopReason: "error",
+				error: createProviderError("unknown", `Unhandled stop reason: ${reason}`, { providerCode: reason }),
+			};
 	}
 }

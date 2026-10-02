@@ -13,7 +13,9 @@ import {
 	type ContentBlockStopEvent,
 	ConversationRole,
 	ConverseStreamCommand,
+	type ConverseStreamCommandInput,
 	type ConverseStreamMetadataEvent,
+	type ConverseStreamOutput,
 	ImageFormat,
 	type Message,
 	type SystemContentBlock,
@@ -27,13 +29,21 @@ import type { BuildMiddleware, DocumentType, MetadataBearer } from "@smithy/type
 import { HttpProxyAgent } from "http-proxy-agent";
 import { HttpsProxyAgent } from "https-proxy-agent";
 import { calculateCost, clampThinkingLevel } from "../models.ts";
-import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import {
+	classifyHttpStatus,
+	classifyProviderCode,
+	classifyProviderError,
+	createProviderError,
+} from "../stream/provider-errors.ts";
+import { createProviderStream, type ProviderFragmentSink } from "../stream/runner.ts";
 import type {
 	CacheRetention,
 	Context,
 	ImageContent,
 	Model,
 	ProviderEnv,
+	ProviderError,
+	ProviderErrorKind,
 	SimpleStreamOptions,
 	StopReason,
 	StreamFunction,
@@ -109,229 +119,253 @@ interface BedrockStreamState {
 
 const EMPTY_TEXT_PLACEHOLDER = "<empty>";
 
-export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOptions> = (
-	model: Model<"bedrock-converse-stream">,
-	context: Context,
-	options: BedrockOptions = {},
-): AssistantMessageEventStream => {
-	const normalizer = new AssistantStreamNormalizer(options);
-	if (
-		!normalizer.validateConfiguration({
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		})
-	)
-		return normalizer.stream;
-	options = { ...options, signal: normalizer.signal };
-	normalizer.push({
-		type: "start",
-		init: {
-			api: "bedrock-converse-stream",
-			provider: model.provider,
-			model: model.id,
-			timestamp: Date.now(),
-		},
-	});
+interface BedrockStop {
+	reason: string | undefined;
+	hasMessageStop: boolean;
+	hasToolCall: boolean;
+}
 
-	(async () => {
-		let usage: Usage = {
-			availability: "unavailable",
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOptions> = createProviderStream<
+	"bedrock-converse-stream",
+	BedrockOptions,
+	ConverseStreamCommandInput,
+	AsyncIterable<ConverseStreamOutput>,
+	BedrockStop,
+	ConverseStreamMetadataEvent
+>({
+	buildRequest({ model, context, options }) {
+		const config: BedrockRuntimeClientConfig = {
+			profile: options.profile || getProviderEnvValue("AWS_PROFILE", options.env),
+			// The stream runner owns retries.
+			maxAttempts: 1,
 		};
-		let stopReason: StopReason = "stop";
-		let hasMessageStop = false;
-		const streamState: BedrockStreamState = { blocksByRawIndex: new Map(), nextContentIndex: 0 };
+		const configuredRegion = getConfiguredBedrockRegion(options);
+		const hasAmbientConfiguredProfile = Boolean(getProviderEnvValue("AWS_PROFILE"));
+		const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
+		const useExplicitEndpoint = shouldUseExplicitBedrockEndpoint(
+			model.baseUrl,
+			configuredRegion,
+			hasAmbientConfiguredProfile,
+		);
 
-		try {
-			const config: BedrockRuntimeClientConfig = {
-				profile: options.profile || getProviderEnvValue("AWS_PROFILE", options.env),
-			};
-			const configuredRegion = getConfiguredBedrockRegion(options);
-			const hasAmbientConfiguredProfile = Boolean(getProviderEnvValue("AWS_PROFILE"));
-			const endpointRegion = getStandardBedrockEndpointRegion(model.baseUrl);
-			const useExplicitEndpoint = shouldUseExplicitBedrockEndpoint(
-				model.baseUrl,
-				configuredRegion,
-				hasAmbientConfiguredProfile,
-			);
+		// Only pin standard AWS Bedrock runtime endpoints when no region or ambient AWS_PROFILE is configured.
+		// This preserves custom endpoints (VPC/proxy) from #3402 without forcing built-in
+		// catalog defaults such as us-east-1 to override AWS_REGION/AWS_PROFILE.
+		if (useExplicitEndpoint) {
+			config.endpoint = model.baseUrl;
+		}
 
-			// Only pin standard AWS Bedrock runtime endpoints when no region or ambient AWS_PROFILE is configured.
-			// This preserves custom endpoints (VPC/proxy) from #3402 without forcing built-in
-			// catalog defaults such as us-east-1 to override AWS_REGION/AWS_PROFILE.
-			if (useExplicitEndpoint) {
-				config.endpoint = model.baseUrl;
+		// Resolve bearer token for Bedrock API key auth.
+		const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
+		const bearerToken =
+			options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;
+		const useBearerToken = bearerToken !== undefined && !skipAuth;
+
+		// in Node.js/Bun environment only
+		if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
+			// Region resolution: ARN-embedded > explicit option > env vars > SDK default chain.
+			// When the model ID is an inference profile ARN, extract the region from it.
+			// This avoids conflicts with AWS_REGION set for other services.
+			const arnRegionMatch = model.id.match(/^arn:aws(?:-[a-z0-9-]+)?:bedrock:([a-z0-9-]+):/);
+			if (arnRegionMatch) {
+				config.region = arnRegionMatch[1];
+			} else if (configuredRegion) {
+				config.region = configuredRegion;
+			} else if (endpointRegion && useExplicitEndpoint) {
+				config.region = endpointRegion;
+			} else if (!hasAmbientConfiguredProfile) {
+				config.region = "us-east-1";
 			}
 
-			// Resolve bearer token for Bedrock API key auth.
-			const skipAuth = getProviderEnvValue("AWS_BEDROCK_SKIP_AUTH", options.env) === "1";
-			const bearerToken =
-				options.bearerToken || getProviderEnvValue("AWS_BEARER_TOKEN_BEDROCK", options.env) || undefined;
-			const useBearerToken = bearerToken !== undefined && !skipAuth;
-
-			// in Node.js/Bun environment only
-			if (typeof process !== "undefined" && (process.versions?.node || process.versions?.bun)) {
-				// Region resolution: ARN-embedded > explicit option > env vars > SDK default chain.
-				// When the model ID is an inference profile ARN, extract the region from it.
-				// This avoids conflicts with AWS_REGION set for other services.
-				const arnRegionMatch = model.id.match(/^arn:aws(?:-[a-z0-9-]+)?:bedrock:([a-z0-9-]+):/);
-				if (arnRegionMatch) {
-					config.region = arnRegionMatch[1];
-				} else if (configuredRegion) {
-					config.region = configuredRegion;
-				} else if (endpointRegion && useExplicitEndpoint) {
-					config.region = endpointRegion;
-				} else if (!hasAmbientConfiguredProfile) {
-					config.region = "us-east-1";
-				}
-
-				// Support proxies that don't need authentication
-				if (skipAuth) {
-					config.credentials = {
-						accessKeyId: "dummy-access-key",
-						secretAccessKey: "dummy-secret-key",
-					};
-				}
-
-				const credentials = getConfiguredBedrockCredentials(options.env);
-				if (!skipAuth && credentials) {
-					config.credentials = credentials;
-				}
-
-				const proxyUrl = resolveHttpProxyUrlForTarget(model.baseUrl, options.env);
-				if (proxyUrl) {
-					// Bedrock runtime uses NodeHttp2Handler by default since v3.798.0, which is based
-					// on `http2` module and has no support for http agent.
-					// Use NodeHttpHandler to support HTTP(S) proxy agents.
-					config.requestHandler = new NodeHttpHandler({
-						httpAgent: new HttpProxyAgent(proxyUrl),
-						httpsAgent: new HttpsProxyAgent(proxyUrl) as unknown as HttpsAgent,
-					});
-				} else if (getProviderEnvValue("AWS_BEDROCK_FORCE_HTTP1", options.env) === "1") {
-					// Some custom endpoints require HTTP/1.1 instead of HTTP/2
-					config.requestHandler = new NodeHttpHandler();
-				}
-			} else {
-				// Non-Node environment (browser): fall back to us-east-1 since
-				// there's no config file resolution available.
-				config.region =
-					configuredRegion || (endpointRegion && useExplicitEndpoint ? endpointRegion : undefined) || "us-east-1";
+			// Support proxies that don't need authentication
+			if (skipAuth) {
+				config.credentials = {
+					accessKeyId: "dummy-access-key",
+					secretAccessKey: "dummy-secret-key",
+				};
 			}
 
-			if (useBearerToken) {
-				config.token = { token: bearerToken };
-				config.authSchemePreference = ["httpBearerAuth"];
+			const credentials = getConfiguredBedrockCredentials(options.env);
+			if (!skipAuth && credentials) {
+				config.credentials = credentials;
 			}
 
-			const client = new BedrockRuntimeClient(config);
-			if (options.headers && Object.keys(options.headers).length > 0) {
-				addCustomHeadersMiddleware(client, options.headers);
+			const proxyUrl = resolveHttpProxyUrlForTarget(model.baseUrl, options.env);
+			if (proxyUrl) {
+				// Bedrock runtime uses NodeHttp2Handler by default since v3.798.0, which is based
+				// on `http2` module and has no support for http agent.
+				// Use NodeHttpHandler to support HTTP(S) proxy agents.
+				config.requestHandler = new NodeHttpHandler({
+					httpAgent: new HttpProxyAgent(proxyUrl),
+					httpsAgent: new HttpsProxyAgent(proxyUrl) as unknown as HttpsAgent,
+				});
+			} else if (getProviderEnvValue("AWS_BEDROCK_FORCE_HTTP1", options.env) === "1") {
+				// Some custom endpoints require HTTP/1.1 instead of HTTP/2
+				config.requestHandler = new NodeHttpHandler();
 			}
-			const forcePromptCache = getProviderEnvValue("AWS_BEDROCK_FORCE_CACHE", options.env) === "1";
-			const cacheRetention =
-				forcePromptCache || supportsPromptCacheMode(model, "explicit")
-					? resolvePromptCacheRetention(model, options.cacheRetention, options.env, {
-							forceShort: forcePromptCache,
-						})
-					: "none";
-			const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
-			const toolResultPayload = new ToolResultPayloadTracker();
-			let commandInput = {
-				modelId: model.id,
-				messages: convertMessages(context, model, cacheRetention, toolResultPayload),
-				system: buildSystemPrompt(context.systemPrompt, cacheRetention),
-				inferenceConfig: {
-					...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
-					...(options.temperature !== undefined &&
-						supportsAnthropicSamplingParameters(model.id, model.name) !== false && {
-							temperature: options.temperature,
-						}),
-				},
-				toolConfig: convertToolConfig(context.tools, options.toolChoice),
-				additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
-				...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
-			};
-			const nextCommandInput = await options?.onPayload?.(commandInput, model, toolResultPayload.metadata);
-			if (nextCommandInput !== undefined) {
-				commandInput = nextCommandInput as typeof commandInput;
-			}
-			const command = new ConverseStreamCommand(commandInput);
+		} else {
+			// Non-Node environment (browser): fall back to us-east-1 since
+			// there's no config file resolution available.
+			config.region =
+				configuredRegion || (endpointRegion && useExplicitEndpoint ? endpointRegion : undefined) || "us-east-1";
+		}
 
-			const response = await client.send(command, { abortSignal: options.signal });
-			if (response.$metadata.httpStatusCode !== undefined) {
+		if (useBearerToken) {
+			config.token = { token: bearerToken };
+			config.authSchemePreference = ["httpBearerAuth"];
+		}
+
+		const client = new BedrockRuntimeClient(config);
+		if (options.headers && Object.keys(options.headers).length > 0) {
+			addCustomHeadersMiddleware(client, options.headers);
+		}
+		const forcePromptCache = getProviderEnvValue("AWS_BEDROCK_FORCE_CACHE", options.env) === "1";
+		const cacheRetention =
+			forcePromptCache || supportsPromptCacheMode(model, "explicit")
+				? resolvePromptCacheRetention(model, options.cacheRetention, options.env, {
+						forceShort: forcePromptCache,
+					})
+				: "none";
+		const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
+		const toolResultPayload = new ToolResultPayloadTracker();
+		const payload = {
+			modelId: model.id,
+			messages: convertMessages(context, model, cacheRetention, toolResultPayload),
+			system: buildSystemPrompt(context.systemPrompt, cacheRetention),
+			inferenceConfig: {
+				...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
+				...(options.temperature !== undefined &&
+					supportsAnthropicSamplingParameters(model.id, model.name) !== false && {
+						temperature: options.temperature,
+					}),
+			},
+			toolConfig: convertToolConfig(context.tools, options.toolChoice),
+			additionalModelRequestFields: buildAdditionalModelRequestFields(model, options),
+			...(options.requestMetadata !== undefined && { requestMetadata: options.requestMetadata }),
+		};
+		return {
+			payload,
+			metadata: toolResultPayload.metadata,
+			async send(commandInput, { signal }) {
+				const response = await client.send(new ConverseStreamCommand(commandInput), { abortSignal: signal });
 				const responseHeaders: Record<string, string> = {};
 				if (response.$metadata.requestId) {
 					responseHeaders["x-amzn-requestid"] = response.$metadata.requestId;
 				}
-				await options?.onResponse?.({ status: response.$metadata.httpStatusCode, headers: responseHeaders }, model);
-			}
+				return {
+					...(response.$metadata.httpStatusCode === undefined
+						? {}
+						: { response: { status: response.$metadata.httpStatusCode, headers: responseHeaders } }),
+					body: response.stream!,
+				};
+			},
+		};
+	},
 
-			for await (const item of response.stream!) {
-				if (item.messageStart) {
-					if (item.messageStart.role !== ConversationRole.ASSISTANT) {
-						throw new Error("Unexpected assistant message start but got user message start instead");
-					}
-				} else if (item.contentBlockStart) {
-					handleContentBlockStart(item.contentBlockStart, streamState, normalizer);
-				} else if (item.contentBlockDelta) {
-					handleContentBlockDelta(item.contentBlockDelta, streamState, normalizer);
-				} else if (item.contentBlockStop) {
-					handleContentBlockStop(item.contentBlockStop, streamState, normalizer);
-				} else if (item.messageStop) {
-					hasMessageStop = true;
-					stopReason = mapStopReason(item.messageStop.stopReason);
-				} else if (item.metadata) {
-					const metadataUsage = parseMetadataUsage(item.metadata, model);
-					if (metadataUsage) {
-						usage = metadataUsage;
-						normalizer.push({ type: "meta", patch: { usage } });
-					}
-				} else if (item.internalServerException) {
-					throw item.internalServerException;
-				} else if (item.modelStreamErrorException) {
-					throw item.modelStreamErrorException;
-				} else if (item.validationException) {
-					throw item.validationException;
-				} else if (item.throttlingException) {
-					throw item.throttlingException;
-				} else if (item.serviceUnavailableException) {
-					throw item.serviceUnavailableException;
+	async parse(stream, sink) {
+		const streamState: BedrockStreamState = { blocksByRawIndex: new Map(), nextContentIndex: 0 };
+		let reason: string | undefined;
+		let hasMessageStop = false;
+		for await (const item of stream) {
+			if (item.messageStart) {
+				if (item.messageStart.role !== ConversationRole.ASSISTANT) {
+					throw new Error("Unexpected assistant message start but got user message start instead");
 				}
+			} else if (item.contentBlockStart) {
+				handleContentBlockStart(item.contentBlockStart, streamState, sink);
+			} else if (item.contentBlockDelta) {
+				handleContentBlockDelta(item.contentBlockDelta, streamState, sink);
+			} else if (item.contentBlockStop) {
+				handleContentBlockStop(item.contentBlockStop, streamState, sink);
+			} else if (item.messageStop) {
+				hasMessageStop = true;
+				reason = item.messageStop.stopReason;
+			} else if (item.metadata) {
+				sink.usage(item.metadata);
+			} else if (item.internalServerException) {
+				throw item.internalServerException;
+			} else if (item.modelStreamErrorException) {
+				throw item.modelStreamErrorException;
+			} else if (item.validationException) {
+				throw item.validationException;
+			} else if (item.throttlingException) {
+				throw item.throttlingException;
+			} else if (item.serviceUnavailableException) {
+				throw item.serviceUnavailableException;
 			}
-
-			if (options.signal?.aborted) {
-				throw new Error("Request was aborted");
-			}
-
-			if (!hasMessageStop && [...streamState.blocksByRawIndex.values()].some((block) => block.kind === "toolCall")) {
-				throw new Error("Bedrock stream ended before messageStop");
-			}
-
-			if (stopReason === "error" || stopReason === "aborted") {
-				throw new Error("An unknown error occurred");
-			}
-
-			normalizer.push({ type: "done", reason: stopReason, usage });
-		} catch (error) {
-			normalizer.push({
-				type: "error",
-				reason: options.signal?.aborted ? "aborted" : "error",
-				errorMessage: formatBedrockError(error),
-				usage,
-			});
-		} finally {
-			normalizer.end();
 		}
-	})();
+		sink.stop({
+			reason,
+			hasMessageStop,
+			hasToolCall: [...streamState.blocksByRawIndex.values()].some((block) => block.kind === "toolCall"),
+		});
+	},
 
-	return normalizer.stream;
-};
+	mapStopReason(stop) {
+		if (!stop?.hasMessageStop) {
+			return stop?.hasToolCall
+				? { stopReason: "error", error: createProviderError("network", "Bedrock stream ended before messageStop") }
+				: { stopReason: "stop" };
+		}
+		const stopReason = mapStopReason(stop.reason);
+		if (stopReason !== "error") return { stopReason };
+		return {
+			stopReason: "error",
+			error: createProviderError(stopReasonErrorKind(stop.reason), "An unknown error occurred", {
+				...(stop.reason === undefined ? {} : { providerCode: stop.reason }),
+			}),
+		};
+	},
+
+	mapUsage: (metadata, { model }) => parseMetadataUsage(metadata, model),
+
+	mapError: (error) => classifyBedrockError(error),
+});
+
+function stopReasonErrorKind(reason: string | undefined): ProviderErrorKind {
+	switch (reason) {
+		case BedrockStopReason.CONTENT_FILTERED:
+		case BedrockStopReason.GUARDRAIL_INTERVENED:
+			return "refusal";
+		case BedrockStopReason.MALFORMED_TOOL_USE:
+			return "invalid_tool_call";
+		default:
+			return "unknown";
+	}
+}
+
+/** Bedrock exception names whose kind does not depend on the message. */
+const BEDROCK_EXCEPTION_KINDS: ReadonlyMap<string, ProviderErrorKind> = new Map([
+	["ThrottlingException", "rate_limit"],
+	["ServiceUnavailableException", "overloaded"],
+	["ModelNotReadyException", "overloaded"],
+	["InternalServerException", "server"],
+	["ModelStreamErrorException", "server"],
+	["ModelErrorException", "server"],
+	["ModelTimeoutException", "timeout"],
+	["ServiceQuotaExceededException", "quota"],
+	["AccessDeniedException", "auth"],
+	["CredentialsProviderError", "auth"],
+]);
+
+function classifyBedrockError(error: unknown): ProviderError {
+	const message = formatBedrockError(error);
+	if (error instanceof Error) {
+		const kind = BEDROCK_EXCEPTION_KINDS.get(error.name);
+		if (kind) return createProviderError(kind, message, { providerCode: error.name });
+		if (error instanceof BedrockRuntimeServiceException) {
+			const status = error.$metadata.httpStatusCode;
+			return status === undefined
+				? classifyProviderCode(error.name, message)
+				: classifyHttpStatus(status, message, error.name);
+		}
+		// The HTTP/2 handler reports a dropped connection only through this message.
+		if (error.message === "Unexpected error: http2 request did not get a response") {
+			return createProviderError("network", message);
+		}
+	}
+	return classifyProviderError(error, { message });
+}
 
 /**
  * Human-readable prefixes for Bedrock SDK exception names.
@@ -461,7 +495,7 @@ export const streamSimpleBedrock: StreamFunction<"bedrock-converse-stream", Simp
 function handleContentBlockStart(
 	event: ContentBlockStartEvent,
 	state: BedrockStreamState,
-	normalizer: AssistantStreamNormalizer,
+	normalizer: ProviderFragmentSink,
 ): void {
 	const rawIndex = event.contentBlockIndex!;
 	const start = event.start;
@@ -480,7 +514,7 @@ function handleContentBlockStart(
 function handleContentBlockDelta(
 	event: ContentBlockDeltaEvent,
 	state: BedrockStreamState,
-	normalizer: AssistantStreamNormalizer,
+	normalizer: ProviderFragmentSink,
 ): void {
 	const rawIndex = event.contentBlockIndex!;
 	const delta = event.delta;
@@ -548,7 +582,7 @@ function parseMetadataUsage(
 function handleContentBlockStop(
 	event: ContentBlockStopEvent,
 	state: BedrockStreamState,
-	normalizer: AssistantStreamNormalizer,
+	normalizer: ProviderFragmentSink,
 ): void {
 	const block = state.blocksByRawIndex.get(event.contentBlockIndex!);
 	if (!block) return;
@@ -891,7 +925,7 @@ function convertToolConfig(
 	return { tools: bedrockTools, toolChoice: bedrockToolChoice };
 }
 
-function mapStopReason(reason: string | undefined): StopReason {
+function mapStopReason(reason: string | undefined): Extract<StopReason, "stop" | "length" | "toolUse" | "error"> {
 	switch (reason) {
 		case BedrockStopReason.END_TURN:
 		case BedrockStopReason.STOP_SEQUENCE:

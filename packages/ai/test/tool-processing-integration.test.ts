@@ -1,12 +1,12 @@
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
-import { processResponsesStream } from "../src/providers/openai-responses-shared.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import { TOOL_ARGUMENT_BATCH_INTERVAL_MS } from "../src/stream/tool-argument-coalescer.ts";
 import type { AssistantMessageEvent } from "../src/types.ts";
 import { EVENT_STREAM_MAX_QUEUED_EVENTS, EventStreamOverflowError } from "../src/utils/event-stream.ts";
 import * as jsonParse from "../src/utils/json-parse.ts";
+import { streamResponsesEvents } from "./responses-stream.ts";
 
 afterEach(() => {
 	vi.useRealTimers();
@@ -76,8 +76,6 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 	it("coalesces the actual Responses adapter's repeated identities and preserves complete arguments", async () => {
 		vi.useFakeTimers();
 		const parse = vi.spyOn(jsonParse, "parseStreamingJson");
-		const normalizer = new AssistantStreamNormalizer();
-		start(normalizer);
 		const model = getModel("openai", "gpt-4o");
 		const args = { newText: "λ🌲\n".repeat(8192) };
 		const raw = JSON.stringify(args);
@@ -106,15 +104,13 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 			} as ResponseStreamEvent;
 			yield { type: "response.completed", response: { id: "response", status: "completed" } } as ResponseStreamEvent;
 		}
-		const completion = await processResponsesStream(events(), normalizer, model);
-		normalizer.push({ type: "done", reason: "toolUse" });
+		const { stream } = streamResponsesEvents(events(), model);
 		const received: AssistantMessageEvent[] = [];
-		for await (const event of normalizer.stream) received.push(event);
+		for await (const event of stream) received.push(event);
 		const deltas = received.filter((event) => event.type === "toolcall_delta");
 		expect(deltas.map((event) => event.argsTextDelta).join("")).toBe(raw);
 		expect(parse.mock.calls.length).toBeLessThan(32);
-		expect(completion.stopReason).toBe("toolUse");
-		expect(await normalizer.stream.result()).toMatchObject({
+		expect(await stream.result()).toMatchObject({
 			stopReason: "toolUse",
 			content: [{ id: "call_edit|fc_item", arguments: args }],
 		});
