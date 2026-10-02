@@ -41,6 +41,9 @@ export interface Keybindings {
 	"tui.select.pageDown": true;
 	"tui.select.confirm": true;
 	"tui.select.cancel": true;
+	// Focus traversal inside focus groups
+	"tui.focus.next": true;
+	"tui.focus.previous": true;
 	// Alternate-screen viewport navigation
 	"tui.altScreen.pageUp": true;
 	"tui.altScreen.pageDown": true;
@@ -156,6 +159,8 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: ["escape", "ctrl+c"],
 		description: "Cancel selection",
 	},
+	"tui.focus.next": { defaultKeys: "tab", description: "Move focus to the next control" },
+	"tui.focus.previous": { defaultKeys: "shift+tab", description: "Move focus to the previous control" },
 	// These intentionally shadow the unmodified editor bindings in fullscreen mode.
 	"tui.altScreen.pageUp": {
 		defaultKeys: "pageUp",
@@ -233,11 +238,25 @@ export class KeybindingsManager {
 	private userBindings: KeybindingsConfig;
 	private keysById = new Map<Keybinding, KeyId[]>();
 	private conflicts: KeybindingConflict[] = [];
+	private changeListeners = new Set<() => void>();
 
 	constructor(definitions: KeybindingDefinitions, userBindings: KeybindingsConfig = {}) {
-		this.definitions = definitions;
-		this.userBindings = userBindings;
+		this.definitions = { ...definitions };
+		this.userBindings = { ...userBindings };
 		this.rebuild();
+	}
+
+	/** Subscribe to changes of the definition table or user overrides. Returns an unsubscribe function. */
+	onChange(listener: () => void): () => void {
+		this.changeListeners.add(listener);
+		return () => {
+			this.changeListeners.delete(listener);
+		};
+	}
+
+	private applyChange(): void {
+		this.rebuild();
+		for (const listener of [...this.changeListeners]) listener();
 	}
 
 	private rebuild(): void {
@@ -275,12 +294,43 @@ export class KeybindingsManager {
 		return false;
 	}
 
+	/** Ids of every defined action whose resolved keys match the input, in definition order. */
+	findKeybindings(data: string): string[] {
+		const matches: string[] = [];
+		for (const [id, keys] of this.keysById) {
+			if (keys.some((key) => matchesKey(data, key))) matches.push(id);
+		}
+		return matches;
+	}
+
 	getKeys(keybinding: Keybinding): KeyId[] {
 		return [...(this.keysById.get(keybinding) ?? [])];
 	}
 
-	getDefinition(keybinding: Keybinding): KeybindingDefinition {
-		return this.definitions[keybinding]!;
+	getDefinition(keybinding: Keybinding): KeybindingDefinition | undefined {
+		return this.definitions[keybinding];
+	}
+
+	hasDefinition(id: string): boolean {
+		return Object.hasOwn(this.definitions, id);
+	}
+
+	getDefinitions(): KeybindingDefinitions {
+		return { ...this.definitions };
+	}
+
+	/** Add or replace action definitions. Stored user overrides for these ids apply immediately. */
+	setDefinitions(definitions: KeybindingDefinitions): void {
+		this.definitions = { ...this.definitions, ...definitions };
+		this.applyChange();
+	}
+
+	/** Remove action definitions. User overrides stay stored and apply again if an id is redefined. */
+	removeDefinitions(ids: readonly string[]): void {
+		const removed = new Set(ids.filter((id) => this.hasDefinition(id)));
+		if (removed.size === 0) return;
+		this.definitions = Object.fromEntries(Object.entries(this.definitions).filter(([id]) => !removed.has(id)));
+		this.applyChange();
 	}
 
 	getConflicts(): KeybindingConflict[] {
@@ -288,8 +338,16 @@ export class KeybindingsManager {
 	}
 
 	setUserBindings(userBindings: KeybindingsConfig): void {
-		this.userBindings = userBindings;
-		this.rebuild();
+		this.userBindings = { ...userBindings };
+		this.applyChange();
+	}
+
+	/** Override one action's keys, or restore its default keys with `undefined`. */
+	setUserBinding(id: string, keys: KeyId | KeyId[] | undefined): void {
+		this.userBindings = Object.fromEntries(
+			Object.entries({ ...this.userBindings, [id]: keys }).filter(([, value]) => value !== undefined),
+		);
+		this.applyChange();
 	}
 
 	getUserBindings(): KeybindingsConfig {

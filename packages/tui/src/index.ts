@@ -43,6 +43,15 @@ export {
 } from "./components/v-stack.ts";
 // Editor component interface (for custom editors)
 export type { EditorComponent } from "./editor-component.ts";
+// Focus groups and Tab traversal
+export {
+	type FocusDirection,
+	FocusGroup,
+	type FocusGroupChildOptions,
+	type FocusGroupOptions,
+	type FocusScope,
+	isFocusScope,
+} from "./focus.ts";
 // Fuzzy matching
 export { type FuzzyMatch, fuzzyFilter, fuzzyMatch } from "./fuzzy.ts";
 // Keybindings
@@ -72,6 +81,14 @@ export {
 	parseKey,
 	setKittyProtocolActive,
 } from "./keys.ts";
+// Declarative spec-to-component reconciler
+export {
+	type ViewNode,
+	type ViewNodeDefinition,
+	type ViewNodeOfType,
+	ViewReconciler,
+	ViewRegistry,
+} from "./reconciler.ts";
 // Explicit component render frames and composition helpers
 export {
 	concatRenderFrames,
@@ -87,6 +104,21 @@ export {
 } from "./render-frame.ts";
 // Input buffering for batch splitting
 export { StdinBuffer, type StdinBufferEventMap, type StdinBufferOptions } from "./stdin-buffer.ts";
+// Semantic tokens and theme-resolved styled text
+export {
+	PLAIN_SEMANTIC_THEME,
+	renderStyledText,
+	type SemanticEmphasis,
+	type SemanticTheme,
+	type SemanticToken,
+	type StyledSpan,
+	type StyledText,
+	sanitizeText,
+	styledTextToPlain,
+	styledTextWidth,
+	truncateStyledText,
+	wrapStyledText,
+} from "./styled-text.ts";
 // Terminal interface and implementations
 export {
 	buildNotificationSequence,
