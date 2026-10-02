@@ -7,6 +7,19 @@
  * tests; the runtime imports individual schema modules instead.
  */
 
+import {
+	ActiveToolCallStateSchema,
+	ApiSchema,
+	AssistantContentSchema,
+	AssistantMessageDiagnosticSchema,
+	AssistantMessageSchema,
+	DiagnosticErrorInfoSchema,
+	StopReasonSchema,
+	TextContentSchema,
+	ThinkingContentSchema,
+	ToolCallSchema,
+	UsageSchema,
+} from "@hansjm10/volt-ai/schemas";
 import { type TSchema, Type } from "typebox";
 import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
@@ -89,6 +102,7 @@ import {
 	RpcQueueUpdateEventSchema,
 	RpcSessionTreeNodeSchema,
 	RpcSessionTreePageSchema,
+	RpcSlimAssistantEventSchema,
 	RpcTranscriptEntryEventSchema,
 } from "./conversation.ts";
 import {
@@ -110,21 +124,6 @@ import {
 	RpcSubagentEventSchema,
 	RpcUiActionStateChangedEventSchema,
 } from "./events.ts";
-import {
-	RpcActiveToolCallStateSchema,
-	RpcApiSchema,
-	RpcAssistantContentSchema,
-	RpcAssistantMessageDiagnosticSchema,
-	RpcAssistantMessageSchema,
-	RpcDiagnosticErrorInfoSchema,
-	RpcModelSchema,
-	RpcSlimAssistantEventSchema,
-	RpcStopReasonSchema,
-	RpcTextContentSchema,
-	RpcThinkingContentSchema,
-	RpcToolCallSchema,
-	RpcUsageSchema,
-} from "./external.ts";
 import {
 	RpcGitChangeCountsSchema,
 	RpcGitComparisonSchema,
@@ -242,6 +241,7 @@ import {
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
 	RpcListSubagentsResponseSchema,
+	RpcModelSchema,
 	RpcPromptCacheStatusSchema,
 	RpcPromptResponseSchema,
 	RpcQueuedMessageSchema,
@@ -389,18 +389,18 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcGitContext: RpcGitContextSchema,
 	RpcGitContextChangedEvent: RpcGitContextChangedEventSchema,
 
-	// Assistant message family (volt-ai wire projections)
-	RpcTextContent: RpcTextContentSchema,
-	RpcThinkingContent: RpcThinkingContentSchema,
-	RpcToolCall: RpcToolCallSchema,
-	RpcAssistantContent: RpcAssistantContentSchema,
-	RpcUsage: RpcUsageSchema,
-	RpcStopReason: RpcStopReasonSchema,
-	RpcApi: RpcApiSchema,
-	RpcDiagnosticErrorInfo: RpcDiagnosticErrorInfoSchema,
-	RpcAssistantMessageDiagnostic: RpcAssistantMessageDiagnosticSchema,
-	RpcAssistantMessage: RpcAssistantMessageSchema,
-	RpcActiveToolCallState: RpcActiveToolCallStateSchema,
+	// Assistant message family (volt-ai schemas and their wire projections)
+	RpcTextContent: TextContentSchema,
+	RpcThinkingContent: ThinkingContentSchema,
+	RpcToolCall: ToolCallSchema,
+	RpcAssistantContent: AssistantContentSchema,
+	RpcUsage: UsageSchema,
+	RpcStopReason: StopReasonSchema,
+	RpcApi: ApiSchema,
+	RpcDiagnosticErrorInfo: DiagnosticErrorInfoSchema,
+	RpcAssistantMessageDiagnostic: AssistantMessageDiagnosticSchema,
+	RpcAssistantMessage: AssistantMessageSchema,
+	RpcActiveToolCallState: ActiveToolCallStateSchema,
 	RpcModel: RpcModelSchema,
 	RpcSlimAssistantEvent: RpcSlimAssistantEventSchema,
 

@@ -206,7 +206,7 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 						chunk.usageMetadata.totalTokenCount,
 					].some((value) => typeof value === "number")
 				) {
-					usage = {
+					const counts = {
 						availability:
 							hasFinishReason &&
 							typeof chunk.usageMetadata.promptTokenCount === "number" &&
@@ -220,15 +220,8 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 						cacheRead: chunk.usageMetadata.cachedContentTokenCount || 0,
 						cacheWrite: 0,
 						totalTokens: chunk.usageMetadata.totalTokenCount || 0,
-						cost: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							total: 0,
-						},
-					};
-					calculateCost(model, usage);
+					} satisfies Omit<Usage, "cost">;
+					usage = { ...counts, cost: calculateCost(model, counts) };
 					normalizer.push({ type: "meta", patch: { usage } });
 				}
 			}

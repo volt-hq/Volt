@@ -1,3 +1,4 @@
+import { getPriceVersion } from "../models.ts";
 import type { Api, InferenceSpeed, Model, Usage } from "../types.ts";
 
 const OPENAI_BASE_URL = "https://api.openai.com/v1";
@@ -84,22 +85,25 @@ export function getFastInferenceServiceTier(
 	return inferenceSpeed === "fast" ? "priority" : "default";
 }
 
-export function applyOpenAIPriorityPricing(
-	usage: Usage,
+/** Cost of `usage` at the direct OpenAI priority rates, or undefined when the model has none. */
+export function getOpenAIPriorityCost(
+	usage: Pick<Usage, "input" | "output" | "cacheRead" | "cacheWrite">,
 	model: Pick<Model<"openai-responses">, "api" | "provider" | "baseUrl" | "id">,
-): boolean {
-	if (!isDirectOpenAIFastModel(model)) {
-		return false;
-	}
-	const rates = OPENAI_PRIORITY_RATES[model.id];
+): Usage["cost"] | undefined {
+	const rates = isDirectOpenAIFastModel(model) ? OPENAI_PRIORITY_RATES[model.id] : undefined;
 	if (!rates) {
-		return false;
+		return undefined;
 	}
-
-	usage.cost.input = (usage.input * rates.input) / TOKENS_PER_MILLION;
-	usage.cost.output = (usage.output * rates.output) / TOKENS_PER_MILLION;
-	usage.cost.cacheRead = (usage.cacheRead * rates.cacheRead) / TOKENS_PER_MILLION;
-	usage.cost.cacheWrite = (usage.cacheWrite * rates.cacheWrite) / TOKENS_PER_MILLION;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
-	return true;
+	const input = (usage.input * rates.input) / TOKENS_PER_MILLION;
+	const output = (usage.output * rates.output) / TOKENS_PER_MILLION;
+	const cacheRead = (usage.cacheRead * rates.cacheRead) / TOKENS_PER_MILLION;
+	const cacheWrite = (usage.cacheWrite * rates.cacheWrite) / TOKENS_PER_MILLION;
+	return {
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
+		total: input + output + cacheRead + cacheWrite,
+		priceVersion: getPriceVersion(rates),
+	};
 }

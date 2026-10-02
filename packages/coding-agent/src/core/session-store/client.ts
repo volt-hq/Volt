@@ -63,6 +63,7 @@ interface SharedStoreEntry {
 const sharedStores = new Map<string, SharedStoreEntry>();
 const SQLITE_WARNING_FLAG = "--disable-warning=ExperimentalWarning";
 const DAEMON_ONLY_V8_FLAG = "--optimize-for-size";
+const SOURCE_CONDITION = "volt-source";
 
 function workerModuleUrl(): URL {
 	const moduleUrl: string | undefined = import.meta.url;
@@ -71,11 +72,23 @@ function workerModuleUrl(): URL {
 	return new URL(moduleUrl?.endsWith(".ts") ? "./worker.ts" : "./worker.js", moduleUrl);
 }
 
-function workerExecArgv(): string[] {
-	return [
-		...process.execArgv.filter((argument) => argument !== SQLITE_WARNING_FLAG && argument !== DAEMON_ONLY_V8_FLAG),
-		SQLITE_WARNING_FLAG,
-	];
+function hasSourceCondition(argv: readonly string[]): boolean {
+	return argv.some(
+		(argument, index) =>
+			argument === `--conditions=${SOURCE_CONDITION}` ||
+			argument === `-C=${SOURCE_CONDITION}` ||
+			((argument === "--conditions" || argument === "-C") && argv[index + 1] === SOURCE_CONDITION),
+	);
+}
+
+function workerExecArgv(workerUrl: URL): string[] {
+	const inherited = process.execArgv.filter(
+		(argument) => argument !== SQLITE_WARNING_FLAG && argument !== DAEMON_ONLY_V8_FLAG,
+	);
+	// A source worker resolves workspace packages to their sources, which exist even when dist is not built.
+	const sourceCondition =
+		workerUrl.pathname.endsWith(".ts") && !hasSourceCondition(inherited) ? [`--conditions=${SOURCE_CONDITION}`] : [];
+	return [...inherited, ...sourceCondition, SQLITE_WARNING_FLAG];
 }
 
 export class SQLiteSessionStoreClient {
@@ -104,9 +117,10 @@ export class SQLiteSessionStoreClient {
 
 	static async open(sessionDirectory: string): Promise<SQLiteSessionStoreClient> {
 		const resolvedDirectory = resolve(sessionDirectory);
-		const worker = new Worker(workerModuleUrl(), {
+		const workerUrl = workerModuleUrl();
+		const worker = new Worker(workerUrl, {
 			workerData: { sessionDirectory: resolvedDirectory },
-			execArgv: workerExecArgv(),
+			execArgv: workerExecArgv(workerUrl),
 		});
 		const client = new SQLiteSessionStoreClient(resolvedDirectory, worker);
 		try {

@@ -69,10 +69,21 @@ export interface OpenAIResponsesStreamOptions {
 		responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 		requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	) => ResponseCreateParamsStreaming["service_tier"] | undefined;
-	applyServiceTierPricing?: (
+	/** Returns the cost billed at `serviceTier`, given usage priced at the model's standard rates. */
+	priceServiceTier?: (
 		usage: Usage,
 		serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	) => void;
+	) => Usage["cost"];
+}
+
+/** Scales every cost component by a service-tier multiplier, keeping the price version it was derived from. */
+export function scaleCost(cost: Usage["cost"], multiplier: number): Usage["cost"] {
+	if (multiplier === 1) return cost;
+	const input = cost.input * multiplier;
+	const output = cost.output * multiplier;
+	const cacheRead = cost.cacheRead * multiplier;
+	const cacheWrite = cost.cacheWrite * multiplier;
+	return { ...cost, input, output, cacheRead, cacheWrite, total: input + output + cacheRead + cacheWrite };
 }
 
 export interface ConvertResponsesMessagesOptions {
@@ -494,21 +505,30 @@ export async function processResponsesStream<TApi extends Api>(
 					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 				};
 			}
-			calculateCost(model, usage);
 			const requestedServiceTier = options?.serviceTier ?? undefined;
 			const responseServiceTier = response?.service_tier ?? undefined;
 			const effectiveServiceTier = responseServiceTier ?? requestedServiceTier;
-			if (requestedServiceTier !== undefined || responseServiceTier !== undefined) {
-				usage.serviceTier = {
-					...(requestedServiceTier === undefined ? {} : { requested: requestedServiceTier satisfies ServiceTier }),
-					...(responseServiceTier === undefined ? {} : { effective: responseServiceTier satisfies ServiceTier }),
-				};
-			}
-			if (options?.applyServiceTierPricing) {
+			usage = {
+				...usage,
+				...(requestedServiceTier === undefined && responseServiceTier === undefined
+					? {}
+					: {
+							serviceTier: {
+								...(requestedServiceTier === undefined
+									? {}
+									: { requested: requestedServiceTier satisfies ServiceTier }),
+								...(responseServiceTier === undefined
+									? {}
+									: { effective: responseServiceTier satisfies ServiceTier }),
+							},
+						}),
+				cost: calculateCost(model, usage),
+			};
+			if (options?.priceServiceTier) {
 				const serviceTier = options.resolveServiceTier
 					? options.resolveServiceTier(responseServiceTier, requestedServiceTier)
 					: effectiveServiceTier;
-				options.applyServiceTierPricing(usage, serviceTier);
+				usage = { ...usage, cost: options.priceServiceTier(usage, serviceTier) };
 			}
 			normalizer.push({ type: "meta", patch: { usage } });
 		}

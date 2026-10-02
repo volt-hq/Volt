@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { clampThinkingLevel, getModel, getSupportedThinkingLevels } from "../src/models.ts";
-import { applyOpenAIPriorityPricing, supportsFastInference } from "../src/providers/openai-fast-inference.ts";
+import { getOpenAIPriorityCost, supportsFastInference } from "../src/providers/openai-fast-inference.ts";
 import { streamSimple } from "../src/stream.ts";
 import type { SimpleStreamOptions, Usage } from "../src/types.ts";
 
@@ -68,8 +68,7 @@ describe("GPT-6.1 Sol metadata", () => {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
 		expect(supportsFastInference(model)).toBe(true);
-		expect(applyOpenAIPriorityPricing(usage, model)).toBe(true);
-		expect(usage.cost).toMatchObject({
+		expect(getOpenAIPriorityCost(usage, model)).toMatchObject({
 			input: cost.input / 500,
 			output: cost.output / 500,
 			cacheRead: cost.cacheRead / 500,

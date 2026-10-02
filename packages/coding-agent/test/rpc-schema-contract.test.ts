@@ -1,4 +1,10 @@
-import type { ActiveToolCallState, AssistantMessage, AssistantMessageEvent, Usage } from "@hansjm10/volt-ai";
+import {
+	type ActiveToolCallState,
+	ApiSchema,
+	type AssistantMessage,
+	type AssistantMessageEvent,
+	type Usage,
+} from "@hansjm10/volt-ai";
 import type { TSchema } from "typebox";
 import { Compile } from "typebox/compile";
 import { describe, expect, test } from "vitest";
@@ -18,7 +24,6 @@ import {
 	RpcHostActionUpdateSchema,
 	RpcModelsChangedEventSchema,
 } from "../src/core/rpc/schema/events.ts";
-import { RpcApiSchema } from "../src/core/rpc/schema/external.ts";
 import { RpcGitContextSchema } from "../src/core/rpc/schema/git-context.ts";
 import { RpcPlanningStateChangedEventSchema } from "../src/core/rpc/schema/planning.ts";
 import { RpcWorkflowEventSchema } from "../src/core/rpc/schema/projections.ts";
@@ -87,7 +92,7 @@ describe("RPC contract schema integrity", () => {
 	});
 
 	test("open string enums accept novel values", () => {
-		for (const schema of [RpcApiSchema, UiActionCapabilityFeatureSchema]) {
+		for (const schema of [ApiSchema, UiActionCapabilityFeatureSchema]) {
 			expect(check(schema, "some-novel-value.v9")).toBe(true);
 			expect(check(schema, 7)).toBe(false);
 		}

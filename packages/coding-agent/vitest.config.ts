@@ -7,6 +7,7 @@ import { configDefaults, defineConfig } from "vitest/config";
 const testAgentDir = join(tmpdir(), `volt-coding-agent-vitest-${randomUUID()}`);
 const aiSrcIndex = fileURLToPath(new URL("../ai/src/index.ts", import.meta.url));
 const aiSrcOAuth = fileURLToPath(new URL("../ai/src/oauth.ts", import.meta.url));
+const aiSrcSchemas = fileURLToPath(new URL("../ai/src/schemas.ts", import.meta.url));
 const agentSrcIndex = fileURLToPath(new URL("../agent/src/index.ts", import.meta.url));
 const tuiSrcIndex = fileURLToPath(new URL("../tui/src/index.ts", import.meta.url));
 
@@ -38,6 +39,7 @@ export default defineConfig({
 		alias: [
 			{ find: /^@hansjm10\/volt-ai$/, replacement: aiSrcIndex },
 			{ find: /^@hansjm10\/volt-ai\/oauth$/, replacement: aiSrcOAuth },
+			{ find: /^@hansjm10\/volt-ai\/schemas$/, replacement: aiSrcSchemas },
 			{ find: /^@hansjm10\/volt-agent-core$/, replacement: agentSrcIndex },
 			{ find: /^@hansjm10\/volt-tui$/, replacement: tuiSrcIndex },
 		],

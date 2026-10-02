@@ -7,6 +7,7 @@ const jiti = createJiti(import.meta.url, {
 		"@hansjm10/volt-agent-core": fileURLToPath(new URL("packages/agent/src/index.ts", repoRoot)),
 		"@hansjm10/volt-ai": fileURLToPath(new URL("packages/ai/src/index.ts", repoRoot)),
 		"@hansjm10/volt-ai/oauth": fileURLToPath(new URL("packages/ai/src/oauth.ts", repoRoot)),
+		"@hansjm10/volt-ai/schemas": fileURLToPath(new URL("packages/ai/src/schemas.ts", repoRoot)),
 		"@hansjm10/volt-tui": fileURLToPath(new URL("packages/tui/src/index.ts", repoRoot)),
 	},
 });

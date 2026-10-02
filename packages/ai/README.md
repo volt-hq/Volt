@@ -40,6 +40,7 @@ under the MIT License.
   - [Type Safety](#type-safety)
 - [Cross-Provider Handoffs](#cross-provider-handoffs)
 - [Context Serialization](#context-serialization)
+  - [Message and Model Schemas](#message-and-model-schemas)
 - [Browser Usage](#browser-usage)
   - [Browser Compatibility Notes](#browser-compatibility-notes)
   - [Environment Variables](#environment-variables-nodejs-only)
@@ -1117,6 +1118,19 @@ const continuation = await complete(newModel, restored);
 ```
 
 > **Note**: If the context contains images (encoded as base64 as shown in the Image Input section), those will also be serialized.
+
+### Message and Model Schemas
+
+TypeBox schemas for the data model are exported alongside the types: `MessageSchema` (and `UserMessageSchema`, `AssistantMessageSchema`, `ToolResultMessageSchema`), the content block schemas, `UsageSchema`, `StopReasonSchema`, `AssistantMessageDiagnosticSchema`, `ActiveToolCallStateSchema`, and `ModelSchema`. Object schemas reject unknown fields. `AI_SCHEMA_VERSION` changes whenever any schema changes shape. The `@hansjm10/volt-ai/schemas` subpath exports the same schemas and loads only TypeBox, for workers and other contexts that should not load the whole package.
+
+```typescript
+import { MessageSchema } from '@hansjm10/volt-ai';
+import { Value } from 'typebox/value';
+
+const valid = restored.messages.every((message) => Value.Check(MessageSchema, message));
+```
+
+Messages are not modified after they are produced. `usage.cost` is derived from the token counts by `calculateCost(model, usage)`, which returns a new cost and records `priceVersion`, the `getPriceVersion(model.cost)` of the price table it used. A stored cost whose `priceVersion` differs from the model's current one was priced with other rates.
 
 ## Browser Usage
 

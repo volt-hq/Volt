@@ -23,15 +23,7 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 import { clampThinkingLevel } from "../models.ts";
 import { registerSessionResourceCleanup } from "../session-resources.ts";
 import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
-import type {
-	Context,
-	Model,
-	ProviderEnv,
-	SimpleStreamOptions,
-	StreamFunction,
-	StreamOptions,
-	Usage,
-} from "../types.ts";
+import type { Context, Model, ProviderEnv, SimpleStreamOptions, StreamFunction, StreamOptions } from "../types.ts";
 import { combineAbortSignals } from "../utils/abort-signals.ts";
 import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { createAssistantMessageDiagnostic, formatThrownValue } from "../utils/diagnostics.ts";
@@ -46,6 +38,7 @@ import {
 	convertResponsesTools,
 	type ProcessResponsesStreamResult,
 	processResponsesStream,
+	scaleCost,
 } from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
@@ -563,21 +556,6 @@ function getServiceTierCostMultiplier(
 	}
 }
 
-function applyServiceTierPricing(
-	usage: Usage,
-	serviceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
-	model: Pick<Model<"openai-codex-responses">, "id">,
-) {
-	const multiplier = getServiceTierCostMultiplier(model, serviceTier);
-	if (multiplier === 1) return;
-
-	usage.cost.input *= multiplier;
-	usage.cost.output *= multiplier;
-	usage.cost.cacheRead *= multiplier;
-	usage.cost.cacheWrite *= multiplier;
-	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
-}
-
 function resolveCodexServiceTier(
 	responseServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
 	requestServiceTier: ResponseCreateParamsStreaming["service_tier"] | undefined,
@@ -616,7 +594,7 @@ async function processStream(
 	return processResponsesStream(mapCodexEvents(parseSSE(response, options?.signal)), normalizer, model, {
 		serviceTier: options?.serviceTier,
 		resolveServiceTier: resolveCodexServiceTier,
-		applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+		priceServiceTier: (usage, serviceTier) => scaleCost(usage.cost, getServiceTierCostMultiplier(model, serviceTier)),
 	});
 }
 
@@ -1455,7 +1433,8 @@ async function processWebSocketStream(
 			{
 				serviceTier: options?.serviceTier,
 				resolveServiceTier: resolveCodexServiceTier,
-				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
+				priceServiceTier: (usage, serviceTier) =>
+					scaleCost(usage.cost, getServiceTierCostMultiplier(model, serviceTier)),
 			},
 		);
 		if (options?.signal?.aborted) {

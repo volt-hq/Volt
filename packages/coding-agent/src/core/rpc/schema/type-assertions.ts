@@ -1,9 +1,9 @@
 /**
  * Compile-time drift tripwires pinning the contract schemas to the upstream
- * types they project onto the wire (volt-ai, volt-agent-core, and host
- * modules that own the source shapes). No runtime exports — `tsc --noEmit`
- * and every build fail when an upstream shape changes until the contract is
- * updated consciously.
+ * types they project onto the wire (volt-agent-core and host modules that own
+ * the source shapes). volt-ai pins its own schemas, which the contract uses
+ * directly. No runtime exports — `tsc --noEmit` and every build fail when an
+ * upstream shape changes until the contract is updated consciously.
  *
  * Notes:
  * - MutualExtends tolerates *optional* additions: the stream-frame schemas
@@ -14,16 +14,6 @@
  */
 
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type {
-	ActiveToolCallState,
-	AssistantMessage,
-	ImageContent,
-	StopReason,
-	TextContent,
-	ThinkingContent,
-	ToolCall,
-	Usage,
-} from "@hansjm10/volt-ai";
 import type { Static } from "typebox";
 import type { SessionStats } from "../../agent-session.ts";
 import type { BashResult } from "../../bash-executor.ts";
@@ -53,24 +43,13 @@ import type {
 	ProjectedMessageUpdateFrame,
 	SlimAssistantEvent,
 } from "../stream-projection.ts";
-import type { RpcModel } from "../types.ts";
 import type {
 	RpcMessageEndFrameSchema,
 	RpcMessageStartFrameSchema,
 	RpcMessageUpdateFrameSchema,
+	RpcSlimAssistantEventSchema,
 } from "./conversation.ts";
 import type { RpcHostActionRequestSchema, RpcHostActionUpdateSchema } from "./events.ts";
-import type {
-	RpcActiveToolCallStateSchema,
-	RpcAssistantMessageSchema,
-	RpcModelSchema,
-	RpcSlimAssistantEventSchema,
-	RpcStopReasonSchema,
-	RpcTextContentSchema,
-	RpcThinkingContentSchema,
-	RpcToolCallSchema,
-	RpcUsageSchema,
-} from "./external.ts";
 import type { Assert, JsonWireShape, MutualExtends } from "./helpers.ts";
 import type {
 	RpcMcpCapabilitiesResponseSchema,
@@ -85,25 +64,11 @@ import type {
 	RpcMcpToolSummarySchema,
 	RpcSourceInfoSchema,
 } from "./mcp.ts";
-import type { RpcImageContentSchema, RpcThinkingLevelSchema } from "./primitives.ts";
+import type { RpcThinkingLevelSchema } from "./primitives.ts";
 import type { RpcReviewCoverageSchema, RpcReviewFindingSchema } from "./projections.ts";
 import type { RpcBashResultSchema, RpcCompactionResultSchema, RpcSessionStatsSchema } from "./responses.ts";
 import type { RpcPromptCacheStatusSchema } from "./session.ts";
 import type { RpcSubscriptionUsageReportSchema } from "./subscription-usage.ts";
-
-// volt-ai content and message shapes
-type _imageContent = Assert<MutualExtends<Static<typeof RpcImageContentSchema>, ImageContent>>;
-type _textContent = Assert<MutualExtends<Static<typeof RpcTextContentSchema>, TextContent>>;
-type _thinkingContent = Assert<MutualExtends<Static<typeof RpcThinkingContentSchema>, ThinkingContent>>;
-type _toolCall = Assert<MutualExtends<Static<typeof RpcToolCallSchema>, ToolCall>>;
-type _usage = Assert<MutualExtends<Static<typeof RpcUsageSchema>, Usage>>;
-type _stopReason = Assert<MutualExtends<Static<typeof RpcStopReasonSchema>, StopReason>>;
-type _assistantDiagnostics = Assert<
-	MutualExtends<Static<typeof RpcAssistantMessageSchema>["diagnostics"], AssistantMessage["diagnostics"] | undefined>
->;
-type _assistantMessage = Assert<MutualExtends<Static<typeof RpcAssistantMessageSchema>, AssistantMessage>>;
-type _activeToolCallState = Assert<MutualExtends<Static<typeof RpcActiveToolCallStateSchema>, ActiveToolCallState>>;
-type _model = Assert<MutualExtends<Static<typeof RpcModelSchema>, RpcModel>>;
 
 // volt-agent-core
 type _thinkingLevel = Assert<MutualExtends<Static<typeof RpcThinkingLevelSchema>, ThinkingLevel>>;

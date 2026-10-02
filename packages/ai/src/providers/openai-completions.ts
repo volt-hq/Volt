@@ -1073,7 +1073,7 @@ function parseChunkUsage(
 	const input = Math.max(0, promptTokens - cacheReadTokens - cacheWriteTokens);
 	// OpenAI completion_tokens already includes reasoning_tokens.
 	const outputTokens = rawUsage.completion_tokens || 0;
-	const usage: Usage = {
+	const counts = {
 		availability:
 			typeof rawUsage.prompt_tokens === "number" && typeof rawUsage.completion_tokens === "number"
 				? availability
@@ -1083,10 +1083,8 @@ function parseChunkUsage(
 		cacheRead: cacheReadTokens,
 		cacheWrite: cacheWriteTokens,
 		totalTokens: input + outputTokens + cacheReadTokens + cacheWriteTokens,
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	calculateCost(model, usage);
-	return usage;
+	} satisfies Omit<Usage, "cost">;
+	return { ...counts, cost: calculateCost(model, counts) };
 }
 
 function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"] | string): {

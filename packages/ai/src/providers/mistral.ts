@@ -333,7 +333,7 @@ async function consumeChatStream(
 				(value) => typeof value === "number",
 			)
 		) {
-			state.usage = {
+			const counts = {
 				availability:
 					(hasFinishReason || chunk.choices.length === 0 || chunk.choices[0]?.finishReason) &&
 					typeof chunk.usage.promptTokens === "number" &&
@@ -346,9 +346,8 @@ async function consumeChatStream(
 				cacheWrite: 0,
 				totalTokens:
 					chunk.usage.totalTokens || (chunk.usage.promptTokens || 0) + (chunk.usage.completionTokens || 0),
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			};
-			calculateCost(model, state.usage);
+			} satisfies Omit<Usage, "cost">;
+			state.usage = { ...counts, cost: calculateCost(model, counts) };
 			normalizer.push({ type: "meta", patch: { usage: state.usage } });
 		}
 

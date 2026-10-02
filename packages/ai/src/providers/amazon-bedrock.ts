@@ -531,7 +531,7 @@ function parseMetadataUsage(
 		].some((value) => typeof value === "number")
 	)
 		return undefined;
-	const usage: Usage = {
+	const counts = {
 		availability:
 			typeof event.usage.inputTokens === "number" && typeof event.usage.outputTokens === "number"
 				? "complete"
@@ -541,10 +541,8 @@ function parseMetadataUsage(
 		cacheRead: event.usage.cacheReadInputTokens || 0,
 		cacheWrite: event.usage.cacheWriteInputTokens || 0,
 		totalTokens: event.usage.totalTokens || (event.usage.inputTokens || 0) + (event.usage.outputTokens || 0),
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-	};
-	calculateCost(model, usage);
-	return usage;
+	} satisfies Omit<Usage, "cost">;
+	return { ...counts, cost: calculateCost(model, counts) };
 }
 
 function handleContentBlockStop(

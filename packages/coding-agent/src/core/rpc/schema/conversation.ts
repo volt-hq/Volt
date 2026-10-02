@@ -8,13 +8,13 @@
  * where the constructing type does not, so the artifact matches the wire.
  */
 
-import { Type } from "typebox";
 import {
-	RpcActiveToolCallStateSchema,
-	RpcAssistantMessageSchema,
-	RpcSlimAssistantEventSchema,
-	RpcStopReasonSchema,
-} from "./external.ts";
+	ActiveToolCallStateSchema,
+	AssistantMessageSchema,
+	StopReasonSchema,
+	ToolCallSchema,
+} from "@hansjm10/volt-ai/schemas";
+import { Type } from "typebox";
 import { readonlyArrayOf, stringEnum } from "./helpers.ts";
 import { RpcAssistantStreamPositionSchema, RpcConversationBootstrapReasonSchema } from "./primitives.ts";
 import {
@@ -39,8 +39,8 @@ const deliverySchema = Type.Optional(RpcConversationDeliveryPositionSchema);
 export const RpcConversationActiveAssistantSchema = Type.Object(
 	{
 		stream: RpcAssistantStreamPositionSchema,
-		message: RpcAssistantMessageSchema,
-		toolState: Type.Optional(readonlyArrayOf(RpcActiveToolCallStateSchema)),
+		message: AssistantMessageSchema,
+		toolState: Type.Optional(readonlyArrayOf(ActiveToolCallStateSchema)),
 		projection: Type.Optional(RpcProjectionTruncationSchema),
 	},
 	{ additionalProperties: false },
@@ -83,7 +83,7 @@ export const RpcConversationTranscriptItemSchema = Type.Object(
 		output: Type.Optional(Type.String()),
 		outputTruncated: Type.Optional(Type.Boolean()),
 		parts: Type.Optional(Type.Array(RpcConversationAssistantPartSchema)),
-		stopReason: Type.Optional(RpcStopReasonSchema),
+		stopReason: Type.Optional(StopReasonSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -172,11 +172,74 @@ export const RpcConversationBootstrapEventSchema = Type.Object(
 // Assistant stream frames (message_start / message_update / message_end)
 // ============================================================================
 
+const contentIndexSchema = Type.Integer();
+
+/**
+ * The nine incremental assistant events carried by `message_update` frames:
+ * the volt-ai AssistantMessageEvent variants minus their `seq`, `snapshot`,
+ * and `toolState` fields (pinned to SlimAssistantEvent in type-assertions.ts).
+ */
+export const RpcSlimAssistantEventSchema = Type.Union([
+	Type.Object({ type: Type.Literal("text_start"), contentIndex: contentIndexSchema }, { additionalProperties: false }),
+	Type.Object(
+		{ type: Type.Literal("text_delta"), contentIndex: contentIndexSchema, delta: Type.String() },
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{ type: Type.Literal("text_end"), contentIndex: contentIndexSchema, content: Type.String() },
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			type: Type.Literal("thinking_start"),
+			contentIndex: contentIndexSchema,
+			redacted: Type.Optional(Type.Boolean()),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{ type: Type.Literal("thinking_delta"), contentIndex: contentIndexSchema, delta: Type.String() },
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			type: Type.Literal("thinking_end"),
+			contentIndex: contentIndexSchema,
+			content: Type.String(),
+			redacted: Type.Optional(Type.Boolean()),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			type: Type.Literal("toolcall_start"),
+			contentIndex: contentIndexSchema,
+			id: Type.String(),
+			name: Type.String(),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
+			type: Type.Literal("toolcall_delta"),
+			contentIndex: contentIndexSchema,
+			argsTextDelta: Type.String(),
+			id: Type.Optional(Type.String()),
+			name: Type.Optional(Type.String()),
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{ type: Type.Literal("toolcall_end"), contentIndex: contentIndexSchema, toolCall: ToolCallSchema },
+		{ additionalProperties: false },
+	),
+]);
+
 export const RpcMessageStartFrameSchema = Type.Object(
 	{
 		type: Type.Literal("message_start"),
 		stream: RpcAssistantStreamPositionSchema,
-		message: RpcAssistantMessageSchema,
+		message: AssistantMessageSchema,
 		delivery: deliverySchema,
 	},
 	{ additionalProperties: false },
@@ -187,8 +250,8 @@ export const RpcMessageUpdateFrameSchema = Type.Object(
 		type: Type.Literal("message_update"),
 		stream: RpcAssistantStreamPositionSchema,
 		assistantMessageEvent: RpcSlimAssistantEventSchema,
-		message: Type.Optional(RpcAssistantMessageSchema),
-		toolState: Type.Optional(readonlyArrayOf(RpcActiveToolCallStateSchema)),
+		message: Type.Optional(AssistantMessageSchema),
+		toolState: Type.Optional(readonlyArrayOf(ActiveToolCallStateSchema)),
 		delivery: deliverySchema,
 	},
 	{ additionalProperties: false },
@@ -198,7 +261,7 @@ export const RpcMessageEndFrameSchema = Type.Object(
 	{
 		type: Type.Literal("message_end"),
 		stream: RpcAssistantStreamPositionSchema,
-		message: RpcAssistantMessageSchema,
+		message: AssistantMessageSchema,
 		delivery: deliverySchema,
 	},
 	{ additionalProperties: false },

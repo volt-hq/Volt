@@ -300,7 +300,7 @@ describe("provider-specific usage events", () => {
 		mock.chunks = [usageEvent("responses", 3, true)];
 		const normalizer = new AssistantStreamNormalizer();
 		normalizer.push({ type: "start", init });
-		const applyServiceTierPricing = vi.fn();
+		const priceServiceTier = vi.fn((usage: Usage) => usage.cost);
 		await processResponsesStream(
 			chunks() as AsyncIterable<ResponseStreamEvent>,
 			normalizer,
@@ -309,12 +309,12 @@ describe("provider-specific usage events", () => {
 				api: "openai-responses",
 				provider: "openai",
 			},
-			{ serviceTier: "priority", applyServiceTierPricing },
+			{ serviceTier: "priority", priceServiceTier },
 		);
 		normalizer.push({ type: "done", reason: "stop" });
 		const result = await drainEventStream(normalizer.stream);
 		expect(result.usage.serviceTier).toEqual({ requested: "priority" });
-		expect(applyServiceTierPricing).toHaveBeenCalledWith(expect.anything(), "priority");
+		expect(priceServiceTier).toHaveBeenCalledWith(expect.anything(), "priority");
 	});
 
 	it("accepts Completions usage-only terminal chunks", async () => {

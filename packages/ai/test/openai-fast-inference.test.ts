@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getModel } from "../src/models.ts";
+import { getModel, getPriceVersion } from "../src/models.ts";
 import { streamSimpleOpenAICodexResponses } from "../src/providers/openai-codex-responses.ts";
 import { getFastInferenceServiceTier, supportsFastInference } from "../src/providers/openai-fast-inference.ts";
 import { streamSimpleOpenAIResponses } from "../src/providers/openai-responses.ts";
@@ -93,7 +93,14 @@ describe("OpenAI Responses fast inference", () => {
 
 		expect(payload?.service_tier).toBe("priority");
 		expect(result.usage.serviceTier).toEqual({ requested: "priority", effective: "priority" });
-		expect(result.usage.cost).toEqual({ input: 20, output: 100, cacheRead: 2, cacheWrite: 0, total: 122 });
+		expect(result.usage.cost).toEqual({
+			input: 20,
+			output: 100,
+			cacheRead: 2,
+			cacheWrite: 0,
+			total: 122,
+			priceVersion: getPriceVersion({ input: 20, output: 100, cacheRead: 2, cacheWrite: 25 }),
+		});
 	});
 
 	it("sends priority and applies the canonical GPT-5.6 rates", async () => {
@@ -111,7 +118,14 @@ describe("OpenAI Responses fast inference", () => {
 
 		expect(payload?.service_tier).toBe("priority");
 		expect(result.usage.serviceTier).toEqual({ requested: "priority", effective: "priority" });
-		expect(result.usage.cost).toEqual({ input: 10, output: 60, cacheRead: 1, cacheWrite: 0, total: 71 });
+		expect(result.usage.cost).toEqual({
+			input: 10,
+			output: 60,
+			cacheRead: 1,
+			cacheWrite: 0,
+			total: 71,
+			priceVersion: getPriceVersion({ input: 10, output: 60, cacheRead: 1, cacheWrite: 12.5 }),
+		});
 	});
 
 	it("sends priority and applies the published direct OpenAI rates", async () => {
@@ -129,7 +143,14 @@ describe("OpenAI Responses fast inference", () => {
 
 		expect(payload?.service_tier).toBe("priority");
 		expect(result.usage.serviceTier).toEqual({ requested: "priority", effective: "priority" });
-		expect(result.usage.cost).toEqual({ input: 0.45, output: 3.6, cacheRead: 0.045, cacheWrite: 0, total: 4.095 });
+		expect(result.usage.cost).toEqual({
+			input: 0.45,
+			output: 3.6,
+			cacheRead: 0.045,
+			cacheWrite: 0,
+			total: 4.095,
+			priceVersion: getPriceVersion({ input: 0.45, output: 3.6, cacheRead: 0.045, cacheWrite: 0 }),
+		});
 	});
 
 	it("records a priority request downgrade and charges the effective default tier", async () => {
@@ -148,6 +169,7 @@ describe("OpenAI Responses fast inference", () => {
 			cacheRead: model.cost.cacheRead,
 			cacheWrite: 0,
 			total: model.cost.input + model.cost.output + model.cost.cacheRead,
+			priceVersion: getPriceVersion(model.cost),
 		});
 	});
 

@@ -7,6 +7,7 @@
  * clients. `x-volt-expected` carries the human phrasing validation errors use.
  */
 
+import { ImageContentSchema } from "@hansjm10/volt-ai/schemas";
 import { Type } from "typebox";
 import {
 	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
@@ -85,12 +86,16 @@ export const RpcConversationBootstrapReasonSchema = stringEnum([
 	"overflow",
 ]);
 
-/** Wire projection of volt-ai's ImageContent (pinned in type-assertions.ts). */
+/** volt-ai's ImageContent annotated with the conversation-input byte limits. */
 export const RpcImageContentSchema = Type.Object(
 	{
-		type: Type.Literal("image"),
-		data: Type.String({ "x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES }),
-		mimeType: Type.String({ "x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES }),
+		...ImageContentSchema.properties,
+		data: Type.Options(ImageContentSchema.properties.data, {
+			"x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
+		}),
+		mimeType: Type.Options(ImageContentSchema.properties.mimeType, {
+			"x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
+		}),
 	},
 	{ additionalProperties: false },
 );

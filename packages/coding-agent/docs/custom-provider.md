@@ -553,18 +553,21 @@ When identity arrives late, include the newly known `id` / `name` on the next `t
 
 ### Usage and Cost
 
-Keep usage as a small provider-local value, calculate cost, and fold it through a `meta` fragment:
+Keep usage as a small provider-local value and replace it on every update. `calculateCost` derives a new cost from the token counts and the model's price table, records the table's `priceVersion`, and never modifies its input. Fold the result through a `meta` fragment:
 
 ```typescript
-usage = {
-  ...usage,
+const counts = {
   input: response.usage.input_tokens,
   output: response.usage.output_tokens,
   cacheRead: response.usage.cache_read_tokens ?? 0,
   cacheWrite: response.usage.cache_write_tokens ?? 0,
 };
-usage.totalTokens = usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
-calculateCost(model, usage);
+usage = {
+  ...usage,
+  ...counts,
+  totalTokens: counts.input + counts.output + counts.cacheRead + counts.cacheWrite,
+  cost: calculateCost(model, counts),
+};
 normalizer.push({ type: "meta", patch: { usage } });
 ```
 
