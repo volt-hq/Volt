@@ -2,6 +2,7 @@ import * as fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import type { AssistantMessageInit, AssistantStreamFragment } from "../src/stream/fragments.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
+import { createProviderError } from "../src/stream/provider-errors.ts";
 import type { AssistantMessage, AssistantMessageEvent, Usage } from "../src/types.ts";
 import type { AssistantMessageDiagnostic } from "../src/utils/diagnostics.ts";
 import { parseStreamingJson } from "../src/utils/json-parse.ts";
@@ -411,7 +412,7 @@ describe("AssistantStreamNormalizer", () => {
 		expect(error.error).toBe(result);
 		expect(result).toMatchObject({
 			stopReason: "error",
-			errorMessage: "Assistant stream ended without a terminal fragment",
+			error: { kind: "network", retryable: true, message: "Assistant stream ended without a terminal fragment" },
 			content: [{ type: "thinking", thinking: "unfinished", thinkingSignature: "partial-signature" }],
 		});
 	});
@@ -531,7 +532,7 @@ describe("AssistantStreamNormalizer", () => {
 			{
 				type: "error",
 				reason: "aborted",
-				errorMessage: "Request was aborted",
+				error: createProviderError("aborted", "Request was aborted"),
 				diagnostics: [abortDiagnostic],
 				usage: createUsage({ input: 4, output: 2, totalTokens: 6 }),
 			},
@@ -544,7 +545,7 @@ describe("AssistantStreamNormalizer", () => {
 		expect(error.error).toBe(result);
 		expect(result).toMatchObject({
 			stopReason: "aborted",
-			errorMessage: "Request was aborted",
+			error: { kind: "aborted", message: "Request was aborted" },
 			usage: { input: 4, output: 2, totalTokens: 6 },
 			content: [
 				{ type: "thinking", thinking: "partial plan", thinkingSignature: "signature:tail" },
@@ -723,7 +724,7 @@ function buildGeneratedFragmentStream(input: GeneratedFragmentStreamInput): Gene
 		fragments.push({
 			type: "error",
 			reason: "aborted",
-			errorMessage: "generated abort",
+			error: createProviderError("aborted", "generated abort"),
 			diagnostics: [{ type: "generated_abort", timestamp: 3, details: { source: "property" } }],
 		});
 	}
@@ -896,11 +897,11 @@ function expectGeneratedMalformedRecovery(
 		expect(result.stopReason).toBe("error");
 		expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
 	} else if (generated.input.terminal === "error") {
-		expect(result).toMatchObject({ stopReason: "aborted", errorMessage: "generated abort" });
+		expect(result).toMatchObject({ stopReason: "aborted", error: { kind: "aborted", message: "generated abort" } });
 	} else {
 		expect(result).toMatchObject({
 			stopReason: "error",
-			errorMessage: "Assistant stream ended without a terminal fragment",
+			error: { kind: "network", message: "Assistant stream ended without a terminal fragment" },
 		});
 	}
 

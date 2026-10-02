@@ -290,7 +290,10 @@ describe("review completeness recovery", () => {
 				...analysis("report_review_candidates", { ...empty, candidates: [candidate] }),
 				...analysis("report_review_verification", verification(true, [candidate])),
 				...(stage === "verification" ? analysis("report_review_candidates", empty) : []),
-				fauxAssistantMessage("", { stopReason: "error", errorMessage: PRIVATE }),
+				fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "unknown", retryable: false, message: PRIVATE },
+				}),
 				...presentation(false, () => {}),
 				...presentation(true, () => {}),
 			]);
@@ -330,8 +333,14 @@ describe("review completeness recovery", () => {
 		harness.setResponses([
 			...analysis("report_review_candidates", { ...empty, candidates: [localCandidate] }, false),
 			...analysis("report_review_verification", verification(true, [localCandidate]), false),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "Follow-up provider failure" }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "Presentation provider failure" }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: "Follow-up provider failure" },
+			}),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: "Presentation provider failure" },
+			}),
 		]);
 		const result = await run({ onUsage: (value) => usage.push(value) });
 		expect(result.errorMessage).toBeUndefined();
@@ -368,7 +377,10 @@ describe("review completeness recovery", () => {
 			...analysis("report_review_verification", verification(true)),
 			...analysis("report_review_candidates", empty),
 			...analysis("report_review_verification", verification(true)),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: PRIVATE }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: PRIVATE },
+			}),
 		]);
 		const result = await run();
 		expect(result.errorMessage).toBeUndefined();
@@ -385,7 +397,10 @@ describe("review completeness recovery", () => {
 			...analysis("report_review_verification", verification(true)),
 			() => {
 				controller.abort();
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: PRIVATE });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "unknown", retryable: false, message: PRIVATE },
+				});
 			},
 		]);
 		const result = await run({ signal: controller.signal });

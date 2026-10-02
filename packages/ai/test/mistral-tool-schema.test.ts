@@ -56,6 +56,6 @@ describe("Mistral tool schema serialization", () => {
 		expect(nested).toBeTruthy();
 		expect(Object.getOwnPropertySymbols((nested as Record<string, unknown>) ?? {})).toHaveLength(0);
 		expect(response.stopReason).toBe("error");
-		expect(response.errorMessage).not.toContain("Input validation failed");
+		expect(response.error?.message).not.toContain("Input validation failed");
 	});
 });

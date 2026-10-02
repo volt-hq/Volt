@@ -398,7 +398,7 @@ describe("#409 initial review accounting", () => {
 			),
 			fauxAssistantMessage("Follow-up failed", {
 				stopReason: "error",
-				errorMessage: "failed",
+				error: { kind: "unknown", retryable: false, message: "failed" },
 				usage: usage(5, "partial"),
 			}),
 			fauxAssistantMessage(fauxToolCall("review_diff", { path: "file.ts" }), {
@@ -453,7 +453,7 @@ describe("#409 initial review accounting", () => {
 		h.setResponses([
 			fauxAssistantMessage("Interrupted", {
 				stopReason: "error",
-				errorMessage: "WebSocket error",
+				error: { kind: "network", retryable: true, message: "WebSocket error" },
 				usage: usage(5, "partial"),
 			}),
 			candidates(),
@@ -566,7 +566,7 @@ describe("#409 initial review accounting", () => {
 				return fauxAssistantMessage("Provider failure", {
 					stopReason: "error",
 					usage: usage(5, "partial"),
-					errorMessage: "request failed",
+					error: { kind: "unknown", retryable: false, message: "request failed" },
 				});
 			},
 		]);

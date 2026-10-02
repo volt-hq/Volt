@@ -645,7 +645,10 @@ describe("AgentSession background jobs", () => {
 		await harness.session.waitForBackgroundJobs();
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-			fauxAssistantMessage("", { stopReason, errorMessage: "Controlled provider failure" }),
+			fauxAssistantMessage("", {
+				stopReason,
+				error: { kind: "unknown", retryable: false, message: "Controlled provider failure" },
+			}),
 		]);
 		await harness.session.prompt("Read the result");
 		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);

@@ -91,7 +91,10 @@ describe("Codex interrupted tool response recovery", () => {
 
 		const failed = await streamOpenAICodexResponses(model, context, options).result();
 
-		expect(failed).toMatchObject({ stopReason: "error", errorMessage: "WebSocket error" });
+		expect(failed).toMatchObject({
+			stopReason: "error",
+			error: { kind: "network", retryable: true, message: "WebSocket error" },
+		});
 		expect(failed.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: "write" }));
 		expect(failed.diagnostics).toContainEqual(
 			expect.objectContaining({
@@ -138,7 +141,10 @@ describe("Codex interrupted tool response recovery", () => {
 			vi.fn(async () => new Response(body, { status: 200 })),
 		);
 		const result = await streamOpenAICodexResponses(model, context, { apiKey: token, transport: "sse" }).result();
-		expect(result).toMatchObject({ stopReason: "error", errorMessage: "fetch failed" });
+		expect(result).toMatchObject({
+			stopReason: "error",
+			error: { kind: "network", retryable: true, message: "fetch failed" },
+		});
 		expect(result.content).toContainEqual(expect.objectContaining({ type: "toolCall", name: "write" }));
 		expect(result.diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments")).not.toBe(true);
 	});

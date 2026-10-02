@@ -1,5 +1,5 @@
 import { registerApiProvider, unregisterApiProviders } from "../api-registry.ts";
-import { createProviderError } from "../stream/provider-errors.ts";
+import { classifyProviderError, createProviderError } from "../stream/provider-errors.ts";
 import { createProviderStream, type ProviderStreamSink, type StopReasonMapping } from "../stream/runner.ts";
 import type {
 	AssistantMessage,
@@ -11,6 +11,7 @@ import type {
 	PromptCacheRefreshCheck,
 	PromptCacheRefreshFunction,
 	PromptCacheRefreshResult,
+	ProviderError,
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
@@ -82,7 +83,7 @@ export function fauxAssistantMessage(
 	content: string | FauxContentBlock | FauxContentBlock[],
 	options: {
 		stopReason?: AssistantMessage["stopReason"];
-		errorMessage?: string;
+		error?: ProviderError;
 		responseId?: string;
 		timestamp?: number;
 		usage?: Usage;
@@ -96,7 +97,7 @@ export function fauxAssistantMessage(
 		model: DEFAULT_MODEL_ID,
 		usage: options.usage === undefined ? DEFAULT_USAGE : structuredClone(options.usage),
 		stopReason: options.stopReason ?? "stop",
-		...(options.errorMessage === undefined ? {} : { errorMessage: options.errorMessage }),
+		...(options.error === undefined ? {} : { error: options.error }),
 		...(options.responseId === undefined ? {} : { responseId: options.responseId }),
 		timestamp: options.timestamp ?? Date.now(),
 	};
@@ -346,7 +347,7 @@ function createErrorMessage(error: unknown, api: string, provider: string, model
 		model: modelId,
 		usage: DEFAULT_USAGE,
 		stopReason: "error",
-		errorMessage: error instanceof Error ? error.message : String(error),
+		error: classifyProviderError(error),
 		timestamp: Date.now(),
 	};
 }
@@ -465,11 +466,14 @@ async function streamWithDeltas(
 /** A scripted message's own terminal: its stop reason, and its error for error and aborted stops. */
 function mapFauxStopReason(message: AssistantMessage | undefined): StopReasonMapping {
 	if (!message) return { stopReason: "stop" };
-	if (message.stopReason === "error" || message.stopReason === "aborted") {
+	if (message.stopReason === "error") {
 		return {
-			stopReason: message.stopReason,
-			error: createProviderError("unknown", message.errorMessage ?? "An unknown error occurred"),
+			stopReason: "error",
+			error: message.error ?? createProviderError("unknown", "An unknown error occurred"),
 		};
+	}
+	if (message.stopReason === "aborted") {
+		return { stopReason: "aborted", error: message.error ?? createProviderError("aborted", "Request was aborted") };
 	}
 	return { stopReason: message.stopReason };
 }

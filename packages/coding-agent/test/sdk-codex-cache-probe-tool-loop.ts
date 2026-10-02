@@ -398,7 +398,7 @@ async function main(): Promise<void> {
 
 			if (assistant.stopReason === "error" || assistant.stopReason === "aborted") {
 				throw new Error(
-					`Turn ${turn}.${i + 1} ended with stopReason=${assistant.stopReason}: ${assistant.errorMessage || "unknown error"}`,
+					`Turn ${turn}.${i + 1} ended with stopReason=${assistant.stopReason}: ${assistant.error?.message || "unknown error"}`,
 				);
 			}
 			previousCacheRead = assistant.usage.cacheRead;

@@ -162,7 +162,10 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 			harness.setResponses([
 				fauxAssistantMessage("", {
 					stopReason: "error",
-					errorMessage: kind === "compaction" ? "prompt is too long" : "overloaded_error",
+					error:
+						kind === "compaction"
+							? { kind: "context_overflow", retryable: false, message: "prompt is too long" }
+							: { kind: "overloaded", retryable: true, message: "overloaded_error" },
 				}),
 				async () => {
 					continued.resolve();

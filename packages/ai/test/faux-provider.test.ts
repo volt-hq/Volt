@@ -131,7 +131,7 @@ describe("faux provider", () => {
 		expect(first.content).toEqual([{ type: "text", text: "first" }]);
 		expect(second.content).toEqual([{ type: "text", text: "second" }]);
 		expect(exhausted.stopReason).toBe("error");
-		expect(exhausted.errorMessage).toBe("No more faux responses queued");
+		expect(exhausted.error?.message).toBe("No more faux responses queued");
 		expect(registration.getPendingResponseCount()).toBe(0);
 		expect(registration.state.callCount).toBe(3);
 	});
@@ -157,7 +157,7 @@ describe("faux provider", () => {
 		// best-effort consumers) and still leaves turn responses untouched.
 		const exhausted = await completeSimple(registration.getModel(), context);
 		expect(exhausted.stopReason).toBe("error");
-		expect(exhausted.errorMessage).toBe("No more faux responses queued");
+		expect(exhausted.error?.message).toBe("No more faux responses queued");
 		expect(registration.getPendingResponseCount()).toBe(1);
 
 		const turn = await complete(registration.getModel(), context);
@@ -218,7 +218,7 @@ describe("faux provider", () => {
 		const terminal = events[events.length - 1];
 		if (terminal.type === "error") {
 			expect(terminal.error.stopReason).toBe("error");
-			expect(terminal.error.errorMessage).toBe("boom");
+			expect(terminal.error.error?.message).toBe("boom");
 		}
 	});
 
@@ -446,7 +446,7 @@ describe("faux provider", () => {
 			{
 				...fauxAssistantMessage("partial"),
 				stopReason: "error",
-				errorMessage: "upstream failed",
+				error: { kind: "server", retryable: true, message: "upstream failed" },
 			},
 		]);
 
@@ -460,7 +460,7 @@ describe("faux provider", () => {
 		if (terminal.type === "error") {
 			expect(terminal.reason).toBe("error");
 			expect(terminal.error.stopReason).toBe("error");
-			expect(terminal.error.errorMessage).toBe("upstream failed");
+			expect(terminal.error.error?.message).toBe("upstream failed");
 		}
 	});
 
@@ -471,7 +471,7 @@ describe("faux provider", () => {
 			{
 				...fauxAssistantMessage("partial"),
 				stopReason: "aborted",
-				errorMessage: "Request was aborted",
+				error: { kind: "aborted", retryable: false, message: "Request was aborted" },
 			},
 		]);
 
@@ -485,7 +485,7 @@ describe("faux provider", () => {
 		if (terminal.type === "error") {
 			expect(terminal.reason).toBe("aborted");
 			expect(terminal.error.stopReason).toBe("aborted");
-			expect(terminal.error.errorMessage).toBe("Request was aborted");
+			expect(terminal.error.error?.message).toBe("Request was aborted");
 		}
 	});
 

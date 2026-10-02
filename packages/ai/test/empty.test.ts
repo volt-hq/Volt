@@ -41,7 +41,7 @@ async function testEmptyMessage<TApi extends Api>(llm: Model<TApi>, options: Str
 	expect(response.role).toBe("assistant");
 	// Should handle empty string gracefully
 	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
+		expect(response.error?.message).toBeDefined();
 	} else {
 		expect(response.content).toBeDefined();
 	}
@@ -66,7 +66,7 @@ async function testEmptyStringMessage<TApi extends Api>(llm: Model<TApi>, option
 
 	// Should handle empty string gracefully
 	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
+		expect(response.error?.message).toBeDefined();
 	} else {
 		expect(response.content).toBeDefined();
 	}
@@ -91,7 +91,7 @@ async function testWhitespaceOnlyMessage<TApi extends Api>(llm: Model<TApi>, opt
 
 	// Should handle whitespace-only gracefully
 	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
+		expect(response.error?.message).toBeDefined();
 	} else {
 		expect(response.content).toBeDefined();
 	}
@@ -141,7 +141,7 @@ async function testEmptyAssistantMessage<TApi extends Api>(llm: Model<TApi>, opt
 
 	// Should handle empty assistant message in context gracefully
 	if (response.stopReason === "error") {
-		expect(response.errorMessage).toBeDefined();
+		expect(response.error?.message).toBeDefined();
 	} else {
 		expect(response.content).toBeDefined();
 		expect(response.content.length).toBeGreaterThan(0);

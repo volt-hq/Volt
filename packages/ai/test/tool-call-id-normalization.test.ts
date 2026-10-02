@@ -66,7 +66,7 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 				{ apiKey: copilotToken },
 			);
 
-			expect(assistantResponse.stopReason, `Copilot error: ${assistantResponse.errorMessage}`).toBe("toolUse");
+			expect(assistantResponse.stopReason, `Copilot error: ${assistantResponse.error?.message}`).toBe("toolUse");
 
 			const toolCall = assistantResponse.content.find((c) => c.type === "toolCall");
 			expect(toolCall).toBeDefined();
@@ -105,10 +105,10 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 			);
 
 			// Should NOT fail with "call_id too long" error
-			expect(openrouterResponse.stopReason, `OpenRouter error: ${openrouterResponse.errorMessage}`).not.toBe(
+			expect(openrouterResponse.stopReason, `OpenRouter error: ${openrouterResponse.error?.message}`).not.toBe(
 				"error",
 			);
-			expect(openrouterResponse.errorMessage).toBeUndefined();
+			expect(openrouterResponse.error?.message).toBeUndefined();
 		},
 		60000,
 	);
@@ -136,7 +136,7 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 				{ apiKey: copilotToken },
 			);
 
-			expect(assistantResponse.stopReason, `Copilot error: ${assistantResponse.errorMessage}`).toBe("toolUse");
+			expect(assistantResponse.stopReason, `Copilot error: ${assistantResponse.error?.message}`).toBe("toolUse");
 
 			const toolCall = assistantResponse.content.find((c) => c.type === "toolCall");
 			expect(toolCall).toBeDefined();
@@ -168,8 +168,8 @@ describe("Tool Call ID Normalization - Live Handoff", () => {
 			);
 
 			// Should NOT fail with ID validation error
-			expect(codexResponse.stopReason, `Codex error: ${codexResponse.errorMessage}`).not.toBe("error");
-			expect(codexResponse.errorMessage).toBeUndefined();
+			expect(codexResponse.stopReason, `Codex error: ${codexResponse.error?.message}`).not.toBe("error");
+			expect(codexResponse.error?.message).toBeUndefined();
 		},
 		60000,
 	);
@@ -254,10 +254,10 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 			);
 
 			// Should NOT fail with "call_id too long" error
-			expect(response.stopReason, `OpenRouter error: ${response.errorMessage}`).not.toBe("error");
-			if (response.errorMessage) {
-				expect(response.errorMessage).not.toContain("call_id");
-				expect(response.errorMessage).not.toContain("too long");
+			expect(response.stopReason, `OpenRouter error: ${response.error?.message}`).not.toBe("error");
+			if (response.error?.message) {
+				expect(response.error?.message).not.toContain("call_id");
+				expect(response.error?.message).not.toContain("too long");
 			}
 		},
 		30000,
@@ -280,10 +280,10 @@ describe("Tool Call ID Normalization - Prefilled Context", () => {
 			);
 
 			// Should NOT fail with ID validation error
-			expect(response.stopReason, `Codex error: ${response.errorMessage}`).not.toBe("error");
-			if (response.errorMessage) {
-				expect(response.errorMessage).not.toContain("id");
-				expect(response.errorMessage).not.toContain("additional characters");
+			expect(response.stopReason, `Codex error: ${response.error?.message}`).not.toBe("error");
+			if (response.error?.message) {
+				expect(response.error?.message).not.toContain("id");
+				expect(response.error?.message).not.toContain("additional characters");
 			}
 		},
 		30000,

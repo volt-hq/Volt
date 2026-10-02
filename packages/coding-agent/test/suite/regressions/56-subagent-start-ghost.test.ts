@@ -62,7 +62,7 @@ async function createTestContext(options: {
 			child.setResponses([
 				fauxAssistantMessage("", {
 					stopReason: "error",
-					errorMessage: "provider rejected the accepted request",
+					error: { kind: "unknown", retryable: false, message: "provider rejected the accepted request" },
 				}),
 			]);
 		}

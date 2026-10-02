@@ -79,7 +79,7 @@ describe.skipIf(!apiKey)("Xiaomi Token Plan AMS Anthropic empty thinking signatu
 			reasoning: "high",
 		});
 
-		expect(first.stopReason, first.errorMessage).toBe("stop");
+		expect(first.stopReason, first.error?.message).toBe("stop");
 
 		const thinkingBlocks = getThinkingBlocks(first);
 		expect(thinkingBlocks.length).toBeGreaterThan(0);

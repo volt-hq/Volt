@@ -178,7 +178,7 @@ describe.skipIf(!hasBedrockCredentials())("Bedrock Claude max tokens E2E", () =>
 				{ reasoning: "low" },
 			).result();
 
-			expect(response.stopReason, response.errorMessage).not.toBe("error");
+			expect(response.stopReason, response.error?.message).not.toBe("error");
 			expect(response.usage.output).toBeGreaterThan(4096);
 		},
 	);

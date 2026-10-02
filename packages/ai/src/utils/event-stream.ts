@@ -264,7 +264,7 @@ function assistantOverflowEvent(error: EventStreamOverflowError, event: Assistan
 		usage,
 		content,
 		stopReason: "error",
-		errorMessage: error.message,
+		error: Object.freeze({ kind: "stream_limit" as const, retryable: false, message: error.message }),
 		diagnostics,
 	});
 	return Object.freeze({ type: "error", seq: event.seq, reason: "error", error: message });

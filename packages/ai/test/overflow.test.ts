@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { classifyProviderError } from "../src/stream/provider-errors.ts";
 import type { AssistantMessage } from "../src/types.ts";
 import { isContextOverflow } from "../src/utils/overflow.ts";
 
+/** A failed message whose error the shared provider classification derived from this text. */
 function createErrorMessage(errorMessage: string): AssistantMessage {
 	return {
 		role: "assistant",
@@ -24,7 +26,7 @@ function createErrorMessage(errorMessage: string): AssistantMessage {
 			},
 		},
 		stopReason: "error",
-		errorMessage,
+		error: classifyProviderError(new Error(errorMessage)),
 		timestamp: Date.now(),
 	};
 }

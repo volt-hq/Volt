@@ -147,7 +147,7 @@ describe.each(["openai", "mistral", "bedrock"] as const)("%s strict tool complet
 			// Mistral synthesizes a successful terminal; missing call completion still fails closed.
 			expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
 		} else {
-			expect(result.errorMessage).toBe(
+			expect(result.error?.message).toBe(
 				provider === "openai" ? "Stream ended without finish_reason" : "Bedrock stream ended before messageStop",
 			);
 			expect(result.diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments")).not.toBe(true);

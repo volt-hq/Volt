@@ -224,7 +224,7 @@ async function main(): Promise<void> {
 				].join(" | "),
 			);
 			if (message.stopReason === "error" || message.stopReason === "aborted") {
-				throw new Error(message.errorMessage ?? `request failed on turn ${turn}.${requests}`);
+				throw new Error(message.error?.message ?? `request failed on turn ${turn}.${requests}`);
 			}
 			if (toolCalls.length === 0) {
 				finalText = textOf(message);

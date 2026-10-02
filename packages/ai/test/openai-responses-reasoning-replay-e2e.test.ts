@@ -75,8 +75,8 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			});
 
 			// The key assertion: no 400 error from orphaned reasoning item
-			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
-			expect(response.errorMessage).toBeFalsy();
+			expect(response.stopReason, `Error: ${response.error?.message}`).not.toBe("error");
+			expect(response.error?.message).toBeFalsy();
 			// Model should respond (text or tool call)
 			expect(response.content.length).toBeGreaterThan(0);
 		});
@@ -159,8 +159,8 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			});
 
 			// The key assertion: no 400 error from orphaned function_call
-			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
-			expect(response.errorMessage).toBeFalsy();
+			expect(response.stopReason, `Error: ${response.error?.message}`).not.toBe("error");
+			expect(response.error?.message).toBeFalsy();
 			expect(response.content.length).toBeGreaterThan(0);
 
 			// Log what was sent for debugging
@@ -277,8 +277,8 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 			}
 
 			// The key assertion: no 400 error
-			expect(response.stopReason, `Error: ${response.errorMessage}`).not.toBe("error");
-			expect(response.errorMessage).toBeFalsy();
+			expect(response.stopReason, `Error: ${response.error?.message}`).not.toBe("error");
+			expect(response.error?.message).toBeFalsy();
 			expect(response.content.length).toBeGreaterThan(0);
 
 			// Verify the model understood the context

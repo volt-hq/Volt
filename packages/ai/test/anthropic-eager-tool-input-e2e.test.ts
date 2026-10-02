@@ -120,8 +120,8 @@ async function expectToolEnabledRequestAccepted(
 		options,
 	);
 
-	expect(response.errorMessage, response.errorMessage).toBeFalsy();
-	expect(response.stopReason, response.errorMessage).not.toBe("error");
+	expect(response.error?.message, response.error?.message).toBeFalsy();
+	expect(response.stopReason, response.error?.message).not.toBe("error");
 }
 
 describe("Anthropic Messages eager tool input streaming E2E", () => {

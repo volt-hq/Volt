@@ -368,8 +368,8 @@
 				"stopReason": {
 					"$ref": "#/$defs/RpcStopReason"
 				},
-				"errorMessage": {
-					"type": "string"
+				"error": {
+					"$ref": "#/$defs/RpcProviderError"
 				},
 				"timestamp": {
 					"type": "number"
@@ -7175,6 +7175,48 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"RpcProviderError": {
+			"type": "object",
+			"required": [
+				"kind",
+				"retryable",
+				"message"
+			],
+			"properties": {
+				"kind": {
+					"$ref": "#/$defs/RpcProviderErrorKind"
+				},
+				"retryable": {
+					"type": "boolean"
+				},
+				"providerCode": {
+					"type": "string"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"RpcProviderErrorKind": {
+			"type": "string",
+			"enum": [
+				"rate_limit",
+				"overloaded",
+				"server",
+				"network",
+				"timeout",
+				"quota",
+				"auth",
+				"invalid_request",
+				"context_overflow",
+				"refusal",
+				"invalid_tool_call",
+				"stream_limit",
+				"aborted",
+				"unknown"
+			]
 		},
 		"RpcPushPlatform": {
 			"type": "string",

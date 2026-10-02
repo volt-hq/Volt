@@ -121,7 +121,10 @@ describe("stream runner lifecycle and hooks", () => {
 		const { stream } = scriptedStream({ parse: async (sink) => sink.stop("blocked") });
 		const events = await collect(stream(model, { messages: [] }));
 		expect(events.map((event) => event.type)).toEqual(["start", "error"]);
-		expect(events[1]).toMatchObject({ reason: "error", error: { errorMessage: "blocked by policy" } });
+		expect(events[1]).toMatchObject({
+			reason: "error",
+			error: { error: { kind: "refusal", retryable: false, providerCode: "blocked", message: "blocked by policy" } },
+		});
 	});
 
 	it("passes an unreported stop reason to the hook as undefined", async () => {
@@ -189,7 +192,9 @@ describe("stream runner lifecycle and hooks", () => {
 		});
 		const events = await collect(stream(model, { messages: [] }));
 		expect(events.map((event) => event.type)).toEqual(["start", "error"]);
-		expect(events[1]).toMatchObject({ error: { errorMessage: "No API key for provider: test-provider" } });
+		expect(events[1]).toMatchObject({
+			error: { error: { kind: "auth", retryable: false, message: "No API key for provider: test-provider" } },
+		});
 	});
 
 	it("attaches the diagnostics of a typed provider failure", async () => {
@@ -200,7 +205,10 @@ describe("stream runner lifecycle and hooks", () => {
 			},
 		});
 		const result = await stream(model, { messages: [] }).result();
-		expect(result).toMatchObject({ stopReason: "error", errorMessage: "bad arguments" });
+		expect(result).toMatchObject({
+			stopReason: "error",
+			error: { kind: "invalid_tool_call", message: "bad arguments" },
+		});
 		expect(result.diagnostics).toEqual([diagnostic]);
 	});
 
@@ -215,7 +223,7 @@ describe("stream runner lifecycle and hooks", () => {
 		});
 		expect(await stream(model, { messages: [] }).result()).toMatchObject({
 			stopReason: "error",
-			errorMessage: "400 failure",
+			error: { kind: "invalid_request", retryable: false, providerCode: "400", message: "400 failure" },
 		});
 	});
 });
@@ -229,7 +237,7 @@ describe("stream runner abort mapping", () => {
 		expect(events.map((event) => event.type)).toEqual(["start", "error"]);
 		expect(events[1]).toMatchObject({
 			reason: "aborted",
-			error: { stopReason: "aborted", errorMessage: "Request was aborted" },
+			error: { stopReason: "aborted", error: { kind: "aborted", retryable: false, message: "Request was aborted" } },
 		});
 		expect(sent).toHaveLength(0);
 	});
@@ -247,7 +255,7 @@ describe("stream runner abort mapping", () => {
 		const result = await stream(model, { messages: [] }, { signal: controller.signal }).result();
 		expect(result).toMatchObject({
 			stopReason: "aborted",
-			errorMessage: "Request was aborted",
+			error: { kind: "aborted", message: "Request was aborted" },
 			content: [{ type: "text", text: "partial" }],
 		});
 	});
@@ -271,7 +279,7 @@ describe("stream runner abort mapping", () => {
 		const result = stream(model, { messages: [] }, { signal: controller.signal, maxRetries: 1 }).result();
 		await vi.advanceTimersByTimeAsync(0);
 		controller.abort();
-		expect(await result).toMatchObject({ stopReason: "aborted", errorMessage: "Request was aborted" });
+		expect(await result).toMatchObject({ stopReason: "aborted", error: { kind: "aborted" } });
 		expect(sent).toHaveLength(1);
 	});
 });
@@ -281,7 +289,7 @@ describe("stream runner retry policy", () => {
 		const { stream, sent } = scriptedStream({ sends: [httpError(503), "ok"] });
 		expect(await stream(model, { messages: [] }).result()).toMatchObject({
 			stopReason: "error",
-			errorMessage: "503 failure",
+			error: { kind: "overloaded", retryable: true, message: "503 failure" },
 		});
 		expect(sent).toHaveLength(1);
 	});
@@ -303,7 +311,10 @@ describe("stream runner retry policy", () => {
 		const { stream, sent } = scriptedStream({ sends: [httpError(503), httpError(503), "ok"] });
 		const result = stream(model, { messages: [] }, { maxRetries: 1 }).result();
 		await vi.advanceTimersByTimeAsync(1_000);
-		expect(await result).toMatchObject({ stopReason: "error", errorMessage: "503 failure" });
+		expect(await result).toMatchObject({
+			stopReason: "error",
+			error: { kind: "overloaded", message: "503 failure" },
+		});
 		expect(sent).toHaveLength(2);
 	});
 
@@ -352,8 +363,8 @@ describe("stream runner retry policy", () => {
 		const { stream, sent } = scriptedStream({ sends: [httpError(429, { "retry-after": "120" }), "ok"] });
 		const result = await stream(model, { messages: [] }, { maxRetries: 1, maxRetryDelayMs: 60_000 }).result();
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("429 failure");
-		expect(result.errorMessage).toContain("120s retry delay");
+		expect(result.error?.message).toContain("429 failure");
+		expect(result.error?.message).toContain("120s retry delay");
 		expect(sent).toHaveLength(1);
 	});
 
@@ -375,7 +386,10 @@ describe("stream runner retry policy", () => {
 			},
 		});
 		const result = await stream(model, { messages: [] }, { maxRetries: 3 }).result();
-		expect(result).toMatchObject({ stopReason: "error", errorMessage: "connection dropped" });
+		expect(result).toMatchObject({
+			stopReason: "error",
+			error: { kind: "network", retryable: true, message: "connection dropped" },
+		});
 		expect(sent).toHaveLength(1);
 	});
 });

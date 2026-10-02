@@ -1,5 +1,6 @@
 import { clearApiProviders, registerApiProvider } from "../api-registry.ts";
 import { AssistantStreamNormalizer } from "../stream/normalizer.ts";
+import { classifyProviderError } from "../stream/provider-errors.ts";
 import type {
 	Api,
 	AssistantMessageEvent,
@@ -149,11 +150,7 @@ function createLazyLoadErrorStream<TApi extends Api>(model: Model<TApi>, error: 
 		type: "start",
 		init: { api: model.api, provider: model.provider, model: model.id, timestamp: Date.now() },
 	});
-	normalizer.push({
-		type: "error",
-		reason: "error",
-		errorMessage: error instanceof Error ? error.message : String(error),
-	});
+	normalizer.push({ type: "error", reason: "error", error: classifyProviderError(error) });
 	return normalizer.stream;
 }
 

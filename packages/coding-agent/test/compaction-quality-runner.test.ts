@@ -137,7 +137,11 @@ describe("compaction quality runner (offline injected streams only)", () => {
 					? responseStream(
 							fauxAssistantMessage("", {
 								stopReason: "error",
-								errorMessage: "Your input exceeds the context window of this model",
+								error: {
+									kind: "context_overflow",
+									retryable: false,
+									message: "Your input exceeds the context window of this model",
+								},
 							}),
 						)
 					: responseStream();
@@ -159,7 +163,7 @@ describe("compaction quality runner (offline injected streams only)", () => {
 					responseStream(
 						fauxAssistantMessage("PRIVATE_ERROR_CONTENT", {
 							stopReason: "error",
-							errorMessage: "PRIVATE_ACCESS_TOKEN",
+							error: { kind: "unknown", retryable: false, message: "PRIVATE_ACCESS_TOKEN" },
 						}),
 					),
 			});

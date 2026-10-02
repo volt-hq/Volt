@@ -61,7 +61,7 @@ async function runWithoutReasoning<TApi extends Api>(
 	}
 
 	const response = await s.result();
-	expect(response.stopReason, response.errorMessage).toBe("stop");
+	expect(response.stopReason, response.error?.message).toBe("stop");
 
 	const text = response.content
 		.filter((block) => block.type === "text")

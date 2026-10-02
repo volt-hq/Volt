@@ -133,7 +133,7 @@ describe("azure-openai-responses base URL normalization", () => {
 		const model = getModel("azure-openai-responses", "gpt-4o-mini");
 		const result = await streamAzureOpenAIResponses(model, context, { apiKey: "test-api-key" }).result();
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toContain("Invalid Azure OpenAI base URL");
+		expect(result.error?.message).toContain("Invalid Azure OpenAI base URL");
 	});
 
 	it("clamps prompt_cache_key to OpenAI's 64-character limit", async () => {

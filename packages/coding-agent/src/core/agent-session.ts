@@ -51,6 +51,7 @@ import { AgentHarness, AgentHarnessAdmissionGate } from "@hansjm10/volt-agent-co
 import type {
 	Api,
 	AssistantMessage,
+	AssistantMessageDiagnostic,
 	Context,
 	ImageContent,
 	JsonObject,
@@ -196,7 +197,6 @@ import {
 	resolvePromptCacheStatus,
 } from "./prompt-cache-status.ts";
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
-import { isRejectedToolCallResponse, isTransientProviderError } from "./provider-errors.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { RpcGitContext, UiActionStateDescriptor } from "./rpc/types.ts";
 import type {
@@ -279,6 +279,29 @@ export interface ParsedSkillBlock {
 	location: string;
 	content: string;
 	userMessage: string | undefined;
+}
+
+/** Local stream limits and processing failures: a new attempt would repeat them unchanged. */
+const NON_RETRYABLE_STREAM_DIAGNOSTICS: ReadonlySet<string> = new Set([
+	"tool_argument_generation_limit",
+	"assistant_stream_queue_limit",
+	"assistant_stream_processing_error",
+]);
+
+function hasLocalStreamFailure(diagnostics?: readonly AssistantMessageDiagnostic[]): boolean {
+	return diagnostics?.some((diagnostic) => NON_RETRYABLE_STREAM_DIAGNOSTICS.has(diagnostic.type)) === true;
+}
+
+/**
+ * Whether a response failed only because its tool calls were rejected before execution. Unlike a
+ * transient failure, repeating the request would not help; a new attempt must carry the rejection
+ * feedback so the model can correct its arguments.
+ */
+function isRejectedToolCallResponse(diagnostics?: readonly AssistantMessageDiagnostic[]): boolean {
+	return (
+		diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments") === true &&
+		!hasLocalStreamFailure(diagnostics)
+	);
 }
 
 export type CompactionReason = "manual" | "threshold" | "overflow";
@@ -2819,8 +2842,8 @@ export class AgentSession {
 		} else if (handledEvent.type === "tool_execution_end") {
 			this._pendingToolExecutions.delete(handledEvent.toolCallId);
 		} else if (handledEvent.type === "turn_end") {
-			if (handledEvent.message.role === "assistant" && handledEvent.message.errorMessage) {
-				this._runtimeErrorMessage = handledEvent.message.errorMessage;
+			if (handledEvent.message.role === "assistant" && handledEvent.message.error) {
+				this._runtimeErrorMessage = handledEvent.message.error.message;
 			}
 		} else if (handledEvent.type === "agent_end") {
 			this._streamingMessage = undefined;
@@ -5280,7 +5303,7 @@ export class AgentSession {
 		}
 
 		if (msg.stopReason === "error") {
-			this._settleRetry(false, msg.errorMessage);
+			this._settleRetry(false, msg.error?.message);
 		}
 
 		const compacted = await this._checkCompaction(msg);
@@ -8217,19 +8240,14 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Check if an error is retryable: transient provider failures (overloaded, rate limit, server errors)
-	 * or tool calls rejected before execution, which retry with feedback explaining the rejection.
-	 * Context overflow errors are NOT retryable (handled by compaction instead).
+	 * Check if an error is retryable: provider failures classified as retryable (rate limits, overload,
+	 * server, network, and timeout errors) or tool calls rejected before execution, which retry with
+	 * feedback explaining the rejection. Context overflow is never retryable; compaction handles it, and
+	 * a local stream limit or processing failure would repeat unchanged.
 	 */
 	private _isRetryableError(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error" || !message.errorMessage) return false;
-
-		// Context overflow is handled by compaction, not retry
-		const contextWindow = this.model?.contextWindow ?? 0;
-		if (isContextOverflow(message, contextWindow)) return false;
-
-		const err = message.errorMessage;
-		return isRejectedToolCallResponse(message.diagnostics) || isTransientProviderError(err, message.diagnostics);
+		if (message.stopReason !== "error" || !message.error || hasLocalStreamFailure(message.diagnostics)) return false;
+		return message.error.retryable || isRejectedToolCallResponse(message.diagnostics);
 	}
 
 	/**
@@ -8264,7 +8282,7 @@ export class AgentSession {
 				attempt: this._retryAttempt,
 				maxAttempts: settings.maxRetries,
 				delayMs,
-				errorMessage: message.errorMessage || "Unknown error",
+				errorMessage: message.error?.message || "Unknown error",
 			});
 
 			if (this._disposed || abortGeneration !== this._abortGeneration) {

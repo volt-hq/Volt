@@ -35,6 +35,14 @@ const PROVIDER_CODE_KINDS: ReadonlyMap<string, ProviderErrorKind> = new Map([
 	["FreeUsageLimitError", "quota"],
 ]);
 
+/** Request rejections that may still carry a context overflow, so overflow text is checked first. */
+const INVALID_REQUEST_CODES: ReadonlySet<string> = new Set([
+	"invalid_request_error",
+	"not_found_error",
+	"invalid_request",
+	"invalid_value",
+]);
+
 const NETWORK_ERROR_CODES: ReadonlySet<string> = new Set([
 	"ECONNRESET",
 	"ECONNREFUSED",
@@ -139,13 +147,13 @@ export function classifyProviderError(error: unknown, options: { message?: strin
 	const status = readStatus(error);
 	const providerCode = readProviderCode(error);
 	if (status !== undefined) return classifyHttpStatus(status, message, providerCode);
-	const codeOption = providerCode === undefined ? {} : { providerCode };
-	const coded = providerCode === undefined ? undefined : PROVIDER_CODE_KINDS.get(providerCode);
-	if (coded) return createProviderError(coded, message, codeOption);
-	const transport = classifyTransportError(error);
-	if (transport) return createProviderError(transport, message, codeOption);
-	if (isContextOverflowText(message)) return createProviderError("context_overflow", message, codeOption);
-	return createProviderError("unknown", message, codeOption);
+	if (providerCode === undefined || !PROVIDER_CODE_KINDS.has(providerCode)) {
+		const transport = classifyTransportError(error);
+		if (transport) {
+			return createProviderError(transport, message, providerCode === undefined ? {} : { providerCode });
+		}
+	}
+	return classifyProviderCode(providerCode, message);
 }
 
 /** Classify a provider error code or type reported without an HTTP status, such as a mid-stream error event. */
@@ -154,6 +162,9 @@ export function classifyProviderCode(providerCode: string | undefined, message: 
 	const coded = providerCode ? PROVIDER_CODE_KINDS.get(providerCode) : undefined;
 	if (coded) return createProviderError(coded, message, codeOption);
 	if (isContextOverflowText(message)) return createProviderError("context_overflow", message, codeOption);
+	if (providerCode && INVALID_REQUEST_CODES.has(providerCode)) {
+		return createProviderError("invalid_request", message, codeOption);
+	}
 	return createProviderError("unknown", message, codeOption);
 }
 

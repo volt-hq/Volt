@@ -9,6 +9,7 @@ import * as path from "node:path";
 import type { AgentAbortSource, AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import {
 	type AssistantMessage,
+	createProviderError,
 	getProviders,
 	type ImageContent,
 	type Message,
@@ -4503,7 +4504,10 @@ export class InteractiveMode {
 							retryAttempt > 0
 								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 								: "Operation aborted";
-						this.streamingMessage = { ...this.streamingMessage, errorMessage };
+						this.streamingMessage = {
+							...this.streamingMessage,
+							error: createProviderError("aborted", errorMessage),
+						};
 					}
 					if (this.streamingRenderCoalescer) {
 						this.streamingRenderCoalescer.finish(this.streamingMessage);
@@ -4513,7 +4517,7 @@ export class InteractiveMode {
 
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
 						if (!errorMessage) {
-							errorMessage = this.streamingMessage.errorMessage || "Error";
+							errorMessage = this.streamingMessage.error?.message || "Error";
 						}
 						for (const [, component] of this.pendingTools.entries()) {
 							component.updateResult({
@@ -4971,7 +4975,7 @@ export class InteractiveMode {
 										? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 										: "Operation aborted";
 							} else {
-								errorMessage = message.errorMessage || "Error";
+								errorMessage = message.error?.message || "Error";
 							}
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 						} else {

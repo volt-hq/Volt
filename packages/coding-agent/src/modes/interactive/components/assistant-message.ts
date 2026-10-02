@@ -144,8 +144,8 @@ export class AssistantMessageComponent extends Container {
 		if (!hasToolCalls) {
 			if (message.stopReason === "aborted") {
 				const abortMessage =
-					message.errorMessage && message.errorMessage !== "Request was aborted"
-						? message.errorMessage
+					message.error?.message && message.error.message !== "Request was aborted"
+						? message.error.message
 						: "Operation aborted";
 				if (hasVisibleContent) {
 					this.contentContainer.addChild(new Spacer(1));
@@ -154,7 +154,7 @@ export class AssistantMessageComponent extends Container {
 				}
 				this.contentContainer.addChild(new Text(theme.fg("error", `[aborted] ${abortMessage}`), 1, 0));
 			} else if (message.stopReason === "error") {
-				const errorMsg = message.errorMessage || "Unknown error";
+				const errorMsg = message.error?.message || "Unknown error";
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(new Text(theme.fg("error", `[failure] ${errorMsg}`), 1, 0));
 			}

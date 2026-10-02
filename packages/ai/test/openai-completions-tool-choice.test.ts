@@ -479,7 +479,7 @@ describe("openai-completions tool_choice", () => {
 		).result();
 
 		expect(response.stopReason).toBe("error");
-		expect(response.errorMessage).toBe("Provider finish_reason: network_error");
+		expect(response.error?.message).toBe("Provider finish_reason: network_error");
 	});
 
 	it("ignores null stream chunks from openai-compatible providers", async () => {
@@ -518,7 +518,7 @@ describe("openai-completions tool_choice", () => {
 		).result();
 
 		expect(response.stopReason).toBe("stop");
-		expect(response.errorMessage).toBeUndefined();
+		expect(response.error?.message).toBeUndefined();
 		expect(response.responseId).toBe("chatcmpl-test");
 		expect(response.usage.totalTokens).toBe(4);
 		expect(response.content).toEqual([{ type: "text", text: "OK" }]);
@@ -553,7 +553,7 @@ describe("openai-completions tool_choice", () => {
 		).result();
 
 		expect(response.stopReason).toBe("error");
-		expect(response.errorMessage).toBe("Stream ended without finish_reason");
+		expect(response.error?.message).toBe("Stream ended without finish_reason");
 	});
 
 	it("coalesces tool call deltas by stable index when provider mutates ids mid-stream", async () => {

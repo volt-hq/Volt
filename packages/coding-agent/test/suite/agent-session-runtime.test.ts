@@ -341,7 +341,7 @@ describe("AgentSessionRuntime characterization", () => {
 					message: {
 						...event.message,
 						stopReason: "error",
-						errorMessage: "overloaded_error",
+						error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
 					},
 				};
 			});

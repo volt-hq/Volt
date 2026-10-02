@@ -376,7 +376,7 @@ describe("openai-codex streaming", () => {
 		await vi.advanceTimersByTimeAsync(10_000);
 		const result = await observedResultPromise;
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("Codex SSE response headers timed out after 20000ms");
+		expect(result.error?.message).toBe("Codex SSE response headers timed out after 20000ms");
 	});
 
 	it("aborts SSE body reads after response headers arrive", async () => {
@@ -481,7 +481,7 @@ describe("openai-codex streaming", () => {
 
 		const result = await resultStream.result();
 		expect(result.stopReason).toBe("aborted");
-		expect(result.errorMessage).toBe("Request was aborted");
+		expect(result.error?.message).toBe("Request was aborted");
 		expect(events).toContain("text_delta:one");
 		expect(events).not.toContain("text_delta:two");
 		expect(cancelled).toBe(true);
@@ -1606,7 +1606,7 @@ describe("openai-codex streaming", () => {
 
 		const result = await resultPromise;
 		expect(result.stopReason).toBe("error");
-		expect(result.errorMessage).toBe("WebSocket idle timeout after 50ms");
+		expect(result.error?.message).toBe("WebSocket idle timeout after 50ms");
 		expect(fetchMock).not.toHaveBeenCalled();
 	});
 
@@ -1912,5 +1912,43 @@ describe("openai-codex streaming", () => {
 		const result = await resultPromise;
 		expect(result.content.find((content) => content.type === "text")?.text).toBe("Hello");
 		expect(codexRequests).toBe(4);
+	});
+	it("does not retry a ChatGPT usage limit and reports it as quota", async () => {
+		const fetchMock = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({ error: { code: "usage_limit_reached", message: "limit", plan_type: "PLUS" } }),
+					{ status: 429, headers: { "content-type": "application/json", "retry-after": "1" } },
+				),
+		);
+		vi.stubGlobal("fetch", fetchMock);
+		const model: Model<"openai-codex-responses"> = {
+			id: "gpt-5.1-codex",
+			name: "GPT-5.1 Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+		const result = await streamOpenAICodexResponses(
+			model,
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			{ apiKey: mockToken(), transport: "sse", maxRetries: 3 },
+		).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		expect(result).toMatchObject({
+			stopReason: "error",
+			error: {
+				kind: "quota",
+				retryable: false,
+				providerCode: "usage_limit_reached",
+				message: "You have hit your ChatGPT usage limit (plus plan).",
+			},
+		});
 	});
 });

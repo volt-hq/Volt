@@ -316,7 +316,10 @@ describe("regression #199: approved plan finalization", () => {
 					systemPrompt: context.systemPrompt ?? "",
 				});
 				harness.control.queueFollowUp(createUserMessage("queued during final-response retry"));
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded_error" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+				});
 			},
 			async (context) => {
 				requestSnapshots.push({
@@ -403,7 +406,10 @@ describe("regression #199: approved plan finalization", () => {
 					systemPrompt: context.systemPrompt ?? "",
 				});
 				harness.control.queueFollowUp(createUserMessage("queued during final-response compaction"));
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "prompt is too long" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+				});
 			},
 			fauxAssistantMessage("compacted final-response context"),
 			async (context) => {

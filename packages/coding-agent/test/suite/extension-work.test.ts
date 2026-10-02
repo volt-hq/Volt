@@ -484,7 +484,10 @@ describe("managed extension work through AgentSession", () => {
 		harness.setResponses([
 			async () => {
 				await started.promise;
-				return fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" });
+				return fauxAssistantMessage("", {
+					stopReason: "error",
+					error: { kind: "overloaded", retryable: true, message: "overloaded" },
+				});
 			},
 			fauxAssistantMessage("done"),
 		]);

@@ -30,7 +30,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 			}
 
 			const response = await s.result();
-			expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("stop");
+			expect(response.stopReason, `Error: ${response.error?.message}`).toBe("stop");
 			expect(response.content.some((b) => b.type === "text")).toBe(true);
 			expect(hasThinking || response.content.some((b) => b.type === "thinking")).toBe(true);
 		});
@@ -47,7 +47,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 
 			const response = await s.result();
 			expect(response.stopReason).toBe("error");
-			expect(response.errorMessage).toContain("xhigh");
+			expect(response.error?.message).toContain("xhigh");
 		});
 
 		it("should error with openai-completions when using xhigh", async () => {
@@ -65,7 +65,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY)("xhigh reasoning", () => {
 
 			const response = await s.result();
 			expect(response.stopReason).toBe("error");
-			expect(response.errorMessage).toContain("xhigh");
+			expect(response.error?.message).toContain("xhigh");
 		});
 	});
 });

@@ -94,7 +94,7 @@ async function runWithoutReasoning(model: Model<"anthropic-messages">): Promise<
 	}
 
 	const response = await s.result();
-	expect(response.stopReason, response.errorMessage).toBe("stop");
+	expect(response.stopReason, response.error?.message).toBe("stop");
 
 	const text = response.content
 		.filter((block) => block.type === "text")

@@ -62,7 +62,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 		}
 
 		const response = await s.result();
-		expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("toolUse");
+		expect(response.stopReason, `Error: ${response.error?.message}`).toBe("toolUse");
 
 		// The tool call should come back with the ORIGINAL name "todowrite", not "TodoWrite"
 		expect(toolCallName).toBe("todowrite");
@@ -103,7 +103,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 		}
 
 		const response = await s.result();
-		expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("toolUse");
+		expect(response.stopReason, `Error: ${response.error?.message}`).toBe("toolUse");
 
 		// The tool call should come back with the ORIGINAL name "read", not "Read"
 		expect(toolCallName).toBe("read");
@@ -146,7 +146,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 		}
 
 		const response = await s.result();
-		expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("toolUse");
+		expect(response.stopReason, `Error: ${response.error?.message}`).toBe("toolUse");
 
 		// With the BROKEN find -> Glob mapping:
 		// - Sent as "Glob" to Anthropic
@@ -197,7 +197,7 @@ describe.skipIf(!oauthToken)("Anthropic OAuth tool name normalization", () => {
 		}
 
 		const response = await s.result();
-		expect(response.stopReason, `Error: ${response.errorMessage}`).toBe("toolUse");
+		expect(response.stopReason, `Error: ${response.error?.message}`).toBe("toolUse");
 
 		// Custom tool names should pass through unchanged
 		expect(toolCallName).toBe("my_custom_tool");

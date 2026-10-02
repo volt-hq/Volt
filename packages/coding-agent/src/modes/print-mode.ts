@@ -147,7 +147,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			if (lastMessage?.role === "assistant") {
 				const assistantMsg = lastMessage as AssistantMessage;
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
-					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
+					console.error(assistantMsg.error?.message || `Request ${assistantMsg.stopReason}`);
 					exitCode = 1;
 				} else {
 					for (const content of assistantMsg.content) {

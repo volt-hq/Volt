@@ -233,7 +233,11 @@ describe("AgentSession cache-preserving compaction", () => {
 				harness.setResponses([
 					fauxAssistantMessage("", {
 						stopReason: "error",
-						errorMessage: "Your input exceeds the context window of this model",
+						error: {
+							kind: "context_overflow",
+							retryable: false,
+							message: "Your input exceeds the context window of this model",
+						},
 					}),
 				]);
 			}

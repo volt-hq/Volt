@@ -115,7 +115,7 @@ describe.each(["google", "google-vertex"] as const)("%s tool completion", (provi
 			if (finishReason === "MAX_TOKENS") {
 				expect(result.diagnostics).toContainEqual(expect.objectContaining({ type: "invalid_tool_arguments" }));
 			} else {
-				expect(result.errorMessage).toBe(
+				expect(result.error?.message).toBe(
 					finishReason === undefined
 						? `${provider === "google" ? "Google" : "Google Vertex"} stream ended without finishReason`
 						: "An unknown error occurred",
@@ -260,7 +260,10 @@ describe("Google Vertex stream normalization", () => {
 		expect(events.map((event) => event.type)).toEqual(["start", "error"]);
 		expect(events.map((event) => event.seq)).toEqual([0, 1]);
 		expect(events[1]).toMatchObject({ reason: "aborted" });
-		expect(result).toMatchObject({ stopReason: "aborted", errorMessage: "Request was aborted" });
+		expect(result).toMatchObject({
+			stopReason: "aborted",
+			error: { kind: "aborted", retryable: false, message: "Request was aborted" },
+		});
 		expect(Object.isFrozen(events[1])).toBe(true);
 		expect(Object.isFrozen(result)).toBe(true);
 	});

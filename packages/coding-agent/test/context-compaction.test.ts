@@ -3,8 +3,10 @@ import {
 	type AssistantMessage,
 	type Context,
 	createAssistantMessageEventStream,
+	createProviderError,
 	fauxAssistantMessage,
 	type Model,
+	type ProviderError,
 	type SimpleStreamOptions,
 	type Usage,
 } from "@hansjm10/volt-ai";
@@ -49,13 +51,13 @@ function preparation(): CompactionPreparation {
 function streamResponse(
 	text = "## Goal\nPreserve original goal",
 	stopReason: "stop" | "length" | "toolUse" | "error" | "aborted" = "stop",
-	errorMessage?: string,
+	error?: ProviderError,
 	usage?: Partial<Usage>,
 	diagnostics?: AssistantMessage["diagnostics"],
 ) {
 	const stream = createAssistantMessageEventStream();
 	queueMicrotask(() => {
-		const message = fauxAssistantMessage(text, { stopReason, errorMessage });
+		const message = fauxAssistantMessage(text, { stopReason, error });
 		message.usage = { ...message.usage, ...usage };
 		if (diagnostics !== undefined) message.diagnostics = diagnostics;
 		if (stopReason === "error" || stopReason === "aborted")
@@ -209,7 +211,14 @@ describe("cache-preserving compaction", () => {
 					...options((_model, request) => {
 						calls.push(request);
 						return overflow === "provider" && calls.length === 1
-							? streamResponse("", "error", "Your input exceeds the context window of this model")
+							? streamResponse(
+									"",
+									"error",
+									createProviderError(
+										"context_overflow",
+										"Your input exceeds the context window of this model",
+									),
+								)
 							: streamResponse("Older-only checkpoint");
 					}),
 					context: async () => source,
@@ -370,10 +379,14 @@ describe("cache-preserving compaction", () => {
 			options(() => {
 				calls++;
 				if (calls === 1)
-					return streamResponse("", "error", "service unavailable", { input: 10, totalTokens: 10 }, [
-						{ type: "codex_request", timestamp: 1, details: { sseAttempts: 1 } },
-					]);
-				if (calls === 2) throw new Error("service unavailable");
+					return streamResponse(
+						"",
+						"error",
+						createProviderError("overloaded", "service unavailable"),
+						{ input: 10, totalTokens: 10 },
+						[{ type: "codex_request", timestamp: 1, details: { sseAttempts: 1 } }],
+					);
+				if (calls === 2) throw Object.assign(new Error("service unavailable"), { status: 503 });
 				return streamResponse(
 					"retry checkpoint",
 					"stop",
@@ -432,7 +445,7 @@ describe("cache-preserving compaction", () => {
 				return streamResponse(
 					calls === 1 ? "" : `checkpoint ${calls}`,
 					calls === 1 ? "error" : "stop",
-					calls === 1 ? "service unavailable" : undefined,
+					calls === 1 ? createProviderError("overloaded", "service unavailable") : undefined,
 					{ input: calls * 10, cacheRead: calls * 100, totalTokens: calls * 110 },
 					[{ type: "codex_request", timestamp: calls, details: { sha256: String(calls).repeat(64) } }],
 				);
@@ -511,7 +524,11 @@ describe("cache-preserving compaction", () => {
 		const opts = options((_model, request) => {
 			calls.push(request);
 			if (overflow === "provider" && calls.length === 1)
-				return streamResponse("", "error", "Your input exceeds the context window of this model");
+				return streamResponse(
+					"",
+					"error",
+					createProviderError("context_overflow", "Your input exceeds the context window of this model"),
+				);
 			return streamResponse();
 		});
 		const result = await compactContext(
@@ -602,14 +619,15 @@ describe("cache-preserving compaction", () => {
 		expect(stream).toHaveBeenCalledTimes(1);
 	});
 
-	it.each(["insufficient_quota", "invalid api key", "invalid request"])(
-		"does not retry or change strategies after %s",
-		async (message) => {
-			const stream = vi.fn(() => streamResponse("", "error", message));
-			await expect(compactContext(preparation(), model, options(stream))).rejects.toThrow(message);
-			expect(stream).toHaveBeenCalledTimes(1);
-		},
-	);
+	it.each([
+		["insufficient_quota", "quota"],
+		["invalid api key", "auth"],
+		["invalid request", "invalid_request"],
+	] as const)("does not retry or change strategies after %s", async (message, kind) => {
+		const stream = vi.fn(() => streamResponse("", "error", createProviderError(kind, message)));
+		await expect(compactContext(preparation(), model, options(stream))).rejects.toThrow(message);
+		expect(stream).toHaveBeenCalledTimes(1);
+	});
 
 	it("bounds transient retries at two while retaining the same native request", async () => {
 		const calls: Context[] = [];
@@ -619,7 +637,7 @@ describe("cache-preserving compaction", () => {
 				model,
 				options((_model, request) => {
 					calls.push(request);
-					return streamResponse("", "error", "service unavailable");
+					return streamResponse("", "error", createProviderError("overloaded", "service unavailable"));
 				}),
 			),
 		).rejects.toThrow("failed after 3 attempts");
@@ -771,7 +789,10 @@ describe("cache-preserving compaction", () => {
 				return calls === 1
 					? delayedResponse(
 							9 * MINUTE,
-							fauxAssistantMessage("", { stopReason: "error", errorMessage: "service unavailable" }),
+							fauxAssistantMessage("", {
+								stopReason: "error",
+								error: { kind: "overloaded", retryable: true, message: "service unavailable" },
+							}),
 						)
 					: delayedResponse(9 * MINUTE, fauxAssistantMessage("## Goal\nSlow checkpoint"), 7 * MINUTE);
 			}),
@@ -822,7 +843,10 @@ describe("cache-preserving compaction", () => {
 					return delayedResponse(
 						9 * MINUTE,
 						calls === 1
-							? fauxAssistantMessage("", { stopReason: "error", errorMessage: "service unavailable" })
+							? fauxAssistantMessage("", {
+									stopReason: "error",
+									error: { kind: "overloaded", retryable: true, message: "service unavailable" },
+								})
 							: fauxAssistantMessage(`checkpoint ${calls}`),
 					);
 				}),
@@ -867,7 +891,7 @@ describe("cache-preserving compaction", () => {
 		});
 		await expect(
 			compactContext(preparation(), model, {
-				...options(() => streamResponse("", "error", "invalid request")),
+				...options(() => streamResponse("", "error", createProviderError("invalid_request", "invalid request"))),
 				onFailure,
 			}),
 		).rejects.toThrow("invalid request");
@@ -882,7 +906,7 @@ describe("cache-preserving compaction", () => {
 	it("cancels a request and backoff without another attempt", async () => {
 		vi.useFakeTimers();
 		const controller = new AbortController();
-		const stream = vi.fn(() => streamResponse("", "error", "service unavailable"));
+		const stream = vi.fn(() => streamResponse("", "error", createProviderError("overloaded", "service unavailable")));
 		const promise = compactContext(preparation(), model, {
 			...options(stream, controller.signal),
 			retry: { ...retry, baseDelayMs: 10_000 },

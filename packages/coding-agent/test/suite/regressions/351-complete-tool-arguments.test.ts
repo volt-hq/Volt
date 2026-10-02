@@ -55,7 +55,7 @@ describe("issue #351 complete tool arguments", () => {
 				const result = await normalizer.stream.result();
 				// A provider may attach a transient-looking transport message as well.
 				// The diagnostic must select an immediate feedback retry regardless of that text.
-				return { ...result, errorMessage: "HTTP status 503: connection timeout" };
+				return { ...result, error: { ...result.error!, message: "HTTP status 503: connection timeout" } };
 			},
 			(context) => {
 				retryContext = context;

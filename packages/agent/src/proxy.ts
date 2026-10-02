@@ -10,7 +10,12 @@ import {
 	type AssistantStreamFragment,
 	AssistantStreamNormalizer,
 	type Context,
+	classifyHttpStatus,
+	classifyProviderError,
+	createProviderError,
 	type Model,
+	type ProviderError,
+	ProviderStreamError,
 	type SimpleStreamOptions,
 	type StopReason,
 } from "@hansjm10/volt-ai";
@@ -35,7 +40,7 @@ export type ProxyAssistantMessageEvent =
 	| {
 			type: "error";
 			reason: Extract<StopReason, "aborted" | "error">;
-			errorMessage?: string;
+			error?: ProviderError;
 			usage: AssistantMessage["usage"];
 	  };
 
@@ -124,7 +129,10 @@ export function streamProxy<TApi extends Api>(
 				} catch {
 					// Preserve the status-based message when the response is not JSON.
 				}
-				throw new Error(errorMessage);
+				const failure = classifyHttpStatus(response.status, errorMessage);
+				throw new ProviderStreamError(failure.kind, errorMessage, {
+					...(failure.providerCode === undefined ? {} : { providerCode: failure.providerCode }),
+				});
 			}
 
 			if (!response.body) {
@@ -167,10 +175,13 @@ export function streamProxy<TApi extends Api>(
 			if (!started) {
 				normalizer.push(createStartFragment(model));
 			}
+			const aborted = options.signal?.aborted === true;
 			normalizer.push({
 				type: "error",
-				reason: options.signal?.aborted ? "aborted" : "error",
-				errorMessage: error instanceof Error ? error.message : String(error),
+				reason: aborted ? "aborted" : "error",
+				error: aborted
+					? createProviderError("aborted", error instanceof Error ? error.message : String(error))
+					: classifyProviderError(error),
 			});
 		} finally {
 			options.signal?.removeEventListener("abort", abortHandler);
@@ -236,7 +247,7 @@ function processProxyEvent<TApi extends Api>(
 			return {
 				type: "error",
 				reason: proxyEvent.reason,
-				errorMessage: proxyEvent.errorMessage ?? "Proxy stream failed",
+				error: proxyEvent.error ?? createProviderError("unknown", "Proxy stream failed"),
 				usage: proxyEvent.usage,
 			};
 		default: {

@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
+import { ProviderErrorSchema } from "@hansjm10/volt-ai/schemas";
 import { Compile } from "typebox/compile";
 import {
 	ConversationProjectionLimitError,
@@ -58,6 +59,7 @@ const CONVERSATION_PROJECTION_MAX_REBIND_CONTROLS = 128;
 const CONVERSATION_PROJECTION_MAX_REBIND_CONTROL_BYTES = 512 * 1024;
 
 const backgroundJobsChangedValidator = Compile(RpcBackgroundJobsChangedEventSchema);
+const providerErrorValidator = Compile(ProviderErrorSchema);
 
 type ActiveAssistantSourceEvent = object;
 
@@ -518,7 +520,7 @@ function assertCanonicalSessionMessage(message: Record<string, unknown>): void {
 				!ASSISTANT_STOP_REASONS.has(message.stopReason) ||
 				!isOptionalString(message.responseModel) ||
 				!isOptionalString(message.responseId) ||
-				!isOptionalString(message.errorMessage) ||
+				(message.error !== undefined && !providerErrorValidator.Check(message.error)) ||
 				(message.diagnostics !== undefined && !isContentArray(message.diagnostics, isAssistantDiagnostic))
 			) {
 				throw new Error("Conversation transcript assistant-message commit is malformed");

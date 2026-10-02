@@ -252,7 +252,10 @@ describe("AgentHarness continuation state", () => {
 		const canonicalUser = { role: "user", content: "retry this", timestamp: Date.now() } as const;
 		await session.appendMessage(canonicalUser);
 		await session.appendMessage(
-			fauxAssistantMessage("canonical error", { stopReason: "error", errorMessage: "provider failed" }),
+			fauxAssistantMessage("canonical error", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: "provider failed" },
+			}),
 		);
 		const requestTexts: string[][] = [];
 		registration.setResponses([
@@ -388,7 +391,7 @@ describe("AgentHarness continuation state", () => {
 				});
 				return fauxAssistantMessage("failed final", {
 					stopReason: "error",
-					errorMessage: "temporary provider failure",
+					error: { kind: "server", retryable: true, message: "temporary provider failure" },
 				});
 			},
 			(context) => {

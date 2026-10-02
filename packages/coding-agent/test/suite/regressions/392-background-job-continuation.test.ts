@@ -533,7 +533,12 @@ describe("#392 background outcome continuation", () => {
 	it("does not repeatedly wake when the provider fails", async () => {
 		const { harness, workers } = await setup();
 		await launch(harness);
-		harness.setResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "Provider unavailable" })]);
+		harness.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: "Provider unavailable" },
+			}),
+		]);
 		workers.get("work")!.resolve();
 		await vi.waitFor(() => expect(harness.faux.state.callCount).toBe(3));
 		await harness.session.waitForIdle();

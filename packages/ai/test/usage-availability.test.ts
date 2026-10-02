@@ -9,6 +9,7 @@ import { streamGoogleVertex } from "../src/providers/google-vertex.ts";
 import { streamMistral } from "../src/providers/mistral.ts";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
+import { createProviderError } from "../src/stream/provider-errors.ts";
 import { stream } from "../src/stream.ts";
 import type { AssistantMessageEvent, Context, Usage } from "../src/types.ts";
 import { drainEventStream } from "../src/utils/event-stream.ts";
@@ -229,7 +230,7 @@ describe.each<Provider>(["openai", "mistral", "google", "vertex", "anthropic", "
 				mock.chunks = [usageEvent(provider, reported, true), new Error("interrupted after usage")];
 				const failed = await drainEventStream(run(provider));
 				expect(failed.stopReason).toBe("error");
-				expect(failed.errorMessage).toContain("interrupted after usage");
+				expect(failed.error?.message).toContain("interrupted after usage");
 				expect(failed.usage).toStrictEqual(result.usage);
 			}
 		});
@@ -396,7 +397,7 @@ describe("normalizer usage evidence", () => {
 		normalizer.push({ type: "start", init });
 		const usage = { ...zero, input: 12, totalTokens: 12 };
 		if (reason === "stop") normalizer.push({ type: "done", reason, usage });
-		else normalizer.push({ type: "error", reason, errorMessage: "failure", usage });
+		else normalizer.push({ type: "error", reason, error: createProviderError("unknown", "failure"), usage });
 		const result = await drainEventStream(normalizer.stream);
 		expect(result.usage).not.toHaveProperty("availability");
 		expect(result.usage).toStrictEqual(usage);
@@ -432,7 +433,7 @@ describe("normalizer usage evidence", () => {
 			normalizer.push({ type: "text_delta", contentIndex: 0, delta: "ok" });
 		}
 		normalizer.push({ type: "meta", patch: { usage: { cost: { total: 0.1 } } } });
-		normalizer.push({ type: "error", reason: "aborted", errorMessage: "aborted" });
+		normalizer.push({ type: "error", reason: "aborted", error: createProviderError("aborted", "aborted") });
 		const events: AssistantMessageEvent[] = [];
 		for await (const event of normalizer.stream) events.push(event);
 		expect(events.filter((event) => event.type === "text_delta").map((event) => event.snapshot.usage.input)).toEqual([
@@ -486,7 +487,11 @@ describe("faux usage fixtures", () => {
 			serviceTier: { requested: "priority", effective: "default" },
 		};
 		registration.setResponses([
-			fauxAssistantMessage("partial", { usage, stopReason: "error", errorMessage: "failed" }),
+			fauxAssistantMessage("partial", {
+				usage,
+				stopReason: "error",
+				error: createProviderError("server", "failed"),
+			}),
 		]);
 		expect((await drainEventStream(stream(registration.getModel(), context))).usage).toEqual(usage);
 	});

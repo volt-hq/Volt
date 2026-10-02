@@ -39,7 +39,7 @@ function createAbortedAssistantMessage(): AssistantMessage {
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		},
 		stopReason: "aborted",
-		errorMessage: "Request was aborted",
+		error: { kind: "aborted", retryable: false, message: "Request was aborted" },
 		timestamp: 0,
 	};
 	Object.freeze(toolCall.arguments);
@@ -75,9 +75,11 @@ describe("InteractiveMode aborted stream snapshots (#105)", () => {
 		await handleEvent.call(context, { type: "message_end", message });
 
 		const displayedMessage = finish.mock.calls[0]?.[0];
-		expect(displayedMessage).toEqual(expect.objectContaining({ errorMessage: "Aborted after 2 retry attempts" }));
+		expect(displayedMessage).toEqual(
+			expect.objectContaining({ error: expect.objectContaining({ message: "Aborted after 2 retry attempts" }) }),
+		);
 		expect(displayedMessage).not.toBe(message);
-		expect(message.errorMessage).toBe("Request was aborted");
+		expect(message.error?.message).toBe("Request was aborted");
 		expect(updateResult).toHaveBeenCalledWith({
 			content: [{ type: "text", text: "Aborted after 2 retry attempts" }],
 			isError: true,

@@ -56,8 +56,8 @@ describe("issue #350 bounded tool argument generation", () => {
 			}
 			const result = await normalizer.stream.result();
 			expect(normalizer.signal.aborted).toBe(true);
-			// Classification must rely on the typed diagnostic, including provider-looking text.
-			return { ...result, errorMessage: "HTTP status 503: connection timeout" };
+			// Classification must rely on the typed error, not provider-looking text.
+			return { ...result, error: { ...result.error!, message: "HTTP status 503: connection timeout" } };
 		};
 	}
 
@@ -104,7 +104,10 @@ describe("issue #350 bounded tool argument generation", () => {
 	it("continues to retry ordinary transient outages", async () => {
 		const { harness, execute } = await setup();
 		harness.setResponses([
-			fauxAssistantMessage([], { stopReason: "error", errorMessage: "HTTP status 503: service unavailable" }),
+			fauxAssistantMessage([], {
+				stopReason: "error",
+				error: { kind: "overloaded", retryable: true, message: "HTTP status 503: service unavailable" },
+			}),
 			fauxAssistantMessage("recovered"),
 		]);
 		await harness.session.prompt("Continue");

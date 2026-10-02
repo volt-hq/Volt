@@ -116,8 +116,18 @@ interface AssistantMessage {
   model: string;
   usage: Usage;
   stopReason: "stop" | "length" | "toolUse" | "error" | "aborted";
-  errorMessage?: string;
+  error?: ProviderError; // set when stopReason is "error" or "aborted"
   timestamp: number;
+}
+
+interface ProviderError {
+  kind:
+    | "rate_limit" | "overloaded" | "server" | "network" | "timeout" // transient
+    | "quota" | "auth" | "invalid_request" | "context_overflow" | "refusal"
+    | "invalid_tool_call" | "stream_limit" | "aborted" | "unknown";
+  retryable: boolean;     // repeating the identical request may succeed
+  providerCode?: string;  // provider error code or type, or the HTTP status
+  message: string;
 }
 
 interface ToolResultMessage {

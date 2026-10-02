@@ -64,10 +64,10 @@ describe.skipIf(!process.env.OPENROUTER_API_KEY)("OpenRouter cache_write repro E
 			};
 
 			const first = await completeSimple(model, context, options);
-			expect(first.stopReason, first.errorMessage).toBe("stop");
+			expect(first.stopReason, first.error?.message).toBe("stop");
 
 			const second = await completeSimple(model, context, options);
-			expect(second.stopReason, second.errorMessage).toBe("stop");
+			expect(second.stopReason, second.error?.message).toBe("stop");
 
 			// Regression expectation: cache_write_tokens from provider usage must be preserved.
 			// With the cache_control marker above, at least one of the two calls should create cache.

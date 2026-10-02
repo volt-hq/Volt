@@ -1405,7 +1405,7 @@ async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Prom
 			if (options.signal?.aborted) throw new Error("Review aborted");
 			const lastAssistant = [...session.messages].reverse().find((message) => message.role === "assistant");
 			if (lastAssistant?.role === "assistant" && lastAssistant.stopReason === "error") {
-				throw new ReviewPassError(options.name, "request", lastAssistant.errorMessage);
+				throw new ReviewPassError(options.name, "request", lastAssistant.error?.message);
 			}
 			const report = options.collector.getReport();
 			const errors = await options.repair(report);

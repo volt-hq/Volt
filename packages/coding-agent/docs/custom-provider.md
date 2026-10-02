@@ -387,72 +387,81 @@ For providers with non-standard APIs, implement `streamSimple`. Study the existi
 
 ### Stream Pattern
 
-Custom providers emit lightweight fragments into `AssistantStreamNormalizer`. The normalizer is the only component that builds an `AssistantMessage`; it also produces immutable, sequenced public events and guarantees a terminal error if a fragment source ends unexpectedly.
+Custom providers implement only request building and fragment parsing. Pass a `StreamProvider` definition to `createProviderStream`; the shared runner owns the event stream and `AssistantStreamNormalizer` (the only component that builds an `AssistantMessage`), the `onPayload` and `onResponse` hooks, abort mapping, the retry policy, and the terminal `done` or `error` event.
 
 ```typescript
 import {
-  type AssistantMessageEventStream,
-  AssistantStreamNormalizer,
-  type Context,
-  type Model,
+  type Api,
   type SimpleStreamOptions,
   type Usage,
   calculateCost,
+  createProviderError,
+  createProviderStream,
 } from "@hansjm10/volt-ai";
 
-function streamMyProvider(
-  model: Model<any>,
-  context: Context,
-  options?: SimpleStreamOptions
-): AssistantMessageEventStream {
-  const normalizer = new AssistantStreamNormalizer();
-  normalizer.push({
-    type: "start",
-    init: {
-      api: model.api,
-      provider: model.provider,
-      model: model.id,
-      timestamp: Date.now(),
-    },
-  });
+interface MyEvent { type: string; text?: string; finish?: string; usage?: { input: number; output: number } }
 
-  (async () => {
-    let usage: Usage = {
-      input: 0,
-      output: 0,
-      cacheRead: 0,
-      cacheWrite: 0,
-      totalTokens: 0,
-      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+const streamMyProvider = createProviderStream<
+  Api,
+  SimpleStreamOptions,
+  MyRequestBody,                 // wire payload
+  AsyncIterable<MyEvent>,        // accepted response body
+  string,                        // raw stop reason
+  { input: number; output: number } // raw usage
+>({
+  buildRequest({ model, context, options }) {
+    const payload = toMyRequestBody(model, context, options);
+    return {
+      payload,
+      // One attempt. Throw on a rejected request; the runner retries retryable failures.
+      async send(body, { signal }) {
+        const response = await fetch(`${model.baseUrl}/v1/stream`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${options.apiKey}` },
+          body: JSON.stringify(body),
+          signal,
+        });
+        if (!response.ok) {
+          // Status and headers drive the typed error and `retry-after` handling.
+          throw Object.assign(new Error(await response.text()), { status: response.status, headers: response.headers });
+        }
+        return { response: { status: response.status, headers: {} }, body: parseMyEvents(response) };
+      },
     };
-    let stopReason: "stop" | "length" | "toolUse" = "stop";
+  },
 
-    try {
-      // Make API request and process response...
-      // Push text/thinking/tool-call fragments as they arrive.
-
-      normalizer.push({ type: "done", reason: stopReason, usage });
-    } catch (error) {
-      normalizer.push({
-        type: "error",
-        reason: options?.signal?.aborted ? "aborted" : "error",
-        errorMessage: error instanceof Error ? error.message : String(error),
-        usage,
-      });
-    } finally {
-      normalizer.end();
+  async parse(events, sink) {
+    for await (const event of events) {
+      if (event.text) {
+        // Push text/thinking/tool-call fragments as they arrive (see below).
+      }
+      if (event.usage) sink.usage(event.usage);
+      if (event.finish) sink.stop(event.finish);
     }
-  })();
+  },
 
-  return normalizer.stream;
-}
+  mapStopReason: (finish) =>
+    finish === "stop" || finish === undefined
+      ? { stopReason: "stop" }
+      : finish === "length"
+        ? { stopReason: "length" }
+        : { stopReason: "error", error: createProviderError("refusal", `Provider finish reason: ${finish}`) },
+
+  mapUsage: (counts, { model }): Usage => ({
+    ...counts,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: counts.input + counts.output,
+    cost: calculateCost(model, { ...counts, cacheRead: 0, cacheWrite: 0 }),
+  }),
+});
 ```
 
-`normalizer.end()` is deliberately called in `finally`. It is a no-op after `done` or `error`; if neither terminal fragment was emitted, it synthesizes an error so callers do not hang waiting for `stream.result()`.
+The runner starts the message on the first fragment, maps any failure under an aborted signal to `stopReason: "aborted"`, and turns every other failure into a typed `error` on the assistant message: `{ kind, retryable, providerCode?, message }`. Failures carrying an HTTP `status` (and an optional provider `code` or `type`) are classified by `classifyProviderError`; supply `mapError` for provider-specific failures, or throw `new ProviderStreamError(kind, message)` where the provider already knows the classification. Only a failed `send` with a retryable error retries, up to `maxRetries`.
 
 ### Payload delivery evidence
 
-Call `options.onPayload(payload, model, metadata)` after serialization and before sending a request. `ProviderPayloadMetadata.toolResultMessageIndices` contains the zero-based indices of original `context.messages` tool results represented in that payload. Record these indices when emitting each tool result, after replay filtering. Preserve the source index through tool-call ID normalization and grouped result messages. Do not include omitted messages or synthesized missing-result placeholders.
+Return the serialized payload from `buildRequest` together with its `metadata`; the runner calls `options.onPayload(payload, model, metadata)` once before the first attempt. `ProviderPayloadMetadata.toolResultMessageIndices` contains the zero-based indices of original `context.messages` tool results represented in that payload. Record these indices when emitting each tool result, after replay filtering. Preserve the source index through tool-call ID normalization and grouped result messages. Do not include omitted messages or synthesized missing-result placeholders.
 
 The metadata is host-only and must not enter the wire payload. It describes the payload before the callback runs, not a replacement returned by the callback. Do not infer it from tool-call IDs or scan output text for matches. Providers that cannot establish this mapping must omit the metadata rather than claim delivery.
 
@@ -460,13 +469,11 @@ Volt uses this evidence to clear background-job notices only after an unchanged 
 
 ### Fragment Types
 
-Push fragments via `normalizer.push()` in this order:
+Push fragments via `sink.push()` in `parse`:
 
-1. `{ type: "start", init }` - Identifies the API, provider, model, and timestamp. Emit it exactly once.
+1. Optional `{ type: "meta", patch }` fragments - Fold response ID/model or diagnostics into subsequent snapshots. Report usage with `sink.usage()` instead.
 
-2. Optional `{ type: "meta", patch }` fragments - Fold response ID/model, usage, or diagnostics into subsequent snapshots.
-
-3. Content fragments (repeatable; `contentIndex` must be dense: `0`, `1`, `2`, ...):
+2. Content fragments (repeatable; `contentIndex` must be dense: `0`, `1`, `2`, ...):
    - `{ type: "text_start", contentIndex }`
    - `{ type: "text_delta", contentIndex, delta }`
    - `{ type: "text_end", contentIndex, content?, textSignature? }`
@@ -477,7 +484,9 @@ Push fragments via `normalizer.push()` in this order:
    - `{ type: "toolcall_delta", contentIndex, argsTextDelta, id?, name? }`
    - `{ type: "toolcall_end", contentIndex, toolCall?, thoughtSignature? }`
 
-4. `{ type: "done", reason, usage? }` or `{ type: "error", reason, errorMessage, diagnostics?, usage? }` - Terminates the stream.
+3. `sink.stop(raw)` records the provider's stop reason; the runner maps the last one with `mapStopReason` and emits the terminal event.
+
+The runner emits `start` before the first fragment; a provider that needs a different `init` (timestamp, response ID) may push its own `{ type: "start", init }` first. If a `sink.check*` method returns `false`, a local tool-argument limit already failed the stream; return from `parse`.
 
 Provider code should retain only protocol bookkeeping such as raw-index-to-dense-index maps and late tool identity. Do not build an `AssistantMessage`, retain content strings, or add private `partialJson` / `partialArgs` fields; the normalizer owns that state.
 
@@ -489,9 +498,9 @@ Allocate a dense index when the provider announces a block, then forward its del
 let nextContentIndex = 0;
 const contentIndex = nextContentIndex++;
 
-normalizer.push({ type: "text_start", contentIndex });
-normalizer.push({ type: "text_delta", contentIndex, delta });
-normalizer.push({ type: "text_end", contentIndex });
+sink.push({ type: "text_start", contentIndex });
+sink.push({ type: "text_delta", contentIndex, delta });
+sink.push({ type: "text_end", contentIndex });
 ```
 
 If the upstream API has sparse or out-of-order block indexes, map them to dense indexes locally:
@@ -515,20 +524,20 @@ The normalizer accumulates and incrementally parses tool argument JSON. Provider
 ```typescript
 const contentIndex = nextContentIndex++;
 
-normalizer.push({
+sink.push({
   type: "toolcall_start",
   contentIndex,
   id: toolCallId,
   name: toolName,
 });
 
-normalizer.push({
+sink.push({
   type: "toolcall_delta",
   contentIndex,
   argsTextDelta: jsonDelta,
 });
 
-normalizer.push({
+sink.push({
   type: "toolcall_end",
   contentIndex,
 });
@@ -537,7 +546,7 @@ normalizer.push({
 If a tool call starts with pre-seeded arguments, serialize them and emit that string as the immediate first `toolcall_delta`. If the provider supplies a final argument object that is not guaranteed to be an append of prior deltas, pass a complete authoritative `toolCall` on `toolcall_end`:
 
 ```typescript
-normalizer.push({
+sink.push({
   type: "toolcall_end",
   contentIndex,
   toolCall: {
@@ -553,77 +562,47 @@ When identity arrives late, include the newly known `id` / `name` on the next `t
 
 ### Usage and Cost
 
-Keep usage as a small provider-local value and replace it on every update. `calculateCost` derives a new cost from the token counts and the model's price table, records the table's `priceVersion`, and never modifies its input. Fold the result through a `meta` fragment:
+Report raw usage with `sink.usage(raw)` whenever the provider sends it. The runner maps it with your `mapUsage` hook and folds the result into subsequent snapshots. `calculateCost` derives a new cost from the token counts and the model's price table, records the table's `priceVersion`, and never modifies its input:
 
 ```typescript
-const counts = {
-  input: response.usage.input_tokens,
-  output: response.usage.output_tokens,
-  cacheRead: response.usage.cache_read_tokens ?? 0,
-  cacheWrite: response.usage.cache_write_tokens ?? 0,
-};
-usage = {
-  ...usage,
-  ...counts,
-  totalTokens: counts.input + counts.output + counts.cacheRead + counts.cacheWrite,
-  cost: calculateCost(model, counts),
-};
-normalizer.push({ type: "meta", patch: { usage } });
+mapUsage: (raw, { model }) => {
+  const counts = {
+    input: raw.input_tokens,
+    output: raw.output_tokens,
+    cacheRead: raw.cache_read_tokens ?? 0,
+    cacheWrite: raw.cache_write_tokens ?? 0,
+  };
+  return {
+    ...counts,
+    totalTokens: counts.input + counts.output + counts.cacheRead + counts.cacheWrite,
+    cost: calculateCost(model, counts),
+  };
+},
 ```
 
 ### Context Overflow Errors
 
-When a request exceeds the model's context window, volt can recover automatically by compacting the conversation and retrying. This recovery only kicks in if volt recognizes the failure as an overflow.
+When a request exceeds the model's context window, volt can recover automatically by compacting the conversation and retrying. This recovery only kicks in when the failed assistant message's error has `kind: "context_overflow"`.
 
-Detection runs on the finalized assistant message:
-
-- `stopReason === "error"`
-- `errorMessage` matches one of volt's known overflow patterns (see [`packages/ai/src/utils/overflow.ts`](../../ai/src/utils/overflow.ts))
-
-If your provider returns overflow errors with a message volt does not recognize, normalize the error from the same extension that registers the provider. Use a `message_end` handler to rewrite the assistant message so its `errorMessage` starts with a phrase volt recognizes. The generic fallback `context_length_exceeded` is the safest choice.
+The shared classification sets that kind for HTTP 413, for provider codes such as `context_length_exceeded` and `request_too_large`, and for the overflow messages of known OpenAI-compatible backends (see [`packages/ai/src/utils/overflow.ts`](../../ai/src/utils/overflow.ts)). If your provider reports overflow differently, classify it in the provider itself:
 
 ```typescript
-const MY_PROVIDER_OVERFLOW_PATTERN = /your provider's overflow phrase/i;
-
-export default function (volt: ExtensionAPI) {
-  volt.registerProvider("my-provider", { /* ... */ });
-
-  volt.on("message_end", (event, ctx) => {
-    const message = event.message;
-    if (message.role !== "assistant") return;
-    if (message.stopReason !== "error") return;
-    if (
-      message.provider !== "my-provider" &&
-      ctx.model?.provider !== "my-provider"
-    )
-      return;
-
-    const errorMessage = message.errorMessage ?? "";
-    if (errorMessage.includes("context_length_exceeded")) return;
-    if (!MY_PROVIDER_OVERFLOW_PATTERN.test(errorMessage)) return;
-
-    return {
-      message: {
-        ...message,
-        errorMessage: `context_length_exceeded: ${errorMessage}`,
-      },
-    };
-  });
-}
+mapError(error, ctx) {
+  const classified = classifyProviderError(error);
+  return MY_PROVIDER_OVERFLOW_CODE === (error as { code?: string }).code
+    ? createProviderError("context_overflow", classified.message, { providerCode: MY_PROVIDER_OVERFLOW_CODE })
+    : classified;
+},
 ```
 
-`message_end` runs before volt tracks the assistant message for auto-compaction, so the rewritten `errorMessage` is what volt checks. With this in place, volt will:
+or throw `new ProviderStreamError("context_overflow", message)` from `send` or `parse`. With this in place, volt will:
 
-1. Detect the overflow from `errorMessage`.
+1. Detect the overflow from `error.kind`.
 2. Drop the failed assistant message from live context.
 3. Run compaction.
 4. Retry the request once.
 
-Guard the rewrite carefully:
-
-- Scope it to your provider (`message.provider` and `ctx.model?.provider`) so unrelated errors from other providers are untouched.
-- Match a provider-specific pattern, not volt's generic overflow patterns. Rewriting rate-limit or throttling errors (`rate limit`, `too many requests`) would falsely trigger compaction instead of volt's normal retry-with-backoff path.
-- Skip when `errorMessage` already includes `context_length_exceeded` so the handler is idempotent.
+Classify only your provider's own overflow signal. Rate-limit and throttling failures must stay `rate_limit` so volt retries them with backoff instead of compacting.
 
 ### Registration
 

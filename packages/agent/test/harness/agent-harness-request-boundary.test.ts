@@ -239,7 +239,7 @@ describe("AgentHarness post-durability request boundary", () => {
 		expect((await session.buildContext()).messages.at(-1)).toMatchObject({
 			role: "assistant",
 			stopReason: "error",
-			errorMessage: "admission failed",
+			error: { message: "admission failed" },
 		});
 	});
 
@@ -286,7 +286,10 @@ describe("AgentHarness post-durability request boundary", () => {
 		await harness.setTools([tool], [tool.name]);
 		faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("inspect", {})], { stopReason: "toolUse" }),
-			fauxAssistantMessage("", { stopReason: "error", errorMessage: "overloaded" }),
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "overloaded", retryable: true, message: "overloaded" },
+			}),
 			fauxAssistantMessage("retried"),
 		]);
 		await runPrompt(harness, "request");

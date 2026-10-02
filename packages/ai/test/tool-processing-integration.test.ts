@@ -2,6 +2,7 @@ import type { ResponseStreamEvent } from "openai/resources/responses/responses.j
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getModel } from "../src/models.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
+import { createProviderError } from "../src/stream/provider-errors.ts";
 import { TOOL_ARGUMENT_BATCH_INTERVAL_MS } from "../src/stream/tool-argument-coalescer.ts";
 import type { AssistantMessageEvent } from "../src/types.ts";
 import { EVENT_STREAM_MAX_QUEUED_EVENTS, EventStreamOverflowError } from "../src/utils/event-stream.ts";
@@ -42,7 +43,7 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 				details: expect.objectContaining({ limit: "maxBytes", events: 3 }),
 			}),
 		]);
-		expect(message.errorMessage).toContain("maxBytes");
+		expect(message.error?.message).toContain("maxBytes");
 		expect(parse).toHaveBeenCalledTimes(1);
 		expect(vi.getTimerCount()).toBe(0);
 		normalizer.push({ type: "toolcall_end", contentIndex: 0, argumentsText: '{"text":"accepted too late"}' });
@@ -69,7 +70,7 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 			type: "tool_argument_generation_limit",
 			details: { limit: "maxDurationMs" },
 		});
-		expect(message.errorMessage).toContain("maxDurationMs");
+		expect(message.error?.message).toContain("maxDurationMs");
 		expect(vi.getTimerCount()).toBe(0);
 	});
 
@@ -281,7 +282,7 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 		controller.abort();
 		expect(normalizer.signal.aborted).toBe(true);
 		expect(vi.getTimerCount()).toBe(0);
-		normalizer.push({ type: "error", reason: "aborted", errorMessage: "Operation aborted" });
+		normalizer.push({ type: "error", reason: "aborted", error: createProviderError("aborted", "Operation aborted") });
 		const events = await collect(normalizer);
 		expect(events.filter((event) => event.type === "toolcall_delta").map((event) => event.argsTextDelta)).toEqual([
 			'{"x":"',
@@ -308,7 +309,7 @@ describe("tool limits, strict completion, and processing cooperate", () => {
 			content: [],
 			diagnostics: [{ type: "assistant_stream_processing_error", details: {} }],
 		});
-		expect(message.errorMessage).toBe(
+		expect(message.error?.message).toBe(
 			"Assistant stream processing failed. No tools from this response were executed. Retry explicitly.",
 		);
 		expect(JSON.stringify(message).length).toBeLessThan(1024);

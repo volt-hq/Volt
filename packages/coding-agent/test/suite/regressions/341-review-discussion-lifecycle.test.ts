@@ -595,7 +595,10 @@ describe("Regression #341 host sibling lifecycle", () => {
 		const { api, harness, runtimes } = await fixture();
 		harness.setResponses([
 			fauxAssistantMessage("Initial answer"),
-			fauxAssistantMessage("Failure", { stopReason: "error", errorMessage: "Failed" }),
+			fauxAssistantMessage("Failure", {
+				stopReason: "error",
+				error: { kind: "unknown", retryable: false, message: "Failed" },
+			}),
 		]);
 		const [discussion] = successful(await api.start("review-341", ["f1"], "start"));
 		const child = runtimes[1]!;

@@ -116,7 +116,7 @@ describe("#409 interactive terminal review accounting", () => {
 						}
 						return fauxAssistantMessage("Provider failure", {
 							stopReason: "error",
-							errorMessage: "request failed",
+							error: { kind: "unknown", retryable: false, message: "request failed" },
 							usage: { ...usage, availability: "partial" },
 						});
 					},

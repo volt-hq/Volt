@@ -16,6 +16,8 @@ import {
 	type AssistantMessageEventStream,
 	AssistantStreamNormalizer,
 	type Context,
+	classifyProviderError,
+	createProviderError,
 	type Model,
 	type OAuthCredentials,
 	type OAuthLoginCallbacks,
@@ -348,7 +350,7 @@ export function streamGitLabDuo(
 			normalizer.push({
 				type: "error",
 				reason: event.reason,
-				errorMessage: event.error.errorMessage ?? "Delegated provider stream failed",
+				error: event.error.error ?? createProviderError("unknown", "Delegated provider stream failed"),
 				usage: event.error.usage,
 			});
 			return;
@@ -474,10 +476,11 @@ export function streamGitLabDuo(
 
 			for await (const event of innerStream) replayEvent(event);
 		} catch (error) {
+			const aborted = options?.signal?.aborted === true;
 			normalizer.push({
 				type: "error",
-				reason: options?.signal?.aborted ? "aborted" : "error",
-				errorMessage: error instanceof Error ? error.message : String(error),
+				reason: aborted ? "aborted" : "error",
+				error: aborted ? createProviderError("aborted", "Request was aborted") : classifyProviderError(error),
 			});
 		} finally {
 			normalizer.end();
