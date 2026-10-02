@@ -77,6 +77,12 @@ If rebase conflicts occur:
 - If a conflict is in a file you did not modify, abort and ask the user.
 - Never force push.
 
+History:
+
+- `main` starts at a new root commit. History before the architecture rewrite, including Pi's, is at the protected tag `legacy/main`. Never delete or move `legacy/*` or `v*` tags.
+- Before pushing a branch, confirm it descends from the current root: `git merge-base --is-ancestor "$(git rev-list --max-parents=0 origin/main)" HEAD`. A branch from a pre-rewrite clone cannot merge; start from a fresh clone instead.
+- For `git log` or `git blame` across the boundary, use a separate clone: `git fetch origin 'refs/tags/legacy/*:refs/tags/legacy/*'`, then `git replace --graft "$(git rev-list --max-parents=0 origin/main)" legacy/main`, and disable pushing with `git remote set-url --push origin no-push`. Never push `refs/replace/*`.
+
 ## Issues and PRs
 
 See `CONTRIBUTING.md` for the issue quality bar and PR requirements.

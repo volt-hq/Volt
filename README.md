@@ -108,3 +108,5 @@ We treat npm dependency changes as reviewed code changes.
 Volt is maintained and distributed by [Jordan Hans](https://github.com/hansjm10). It is derived from [Mario Zechner's Pi project](https://github.com/earendil-works/pi) under the MIT License. [Why I Forked Pi to Build Volt](https://volt-cli.dev/blog/why-i-forked-pi-to-build-volt/) explains the project's origins and terminal-to-phone direction.
 
 Volt preserves the copyright and license notices for Pi and other incorporated open-source software. See [LICENSE](LICENSE) and [THIRD-PARTY-NOTICES.md](packages/coding-agent/THIRD-PARTY-NOTICES.md).
+
+Volt's Git history restarts at the beginning of its architecture rewrite. The full earlier history, including the Pi history Volt was built from, remains available at the [`legacy/main`](https://github.com/volt-hq/Volt/tree/legacy/main) tag.

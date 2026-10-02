@@ -79,4 +79,4 @@ If you are adding a new provider to `packages/ai`, follow the [provider checklis
 
 Planned and in-flight work across the Volt CLI and its companion app is tracked on the [Volt Roadmap](https://github.com/orgs/volt-hq/projects/1) project board. Items from private repositories are only visible to people with access, so the board may look sparse from the outside.
 
-Volt is a fork of [Pi](https://github.com/earendil-works/pi). Historical Pi design material remains upstream and does not represent the Volt roadmap.
+Volt is derived from [Pi](https://github.com/earendil-works/pi). Historical Pi design material remains upstream and does not represent the Volt roadmap. Volt's own history before its architecture rewrite is at the `legacy/main` tag.
