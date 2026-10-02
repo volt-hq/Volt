@@ -1,0 +1,87 @@
+# Plan-mode lifecycle proof of concept
+
+This proof of concept separates plan authoring from approved execution so an executing agent cannot repeatedly rewrite the scope it is meant to finish.
+
+## Lifecycle
+
+The persisted plan wire shape remains unchanged. Legal transitions are enforced when state is committed:
+
+```text
+no plan -> draft -> ready -> active -> completed
+                  |        |
+                  |        +-> draft (explicit replan; approval removed)
+                  +-> draft (user requests changes)
+
+ready -> handed_off (clear-context execution source)
+```
+
+- `draft` and `ready` have no execution metadata.
+- `active`, `completed`, and `handed_off` require execution metadata.
+- Entering Plan mode during active execution is treated as an explicit replan transition, not a mode-only mutation.
+- Entering Plan mode after completion or handoff starts a new plan.
+- Every transition is revision-fenced and every committed state passes the same semantic parser used for restored state.
+- Asynchronous mode, activation, and handoff requests commit in invocation order. Toggle targets are derived only when their queued transition starts, after earlier transitions have settled.
+
+## Tool split
+
+Planning exposes operations authorized by a host-owned research capability profile:
+
+- workspace and network reads
+- vetted process inspection through the structured `inspect` tool
+- explicitly trusted MCP discovery and reads
+- `update_plan`, which creates or completely replaces a working draft as research changes the current understanding; outcomes may contain one level of executable substeps, with no product-level item-count target
+- `submit_plan`, which moves a researched draft to `ready`
+
+Unrestricted Bash, workspace/network writes, delegation, extension/custom operations, and unresolved mixed-tool actions are not granted. Before a Plan-to-Build transition commits, Volt awaits unrestricted eager/keep-alive MCP startup, rebuilds direct MCP definitions from fresh tool metadata, and resynchronizes requested Build tools under the session's allow/exclude policy. MCP tools, resources, and prompts carry independent freshness timestamps, so a restricted resource-only refresh cannot promote stale tool metadata. Concurrent partial refresh commits merge against the latest cached categories. Build is not exposed while restoration is still running.
+
+Approved execution exposes:
+
+- normal Build tools
+- `update_plan_progress`, which can change only status and notes for existing executable leaf IDs; group status is derived from its substeps
+- `request_replan`, which pauses execution, removes execution metadata, returns the plan to `draft`, and terminates the current run
+
+Approved title, summary, outcome/substep IDs, text, order, hierarchy, and cardinality are therefore structurally inaccessible to the execution progress tool. Completing every executable leaf moves the plan to `completed` and removes both execution-only plan tools from the active tool set.
+
+Exact no-op draft and progress updates are rejected so repeated calls cannot consume revisions without making progress.
+
+## Exploration and working drafts
+
+The trusted Plan-mode prompt directs the model to treat the canonical title, summary, and checklist as the complete handoff artifact because either execution strategy may need to act without the planning transcript, review output, tool results, or prior discussion. After one targeted orientation pass through relevant code, configuration, tests, documentation, or history, it creates a compact but self-contained working draft instead of waiting for research to finish. The draft names its objective or review target, concrete findings and current state, constraints, decisions, assumptions, unresolved questions, and verification intent; it replaces context-dependent references with the named subject and relevant details. Checklist entries describe independently verifiable outcomes and include useful subsystems, files, or symbols. Outcomes may contain one level of executable substeps when they encompass multiple distinct actions. The model uses the fewest items that preserve clear scope and execution detail, but large tasks may use as many outcomes and substeps as required; unrelated work is never compressed to meet an arbitrary count. The model revises the artifact whenever evidence materially changes its context, scope, approach, ordering, or verification, but not mechanically after every read. Before submission, it resolves discoverable repository facts, distinguishes evidence from assumptions, compares meaningful alternatives, removes investigation-only steps and resolved questions, records the chosen approach and remaining assumptions, and includes explicit acceptance and verification criteria. The submitted artifact must explain why the work is needed, what must change, and how completion will be verified to an executor that receives only the plan.
+
+`submit_plan` is blocked at the model tool boundary until the current runtime has observed a successful operation that resolved to a research-evidence capability (`workspace.read`, `network.read`, or `integration.read`). That evidence remains valid when ordinary user feedback, including feedback queued during submission, returns the researched ready plan to draft in the same conversation generation, so a focused revision can be resubmitted without an unrelated read. Fresh Plan-mode entry, execution replanning, tree navigation, and a resumed draft must perform a new exploration call before submission. Direct SDK state-transition methods remain deterministic and do not synthesize tool evidence.
+
+The research surface includes non-mutating LSP actions. LSP uses argument-sensitive resolution, so `rename`, `fix`, and unknown future actions fail closed. Repository inspection similarly resolves only validated Git/GitHub operations after building direct argv; each Git operation uses a positive option grammar, branch/tag listing cannot be negated, and repository-configured helpers are disabled. MCP calls require explicit per-server `trustedReads` evidence that remains effective under normal include/exclude filters. Restricted eager startup, connect, list, describe, and pre-call refreshes request only configured tool/resource metadata categories and never list prompts; tool list/describe requires configured trusted tools rather than resource trust alone. Restricted calls refresh and revalidate the exact tool's configured trust, `readOnlyHint`, and separator-aware risk immediately before invocation. Protocol-level failed MCP results remain structured but become failed top-level tool results, so they cannot satisfy the research gate.
+
+## Operation authorization
+
+Capability resolvers are registered only by trusted host code and remain separate from public `ToolDefinition`, so extensions and SDK callers cannot self-attest. Plan selects the reusable research grant profile; another future Review/Explore mode can reuse that profile or a subset without adding mode flags to tools.
+
+Discovery advertises a mixed tool when at least one operation is compatible with the profile. Every concrete call is resolved again from its final arguments after extension `tool_call` hooks, preventing an allowed read from being transformed into a write at the last boundary. Unknown tools and operations fail closed under restricted profiles. Successful resolved capabilities—not tool names—drive the exploration gate.
+
+## Cache-safe model context
+
+Plan state is not rendered into the system prompt or appended ephemerally to every provider request. The system prompt contains only static policy selected by mode and phase, so draft and progress revisions leave provider instructions byte-identical.
+
+Canonical state reaches the model through append-only context:
+
+- planning tool results return plan ID, revision, phase, and steps
+- both execution strategies persist one complete activation checkpoint from the active plan, including actual statuses and notes
+- host-driven transitions such as Change Plan and manual Plan-mode re-entry persist a checkpoint
+- compaction appends a fresh checkpoint after the new context boundary
+- restoration adds a checkpoint only when the current revision is absent from retained tool results or prior checkpoints
+
+This preserves Codex WebSocket continuation and provider prefix caching during ordinary planning and execution turns. Mode, phase, or tool-policy boundaries may still cause one intentional cache miss.
+
+Working-draft revisions compact the model's current understanding into canonical plan state, but they do not remove earlier research or prior revisions from the append-only model context. Normal context compaction remains responsible for reclaiming context tokens and appends the latest complete plan checkpoint after its new boundary.
+
+## Deliberately deferred
+
+This POC does not yet add:
+
+- a persisted research-evidence/provenance record; the submission gate is runtime-local
+- a configurable Plan-mode turn, tool-call, or structural-revision budget
+- semantic no-progress detection beyond exact duplicate updates
+- extension/custom or delegated research operations; public tool schemas are intentionally not accepted as authorization evidence
+- a user-facing allow/ask/deny policy language layered over the capability substrate
+
+Additional research surfaces should be expanded through trusted host operation resolvers rather than tool names, self-attested metadata, or prompt instructions. A later hardening pass can add persisted evidence and configurable budgets without weakening the frozen-plan boundary.

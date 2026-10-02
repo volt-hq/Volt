@@ -1,0 +1,72 @@
+{
+	"name": "@hansjm10/volt-agent-core",
+	"version": "0.2.3",
+	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		},
+		"./node": {
+			"types": "./dist/node.d.ts",
+			"import": "./dist/node.js"
+		},
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public",
+		"tag": "latest"
+	},
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsc -p tsconfig.build.json",
+		"test": "vitest --run",
+		"test:harness": "vitest --run --config vitest.harness.config.ts",
+		"coverage:harness": "vitest --run --config vitest.harness.config.ts --coverage",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"dependencies": {
+		"@hansjm10/volt-ai": "^0.2.3",
+		"ignore": "7.0.5",
+		"typebox": "1.1.38",
+		"yaml": "2.9.0"
+	},
+	"keywords": [
+		"ai",
+		"agent",
+		"llm",
+		"transport",
+		"state-management"
+	],
+	"contributors": [
+		"Mario Zechner",
+		"Jordan Hans"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/volt-hq/Volt.git",
+		"directory": "packages/agent"
+	},
+	"homepage": "https://github.com/volt-hq/Volt#readme",
+	"bugs": {
+		"url": "https://github.com/volt-hq/Volt/issues"
+	},
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"devDependencies": {
+		"@types/node": "24.12.4",
+		"@vitest/coverage-v8": "5.0.2",
+		"typescript": "npm:@typescript/typescript6@6.0.2",
+		"vitest": "5.0.2"
+	}
+}

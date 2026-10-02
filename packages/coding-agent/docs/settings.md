@@ -1,0 +1,477 @@
+# Settings
+
+Volt uses JSON settings files with project settings overriding global settings.
+
+| Location | Scope |
+|----------|-------|
+| `~/.volt/agent/settings.json` | Global (all projects) |
+| `.volt/settings.json` | Project (current directory) |
+
+Edit directly or use `/settings` for common options.
+
+## Project Trust
+
+On interactive startup, volt asks before trusting a project folder that contains project-local settings, MCP server config, resources, or project `.agents/skills` and has no saved decision for the folder or a parent folder in `~/.volt/agent/trust.json`. Trusting a project allows volt to load `.volt/settings.json`, `.mcp.json`/`.volt/mcp.json`, and `.volt` resources, install missing project packages, and execute project extensions.
+
+Non-interactive modes (`-p`, `--mode json`, and `--mode rpc`) do not show a trust prompt. Without an applicable saved trust decision, they use `defaultProjectTrust` from global settings: `ask` (default) and `never` ignore those project resources, while `always` trusts them. Pass `--approve`/`-a` or `--no-approve`/`-na` to override project trust for one run.
+
+If no extension or saved decision applies, `defaultProjectTrust` controls the fallback behavior. Set it to `"ask"`, `"always"`, or `"never"` in `~/.volt/agent/settings.json`, or change it with `/settings`.
+
+`volt config` and package commands use the same project trust flow, except `volt update` never prompts. Pass `--approve` to trust project-local settings for one command or `--no-approve` to ignore them.
+
+Use `/trust` in interactive mode to save a project trust decision for future sessions, including trust for the immediate parent folder. It writes `~/.volt/agent/trust.json` only; the current session is not reloaded, so restart volt for changes to take effect.
+
+MCP server configuration is not stored in `settings.json`; use `~/.volt/agent/mcp.json` for user-local servers, shared `~/.config/mcp/mcp.json`, trusted project `.mcp.json`, or trusted project `.volt/mcp.json`. OAuth tokens for MCP HTTP/SSE servers are stored separately in `~/.volt/agent/mcp-auth.json`. See [MCP](mcp.md).
+
+## Profiles
+
+Profiles are named settings overlays for switching workflows. Select one at startup with `--profile <name>`, set `VOLT_PROFILE`, or set `defaultProfile` in settings. In interactive mode, use `/profile` to show the active profile, switch to another profile, or create an empty global profile and switch to it. When interactive mode exits, Volt remembers the active profile by saving it as `defaultProfile`. Profiles can override normal settings such as packages, extensions, skills, prompts, themes, model defaults, model cycling, thinking level, and UI preferences.
+
+Global and project profiles follow the normal settings precedence and trust model: global settings load first, the selected global profile overlays them, trusted project settings overlay that, and the selected trusted project profile overlays last. Without project trust, project profiles are ignored. Switching profiles with `/profile` reloads the current session's settings-backed resources so profile resource changes apply without restarting.
+
+```json
+{
+  "defaultProfile": "development",
+  "profiles": {
+    "development": {
+      "packages": ["npm:@me/dev-tools"],
+      "extensions": ["./extensions/dev.ts"],
+      "enabledModels": ["anthropic/*", "openai/*"]
+    },
+    "work": {
+      "packages": ["npm:@corp/work-tools"],
+      "defaultProvider": "github-copilot",
+      "enabledModels": ["github-copilot/*"]
+    }
+  }
+}
+```
+
+Profiles do not isolate auth or sessions yet. `sessionDir` and reserved profile `storage` settings are ignored for now so future auth/session profile support can be added without changing the profile shape.
+
+## All Settings
+
+### Profiles
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `defaultProfile` | string | - | Profile to apply when `--profile` and `VOLT_PROFILE` are not set; updated to the active profile when interactive mode exits |
+| `profiles` | object | `{}` | Named settings overlays keyed by profile name |
+
+### Agent Behavior
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `personality` | string | `"default"` | Communication style for Volt's built-in system prompt: `"default"` for a collaborative, adaptive voice, `"pragmatic"` for direct recommendations focused on simple, maintainable solutions, or `"simplified-technical"` for ASD-STE100-inspired Simplified Technical English in user-facing prose. Ignored when a custom `SYSTEM.md` replaces the built-in prompt |
+
+In interactive mode, run `/settings` and change **Personality**. The selection applies to the next turn.
+
+The `"simplified-technical"` personality keeps source code, identifiers, commands, configuration, quoted text, and repository artifacts in their normal technical form. It follows project conventions for code comments and documentation unless the user requests Simplified Technical English. It is a writing aid and does not certify full ASD-STE100 compliance.
+
+```json
+{
+  "personality": "simplified-technical"
+}
+```
+
+### Model & Thinking
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `defaultProvider` | string | - | Default provider (e.g., `"anthropic"`, `"openai"`) |
+| `defaultModel` | string | - | Default model ID |
+| `defaultThinkingLevel` | string | - | `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"`, `"max"` |
+| `reviewModel` | string | - | Discovery model for `/review`; falls back to the session model |
+| `reviewVerifierModel` | string | - | Independent verifier model for `/review`; falls back to `reviewModel` |
+| `reviewTools` | string[] | `[]` | Optional auxiliary review tools; immutable snapshot tools are always enabled |
+| `hideThinkingBlock` | boolean | `false` | Hide thinking blocks in output |
+| `thinkingBudgets` | object | - | Custom token budgets per thinking level |
+
+#### thinkingBudgets
+
+```json
+{
+  "thinkingBudgets": {
+    "minimal": 1024,
+    "low": 4096,
+    "medium": 10240,
+    "high": 32768
+  }
+}
+```
+
+### UI & Display
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
+| `quietStartup` | boolean | `false` | Hide startup header |
+| `defaultProjectTrust` | string | `"ask"` | Fallback project trust behavior: `"ask"`, `"always"`, or `"never"`. Global setting only |
+| `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |
+| `enableInstallTelemetry` | boolean | `true` | Send an anonymous install/update version ping after first install or changelog-detected updates. This does not control update checks |
+| `enableAnalytics` | boolean | `false` | Opt-in analytics data sharing. Currently only asked for during the experimental first-time setup (`VOLT_EXPERIMENTAL=1`) |
+| `trackingId` | string | - | Analytics tracking identifier, generated when `enableAnalytics` is turned on |
+| `doubleEscapeAction` | string | `"tree"` | Action for double-escape: `"tree"`, `"fork"`, or `"none"` |
+| `treeFilterMode` | string | `"default"` | Default filter for `/tree`: `"default"`, `"no-tools"`, `"user-only"`, `"labeled-only"`, `"all"` |
+| `editorPaddingX` | number | `0` | Horizontal padding for input editor (0-3) |
+| `autocompleteMaxVisible` | number | `5` | Max visible items in autocomplete dropdown (3-20) |
+| `showHardwareCursor` | boolean | `false` | Show the terminal cursor while TUI positions it for IME support |
+| `tuiMode` | string | `"regular"` | Interactive TUI mode: `"regular"` uses terminal-owned native scrollback; `"fullscreen"` uses an application-owned alternate-screen viewport. Changes from `/settings` apply immediately; `--tui-mode` overrides this setting only for the current run |
+| `fullscreenExitOutput` | string | `"transcript"` | Fullscreen shutdown output: `"transcript"` prints the final transcript before the normal resume hint, while `"resume-hint"` restores the previous screen without printing the transcript. Has no effect in regular mode |
+| `fullscreenScrollbar` | string | `"auto"` | Fullscreen transcript scrollbar: `"auto"` shows it temporarily while scrolling, `"always"` reserves the rightmost column and keeps it visible, and `"hidden"` hides it. Has no effect in regular mode |
+
+### Telemetry and update checks
+
+`enableInstallTelemetry` controls install/update telemetry and provider attribution headers. Hosted install/update pings are disabled unless `VOLT_REPORT_INSTALL_URL` is set. Hosted version checks are disabled unless `VOLT_LATEST_VERSION_URL` is set.
+
+Set `VOLT_SKIP_VERSION_CHECK=1` to disable the Volt version update check. Use `--offline` or `VOLT_OFFLINE=1` to disable all startup network operations described here, including update checks, package update checks, and install/update telemetry.
+
+### Network
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `httpProxy` | string | - | HTTP proxy URL applied as `HTTP_PROXY` and `HTTPS_PROXY`. Global setting only. |
+
+```json
+{
+  "httpProxy": "http://127.0.0.1:7890"
+}
+```
+
+### Warnings
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `warnings.anthropicExtraUsage` | boolean | `true` | Show a warning when Anthropic subscription auth may use paid extra usage |
+| `warnings.contextTokens` | number | `350000` | Turn footer context usage to the warning color at this absolute token count, in addition to percentage-based warnings. Set to `0` to disable the absolute threshold |
+
+Both options are available under **Warnings** in `/settings`.
+
+```json
+{
+  "warnings": {
+    "anthropicExtraUsage": false,
+    "contextTokens": 350000
+  }
+}
+```
+
+### Prompt Cache
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `promptCache.keepAlive` | boolean | `true` | Refresh the prompt cache shortly before it expires, so the next request reuses it instead of resending the conversation uncached |
+| `promptCache.keepAliveIdleMinutes` | number | `15` | How long to keep refreshing after work finishes. `0` refreshes only while work runs: a turn, compaction, background job, `!` command, or extension command (including one waiting for your input) |
+
+Keepalive applies only to models whose provider documents a cache lifetime that renews on each hit and supports a refresh that generates no output. Today that is Anthropic's Messages API with adaptive thinking or thinking off (for example Claude Opus 5.5 with its 5-minute cache). Claude 4.5 and earlier models with thinking on use a thinking budget, which cannot be refreshed; keepalive stays off for those requests, and changing the thinking level ends keepalive until the next request. A refresh replays the previous request with `max_tokens: 0`, about a minute before expiry. It bills as a cache read (for example $0.20 per million tokens on Opus 5.5), usually a small fraction of resending the whole conversation. On a Claude subscription, refreshes count toward plan usage at the same reduced rate as other cache reads.
+
+After each real request, Volt sends at most as many refreshes as cost less together than the cache miss they prevent, even when work keeps running (for example a long background job). On Opus 5.5 that is 24 refreshes, about 96 minutes, on the 5-minute cache. Models without cache prices are never refreshed. A refresh whose timer fires late, for example after the computer sleeps, is skipped instead of being sent so close to expiry that it could pay for a full cache write.
+
+Refresh costs appear in the footer totals and session stats. While the idle window runs, the footer shows `cache warm 12m`. When it ends, the footer counts down to expiry and, if `terminal.turnDoneAlert` is on, Volt sends the same bell or notification as a finished turn while the terminal is unfocused.
+
+Volt records metadata-only prompt-cache audit logs (request token counts and gaps, refresh outcomes and costs, keepalive stops; never prompt or response content) as JSONL batches in `~/.volt/agent/prompt-cache-audit/`, keeping the newest 200 files up to 50 MB. Set `VOLT_PROMPT_CACHE_AUDIT=0` to turn them off.
+
+```json
+{
+  "promptCache": {
+    "keepAlive": true,
+    "keepAliveIdleMinutes": 15
+  }
+}
+```
+
+### Compaction
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `compaction.enabled` | boolean | `true` | Enable auto-compaction |
+| `compaction.reserveTokens` | number | `16384` | Tokens reserved for LLM response |
+| `compaction.keepRecentTokens` | number | `20000` | Recent tokens to keep (not summarized) |
+| `compaction.modelThresholds` | object | `{}` | Absolute auto-compaction token counts keyed by exact `provider/model-id`. Omitted entries or `0` use the normal context-limit trigger |
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
+Under **Agent** in `/settings`, **Compact at** configures the currently selected provider/model. Choose `350k` to compact at 350,000 tokens, or `default` to restore the context-limit trigger. **Auto-compact** must be enabled. The model reference is shown in the description; switch models to configure another one. Changes are saved to global settings (or the active global profile), with trusted project settings taking precedence as usual.
+
+A paired phone can configure these same preferences through native Context actions: **Auto-compaction** and **Compact at**. They save on the connected host globally, or in its active global profile—not in phone storage or just the current session. **Compact at** targets the exact provider/model shown when the control opens. Switching the host model or profile before saving rejects the stale edit; refresh the controls and try again. The host retains the threshold when auto-compaction is off.
+
+Phone controls show effective values but disable edits when trusted project settings, the active trusted project profile, or a runtime override controls that setting. Edit that override on the host instead; saving a shadowed global preference would have no effect. Controls are also unavailable during an agent operation or compaction, or without a selected model. Saves wait for host persistence and report write errors. See [Native UI actions](rpc.md#native-ui-actions) for the invocation contract.
+
+For an arbitrary count, use the phone's token-count control or edit `settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "modelThresholds": {
+      "openai/gpt-6-astra": 350000
+    }
+  }
+}
+```
+
+Use the exact provider/model reference from `/model`; `openai` and `openai-codex` are separate entries. Counts must be positive safe integers; invalid entries are ignored. `0` explicitly restores the default, including over an inherited profile setting. These thresholds do not change the model's real context window, response reserve, recent-message budget, or `warnings.contextTokens`.
+
+Compaction runs at the next safe turn boundary when usage reaches the configured count (including estimated trailing tool results), or earlier if the normal context-limit trigger fires. A single response or tool batch can overshoot the count; it is not a hard input cap. Keep thresholds comfortably above the retained context size to avoid frequent compactions. See [Compaction](compaction.md) for behavior and tradeoffs. Restart or `/reload` after editing JSON; `/settings` changes apply to subsequent checks immediately.
+
+### Branch Summary
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `branchSummary.reserveTokens` | number | `16384` | Tokens reserved for branch summarization |
+| `branchSummary.skipPrompt` | boolean | `false` | Skip "Summarize branch?" prompt on `/tree` navigation (defaults to no summary) |
+
+### Retry
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `retry.enabled` | boolean | `true` | Enable automatic agent-level retry on transient errors and rejected tool calls |
+| `retry.maxRetries` | number | `6` | Maximum agent-level retry attempts |
+| `retry.baseDelayMs` | number | `2000` | Base delay for agent-level exponential backoff (2s, 4s, 8s, 16s, 32s, 64s by default) |
+| `retry.provider.timeoutMs` | number | SDK default | Provider/SDK request timeout in milliseconds |
+| `retry.provider.maxRetries` | number | `0` | Provider/SDK retry attempts |
+| `retry.provider.maxRetryDelayMs` | number | `60000` | Max server-requested delay before failing (60s) |
+
+With the defaults, agent-level retries wait for up to 126 seconds in total across six attempts. In interactive mode, press the configured interrupt key (Escape by default) during the retry countdown to stop retrying.
+
+When a response is rejected because its tool-call arguments are not complete, valid JSON (for example, an unescaped tab inside a string), none of its tools run. Volt retries immediately, without backoff, and tells the model why the call was rejected. These retries count toward `retry.maxRetries`.
+
+When a provider requests a retry delay longer than `retry.provider.maxRetryDelayMs` (e.g., Google's "quota will reset after 5h"), the request fails immediately with an informative error instead of waiting silently. Set to `0` to disable the cap.
+
+Keep `retry.provider.maxRetries` at `0` unless provider-level retries are explicitly needed. Setting it above `0` can make SDK/provider retries handle out-of-usage-limit errors before Volt sees them, which may block the agent until the provider quota resets in some circumstances.
+
+```json
+{
+  "retry": {
+    "enabled": true,
+    "maxRetries": 6,
+    "baseDelayMs": 2000,
+    "provider": {
+      "timeoutMs": 3600000,
+      "maxRetries": 0,
+      "maxRetryDelayMs": 60000
+    }
+  }
+}
+```
+
+### Tool Argument Generation
+
+Tool argument preparation has independent byte limits and an idle timeout. By default, long tool calls can continue while argument bytes arrive. These limits apply before a tool can execute; they do not change tool execution timeouts or the HTTP idle timeout.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `toolArgumentLimits.maxBytes` | integer | `1048576` (1 MiB) | Maximum UTF-8 JSON bytes for one tool call |
+| `toolArgumentLimits.maxTotalBytes` | integer | `8388608` (8 MiB) | Maximum aggregate argument bytes across one provider response |
+| `toolArgumentLimits.maxIdleMs` | integer | `300000` (5 minutes) | Maximum time without new argument bytes for each tool call |
+| `toolArgumentLimits.maxDurationMs` | integer | Disabled | Optional maximum elapsed preparation time for each tool call, including time with continuing deltas |
+
+Nonempty argument deltas reset that call's idle timeout. For providers that send replacement argument objects or strings, growth in argument bytes resets it. Empty deltas, unchanged replacements, and activity on other calls do not reset it. Arguments must still be a complete, valid JSON object before execution.
+
+Values must be positive safe integers; `maxIdleMs` and `maxDurationMs` must also be at most `2147483647`. Omitted fields use the defaults; omit `maxDurationMs` to leave total preparation time uncapped. If you previously configured `maxDurationMs` to accommodate long documents, remove it to use only the idle timeout. If a limit is exceeded, Volt cancels the provider stream and executes no tools from that response. The failure does not automatically retry; explicitly continue after reviewing the failure or adjusting the limit.
+
+```json
+{
+  "toolArgumentLimits": {
+    "maxBytes": 2097152,
+    "maxTotalBytes": 8388608,
+    "maxIdleMs": 300000
+  }
+}
+```
+
+Add `"maxDurationMs": 1800000` to opt into a 30-minute total preparation cap per call, in addition to the idle timeout. SDK callers can pass `toolArgumentLimits` to `createAgentSession`; supplied fields override matching settings fields. Direct `stream`/`streamSimple` callers and `AgentHarness` stream options accept the same object.
+
+### Message Delivery
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `steeringMode` | string | `"one-at-a-time"` | How steering messages are sent: `"all"` or `"one-at-a-time"` |
+| `followUpMode` | string | `"one-at-a-time"` | How follow-up messages are sent: `"all"` or `"one-at-a-time"` |
+| `transport` | string | `"auto"` | Preferred transport for providers that support multiple transports: `"sse"`, `"websocket"`, `"websocket-cached"`, or `"auto"` |
+| `httpIdleTimeoutMs` | number | `300000` | HTTP header/body idle timeout in milliseconds, also used by providers with explicit stream idle timeouts. Set to `0` to disable. |
+| `websocketConnectTimeoutMs` | number | `15000` | WebSocket connect/open handshake timeout in milliseconds for providers that support WebSocket transports. Set to `0` to disable. |
+
+### Terminal & Images
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `terminal.showImages` | boolean | `true` | Show images in terminal (if supported) |
+| `terminal.imageWidthCells` | number | `60` | Preferred inline image width in terminal cells |
+| `terminal.clearOnShrink` | boolean | `false` | Clear empty rows when content shrinks (can cause flicker) |
+| `terminal.showTerminalProgress` | boolean | `false` | Show OSC 9;4 indeterminate progress in supporting terminal tab bars |
+| `terminal.turnDoneAlert` | string | `"off"` | Alert when Volt finishes a response: `"off"`, `"bell"`, or `"notify"`. `"bell"` writes the terminal BEL sequence, which most terminals and tmux handle as an audible/visual alert according to terminal settings. `"notify"` posts a desktop notification on terminals that support one (kitty via OSC 99; WezTerm, Ghostty, foot, and urxvt via OSC 777; iTerm2 and ConEmu via OSC 9) and falls back to the BEL sequence everywhere else (Windows Terminal, Apple Terminal, VS Code, tmux/screen, unknown terminals). On terminals that support focus reporting (DECSET 1004), the alert is suppressed while the terminal window is focused; terminals without focus reporting always alert |
+| `images.autoResize` | boolean | `true` | Resize images to 2000x2000 max |
+| `images.blockImages` | boolean | `false` | Block all images from being sent to LLM |
+
+### Shell
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `shellPath` | string | - | Custom shell path (e.g., for Cygwin on Windows) |
+| `shellCommandPrefix` | string | - | Prefix for every bash command (e.g., `"shopt -s expand_aliases"`) |
+| `npmCommand` | string[] | - | Command argv used for npm package lookup/install operations (e.g., `["mise", "exec", "node@20", "--", "npm"]`) |
+
+```json
+{
+  "npmCommand": ["mise", "exec", "node@20", "--", "npm"]
+}
+```
+
+`npmCommand` is used for all npm package-manager operations, including installs, uninstalls, and dependency installs inside git packages. User-scoped npm packages install under `~/.volt/agent/npm/`; project-scoped npm packages install under `.volt/npm/`. Use argv-style entries exactly as the process should be launched. When `npmCommand` is configured, git package dependency installs use plain `install` to avoid npm-specific flags in wrappers or alternate package managers.
+
+### Sessions
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `sessionDir` | string | - | Directory containing the authoritative `sessions.sqlite` store. Accepts absolute or relative paths, plus `~`. |
+
+```json
+{ "sessionDir": ".volt/sessions" }
+```
+
+When multiple sources specify a session directory, precedence is `--session-dir`, `VOLT_CODING_AGENT_SESSION_DIR`, then `sessionDir` in settings.json.
+
+### Model Cycling
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `enabledModels` | string[] | - | Model patterns for Ctrl+P cycling (same format as `--models` CLI flag) |
+
+```json
+{
+  "enabledModels": ["claude-*", "gpt-4o", "gemini-2*"]
+}
+```
+
+### Markdown
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `markdown.codeBlockIndent` | string | `"  "` | Indentation for code blocks |
+
+### LSP Diagnostics
+
+See [LSP Diagnostics](lsp.md) for the full reference, including built-in server defaults.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `lsp.enabled` | boolean | `true` | Run language servers and append diagnostics to `edit`/`write` results; set `false` to disable (`--lsp` force-enables per run) |
+| `lsp.servers` | object | built-ins | Server definitions keyed by name, merged over the built-in defaults. Command paths and root discovery are confined to the canonical project workspace |
+| `lsp.settleMs` | number | `1500` | How long to wait for published diagnostics after a change |
+| `lsp.firstSettleMs` | number | `10000` | Wait window for the first diagnostics from a freshly started server |
+| `lsp.idleShutdownMs` | number | `600000` | Shut down servers idle for this long; `0` disables |
+| `lsp.traceFile` | string | | Append LSP protocol traffic, server stderr, and launch context to this file; relative paths resolve from the canonical project workspace |
+| `lsp.maxDiagnostics` | number | `20` | Maximum diagnostics reported per tool call |
+| `lsp.severity` | string | `"error"` | Minimum severity to report: `error`, `warning`, `information`, or `hint` |
+
+### Remote Access (daemon)
+
+Settings for the background daemon and live shared sessions; see [Background daemon](daemon.md).
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `remote.background` | boolean | `false` | Interactive Volt starts the daemon automatically. Supported TUIs connect to an already-running daemon regardless, auto-register their workspace, and acquire a conversation lease. |
+| `remote.detachedRuntimeTtlMs` | number | `1800000` | How long the daemon retains an idle detached headless runtime (30 minutes) |
+| `remote.allowTools` | string[] | - | Additional tool ceiling for daemon-owned headless runtimes, intersected with the paired client's persisted grant and any workspace ceiling; `[]` denies all tools. TUI-owned conversations use the TUI session's full tool set. |
+| `remote.pullRequestDiscovery` | boolean | `true` | Let the daemon use local Git metadata and the authenticated GitHub CLI to discover exact repository + branch + head-OID pull-request associations for trusted sessions. Linked open or draft PRs keep their status refreshed in the background with batched GitHub CLI queries. Set `false` to disable provider calls, including background PR status refresh; existing private Work state remains local. |
+
+### Resources
+
+These settings define where to load extensions, skills, prompts, and themes from.
+
+Paths in `~/.volt/agent/settings.json` resolve relative to `~/.volt/agent`. Paths in `.volt/settings.json` resolve relative to `.volt`. Absolute paths and `~` are supported.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `packages` | array | `[]` | npm/git packages to load resources from |
+| `extensions` | string[] | `[]` | Local extension file paths or directories |
+| `skills` | string[] | `[]` | Local skill file paths or directories |
+| `prompts` | string[] | `[]` | Local prompt template paths or directories |
+| `themes` | string[] | `[]` | Local theme file paths or directories |
+| `enableSkillCommands` | boolean | `true` | Register skills as `/skill:name` commands |
+
+Arrays support glob patterns and exclusions. Use `!pattern` to exclude. Use `+path` to force-include an exact path and `-path` to force-exclude an exact path.
+
+#### packages
+
+String form loads all resources from a package:
+
+```json
+{
+  "packages": ["volt-skills", "@org/my-extension"]
+}
+```
+
+Object form filters which resources to load:
+
+```json
+{
+  "packages": [
+    {
+      "source": "volt-skills",
+      "skills": ["brave-search", "transcribe"],
+      "extensions": []
+    }
+  ]
+}
+```
+
+See [packages.md](packages.md) for package management details.
+
+## Example
+
+```json
+{
+  "defaultProvider": "anthropic",
+  "defaultModel": "claude-sonnet-4-20250514",
+  "defaultThinkingLevel": "medium",
+  "theme": "dark",
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  },
+  "retry": {
+    "enabled": true,
+    "maxRetries": 6
+  },
+  "enabledModels": ["claude-*", "gpt-4o"],
+  "warnings": {
+    "anthropicExtraUsage": true,
+    "contextTokens": 350000
+  },
+  "packages": ["volt-skills"]
+}
+```
+
+## Project Overrides
+
+Project settings (`.volt/settings.json`) override global settings. Nested objects are merged:
+
+```json
+// ~/.volt/agent/settings.json (global)
+{
+  "theme": "dark",
+  "compaction": { "enabled": true, "reserveTokens": 16384 }
+}
+
+// .volt/settings.json (project)
+{
+  "compaction": { "reserveTokens": 8192 }
+}
+
+// Result
+{
+  "theme": "dark",
+  "compaction": { "enabled": true, "reserveTokens": 8192 }
+}
+```

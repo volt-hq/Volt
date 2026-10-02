@@ -1,0 +1,640 @@
+import { execFileSync } from "node:child_process";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, delimiter, join, sep } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+	detectGitOperation,
+	GitContextObservationBinding,
+	GitContextProvider,
+	parseGitStatusPorcelainV2,
+} from "../src/core/git-context-provider.ts";
+import { GitContextProviderPool } from "../src/core/git-context-provider-pool.ts";
+import { discoverGitWorktree, getGitRepositoryDisplayName } from "../src/core/git-repository.ts";
+
+const SHA1 = "0123456789abcdef0123456789abcdef01234567";
+const SHA256 = `${SHA1}0123456789abcdef01234567`;
+const pathEnvironmentKey = Object.keys(process.env).find((key) => key.toUpperCase() === "PATH") ?? "PATH";
+const originalPath = process.env[pathEnvironmentKey];
+const tempDirectories: string[] = [];
+
+type FakeGitMode = "failure" | "hanging" | "oversized-output" | "delayed-counted-status";
+
+function tempDirectory(label: string): string {
+	const directory = mkdtempSync(join(tmpdir(), `${label}-`));
+	tempDirectories.push(directory);
+	return directory;
+}
+
+function git(cwd: string, ...args: string[]): string {
+	return execFileSync("git", args, {
+		cwd,
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+	}).trim();
+}
+
+function initRepository(label = "git-context"): string {
+	const directory = tempDirectory(label);
+	git(directory, "init", "--initial-branch=main");
+	git(directory, "config", "user.email", "volt@example.invalid");
+	git(directory, "config", "user.name", "Volt Test");
+	return directory;
+}
+
+function commitFile(repository: string, name: string, content: string, message = name): void {
+	writeFileSync(join(repository, name), content);
+	git(repository, "add", "--", name);
+	git(repository, "commit", "-m", message);
+}
+
+function createSyntheticWorktree(label = "synthetic-git-context"): string {
+	const directory = tempDirectory(label);
+	mkdirSync(join(directory, ".git"));
+	writeFileSync(join(directory, ".git", "HEAD"), "ref: refs/heads/main\n");
+	return directory;
+}
+
+function installFakeGit(mode: FakeGitMode, countFile?: string): void {
+	const binDirectory = tempDirectory("fake-git-bin");
+	const fixture = join(binDirectory, "fake-git.mjs");
+	writeFileSync(
+		fixture,
+		`import { appendFileSync } from "node:fs";
+import { setTimeout as delay } from "node:timers/promises";
+
+const mode = ${JSON.stringify(mode)};
+const countFile = ${countFile === undefined ? "undefined" : JSON.stringify(countFile)};
+
+switch (mode) {
+	case "failure":
+		process.exitCode = 1;
+		break;
+	case "hanging":
+		await delay(100);
+		break;
+	case "oversized-output":
+		process.stdout.write("a".repeat(2_048));
+		break;
+	case "delayed-counted-status":
+		await delay(50);
+		await new Promise((resolve) => process.stdout.write(${JSON.stringify(`# branch.oid ${SHA1}\0# branch.head main\0`)}, resolve));
+		appendFileSync(countFile, "call\\n");
+		break;
+}
+`,
+	);
+	if (process.platform === "win32") {
+		writeFileSync(join(binDirectory, "git.cmd"), `@echo off\r\n"${process.execPath}" "${fixture}" %*\r\n`);
+	} else {
+		const executable = join(binDirectory, "git");
+		writeFileSync(executable, `#!/bin/sh\nexec "${process.execPath}" "${fixture}" "$@"\n`);
+		chmodSync(executable, 0o755);
+	}
+	process.env[pathEnvironmentKey] = `${binDirectory}${delimiter}${originalPath ?? ""}`;
+}
+
+async function waitFor(condition: () => boolean, timeoutMs = 3000): Promise<void> {
+	const startedAt = Date.now();
+	while (!condition()) {
+		if (Date.now() - startedAt > timeoutMs) throw new Error("Timed out waiting for condition");
+		await new Promise((resolve) => setTimeout(resolve, 10));
+	}
+}
+
+afterEach(() => {
+	if (originalPath === undefined) delete process.env[pathEnvironmentKey];
+	else process.env[pathEnvironmentKey] = originalPath;
+	while (tempDirectories.length > 0) {
+		rmSync(tempDirectories.pop()!, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	}
+});
+
+describe("parseGitStatusPorcelainV2", () => {
+	it("counts mixed and overlapping path states without retaining names", () => {
+		const output = [
+			`# branch.oid ${SHA1}`,
+			"# branch.head feature/context",
+			"# branch.upstream origin/feature/context",
+			"# branch.ab +12 -3",
+			`1 A. N... 000000 100644 100644 ${SHA1} ${SHA1} added name`,
+			`1 .M N... 100644 100644 100644 ${SHA1} ${SHA1} modified name`,
+			`1 MT N... 100644 100644 100644 ${SHA1} ${SHA1} dual state`,
+			`2 C. N... 100644 100644 100644 ${SHA1} ${SHA1} C100 copied strange\nname`,
+			"source strange name",
+			`2 .R N... 100644 100644 100644 ${SHA1} ${SHA1} R100 renamed destination`,
+			"renamed source",
+			`u UU N... 100644 100644 100644 100644 ${SHA1} ${SHA1} ${SHA1} conflict`,
+			"? untracked path",
+			"! ignored path",
+			"",
+		].join("\0");
+
+		const parsed = parseGitStatusPorcelainV2(output);
+		expect(parsed).toEqual({
+			head: { kind: "branch", name: "feature/context", oid: SHA1 },
+			upstream: { ref: "origin/feature/context", ahead: 12, behind: 3 },
+			status: {
+				staged: { added: 2, modified: 1, deleted: 0, renamed: 0 },
+				unstaged: { added: 0, modified: 2, deleted: 0, renamed: 1 },
+				untracked: 1,
+				conflicted: 1,
+				total: 7,
+				clean: false,
+			},
+		});
+		expect(JSON.stringify(parsed)).not.toContain("strange");
+		expect(Object.isFrozen(parsed.status.staged)).toBe(true);
+	});
+
+	it("parses detached SHA-256 and unborn HEAD variants", () => {
+		expect(parseGitStatusPorcelainV2(`# branch.oid ${SHA256}\0# branch.head (detached)\0`)).toMatchObject({
+			head: { kind: "detached", oid: SHA256 },
+			upstream: null,
+			status: { clean: true, total: 0 },
+		});
+		expect(parseGitStatusPorcelainV2("# branch.oid (initial)\0# branch.head main\0")).toMatchObject({
+			head: { kind: "unborn", name: "main" },
+			upstream: null,
+			status: { clean: true, total: 0 },
+		});
+	});
+});
+
+describe("Git repository discovery", () => {
+	it("discovers linked worktrees and derives the common repository name", () => {
+		const repository = initRepository("common-repository");
+		commitFile(repository, "tracked.txt", "base\n");
+		const worktree = tempDirectory("linked-worktree");
+		git(repository, "worktree", "add", "-b", "linked", worktree);
+
+		const location = discoverGitWorktree(worktree);
+		expect(location).not.toBeNull();
+		expect(location?.gitDir).not.toBe(location?.commonGitDir);
+		expect(getGitRepositoryDisplayName(location!)).toBe(basename(repository));
+		expect(getGitRepositoryDisplayName(location!, "managed workspace")).toBe("managed workspace");
+	});
+
+	it("recognizes reftable metadata and operation marker progress", () => {
+		const repository = createSyntheticWorktree("reftable-repository");
+		mkdirSync(join(repository, ".git", "reftable"));
+		writeFileSync(join(repository, ".git", "reftable", "tables.list"), "0\n");
+		const location = discoverGitWorktree(repository)!;
+		expect(location.reftableDir).toBe(join(repository, ".git", "reftable"));
+
+		mkdirSync(join(location.gitDir, "rebase-merge"));
+		writeFileSync(join(location.gitDir, "rebase-merge", "msgnum"), "2\n");
+		writeFileSync(join(location.gitDir, "rebase-merge", "end"), "5\n");
+		expect(detectGitOperation(location)).toEqual({ kind: "rebase", step: 2, total: 5 });
+		rmSync(join(location.gitDir, "rebase-merge"), { recursive: true });
+
+		for (const [marker, kind] of [
+			["MERGE_HEAD", "merge"],
+			["CHERRY_PICK_HEAD", "cherry_pick"],
+			["REVERT_HEAD", "revert"],
+			["BISECT_LOG", "bisect"],
+		] as const) {
+			writeFileSync(join(location.gitDir, marker), "marker\n");
+			expect(detectGitOperation(location)).toEqual({ kind });
+			rmSync(join(location.gitDir, marker));
+		}
+		mkdirSync(join(location.gitDir, "sequencer"));
+		writeFileSync(join(location.gitDir, "sequencer", "todo"), "pick something\n");
+		expect(detectGitOperation(location)).toEqual({ kind: "sequencer" });
+	});
+});
+
+describe("GitContextProvider", () => {
+	it("distinguishes definitive non-Git observations from transient failures", async () => {
+		const nonGit = await GitContextProvider.create(tempDirectory("not-git"));
+		expect(nonGit.getSnapshot()).toBeNull();
+		expect(await nonGit.refresh()).toEqual({ status: "definitive", gitContext: null });
+		nonGit.dispose();
+
+		const syntheticRepository = createSyntheticWorktree("failed-observation");
+		installFakeGit("failure");
+		const failed = new GitContextProvider(syntheticRepository);
+		expect(await failed.refresh()).toEqual({ status: "transient_failure", gitContext: null });
+		failed.dispose();
+
+		if (originalPath === undefined) delete process.env[pathEnvironmentKey];
+		else process.env[pathEnvironmentKey] = originalPath;
+
+		const repository = initRepository("unborn-repository");
+		const provider = await GitContextProvider.create(repository);
+		expect(provider.getSnapshot()).toMatchObject({
+			repository: basename(repository),
+			head: { kind: "unborn", name: "main" },
+			status: { clean: true, total: 0 },
+			stale: false,
+			revision: 1,
+		});
+		provider.dispose();
+	});
+
+	it("publishes every definitive observation without treating failures as absence", async () => {
+		const repository = createSyntheticWorktree("observation-listener");
+		installFakeGit("failure");
+		const provider = new GitContextProvider(repository);
+		const observations: Array<"definitive" | "transient_failure"> = [];
+		provider.subscribeObservations((observation) => observations.push(observation.status));
+		expect((await provider.refresh()).status).toBe("transient_failure");
+		expect(observations).toEqual([]);
+
+		if (originalPath === undefined) delete process.env[pathEnvironmentKey];
+		else process.env[pathEnvironmentKey] = originalPath;
+		rmSync(join(repository, ".git"), { recursive: true });
+		expect(await provider.refresh()).toEqual({ status: "definitive", gitContext: null });
+		expect(observations).toEqual(["definitive"]);
+		provider.dispose();
+	});
+
+	it("rebinds host-owned observations to a replacement provider", async () => {
+		const initial = new GitContextProvider(tempDirectory("initial-non-git"));
+		const replacementRepository = initRepository("replacement-repository");
+		const replacement = new GitContextProvider(replacementRepository);
+		const observations: Array<string | null> = [];
+		const binding = new GitContextObservationBinding(
+			(observation) => {
+				if (observation.status === "definitive") {
+					observations.push(observation.gitContext?.repository ?? null);
+				}
+			},
+			{ monitor: true },
+		);
+
+		binding.bind(initial);
+		await waitFor(() => observations.length === 1);
+		expect(observations).toEqual([null]);
+		expect((initial as unknown as { observationCount: number }).observationCount).toBe(1);
+
+		binding.bind(replacement);
+		await waitFor(() => observations.includes(basename(replacementRepository)));
+		expect((initial as unknown as { observationCount: number }).observationCount).toBe(0);
+		expect((replacement as unknown as { observationCount: number }).observationCount).toBe(1);
+		const reboundObservationCount = observations.length;
+		await initial.refresh();
+		expect(observations).toHaveLength(reboundObservationCount);
+
+		binding.dispose();
+		expect((replacement as unknown as { observationCount: number }).observationCount).toBe(0);
+		await replacement.refresh();
+		expect(observations).toHaveLength(reboundObservationCount);
+		initial.dispose();
+		replacement.dispose();
+	});
+
+	it("parses an unborn repository", async () => {
+		const repository = initRepository("unborn-repository");
+		const provider = await GitContextProvider.create(repository);
+		expect(provider.getSnapshot()).toMatchObject({
+			repository: basename(repository),
+			head: { kind: "unborn", name: "main" },
+			status: { clean: true, total: 0 },
+			stale: false,
+			revision: 1,
+		});
+		provider.dispose();
+	});
+
+	it("reports exact real-repository mixed status and excludes ignored files", async () => {
+		const repository = initRepository("mixed-repository");
+		writeFileSync(join(repository, ".gitignore"), "ignored.log\n");
+		writeFileSync(join(repository, "first.txt"), "first\n");
+		writeFileSync(join(repository, "dual.txt"), "dual\n");
+		git(repository, "add", ".gitignore", "first.txt", "dual.txt");
+		git(repository, "commit", "-m", "base");
+
+		writeFileSync(join(repository, "first.txt"), "first changed\n");
+		writeFileSync(join(repository, "dual.txt"), "dual staged\n");
+		git(repository, "add", "dual.txt");
+		writeFileSync(join(repository, "dual.txt"), "dual staged and unstaged\n");
+		writeFileSync(join(repository, "added.txt"), "added\n");
+		git(repository, "add", "added.txt");
+		writeFileSync(join(repository, "untracked.txt"), "untracked\n");
+		writeFileSync(join(repository, "ignored.log"), "ignored\n");
+
+		const provider = await GitContextProvider.create(repository);
+		expect(provider.getSnapshot()?.status).toEqual({
+			staged: { added: 1, modified: 1, deleted: 0, renamed: 0 },
+			unstaged: { added: 0, modified: 2, deleted: 0, renamed: 0 },
+			untracked: 1,
+			conflicted: 0,
+			total: 4,
+			clean: false,
+		});
+		provider.dispose();
+	});
+
+	it("counts staged renames and conflicts without exposing unusual paths", async () => {
+		const repository = initRepository("conflict-repository");
+		commitFile(repository, "odd original.txt", "base\n");
+		git(repository, "mv", "odd original.txt", "odd destination →.txt");
+		let provider = await GitContextProvider.create(repository);
+		expect(provider.getSnapshot()?.status.staged.renamed).toBe(1);
+		expect(JSON.stringify(provider.getSnapshot())).not.toContain(repository);
+		expect(JSON.stringify(provider.getSnapshot())).not.toContain("odd destination");
+		provider.dispose();
+
+		git(repository, "reset", "--hard", "HEAD");
+		git(repository, "switch", "-c", "side");
+		writeFileSync(join(repository, "odd original.txt"), "side\n");
+		git(repository, "commit", "-am", "side");
+		git(repository, "switch", "main");
+		writeFileSync(join(repository, "odd original.txt"), "main\n");
+		git(repository, "commit", "-am", "main");
+		try {
+			git(repository, "merge", "side");
+		} catch {
+			// Expected content conflict.
+		}
+		provider = await GitContextProvider.create(repository);
+		expect(provider.getSnapshot()?.status).toMatchObject({ conflicted: 1, total: 1, clean: false });
+		provider.dispose();
+	});
+
+	it("reports detached HEAD and coherent managed-base divergence", async () => {
+		const repository = initRepository("base-repository");
+		commitFile(repository, "tracked.txt", "root\n", "root");
+		git(repository, "branch", "base");
+		writeFileSync(join(repository, "tracked.txt"), "main\n");
+		git(repository, "commit", "-am", "main");
+		git(repository, "switch", "base");
+		writeFileSync(join(repository, "tracked.txt"), "base\n");
+		git(repository, "commit", "-am", "base");
+		git(repository, "switch", "main");
+
+		const provider = await GitContextProvider.create(repository, {
+			workspaceName: "managed-workspace",
+			baseRef: "base",
+		});
+		expect(provider.getSnapshot()).toMatchObject({
+			repository: "managed-workspace",
+			head: { kind: "branch", name: "main" },
+			base: { ref: "base", ahead: 1, behind: 1 },
+		});
+		provider.dispose();
+
+		git(repository, "switch", "--detach");
+		const detached = await GitContextProvider.create(repository);
+		expect(detached.getSnapshot()?.head).toMatchObject({ kind: "detached" });
+		detached.dispose();
+	});
+
+	it("deduplicates unchanged scans and emits immutable full replacements", async () => {
+		const repository = initRepository("dedupe-repository");
+		commitFile(repository, "tracked.txt", "base\n");
+		const provider = await GitContextProvider.create(repository);
+		const events: Array<ReturnType<GitContextProvider["getSnapshot"]>> = [];
+		const unsubscribe = provider.subscribe((snapshot) => events.push(snapshot));
+		const original = provider.getSnapshot();
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		await provider.refresh();
+		expect(events).toEqual([]);
+		expect(provider.getSnapshot()?.revision).toBe(original?.revision);
+		expect(provider.getSnapshot()?.observedAt).not.toBe(original?.observedAt);
+
+		writeFileSync(join(repository, "tracked.txt"), "changed\n");
+		await provider.refresh();
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ revision: 2, stale: false, status: { clean: false } });
+		expect(Object.isFrozen(events[0])).toBe(true);
+		unsubscribe();
+		provider.dispose();
+	});
+
+	it("retains the last good snapshot across failure and recovery", async () => {
+		const repository = initRepository("stale-repository");
+		commitFile(repository, "tracked.txt", "base\n");
+		const provider = await GitContextProvider.create(repository);
+		const good = provider.getSnapshot()!;
+		const events: Array<ReturnType<GitContextProvider["getSnapshot"]>> = [];
+		provider.subscribe((snapshot) => events.push(snapshot));
+
+		installFakeGit("failure");
+		await provider.refresh();
+		expect(provider.getSnapshot()).toMatchObject({
+			head: good.head,
+			observedAt: good.observedAt,
+			stale: true,
+			revision: 2,
+		});
+		expect((provider as unknown as { pollDelayMs: number }).pollDelayMs).toBeGreaterThan(30_000);
+		if (originalPath === undefined) delete process.env[pathEnvironmentKey];
+		else process.env[pathEnvironmentKey] = originalPath;
+		await provider.refresh();
+		expect(provider.getSnapshot()).toMatchObject({ stale: false, revision: 3 });
+		expect(events.map((event) => event?.stale)).toEqual([true, false]);
+		provider.dispose();
+	});
+
+	it("bounds timeout and output failures", async () => {
+		const repository = createSyntheticWorktree("bounded-repository");
+		installFakeGit("hanging");
+		let provider = await GitContextProvider.create(repository, { commandTimeoutMs: 25 });
+		expect(provider.getSnapshot()).toBeNull();
+		provider.dispose();
+
+		installFakeGit("oversized-output");
+		provider = await GitContextProvider.create(repository, { maxStdoutBytes: 64 });
+		expect(provider.getSnapshot()).toBeNull();
+		provider.dispose();
+	});
+
+	it("streams large untracked listings past the per-record output bound", async () => {
+		const repository = initRepository("untracked-flood");
+		commitFile(repository, "tracked.txt", "base\n");
+		for (let index = 0; index < 120; index++) {
+			writeFileSync(join(repository, `untracked-${index}.txt`), "x\n");
+		}
+		const provider = await GitContextProvider.create(repository, { maxStdoutBytes: 256 });
+		expect(provider.getSnapshot()).toMatchObject({
+			stale: false,
+			status: { untracked: 120, total: 120, clean: false },
+		});
+		provider.dispose();
+	});
+
+	it("schedules a follow-up scan when a refresh arrives mid-scan", async () => {
+		const repository = createSyntheticWorktree("rerun-repository");
+		const countFile = join(tempDirectory("git-rerun-count"), "calls");
+		installFakeGit("delayed-counted-status", countFile);
+		const provider = new GitContextProvider(repository);
+		const first = provider.refresh();
+		expect(provider.refresh()).toBe(first);
+		await first;
+		expect(gitCallCount(countFile)).toBe(1);
+		// The joined refresh reruns even with no observers keeping a poll alive.
+		await waitFor(() => gitCallCount(countFile) >= 2);
+		await waitFor(() => (provider as unknown as { children: Set<unknown> }).children.size === 0);
+		provider.dispose();
+	});
+
+	it("coalesces concurrent refreshes and stops observer polling on disposal", async () => {
+		const repository = createSyntheticWorktree("coalesced-repository");
+		const countFile = join(tempDirectory("git-count"), "calls");
+		installFakeGit("delayed-counted-status", countFile);
+		const provider = await GitContextProvider.create(repository, { pollIntervalMs: 25 });
+		const unsubscribe = provider.subscribe(() => undefined);
+		expect((provider as unknown as { watchers: unknown[] }).watchers.length).toBeGreaterThan(0);
+		await Promise.all([provider.refresh(), provider.refresh(), provider.refresh()]);
+		expect(gitCallCount(countFile)).toBe(2);
+		await waitFor(() => gitCallCount(countFile) >= 3);
+		unsubscribe();
+		await waitFor(() => (provider as unknown as { children: Set<unknown> }).children.size === 0);
+		provider.dispose();
+		expect((provider as unknown as { pollTimer: unknown; watchers: unknown[] }).watchers).toEqual([]);
+		expect((provider as unknown as { pollTimer: unknown }).pollTimer).toBeNull();
+		const countAfterDispose = gitCallCount(countFile);
+		await new Promise((resolve) => setTimeout(resolve, 100));
+		expect(gitCallCount(countFile)).toBe(countAfterDispose);
+	});
+
+	it("never includes configured remote URLs or absolute worktree paths", async () => {
+		const repository = initRepository("private-repository");
+		commitFile(repository, "tracked.txt", "base\n");
+		git(repository, "remote", "add", "origin", "https://secret.example/token/repository.git");
+		const provider = await GitContextProvider.create(repository);
+		const serialized = JSON.stringify(provider.getSnapshot());
+		expect(serialized).not.toContain(repository);
+		expect(serialized).not.toContain("secret.example");
+		expect(serialized).not.toContain("https://");
+		provider.dispose();
+
+		const unsafeOverride = await GitContextProvider.create(repository, {
+			workspaceName: "workspace https://secret.example/token/repository.git",
+		});
+		expect(JSON.stringify(unsafeOverride.getSnapshot())).not.toContain("secret.example");
+		unsafeOverride.dispose();
+	});
+});
+
+describe("GitContextProvider refresh scheduling", () => {
+	afterEach(() => {
+		vi.useRealTimers();
+	});
+
+	function providerWithSpiedRefresh(label: string) {
+		vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+		const provider = new GitContextProvider(tempDirectory(label));
+		const refresh = vi.spyOn(provider, "refresh").mockResolvedValue({ status: "definitive", gitContext: null });
+		return { provider, refresh };
+	}
+
+	it("still scans within one second while requests keep arriving", () => {
+		const { provider, refresh } = providerWithSpiedRefresh("deferral-cap");
+		const start = Date.now();
+		const scannedAt: number[] = [];
+		refresh.mockImplementation(async () => {
+			scannedAt.push(Date.now() - start);
+			return { status: "definitive", gitContext: null };
+		});
+		// Every request lands inside the 100 ms debounce of the previous one.
+		for (let elapsed = 0; elapsed < 2500; elapsed += 50) {
+			provider.scheduleRefresh();
+			vi.advanceTimersByTime(50);
+		}
+		expect(scannedAt.length).toBeGreaterThanOrEqual(2);
+		expect(scannedAt[0]).toBeLessThanOrEqual(1000);
+		for (let index = 1; index < scannedAt.length; index++) {
+			expect(scannedAt[index] - scannedAt[index - 1]).toBeLessThanOrEqual(1050);
+		}
+		provider.dispose();
+	});
+
+	it("collapses a short burst into one scan after the debounce", () => {
+		const { provider, refresh } = providerWithSpiedRefresh("deferral-burst");
+		for (let index = 0; index < 5; index++) {
+			provider.scheduleRefresh();
+			vi.advanceTimersByTime(20);
+		}
+		expect(refresh).not.toHaveBeenCalled();
+		vi.advanceTimersByTime(100);
+		expect(refresh).toHaveBeenCalledTimes(1);
+
+		// The cap restarts with the next request instead of firing it immediately.
+		provider.scheduleRefresh();
+		vi.advanceTimersByTime(99);
+		expect(refresh).toHaveBeenCalledTimes(1);
+		vi.advanceTimersByTime(1);
+		expect(refresh).toHaveBeenCalledTimes(2);
+
+		provider.scheduleRefresh();
+		provider.dispose();
+		vi.advanceTimersByTime(2000);
+		expect(refresh).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("GitContextProviderPool", () => {
+	it("shares one provider per cwd, workspace name, and base ref", () => {
+		const cwd = tempDirectory("pool-shared");
+		const pool = new GitContextProviderPool();
+		const first = pool.acquire({ cwd });
+		const second = pool.acquire({ cwd: `${cwd}${sep}` });
+		expect(second.provider).toBe(first.provider);
+
+		const distinct = [
+			pool.acquire({ cwd: tempDirectory("pool-other") }),
+			pool.acquire({ cwd, workspaceName: "workspace" }),
+			pool.acquire({ cwd, baseRef: "main" }),
+		];
+		const providers = new Set([first.provider, ...distinct.map((lease) => lease.provider)]);
+		expect(providers.size).toBe(4);
+		for (const lease of [first, second, ...distinct]) lease.release();
+	});
+
+	it("disposes a provider with its last lease and hands out a fresh one afterwards", () => {
+		const cwd = tempDirectory("pool-release");
+		const pool = new GitContextProviderPool();
+		const first = pool.acquire({ cwd });
+		const second = pool.acquire({ cwd });
+		first.release();
+		first.release();
+		expect(second.provider.isDisposed).toBe(false);
+		second.release();
+		expect(second.provider.isDisposed).toBe(true);
+
+		const next = pool.acquire({ cwd });
+		expect(next.provider).not.toBe(first.provider);
+		expect(next.provider.isDisposed).toBe(false);
+		next.release();
+	});
+
+	it("replaces a provider disposed outside the pool without letting its stale lease dispose the replacement", () => {
+		const cwd = tempDirectory("pool-replaced");
+		const pool = new GitContextProviderPool();
+		const stale = pool.acquire({ cwd });
+		stale.provider.dispose();
+		const replacement = pool.acquire({ cwd });
+		expect(replacement.provider).not.toBe(stale.provider);
+		stale.release();
+		expect(replacement.provider.isDisposed).toBe(false);
+		replacement.release();
+		expect(replacement.provider.isDisposed).toBe(true);
+	});
+
+	it("runs one scan when two holders request a refresh together", async () => {
+		const repository = createSyntheticWorktree("pool-scan");
+		const countFile = join(tempDirectory("pool-scan-count"), "calls");
+		installFakeGit("delayed-counted-status", countFile);
+		const pool = new GitContextProviderPool();
+		const parent = pool.acquire({ cwd: repository });
+		const subagent = pool.acquire({ cwd: repository });
+		parent.provider.scheduleRefresh();
+		subagent.provider.scheduleRefresh();
+		await waitFor(() => parent.provider.getSnapshot() !== null);
+		await waitFor(() => (parent.provider as unknown as { children: Set<unknown> }).children.size === 0);
+		await new Promise((resolve) => setTimeout(resolve, 200));
+		expect(gitCallCount(countFile)).toBe(1);
+		subagent.release();
+		parent.release();
+	});
+});
+
+function gitCallCount(path: string): number {
+	if (!existsSync(path)) return 0;
+	return readFileSync(path, "utf8")
+		.split(/\r?\n/)
+		.filter((line) => line.length > 0).length;
+}

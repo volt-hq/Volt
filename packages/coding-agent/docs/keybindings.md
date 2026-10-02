@@ -1,0 +1,269 @@
+# Keybindings
+
+All keyboard shortcuts can be customized via `~/.volt/agent/keybindings.json`. Each action can be bound to one or more keys.
+
+The config file uses the same namespaced keybinding ids that volt uses internally and that extension authors use in `keyHint()` and injected `keybindings` managers.
+
+Older configs using pre-namespaced ids such as `cursorUp` or `expandTools` are migrated automatically to the namespaced ids on startup.
+
+After editing `keybindings.json`, run `/reload` in volt to apply the changes without restarting the session.
+
+## Key Format
+
+`modifier+key` where modifiers are `ctrl`, `shift`, `alt` (combinable) and keys are:
+
+- **Letters:** `a-z`
+- **Digits:** `0-9`
+- **Special:** `escape`, `esc`, `enter`, `return`, `tab`, `space`, `backspace`, `delete`, `insert`, `clear`, `home`, `end`, `pageUp`, `pageDown`, `up`, `down`, `left`, `right`
+- **Function:** `f1`-`f12`
+- **Symbols:** `` ` ``, `-`, `=`, `[`, `]`, `\`, `;`, `'`, `,`, `.`, `/`, `!`, `@`, `#`, `$`, `%`, `^`, `&`, `*`, `(`, `)`, `_`, `+`, `|`, `~`, `{`, `}`, `:`, `<`, `>`, `?`
+
+Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1`, etc.
+
+## All Actions
+
+### TUI Editor Cursor Movement
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.editor.cursorUp` | `up` | Move cursor up |
+| `tui.editor.cursorDown` | `down` | Move cursor down |
+| `tui.editor.cursorLeft` | `left`, `ctrl+b` | Move cursor left |
+| `tui.editor.cursorRight` | `right`, `ctrl+f` | Move cursor right |
+| `tui.editor.cursorWordLeft` | `alt+left`, `ctrl+left`, `alt+b` | Move cursor word left |
+| `tui.editor.cursorWordRight` | `alt+right`, `ctrl+right`, `alt+f` | Move cursor word right |
+| `tui.editor.cursorLineStart` | `home`, `ctrl+a` | Move to line start |
+| `tui.editor.cursorLineEnd` | `end`, `ctrl+e` | Move to line end |
+| `tui.editor.jumpForward` | `ctrl+]` | Jump forward to character |
+| `tui.editor.jumpBackward` | `ctrl+alt+]` | Jump backward to character |
+| `tui.editor.pageUp` | `pageUp` | Scroll up by page |
+| `tui.editor.pageDown` | `pageDown` | Scroll down by page |
+
+### TUI Editor Deletion
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.editor.deleteCharBackward` | `backspace` | Delete character backward |
+| `tui.editor.deleteCharForward` | `delete`, `ctrl+d` | Delete character forward |
+| `tui.editor.deleteWordBackward` | `ctrl+w`, `alt+backspace` | Delete word backward |
+| `tui.editor.deleteWordForward` | `alt+d`, `alt+delete` | Delete word forward |
+| `tui.editor.deleteToLineStart` | `ctrl+u` | Delete to line start |
+| `tui.editor.deleteToLineEnd` | `ctrl+k` | Delete to line end |
+
+### TUI Input
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.input.newLine` | `shift+enter` | Insert new line |
+| `tui.input.submit` | `enter` | Submit input |
+| `tui.input.tab` | `tab` | Tab / autocomplete |
+
+### TUI Kill Ring
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.editor.yank` | `ctrl+y` | Paste most recently deleted text |
+| `tui.editor.yankPop` | `alt+y` | Cycle through deleted text after yank |
+| `tui.editor.undo` | `ctrl+-` | Undo last edit |
+
+### TUI Clipboard and Selection
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.input.copy` | `ctrl+c` | Copy selection |
+| `tui.select.up` | `up` | Move selection up |
+| `tui.select.down` | `down` | Move selection down |
+| `tui.select.pageUp` | `pageUp` | Page up in list |
+| `tui.select.pageDown` | `pageDown` | Page down in list |
+| `tui.select.confirm` | `enter` | Confirm selection |
+| `tui.select.cancel` | `escape`, `ctrl+c` | Cancel selection |
+
+### TUI Fullscreen Viewport
+
+These actions apply in `--tui-mode fullscreen` and target the primary transcript `ScrollView`. Two-finger trackpad and mouse-wheel input instead target the deepest scroll view under the pointer, with unused movement chaining outward and input over the fixed dock falling back to the transcript. Pointer routing does not change keyboard focus or the primary keyboard scroll target.
+
+Clicking an OSC 8 hyperlink opens it in the default browser. Dragging with the primary mouse button selects rendered text and copies it to the clipboard; holding the drag at a scroll region's top or bottom edge auto-scrolls into off-screen content. On Windows, a secondary-button press pastes clipboard text into the focused input. See [Terminal setup](terminal-setup.md) for terminal-specific mouse, link, and trackpad behavior.
+
+Fullscreen transcript bindings take precedence over unmodified editor bindings. Their `ctrl` variants continue to control the editor. Outside fullscreen mode, both variants control the editor.
+
+| Key | Regular mode | Fullscreen mode |
+|-----|--------------|-----------------|
+| `home`, `end` | Editor | Transcript |
+| `ctrl+home`, `ctrl+end` | Editor | Editor |
+| `pageUp`, `pageDown` | Editor | Transcript |
+| `ctrl+pageUp`, `ctrl+pageDown` | Editor | Editor |
+
+This routing remains configurable through the ordinary action bindings. For example, `"tui.altScreen.pageUp": "ctrl+pageUp"` makes `pageUp` control the editor and `ctrl+pageUp` control the transcript in fullscreen mode. Bind `tui.altScreen.halfPageUp`/`halfPageDown` for half-page steps or `tui.altScreen.lineUp`/`lineDown` for single-line steps. Setting an action to `[]` disables its shortcut. User bindings replace that action's defaults.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `tui.altScreen.pageUp` | `pageUp` | Scroll the transcript up by one page |
+| `tui.altScreen.pageDown` | `pageDown` | Scroll the transcript down by one page |
+| `tui.altScreen.halfPageUp` | *(none)* | Scroll the transcript up by half a page |
+| `tui.altScreen.halfPageDown` | *(none)* | Scroll the transcript down by half a page |
+| `tui.altScreen.lineUp` | *(none)* | Scroll the transcript up by one line |
+| `tui.altScreen.lineDown` | *(none)* | Scroll the transcript down by one line |
+| `tui.altScreen.previousPrompt` | `ctrl+shift+up` | Jump to the previous marked prompt |
+| `tui.altScreen.nextPrompt` | `ctrl+shift+down` | Jump to the next marked prompt |
+| `tui.altScreen.search` | `ctrl+shift+f` | Search the rendered transcript |
+| `tui.altScreen.searchNext` | `enter`, `ctrl+g` | Select the next match while searching |
+| `tui.altScreen.searchPrevious` | `shift+enter`, `ctrl+shift+g` | Select the previous match while searching |
+| `tui.altScreen.searchClose` | `escape` | Close transcript search |
+| `tui.altScreen.top` | `home` | Scroll to the transcript beginning |
+| `tui.altScreen.bottom` | `end` | Scroll to the end and follow new output |
+
+### Application
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.interrupt` | `escape` | Cancel / abort |
+| `app.clear` | `ctrl+c` | Clear editor |
+| `app.exit` | `ctrl+d` | Exit (when editor empty) |
+| `app.debug` | `f12` | Capture diagnostics without interrupting work (`/debug`) |
+| `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
+| `app.mode.toggle` | `shift+tab` | Toggle Build and Plan mode |
+| `app.plan.togglePane` | `alt+p` | Switch focus between the conversation and responsive plan pane |
+| `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
+| `app.clipboard.pasteImage` | `ctrl+v` (`alt+v` on Windows) | Paste image from clipboard |
+
+While work is active, quitting with `Ctrl+D`, double `Ctrl+C`, or `/quit` first shows a warning. Repeat the quit action within three seconds to confirm. Resuming editing or starting another operation requires a new confirmation. `Ctrl+C` always clears a nonempty editor first. Idle exit works immediately (`Ctrl+C` still needs two presses).
+
+Use `F12` or `/debug` to capture diagnostics while a response or tool is active. The shortcut works even when a selector or overlay has focus. Customize it with `app.debug`, or set it to `[]` to use only `/debug`. `F12` does not require extended keyboard encoding. Avoid shifted control shortcuts such as `Ctrl+Shift+D` on terminals that send the same bytes as `Ctrl+D`; they cannot be distinguished there.
+
+### Sessions
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.session.new` | *(none)* | Start a new session (`/clear`) |
+| `app.session.tree` | *(none)* | Open session tree navigator (`/tree`) |
+| `app.session.fork` | *(none)* | Fork current session (`/fork`) |
+| `app.session.resume` | *(none)* | Open session resume picker (`/resume`) |
+| `app.subagents.open` | `alt+a` | Switch between the main conversation and subagent conversations (`/subagents`) |
+| `app.subagents.previous` | `left` | Show the previous subagent while in the subagents view |
+| `app.subagents.next` | `right` | Show the next subagent while in the subagents view |
+| `app.session.togglePath` | `ctrl+p` | Toggle path display |
+| `app.session.toggleSort` | `ctrl+s` | Toggle sort mode |
+| `app.session.toggleNamedFilter` | `ctrl+n` | Toggle named-only filter |
+| `app.session.rename` | `ctrl+r` | Rename session |
+| `app.session.delete` | `ctrl+d` | Delete session |
+| `app.session.deleteNoninvasive` | `ctrl+backspace` | Delete session when query is empty |
+
+### Background Jobs
+
+`/jobs` or Alt+J opens the live background-job inspector, including while the model is waiting. Arrow keys select a job; Enter opens its retained output. In the output view, arrow keys and PageUp/PageDown scroll a paused, bounded reading snapshot. End resumes following new output. Escape returns to the list or closes the inspector without cancelling work.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.jobs.open` | `alt+j` | Open or close the background-job inspector |
+| `app.jobs.cancel` | `ctrl+k` | Request cancellation of the selected job, after confirmation |
+| `app.jobs.follow` | `end` | Follow the latest output in the inspector |
+
+Cancellation uses Enter to confirm and Escape to keep the job running. The job remains **Cancelling** until its worker stops. Navigation and confirmation use the configurable `tui.select.*` actions.
+
+### Structured Questions
+
+Questions replace the editor while Volt waits for your preferences. Use `tui.select.up`/`down` to highlight an option and `tui.select.confirm` to answer. Typing or pasting starts a custom answer, including the first character. Custom answers and optional notes use the normal multiline editor (`tui.input.submit` to continue, `tui.input.newLine` for a newline).
+
+Multiple questions end with a review: highlight a question to edit it, or confirm **Submit answers**. Highlighting alone never supplies an answer. Skip discards the entire request's answers; cancel is a distinct result. Neither grants tool permissions.
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.questions.back` | `shift+tab` | Return to choices, the previous question, or from review; preserve drafts |
+| `app.questions.skip` | `ctrl+s` | Skip this request without answers |
+| `app.questions.notes` | `ctrl+n` | Add optional notes to the highlighted option |
+| `tui.select.cancel` | `escape`, `ctrl+c` | Cancel the request without answers |
+| `app.questions.pageUp` / `app.questions.pageDown` | `ctrl+pageUp` / `ctrl+pageDown` | Scroll long questions and review summaries |
+
+Plain PageUp/PageDown also scroll the question in regular mode. In fullscreen mode they retain their normal transcript-scrolling behavior; use Ctrl+PageUp/Down for the question panel.
+
+### Models and Thinking
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.model.select` | `ctrl+l` | Open model selector |
+| `app.model.cycleForward` | `ctrl+p` | Cycle to next model |
+| `app.model.cycleBackward` | `shift+ctrl+p` | Cycle to previous model |
+| `app.thinking.cycle` | `shift+tab` | Cycle thinking level |
+| `app.thinking.toggle` | `ctrl+t` | Collapse or expand thinking blocks |
+
+### Display and Message Queue
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.tools.expand` | `ctrl+o` | Collapse or expand tool output and review details |
+| `app.message.followUp` | `alt+enter` | Queue follow-up message |
+| `app.message.dequeue` | `alt+up` | Restore queued messages to editor |
+
+### Tree Navigation
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.tree.foldOrUp` | `ctrl+left`, `alt+left` | Fold current branch segment, or jump to the previous segment start |
+| `app.tree.unfoldOrDown` | `ctrl+right`, `alt+right` | Unfold current branch segment, or jump to the next segment start or branch end |
+| `app.tree.editLabel` | `shift+l` | Edit the label on the selected tree node |
+| `app.tree.toggleLabelTimestamp` | `shift+t` | Toggle label timestamps in the tree |
+| `app.tree.filter.default` | `ctrl+d` | Set tree filter to default view |
+| `app.tree.filter.noTools` | `ctrl+t` | Toggle tree filter that hides tool results |
+| `app.tree.filter.userOnly` | `ctrl+u` | Toggle tree filter that shows only user messages |
+| `app.tree.filter.labeledOnly` | `ctrl+l` | Toggle tree filter that shows only labeled entries |
+| `app.tree.filter.all` | `ctrl+a` | Toggle tree filter that shows all entries |
+| `app.tree.filter.cycleForward` | `ctrl+o` | Cycle tree filter forward |
+| `app.tree.filter.cycleBackward` | `shift+ctrl+o` | Cycle tree filter backward |
+
+### Scoped Models Selector
+
+Used inside the scoped models selector (opened via `/scoped-models`).
+
+| Keybinding id | Default | Description |
+|--------|---------|-------------|
+| `app.models.save` | `ctrl+s` | Save current model selection to settings |
+| `app.models.enableAll` | `ctrl+a` | Enable all models (or all matching the current search) |
+| `app.models.clearAll` | `ctrl+x` | Clear all models (or all matching the current search) |
+| `app.models.toggleProvider` | `ctrl+p` | Toggle all models for the current provider |
+| `app.models.reorderUp` | `alt+up` | Move the selected model up in the cycle order |
+| `app.models.reorderDown` | `alt+down` | Move the selected model down in the cycle order |
+
+## Custom Configuration
+
+Create `~/.volt/agent/keybindings.json`:
+
+```json
+{
+  "tui.editor.cursorUp": ["up", "ctrl+p"],
+  "tui.editor.cursorDown": ["down", "ctrl+n"],
+  "tui.editor.deleteWordBackward": ["ctrl+w", "alt+backspace"]
+}
+```
+
+Each action can have a single key or an array of keys. User config overrides defaults.
+
+On native Windows, `app.suspend` has no default binding because Windows terminals do not support Unix job control. If you bind it manually, volt shows a status message instead of suspending. In WSL, the normal Linux `ctrl+z`/`fg` behavior still applies.
+
+### Emacs Example
+
+```json
+{
+  "tui.editor.cursorUp": ["up", "ctrl+p"],
+  "tui.editor.cursorDown": ["down", "ctrl+n"],
+  "tui.editor.cursorLeft": ["left", "ctrl+b"],
+  "tui.editor.cursorRight": ["right", "ctrl+f"],
+  "tui.editor.cursorWordLeft": ["alt+left", "alt+b"],
+  "tui.editor.cursorWordRight": ["alt+right", "alt+f"],
+  "tui.editor.deleteCharForward": ["delete", "ctrl+d"],
+  "tui.editor.deleteCharBackward": ["backspace", "ctrl+h"],
+  "tui.input.newLine": ["shift+enter", "ctrl+j"]
+}
+```
+
+### Vim Example
+
+```json
+{
+  "tui.editor.cursorUp": ["up", "alt+k"],
+  "tui.editor.cursorDown": ["down", "alt+j"],
+  "tui.editor.cursorLeft": ["left", "alt+h"],
+  "tui.editor.cursorRight": ["right", "alt+l"],
+  "tui.editor.cursorWordLeft": ["alt+left", "alt+b"],
+  "tui.editor.cursorWordRight": ["alt+right", "alt+w"]
+}
+```

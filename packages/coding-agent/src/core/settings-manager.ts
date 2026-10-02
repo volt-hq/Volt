@@ -1,0 +1,2014 @@
+import { Buffer } from "node:buffer";
+import type { ToolArgumentLimits, Transport } from "@hansjm10/volt-ai";
+import type { TuiMode as RendererTuiMode, ScrollViewScrollbar } from "@hansjm10/volt-tui";
+import { randomUUID } from "crypto";
+import { existsSync, lstatSync, mkdirSync, readFileSync } from "fs";
+import { dirname, join } from "path";
+import lockfile from "proper-lockfile";
+import { CONFIG_DIR_NAME, getAgentDir } from "../config.ts";
+import { writeDurableAtomicFileSync } from "../utils/durable-atomic-write.ts";
+import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { ensurePrivateDirectorySync, hardenPrivateRegularFileSync } from "../utils/private-files.ts";
+import { DEFAULT_HTTP_IDLE_TIMEOUT_MS, parseHttpIdleTimeoutMs } from "./http-dispatcher.ts";
+import type { LspSettings } from "./lsp/config.ts";
+import { isPersonality, type Personality } from "./personality.ts";
+
+const DEFAULT_CONTEXT_WARNING_TOKENS = 350_000;
+const DEFAULT_PROMPT_CACHE_KEEPALIVE_IDLE_MINUTES = 15;
+
+export interface CompactionSettings {
+	enabled?: boolean; // default: true
+	reserveTokens?: number; // default: 16384
+	keepRecentTokens?: number; // default: 20000
+	/** Absolute auto-compaction thresholds keyed by exact provider/model ID. 0 uses the context-limit default. */
+	modelThresholds?: Record<string, number>;
+}
+
+export interface BranchSummarySettings {
+	reserveTokens?: number; // default: 16384 (tokens reserved for prompt + LLM response)
+	skipPrompt?: boolean; // default: false - when true, skips "Summarize branch?" prompt and defaults to no summary
+}
+
+export interface ProviderRetrySettings {
+	timeoutMs?: number; // SDK/provider request timeout in milliseconds
+	maxRetries?: number; // SDK/provider retry attempts
+	maxRetryDelayMs?: number; // default: 60000 (max server-requested delay before failing)
+}
+
+export interface RetrySettings {
+	enabled?: boolean; // default: true
+	maxRetries?: number; // default: 6
+	baseDelayMs?: number; // default: 2000 (exponential backoff: 2s, 4s, 8s, 16s, 32s, 64s)
+	provider?: ProviderRetrySettings;
+}
+
+export type TurnDoneAlert = "off" | "bell" | "notify";
+export type TuiMode = RendererTuiMode;
+export type FullscreenExitOutput = "transcript" | "resume-hint";
+
+export interface TerminalSettings {
+	showImages?: boolean; // default: true (only relevant if terminal supports images)
+	imageWidthCells?: number; // default: 60 (preferred inline image width in terminal cells)
+	clearOnShrink?: boolean; // default: false (clear empty rows when content shrinks)
+	showTerminalProgress?: boolean; // default: false (OSC 9;4 terminal progress indicators)
+	turnDoneAlert?: TurnDoneAlert; // default: "off" (bell or desktop notification when a turn finishes while the terminal is unfocused)
+}
+
+export interface ImageSettings {
+	autoResize?: boolean; // default: true (resize images to 2000x2000 max for better model compatibility)
+	blockImages?: boolean; // default: false - when true, prevents all images from being sent to LLM providers
+}
+
+export interface ThinkingBudgetsSettings {
+	minimal?: number;
+	low?: number;
+	medium?: number;
+	high?: number;
+}
+
+export interface MarkdownSettings {
+	codeBlockIndent?: string; // default: "  "
+}
+
+export interface PromptCacheSettings {
+	keepAlive?: boolean; // default: true - refresh renewing prompt caches shortly before expiry
+	keepAliveIdleMinutes?: number; // default: 15 - keep refreshing this long after work settles; 0 = only while work runs
+}
+
+export interface PromptCacheKeepAliveConfig {
+	enabled: boolean;
+	idleWindowMs: number;
+}
+
+export interface WarningSettings {
+	anthropicExtraUsage?: boolean; // default: true
+	contextTokens?: number; // default: 350000; 0 disables the absolute context warning
+}
+
+export type DefaultProjectTrust = "ask" | "always" | "never";
+
+export type TransportSetting = Transport;
+
+export interface ProfileStorageSettings {
+	/** Reserved for future per-profile auth isolation. Ignored by the MVP. */
+	authDir?: string;
+	/** Reserved for future per-profile session isolation. Ignored by the MVP. */
+	sessionDir?: string;
+}
+
+export type ProfileSettings = Omit<
+	Settings,
+	| "lastChangelogVersion"
+	| "defaultProfile"
+	| "profiles"
+	| "defaultProjectTrust"
+	| "enableInstallTelemetry"
+	| "enableAnalytics"
+	| "trackingId"
+	| "sessionDir"
+> & {
+	/** Reserved for future per-profile storage isolation. Ignored by the MVP. */
+	storage?: ProfileStorageSettings;
+};
+
+/**
+ * Package source for npm/git packages.
+ * - String form: load all resources from the package
+ * - Object form: store package metadata and optionally filter which resources to load
+ */
+export type PackageSource =
+	| string
+	| {
+			source: string;
+			scripts?: "never" | "allow";
+			extensions?: string[];
+			skills?: string[];
+			prompts?: string[];
+			themes?: string[];
+	  };
+
+export interface Settings {
+	lastChangelogVersion?: string;
+	defaultProfile?: string;
+	profiles?: Record<string, ProfileSettings>;
+	defaultProvider?: string;
+	defaultModel?: string;
+	personality?: Personality; // default: "default"
+	defaultThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+	transport?: TransportSetting; // default: "auto"
+	steeringMode?: "all" | "one-at-a-time";
+	followUpMode?: "all" | "one-at-a-time";
+	theme?: string;
+	compaction?: CompactionSettings;
+	branchSummary?: BranchSummarySettings;
+	retry?: RetrySettings;
+	/** Independent byte and elapsed-time bounds on tool arguments before execution. */
+	toolArgumentLimits?: ToolArgumentLimits;
+	hideThinkingBlock?: boolean;
+	shellPath?: string; // Custom shell path (e.g., for Cygwin users on Windows)
+	quietStartup?: boolean;
+	defaultProjectTrust?: DefaultProjectTrust; // default: "ask"; global setting only
+	shellCommandPrefix?: string; // Prefix prepended to every bash command (e.g., "shopt -s expand_aliases" for alias support)
+	npmCommand?: string[]; // Command used for npm package lookup/install operations, argv-style (e.g., ["mise", "exec", "node@20", "--", "npm"])
+	collapseChangelog?: boolean; // Show condensed changelog after update (use /changelog for full)
+	enableInstallTelemetry?: boolean; // default: true - anonymous version/update ping after changelog-detected updates
+	enableAnalytics?: boolean; // default: false - opt-in analytics data sharing
+	trackingId?: string; // analytics tracking identifier, generated when analytics is enabled
+	packages?: PackageSource[]; // Array of npm/git package sources (string or object with filtering)
+	extensions?: string[]; // Array of local extension file paths or directories
+	skills?: string[]; // Array of local skill file paths or directories
+	prompts?: string[]; // Array of local prompt template paths or directories
+	themes?: string[]; // Array of local theme file paths or directories
+	enableSkillCommands?: boolean; // default: true - register skills as /skill:name commands
+	terminal?: TerminalSettings;
+	images?: ImageSettings;
+	enabledModels?: string[]; // Model patterns for cycling (same format as --models CLI flag)
+	reviewModel?: string; // Discovery model for /review (falls back to the session model)
+	reviewVerifierModel?: string; // Independent verification model for /review (falls back to reviewModel)
+	reviewTools?: string[]; // Optional auxiliary tool names; immutable review snapshot tools are always active
+	doubleEscapeAction?: "fork" | "tree" | "none"; // Action for double-escape with empty editor (default: "tree")
+	treeFilterMode?: "default" | "no-tools" | "user-only" | "labeled-only" | "all"; // Default filter when opening /tree
+	thinkingBudgets?: ThinkingBudgetsSettings; // Custom token budgets for thinking levels
+	editorPaddingX?: number; // Horizontal padding for input editor (default: 0)
+	autocompleteMaxVisible?: number; // Max visible items in autocomplete dropdown (default: 5)
+	showHardwareCursor?: boolean; // Show terminal cursor while still positioning it for IME
+	markdown?: MarkdownSettings;
+	warnings?: WarningSettings;
+	promptCache?: PromptCacheSettings;
+	sessionDir?: string; // Custom session storage directory (same format as --session-dir CLI flag)
+	httpProxy?: string; // Proxy URL applied as HTTP_PROXY and HTTPS_PROXY for Pi-managed HTTP clients
+	httpIdleTimeoutMs?: number; // HTTP header/body idle timeout in milliseconds; 0 disables it
+	websocketConnectTimeoutMs?: number; // WebSocket connect/open handshake timeout in milliseconds; 0 disables it
+	lsp?: LspSettings; // LSP diagnostics after edit/write (see docs/lsp.md)
+	remote?: RemoteSettings; // voltd daemon / remote access (see docs/daemon.md)
+	tuiMode?: TuiMode; // default: "regular"
+	fullscreenExitOutput?: FullscreenExitOutput; // default: "transcript"; no effect in regular mode
+	fullscreenScrollbar?: ScrollViewScrollbar; // default: "auto"; no effect in regular mode
+}
+
+export interface RemoteSettings {
+	/** Auto-spawn the voltd daemon at startup. Supported TUIs join any running daemon. Default: false. */
+	background?: boolean;
+	/** Detached headless runtime retention TTL in milliseconds (daemon-side). */
+	detachedRuntimeTtlMs?: number;
+	/** Tool allowlist for daemon-owned headless runtimes only. */
+	allowTools?: string[];
+	/** Discover exact pull-request associations for trusted Work sessions. Default: true. */
+	pullRequestDiscovery?: boolean;
+}
+
+/** Deep merge records: overrides take precedence, nested objects merge recursively, arrays replace. */
+function deepMergeRecord(base: Record<string, unknown>, overrides: Record<string, unknown>): Record<string, unknown> {
+	const result: Record<string, unknown> = { ...base };
+
+	for (const [key, overrideValue] of Object.entries(overrides)) {
+		if (overrideValue === undefined) {
+			continue;
+		}
+		if (overrideValue === null) {
+			delete result[key];
+			continue;
+		}
+
+		const baseValue = base[key];
+		if (isSettingsRecord(baseValue) && isSettingsRecord(overrideValue)) {
+			result[key] = deepMergeRecord(baseValue, overrideValue);
+		} else {
+			result[key] = overrideValue;
+		}
+	}
+
+	return result;
+}
+
+/** Deep merge settings: project/overrides take precedence, nested objects merge recursively. */
+function deepMergeSettings(base: Settings, overrides: Settings): Settings {
+	return deepMergeRecord(base as Record<string, unknown>, overrides as Record<string, unknown>) as Settings;
+}
+
+function normalizeProfileName(profile: string | undefined): string | undefined {
+	const trimmed = profile?.trim();
+	return trimmed ? trimmed : undefined;
+}
+
+function isSettingsRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function defineOwnEnumerableProperty(target: Record<string, unknown>, key: string, value: unknown): void {
+	Object.defineProperty(target, key, {
+		value,
+		enumerable: true,
+		configurable: true,
+		writable: true,
+	});
+}
+
+function mergeModifiedModelThresholds(
+	current: unknown,
+	snapshot: unknown,
+	modifiedModels: Set<string> | undefined,
+): unknown {
+	if (!modifiedModels || !isSettingsRecord(snapshot)) {
+		return snapshot;
+	}
+	const merged: Record<string, unknown> = isSettingsRecord(current) ? { ...current } : {};
+	for (const modelReference of modifiedModels) {
+		defineOwnEnumerableProperty(merged, modelReference, snapshot[modelReference]);
+	}
+	return merged;
+}
+
+function normalizeProfileClears(profile: Record<string, unknown>): void {
+	for (const key of Object.keys(profile)) {
+		const value = profile[key];
+		if (value === undefined) {
+			profile[key] = null;
+		} else if (isSettingsRecord(value)) {
+			normalizeProfileClears(value);
+		}
+	}
+}
+
+function getOwnProfileSettings(settings: Settings, profileName: string): ProfileSettings | undefined {
+	const profiles = settings.profiles;
+	if (!isSettingsRecord(profiles) || !Object.hasOwn(profiles, profileName)) {
+		return undefined;
+	}
+
+	const profile = profiles[profileName];
+	return isSettingsRecord(profile) ? (profile as ProfileSettings) : undefined;
+}
+
+function cloneProfiles(profiles: Settings["profiles"]): Record<string, ProfileSettings> {
+	const cloned: Record<string, ProfileSettings> = {};
+	if (!isSettingsRecord(profiles)) {
+		return cloned;
+	}
+
+	for (const [profileName, profile] of Object.entries(profiles)) {
+		defineOwnEnumerableProperty(cloned, profileName, profile);
+	}
+	return cloned;
+}
+
+function sanitizeProfileSettings(profile: ProfileSettings | undefined): Settings {
+	if (!profile) {
+		return {};
+	}
+
+	const sanitized = structuredClone(profile) as Record<string, unknown>;
+	delete sanitized.lastChangelogVersion;
+	delete sanitized.defaultProfile;
+	delete sanitized.profiles;
+	delete sanitized.defaultProjectTrust;
+	delete sanitized.enableInstallTelemetry;
+	delete sanitized.enableAnalytics;
+	delete sanitized.trackingId;
+	delete sanitized.sessionDir;
+	delete sanitized.storage;
+	return sanitized as Settings;
+}
+
+function parseTimeoutSetting(value: unknown, settingName: string): number | undefined {
+	const timeoutMs = parseHttpIdleTimeoutMs(value);
+	if (timeoutMs !== undefined) {
+		return timeoutMs;
+	}
+	if (value !== undefined) {
+		throw new Error(`Invalid ${settingName} setting: ${String(value)}`);
+	}
+	return undefined;
+}
+
+export type SettingsScope = "global" | "project";
+
+export interface SettingsManagerCreateOptions {
+	projectTrusted?: boolean;
+	profile?: string;
+}
+
+export interface SettingsStorage {
+	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
+}
+
+export interface SettingsError {
+	scope: SettingsScope;
+	error: Error;
+}
+
+interface ModifiedSetting {
+	field: keyof Settings;
+	nestedKey?: string;
+}
+
+type ModifiedProfileNestedFields = Map<string, Map<keyof Settings, Set<string>>>;
+
+export class FileSettingsStorage implements SettingsStorage {
+	private static readonly MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
+	private globalSettingsPath: string;
+	private projectSettingsPath: string;
+
+	constructor(cwd: string, agentDir: string) {
+		const resolvedCwd = resolvePath(cwd);
+		const resolvedAgentDir = resolvePath(agentDir);
+		this.globalSettingsPath = join(resolvedAgentDir, "settings.json");
+		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
+	}
+
+	private acquireLockSyncWithRetry(path: string): () => void {
+		const maxAttempts = 10;
+		const delayMs = 20;
+		let lastError: unknown;
+
+		for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+			try {
+				return lockfile.lockSync(path, { realpath: false });
+			} catch (error) {
+				const code =
+					typeof error === "object" && error !== null && "code" in error
+						? String((error as { code?: unknown }).code)
+						: undefined;
+				if (code !== "ELOCKED" || attempt === maxAttempts) {
+					throw error;
+				}
+				lastError = error;
+				const start = Date.now();
+				while (Date.now() - start < delayMs) {
+					// Sleep synchronously to avoid changing callers to async.
+				}
+			}
+		}
+
+		throw (lastError as Error) ?? new Error("Failed to acquire settings lock");
+	}
+
+	private prepareDirectory(scope: SettingsScope, directoryPath: string): void {
+		if (scope === "global") {
+			ensurePrivateDirectorySync(directoryPath);
+			return;
+		}
+		mkdirSync(directoryPath, { recursive: true, mode: 0o755 });
+		const stat = lstatSync(directoryPath);
+		if (stat.isSymbolicLink() || !stat.isDirectory()) {
+			throw new Error(`Refusing to use non-directory project settings path: ${directoryPath}`);
+		}
+	}
+
+	private readCurrent(scope: SettingsScope, path: string): string | undefined {
+		if (!existsSync(path)) return undefined;
+		if (scope === "global") {
+			hardenPrivateRegularFileSync(path);
+		} else {
+			const stat = lstatSync(path);
+			if (stat.isSymbolicLink() || !stat.isFile() || stat.nlink !== 1) {
+				throw new Error(`Refusing to use non-regular project settings file: ${path}`);
+			}
+		}
+		if (lstatSync(path).size > FileSettingsStorage.MAX_SETTINGS_BYTES) {
+			throw new Error(`Settings file exceeds ${FileSettingsStorage.MAX_SETTINGS_BYTES} bytes: ${path}`);
+		}
+		return readFileSync(path, "utf-8");
+	}
+
+	private writeNext(scope: SettingsScope, path: string, next: string): void {
+		if (Buffer.byteLength(next, "utf8") > FileSettingsStorage.MAX_SETTINGS_BYTES) {
+			throw new Error(`Refusing to write settings larger than ${FileSettingsStorage.MAX_SETTINGS_BYTES} bytes`);
+		}
+		writeDurableAtomicFileSync(path, next, {
+			directoryMode: scope === "global" ? 0o700 : 0o755,
+			fileMode: scope === "global" ? 0o600 : 0o644,
+		});
+	}
+
+	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
+		const path = scope === "global" ? this.globalSettingsPath : this.projectSettingsPath;
+		const dir = dirname(path);
+
+		let release: (() => void) | undefined;
+		try {
+			if (existsSync(path)) {
+				this.prepareDirectory(scope, dir);
+				release = this.acquireLockSyncWithRetry(path);
+				const next = fn(this.readCurrent(scope, path));
+				if (next !== undefined) this.writeNext(scope, path, next);
+				return;
+			}
+
+			const initialNext = fn(undefined);
+			if (initialNext === undefined) return;
+			this.prepareDirectory(scope, dir);
+			release = this.acquireLockSyncWithRetry(path);
+			const current = this.readCurrent(scope, path);
+			const next = current === undefined ? initialNext : fn(current);
+			if (next !== undefined) this.writeNext(scope, path, next);
+		} finally {
+			if (release) {
+				release();
+			}
+		}
+	}
+}
+
+export class InMemorySettingsStorage implements SettingsStorage {
+	private global: string | undefined;
+	private project: string | undefined;
+
+	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
+		const current = scope === "global" ? this.global : this.project;
+		const next = fn(current);
+		if (next !== undefined) {
+			if (scope === "global") {
+				this.global = next;
+			} else {
+				this.project = next;
+			}
+		}
+	}
+}
+
+export class SettingsManager {
+	private storage: SettingsStorage;
+	private globalSettings: Settings;
+	private projectSettings: Settings;
+	private globalEffectiveSettings: Settings = {};
+	private projectEffectiveSettings: Settings = {};
+	private settings: Settings = {};
+	private requestedProfile: string | undefined;
+	private activeProfile: string | undefined;
+	private reportedMissingProfiles = new Set<string>();
+	private projectTrusted: boolean;
+	private modifiedFields = new Set<keyof Settings>(); // Track global fields modified during session
+	private modifiedNestedFields = new Map<keyof Settings, Set<string>>(); // Track global nested field modifications
+	private modifiedProfileFields = new Map<string, Set<keyof Settings>>(); // Track global profile field modifications
+	private modifiedProfileNestedFields: ModifiedProfileNestedFields = new Map(); // Track global profile nested field modifications
+	/** Global threshold edits keyed by profile; undefined denotes the base global settings. */
+	private modifiedCompactionThresholds = new Map<string | undefined, Set<string>>();
+	private modifiedProjectFields = new Set<keyof Settings>(); // Track project fields modified during session
+	private modifiedProjectNestedFields = new Map<keyof Settings, Set<string>>(); // Track project nested field modifications
+	private modifiedProjectProfileFields = new Map<string, Set<keyof Settings>>(); // Track project profile field modifications
+	private modifiedProjectProfileNestedFields: ModifiedProfileNestedFields = new Map(); // Track project profile nested field modifications
+	private globalSettingsLoadError: Error | null = null; // Track if global settings file had parse errors
+	private projectSettingsLoadError: Error | null = null; // Track if project settings file had parse errors
+	/** Settled serialization lane; write errors are recorded without blocking later settings writes. */
+	private writeQueue: Promise<void> = Promise.resolve();
+	/** Latest accepted write, retained as a rejecting durability watermark for flush callers. */
+	private writeWatermark: Promise<void> = Promise.resolve();
+	private errors: SettingsError[];
+	private sessionOverrides: Settings = {}; // Runtime overrides (e.g. CLI flags), reapplied on every re-merge
+	private readonly compactionListeners = new Set<() => void>();
+	private compactionFingerprint = "";
+
+	private constructor(
+		storage: SettingsStorage,
+		initialGlobal: Settings,
+		initialProject: Settings,
+		globalLoadError: Error | null = null,
+		projectLoadError: Error | null = null,
+		initialErrors: SettingsError[] = [],
+		projectTrusted = true,
+		profile?: string,
+	) {
+		this.storage = storage;
+		this.globalSettings = initialGlobal;
+		this.projectSettings = initialProject;
+		this.projectTrusted = projectTrusted;
+		this.requestedProfile = normalizeProfileName(profile);
+		this.globalSettingsLoadError = globalLoadError;
+		this.projectSettingsLoadError = projectLoadError;
+		this.errors = [...initialErrors];
+		this.mergeEffectiveSettings();
+	}
+
+	private getProfileOverlay(settings: Settings, profileName: string | undefined): Settings {
+		if (!profileName) {
+			return {};
+		}
+		return sanitizeProfileSettings(getOwnProfileSettings(settings, profileName));
+	}
+
+	private applyProfile(settings: Settings, profileName: string | undefined): Settings {
+		return deepMergeSettings(settings, this.getProfileOverlay(settings, profileName));
+	}
+
+	private reportMissingProfile(profileName: string): void {
+		if (!this.projectTrusted || this.reportedMissingProfiles.has(profileName)) {
+			return;
+		}
+		if (
+			getOwnProfileSettings(this.globalSettings, profileName) ||
+			getOwnProfileSettings(this.projectSettings, profileName)
+		) {
+			return;
+		}
+		this.reportedMissingProfiles.add(profileName);
+		this.recordError("global", new Error(`Profile "${profileName}" was selected but is not defined`));
+	}
+
+	/** Re-merge effective settings from global, project, profile overlays, and session overrides */
+	private mergeEffectiveSettings(notifyCompaction = true): void {
+		const baseSettings = deepMergeSettings(this.globalSettings, this.projectSettings);
+		const profileName = this.requestedProfile ?? normalizeProfileName(baseSettings.defaultProfile);
+		this.activeProfile = profileName;
+		this.globalEffectiveSettings = this.applyProfile(this.globalSettings, profileName);
+		const projectProfileOverlay = this.projectTrusted
+			? this.getProfileOverlay(this.projectSettings, profileName)
+			: {};
+		this.projectEffectiveSettings = this.projectTrusted
+			? deepMergeSettings(this.projectSettings, projectProfileOverlay)
+			: {};
+
+		let merged = deepMergeSettings(this.globalEffectiveSettings, this.projectTrusted ? this.projectSettings : {});
+		merged = deepMergeSettings(merged, projectProfileOverlay);
+		if (Object.keys(this.sessionOverrides).length > 0) {
+			merged = deepMergeSettings(merged, this.sessionOverrides);
+		}
+		this.settings = merged;
+		if (profileName) {
+			this.reportMissingProfile(profileName);
+		}
+		if (notifyCompaction) this.notifyCompactionSettingsChanged();
+	}
+
+	/** Observe effective compaction preferences and their scope; saves notify after durability. */
+	subscribeCompactionSettings(listener: () => void): () => void {
+		this.compactionListeners.add(listener);
+		return () => this.compactionListeners.delete(listener);
+	}
+
+	private notifyCompactionSettingsChanged(): void {
+		const fingerprint = JSON.stringify({
+			profile: this.activeProfile,
+			compaction: this.settings.compaction,
+			projectTrusted: this.projectTrusted,
+			projectCompaction: this.projectSettings.compaction,
+			projectProfileCompaction: this.getProfileOverlay(this.projectSettings, this.activeProfile).compaction,
+			runtimeCompaction: this.sessionOverrides.compaction,
+			globalLoadError: this.globalSettingsLoadError?.message,
+			projectLoadError: this.projectSettingsLoadError?.message,
+		});
+		if (fingerprint === this.compactionFingerprint) return;
+		this.compactionFingerprint = fingerprint;
+		for (const listener of this.compactionListeners) {
+			try {
+				listener();
+			} catch {
+				// Presentation observers must not affect settings persistence.
+			}
+		}
+	}
+
+	/** Why a global compaction edit would be unsafe or ineffective in this scope. */
+	getCompactionWriteDisabledReason(field: "enabled" | "modelThresholds", modelReference?: string): string | undefined {
+		if (this.globalSettingsLoadError) return "Host global settings could not be loaded; repair them and reload";
+		if (this.projectSettingsLoadError) return "Host project settings could not be loaded; repair them and reload";
+		const path = ["compaction", field, ...(field === "modelThresholds" ? [modelReference ?? ""] : [])];
+		const overridesPath = (settings: Settings): boolean => {
+			let current: unknown = settings;
+			for (const key of path) {
+				if (!isSettingsRecord(current)) return true;
+				if (!Object.hasOwn(current, key) || current[key] === undefined) return false;
+				current = current[key];
+			}
+			return true;
+		};
+		if (overridesPath(this.sessionOverrides))
+			return "A runtime override controls this setting; global edits would not apply";
+		if (this.projectTrusted && overridesPath(this.getProfileOverlay(this.projectSettings, this.activeProfile))) {
+			return `Trusted project profile "${this.activeProfile}" overrides this setting; edit it on the host`;
+		}
+		if (this.projectTrusted && overridesPath(this.projectSettings)) {
+			return "Trusted project settings override this setting; edit them on the host";
+		}
+		return undefined;
+	}
+
+	/** Create a SettingsManager that loads from files */
+	static create(
+		cwd: string,
+		agentDir: string = getAgentDir(),
+		options: SettingsManagerCreateOptions = {},
+	): SettingsManager {
+		const storage = new FileSettingsStorage(cwd, agentDir);
+		return SettingsManager.fromStorage(storage, options);
+	}
+
+	/** Create a SettingsManager from an arbitrary storage backend */
+	static fromStorage(storage: SettingsStorage, options: SettingsManagerCreateOptions = {}): SettingsManager {
+		const projectTrusted = options.projectTrusted ?? true;
+		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
+		const projectLoad = SettingsManager.tryLoadFromStorage(storage, "project", projectTrusted);
+		const initialErrors: SettingsError[] = [];
+		if (globalLoad.error) {
+			initialErrors.push({ scope: "global", error: globalLoad.error });
+		}
+		if (projectLoad.error) {
+			initialErrors.push({ scope: "project", error: projectLoad.error });
+		}
+
+		return new SettingsManager(
+			storage,
+			globalLoad.settings,
+			projectLoad.settings,
+			globalLoad.error,
+			projectLoad.error,
+			initialErrors,
+			projectTrusted,
+			options.profile,
+		);
+	}
+
+	/** Create an in-memory SettingsManager (no file I/O) */
+	static inMemory(settings: Partial<Settings> = {}, options: SettingsManagerCreateOptions = {}): SettingsManager {
+		const storage = new InMemorySettingsStorage();
+		const initialSettings = SettingsManager.migrateSettings(structuredClone(settings) as Record<string, unknown>);
+		storage.withLock("global", () => JSON.stringify(initialSettings, null, 2));
+		return SettingsManager.fromStorage(storage, options);
+	}
+
+	private static loadFromStorage(storage: SettingsStorage, scope: SettingsScope, projectTrusted = true): Settings {
+		if (scope === "project" && !projectTrusted) {
+			return {};
+		}
+
+		let content: string | undefined;
+		storage.withLock(scope, (current) => {
+			content = current;
+			return undefined;
+		});
+
+		if (!content) {
+			return {};
+		}
+		const settings = JSON.parse(content);
+		return SettingsManager.migrateSettings(settings);
+	}
+
+	private static tryLoadFromStorage(
+		storage: SettingsStorage,
+		scope: SettingsScope,
+		projectTrusted = true,
+	): { settings: Settings; error: Error | null } {
+		try {
+			return { settings: SettingsManager.loadFromStorage(storage, scope, projectTrusted), error: null };
+		} catch (error) {
+			return { settings: {}, error: error as Error };
+		}
+	}
+
+	/** Migrate old settings format to new format */
+	private static migrateSettings(settings: Record<string, unknown>): Settings {
+		// Migrate queueMode -> steeringMode
+		if ("queueMode" in settings && !("steeringMode" in settings)) {
+			settings.steeringMode = settings.queueMode;
+			delete settings.queueMode;
+		}
+
+		// Migrate legacy websockets boolean -> transport enum
+		if (!("transport" in settings) && typeof settings.websockets === "boolean") {
+			settings.transport = settings.websockets ? "websocket" : "sse";
+			delete settings.websockets;
+		}
+
+		// Migrate old skills object format to new array format
+		if (
+			"skills" in settings &&
+			typeof settings.skills === "object" &&
+			settings.skills !== null &&
+			!Array.isArray(settings.skills)
+		) {
+			const skillsSettings = settings.skills as {
+				enableSkillCommands?: boolean;
+				customDirectories?: unknown;
+			};
+			if (skillsSettings.enableSkillCommands !== undefined && settings.enableSkillCommands === undefined) {
+				settings.enableSkillCommands = skillsSettings.enableSkillCommands;
+			}
+			if (Array.isArray(skillsSettings.customDirectories) && skillsSettings.customDirectories.length > 0) {
+				settings.skills = skillsSettings.customDirectories;
+			} else {
+				delete settings.skills;
+			}
+		}
+
+		// Migrate retry.maxDelayMs -> retry.provider.maxRetryDelayMs
+		if (
+			"retry" in settings &&
+			typeof settings.retry === "object" &&
+			settings.retry !== null &&
+			!Array.isArray(settings.retry)
+		) {
+			const retrySettings = settings.retry as Record<string, unknown>;
+			const providerSettings =
+				typeof retrySettings.provider === "object" && retrySettings.provider !== null
+					? (retrySettings.provider as Record<string, unknown>)
+					: undefined;
+			if (
+				typeof retrySettings.maxDelayMs === "number" &&
+				(providerSettings?.maxRetryDelayMs === undefined || providerSettings?.maxRetryDelayMs === null)
+			) {
+				retrySettings.provider = {
+					...(providerSettings ?? {}),
+					maxRetryDelayMs: retrySettings.maxDelayMs,
+				};
+			}
+			delete retrySettings.maxDelayMs;
+		}
+
+		return settings as Settings;
+	}
+
+	getGlobalSettings(): Settings {
+		return structuredClone(this.globalSettings);
+	}
+
+	getProjectSettings(): Settings {
+		return structuredClone(this.projectSettings);
+	}
+
+	getGlobalEffectiveSettings(): Settings {
+		return structuredClone(this.globalEffectiveSettings);
+	}
+
+	getProjectEffectiveSettings(): Settings {
+		return structuredClone(this.projectEffectiveSettings);
+	}
+
+	getActiveProfile(): string | undefined {
+		return this.activeProfile;
+	}
+
+	getRequestedProfile(): string | undefined {
+		return this.requestedProfile;
+	}
+
+	getProfileNames(): string[] {
+		const names = new Set<string>();
+		const addProfileNames = (profiles: Settings["profiles"]) => {
+			if (!isSettingsRecord(profiles)) {
+				return;
+			}
+			for (const [profileName, profile] of Object.entries(profiles)) {
+				if (isSettingsRecord(profile)) {
+					names.add(profileName);
+				}
+			}
+		};
+
+		addProfileNames(this.globalSettings.profiles);
+		if (this.projectTrusted) {
+			addProfileNames(this.projectSettings.profiles);
+		}
+		return [...names].sort((a, b) => a.localeCompare(b));
+	}
+
+	hasProfile(profile: string): boolean {
+		const profileName = normalizeProfileName(profile);
+		if (!profileName) {
+			return false;
+		}
+		return (
+			getOwnProfileSettings(this.globalSettings, profileName) !== undefined ||
+			(this.projectTrusted && getOwnProfileSettings(this.projectSettings, profileName) !== undefined)
+		);
+	}
+
+	ensureGlobalProfile(profile: string): string {
+		const profileName = normalizeProfileName(profile);
+		if (!profileName) {
+			throw new Error("Profile name cannot be empty");
+		}
+		if (getOwnProfileSettings(this.globalSettings, profileName)) {
+			return profileName;
+		}
+
+		this.globalSettings.profiles = cloneProfiles(this.globalSettings.profiles);
+		defineOwnEnumerableProperty(this.globalSettings.profiles, profileName, {});
+		this.markProfileModified(profileName);
+		this.save();
+		return profileName;
+	}
+
+	setActiveProfile(profile: string | undefined): void {
+		this.requestedProfile = normalizeProfileName(profile);
+		this.reportedMissingProfiles.clear();
+		this.mergeEffectiveSettings();
+	}
+
+	rememberActiveProfile(): void {
+		if (!this.activeProfile || getOwnProfileSettings(this.globalSettings, this.activeProfile) === undefined) {
+			return;
+		}
+		if (normalizeProfileName(this.globalSettings.defaultProfile) === this.activeProfile) {
+			return;
+		}
+		this.globalSettings.defaultProfile = this.activeProfile;
+		this.markModified("defaultProfile");
+		this.save();
+	}
+
+	isProjectTrusted(): boolean {
+		return this.projectTrusted;
+	}
+
+	setProjectTrusted(trusted: boolean): void {
+		if (this.projectTrusted === trusted) {
+			return;
+		}
+
+		this.projectTrusted = trusted;
+		this.modifiedProjectFields.clear();
+		this.modifiedProjectNestedFields.clear();
+		this.modifiedProjectProfileFields.clear();
+		this.modifiedProjectProfileNestedFields.clear();
+
+		if (!trusted) {
+			this.projectSettings = {};
+			this.projectSettingsLoadError = null;
+			this.mergeEffectiveSettings();
+			return;
+		}
+
+		const projectLoad = SettingsManager.tryLoadFromStorage(this.storage, "project", trusted);
+		this.projectSettings = projectLoad.settings;
+		this.projectSettingsLoadError = projectLoad.error;
+		if (projectLoad.error) {
+			this.recordError("project", projectLoad.error);
+		}
+		this.mergeEffectiveSettings();
+	}
+
+	async reload(): Promise<void> {
+		await this.writeQueue;
+		const globalLoad = SettingsManager.tryLoadFromStorage(this.storage, "global");
+		if (!globalLoad.error) {
+			this.globalSettings = globalLoad.settings;
+			this.globalSettingsLoadError = null;
+		} else {
+			this.globalSettingsLoadError = globalLoad.error;
+			this.recordError("global", globalLoad.error);
+		}
+
+		this.modifiedFields.clear();
+		this.modifiedNestedFields.clear();
+		this.modifiedProfileFields.clear();
+		this.modifiedProfileNestedFields.clear();
+		this.modifiedCompactionThresholds.clear();
+		this.modifiedProjectFields.clear();
+		this.modifiedProjectNestedFields.clear();
+		this.modifiedProjectProfileFields.clear();
+		this.modifiedProjectProfileNestedFields.clear();
+
+		const projectLoad = SettingsManager.tryLoadFromStorage(this.storage, "project", this.projectTrusted);
+		if (!projectLoad.error) {
+			this.projectSettings = projectLoad.settings;
+			this.projectSettingsLoadError = null;
+		} else {
+			this.projectSettingsLoadError = projectLoad.error;
+			this.recordError("project", projectLoad.error);
+		}
+
+		this.mergeEffectiveSettings();
+	}
+
+	/** Apply additional overrides on top of current settings. Overrides persist across reload() and re-merges. */
+	applyOverrides(overrides: Partial<Settings>): void {
+		this.sessionOverrides = deepMergeSettings(this.sessionOverrides, overrides);
+		this.mergeEffectiveSettings();
+	}
+
+	/** Mark a global field as modified during this session */
+	private markModified(field: keyof Settings, nestedKey?: string): void {
+		this.modifiedFields.add(field);
+		if (nestedKey) {
+			if (!this.modifiedNestedFields.has(field)) {
+				this.modifiedNestedFields.set(field, new Set());
+			}
+			this.modifiedNestedFields.get(field)!.add(nestedKey);
+		}
+	}
+
+	/** Mark a project field as modified during this session */
+	private markProjectModified(field: keyof Settings, nestedKey?: string): void {
+		this.modifiedProjectFields.add(field);
+		if (nestedKey) {
+			if (!this.modifiedProjectNestedFields.has(field)) {
+				this.modifiedProjectNestedFields.set(field, new Set());
+			}
+			this.modifiedProjectNestedFields.get(field)!.add(nestedKey);
+		}
+	}
+
+	private trackProfileNestedField(
+		modifiedNestedFields: ModifiedProfileNestedFields,
+		profileName: string,
+		field: keyof Settings,
+		nestedKey: string,
+	): void {
+		let profileNestedFields = modifiedNestedFields.get(profileName);
+		if (!profileNestedFields) {
+			profileNestedFields = new Map();
+			modifiedNestedFields.set(profileName, profileNestedFields);
+		}
+		if (!profileNestedFields.has(field)) {
+			profileNestedFields.set(field, new Set());
+		}
+		profileNestedFields.get(field)!.add(nestedKey);
+	}
+
+	private markProfileModified(profileName: string, field?: keyof Settings, nestedKey?: string): void {
+		this.modifiedFields.add("profiles");
+		if (!this.modifiedProfileFields.has(profileName)) {
+			this.modifiedProfileFields.set(profileName, new Set());
+		}
+		if (field !== undefined) {
+			this.modifiedProfileFields.get(profileName)!.add(field);
+			if (nestedKey) {
+				this.trackProfileNestedField(this.modifiedProfileNestedFields, profileName, field, nestedKey);
+			}
+		}
+	}
+
+	private markProjectProfileModified(profileName: string, field: keyof Settings, nestedKey?: string): void {
+		this.modifiedProjectFields.add("profiles");
+		if (!this.modifiedProjectProfileFields.has(profileName)) {
+			this.modifiedProjectProfileFields.set(profileName, new Set());
+		}
+		this.modifiedProjectProfileFields.get(profileName)!.add(field);
+		if (nestedKey) {
+			this.trackProfileNestedField(this.modifiedProjectProfileNestedFields, profileName, field, nestedKey);
+		}
+	}
+
+	private assertProjectTrustedForWrite(): void {
+		if (!this.projectTrusted) {
+			throw new Error("Project is not trusted; refusing to write project settings");
+		}
+	}
+
+	private recordError(scope: SettingsScope, error: unknown): void {
+		const normalizedError = error instanceof Error ? error : new Error(String(error));
+		this.errors.push({ scope, error: normalizedError });
+	}
+
+	private clearModifiedScope(scope: SettingsScope): void {
+		if (scope === "global") {
+			this.modifiedFields.clear();
+			this.modifiedNestedFields.clear();
+			this.modifiedProfileFields.clear();
+			this.modifiedProfileNestedFields.clear();
+			this.modifiedCompactionThresholds.clear();
+			return;
+		}
+
+		this.modifiedProjectFields.clear();
+		this.modifiedProjectNestedFields.clear();
+		this.modifiedProjectProfileFields.clear();
+		this.modifiedProjectProfileNestedFields.clear();
+	}
+
+	private enqueueWrite(scope: SettingsScope, task: () => void): void {
+		const write = this.writeQueue.then(() => {
+			if (scope === "project") {
+				this.assertProjectTrustedForWrite();
+			}
+			task();
+			this.clearModifiedScope(scope);
+			// A later accepted write may already have changed the effective values.
+			// Publish only once the latest snapshot is durable, not after an older write.
+			if (this.writeWatermark === write) this.notifyCompactionSettingsChanged();
+		});
+		this.writeQueue = write.catch((error) => {
+			this.recordError(scope, error);
+		});
+		this.writeWatermark = write;
+		void write.catch(() => {});
+	}
+
+	private cloneModifiedNestedFields(source: Map<keyof Settings, Set<string>>): Map<keyof Settings, Set<string>> {
+		const snapshot = new Map<keyof Settings, Set<string>>();
+		for (const [key, value] of source.entries()) {
+			snapshot.set(key, new Set(value));
+		}
+		return snapshot;
+	}
+
+	private cloneModifiedProfileFields(source: Map<string, Set<keyof Settings>>): Map<string, Set<keyof Settings>> {
+		const snapshot = new Map<string, Set<keyof Settings>>();
+		for (const [profileName, fields] of source.entries()) {
+			snapshot.set(profileName, new Set(fields));
+		}
+		return snapshot;
+	}
+
+	private cloneModifiedProfileNestedFields(source: ModifiedProfileNestedFields): ModifiedProfileNestedFields {
+		const snapshot: ModifiedProfileNestedFields = new Map();
+		for (const [profileName, profileNestedFields] of source.entries()) {
+			const clonedNestedFields = new Map<keyof Settings, Set<string>>();
+			for (const [field, nestedFields] of profileNestedFields.entries()) {
+				clonedNestedFields.set(field, new Set(nestedFields));
+			}
+			snapshot.set(profileName, clonedNestedFields);
+		}
+		return snapshot;
+	}
+
+	private persistScopedSettings(
+		scope: SettingsScope,
+		snapshotSettings: Settings,
+		modifiedFields: Set<keyof Settings>,
+		modifiedNestedFields: Map<keyof Settings, Set<string>>,
+		modifiedProfileFields: Map<string, Set<keyof Settings>>,
+		modifiedProfileNestedFields: ModifiedProfileNestedFields,
+		modifiedCompactionThresholds?: Map<string | undefined, Set<string>>,
+	): void {
+		this.storage.withLock(scope, (current) => {
+			const currentFileSettings = current
+				? SettingsManager.migrateSettings(JSON.parse(current) as Record<string, unknown>)
+				: {};
+			const mergedSettings: Settings = { ...currentFileSettings };
+			for (const field of modifiedFields) {
+				const value = snapshotSettings[field];
+				if (field === "profiles" && modifiedProfileFields.size > 0) {
+					const currentProfiles = isSettingsRecord(currentFileSettings.profiles)
+						? currentFileSettings.profiles
+						: {};
+					const snapshotProfiles = isSettingsRecord(snapshotSettings.profiles) ? snapshotSettings.profiles : {};
+					const mergedProfiles: Record<string, unknown> = {};
+					for (const [profileName, profile] of Object.entries(currentProfiles)) {
+						defineOwnEnumerableProperty(mergedProfiles, profileName, profile);
+					}
+
+					for (const [profileName, profileFields] of modifiedProfileFields.entries()) {
+						const currentProfile: Record<string, unknown> =
+							Object.hasOwn(currentProfiles, profileName) && isSettingsRecord(currentProfiles[profileName])
+								? currentProfiles[profileName]
+								: {};
+						const snapshotProfile: Record<string, unknown> =
+							Object.hasOwn(snapshotProfiles, profileName) && isSettingsRecord(snapshotProfiles[profileName])
+								? snapshotProfiles[profileName]
+								: {};
+						if (profileFields.size === 0) {
+							defineOwnEnumerableProperty(mergedProfiles, profileName, snapshotProfile);
+							continue;
+						}
+						const mergedProfile: Record<string, unknown> = {};
+						const profileNestedFields = modifiedProfileNestedFields.get(profileName);
+						for (const [profileField, profileValue] of Object.entries(currentProfile)) {
+							defineOwnEnumerableProperty(mergedProfile, profileField, profileValue);
+						}
+						for (const profileField of profileFields) {
+							const nestedModified = profileNestedFields?.get(profileField);
+							const snapshotValue = snapshotProfile[profileField];
+							if (nestedModified && isSettingsRecord(snapshotValue)) {
+								const baseNested = isSettingsRecord(currentProfile[profileField])
+									? currentProfile[profileField]
+									: {};
+								const mergedNested: Record<string, unknown> = { ...baseNested };
+								for (const nestedKey of nestedModified) {
+									mergedNested[nestedKey] =
+										profileField === "compaction" && nestedKey === "modelThresholds"
+											? mergeModifiedModelThresholds(
+													baseNested[nestedKey],
+													snapshotValue[nestedKey],
+													modifiedCompactionThresholds?.get(profileName),
+												)
+											: snapshotValue[nestedKey];
+								}
+								defineOwnEnumerableProperty(mergedProfile, profileField, mergedNested);
+							} else {
+								defineOwnEnumerableProperty(mergedProfile, profileField, snapshotValue);
+							}
+						}
+						defineOwnEnumerableProperty(mergedProfiles, profileName, mergedProfile);
+					}
+
+					mergedSettings.profiles = mergedProfiles as Record<string, ProfileSettings>;
+				} else if (modifiedNestedFields.has(field) && isSettingsRecord(value)) {
+					const nestedModified = modifiedNestedFields.get(field)!;
+					const baseNested = isSettingsRecord(currentFileSettings[field]) ? currentFileSettings[field] : {};
+					const mergedNested: Record<string, unknown> = { ...baseNested };
+					for (const nestedKey of nestedModified) {
+						mergedNested[nestedKey] =
+							field === "compaction" && nestedKey === "modelThresholds"
+								? mergeModifiedModelThresholds(
+										baseNested[nestedKey],
+										value[nestedKey],
+										modifiedCompactionThresholds?.get(undefined),
+									)
+								: value[nestedKey];
+					}
+					(mergedSettings as Record<string, unknown>)[field] = mergedNested;
+				} else {
+					(mergedSettings as Record<string, unknown>)[field] = value;
+				}
+			}
+
+			return JSON.stringify(mergedSettings, null, 2);
+		});
+	}
+
+	private save(): void {
+		this.mergeEffectiveSettings(false);
+
+		if (this.globalSettingsLoadError) {
+			return;
+		}
+
+		const snapshotGlobalSettings = structuredClone(this.globalSettings);
+		const modifiedFields = new Set(this.modifiedFields);
+		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedNestedFields);
+		const modifiedProfileFields = this.cloneModifiedProfileFields(this.modifiedProfileFields);
+		const modifiedProfileNestedFields = this.cloneModifiedProfileNestedFields(this.modifiedProfileNestedFields);
+		const modifiedCompactionThresholds = structuredClone(this.modifiedCompactionThresholds);
+
+		this.enqueueWrite("global", () => {
+			this.persistScopedSettings(
+				"global",
+				snapshotGlobalSettings,
+				modifiedFields,
+				modifiedNestedFields,
+				modifiedProfileFields,
+				modifiedProfileNestedFields,
+				modifiedCompactionThresholds,
+			);
+		});
+	}
+
+	private saveProjectSettings(settings: Settings): void {
+		this.assertProjectTrustedForWrite();
+		this.projectSettings = structuredClone(settings);
+		this.mergeEffectiveSettings();
+
+		if (this.projectSettingsLoadError) {
+			return;
+		}
+
+		const snapshotProjectSettings = structuredClone(this.projectSettings);
+		const modifiedFields = new Set(this.modifiedProjectFields);
+		const modifiedNestedFields = this.cloneModifiedNestedFields(this.modifiedProjectNestedFields);
+		const modifiedProfileFields = this.cloneModifiedProfileFields(this.modifiedProjectProfileFields);
+		const modifiedProfileNestedFields = this.cloneModifiedProfileNestedFields(
+			this.modifiedProjectProfileNestedFields,
+		);
+		this.enqueueWrite("project", () => {
+			this.persistScopedSettings(
+				"project",
+				snapshotProjectSettings,
+				modifiedFields,
+				modifiedNestedFields,
+				modifiedProfileFields,
+				modifiedProfileNestedFields,
+			);
+		});
+	}
+
+	private updateProfileSettings(settings: Settings, profileName: string, update: (settings: Settings) => void): void {
+		settings.profiles = cloneProfiles(settings.profiles);
+		const profileSettings = structuredClone(getOwnProfileSettings(settings, profileName) ?? {}) as Settings;
+		update(profileSettings);
+		normalizeProfileClears(profileSettings as Record<string, unknown>);
+		defineOwnEnumerableProperty(settings.profiles, profileName, profileSettings);
+	}
+
+	private updateGlobalSettings(field: keyof Settings, update: (settings: Settings) => void, nestedKey?: string): void {
+		this.updateGlobalSettingsFields([{ field, nestedKey }], update);
+	}
+
+	private updateGlobalSettingsFields(modifiedSettings: ModifiedSetting[], update: (settings: Settings) => void): void {
+		if (this.activeProfile) {
+			this.updateProfileSettings(this.globalSettings, this.activeProfile, update);
+			for (const modifiedSetting of modifiedSettings) {
+				this.markProfileModified(this.activeProfile, modifiedSetting.field, modifiedSetting.nestedKey);
+			}
+		} else {
+			update(this.globalSettings);
+			for (const modifiedSetting of modifiedSettings) {
+				this.markModified(modifiedSetting.field, modifiedSetting.nestedKey);
+			}
+		}
+		this.save();
+	}
+
+	private updateProjectSettings(
+		field: keyof Settings,
+		update: (settings: Settings) => void,
+		nestedKey?: string,
+	): void {
+		this.updateProjectSettingsFields([{ field, nestedKey }], update);
+	}
+
+	private updateProjectSettingsFields(
+		modifiedSettings: ModifiedSetting[],
+		update: (settings: Settings) => void,
+	): void {
+		this.assertProjectTrustedForWrite();
+		const projectSettings = structuredClone(this.projectSettings);
+		if (this.activeProfile) {
+			this.updateProfileSettings(projectSettings, this.activeProfile, update);
+			for (const modifiedSetting of modifiedSettings) {
+				this.markProjectProfileModified(this.activeProfile, modifiedSetting.field, modifiedSetting.nestedKey);
+			}
+		} else {
+			update(projectSettings);
+			for (const modifiedSetting of modifiedSettings) {
+				this.markProjectModified(modifiedSetting.field, modifiedSetting.nestedKey);
+			}
+		}
+		this.saveProjectSettings(projectSettings);
+	}
+
+	async flush(): Promise<void> {
+		await this.writeWatermark;
+	}
+
+	drainErrors(): SettingsError[] {
+		const drained = [...this.errors];
+		this.errors = [];
+		return drained;
+	}
+
+	getLastChangelogVersion(): string | undefined {
+		return this.settings.lastChangelogVersion;
+	}
+
+	setLastChangelogVersion(version: string): void {
+		this.globalSettings.lastChangelogVersion = version;
+		this.markModified("lastChangelogVersion");
+		this.save();
+	}
+
+	getSessionDir(): string | undefined {
+		const sessionDir = this.settings.sessionDir;
+		return sessionDir ? normalizePath(sessionDir) : sessionDir;
+	}
+
+	getDefaultProvider(): string | undefined {
+		return this.settings.defaultProvider;
+	}
+
+	getDefaultModel(): string | undefined {
+		return this.settings.defaultModel;
+	}
+
+	getPersonality(): Personality {
+		return isPersonality(this.settings.personality) ? this.settings.personality : "default";
+	}
+
+	setPersonality(personality: Personality): void {
+		this.updateGlobalSettings("personality", (settings) => {
+			settings.personality = personality;
+		});
+	}
+
+	setDefaultProvider(provider: string): void {
+		this.updateGlobalSettings("defaultProvider", (settings) => {
+			settings.defaultProvider = provider;
+		});
+	}
+
+	setDefaultModel(modelId: string): void {
+		this.updateGlobalSettings("defaultModel", (settings) => {
+			settings.defaultModel = modelId;
+		});
+	}
+
+	setDefaultModelAndProvider(provider: string, modelId: string): void {
+		this.updateGlobalSettingsFields([{ field: "defaultProvider" }, { field: "defaultModel" }], (settings) => {
+			settings.defaultProvider = provider;
+			settings.defaultModel = modelId;
+		});
+	}
+
+	getSteeringMode(): "all" | "one-at-a-time" {
+		return this.settings.steeringMode || "one-at-a-time";
+	}
+
+	setSteeringMode(mode: "all" | "one-at-a-time"): void {
+		this.updateGlobalSettings("steeringMode", (settings) => {
+			settings.steeringMode = mode;
+		});
+	}
+
+	getFollowUpMode(): "all" | "one-at-a-time" {
+		return this.settings.followUpMode || "one-at-a-time";
+	}
+
+	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
+		this.updateGlobalSettings("followUpMode", (settings) => {
+			settings.followUpMode = mode;
+		});
+	}
+
+	getTheme(): string | undefined {
+		return this.settings.theme;
+	}
+
+	setTheme(theme: string): void {
+		this.updateGlobalSettings("theme", (settings) => {
+			settings.theme = theme;
+		});
+	}
+
+	getDefaultThinkingLevel(): "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | undefined {
+		return this.settings.defaultThinkingLevel;
+	}
+
+	setDefaultThinkingLevel(level: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"): void {
+		this.updateGlobalSettings("defaultThinkingLevel", (settings) => {
+			settings.defaultThinkingLevel = level;
+		});
+	}
+
+	getTransport(): TransportSetting {
+		return this.settings.transport ?? "auto";
+	}
+
+	setTransport(transport: TransportSetting): void {
+		this.updateGlobalSettings("transport", (settings) => {
+			settings.transport = transport;
+		});
+	}
+
+	getCompactionEnabled(): boolean {
+		return this.settings.compaction?.enabled ?? true;
+	}
+
+	setCompactionEnabled(enabled: boolean): void {
+		this.updateGlobalSettings(
+			"compaction",
+			(settings) => {
+				if (!settings.compaction) {
+					settings.compaction = {};
+				}
+				settings.compaction.enabled = enabled;
+			},
+			"enabled",
+		);
+	}
+
+	getCompactionReserveTokens(): number {
+		return this.settings.compaction?.reserveTokens ?? 16384;
+	}
+
+	getCompactionKeepRecentTokens(): number {
+		return this.settings.compaction?.keepRecentTokens ?? 20000;
+	}
+
+	getCompactionThresholdTokens(modelReference: string): number {
+		const thresholds = this.settings.compaction?.modelThresholds;
+		const value = thresholds && Object.hasOwn(thresholds, modelReference) ? thresholds[modelReference] : undefined;
+		return typeof value === "number" && Number.isSafeInteger(value) && value > 0 ? value : 0;
+	}
+
+	setCompactionThresholdTokens(modelReference: string, tokens: number): void {
+		if (!Number.isSafeInteger(tokens) || tokens < 0) {
+			throw new Error("Compaction threshold must be a non-negative safe integer (0 uses the default)");
+		}
+		let modifiedModels = this.modifiedCompactionThresholds.get(this.activeProfile);
+		if (!modifiedModels) {
+			modifiedModels = new Set();
+			this.modifiedCompactionThresholds.set(this.activeProfile, modifiedModels);
+		}
+		modifiedModels.add(modelReference);
+		this.updateGlobalSettings(
+			"compaction",
+			(settings) => {
+				settings.compaction ??= {};
+				settings.compaction.modelThresholds = {
+					...settings.compaction.modelThresholds,
+					[modelReference]: tokens,
+				};
+			},
+			"modelThresholds",
+		);
+	}
+
+	getCompactionSettings(model?: { provider: string; id: string }): {
+		enabled: boolean;
+		reserveTokens: number;
+		keepRecentTokens: number;
+		thresholdTokens?: number;
+	} {
+		return {
+			enabled: this.getCompactionEnabled(),
+			reserveTokens: this.getCompactionReserveTokens(),
+			keepRecentTokens: this.getCompactionKeepRecentTokens(),
+			...(model ? { thresholdTokens: this.getCompactionThresholdTokens(`${model.provider}/${model.id}`) } : {}),
+		};
+	}
+
+	getBranchSummarySettings(): { reserveTokens: number; skipPrompt: boolean } {
+		return {
+			reserveTokens: this.settings.branchSummary?.reserveTokens ?? 16384,
+			skipPrompt: this.settings.branchSummary?.skipPrompt ?? false,
+		};
+	}
+
+	getBranchSummarySkipPrompt(): boolean {
+		return this.settings.branchSummary?.skipPrompt ?? false;
+	}
+
+	getRetryEnabled(): boolean {
+		return this.settings.retry?.enabled ?? true;
+	}
+
+	setRetryEnabled(enabled: boolean): void {
+		this.updateGlobalSettings(
+			"retry",
+			(settings) => {
+				if (!settings.retry) {
+					settings.retry = {};
+				}
+				settings.retry.enabled = enabled;
+			},
+			"enabled",
+		);
+	}
+
+	getRetrySettings(): { enabled: boolean; maxRetries: number; baseDelayMs: number } {
+		return {
+			enabled: this.getRetryEnabled(),
+			maxRetries: this.settings.retry?.maxRetries ?? 6,
+			baseDelayMs: this.settings.retry?.baseDelayMs ?? 2000,
+		};
+	}
+
+	getHttpIdleTimeoutMs(): number {
+		return parseTimeoutSetting(this.settings.httpIdleTimeoutMs, "httpIdleTimeoutMs") ?? DEFAULT_HTTP_IDLE_TIMEOUT_MS;
+	}
+
+	getRemoteSettings(): RemoteSettings {
+		return this.settings.remote ?? {};
+	}
+
+	setHttpIdleTimeoutMs(timeoutMs: number): void {
+		if (!Number.isFinite(timeoutMs) || timeoutMs < 0) {
+			throw new Error(`Invalid httpIdleTimeoutMs setting: ${String(timeoutMs)}`);
+		}
+		this.updateGlobalSettings("httpIdleTimeoutMs", (settings) => {
+			settings.httpIdleTimeoutMs = Math.floor(timeoutMs);
+		});
+	}
+
+	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
+		return {
+			timeoutMs: this.settings.retry?.provider?.timeoutMs,
+			maxRetries: this.settings.retry?.provider?.maxRetries,
+			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
+		};
+	}
+
+	getToolArgumentLimits(): ToolArgumentLimits | undefined {
+		const limits = this.settings.toolArgumentLimits;
+		if (limits === undefined) return undefined;
+		if (!isSettingsRecord(limits)) throw new Error("Invalid toolArgumentLimits setting: expected an object");
+		return structuredClone(limits);
+	}
+
+	getWebSocketConnectTimeoutMs(): number | undefined {
+		return parseTimeoutSetting(this.settings.websocketConnectTimeoutMs, "websocketConnectTimeoutMs");
+	}
+
+	getHideThinkingBlock(): boolean {
+		return this.settings.hideThinkingBlock ?? false;
+	}
+
+	setHideThinkingBlock(hide: boolean): void {
+		this.updateGlobalSettings("hideThinkingBlock", (settings) => {
+			settings.hideThinkingBlock = hide;
+		});
+	}
+
+	getShellPath(): string | undefined {
+		return this.settings.shellPath;
+	}
+
+	setShellPath(path: string | undefined): void {
+		this.updateGlobalSettings("shellPath", (settings) => {
+			settings.shellPath = path;
+		});
+	}
+
+	getQuietStartup(): boolean {
+		return this.settings.quietStartup ?? false;
+	}
+
+	setQuietStartup(quiet: boolean): void {
+		this.updateGlobalSettings("quietStartup", (settings) => {
+			settings.quietStartup = quiet;
+		});
+	}
+
+	getDefaultProjectTrust(): DefaultProjectTrust {
+		const value = this.globalSettings.defaultProjectTrust;
+		return value === "always" || value === "never" ? value : "ask";
+	}
+
+	setDefaultProjectTrust(defaultProjectTrust: DefaultProjectTrust): void {
+		this.globalSettings.defaultProjectTrust = defaultProjectTrust;
+		this.markModified("defaultProjectTrust");
+		this.save();
+	}
+
+	getShellCommandPrefix(): string | undefined {
+		return this.settings.shellCommandPrefix;
+	}
+
+	setShellCommandPrefix(prefix: string | undefined): void {
+		this.updateGlobalSettings("shellCommandPrefix", (settings) => {
+			settings.shellCommandPrefix = prefix;
+		});
+	}
+
+	getNpmCommand(): string[] | undefined {
+		return this.settings.npmCommand ? [...this.settings.npmCommand] : undefined;
+	}
+
+	setNpmCommand(command: string[] | undefined): void {
+		this.updateGlobalSettings("npmCommand", (settings) => {
+			settings.npmCommand = command ? [...command] : undefined;
+		});
+	}
+
+	getCollapseChangelog(): boolean {
+		return this.settings.collapseChangelog ?? false;
+	}
+
+	setCollapseChangelog(collapse: boolean): void {
+		this.updateGlobalSettings("collapseChangelog", (settings) => {
+			settings.collapseChangelog = collapse;
+		});
+	}
+
+	getEnableInstallTelemetry(): boolean {
+		return this.settings.enableInstallTelemetry ?? true;
+	}
+
+	setEnableInstallTelemetry(enabled: boolean): void {
+		this.globalSettings.enableInstallTelemetry = enabled;
+		this.markModified("enableInstallTelemetry");
+		this.save();
+	}
+
+	getEnableAnalytics(): boolean {
+		return this.settings.enableAnalytics ?? false;
+	}
+
+	getTrackingId(): string | undefined {
+		return this.settings.trackingId;
+	}
+
+	/** Set the analytics opt-in preference; generates a tracking identifier on first opt-in */
+	setEnableAnalytics(enabled: boolean): void {
+		this.globalSettings.enableAnalytics = enabled;
+		this.markModified("enableAnalytics");
+		if (enabled && !this.globalSettings.trackingId) {
+			this.globalSettings.trackingId = randomUUID();
+			this.markModified("trackingId");
+		}
+		this.save();
+	}
+
+	getPackages(): PackageSource[] {
+		return [...(this.settings.packages ?? [])];
+	}
+
+	setPackages(packages: PackageSource[]): void {
+		this.updateGlobalSettings("packages", (settings) => {
+			settings.packages = packages;
+		});
+	}
+
+	setProjectPackages(packages: PackageSource[]): void {
+		this.updateProjectSettings("packages", (settings) => {
+			settings.packages = packages;
+		});
+	}
+
+	getExtensionPaths(): string[] {
+		return [...(this.settings.extensions ?? [])];
+	}
+
+	setExtensionPaths(paths: string[]): void {
+		this.updateGlobalSettings("extensions", (settings) => {
+			settings.extensions = paths;
+		});
+	}
+
+	setProjectExtensionPaths(paths: string[]): void {
+		this.updateProjectSettings("extensions", (settings) => {
+			settings.extensions = paths;
+		});
+	}
+
+	getSkillPaths(): string[] {
+		return [...(this.settings.skills ?? [])];
+	}
+
+	setSkillPaths(paths: string[]): void {
+		this.updateGlobalSettings("skills", (settings) => {
+			settings.skills = paths;
+		});
+	}
+
+	setProjectSkillPaths(paths: string[]): void {
+		this.updateProjectSettings("skills", (settings) => {
+			settings.skills = paths;
+		});
+	}
+
+	getPromptTemplatePaths(): string[] {
+		return [...(this.settings.prompts ?? [])];
+	}
+
+	setPromptTemplatePaths(paths: string[]): void {
+		this.updateGlobalSettings("prompts", (settings) => {
+			settings.prompts = paths;
+		});
+	}
+
+	setProjectPromptTemplatePaths(paths: string[]): void {
+		this.updateProjectSettings("prompts", (settings) => {
+			settings.prompts = paths;
+		});
+	}
+
+	getThemePaths(): string[] {
+		return [...(this.settings.themes ?? [])];
+	}
+
+	setThemePaths(paths: string[]): void {
+		this.updateGlobalSettings("themes", (settings) => {
+			settings.themes = paths;
+		});
+	}
+
+	setProjectThemePaths(paths: string[]): void {
+		this.updateProjectSettings("themes", (settings) => {
+			settings.themes = paths;
+		});
+	}
+
+	getEnableSkillCommands(): boolean {
+		return this.settings.enableSkillCommands ?? true;
+	}
+
+	setEnableSkillCommands(enabled: boolean): void {
+		this.updateGlobalSettings("enableSkillCommands", (settings) => {
+			settings.enableSkillCommands = enabled;
+		});
+	}
+
+	getThinkingBudgets(): ThinkingBudgetsSettings | undefined {
+		return this.settings.thinkingBudgets;
+	}
+
+	getShowImages(): boolean {
+		return this.settings.terminal?.showImages ?? true;
+	}
+
+	setShowImages(show: boolean): void {
+		this.updateGlobalSettings(
+			"terminal",
+			(settings) => {
+				if (!settings.terminal) {
+					settings.terminal = {};
+				}
+				settings.terminal.showImages = show;
+			},
+			"showImages",
+		);
+	}
+
+	getImageWidthCells(): number {
+		const width = this.settings.terminal?.imageWidthCells;
+		if (typeof width !== "number" || !Number.isFinite(width)) {
+			return 60;
+		}
+		return Math.max(1, Math.floor(width));
+	}
+
+	setImageWidthCells(width: number): void {
+		this.updateGlobalSettings(
+			"terminal",
+			(settings) => {
+				if (!settings.terminal) {
+					settings.terminal = {};
+				}
+				settings.terminal.imageWidthCells = Math.max(1, Math.floor(width));
+			},
+			"imageWidthCells",
+		);
+	}
+
+	getClearOnShrink(): boolean {
+		// Settings takes precedence, then env var, then default false
+		if (this.settings.terminal?.clearOnShrink !== undefined) {
+			return this.settings.terminal.clearOnShrink;
+		}
+		return process.env.VOLT_CLEAR_ON_SHRINK === "1";
+	}
+
+	setClearOnShrink(enabled: boolean): void {
+		this.updateGlobalSettings(
+			"terminal",
+			(settings) => {
+				if (!settings.terminal) {
+					settings.terminal = {};
+				}
+				settings.terminal.clearOnShrink = enabled;
+			},
+			"clearOnShrink",
+		);
+	}
+
+	getShowTerminalProgress(): boolean {
+		return this.settings.terminal?.showTerminalProgress ?? false;
+	}
+
+	setShowTerminalProgress(enabled: boolean): void {
+		this.updateGlobalSettings(
+			"terminal",
+			(settings) => {
+				if (!settings.terminal) {
+					settings.terminal = {};
+				}
+				settings.terminal.showTerminalProgress = enabled;
+			},
+			"showTerminalProgress",
+		);
+	}
+
+	getPromptCacheKeepAlive(): PromptCacheKeepAliveConfig {
+		const settings = this.settings.promptCache;
+		const minutes = settings?.keepAliveIdleMinutes;
+		const idleMinutes =
+			typeof minutes === "number" && Number.isFinite(minutes) && minutes >= 0
+				? minutes
+				: DEFAULT_PROMPT_CACHE_KEEPALIVE_IDLE_MINUTES;
+		return { enabled: settings?.keepAlive !== false, idleWindowMs: Math.round(idleMinutes * 60_000) };
+	}
+
+	/** `"off"` disables keepalive; a number of minutes enables it with that idle window. */
+	setPromptCacheKeepAlive(mode: "off" | number): void {
+		this.updateGlobalSettingsFields(
+			[
+				{ field: "promptCache", nestedKey: "keepAlive" },
+				{ field: "promptCache", nestedKey: "keepAliveIdleMinutes" },
+			],
+			(settings) => {
+				if (!settings.promptCache) settings.promptCache = {};
+				settings.promptCache.keepAlive = mode !== "off";
+				if (mode !== "off") settings.promptCache.keepAliveIdleMinutes = mode;
+			},
+		);
+	}
+
+	getTurnDoneAlert(): TurnDoneAlert {
+		const mode = this.settings.terminal?.turnDoneAlert;
+		return mode === "bell" || mode === "notify" ? mode : "off";
+	}
+
+	getContextWarningTokens(): number {
+		const threshold = this.settings.warnings?.contextTokens;
+		if (typeof threshold !== "number" || !Number.isFinite(threshold) || threshold < 0) {
+			return DEFAULT_CONTEXT_WARNING_TOKENS;
+		}
+		return Math.floor(threshold);
+	}
+
+	setTurnDoneAlert(mode: TurnDoneAlert): void {
+		this.updateGlobalSettings(
+			"terminal",
+			(settings) => {
+				if (!settings.terminal) {
+					settings.terminal = {};
+				}
+				settings.terminal.turnDoneAlert = mode;
+			},
+			"turnDoneAlert",
+		);
+	}
+
+	getTuiMode(): TuiMode {
+		return this.settings.tuiMode === "fullscreen" ? "fullscreen" : "regular";
+	}
+
+	setTuiMode(mode: TuiMode): void {
+		this.updateGlobalSettings("tuiMode", (settings) => {
+			settings.tuiMode = mode;
+		});
+	}
+
+	getFullscreenExitOutput(): FullscreenExitOutput {
+		return this.settings.fullscreenExitOutput === "resume-hint" ? "resume-hint" : "transcript";
+	}
+
+	setFullscreenExitOutput(output: FullscreenExitOutput): void {
+		this.updateGlobalSettings("fullscreenExitOutput", (settings) => {
+			settings.fullscreenExitOutput = output;
+		});
+	}
+
+	getFullscreenScrollbar(): ScrollViewScrollbar {
+		const mode = this.settings.fullscreenScrollbar;
+		return mode === "always" || mode === "hidden" ? mode : "auto";
+	}
+
+	setFullscreenScrollbar(mode: ScrollViewScrollbar): void {
+		this.updateGlobalSettings("fullscreenScrollbar", (settings) => {
+			settings.fullscreenScrollbar = mode;
+		});
+	}
+
+	getImageAutoResize(): boolean {
+		return this.settings.images?.autoResize ?? true;
+	}
+
+	setImageAutoResize(enabled: boolean): void {
+		this.updateGlobalSettings(
+			"images",
+			(settings) => {
+				if (!settings.images) {
+					settings.images = {};
+				}
+				settings.images.autoResize = enabled;
+			},
+			"autoResize",
+		);
+	}
+
+	getBlockImages(): boolean {
+		return this.settings.images?.blockImages ?? false;
+	}
+
+	setBlockImages(blocked: boolean): void {
+		this.updateGlobalSettings(
+			"images",
+			(settings) => {
+				if (!settings.images) {
+					settings.images = {};
+				}
+				settings.images.blockImages = blocked;
+			},
+			"blockImages",
+		);
+	}
+
+	getEnabledModels(): string[] | undefined {
+		return this.settings.enabledModels;
+	}
+
+	getReviewModel(): string | undefined {
+		return this.settings.reviewModel;
+	}
+
+	setReviewModel(modelReference: string | undefined): void {
+		this.updateGlobalSettings("reviewModel", (settings) => {
+			settings.reviewModel = modelReference;
+		});
+	}
+
+	getReviewVerifierModel(): string | undefined {
+		return this.settings.reviewVerifierModel;
+	}
+
+	setReviewVerifierModel(modelReference: string | undefined): void {
+		this.updateGlobalSettings("reviewVerifierModel", (settings) => {
+			settings.reviewVerifierModel = modelReference;
+		});
+	}
+
+	getReviewTools(): string[] | undefined {
+		const tools = this.settings.reviewTools;
+		if (!Array.isArray(tools)) {
+			return undefined;
+		}
+		const normalized = tools.map((tool) => tool.trim()).filter(Boolean);
+		return normalized.length > 0 ? [...new Set(normalized)] : undefined;
+	}
+
+	setReviewTools(toolNames: string[] | undefined): void {
+		this.updateGlobalSettings("reviewTools", (settings) => {
+			const normalized = toolNames?.map((tool) => tool.trim()).filter(Boolean) ?? [];
+			settings.reviewTools = normalized.length > 0 ? [...new Set(normalized)] : undefined;
+		});
+	}
+
+	setEnabledModels(patterns: string[] | undefined): void {
+		this.updateGlobalSettings("enabledModels", (settings) => {
+			settings.enabledModels = patterns;
+		});
+	}
+
+	getDoubleEscapeAction(): "fork" | "tree" | "none" {
+		return this.settings.doubleEscapeAction ?? "tree";
+	}
+
+	setDoubleEscapeAction(action: "fork" | "tree" | "none"): void {
+		this.updateGlobalSettings("doubleEscapeAction", (settings) => {
+			settings.doubleEscapeAction = action;
+		});
+	}
+
+	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all" {
+		const mode = this.settings.treeFilterMode;
+		const valid = ["default", "no-tools", "user-only", "labeled-only", "all"];
+		return mode && valid.includes(mode) ? mode : "default";
+	}
+
+	setTreeFilterMode(mode: "default" | "no-tools" | "user-only" | "labeled-only" | "all"): void {
+		this.updateGlobalSettings("treeFilterMode", (settings) => {
+			settings.treeFilterMode = mode;
+		});
+	}
+
+	getShowHardwareCursor(): boolean {
+		return this.settings.showHardwareCursor ?? process.env.VOLT_HARDWARE_CURSOR === "1";
+	}
+
+	setShowHardwareCursor(enabled: boolean): void {
+		this.updateGlobalSettings("showHardwareCursor", (settings) => {
+			settings.showHardwareCursor = enabled;
+		});
+	}
+
+	getEditorPaddingX(): number {
+		return this.settings.editorPaddingX ?? 0;
+	}
+
+	setEditorPaddingX(padding: number): void {
+		this.updateGlobalSettings("editorPaddingX", (settings) => {
+			settings.editorPaddingX = Math.max(0, Math.min(3, Math.floor(padding)));
+		});
+	}
+
+	getAutocompleteMaxVisible(): number {
+		return this.settings.autocompleteMaxVisible ?? 5;
+	}
+
+	setAutocompleteMaxVisible(maxVisible: number): void {
+		this.updateGlobalSettings("autocompleteMaxVisible", (settings) => {
+			settings.autocompleteMaxVisible = Math.max(3, Math.min(20, Math.floor(maxVisible)));
+		});
+	}
+
+	getCodeBlockIndent(): string {
+		return this.settings.markdown?.codeBlockIndent ?? "  ";
+	}
+
+	getLspSettings(): LspSettings | undefined {
+		return this.settings.lsp ? structuredClone(this.settings.lsp) : undefined;
+	}
+
+	getWarnings(): WarningSettings {
+		return { ...(this.settings.warnings ?? {}) };
+	}
+
+	setWarnings(warnings: WarningSettings): void {
+		this.updateGlobalSettings("warnings", (settings) => {
+			settings.warnings = { ...warnings };
+		});
+	}
+}

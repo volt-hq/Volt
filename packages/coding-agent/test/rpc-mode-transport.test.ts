@@ -1,0 +1,1952 @@
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { AgentSession, PromptPreflightResult } from "../src/core/agent-session.ts";
+import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
+import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import type { ExtensionUIContext } from "../src/core/extensions/index.ts";
+import type { HostInteraction } from "../src/core/host-interaction.ts";
+import { isStdoutTakenOver, restoreStdout } from "../src/core/output-guard.ts";
+import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
+import type { RpcGitContext } from "../src/core/rpc/types.ts";
+import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
+import { runRpcMode as runRpcModeImpl } from "../src/modes/rpc/rpc-mode.ts";
+
+function runRpcMode(runtimeHost: AgentSessionRuntime, options?: Parameters<typeof runRpcModeImpl>[1]): Promise<void> {
+	if (typeof runtimeHost.runWithStableSession !== "function") {
+		Object.assign(runtimeHost, {
+			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	if (typeof runtimeHost.runSessionInterruption !== "function") {
+		Object.assign(runtimeHost, {
+			runSessionInterruption<T>(operation: (session: AgentSession) => T): T {
+				return operation(runtimeHost.session);
+			},
+		});
+	}
+	return runRpcModeImpl(runtimeHost, options);
+}
+
+function createSessionRef(sessionId: string): SessionReference {
+	return Object.freeze({
+		sessionDirectory: "/sessions",
+		storeId: "test-store",
+		sessionId,
+		sessionGeneration: "generation-test",
+	});
+}
+
+function createRuntimeHost(): { runtimeHost: AgentSessionRuntime; dispose: ReturnType<typeof vi.fn> } {
+	const dispose = vi.fn(async () => {});
+	const sessionId = "runtime-session";
+	const runtimeHost = {
+		session: {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			bindExtensions: vi.fn(async () => {}),
+			sessionId,
+			sessionManager: {
+				getClientInput: vi.fn(() => undefined),
+				getSessionDir: vi.fn(() => "/sessions"),
+				getSessionRef: vi.fn(() => createSessionRef(sessionId)),
+			},
+			subscribe: vi.fn(() => () => {}),
+			subscribeRuntimeEvents: vi.fn(() => () => {}),
+		},
+		newSession: vi.fn(async () => ({ cancelled: true })),
+		switchSession: vi.fn(async () => ({ cancelled: true })),
+		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+		dispose,
+		setRebindSession: vi.fn(),
+	} as unknown as AgentSessionRuntime;
+
+	return { runtimeHost, dispose };
+}
+
+interface RpcModeHarness {
+	close(): void;
+	modePromise: Promise<void>;
+	send(message: object): void;
+	writes: object[];
+}
+
+function createStateSession(sessionId: string, gitContext: RpcGitContext | null = null) {
+	return {
+		activeToolExecutions: new Map(),
+		subscribeRuntimeEvents: vi.fn(() => () => {}),
+		activeCompaction: undefined,
+		autoCompactionEnabled: true,
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+		bindExtensions: vi.fn(async () => {}),
+		followUpMode: "one-at-a-time" as const,
+		gitContextProvider: {
+			getSnapshot: vi.fn(() => gitContext),
+			refresh: vi.fn(() => new Promise(() => {})),
+		},
+		isCompacting: false,
+		isStreaming: false,
+		messages: [],
+		model: undefined,
+		pendingMessageCount: 0,
+		sessionId,
+		sessionManager: {
+			getSessionDir: () => "/sessions",
+			getSessionRef: () => createSessionRef(sessionId),
+			getStartingGitContext: () => undefined,
+		},
+		steeringMode: "one-at-a-time" as const,
+		subscribe: vi.fn(() => () => {}),
+		thinkingLevel: "off" as const,
+		getAvailableThinkingLevels: vi.fn(() => ["off"]),
+	};
+}
+
+function createPayloadValidationSession() {
+	return {
+		subscribeRuntimeEvents: vi.fn(() => () => {}),
+		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+		bindExtensions: vi.fn(async () => {}),
+		executeBash: vi.fn(async () => ({ cancelled: false, exitCode: 0, output: "" })),
+		followUp: vi.fn(async () => {}),
+		prompt: vi.fn(async () => {}),
+		sessionId: "payload-validation-session",
+		sessionManager: {
+			getBranch: vi.fn(() => []),
+			getSessionId: vi.fn(() => "payload-validation-session"),
+		},
+		setAutoCompactionEnabled: vi.fn(),
+		setAutoRetryEnabled: vi.fn(),
+		setFollowUpMode: vi.fn(),
+		setSessionName: vi.fn(),
+		setSteeringMode: vi.fn(),
+		setThinkingLevel: vi.fn(),
+		steer: vi.fn(async () => {}),
+		subscribe: vi.fn(() => () => {}),
+	};
+}
+
+function createPayloadValidationRuntimeHost(
+	session: ReturnType<typeof createPayloadValidationSession>,
+): AgentSessionRuntime {
+	return {
+		session,
+		newSession: vi.fn(async () => ({ cancelled: true })),
+		switchSession: vi.fn(async () => ({ cancelled: true })),
+		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+		dispose: vi.fn(async () => {}),
+		setRebindSession: vi.fn(),
+	} as unknown as AgentSessionRuntime;
+}
+
+async function startRpcModeHarness(runtimeHost: AgentSessionRuntime): Promise<RpcModeHarness> {
+	let lineHandler: ((line: string) => void) | undefined;
+	let closeHandler: RpcCloseHandler | undefined;
+	const writes: object[] = [];
+	const transport: RpcTransport = {
+		write: vi.fn((value) => {
+			writes.push(value);
+		}),
+		onLine: vi.fn((handler) => {
+			lineHandler = handler;
+			return vi.fn();
+		}),
+		onClose: vi.fn((handler) => {
+			closeHandler = handler;
+			return vi.fn();
+		}),
+		waitForBackpressure: vi.fn(async () => {}),
+		flush: vi.fn(async () => {}),
+		close: vi.fn(async () => {}),
+	};
+	let resolveReady: () => void = () => {};
+	const ready = new Promise<void>((resolve) => {
+		resolveReady = resolve;
+	});
+	const modePromise = runRpcMode(runtimeHost, { onReady: resolveReady, transport });
+	await ready;
+	await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+	return {
+		close() {
+			closeHandler?.();
+		},
+		modePromise,
+		send(message: object) {
+			if (!lineHandler) {
+				throw new Error("RPC line handler was not registered");
+			}
+			lineHandler(JSON.stringify(message));
+		},
+		writes,
+	};
+}
+
+afterEach(() => {
+	restoreStdout();
+});
+
+describe("RPC mode caller-provided transports", () => {
+	test("lists sessions and switches by session id", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const makeSession = (sessionId: string) => ({
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
+			sessionFile: `/sessions/${sessionId}.jsonl`,
+			sessionId,
+		});
+		let currentSession = makeSession("initial-session");
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			listSessions: vi.fn(async () => [
+				{
+					current: true,
+					createdAt: "2026-01-01T00:00:00.000Z",
+					firstMessage: "hello",
+					messageCount: 2,
+					modifiedAt: "2026-01-01T00:01:00.000Z",
+					sessionId: "initial-session",
+					sessionName: "Initial",
+				},
+			]),
+			switchSessionById: vi.fn(async () => {
+				currentSession = makeSession("selected-session");
+				return { cancelled: false };
+			}),
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			onReady: () => {
+				resolveReady();
+			},
+			transport,
+		});
+		await ready;
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(JSON.stringify({ id: "list-1", type: "list_sessions" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "list-1",
+				type: "response",
+				command: "list_sessions",
+				success: true,
+				data: {
+					sessions: [
+						{
+							current: true,
+							createdAt: "2026-01-01T00:00:00.000Z",
+							firstMessage: "hello",
+							messageCount: 2,
+							modifiedAt: "2026-01-01T00:01:00.000Z",
+							sessionId: "initial-session",
+							sessionName: "Initial",
+						},
+					],
+				},
+			}),
+		);
+
+		lineHandler?.(JSON.stringify({ id: "switch-1", type: "switch_session_by_id", sessionId: "selected-session" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "switch-1",
+				type: "response",
+				command: "switch_session_by_id",
+				success: true,
+				data: { cancelled: false },
+			}),
+		);
+		expect(runtimeHost.switchSessionById).toHaveBeenCalledWith("selected-session", {
+			assertConversationGenerationCurrent: expect.any(Function),
+		});
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("get_state returns the cached Git replacement without waiting for refresh", async () => {
+		const gitContext: RpcGitContext = {
+			repository: "workspace",
+			head: { kind: "branch", name: "main", oid: "0123456789abcdef0123456789abcdef01234567" },
+			upstream: null,
+			base: null,
+			status: {
+				staged: { added: 0, modified: 0, deleted: 0, renamed: 0 },
+				unstaged: { added: 0, modified: 0, deleted: 0, renamed: 0 },
+				untracked: 0,
+				conflicted: 0,
+				total: 0,
+				clean: true,
+			},
+			operation: null,
+			revision: 1,
+			observedAt: "2026-07-29T00:00:00.000Z",
+			stale: false,
+		};
+		const session = createStateSession("git-state-session", gitContext);
+		const runtimeHost = {
+			session,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const rpc = await startRpcModeHarness(runtimeHost);
+		try {
+			rpc.send({ id: "git-state", type: "get_state" });
+			await vi.waitFor(() =>
+				expect(rpc.writes).toContainEqual(
+					expect.objectContaining({
+						id: "git-state",
+						data: expect.objectContaining({ gitContext }),
+					}),
+				),
+			);
+			expect(session.gitContextProvider.refresh).not.toHaveBeenCalled();
+		} finally {
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("serializes regular commands so state reads wait for pending session switches", async () => {
+		let resolveSwitch: ((result: { cancelled: boolean }) => void) | undefined;
+		let switchResolved = false;
+		let currentSession = createStateSession("initial-session");
+		const finishSwitch = () => {
+			if (switchResolved || !resolveSwitch) {
+				return;
+			}
+			switchResolved = true;
+			currentSession = createStateSession("selected-session");
+			resolveSwitch({ cancelled: false });
+		};
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			switchSessionById: vi.fn(
+				() =>
+					new Promise<{ cancelled: boolean }>((resolve) => {
+						resolveSwitch = resolve;
+					}),
+			),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const rpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			rpc.send({ id: "switch-1", type: "switch_session_by_id", sessionId: "selected-session" });
+			await vi.waitFor(() => expect(runtimeHost.switchSessionById).toHaveBeenCalledOnce());
+			rpc.send({ id: "state-1", type: "get_state" });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(rpc.writes).not.toContainEqual(expect.objectContaining({ id: "state-1" }));
+
+			finishSwitch();
+			await vi.waitFor(() =>
+				expect(rpc.writes).toContainEqual(
+					expect.objectContaining({
+						id: "state-1",
+						data: expect.objectContaining({ sessionId: "selected-session" }),
+					}),
+				),
+			);
+		} finally {
+			finishSwitch();
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("leases ordinary dispatch while interruption commands bypass the held session actor", async () => {
+		let currentSession = Object.assign(createStateSession("initial-session"), {
+			abort: vi.fn(async () => {}),
+			abortRetry: vi.fn(),
+			abortBash: vi.fn(),
+		});
+		const leasedSession = createStateSession("leased-session");
+		let releaseStableDispatch = () => {};
+		let markStableDispatchStarted = () => {};
+		const stableDispatchStarted = new Promise<void>((resolve) => {
+			markStableDispatchStarted = resolve;
+		});
+		const stableDispatchGate = new Promise<void>((resolve) => {
+			releaseStableDispatch = resolve;
+		});
+		const runWithStableSession = vi.fn(async (operation: (session: AgentSession) => Promise<unknown> | unknown) => {
+			markStableDispatchStarted();
+			await stableDispatchGate;
+			currentSession = leasedSession as typeof currentSession;
+			return operation(leasedSession as unknown as AgentSession);
+		});
+		const runSessionInterruption = vi.fn((operation: (session: AgentSession) => unknown) =>
+			operation(currentSession as unknown as AgentSession),
+		);
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			runWithStableSession,
+			runSessionInterruption,
+		} as unknown as AgentSessionRuntime;
+		const ordinaryRpc = await startRpcModeHarness(runtimeHost);
+		const interruptRpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			ordinaryRpc.send({ id: "state-leased", type: "get_state" });
+			await stableDispatchStarted;
+			expect(ordinaryRpc.writes).not.toContainEqual(expect.objectContaining({ id: "state-leased" }));
+
+			interruptRpc.send({ id: "abort-held-actor", type: "abort" });
+			interruptRpc.send({ id: "abort-retry-held-actor", type: "abort_retry" });
+			interruptRpc.send({ id: "abort-bash-held-actor", type: "abort_bash" });
+			await vi.waitFor(() => {
+				expect(currentSession.abort).toHaveBeenCalledOnce();
+				expect(currentSession.abortRetry).toHaveBeenCalledOnce();
+				expect(currentSession.abortBash).toHaveBeenCalledOnce();
+			});
+			// A remote stop delivers input the client already queued instead of stranding it.
+			expect(currentSession.abort).toHaveBeenCalledWith("remote_request", { deliverQueuedMessages: true });
+			expect(runWithStableSession).toHaveBeenCalledOnce();
+			expect(runSessionInterruption).toHaveBeenCalledTimes(3);
+
+			releaseStableDispatch();
+			await vi.waitFor(() =>
+				expect(ordinaryRpc.writes).toContainEqual(
+					expect.objectContaining({
+						id: "state-leased",
+						data: expect.objectContaining({ sessionId: "leased-session" }),
+					}),
+				),
+			);
+		} finally {
+			releaseStableDispatch();
+			ordinaryRpc.close();
+			interruptRpc.close();
+			await Promise.all([ordinaryRpc.modePromise.catch(() => {}), interruptRpc.modePromise.catch(() => {})]);
+		}
+	});
+
+	test("two streams never interrupt a stale local session across a paused replacement boundary", async () => {
+		const originalSession = Object.assign(createStateSession("original-session"), {
+			abort: vi.fn(async () => {}),
+			abortRetry: vi.fn(),
+			abortBash: vi.fn(),
+		});
+		const replacementSession = Object.assign(createStateSession("replacement-session"), {
+			abort: vi.fn(async () => {}),
+			abortRetry: vi.fn(),
+			abortBash: vi.fn(),
+		});
+		let currentSession = originalSession;
+		let replacementInProgress = false;
+		const runSessionInterruption = vi.fn((operation: (session: AgentSession) => unknown) => {
+			if (replacementInProgress) {
+				throw new Error("Agent session generation is changing; retry the interruption");
+			}
+			return operation(currentSession as unknown as AgentSession);
+		});
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+			runSessionInterruption,
+		} as unknown as AgentSessionRuntime;
+		const firstRpc = await startRpcModeHarness(runtimeHost);
+		const secondRpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			// Both mode-local pointers still reference originalSession. Runtime
+			// ownership has staged the replacement, but publication/rebind is paused.
+			currentSession = replacementSession;
+			replacementInProgress = true;
+			firstRpc.send({ id: "abort-during-rebind", type: "abort" });
+			await vi.waitFor(() =>
+				expect(firstRpc.writes).toContainEqual(
+					expect.objectContaining({
+						id: "abort-during-rebind",
+						command: "abort",
+						success: false,
+						error: "Agent session generation is changing; retry the interruption",
+					}),
+				),
+			);
+			expect(originalSession.abort).not.toHaveBeenCalled();
+			expect(replacementSession.abort).not.toHaveBeenCalled();
+
+			replacementInProgress = false;
+			secondRpc.send({ id: "abort-after-rebind", type: "abort" });
+			await vi.waitFor(() => {
+				expect(replacementSession.abort).toHaveBeenCalledOnce();
+				expect(secondRpc.writes).toContainEqual(
+					expect.objectContaining({ id: "abort-after-rebind", command: "abort", success: true }),
+				);
+			});
+			expect(originalSession.abort).not.toHaveBeenCalled();
+			expect(runSessionInterruption).toHaveBeenCalledTimes(2);
+		} finally {
+			firstRpc.close();
+			secondRpc.close();
+			await Promise.all([firstRpc.modePromise.catch(() => {}), secondRpc.modePromise.catch(() => {})]);
+		}
+	});
+
+	test("drains an admitted structural command before transport close settles", async () => {
+		let resolveNewSession: ((result: { cancelled: boolean }) => void) | undefined;
+		let newSessionResolved = false;
+		let currentSession = createStateSession("initial-session");
+		const finishNewSession = () => {
+			if (newSessionResolved || !resolveNewSession) {
+				return;
+			}
+			newSessionResolved = true;
+			currentSession = createStateSession("next-session");
+			resolveNewSession({ cancelled: false });
+		};
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(
+				() =>
+					new Promise<{ cancelled: boolean }>((resolve) => {
+						resolveNewSession = resolve;
+					}),
+			),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const rpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			rpc.send({ id: "new-1", type: "new_session" });
+			await vi.waitFor(() => expect(runtimeHost.newSession).toHaveBeenCalledOnce());
+
+			let modeSettled = false;
+			void rpc.modePromise.finally(() => {
+				modeSettled = true;
+			});
+			rpc.close();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(modeSettled).toBe(false);
+			expect(runtimeHost.dispose).not.toHaveBeenCalled();
+
+			finishNewSession();
+			await expect(rpc.modePromise).resolves.toBeUndefined();
+
+			expect(rpc.writes).not.toContainEqual(expect.objectContaining({ id: "new-1" }));
+			expect(runtimeHost.dispose).toHaveBeenCalledOnce();
+		} finally {
+			finishNewSession();
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("holds structural commands through prompt admission but not the provider turn", async () => {
+		const { runtimeHost } = createRuntimeHost();
+		const admissions = new Set<Promise<void>>();
+		Object.assign(runtimeHost, {
+			trackClientInputAdmission(_session: AgentSession, admission: Promise<void>) {
+				admissions.add(admission);
+				void admission.finally(() => admissions.delete(admission));
+			},
+			newSession: vi.fn(async () => {
+				await Promise.all([...admissions]);
+				return { cancelled: true };
+			}),
+		});
+		let acceptPrompt = (): void => {};
+		let finishPrompt = (): void => {};
+		const prompt = vi.fn(
+			(_message: string, options: { preflightResult?: (result: PromptPreflightResult) => void }) =>
+				new Promise<void>((resolve) => {
+					acceptPrompt = () => options.preflightResult?.({ success: true, outcome: "admitted" });
+					finishPrompt = resolve;
+				}),
+		);
+		Object.assign(runtimeHost.session, { prompt });
+		const rpc = await startRpcModeHarness(runtimeHost);
+
+		try {
+			rpc.send({
+				id: "prompt-admission",
+				type: "prompt",
+				clientMessageId: "prompt-admission-client",
+				message: "queue me",
+			});
+			await vi.waitFor(() => expect(prompt).toHaveBeenCalledOnce());
+			rpc.send({ id: "new-after-prompt", type: "new_session" });
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(runtimeHost.newSession).toHaveBeenCalledOnce();
+			expect(rpc.writes).not.toContainEqual(expect.objectContaining({ id: "new-after-prompt" }));
+
+			acceptPrompt();
+			await vi.waitFor(() =>
+				expect(rpc.writes).toContainEqual(
+					expect.objectContaining({ id: "new-after-prompt", command: "new_session", success: true }),
+				),
+			);
+			// Admission releases the lifecycle actor while the model call remains live.
+			expect(rpc.writes).toContainEqual(
+				expect.objectContaining({ id: "prompt-admission", command: "prompt", success: true }),
+			);
+		} finally {
+			finishPrompt();
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("bridges host-initiated action requests over RPC", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		let hostInteraction: HostInteraction | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const currentSession = {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
+			sessionId: "session-1",
+			sessionFile: "/sessions/session-1.jsonl",
+			setHostInteraction: vi.fn((interaction: HostInteraction) => {
+				hostInteraction = interaction;
+			}),
+		};
+		const runtimeHost = {
+			session: currentSession,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			onReady: () => {
+				resolveReady();
+			},
+			transport,
+		});
+		await ready;
+		await vi.waitFor(() => expect(hostInteraction).toBeDefined());
+
+		await expect(
+			hostInteraction!.requestAction({
+				id: "no-caps",
+				action: "test.action",
+				title: "Unavailable action",
+			}),
+		).resolves.toMatchObject({ decision: "unavailable" });
+		expect(writes).not.toContainEqual(expect.objectContaining({ type: "host_action_request", id: "no-caps" }));
+
+		lineHandler?.(
+			JSON.stringify({ id: "caps-1", type: "set_client_capabilities", features: ["host_action_requests.v1"] }),
+		);
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "caps-1",
+				type: "response",
+				command: "set_client_capabilities",
+				success: true,
+			}),
+		);
+
+		const decisionPromise = hostInteraction!.requestAction({
+			id: "host-1",
+			action: "test.action",
+			title: "Approve test action?",
+			message: "This action is blocking.",
+			blocking: true,
+		});
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				type: "host_action_request",
+				id: "host-1",
+				action: "test.action",
+				title: "Approve test action?",
+				message: "This action is blocking.",
+				blocking: true,
+			}),
+		);
+		hostInteraction!.updateAction?.({ id: "host-1", action: "test.action", status: "running" });
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				type: "host_action_update",
+				id: "host-1",
+				action: "test.action",
+				status: "running",
+			}),
+		);
+
+		lineHandler?.(JSON.stringify({ id: "pending-1", type: "get_pending_host_actions" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "pending-1",
+				type: "response",
+				command: "get_pending_host_actions",
+				success: true,
+				data: {
+					actions: [
+						{
+							type: "host_action_request",
+							id: "host-1",
+							action: "test.action",
+							title: "Approve test action?",
+							message: "This action is blocking.",
+							blocking: true,
+						},
+					],
+				},
+			}),
+		);
+
+		lineHandler?.(JSON.stringify({ type: "host_action_response", id: "host-1", decision: "approved" }));
+		await expect(decisionPromise).resolves.toMatchObject({ decision: "approved" });
+
+		const cancelledPromise = hostInteraction!.requestAction({
+			id: "host-2",
+			action: "test.action",
+			title: "Cancelled action",
+			blocking: true,
+		});
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				type: "host_action_request",
+				id: "host-2",
+				action: "test.action",
+				title: "Cancelled action",
+				blocking: true,
+			}),
+		);
+		lineHandler?.(JSON.stringify({ id: "caps-2", type: "set_client_capabilities", features: [] }));
+		await expect(cancelledPromise).resolves.toMatchObject({
+			decision: "dismissed",
+			message: "Host action capability disabled",
+		});
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("preserves pending host action requests across retained runtime reconnects", async () => {
+		let hostInteraction: HostInteraction | undefined;
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const currentSession = {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
+			sessionId: "session-1",
+			sessionFile: "/sessions/session-1.jsonl",
+			setHostInteraction: vi.fn((interaction: HostInteraction) => {
+				hostInteraction = interaction;
+			}),
+		};
+		const runtimeHost = {
+			session: currentSession,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const startConnection = async () => {
+			let lineHandler: ((line: string) => void) | undefined;
+			let closeHandler: RpcCloseHandler | undefined;
+			const writes: object[] = [];
+			const transport: RpcTransport = {
+				write: vi.fn((value) => {
+					writes.push(value);
+				}),
+				onLine: vi.fn((handler) => {
+					lineHandler = handler;
+					return vi.fn();
+				}),
+				onClose: vi.fn((handler) => {
+					closeHandler = handler;
+					return vi.fn();
+				}),
+				waitForBackpressure: vi.fn(async () => {}),
+				flush: vi.fn(async () => {}),
+				close: vi.fn(async () => {}),
+			};
+			let resolveReady: () => void = () => {};
+			const ready = new Promise<void>((resolve) => {
+				resolveReady = resolve;
+			});
+			const modePromise = runRpcMode(runtimeHost, {
+				disposeRuntimeOnClose: false,
+				onReady: resolveReady,
+				transport,
+			});
+			await ready;
+			await vi.waitFor(() => expect(lineHandler).toBeDefined());
+			return {
+				close: () => {
+					closeHandler?.();
+				},
+				modePromise,
+				send: (message: object) => {
+					if (!lineHandler) {
+						throw new Error("RPC line handler was not registered");
+					}
+					lineHandler(JSON.stringify(message));
+				},
+				writes,
+			};
+		};
+
+		const firstConnection = await startConnection();
+		firstConnection.send({
+			id: "caps-1",
+			type: "set_client_capabilities",
+			features: ["host_action_requests.v1"],
+		});
+		await vi.waitFor(() =>
+			expect(firstConnection.writes).toContainEqual({
+				id: "caps-1",
+				type: "response",
+				command: "set_client_capabilities",
+				success: true,
+			}),
+		);
+		if (!hostInteraction) {
+			throw new Error("Host interaction was not installed");
+		}
+		const retainedHostInteraction = hostInteraction;
+		const decisionPromise = retainedHostInteraction.requestAction({
+			id: "host-reconnect",
+			action: "test.action",
+			title: "Approve after reconnect?",
+			message: "This request should survive transport close.",
+			blocking: true,
+		});
+		await vi.waitFor(() =>
+			expect(firstConnection.writes).toContainEqual({
+				type: "host_action_request",
+				id: "host-reconnect",
+				action: "test.action",
+				title: "Approve after reconnect?",
+				message: "This request should survive transport close.",
+				blocking: true,
+			}),
+		);
+
+		firstConnection.close();
+		await expect(firstConnection.modePromise).resolves.toBeUndefined();
+		let settled = false;
+		void decisionPromise.then(() => {
+			settled = true;
+		});
+		await Promise.resolve();
+		expect(settled).toBe(false);
+		expect(runtimeHost.dispose).not.toHaveBeenCalled();
+
+		const secondConnection = await startConnection();
+		secondConnection.send({
+			id: "caps-2",
+			type: "set_client_capabilities",
+			features: ["host_action_requests.v1"],
+		});
+		await vi.waitFor(() =>
+			expect(secondConnection.writes).toContainEqual({
+				id: "caps-2",
+				type: "response",
+				command: "set_client_capabilities",
+				success: true,
+			}),
+		);
+		secondConnection.send({ id: "pending-2", type: "get_pending_host_actions" });
+		await vi.waitFor(() =>
+			expect(secondConnection.writes).toContainEqual({
+				id: "pending-2",
+				type: "response",
+				command: "get_pending_host_actions",
+				success: true,
+				data: {
+					actions: [
+						{
+							type: "host_action_request",
+							id: "host-reconnect",
+							action: "test.action",
+							title: "Approve after reconnect?",
+							message: "This request should survive transport close.",
+							blocking: true,
+						},
+					],
+				},
+			}),
+		);
+
+		retainedHostInteraction.updateAction?.({
+			id: "host-reconnect",
+			action: "test.action",
+			status: "running",
+		});
+		await vi.waitFor(() =>
+			expect(secondConnection.writes).toContainEqual({
+				type: "host_action_update",
+				id: "host-reconnect",
+				action: "test.action",
+				status: "running",
+			}),
+		);
+
+		secondConnection.send({
+			type: "host_action_response",
+			id: "host-reconnect",
+			decision: "approved",
+			message: "approved after reconnect",
+		});
+		await expect(decisionPromise).resolves.toMatchObject({
+			decision: "approved",
+			message: "approved after reconnect",
+		});
+
+		secondConnection.close();
+		await expect(secondConnection.modePromise).resolves.toBeUndefined();
+	});
+
+	test("dismisses retained host action requests when a reconnect disables host action support", async () => {
+		let hostInteraction: HostInteraction | undefined;
+		const currentSession = {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => () => {}),
+			subscribeRuntimeEvents: vi.fn(() => () => {}),
+			sessionId: "session-1",
+			setHostInteraction: vi.fn((interaction: HostInteraction) => {
+				hostInteraction = interaction;
+			}),
+		};
+		const runtimeHost = {
+			session: currentSession,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		const startConnection = async () => {
+			let lineHandler: ((line: string) => void) | undefined;
+			let closeHandler: RpcCloseHandler | undefined;
+			const writes: object[] = [];
+			const transport: RpcTransport = {
+				write: vi.fn((value) => {
+					writes.push(value);
+				}),
+				onLine: vi.fn((handler) => {
+					lineHandler = handler;
+					return vi.fn();
+				}),
+				onClose: vi.fn((handler) => {
+					closeHandler = handler;
+					return vi.fn();
+				}),
+				waitForBackpressure: vi.fn(async () => {}),
+				flush: vi.fn(async () => {}),
+				close: vi.fn(async () => {}),
+			};
+			let resolveReady: () => void = () => {};
+			const ready = new Promise<void>((resolve) => {
+				resolveReady = resolve;
+			});
+			const modePromise = runRpcMode(runtimeHost, {
+				disposeRuntimeOnClose: false,
+				onReady: resolveReady,
+				transport,
+			});
+			await ready;
+			await vi.waitFor(() => expect(lineHandler).toBeDefined());
+			return {
+				close: () => closeHandler?.(),
+				modePromise,
+				send: (message: object) => {
+					if (!lineHandler) {
+						throw new Error("RPC line handler was not registered");
+					}
+					lineHandler(JSON.stringify(message));
+				},
+				writes,
+			};
+		};
+
+		const firstConnection = await startConnection();
+		firstConnection.send({
+			id: "caps-1",
+			type: "set_client_capabilities",
+			features: ["host_action_requests.v1"],
+		});
+		await vi.waitFor(() =>
+			expect(firstConnection.writes).toContainEqual(expect.objectContaining({ id: "caps-1", success: true })),
+		);
+		if (!hostInteraction) {
+			throw new Error("Host interaction was not installed");
+		}
+		const decisionPromise = hostInteraction.requestAction({
+			id: "host-disabled-reconnect",
+			action: "test.action",
+			title: "Approve after reconnect?",
+		});
+		await vi.waitFor(() =>
+			expect(firstConnection.writes).toContainEqual(
+				expect.objectContaining({ type: "host_action_request", id: "host-disabled-reconnect" }),
+			),
+		);
+		firstConnection.close();
+		await expect(firstConnection.modePromise).resolves.toBeUndefined();
+
+		const secondConnection = await startConnection();
+		secondConnection.send({ id: "caps-2", type: "set_client_capabilities", features: [] });
+		await expect(decisionPromise).resolves.toMatchObject({
+			decision: "dismissed",
+			message: "Host action capability disabled",
+		});
+		secondConnection.send({ id: "pending-2", type: "get_pending_host_actions" });
+		await vi.waitFor(() =>
+			expect(secondConnection.writes).toContainEqual({
+				id: "pending-2",
+				type: "response",
+				command: "get_pending_host_actions",
+				success: true,
+				data: { actions: [] },
+			}),
+		);
+
+		secondConnection.close();
+		await expect(secondConnection.modePromise).resolves.toBeUndefined();
+	});
+
+	test("cancels pending host action requests when disposing the runtime", async () => {
+		let closeHandler: RpcCloseHandler | undefined;
+		let hostInteraction: HostInteraction | undefined;
+		let lineHandler: ((line: string) => void) | undefined;
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return vi.fn();
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return vi.fn();
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const runtimeHost = {
+			session: {
+				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+				bindExtensions: vi.fn(async () => {}),
+				subscribe: vi.fn(() => () => {}),
+				subscribeRuntimeEvents: vi.fn(() => () => {}),
+				sessionId: "session-1",
+				setHostInteraction: vi.fn((interaction: HostInteraction) => {
+					hostInteraction = interaction;
+				}),
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+		const modePromise = runRpcMode(runtimeHost, { onReady: resolveReady, transport });
+		await ready;
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+		lineHandler?.(
+			JSON.stringify({ id: "caps-1", type: "set_client_capabilities", features: ["host_action_requests.v1"] }),
+		);
+		await vi.waitFor(() => expect(writes).toContainEqual(expect.objectContaining({ id: "caps-1", success: true })));
+		if (!hostInteraction) {
+			throw new Error("Host interaction was not installed");
+		}
+		const decisionPromise = hostInteraction.requestAction({
+			id: "host-dispose",
+			action: "test.action",
+			title: "Dispose?",
+		});
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual(expect.objectContaining({ type: "host_action_request", id: "host-dispose" })),
+		);
+
+		closeHandler?.();
+		await expect(decisionPromise).resolves.toMatchObject({
+			decision: "dismissed",
+			message: "RPC mode is shutting down",
+		});
+		await expect(modePromise).resolves.toBeUndefined();
+		expect(runtimeHost.dispose).toHaveBeenCalledOnce();
+	});
+
+	test("rejects invalid scalar state mutation payloads before calling session setters", async () => {
+		const session = createPayloadValidationSession();
+		const rpc = await startRpcModeHarness(createPayloadValidationRuntimeHost(session));
+		const invalidCommands = [
+			{ id: "auto-compaction-invalid", type: "set_auto_compaction", enabled: "false" },
+			{ id: "auto-retry-invalid", type: "set_auto_retry", enabled: "false" },
+			{ id: "steering-mode-invalid", type: "set_steering_mode", mode: "bad" },
+			{ id: "follow-up-mode-invalid", type: "set_follow_up_mode", mode: "bad" },
+			{ id: "thinking-level-invalid", type: "set_thinking_level", level: "bad" },
+			{ id: "session-name-invalid", type: "set_session_name", name: 123 },
+		];
+
+		try {
+			for (const command of invalidCommands) {
+				rpc.send(command);
+			}
+
+			await vi.waitFor(() => {
+				for (const command of invalidCommands) {
+					expect(rpc.writes).toContainEqual(
+						expect.objectContaining({
+							id: command.id,
+							type: "response",
+							command: command.type,
+							success: false,
+							error: expect.any(String),
+						}),
+					);
+				}
+			});
+			expect(session.setAutoCompactionEnabled).not.toHaveBeenCalled();
+			expect(session.setAutoRetryEnabled).not.toHaveBeenCalled();
+			expect(session.setSteeringMode).not.toHaveBeenCalled();
+			expect(session.setFollowUpMode).not.toHaveBeenCalled();
+			expect(session.setThinkingLevel).not.toHaveBeenCalled();
+			expect(session.setSessionName).not.toHaveBeenCalled();
+		} finally {
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("rejects invalid prompt and bash string payloads before calling session methods", async () => {
+		const session = createPayloadValidationSession();
+		const rpc = await startRpcModeHarness(createPayloadValidationRuntimeHost(session));
+		const invalidCommands = [
+			{ id: "prompt-invalid", type: "prompt", clientMessageId: "client-prompt-invalid", message: 123 },
+			{ id: "steer-invalid", type: "steer", clientMessageId: "client-steer-invalid", message: 123 },
+			{
+				id: "follow-up-invalid",
+				type: "follow_up",
+				clientMessageId: "client-follow-up-invalid",
+				message: 123,
+			},
+			{ id: "bash-invalid", type: "bash", command: 123 },
+		];
+
+		try {
+			for (const command of invalidCommands) {
+				rpc.send(command);
+			}
+
+			await vi.waitFor(() => {
+				for (const command of invalidCommands) {
+					expect(rpc.writes).toContainEqual(
+						expect.objectContaining({
+							id: command.id,
+							type: "response",
+							command: command.type,
+							success: false,
+							error: expect.any(String),
+						}),
+					);
+				}
+			});
+			expect(session.prompt).not.toHaveBeenCalled();
+			expect(session.steer).not.toHaveBeenCalled();
+			expect(session.followUp).not.toHaveBeenCalled();
+			expect(session.executeBash).not.toHaveBeenCalled();
+		} finally {
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("rejects invalid transcript pagination payloads before projecting the transcript", async () => {
+		const session = createPayloadValidationSession();
+		const rpc = await startRpcModeHarness(createPayloadValidationRuntimeHost(session));
+		const invalidCommands = [
+			{ id: "transcript-limit-invalid", type: "get_transcript", limit: "10" },
+			{ id: "transcript-before-invalid", type: "get_transcript", beforeEntryId: 123 },
+		];
+
+		try {
+			for (const command of invalidCommands) {
+				rpc.send(command);
+			}
+
+			await vi.waitFor(() => {
+				for (const command of invalidCommands) {
+					expect(rpc.writes).toContainEqual(
+						expect.objectContaining({
+							id: command.id,
+							type: "response",
+							command: command.type,
+							success: false,
+							error: expect.any(String),
+						}),
+					);
+				}
+			});
+			expect(session.sessionManager.getBranch).not.toHaveBeenCalled();
+			expect(session.sessionManager.getSessionId).not.toHaveBeenCalled();
+		} finally {
+			rpc.close();
+			await rpc.modePromise.catch(() => {});
+		}
+	});
+
+	test("returns projected transcript items", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const sessionManager = SessionManager.inMemory("/workspace");
+		sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 10 });
+		const currentSession = {
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
+			sessionId: sessionManager.getSessionId(),
+			sessionManager,
+		};
+		const runtimeHost = {
+			session: currentSession,
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			onReady: () => {
+				resolveReady();
+			},
+			transport,
+		});
+		await ready;
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(JSON.stringify({ id: "transcript-1", type: "get_transcript", limit: 10 }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "transcript-1",
+				type: "response",
+				command: "get_transcript",
+				success: true,
+				data: {
+					sessionId: sessionManager.getSessionId(),
+					items: [
+						expect.objectContaining({
+							role: "user",
+							text: "hello",
+						}),
+					],
+					hasMore: false,
+					nextBeforeEntryId: null,
+				},
+			}),
+		);
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("notifies caller when the active session changes", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writes: object[] = [];
+		const transport: RpcTransport = {
+			write: vi.fn((value) => {
+				writes.push(value);
+			}),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: vi.fn(async () => {}),
+		};
+		const makeSession = (sessionId: string) => ({
+			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+			bindExtensions: vi.fn(async () => {}),
+			subscribe: vi.fn(() => detachSession),
+			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
+			sessionId,
+			sessionManager: {
+				getSessionRef: vi.fn(() => createSessionRef(sessionId)),
+			},
+		});
+		let currentSession = makeSession("initial-session");
+		let rebindSession: (() => Promise<void>) | undefined;
+		const runtimeHost = {
+			get session() {
+				return currentSession;
+			},
+			newSession: vi.fn(async () => {
+				currentSession = makeSession("next-session");
+				await rebindSession?.();
+				return { cancelled: false };
+			}),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose: vi.fn(async () => {}),
+			setRebindSession: vi.fn((rebind: (() => Promise<void>) | undefined) => {
+				rebindSession = rebind;
+			}),
+		} as unknown as AgentSessionRuntime;
+		const sessionChanges: Array<{ sessionRef?: SessionReference; sessionId: string }> = [];
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			onReady: () => {
+				resolveReady();
+			},
+			onSessionChanged: (session) => {
+				sessionChanges.push(session);
+			},
+			transport,
+		});
+		await ready;
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(JSON.stringify({ id: "new-session-1", type: "new_session" }));
+		await vi.waitFor(() =>
+			expect(writes).toContainEqual({
+				id: "new-session-1",
+				type: "response",
+				command: "new_session",
+				success: true,
+				data: { cancelled: false },
+			}),
+		);
+
+		expect(sessionChanges).toEqual([
+			{ sessionRef: createSessionRef("initial-session"), sessionId: "initial-session" },
+			{ sessionRef: createSessionRef("next-session"), sessionId: "next-session" },
+		]);
+
+		closeHandler?.();
+		await expect(modePromise).resolves.toBeUndefined();
+	});
+
+	test("rejects and closes when a command response write rejects", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const writeError = new Error("write failed");
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(() => Promise.reject(writeError)),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn(() => detachClose),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const { runtimeHost, dispose } = createRuntimeHost();
+
+		const modePromise = runRpcMode(runtimeHost, { transport });
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(JSON.stringify({ id: "write-failure", type: "unknown_command" }));
+
+		await expect(modePromise).rejects.toBe(writeError);
+		expect(transport.write).toHaveBeenCalledOnce();
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("rejects and closes when a fire-and-forget prompt response write rejects", async () => {
+		let lineHandler: ((line: string) => void) | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const writeError = new Error("write failed");
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(() => Promise.reject(writeError)),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return detachInput;
+			}),
+			onClose: vi.fn(() => detachClose),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const { runtimeHost, dispose } = createRuntimeHost();
+		Object.assign(runtimeHost.session, {
+			prompt: vi.fn((_message: string, options: { preflightResult?: (result: PromptPreflightResult) => void }) => {
+				options.preflightResult?.({ success: true, outcome: "admitted" });
+				return Promise.resolve();
+			}),
+		});
+
+		const modePromise = runRpcMode(runtimeHost, { transport });
+		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+
+		lineHandler?.(
+			JSON.stringify({
+				id: "prompt-write-failure",
+				type: "prompt",
+				clientMessageId: "client-prompt-write-failure",
+				message: "hello",
+			}),
+		);
+
+		await expect(modePromise).rejects.toBe(writeError);
+		expect(transport.write).toHaveBeenCalledOnce();
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("runtime-event backpressure subscriber handles write failures by shutting down", async () => {
+		let sessionEventHandler: ((event: object) => void) | undefined;
+		let backpressureHandler: (() => Promise<void> | void) | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const writeError = new Error("write failed");
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(() => Promise.reject(writeError)),
+			onLine: vi.fn(() => detachInput),
+			onClose: vi.fn(() => detachClose),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = {
+			session: {
+				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+				bindExtensions: vi.fn(async () => {}),
+				subscribe: vi.fn((handler: (event: object) => void) => {
+					sessionEventHandler = handler;
+					return detachSession;
+				}),
+				subscribeRuntimeEvents: vi.fn((handler: () => Promise<void> | void) => {
+					backpressureHandler = handler;
+					return detachBackpressure;
+				}),
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose,
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+
+		const modePromise = runRpcMode(runtimeHost, { transport });
+		await vi.waitFor(() => expect(sessionEventHandler).toBeDefined());
+		await vi.waitFor(() => expect(backpressureHandler).toBeDefined());
+
+		sessionEventHandler?.({ type: "agent_event" });
+
+		await expect(Promise.resolve(backpressureHandler?.())).resolves.toBeUndefined();
+		await expect(modePromise).rejects.toBe(writeError);
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(detachSession).toHaveBeenCalledOnce();
+		expect(detachBackpressure).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("does not subscribe after startup close interrupts extension binding", async () => {
+		let closeHandler: RpcCloseHandler | undefined;
+		let resolveBindExtensions: (() => void) | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => detachInput),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const subscribe = vi.fn(() => () => {});
+		const runtimeEventSubscribe = vi.fn(() => () => {});
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = {
+			session: {
+				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+				bindExtensions: vi.fn(
+					() =>
+						new Promise<void>((resolve) => {
+							resolveBindExtensions = resolve;
+						}),
+				),
+				subscribe,
+				subscribeRuntimeEvents: runtimeEventSubscribe,
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose,
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+
+		const modePromise = runRpcMode(runtimeHost, { transport });
+		await vi.waitFor(() => {
+			expect(closeHandler).toBeDefined();
+			expect(runtimeHost.session.bindExtensions).toHaveBeenCalledOnce();
+		});
+
+		closeHandler?.();
+		await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+		expect(resolveBindExtensions).toBeDefined();
+		resolveBindExtensions?.();
+
+		await expect(modePromise).rejects.toThrow("RPC transport closed during startup");
+		expect(subscribe).not.toHaveBeenCalled();
+		expect(runtimeEventSubscribe).not.toHaveBeenCalled();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("startup cleanup treats extension shutdown UI requests as cancelled", async () => {
+		let uiContext: ExtensionUIContext | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const startupError = new Error("bind failed");
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => detachInput),
+			onClose: vi.fn(() => detachClose),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const dispose = vi.fn(async () => {
+			if (!uiContext) {
+				throw new Error("missing extension UI context");
+			}
+			const confirmed = await uiContext.confirm("Shutdown", "Continue?");
+			expect(confirmed).toBe(false);
+		});
+		const runtimeHost = {
+			session: {
+				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+				bindExtensions: vi.fn(async (options: { uiContext: ExtensionUIContext }) => {
+					uiContext = options.uiContext;
+					throw startupError;
+				}),
+				subscribe: vi.fn(() => () => {}),
+				subscribeRuntimeEvents: vi.fn(() => () => {}),
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose,
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+
+		await expect(runRpcMode(runtimeHost, { transport })).rejects.toBe(startupError);
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(transport.write).not.toHaveBeenCalled();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("cleans up when onReady throws", async () => {
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const detachSession = vi.fn();
+		const detachBackpressure = vi.fn();
+		const readyError = new Error("ready failed");
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => detachInput),
+			onClose: vi.fn(() => detachClose),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const dispose = vi.fn(async () => {});
+		const runtimeHost = {
+			session: {
+				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
+				bindExtensions: vi.fn(async () => {}),
+				subscribe: vi.fn(() => detachSession),
+				subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
+			},
+			newSession: vi.fn(async () => ({ cancelled: true })),
+			switchSession: vi.fn(async () => ({ cancelled: true })),
+			fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
+			dispose,
+			setRebindSession: vi.fn(),
+		} as unknown as AgentSessionRuntime;
+
+		const modePromise = runRpcMode(runtimeHost, {
+			transport,
+			onReady: () => {
+				throw readyError;
+			},
+		});
+
+		await expect(modePromise).rejects.toBe(readyError);
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(detachSession).toHaveBeenCalledOnce();
+		expect(detachBackpressure).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("close without exiting the embedding process", async () => {
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => detachInput),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const { runtimeHost, dispose } = createRuntimeHost();
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation(((_code?: string | number | null | undefined) => {
+			throw new Error("process.exit called");
+		}) as typeof process.exit);
+
+		try {
+			let resolveReady: () => void = () => {};
+			const ready = new Promise<void>((resolve) => {
+				resolveReady = resolve;
+			});
+			const modePromise = runRpcMode(runtimeHost, {
+				transport,
+				onReady: () => {
+					resolveReady();
+				},
+			});
+			await ready;
+			expect(closeHandler).toBeDefined();
+
+			closeHandler?.();
+
+			await expect(modePromise).resolves.toBeUndefined();
+			expect(exitSpy).not.toHaveBeenCalled();
+			expect(dispose).toHaveBeenCalledOnce();
+			expect(detachInput).toHaveBeenCalledOnce();
+			expect(detachClose).toHaveBeenCalledOnce();
+			expect(transportClose).toHaveBeenCalledOnce();
+		} finally {
+			exitSpy.mockRestore();
+		}
+	});
+
+	test("can close caller-provided transports without disposing the runtime", async () => {
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => detachInput),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const { runtimeHost, dispose } = createRuntimeHost();
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			disposeRuntimeOnClose: false,
+			transport,
+			onReady: () => {
+				resolveReady();
+			},
+		});
+		await ready;
+		expect(closeHandler).toBeDefined();
+
+		closeHandler?.();
+
+		await expect(modePromise).resolves.toBeUndefined();
+		expect(dispose).not.toHaveBeenCalled();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("rejects and closes when the input transport closes with an error", async () => {
+		let closeHandler: RpcCloseHandler | undefined;
+		const detachInput = vi.fn();
+		const detachClose = vi.fn();
+		const inputError = new Error("input failed");
+		const transportClose = vi.fn(async () => {});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => detachInput),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return detachClose;
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: vi.fn(async () => {}),
+			close: transportClose,
+		};
+		const { runtimeHost, dispose } = createRuntimeHost();
+
+		const modePromise = runRpcMode(runtimeHost, { transport });
+		await vi.waitFor(() => expect(closeHandler).toBeDefined());
+
+		closeHandler?.(inputError);
+
+		await expect(modePromise).rejects.toBe(inputError);
+		expect(dispose).toHaveBeenCalledOnce();
+		expect(detachInput).toHaveBeenCalledOnce();
+		expect(detachClose).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+
+	test("closes the transport when shutdown flushing fails", async () => {
+		let closeHandler: RpcCloseHandler | undefined;
+		const flushError = new Error("flush failed");
+		const transportClose = vi.fn(async () => {});
+		const transportFlush = vi.fn(async () => {
+			throw flushError;
+		});
+		const transport: RpcTransport = {
+			write: vi.fn(),
+			onLine: vi.fn(() => () => {}),
+			onClose: vi.fn((handler) => {
+				closeHandler = handler;
+				return () => {};
+			}),
+			waitForBackpressure: vi.fn(async () => {}),
+			flush: transportFlush,
+			close: transportClose,
+		};
+		const { runtimeHost } = createRuntimeHost();
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			transport,
+			onReady: () => {
+				resolveReady();
+			},
+		});
+		await ready;
+		expect(closeHandler).toBeDefined();
+
+		closeHandler?.();
+
+		await expect(modePromise).rejects.toThrow(flushError);
+		expect(transportFlush).toHaveBeenCalledOnce();
+		expect(transportClose).toHaveBeenCalledOnce();
+	});
+});
+
+describe("RPC mode stream discontinuity", () => {
+	test("rejects recovery when the transport has no ordered conversation feed", async () => {
+		const { runtimeHost } = createRuntimeHost();
+		const harness = await startRpcModeHarness(runtimeHost);
+		harness.send({
+			id: "disc-1",
+			type: "report_stream_discontinuity",
+			sessionId: "session-1",
+			subscriptionId: "subscription-1",
+			lastAppliedCursor: 2,
+			reason: "cursor_gap",
+		});
+		await vi.waitFor(() =>
+			expect(harness.writes).toContainEqual({
+				id: "disc-1",
+				type: "response",
+				command: "report_stream_discontinuity",
+				success: false,
+				error: "Ordered conversation recovery is unavailable on this RPC transport",
+			}),
+		);
+
+		harness.close();
+		await harness.modePromise;
+	});
+});
+
+describe("RPC mode stdio transport", () => {
+	test("restores stdout when non-exiting stdio mode closes", async () => {
+		const initialEndListenerCount = process.stdin.listenerCount("end");
+		const { runtimeHost } = createRuntimeHost();
+		let resolveReady: () => void = () => {};
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+
+		const modePromise = runRpcMode(runtimeHost, {
+			exitProcess: false,
+			onReady: () => {
+				resolveReady();
+			},
+		});
+		await ready;
+		expect(process.stdin.listenerCount("end")).toBeGreaterThan(initialEndListenerCount);
+		expect(isStdoutTakenOver()).toBe(true);
+
+		process.stdin.emit("end");
+
+		await expect(modePromise).resolves.toBeUndefined();
+		expect(isStdoutTakenOver()).toBe(false);
+	});
+});

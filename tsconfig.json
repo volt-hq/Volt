@@ -1,0 +1,26 @@
+{
+	"extends": "./tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"paths": {
+			"*": ["./*"],
+			"@hansjm10/volt-ai": ["./packages/ai/src/index.ts"],
+			"@hansjm10/volt-ai/oauth": ["./packages/ai/src/oauth.ts"],
+			"@hansjm10/volt-ai/*": ["./packages/ai/src/*.ts", "./packages/ai/src/providers/*.ts"],
+			"@hansjm10/volt-ai/dist/*": ["./packages/ai/src/*"],
+			"@hansjm10/volt-agent-core": ["./packages/agent/src/index.ts"],
+			"@hansjm10/volt-agent-core/node": ["./packages/agent/src/node.ts"],
+			"@hansjm10/volt-agent-core/*": ["./packages/agent/src/*"],
+			"@hansjm10/volt-coding-agent": ["./packages/coding-agent/src/index.ts"],
+			"@hansjm10/volt-coding-agent/hooks": ["./packages/coding-agent/src/core/hooks/index.ts"],
+			"@hansjm10/volt-coding-agent/*": ["./packages/coding-agent/src/*"],
+			"typebox": ["./node_modules/typebox"],
+			"@hansjm10/volt-tui": ["./packages/tui/src/index.ts"],
+			"@hansjm10/volt-tui/*": ["./packages/tui/src/*"],
+			"@hansjm10/volt-agent-old": ["./packages/agent-old/src/index.ts"],
+			"@hansjm10/volt-agent-old/*": ["./packages/agent-old/src/*"]
+		}
+	},
+	"include": ["packages/*/src/**/*", "packages/*/test/**/*", "packages/coding-agent/examples/**/*"],
+	"exclude": ["**/dist/**", "packages/coding-agent/examples/extensions/gondolin/**"]
+}

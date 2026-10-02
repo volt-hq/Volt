@@ -1,0 +1,482 @@
+# Background daemon (voltd)
+
+`voltd` is a persistent background daemon that owns Volt's remote-access
+plane: the stable Iroh endpoint identity, phone pairing and revocation,
+workspace registration, push notification dispatch, headless conversation
+runtimes, and the conversation lease broker that lets a phone and a desktop
+TUI share one live conversation.
+
+It replaces the old foreground `volt remote host` process. Remote access no
+longer requires a dedicated terminal: the daemon keeps running when every TUI
+is closed, and paired phones stay paired across restarts because the Iroh
+secret key lives in the daemon's state file.
+
+## Quick start
+
+```bash
+volt daemon start          # start the daemon (no-op if already running)
+volt remote pair           # pair a phone (QR / ticket)
+volt daemon status         # inspect workspaces, clients, leases
+```
+
+Every supported interactive Volt process connects to a running daemon,
+resolves its working directory to a registered workspace, and acquires a
+conversation lease for the open session so a paired phone can co-attach to it
+live. Automatic attachment uses the nearest registered ancestor (or a managed
+worktree's parent workspace); it registers the directory only when neither
+matches. Set
+`remote.background: true` to additionally start the daemon on demand. A TUI
+that was already open while the daemon was stopped reconnects automatically
+when another process starts it.
+
+## CLI
+
+```
+volt daemon start                 Start the background daemon.
+volt daemon stop                  Graceful shutdown (state flushed, phones notified).
+volt daemon status [--json]       Status; exit 0 only when phone transport and relay access are ready.
+volt daemon restart               Stop then start; persistent state survives.
+volt daemon logs [-f] [-n N]      Tail the daemon log.
+volt daemon install-service       Register a login service (launchd/systemd).
+volt daemon uninstall-service     Remove the login service.
+volt daemon run --foreground      Run in this process (internal; used by start and the login service).
+
+volt remote pair [--workspace <name>]   Create a pairing ticket, wait for the phone.
+volt remote status [--json]             Same status view as volt daemon status.
+volt remote clients                     List paired clients.
+volt remote credential revoke           Reset this daemon's managed relay credentials.
+volt remote revoke <node-id>            Revoke a client and close its connections.
+volt remote approve-repair <node-id>    Allow a revoked node ID to re-pair.
+volt remote workspace add [path] [--name <name>]
+volt remote workspace remove <name>
+volt remote workspace list
+volt remote worktree add [--workspace <name>] [--name <id>] [--branch <ref>] [--base <ref>]
+volt remote worktree list [--workspace <name>] [--json]
+volt remote worktree remove <id> [--workspace <name>] [--force]
+volt remote worktree prune [--workspace <name>]
+volt remote worktree diff <id> [--workspace <name>]
+```
+
+`volt remote host` is gone; running it prints a pointer to `volt daemon
+start`. The daemon requires a Node.js npm install or source checkout with the
+exact required `@hansjm10/volt-iroh` wrapper and its optional selected native
+binding. Installs made with `--omit=optional` cannot provide phone transport,
+and Darwin x64 has no binding. Standalone Node SEA builds do not bundle Iroh and
+cannot host the daemon.
+
+`volt daemon install-service` writes a launchd LaunchAgent (macOS) or a
+systemd user unit (Linux) that starts the daemon at login. The service does
+not auto-restart after a graceful `volt daemon stop`; on Linux, run
+`loginctl enable-linger` if the daemon should also run without an active
+login session.
+
+The daemon keeps volt's native modules open, so `volt update` must stop it
+before replacing the installation. It asks first, and after the update it
+starts the daemon again from the updated installation. If the login service was
+running the daemon, `volt update` reinstalls the service from the updated
+installation and starts the daemon through it, so the daemon keeps the service
+environment. Without an interactive terminal, it does not update and prints the
+commands to run instead: `volt daemon stop`, `volt update --self`, then `volt
+daemon start`, or `volt daemon install-service` when the login service runs the
+daemon.
+
+The login service records the path of the installation it runs. When the
+service is installed but not running the daemon, `volt update` points it at
+the updated installation without starting the daemon, because an update can
+move that path (pnpm global installs, renamed packages). On macOS this also
+unloads the service until the next login; run `volt daemon install-service` to
+start it sooner. If the service cannot be updated, `volt update` says so and
+exits with an error; run `volt daemon install-service` to fix it.
+
+## Daemon environment
+
+Headless conversation runtimes run inside the daemon process, so their bash
+commands, language servers, MCP servers, tool installers, and Git all resolve
+through the daemon's environment. Whether the login service or a terminal
+started the daemon, it builds that environment the same way at startup:
+
+1. It takes the environment a new terminal session starts from, before any
+   shell profile runs:
+   - Started by the login service (`volt daemon install-service`): the
+     environment launchd or the systemd user manager gave the daemon. This
+     includes their `PATH`, values set with `launchctl setenv` or
+     `systemctl --user set-environment`, `environment.d` files, and variables
+     the desktop session imports, such as `DISPLAY` and `WAYLAND_DISPLAY`.
+   - Started from a terminal on Linux: the systemd user manager's environment
+     (what `systemctl --user show-environment` prints), read with `busctl`.
+   - Otherwise, for example started from a terminal on macOS or without a
+     systemd user session: the system default `PATH` plus `HOME`, `USER`,
+     `LOGNAME`, `SHELL`, `TMPDIR`, `LANG`, `LC_*`, `XDG_*`, `SSH_AUTH_SOCK`,
+     `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`, `WAYLAND_DISPLAY`, and
+     `XAUTHORITY` from the process that started it.
+2. It runs your login shell (from the user database, falling back to `SHELL`)
+   from that environment, as an interactive login shell (`-i -l -c`) without a
+   terminal.
+3. It adopts the environment the shell produces, so `PATH` and the variables
+   your shell profile exports match a new terminal. `VOLT_*` variables from
+   the process that started the daemon are kept.
+
+Supported login shells are bash, zsh, fish, sh, dash, and ksh. While
+resolving, the shell runs with `VOLT_RESOLVING_ENVIRONMENT=1`. If your profile
+starts interactive programs or prompts, for example auto-attaching tmux, skip
+that work when the variable is set:
+
+```sh
+if [ -z "$VOLT_RESOLVING_ENVIRONMENT" ]; then
+  # interactive-only setup
+fi
+```
+
+If the shell is unsupported, exits without printing an environment, or takes
+longer than 10 seconds, the daemon keeps the environment it was started with
+and logs a warning. Windows always keeps the inherited environment. To skip
+resolution, start the daemon with `VOLT_DAEMON_INHERIT_ENV=1`, for example
+`VOLT_DAEMON_INHERIT_ENV=1 volt daemon restart`.
+
+Consequences:
+
+- Variables exported only in the terminal that started the daemon, including
+  API keys, do not reach daemon-hosted sessions. Export them from your shell
+  profile (or on Linux, an `environment.d` file) instead.
+- The environment is resolved once per daemon start. After changing `PATH` or
+  your shell profile, run `volt daemon restart`.
+- `volt daemon restart` starts the daemon from your terminal, not through the
+  login service. On macOS, values set with `launchctl setenv` therefore reach
+  the daemon only when the login service starts it. To restart through the
+  service, run `volt daemon stop`, then
+  `launchctl kickstart -k gui/$(id -u)/com.github.hansjm10.voltd` on macOS or
+  `systemctl --user restart voltd.service` on Linux.
+- Per-directory environments are not applied: direnv, activated virtualenvs,
+  and hook-based version managers such as `mise activate`. Version managers
+  that work through shims on `PATH` (asdf, mise shims) still pick the version
+  for the session's working directory.
+
+`volt daemon status` shows the result, for example
+`environment: login shell /bin/zsh (service environment, 412ms)` or
+`environment: inherited (timed out after 10000ms)`. The parenthesized base is
+`service environment`, `systemd user environment`, or `minimal environment`,
+matching the three cases above. `volt daemon logs` records the resolved `PATH`
+and the names, not values, of variables the daemon started with that the
+resolved environment no longer has. On failure it records the shell's exit
+status and the end of its error output.
+
+## Manage remote access from the TUI
+
+Open `/remote` to inspect connections, pair a phone, and revoke device access.
+Opening or refreshing the control center does not register a workspace.
+
+Choose **Register current directory** to register the exact current directory,
+even when its parent is already registered. Repeating the action, including via
+a symlink to the same directory, reuses the existing registration. New names
+receive a numeric suffix when needed to avoid existing workspace names. A
+managed worktree or its subdirectory cannot be registered separately: use its
+parent workspace instead.
+
+Registration updates the workspace list but does not move the current
+conversation, change its lease, or modify the parent workspace. The current
+workspace/lease display continues to reflect the active conversation.
+
+For managed relays, **Relay access** reports enrollment, token expiry, inactive
+Volt Pro subscriptions, and pending credential resets separately from the
+local daemon endpoint. An endpoint marked ready does not mean relay access is
+active.
+
+Use **Pair a phone** for another phone using the same active subscription. If
+Volt Pro is inactive, renew the existing subscription; the daemon checks again
+automatically and reconnects existing phones without restarting or pairing again.
+Automatic checks run every 15 seconds for a computer that lost relay access less
+than a day ago, every 5 minutes for up to a week, then hourly. **Relay access**
+shows when the next check runs. After renewing, choose **Check relay access now**
+to check immediately. If the renewal is not recognized yet, Volt keeps checking;
+if Apple's renewal notification is missed, confirmation can take up to about an
+hour. **Refresh status** reloads the display, not the subscription itself.
+
+To enroll using a different subscribed phone, choose **Reset credentials and
+pair again…**. Review the confirmation (Cancel is selected by default). Reset
+revokes the computer's entire managed relay grant, including its phones' relay
+credentials, and cancels outstanding pairing codes. It preserves the computer
+identity, workspaces, worktrees, conversations, and existing device permissions.
+**It does not revoke direct device access**; revoke old phones separately under
+**Paired devices**.
+
+After reset, choose the new phone's access level and workspace, then scan the
+fresh pairing QR and verify its details. No daemon restart is needed. If the
+broker is unavailable, the reset remains pending: retry it when online before
+pairing. On the CLI, the equivalent is `volt remote credential revoke`, followed
+by `volt remote pair` after revocation succeeds; the CLI revoke command runs
+without an interactive confirmation.
+
+## File layout
+
+Everything lives under `~/.volt/agent/daemon/` (mode `0700`):
+
+| File | Purpose |
+|------|---------|
+| `voltd.sock` | Control socket (JSONL protocol; mode `0600`) |
+| `voltd.pid` | Advisory pidfile; liveness truth is always a socket probe |
+| `voltd.log` | Daemon log (`volt daemon logs`) |
+| `state.json` | Iroh secret key, paired clients, workspaces, settings (`0600`) |
+| `work-state.json` | Private, bounded session-to-change and pull-request associations (`0600`) |
+| `audit.jsonl` | Append-only audit log (pairing, leases, relays, lifecycle) |
+
+On first start the daemon migrates the legacy `remote/iroh-host.json` state
+file automatically and renames it to `.migrated`. A pre-grant file keeps the
+Iroh secret key (so the saved host identity does not rotate) plus validated
+workspace/worktree metadata, but intentionally drops active clients, revoked
+clients, and pending pairing tickets. The daemon logs and audits this expected
+migration as `legacy_remote_access_dropped`; it is not corruption. Every old
+client must pair again to receive an explicit current grant.
+
+## Session storage
+
+Conversation history uses the same authoritative SQLite storage as local Volt.
+Each registered workspace's session directory, or an explicitly configured
+session directory, contains `sessions.sqlite`; session lists and resumes use its
+indexes. The daemon addresses conversations by stable workspace/session IDs and
+never sends the database path, session directory, or host-side
+`SessionReference` over the remote wire.
+
+Daemon handoffs reopen stable session identities from SQLite; they do not
+transfer or reopen JSONL snapshot files.
+
+## Configured remote agents
+
+Hosts advertising `agent_options.v1` expose a read-only workspace-discovery
+stream with purpose `agent_options`. `get_agent_options` requires
+`model.select.v1`, is bound to the stream-authorized workspace, and returns the
+current authenticated model catalog plus a complete default model, thinking,
+Fast, and Build/Plan configuration. Discovery creates no session or runtime,
+changes no selection, provisions no worktree, and does not mutate host
+defaults.
+
+Clients own configured-agent setup. They keep one caller-generated session ID
+for the retry intent, optionally provision a deterministic worktree through
+`create_worktree`, then open a normal conversation with `target:"new"`, that
+session ID, and the chosen placement. The first attach creates the exact
+session identity; identical retries resume it, including after daemon restart,
+and concurrent attempts wait for the same runtime publication. Reusing the ID
+with a different workspace, worktree, or working directory fails closed.
+
+After attach, clients apply model, thinking level, Fast mode, and Build/Plan
+mode as session-only commands, in that order, before sending the initial prompt.
+A configuration failure leaves one empty resumable session and sends no prompt.
+A successfully provisioned worktree is intentionally retained if a later step
+fails; the client offers retry or explicit removal instead of expecting the
+daemon to roll unrelated resources back. Prompt retries use the normal stable
+command-ID receipt path, so neither configured attach nor prompt delivery needs
+a launch receipt or transaction store.
+
+## App-started pull-request reviews
+
+Select the repository and PR before creating a review conversation. The app
+resolves the PR without starting an agent, then asks the daemon to prepare its
+exact reviewed commit. This requires `conversation.observe.v1` for discovery
+and both `conversation.control.v1` and `worktrees.manage.v1` for preparation;
+ordinary coding/review/chat presets do not grant worktree management.
+
+The daemon reuses only a clean, idle, registered worktree with the correct
+repository, PR branch and commit (or matching host-owned PR metadata).
+Otherwise it creates a dedicated worktree and local branch at the verified PR
+head, including fork PRs. It never switches, resets or stashes the parent
+checkout, installs dependencies, or runs checkout hooks or filters.
+
+The app keeps one session ID for each launch intent. Preparation durably binds
+that ID to its checkout; identical retries retain the placement across daemon
+restarts. Only after preparation succeeds does the app attach and configure
+that session, then start the review. Changed identities or moved heads fail
+explicitly: select and prepare a new review instead of retargeting an existing
+one. Successful checkouts remain after cancellation or later configuration
+failure, available for retry or explicit worktree removal.
+
+General, findings handoffs and finding discussions inherit the same checkout.
+Ordinary discussion/fix prompts may edit it; resume never undoes those edits.
+Starting another bound PR review requires a clean checkout at the original PR
+head. The original repository selection remains authoritative even though the
+new local branch has a generated name. Local/unprepared and non-PR reviews
+retain their existing behavior. See the [wire contract](iroh-remote-protocol.md#prepared-pull-request-reviews).
+
+## Conversation leases
+
+Exactly one process owns the live runtime for each `(workspace, session)`
+conversation at a time:
+
+- **daemon-active / daemon-detached** — the daemon runs a headless runtime for
+  phones. When the last phone disconnects, the runtime is retained for
+  `remote.detachedRuntimeTtlMs` (default 30 minutes) so a reattach is warm.
+- **tui-owned** — a desktop TUI owns the runtime. The daemon still terminates
+  the phone's Iroh connection, then relays the raw stream bytes to the TUI,
+  which serves it from its in-process session. Prompts from either side appear
+  on both; the TUI footer shows `📱 n` while phones are attached.
+- **daemon-draining** — a TUI asked to take over while a remote turn is
+  streaming. The TUI shows a read-only "Attaching — finishing remote turn…"
+  viewer, phones get transient `lease_draining` errors on new prompts, and
+  ownership transfers at the turn boundary.
+
+Handoffs are invisible on the phone: when a TUI takes over or quits, the
+daemon closes phone streams with reason `lease_transferred` and the app
+reconnects immediately to the new owner. Abort is non-destructive everywhere:
+stopping a turn never closes streams or disposes runtimes.
+
+When the TUI owns the lease, phone prompts run with the TUI session's full
+local tool set. `remote.allowTools` applies only to daemon-owned headless
+runtimes — see [Security](security.md).
+
+## Work and pull-request association
+
+The daemon observes fresh path-free Git branch state from whichever process
+owns a conversation lease. Daemon runtimes publish directly; a TUI may publish
+only over the exact local control connection holding that `(workspace,
+session)` lease. Phone input and `list_sessions` requests cannot choose an
+association or start provider discovery.
+
+For trusted workspaces, the daemon uses configured Git remotes plus the local
+authenticated `gh` CLI to match the exact head repository, branch, and object
+ID. Provider failure remains distinct from “no pull request,” ambiguous matches
+are not guessed, and configured/default base branches such as `main` are not
+grouped across sessions. A positive PR match is sticky: later checkouts,
+refresh failures, branch reuse, or a newer PR do not silently move the session
+to another change. Set `remote.pullRequestDiscovery: false` to disable provider
+calls.
+
+Once a PR is linked, the daemon keeps its status current in the background,
+whether or not the session is still on the PR branch or has a running runtime,
+and across daemon restarts. It refreshes every linked open or draft PR with one
+batched `gh api graphql` query per GitHub host: about every minute while any
+client stream is open or was open in the last few minutes, and about every 15
+minutes otherwise. It also refreshes right away on daemon start, when a session
+leaves a PR branch, and when a session's runtime ends. A PR stops being
+refreshed once it is merged or closed. A closed PR that is later reopened is
+picked up again only when a session returns to its branch. Reads never wait on
+GitHub; they return the stored status.
+
+Associations are stored separately in private `work-state.json`. The file uses
+opaque local IDs and a salted hash of the common Git directory, and stores each
+linked PR's repository host, owner, and name so its status can be refreshed
+after the branch is gone. Checkout paths, repository identities, credentials,
+raw provider output, and provider diagnostics are not projected to phones. `list_sessions.workContext` contains only the opaque change ID,
+repository display name, effective branch, resolution state, and bounded PR
+summary described in [Iroh Remote Protocol](iroh-remote-protocol.md#remote-rpc-command-allowlist).
+
+## Git worktrees
+
+Concurrent sessions in one workspace share one checkout by default — two
+agents will step on each other's files and branches. The daemon can instead
+run a session inside a **daemon-managed git worktree**: an isolated checkout
+on its own branch under `~/.volt/agent/worktrees/` (0700). Create worktrees
+with `volt remote worktree add`, from the TUI's `/worktree` command, or from a
+paired phone (`manage_worktrees` stream, gated on the `worktrees.v1` feature);
+then open a conversation with `target:"new"`, a caller-generated `sessionId`,
+and a `worktreeId`.
+
+Key behaviors:
+
+- **Sessions stay with the parent workspace.** Worktree sessions use the
+  parent workspace's SQLite store and remain listed there; leases, push
+  notifications, and `list_sessions` are unchanged. The daemon persists a
+  session→worktree binding so resumes (phone reattach, daemon restart, TUI
+  takeover) land back in the worktree checkout.
+- **Policy inheritance.** A worktree runtime uses exactly the parent
+  workspace's trust decision and tool allowlist — never wider. Trust is never
+  prompted for or persisted on worktree paths.
+- **Branch layout.** Each worktree gets its own branch (default
+  `volt/<id>`) off the recorded base ref (default: the checkout's current
+  branch). `volt remote worktree list` shows dirtiness and ahead/behind counts
+  against the base; `volt remote worktree diff <id>` shows the branch diff.
+  Merging back is always a user action — the daemon never mutates the main
+  checkout.
+- **Removal safety.** `worktree remove` refuses dirty or in-use worktrees
+  without `--force`; force stops bound runtimes first. `worktree prune`
+  reconciles records against the filesystem and quarantines unrecognized
+  directories by renaming (never deleting) them.
+- **Fresh checkouts are fresh.** Worktrees share git objects but not
+  untracked files: `node_modules`, virtualenvs, and build caches must be
+  reinstalled per worktree.
+
+Cleanup policies live in `state.json` under `settings.worktreeCleanup`:
+
+```json
+{ "worktreeCleanup": { "retention": { "enabled": true, "ttlMs": 3600000 }, "pruneOnStart": true } }
+```
+
+- `retention` (on by default, one hour): reclaim inactive, disposable checkouts
+  after their runtime is disposed. Deadlines survive daemon restarts, and skipped
+  checkouts are retried. Clean review snapshots at their recorded PR head and
+  clean agent branches fully merged into their recorded base are eligible.
+  Before refusing a new checkout at the 16-checkout limit, Volt also attempts
+  reclamation regardless of the retention timer setting.
+- Automatic reclamation preserves branches, exact commits, session bindings,
+  transcripts, and review receipts. Resume recreates the same checkout at the
+  recorded commit; a moved branch or changed repository fails explicitly rather
+  than redirecting the session or resetting user work. Archived records remain
+  listed with `available:false` until restored and do not consume checkout capacity.
+- Local resume checks archive recovery state even when the checkout directory
+  already exists. Interactive, print, and JSON runtimes retain a local control
+  connection that pins the checkout until session teardown; startup failures
+  release that protection. The local `worktree_restore` request restores and
+  acquires this connection-owned protection before reporting success. Closing
+  the connection releases it, including when restoration finishes after disconnect.
+- Active runtimes/leases, pending review launches, runtime preparations, locked
+  checkouts, dirty/untracked/ignored files, submodules, and ambiguous ownership
+  block reclamation. Adopted checkouts and older agent records without disposable
+  provenance are retained. Automatic cleanup never forces deletion or deletes
+  branches. Reclamation and skip reasons appear in the audit log.
+- `pruneOnStart` (default `true`): reconcile worktree records and checkouts
+  during daemon startup, retaining archived records and their session bindings.
+
+If every checkout is protected, `worktree_limit_reached` means checkout capacity,
+not a GitHub-access problem. Finish active sessions, inspect
+`volt remote worktree list --workspace <name>`, preserve or merge outstanding work,
+and explicitly remove only checkouts you no longer need before retrying. Do not
+use `--force` as routine capacity recovery.
+
+Downgrade caveat: older daemons drop the `worktrees` state collection on
+their next write. Checkouts survive on disk as orphans; re-upgrading and
+running `volt remote worktree prune` quarantines them.
+
+## Optional: theme token push (experimental)
+
+With `VOLT_HOST_THEME_TOKENS=1` in the daemon's environment (or
+`settings.themeTokenPush` in `state.json`), the daemon pushes its resolved
+theme colors to phones that advertise the `host_theme_tokens.v1` capability as
+`host_theme_tokens` frames (hex color values only — nothing path-like ever
+crosses the wire). Off by default; clients that ignore the frame are fully
+supported.
+
+## Troubleshooting
+
+- `volt daemon start` and `restart` wait up to 60 seconds after spawning for
+  local control readiness, returning sooner when ready or when the child exits.
+  This is separate from phone transport readiness. If the wait expires with the
+  child still alive, the command exits nonzero but leaves it running and reports
+  its PID with “readiness unconfirmed.” Check `volt daemon status` and the reported
+  log before retrying; slow source loading can delay the control endpoint.
+- `volt daemon status --json` reports `remoteTransport.state` as `starting`,
+  `ready`, `degraded`, or `unavailable`, plus a safe reason code/message and the
+  wrapper version when discoverable. For managed relays, `relayCredential.state`
+  reports relay access and `relayCredential.nextRefreshAt` the next automatic
+  check. Both daemon and remote status exit nonzero unless phone transport is
+  `ready` and managed relay access is not `expired`, `subscription_inactive`, or
+  `revocation_pending`; local daemon workspace/client maintenance remains
+  available while it is not ready.
+- `native_binding_missing` → reinstall without `--omit=optional` on a supported
+  platform. Darwin x64 is intentionally local CLI/TUI only.
+- `endpoint_start_failed` → inspect `volt daemon logs`, fix the reported host
+  issue, then restart the daemon.
+- `host_storage_full` → free computer disk/quota capacity, then retry. Rejected
+  handshakes do not create an in-memory authorization, and the phone keeps its
+  saved pairing, selected agent, and transcript.
+- `volt daemon status` reports that the daemon is not running → run `volt daemon
+  start` and check `volt daemon logs`.
+- Stale socket after a crash: `volt daemon start` probes the socket, unlinks
+  it when dead, and rebinds.
+- A second daemon on the same agent dir exits immediately (single-instance is
+  guaranteed by the socket bind).
+- Phone shows an "in use" error: the existing daemon-owned runtime permits tools outside this phone's persisted grant, so it cannot safely co-attach. Re-pair with a compatible grant or close the broader runtime. A `duplicate_conversation_connection` error instead means the same phone raced two connections and retries on its own.
+- Full audit trail: `~/.volt/agent/daemon/audit.jsonl` records pairing,
+  revocation, lease transitions, and daemon lifecycle for post-hoc review.
+
+## Manual walk-away checklist
+
+See [scripts/manual-walkaway.md](../scripts/manual-walkaway.md) for the full
+end-to-end verification script (TUI ↔ phone handoff in both directions,
+mid-turn attach, abort semantics, and daemon restart behavior).

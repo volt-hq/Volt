@@ -1,0 +1,8 @@
+# TLC tooling + run artifacts (not source)
+tla2tools.jar
+states/
+*.old
+*.dot
+*_TTrace_*.tla
+*_TTrace_*.bin
+MC.out

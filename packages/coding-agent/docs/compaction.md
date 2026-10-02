@@ -1,0 +1,462 @@
+# Compaction & Branch Summarization
+
+LLMs have limited context windows. When conversations grow too long, volt uses compaction to summarize older content while preserving recent work. This page covers both auto-compaction and branch summarization.
+
+**Source files**:
+- [`packages/coding-agent/src/core/compaction/context-compaction.ts`](../src/core/compaction/context-compaction.ts) - Cache-preserving session compaction
+- [`packages/coding-agent/src/core/compaction/compaction.ts`](../src/core/compaction/compaction.ts) - Cut-point preparation and chunked fallback
+- [`packages/coding-agent/src/core/compaction/branch-summarization.ts`](../src/core/compaction/branch-summarization.ts) - Branch summarization
+- [`packages/coding-agent/src/core/compaction/utils.ts`](../src/core/compaction/utils.ts) - Shared utilities (file tracking, serialization)
+- [`packages/coding-agent/src/core/session-manager.ts`](../src/core/session-manager.ts) - Entry types (`CompactionEntry`, `BranchSummaryEntry`)
+- [`packages/coding-agent/src/core/extensions/types.ts`](../src/core/extensions/types.ts) - Extension event types
+
+For TypeScript definitions in your project, inspect `node_modules/@hansjm10/volt-coding-agent/dist/`.
+
+## Overview
+
+Volt has two summarization mechanisms:
+
+| Mechanism | Trigger | Purpose |
+|-----------|---------|---------|
+| Compaction | Context exceeds threshold, or `/compact` | Summarize old messages to free up context |
+| Branch summarization | `/tree` navigation | Preserve context when switching branches |
+
+Both use the same structured summary format and track file operations cumulatively.
+
+## Compaction
+
+### When It Triggers
+
+By default, auto-compaction triggers when:
+
+```
+contextTokens > contextWindow - reserveTokens
+```
+
+By default, `reserveTokens` is 16384 tokens (configurable in `~/.volt/agent/settings.json` or `<project-dir>/.volt/settings.json`). This leaves room for the LLM's response.
+
+Set `compaction.modelThresholds["provider/model-id"]` to add an earlier absolute trigger for a specific model. For example, `"openai/gpt-6-astra": 350000` triggers when context usage reaches 350,000 tokens, without changing the model's context window. Configure the current model under **Compact at** in `/settings`, or use JSON for arbitrary counts. Omitted entries and `0` retain the default; invalid counts are ignored. Auto-compaction must be enabled, and the normal context-limit and overflow recovery triggers still apply.
+
+Checks run at safe boundaries after responses and tool batches, and before the next prompt when prior assistant usage is available. Usage includes estimates for trailing tool results, so a single batch can overshoot the configured count. Warning thresholds remain independent. Earlier compaction reduces ongoing context size but adds summarization requests and can lose detail; keep the threshold comfortably above the retained context size. See [Settings](settings.md#compaction) for configuration and scope.
+
+You can also trigger manually with `/compact [instructions]`, where optional instructions focus the summary.
+
+### How It Works
+
+1. **Find cut point**: Walk backwards from the newest message, accumulating token estimates up to `keepRecentTokens` (default 20k). When active tool definitions would consume too much of the selected model's context, Volt lowers this message budget to leave the configured reserve and tool definitions room.
+2. **Identify summary scope**: Collect the older messages from the previous kept boundary (or session start) up to the cut point, and identify the recent suffix that will remain verbatim.
+3. **Generate summary**: Make one request with the current system prompt, tool definitions, reasoning setting, and full native conversation, including the previous checkpoint and recent suffix. Append a checkpoint instruction defining the older summary scope using the saved suffix's message count and, when the context pipeline preserves message counts, a bounded, quoted excerpt of its transformed beginning. Do not insert boundary markers into, shorten, or rewrite the existing conversation. The recent suffix is available for corrections and continuity, not to duplicate its narrative in the summary.
+4. **Append entry**: Save `CompactionEntry` with summary and `firstKeptEntryId`
+5. **Reload**: Session reloads, using summary + messages from `firstKeptEntryId` onwards; the completion result reports a fresh token estimate for the rebuilt messages and active tool definitions
+
+```
+Before compaction:
+
+  entry:  0     1     2     3      4     5     6      7      8     9
+        ┌─────┬─────┬─────┬─────┬──────┬─────┬─────┬──────┬──────┬─────┐
+        │ hdr │ usr │ ass │ tool │ usr │ ass │ tool │ tool │ ass │ tool│
+        └─────┴─────┴─────┴──────┴─────┴─────┴──────┴──────┴─────┴─────┘
+                └────────┬───────┘ └──────────────┬──────────────┘
+               messagesToSummarize            kept messages
+                                   ↑
+                          firstKeptEntryId (entry 4)
+
+After compaction (new entry appended):
+
+  entry:  0     1     2     3      4     5     6      7      8     9     10
+        ┌─────┬─────┬─────┬─────┬──────┬─────┬─────┬──────┬──────┬─────┬─────┐
+        │ hdr │ usr │ ass │ tool │ usr │ ass │ tool │ tool │ ass │ tool│ cmp │
+        └─────┴─────┴─────┴──────┴─────┴─────┴──────┴──────┴─────┴─────┴─────┘
+               └──────────┬──────┘ └──────────────────────┬───────────────────┘
+                 not sent to LLM                    sent to LLM
+                                                         ↑
+                                              starts from firstKeptEntryId
+
+What the LLM sees:
+
+  ┌────────┬─────────┬─────┬─────┬──────┬──────┬─────┬──────┐
+  │ system │ summary │ usr │ ass │ tool │ tool │ ass │ tool │
+  └────────┴─────────┴─────┴─────┴──────┴──────┴─────┴──────┘
+       ↑         ↑      └─────────────────┬────────────────┘
+    prompt   from cmp          messages from firstKeptEntryId
+```
+
+On repeated compactions, the summarized span starts at the previous compaction's kept boundary (`firstKeptEntryId`), not at the compaction entry itself, falling back to the entry after the previous compaction if that kept entry cannot be found in the path. This preserves messages that survived the earlier compaction by including them in the next summarization pass as well. Volt also recalculates `tokensBefore` from the rebuilt session context and active tool definitions before writing the new `CompactionEntry`, so the token count reflects the actual pre-compaction context being replaced.
+
+### Summary Budget and Failure Handling
+
+Built-in compaction requests at most 4096 summary tokens per request, independently of `reserveTokens`. It also stops and rejects generated text above 16,384 characters per response, including on providers that do not enforce the requested token limit. File-operation metadata is appended separately.
+
+The normal single-pass request preserves the session's reasoning level, Fast mode, transport, routing identity and cache policy. Keeping the full conversation avoids relying on a shorter intermediate prefix having been cached, and can preserve append-only WebSocket continuation. Cache hits are not guaranteed, particularly after provider/extension transformations or cache expiry. Context hooks receive the full history once. Boundary excerpts use only content already present after context hooks and conversion, never saved raw content that they may have removed or redacted. If message counts change, the excerpt is omitted rather than guessed. Arbitrary reordering can still make the boundary reference less precise. Compaction never executes returned tool calls.
+
+If the full native request (including the recent suffix, checkpoint instruction, and output/thinking allowance) is estimated not to fit, or the provider reports a context overflow, Volt uses the existing chronological chunked summarizer with a small fixed output allowance and minimal supported reasoning. This fallback still summarizes only the older source; it does not add the retained suffix to its chunks. It sends one request at a time, so it also works with providers that permit only one active request. Other errors do not select the fallback. Each summarization request, including each retry and each fallback chunk, has a 10-minute deadline, so slow high-reasoning responses are not cut short by earlier attempts. A request that reaches its deadline ends the compaction instead of retrying. Built-in summary generation also has a 30-minute overall deadline covering context conversion, all requests, retry delays and any fallback. Stalled connections are still detected separately by the HTTP idle timeout (`httpIdleTimeoutMs`). Transient failures have at most two compaction-level retries per request; provider-level retries are disabled for session compaction.
+
+Cancellation, timeout, empty responses, truncated output and tool-calling responses do not install a checkpoint. The original conversation remains intact. Timeout errors name the step that was running, such as `native request 2 in progress`. Custom extension-provided summaries retain their extension hook behavior.
+
+When built-in compaction fails or is cancelled, Volt writes a failure record to `~/.volt/agent/debug/compaction-latest.json` (or the configured agent directory), replacing the previous record. It contains the session ID, error, active step, elapsed time, deadlines, thinking level and every dispatched request's record as described below, including Codex request diagnostics when enabled. It contains no prompts or summary text. Writing it never changes the compaction outcome.
+
+### Compaction Cache Usage
+
+After a successful manual or automatic compaction, interactive mode shows a separate line for each summarization request, for example:
+
+```text
+Native compaction request 1 (stop): 68,000 cached / 70,000 prompt tokens — 97.1% hit
+```
+
+These are the compaction requests themselves, not the first conversation request after compaction or the footer's latest cache-hit rate. The percentage is `cacheRead / (input + cacheRead + cacheWrite) * 100`; output tokens are excluded. Missing, invalid, or zero-prompt usage is shown as unavailable, not as a cache miss.
+
+Built-in session compaction saves these records in `CompactionEntry.details.requests` and returns them in the completion result. Each record contains the strategy (`native` or `chunked`), a one-based `attempt` in dispatch order across all chunks and retries, the requested provider/model, timing (`startedAt` epoch milliseconds, then `timeToFirstEventMs`, `timeToFirstTextMs` and `durationMs` from dispatch; reasoning usually occurs between the first event and the first text), the terminal `stopReason`, and the provider-reported `input`, `output`, `cacheRead`, `cacheWrite`, and `totalTokens` under `usage`. A request that fails before a terminal response has neither `stopReason` nor `usage`; invalid token counts are omitted. Retries and fallback requests remain separate even when they finish out of order. See [session storage](session-format.md) for inspecting entries through `SessionManager` or a JSONL snapshot.
+
+Records cover only that compaction, including earlier failed attempts if it eventually succeeds. A failed or cancelled compaction still installs no entry. Custom extension summaries and the standalone chunked helper do not automatically collect these records. The metadata is not inserted into the summary or provider context, and does not change provider requests or footer totals.
+
+To check prefix-cache reuse, run `/compact` shortly after a normal reply without changing the model, reasoning, system prompt, or tools, then inspect the **native** request's line. Cache expiry and provider routing can still affect the result. The first conversation request after compaction uses a new summary prefix, so its cache-hit rate measures something different.
+
+#### Codex Request Diagnostics
+
+For an OpenAI Codex cache investigation, enable redacted request diagnostics **before starting Volt**:
+
+```bash
+VOLT_CODEX_REQUEST_DIAGNOSTICS=1 volt --session <session-id>
+```
+
+PowerShell:
+
+```powershell
+$env:VOLT_CODEX_REQUEST_DIAGNOSTICS = "1"
+volt --session <session-id>
+```
+
+Use the updated runtime, including the daemon if it owns the session. Setting the variable in a bash tool invocation does not enable it in the already-running parent process. Only the exact value `1` enables capture; a provider-scoped environment override takes precedence. Unset it or set it to `0` when finished.
+
+Normal responses save `codex_request` records in `message.diagnostics`. Successful built-in compactions copy them into `details.requests[].diagnostics`, alongside each summarization request's usage. Records contain:
+
+- Actual `transport` (`websocket` or `sse`), configured transport, and `requestMode` (`full` or `delta`).
+- `continuationReason`: `eligible`, `no_previous_response`, `non_input_changed`, `input_shorter`, `input_prefix_changed`, or `missing_response_id`; disabled/unavailable continuation reports `cache_disabled`, `transport_not_cached`, or `connection_not_cached`. SSE reports `sse_requested` or `websocket_fallback`.
+- `connectionReused` for WebSocket dispatches only. This does not assert a provider cache hit.
+- A one-based dispatch `attempt` within that provider invocation. WebSocket send failures, subsequent SSE fallback, and SSE retries retain separate records; this counter is independent of the outer compaction request's `attempt`. Connection failures before a send do not create a request record.
+- Full and wire input-item counts, plus SHA-256 `hashes` for the cache key, instructions, tools, non-input `configuration`, ordered full-context `inputItems`, actual `wireInput`, and `previousResponseId`. Missing scalar fields hash JSON `null`. The configuration fingerprint excludes the WebSocket envelope's `type`, `input`, and `previous_response_id`.
+
+Fingerprints use serialized post-hook payload snapshots, preserving property order without re-evaluating hook-owned getters or `toJSON`. Full requests use the actual wire snapshot. For delta requests, `inputItems` describes the already-serialized full context before transport selection, while `wireInput` describes the actual transmitted suffix. WebSocket dispatch decisions are captured after full/delta selection, unlike `onPayload`, which sees the full request before that selection. Per-item hashes cover the first 2,048 items, with `inputItemsTruncated` indicating a longer input; the full wire-input hash is not truncated. If hashing fails or does not finish within 250 ms, `hashesAvailable` is false and the request continues with transport metadata only. Hashing is not awaited before request dispatch; terminal diagnostics may wait for that bounded hashing interval.
+
+Capture a normal reply and promptly run `/compact` without changing settings. Compare the records' configuration fingerprints and ordered input hashes, then their full/delta decisions and cache-hit usage. The native request keeps the full conversation and appends a checkpoint instruction, so an eligible cached WebSocket can send just that appended instruction. If continuation is unavailable, a full replay may still hit the provider's prompt cache; these records do not identify server-side routing, eviction, or cache-breakpoint decisions.
+
+These diagnostics are off by default and contain no raw prompts, tool definitions, credentials, cache keys, or response IDs. Hashes are comparison fingerprints, not anonymization. Enabled records are session metadata and travel with session snapshots and metadata-bearing events/results; review them before sharing. Built-in provider conversion does not send them to the model, and they do not enter compaction summaries, footer totals, or request payloads. No extra diagnostic transcript lines are displayed. Failed overall compactions still install no entry.
+
+### Split Turns
+
+A "turn" starts with a user message and includes all assistant responses and tool calls until the next user message. Normally, compaction cuts at turn boundaries.
+
+When a single turn exceeds `keepRecentTokens`, the cut point lands mid-turn at an assistant message. This is a "split turn":
+
+```
+Split turn (one huge turn exceeds budget):
+
+  entry:  0     1     2      3     4      5      6     7      8
+        ┌─────┬─────┬─────┬──────┬─────┬──────┬──────┬─────┬──────┐
+        │ hdr │ usr │ ass │ tool │ ass │ tool │ tool │ ass │ tool │
+        └─────┴─────┴─────┴──────┴─────┴──────┴──────┴─────┴──────┘
+                ↑                                     ↑
+         turnStartIndex = 1                  firstKeptEntryId = 7
+                │                                     │
+                └──── turnPrefixMessages (1-6) ───────┘
+                                                      └── kept (7-8)
+
+  isSplitTurn = true
+  messagesToSummarize = []  (no complete turns before)
+  turnPrefixMessages = [usr, ass, tool, ass, tool, tool]
+```
+
+The normal single-pass request summarizes older history and the turn prefix together, with the retained suffix visible for continuity and newer corrections. The cut point and verbatim retained messages are unchanged. The oversized-input fallback generates the history summary first and then the turn-prefix summary, and merges them; each processes its chunks chronologically. If the history summary fails or is cancelled, the turn-prefix request is never sent.
+
+### Cut Point Rules
+
+Valid cut points are:
+- User messages
+- Assistant messages
+- BashExecution messages
+- Custom messages (custom_message, branch_summary)
+
+Volt excludes a candidate context entry when retaining it would exceed the effective message allowance. It always retains the newest indivisible context suffix when no later retained anchor exists, even if that suffix alone exceeds the allowance. In particular, Volt never cuts at tool results: an assistant tool call and its trailing results stay together so compaction advances with a valid continuation.
+
+### CompactionEntry Structure
+
+Defined in [`session-manager.ts`](../src/core/session-manager.ts):
+
+```typescript
+interface CompactionEntry {
+  type: "compaction";
+  id: string;
+  parentId: string;
+  timestamp: number;
+  summary: string;
+  firstKeptEntryId: string;
+  tokensBefore: number;
+  fromHook?: boolean;  // true if provided by extension (legacy field name)
+  details?: JsonValue; // implementation-specific JSON data
+}
+
+// Default compaction uses this for details (from compaction.ts):
+interface CompactionDetails {
+  readFiles: string[];
+  modifiedFiles: string[];
+  requests?: CompactionRequestUsage[]; // Per-request usage from built-in session compaction
+}
+```
+
+Extensions can store data from Volt's lossless JSON grammar in `details`. Optional fields must be omitted rather than set to `undefined`; cycles, non-finite numbers, rich objects such as `Map`/`Date`/typed arrays, and shared memory are rejected. The default compaction tracks file operations, but custom extension implementations can use their own plain JSON structure.
+
+See [`prepareCompaction()`](../src/core/compaction/compaction.ts) and [`compact()`](../src/core/compaction/compaction.ts) for the implementation.
+
+## Branch Summarization
+
+### When It Triggers
+
+When you use `/tree` to navigate to a different branch, volt offers to summarize the work you're leaving. This injects context from the left branch into the new branch.
+
+### How It Works
+
+1. **Find common ancestor**: Deepest node shared by old and new positions
+2. **Collect entries**: Walk from old leaf back to common ancestor
+3. **Prepare with budget**: Include messages up to token budget (newest first)
+4. **Generate summary**: Call LLM with structured format
+5. **Append entry**: Save `BranchSummaryEntry` at navigation point
+
+```
+Tree before navigation:
+
+         ┌─ B ─ C ─ D (old leaf, being abandoned)
+    A ───┤
+         └─ E ─ F (target)
+
+Common ancestor: A
+Entries to summarize: B, C, D
+
+After navigation with summary:
+
+         ┌─ B ─ C ─ D ─ [summary of B,C,D]
+    A ───┤
+         └─ E ─ F (new leaf)
+```
+
+### Cumulative File Tracking
+
+Both compaction and branch summarization track files cumulatively. When generating a summary, volt extracts file operations from:
+- Tool calls in the messages being summarized
+- Previous compaction or branch summary `details` (if any)
+
+This means file tracking accumulates across multiple compactions or nested branch summaries, preserving the full history of read and modified files.
+
+### BranchSummaryEntry Structure
+
+Defined in [`session-manager.ts`](../src/core/session-manager.ts):
+
+```typescript
+interface BranchSummaryEntry {
+  type: "branch_summary";
+  id: string;
+  parentId: string;
+  timestamp: number;
+  summary: string;
+  fromId: string;      // Entry we navigated from
+  fromHook?: boolean;  // true if provided by extension (legacy field name)
+  details?: JsonValue; // implementation-specific JSON data
+}
+
+// Default branch summarization uses this for details (from branch-summarization.ts):
+interface BranchSummaryDetails {
+  readFiles: string[];
+  modifiedFiles: string[];
+}
+```
+
+As with compaction, extensions can store custom lossless JSON data in `details`.
+
+See [`collectEntriesForBranchSummary()`](../src/core/compaction/branch-summarization.ts), [`prepareBranchEntries()`](../src/core/compaction/branch-summarization.ts), and [`generateBranchSummary()`](../src/core/compaction/branch-summarization.ts) for the implementation.
+
+## Summary Format
+
+Both compaction and branch summarization use the same structured format:
+
+```markdown
+## Goal
+[What the user is trying to accomplish]
+
+## Constraints & Preferences
+- [Requirements mentioned by user]
+
+## Progress
+### Done
+- [x] [Completed tasks]
+
+### In Progress
+- [ ] [Current work]
+
+### Blocked
+- [Issues, if any]
+
+## Key Decisions
+- **[Decision]**: [Rationale]
+
+## Next Steps
+1. [What should happen next]
+
+## Critical Context
+- [Data needed to continue]
+
+<read-files>
+path/to/file1.ts
+path/to/file2.ts
+</read-files>
+
+<modified-files>
+path/to/changed.ts
+</modified-files>
+```
+
+### Message Serialization
+
+The normal compaction path keeps the full native message history and signatures unchanged through the configured context/conversion pipeline. Its appended scope instruction includes only a bounded text reference to the start of the retained suffix, not a serialized replacement for the history. The chunked fallback and branch summarization serialize their source messages to text via [`serializeConversation()`](../src/core/compaction/utils.ts):
+
+```
+[User]: What they said
+[Assistant thinking]: Internal reasoning
+[Assistant]: Response text
+[Assistant tool calls]: read(path="foo.ts"); edit(path="bar.ts", ...)
+[Tool result]: Output from tool
+```
+
+This prevents the model from treating it as a conversation to continue.
+
+Tool results are truncated to 2000 characters during serialization. Content beyond that limit is replaced with a marker indicating how many characters were truncated. This keeps summarization requests within reasonable token budgets, since tool results (especially from `read` and `bash`) are typically the largest contributors to context size.
+
+## Custom Summarization via Extensions
+
+Extensions can intercept and customize both compaction and branch summarization. See [`extensions/types.ts`](../src/core/extensions/types.ts) for event type definitions. Volt validates and owns custom summaries before appending an entry or moving the branch leaf. Invalid details fail the operation without committing a compaction or tree-navigation mutation.
+
+### session_before_compact
+
+Fired before auto-compaction or `/compact`. Can cancel or provide custom summary. See `SessionBeforeCompactEvent` and `CompactionPreparation` in the types file.
+
+```typescript
+volt.on("session_before_compact", async (event, ctx) => {
+  const { preparation, branchEntries, customInstructions, reason, willRetry, signal } = event;
+
+  // preparation.messagesToSummarize - messages to summarize
+  // preparation.turnPrefixMessages - split turn prefix (if isSplitTurn)
+  // preparation.previousSummary - previous compaction summary
+  // preparation.fileOps - extracted file operations
+  // preparation.tokensBefore - context tokens before compaction
+  // preparation.firstKeptEntryId - where kept messages start
+  // preparation.settings - compaction settings
+
+  // branchEntries - all entries on current branch (for custom state)
+  // reason - "manual" (/compact), "threshold", or "overflow"
+  // willRetry - whether the interrupted turn resumes after compaction
+  // signal - AbortSignal (pass to LLM calls)
+
+  // Cancel:
+  return { cancel: true };
+
+  // Custom summary:
+  return {
+    compaction: {
+      summary: "Your summary...",
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+      details: { /* custom data */ },
+    }
+  };
+});
+```
+
+Both `session_before_compact` and `session_compact` carry `reason` and `willRetry`, so extensions can distinguish manual compaction, proactive threshold compaction, and overflow recovery. `willRetry` is true when the interrupted turn resumes after compaction: overflow recovery retries it, and threshold compaction continues a turn that was stopped mid-run or produced an empty length-limited response.
+
+#### Converting Messages to Text
+
+To generate a summary with your own model, convert messages to text using `serializeConversation`:
+
+```typescript
+import { convertToLlm, serializeConversation } from "@hansjm10/volt-coding-agent";
+
+volt.on("session_before_compact", async (event, ctx) => {
+  const { preparation } = event;
+  
+  // Convert AgentMessage[] to Message[], then serialize to text
+  const conversationText = serializeConversation(
+    convertToLlm(preparation.messagesToSummarize)
+  );
+  // Returns:
+  // [User]: message text
+  // [Assistant thinking]: thinking content
+  // [Assistant]: response text
+  // [Assistant tool calls]: read(path="..."); bash(command="...")
+  // [Tool result]: output text
+
+  // Now send to your model for summarization
+  const summary = await myModel.summarize(conversationText);
+  
+  return {
+    compaction: {
+      summary,
+      firstKeptEntryId: preparation.firstKeptEntryId,
+      tokensBefore: preparation.tokensBefore,
+    }
+  };
+});
+```
+
+See [custom-compaction.ts](../examples/extensions/custom-compaction.ts) for a complete example using a different model.
+
+### session_before_tree
+
+Fired before `/tree` navigation. Always fires regardless of whether user chose to summarize. Can cancel navigation or provide custom summary.
+
+```typescript
+volt.on("session_before_tree", async (event, ctx) => {
+  const { preparation, signal } = event;
+
+  // preparation.targetId - where we're navigating to
+  // preparation.oldLeafId - current position (being abandoned)
+  // preparation.commonAncestorId - shared ancestor
+  // preparation.entriesToSummarize - entries that would be summarized
+  // preparation.userWantsSummary - whether user chose to summarize
+
+  // Cancel navigation entirely:
+  return { cancel: true };
+
+  // Provide custom summary (only used if userWantsSummary is true):
+  if (preparation.userWantsSummary) {
+    return {
+      summary: {
+        summary: "Your summary...",
+        details: { /* custom data */ },
+      }
+    };
+  }
+});
+```
+
+See `SessionBeforeTreeEvent` and `TreePreparation` in the types file.
+
+## Settings
+
+Configure compaction in `~/.volt/agent/settings.json` or `<project-dir>/.volt/settings.json`:
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000
+  }
+}
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `enabled` | `true` | Enable auto-compaction |
+| `reserveTokens` | `16384` | Tokens to reserve for LLM response |
+| `keepRecentTokens` | `20000` | Maximum recent message tokens to keep; active tool definitions can lower the effective budget |
+| `modelThresholds` | `{}` | Absolute token thresholds keyed by exact `provider/model-id`; `0` or omitted uses the context-limit default |
+
+Disable auto-compaction with `"enabled": false`. You can still compact manually with `/compact`.

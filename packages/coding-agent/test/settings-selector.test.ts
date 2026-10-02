@@ -1,0 +1,215 @@
+import { setKeybindings } from "@hansjm10/volt-tui";
+import { beforeAll, beforeEach, describe, expect, test, vi } from "vitest";
+import { KeybindingsManager } from "../src/core/keybindings.ts";
+import type { Personality } from "../src/core/personality.ts";
+import { initTheme } from "../src/core/theme/runtime.ts";
+import {
+	type SettingsCallbacks,
+	type SettingsConfig,
+	SettingsSelectorComponent,
+} from "../src/modes/interactive/components/settings-selector.ts";
+import { stripAnsi } from "../src/utils/ansi.ts";
+import { createTestSession } from "./utilities.ts";
+
+beforeAll(() => {
+	initTheme("dark");
+});
+
+beforeEach(() => {
+	setKeybindings(new KeybindingsManager());
+});
+
+function createConfig(personality: Personality): SettingsConfig {
+	return {
+		autoCompact: true,
+		currentModel: "openai-codex/gpt-6-astra",
+		compactionThresholdTokens: 0,
+		personality,
+		showImages: false,
+		imageWidthCells: 80,
+		autoResizeImages: true,
+		blockImages: false,
+		enableSkillCommands: true,
+		steeringMode: "one-at-a-time",
+		followUpMode: "one-at-a-time",
+		transport: "auto",
+		httpIdleTimeoutMs: 300_000,
+		thinkingLevel: "medium",
+		availableThinkingLevels: ["off", "medium"],
+		availableModels: [],
+		currentTheme: "dark",
+		availableThemes: ["dark"],
+		hideThinkingBlock: false,
+		collapseChangelog: false,
+		enableInstallTelemetry: true,
+		doubleEscapeAction: "tree",
+		treeFilterMode: "default",
+		showHardwareCursor: false,
+		editorPaddingX: 0,
+		autocompleteMaxVisible: 7,
+		quietStartup: false,
+		defaultProjectTrust: "ask",
+		clearOnShrink: false,
+		showTerminalProgress: true,
+		tuiMode: "regular",
+		fullscreenExitOutput: "transcript",
+		fullscreenScrollbar: "auto",
+		warnings: {},
+	};
+}
+
+function createCallbacks(onPersonalityChange: (personality: Personality) => void): SettingsCallbacks {
+	return {
+		onAutoCompactChange: () => {},
+		onCompactionThresholdChange: () => {},
+		onPersonalityChange,
+		onShowImagesChange: () => {},
+		onImageWidthCellsChange: () => {},
+		onAutoResizeImagesChange: () => {},
+		onBlockImagesChange: () => {},
+		onEnableSkillCommandsChange: () => {},
+		onSteeringModeChange: () => {},
+		onFollowUpModeChange: () => {},
+		onTransportChange: () => {},
+		onHttpIdleTimeoutMsChange: () => {},
+		onThinkingLevelChange: () => {},
+		onReviewModelChange: () => {},
+		onThemeChange: () => {},
+		onHideThinkingBlockChange: () => {},
+		onCollapseChangelogChange: () => {},
+		onEnableInstallTelemetryChange: () => {},
+		onDoubleEscapeActionChange: () => {},
+		onTreeFilterModeChange: () => {},
+		onShowHardwareCursorChange: () => {},
+		onEditorPaddingXChange: () => {},
+		onAutocompleteMaxVisibleChange: () => {},
+		onQuietStartupChange: () => {},
+		onDefaultProjectTrustChange: () => {},
+		onClearOnShrinkChange: () => {},
+		onShowTerminalProgressChange: () => {},
+		onTuiModeChange: () => {},
+		onFullscreenExitOutputChange: () => {},
+		onFullscreenScrollbarChange: () => {},
+		onWarningsChange: () => {},
+		onCancel: () => {},
+	};
+}
+
+describe("SettingsSelectorComponent", () => {
+	test("selects 350k for the current model independently of warnings and can restore the default", () => {
+		const onCompactionThresholdChange = vi.fn();
+		const callbacks = createCallbacks(() => {});
+		callbacks.onCompactionThresholdChange = onCompactionThresholdChange;
+		callbacks.onWarningsChange = vi.fn();
+		callbacks.onAutoCompactChange = vi.fn();
+		const list = new SettingsSelectorComponent(createConfig("default"), callbacks).getSettingsList();
+		for (const character of "compactat") list.handleInput(character);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("openai-codex/gpt-6-astra");
+		for (let index = 0; index < 5; index++) list.handleInput(" ");
+		expect(onCompactionThresholdChange).toHaveBeenLastCalledWith(350_000);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("350k");
+		for (let index = 0; index < 3; index++) list.handleInput(" ");
+		expect(onCompactionThresholdChange).toHaveBeenLastCalledWith(0);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("default");
+		expect(callbacks.onWarningsChange).not.toHaveBeenCalled();
+		expect(callbacks.onAutoCompactChange).not.toHaveBeenCalled();
+	});
+
+	test("displays a custom configured count and hides Compact at without a model", () => {
+		const config = createConfig("default");
+		config.compactionThresholdTokens = 425_123;
+		const callbacks = createCallbacks(() => {});
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		for (const character of "compactat") list.handleInput(character);
+		expect(stripAnsi(list.render(100).lines.join("\n"))).toContain("425123");
+		delete config.currentModel;
+		const noModel = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+		for (const character of "compactat") noModel.handleInput(character);
+		expect(stripAnsi(noModel.render(100).lines.join("\n"))).not.toContain("Compact at");
+	});
+
+	test("cycles through fullscreen settings", () => {
+		const onTuiModeChange = vi.fn();
+		const onExitOutputChange = vi.fn();
+		const onScrollbarChange = vi.fn();
+		const callbacks = createCallbacks(() => undefined);
+		callbacks.onTuiModeChange = onTuiModeChange;
+		callbacks.onFullscreenExitOutputChange = onExitOutputChange;
+		callbacks.onFullscreenScrollbarChange = onScrollbarChange;
+
+		const cycle = (label: string, count: number) => {
+			const list = new SettingsSelectorComponent(createConfig("default"), callbacks).getSettingsList();
+			for (const character of label.replaceAll(" ", "")) list.handleInput(character);
+			for (let index = 0; index < count; index++) list.handleInput(" ");
+		};
+
+		cycle("TUI mode", 1);
+		expect(onTuiModeChange).toHaveBeenCalledWith("fullscreen");
+		onExitOutputChange.mockClear();
+		cycle("Fullscreen exit output", 2);
+		expect(onExitOutputChange.mock.calls).toEqual([["resume-hint"], ["transcript"]]);
+		onScrollbarChange.mockClear();
+		cycle("Fullscreen scrollbar", 3);
+		expect(onScrollbarChange.mock.calls.flat()).toEqual(["always", "hidden", "auto"]);
+	});
+
+	test("changes the active session personality", () => {
+		const { session, cleanup } = createTestSession({ inMemory: true });
+		try {
+			session.settingsManager.ensureGlobalProfile("delivery");
+			session.settingsManager.setActiveProfile("delivery");
+			const onPersonalityChange = vi.fn((personality: Personality) => session.setPersonality(personality));
+			const selector = new SettingsSelectorComponent(
+				createConfig(session.settingsManager.getPersonality()),
+				createCallbacks(onPersonalityChange),
+			);
+			const settingsList = selector.getSettingsList();
+
+			for (const character of "personality") {
+				settingsList.handleInput(character);
+			}
+			const initialRender = stripAnsi(settingsList.render(100).lines.join("\n"));
+			expect(initialRender).toContain("Personality");
+			expect(initialRender).toContain("default");
+
+			settingsList.handleInput("\n");
+
+			expect(onPersonalityChange).toHaveBeenCalledWith("pragmatic");
+			expect(session.settingsManager.getPersonality()).toBe("pragmatic");
+			expect(session.settingsManager.getGlobalSettings().profiles?.delivery?.personality).toBe("pragmatic");
+			expect(stripAnsi(settingsList.render(100).lines.join("\n"))).toContain("pragmatic");
+
+			settingsList.handleInput("\n");
+
+			expect(onPersonalityChange).toHaveBeenLastCalledWith("simplified-technical");
+			expect(session.settingsManager.getPersonality()).toBe("simplified-technical");
+			expect(session.settingsManager.getGlobalSettings().profiles?.delivery?.personality).toBe(
+				"simplified-technical",
+			);
+			expect(stripAnsi(settingsList.render(100).lines.join("\n"))).toContain("simplified-technical");
+		} finally {
+			cleanup();
+		}
+	});
+
+	test("changes the context warning threshold from the warnings settings", () => {
+		const config = createConfig("default");
+		config.warnings = { contextTokens: 350_000 };
+		const onWarningsChange = vi.fn();
+		const callbacks = createCallbacks(() => {});
+		callbacks.onWarningsChange = onWarningsChange;
+		const settingsList = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		for (const character of "warnings") {
+			settingsList.handleInput(character);
+		}
+		settingsList.handleInput("\n");
+		expect(stripAnsi(settingsList.render(100).lines.join("\n"))).toContain("Context usage");
+		expect(stripAnsi(settingsList.render(100).lines.join("\n"))).toContain("350k");
+
+		settingsList.handleInput("\x1b[B");
+		settingsList.handleInput("\n");
+
+		expect(onWarningsChange).toHaveBeenCalledWith({ contextTokens: 500_000 });
+	});
+});

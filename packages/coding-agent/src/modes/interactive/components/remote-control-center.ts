@@ -1,0 +1,1745 @@
+import { realpath, stat } from "node:fs/promises";
+import { basename, isAbsolute, relative, resolve } from "node:path";
+import {
+	type Component,
+	concatRenderFrames,
+	createRenderFrame,
+	getCapabilities,
+	getCellDimensions,
+	getKeybindings,
+	Image,
+	prefixRenderFrame,
+	type RenderFrame,
+	truncateToWidth,
+	visibleWidth,
+	wrapTextWithAnsi,
+} from "@hansjm10/volt-tui";
+import { getAgentDir, VERSION } from "../../../config.ts";
+import {
+	IROH_REMOTE_ACCESS_PRESET_NAMES,
+	type IrohRemoteAccessPresetName,
+	isIrohRemoteAccessPresetName,
+} from "../../../core/remote/iroh/access-grant.ts";
+import { isIrohRemoteWorkspaceName } from "../../../core/remote/iroh/handshake.ts";
+import {
+	createIrohRemoteTicketQrCode,
+	encodeIrohRemoteTicketQrCodePng,
+	formatIrohRemoteTicketQrCode,
+	IROH_REMOTE_QR_QUIET_ZONE_MODULES,
+	type IrohRemoteTicketQrCode,
+} from "../../../core/remote/iroh/qr.ts";
+import { getIrohRemotePairingVerificationDetails } from "../../../core/remote/iroh/ticket.ts";
+import { getIrohRemoteWorkspaceNameAlias } from "../../../core/remote/iroh/workspace.ts";
+import { theme } from "../../../core/theme/runtime.ts";
+import { createDaemonClient, type DaemonClient } from "../../../daemon/control-client.ts";
+import {
+	CONTROL_PAIR_CANCEL_CAPABILITY,
+	CONTROL_RPC_GRANTS_CAPABILITY,
+	type ControlEvent,
+	type ControlRelayCredentialStatus,
+	type ControlResponse,
+	type DaemonRemotePolicyStatus,
+	isRemoteTransportPairingAvailable,
+} from "../../../daemon/control-protocol.ts";
+import { type DaemonProbeState, ensureDaemonRunning, probeDaemon, waitForDaemonExit } from "../../../daemon/spawn.ts";
+import {
+	findRecoverableVoltdStateBackup,
+	inspectVoltdStateFiles,
+	recoverVoltdStateFromBackup,
+	regenerateInvalidVoltdState,
+} from "../../../daemon/state.ts";
+import { DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS } from "../../../remote/integrated-runtime-retention.ts";
+import { stripAnsi } from "../../../utils/ansi.ts";
+import { DynamicBorder } from "./dynamic-border.ts";
+import { keyHint } from "./keybinding-hints.ts";
+
+type RemoteStatus = Extract<ControlResponse, { type: "status_result" }>;
+type PairingProgress = Extract<ControlEvent, { type: "pairing_progress" }>;
+
+export class RemoteControlRequestError extends Error {
+	readonly code: string;
+
+	constructor(code: string, message: string) {
+		super(message);
+		this.name = "RemoteControlRequestError";
+		this.code = code;
+	}
+}
+
+const UNSAFE_TERMINAL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g;
+// One title, three actions, and one keyboard-hint row; no extra borders or header.
+const PAIRING_QR_RESERVED_ROWS = 5;
+// Inline QR images use whole-pixel modules; 4 px modules scan reliably and keep Sixel rasters well within limits.
+const PAIRING_QR_MIN_MODULE_PIXELS = 2;
+const PAIRING_QR_MAX_MODULE_PIXELS = 4;
+
+interface PairingQrImageLayout {
+	qrCode: IrohRemoteTicketQrCode;
+	modulePixels: number;
+	columns: number;
+	rows: number;
+	widthPx: number;
+	heightPx: number;
+}
+
+export type RemoteControlSnapshot =
+	| {
+			kind: "offline";
+			state: DaemonProbeState;
+			error?: string;
+			invalidState?: { path: string; error: string };
+	  }
+	| { kind: "online"; status: RemoteStatus };
+
+export interface RemotePairingHandle {
+	requestId: string;
+	dispose(): void;
+}
+
+export interface RemoteControlBackend {
+	load(): Promise<RemoteControlSnapshot>;
+	startDaemon(): Promise<void>;
+	regenerateState(): Promise<{ backupPath: string; preservedIdentity: boolean }>;
+	findRecoveryBackup(): Promise<{ path: string; preservedIdentity: boolean } | undefined>;
+	recoverStateBackup(path: string): Promise<{ preservedIdentity: boolean }>;
+	registerCurrentWorkspace(path: string): Promise<{ name: string; path: string }>;
+	beginPairing(
+		workspaceName: string,
+		access: IrohRemoteAccessPresetName,
+		onProgress: (event: PairingProgress) => void,
+	): Promise<RemotePairingHandle>;
+	resetRelayCredential(): Promise<void>;
+	/** Ask the daemon to refresh expired or suspended relay access now. */
+	checkRelayAccess(): Promise<void>;
+	revokeClient(clientNodeId: string): Promise<void>;
+	approveClientRepair(clientNodeId: string): Promise<void>;
+	close(): Promise<void>;
+}
+
+/**
+ * A management-only daemon client. It never acquires or releases a conversation
+ * lease, so opening and closing /remote cannot transfer ownership of the active
+ * session.
+ */
+export function createRemoteControlBackend(agentDir: string = getAgentDir()): RemoteControlBackend {
+	let client: DaemonClient | undefined;
+	const eventHandlers = new Set<(event: ControlEvent) => void>();
+	const pendingPairingRequestIds = new Set<string>();
+	const pairingCancellations = new Map<string, Promise<void>>();
+
+	const cancelPairing = (active: DaemonClient, requestId: string): Promise<void> => {
+		const existing = pairingCancellations.get(requestId);
+		if (existing) return existing;
+		if (!pendingPairingRequestIds.has(requestId)) return Promise.resolve();
+		const cancellation = (async () => {
+			try {
+				if (active.connectionState === "connected") {
+					const response = await active.request({ type: "pair_cancel", requestId });
+					if (response.type === "error") throw new Error(response.message);
+				}
+			} catch {
+				// A current daemon also invalidates tickets when the owning control connection closes.
+				await active.close().catch(() => {});
+			} finally {
+				pendingPairingRequestIds.delete(requestId);
+				pairingCancellations.delete(requestId);
+			}
+		})();
+		pairingCancellations.set(requestId, cancellation);
+		return cancellation;
+	};
+
+	const closeClient = async (): Promise<void> => {
+		const active = client;
+		client = undefined;
+		if (active) {
+			await Promise.all([...pendingPairingRequestIds].map((requestId) => cancelPairing(active, requestId)));
+		}
+		pendingPairingRequestIds.clear();
+		pairingCancellations.clear();
+		await active?.close();
+	};
+
+	const connect = async (): Promise<DaemonClient> => {
+		if (client?.connectionState === "connected") return client;
+		await closeClient();
+		const probe = await probeDaemon(agentDir);
+		if (!probe.healthy) throw new Error(`voltd is ${probe.state}`);
+		const connected = createDaemonClient({
+			socketPath: probe.socketPath,
+			authToken: probe.authToken,
+			client: "cli",
+			version: VERSION,
+			reconnect: false,
+			onEvent: (event) => {
+				for (const handler of eventHandlers) handler(event);
+			},
+		});
+		client = connected;
+		try {
+			await connected.connect();
+			return connected;
+		} catch (error) {
+			await closeClient();
+			throw error;
+		}
+	};
+
+	return {
+		async load() {
+			const probe = await probeDaemon(agentDir);
+			if (!probe.healthy) {
+				const invalidState = inspectVoltdStateFiles(agentDir);
+				return {
+					kind: "offline",
+					state: probe.state,
+					...(invalidState === undefined ? {} : { error: invalidState.error, invalidState }),
+				};
+			}
+			try {
+				const response = await (await connect()).request({ type: "status" });
+				if (response.type === "error") throw new Error(response.message);
+				if (response.type !== "status_result") throw new Error(`unexpected ${response.type} response`);
+				return { kind: "online", status: response };
+			} catch (error) {
+				await closeClient();
+				return {
+					kind: "offline",
+					state: "unresponsive",
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		},
+		async startDaemon() {
+			const result = await ensureDaemonRunning(agentDir);
+			if (!result.healthy) throw new Error(result.error ?? `voltd did not start (${result.state})`);
+			await closeClient();
+		},
+		async regenerateState() {
+			const probe = await probeDaemon(agentDir);
+			if (probe.healthy || probe.state !== "not-running") {
+				throw new Error(`voltd must be fully stopped before regenerating state (currently ${probe.state})`);
+			}
+			return regenerateInvalidVoltdState(agentDir);
+		},
+		async findRecoveryBackup() {
+			return findRecoverableVoltdStateBackup(agentDir);
+		},
+		async recoverStateBackup(path) {
+			const probe = await probeDaemon(agentDir);
+			if (probe.healthy) {
+				const response = await (await connect()).request({ type: "shutdown" });
+				if (response.type === "error") throw new Error(response.message);
+				await closeClient();
+				const exit = await waitForDaemonExit({
+					agentDir,
+					pid: probe.pid,
+					socketPath: probe.socketPath,
+				});
+				if (exit !== "exited") throw new Error("voltd did not stop before state recovery");
+			} else if (probe.state !== "not-running") {
+				throw new Error(`voltd must be stopped before state recovery (currently ${probe.state})`);
+			}
+			const recovered = await recoverVoltdStateFromBackup(agentDir, path);
+			const restarted = await ensureDaemonRunning(agentDir);
+			if (!restarted.healthy) {
+				throw new Error(restarted.error ?? `voltd did not restart (${restarted.state})`);
+			}
+			return { preservedIdentity: recovered.preservedIdentity };
+		},
+		async registerCurrentWorkspace(path) {
+			const directory = await realpath(path);
+			if (!(await stat(directory)).isDirectory()) throw new Error(`Not a directory: ${directory}`);
+			const active = await connect();
+			const worktree = await active.request({ type: "worktree_resolve", path: directory });
+			if (worktree.type === "worktree_resolve_result") {
+				throw new Error(
+					`This directory belongs to managed worktree ${worktree.worktreeId}. Use parent workspace ${worktree.workspaceName}; managed worktrees cannot be registered separately.`,
+				);
+			}
+			if (worktree.type !== "error") throw new Error(`unexpected ${worktree.type} response`);
+			if (worktree.code !== "not_found") throw new RemoteControlRequestError(worktree.code, worktree.message);
+
+			const status = await active.request({ type: "status" });
+			if (status.type === "error") throw new RemoteControlRequestError(status.code, status.message);
+			if (status.type !== "status_result") throw new Error(`unexpected ${status.type} response`);
+			// Explicit registration must not reuse an enclosing workspace. Daemon
+			// registration stores canonical paths, so aliases reuse the exact entry.
+			const existing = status.workspaces.find((workspace) => workspace.path === directory);
+			if (existing) return { name: existing.name, path: existing.path };
+			const takenNames = new Set(
+				status.workspaces.map((workspace) => getIrohRemoteWorkspaceNameAlias(workspace.name)),
+			);
+			const directoryName = basename(directory);
+			const base = isIrohRemoteWorkspaceName(directoryName) ? directoryName : "workspace";
+			let name = base;
+			for (let suffix = 2; takenNames.has(getIrohRemoteWorkspaceNameAlias(name)); suffix++) {
+				name = `${base}-${suffix}`;
+				if (!isIrohRemoteWorkspaceName(name)) name = `workspace-${suffix}`;
+			}
+			const registered = await active.request({ type: "workspace_register", name, path: directory });
+			if (registered.type === "error") throw new RemoteControlRequestError(registered.code, registered.message);
+			if (registered.type !== "ok") throw new Error(`unexpected ${registered.type} response`);
+			return { name, path: directory };
+		},
+		async beginPairing(workspaceName, access, onProgress) {
+			const queued: PairingProgress[] = [];
+			let requestId: string | undefined;
+			let terminal = false;
+			const handler = (event: ControlEvent): void => {
+				if (event.type !== "pairing_progress") return;
+				if (requestId === undefined) {
+					queued.push(event);
+				} else if (event.requestId === requestId) {
+					if (event.phase === "completed" || event.phase === "failed") {
+						terminal = true;
+						pendingPairingRequestIds.delete(requestId);
+					}
+					onProgress(event);
+				}
+			};
+			eventHandlers.add(handler);
+			try {
+				const response = await (await connect()).request({ type: "pair_request", workspaceName, access });
+				if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
+				if (response.type !== "pair_started") throw new Error(`unexpected ${response.type} response`);
+				const startedRequestId = response.requestId;
+				requestId = startedRequestId;
+				for (const event of queued) {
+					if (event.requestId !== startedRequestId) continue;
+					if (event.phase === "completed" || event.phase === "failed") terminal = true;
+					onProgress(event);
+				}
+				if (!terminal) pendingPairingRequestIds.add(startedRequestId);
+				return {
+					requestId: startedRequestId,
+					dispose: () => {
+						eventHandlers.delete(handler);
+						if (terminal) return;
+						terminal = true;
+						const activeClient = client;
+						if (activeClient) void cancelPairing(activeClient, startedRequestId);
+					},
+				};
+			} catch (error) {
+				eventHandlers.delete(handler);
+				throw error;
+			}
+		},
+		async resetRelayCredential() {
+			const response = await (await connect()).request({ type: "relay_credential_revoke" });
+			if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
+			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
+		},
+		async checkRelayAccess() {
+			const response = await (await connect()).request({ type: "relay_credential_check" });
+			if (response.type === "error") throw new RemoteControlRequestError(response.code, response.message);
+			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
+		},
+		async revokeClient(clientNodeId) {
+			const response = await (await connect()).request({ type: "client_revoke", clientNodeId });
+			if (response.type === "error") throw new Error(response.message);
+			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
+		},
+		async approveClientRepair(clientNodeId) {
+			const response = await (await connect()).request({ type: "client_approve_repair", clientNodeId });
+			if (response.type === "error") throw new Error(response.message);
+			if (response.type !== "ok") throw new Error(`unexpected ${response.type} response`);
+		},
+		close: closeClient,
+	};
+}
+
+export interface RemoteControlCenterOptions {
+	getTerminalRows(): number;
+	getCurrentWorkspaceName(): string | undefined;
+	getCurrentWorkspacePath(): string;
+	currentSessionId: string;
+	requestRender(): void;
+	copyText(text: string): Promise<void>;
+	onClose(): void;
+}
+
+type View =
+	| { kind: "loading"; label: string }
+	| { kind: "offline"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
+	| { kind: "overview"; status: RemoteStatus; notice?: string; noticeTone?: NoticeTone }
+	| { kind: "access-picker"; status: RemoteStatus; notice?: string }
+	| { kind: "confirm-credential-reset"; status: RemoteStatus; error?: string }
+	| { kind: "workspace-picker"; status: RemoteStatus; access: IrohRemoteAccessPresetName }
+	| { kind: "confirm-regenerate"; snapshot: Extract<RemoteControlSnapshot, { kind: "offline" }> }
+	| {
+			kind: "confirm-recover";
+			status: RemoteStatus;
+			workspaceName: string;
+			access: IrohRemoteAccessPresetName;
+			backupPath: string;
+	  }
+	| { kind: "confirm-revoke"; status: RemoteStatus; clientNodeId: string }
+	| { kind: "confirm-repair"; status: RemoteStatus; clientNodeId: string }
+	| {
+			kind: "pairing";
+			status: RemoteStatus;
+			workspaceName: string;
+			access: IrohRemoteAccessPresetName;
+			phase: "starting" | "ticket" | "waiting" | "completed" | "failed";
+			ticket?: string;
+			message?: string;
+			recoveryBackupPath?: string;
+			showQr?: boolean;
+	  };
+
+type NoticeTone = "success" | "warning" | "error";
+
+type DisplayRow = {
+	key?: string;
+	text: string;
+	raw?: boolean;
+	wrap?: boolean;
+	tone?: "text" | "muted" | "dim" | "accent" | "success" | "warning" | "error";
+};
+
+function formatDuration(ms: number): string {
+	const seconds = Math.max(0, Math.floor(ms / 1000));
+	if (seconds < 60) return `${seconds}s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.floor(minutes / 60);
+	if (hours < 48) return `${hours}h ${minutes % 60}m`;
+	return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+}
+
+function abbreviatedId(value: string, width = 12): string {
+	return value.length <= width ? value : `${value.slice(0, Math.max(4, width - 1))}…`;
+}
+
+const RELAY_CREDENTIAL_DETAILS: Readonly<
+	Record<ControlRelayCredentialStatus["state"], { label: string; guidance: string; tone: DisplayRow["tone"] }>
+> = {
+	unpaired: {
+		label: "Not set up",
+		guidance: "Pair a phone with an active Volt Pro subscription to enable relay access.",
+		tone: "muted",
+	},
+	pairing: {
+		label: "Pairing in progress",
+		guidance: "Finish the current pairing, or reset credentials to start again.",
+		tone: "warning",
+	},
+	active: {
+		label: "Active",
+		guidance: "Pair another phone using the same subscription. Reset only to start a new enrollment.",
+		tone: "success",
+	},
+	expired: {
+		label: "Access expired",
+		guidance:
+			"Relay access is paused. Volt retries automatically; check your connection and subscription, or choose Check relay access now.",
+		tone: "warning",
+	},
+	subscription_inactive: {
+		label: "Volt Pro subscription inactive",
+		guidance:
+			"Renew the existing subscription, then choose Check relay access now; Volt also reconnects automatically. To enroll a different subscribed phone, reset credentials.",
+		tone: "warning",
+	},
+	revocation_pending: {
+		label: "Credential reset pending",
+		guidance: "Retry the reset when online. Pairing is blocked until the old relay credentials are revoked.",
+		tone: "warning",
+	},
+};
+
+function relayAccessNeedsRecovery(status: RemoteStatus): boolean {
+	return status.relayCredential?.state === "expired" || status.relayCredential?.state === "subscription_inactive";
+}
+
+function supportsSafePairing(status: RemoteStatus): boolean {
+	return (
+		status.relayCredential?.state !== "subscription_inactive" &&
+		status.relayCredential?.state !== "revocation_pending" &&
+		status.relayCredential?.state !== "pairing" &&
+		isRemoteTransportPairingAvailable(status.remoteTransport) &&
+		status.capabilities?.includes(CONTROL_PAIR_CANCEL_CAPABILITY) === true &&
+		status.capabilities.includes(CONTROL_RPC_GRANTS_CAPABILITY)
+	);
+}
+
+const ACCESS_PRESET_DETAILS: Readonly<Record<IrohRemoteAccessPresetName, { label: string; description: string }>> =
+	Object.freeze({
+		coding: {
+			label: "Coding",
+			description: "Coding tools plus conversation and model controls.",
+		},
+		review: {
+			label: "Review",
+			description: "Read-only tools plus conversation and model controls.",
+		},
+		chat: {
+			label: "Chat",
+			description: "Conversation and model controls without tool access.",
+		},
+		full: {
+			label: "Full access",
+			description: "Everything: API keys, log upload, host control, worktrees, and workspaces.",
+		},
+	});
+
+function workspaceForPath(status: RemoteStatus, path: string): RemoteStatus["workspaces"][number] | undefined {
+	const currentPath = resolve(path);
+	return status.workspaces
+		.filter((workspace) => {
+			const workspacePath = resolve(workspace.path);
+			const pathFromWorkspace = relative(workspacePath, currentPath);
+			return pathFromWorkspace === "" || (!pathFromWorkspace.startsWith("..") && !isAbsolute(pathFromWorkspace));
+		})
+		.sort((left, right) => right.path.length - left.path.length)[0];
+}
+
+function policyTools(policy: DaemonRemotePolicyStatus, fallback?: string[]): string {
+	if (policy.allowTools !== null) return policy.allowTools.join(", ") || "none";
+	if (fallback !== undefined) return fallback.join(", ") || "none";
+	return "per-device grant";
+}
+
+function supportsInlinePairingQr(): boolean {
+	const protocol = getCapabilities().images;
+	return protocol === "kitty" || protocol === "sixel";
+}
+
+/** Full-viewport control center for daemon health, phone pairing, and access. */
+export class RemoteControlCenterComponent implements Component {
+	private readonly backend: RemoteControlBackend;
+	private readonly options: RemoteControlCenterOptions;
+	private view: View = { kind: "loading", label: "Loading remote access…" };
+	private selectedKey = "refresh";
+	private scrollOffset = 0;
+	private manualScroll = false;
+	private lastRows: DisplayRow[] = [];
+	private lastPageSize = 1;
+	private pairingHandle: RemotePairingHandle | undefined;
+	private pairingQrCode: { ticket: string; qrCode: IrohRemoteTicketQrCode } | undefined;
+	private pairingQrImage: { key: string; image: Image } | undefined;
+	private pairingAttempt = 0;
+	private generation = 0;
+	private disposed = false;
+
+	constructor(backend: RemoteControlBackend, options: RemoteControlCenterOptions) {
+		this.backend = backend;
+		this.options = options;
+	}
+
+	async start(): Promise<void> {
+		await this.refresh();
+	}
+
+	invalidate(): void {
+		// Theme styling is resolved during render.
+	}
+
+	dispose(): void {
+		if (this.disposed) return;
+		this.disposed = true;
+		this.generation++;
+		this.pairingAttempt++;
+		this.pairingHandle?.dispose();
+		this.pairingHandle = undefined;
+		this.clearPairingQrImage(true);
+		void this.backend.close();
+	}
+
+	render(width: number): RenderFrame {
+		if (width <= 0) return createRenderFrame([]);
+		const height = Math.max(6, this.options.getTerminalRows() || 24);
+		const header = this.renderHeader(width);
+		const footer = this.renderFooter(width);
+		const pageSize = Math.max(1, height - header.length - footer.length);
+		this.lastPageSize = pageSize;
+		const rows = this.buildRows(width, height).flatMap((row) => {
+			if (!row.wrap) return [row];
+			const safeText = stripAnsi(row.text).replace(UNSAFE_TERMINAL_CHARACTERS, "");
+			return wrapTextWithAnsi(safeText, Math.max(1, width - 2)).map((text) => ({ ...row, text }));
+		});
+		this.lastRows = rows;
+		this.ensureSelection(rows);
+		const pairingQrImage = this.renderPairingQrImage(width, height);
+		if (pairingQrImage) {
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			const body = concatRenderFrames([
+				createRenderFrame([this.renderRow(rows[0]!, width)]),
+				pairingQrImage,
+				createRenderFrame(rows.slice(1).map((row) => this.renderRow(row, width))),
+			]);
+			const padding = Array.from({ length: Math.max(0, pageSize - body.lines.length) }, () => "");
+			return concatRenderFrames([
+				createRenderFrame(header),
+				body,
+				createRenderFrame(padding),
+				createRenderFrame(footer),
+			]);
+		}
+		const selectedIndex = rows.findIndex((row) => row.key === this.selectedKey);
+		const maxOffset = Math.max(0, rows.length - pageSize);
+		if (!this.manualScroll && selectedIndex >= 0) {
+			if (selectedIndex < this.scrollOffset) this.scrollOffset = selectedIndex;
+			if (selectedIndex >= this.scrollOffset + pageSize) this.scrollOffset = selectedIndex - pageSize + 1;
+		}
+		this.scrollOffset = Math.max(0, Math.min(this.scrollOffset, maxOffset));
+		const body = rows.slice(this.scrollOffset, this.scrollOffset + pageSize).map((row) => this.renderRow(row, width));
+		while (body.length < pageSize) body.push("");
+		return createRenderFrame([...header, ...body, ...footer]);
+	}
+
+	handleInput(data: string): void {
+		const keybindings = getKeybindings();
+		if (keybindings.matches(data, "tui.select.cancel")) {
+			if (this.view.kind === "confirm-credential-reset") {
+				void this.refresh();
+				return;
+			}
+			if (
+				this.view.kind === "access-picker" ||
+				this.view.kind === "workspace-picker" ||
+				this.view.kind === "confirm-regenerate" ||
+				this.view.kind === "confirm-recover" ||
+				this.view.kind === "confirm-revoke" ||
+				this.view.kind === "confirm-repair" ||
+				this.view.kind === "pairing"
+			) {
+				if (this.view.kind === "pairing") this.pairingAttempt++;
+				this.pairingHandle?.dispose();
+				this.pairingHandle = undefined;
+				if (this.view.kind === "confirm-regenerate") {
+					this.view = { kind: "offline", snapshot: this.view.snapshot };
+					this.selectedKey = "regenerate-state";
+				} else if (this.view.kind === "confirm-recover") {
+					this.view = {
+						kind: "pairing",
+						status: this.view.status,
+						workspaceName: this.view.workspaceName,
+						access: this.view.access,
+						phase: "failed",
+						message: "Iroh endpoint unavailable",
+						recoveryBackupPath: this.view.backupPath,
+					};
+					this.selectedKey = "pairing-recover";
+				} else if (this.view.kind === "workspace-picker") {
+					const { status, access } = this.view;
+					this.view = { kind: "access-picker", status };
+					this.selectedKey = `access:${access}`;
+				} else {
+					const returnKey =
+						this.view.kind === "confirm-revoke"
+							? `client:${this.view.clientNodeId}`
+							: this.view.kind === "confirm-repair"
+								? `revoked:${this.view.clientNodeId}`
+								: "pair";
+					this.view = { kind: "overview", status: this.view.status };
+					this.selectedKey = returnKey;
+				}
+				this.scrollOffset = 0;
+				this.manualScroll = false;
+				this.options.requestRender();
+			} else {
+				this.options.onClose();
+			}
+			return;
+		}
+		if (keybindings.matches(data, "tui.select.up")) {
+			this.moveSelection(-1);
+		} else if (keybindings.matches(data, "tui.select.down")) {
+			this.moveSelection(1);
+		} else if (keybindings.matches(data, "tui.select.pageUp")) {
+			this.scrollRows(-this.lastPageSize);
+		} else if (keybindings.matches(data, "tui.select.pageDown")) {
+			this.scrollRows(this.lastPageSize);
+		} else if (keybindings.matches(data, "tui.select.confirm")) {
+			this.activateSelection();
+		} else {
+			return;
+		}
+		this.options.requestRender();
+	}
+
+	private async refresh(notice?: string): Promise<void> {
+		const generation = ++this.generation;
+		this.pairingAttempt++;
+		this.pairingHandle?.dispose();
+		this.pairingHandle = undefined;
+		this.view = { kind: "loading", label: "Refreshing remote access…" };
+		this.options.requestRender();
+		const snapshot = await this.backend.load();
+		if (this.disposed || generation !== this.generation) return;
+		this.view =
+			snapshot.kind === "online"
+				? { kind: "overview", status: snapshot.status, ...(notice === undefined ? {} : { notice }) }
+				: { kind: "offline", snapshot };
+		this.selectedKey = snapshot.kind === "online" ? "refresh" : "start";
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.options.requestRender();
+	}
+
+	private async startDaemon(): Promise<void> {
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Starting voltd…" };
+		this.options.requestRender();
+		try {
+			await this.backend.startDaemon();
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh("Daemon started");
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			this.view = {
+				kind: "offline",
+				snapshot: {
+					kind: "offline",
+					state: "not-running",
+					error: error instanceof Error ? error.message : String(error),
+				},
+			};
+			this.selectedKey = "start";
+			this.options.requestRender();
+		}
+	}
+
+	private async regenerateState(): Promise<void> {
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Backing up and regenerating daemon state…" };
+		this.options.requestRender();
+		try {
+			const result = await this.backend.regenerateState();
+			await this.backend.startDaemon();
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh(
+				`Daemon state regenerated; backup saved to ${result.backupPath}${result.preservedIdentity ? " · Iroh identity preserved" : " · new Iroh identity created"}`,
+			);
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			this.view =
+				snapshot.kind === "online"
+					? { kind: "overview", status: snapshot.status, notice: "Daemon state was regenerated" }
+					: {
+							kind: "offline",
+							snapshot: {
+								...snapshot,
+								error: error instanceof Error ? error.message : String(error),
+							},
+						};
+			this.selectedKey =
+				snapshot.kind === "online" ? "refresh" : snapshot.invalidState ? "regenerate-state" : "start";
+			this.options.requestRender();
+		}
+	}
+
+	private async recoverStateBackup(backupPath: string): Promise<void> {
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Stopping voltd and recovering daemon state…" };
+		this.options.requestRender();
+		try {
+			const result = await this.backend.recoverStateBackup(backupPath);
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh(
+				result.preservedIdentity
+					? "Recovered daemon state and preserved the Iroh identity"
+					: "Recovered daemon state with a new Iroh identity; pair phones again",
+			);
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			this.view =
+				snapshot.kind === "online"
+					? {
+							kind: "overview",
+							status: snapshot.status,
+							notice: `State recovery failed: ${error instanceof Error ? error.message : String(error)}`,
+							noticeTone: "error",
+						}
+					: { kind: "offline", snapshot };
+			this.selectedKey = "refresh";
+			this.options.requestRender();
+		}
+	}
+
+	private async registerCurrentWorkspace(): Promise<void> {
+		const generation = ++this.generation;
+		const currentPath = this.options.getCurrentWorkspacePath();
+		this.view = { kind: "loading", label: "Registering current directory…" };
+		this.options.requestRender();
+		try {
+			const workspace = await this.backend.registerCurrentWorkspace(currentPath);
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh(
+				`Registered directory: ${workspace.path} (workspace ${workspace.name}). Current conversation unchanged.`,
+			);
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			const notice = `Workspace registration failed: ${error instanceof Error ? error.message : String(error)}`;
+			this.view =
+				snapshot.kind === "online"
+					? { kind: "overview", status: snapshot.status, notice, noticeTone: "error" }
+					: { kind: "offline", snapshot: { ...snapshot, error: notice } };
+			this.selectedKey = snapshot.kind === "online" ? "register-current" : "start";
+			this.options.requestRender();
+		}
+	}
+
+	private async beginPairing(
+		workspaceName: string,
+		access: IrohRemoteAccessPresetName,
+		status: RemoteStatus,
+	): Promise<void> {
+		const pairingAttempt = ++this.pairingAttempt;
+		this.pairingHandle?.dispose();
+		this.pairingHandle = undefined;
+		this.view = { kind: "pairing", status, workspaceName, access, phase: "starting" };
+		this.selectedKey = "pairing-back";
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.options.requestRender();
+		try {
+			const handle = await this.backend.beginPairing(workspaceName, access, (event) =>
+				this.onPairingProgress(event, pairingAttempt),
+			);
+			if (
+				this.disposed ||
+				pairingAttempt !== this.pairingAttempt ||
+				this.view.kind !== "pairing" ||
+				this.view.workspaceName !== workspaceName ||
+				this.view.access !== access
+			) {
+				handle.dispose();
+				return;
+			}
+			if (this.view.phase === "completed" || this.view.phase === "failed") {
+				handle.dispose();
+			} else {
+				this.pairingHandle = handle;
+			}
+		} catch (error) {
+			const recoveryBackup =
+				error instanceof RemoteControlRequestError && error.code === "iroh_unavailable"
+					? await this.backend.findRecoveryBackup()
+					: undefined;
+			if (this.disposed || pairingAttempt !== this.pairingAttempt || this.view.kind !== "pairing") return;
+			this.view = {
+				...this.view,
+				phase: "failed",
+				message: error instanceof Error ? error.message : String(error),
+				...(recoveryBackup === undefined ? {} : { recoveryBackupPath: recoveryBackup.path }),
+			};
+			this.selectedKey = recoveryBackup === undefined ? "pairing-back" : "pairing-recover";
+			this.options.requestRender();
+		}
+	}
+
+	private onPairingProgress(event: PairingProgress, pairingAttempt: number): void {
+		if (this.disposed || pairingAttempt !== this.pairingAttempt || this.view.kind !== "pairing") return;
+		if (event.phase === "ticket" && event.ticket) {
+			this.view = { ...this.view, phase: "ticket", ticket: event.ticket };
+		} else if (event.phase === "waiting") {
+			this.view = { ...this.view, phase: "waiting" };
+		} else if (event.phase === "completed") {
+			this.view = {
+				...this.view,
+				phase: "completed",
+				message: `Paired ${event.clientNodeId ? abbreviatedId(event.clientNodeId, 20) : "device"}`,
+				showQr: false,
+			};
+			this.pairingHandle?.dispose();
+			this.pairingHandle = undefined;
+		} else if (event.phase === "failed") {
+			this.view = { ...this.view, phase: "failed", message: event.error ?? "Pairing failed", showQr: false };
+			this.pairingHandle?.dispose();
+			this.pairingHandle = undefined;
+		}
+		this.options.requestRender();
+	}
+
+	private async copyPairingTicket(): Promise<void> {
+		if (this.view.kind !== "pairing" || !this.view.ticket) return;
+		const pairingAttempt = this.pairingAttempt;
+		const ticket = this.view.ticket;
+		try {
+			await this.options.copyText(ticket);
+			if (
+				!this.disposed &&
+				pairingAttempt === this.pairingAttempt &&
+				this.view.kind === "pairing" &&
+				this.view.ticket === ticket
+			) {
+				this.view = { ...this.view, message: "Pairing ticket copied" };
+			}
+		} catch (error) {
+			if (
+				!this.disposed &&
+				pairingAttempt === this.pairingAttempt &&
+				this.view.kind === "pairing" &&
+				this.view.ticket === ticket
+			) {
+				this.view = { ...this.view, message: error instanceof Error ? error.message : String(error) };
+			}
+		}
+		if (!this.disposed) this.options.requestRender();
+	}
+
+	private async resetRelayCredential(): Promise<void> {
+		if (this.view.kind !== "confirm-credential-reset") return;
+		const status = this.view.status;
+		const generation = ++this.generation;
+		this.pairingAttempt++;
+		this.pairingHandle?.dispose();
+		this.pairingHandle = undefined;
+		this.view = { kind: "loading", label: "Resetting relay credentials…" };
+		this.options.requestRender();
+		try {
+			await this.backend.resetRelayCredential();
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			if (snapshot.kind === "offline") {
+				this.view = { kind: "offline", snapshot };
+				this.selectedKey = "refresh";
+			} else if (supportsSafePairing(snapshot.status) && snapshot.status.workspaces.length > 0) {
+				this.view = {
+					kind: "access-picker",
+					status: snapshot.status,
+					notice: "Relay credentials reset. Choose access for the new phone.",
+				};
+				this.selectedKey = "access:coding";
+			} else {
+				this.view = {
+					kind: "overview",
+					status: snapshot.status,
+					notice: "Relay credentials reset. Register a workspace or restore phone transport, then pair a phone.",
+				};
+				this.selectedKey = snapshot.status.workspaces.length === 0 ? "register-current" : "refresh";
+			}
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			this.view = {
+				kind: "confirm-credential-reset",
+				status,
+				error: `Reset failed: ${error instanceof Error ? error.message : String(error)}`,
+			};
+			this.selectedKey = "cancel-credential-reset";
+		}
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.options.requestRender();
+	}
+
+	private async checkRelayAccess(): Promise<void> {
+		if (this.view.kind !== "overview") return;
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Checking relay access…" };
+		this.options.requestRender();
+		let checkError: unknown;
+		try {
+			await this.backend.checkRelayAccess();
+		} catch (error) {
+			checkError = error;
+		}
+		if (this.disposed || generation !== this.generation) return;
+		const snapshot = await this.backend.load();
+		if (this.disposed || generation !== this.generation) return;
+		if (snapshot.kind === "offline") {
+			this.view = { kind: "offline", snapshot };
+			this.selectedKey = "start";
+		} else {
+			const state = snapshot.status.relayCredential?.state;
+			const notice: { notice: string; noticeTone: NoticeTone } | undefined =
+				checkError !== undefined
+					? {
+							notice: `Relay access check failed: ${checkError instanceof Error ? checkError.message : String(checkError)}`,
+							noticeTone: "error",
+						}
+					: state === "active"
+						? { notice: "Relay access restored. Paired phones can reconnect.", noticeTone: "success" }
+						: state === "subscription_inactive"
+							? {
+									notice:
+										"Volt Pro is still inactive. If you just renewed, Apple can take a few minutes to confirm; Volt keeps checking automatically.",
+									noticeTone: "warning",
+								}
+							: state === "expired"
+								? {
+										notice: "Relay access is still expired. Volt keeps retrying automatically.",
+										noticeTone: "warning",
+									}
+								: undefined;
+			this.view = { kind: "overview", status: snapshot.status, ...notice };
+			this.selectedKey = relayAccessNeedsRecovery(snapshot.status) ? "check-relay-access" : "refresh";
+		}
+		this.scrollOffset = 0;
+		this.manualScroll = false;
+		this.options.requestRender();
+	}
+
+	private async revokeClient(clientNodeId: string): Promise<void> {
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Revoking device…" };
+		this.options.requestRender();
+		try {
+			await this.backend.revokeClient(clientNodeId);
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh(`Revoked ${abbreviatedId(clientNodeId, 20)}`);
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			this.view =
+				snapshot.kind === "online"
+					? {
+							kind: "overview",
+							status: snapshot.status,
+							notice: `Revoke failed: ${error instanceof Error ? error.message : String(error)}`,
+							noticeTone: "error",
+						}
+					: { kind: "offline", snapshot };
+			this.options.requestRender();
+		}
+	}
+
+	private async approveClientRepair(clientNodeId: string): Promise<void> {
+		const generation = ++this.generation;
+		this.view = { kind: "loading", label: "Allowing device to re-pair…" };
+		this.options.requestRender();
+		try {
+			await this.backend.approveClientRepair(clientNodeId);
+			if (this.disposed || generation !== this.generation) return;
+			await this.refresh("Re-pair approved. Choose Pair a phone and scan a fresh QR.");
+		} catch (error) {
+			if (this.disposed || generation !== this.generation) return;
+			const snapshot = await this.backend.load();
+			if (this.disposed || generation !== this.generation) return;
+			this.view =
+				snapshot.kind === "online"
+					? {
+							kind: "overview",
+							status: snapshot.status,
+							notice: `Repair approval failed: ${error instanceof Error ? error.message : String(error)}`,
+							noticeTone: "error",
+						}
+					: { kind: "offline", snapshot };
+			this.selectedKey = snapshot.kind === "online" ? `revoked:${clientNodeId}` : "start";
+			this.options.requestRender();
+		}
+	}
+
+	private activateSelection(): void {
+		if (this.view.kind === "loading") return;
+		const key = this.selectedKey;
+		if (key === "refresh") {
+			void this.refresh();
+			return;
+		}
+		if (key === "start") {
+			void this.startDaemon();
+			return;
+		}
+		if (key === "regenerate-state" && this.view.kind === "offline" && this.view.snapshot.invalidState) {
+			this.view = { kind: "confirm-regenerate", snapshot: this.view.snapshot };
+			this.selectedKey = "confirm-regenerate-state";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "confirm-regenerate-state" && this.view.kind === "confirm-regenerate") {
+			void this.regenerateState();
+			return;
+		}
+		if (key === "pairing-recover" && this.view.kind === "pairing" && this.view.recoveryBackupPath) {
+			this.view = {
+				kind: "confirm-recover",
+				status: this.view.status,
+				workspaceName: this.view.workspaceName,
+				access: this.view.access,
+				backupPath: this.view.recoveryBackupPath,
+			};
+			this.selectedKey = "confirm-recover-state";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "confirm-recover-state" && this.view.kind === "confirm-recover") {
+			void this.recoverStateBackup(this.view.backupPath);
+			return;
+		}
+		if (key === "register-current") {
+			if (this.view.kind === "overview") void this.registerCurrentWorkspace();
+			return;
+		}
+		if (key === "check-relay-access") {
+			if (this.view.kind === "overview" && relayAccessNeedsRecovery(this.view.status)) void this.checkRelayAccess();
+			return;
+		}
+		if (key === "reset-credential" && this.view.kind === "overview" && this.view.status.relayCredential) {
+			this.view = { kind: "confirm-credential-reset", status: this.view.status };
+			this.selectedKey = "cancel-credential-reset";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "cancel-credential-reset" && this.view.kind === "confirm-credential-reset") {
+			void this.refresh();
+			return;
+		}
+		if (key === "confirm-credential-reset" && this.view.kind === "confirm-credential-reset") {
+			void this.resetRelayCredential();
+			return;
+		}
+		if (key === "pair") {
+			if (this.view.kind !== "overview" || !supportsSafePairing(this.view.status)) return;
+			this.view = { kind: "access-picker", status: this.view.status };
+			this.selectedKey = "access:coding";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key.startsWith("access:") && this.view.kind === "access-picker") {
+			const selectedAccess = key.slice("access:".length);
+			if (!isIrohRemoteAccessPresetName(selectedAccess)) return;
+			const currentWorkspace = this.options.getCurrentWorkspaceName();
+			const match = this.view.status.workspaces.find((workspace) => workspace.name === currentWorkspace);
+			if (match) {
+				void this.beginPairing(match.name, selectedAccess, this.view.status);
+			} else if (this.view.status.workspaces.length === 1) {
+				void this.beginPairing(this.view.status.workspaces[0]!.name, selectedAccess, this.view.status);
+			} else if (this.view.status.workspaces.length > 1) {
+				this.view = { kind: "workspace-picker", status: this.view.status, access: selectedAccess };
+				this.selectedKey = `workspace:${this.view.status.workspaces[0]!.name}`;
+				this.scrollOffset = 0;
+				this.manualScroll = false;
+			}
+			return;
+		}
+		if (key.startsWith("workspace:") && this.view.kind === "workspace-picker") {
+			void this.beginPairing(key.slice("workspace:".length), this.view.access, this.view.status);
+			return;
+		}
+		if (key.startsWith("client:") && this.view.kind === "overview") {
+			const clientNodeId = key.slice("client:".length);
+			this.view = { kind: "confirm-revoke", status: this.view.status, clientNodeId };
+			this.selectedKey = `revoke:${clientNodeId}`;
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key.startsWith("revoked:") && this.view.kind === "overview") {
+			const clientNodeId = key.slice("revoked:".length);
+			this.view = { kind: "confirm-repair", status: this.view.status, clientNodeId };
+			this.selectedKey = `approve-repair:${clientNodeId}`;
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key.startsWith("revoke:") && this.view.kind === "confirm-revoke") {
+			void this.revokeClient(this.view.clientNodeId);
+			return;
+		}
+		if (key.startsWith("approve-repair:") && this.view.kind === "confirm-repair") {
+			void this.approveClientRepair(this.view.clientNodeId);
+			return;
+		}
+		if (key === "pairing-copy" && this.view.kind === "pairing" && this.view.ticket) {
+			void this.copyPairingTicket();
+			return;
+		}
+		if (key === "pairing-show-qr" && this.view.kind === "pairing" && this.view.ticket) {
+			this.view = { ...this.view, showQr: true };
+			this.selectedKey = "pairing-verification";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "pairing-verification" && this.view.kind === "pairing") {
+			this.view = { ...this.view, showQr: false };
+			this.selectedKey = "pairing-show-qr";
+			this.scrollOffset = 0;
+			this.manualScroll = false;
+			return;
+		}
+		if (key === "pairing-back" && this.view.kind === "pairing") {
+			if (this.view.phase === "completed") {
+				void this.refresh(this.view.message);
+			} else {
+				this.pairingAttempt++;
+				this.pairingHandle?.dispose();
+				this.pairingHandle = undefined;
+				this.view = { kind: "overview", status: this.view.status };
+				this.selectedKey = "pair";
+				this.scrollOffset = 0;
+				this.manualScroll = false;
+			}
+		}
+	}
+
+	private moveSelection(delta: number): void {
+		const selectable = this.lastRows.filter((row) => row.key);
+		if (selectable.length === 0) return;
+		const index = selectable.findIndex((row) => row.key === this.selectedKey);
+		const next = Math.max(0, Math.min(selectable.length - 1, (index < 0 ? 0 : index) + delta));
+		this.selectedKey = selectable[next]!.key!;
+		this.manualScroll = false;
+	}
+
+	private scrollRows(delta: number): void {
+		const maxOffset = Math.max(0, this.lastRows.length - this.lastPageSize);
+		this.scrollOffset = Math.max(0, Math.min(maxOffset, this.scrollOffset + delta));
+		this.manualScroll = true;
+	}
+
+	private ensureSelection(rows: DisplayRow[]): void {
+		if (rows.some((row) => row.key === this.selectedKey)) return;
+		this.selectedKey = rows.find((row) => row.key)?.key ?? "";
+	}
+
+	private renderHeader(width: number): string[] {
+		if (this.view.kind === "pairing" && this.view.showQr) return [];
+		let state = "loading";
+		if (this.view.kind === "offline") state = this.view.snapshot.state;
+		else if (this.view.kind === "confirm-regenerate" || this.view.kind === "confirm-recover") state = "confirmation";
+		else if ("status" in this.view) {
+			const status = this.view.status;
+			const relay = status.relayCredential;
+			state = `${status.remoteTransport?.state !== "ready" ? (status.remoteTransport?.state ?? "unavailable") : relay ? RELAY_CREDENTIAL_DETAILS[relay.state].label : "ready"} · ${status.phoneConnections} phone${status.phoneConnections === 1 ? "" : "s"}`;
+		}
+		const title = theme.bold(theme.fg("accent", "Remote Access"));
+		const remoteUnavailable =
+			"status" in this.view &&
+			(this.view.status.remoteTransport?.state !== "ready" ||
+				(this.view.status.relayCredential !== undefined && this.view.status.relayCredential.state !== "active"));
+		const right = theme.fg(this.view.kind === "offline" || remoteUnavailable ? "warning" : "muted", state);
+		const gap = " ".repeat(Math.max(1, width - visibleWidth(title) - visibleWidth(right) - 2));
+		return [new DynamicBorder().render(width).lines[0]!, truncateToWidth(` ${title}${gap}${right} `, width, ""), ""];
+	}
+
+	private renderFooter(width: number): string[] {
+		const hints = [keyHint("tui.select.up", "navigate"), keyHint("tui.select.pageDown", "scroll")];
+		hints.push(keyHint("tui.select.confirm", "select"));
+		hints.push(
+			keyHint("tui.select.cancel", this.view.kind === "overview" || this.view.kind === "offline" ? "close" : "back"),
+		);
+		const hintLine = truncateToWidth(` ${hints.join("  ")}`, width, "");
+		if (this.view.kind === "pairing" && this.view.showQr) return [hintLine];
+		return [hintLine, new DynamicBorder().render(width).lines[0]!];
+	}
+
+	private buildRows(width: number, height: number): DisplayRow[] {
+		if (this.view.kind === "loading") return [{ text: this.view.label, tone: "muted" }];
+		if (this.view.kind === "offline") {
+			return [
+				{ text: "DAEMON", tone: "accent" },
+				{ text: `voltd is ${this.view.snapshot.state}`, tone: "warning" },
+				...(this.view.snapshot.error
+					? [{ text: this.view.snapshot.error, tone: "error" as const, wrap: true }]
+					: []),
+				...(this.view.snapshot.invalidState
+					? [
+							{
+								text: "Regeneration creates a backup, preserves validated settings/identity when possible, and may require phones to pair again.",
+								tone: "warning" as const,
+							},
+							{ key: "regenerate-state", text: "Regenerate daemon state…", tone: "warning" as const },
+						]
+					: [{ key: "start", text: "Start daemon", tone: "text" as const }]),
+				{ key: "refresh", text: "Refresh status", tone: "text" },
+			];
+		}
+		if (this.view.kind === "confirm-regenerate") {
+			return [
+				{ text: "REGENERATE DAEMON STATE", tone: "warning" },
+				{ text: this.view.snapshot.invalidState?.path ?? "Unknown state file", tone: "dim" },
+				{ text: "The invalid file will be kept as a timestamped backup.", tone: "text" },
+				{ text: "Validated identity, workspace, and settings data will be preserved when safe.", tone: "text" },
+				{ text: "Invalid access records are dropped; phones may need to pair again.", tone: "warning" },
+				{ key: "confirm-regenerate-state", text: "Confirm regenerate state", tone: "warning" },
+			];
+		}
+		if (this.view.kind === "confirm-recover") {
+			return [
+				{ text: "RECOVER PREVIOUS DAEMON STATE", tone: "warning" },
+				{ text: this.view.backupPath, tone: "dim" },
+				{ text: "The current daemon will stop and its state will be backed up.", tone: "text" },
+				{ text: "Validated identity, workspace, and settings data will be restored.", tone: "text" },
+				{ text: "Legacy access records are dropped; phones may need to pair again.", tone: "warning" },
+				{ key: "confirm-recover-state", text: "Confirm recover and restart", tone: "warning" },
+			];
+		}
+		if (this.view.kind === "confirm-credential-reset") {
+			return [
+				{ text: "RESET RELAY CREDENTIALS", tone: "warning" },
+				...(this.view.error ? [{ text: this.view.error, tone: "error" as const, wrap: true }] : []),
+				{
+					text: "Use this to start a new subscription enrollment, not to renew your existing subscription.",
+					tone: "text",
+					wrap: true,
+				},
+				{
+					text: "This revokes relay credentials for this computer and all its phones, and cancels pending pairing codes.",
+					tone: "warning",
+					wrap: true,
+				},
+				{
+					text: "Your computer identity, workspaces, worktrees, and conversations stay unchanged.",
+					tone: "text",
+					wrap: true,
+				},
+				{
+					text: "Existing device permissions and direct connections are NOT revoked. Revoke old phones separately under Paired devices.",
+					tone: "warning",
+					wrap: true,
+				},
+				{
+					text: "After reset, pair using a phone with an active Volt Pro subscription. No daemon restart is needed.",
+					tone: "text",
+					wrap: true,
+				},
+				{ key: "cancel-credential-reset", text: "Cancel", tone: "text" },
+				{
+					key: "confirm-credential-reset",
+					text:
+						this.view.error || this.view.status.relayCredential?.state === "revocation_pending"
+							? "Retry reset and pair again"
+							: "Reset credentials and pair again",
+					tone: "warning",
+				},
+			];
+		}
+		if (this.view.kind === "access-picker") {
+			return [
+				...(this.view.notice ? [{ text: this.view.notice, tone: "success" as const, wrap: true }] : []),
+				{ text: "PAIR A PHONE · ACCESS", tone: "accent" },
+				{ text: "Choose what this phone may do. Access can be changed later.", tone: "muted" },
+				...IROH_REMOTE_ACCESS_PRESET_NAMES.flatMap((name) => {
+					const details = ACCESS_PRESET_DETAILS[name];
+					return [
+						{
+							key: `access:${name}`,
+							text: details.label,
+							tone: name === "full" ? ("warning" as const) : ("text" as const),
+						},
+						{ text: `  ${details.description}`, tone: "dim" as const },
+					];
+				}),
+			];
+		}
+		if (this.view.kind === "workspace-picker") {
+			return [
+				{ text: `PAIR A PHONE · ${ACCESS_PRESET_DETAILS[this.view.access].label}`, tone: "accent" },
+				{ text: "Choose the phone's initial workspace.", tone: "muted" },
+				...this.view.status.workspaces.map((workspace) => ({
+					key: `workspace:${workspace.name}`,
+					text: `${workspace.name}  ${workspace.path}`,
+					tone: "text" as const,
+				})),
+			];
+		}
+		if (this.view.kind === "confirm-revoke") {
+			const revokeView = this.view;
+			const client = revokeView.status.clients.find(
+				(candidate) => candidate.clientNodeId === revokeView.clientNodeId,
+			);
+			return [
+				{ text: "REVOKE DEVICE", tone: "error" },
+				{ text: client?.label || "Unnamed phone", tone: "text" },
+				{ text: revokeView.clientNodeId, tone: "dim" },
+				{ text: "This immediately closes the device's active remote connections.", tone: "warning" },
+				{ key: `revoke:${revokeView.clientNodeId}`, text: "Confirm revoke", tone: "error" },
+			];
+		}
+		if (this.view.kind === "confirm-repair") {
+			const repairView = this.view;
+			const client = repairView.status.revokedClients?.find(
+				(candidate) => candidate.clientNodeId === repairView.clientNodeId,
+			);
+			return [
+				{ text: "ALLOW DEVICE TO RE-PAIR", tone: "warning" },
+				{ text: client?.label || "Unnamed phone", tone: "text" },
+				{ text: repairView.clientNodeId, tone: "dim" },
+				{ text: "This identity may use one fresh pairing ticket after approval.", tone: "warning" },
+				{ text: "The device remains revoked until fresh pairing succeeds.", tone: "muted" },
+				{ key: `approve-repair:${repairView.clientNodeId}`, text: "Confirm allow re-pair", tone: "warning" },
+			];
+		}
+		if (this.view.kind === "pairing") return this.buildPairingRows(width, height);
+
+		const status = this.view.status;
+		const remotePolicy = status.remotePolicy ?? {
+			allowTools: null,
+			detachedRuntimeTtlMs: DEFAULT_INTEGRATED_DETACHED_RUNTIME_TTL_MS,
+		};
+		const relayCredential = status.relayCredential;
+		const relayDetails = relayCredential === undefined ? undefined : RELAY_CREDENTIAL_DETAILS[relayCredential.state];
+		const credentialBlocksPairing =
+			relayCredential?.state === "subscription_inactive" ||
+			relayCredential?.state === "revocation_pending" ||
+			relayCredential?.state === "pairing";
+		const currentLease = status.leases.find((lease) => lease.sessionId === this.options.currentSessionId);
+		const currentWorkspace =
+			status.workspaces.find((workspace) => workspace.name === this.options.getCurrentWorkspaceName()) ??
+			workspaceForPath(status, this.options.getCurrentWorkspacePath());
+		const rows: DisplayRow[] = [
+			...(this.view.notice
+				? [
+						{
+							text: this.view.notice,
+							wrap: true,
+							tone: this.view.noticeTone ?? ("success" as const),
+						},
+					]
+				: []),
+			{ text: "CONNECTION", tone: "accent" },
+			{
+				text: `voltd ${status.version} · pid ${status.pid} · up ${formatDuration(Date.now() - status.startedAtMs)}`,
+				tone: "text",
+			},
+			{
+				text: `${relayCredential ? "Daemon endpoint" : "Phone transport"}: ${status.remoteTransport?.state ?? "unavailable"}${status.remoteTransport?.wrapperVersion ? ` · wrapper ${status.remoteTransport.wrapperVersion}` : ""}${status.remoteTransport?.reasonCode ? ` · ${status.remoteTransport.reasonCode}` : ""}`,
+				tone: status.remoteTransport?.state === "ready" ? "success" : "warning",
+			},
+			...(status.remoteTransport?.message
+				? [{ text: status.remoteTransport.message, tone: "warning" as const, wrap: true }]
+				: []),
+			...(relayDetails
+				? [
+						{ text: `Relay access: ${relayDetails.label}`, tone: relayDetails.tone, wrap: true },
+						{ text: relayDetails.guidance, tone: "muted" as const, wrap: true },
+					]
+				: []),
+			...(relayAccessNeedsRecovery(status)
+				? [
+						{
+							text:
+								relayCredential?.nextRefreshAt === undefined
+									? "Checking relay access now"
+									: `Next automatic check in ${formatDuration(relayCredential.nextRefreshAt - Date.now())}`,
+							tone: "muted" as const,
+							wrap: true,
+						},
+					]
+				: []),
+			{
+				text: `${status.phoneConnections} attached phone${status.phoneConnections === 1 ? "" : "s"} · ${status.clients.length} paired device${status.clients.length === 1 ? "" : "s"}${status.revokedClients === undefined ? "" : ` · ${status.revokedClients.length} revoked`}`,
+				tone: status.phoneConnections > 0 ? "success" : "muted",
+			},
+			{
+				text: currentLease
+					? `Current lease: ${currentLease.state} · ${currentLease.streamCount} stream${currentLease.streamCount === 1 ? "" : "s"} · ${currentLease.relayCount} relay${currentLease.relayCount === 1 ? "" : "s"}`
+					: "Current lease: not reported by daemon",
+				tone: currentLease ? "text" : "muted",
+			},
+			{ text: "ACTIONS", tone: "accent" },
+			{ key: "refresh", text: "Refresh status", tone: "text" },
+			...(relayAccessNeedsRecovery(status)
+				? [{ key: "check-relay-access", text: "Check relay access now", tone: "text" as const }]
+				: []),
+			{ key: "register-current", text: "Register current directory", tone: "text" },
+			...(!isRemoteTransportPairingAvailable(status.remoteTransport)
+				? [{ text: "Pairing is disabled until phone transport is ready.", tone: "warning" as const }]
+				: status.workspaces.length === 0
+					? [{ text: "Pairing needs a registered workspace.", tone: "warning" as const }]
+					: credentialBlocksPairing
+						? []
+						: supportsSafePairing(status)
+							? [{ key: "pair", text: "Pair a phone", tone: "text" as const }]
+							: [{ text: "Restart voltd to pair with explicit access grants.", tone: "warning" as const }]),
+			...(relayCredential !== undefined && relayCredential.state !== "unpaired"
+				? [
+						{
+							key: "reset-credential",
+							text:
+								relayCredential.state === "revocation_pending"
+									? "Retry credential reset and pair again…"
+									: "Reset credentials and pair again…",
+							tone: "warning" as const,
+						},
+					]
+				: []),
+			{ text: "HEADLESS POLICY", tone: "accent" },
+			...(status.remotePolicy
+				? [
+						{
+							text: `Tools: ${policyTools(remotePolicy, currentWorkspace?.allowedTools)}`,
+							tone: "text" as const,
+						},
+						{
+							text: `Source: ${remotePolicy.allowTools !== null ? "daemon override" : currentWorkspace?.allowedTools ? `workspace ${currentWorkspace.name}` : "paired device grant"}`,
+							tone: "dim" as const,
+						},
+						{
+							text: `Detached runtime retention: ${formatDuration(remotePolicy.detachedRuntimeTtlMs)}`,
+							tone: "text" as const,
+						},
+					]
+				: [
+						{ text: "Tools: not reported by this running daemon", tone: "muted" as const },
+						{ text: "Detached runtime retention: not reported", tone: "muted" as const },
+					]),
+			{ text: "PAIRED DEVICES", tone: "accent" },
+		];
+		if (status.clients.length === 0) rows.push({ text: "No paired devices.", tone: "muted" });
+		for (const client of status.clients) {
+			rows.push({
+				key: `client:${client.clientNodeId}`,
+				text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · last seen ${formatDuration(Date.now() - (client.lastSeenAtMs ?? client.pairedAtMs))} ago`,
+				tone: "text",
+			});
+			rows.push({
+				text: `  Tools: ${
+					client.allowedTools
+						? `${client.allowedTools.join(", ") || "none"}${client.usesDefaultTools ? " (default)" : ""}`
+						: "not reported"
+				}`,
+				tone: "dim",
+			});
+		}
+		if (status.revokedClients !== undefined) {
+			rows.push({ text: "REVOKED DEVICES", tone: "accent" });
+			if (status.revokedClients.length === 0) rows.push({ text: "No revoked devices.", tone: "muted" });
+			for (const client of status.revokedClients) {
+				const approved = client.rePairApprovedAtMs !== undefined;
+				rows.push({
+					...(approved ? {} : { key: `revoked:${client.clientNodeId}` }),
+					text: `${client.label || "Unnamed phone"} · ${abbreviatedId(client.clientNodeId, width < 60 ? 10 : 20)} · revoked ${formatDuration(Date.now() - client.revokedAtMs)} ago`,
+					tone: approved ? "success" : "warning",
+				});
+				rows.push({
+					text: approved ? "  Re-pair approved · scan a fresh QR" : "  Select to allow fresh pairing",
+					tone: approved ? "success" : "dim",
+				});
+			}
+		}
+		rows.push({ text: "WORKSPACES", tone: "accent" });
+		if (status.workspaces.length === 0) rows.push({ text: "No registered workspaces.", tone: "muted" });
+		for (const workspace of status.workspaces) {
+			rows.push({
+				text: `${workspace.name === currentWorkspace?.name ? "Current · " : ""}${workspace.name} · ${workspace.path}`,
+				tone: workspace.name === currentWorkspace?.name ? "accent" : "text",
+			});
+			if (workspace.allowedTools)
+				rows.push({ text: `  Tools: ${workspace.allowedTools.join(", ") || "none"}`, tone: "dim" });
+		}
+		rows.push({ text: "LEASES", tone: "accent" });
+		if (status.leases.length === 0) rows.push({ text: "No active conversation leases.", tone: "muted" });
+		for (const lease of status.leases) {
+			const current = lease.sessionId === this.options.currentSessionId;
+			rows.push({
+				text: `${current ? "Current · " : ""}${lease.workspaceName}/${abbreviatedId(lease.sessionId, width < 60 ? 10 : 18)} · ${lease.state} · ${lease.streamCount} streams · ${lease.relayCount} relays`,
+				tone: current ? "accent" : "text",
+			});
+		}
+		return rows;
+	}
+
+	private buildPairingRows(width: number, height: number): DisplayRow[] {
+		if (this.view.kind !== "pairing") return [];
+		const phaseLabel = {
+			starting: "Creating one-time ticket…",
+			ticket: "Ticket ready",
+			waiting: "Scan with Volt on your phone",
+			completed: "Pairing complete",
+			failed: "Pairing failed",
+		}[this.view.phase];
+		const rows: DisplayRow[] = [
+			{
+				text: `PAIR PHONE · ${this.view.workspaceName} · ${ACCESS_PRESET_DETAILS[this.view.access].label}`,
+				tone: "accent",
+			},
+			{
+				text:
+					this.view.phase === "waiting"
+						? "Scan with Volt, then compare these values before confirming"
+						: phaseLabel,
+				tone: this.view.phase === "failed" ? "error" : this.view.phase === "completed" ? "success" : "text",
+			},
+		];
+		if (this.view.message)
+			rows.push({ text: this.view.message, tone: this.view.phase === "failed" ? "error" : "muted" });
+
+		let qrLines: string[] | undefined;
+		let qrError: string | undefined;
+		if (this.view.ticket) {
+			try {
+				qrLines = formatIrohRemoteTicketQrCode(this.view.ticket)
+					.split("\n")
+					.filter((line, index, lines) => line.length > 0 || (index > 0 && index < lines.length - 1));
+			} catch (error) {
+				qrError = error instanceof Error ? error.message : String(error);
+			}
+		}
+		const qrWidth = qrLines === undefined ? 0 : Math.max(...qrLines.map((line) => visibleWidth(line)));
+		const qrHeight = (qrLines?.length ?? 0) + PAIRING_QR_RESERVED_ROWS;
+		const qrFits = qrLines !== undefined && qrHeight <= height && qrWidth <= width;
+		const qrSizeWarning = `QR needs ${qrWidth} columns × ${qrHeight} rows; available: ${width} × ${height}.`;
+		const inlineQrFits = this.pairingQrImageLayout(this.view.ticket, width, height) !== undefined;
+		if (this.view.showQr) {
+			if (this.renderPairingQrImage(width, height)) {
+				return [
+					{ text: `PAIR QR · ${this.view.workspaceName}`, tone: "accent" },
+					{ key: "pairing-verification", text: "Show verification details", tone: "text" },
+					{ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" },
+					{ key: "pairing-back", text: "Cancel pairing", tone: "text" },
+				];
+			}
+			if (qrFits && qrLines !== undefined) {
+				return [
+					{ text: `PAIR QR · ${this.view.workspaceName}`, tone: "accent" },
+					...qrLines.map((line) => ({ text: line, raw: true })),
+					{ key: "pairing-verification", text: "Show verification details", tone: "text" },
+					{ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" },
+					{ key: "pairing-back", text: "Cancel pairing", tone: "text" },
+				];
+			}
+			rows.push({ text: qrError ? `QR unavailable: ${qrError}` : qrSizeWarning, tone: "warning", wrap: true });
+			rows.push({ key: "pairing-verification", text: "Show verification details", tone: "text" });
+		} else if (this.view.ticket) {
+			try {
+				const details = getIrohRemotePairingVerificationDetails(this.view.ticket);
+				const addDetail = (label: string, value: string | string[]): void => {
+					rows.push({ text: label, tone: "dim" });
+					for (const item of typeof value === "string" ? [value] : value) {
+						const safeValue = stripAnsi(item).replace(UNSAFE_TERMINAL_CHARACTERS, "");
+						rows.push(
+							...wrapTextWithAnsi(safeValue, Math.max(1, width - 2)).map((line) => ({
+								text: line,
+								tone: "text" as const,
+							})),
+						);
+					}
+				};
+				addDetail("Fingerprint", details.hostFingerprint);
+				addDetail("Host ID", details.hostNodeId);
+				addDetail("Workspace", details.workspace);
+				addDetail("Relay mode", details.relayMode);
+				addDetail("HTTPS relay origins", details.relayOrigins.length === 0 ? "none" : details.relayOrigins);
+				addDetail(
+					"Expires (UTC)",
+					details.expiresAt === undefined ? "not specified" : new Date(details.expiresAt).toISOString(),
+				);
+			} catch (error) {
+				rows.push({
+					text: `Verification unavailable: ${error instanceof Error ? error.message : String(error)}`,
+					tone: "error",
+				});
+			}
+			if (inlineQrFits || qrFits) {
+				rows.push({ key: "pairing-show-qr", text: "Show pairing QR", tone: "text" });
+			} else if (qrError) {
+				rows.push({ text: `QR unavailable: ${qrError}`, tone: "warning" });
+			} else {
+				rows.push({ text: qrSizeWarning, tone: "warning", wrap: true });
+				rows.push({ text: "Reduce the terminal font size, or use Copy pairing ticket.", tone: "dim", wrap: true });
+			}
+		}
+		if (this.view.ticket) rows.push({ key: "pairing-copy", text: "Copy pairing ticket", tone: "text" });
+		if (this.view.recoveryBackupPath) {
+			rows.push({
+				text: "A recoverable daemon-state backup is available from before the endpoint failure.",
+				tone: "warning",
+			});
+			rows.push({ key: "pairing-recover", text: "Recover previous daemon state…", tone: "warning" });
+		}
+		rows.push({
+			key: "pairing-back",
+			text:
+				this.view.phase === "completed"
+					? "Return to overview"
+					: this.view.phase === "starting"
+						? "Back to overview"
+						: "Cancel pairing",
+			tone: "text",
+		});
+		return rows;
+	}
+
+	private getPairingQrCode(ticket: string): IrohRemoteTicketQrCode {
+		if (this.pairingQrCode?.ticket === ticket) return this.pairingQrCode.qrCode;
+		this.clearPairingQrImage(true);
+		const qrCode = createIrohRemoteTicketQrCode(ticket);
+		this.pairingQrCode = { ticket, qrCode };
+		return qrCode;
+	}
+
+	/** Pick the largest whole-pixel module size whose image fits the QR view, or undefined when none fits. */
+	private pairingQrImageLayout(
+		ticket: string | undefined,
+		width: number,
+		height: number,
+	): PairingQrImageLayout | undefined {
+		if (!ticket || !supportsInlinePairingQr() || width <= 2 || height <= PAIRING_QR_RESERVED_ROWS) return undefined;
+		let qrCode: IrohRemoteTicketQrCode;
+		try {
+			qrCode = this.getPairingQrCode(ticket);
+		} catch {
+			return undefined;
+		}
+		const cells = getCellDimensions();
+		const sideModules = qrCode.size + IROH_REMOTE_QR_QUIET_ZONE_MODULES * 2;
+		const availablePx = Math.min((width - 2) * cells.widthPx, (height - PAIRING_QR_RESERVED_ROWS) * cells.heightPx);
+		const modulePixels = Math.min(PAIRING_QR_MAX_MODULE_PIXELS, Math.floor(availablePx / sideModules));
+		if (modulePixels < PAIRING_QR_MIN_MODULE_PIXELS) return undefined;
+		// Fill whole cells exactly so the image is displayed 1:1 instead of being resampled to fit them.
+		const columns = Math.ceil((sideModules * modulePixels) / cells.widthPx);
+		const rows = Math.ceil((sideModules * modulePixels) / cells.heightPx);
+		return { qrCode, modulePixels, columns, rows, widthPx: columns * cells.widthPx, heightPx: rows * cells.heightPx };
+	}
+
+	/**
+	 * Render the centered QR image for the QR view. Returns undefined when the terminal cannot draw it, so the
+	 * view falls back to the text QR or the size warning instead of showing actions without a code.
+	 */
+	private renderPairingQrImage(width: number, height: number): RenderFrame | undefined {
+		const ticket = this.view.kind === "pairing" && this.view.showQr ? this.view.ticket : undefined;
+		const layout = this.pairingQrImageLayout(ticket, width, height);
+		if (!ticket || !layout) {
+			this.clearPairingQrImage();
+			return undefined;
+		}
+		const { columns, rows, modulePixels, widthPx, heightPx } = layout;
+		const imageKey = `${ticket}\0${modulePixels}\0${columns}x${rows}\0${widthPx}x${heightPx}`;
+		if (this.pairingQrImage?.key !== imageKey) {
+			this.clearPairingQrImage();
+			this.pairingQrImage = {
+				key: imageKey,
+				image: new Image(
+					encodeIrohRemoteTicketQrCodePng(layout.qrCode, { modulePixels, widthPx, heightPx }),
+					"image/png",
+					{ fallbackColor: (value) => theme.fg("muted", value) },
+					{ maxWidthCells: columns, maxHeightCells: rows, filename: "pairing-qr.png" },
+					{ widthPx, heightPx },
+				),
+			};
+		}
+		// A failed render keeps its cached Image so later frames do not retry the same encode.
+		const imageFrame = this.pairingQrImage.image.render(width);
+		const placement = imageFrame.images[0];
+		if (!placement) return undefined;
+		return prefixRenderFrame(imageFrame, " ".repeat(Math.max(0, Math.floor((width - placement.columns) / 2))));
+	}
+
+	private clearPairingQrImage(clearQrCode = false): void {
+		this.pairingQrImage?.image.dispose();
+		this.pairingQrImage = undefined;
+		if (clearQrCode) this.pairingQrCode = undefined;
+	}
+
+	private renderRow(row: DisplayRow, width: number): string {
+		const marker = row.raw ? "" : row.key ? (row.key === this.selectedKey ? "› " : "  ") : "  ";
+		const color = row.tone ?? "text";
+		const safeText = row.raw ? row.text : stripAnsi(row.text).replace(UNSAFE_TERMINAL_CHARACTERS, "");
+		const content = truncateToWidth(`${marker}${safeText}`, width, "…");
+		let styled = theme.fg(color, content);
+		if (row.key === this.selectedKey) {
+			styled = theme.bg("selectedBg", `${styled}${" ".repeat(Math.max(0, width - visibleWidth(content)))}`);
+		}
+		return truncateToWidth(styled, width, "");
+	}
+}

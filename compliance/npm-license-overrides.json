@@ -1,0 +1,40 @@
+{
+	"schemaVersion": 1,
+	"packages": {
+		"@aws-sdk/credential-provider-http@3.972.39": [
+			{
+				"path": "compliance/npm-license-overrides/aws-sdk-js-v3-LICENSE",
+				"source": "https://github.com/aws/aws-sdk-js-v3/blob/8d0b4988c22db47c3ace06cb8c56655e3d7f055b/LICENSE",
+				"sha256": "4186c3f89c23f27b4c0caab574737c49ee5137c36a3c103484feaca4aeec2310"
+			}
+		],
+		"@aws-sdk/credential-provider-login@3.972.41": [
+			{
+				"path": "compliance/npm-license-overrides/aws-sdk-js-v3-LICENSE",
+				"source": "https://github.com/aws/aws-sdk-js-v3/blob/8d0b4988c22db47c3ace06cb8c56655e3d7f055b/LICENSE",
+				"sha256": "4186c3f89c23f27b4c0caab574737c49ee5137c36a3c103484feaca4aeec2310"
+			}
+		],
+		"@aws-sdk/nested-clients@3.997.9": [
+			{
+				"path": "compliance/npm-license-overrides/aws-sdk-js-v3-LICENSE",
+				"source": "https://github.com/aws/aws-sdk-js-v3/blob/8d0b4988c22db47c3ace06cb8c56655e3d7f055b/LICENSE",
+				"sha256": "4186c3f89c23f27b4c0caab574737c49ee5137c36a3c103484feaca4aeec2310"
+			}
+		],
+		"data-uri-to-buffer@4.0.1": [
+			{
+				"path": "compliance/npm-license-overrides/data-uri-to-buffer-LICENSE",
+				"source": "https://github.com/TooTallNate/node-data-uri-to-buffer/blob/85cd8c854aefbf1bb636789d80364cfac8ea1583/README.md#license",
+				"sha256": "1915735866a7729128309d7038564aa432c4ec0f7105f3d3e2bf1597d0d1330f"
+			}
+		],
+		"omggif@1.0.10": [
+			{
+				"path": "compliance/npm-license-overrides/omggif-README-LICENSE",
+				"source": "https://registry.npmjs.org/omggif/-/omggif-1.0.10.tgz#README",
+				"sha256": "fc7d762e0ebf8720d0a03cf00058aaa3a198347e9651be2f50a25e3b3ec13985"
+			}
+		]
+	}
+}

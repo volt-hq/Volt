@@ -1,0 +1,377 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # Keep the required branch-protection check green only when all Linux work passes.
+  build-check-test:
+    needs: [build-check, test-linux]
+    if: always()
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require build, checks, and both Linux test shards
+        env:
+          BUILD_RESULT: ${{ needs.build-check.result }}
+          TEST_RESULT: ${{ needs.test-linux.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$TEST_RESULT" = success
+
+  build-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install npm 11.17.0
+        working-directory: ${{ runner.temp }}
+        run: npm install -g npm@11.17.0 --ignore-scripts
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo ln -sf "$(which fdfind)" /usr/local/bin/fd
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Load Linux x64 Iroh binding
+        run: node scripts/check-iroh-native-load.mjs
+
+      - name: Build
+        run: npm run build
+
+      - name: Check
+        run: npm run check
+
+      - name: Test native prebuild workflow and bundle assembly
+        run: node --test scripts/workspace-fs-prebuilds.test.mjs
+
+      - name: Require changesets for product changes
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch --depth=1 origin "refs/heads/${BASE_REF}"
+          node scripts/check-changesets.mjs --require --base FETCH_HEAD
+
+      - name: Test other suites
+        run: |
+          ./test.sh run test:memory-benchmark
+          ./test.sh run test:swebench-benchmark
+          ./test.sh test --workspace packages/agent --workspace packages/ai --workspace packages/tui --if-present
+          ./test.sh --prefix packages/coding-agent/examples/remote/firebase-push-relay/functions test
+
+  test-linux:
+    name: Linux tests (${{ matrix.shard }}/2)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    permissions:
+      contents: read
+    env:
+      VOLT_TEST_REQUIRE_NATIVE_IROH: '1'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install npm 11.17.0
+        working-directory: ${{ runner.temp }}
+        run: npm install -g npm@11.17.0 --ignore-scripts
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep
+          sudo ln -sf "$(which fdfind)" /usr/local/bin/fd
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Load Linux x64 Iroh binding
+        run: node scripts/check-iroh-native-load.mjs
+
+      - name: Test coding-agent shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: ./test.sh test --workspace packages/coding-agent -- --shard="${SHARD}/2"
+
+  relay-credential-broker:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        image: postgres:17@sha256:e38411452a464af89e5adadb8d223bf53b898d47d6ef918b2d58c08707350449
+        env:
+          POSTGRES_DB: volt_relay_credential_broker_test
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d volt_relay_credential_broker_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      VOLT_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/volt_relay_credential_broker_test?sslmode=disable
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.27.x'
+          cache-dependency-path: services/relay-credential-broker/go.sum
+
+      - name: Test relay credential broker
+        working-directory: services/relay-credential-broker
+        run: go test ./...
+
+      - name: Race test relay credential broker
+        working-directory: services/relay-credential-broker
+        run: go test -race ./...
+
+      - name: Vet relay credential broker
+        working-directory: services/relay-credential-broker
+        run: go vet ./...
+
+  test-windows:
+    name: Windows tests (${{ matrix.shard }}/3)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    permissions:
+      contents: read
+    env:
+      VITEST_MAX_WORKERS: '2'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install npm 11.17.0
+        working-directory: ${{ runner.temp }}
+        run: npm install -g npm@11.17.0 --ignore-scripts
+
+      - name: Install system dependencies
+        run: choco install fd ripgrep --no-progress -y
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Load Windows x64 Iroh binding
+        run: node scripts/check-iroh-native-load.mjs
+
+      # Run the non-coding-agent portions of the root test script only once.
+      - name: Test other suites
+        if: matrix.shard == 1
+        shell: bash
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: |
+          ./test.sh run test:memory-benchmark
+          ./test.sh run test:swebench-benchmark
+          ./test.sh test --workspace packages/agent --workspace packages/ai --workspace packages/tui --if-present
+          ./test.sh --prefix packages/coding-agent/examples/remote/firebase-push-relay/functions test
+
+      - name: Test coding-agent shard
+        shell: bash
+        env:
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+          SHARD: ${{ matrix.shard }}
+        run: ./test.sh test --workspace packages/coding-agent -- --shard="${SHARD}/3"
+
+  iroh-native-darwin-arm64:
+    name: Iroh native load (Darwin arm64)
+    runs-on: macos-15
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.23.1'
+          package-manager-cache: false
+
+      - name: Install npm 11.17.0
+        working-directory: ${{ runner.temp }}
+        run: npm install -g npm@11.17.0 --ignore-scripts
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Load Darwin arm64 Iroh binding
+        run: node scripts/check-iroh-native-load.mjs
+
+  workspace-fs-native:
+    name: Workspace fs native (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            rust-target: aarch64-apple-darwin
+            runner: macos-15
+          - target: darwin-x64
+            rust-target: x86_64-apple-darwin
+            runner: macos-15-intel
+          - target: linux-arm64-gnu
+            rust-target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: linux-x64-gnu
+            rust-target: x86_64-unknown-linux-gnu
+            runner: ubuntu-24.04
+          - target: win32-arm64-msvc
+            rust-target: aarch64-pc-windows-msvc
+            runner: windows-11-arm
+          - target: win32-x64-msvc
+            rust-target: x86_64-pc-windows-msvc
+            runner: windows-2025
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js 22.19
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: '22.19.0'
+          package-manager-cache: false
+
+      - name: Setup pinned Rust toolchain
+        shell: bash
+        env:
+          RUST_TARGET: ${{ matrix.rust-target }}
+        run: |
+          rustup toolchain install 1.97.1 --profile minimal --component clippy --component rustfmt
+          rustup target add --toolchain 1.97.1 "${RUST_TARGET}"
+
+      - name: Format, lint, and test Rust crate
+        shell: bash
+        run: |
+          cd packages/coding-agent/native/workspace-fs
+          cargo fmt --all -- --check
+          cargo clippy --all-targets -- -D warnings
+          cargo test --locked
+
+      - name: Build and load target-native addon
+        shell: bash
+        env:
+          WORKSPACE_FS_TARGET: ${{ matrix.target }}
+        run: |
+          test "$(node --version)" = "v22.19.0"
+          node scripts/workspace-fs-native.mjs build "${WORKSPACE_FS_TARGET}"
+          node scripts/workspace-fs-native.mjs manifest
+          node scripts/workspace-fs-native.mjs verify
+
+      - name: Check Rust advisories and licenses
+        if: matrix.target == 'linux-x64-gnu'
+        shell: bash
+        run: |
+          cargo install cargo-deny --version 0.20.2 --locked
+          cd packages/coding-agent/native/workspace-fs
+          cargo deny check advisories licenses bans sources
+
+  workspace-fs-musl-load:
+    name: Workspace fs musl load (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+          - arch: x64
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Load committed musl addon with Node.js 22.19 on Alpine
+        shell: bash
+        env:
+          NODE_IMAGE: node:22.19.0-alpine@sha256:d2166de198f26e17e5a442f537754dd616ab069c47cc57b889310a717e0abbf9
+        run: |
+          # Retry registry transport failures, never a failed native verification.
+          for attempt in 1 2 3; do
+            if docker pull "$NODE_IMAGE"; then
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            sleep "$((attempt * 5))"
+          done
+          docker run --rm --pull=never \
+            --volume "${PWD}:/workspace:ro" \
+            --workdir /workspace \
+            "$NODE_IMAGE" \
+            sh -c 'test "$(node --version)" = "v22.19.0" && node scripts/workspace-fs-native.mjs verify'

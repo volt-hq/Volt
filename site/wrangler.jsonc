@@ -1,0 +1,16 @@
+// Cloudflare Workers config for the volt-cli.dev site.
+// Assets-only Worker: no script, just the static build output from dist/.
+// _headers and _redirects in dist/ (copied from public/) are honored.
+{
+  "name": "volt",
+  "compatibility_date": "2026-07-07",
+  // Only the custom domains (volt-cli.dev / www.volt-cli.dev) should serve this
+  // Worker — keep the workers.dev subdomain and preview URLs turned off.
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "directory": "./dist",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "404-page"
+  }
+}

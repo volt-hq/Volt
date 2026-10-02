@@ -1,0 +1,1439 @@
+> volt can help you use the SDK. Ask it to build an integration for your use case.
+
+# SDK
+
+The SDK provides programmatic access to volt's agent capabilities. Use it to embed volt in other applications, build custom interfaces, or integrate with automated workflows.
+
+**Example use cases:**
+- Build a custom UI (web, desktop, mobile)
+- Integrate agent capabilities into existing applications
+- Create automated pipelines with agent reasoning
+- Build custom tools that spawn sub-agents
+- Test agent behavior programmatically
+
+See [examples/sdk/](../examples/sdk/) for working examples from minimal to full control.
+
+## Quick Start
+
+```typescript
+import { AuthStorage, createAgentSession, ModelRegistry, SessionManager } from "@hansjm10/volt-coding-agent";
+
+// Set up credential storage and model registry
+const authStorage = AuthStorage.create();
+const modelRegistry = ModelRegistry.create(authStorage);
+
+const { session } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(),
+  authStorage,
+  modelRegistry,
+});
+
+session.subscribe((event) => {
+  if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
+});
+
+await session.prompt("What files are in the current directory?");
+```
+
+## Installation
+
+```bash
+npm install @hansjm10/volt-coding-agent
+```
+
+The SDK is included in the main package. No separate installation needed.
+
+## Core Concepts
+
+### createAgentSession()
+
+The main factory function for a single `AgentSession`.
+
+`createAgentSession()` uses a `ResourceLoader` to supply extensions, skills, prompt templates, themes, and context files. If you do not provide one, it uses `DefaultResourceLoader` with standard discovery.
+
+```typescript
+import { createAgentSession, SessionManager } from "@hansjm10/volt-coding-agent";
+
+// Minimal: defaults with DefaultResourceLoader
+const { session } = await createAgentSession();
+
+// Custom: override specific options
+const { session } = await createAgentSession({
+  model: myModel,
+  tools: ["read", "bash"],
+  agentMode: "plan",
+  sessionManager: SessionManager.inMemory(),
+});
+```
+
+`agentMode` defaults to `"build"`. A new Plan-mode session exposes only read-only exploration and native checklist tools; persisted branches restore their own planning state.
+
+Passing `sessionManager` transfers its ownership to `createAgentSession()` immediately. On success, dispose the returned session and await `session.waitForClosed()`. If setup fails, the factory closes the consumed manager but retains any committed session row; do not reuse the manager object. Open its `SessionReference` again when another live manager is needed.
+
+### AgentSession
+
+The session manages agent lifecycle, message history, model state, compaction, and event streaming.
+
+```typescript
+interface AgentSession {
+  // Send a prompt and wait for completion
+  prompt(text: string, options?: PromptOptions): Promise<void>;
+
+  // Queue messages during streaming
+  steer(text: string): Promise<void>;
+  followUp(text: string): Promise<void>;
+
+  // Send lossless JSON custom data
+  sendCustomMessage<T>(message: CustomMessageInput<T>, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
+
+  // Subscribe to events (returns unsubscribe function)
+  subscribe(listener: (event: AgentSessionEvent) => void): () => void;
+
+  // Session identity
+  sessionRef: SessionReference | undefined; // undefined for in-memory sessions
+  sessionId: string;
+
+  // Model control
+  setModel(model: Model): Promise<void>;
+  setThinkingLevel(level: ThinkingLevel): Promise<void>;
+  cycleModel(): Promise<ModelCycleResult | undefined>;
+  cycleThinkingLevel(): ThinkingLevel | undefined;
+
+  // Planning
+  planningState: PlanningState;
+  setAgentMode(mode: "build" | "plan"): Promise<PlanningState>;
+  changePlan(planId: string, expectedRevision: number): PlanningState;
+  discardPlan(planId: string, expectedRevision: number): PlanningState;
+
+  // State access
+  state: AgentSessionState;
+  model: Model | undefined;
+  thinkingLevel: ThinkingLevel;
+  messages: AgentMessage[];
+  isStreaming: boolean; // provider run or session continuation
+  isBusy: boolean;      // also includes prompt preflight and standalone session operations
+
+  // In-place tree navigation within the current session
+  navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
+
+  // Compaction
+  compact(customInstructions?: string): Promise<CompactionResult>;
+  abortCompaction(): void;
+
+  // Abort current operation; queued input is retained unless deliverQueuedMessages is set
+  abort(source?: AgentAbortSource, options?: { deliverQueuedMessages?: boolean }): Promise<void>;
+
+  // Cleanup
+  dispose(): void;
+  waitForClosed(): Promise<void>;
+}
+```
+
+Always await `setAgentMode()` before reading `planningState`, `agentMode`, or active tools. In particular, a Plan-to-Build transition waits for unrestricted MCP startup and direct-tool restoration before the returned Build state is exposed. Mode and plan-execution transitions are serialized in invocation order; a queued toggle derives its target only after earlier transitions commit.
+
+Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
+Approving a ready plan also lives there:
+
+```typescript
+await runtime.executePlan(plan.id, plan.revision, "retain_context");
+await runtime.executePlan(plan.id, plan.revision, "new_session");
+```
+
+All user plan actions are fenced by the exact plan ID and revision. Repeating an already-approved execution request is idempotent.
+
+Persisted review finding discussions use normal Build tools and Plan-mode research/authoring under the session's grants. Fix requests can be implemented in the discussion, including approved `retain_context` plan execution. Their source-linked identity cannot be replaced, forked/cloned or handed off with `new_session`; reset through the source review instead. Canonical finding outcomes also belong to the source review. These lifecycle boundaries do not restrict code fixes. Trusted host policy supersedes obsolete read-only guidance in resumed discussion context without rewriting history.
+
+### createAgentSessionRuntime() and AgentSessionRuntime
+
+Use the runtime API when you need to replace the active session and rebuild cwd-bound runtime state.
+This is the same layer used by the built-in interactive, print, and RPC modes.
+
+`createAgentSessionRuntime()` takes a runtime factory plus the initial cwd/session target. Passing the manager consumes it immediately. The factory closes over process-global fixed inputs, recreates cwd-bound services for the effective cwd, resolves session options against those services, and returns a full runtime result. A `CreateAgentSessionRuntimeFactory` callback borrows cleanup ownership from its enclosing runtime operation until it returns an `AgentSession`; construct and return the session as its final ownership-transferring step.
+
+```typescript
+import {
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  getAgentDir,
+  SessionManager,
+} from "@hansjm10/volt-coding-agent";
+
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd });
+  return {
+    ...(await createAgentSessionFromServices({
+      services,
+      sessionManager,
+      sessionStartEvent,
+    })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: process.cwd(),
+  agentDir: getAgentDir(),
+  sessionManager: await SessionManager.create(process.cwd()),
+});
+```
+
+`AgentSessionRuntime` owns replacement of the active runtime across:
+
+- `newSession()`
+- `switchSession()`
+- `fork()`
+- clone flows via `fork(entryId, { position: "at" })`
+- `importFromJsonl()`
+
+Important behavior:
+
+- `runtime.session` changes after those operations
+- event subscriptions are attached to a specific `AgentSession`, so re-subscribe after replacement
+- if you use extensions, call `runtime.session.bindExtensions(...)` again for the new session
+- creation returns diagnostics on `runtime.diagnostics`
+- if runtime creation or replacement fails, the method throws and the caller decides how to handle it
+
+`AgentSession` owns its manager: `session.dispose()` installs the shutdown fence, and `await session.waitForClosed()` drains persistence and releases the SQLite store. `AgentSessionRuntime` does the same for its active session during `await runtime.dispose()`.
+
+```typescript
+let session = runtime.session;
+let unsubscribe = session.subscribe(() => {});
+
+await runtime.newSession();
+
+unsubscribe();
+session = runtime.session;
+unsubscribe = session.subscribe(() => {});
+```
+
+### SubagentManager
+
+`SubagentManager` starts isolated child runtimes through the same runtime factory used by `AgentSessionRuntime`. Named starts use definitions from `ResourceLoader.getSubagents()`; project definitions are present only when project trust is active.
+
+```typescript
+import {
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSession,
+  createAgentSessionFromServices,
+  createAgentSessionServices,
+  getAgentDir,
+  SubagentManager,
+} from "@hansjm10/volt-coding-agent";
+
+const cwd = process.cwd();
+const agentDir = getAgentDir();
+
+const parentServices = await createAgentSessionServices({ cwd, agentDir });
+const childAllowedTools = ["read", "grep", "find", "ls"];
+
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir, sessionManager, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd, agentDir });
+  return {
+    ...(await createAgentSessionFromServices({
+      services,
+      sessionManager,
+      sessionStartEvent,
+      tools: childAllowedTools,
+    })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+
+const subagents = new SubagentManager({
+  createRuntime,
+  cwd,
+  agentDir,
+  resourceLoader: parentServices.resourceLoader,
+  allowedTools: childAllowedTools,
+});
+
+const handle = await subagents.startByName("scout");
+try {
+  const done = handle.waitForEnd();
+  await handle.prompt("Find the auth entry points");
+  const result = await done;
+  const transcript = await handle.getTranscript();
+  console.log(result.status, result.error, result.sessionId, transcript.items.at(-1));
+} finally {
+  await handle.dispose();
+}
+```
+
+During normal execution, `waitForEnd()` resolves after the child session settles, including automatic retries, overflow compaction, queued continuations, and child background jobs. Native background delegation keeps parent cancellation and delegation ownership until that work settles. Direct SDK callers using `retainRuntimeOnDispose: true` must abort and drain active child work before disposing the handle; the external owner must retain and eventually dispose the runtime. Retaining a runtime alone does not preserve delegation ownership after direct handle disposal. The result has this contract:
+
+```typescript
+interface SubagentResult {
+  id: string;
+  sessionId: string;
+  status: "completed" | "failed" | "aborted";
+  error?: string;
+  event: SubagentEndEvent;
+}
+```
+
+`status` is the authoritative terminal outcome, and `error` supplies terminal failure detail when available. Do not infer the outcome from `event` or its assistant stop reasons: the latest low-level `agent_end` retains attempt history and can contain an error from a retry that was subsequently aborted.
+
+Cancellation remains authoritative while a child is prepared but not yet published. If `handle.abort()` is called or the delegation scope aborts before the first prompt is accepted, a later `handle.prompt()` rejects, rolls back the prepared runtime registration, disposes the handle, and leaves no activity or registry record. Any already committed child session row is retained and remains addressable by its session identity.
+
+Definition-less `start()` children join the session tree exactly like definition-backed ones — they share the session-wide registry, the delegation scope's ceilings, and depth accounting — but they are fail-closed for nested delegation: only a definition can declare an `allowedSubagents` policy, so an unnamed child cannot spawn further subagents.
+
+To expose the built-in `subagent` tool in an SDK-created parent session, pass the manager as `subagentToolManager`. It is active by default when no explicit tool allowlist is provided:
+
+```typescript
+const { session } = await createAgentSession({
+  subagentToolManager: subagents,
+});
+```
+
+If you pass `tools`, the allowlist remains strict and must include `subagent` when delegation should stay available:
+
+```typescript
+const { session } = await createAgentSession({
+  tools: ["subagent", "read", "grep", "find", "ls"],
+  subagentToolManager: subagents,
+});
+```
+
+Root sessions retain compatibility support for single `{ agent: string, task: string }`, parallel `{ tasks: Array<{ agent: string, task: string }> }`, chain `{ chain: Array<{ agent: string, task: string }> }`, list `{ list: true, cursor?: number }`, and follow `{ follow: string }` calls on `subagent`. In a runtime whose `SubagentManager` has a `SubagentRuntimeContext`, `subagent` is spawn-only and the child-only `subagent_registry` tool owns list and follow. It remains registered when depth, child-count, or child-name policy leaves no spawnable definitions. List mode returns up to 50 session-wide registry records per page, newest first by immutable registration sequence, within the aggregate output byte limit; when more records remain it reports a `nextCursor` registration-sequence cursor, so pages stay exact while records change state. Follow mode reuses an existing run by id, waits when it is still running, and prefixes the returned output with an untrusted-data notice because followed runs were prompted elsewhere in the tree.
+
+When the built-in `subagent` tool's manager implements the atomic spawn-confirmation methods — including `SubagentManager` — spawn modes are two-phase. The initial request internally lists the live registry and returns a one-time token without starting a child. Repeating the exact normalized request with `confirm: string` set to that token starts it. Reservations live in the shared session registry, so concurrent identical requests across different branches produce only one token; other callers observe the pending or claimed reservation. Tokens expire after five minutes, are request-bound and one-time. Custom `SubagentToolManager` implementations without the atomic methods retain immediate spawn behavior; direct `SubagentManager.startByName()` calls are unchanged.
+
+Custom runtime factories that support nested delegation must construct each child session's manager with the `subagentContext` passed to `CreateAgentSessionRuntimeFactory`. Explicit `tools` and `excludeTools` policies treat `subagent` and `subagent_registry` as separate names; omitting the registry name from an explicit child allowlist disables direct registry calls and its snapshot guidance, but not the spawn tool's internal registry preflight.
+
+Parallel mode accepts up to 8 tasks per call with max concurrency 4, rejects exact duplicate agent/task pairs before starting, keeps result ordering stable, and returns mixed-status details for partial failures. Chain mode runs up to 8 steps sequentially, replaces `{previous}` with the prior successful step output, returns the final successful step output on full success, and stops at the first failed step. Recursive delegation is fail-closed unless `allowedSubagents` is explicit, and every descendant shares the root delegation scope's cancellation signal and accounting. Structural spawn safeguards default to depth 5, 100 starts, and 16 active descendants; exhausting one rejects a new spawn without aborting admitted descendants. Each child runtime receives a wrap-up warning after 80 assistant turns and must return a tool-free final report after its turn 120. A child that tries to keep using tools in that report turn is aborted without affecting parallel siblings. Token, cost, and deadline budgets remain unlimited by default. A host can override the per-runtime thresholds through `SubagentManagerOptions.turnLimits` and tree-wide aggregate limits through `SubagentManagerOptions.delegationLimits`; every field accepts `Number.POSITIVE_INFINITY` explicitly, and setting per-runtime `maxTurns` to it without `warnAtTurns` disables both default turn stages. An unset `warnAtTurns` otherwise clamps to `min(80, maxTurns)` so a smaller explicit cap keeps a consistent warning stage, and an explicit `warnAtTurns` above a finite `maxTurns` is rejected instead of silently never firing. Model-visible output is capped at 50 KB per task/step and 100 KB in aggregate for parallel and list modes. Details payloads retain at most 100 task entries per snapshot with one shared aggregate output-text byte budget — omitted entries are counted in `summary.omittedTasks` and full output stays reachable through child sessions and the registry — so details stay well under remote frame limits regardless of future cap changes; tool details also store the final tree-budget snapshot.
+
+For example, an SDK host can customize the staged turn limits and opt into other finite tree-wide consumption budgets:
+
+```typescript
+const budgetedSubagents = new SubagentManager({
+  createRuntime,
+  cwd,
+  agentDir,
+  resourceLoader: parentServices.resourceLoader,
+  turnLimits: {
+    warnAtTurns: 200,
+    maxTurns: 250,
+  },
+  delegationLimits: {
+    maxTotalTokens: 2_000_000,
+    maxTotalCostUsd: 25,
+    maxDurationMs: 30 * 60 * 1000,
+  },
+});
+```
+
+Crossing a configured token, cost, or deadline budget aborts that delegation tree and its active descendants. Each child's turn budget instead requests its final report at `maxTurns`; refusing that report by requesting another tool aborts only that child.
+
+### Background jobs
+
+`AgentSession` augments its native `bash` and `subagent` tools with `background: true` and provides a `jobs` control tool. Include `jobs` in explicit tool allowlists when background work is needed. Standalone tool factories and custom/extension execution overrides are not automatically detached.
+
+The initial subagent confirmation preflight remains synchronous. A confirmed single, parallel, or chain spawning call can return a job ID before children finish. The `jobs` tool supports `list`, `read`, `wait`, and `cancel`; `read` and `wait` return bounded, non-consuming snapshots. See [Background jobs](usage.md#background-jobs) for arguments and limits.
+
+`session.waitForIdle()` reports foreground settlement, including already-scheduled background outcome continuations, but does not wait for still-running background jobs. `session.hasBackgroundJobs` includes running and cancelling jobs; `session.waitForBackgroundJobs()` joins them without cancellation. `session.abort()` cancels both foreground and background work and joins cleanup. `dispose()` synchronously fences new jobs; `waitForClosed()` joins their cleanup. Active jobs block reload, tree navigation, and Plan entry. Compaction keeps their handles valid. Background launch authorizes one automatic continuation for a successful or failed outcome, including when the parent has returned to idle. Notices are committed through normal provider boundaries. Explicit job cancellation suppresses its pending continuation without waking the parent; session abort suppresses all outstanding continuations. Natural foreground settlement does not revoke background outcome handling.
+
+Host policies registered with `session.registerTurnPolicy({ nextAction })` return `undefined` for no change, `{ type: "stop" }` for explicit termination, or `{ type: "pause" }` for a resumable interruption. Returning `context.defaultAction` is an explicit override, not a no-op. After the final policy decision, an explicit stop suppresses automatic continuation for all existing jobs, including still-running workers, without cancelling them or discarding output. A later explicit prompt remains subject to the policies; newly launched jobs receive independent wake authority. Ordinary completion and compaction pauses preserve background wakes. Proposing a notice does not consume its wake: only the final policy decision accepting that notice-bearing request does. Paused or discarded notices remain pending without repeatedly retrying the same policy. Registering or removing a next-action policy, an explicitly started run, or successful compaction allows another attempt; every attempt still passes through the current policies. A policy whose readiness changes internally calls its registration handle's `invalidate()` to request reevaluation. Failed automatic preflight also waits for such a readiness change, while failure after a notice-bearing request was accepted does not rearm that wake.
+
+While `session.abort()` drains cleanup, a shared admission gate prevents new foreground turns, continuations, compaction/tree operations, and native Bash/subagent work. This includes custom messages with `triggerTurn: true` when they would start a turn. Pending reservations cannot restart after the gate reopens. Queue storage, non-triggering custom messages, and job inspection remain available. Admission reopens after cleanup settles, even when abort reports a cleanup error; disposal keeps it closed permanently.
+
+Jobs are runtime- and branch-scoped. Running work and retained output are not recovered after a restart or runtime replacement. Existing transcript acknowledgements and completion notices remain historical records. A remote transport disconnect does not cancel jobs while the host runtime is retained.
+
+RPC clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, { conversationAuthority })`. Results include the owning `sessionId`; ordered responses also carry `branchEpoch`. `getState().backgroundJobs` and conversation bootstraps contain metadata-only snapshots, while `background_jobs_changed` invalidates the list and inspected output even after foreground settlement. RPC inspection does not acknowledge model collection. See [RPC background jobs](rpc.md#background-jobs) for remote grants, cancellation authority, and reconnect semantics.
+
+Native `tool_result` hooks run once for actual background completion rather than for the start acknowledgement. Completion hooks receive the job's abort signal through `ctx.signal`. Progress snapshots are available through `jobs` before completion hooks; `jobs` result hooks can inspect or transform those reads. Keep asynchronous completion hooks cancellation-aware and avoid assuming they run during a foreground model turn.
+
+### LSP health and outcomes
+
+`session.getLspStatus()` returns an on-demand snapshot with `enabled`, `workspaceRoot`, configured/per-root `servers`, and optional `traceFile`. Disabled and unused servers remain inspectable; reading status never starts a server, probes an executable, or offers an install. Per-root state distinguishes idle from failed and process startup from initialized readiness. Version, capability, coverage, recent error, and operation/latency evidence may be unknown until an operation runs.
+
+The model-facing `lsp` action `status` accepts optional `path`; all other actions require a path. Normal tool allowlists/exclusions still apply. Status is a read in Plan mode; rename/fix remain writes, and Plan never permits automatic installation.
+
+Explicit LSP tool results and automatic edit/write diagnostics carry `details.lsp`: bounded operation identity, trigger/action, completion time, outcome/reason, language/server, duration/cold-start timing, diagnostic/result counts, freshness, and source. Prefer this evidence over parsing human-readable text. Explicit failures set the normal `isError` flag; diagnostic failure never turns a successful edit/write into a failed mutation. No-publication timeouts are not clean results. RPC clients continue to use the existing tool-result error projection.
+
+See [LSP](lsp.md) for exact fields, TypeScript >=7 repair consent, Swift coverage limits, and the offline `volt lsp audit` command. Headless hosts do not install automatically; eligible interactive/RPC hosts must obtain explicit consent for reviewed built-in repairs.
+
+### Prompting and Message Queueing
+
+`PromptOptions` controls prompt expansion, queueing behavior while streaming, and prompt preflight notifications:
+
+```typescript
+interface PromptOptions {
+  expandPromptTemplates?: boolean;
+  images?: ImageContent[];
+  streamingBehavior?: "steer" | "followUp";
+  source?: InputSource;
+  preflightResult?: (success: boolean) => void;
+}
+```
+
+`preflightResult` is called once per `prompt()` invocation:
+
+- `true` when the prompt was accepted, queued, or handled immediately
+- `false` when prompt preflight rejected before acceptance
+
+It fires before `prompt()` resolves. `prompt()` still resolves only after the full accepted run finishes, including retries. Failures after acceptance are reported through the normal event and message stream, not through `preflightResult(false)`.
+
+The `prompt()` method handles prompt templates, extension commands, and message sending:
+
+```typescript
+// Basic prompt (when not streaming)
+await session.prompt("What files are here?");
+
+// With images
+await session.prompt("What's in this image?", {
+  images: [{ type: "image", source: { type: "base64", mediaType: "image/png", data: "..." } }]
+});
+
+// During streaming: must specify how to queue the message
+await session.prompt("Stop and do this instead", { streamingBehavior: "steer" });
+await session.prompt("After you're done, also check X", { streamingBehavior: "followUp" });
+```
+
+**Behavior:**
+- **Extension commands** (e.g., `/mycommand`): Execute immediately, even during streaming. They manage their own LLM interaction via `volt.sendMessage()`.
+- **File-based prompt templates** (from `.md` files): Expanded to their content before sending or queueing.
+- **During streaming without `streamingBehavior`**: Throws an error. Use `steer()` or `followUp()` directly, or specify the option.
+- **`preflightResult(true)`**: Means the prompt was accepted, queued, or handled immediately.
+- **`preflightResult(false)`**: Means preflight rejected before acceptance.
+
+For explicit queueing during streaming:
+
+```typescript
+// Queue a steering message for delivery after the current assistant turn finishes its tool calls
+await session.steer("New instruction");
+
+// Wait for agent to finish (delivered only when agent stops)
+await session.followUp("After you're done, also do this");
+```
+
+Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
+
+### Host inference accounting
+
+`createAgentSession({ inferenceAccounting })` accepts an awaited host-only metadata sink. It is used by isolated review sessions and also observes their compaction requests. The callback receives the selected model after auth resolution and returns `{ observe(usage, sequence, terminal, response): Promise<void> }`. `observe` receives cumulative usage snapshots, stream sequence, whether the attempt is terminal, and whether a terminal assistant response was observed (rather than a thrown request/stream failure). Replace earlier snapshots for that request; do not add them. The hook receives no prompt or response content.
+
+The admission callback finishes before provider dispatch. Observer promises are awaited; unlike `session.subscribe` listeners, rejection fails inference. Hosts must preserve request identity, bound retained metadata, and drain writes before reporting durable completion. Provider-internal HTTP retries are not separate admissions. An admitted request interrupted before dispatch is still a pending host attempt, not proof of a provider charge. Ordinary automatic session naming is outside this hook; isolated review sessions use deterministic names to avoid those cosmetic calls.
+
+`Usage.availability` distinguishes complete, partial, and unavailable provider reporting; absent metadata remains unknown. Preserve partial counters on failure instead of claiming zero. Model-priced estimates are not invoices or subscription charges. This hook does not persist anything by itself or enable a general billing service.
+
+### Session state
+
+`AgentSession` exposes an owned, read-only runtime snapshot through `session.state`. Mutate the session through its explicit methods so persistence and the provider context remain synchronized.
+
+```typescript
+// Access current state
+const state = session.state;
+
+// state.messages: AgentMessage[] - conversation history
+// state.model: Model - current model
+// state.thinkingLevel: ThinkingLevel - current thinking level
+// state.systemPrompt: string - system prompt
+// state.tools: AgentTool[] - available tools
+// state.streamingMessage?: AgentMessage - current partial assistant message
+// state.errorMessage?: string - latest assistant error
+
+// Change persisted runtime policy
+await session.setModel(model);
+await session.setThinkingLevel("high");
+
+// Change the active tool projection
+session.setActiveToolsByName(["read", "bash"]);
+
+// Wait for the full session prompt transaction to settle
+await session.waitForIdle();
+```
+
+`session.waitForIdle()` includes prompt preflight, retries, compaction, and queued continuations. `session.waitForNotBusy()` waits until `session.isBusy` is false, which also covers `!` commands, extension commands, and reload; do not await it from inside an extension command. `session.dispose()` installs the close fence synchronously; call `await session.waitForClosed()` outside callbacks when teardown must fully drain.
+
+### Events
+
+Subscribe to events to receive streaming output and lifecycle notifications. Volt snapshots the listener list and gives every listener its own full JSON-data snapshot. Mutating an event, throwing synchronously, or returning a rejected promise cannot affect session state or suppress later listeners. Listener promises are observed only to contain rejection; they do not delay session work.
+
+The source event is validated and owned even when there are no listeners. Public custom-message inputs, finalized messages, and tool final/update results are validated before acceptance, so invalid producer data fails explicitly instead of silently dropping an event. Accepted event and persisted values are limited to `null`, booleans, strings, finite numbers other than negative zero, dense arrays, and ordinary plain objects with enumerable string-keyed data properties. Omit absent optional properties. `undefined`, cycles, sparse/accessor/symbol-keyed objects, custom prototypes, `Map`, `Set`, `Date`, typed arrays, buffers, `ArrayBuffer`, `SharedArrayBuffer`, and other rich objects are rejected; convert them to plain JSON representations first.
+
+```typescript
+session.subscribe((event) => {
+  switch (event.type) {
+    // Streaming text from assistant
+    case "message_update":
+      if (event.assistantMessageEvent.type === "text_delta") {
+        process.stdout.write(event.assistantMessageEvent.delta);
+      }
+      if (event.assistantMessageEvent.type === "thinking_delta") {
+        // Thinking output (if thinking enabled)
+      }
+      break;
+    
+    // Tool execution
+    case "tool_execution_start":
+      console.log(`Tool: ${event.toolName}`);
+      break;
+    case "tool_execution_update":
+      // Streaming tool output
+      break;
+    case "tool_execution_end":
+      console.log(`Result: ${event.isError ? "error" : "success"}`);
+      break;
+    
+    // Message lifecycle
+    case "message_start":
+      // New message starting
+      break;
+    case "message_end":
+      // Message complete
+      break;
+    
+    // Agent lifecycle
+    case "agent_start":
+      // Agent started processing prompt
+      break;
+    case "agent_end":
+      // Agent run finished (event.messages contains new messages).
+      // A retry or compaction/queued continuation may still follow.
+      break;
+    case "agent_settled":
+      // Foreground prompt settled. Outstanding background jobs may later resume the session.
+      break;
+    
+    // Turn lifecycle (one LLM response + tool calls)
+    case "turn_start":
+      break;
+    case "turn_end":
+      // event.message: assistant response
+      // event.toolResults: tool results from this turn
+      break;
+    
+    // Session events (queue, compaction, retry)
+    case "queue_update":
+      console.log(event.steering, event.followUp);
+      break;
+    case "compaction_start":
+    case "compaction_end":
+    case "auto_retry_start":
+    case "auto_retry_end":
+      break;
+  }
+});
+```
+
+## Options Reference
+
+### Directories
+
+```typescript
+const { session } = await createAgentSession({
+  // Working directory for DefaultResourceLoader discovery
+  cwd: process.cwd(), // default
+  
+  // Global config directory
+  agentDir: "~/.volt/agent", // default (expands ~)
+});
+```
+
+`cwd` is used by `DefaultResourceLoader` for:
+- Project extensions (`.volt/extensions/`)
+- Project skills:
+  - `.volt/skills/`
+  - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
+- Project prompts (`.volt/prompts/`)
+- Context files (`AGENTS.md` walking up from cwd)
+- Workspace session-store directory selection
+
+`agentDir` is used by `DefaultResourceLoader` for:
+- Global extensions (`extensions/`)
+- Global skills:
+  - `skills/` under `agentDir` (for example `~/.volt/agent/skills/`)
+  - `~/.agents/skills/`
+- Global prompts (`prompts/`)
+- Global context file (`AGENTS.md`)
+- Settings (`settings.json`)
+- Custom models (`models.json`)
+- Credentials (`auth.json`)
+- Per-workspace SQLite session stores (`sessions/`)
+
+When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control resource discovery. They still influence workspace session-store selection and tool path resolution.
+
+### Model
+
+```typescript
+import { getModel } from "@hansjm10/volt-ai";
+import { AuthStorage, ModelRegistry } from "@hansjm10/volt-coding-agent";
+
+const authStorage = AuthStorage.create();
+const modelRegistry = ModelRegistry.create(authStorage);
+
+// Find specific built-in model (doesn't check if API key exists)
+const opus = getModel("anthropic", "claude-opus-4-5");
+if (!opus) throw new Error("Model not found");
+
+// Find any model by provider/id, including custom models from models.json
+// (doesn't check if API key exists)
+const customModel = modelRegistry.find("my-provider", "my-model");
+
+// Get only models that have valid API keys configured
+const available = await modelRegistry.getAvailable();
+
+const { session } = await createAgentSession({
+  model: opus,
+  thinkingLevel: "medium", // off, minimal, low, medium, high, xhigh, max
+  
+  // Models for cycling (Ctrl+P in interactive mode)
+  scopedModels: [
+    { model: opus, thinkingLevel: "high" },
+    { model: haiku, thinkingLevel: "off" },
+  ],
+  
+  authStorage,
+  modelRegistry,
+});
+```
+
+If no model is provided:
+1. Tries to restore from session (if continuing)
+2. Uses default from settings
+3. Falls back to first available model
+
+> See [examples/sdk/02-custom-model.ts](../examples/sdk/02-custom-model.ts)
+
+### API Keys and OAuth
+
+API key resolution priority (handled by AuthStorage):
+1. Runtime overrides (via `setRuntimeApiKey`, not persisted)
+2. Stored credentials in `auth.json` (API keys or OAuth tokens)
+3. Environment variables (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, etc.)
+4. Fallback resolver (for custom provider keys from `models.json`)
+
+```typescript
+import { AuthStorage, ModelRegistry } from "@hansjm10/volt-coding-agent";
+
+// Default: uses ~/.volt/agent/auth.json and ~/.volt/agent/models.json
+const authStorage = AuthStorage.create();
+const modelRegistry = ModelRegistry.create(authStorage);
+
+const { session } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(),
+  authStorage,
+  modelRegistry,
+});
+
+// Runtime API key override (not persisted to disk)
+authStorage.setRuntimeApiKey("anthropic", "sk-my-temp-key");
+
+// Custom auth storage location
+const customAuth = AuthStorage.create("/my/app/auth.json");
+const customRegistry = ModelRegistry.create(customAuth, "/my/app/models.json");
+
+const { session } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(),
+  authStorage: customAuth,
+  modelRegistry: customRegistry,
+});
+
+// No custom models.json (built-in models only)
+const simpleRegistry = ModelRegistry.inMemory(authStorage);
+```
+
+> See [examples/sdk/09-api-keys-and-oauth.ts](../examples/sdk/09-api-keys-and-oauth.ts)
+
+### System Prompt
+
+Use a `ResourceLoader` to override the system prompt:
+
+```typescript
+import { createAgentSession, DefaultResourceLoader } from "@hansjm10/volt-coding-agent";
+
+const loader = new DefaultResourceLoader({
+  systemPromptOverride: () => "You are a helpful assistant.",
+});
+await loader.reload();
+
+const { session } = await createAgentSession({ resourceLoader: loader });
+```
+
+> See [examples/sdk/03-custom-prompt.ts](../examples/sdk/03-custom-prompt.ts)
+
+### Tools
+
+Specify which built-in tools to enable:
+
+- Built-in tool names: `read`, `bash`, `jobs`, `edit`, `write`, `image_gen`, `web_search`, `web_fetch`, `grep`, `find`, `ls`, `inspect`, `lsp`, `subagent`, child-only `subagent_registry`, and `mcp`
+- Default built-ins: `read`, `bash`, `jobs`, `edit`, `write`, `web_search`, `web_fetch`, `lsp` (status remains available when LSP is disabled), `image_gen` when an OpenAI Codex model is selected, `subagent` when spawning is available, and `subagent_registry` when the manager belongs to a child runtime
+- `noTools: "all"` disables all tools
+- `noTools: "builtin"` disables default built-ins, including `subagent`, while keeping extension and custom tools enabled
+- `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
+
+The `edit` tool returns `details.diff` for Volt's TUI display and `details.patch` as a standard unified patch for SDK consumers. The Codex-only `image_gen` tool can read and upload local reference images and write generated PNG files; include it in an explicit `tools` allowlist when an SDK session should retain that authority.
+
+```typescript
+import { createAgentSession } from "@hansjm10/volt-coding-agent";
+
+// Read-only mode
+const { session } = await createAgentSession({
+  tools: ["read", "grep", "find", "ls"],
+});
+
+// Pick specific tools
+const { session } = await createAgentSession({
+  tools: ["read", "bash", "grep"],
+});
+
+// Disable one tool while keeping the rest available
+const { session } = await createAgentSession({
+  excludeTools: ["ask_question"],
+});
+```
+
+#### Tools with Custom cwd
+
+When you pass a custom `cwd`, `createAgentSession()` builds selected built-in tools for that cwd.
+
+```typescript
+import { createAgentSession, SessionManager } from "@hansjm10/volt-coding-agent";
+
+const cwd = "/path/to/project";
+
+// Use default tools for custom cwd
+const { session } = await createAgentSession({
+  cwd,
+  sessionManager: SessionManager.inMemory(cwd),
+});
+
+// Or pick specific tools for custom cwd
+const { session } = await createAgentSession({
+  cwd,
+  tools: ["read", "bash", "grep"],
+  sessionManager: SessionManager.inMemory(cwd),
+});
+```
+
+> See [examples/sdk/05-tools.ts](../examples/sdk/05-tools.ts)
+
+### Custom Tools
+
+```typescript
+import { Type } from "typebox";
+import { createAgentSession, defineTool } from "@hansjm10/volt-coding-agent";
+
+// Inline custom tool
+const myTool = defineTool({
+  name: "my_tool",
+  label: "My Tool",
+  description: "Does something useful",
+  parameters: Type.Object({
+    input: Type.String({ description: "Input value" }),
+  }),
+  execute: async (_toolCallId, params) => ({
+    content: [{ type: "text", text: `Result: ${params.input}` }],
+    details: {},
+  }),
+});
+
+// Pass custom tools directly
+const { session } = await createAgentSession({
+  customTools: [myTool],
+});
+```
+
+Use `defineTool()` for standalone definitions and arrays like `customTools: [myTool]`. Inline `volt.registerTool({ ... })` already infers parameter types correctly.
+
+Custom tools passed via `customTools` are combined with extension-registered tools. Extensions loaded by the ResourceLoader can also register tools via `volt.registerTool()`.
+
+Every final tool result and streamed update must satisfy the lossless JSON grammar described under [Events](#events). Invalid final results become explicit failed tool results. An invalid streamed update aborts the linked tool signal, suppresses later updates, waits for tool settlement, and then becomes the explicit failure; callbacks after settlement are ignored.
+
+If you pass `tools`, include each custom or extension tool name you want enabled, for example `tools: ["read", "bash", "my_tool"]`.
+
+> See [examples/sdk/05-tools.ts](../examples/sdk/05-tools.ts)
+
+### Extensions
+
+Extensions are loaded by the `ResourceLoader`. `DefaultResourceLoader` discovers extensions from `~/.volt/agent/extensions/`, `.volt/extensions/`, and settings.json extension sources.
+
+```typescript
+import { createAgentSession, DefaultResourceLoader } from "@hansjm10/volt-coding-agent";
+
+const loader = new DefaultResourceLoader({
+  additionalExtensionPaths: ["/path/to/my-extension.ts"],
+  extensionFactories: [
+    (volt) => {
+      volt.on("agent_start", () => {
+        console.log("[Inline Extension] Agent starting");
+      });
+    },
+  ],
+});
+await loader.reload();
+
+const { session } = await createAgentSession({ resourceLoader: loader });
+```
+
+Extensions can register tools, subscribe to events, add commands, and more. See [extensions.md](extensions.md) for the full API.
+
+**Event Bus:** Extensions can communicate via `volt.events`. Pass a shared `eventBus` to `DefaultResourceLoader` if you need to emit or listen from outside:
+
+```typescript
+import { createEventBus, DefaultResourceLoader } from "@hansjm10/volt-coding-agent";
+
+const eventBus = createEventBus();
+const loader = new DefaultResourceLoader({
+  eventBus,
+});
+await loader.reload();
+
+eventBus.on("my-extension:status", (data) => console.log(data));
+```
+
+> See [examples/sdk/06-extensions.ts](../examples/sdk/06-extensions.ts) and [docs/extensions.md](extensions.md)
+
+### Managed extension work
+
+Extensions can use `request_boundary`, `ctx.work`, and `volt.getWorkStatus()` to prepare bounded read-only context. No extension or auxiliary model is enabled by the SDK. See [Managed context preparation](extensions.md#managed-context-preparation) for task ownership, services, and context admission semantics.
+
+`session.registerTurnPolicy(policy)` snapshots and freezes the `beforeToolCall` and `nextAction` callbacks. Mutating the original object no longer changes registered behavior. The returned callable `PolicyRegistration` removes the policy; `registration.update(nextPolicy)` replaces its complete callback snapshot in place, and `registration.invalidate()` revokes previous authorization after a closure-state change. Make closure changes and invalidation synchronously, without an intervening await. Updates and removals preserve other registrations and their order. Removed handles cannot update or invalidate.
+
+Tool-policy revisions cover every managed operation, the complete source-validation collection, and final provider admission. Changes during collection or later admission awaits omit optional context with `authority_changed` rather than retrying validation or extending deadlines. Mandatory context continues normally. These controls do not sandbox trusted extensions or later provider payload hooks. Extension call/result policies use the same [registration-handle contract](extensions.md#updating-tool-policies).
+
+Hosts may tighten the default resource ceilings and opt into a bounded first-request preparation wait when constructing a session:
+
+```typescript
+const { session } = await createAgentSession({
+  extensionWorkLimits: {
+    perRuntimeTasks: 2,
+    perExtensionTasks: 1,
+    taskTimeoutMs: 3000,
+    maxTaskTimeoutMs: 5000,
+    suffixBytes: 8192,
+    firstRequestWaitMs: 50, // Default 0; at most 100 ms, shared across extensions.
+  },
+});
+```
+
+All supplied limits must be finite nonnegative integers. Resource ceilings can only tighten defaults; `firstRequestWaitMs` is the exception, with default 0 and maximum 100. Extensions must synchronously request that allowance at the first boundary; configuration alone does not add a delay. Workspace services require active trusted native `read`, `find`, `grep`, or `lsp` implementations. `readSkill` uses an exact native-loaded catalog resource grant and a registered trusted read implementation, without activating general reads. Custom overrides are not silently bypassed. Metadata-only SDK skills have no native file identity and are omitted from the managed catalog; use `DefaultResourceLoader` or the native `loadSkills`/`loadSkillsFromDir` results for resource-backed skills. Managed task completion cannot start model inference; cleanup participates in session teardown. The process-wide ceiling includes revoked callbacks that have not settled.
+
+This is a trusted-extension execution convenience, not a sandbox, provider spending cap, transparent cache, or additional permission for network export. Generic operation diagnostics contain metadata, not source text.
+
+### Skills
+
+```typescript
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  type Skill,
+} from "@hansjm10/volt-coding-agent";
+
+const customSkill: Skill = {
+  name: "my-skill",
+  description: "Custom instructions",
+  filePath: "/path/to/SKILL.md",
+  baseDir: "/path/to",
+  source: "custom",
+};
+
+const loader = new DefaultResourceLoader({
+  skillsOverride: (current) => ({
+    skills: [...current.skills, customSkill],
+    diagnostics: current.diagnostics,
+  }),
+});
+await loader.reload();
+
+const { session } = await createAgentSession({ resourceLoader: loader });
+```
+
+> See [examples/sdk/04-skills.ts](../examples/sdk/04-skills.ts)
+
+### Context Files
+
+```typescript
+import { createAgentSession, DefaultResourceLoader } from "@hansjm10/volt-coding-agent";
+
+const loader = new DefaultResourceLoader({
+  agentsFilesOverride: (current) => ({
+    agentsFiles: [
+      ...current.agentsFiles,
+      { path: "/virtual/AGENTS.md", content: "# Guidelines\n\n- Be concise" },
+    ],
+  }),
+});
+await loader.reload();
+
+const { session } = await createAgentSession({ resourceLoader: loader });
+```
+
+> See [examples/sdk/07-context-files.ts](../examples/sdk/07-context-files.ts)
+
+### Slash Commands
+
+```typescript
+import {
+  createAgentSession,
+  DefaultResourceLoader,
+  type PromptTemplate,
+} from "@hansjm10/volt-coding-agent";
+
+const customCommand: PromptTemplate = {
+  name: "deploy",
+  description: "Deploy the application",
+  source: "(custom)",
+  content: "# Deploy\n\n1. Build\n2. Test\n3. Deploy",
+};
+
+const loader = new DefaultResourceLoader({
+  promptsOverride: (current) => ({
+    prompts: [...current.prompts, customCommand],
+    diagnostics: current.diagnostics,
+  }),
+});
+await loader.reload();
+
+const { session } = await createAgentSession({ resourceLoader: loader });
+```
+
+> See [examples/sdk/08-prompt-templates.ts](../examples/sdk/08-prompt-templates.ts)
+
+### Session Management
+
+Each workspace or custom session directory has one authoritative `sessions.sqlite` store. Persisted sessions use stable references:
+
+```typescript
+interface SessionReference {
+  readonly sessionDirectory: string;
+  readonly storeId: string;
+  readonly sessionId: string;
+  readonly sessionGeneration: string;
+}
+```
+
+Persisted factories and store queries are asynchronous. JSONL paths are explicit snapshot imports only.
+
+```typescript
+import {
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSession,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  getAgentDir,
+  SessionManager,
+} from "@hansjm10/volt-coding-agent";
+
+// In-memory (no persistence)
+const { session } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(),
+});
+
+// New persistent session
+const { session: persisted } = await createAgentSession({
+  sessionManager: await SessionManager.create(process.cwd()),
+});
+
+// Continue most recent
+const { session: continued, modelFallbackMessage } = await createAgentSession({
+  sessionManager: await SessionManager.continueRecent(process.cwd()),
+});
+if (modelFallbackMessage) {
+  console.log("Note:", modelFallbackMessage);
+}
+
+// Summary-only listing and deep search return SessionInfo objects with stable refs.
+// Search scans extracted searchable text one session at a time.
+const currentProjectSessions = await SessionManager.list(process.cwd());
+const matchingSessions = await SessionManager.search(process.cwd(), "authentication");
+const allSessions = await SessionManager.listAll();
+const selectedRef = currentProjectSessions[0]?.ref;
+
+if (selectedRef) {
+  const { session: opened } = await createAgentSession({
+    sessionManager: await SessionManager.open(selectedRef),
+  });
+  console.log(opened.sessionId);
+}
+
+// Explicitly import or export a JSONL interchange snapshot
+const imported = await SessionManager.importFromJsonl("/path/to/session-snapshot.jsonl");
+try {
+  const importedRef = imported.getSessionRef();
+  if (importedRef) {
+    await SessionManager.exportJsonlSnapshot(importedRef, "/path/to/export.jsonl");
+  }
+} finally {
+  await imported.closePersistence();
+}
+
+// Session replacement API for /clear, /resume, /fork, /clone, and import flows.
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd });
+  return {
+    ...(await createAgentSessionFromServices({
+      services,
+      sessionManager,
+      sessionStartEvent,
+    })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: process.cwd(),
+  agentDir: getAgentDir(),
+  sessionManager: await SessionManager.create(process.cwd()),
+});
+
+await runtime.newSession();
+if (selectedRef) await runtime.switchSession(selectedRef);
+await runtime.fork("entry-id");
+await runtime.fork("entry-id", { position: "at" }); // clone through this entry
+await runtime.importFromJsonl("/path/to/session-snapshot.jsonl");
+```
+
+`AgentSession.sessionRef` is the current persisted reference, or `undefined` for an in-memory session. `AgentSession.sessionId` is always available.
+
+**SessionManager tree API:**
+
+```typescript
+if (!selectedRef) throw new Error("No saved session");
+const sm = await SessionManager.open(selectedRef);
+try {
+  const entries = sm.getEntries();
+  const tree = sm.getTree();
+  const path = sm.getBranch();
+  const leaf = sm.getLeafEntry();
+  const entry = sm.getEntry(id);
+  const children = sm.getChildren(id);
+
+  const label = sm.getLabel(id);
+  sm.appendLabelChange(id, "checkpoint");
+
+  sm.branch(entryId);
+  sm.branchWithSummary(id, "Summary...");
+  await sm.createBranchedSession(leafId);
+  await sm.flush();
+} finally {
+  await sm.closePersistence();
+}
+```
+
+Callers that directly own a persisted `SessionManager` must await `closePersistence()` before deleting its session directory or exiting. Static list, search, context lookup, export, and delete operations release their scoped store ownership before resolving.
+
+> See [examples/sdk/11-sessions.ts](../examples/sdk/11-sessions.ts) and [Session Format](session-format.md)
+
+### Settings Management
+
+```typescript
+import { createAgentSession, SettingsManager, SessionManager } from "@hansjm10/volt-coding-agent";
+
+// Default: loads from files (global + project merged)
+const { session } = await createAgentSession({
+  settingsManager: SettingsManager.create(),
+});
+
+// With overrides
+const settingsManager = SettingsManager.create();
+settingsManager.applyOverrides({
+  compaction: { enabled: false },
+  retry: { enabled: true, maxRetries: 5 },
+});
+const { session } = await createAgentSession({ settingsManager });
+
+// In-memory (no file I/O, for testing)
+const { session } = await createAgentSession({
+  settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+  sessionManager: SessionManager.inMemory(),
+});
+
+// Custom directories
+const { session } = await createAgentSession({
+  settingsManager: SettingsManager.create("/custom/cwd", "/custom/agent"),
+});
+```
+
+**Static factories:**
+- `SettingsManager.create(cwd?, agentDir?)` - Load from files
+- `SettingsManager.inMemory(settings?)` - No file I/O
+
+**Project-specific settings:**
+
+Settings load from two locations and merge:
+1. Global: `~/.volt/agent/settings.json`
+2. Project: `<cwd>/.volt/settings.json`
+
+Project overrides global. Nested objects merge keys. Setters modify global settings by default.
+
+**Persistence and error handling semantics:**
+
+- Settings getters/setters are synchronous for in-memory state.
+- Setters enqueue persistence writes asynchronously.
+- Call `await settingsManager.flush()` when you need a durability boundary (for example, before process exit or before asserting file contents in tests).
+- `SettingsManager` does not print settings I/O errors. Use `settingsManager.drainErrors()` and report them in your app layer.
+
+> See [examples/sdk/10-settings.ts](../examples/sdk/10-settings.ts)
+
+## ResourceLoader
+
+Use `DefaultResourceLoader` to discover extensions, skills, prompts, themes, and context files.
+
+```typescript
+import {
+  DefaultResourceLoader,
+  getAgentDir,
+} from "@hansjm10/volt-coding-agent";
+
+const loader = new DefaultResourceLoader({
+  cwd,
+  agentDir: getAgentDir(),
+});
+await loader.reload();
+
+const extensions = loader.getExtensions();
+const skills = loader.getSkills();
+const prompts = loader.getPrompts();
+const themes = loader.getThemes();
+const subagents = loader.getSubagents();
+const contextFiles = loader.getAgentsFiles().agentsFiles;
+```
+
+## Return Value
+
+`createAgentSession()` returns:
+
+```typescript
+interface CreateAgentSessionResult {
+  // The session
+  session: AgentSession;
+  
+  // Extensions result (for runner setup)
+  extensionsResult: LoadExtensionsResult;
+  
+  // Warning if session model couldn't be restored
+  modelFallbackMessage?: string;
+}
+
+interface LoadExtensionsResult {
+  extensions: Extension[];
+  errors: Array<{ path: string; error: string }>;
+  runtime: ExtensionRuntime;
+}
+```
+
+## Complete Example
+
+```typescript
+import { getModel } from "@hansjm10/volt-ai";
+import { Type } from "typebox";
+import {
+  AuthStorage,
+  createAgentSession,
+  DefaultResourceLoader,
+  defineTool,
+  ModelRegistry,
+  SessionManager,
+  SettingsManager,
+} from "@hansjm10/volt-coding-agent";
+
+// Set up auth storage (custom location)
+const authStorage = AuthStorage.create("/custom/agent/auth.json");
+
+// Runtime API key override (not persisted)
+if (process.env.MY_KEY) {
+  authStorage.setRuntimeApiKey("anthropic", process.env.MY_KEY);
+}
+
+// Model registry (no custom models.json)
+const modelRegistry = ModelRegistry.create(authStorage);
+
+// Inline tool
+const statusTool = defineTool({
+  name: "status",
+  label: "Status",
+  description: "Get system status",
+  parameters: Type.Object({}),
+  execute: async () => ({
+    content: [{ type: "text", text: `Uptime: ${process.uptime()}s` }],
+    details: {},
+  }),
+});
+
+const model = getModel("anthropic", "claude-opus-4-5");
+if (!model) throw new Error("Model not found");
+
+// In-memory settings with overrides
+const settingsManager = SettingsManager.inMemory({
+  compaction: { enabled: false },
+  retry: { enabled: true, maxRetries: 2 },
+});
+
+const loader = new DefaultResourceLoader({
+  cwd: process.cwd(),
+  agentDir: "/custom/agent",
+  settingsManager,
+  systemPromptOverride: () => "You are a minimal assistant. Be concise.",
+});
+await loader.reload();
+
+const { session } = await createAgentSession({
+  cwd: process.cwd(),
+  agentDir: "/custom/agent",
+
+  model,
+  thinkingLevel: "off",
+  authStorage,
+  modelRegistry,
+
+  tools: ["read", "bash", "status"],
+  customTools: [statusTool],
+  resourceLoader: loader,
+
+  sessionManager: SessionManager.inMemory(),
+  settingsManager,
+});
+
+session.subscribe((event) => {
+  if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+    process.stdout.write(event.assistantMessageEvent.delta);
+  }
+});
+
+await session.prompt("Get status and list files.");
+```
+
+## Run Modes
+
+The SDK exports run mode utilities for building custom interfaces on top of `createAgentSession()`:
+
+### InteractiveMode
+
+Full TUI interactive mode with editor, chat history, and all built-in commands:
+
+```typescript
+import {
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  getAgentDir,
+  InteractiveMode,
+  SessionManager,
+} from "@hansjm10/volt-coding-agent";
+
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd });
+  return {
+    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: process.cwd(),
+  agentDir: getAgentDir(),
+  sessionManager: await SessionManager.create(process.cwd()),
+});
+
+const mode = new InteractiveMode(runtime, {
+  migratedProviders: [],
+  modelFallbackMessage: undefined,
+  initialMessage: "Hello",
+  initialImages: [],
+  initialMessages: [],
+});
+
+await mode.run();
+```
+
+### runPrintMode
+
+Single-shot mode: send prompts, output result, exit:
+
+```typescript
+import {
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  getAgentDir,
+  runPrintMode,
+  SessionManager,
+} from "@hansjm10/volt-coding-agent";
+
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd });
+  return {
+    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: process.cwd(),
+  agentDir: getAgentDir(),
+  sessionManager: await SessionManager.create(process.cwd()),
+});
+
+await runPrintMode(runtime, {
+  mode: "text",
+  initialMessage: "Hello",
+  initialImages: [],
+  messages: ["Follow up"],
+});
+```
+
+### runRpcMode
+
+JSON-RPC mode for subprocess or custom transport integration:
+
+```typescript
+import {
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  getAgentDir,
+  runRpcMode,
+  SessionManager,
+} from "@hansjm10/volt-coding-agent";
+
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd });
+  return {
+    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: process.cwd(),
+  agentDir: getAgentDir(),
+  sessionManager: await SessionManager.create(process.cwd()),
+});
+
+await runRpcMode(runtime);
+```
+
+For same-process RPC clients, use the in-memory transport adapter:
+
+```typescript
+import {
+  createInProcessRpcClient,
+  type CreateAgentSessionRuntimeFactory,
+  createAgentSessionFromServices,
+  createAgentSessionRuntime,
+  createAgentSessionServices,
+  getAgentDir,
+  SessionManager,
+} from "@hansjm10/volt-coding-agent";
+
+const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
+  const services = await createAgentSessionServices({ cwd });
+  return {
+    ...(await createAgentSessionFromServices({ services, sessionManager, sessionStartEvent })),
+    services,
+    diagnostics: services.diagnostics,
+  };
+};
+const runtime = await createAgentSessionRuntime(createRuntime, {
+  cwd: process.cwd(),
+  agentDir: getAgentDir(),
+  sessionManager: await SessionManager.create(process.cwd()),
+});
+
+const client = await createInProcessRpcClient(runtime);
+const state = await client.getState();
+await client.stop(); // also disposes the runtime through RPC mode shutdown
+```
+
+For custom transports, pass any `RpcTransport` to `RpcTransportClient`. This is the client-side adapter used by non-stdio transports such as Iroh streams.
+
+See [RPC documentation](rpc.md) for the JSON protocol.
+
+## RPC Mode Alternative
+
+For subprocess-based integration without building with the SDK, use the CLI directly:
+
+```bash
+volt --mode rpc --no-session
+```
+
+See [RPC documentation](rpc.md) for the JSON protocol.
+
+The SDK is preferred when:
+- You want type safety
+- You're in the same Node.js process
+- You need direct access to agent state
+- You want to customize tools/extensions programmatically
+
+RPC mode is preferred when:
+- You're integrating from another language
+- You want process isolation
+- You're building a language-agnostic client
+
+## Exports
+
+The main entry point exports:
+
+```typescript
+// Factory
+createAgentSession
+createAgentSessionRuntime
+AgentSessionRuntime
+SubagentManager
+
+// RPC clients and transports
+RpcClient
+RpcTransportClient
+InProcessRpcClient
+createInProcessRpcClient
+createLoopbackRpcTransportPair
+
+// Auth and Models
+AuthStorage
+ModelRegistry
+
+// Resource loading
+DefaultResourceLoader
+type ResourceLoader
+createEventBus
+
+// Helpers
+defineTool
+getAgentDir
+getPackageDir
+getReadmePath
+getDocsPath
+getExamplesPath
+
+// Session management
+SessionManager
+type SessionReference
+SettingsManager
+
+// Tool factories
+createCodingTools
+createReadOnlyTools
+createReadTool, createBashTool, createEditTool, createWriteTool, createImageGenTool
+createWebSearchTool, createWebFetchTool, createGrepTool, createFindTool, createLsTool
+createInspectionTool, createLspTool, createSubagentTool, createSubagentRegistryTool, createMcpTool
+
+// Types
+type CreateAgentSessionOptions
+type CreateAgentSessionResult
+type ExtensionFactory
+type ExtensionAPI
+type ToolDefinition
+type CustomMessageInput
+type JsonPrimitive
+type JsonValue
+type JsonObject
+type JsonCompatible
+type JsonCompatibleInput
+type Skill
+type PromptTemplate
+type Tool
+```
+
+For extension types, see [extensions.md](extensions.md) for the full API.

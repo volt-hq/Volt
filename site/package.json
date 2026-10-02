@@ -1,0 +1,26 @@
+{
+  "name": "volt-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Marketing, docs, and install site for Volt (volt-cli.dev)",
+  "scripts": {
+    "sync-docs": "node scripts/sync-docs.mjs",
+    "predev": "node scripts/sync-docs.mjs",
+    "dev": "astro dev",
+    "prebuild": "node scripts/sync-docs.mjs",
+    "build": "astro build",
+    "postbuild": "node --test test/spacing.test.mjs",
+    "preview": "astro preview",
+    "deploy": "wrangler deploy"
+  },
+  "dependencies": {
+    "@astrojs/rss": "4.0.19",
+    "@astrojs/starlight": "0.41.3",
+    "astro": "7.3.5",
+    "sharp": "0.35.5"
+  },
+  "devDependencies": {
+    "wrangler": "4.142.0"
+  }
+}

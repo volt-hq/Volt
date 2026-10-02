@@ -1,0 +1,150 @@
+# Sessions
+
+Volt saves conversations as sessions so you can continue work, branch from earlier turns, and revisit previous paths.
+
+## Session Storage
+
+Volt stores each workspace's sessions in `sessions.sqlite` under its directory in `~/.volt/agent/sessions/`. A custom `--session-dir` contains its own `sessions.sqlite`. This SQLite database is the live authoritative store; sessions are addressed by stable IDs instead of live files.
+
+```bash
+volt -c                  # Continue most recent session
+volt -r                  # Browse and select from past sessions
+volt --no-session        # Ephemeral mode; do not save
+volt --name "my task"    # Set session display name at startup
+volt --session <id|path> # Resume by partial ID, or import a JSONL snapshot by path
+volt --fork <id|path>    # Fork by partial ID, or import a JSONL snapshot as a new session
+```
+
+Use `/session` in interactive mode to see the current store directory, session ID, message count, tokens, and cost.
+
+JSONL is not live storage. It is used only for explicit snapshot import and export; passing a path to `--session` or `--fork` imports a current `snapshotVersion: 1` snapshot into SQLite.
+
+Session listing, exact-ID resolution, continuation candidate selection, and remote discovery read materialized summaries without loading transcript entries. Picker search is a deep scan over extracted user, assistant, and displayed custom-message text. It processes one session document at a time, but latency still grows with searchable history and query complexity; JavaScript regex searches have no general runtime bound.
+
+For storage, snapshots, and the `SessionManager` API, see [Session Format](session-format.md).
+
+## Session Commands
+
+| Command | Description |
+|---------|-------------|
+| `/resume` | Browse and select previous sessions |
+| `/clear` | Start a new session |
+| `/name <name>` | Set the current session display name |
+| `/session` | Show session info |
+| `/tree` | Navigate the current session tree |
+| `/fork` | Create a new session from a previous user message |
+| `/clone` | Duplicate the current active branch into a new session |
+| `/compact [prompt]` | Summarize older context; see [Compaction](compaction.md) |
+| `/export [file]` | Export session to HTML |
+| `/share` | Upload as private GitHub gist with shareable HTML link |
+
+## Resuming and Deleting Sessions
+
+`/resume` opens an interactive session picker for the current project. `volt -r` opens the same picker at startup.
+
+In the picker you can:
+
+- search by typing
+- toggle path display with Ctrl+P
+- toggle sort mode with Ctrl+S
+- filter to named sessions with Ctrl+N
+- rename with Ctrl+R
+- delete with Ctrl+D, then confirm
+
+When available, volt exports a JSONL snapshot to the system trash before deleting the session from SQLite.
+
+## Naming Sessions
+
+Use `/name <name>` to set a human-readable session name:
+
+```text
+/name Refactor auth module
+```
+
+Set the name at startup with `--name` or `-n`:
+
+```bash
+volt --name "Refactor auth module"
+volt --name "CI audit" -p "Review this build failure"
+```
+
+Named sessions are easier to find in `/resume` and `volt -r`.
+
+## Branching with `/tree`
+
+Sessions are stored as trees. Every entry has an `id` and `parentId`, and the current position is the active leaf. `/tree` lets you jump to any previous point and continue from there without creating another session.
+
+<p align="center"><img src="images/tree-view.png" alt="Volt session tree selector. After the first answer the session splits into two branches: the active, highlighted branch adds a separator option, and the other branch, labeled maxLength draft, adds a maxLength option. Each branch lists its user prompt, tool calls, and assistant reply." width="720"></p>
+<p align="center"><em><code>/tree</code> in Volt 0.2.1 after rewriting an earlier prompt. Both branches remain in the same session.</em></p>
+
+Example shape:
+
+```text
+├─ user: "Hello, can you help..."
+│  └─ assistant: "Of course! I can..."
+│     ├─ user: "Let's try approach A..."
+│     │  └─ assistant: "For approach A..."
+│     │     └─ user: "That worked..."  ← active
+│     └─ user: "Actually, approach B..."
+│        └─ assistant: "For approach B..."
+```
+
+### Tree Controls
+
+| Key | Action |
+|-----|--------|
+| ↑/↓ | Navigate visible entries |
+| ←/→ | Page up/down |
+| Ctrl+←/Ctrl+→ or Alt+←/Alt+→ | Fold/unfold or jump between branch segments |
+| Shift+L | Set or clear a label on the selected entry |
+| Shift+T | Toggle label timestamps |
+| Enter | Select entry |
+| Escape/Ctrl+C | Cancel |
+| Ctrl+O | Cycle filter mode |
+
+Filter modes are: default, no-tools, user-only, labeled-only, and all. Configure the default with `treeFilterMode` in [Settings](settings.md).
+
+### Selection Behavior
+
+Selecting a user or custom message:
+
+1. Moves the leaf to the selected message's parent.
+2. Places the selected message text in the editor.
+3. Lets you edit and resubmit, creating a new branch.
+
+Selecting an assistant, tool, compaction, or other non-user entry:
+
+1. Moves the leaf to that entry.
+2. Leaves the editor empty.
+3. Lets you continue from that point.
+
+Selecting the root user message resets the leaf to an empty conversation and places the original prompt in the editor.
+
+## `/tree`, `/fork`, and `/clone`
+
+| Feature | `/tree` | `/fork` | `/clone` |
+|---------|---------|---------|----------|
+| Output | Same session | New session | New session |
+| View | Full tree | User-message selector | Current active branch |
+| Typical use | Explore alternatives in place | Start a new session from an earlier prompt | Duplicate current work before continuing |
+| Summary | Optional branch summary | None | None |
+
+Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone` when you want a separate session ID.
+
+## Branch Summaries
+
+When `/tree` switches away from one branch to another, volt can summarize the abandoned branch and attach that summary at the new position. This preserves important context from the path you left without replaying the whole branch.
+
+When prompted, choose one of:
+
+1. no summary
+2. summarize with the default prompt
+3. summarize with custom focus instructions
+
+See [Compaction](compaction.md) for branch summarization internals and extension hooks.
+
+## Session Format
+
+The SQLite store contains message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries. Explicit JSONL snapshots serialize the same public session tree for interchange; they are not reopened as live storage.
+
+For snapshot parsers, extensions, SDK usage, and the full `SessionManager` API, see [Session Format](session-format.md).

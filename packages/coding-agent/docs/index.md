@@ -1,0 +1,83 @@
+# Volt Documentation
+
+Volt is a coding agent that runs on your computer and lets you continue the same live conversation from its iOS companion app. It includes native planning, code review, subagents, background jobs, LSP, and MCP, with extensions, skills, prompt templates, themes, and packages for project-specific workflows.
+
+## Quick start
+
+Install Volt with npm:
+
+```bash
+npm install -g --ignore-scripts @hansjm10/volt-coding-agent
+```
+
+`--ignore-scripts` disables dependency lifecycle scripts during install. Volt does not require install scripts for normal npm installs.
+
+To uninstall volt itself, use npm for curl and npm installs:
+
+```bash
+npm uninstall -g @hansjm10/volt-coding-agent
+```
+
+For pnpm, Yarn, or Bun installs, use the matching global remove command: `pnpm remove -g @hansjm10/volt-coding-agent`, `yarn global remove @hansjm10/volt-coding-agent`, or `bun uninstall -g @hansjm10/volt-coding-agent`.
+
+Then run it in a project directory:
+
+```bash
+volt
+```
+
+Authenticate with `/login` for subscription providers, or set an API key such as `ANTHROPIC_API_KEY` before starting volt.
+
+For the full first-run flow, see [Quickstart](quickstart.md).
+
+## Start here
+
+- [Quickstart](quickstart.md) - install, authenticate, and run a first session.
+- [Continue from your iPhone](quickstart.md#continue-from-your-iphone) - connect the companion app to your computer.
+- [Using Volt](usage.md) - interactive mode, slash commands, context files, and CLI reference.
+- [Providers](providers.md) - subscription and API-key setup for built-in providers.
+- [Security](security.md) - project trust, sandbox boundaries, remote access warnings, and vulnerability reporting.
+- [Containerization](containerization.md) - sandbox volt with OpenShell, Gondolin, or Docker.
+- [Settings](settings.md) - global and project settings.
+- [Background daemon](daemon.md) - the voltd daemon: remote access, conversation leases, and live shared sessions.
+- [Native MCP support](mcp.md) - built-in token-efficient MCP gateway support and roadmap.
+- [Keybindings](keybindings.md) - default shortcuts and custom keybindings.
+- [Sessions](sessions.md) - session management, branching, and tree navigation.
+- [Compaction](compaction.md) - context compaction and branch summarization.
+
+## Customization
+
+- [Extensions](extensions.md) - TypeScript modules for tools, commands, events, and custom UI.
+- [Skills](skills.md) - Agent Skills for reusable on-demand capabilities.
+- [Prompt templates](prompt-templates.md) - reusable prompts that expand from slash commands.
+- [Themes](themes.md) - built-in and custom terminal themes.
+- [Volt packages](packages.md) - bundle and share extensions, skills, prompts, and themes.
+- [Custom models](models.md) - add model entries for supported provider APIs.
+- [Custom providers](custom-provider.md) - implement custom APIs and OAuth flows.
+
+## Programmatic usage
+
+- [SDK](sdk.md) - embed volt in Node.js applications.
+- [RPC mode](rpc.md) - integrate over stdin/stdout JSONL.
+- [Iroh remote access](usage.md#remote-access-over-iroh-preview) - supported preview host, pair, status, clients, revoke, relay, and safety workflow.
+- [Iroh remote protocol](iroh-remote-protocol.md) - v1 ticket, handshake, JSONL, command, and redaction contract for client authors.
+- [Iroh remote access design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/iroh-remote-access-design.md) - architecture, support boundary, and limitations for Volt access over Iroh.
+- [JSON event stream mode](json.md) - print mode with structured events.
+- [TUI components](tui.md) - build custom terminal UI for extensions.
+
+## Reference
+
+- [Session format](session-format.md) - SQLite storage, JSONL snapshot interchange, entry types, and SessionManager API.
+
+## Platform setup
+
+- [Windows](windows.md)
+- [Termux on Android](termux.md)
+- [tmux](tmux.md)
+- [Terminal setup](terminal-setup.md)
+- [Shell aliases](shell-aliases.md)
+
+## Development
+
+- [Development](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/development.md) - local setup, project structure, and debugging.
+- [Core subagents design](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/subagents-design.md) - implemented local MVP boundary and deferred remote/package work for first-class subagents.

@@ -1,0 +1,16 @@
+{
+	"extends": "../../tsconfig.base.json",
+	"compilerOptions": {
+		"noEmit": true,
+		"paths": {
+			"@hansjm10/volt-coding-agent": ["./src/index.ts"],
+			"@hansjm10/volt-coding-agent/hooks": ["./src/core/hooks/index.ts"],
+			"@hansjm10/volt-tui": ["../tui/src/index.ts"],
+			"@hansjm10/volt-ai": ["../ai/src/index.ts"],
+			"typebox": ["../../node_modules/typebox"]
+		},
+		"skipLibCheck": true
+	},
+	"include": ["examples/**/*.ts"],
+	"exclude": ["node_modules", "dist"]
+}

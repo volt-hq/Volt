@@ -1,0 +1,368 @@
+import {
+	type Component,
+	createRenderFrame,
+	decodePrintableKey,
+	getKeybindings,
+	type RenderFrame,
+	ScrollView,
+	type ScrollViewScrollbar,
+	truncateToWidth,
+	VStack,
+	visibleWidth,
+} from "@hansjm10/volt-tui";
+import type { PlanningState, PlanPhase, PlanState } from "../../../core/planning.ts";
+import { theme } from "../../../core/theme/runtime.ts";
+import { DynamicBorder } from "./dynamic-border.ts";
+import { keyHint, keyText, rawKeyHint } from "./keybinding-hints.ts";
+import {
+	appendWrappedPlanLine,
+	getCurrentPlanStep,
+	getPlanProgress,
+	planPhaseLabel,
+	renderPlanContentLines,
+	usesAsciiPlanMarkers,
+} from "./plan-content.ts";
+
+/** Bounded one/two-line branch-local plan summary kept directly above the editor. */
+export class PlanStatusComponent implements Component {
+	private planning: PlanningState;
+
+	constructor(planning: PlanningState) {
+		this.planning = planning;
+	}
+
+	setPlanning(planning: PlanningState): void {
+		this.planning = planning;
+	}
+
+	invalidate(): void {
+		// Theme styling is resolved during render.
+	}
+
+	render(width: number): RenderFrame {
+		if (width <= 0) return createRenderFrame([]);
+		const plan = this.planning.plan;
+		if (!plan && this.planning.mode === "build") return createRenderFrame([]);
+
+		const mark = usesAsciiPlanMarkers() ? "PLAN" : "◆ PLAN";
+		if (!plan) {
+			return createRenderFrame([
+				truncateToWidth(
+					`${theme.bold(theme.fg("accent", mark))}${theme.fg("dim", " · DRAFT · Agent tools are read-only")}`,
+					width,
+				),
+			]);
+		}
+
+		const { completed, total, percent } = getPlanProgress(plan);
+		const ready = plan.phase === "ready";
+		const left = theme.bold(
+			theme.fg(ready ? "warning" : "accent", `${mark} ${planPhaseLabel(plan)}${ready ? " · APPROVAL NEEDED" : ""}`),
+		);
+		const hasSubsteps = plan.steps.some((step) => step.substeps !== undefined);
+		const right = theme.fg(
+			"dim",
+			plan.phase === "draft"
+				? hasSubsteps
+					? `${plan.steps.length} ${plan.steps.length === 1 ? "outcome" : "outcomes"} · ${total} ${total === 1 ? "task" : "tasks"}`
+					: `${total} proposed ${total === 1 ? "step" : "steps"}`
+				: `${completed}/${total} · ${percent}%`,
+		);
+		const gap = " ".repeat(Math.max(1, width - visibleWidth(left) - visibleWidth(right)));
+		const lines = [truncateToWidth(`${left}${gap}${right}`, width)];
+		// The approval cue stays at every width: nothing proceeds until the user decides.
+		if (ready) {
+			lines.push(
+				truncateToWidth(
+					` ${keyHint("app.plan.togglePane", "choose next step")}  ${keyHint("tui.input.submit", "send feedback")}`,
+					width,
+				),
+			);
+			return createRenderFrame(lines);
+		}
+		if (width < 100) return createRenderFrame(lines);
+
+		const step = getCurrentPlanStep(plan);
+		if (plan.phase === "draft") {
+			lines.push(
+				truncateToWidth(
+					theme.fg("muted", ` Working draft · revision ${plan.revision} · /plan-details to inspect`),
+					width,
+				),
+			);
+		} else if (plan.phase === "handed_off" && plan.execution) {
+			lines.push(
+				truncateToWidth(
+					theme.fg("muted", ` Execution session: ${plan.execution.targetSessionId} · /plan-close to close`),
+					width,
+				),
+			);
+		} else if (plan.phase === "completed") {
+			lines.push(truncateToWidth(theme.fg("muted", " All steps complete · /plan-close to close"), width));
+		} else if (step) {
+			lines.push(truncateToWidth(theme.fg("muted", ` Current · ${step}`), width));
+		}
+		return createRenderFrame(lines);
+	}
+}
+
+export type PlanDetailsAction = "retain_context" | "new_session" | "change" | "close";
+
+export interface PlanActionItem {
+	label: string;
+	action: PlanDetailsAction;
+}
+
+const READY_PLAN_ACTIONS: ReadonlyArray<PlanActionItem> = [
+	{ label: "Execute Plan", action: "retain_context" },
+	{ label: "Execute Plan & Clear Context", action: "new_session" },
+	{ label: "Change Plan", action: "change" },
+];
+
+const FINISHED_PLAN_ACTIONS: ReadonlyArray<PlanActionItem> = [{ label: "Close Plan", action: "close" }];
+
+/** Actions offered by the plan views for a lifecycle phase; draft and active plans offer none. */
+export function getPlanActions(phase: PlanPhase | undefined): ReadonlyArray<PlanActionItem> {
+	if (phase === "ready") return READY_PLAN_ACTIONS;
+	if (phase === "completed" || phase === "handed_off") return FINISHED_PLAN_ACTIONS;
+	return [];
+}
+
+/** Printable keystrokes and pastes that belong in the composer rather than the ready-plan chooser. */
+export function isComposerInput(data: string): boolean {
+	return data.includes("\x1b[200~") || decodePrintableKey(data) !== undefined || /^[^\x00-\x1f\x7f]/u.test(data);
+}
+
+class PlanDetailsSection implements Component {
+	private readonly renderSection: (width: number) => string[];
+
+	constructor(renderSection: (width: number) => string[]) {
+		this.renderSection = renderSection;
+	}
+
+	invalidate(): void {
+		// Theme styling is resolved during render.
+	}
+
+	render(width: number): RenderFrame {
+		return createRenderFrame(this.renderSection(width));
+	}
+}
+
+/**
+ * Scrollable plan viewer. Regular mode keeps its bounded native-scrollback
+ * rendering; fullscreen mode uses a fixed header/actions layout around one
+ * body ScrollView while sharing the same plan, action, and scroll state.
+ */
+export class PlanDetailsComponent implements Component {
+	private static readonly RESERVED_OUTSIDE_ROWS = 7;
+	private plan: PlanState;
+	private readonly getTerminalRows: () => number;
+	private readonly onAction: (action: PlanDetailsAction) => void;
+	private readonly onClose: () => void;
+	private readonly onTextInput: ((data: string) => void) | undefined;
+	private readonly requestRender: () => void;
+	private readonly bodyScroll: ScrollView;
+	private readonly fullscreenLayout: VStack;
+	private actionIndex = 0;
+	private regularPageSize = 1;
+	private fullscreenActive = false;
+
+	constructor(options: {
+		plan: PlanState;
+		getTerminalRows: () => number;
+		fullscreenScrollbar?: ScrollViewScrollbar;
+		onAction: (action: PlanDetailsAction) => void;
+		onClose: () => void;
+		/** Receives text typed or pasted while a ready plan is shown, so it can reach the composer. */
+		onTextInput?: (data: string) => void;
+		requestRender: () => void;
+	}) {
+		this.plan = options.plan;
+		this.getTerminalRows = options.getTerminalRows;
+		this.onAction = options.onAction;
+		this.onClose = options.onClose;
+		this.onTextInput = options.onTextInput;
+		this.requestRender = options.requestRender;
+
+		const body = new PlanDetailsSection((width) => renderPlanContentLines(this.plan, width, theme));
+		this.bodyScroll = new ScrollView(body, {
+			overscroll: "contain",
+			scrollbar: options.fullscreenScrollbar ?? "auto",
+			scrollbarStyle: (text) => theme.bg("scrollbarThumb", text),
+		});
+		const header = new PlanDetailsSection((width) => this.renderFullscreenHeader(width));
+		const actions = new PlanDetailsSection((width) =>
+			this.renderFooter(width, width < 100, this.renderBorder(width)),
+		);
+		this.fullscreenLayout = new VStack([
+			{ component: header, shrink: 1, minSize: 0 },
+			{ component: this.bodyScroll, basis: 0, grow: 1, shrink: 1, minSize: 0 },
+			{ component: actions, shrink: 1, minSize: 0 },
+		]);
+	}
+
+	setPlan(plan: PlanState): void {
+		if (plan.id !== this.plan.id) this.bodyScroll.scrollToStart();
+		if (plan.id !== this.plan.id || plan.phase !== this.plan.phase) this.actionIndex = 0;
+		this.plan = plan;
+	}
+
+	setFullscreenActive(active: boolean): void {
+		this.fullscreenActive = active;
+	}
+
+	setFullscreenScrollbar(scrollbar: ScrollViewScrollbar): void {
+		this.bodyScroll.setScrollbar(scrollbar);
+	}
+
+	getFullscreenLayout(): Component {
+		return this.fullscreenLayout;
+	}
+
+	invalidate(): void {
+		this.fullscreenLayout.invalidate();
+	}
+
+	render(width: number): RenderFrame {
+		if (width <= 0) return createRenderFrame([]);
+		const compact = width < 100;
+		const border = this.renderBorder(width);
+		const titleLines = this.renderTitle(width);
+		const bodyContent = renderPlanContentLines(this.plan, width, theme);
+		const footer = this.renderFooter(width, compact, border);
+		const headerRows = 2 + titleLines.length;
+		const targetRows = Math.max(
+			headerRows + footer.length + 2,
+			this.getTerminalRows() - PlanDetailsComponent.RESERVED_OUTSIDE_ROWS,
+		);
+		const pageSize = Math.max(2, targetRows - headerRows - footer.length);
+		this.regularPageSize = pageSize;
+		this.bodyScroll.updateLayout(bodyContent.length, pageSize, this.requestRender);
+		const end = Math.min(bodyContent.length, this.bodyScroll.scrollTop + pageSize);
+
+		return createRenderFrame([
+			border,
+			...titleLines,
+			this.renderMetadata(width, bodyContent.length, end),
+			...bodyContent.slice(this.bodyScroll.scrollTop, end),
+			...footer,
+		]);
+	}
+
+	handleInput(data: string): void {
+		const kb = getKeybindings();
+		if (kb.matches(data, "tui.select.cancel")) {
+			this.onClose();
+			return;
+		}
+		const actions = getPlanActions(this.plan.phase);
+		if (actions.length > 0 && kb.matches(data, "tui.select.confirm")) {
+			const selected = actions[Math.min(this.actionIndex, actions.length - 1)];
+			if (selected) this.onAction(selected.action);
+			return;
+		}
+		// Several actions take the vertical keys for selection; otherwise they scroll.
+		if (actions.length > 1) {
+			if (kb.matches(data, "tui.editor.cursorLeft") || kb.matches(data, "tui.select.up")) {
+				this.actionIndex = (this.actionIndex + actions.length - 1) % actions.length;
+				this.requestRender();
+				return;
+			}
+			if (kb.matches(data, "tui.editor.cursorRight") || kb.matches(data, "tui.select.down")) {
+				this.actionIndex = (this.actionIndex + 1) % actions.length;
+				this.requestRender();
+				return;
+			}
+		} else if (kb.matches(data, "tui.select.up")) {
+			this.bodyScroll.scrollBy(-1);
+			return;
+		} else if (kb.matches(data, "tui.select.down")) {
+			this.bodyScroll.scrollBy(1);
+			return;
+		}
+
+		const pageSize = Math.max(1, this.fullscreenActive ? this.bodyScroll.viewportHeight : this.regularPageSize);
+		if (kb.matches(data, "tui.editor.pageUp")) {
+			this.bodyScroll.scrollBy(-pageSize);
+		} else if (kb.matches(data, "tui.editor.pageDown")) {
+			this.bodyScroll.scrollBy(pageSize);
+		} else if (this.plan.phase === "ready" && isComposerInput(data)) {
+			this.onTextInput?.(data);
+		}
+	}
+
+	private renderBorder(width: number): string {
+		return new DynamicBorder().render(width).lines[0] ?? "";
+	}
+
+	private renderTitle(width: number): string[] {
+		const lines: string[] = [];
+		appendWrappedPlanLine(lines, " ", theme.bold(theme.fg("accent", this.plan.title ?? "Plan Details")), width);
+		return lines;
+	}
+
+	private renderFullscreenHeader(width: number): string[] {
+		const bodyLength = renderPlanContentLines(this.plan, width, theme).length;
+		const end = Math.min(bodyLength, this.bodyScroll.scrollTop + this.bodyScroll.viewportHeight);
+		return [this.renderBorder(width), ...this.renderTitle(width), this.renderMetadata(width, bodyLength, end)];
+	}
+
+	private renderMetadata(width: number, bodyLength: number, end: number): string {
+		const progress = getPlanProgress(this.plan);
+		const maxScroll = Math.max(0, bodyLength - Math.max(1, this.bodyScroll.viewportHeight));
+		const position = maxScroll > 0 ? ` · rows ${this.bodyScroll.scrollTop + 1}–${end}/${bodyLength}` : "";
+		return truncateToWidth(
+			` ${theme.fg("dim", `${progress.completed}/${progress.total} complete${position}`)}`,
+			width,
+			"",
+		);
+	}
+
+	private renderFooter(width: number, compact: boolean, border: string): string[] {
+		const lines: string[] = [];
+		const actions = getPlanActions(this.plan.phase).map((item) => item.label);
+		// A lone action carries its Enter hint on its own row so the shared hint line keeps its length.
+		const singleActionHint =
+			actions.length === 1 ? `  ${keyHint("tui.select.confirm", actions[0]!.toLowerCase())}` : "";
+		if (actions.length > 0) {
+			lines.push(
+				this.plan.phase === "ready"
+					? truncateToWidth(` ${theme.bold(theme.fg("warning", "Plan ready — choose the next step"))}`, width)
+					: "",
+			);
+			if (compact) {
+				lines.push(
+					...actions.map((label, index) =>
+						truncateToWidth(
+							` ${index === this.actionIndex ? theme.bold(theme.fg("accent", `> ${label}`)) : theme.fg("muted", `  ${label}`)}${singleActionHint}`,
+							width,
+						),
+					),
+				);
+			} else {
+				lines.push(
+					truncateToWidth(
+						` ${actions
+							.map((label, index) =>
+								index === this.actionIndex
+									? theme.bold(theme.fg("accent", `[ ${label} ]`))
+									: theme.fg("muted", label),
+							)
+							.join(theme.fg("dim", "   "))}${singleActionHint}`,
+						width,
+					),
+				);
+			}
+		}
+
+		const actionHints =
+			actions.length > 1
+				? `${rawKeyHint("←/→", "choose")}  ${keyHint("tui.select.confirm", "confirm")}  `
+				: `${rawKeyHint(`${keyText("tui.select.up")}/${keyText("tui.select.down")}`, "scroll")}  `;
+		const pageHint = rawKeyHint(`${keyText("tui.editor.pageUp")}/${keyText("tui.editor.pageDown")}`, "page");
+		lines.push(truncateToWidth(` ${actionHints}${pageHint}  ${keyHint("tui.select.cancel", "back")}`, width, ""));
+		lines.push(border);
+		return lines;
+	}
+}

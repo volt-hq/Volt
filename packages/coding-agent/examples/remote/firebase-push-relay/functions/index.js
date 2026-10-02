@@ -1,0 +1,362 @@
+const { randomBytes } = require("node:crypto");
+const { getAppCheck } = require("firebase-admin/app-check");
+const { initializeApp, getApps } = require("firebase-admin/app");
+const { FieldValue, Timestamp, getFirestore } = require("firebase-admin/firestore");
+const { getMessaging } = require("firebase-admin/messaging");
+const { onRequest } = require("firebase-functions/v2/https");
+const { createPushTargetRegistrationHandler } = require("./registration.js");
+const {
+	RelayAccessVerificationError,
+	RelayKeyServiceUnavailableError,
+	createRelayAccessVerifier,
+	requireMatchingRelayGrant,
+} = require("./relay-auth.js");
+const {
+	RequestError,
+	assertRequestEnvelope,
+	assertVerifiedAppCheck,
+	getAllowedFirebaseAppIds,
+	getBoundedPositiveInteger,
+	getConfiguredRelayUrl,
+	getHeader,
+	getPushTargetTtlMs,
+	isPushTargetExpired,
+	parseNotification,
+	parsePushTargetRevocation,
+	readJsonBody,
+	revokePushTargetTransaction,
+	timingSafeTokenHashMatches,
+} = require("./core.js");
+
+const DEFAULT_COLLECTION = "voltPushTargets";
+const DEFAULT_REGION = "us-central1";
+const DELIVERY_QUOTA_WINDOW_MS = 60_000;
+const DEFAULT_DELIVERIES_PER_TARGET_PER_MINUTE = 30;
+const DEFAULT_REGISTRATIONS_PER_INSTANCE_PER_MINUTE = 30;
+const INVALID_TARGET_ERROR_CODES = new Set([
+	"messaging/invalid-registration-token",
+	"messaging/mismatched-credential",
+	"messaging/registration-token-not-registered",
+]);
+
+if (getApps().length === 0) {
+	initializeApp();
+}
+
+const allowedFirebaseAppIds = getAllowedFirebaseAppIds();
+const publicRelayUrl = getConfiguredRelayUrl();
+const pushTargetTtlMs = getPushTargetTtlMs();
+const maxDeliveriesPerTargetPerMinute = getBoundedPositiveInteger(
+	process.env.DELIVERIES_PER_TARGET_PER_MINUTE,
+	1,
+	600,
+	DEFAULT_DELIVERIES_PER_TARGET_PER_MINUTE,
+);
+const maxRegistrationsPerInstancePerMinute = getBoundedPositiveInteger(
+	process.env.REGISTRATIONS_PER_INSTANCE_PER_MINUTE,
+	1,
+	120,
+	DEFAULT_REGISTRATIONS_PER_INSTANCE_PER_MINUTE,
+);
+const registrationWindows = new Map();
+const verifyRelayAccess = createRelayAccessVerifier();
+const registerPushTarget = createPushTargetRegistrationHandler({
+	enforceRegistrationRateLimit,
+	getPushTargetsCollection,
+	now: Date.now,
+	publicRelayUrl,
+	pushTargetTtlMs,
+	randomPushTargetAuthToken: () => randomBytes(32).toString("base64url"),
+	timestampFromMillis: (value) => Timestamp.fromMillis(value),
+	verifyRegistrationAppCheck,
+});
+
+exports.pushRelay = onRequest(
+	{
+		concurrency: 20,
+		cors: false,
+		invoker: "public",
+		maxInstances: 10,
+		memory: "256MiB",
+		region: process.env.FUNCTION_REGION || DEFAULT_REGION,
+		timeoutSeconds: 15,
+	},
+	async (request, response) => {
+		response.set("cache-control", "no-store");
+		response.set("x-content-type-options", "nosniff");
+		try {
+			await routeRequest(request, response);
+		} catch (error) {
+			if (response.headersSent) return;
+			if (error instanceof RequestError) {
+				response.status(error.status).json({ error: error.publicMessage });
+				return;
+			}
+			console.error("push relay request failed", getSafeErrorLog(error));
+			response.status(500).json({ error: "internal_error" });
+		}
+	},
+);
+
+async function routeRequest(request, response) {
+	if (request.method !== "POST") {
+		response.set("allow", "POST");
+		throw new RequestError(405, "method_not_allowed");
+	}
+	assertRequestEnvelope(request);
+	const routePath = normalizeRoutePath(request.path || request.originalUrl || request.url || "/");
+	if (routePath === "/v1/push-targets") {
+		await registerPushTarget(request, response);
+		return;
+	}
+	if (routePath === "/v1/push-targets/revoke") {
+		await revokePushTarget(request, response);
+		return;
+	}
+	if (routePath === "/v1/push-targets/status") {
+		await getPushTargetStatus(request, response);
+		return;
+	}
+	if (routePath === "/v1/notifications") {
+		await sendNotification(request, response);
+		return;
+	}
+	throw new RequestError(404, "not_found");
+}
+
+function getPushTargetsCollection() {
+	return getFirestore().collection(DEFAULT_COLLECTION);
+}
+
+async function verifyRegistrationAppCheck(request) {
+	const appCheckToken = getHeader(request, "x-firebase-appcheck");
+	if (appCheckToken === undefined || appCheckToken.length > 8192) {
+		throw new RequestError(401, "app_check_limited_use_token_required");
+	}
+	let verification;
+	try {
+		verification = await getAppCheck().verifyToken(appCheckToken, { consume: true });
+	} catch {
+		throw new RequestError(401, "app_check_invalid");
+	}
+	return assertVerifiedAppCheck(verification, allowedFirebaseAppIds);
+}
+
+function enforceRegistrationRateLimit(appId) {
+	const now = Date.now();
+	const existing = registrationWindows.get(appId);
+	if (existing === undefined || existing.startedAtMs + DELIVERY_QUOTA_WINDOW_MS <= now) {
+		registrationWindows.set(appId, { count: 1, startedAtMs: now });
+		return;
+	}
+	if (existing.count >= maxRegistrationsPerInstancePerMinute) {
+		throw new RequestError(429, "registration_rate_limited");
+	}
+	existing.count += 1;
+}
+
+async function revokePushTarget(request, response) {
+	const revocation = parsePushTargetRevocation(readJsonBody(request));
+	const pushTargetRef = getPushTargetsCollection().doc(revocation.pushTargetId);
+	const status = await revokePushTargetTransaction(
+		getFirestore(),
+		pushTargetRef,
+		revocation.pushTargetAuthToken,
+	);
+	response.status(200).json({ status });
+}
+
+async function getPushTargetStatus(request, response) {
+	const credential = parsePushTargetRevocation(readJsonBody(request));
+	const snapshot = await getPushTargetsCollection().doc(credential.pushTargetId).get();
+	if (!snapshot.exists) {
+		throw new RequestError(404, "push_target_not_found");
+	}
+	const pushTarget = snapshot.data();
+	if (!isAuthorizedTargetCredential(pushTarget, credential.pushTargetAuthToken)) {
+		throw new RequestError(401, "unauthorized");
+	}
+	if (!isValidEnabledPushTarget(pushTarget) || isPushTargetExpired(pushTarget)) {
+		throw new RequestError(410, "push_target_invalid");
+	}
+	const expiresAtMs = getFirestoreTimestampMillis(pushTarget.expiresAt);
+	if (expiresAtMs === undefined) {
+		throw new RequestError(410, "push_target_invalid");
+	}
+	response.status(200).json({
+		status: "active",
+		expiresAtEpochSeconds: Math.floor(expiresAtMs / 1000),
+	});
+}
+
+async function sendNotification(request, response) {
+	const notification = parseNotification(readJsonBody(request));
+	let relayAccess;
+	try {
+		relayAccess = await verifyRelayAccess(
+			getHeader(request, "authorization"),
+			notification.hostNodeId,
+		);
+	} catch (error) {
+		if (error instanceof RelayKeyServiceUnavailableError) {
+			throw new RequestError(503, "managed_relay_keys_unavailable");
+		}
+		if (error instanceof RelayAccessVerificationError) {
+			throw new RequestError(401, "managed_relay_authorization_invalid");
+		}
+		throw error;
+	}
+	const authorizedTarget = await reserveAuthorizedPushTarget(
+		notification,
+		relayAccess.grantId,
+	);
+	const { pushTarget, pushTargetRef } = authorizedTarget;
+
+	try {
+		const messageId = await getMessaging().send({
+			data: notification.data,
+			notification: {
+				body: notification.body,
+				title: notification.title,
+			},
+			token: pushTarget.token,
+		});
+		await markPushSent(pushTargetRef, notification, messageId);
+		response.status(200).json({ status: "sent", messageId });
+	} catch (error) {
+		if (isInvalidTargetError(error)) {
+			await disablePushTarget(pushTargetRef, getErrorCode(error) || "messaging/invalid-target");
+			throw new RequestError(410, "push_target_invalid");
+		}
+		respondFcmSendFailed(response, "notification", notification, error);
+	}
+}
+
+async function reserveAuthorizedPushTarget(request, relayGrantId) {
+	const pushTargetRef = getPushTargetsCollection().doc(request.pushTargetId);
+	return getFirestore().runTransaction(async (transaction) => {
+		const snapshot = await transaction.get(pushTargetRef);
+		if (!snapshot.exists) {
+			throw new RequestError(404, "push_target_not_found");
+		}
+		const pushTarget = snapshot.data();
+		if (!isValidEnabledPushTarget(pushTarget)) {
+			throw new RequestError(410, "push_target_invalid");
+		}
+		if (isPushTargetExpired(pushTarget)) {
+			throw new RequestError(410, "push_target_expired");
+		}
+		if (!isAuthorizedTargetCredential(pushTarget, request.pushTargetAuthToken)) {
+			throw new RequestError(401, "unauthorized");
+		}
+		try {
+			requireMatchingRelayGrant(pushTarget.grantId, relayGrantId);
+		} catch {
+			throw new RequestError(403, "push_target_grant_mismatch");
+		}
+
+		const nowMs = Date.now();
+		const windowStartedAtMs = getFirestoreTimestampMillis(pushTarget.deliveryWindowStartedAt);
+		const inCurrentWindow =
+			windowStartedAtMs !== undefined && windowStartedAtMs + DELIVERY_QUOTA_WINDOW_MS > nowMs;
+		const deliveryWindowCount = inCurrentWindow && Number.isSafeInteger(pushTarget.deliveryWindowCount)
+			? pushTarget.deliveryWindowCount
+			: 0;
+		if (deliveryWindowCount >= maxDeliveriesPerTargetPerMinute) {
+			throw new RequestError(429, "push_target_rate_limited");
+		}
+		transaction.update(pushTargetRef, {
+			deliveryWindowCount: deliveryWindowCount + 1,
+			grantId: relayGrantId,
+			deliveryWindowStartedAt: inCurrentWindow
+				? pushTarget.deliveryWindowStartedAt
+				: Timestamp.fromMillis(nowMs),
+			updatedAt: Timestamp.fromMillis(nowMs),
+		});
+		return { pushTarget, pushTargetRef };
+	});
+}
+
+function isValidEnabledPushTarget(value) {
+	return (
+		isRecord(value) &&
+		value.enabled === true &&
+		value.provider === "fcm" &&
+		value.platform === "ios" &&
+		typeof value.token === "string" &&
+		value.token.length >= 16 &&
+		value.token.length <= 4096
+	);
+}
+
+function isAuthorizedTargetCredential(pushTarget, authToken) {
+	return (
+		isRecord(pushTarget) &&
+		typeof authToken === "string" &&
+		timingSafeTokenHashMatches(authToken, pushTarget.pushTargetAuthTokenHash)
+	);
+}
+
+function getFirestoreTimestampMillis(value) {
+	if (isRecord(value) && typeof value.toMillis === "function") {
+		const millis = value.toMillis();
+		return Number.isFinite(millis) ? millis : undefined;
+	}
+	return undefined;
+}
+
+async function markPushSent(pushTargetRef, request, messageId) {
+	await pushTargetRef.update({
+		lastEventId: request.eventId,
+		lastKind: request.kind,
+		lastMessageId: messageId,
+		lastSentAt: FieldValue.serverTimestamp(),
+		updatedAt: FieldValue.serverTimestamp(),
+	});
+}
+
+async function disablePushTarget(pushTargetRef, reason) {
+	await pushTargetRef.update({
+		disabledAt: FieldValue.serverTimestamp(),
+		disabledReason: reason,
+		enabled: false,
+		updatedAt: FieldValue.serverTimestamp(),
+	});
+}
+
+function respondFcmSendFailed(response, route, request, error) {
+	const code = getErrorCode(error) || "unknown";
+	console.error(`FCM ${route} send failed`, {
+		eventId: request.eventId.slice(0, 128),
+		kind: request.kind.slice(0, 64),
+		...getSafeErrorLog(error),
+	});
+	response.status(502).json({ error: "fcm_send_failed", code });
+}
+
+function normalizeRoutePath(rawPath) {
+	let routePath = rawPath.split("?", 1)[0] || "/";
+	if (routePath.startsWith("/pushRelay/")) {
+		routePath = routePath.slice("/pushRelay".length);
+	}
+	return routePath.replace(/\/+$/, "") || "/";
+}
+
+function isInvalidTargetError(error) {
+	const code = getErrorCode(error);
+	return Boolean(code && INVALID_TARGET_ERROR_CODES.has(code));
+}
+
+function getErrorCode(error) {
+	return isRecord(error) && typeof error.code === "string" ? error.code : undefined;
+}
+
+function getSafeErrorLog(error) {
+	const code = getErrorCode(error);
+	const name = error instanceof Error ? error.name.slice(0, 64) : "UnknownError";
+	return { ...(code === undefined ? {} : { code: code.slice(0, 96) }), name };
+}
+
+function isRecord(value) {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}

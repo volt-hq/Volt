@@ -1,0 +1,896 @@
+# @hansjm10/volt-tui
+
+Minimal terminal UI framework with differential rendering and synchronized output for flicker-free interactive CLI applications.
+
+Maintained and distributed as part of Volt by [Jordan Hans](https://github.com/hansjm10).
+Volt is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono)
+under the MIT License.
+
+## Features
+
+- **Interchangeable Renderers**: Shared `TUI` interface with main-screen and alternate-screen implementations
+- **Differential Rendering**: Updates only changed lines or viewport rows
+- **Application-owned Scrolling**: Alternate-screen viewport supports mouse, trackpad, and keyboard navigation
+- **Synchronized Output**: Uses CSI 2026 for atomic screen updates (no flicker)
+- **Bracketed Paste Mode**: Handles large pastes correctly with markers for >10 line pastes
+- **Component-based**: Simple Component interface with render() method
+- **Theme Support**: Components accept theme interfaces for customizable styling
+- **Built-in Components**: Text, TruncatedText, Input, Editor, Markdown, Loader, SelectList, SettingsList, Spacer, Image, Box, Container, VStack, HStack, ScrollView
+- **Inline Images**: Renders images through Kitty, iTerm2, or negotiated Sixel graphics protocols
+- **Autocomplete Support**: File paths and slash commands
+
+## Quick Start
+
+```typescript
+import { type TUI, Text, Editor, ProcessTerminal, TuiMainScreen, matchesKey } from "@hansjm10/volt-tui";
+
+// Create terminal
+const terminal = new ProcessTerminal();
+
+// Create the default main-screen renderer through the shared TUI interface
+const tui: TUI = new TuiMainScreen(terminal);
+
+// Add components
+tui.addChild(new Text("Welcome to my app!"));
+
+import { defaultEditorTheme as editorTheme } from './test/test-themes.ts';
+const editor = new Editor(tui, editorTheme);
+editor.onSubmit = (text) => {
+  console.log("Submitted:", text);
+  tui.addChild(new Text(`You said: ${text}`));
+};
+tui.addChild(editor);
+
+// Focus the editor so it receives keyboard input
+tui.setFocus(editor);
+
+// In raw mode Ctrl+C doesn't send SIGINT — intercept it here to allow exit
+tui.addInputListener((data) => {
+  if (matchesKey(data, 'ctrl+c')) {
+    tui.stop();
+    process.exit(0);
+  }
+});
+
+// Start
+tui.start();
+```
+
+## Core API
+
+### TUI interface and renderers
+
+`TUI` is the shared interface for component management, focus, overlays, input, lifecycle, terminal queries, and rendering. Choose a concrete renderer only when constructing the application:
+
+- `TuiMainScreen` renders into the main terminal buffer and preserves terminal-owned native scrollback.
+- `TuiAltScreen` renders a fixed-height viewport in the alternate terminal buffer with application-owned scrolling. By default, stopping it restores the main buffer and prints the complete final document; pass `{ preserveScreen: true }` to restore the previous main-buffer contents instead.
+
+`TUI` is no longer constructible. Migrate `new TUI(terminal)` to `new TuiMainScreen(terminal)` and keep `TUI` only as the renderer-neutral type.
+
+```typescript
+import { type TUI, TuiAltScreen, TuiMainScreen } from "@hansjm10/volt-tui";
+
+const tui: TUI = new TuiMainScreen(terminal);
+// To use an application-owned viewport in the alternate terminal buffer instead:
+// const tui: TUI = new TuiAltScreen(terminal);
+
+tui.addChild(component);
+tui.removeChild(component);
+tui.start();
+tui.stop();
+tui.requestRender(); // Request a re-render
+
+// Register application shortcuts globally, regardless of component focus.
+// Return { consume: true } when handled to keep input out of the focused component.
+tui.addInputListener(handleApplicationShortcut);
+```
+
+### Alternate-screen viewport layouts
+
+`TuiAltScreen` can render an explicit terminal-height layout. `VStack` and `HStack` allocate constrained regions, while `ScrollView` owns scrolling for one region. These constrained semantics apply only when a layout root is mounted on `TuiAltScreen`; `TuiMainScreen` renders the ordinary unbounded component document and leaves scrolling to the terminal.
+
+```typescript
+import {
+  Container,
+  isViewportTUI,
+  ScrollView,
+  Text,
+  VStack,
+} from "@hansjm10/volt-tui";
+
+const transcript = new Container();
+transcript.addChild(new Text("History"));
+
+const editorAndFooter = new VStack([
+  editor,
+  new Text("status"),
+]);
+
+if (isViewportTUI(tui)) {
+  tui.setLayoutRoot(new VStack([
+    {
+      component: new ScrollView(transcript, {
+        follow: "end",
+        primary: true,
+        overscroll: "chain",
+      }),
+      basis: 0,
+      grow: 1,
+      minSize: 1,
+    },
+    {
+      component: editorAndFooter,
+      basis: "auto",
+      shrink: 1,
+      minSize: 1,
+    },
+  ]));
+}
+```
+
+Stack entries support `basis`, `grow`, `shrink`, `minSize`, `maxSize`, and responsive `visible` callbacks. Mouse-wheel input targets the deepest scroll view under the pointer, and unused delta chains to outer scroll views by default; set `overscroll: "contain"` to stop that chaining. The scroll view marked `primary: true` receives alternate-screen keyboard navigation and wheel input over non-scrollable regions, so pointer routing does not change keyboard focus.
+
+The primary scroll view can jump between OSC 133 semantic prompt markers. Call `scrollView.setPrimary(true)` when focus changes between independently scrollable panes. Press `Ctrl+Shift+F` to search the primary view's rendered content, `Enter`/`Ctrl+G` and `Shift+Enter`/`Ctrl+Shift+G` to move between matches, and `Escape` to close search. `TuiAltScreenOptions.searchMatchStyle` and `searchCurrentMatchStyle` customize match highlighting.
+
+Layout geometry is rebuilt for each requested frame. Stateful components are retained, and their existing rendered-line caches remain effective. Before painting, alternate-screen layout conditionally repeats with a fresh cache until render-visible `ScrollView` geometry such as `viewportHeight`, `scrollTop`, follow state, and scrollbar visibility is current. Components may render from that state, but their output must converge within eight layout passes; non-convergent geometry throws a developer error instead of painting a contradictory frame. Calling `render(width)` directly on layout components produces an unbounded document without viewport stabilization, which is also used when alternate-screen mode restores the main screen.
+
+### Overlays
+
+Overlays render components on top of existing content without replacing it. Useful for dialogs, menus, and modal UI.
+
+```typescript
+// Show overlay with default options (centered, max 80 cols)
+const handle = tui.showOverlay(component);
+
+// Show overlay with custom positioning and sizing
+// Values can be numbers (absolute) or percentage strings (e.g., "50%")
+const handle = tui.showOverlay(component, {
+  // Sizing
+  width: 60,              // Fixed width in columns
+  width: "80%",           // Width as percentage of terminal
+  minWidth: 40,           // Minimum width floor
+  maxHeight: 20,          // Maximum height in rows
+  maxHeight: "50%",       // Maximum height as percentage of terminal
+
+  // Anchor-based positioning (default: 'center')
+  anchor: 'bottom-right', // Position relative to anchor point
+  offsetX: 2,             // Horizontal offset from anchor
+  offsetY: -1,            // Vertical offset from anchor
+
+  // Percentage-based positioning (alternative to anchor)
+  row: "25%",             // Vertical position (0%=top, 100%=bottom)
+  col: "50%",             // Horizontal position (0%=left, 100%=right)
+
+  // Absolute positioning (overrides anchor/percent)
+  row: 5,                 // Exact row position
+  col: 10,                // Exact column position
+
+  // Margin from terminal edges
+  margin: 2,              // All sides
+  margin: { top: 1, right: 2, bottom: 1, left: 2 },
+
+  // Responsive visibility
+  visible: (termWidth, termHeight) => termWidth >= 100  // Hide on narrow terminals
+
+  // Focus behavior
+  nonCapturing: true       // Don't auto-focus when shown
+});
+
+// OverlayHandle methods
+handle.hide();              // Permanently remove the overlay
+handle.setHidden(true);     // Temporarily hide (can show again)
+handle.setHidden(false);    // Show again after hiding
+handle.isHidden();          // Check if temporarily hidden
+handle.focus();             // Focus and bring to visual front
+handle.unfocus();           // Release focus to normal fallback
+handle.unfocus({ target: baseComponent }); // Release this overlay to a specific component
+handle.unfocus({ target: null });   // Release this overlay and leave focus empty
+handle.isFocused();         // Check if overlay has focus
+
+handle.unfocus();
+// Overlay loses focus; TUI falls back to another visible capturing overlay or the previous focus target.
+
+handle.unfocus({ target: null });
+// Overlay loses focus; no component receives input until focus is set again.
+
+// A focused visible overlay reclaims keyboard input after temporary replacement UI
+// releases focus. If you want a specific component to receive input while overlays remain
+// visible, call handle.unfocus({ target: component }).
+
+// Hide topmost overlay
+tui.hideOverlay();
+
+// Check if any visible overlay is active
+tui.hasOverlay();
+```
+
+**Anchor values**: `'center'`, `'top-left'`, `'top-right'`, `'bottom-left'`, `'bottom-right'`, `'top-center'`, `'bottom-center'`, `'left-center'`, `'right-center'`
+
+**Resolution order**:
+1. `minWidth` is applied as a floor after width calculation
+2. For position: absolute `row`/`col` > percentage `row`/`col` > `anchor`
+3. `margin` clamps final position to stay within terminal bounds
+4. `visible` callback controls whether overlay renders (called each frame)
+
+### Component Interface
+
+All components implement:
+
+```typescript
+interface RenderFrame {
+  readonly lines: readonly string[];
+  readonly images: readonly ImagePlacement[];
+}
+
+interface Component {
+  render(width: number): RenderFrame;
+  handleInput?(data: string): void;
+  invalidate?(): void;
+}
+```
+
+| Method | Description |
+|--------|-------------|
+| `render(width)` | Returns all rendered lines and explicit image placements. Each line **must not exceed `width`** or the TUI renderer will error. Use `truncateToWidth()` or manual wrapping to ensure this. |
+| `handleInput?(data)` | Called when the component has focus and receives keyboard input. The `data` string contains raw terminal input (may include ANSI escape sequences). |
+| `invalidate?()` | Called to clear any cached render state. Components should re-render from scratch on the next `render()` call. |
+
+Text-only components return `createRenderFrame(lines)`. Components that combine children must use frame helpers such as `concatRenderFrames()`, `sliceRenderFrame()`, `spliceRenderFrameRows()`, `prefixRenderFrame()`, and `mapRenderFrameLines()` so image placements are translated or clipped with the lines. Reading `child.render(width).lines` is appropriate only at a true text-only boundary such as HTML export, not while composing another component.
+
+The TUI appends a full SGR reset and OSC 8 reset at the end of each rendered line. Styles do not carry across lines. If you emit multi-line text with styling, reapply styles per line or use `wrapTextWithAnsi()` so styles are preserved for each wrapped line.
+
+### Focusable Interface (IME Support)
+
+Components that display a text cursor and need IME (Input Method Editor) support should implement the `Focusable` interface:
+
+```typescript
+import {
+  createRenderFrame,
+  CURSOR_MARKER,
+  type Component,
+  type Focusable,
+  type RenderFrame,
+} from "@hansjm10/volt-tui";
+
+class MyInput implements Component, Focusable {
+  focused: boolean = false;  // Set by TUI when focus changes
+  
+  render(width: number): RenderFrame {
+    const marker = this.focused ? CURSOR_MARKER : "";
+    // Emit marker right before the fake cursor
+    return createRenderFrame([`> ${beforeCursor}${marker}\x1b[7m${atCursor}\x1b[27m${afterCursor}`]);
+  }
+}
+```
+
+When a `Focusable` component has focus, TUI:
+1. Sets `focused = true` on the component
+2. Scans rendered output for `CURSOR_MARKER` (a zero-width APC escape sequence)
+3. Positions the hardware terminal cursor at that location
+4. Shows the hardware cursor only when `showHardwareCursor` is enabled
+
+The cursor remains hidden by default. This keeps the fake cursor rendering, while still positioning the hardware cursor for terminals that track IME candidate windows with hidden cursors. Some terminals require a visible hardware cursor for IME positioning; enable it with the renderer constructor option, `setShowHardwareCursor(true)`, or `VOLT_HARDWARE_CURSOR=1`. The `Editor` and `Input` built-in components already implement this interface.
+
+**Container components with embedded inputs:** When a container component (dialog, selector, etc.) contains an `Input` or `Editor` child, the container must implement `Focusable` and propagate the focus state to the child:
+
+```typescript
+import { Container, type Focusable, Input } from "@hansjm10/volt-tui";
+
+class SearchDialog extends Container implements Focusable {
+  private searchInput: Input;
+
+  // Propagate focus to child input for IME cursor positioning
+  private _focused = false;
+  get focused(): boolean { return this._focused; }
+  set focused(value: boolean) {
+    this._focused = value;
+    this.searchInput.focused = value;
+  }
+
+  constructor() {
+    super();
+    this.searchInput = new Input();
+    this.addChild(this.searchInput);
+  }
+}
+```
+
+Without this propagation, typing with an IME (Chinese, Japanese, Korean, etc.) will show the candidate window in the wrong position.
+
+## Built-in Components
+
+### Container
+
+Groups child components.
+
+```typescript
+const container = new Container();
+container.addChild(component);
+container.removeChild(component);
+```
+
+### Box
+
+Container that applies padding and background color to all children.
+
+```typescript
+const box = new Box(
+  1,                              // paddingX (default: 1)
+  1,                              // paddingY (default: 1)
+  (text) => chalk.bgGray(text)   // optional background function
+);
+box.addChild(new Text("Content"));
+box.setBgFn((text) => chalk.bgBlue(text));  // Change background dynamically
+```
+
+### Text
+
+Displays multi-line text with word wrapping and padding.
+
+```typescript
+const text = new Text(
+  "Hello World",                  // text content
+  1,                              // paddingX (default: 1)
+  1,                              // paddingY (default: 1)
+  (text) => chalk.bgGray(text)   // optional background function
+);
+text.setText("Updated text");
+text.setCustomBgFn((text) => chalk.bgBlue(text));
+```
+
+### TruncatedText
+
+Single-line text that truncates to fit viewport width. Useful for status lines and headers.
+
+```typescript
+const truncated = new TruncatedText(
+  "This is a very long line that will be truncated...",
+  0,  // paddingX (default: 0)
+  0   // paddingY (default: 0)
+);
+```
+
+### Input
+
+Single-line text input with horizontal scrolling.
+
+```typescript
+const input = new Input();
+input.onSubmit = (value) => console.log(value);
+input.setValue("initial");
+input.getValue();
+```
+
+**Key Bindings:**
+- `Enter` - Submit
+- `Ctrl+A` / `Ctrl+E` - Line start/end
+- `Ctrl+W` or `Alt+Backspace` - Delete word backwards
+- `Ctrl+U` - Delete to start of line
+- `Ctrl+K` - Delete to end of line
+- `Ctrl+Left` / `Ctrl+Right` - Word navigation
+- `Alt+Left` / `Alt+Right` - Word navigation
+- Arrow keys, Backspace, Delete work as expected
+
+### Editor
+
+Multi-line text editor with autocomplete, file completion, paste handling, and vertical scrolling when content exceeds terminal height.
+
+```typescript
+interface EditorTheme {
+  borderColor: (str: string) => string;
+  selectList: SelectListTheme;
+}
+
+interface EditorOptions {
+  paddingX?: number;  // Horizontal padding (default: 0)
+}
+
+const editor = new Editor(tui, theme, options?);  // tui is required for height-aware scrolling
+editor.onSubmit = (text) => console.log(text);
+editor.onChange = (text, change) => {
+  // Submission clears the editor before onSubmit; distinguish it from deletion.
+  console.log("Changed:", text, "Submitted:", change?.submittedText);
+};
+editor.disableSubmit = true; // Disable submit temporarily
+editor.setAutocompleteProvider(provider);
+editor.borderColor = (s) => chalk.blue(s); // Change border dynamically
+editor.setPaddingX(1); // Update horizontal padding dynamically
+editor.getPaddingX();  // Get current padding
+```
+
+**Features:**
+- Multi-line editing with word wrap
+- Slash command autocomplete (type `/`)
+- File path autocomplete (press `Tab`)
+- Large paste handling (>10 lines creates `[paste #1 +50 lines]` marker)
+- Horizontal lines above/below editor
+- Fake cursor rendering (hidden real cursor)
+
+**Key Bindings:**
+- `Enter` - Submit
+- `Shift+Enter`, `Ctrl+Enter`, or `Alt+Enter` - New line (terminal-dependent, Alt+Enter most reliable)
+- `Tab` - Autocomplete
+- `Ctrl+K` - Delete to end of line
+- `Ctrl+U` - Delete to start of line
+- `Ctrl+W` or `Alt+Backspace` - Delete word backwards
+- `Alt+D` or `Alt+Delete` - Delete word forwards
+- `Ctrl+A` / `Ctrl+E` - Line start/end
+- `Ctrl+]` - Jump forward to character (awaits next keypress, then moves cursor to first occurrence)
+- `Ctrl+Alt+]` - Jump backward to character
+- Arrow keys, Backspace, Delete work as expected
+
+### Markdown
+
+Renders markdown with syntax highlighting and theming support.
+
+```typescript
+interface MarkdownTheme {
+  heading: (text: string) => string;
+  link: (text: string) => string;
+  linkUrl: (text: string) => string;
+  code: (text: string) => string;
+  codeBlock: (text: string) => string;
+  codeBlockBorder: (text: string) => string;
+  quote: (text: string) => string;
+  quoteBorder: (text: string) => string;
+  hr: (text: string) => string;
+  listBullet: (text: string) => string;
+  bold: (text: string) => string;
+  italic: (text: string) => string;
+  strikethrough: (text: string) => string;
+  underline: (text: string) => string;
+  highlightCode?: (code: string, lang?: string) => string[];
+}
+
+interface DefaultTextStyle {
+  color?: (text: string) => string;
+  bgColor?: (text: string) => string;
+  bold?: boolean;
+  italic?: boolean;
+  strikethrough?: boolean;
+  underline?: boolean;
+}
+
+const md = new Markdown(
+  "# Hello\n\nSome **bold** text",
+  1,              // paddingX
+  1,              // paddingY
+  theme,          // MarkdownTheme
+  defaultStyle    // optional DefaultTextStyle
+);
+md.setText("Updated markdown");
+```
+
+**Features:**
+- Headings, bold, italic, code blocks, lists, links, blockquotes
+- HTML tags rendered as plain text
+- Optional syntax highlighting via `highlightCode`
+- Padding support
+- Render caching for performance
+
+### Loader
+
+Animated loading spinner.
+
+```typescript
+const loader = new Loader(
+  tui,                              // TUI instance for render updates
+  (s) => chalk.cyan(s),            // spinner color function
+  (s) => chalk.gray(s),            // message color function
+  "Loading..."                      // message (default: "Loading...")
+);
+loader.start();
+loader.setMessage("Still loading...");
+loader.stop();
+```
+
+### CancellableLoader
+
+Extends Loader with Escape key handling and an AbortSignal for cancelling async operations.
+
+```typescript
+const loader = new CancellableLoader(
+  tui,                              // TUI instance for render updates
+  (s) => chalk.cyan(s),            // spinner color function
+  (s) => chalk.gray(s),            // message color function
+  "Working..."                      // message
+);
+loader.onAbort = () => done(null); // Called when user presses Escape
+doAsyncWork(loader.signal).then(done);
+```
+
+**Properties:**
+- `signal: AbortSignal` - Aborted when user presses Escape
+- `aborted: boolean` - Whether the loader was aborted
+- `onAbort?: () => void` - Callback when user presses Escape
+
+### SelectList
+
+Interactive selection list with keyboard navigation.
+
+```typescript
+interface SelectItem {
+  value: string;
+  label: string;
+  description?: string;
+}
+
+interface SelectListTheme {
+  selectedPrefix: (text: string) => string;
+  selectedText: (text: string) => string;
+  description: (text: string) => string;
+  scrollInfo: (text: string) => string;
+  noMatch: (text: string) => string;
+}
+
+const list = new SelectList(
+  [
+    { value: "opt1", label: "Option 1", description: "First option" },
+    { value: "opt2", label: "Option 2", description: "Second option" },
+  ],
+  5,      // maxVisible
+  theme   // SelectListTheme
+);
+
+list.onSelect = (item) => console.log("Selected:", item);
+list.onCancel = () => console.log("Cancelled");
+list.onSelectionChange = (item) => console.log("Highlighted:", item);
+list.setFilter("opt"); // Filter items
+```
+
+**Controls:**
+- Arrow keys: Navigate
+- Enter: Select
+- Escape: Cancel
+
+### SettingsList
+
+Settings panel with value cycling and submenus.
+
+```typescript
+interface SettingItem {
+  id: string;
+  label: string;
+  description?: string;
+  currentValue: string;
+  values?: string[];  // If provided, Enter/Space cycles through these
+  submenu?: (currentValue: string, done: (selectedValue?: string) => void) => Component;
+}
+
+interface SettingsListTheme {
+  label: (text: string, selected: boolean) => string;
+  value: (text: string, selected: boolean) => string;
+  description: (text: string) => string;
+  cursor: string;
+  hint: (text: string) => string;
+}
+
+const settings = new SettingsList(
+  [
+    { id: "theme", label: "Theme", currentValue: "dark", values: ["dark", "light"] },
+    { id: "model", label: "Model", currentValue: "gpt-4", submenu: (val, done) => modelSelector },
+  ],
+  10,      // maxVisible
+  theme,   // SettingsListTheme
+  (id, newValue) => console.log(`${id} changed to ${newValue}`),
+  () => console.log("Cancelled")
+);
+settings.updateValue("theme", "light");
+```
+
+**Controls:**
+- Arrow keys: Navigate
+- Enter/Space: Activate (cycle value or open submenu)
+- Escape: Cancel
+
+### Spacer
+
+Empty lines for vertical spacing.
+
+```typescript
+const spacer = new Spacer(2); // 2 empty lines (default: 1)
+```
+
+### Image
+
+Renders images inline for terminals that support the Kitty graphics protocol (Kitty, Ghostty, WezTerm), iTerm2 inline images, or Sixel (Windows Terminal 1.22+). Sixel is enabled only after Windows Terminal reports DA1 attribute `4`; an environment variable alone is not treated as support. Unsupported terminals fall back to a text placeholder.
+
+```typescript
+interface ImageTheme {
+  fallbackColor: (str: string) => string;
+}
+
+interface ImageOptions {
+  maxWidthCells?: number;
+  maxHeightCells?: number;
+  filename?: string;
+}
+
+const image = new Image(
+  base64Data,       // base64-encoded image data
+  "image/png",      // MIME type
+  theme,            // ImageTheme
+  options           // optional ImageOptions
+);
+tui.addChild(image);
+```
+
+Supported formats for Kitty and iTerm2 are PNG, JPEG, GIF, and WebP. Sixel rendering requires PNG input so it can decode pixels synchronously; applications should convert other formats before creating the component. Sixel output uses a deterministic adaptive palette of up to 256 colors without dithering. Dimensions are parsed from image headers automatically.
+
+#### Alternate-screen image compatibility
+
+`TuiAltScreen` supports inline images and partial viewport cropping with Kitty and Sixel. Kitty placements can be updated independently. Sixel has no placement IDs or deletion command, so a changed, removed, scrolled, or resized Sixel image causes the terminal-height viewport to be cleared and repainted; text-only frames keep differential rendering. iTerm2's inline-image protocol cannot delete an existing placement or crop its source while scrolling, so `TuiAltScreen` renders image components as text placeholders there. `TuiMainScreen` continues to render iTerm2 inline images normally.
+
+Sixel is disabled inside tmux and GNU screen because these sessions do not reliably forward the required graphics and capability negotiation. Run the application directly in Windows Terminal to use Sixel.
+
+## Autocomplete
+
+### CombinedAutocompleteProvider
+
+Supports both slash commands and file paths.
+
+```typescript
+import { CombinedAutocompleteProvider } from "@hansjm10/volt-tui";
+
+const provider = new CombinedAutocompleteProvider(
+  [
+    { name: "help", description: "Show help" },
+    { name: "clear", description: "Clear screen" },
+    { name: "delete", description: "Delete last message" },
+  ],
+  process.cwd() // base path for file completion
+);
+
+editor.setAutocompleteProvider(provider);
+```
+
+**Features:**
+- Type `/` to see slash commands
+- Press `Tab` for file path completion
+- Works with `~/`, `./`, `../`, and `@` prefix
+- Filters to attachable files for `@` prefix
+
+## Key Detection
+
+Use `matchesKey()` with the `Key` helper for detecting keyboard input (supports Kitty keyboard protocol):
+
+```typescript
+import { matchesKey, Key } from "@hansjm10/volt-tui";
+
+if (matchesKey(data, Key.ctrl("c"))) {
+  process.exit(0);
+}
+
+if (matchesKey(data, Key.enter)) {
+  submit();
+} else if (matchesKey(data, Key.escape)) {
+  cancel();
+} else if (matchesKey(data, Key.up)) {
+  moveUp();
+}
+```
+
+**Key identifiers** (use `Key.*` for autocomplete, or string literals):
+- Basic keys: `Key.enter`, `Key.escape`, `Key.tab`, `Key.space`, `Key.backspace`, `Key.delete`, `Key.home`, `Key.end`
+- Arrow keys: `Key.up`, `Key.down`, `Key.left`, `Key.right`
+- With modifiers: `Key.ctrl("c")`, `Key.shift("tab")`, `Key.alt("left")`, `Key.ctrlShift("p")`
+- String format also works: `"enter"`, `"ctrl+c"`, `"shift+tab"`, `"ctrl+shift+p"`
+
+## Rendering modes
+
+`TuiMainScreen` uses three rendering strategies:
+
+1. **First Render**: Output all lines without clearing scrollback
+2. **Width Changed or Change Above Viewport**: Clear the screen and fully re-render
+3. **Normal Update**: Move the cursor to the first changed line, clear to the end, and render changed lines
+
+`TuiAltScreen` owns a terminal-height viewport. Without an explicit layout root it preserves single-document scrolling behavior. With `setLayoutRoot()`, `VStack`, `HStack`, and nested `ScrollView` components can reserve fixed regions and independently scroll constrained regions. It follows streaming output while at the bottom and preserves a manually selected scroll position while content grows. Mouse-wheel and configurable keyboard navigation scroll without modifying terminal scrollback, including jumps between OSC 133 semantic prompt markers. Clicking an OSC 8 hyperlink invokes the configured URL handler. Dragging with the primary mouse button selects text and copies it through the configured callback or OSC 52; holding the drag at a scroll view's top or bottom edge auto-scrolls into off-screen content. Kitty and Sixel images support vertical viewport cropping; Sixel image changes repaint the full viewport, while iTerm2 inline images fall back to text because the protocol cannot delete or crop placements during viewport repainting.
+
+Both renderers wrap updates in **synchronized output** (`\x1b[?2026h` ... `\x1b[?2026l`) for atomic, flicker-free rendering.
+
+## Terminal Interface
+
+The TUI works with any object implementing the `Terminal` interface:
+
+```typescript
+interface Terminal {
+  start(onInput: (data: string) => void, onResize: () => void): void;
+  stop(): void;
+  write(data: string): void;
+  get columns(): number;
+  get rows(): number;
+  moveBy(lines: number): void;
+  hideCursor(): void;
+  showCursor(): void;
+  clearLine(): void;
+  clearFromCursor(): void;
+  clearScreen(): void;
+}
+```
+
+**Built-in implementations:**
+- `ProcessTerminal` - Uses `process.stdin/stdout`
+- `VirtualTerminal` - For testing (uses `@xterm/headless`)
+
+## Utilities
+
+```typescript
+import { visibleWidth, truncateToWidth, wrapTextWithAnsi } from "@hansjm10/volt-tui";
+
+// Get visible width of string (ignoring ANSI codes)
+const width = visibleWidth("\x1b[31mHello\x1b[0m"); // 5
+
+// Truncate string to width (preserving ANSI codes, adds ellipsis)
+const truncated = truncateToWidth("Hello World", 8); // "Hello..."
+
+// Truncate without ellipsis
+const truncatedNoEllipsis = truncateToWidth("Hello World", 8, ""); // "Hello Wo"
+
+// Wrap text to width (preserving ANSI codes across line breaks)
+const lines = wrapTextWithAnsi("This is a long line that needs wrapping", 20);
+// ["This is a long line", "that needs wrapping"]
+```
+
+## Creating Custom Components
+
+When creating custom components, **each line in the returned frame must not exceed the `width` parameter**. The TUI renderer will error if any line is wider than the terminal.
+
+### Handling Input
+
+Use `matchesKey()` with the `Key` helper for keyboard input:
+
+```typescript
+import {
+  createRenderFrame,
+  matchesKey,
+  Key,
+  truncateToWidth,
+  type Component,
+  type RenderFrame,
+} from "@hansjm10/volt-tui";
+
+class MyInteractiveComponent implements Component {
+  private selectedIndex = 0;
+  private items = ["Option 1", "Option 2", "Option 3"];
+  
+  public onSelect?: (index: number) => void;
+  public onCancel?: () => void;
+
+  handleInput(data: string): void {
+    if (matchesKey(data, Key.up)) {
+      this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+    } else if (matchesKey(data, Key.down)) {
+      this.selectedIndex = Math.min(this.items.length - 1, this.selectedIndex + 1);
+    } else if (matchesKey(data, Key.enter)) {
+      this.onSelect?.(this.selectedIndex);
+    } else if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
+      this.onCancel?.();
+    }
+  }
+
+  render(width: number): RenderFrame {
+    return createRenderFrame(this.items.map((item, i) => {
+      const prefix = i === this.selectedIndex ? "> " : "  ";
+      return truncateToWidth(prefix + item, width);
+    }));
+  }
+}
+```
+
+### Handling Line Width
+
+Use the provided utilities to ensure lines fit:
+
+```typescript
+import {
+  createRenderFrame,
+  visibleWidth,
+  truncateToWidth,
+  type Component,
+  type RenderFrame,
+} from "@hansjm10/volt-tui";
+
+class MyComponent implements Component {
+  private text: string;
+
+  constructor(text: string) {
+    this.text = text;
+  }
+
+  render(width: number): RenderFrame {
+    // Option 1: Truncate long lines
+    return createRenderFrame([truncateToWidth(this.text, width)]);
+
+    // Option 2: Check and pad to exact width
+    const line = this.text;
+    const visible = visibleWidth(line);
+    if (visible > width) {
+      return createRenderFrame([truncateToWidth(line, width)]);
+    }
+    // Pad to exact width (optional, for backgrounds)
+    return createRenderFrame([line + " ".repeat(width - visible)]);
+  }
+}
+```
+
+### ANSI Code Considerations
+
+Both `visibleWidth()` and `truncateToWidth()` correctly handle ANSI escape codes:
+
+- `visibleWidth()` ignores ANSI codes when calculating width
+- `truncateToWidth()` preserves ANSI codes and properly closes them when truncating
+
+```typescript
+import chalk from "chalk";
+
+const styled = chalk.red("Hello") + " " + chalk.blue("World");
+const width = visibleWidth(styled); // 11 (not counting ANSI codes)
+const truncated = truncateToWidth(styled, 8); // Red "Hello" + " W..." with proper reset
+```
+
+### Caching
+
+For performance, components should cache their rendered output and only re-render when necessary:
+
+```typescript
+class CachedComponent implements Component {
+  private text: string;
+  private cachedWidth?: number;
+  private cachedFrame?: RenderFrame;
+
+  render(width: number): RenderFrame {
+    if (this.cachedFrame && this.cachedWidth === width) {
+      return this.cachedFrame;
+    }
+
+    const frame = createRenderFrame([truncateToWidth(this.text, width)]);
+
+    this.cachedWidth = width;
+    this.cachedFrame = frame;
+    return frame;
+  }
+
+  invalidate(): void {
+    this.cachedWidth = undefined;
+    this.cachedFrame = undefined;
+  }
+}
+```
+
+## Example
+
+See `test/chat-simple.ts` for a complete chat interface example with:
+- Markdown messages with custom background colors
+- Loading spinner during responses
+- Editor with autocomplete and slash commands
+- Spacers between messages
+
+Run it:
+```bash
+npx tsx test/chat-simple.ts
+```
+
+## Development
+
+```bash
+# Install dependencies (from monorepo root)
+npm install
+
+# Run type checking
+npm run check
+
+# Run the demo
+npx tsx test/chat-simple.ts
+```
+
+### Debug logging
+
+Set `VOLT_TUI_WRITE_LOG` to capture the raw ANSI stream written to stdout.
+
+```bash
+VOLT_TUI_WRITE_LOG=/tmp/tui-ansi.log npx tsx test/chat-simple.ts
+```
+
+## License
+
+MIT

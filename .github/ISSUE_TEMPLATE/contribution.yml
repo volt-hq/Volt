@@ -1,0 +1,34 @@
+name: Contribution Proposal
+description: Propose a change or feature before starting a PR
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/volt-hq/Volt/blob/main/CONTRIBUTING.md) and check the [Volt Roadmap](https://github.com/orgs/volt-hq/projects/1).
+
+        Keep this short. Explain the terminal or phone workflow it improves, and whether it affects the CLI, daemon, companion app, or shared libraries.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What do you want to change?
+      description: Be specific and concise.
+    validations:
+      required: true
+
+  - type: textarea
+    id: why
+    attributes:
+      label: Why?
+      description: What problem does this solve?
+    validations:
+      required: true
+
+  - type: textarea
+    id: how
+    attributes:
+      label: How? (optional)
+      description: Brief technical approach if you have one in mind.
+    validations:
+      required: false

@@ -1,0 +1,911 @@
+import {
+	type AssistantMessage,
+	type Context,
+	estimateToolDefinitionTokens,
+	type FauxProviderRegistration,
+	fauxAssistantMessage,
+	type Message,
+	type Model,
+	registerFauxProvider,
+	type Tool,
+	Type,
+	type Usage,
+} from "@hansjm10/volt-ai";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	type CompactionPreparation,
+	calculateContextTokens,
+	compact,
+	DEFAULT_COMPACTION_SETTINGS,
+	estimateContextTokens,
+	estimateMessagesTokens,
+	estimateTokens,
+	findCutPoint,
+	findTurnStartIndex,
+	generateSummary,
+	getLastAssistantUsage,
+	prepareCompaction,
+	serializeConversation,
+	shouldCompact,
+} from "../../src/harness/compaction/compaction.ts";
+import { buildSessionContext } from "../../src/harness/session/session.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	CompactionSettings,
+	CustomMessageEntry,
+	MessageEntry,
+	ModelChangeEntry,
+	SessionTreeEntry,
+	ThinkingLevelChangeEntry,
+} from "../../src/harness/types.ts";
+import { getOrThrow } from "../../src/harness/types.ts";
+import type { AgentMessage } from "../../src/types.ts";
+
+let nextId = 0;
+function createId(): string {
+	return `entry-${nextId++}`;
+}
+
+function createMockUsage(input: number, output: number, cacheRead = 0, cacheWrite = 0): Usage {
+	return {
+		input,
+		output,
+		cacheRead,
+		cacheWrite,
+		totalTokens: input + output + cacheRead + cacheWrite,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+}
+
+function createUserMessage(text: string): AgentMessage {
+	return {
+		role: "user",
+		content: [{ type: "text", text }],
+		timestamp: Date.now(),
+	};
+}
+
+function createAssistantMessage(text: string, usage = createMockUsage(100, 50)): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "claude-sonnet-4-5",
+		usage,
+		stopReason: "stop",
+		timestamp: Date.now(),
+	};
+}
+
+function createMessageEntry(message: AgentMessage, parentId: string | null = null): MessageEntry {
+	return {
+		type: "message",
+		id: createId(),
+		parentId,
+		timestamp: new Date().toISOString(),
+		message,
+	};
+}
+
+function createCompactionEntry(
+	summary: string,
+	firstKeptEntryId: string,
+	parentId: string | null = null,
+): CompactionEntry {
+	return {
+		type: "compaction",
+		id: createId(),
+		parentId,
+		timestamp: new Date().toISOString(),
+		summary,
+		firstKeptEntryId,
+		tokensBefore: 1234,
+	};
+}
+
+function createThinkingLevelEntry(level: string, parentId: string | null = null): ThinkingLevelChangeEntry {
+	return {
+		type: "thinking_level_change",
+		id: createId(),
+		parentId,
+		timestamp: new Date().toISOString(),
+		thinkingLevel: level,
+	};
+}
+
+function createModelChangeEntry(provider: string, modelId: string, parentId: string | null = null): ModelChangeEntry {
+	return {
+		type: "model_change",
+		id: createId(),
+		parentId,
+		timestamp: new Date().toISOString(),
+		provider,
+		modelId,
+	};
+}
+
+function createFauxModel(
+	reasoning: boolean,
+	maxTokens = 8192,
+): { faux: FauxProviderRegistration; model: Model<string> } {
+	const faux = registerFauxProvider({
+		models: [
+			{
+				id: reasoning ? "reasoning-model" : "non-reasoning-model",
+				reasoning,
+				contextWindow: 200000,
+				maxTokens,
+			},
+		],
+	});
+	fauxRegistrations.push(faux);
+	return { faux, model: faux.getModel() };
+}
+
+const fauxRegistrations: FauxProviderRegistration[] = [];
+
+afterEach(() => {
+	while (fauxRegistrations.length > 0) {
+		fauxRegistrations.pop()?.unregister();
+	}
+});
+
+describe("harness compaction", () => {
+	beforeEach(() => {
+		nextId = 0;
+	});
+
+	it("calculates total context tokens from usage", () => {
+		expect(calculateContextTokens(createMockUsage(1000, 500, 200, 100))).toBe(1800);
+		expect(calculateContextTokens(createMockUsage(0, 0, 0, 0))).toBe(0);
+	});
+
+	it("checks compaction threshold", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+		};
+		expect(shouldCompact(95000, 100000, settings)).toBe(true);
+		expect(shouldCompact(89000, 100000, settings)).toBe(false);
+		expect(shouldCompact(95000, 100000, { ...settings, enabled: false })).toBe(false);
+	});
+
+	it("finds a cut point based on token differences", () => {
+		const entries: SessionTreeEntry[] = [];
+		let parentId: string | null = null;
+		for (let i = 0; i < 10; i++) {
+			const user = createMessageEntry(createUserMessage(`User ${i}`), parentId);
+			entries.push(user);
+			const assistant = createMessageEntry(
+				createAssistantMessage(`Assistant ${i}`, createMockUsage(0, 100, (i + 1) * 1000, 0)),
+				user.id,
+			);
+			entries.push(assistant);
+			parentId = assistant.id;
+		}
+
+		const result = findCutPoint(entries, 0, entries.length, 2500);
+		expect(entries[result.firstKeptEntryIndex]?.type).toBe("message");
+	});
+
+	it("excludes the first independently cuttable context entry that would exceed the budget", () => {
+		const first = createMessageEntry(createUserMessage("a".repeat(2400)));
+		const second = createMessageEntry(createUserMessage("b".repeat(2400)), first.id);
+
+		const result = findCutPoint([first, second], 0, 2, 1000);
+
+		expect(result.firstKeptEntryIndex).toBe(1);
+		expect(estimateMessagesTokens([second.message])).toBe(600);
+	});
+
+	it("counts persisted custom and branch-summary context against the budget", () => {
+		const branchSummary: BranchSummaryEntry = {
+			type: "branch_summary",
+			id: createId(),
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			fromId: "branch",
+			summary: "a".repeat(2400),
+		};
+		const customMessage: CustomMessageEntry = {
+			type: "custom_message",
+			id: createId(),
+			parentId: branchSummary.id,
+			timestamp: new Date().toISOString(),
+			customType: "note",
+			content: "b".repeat(2400),
+			display: true,
+		};
+		const user = createMessageEntry(createUserMessage("c".repeat(2400)), customMessage.id);
+
+		const result = findCutPoint([branchSummary, customMessage, user], 0, 3, 1000);
+
+		expect(result.firstKeptEntryIndex).toBe(2);
+		expect([branchSummary, customMessage, user][result.firstKeptEntryIndex]?.id).toBe(user.id);
+	});
+
+	it("keeps a trailing tool call and its results together when they exceed the retention budget", () => {
+		const user = createMessageEntry(createUserMessage("inspect a large file"));
+		const assistant = createMessageEntry(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "large.txt" } }],
+				stopReason: "toolUse",
+			},
+			user.id,
+		);
+		const toolResult = createMessageEntry(
+			{
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "x".repeat(100) }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+			assistant.id,
+		);
+
+		const result = findCutPoint([user, assistant, toolResult], 0, 3, 10);
+
+		expect(result.firstKeptEntryIndex).toBe(1);
+	});
+
+	it("covers cut-point and turn-start edge cases", () => {
+		const thinking = createThinkingLevelEntry("high");
+		const modelChange = createModelChangeEntry("openai", "gpt-4", thinking.id);
+		expect(findCutPoint([thinking, modelChange], 0, 2, 1)).toEqual({
+			firstKeptEntryIndex: 0,
+			turnStartIndex: -1,
+			isSplitTurn: false,
+		});
+
+		const branchSummary: BranchSummaryEntry = {
+			type: "branch_summary",
+			id: createId(),
+			parentId: modelChange.id,
+			timestamp: new Date().toISOString(),
+			fromId: "branch",
+			summary: "branch summary",
+		};
+		const customMessage: CustomMessageEntry = {
+			type: "custom_message",
+			id: createId(),
+			parentId: branchSummary.id,
+			timestamp: new Date().toISOString(),
+			customType: "note",
+			content: "custom content",
+			display: true,
+		};
+		expect(findTurnStartIndex([thinking, branchSummary], 1, 0)).toBe(1);
+		expect(findTurnStartIndex([thinking, customMessage], 1, 0)).toBe(1);
+		expect(findTurnStartIndex([thinking, modelChange], 1, 0)).toBe(-1);
+
+		const result = findCutPoint([thinking, branchSummary, customMessage], 0, 3, 1);
+		expect(result.firstKeptEntryIndex).toBe(2);
+
+		const toolResult = createMessageEntry({
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [{ type: "text", text: "tool output" }],
+			isError: false,
+			timestamp: Date.now(),
+		});
+		expect(findCutPoint([toolResult], 0, 1, 1)).toEqual({
+			firstKeptEntryIndex: 0,
+			turnStartIndex: -1,
+			isSplitTurn: false,
+		});
+
+		const user = createMessageEntry(createUserMessage("user"));
+		const compaction = createCompactionEntry("summary", user.id, user.id);
+		const assistant = createMessageEntry(createAssistantMessage("assistant"), compaction.id);
+		expect(findCutPoint([user, compaction, assistant], 0, 3, 1).firstKeptEntryIndex).toBe(2);
+	});
+
+	it("estimates tokens and context usage across supported message roles", () => {
+		const usage = createMockUsage(10, 5, 3, 2);
+		const assistant = createAssistantMessage("assistant", usage);
+		const assistantWithThinkingAndTool: AssistantMessage = {
+			...assistant,
+			content: [
+				{ type: "thinking", thinking: "thinking" },
+				{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "file.ts" } },
+			],
+		};
+		const customString: AgentMessage = {
+			role: "custom",
+			customType: "note",
+			content: "custom text",
+			display: true,
+			timestamp: Date.now(),
+		};
+		const toolResultWithImage: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "call-1",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "tool text" },
+				{ type: "image", mimeType: "image/png", data: "abc" },
+			],
+			isError: false,
+			timestamp: Date.now(),
+		};
+		const bashExecution: AgentMessage = {
+			role: "bashExecution",
+			command: "npm run check",
+			output: "ok",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			timestamp: Date.now(),
+		};
+		const branchSummaryMessage: AgentMessage = {
+			role: "branchSummary",
+			summary: "branch",
+			fromId: "x",
+			timestamp: Date.now(),
+		};
+		const compactionSummaryMessage: AgentMessage = {
+			role: "compactionSummary",
+			summary: "compact",
+			tokensBefore: 123,
+			timestamp: Date.now(),
+		};
+
+		expect(estimateTokens({ role: "user", content: "plain user", timestamp: Date.now() })).toBeGreaterThan(0);
+		expect(estimateTokens(assistantWithThinkingAndTool)).toBeGreaterThan(0);
+		expect(estimateTokens(customString)).toBeGreaterThan(0);
+		expect(estimateTokens(toolResultWithImage)).toBeGreaterThan(1000);
+		expect(estimateTokens(bashExecution)).toBeGreaterThan(0);
+		expect(estimateTokens(branchSummaryMessage)).toBeGreaterThan(0);
+		expect(estimateTokens(compactionSummaryMessage)).toBeGreaterThan(0);
+		expect(estimateTokens({ role: "unknown", timestamp: Date.now() } as unknown as AgentMessage)).toBe(0);
+		expect(
+			getLastAssistantUsage([createMessageEntry(createUserMessage("user")), createMessageEntry(assistant)]),
+		).toBe(usage);
+		expect(
+			getLastAssistantUsage([
+				createMessageEntry({ ...assistant, stopReason: "aborted" }),
+				createMessageEntry({ ...assistant, stopReason: "error" }),
+			]),
+		).toBeUndefined();
+		expect(estimateContextTokens([createUserMessage("no usage")]).lastUsageIndex).toBeNull();
+		expect(estimateContextTokens([assistant, createUserMessage("tail")])).toMatchObject({
+			usageTokens: 20,
+			lastUsageIndex: 0,
+		});
+	});
+
+	it("builds session context with a compaction entry", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const a1 = createMessageEntry(createAssistantMessage("a"), u1.id);
+		const u2 = createMessageEntry(createUserMessage("2"), a1.id);
+		const a2 = createMessageEntry(createAssistantMessage("b"), u2.id);
+		const compaction = createCompactionEntry("Summary of 1,a,2,b", u2.id, a2.id);
+		const u3 = createMessageEntry(createUserMessage("3"), compaction.id);
+		const a3 = createMessageEntry(createAssistantMessage("c"), u3.id);
+		const loaded = buildSessionContext([u1, a1, u2, a2, compaction, u3, a3]);
+		expect(loaded.messages).toHaveLength(5);
+		expect(loaded.messages[0]?.role).toBe("compactionSummary");
+		expect(loaded.anchorLeafId).toBe(a3.id);
+	});
+
+	it("tracks model and thinking level changes in built context", () => {
+		const user = createMessageEntry(createUserMessage("1"));
+		const modelChange = createModelChangeEntry("openai", "gpt-4", user.id);
+		const assistant = createMessageEntry(createAssistantMessage("a"), modelChange.id);
+		const thinkingChange = createThinkingLevelEntry("high", assistant.id);
+		const loaded = buildSessionContext([user, modelChange, assistant, thinkingChange]);
+		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		expect(loaded.thinkingLevel).toBe("high");
+	});
+
+	it("reduces retained messages and counts active tools when provider usage is unavailable", () => {
+		const entries: SessionTreeEntry[] = [];
+		let parentId: string | null = null;
+		for (let index = 0; index < 5; index++) {
+			const entry = createMessageEntry(createUserMessage(String(index).repeat(4000)), parentId);
+			entries.push(entry);
+			parentId = entry.id;
+		}
+		const settings: CompactionSettings = {
+			...DEFAULT_COMPACTION_SETTINGS,
+			reserveTokens: 1000,
+			keepRecentTokens: 4000,
+		};
+		const largeTool: Tool = {
+			name: "large_tool",
+			description: "x".repeat(16_000),
+			parameters: Type.Object({}),
+		};
+		const contextWindow = 8000;
+
+		const withoutTools = getOrThrow(prepareCompaction(entries, settings));
+		const withTools = getOrThrow(prepareCompaction(entries, settings, { tools: [largeTool], contextWindow }));
+
+		expect(withoutTools).toBeDefined();
+		expect(withTools).toBeDefined();
+		const withoutToolsStart = entries.findIndex((entry) => entry.id === withoutTools!.firstKeptEntryId);
+		const withToolsStart = entries.findIndex((entry) => entry.id === withTools!.firstKeptEntryId);
+		expect(withToolsStart).toBeGreaterThan(withoutToolsStart);
+		const retainedMessages = entries
+			.slice(withToolsStart)
+			.flatMap((entry) => (entry.type === "message" ? [entry.message as AgentMessage] : []));
+		const retainedMessageBudget = Math.min(
+			settings.keepRecentTokens,
+			contextWindow - settings.reserveTokens - estimateToolDefinitionTokens([largeTool]),
+		);
+		expect(estimateMessagesTokens(retainedMessages)).toBeLessThanOrEqual(retainedMessageBudget);
+		expect(withTools!.tokensBefore - withoutTools!.tokensBefore).toBe(estimateToolDefinitionTokens([largeTool]));
+	});
+
+	it("prepares compaction using the latest compaction summary as previousSummary", () => {
+		const u1 = createMessageEntry(createUserMessage("user msg 1"));
+		const a1 = createMessageEntry(createAssistantMessage("assistant msg 1"), u1.id);
+		const u2 = createMessageEntry(createUserMessage("user msg 2"), a1.id);
+		const a2 = createMessageEntry(createAssistantMessage("assistant msg 2", createMockUsage(5000, 1000)), u2.id);
+		const compaction1 = createCompactionEntry("First summary", u2.id, a2.id);
+		const u3 = createMessageEntry(createUserMessage("user msg 3"), compaction1.id);
+		const a3 = createMessageEntry(createAssistantMessage("assistant msg 3", createMockUsage(8000, 2000)), u3.id);
+		const pathEntries = [u1, a1, u2, a2, compaction1, u3, a3];
+		const preparation = getOrThrow(prepareCompaction(pathEntries, DEFAULT_COMPACTION_SETTINGS));
+		expect(preparation).toBeDefined();
+		expect(preparation?.previousSummary).toBe("First summary");
+		expect(preparation?.firstKeptEntryId).toBeTruthy();
+		expect(preparation?.tokensBefore).toBe(estimateContextTokens(buildSessionContext(pathEntries).messages).tokens);
+	});
+
+	it("prepares split-turn compaction with prior file-operation details", () => {
+		const u1 = createMessageEntry(createUserMessage("user msg 1"));
+		const assistantMessage: AssistantMessage = {
+			...createAssistantMessage("assistant msg 1"),
+			content: [{ type: "toolCall", id: "tool-1", name: "write", arguments: { path: "written.ts" } }],
+		};
+		const a1 = createMessageEntry(assistantMessage, u1.id);
+		const compaction1: CompactionEntry = {
+			...createCompactionEntry("First summary", u1.id, a1.id),
+			details: { readFiles: ["old-read.ts"], modifiedFiles: ["old-edit.ts"] },
+		};
+		const u2 = createMessageEntry(createUserMessage("large turn"), compaction1.id);
+		const a2 = createMessageEntry(createAssistantMessage("large assistant message"), u2.id);
+		const preparation = getOrThrow(
+			prepareCompaction([u1, a1, compaction1, u2, a2], {
+				enabled: true,
+				reserveTokens: 100,
+				keepRecentTokens: 1,
+			}),
+		);
+
+		expect(preparation).toMatchObject({ previousSummary: "First summary", isSplitTurn: true });
+		expect(preparation?.turnPrefixMessages.map((message) => message.role)).toEqual(["user"]);
+		expect([...preparation!.fileOps.read]).toContain("old-read.ts");
+		expect([...preparation!.fileOps.edited]).toContain("old-edit.ts");
+		expect([...preparation!.fileOps.written]).toContain("written.ts");
+	});
+
+	it("prepares custom and branch summary entries for summarization", () => {
+		const branchSummary: BranchSummaryEntry = {
+			type: "branch_summary",
+			id: createId(),
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			fromId: "branch",
+			summary: "branch summary",
+		};
+		const customMessage: CustomMessageEntry = {
+			type: "custom_message",
+			id: createId(),
+			parentId: branchSummary.id,
+			timestamp: new Date().toISOString(),
+			customType: "note",
+			content: "custom content",
+			display: true,
+		};
+		const user = createMessageEntry(createUserMessage("keep"), customMessage.id);
+		const assistant = createMessageEntry(createAssistantMessage("assistant"), user.id);
+		const preparation = getOrThrow(
+			prepareCompaction([branchSummary, customMessage, user, assistant], {
+				enabled: true,
+				reserveTokens: 100,
+				keepRecentTokens: 1,
+			}),
+		);
+
+		expect(preparation?.messagesToSummarize.map((message) => message.role)).toEqual(["branchSummary", "custom"]);
+	});
+
+	it("does not prepare compaction when there is nothing valid to compact", () => {
+		const compaction = createCompactionEntry("already compacted", "entry-keep");
+		expect(getOrThrow(prepareCompaction([compaction], DEFAULT_COMPACTION_SETTINGS))).toBeUndefined();
+		expect(getOrThrow(prepareCompaction([], DEFAULT_COMPACTION_SETTINGS))).toBeUndefined();
+	});
+
+	it("serializes conversation with truncated tool results", () => {
+		const longContent = "x".repeat(5000);
+		const messages = convertMessages([
+			{
+				role: "toolResult",
+				toolCallId: "tc1",
+				toolName: "read",
+				content: [{ type: "text", text: longContent }],
+				isError: false,
+				timestamp: Date.now(),
+			},
+		]);
+		const result = serializeConversation(messages);
+		expect(result).toContain("[Tool result]:");
+		expect(result).toContain("[... 3000 more characters truncated]");
+	});
+
+	it("passes reasoning through generateSummary only for reasoning models with thinking enabled", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const seenOptions: Array<Record<string, unknown> | undefined> = [];
+		const { faux: fauxReasoning, model: reasoningModel } = createFauxModel(true);
+		fauxReasoning.setSimpleResponses([
+			(_context, options) => {
+				seenOptions.push(options as Record<string, unknown> | undefined);
+				return fauxAssistantMessage("## Goal\nTest summary");
+			},
+		]);
+		getOrThrow(
+			await generateSummary(
+				messages,
+				reasoningModel,
+				2000,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				"medium",
+			),
+		);
+		expect(seenOptions[0]).toMatchObject({ reasoning: "medium", apiKey: "test-key" });
+
+		const { faux: fauxOff, model: offModel } = createFauxModel(true);
+		fauxOff.setSimpleResponses([
+			(_context, options) => {
+				seenOptions.push(options as Record<string, unknown> | undefined);
+				return fauxAssistantMessage("## Goal\nTest summary");
+			},
+		]);
+		getOrThrow(
+			await generateSummary(messages, offModel, 2000, "test-key", undefined, undefined, undefined, undefined, "off"),
+		);
+		expect(seenOptions[1]).not.toHaveProperty("reasoning");
+
+		const { faux: fauxNonReasoning, model: nonReasoningModel } = createFauxModel(false);
+		fauxNonReasoning.setSimpleResponses([
+			(_context, options) => {
+				seenOptions.push(options as Record<string, unknown> | undefined);
+				return fauxAssistantMessage("## Goal\nTest summary");
+			},
+		]);
+		getOrThrow(
+			await generateSummary(
+				messages,
+				nonReasoningModel,
+				2000,
+				"test-key",
+				undefined,
+				undefined,
+				undefined,
+				undefined,
+				"medium",
+			),
+		);
+		expect(seenOptions[2]).not.toHaveProperty("reasoning");
+	});
+
+	it("includes previous summaries and custom instructions in generateSummary prompts", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		let promptText = "";
+		const { faux, model } = createFauxModel(false);
+		faux.setSimpleResponses([
+			(context) => {
+				const message = context.messages[0];
+				const content = message?.role === "user" ? message.content : [];
+				promptText = Array.isArray(content) && content[0]?.type === "text" ? content[0].text : "";
+				return fauxAssistantMessage("## Goal\nTest summary");
+			},
+		]);
+
+		const summary = getOrThrow(
+			await generateSummary(
+				messages,
+				model,
+				2000,
+				"test-key",
+				{ "x-test": "yes" },
+				undefined,
+				"focus",
+				"old summary",
+			),
+		);
+
+		expect(summary).toContain("Test summary");
+		expect(promptText).toContain("<previous-summary>\nold summary\n</previous-summary>");
+		expect(promptText).toContain("Additional focus: focus");
+	});
+
+	it("returns error results for failed or aborted summary generations", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const { faux: errorFaux, model: errorModel } = createFauxModel(false);
+		errorFaux.setSimpleResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "boom" })]);
+		const errorResult = await generateSummary(messages, errorModel, 2000, "test-key");
+		expect(errorResult).toMatchObject({
+			ok: false,
+			error: { code: "summarization_failed", message: "Summarization failed: boom" },
+		});
+
+		const { faux: abortedFaux, model: abortedModel } = createFauxModel(false);
+		abortedFaux.setSimpleResponses([fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "stopped" })]);
+		const abortedResult = await generateSummary(messages, abortedModel, 2000, "test-key");
+		expect(abortedResult).toMatchObject({ ok: false, error: { code: "aborted", message: "stopped" } });
+	});
+
+	it("clamps compaction summary maxTokens to the model output cap", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const seenOptions: Array<Record<string, unknown> | undefined> = [];
+		const { faux, model } = createFauxModel(false, 128000);
+		faux.setSimpleResponses([
+			(_context, options) => {
+				seenOptions.push(options as Record<string, unknown> | undefined);
+				return fauxAssistantMessage("## Goal\nTest summary");
+			},
+			(_context, options) => {
+				seenOptions.push(options as Record<string, unknown> | undefined);
+				return fauxAssistantMessage("## Goal\nTest summary");
+			},
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: messages,
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 600000,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 500000, keepRecentTokens: 20000 },
+		};
+
+		getOrThrow(await compact(preparation, model, "test-key"));
+
+		expect(seenOptions.map((options) => options?.["maxTokens"])).toEqual([128000, 128000]);
+	});
+
+	it("serializes split-turn summary requests", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const { faux, model } = createFauxModel(false);
+		let activeRequests = 0;
+		let maxActiveRequests = 0;
+		let releaseHistory!: () => void;
+		const historyReleased = new Promise<void>((resolve) => {
+			releaseHistory = resolve;
+		});
+		let markHistoryStarted!: () => void;
+		const historyStarted = new Promise<void>((resolve) => {
+			markHistoryStarted = resolve;
+		});
+		const requestOrder: string[] = [];
+		faux.setSimpleResponses([
+			async () => {
+				activeRequests++;
+				maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+				requestOrder.push("history-start");
+				markHistoryStarted();
+				await historyReleased;
+				requestOrder.push("history-end");
+				activeRequests--;
+				return fauxAssistantMessage("history summary");
+			},
+			() => {
+				activeRequests++;
+				maxActiveRequests = Math.max(maxActiveRequests, activeRequests);
+				requestOrder.push("prefix-start");
+				activeRequests--;
+				return fauxAssistantMessage("prefix summary");
+			},
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: messages,
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+
+		const compaction = compact(preparation, model, "test-key");
+		await historyStarted;
+		expect(faux.state.simpleCallCount).toBe(1);
+		releaseHistory();
+		const result = getOrThrow(await compaction);
+
+		expect(result.summary).toContain("history summary");
+		expect(result.summary).toContain("prefix summary");
+		expect(faux.state.simpleCallCount).toBe(2);
+		expect(maxActiveRequests).toBe(1);
+		expect(requestOrder).toEqual(["history-start", "history-end", "prefix-start"]);
+	});
+
+	it("does not request the turn-prefix summary after a history failure", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const { faux, model } = createFauxModel(false);
+		faux.setSimpleResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "history failed" }),
+			fauxAssistantMessage("prefix summary"),
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: messages,
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+
+		expect(await compact(preparation, model, "test-key")).toMatchObject({
+			ok: false,
+			error: { code: "summarization_failed", message: "Summarization failed: history failed" },
+		});
+		expect(faux.state.simpleCallCount).toBe(1);
+		expect(faux.getPendingSimpleResponseCount()).toBe(1);
+	});
+
+	it("updates the previous summary for a split turn with no new history", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Continue the implementation.")];
+		const previousSummary = "## Goal\nKeep the public API unchanged.";
+		const { faux, model } = createFauxModel(false);
+		const prompts: string[] = [];
+		const recordPrompt = (context: Context): void => {
+			const content = context.messages[0]?.content;
+			prompts.push(
+				Array.isArray(content)
+					? content.map((part) => (part.type === "text" ? part.text : "")).join("")
+					: (content ?? ""),
+			);
+		};
+		faux.setSimpleResponses([
+			(context) => {
+				recordPrompt(context);
+				return fauxAssistantMessage("updated history summary");
+			},
+			(context) => {
+				recordPrompt(context);
+				return fauxAssistantMessage("prefix summary");
+			},
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [],
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			previousSummary,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+
+		const result = getOrThrow(await compact(preparation, model, "test-key"));
+
+		expect(prompts).toHaveLength(2);
+		expect(prompts[0]).toContain("<previous-summary>");
+		expect(prompts[0]).toContain(previousSummary);
+		expect(result.summary).toContain("updated history summary");
+		expect(result.summary).toContain("prefix summary");
+		expect(result.summary).not.toContain("No prior history.");
+	});
+
+	it("returns compaction error results without throwing", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: messages,
+			turnPrefixMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+		const { faux: historyFaux, model: historyModel } = createFauxModel(false);
+		historyFaux.setSimpleResponses([
+			fauxAssistantMessage("", { stopReason: "error", errorMessage: "history failed" }),
+		]);
+		expect(await compact(preparation, historyModel, "test-key")).toMatchObject({
+			ok: false,
+			error: { code: "summarization_failed", message: "Summarization failed: history failed" },
+		});
+
+		const { model: invalidModel } = createFauxModel(false);
+		const invalidResult = await compact(
+			{ ...preparation, messagesToSummarize: [], firstKeptEntryId: "" },
+			invalidModel,
+			"test-key",
+		);
+		expect(invalidResult).toMatchObject({ ok: false, error: { code: "invalid_session" } });
+	});
+
+	it("passes reasoning through turn-prefix summaries when enabled", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const seenOptions: Array<Record<string, unknown> | undefined> = [];
+		const { faux, model } = createFauxModel(true);
+		faux.setSimpleResponses([
+			(_context, options) => {
+				seenOptions.push(options as Record<string, unknown> | undefined);
+				return fauxAssistantMessage("## Original Request\nTest summary");
+			},
+		]);
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [],
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+
+		getOrThrow(await compact(preparation, model, "test-key", undefined, undefined, undefined, "high"));
+
+		expect(seenOptions[0]).toMatchObject({ reasoning: "high" });
+	});
+
+	it("returns turn-prefix compaction errors without throwing", async () => {
+		const messages: AgentMessage[] = [createUserMessage("Summarize this.")];
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "entry-keep",
+			messagesToSummarize: [],
+			turnPrefixMessages: messages,
+			isSplitTurn: true,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { enabled: true, reserveTokens: 2000, keepRecentTokens: 20 },
+		};
+		const { faux, model } = createFauxModel(false);
+		faux.setSimpleResponses([fauxAssistantMessage("", { stopReason: "error", errorMessage: "prefix failed" })]);
+
+		expect(await compact(preparation, model, "test-key")).toMatchObject({
+			ok: false,
+			error: { code: "summarization_failed", message: "Turn prefix summarization failed: prefix failed" },
+		});
+
+		const { faux: abortedFaux, model: abortedModel } = createFauxModel(false);
+		abortedFaux.setSimpleResponses([
+			fauxAssistantMessage("", { stopReason: "aborted", errorMessage: "prefix stopped" }),
+		]);
+		expect(await compact(preparation, abortedModel, "test-key")).toMatchObject({
+			ok: false,
+			error: { code: "aborted", message: "prefix stopped" },
+		});
+	});
+
+	it("returns a compaction result with file details", async () => {
+		const u1 = createMessageEntry(createUserMessage("read a file"));
+		const assistantMessage: AssistantMessage = {
+			...createAssistantMessage("calling tool", createMockUsage(1000, 200)),
+			content: [{ type: "toolCall", id: "tool-1", name: "read", arguments: { path: "src/index.ts" } }],
+		};
+		const a1 = createMessageEntry(assistantMessage, u1.id);
+		const u2 = createMessageEntry(createUserMessage("continue"), a1.id);
+		const a2 = createMessageEntry(createAssistantMessage("done", createMockUsage(4000, 500)), u2.id);
+		const preparation = getOrThrow(prepareCompaction([u1, a1, u2, a2], DEFAULT_COMPACTION_SETTINGS));
+		expect(preparation).toBeDefined();
+		const { faux, model } = createFauxModel(false);
+		faux.setSimpleResponses([fauxAssistantMessage("## Goal\nTest summary")]);
+		const result = getOrThrow(await compact(preparation!, model, "test-key"));
+		expect(result.summary.length).toBeGreaterThan(0);
+		expect(result.firstKeptEntryId).toBeTruthy();
+		expect(result.details).toBeDefined();
+	});
+});
+
+function convertMessages(messages: Message[]): Message[] {
+	return messages;
+}

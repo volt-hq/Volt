@@ -1,0 +1,64 @@
+name: Bug Report
+description: Report a problem with the Volt CLI, daemon, phone connection, or libraries
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Before you start:** Read [CONTRIBUTING.md](https://github.com/volt-hq/Volt/blob/main/CONTRIBUTING.md).
+
+        Keep this short and include a reproducible example. For local CLI issues, retry with `volt --no-extensions` (without explicit `-e` paths) when relevant. This does not disable extensions in an already-running daemon.
+
+        Redact API keys, pairing tickets/QR codes, and private repository content. Report security vulnerabilities [privately](https://github.com/volt-hq/Volt/security/advisories/new), not here.
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected area
+      options:
+        - Terminal / CLI
+        - Daemon / iOS connection
+        - Provider / model
+        - SDK / library
+        - Documentation / installation
+    validations:
+      required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Be specific. Include error messages if any.
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Minimal steps to trigger the bug.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: Volt version
+      description: Output of `volt --version`, or the commit SHA for a source checkout.
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Host OS/architecture, terminal, and install method (npm, standalone, or source). For phone issues, include app and iOS versions.
+    validations:
+      required: true

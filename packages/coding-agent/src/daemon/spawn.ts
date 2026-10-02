@@ -1,0 +1,449 @@
+import { spawn } from "node:child_process";
+import { closeSync, existsSync, openSync } from "node:fs";
+import { join } from "node:path";
+import { ENV_AGENT_DIR, getAgentDir, getPackageDir, VERSION } from "../config.ts";
+import { type ControlSocketProbe, probeControlSocket } from "./control-server.ts";
+import { type PidfileContents, readPidfile, VOLTD_EXIT_STARTUP_CONTENDED } from "./main.ts";
+import { type DaemonPaths, ensureDaemonDirs, getDaemonPaths } from "./paths.ts";
+import { verifyPidfileProcess } from "./process-identity.ts";
+import { type InvalidVoltdStateFile, inspectVoltdStateFiles } from "./state.ts";
+
+// Source loading alone can take ~30s on metadata-heavy filesystems.
+const SPAWN_HEALTH_TIMEOUT_MS = 60_000;
+const SPAWN_HEALTH_POLL_MS = 100;
+const SPAWN_HEALTH_PROBE_TIMEOUT_MS = 500;
+const DAEMON_NODE_ARGS = ["--optimize-for-size"] as const;
+export const DAEMON_SHUTDOWN_TIMEOUT_MS = 75_000;
+const DAEMON_EXIT_POLL_MS = 200;
+
+export type DaemonProbeState =
+	| "healthy"
+	// Readiness wait expired for a live child or an unconfirmed concurrent starter.
+	| "starting"
+	| "shutting-down"
+	| "protocol-mismatch"
+	| "auth-failed"
+	| "unresponsive"
+	| "not-running";
+
+export interface DaemonProbeResult {
+	healthy: boolean;
+	state: DaemonProbeState;
+	pid?: number;
+	version?: string;
+	protocolVersion?: number;
+	startedAtMs?: number;
+	socketPath: string;
+	authToken?: string;
+}
+
+function daemonProbeFromSocketProbe(
+	socketPath: string,
+	probe: ControlSocketProbe,
+	authToken: string | undefined,
+): DaemonProbeResult {
+	if (probe.kind === "healthy") {
+		return {
+			healthy: true,
+			state: "healthy",
+			pid: probe.status.pid,
+			version: probe.status.version,
+			protocolVersion: probe.status.protocolVersion,
+			startedAtMs: probe.status.startedAtMs,
+			socketPath,
+			...(authToken === undefined ? {} : { authToken }),
+		};
+	}
+	if (probe.kind === "live-rejected") {
+		const state: DaemonProbeState =
+			probe.reason === "protocol_mismatch"
+				? "protocol-mismatch"
+				: probe.reason === "auth_failed"
+					? "auth-failed"
+					: probe.reason === "shutting_down"
+						? "shutting-down"
+						: "unresponsive";
+		return {
+			healthy: false,
+			state,
+			...(probe.version === undefined ? {} : { version: probe.version }),
+			...(probe.protocolVersion === undefined ? {} : { protocolVersion: probe.protocolVersion }),
+			socketPath,
+			...(authToken === undefined ? {} : { authToken }),
+		};
+	}
+	if (probe.kind === "unresponsive") {
+		return { healthy: false, state: "unresponsive", socketPath, ...(authToken === undefined ? {} : { authToken }) };
+	}
+	return { healthy: false, state: "not-running", socketPath, ...(authToken === undefined ? {} : { authToken }) };
+}
+
+/**
+ * Probe the pidfile-published daemon endpoint first, then fall back to the
+ * legacy default socket path for older daemons and pre-start diagnostics.
+ */
+export async function probeDaemon(agentDir: string = getAgentDir(), timeoutMs?: number): Promise<DaemonProbeResult> {
+	const startedAtMs = Date.now();
+	const paths = getDaemonPaths(agentDir);
+	const pidfile = readPidfile(paths.pidfilePath);
+	if (pidfile) {
+		const pidfileProbe = await probeControlSocket(pidfile.socketPath, {
+			version: VERSION,
+			timeoutMs,
+			...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+		});
+		const pidfileResult = daemonProbeFromSocketProbe(pidfile.socketPath, pidfileProbe, pidfile.token);
+		if (pidfileResult.state !== "not-running") {
+			return pidfileResult;
+		}
+	}
+	const probe = await probeControlSocket(paths.socketPath, {
+		version: VERSION,
+		// Both discovery paths share the caller's probe budget.
+		timeoutMs: timeoutMs === undefined ? undefined : Math.max(1, timeoutMs - (Date.now() - startedAtMs)),
+	});
+	const result = daemonProbeFromSocketProbe(paths.socketPath, probe, undefined);
+	if (result.state !== "not-running") {
+		return result;
+	}
+	return { healthy: false, state: "not-running", socketPath: paths.socketPath };
+}
+
+export interface RunningDaemon {
+	pid?: number;
+}
+
+/**
+ * Find a voltd for this agent dir that may still hold installed package files
+ * open: anything answering on its control endpoint, or a verified pidfile process.
+ */
+export async function findRunningDaemon(agentDir: string = getAgentDir()): Promise<RunningDaemon | undefined> {
+	const probe = await probeDaemon(agentDir);
+	const pidfile = readPidfile(getDaemonPaths(agentDir).pidfilePath);
+	if (probe.state !== "not-running") {
+		const pid = probe.pid ?? pidfile?.pid;
+		return pid === undefined ? {} : { pid };
+	}
+	if (pidfile && (await verifyPidfileProcess(pidfile)) === "match") {
+		return { pid: pidfile.pid };
+	}
+	return undefined;
+}
+
+export function resolveDaemonCliInvocation(packageDir: string = getPackageDir()): {
+	nodeArgs: string[];
+	entry: string;
+} {
+	const sourceEntry = join(packageDir, "src", "cli.ts");
+	const sourceRunner = join(packageDir, "..", "..", "scripts", "run-coding-agent-source.mjs");
+	if (existsSync(sourceEntry) && existsSync(sourceRunner)) {
+		// Use the same tsconfig path resolution as volt-test, even from the agent directory.
+		// Native Node execution otherwise resolves workspace dependencies to stale dist files.
+		return { nodeArgs: [...DAEMON_NODE_ARGS], entry: sourceRunner };
+	}
+	const bundledEntry = join(packageDir, "dist", "core", "npm", "cli.js");
+	return {
+		nodeArgs: [...DAEMON_NODE_ARGS],
+		entry: existsSync(bundledEntry) ? bundledEntry : join(packageDir, "dist", "cli.js"),
+	};
+}
+
+export type SpawnDaemonResult =
+	| { ok: true; pid?: number; socketPath: string }
+	| { ok: false; state: "starting" | "not-running"; pid?: number; socketPath: string; error: string };
+
+/** Who started a daemon: a terminal command, or the login service from `volt daemon install-service`. */
+export type DaemonStarter = "terminal" | "service";
+
+export interface StartInstalledDaemonDependencies {
+	readonly probeDaemon?: (agentDir: string, timeoutMs?: number) => Promise<DaemonProbeResult>;
+	readonly readyTimeoutMs?: number;
+}
+
+/** Run a `volt daemon` command from the installation at `packageDir`; resolves whether it exited 0. */
+function runInstalledDaemonCommand(agentDir: string, packageDir: string, command: string): Promise<boolean> {
+	const { entry } = resolveDaemonCliInvocation(packageDir);
+	return new Promise<boolean>((resolve) => {
+		const child = spawn(process.execPath, [entry, "daemon", command], {
+			stdio: "inherit",
+			windowsHide: true,
+			env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
+		});
+		child.once("error", () => resolve(false));
+		child.once("close", (code) => resolve(code === 0));
+	});
+}
+
+/**
+ * Point an installed login service at the installation at `packageDir` without starting
+ * the daemon. That installation writes the definition, so it records its own entrypoint.
+ */
+export function refreshInstalledDaemonService(agentDir: string, packageDir: string): Promise<boolean> {
+	return runInstalledDaemonCommand(agentDir, packageDir, "refresh-service");
+}
+
+/**
+ * Start the daemon from the installation at `packageDir`, so a daemon stopped for a
+ * self-update starts with the updated code and protocol. A daemon the login service
+ * ran is started by reinstalling the service from that installation: the service
+ * definition records the entrypoint path, which the update may have moved.
+ */
+export async function startInstalledDaemon(
+	agentDir: string,
+	packageDir: string,
+	starter: DaemonStarter,
+	dependencies: StartInstalledDaemonDependencies = {},
+): Promise<boolean> {
+	const started = await runInstalledDaemonCommand(
+		agentDir,
+		packageDir,
+		starter === "service" ? "install-service" : "start",
+	);
+	if (!started || starter === "terminal") {
+		return started;
+	}
+	// `daemon start` waits for readiness itself; the service manager starts voltd asynchronously.
+	const probeRunningDaemon = dependencies.probeDaemon ?? probeDaemon;
+	const deadline = Date.now() + (dependencies.readyTimeoutMs ?? SPAWN_HEALTH_TIMEOUT_MS);
+	while (true) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs <= 0) {
+			return false;
+		}
+		const probe = await probeRunningDaemon(agentDir, Math.min(SPAWN_HEALTH_PROBE_TIMEOUT_MS, remainingMs));
+		// This process still runs the pre-update code. A newer daemon rejecting its protocol
+		// has already accepted the connection, so it is up and serving updated clients.
+		if (probe.healthy || probe.state === "protocol-mismatch") {
+			return true;
+		}
+		await new Promise((resolve) => setTimeout(resolve, SPAWN_HEALTH_POLL_MS));
+	}
+}
+
+export interface PublishedDaemonEndpoint {
+	socketPath: string;
+	authToken?: string;
+}
+
+/** Read the latest complete pidfile endpoint without probing or auto-starting. */
+export function readPublishedDaemonEndpoint(agentDir: string = getAgentDir()): PublishedDaemonEndpoint | undefined {
+	const pidfile = readPidfile(getDaemonPaths(agentDir).pidfilePath);
+	if (!pidfile) {
+		return undefined;
+	}
+	return {
+		socketPath: pidfile.socketPath,
+		...(pidfile.token === undefined ? {} : { authToken: pidfile.token }),
+	};
+}
+
+export interface WaitForDaemonExitOptions {
+	agentDir?: string;
+	pid?: number;
+	pidfile?: PidfileContents;
+	socketPath?: string;
+	timeoutMs?: number;
+}
+
+export type PublishedDaemonGenerationState = "current" | "retired" | "unverifiable";
+
+/** Compare a captured daemon generation with the generation currently published on disk. */
+export function classifyPublishedDaemonGeneration(
+	target: PidfileContents,
+	current: PidfileContents | undefined,
+): PublishedDaemonGenerationState {
+	if (!current) {
+		return "unverifiable";
+	}
+	if (!target.token || !current.token) {
+		return "unverifiable";
+	}
+	if (target.token !== current.token) {
+		return "retired";
+	}
+	return target.pid === current.pid &&
+		target.startedAtMs === current.startedAtMs &&
+		target.socketPath === current.socketPath
+		? "current"
+		: "unverifiable";
+}
+
+function processIsGone(pid: number | undefined): boolean {
+	if (!pid || pid === process.pid) {
+		return true;
+	}
+	try {
+		process.kill(pid, 0);
+		return false;
+	} catch (error) {
+		return !(error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "EPERM");
+	}
+}
+
+export async function waitForDaemonExit(options: WaitForDaemonExitOptions = {}): Promise<"exited" | "timeout"> {
+	const agentDir = options.agentDir ?? getAgentDir();
+	const paths = getDaemonPaths(agentDir);
+	const deadline = Date.now() + (options.timeoutMs ?? DAEMON_SHUTDOWN_TIMEOUT_MS);
+	const targetPid = options.pid ?? options.pidfile?.pid;
+	const socketPath = options.socketPath ?? options.pidfile?.socketPath ?? paths.socketPath;
+	while (Date.now() < deadline) {
+		if (
+			options.pidfile &&
+			classifyPublishedDaemonGeneration(options.pidfile, readPidfile(paths.pidfilePath)) === "retired"
+		) {
+			return "exited";
+		}
+		const socketProbe = await probeControlSocket(socketPath, {
+			version: VERSION,
+			timeoutMs: 500,
+			...(options.pidfile?.token === undefined ? {} : { authToken: options.pidfile.token }),
+		});
+		if (processIsGone(targetPid) && socketProbe.kind === "no-listener") {
+			return "exited";
+		}
+		await new Promise((resolve) => setTimeout(resolve, DAEMON_EXIT_POLL_MS));
+	}
+	return "timeout";
+}
+
+/** Spawn a detached daemon and wait up to 60s for local control readiness, not phone transport readiness. */
+export async function spawnDetachedDaemon(agentDir: string = getAgentDir()): Promise<SpawnDaemonResult> {
+	const paths: DaemonPaths = getDaemonPaths(agentDir);
+	ensureDaemonDirs(paths);
+	const { nodeArgs, entry } = resolveDaemonCliInvocation();
+	const logFd = openSync(paths.logPath, "a", 0o600);
+	const child = spawn(process.execPath, [...nodeArgs, entry, "daemon", "run", "--foreground"], {
+		detached: true,
+		windowsHide: true,
+		stdio: ["ignore", logFd, logFd],
+		cwd: agentDir,
+		env: { ...process.env, [ENV_AGENT_DIR]: agentDir },
+	});
+	// An unhandled "error" event would crash the calling CLI process; capture it
+	// and surface it through the health-wait result instead.
+	let spawnError: Error | undefined;
+	child.once("error", (error) => {
+		spawnError = error;
+	});
+	child.unref();
+	// The child received duplicated descriptors at spawn; close the parent copy.
+	closeSync(logFd);
+
+	const deadline = Date.now() + SPAWN_HEALTH_TIMEOUT_MS;
+	let socketPath = paths.socketPath;
+	while (true) {
+		const remainingMs = deadline - Date.now();
+		if (remainingMs > 0) {
+			const probe = await probeDaemon(agentDir, Math.min(SPAWN_HEALTH_PROBE_TIMEOUT_MS, remainingMs));
+			socketPath = probe.socketPath;
+			// A concurrent starter may have won while our child exited. Accept that
+			// healthy daemon, but not a status from our own child after it has exited.
+			if (probe.healthy && (probe.pid !== child.pid || (child.exitCode === null && child.signalCode === null))) {
+				return { ok: true, pid: probe.pid, socketPath };
+			}
+		}
+		if (spawnError) {
+			return { ok: false, state: "not-running", socketPath, error: `failed to spawn voltd: ${spawnError.message}` };
+		}
+		// Losing the startup lock does not mean startup failed: its owner can still
+		// be loading state before publishing an endpoint. Keep the original deadline.
+		const startupContended = child.exitCode === VOLTD_EXIT_STARTUP_CONTENDED && child.signalCode === null;
+		if (!startupContended && (child.exitCode !== null || child.signalCode !== null)) {
+			const reason = child.signalCode === null ? `exit code ${child.exitCode}` : `signal ${child.signalCode}`;
+			return {
+				ok: false,
+				state: "not-running",
+				pid: child.pid,
+				socketPath,
+				error: `voltd exited before becoming healthy (${reason})`,
+			};
+		}
+		if (Date.now() >= deadline) {
+			if (startupContended) {
+				return {
+					ok: false,
+					state: "starting",
+					socketPath,
+					error:
+						`voltd readiness unconfirmed after ${SPAWN_HEALTH_TIMEOUT_MS / 1000}s; another starter held the startup lock. ` +
+						"Check status and logs before retrying.",
+				};
+			}
+			return {
+				ok: false,
+				state: "starting",
+				pid: child.pid,
+				socketPath,
+				error:
+					`voltd readiness unconfirmed after ${SPAWN_HEALTH_TIMEOUT_MS / 1000}s; process still running (pid ${child.pid}). ` +
+					"Check status and logs before retrying.",
+			};
+		}
+		await new Promise((resolve) => setTimeout(resolve, Math.min(SPAWN_HEALTH_POLL_MS, deadline - Date.now())));
+	}
+}
+
+export interface EnsureDaemonResult extends DaemonProbeResult {
+	spawned: boolean;
+	error?: string;
+	invalidState?: InvalidVoltdStateFile;
+}
+
+export interface EnsureDaemonRunningDependencies {
+	readonly probeDaemon?: (agentDir: string) => Promise<DaemonProbeResult>;
+	readonly spawnDetachedDaemon?: (agentDir: string) => Promise<SpawnDaemonResult>;
+}
+
+/** Probe the socket; if no healthy daemon answers, spawn one detached. */
+export async function ensureDaemonRunning(
+	agentDir: string = getAgentDir(),
+	dependencies: EnsureDaemonRunningDependencies = {},
+): Promise<EnsureDaemonResult> {
+	const probeRunningDaemon = dependencies.probeDaemon ?? probeDaemon;
+	const spawnDaemon = dependencies.spawnDetachedDaemon ?? spawnDetachedDaemon;
+	let probe = await probeRunningDaemon(agentDir);
+	if (probe.healthy) {
+		return { ...probe, spawned: false };
+	}
+	if (probe.state === "protocol-mismatch" || probe.state === "auth-failed") {
+		return { ...probe, spawned: false };
+	}
+	if (probe.state === "unresponsive") {
+		const paths = getDaemonPaths(agentDir);
+		const pidfile = readPidfile(paths.pidfilePath);
+		if (pidfile?.socketPath === probe.socketPath && (await verifyPidfileProcess(pidfile)) === "match") {
+			return { ...probe, spawned: false };
+		}
+	}
+	if (probe.state === "shutting-down") {
+		await waitForDaemonExit({ agentDir, socketPath: probe.socketPath });
+		probe = await probeRunningDaemon(agentDir);
+		if (probe.state !== "not-running") {
+			return { ...probe, spawned: false };
+		}
+	}
+	const invalidState = inspectVoltdStateFiles(agentDir);
+	if (invalidState) {
+		return {
+			healthy: false,
+			state: "not-running",
+			socketPath: probe.socketPath,
+			spawned: false,
+			error: invalidState.error,
+			invalidState,
+		};
+	}
+	const spawned = await spawnDaemon(agentDir);
+	if (!spawned.ok) {
+		return {
+			healthy: false,
+			state: spawned.state,
+			pid: spawned.pid,
+			socketPath: spawned.socketPath,
+			spawned: true,
+			error: spawned.error,
+		};
+	}
+	const healthyProbe = await probeRunningDaemon(agentDir);
+	return { ...healthyProbe, spawned: true };
+}
