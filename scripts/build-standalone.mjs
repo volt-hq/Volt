@@ -380,14 +380,10 @@ function copyReleaseAssets(stageDirectory, target) {
 	}
 
 	const docsSource = join(codingAgentRoot, "docs");
-	copyTrackedTree(docsSource, join(stageDirectory, "docs"), ["images/doom-extension.png"]);
+	copyTrackedTree(docsSource, join(stageDirectory, "docs"));
 
 	const examplesRoot = join(codingAgentRoot, "examples");
-	const excludedExamples = [
-		"extensions/doom-overlay",
-		"remote/iroh-sidecar",
-		"remote/firebase-push-relay/functions/node_modules",
-	];
+	const excludedExamples = ["remote/firebase-push-relay/functions/node_modules"];
 	copyTrackedTree(examplesRoot, join(stageDirectory, "examples"), excludedExamples);
 	copyFileSync(join(examplesRoot, "README.binary.md"), join(stageDirectory, "examples", "README.md"));
 	rmSync(join(stageDirectory, "examples", "README.binary.md"), { force: true });
@@ -788,9 +784,6 @@ async function build() {
 			mode: 0o644,
 		});
 
-		if (existsSync(join(stageDirectory, "examples", "extensions", "doom-overlay"))) {
-			throw new Error("Doom overlay must not be present in standalone release staging");
-		}
 		assertNoSymlinks(stageDirectory);
 		assertStagedBinarySidecars(stageDirectory, target);
 		writeStagedFileManifest(stageDirectory);

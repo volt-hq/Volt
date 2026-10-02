@@ -45,14 +45,6 @@ native adapter, so a standalone executable cannot host `volt daemon` or
 provide remote/iOS access. Use the npm package or a source checkout for those
 features.
 
-The source-only `examples/extensions/doom-overlay` demo remains in the
-repository, but is excluded from both the published npm package and standalone
-archives. Volt does not redistribute its Doom screenshot, WAD, cloned
-DoomGeneric source, or generated GPL JavaScript/WebAssembly. The optional local
-build script pins DoomGeneric source commit
-`dcb7a8dbc7a16ce3dda29382ac9aae9d77d21284`; its ignored outputs remain subject
-to DoomGeneric's GPL-2.0 license if a user chooses to redistribute them.
-
 This notice is not a substitute for the applicable license texts or the
 release owner's review. Before creating a public release tag, verify the
 runtime archive checksum, generated metafile and license manifest, copied

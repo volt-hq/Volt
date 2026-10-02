@@ -417,7 +417,6 @@ The default export can also be `async`. volt waits for async extension factories
 - SSH and sandbox execution
 - Custom integrations alongside native MCP support
 - Make volt look like Claude Code
-- Games while waiting (yes, Doom runs)
 - ...anything you can dream up
 
 Place in `~/.volt/agent/extensions/`, `.volt/extensions/`, or a [volt package](#volt-packages) to share with others. See [docs/extensions.md](docs/extensions.md) and [examples/extensions/](examples/extensions/).

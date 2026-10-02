@@ -1,0 +1,111 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5724
+
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
+
+// `proper-lockfile` installs `signal-exit`, whose signal listener re-sends
+// SIGTERM/SIGHUP when it observes no other process listeners during the same
+// signal dispatch. InteractiveMode must therefore keep its signal handlers
+// registered until async terminal cleanup has completed.
+
+type ShutdownThis = {
+	isShuttingDown: boolean;
+	runtimeDisposePromise: Promise<void> | undefined;
+	disposeRuntimeHost: () => Promise<void>;
+	unregisterSignalHandlers: () => void;
+	runtimeHost: { dispose: () => Promise<void> };
+	ui: { terminal: { drainInput: (ms: number) => Promise<void> } };
+	stop: () => void;
+	flushStdout: () => Promise<void>;
+	settingsManager: { rememberActiveProfile: () => void; flush: () => Promise<void> };
+	releaseDaemonLeaseOnQuit: () => Promise<void>;
+	closeLspTrace: () => Promise<void>;
+	cleanupAllScratchDirectories: () => void;
+};
+
+type InteractiveModePrototypeWithShutdown = {
+	disposeRuntimeHost(this: ShutdownThis): Promise<void>;
+	shutdown(this: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void>;
+};
+
+const interactiveModePrototype = InteractiveMode.prototype as unknown;
+
+class ProcessExitError extends Error {}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+	let resolve: (() => void) | undefined;
+	const promise = new Promise<void>((res) => {
+		resolve = res;
+	});
+	return {
+		promise,
+		resolve: () => resolve?.(),
+	};
+}
+
+async function callShutdown(context: ShutdownThis, options?: { fromSignal?: boolean }): Promise<void> {
+	try {
+		await (interactiveModePrototype as InteractiveModePrototypeWithShutdown).shutdown.call(context, options);
+	} catch (error) {
+		if (!(error instanceof ProcessExitError)) throw error;
+	}
+}
+
+describe("InteractiveMode SIGTERM shutdown with signal-exit (#5724)", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	test("keeps signal handlers registered while signal-triggered cleanup is pending", async () => {
+		vi.spyOn(process, "exit").mockImplementation((() => {
+			throw new ProcessExitError();
+		}) as typeof process.exit);
+
+		const order: string[] = [];
+		const dispose = deferred();
+		const context: ShutdownThis = {
+			isShuttingDown: false,
+			runtimeDisposePromise: undefined,
+			disposeRuntimeHost: (interactiveModePrototype as InteractiveModePrototypeWithShutdown).disposeRuntimeHost,
+			unregisterSignalHandlers: vi.fn(() => {
+				order.push("unregister");
+			}),
+			runtimeHost: {
+				dispose: vi.fn(() => {
+					order.push("dispose");
+					return dispose.promise;
+				}),
+			},
+			ui: {
+				terminal: {
+					drainInput: vi.fn(async () => {
+						order.push("drainInput");
+					}),
+				},
+			},
+			stop: vi.fn(() => {
+				order.push("stop");
+			}),
+			flushStdout: vi.fn(async () => {}),
+			settingsManager: {
+				rememberActiveProfile: vi.fn(),
+				flush: vi.fn(async () => {}),
+			},
+			releaseDaemonLeaseOnQuit: vi.fn(async () => {}),
+			closeLspTrace: vi.fn(async () => {}),
+			cleanupAllScratchDirectories: vi.fn(),
+		};
+
+		const shutdownPromise = callShutdown(context, { fromSignal: true });
+		await vi.waitFor(() => {
+			expect(order).toEqual(["dispose"]);
+		});
+
+		expect(context.unregisterSignalHandlers).not.toHaveBeenCalled();
+
+		dispose.resolve();
+		await shutdownPromise;
+
+		expect(order).toEqual(["dispose", "drainInput", "stop"]);
+	});
+});

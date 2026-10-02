@@ -24,7 +24,6 @@ Extensions are TypeScript modules that extend volt's behavior. They can subscrib
 - Interactive tools (questions, wizards, custom dialogs)
 - Stateful tools (todo lists, connection pools)
 - External integrations (file watchers, webhooks, CI triggers)
-- Games while you wait (see `snake.ts` example)
 
 See [examples/extensions/](../examples/extensions/) for working implementations.
 
@@ -144,8 +143,6 @@ To share extensions via npm or git as volt packages, see [packages.md](packages.
 | `typebox` | Schema definitions for tool parameters |
 | `@hansjm10/volt-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
 | `@hansjm10/volt-tui` | TUI components for custom rendering |
-
-Pi extension packages also work: Volt maps Pi core imports (`@earendil-works/pi-ai`, `@earendil-works/pi-agent-core`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-tui`, plus the legacy `@mariozechner/pi-*` names) to the corresponding Volt APIs when loading extensions.
 
 npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `npm install`, and imports from `node_modules/` are resolved automatically.
 
@@ -2668,7 +2665,7 @@ const result = await ctx.ui.custom<string | null>(
 
 A focused visible overlay can reclaim input after temporary non-overlay custom UI closes. If you intentionally want another component to keep input while the overlay stays visible, call `handle.unfocus({ target })`. Passing `{ target: null }` releases the overlay without focusing another component.
 
-See [tui.md](tui.md) for the full `OverlayOptions` and `OverlayHandle` API and [overlay-qa-tests.ts](../examples/extensions/overlay-qa-tests.ts) for examples.
+See [tui.md](tui.md) for the full `OverlayOptions` and `OverlayHandle` API.
 
 ### Custom Editor
 
@@ -2820,7 +2817,6 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `truncated-tool.ts` | Output truncation example | `registerTool`, `truncateHead` |
 | `tool-override.ts` | Override built-in read tool | `registerTool` (same name as built-in) |
 | **Commands** |||
-| `pirate.ts` | Modify system prompt per-turn | `registerCommand`, `before_agent_start` |
 | `summarize.ts` | Conversation summary command | `registerCommand`, `ui.custom` |
 | `handoff.ts` | Cross-provider model handoff | `registerCommand`, `ui.editor`, `ui.custom` |
 | `qna.ts` | Q&A with custom UI | `registerCommand`, `ui.custom`, `setEditorText` |
@@ -2854,10 +2850,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `custom-footer.ts` | Replace footer entirely | `registerCommand`, `setFooter` |
 | `custom-header.ts` | Replace startup header | `on("session_start")`, `setHeader` |
 | `modal-editor.ts` | Vim-style modal editor | `setEditorComponent`, `CustomEditor` |
-| `rainbow-editor.ts` | Custom editor styling | `setEditorComponent` |
 | `widget-placement.ts` | Widget above/below editor | `setWidget` |
-| `overlay-test.ts` | Overlay components | `ui.custom` with overlay options |
-| `overlay-qa-tests.ts` | Comprehensive overlay tests | `ui.custom`, all overlay options |
 | `notify.ts` | Simple notifications | `ui.notify` |
 | `timed-confirm.ts` | Dialogs with timeout | `ui.confirm` with timeout/signal |
 | `mac-system-theme.ts` | Auto-switch theme | `setTheme`, `exec` |
@@ -2869,10 +2862,6 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `interactive-shell.ts` | Persistent shell session | `on("user_bash")` |
 | `sandbox/` | Sandboxed tool execution | Tool operations |
 | `gondolin/` | Route built-in tools and `!` commands into a Gondolin micro-VM | Tool operations, built-in tool overrides, `on("user_bash")` |
-| **Games** |||
-| `snake.ts` | Snake game | `registerCommand`, `ui.custom`, keyboard handling |
-| `space-invaders.ts` | Space Invaders game | `registerCommand`, `ui.custom` |
-| `doom-overlay/` | Doom in overlay | `ui.custom` with overlay |
 | **Providers** |||
 | `custom-provider-anthropic/` | Custom Anthropic proxy | `registerProvider` |
 | `custom-provider-gitlab-duo/` | GitLab Duo integration | `registerProvider` with OAuth |

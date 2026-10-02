@@ -29,9 +29,8 @@ completed.
   manifest's metafile checksum, embedded npm package identities, copied
   license-file checksums, and any checksum-pinned overrides. Verify
   `standalone-file-manifest.json` accounts for every other staged archive file.
-  Confirm the npm package and all standalone archives exclude
-  `examples/extensions/doom-overlay`, and contain only components represented
-  by the pinned runtime license or generated bundle inventory. See
+  Confirm the npm package and all standalone archives contain only components
+  represented by the pinned runtime license or generated bundle inventory. See
   [Third-Party Notices](THIRD-PARTY-NOTICES.md).
 
   Build and smoke-test the native matrix: macOS arm64/x64, Linux arm64/x64,
@@ -59,11 +58,8 @@ completed.
   protected `v*` tags only. It has no secrets or reviewer requirement.
 - [x] **Resolve Doom source-archive provenance.** The unverified generated Doom
   JavaScript/WebAssembly and Doom artwork have been removed from the repository.
-  The remaining source-only demo ignores generated output, cloned upstream
-  source, and the downloaded WAD; its optional local build pins the exact
-  DoomGeneric source commit and warns that redistributed output is GPL-2.0.
-  The npm package and custom standalone archives continue to exclude the whole
-  demo as defense in depth.
+  The source-only Doom demo has since been removed as well, so no Doom source,
+  build script, or package exclusion remains.
 - [x] **Prove the npm daemon distribution.** From an unpublished package
   installed outside the repository, run the full Node smoke test in
   [AGENTS.md](AGENTS.md#releasing). Then use an isolated
