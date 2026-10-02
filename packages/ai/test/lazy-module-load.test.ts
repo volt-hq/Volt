@@ -87,11 +87,12 @@ describe("lazy provider module loading", () => {
 		expect(result.loadedSpecifiers).toEqual(["@anthropic-ai/sdk"]);
 	});
 
-	it("loads only the Anthropic SDK when dispatching through streamSimple", () => {
+	it("loads only the Anthropic SDK when dispatching through a client", () => {
 		const result = runProbe(`
 			const model = mod.getModel("anthropic", "claude-sonnet-4-6");
 			const context = { messages: [{ role: "user", content: "hi" }] };
-			await mod.streamSimple(model, context).result();
+			const client = mod.createAiClient({ providers: mod.builtInProviders() });
+			await client.streamSimple(model, context).result();
 		`);
 
 		expect(result.loadedSpecifiers).toEqual(["@anthropic-ai/sdk"]);

@@ -30,7 +30,7 @@ case "$IROH_PLATFORM" in
         ;;
 esac
 
-# Unset API keys (see packages/ai/src/stream.ts getEnvApiKey)
+# Unset API keys (see packages/coding-agent/src/core/env-api-keys.ts)
 unset ANTHROPIC_API_KEY
 unset ANTHROPIC_OAUTH_TOKEN
 unset OPENAI_API_KEY
