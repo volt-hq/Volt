@@ -41,6 +41,9 @@ export interface Keybindings {
 	"tui.select.pageDown": true;
 	"tui.select.confirm": true;
 	"tui.select.cancel": true;
+	"tui.select.left": true;
+	"tui.select.right": true;
+	"tui.select.toggle": true;
 	// Focus traversal inside focus groups
 	"tui.focus.next": true;
 	"tui.focus.previous": true;
@@ -159,6 +162,9 @@ export const TUI_KEYBINDINGS = {
 		defaultKeys: ["escape", "ctrl+c"],
 		description: "Cancel selection",
 	},
+	"tui.select.left": { defaultKeys: "left", description: "Move selection left or collapse" },
+	"tui.select.right": { defaultKeys: "right", description: "Move selection right or expand" },
+	"tui.select.toggle": { defaultKeys: "space", description: "Toggle the selected item" },
 	"tui.focus.next": { defaultKeys: "tab", description: "Move focus to the next control" },
 	"tui.focus.previous": { defaultKeys: "shift+tab", description: "Move focus to the previous control" },
 	// These intentionally shadow the unmodified editor bindings in fullscreen mode.
