@@ -1,3 +1,4 @@
+import { AssistantMessageSchema } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
 import {
 	decodeStoredSessionEntry,
@@ -9,6 +10,7 @@ import {
 	validatePersistedSessionEntrySequence,
 } from "../src/core/session-entry-codec.ts";
 import { CURRENT_SESSION_SNAPSHOT_VERSION, CURRENT_SESSION_VERSION } from "../src/core/session-manager.ts";
+import { StoredAssistantMessageSchema } from "../src/core/stored-assistant-message-schema.ts";
 
 const ENTRY_TIMESTAMP = "2026-09-03T12:00:00.000Z";
 const MESSAGE_TIMESTAMP = Date.parse(ENTRY_TIMESTAMP);
@@ -128,6 +130,12 @@ const REQUIRED_TYPE_FIELD: Record<string, string> = {
 };
 
 describe("session entry codec", () => {
+	it("validates assistant messages with an exact copy of volt-ai's schema", () => {
+		expect(JSON.parse(JSON.stringify(StoredAssistantMessageSchema))).toEqual(
+			JSON.parse(JSON.stringify(AssistantMessageSchema)),
+		);
+	});
+
 	it("round-trips every canonical entry type and derives its envelope", () => {
 		for (const value of validEntries()) {
 			const parsed = parsePersistedSessionEntry(value);

@@ -87,7 +87,13 @@ import {
 	RpcListJobsResponseSchema,
 	RpcReadJobResponseSchema,
 } from "./background-jobs.ts";
-import { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema, RpcMcpAuthFlowSchema } from "./commands.ts";
+import {
+	RPC_COMMAND_SCHEMAS,
+	RpcClientCapabilityFeatureSchema,
+	RpcConversationInputImagesSchema,
+	RpcImageContentSchema,
+	RpcMcpAuthFlowSchema,
+} from "./commands.ts";
 import {
 	RpcConversationActiveAssistantSchema,
 	RpcConversationAssistantPartSchema,
@@ -173,8 +179,6 @@ import {
 	RpcConversationBootstrapReasonSchema,
 	RpcConversationDiscontinuityReasonSchema,
 	RpcConversationIdentifierSchema,
-	RpcConversationInputImagesSchema,
-	RpcImageContentSchema,
 	RpcPushPlatformSchema,
 	RpcPushProviderSchema,
 	RpcQueueModeSchema,

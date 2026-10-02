@@ -7,15 +7,11 @@
  * clients. `x-volt-expected` carries the human phrasing validation errors use.
  */
 
-import { ImageContentSchema } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import {
 	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
 	RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN,
 	RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_MAX_IMAGES,
 	RPC_WIRE_MAX_SAFE_INTEGER,
 } from "../wire-limits.ts";
 import { stringEnum } from "./helpers.ts";
@@ -85,25 +81,6 @@ export const RpcConversationBootstrapReasonSchema = stringEnum([
 	"resync",
 	"overflow",
 ]);
-
-/** volt-ai's ImageContent annotated with the conversation-input byte limits. */
-export const RpcImageContentSchema = Type.Object(
-	{
-		...ImageContentSchema.properties,
-		data: Type.Options(ImageContentSchema.properties.data, {
-			"x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
-		}),
-		mimeType: Type.Options(ImageContentSchema.properties.mimeType, {
-			"x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
-		}),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcConversationInputImagesSchema = Type.Array(RpcImageContentSchema, {
-	"x-volt-max-items": RPC_CONVERSATION_INPUT_MAX_IMAGES,
-	"x-volt-expected": "be an array of image objects",
-});
 
 /** Wire projection of volt-agent-core's seven-level ThinkingLevel (pinned in type-assertions.ts). */
 export const RpcThinkingLevelSchema = stringEnum(["off", "minimal", "low", "medium", "high", "xhigh", "max"], {
