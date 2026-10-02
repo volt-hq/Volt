@@ -1,7 +1,9 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5109
+
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
-import type { ExtensionFactory } from "../../../src/index.ts";
-import { createHarness } from "../harness.ts";
+import type { ExtensionFactory } from "../../../../src/index.ts";
+import { createHarness } from "../../harness.ts";
 
 function toolNames(tools: Array<{ name: string }>): string[] {
 	return tools.map((tool) => tool.name).sort();

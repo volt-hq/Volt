@@ -1,13 +1,15 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/4167
+
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, ToolResultMessage, Usage } from "@hansjm10/volt-ai";
 import { Container, Text, type TUI } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
-import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
-import type { SessionContext } from "../../../src/core/session-manager.ts";
-import { initTheme } from "../../../src/core/theme/runtime.ts";
-import type { ToolExecutionComponent } from "../../../src/modes/interactive/components/tool-execution.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { stripAnsi } from "../../../src/utils/ansi.ts";
+import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import type { SessionContext } from "../../../../src/core/session-manager.ts";
+import { initTheme } from "../../../../src/core/theme/runtime.ts";
+import type { ToolExecutionComponent } from "../../../../src/modes/interactive/components/tool-execution.ts";
+import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
+import { stripAnsi } from "../../../../src/utils/ansi.ts";
 
 const TOOL_CALL_ID = "tool-4167";
 const TOOL_NAME = "slow_tool";

@@ -1,11 +1,11 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5303
+
 import type { ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
 import { afterEach, describe, expect, it } from "vitest";
-import { spawnProcess, waitForChildProcess } from "../../../src/utils/child-process.ts";
+import { spawnProcess, waitForChildProcess } from "../../../../src/utils/child-process.ts";
 
 /**
- * Regression test for https://github.com/earendil-works/pi/issues/5303
- *
  * waitForChildProcess armed a fixed 100ms timer on `exit` and destroyed the
  * stdio streams when it fired. When a short-lived detached descendant kept the
  * stdout pipe open, `close` never fired, so that timer was the only thing that

@@ -1,11 +1,11 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5080
+
 import chalk from "chalk";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { APP_NAME } from "../../../src/config.ts";
-import type { SessionManager, SessionReference } from "../../../src/core/session-manager.ts";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { APP_NAME } from "../../../../src/config.ts";
+import type { SessionManager, SessionReference } from "../../../../src/core/session-manager.ts";
+import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
 
-// Regression for https://github.com/earendil-works/pi/issues/5080
-//
 // On SIGTERM/SIGHUP the graceful shutdown must emit `session_shutdown`
 // (runtimeHost.dispose) BEFORE touching the terminal. Extension teardown such
 // as removing a socket does not write to the tty, so it must not be skipped if

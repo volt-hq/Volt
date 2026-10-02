@@ -1,18 +1,20 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/2860
+
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import type { AgentSession } from "../../../src/core/agent-session.ts";
+import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import {
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
 	createAgentSessionRuntime,
 	createAgentSessionServices,
-} from "../../../src/core/agent-session-runtime.ts";
-import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../src/index.ts";
+} from "../../../../src/core/agent-session-runtime.ts";
+import { AuthStorage } from "../../../../src/core/auth-storage.ts";
+import { SessionManager, type SessionReference } from "../../../../src/core/session-manager.ts";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionFactory } from "../../../../src/index.ts";
 
 function getText(message: AgentSession["messages"][number]): string {
 	if (!("content" in message)) {

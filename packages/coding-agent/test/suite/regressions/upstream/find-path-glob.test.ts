@@ -1,12 +1,12 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/3302
+
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { createFindToolDefinition } from "../../../src/core/tools/find.ts";
+import { createFindToolDefinition } from "../../../../src/core/tools/find.ts";
 
 /**
- * Regression test for https://github.com/earendil-works/pi-mono/issues/3302
- *
  * The `find` tool advertises glob patterns like `src/**\/*.spec.ts`, but the
  * default fd-backed implementation used `fd --glob <pattern>` without
  * `--full-path`, which makes fd match only against the basename. Any pattern

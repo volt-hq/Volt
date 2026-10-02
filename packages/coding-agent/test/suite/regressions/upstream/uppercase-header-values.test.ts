@@ -1,11 +1,13 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5661
+
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { ENV_AGENT_DIR } from "../../../src/config.ts";
-import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { ModelRegistry } from "../../../src/core/model-registry.ts";
-import { runMigrations } from "../../../src/migrations.ts";
-import { createHarness } from "../harness.ts";
+import { ENV_AGENT_DIR } from "../../../../src/config.ts";
+import { AuthStorage } from "../../../../src/core/auth-storage.ts";
+import { ModelRegistry } from "../../../../src/core/model-registry.ts";
+import { runMigrations } from "../../../../src/migrations.ts";
+import { createHarness } from "../../harness.ts";
 
 describe("regression #5661: uppercase models.json header values", () => {
 	const cleanups: Array<() => void> = [];

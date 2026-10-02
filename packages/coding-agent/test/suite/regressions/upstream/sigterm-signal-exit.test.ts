@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, test, vi } from "vitest";
-import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5724
 
-// Regression for https://github.com/earendil-works/pi/issues/5724
-//
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
+
 // `proper-lockfile` installs `signal-exit`, whose signal listener re-sends
 // SIGTERM/SIGHUP when it observes no other process listeners during the same
 // signal dispatch. InteractiveMode must therefore keep its signal handlers

@@ -1,15 +1,17 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5596
+
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentSession } from "../../../src/core/agent-session.ts";
-import { AuthStorage } from "../../../src/core/auth-storage.ts";
-import { ModelRegistry } from "../../../src/core/model-registry.ts";
-import { SessionManager } from "../../../src/core/session-manager.ts";
-import { SettingsManager } from "../../../src/core/settings-manager.ts";
-import { initTheme } from "../../../src/core/theme/runtime.ts";
-import { createTestAgentSessionRuntimeConfig, createTestResourceLoader } from "../../utilities.ts";
+import { AgentSession } from "../../../../src/core/agent-session.ts";
+import { AuthStorage } from "../../../../src/core/auth-storage.ts";
+import { ModelRegistry } from "../../../../src/core/model-registry.ts";
+import { SessionManager } from "../../../../src/core/session-manager.ts";
+import { SettingsManager } from "../../../../src/core/settings-manager.ts";
+import { initTheme } from "../../../../src/core/theme/runtime.ts";
+import { createTestAgentSessionRuntimeConfig, createTestResourceLoader } from "../../../utilities.ts";
 
 describe("regression #5596: missing configured theme export", () => {
 	const cleanups: Array<() => Promise<void>> = [];

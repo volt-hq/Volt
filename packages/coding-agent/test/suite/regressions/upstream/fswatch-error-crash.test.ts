@@ -1,3 +1,5 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/2791
+
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -7,8 +9,6 @@ import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 /**
- * Regression test for https://github.com/earendil-works/pi-mono/issues/2791
- *
  * fs.watch() returns an FSWatcher (EventEmitter). If the watcher emits an
  * 'error' event after creation and no error handler is attached, Node.js
  * treats it as an uncaught exception and terminates the process.
@@ -32,7 +32,7 @@ describe("issue #2791 fs.watch error event crashes process", () => {
 		mkdirSync(themesDir, { recursive: true });
 
 		// Copy dark.json as "custom-test" theme
-		const darkThemePath = join(__dirname, "../../../src/core/theme/dark.json");
+		const darkThemePath = join(__dirname, "../../../../src/core/theme/dark.json");
 		const darkTheme = JSON.parse(readFileSync(darkThemePath, "utf-8"));
 		darkTheme.name = "custom-test";
 		writeFileSync(join(themesDir, "custom-test.json"), JSON.stringify(darkTheme, null, 2));
@@ -43,8 +43,8 @@ describe("issue #2791 fs.watch error event crashes process", () => {
 	});
 
 	it("process should survive an error event on the theme FSWatcher", () => {
-		const themeModulePath = join(__dirname, "../../../src/core/theme/runtime.ts");
-		const tuiModulePath = join(__dirname, "../../../../tui/src/index.ts");
+		const themeModulePath = join(__dirname, "../../../../src/core/theme/runtime.ts");
+		const tuiModulePath = join(__dirname, "../../../../../tui/src/index.ts");
 		const jitiModuleUrl = pathToFileURL(require.resolve("jiti")).href;
 		const agentDir = join(tempRoot, "agent").replace(/\\/g, "/");
 

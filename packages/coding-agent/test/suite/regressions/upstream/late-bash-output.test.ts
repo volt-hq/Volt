@@ -1,5 +1,7 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/5208
+
 import { describe, expect, it } from "vitest";
-import { type BashOperations, createBashTool } from "../../../src/core/tools/bash.ts";
+import { type BashOperations, createBashTool } from "../../../../src/core/tools/bash.ts";
 
 function getTextOutput(result: { content?: Array<{ type: string; text?: string }> }): string {
 	return (

@@ -40,7 +40,7 @@
 - Vitest is hoisted to the root `node_modules`. From the affected package root, use `node ../../node_modules/vitest/dist/cli.js --run test/specific.test.ts`. If that file is missing, the checkout's `node_modules` predates the lockfile; run `npm ci --ignore-scripts` rather than changing dependency metadata.
 - If you create or modify a test file, run it and iterate on test or implementation until it passes.
 - For `packages/coding-agent/test/suite/`, use `test/suite/harness.ts` + the faux provider. No real provider APIs, keys, or paid tokens.
-- Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`.
+- Put issue-specific regressions under `packages/coding-agent/test/suite/regressions/` named `<issue-number>-<short-slug>.test.ts`. Regressions ported from upstream Pi live in `regressions/upstream/` as `<short-slug>.test.ts`, with a first-line header comment linking the upstream issue (`// Upstream Pi regression: https://github.com/earendil-works/pi/issues/<n>`).
 - For ad-hoc scripts, `write` them to a temp file (e.g. `/tmp`), run, edit if needed, remove when done. Don't embed multi-line scripts in `bash` commands.
 - You may commit your own completed work without asking when a commit is a useful checkpoint or natural outcome of the task. Do not commit unrelated work or unfinished changes unless the user asks.
 

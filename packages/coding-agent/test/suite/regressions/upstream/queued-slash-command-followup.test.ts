@@ -1,9 +1,11 @@
+// Upstream Pi regression: https://github.com/earendil-works/pi/issues/2023
+
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
-import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "../harness.ts";
+import { createHarness, getAssistantTexts, getUserTexts, type Harness } from "../../harness.ts";
 
 describe("issue #2023 queued slash-command follow-up", () => {
 	const harnesses: Harness[] = [];
