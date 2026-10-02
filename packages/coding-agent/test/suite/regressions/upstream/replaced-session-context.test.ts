@@ -3,7 +3,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import {
@@ -41,7 +41,7 @@ describe("regression #2860: replaced session callbacks", () => {
 		const tempDir = join(tmpdir(), `volt-2860-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [{ id: "faux-1", reasoning: false }],
 		});
 		faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
@@ -61,6 +61,7 @@ describe("regression #2860: replaced session callbacks", () => {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
 								api: faux.api,
+								streamSimple: faux.streamSimple,
 								models: faux.models.map((registeredModel) => ({
 									id: registeredModel.id,
 									name: registeredModel.name,
@@ -132,7 +133,6 @@ describe("regression #2860: replaced session callbacks", () => {
 
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

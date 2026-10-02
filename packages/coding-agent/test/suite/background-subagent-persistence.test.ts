@@ -16,7 +16,7 @@ import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/index.ts";
 import { createBuiltInSubagentDefinitions, SubagentManager } from "../../src/core/subagents/index.ts";
 import { createTestResourceLoader } from "../utilities.ts";
-import { createHarness, getMessageText, type Harness } from "./harness.ts";
+import { createFauxModelRegistry, createHarness, getMessageText, type Harness } from "./harness.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -68,6 +68,7 @@ async function setup(withConfiguredAuth = true) {
 				noContextFiles: true,
 			},
 		});
+		services.modelRegistry.client.registerProvider(child.faux);
 		services.settingsManager.applyOverrides({ lsp: { enabled: false }, retry: { enabled: false } });
 		const created = await createAgentSessionFromServices({
 			services,
@@ -104,6 +105,7 @@ async function setup(withConfiguredAuth = true) {
 		sessionManager: parent,
 		model: fixture.getModel(),
 		authStorage: fixture.authStorage,
+		modelRegistry: createFauxModelRegistry(fixture),
 		settingsManager: fixture.settingsManager,
 		subagentToolManager: manager,
 		disableMcp: true,

@@ -1,5 +1,6 @@
 import type { SubscriptionUsageResult } from "@hansjm10/volt-ai";
-import type { AuthStorage, OAuthCredential } from "./auth-storage.ts";
+import type { OAuthCredential } from "./auth-storage.ts";
+import type { ModelRegistry } from "./model-registry.ts";
 
 export const DEFAULT_SUBSCRIPTION_USAGE_CACHE_TTL_MS = 60_000;
 export const DEFAULT_SUBSCRIPTION_USAGE_TIMEOUT_MS = 10_000;
@@ -53,7 +54,7 @@ export class SubscriptionUsageService {
 	}
 
 	private async fetchProvider(
-		authStorage: AuthStorage,
+		modelRegistry: ModelRegistry,
 		providerId: string,
 		credential: OAuthCredential,
 	): Promise<SubscriptionUsageProviderReport> {
@@ -75,7 +76,7 @@ export class SubscriptionUsageService {
 
 		let result: SubscriptionUsageResult;
 		try {
-			const request = authStorage
+			const request = modelRegistry
 				.fetchSubscriptionUsage(providerId, { signal: controller.signal })
 				.then((value) => value ?? unavailableResult())
 				.catch(() => unavailableResult());
@@ -84,7 +85,7 @@ export class SubscriptionUsageService {
 			if (timeoutHandle) clearTimeout(timeoutHandle);
 		}
 
-		const currentCredential = authStorage.get(providerId);
+		const currentCredential = modelRegistry.authStorage.get(providerId);
 		if (currentCredential?.type === "oauth") {
 			this.cache.set(providerId, {
 				credential: currentCredential,
@@ -98,7 +99,8 @@ export class SubscriptionUsageService {
 		return { providerId, result };
 	}
 
-	async fetch(authStorage: AuthStorage, activeProviderId: string | undefined): Promise<SubscriptionUsageReport> {
+	async fetch(modelRegistry: ModelRegistry, activeProviderId: string | undefined): Promise<SubscriptionUsageReport> {
+		const authStorage = modelRegistry.authStorage;
 		const storedOAuthProviders = authStorage
 			.list()
 			.filter((providerId) => authStorage.get(providerId)?.type === "oauth");
@@ -108,7 +110,7 @@ export class SubscriptionUsageService {
 		}
 
 		const capableProviderIds = new Set(
-			authStorage
+			modelRegistry.client
 				.getOAuthProviders()
 				.filter((provider) => provider.fetchSubscriptionUsage)
 				.map((provider) => provider.id),
@@ -135,7 +137,7 @@ export class SubscriptionUsageService {
 				if (credential?.type !== "oauth") {
 					return { providerId, result: unavailableResult() };
 				}
-				return this.fetchProvider(authStorage, providerId, credential);
+				return this.fetchProvider(modelRegistry, providerId, credential);
 			}),
 		);
 		return { status: "providers", providers };

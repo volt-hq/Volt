@@ -1597,7 +1597,9 @@ describe("agentLoopContinue with AgentMessage", () => {
 			convertToLlm: identityConverter,
 		};
 
-		expect(() => agentLoopContinue(context, config)).toThrow("Cannot continue: no messages in context");
+		expect(() => agentLoopContinue(context, config, undefined, () => new MockAssistantStream())).toThrow(
+			"Cannot continue: no messages in context",
+		);
 	});
 
 	it("should continue from existing context without emitting user message events", async () => {

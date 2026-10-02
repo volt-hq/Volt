@@ -2,7 +2,7 @@ import { chmodSync, copyFileSync, mkdirSync, mkdtempSync, writeFileSync } from "
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostActionUpdate, HostInteraction } from "../../../src/core/host-interaction.ts";
 import { LspClient } from "../../../src/core/lsp/client.ts";
@@ -376,7 +376,6 @@ describe("LSP install readiness (#399)", () => {
 			initialActiveToolNames: ["lsp"],
 		});
 		const updates: HostActionUpdate[] = [];
-		let reloadedFaux: ReturnType<typeof registerFauxProvider> | undefined;
 		// Use the real installer process boundary, but a harmless rustup fixture.
 		const rustup = join(item.bin, process.platform === "win32" ? "rustup.cmd" : "rustup");
 		writeFileSync(rustup, process.platform === "win32" ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n");
@@ -403,7 +402,8 @@ describe("LSP install readiness (#399)", () => {
 			expect(harness.sessionManager.getSessionId()).toBe(sessionId);
 			expect(harness.session.messages).toEqual(messages);
 			// Reload clears runtime-only model and API registrations, including the harness's faux provider.
-			reloadedFaux = registerFauxProvider();
+			const reloadedFaux = createFauxProvider();
+			harness.session.modelRegistry.client.registerProvider(reloadedFaux);
 			await harness.session.setModel(reloadedFaux.getModel());
 			reloadedFaux.setResponses([
 				fauxAssistantMessage(fauxToolCall("lsp", { action: "hover", path: item.path, symbol: "symbol" }), {
@@ -422,7 +422,6 @@ describe("LSP install readiness (#399)", () => {
 					?.resolvedExecutable,
 			).toBe(explicit);
 		} finally {
-			reloadedFaux?.unregister();
 			await harness.cleanupAsync();
 		}
 	});

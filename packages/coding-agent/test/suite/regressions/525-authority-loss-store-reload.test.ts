@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { type Component, createRenderFrame, type TUI } from "@hansjm10/volt-tui";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { VirtualTerminal } from "../../../../tui/test/virtual-terminal.ts";
@@ -68,7 +68,7 @@ describe("regression #525: recovering a session whose saved state could not be c
 		const tempDir = join(tmpdir(), `volt-525-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
+		const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
 		faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -85,6 +85,7 @@ describe("regression #525: recovering a session whose saved state could not be c
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
 								api: faux.api,
+								streamSimple: faux.streamSimple,
 								models: faux.models.map((registeredModel) => ({
 									id: registeredModel.id,
 									name: registeredModel.name,
@@ -132,7 +133,6 @@ describe("regression #525: recovering a session whose saved state could not be c
 
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

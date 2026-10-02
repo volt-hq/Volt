@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import {
 	AuthStorage,
 	DefaultMcpClientFactory,
@@ -93,7 +93,7 @@ class CheckpointChannel {
 }
 
 function registerBenchmarkFaux() {
-	const faux = registerFauxProvider({
+	const faux = createFauxProvider({
 		models: [{ id: "faux-1", contextWindow: 128_000, maxTokens: 4096 }],
 		tokensPerSecond: 1_000_000,
 	});
@@ -101,6 +101,7 @@ function registerBenchmarkFaux() {
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey(model.provider, "benchmark-only-faux-key");
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
+	modelRegistry.client.registerProvider(faux);
 	modelRegistry.registerProvider(model.provider, {
 		baseUrl: model.baseUrl,
 		apiKey: "benchmark-only-faux-key",
@@ -182,7 +183,6 @@ async function runRuntimeIdle(context) {
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
 		await created.runtime.dispose();
-		created.registered.faux.unregister();
 	}
 }
 
@@ -213,7 +213,6 @@ async function runConversation(context) {
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
 		await created.runtime.dispose();
-		registered.faux.unregister();
 	}
 }
 
@@ -340,7 +339,6 @@ async function runReconnectRetention(context) {
 	} finally {
 		await registry.stopAll("benchmark_cleanup");
 		await created.runtime.dispose();
-		created.registered.faux.unregister();
 	}
 }
 
@@ -381,7 +379,6 @@ async function runExtension(context) {
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
 		await created.runtime.dispose();
-		created.registered.faux.unregister();
 	}
 }
 
@@ -491,7 +488,6 @@ async function runLsp(context) {
 		await context.channel.checkpoint("post-disposal", { disposed: true });
 	} finally {
 		await created.runtime.dispose();
-		created.registered.faux.unregister();
 	}
 }
 

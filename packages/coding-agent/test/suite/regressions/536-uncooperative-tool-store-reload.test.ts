@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall, getApiProvider, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { Component, TUI } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
@@ -61,9 +61,7 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 		const tempDir = join(tmpdir(), `volt-536-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
-		const fauxApi = getApiProvider(faux.api);
-		if (!fauxApi) throw new Error("expected the faux provider to be registered");
+		const faux = createFauxProvider({ models: [{ id: "faux-1", reasoning: false }] });
 		faux.setResponses(responses.map((response) => fauxAssistantMessage(response)));
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
@@ -82,7 +80,7 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 								api: faux.api,
 								// Interactive extension reset clears dynamic providers; rebind the
 								// same faux implementation as well as its model metadata.
-								streamSimple: fauxApi.streamSimple,
+								streamSimple: faux.streamSimple,
 								models: faux.models.map((registeredModel) => ({
 									id: registeredModel.id,
 									name: registeredModel.name,
@@ -130,7 +128,6 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

@@ -1,13 +1,7 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	type AssistantMessage,
-	type AssistantMessageEvent,
-	EventStream,
-	getModel,
-	streamSimple,
-} from "@hansjm10/volt-ai";
+import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -134,8 +128,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			sessionManager,
 			model,
 			thinkingLevel: "off",
-			streamFn: (requestModel, context, options) =>
-				streamSimple(requestModel, context, { ...options, apiKey: "test-key" }),
+			streamFn: modelRegistry.client.streamSimple,
 			convertToLlm,
 			settingsManager,
 			cwd: tempDir,

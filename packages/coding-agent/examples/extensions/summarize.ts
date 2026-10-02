@@ -1,4 +1,4 @@
-import { complete, getModel } from "@hansjm10/volt-ai";
+import { getModel } from "@hansjm10/volt-ai";
 import type { ExtensionAPI, ExtensionCommandContext } from "@hansjm10/volt-coding-agent";
 import { DynamicBorder, getMarkdownTheme } from "@hansjm10/volt-coding-agent";
 import { Container, Markdown, matchesKey, Text } from "@hansjm10/volt-tui";
@@ -165,15 +165,12 @@ export default function (volt: ExtensionAPI) {
 				ctx.ui.notify("Model openai/gpt-5.2 not found", "warning");
 			}
 
-			const auth = model ? await ctx.modelRegistry.getApiKeyAndHeaders(model) : undefined;
-			if (auth && !auth.ok && ctx.hasUI) {
-				ctx.ui.notify(auth.error, "warning");
-			}
-			if (auth?.ok && !auth.apiKey && ctx.hasUI) {
+			const hasAuth = model ? ctx.modelRegistry.hasConfiguredAuth(model) : false;
+			if (model && !hasAuth && ctx.hasUI) {
 				ctx.ui.notify("No API key for openai/gpt-5.2", "warning");
 			}
 
-			if (!model || !auth?.ok || !auth.apiKey) {
+			if (!model || !hasAuth) {
 				return;
 			}
 
@@ -185,15 +182,16 @@ export default function (volt: ExtensionAPI) {
 				},
 			];
 
-			const response = await complete(
+			// The registry's client resolves the model's credentials.
+			const response = await ctx.modelRegistry.client.complete(
 				model,
 				{ messages: summaryMessages },
-				{
-					apiKey: auth.apiKey,
-					headers: auth.headers,
-					reasoningEffort: "high",
-				},
+				{ reasoningEffort: "high" },
 			);
+			if (response.stopReason === "error") {
+				if (ctx.hasUI) ctx.ui.notify(response.error?.message ?? "Summary request failed", "warning");
+				return;
+			}
 
 			const summary = response.content
 				.filter((c): c is { type: "text"; text: string } => c.type === "text")

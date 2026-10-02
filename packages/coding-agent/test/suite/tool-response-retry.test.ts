@@ -224,6 +224,7 @@ describe("tool response transport recovery", () => {
 						noContextFiles: true,
 					},
 				});
+				services.modelRegistry.client.registerProvider(harness.faux);
 				services.settingsManager.applyOverrides({
 					...retrySettings,
 					retry: { ...retrySettings.retry, maxRetries: 1 },

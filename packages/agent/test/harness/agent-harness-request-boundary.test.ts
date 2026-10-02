@@ -1,9 +1,9 @@
 import {
 	type Context,
+	createAiClient,
+	createFauxProvider,
 	fauxAssistantMessage,
 	fauxToolCall,
-	registerFauxProvider,
-	streamSimple,
 } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -27,10 +27,14 @@ function deferred() {
 	return { promise, resolve };
 }
 
+const client = createAiClient();
+
 function setup(options: Partial<AgentHarnessOptions> = {}) {
-	const faux = registerFauxProvider();
+	const faux = createFauxProvider();
+	client.registerProvider(faux);
 	const session = options.session ?? new Session(new InMemorySessionStorage());
 	const harness = new AgentHarness({
+		streamFn: client.streamSimple,
 		session,
 		model: faux.getModel(),
 		...options,
@@ -38,7 +42,7 @@ function setup(options: Partial<AgentHarnessOptions> = {}) {
 	cleanup.push(async () => {
 		harness.dispose();
 		await harness.waitForClosed();
-		faux.unregister();
+		client.unregisterProvider(faux.api);
 	});
 	return { harness, faux, session };
 }
@@ -257,7 +261,7 @@ describe("AgentHarness post-durability request boundary", () => {
 			requestBoundary: async () => candidate,
 			streamFn: (model, context, options) => {
 				invoked(current, structuredClone(candidate.authorization.settle.mock.calls));
-				return streamSimple(model, context, options);
+				return client.streamSimple(model, context, options);
 			},
 		});
 		faux.setResponses([fauxAssistantMessage("done")]);

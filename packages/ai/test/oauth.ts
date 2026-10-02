@@ -8,8 +8,8 @@
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
-import { getOAuthApiKey } from "../src/utils/oauth/index.ts";
-import type { OAuthCredentials, OAuthProvider } from "../src/utils/oauth/types.ts";
+import { builtInOAuthProviders } from "../src/utils/oauth/index.ts";
+import type { OAuthCredentials } from "../src/utils/oauth/types.ts";
 
 const AUTH_PATH = join(homedir(), ".volt", "agent", "auth.json");
 
@@ -65,28 +65,22 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 	}
 
 	if (entry.type === "oauth") {
-		// Build OAuthCredentials record for getOAuthApiKey
-		const oauthCredentials: Record<string, OAuthCredentials> = {};
-		for (const [key, value] of Object.entries(storage)) {
-			if (value.type === "oauth") {
-				const { type: _, ...creds } = value;
-				oauthCredentials[key] = creds;
+		const oauthProvider = builtInOAuthProviders().find((candidate) => candidate.id === provider);
+		if (!oauthProvider) return undefined;
+		const { type: _, ...stored } = entry;
+		let credentials: OAuthCredentials = stored;
+		if (Date.now() >= credentials.expires) {
+			try {
+				credentials = await oauthProvider.refreshToken(credentials);
+			} catch (e) {
+				console.log(JSON.stringify(e));
+				return undefined;
 			}
+			// Save refreshed credentials back to auth.json
+			storage[provider] = { type: "oauth", ...credentials };
+			saveAuthStorage(storage);
 		}
-
-		let result: { newCredentials: OAuthCredentials; apiKey: string } | null = null;
-		try {
-			result = await getOAuthApiKey(provider as OAuthProvider, oauthCredentials);
-		} catch (e) {
-			console.log(JSON.stringify(e));
-		}
-		if (!result) return undefined;
-
-		// Save refreshed credentials back to auth.json
-		storage[provider] = { type: "oauth", ...result.newCredentials };
-		saveAuthStorage(storage);
-
-		return result.apiKey;
+		return oauthProvider.getApiKey(credentials);
 	}
 
 	return undefined;

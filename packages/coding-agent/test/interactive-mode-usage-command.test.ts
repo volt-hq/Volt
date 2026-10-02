@@ -110,7 +110,7 @@ describe("InteractiveMode /usage", () => {
 		await prototype.handleUsageCommand.call(context);
 
 		const rendered = stripAnsi(context.chatContainer.render(120).lines.join("\n"));
-		expect(fetch).toHaveBeenCalledWith({}, "provider-b");
+		expect(fetch).toHaveBeenCalledWith(context.session.modelRegistry, "provider-b");
 		expect(rendered).toContain("Subscription Usage");
 		expect(rendered).toContain("Provider B · Team Plan");
 		expect(rendered).toContain("Weekly: 74.5% remaining");

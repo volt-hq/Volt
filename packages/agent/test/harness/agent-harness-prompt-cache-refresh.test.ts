@@ -1,11 +1,13 @@
 import {
 	type Context,
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
 	fauxAssistantMessage,
 	type PromptCacheMetadata,
 	type PromptCacheRefreshCheck,
-	registerFauxProvider,
 	type SimpleStreamOptions,
-	streamSimple,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
@@ -20,18 +22,27 @@ const renewing: PromptCacheMetadata = {
 	refreshesOnHit: true,
 };
 
-const registrations: Array<ReturnType<typeof registerFauxProvider>> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 const harnesses: AgentHarness[] = [];
 
 afterEach(async () => {
 	const closing = harnesses.splice(0);
 	for (const harness of closing) harness.requestClose();
 	await Promise.all(closing.map((harness) => harness.waitForClosed()));
-	for (const registration of registrations.splice(0)) registration.unregister();
+	for (const api of registeredApis.splice(0)) client.unregisterProvider(api);
 });
 
 function createHarness(
-	options: Omit<AgentHarnessOptions, "session" | "model"> = {},
+	options: Omit<AgentHarnessOptions, "session" | "model" | "streamFn"> &
+		Partial<Pick<AgentHarnessOptions, "streamFn">> = {},
 	canRefreshPromptCache?: PromptCacheRefreshCheck,
 ) {
 	const refreshes: Array<{ context: Context; options: SimpleStreamOptions | undefined }> = [];
@@ -54,7 +65,6 @@ function createHarness(
 			};
 		},
 	});
-	registrations.push(registration);
 	const requests: Context[] = [];
 	registration.setResponses([
 		(context) => {
@@ -64,6 +74,9 @@ function createHarness(
 	]);
 	const session = new Session(new InMemorySessionStorage());
 	const harness = new AgentHarness({
+		streamFn: client.streamSimple,
+		// A caller-supplied stream function comes without a matching refresher.
+		...(options.streamFn === undefined ? { promptCacheRefresh: client } : {}),
 		session,
 		model: registration.getModel(),
 		systemPrompt: "system prompt",
@@ -96,7 +109,9 @@ describe("AgentHarness.refreshPromptCache", () => {
 	});
 
 	it("is unavailable when a custom stream function has no matching refresh", async () => {
-		const { harness, registration } = createHarness({ streamFn: streamSimple });
+		const { harness, registration } = createHarness({
+			streamFn: (model, context, options) => client.streamSimple(model, context, options),
+		});
 		await prompt(harness, "hello");
 
 		expect(await harness.refreshPromptCache()).toEqual({ status: "unavailable", reason: "no_refresh_function" });

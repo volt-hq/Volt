@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { type FauxProviderRegistration, type Model, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, type FauxProvider, type Model } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
@@ -20,7 +20,7 @@ interface TestRuntime {
 	manager: SessionManager;
 	settings: SettingsManager;
 	modelRegistry: ModelRegistry;
-	faux: FauxProviderRegistration;
+	faux: FauxProvider;
 	tempDir: string;
 }
 
@@ -29,8 +29,8 @@ const runtimes: TestRuntime[] = [];
 function registerModels(
 	provider: "openai" | "openai-codex",
 	models: Array<{ id: string; reasoning: boolean }>,
-): { faux: FauxProviderRegistration; modelRegistry: ModelRegistry } {
-	const faux = registerFauxProvider({
+): { faux: FauxProvider; modelRegistry: ModelRegistry } {
+	const faux = createFauxProvider({
 		provider,
 		api: provider === "openai" ? "openai-responses" : "openai-codex-responses",
 		models,
@@ -42,6 +42,7 @@ function registerModels(
 		baseUrl: faux.getModel().baseUrl,
 		apiKey: "faux-key",
 		api: faux.api,
+		streamSimple: faux.streamSimple,
 		models: faux.models.map((model) => ({
 			id: model.id,
 			name: model.name,
@@ -62,7 +63,7 @@ async function createRuntime(options: {
 	models?: Array<{ id: string; reasoning: boolean }>;
 	manager?: SessionManager;
 	modelRegistry?: ModelRegistry;
-	faux?: FauxProviderRegistration;
+	faux?: FauxProvider;
 	explicitModel?: Model<string>;
 	explicitThinking?: ThinkingLevel;
 	settings?: SettingsManager;
@@ -118,15 +119,12 @@ function settingsSnapshot(settings: SettingsManager): object {
 
 afterEach(async () => {
 	const tempDirs = new Set<string>();
-	const fauxProviders = new Set<FauxProviderRegistration>();
 	while (runtimes.length > 0) {
 		const runtime = runtimes.pop()!;
 		runtime.session.dispose();
 		await runtime.session.waitForClosed();
 		tempDirs.add(runtime.tempDir);
-		fauxProviders.add(runtime.faux);
 	}
-	for (const faux of fauxProviders) faux.unregister();
 	for (const tempDir of tempDirs) rmSync(tempDir, { recursive: true, force: true });
 });
 

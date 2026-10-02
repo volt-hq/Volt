@@ -130,7 +130,7 @@ describe("createAgentSession provider attribution headers", () => {
 		});
 
 		try {
-			await createAgentSessionTestControl(session).getStreamFn()(
+			const stream = await createAgentSessionTestControl(session).getStreamFn()(
 				model,
 				{ messages: [] },
 				{
@@ -138,6 +138,8 @@ describe("createAgentSession provider attribution headers", () => {
 					...(options.requestHeaders ? { headers: options.requestHeaders } : {}),
 				},
 			);
+			// The registry's client calls the provider once the request's credentials resolve.
+			await stream.result();
 			return capturedOptions?.headers;
 		} finally {
 			session.dispose();

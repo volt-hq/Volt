@@ -16,12 +16,13 @@ import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import {
 	type Context,
+	createFauxProvider,
 	fauxAssistantMessage,
 	fauxToolCall,
 	type JsonObject,
-	registerFauxProvider,
 	type ToolResultMessage,
 } from "@hansjm10/volt-ai";
+import { ModelRegistry } from "../../src/core/model-registry.ts";
 
 export const LSP_CLI_SCENARIOS = [
 	"deltas",
@@ -216,7 +217,7 @@ function isolatedEnvironment(root: string): NodeJS.ProcessEnv {
 export function prepareLspCliChild(scenario: LspCliScenario, root: string): void {
 	assert.ok(LSP_CLI_SCENARIOS.includes(scenario), `Unknown scenario: ${scenario}`);
 	const definition = scenarioDefinition(scenario);
-	const faux = registerFauxProvider({ api: "faux-lsp-cli", provider: "faux-lsp-cli" });
+	const faux = createFauxProvider({ api: "faux-lsp-cli", provider: "faux-lsp-cli" });
 	const capture = (context: Context, index: number): void => {
 		const path = join(root, "workspace", definition.path);
 		const snapshot: RequestSnapshot = {
@@ -242,6 +243,13 @@ export function prepareLspCliChild(scenario: LspCliScenario, root: string): void
 			return fauxAssistantMessage(TERMINAL_RESPONSE);
 		},
 	]);
+	// The CLI builds its own model registry; stream the faux models through its client.
+	const createModelRegistry = ModelRegistry.create.bind(ModelRegistry);
+	ModelRegistry.create = (authStorage, modelsJsonPath) => {
+		const registry = createModelRegistry(authStorage, modelsJsonPath);
+		registry.client.registerProvider(faux);
+		return registry;
+	};
 	writeFileSync(
 		join(root, "agent", "models.json"),
 		JSON.stringify({

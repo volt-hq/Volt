@@ -112,10 +112,3 @@ export interface OAuthProviderInterface {
 	/** Optional: modify models for this provider (e.g., update baseUrl) */
 	modifyModels?(models: Model<Api>[], credentials: OAuthCredentials): Model<Api>[];
 }
-
-/** @deprecated Use OAuthProviderInterface instead */
-export interface OAuthProviderInfo {
-	id: OAuthProviderId;
-	name: string;
-	available: boolean;
-}

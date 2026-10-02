@@ -1,16 +1,16 @@
 import type * as BedrockRuntime from "@aws-sdk/client-bedrock-runtime";
 import type { ResponseStreamEvent } from "openai/resources/responses/responses.js";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createAiClient } from "../src/client.ts";
 import { streamBedrock } from "../src/providers/amazon-bedrock.ts";
 import { streamAnthropic } from "../src/providers/anthropic.ts";
-import { fauxAssistantMessage, registerFauxProvider } from "../src/providers/faux.ts";
+import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "../src/providers/faux.ts";
 import { streamGoogle } from "../src/providers/google.ts";
 import { streamGoogleVertex } from "../src/providers/google-vertex.ts";
 import { streamMistral } from "../src/providers/mistral.ts";
 import { streamOpenAICompletions } from "../src/providers/openai-completions.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import { createProviderError } from "../src/stream/provider-errors.ts";
-import { stream } from "../src/stream.ts";
 import type { AssistantMessageEvent, Context, Usage } from "../src/types.ts";
 import { drainEventStream } from "../src/utils/event-stream.ts";
 import { streamResponsesEvents } from "./responses-stream.ts";
@@ -447,16 +447,23 @@ describe("normalizer usage evidence", () => {
 	});
 });
 
-const registrations: ReturnType<typeof registerFauxProvider>[] = [];
+const client = createAiClient();
+const { stream } = client;
+const registeredApis: string[] = [];
 afterEach(() => {
-	for (const registration of registrations.splice(0)) registration.unregister();
+	for (const api of registeredApis.splice(0)) client.unregisterProvider(api);
 });
+function registerFauxProvider(): FauxProvider {
+	const faux = createFauxProvider();
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 describe("faux usage fixtures", () => {
 	it.each([undefined, "complete", "partial", "unavailable"] as const)(
 		"preserves explicit usage with %s availability",
 		async (availability) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			const usage: Usage = { ...zero, ...(availability === undefined ? {} : { availability }) };
 			registration.setResponses([fauxAssistantMessage("a nonempty answer", { usage })]);
 			expect((await drainEventStream(stream(registration.getModel(), context))).usage).toEqual(usage);
@@ -465,7 +472,6 @@ describe("faux usage fixtures", () => {
 
 	it("preserves explicit helper-default usage instead of generating estimates", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const usage = fauxAssistantMessage("").usage;
 		registration.setResponses([fauxAssistantMessage("ok", { usage })]);
 		expect((await drainEventStream(stream(registration.getModel(), context))).usage).toEqual(usage);
@@ -473,7 +479,6 @@ describe("faux usage fixtures", () => {
 
 	it("preserves supplied counts, costs and metadata on an error", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const usage: Usage = {
 			...zero,
 			availability: "partial",
@@ -498,7 +503,6 @@ describe("faux usage fixtures", () => {
 
 	it("marks generated estimates complete and synthetic failures unavailable", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([fauxAssistantMessage("ok")]);
 		expect((await drainEventStream(stream(registration.getModel(), context))).usage.availability).toBe("complete");
 		expect((await drainEventStream(stream(registration.getModel(), context))).usage.availability).toBe("unavailable");

@@ -1,8 +1,8 @@
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { AgentHarness, type SessionMutationReceipt } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { createAiClient, createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { describe, expect, it } from "vitest";
 import {
 	createSessionManagerHarnessSession,
 	SessionManagerHarnessStorage,
@@ -10,14 +10,9 @@ import {
 import { DEFAULT_PLANNING_STATE } from "../src/core/planning.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 
-const registrations: Array<{ unregister(): void }> = [];
 const codingAgentRoot = fileURLToPath(new URL("..", import.meta.url));
 const gcFixturePath = fileURLToPath(new URL("./fixtures/harness-session-adapter-gc.ts", import.meta.url));
 const sourceModuleRunnerPath = fileURLToPath(new URL("./source-module-runner.mjs", import.meta.url));
-
-afterEach(() => {
-	for (const registration of registrations.splice(0)) registration.unregister();
-});
 
 describe("SessionManager Harness adapter", () => {
 	it("maps canonical entry identities and ordinary writes through SessionManager", async () => {
@@ -268,10 +263,10 @@ describe("SessionManager Harness adapter", () => {
 	it("keeps participant-owned atomic input canonical exactly once while Harness persists ordinary output", async () => {
 		const manager = SessionManager.inMemory("/workspace");
 		const storage = new SessionManagerHarnessStorage(manager);
-		const registration = registerFauxProvider();
-		registrations.push(registration);
+		const registration = createFauxProvider();
 		registration.setResponses([() => fauxAssistantMessage("done")]);
 		const harness = new AgentHarness({
+			streamFn: createAiClient({ providers: [registration] }).streamSimple,
 			session: createSessionManagerHarnessSession(manager, () => false, storage),
 			model: registration.getModel(),
 			persistActiveToolChanges: false,

@@ -7,7 +7,7 @@
  * 3. Loads the result into the editor for user to fill in answers
  */
 
-import { complete, type UserMessage } from "@hansjm10/volt-ai";
+import type { UserMessage } from "@hansjm10/volt-ai";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { BorderedLoader } from "@hansjm10/volt-coding-agent";
 
@@ -77,24 +77,24 @@ export default function (volt: ExtensionAPI) {
 
 				// Do the work
 				const doExtract = async () => {
-					const auth = await ctx.modelRegistry.getApiKeyAndHeaders(ctx.model!);
-					if (!auth.ok || !auth.apiKey) {
-						throw new Error(auth.ok ? `No API key for ${ctx.model!.provider}` : auth.error);
-					}
 					const userMessage: UserMessage = {
 						role: "user",
 						content: [{ type: "text", text: lastAssistantText! }],
 						timestamp: Date.now(),
 					};
 
-					const response = await complete(
+					// The registry's client resolves the model's credentials.
+					const response = await ctx.modelRegistry.client.complete(
 						ctx.model!,
 						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
+						{ signal: loader.signal },
 					);
 
 					if (response.stopReason === "aborted") {
 						return null;
+					}
+					if (response.stopReason === "error") {
+						throw new Error(response.error?.message ?? "Question extraction failed");
 					}
 
 					return response.content

@@ -7,15 +7,15 @@ import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import type {
-	FauxModelDefinition,
-	FauxPromptCacheRefresh,
-	FauxProviderRegistration,
-	FauxResponseStep,
-	Model,
-	PromptCacheRefreshCheck,
+import {
+	createFauxProvider,
+	type FauxModelDefinition,
+	type FauxPromptCacheRefresh,
+	type FauxProvider,
+	type FauxResponseStep,
+	type Model,
+	type PromptCacheRefreshCheck,
 } from "@hansjm10/volt-ai";
-import { refreshPromptCache, registerFauxProvider, streamSimple } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
@@ -88,7 +88,7 @@ export interface HarnessOptions {
 	projectCwd?: string;
 	/** Share language servers with other sessions using the same pool. */
 	lspServerPool?: LspServerPool;
-	/** Register a faux prompt-cache refresh and wire the session to it. */
+	/** Give the faux provider a prompt-cache refresh and wire the session to it. */
 	refreshPromptCache?: true | FauxPromptCacheRefresh;
 	/** Which request options the faux refresh supports; omitted means all of them. */
 	canRefreshPromptCache?: PromptCacheRefreshCheck;
@@ -100,7 +100,7 @@ export interface Harness {
 	sessionManager: SessionManager;
 	settingsManager: SettingsManager;
 	authStorage: AuthStorage;
-	faux: FauxProviderRegistration;
+	faux: FauxProvider;
 	models: [Model<string>, ...Model<string>[]];
 	getModel(): Model<string>;
 	getModel(modelId: string): Model<string> | undefined;
@@ -114,10 +114,20 @@ export interface Harness {
 	cleanupAsync: () => Promise<void>;
 }
 
+/**
+ * A model registry over the harness's credentials whose client streams the harness's faux provider,
+ * for sessions created outside the harness (the registry `createAgentSession` would create for `agentDir`).
+ */
+export function createFauxModelRegistry(harness: Harness, agentDir = harness.tempDir): ModelRegistry {
+	const registry = ModelRegistry.create(harness.authStorage, join(agentDir, "models.json"));
+	registry.client.registerProvider(harness.faux);
+	return registry;
+}
+
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	// Leave room for nested worktree/quarantine paths within Git for Windows' path limit.
 	const tempDir = mkdtempSync(join(tmpdir(), "volt-"));
-	const fauxProvider: FauxProviderRegistration = registerFauxProvider({
+	const fauxProvider = createFauxProvider({
 		models: options.models,
 		tokensPerSecond: options.tokensPerSecond,
 		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCache: options.refreshPromptCache }),
@@ -137,6 +147,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		authStorage.setRuntimeApiKey(model.provider, "faux-key");
 	}
 	const modelRegistry = ModelRegistry.inMemory(authStorage);
+	modelRegistry.client.registerProvider(fauxProvider);
 	if (withConfiguredAuth) {
 		modelRegistry.registerProvider(model.provider, {
 			baseUrl: model.baseUrl,
@@ -170,8 +181,8 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		sessionManager,
 		model,
 		thinkingLevel: "off",
-		streamFn: streamSimple,
-		...(options.refreshPromptCache === undefined ? {} : { refreshPromptCacheFn: refreshPromptCache }),
+		streamFn: modelRegistry.client.streamSimple,
+		...(options.refreshPromptCache === undefined ? {} : { promptCacheRefresh: modelRegistry.client }),
 		convertToLlm,
 		settingsManager,
 		extensionWorkLimits: options.extensionWorkLimits,
@@ -218,12 +229,10 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 				throw new Error("Persisted harness cleanup must await cleanupAsync()");
 			}
 			session.dispose();
-			fauxProvider.unregister();
 			if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 		},
 		async cleanupAsync() {
 			session.dispose();
-			fauxProvider.unregister();
 			try {
 				await session.waitForClosed();
 			} finally {

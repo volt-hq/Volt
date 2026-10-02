@@ -1,9 +1,15 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AnthropicMessagesCompat, Api, Context, Model, OpenAICompletionsCompat } from "@hansjm10/volt-ai";
-import { getApiProvider } from "@hansjm10/volt-ai";
-import { getOAuthProvider } from "@hansjm10/volt-ai/oauth";
+import {
+	type AnthropicMessagesCompat,
+	type Api,
+	type Context,
+	createAssistantMessageEventStream,
+	fauxAssistantMessage,
+	type Model,
+	type OpenAICompletionsCompat,
+} from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { clearApiKeyCache, ModelRegistry, type ProviderConfigInput } from "../src/core/model-registry.ts";
@@ -1104,11 +1110,14 @@ describe("ModelRegistry", () => {
 				},
 			});
 
-			expect(getOAuthProvider("anthropic")?.name).toBe("Custom Anthropic OAuth");
+			expect(registry.client.getOAuthProvider("anthropic")?.name).toBe("Custom Anthropic OAuth");
+			expect(ModelRegistry.inMemory(authStorage).client.getOAuthProvider("anthropic")?.name).not.toBe(
+				"Custom Anthropic OAuth",
+			);
 
 			registry.unregisterProvider("anthropic");
 
-			expect(getOAuthProvider("anthropic")?.name).not.toBe("Custom Anthropic OAuth");
+			expect(registry.client.getOAuthProvider("anthropic")?.name).not.toBe("Custom Anthropic OAuth");
 		});
 
 		test("unregisterProvider removes custom streamSimple override and restores built-in API stream handler", () => {
@@ -1123,7 +1132,7 @@ describe("ModelRegistry", () => {
 
 			let threwCustomOverride = false;
 			try {
-				getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext);
+				registry.client.getProvider("openai-completions")?.streamSimple(openAiModel, emptyContext);
 			} catch (error) {
 				threwCustomOverride = error instanceof Error && error.message === "custom streamSimple override";
 			}
@@ -1133,7 +1142,7 @@ describe("ModelRegistry", () => {
 
 			let threwCustomOverrideAfterUnregister = false;
 			try {
-				getApiProvider("openai-completions")?.streamSimple(openAiModel, emptyContext);
+				registry.client.getProvider("openai-completions")?.streamSimple(openAiModel, emptyContext);
 			} catch (error) {
 				threwCustomOverrideAfterUnregister =
 					error instanceof Error && error.message === "custom streamSimple override";
@@ -1782,6 +1791,81 @@ describe("ModelRegistry", () => {
 					expect(auth.error).toContain('Failed to resolve API key for provider "custom-provider"');
 				}
 			});
+		});
+	});
+
+	describe("AI client", () => {
+		/** Register a provider whose stream replies with the API key and headers it received. */
+		function registerEchoProvider(registry: ModelRegistry, config: Partial<ProviderConfigInput> = {}): Model<Api> {
+			registry.registerProvider("echo-provider", {
+				baseUrl: "https://echo.test/v1",
+				apiKey: "models-json-key",
+				api: "echo-api",
+				streamSimple: (model, _context, options) => {
+					const stream = createAssistantMessageEventStream();
+					const message = fauxAssistantMessage(
+						JSON.stringify({ apiKey: options?.apiKey, headers: options?.headers }),
+					);
+					stream.push({ type: "done", seq: 0, reason: "stop", message: { ...message, api: model.api } });
+					return stream;
+				},
+				models: [
+					{
+						id: "echo-model",
+						name: "Echo Model",
+						reasoning: false,
+						input: ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow: 1000,
+						maxTokens: 100,
+					},
+				],
+				...config,
+			});
+			const model = registry.find("echo-provider", "echo-model");
+			if (!model) throw new Error("expected the echo model");
+			return model;
+		}
+
+		test("serves the registry catalog and resolves each request's credentials", async () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registerEchoProvider(registry, { headers: { "x-configured": "1" } });
+
+			expect(registry.client.getModels()).toEqual(registry.getAll());
+			expect(registry.client.getModel("echo-provider", "echo-model")).toBe(model);
+			const first = await registry.client.completeSimple(model, emptyContext);
+			authStorage.setRuntimeApiKey("echo-provider", "runtime-key");
+			const second = await registry.client.completeSimple(model, emptyContext, { headers: { "x-request": "2" } });
+
+			const reply = (message: { content: Array<{ type: string; text?: string }> }) =>
+				JSON.parse(message.content.map((block) => block.text ?? "").join(""));
+			expect(reply(first)).toEqual({ apiKey: "models-json-key", headers: { "x-configured": "1" } });
+			expect(reply(second)).toEqual({ apiKey: "runtime-key", headers: { "x-configured": "1", "x-request": "2" } });
+		});
+
+		test("reports a credential resolution failure as a typed auth error", async () => {
+			const registry = ModelRegistry.create(authStorage, modelsJsonPath);
+			const model = registerEchoProvider(registry, { apiKey: "!exit 1", authHeader: true });
+
+			const result = await registry.client.completeSimple(model, emptyContext);
+
+			expect(result.stopReason).toBe("error");
+			expect(result.error?.kind).toBe("auth");
+			expect(result.error?.message).toContain('Failed to resolve API key for provider "echo-provider"');
+		});
+
+		test("keeps providers registered on one registry out of another", () => {
+			const first = ModelRegistry.create(authStorage, modelsJsonPath);
+			const second = ModelRegistry.create(authStorage, modelsJsonPath);
+			registerEchoProvider(first);
+
+			expect(first.client.getProvider("echo-api")).toBeDefined();
+			expect(second.client.getProvider("echo-api")).toBeUndefined();
+			expect(second.find("echo-provider", "echo-model")).toBeUndefined();
+
+			first.clearRegisteredProviders();
+			expect(first.client.getProvider("echo-api")).toBeUndefined();
+			expect(first.client.getProvider("openai-completions")).toBeDefined();
 		});
 	});
 });

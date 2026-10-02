@@ -8,7 +8,7 @@
  *   npx tsx test.ts claude-sonnet-4-5-20250929 --thinking
  */
 
-import { type Api, type Context, type Model, registerApiProvider, streamSimple } from "@hansjm10/volt-ai";
+import { type Api, type Context, createAiClient, type Model } from "@hansjm10/volt-ai";
 import { readFileSync } from "fs";
 import { getAgentDir } from "packages/coding-agent/src/config.js";
 import { join } from "path";
@@ -37,10 +37,8 @@ async function main() {
 	}
 
 	// Register provider
-	registerApiProvider({
-		api: "gitlab-duo-api" as Api,
-		stream: streamGitLabDuo,
-		streamSimple: streamGitLabDuo,
+	const client = createAiClient({
+		providers: [{ api: "gitlab-duo-api" as Api, stream: streamGitLabDuo, streamSimple: streamGitLabDuo }],
 	});
 
 	// Create model
@@ -63,7 +61,7 @@ async function main() {
 
 	console.log(`Model: ${model.id}, Backend: ${cfg.backend}, Thinking: ${useThinking}`);
 
-	const stream = streamSimple(model, context, {
+	const stream = client.streamSimple(model, context, {
 		apiKey: gitlabCred.access,
 		maxTokens: 100,
 		reasoning: useThinking ? "low" : undefined,

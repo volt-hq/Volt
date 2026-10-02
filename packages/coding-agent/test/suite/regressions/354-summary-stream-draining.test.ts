@@ -1,5 +1,5 @@
 import type { StreamFn } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, streamSimple } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import { generateBranchSummary } from "../../../src/core/compaction/branch-summarization.ts";
 import { generateSummary } from "../../../src/core/compaction/compaction.ts";
@@ -23,51 +23,22 @@ describe("summary stream draining (#354)", () => {
 			const entries = harness.sessionManager.getBranch();
 			const model = harness.getModel();
 			const signal = new AbortController().signal;
-			const headers = { "x-summary-request": "preserved" };
-			const env = { SUMMARY_TEST_VALUE: "preserved" };
 			const streamFn = vi.fn<StreamFn>((selectedModel, context, options) => {
-				const response = streamSimple(selectedModel, context, options);
+				const response = harness.session.modelRegistry.client.streamSimple(selectedModel, context, options);
 				return asynchronous ? Promise.resolve(response) : response;
 			});
 			if (branch) {
-				const result = await generateBranchSummary(entries, {
-					model,
-					signal,
-					headers,
-					env,
-					apiKey: "faux-injected-key",
-					streamFn,
-				});
+				const result = await generateBranchSummary(entries, { model, signal, streamFn });
 				expect(result.error).toBeUndefined();
 				expect(result.aborted).toBeUndefined();
 				expect(result.summary).toContain(summary);
 			} else {
-				await expect(
-					generateSummary(
-						[message],
-						model,
-						16384,
-						"faux-injected-key",
-						headers,
-						signal,
-						undefined,
-						undefined,
-						undefined,
-						streamFn,
-						env,
-					),
-				).resolves.toBe(summary);
+				await expect(generateSummary([message], model, 16384, streamFn, signal)).resolves.toBe(summary);
 			}
 			expect(streamFn).toHaveBeenCalledTimes(1);
 			expect(streamFn.mock.calls[0]?.[0]).toBe(model);
 			expect(streamFn.mock.calls[0]?.[1]).toMatchObject({ messages: [{ role: "user" }] });
-			expect(streamFn.mock.calls[0]?.[2]).toMatchObject({
-				signal,
-				headers,
-				env,
-				apiKey: "faux-injected-key",
-				maxTokens: expect.any(Number),
-			});
+			expect(streamFn.mock.calls[0]?.[2]).toMatchObject({ signal, maxTokens: expect.any(Number) });
 			expect(harness.faux.state.simpleCallCount).toBe(1);
 			expect(harness.sessionManager.getBranch()).toEqual(entries);
 			expect(harness.events).toEqual([]);

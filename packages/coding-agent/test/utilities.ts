@@ -6,8 +6,16 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import type { AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { getModel, type Model, type OAuthCredentials, type OAuthProvider, streamSimple } from "@hansjm10/volt-ai";
-import { getOAuthApiKey } from "@hansjm10/volt-ai/oauth";
+import {
+	type ApiProvider,
+	builtInProviders,
+	createAiClient,
+	getModel,
+	type Model,
+	type OAuthCredentials,
+} from "@hansjm10/volt-ai";
+import { builtInOAuthProviders } from "@hansjm10/volt-ai/oauth";
+import { type MockInstance, vi } from "vitest";
 import { AgentSession, type AgentSessionConfig } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { createEventBus } from "../src/core/event-bus.ts";
@@ -27,6 +35,22 @@ import { createCodingTools } from "../src/index.ts";
  */
 export const API_KEY = process.env.ANTHROPIC_OAUTH_TOKEN || process.env.ANTHROPIC_API_KEY;
 
+/**
+ * Register `provider` on the client of every ModelRegistry created until the returned spy is restored,
+ * for hosts (CLI, remote runtimes, subagents) that build their own registries.
+ */
+export function registerOnCreatedModelRegistries(provider: ApiProvider): MockInstance<typeof ModelRegistry.create> {
+	const create = ModelRegistry.create.bind(ModelRegistry);
+	return vi.spyOn(ModelRegistry, "create").mockImplementation((authStorage, modelsJsonPath) => {
+		const registry = create(authStorage, modelsJsonPath);
+		registry.client.registerProvider(provider);
+		return registry;
+	});
+}
+
+/** Streams test sessions without their own stream function through the built-in providers. */
+const builtInClient = createAiClient({ providers: builtInProviders() });
+
 export function createTestAgentSessionRuntimeConfig(options: {
 	model?: Model<any>;
 	thinkingLevel?: ThinkingLevel;
@@ -43,7 +67,7 @@ export function createTestAgentSessionRuntimeConfig(options: {
 		thinkingLevel: options.thinkingLevel ?? "off",
 		streamFn:
 			options.streamFn ??
-			((model, context, streamOptions) => streamSimple(model, context, { ...streamOptions, apiKey })),
+			((model, context, streamOptions) => builtInClient.streamSimple(model, context, { ...streamOptions, apiKey })),
 		convertToLlm: (messages: AgentMessage[]) => convertToLlm(messages),
 		...(options.tools === undefined
 			? {}
@@ -112,23 +136,17 @@ export async function resolveApiKey(provider: string): Promise<string | undefine
 	}
 
 	if (entry.type === "oauth") {
-		// Build OAuthCredentials record for getOAuthApiKey
-		const oauthCredentials: Record<string, OAuthCredentials> = {};
-		for (const [key, value] of Object.entries(storage)) {
-			if (value.type === "oauth") {
-				const { type: _, ...creds } = value;
-				oauthCredentials[key] = creds;
-			}
+		const oauthProvider = builtInOAuthProviders().find((candidate) => candidate.id === provider);
+		if (!oauthProvider) return undefined;
+		const { type: _, ...stored } = entry;
+		let credentials: OAuthCredentials = stored;
+		if (Date.now() >= credentials.expires) {
+			credentials = await oauthProvider.refreshToken(credentials);
+			// Save refreshed credentials back to auth.json
+			storage[provider] = { type: "oauth", ...credentials };
+			saveAuthStorage(storage);
 		}
-
-		const result = await getOAuthApiKey(provider as OAuthProvider, oauthCredentials);
-		if (!result) return undefined;
-
-		// Save refreshed credentials back to auth.json
-		storage[provider] = { type: "oauth", ...result.newCredentials };
-		saveAuthStorage(storage);
-
-		return result.apiKey;
+		return oauthProvider.getApiKey(credentials);
 	}
 
 	return undefined;
@@ -283,11 +301,8 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 			sessionManager,
 			model,
 			thinkingLevel: "off",
-			streamFn: (requestModel, context, streamOptions) =>
-				streamSimple(requestModel, context, {
-					...streamOptions,
-					...(API_KEY === undefined ? {} : { apiKey: API_KEY }),
-				}),
+			// The registry's client resolves API_KEY from the environment.
+			streamFn: modelRegistry.client.streamSimple,
 			convertToLlm,
 			settingsManager,
 			cwd: tempDir,

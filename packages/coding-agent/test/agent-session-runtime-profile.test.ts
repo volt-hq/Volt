@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import {
@@ -43,7 +43,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 		const agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [{ id: "faux-1", reasoning: false }],
 		});
 		const authStorage = AuthStorage.inMemory();
@@ -75,6 +75,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 								baseUrl: faux.getModel().baseUrl,
 								apiKey: "faux-key",
 								api: faux.api,
+								streamSimple: faux.streamSimple,
 								models: faux.models.map((registeredModel) => ({
 									id: registeredModel.id,
 									name: registeredModel.name,
@@ -112,7 +113,6 @@ describe("AgentSessionRuntime profile propagation", () => {
 
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -129,7 +129,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 	});
 
 	it("refreshes snapshotted agent settings after a profile reload", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [{ id: "profile-runtime-model", reasoning: true }],
 		});
 		const settingsManager = SettingsManager.inMemory({
@@ -162,7 +162,6 @@ describe("AgentSessionRuntime profile propagation", () => {
 
 		cleanups.push(() => {
 			session.dispose();
-			faux.unregister();
 		});
 
 		let streamOptions = createAgentSessionTestControl(session).getStreamOptions();
@@ -180,7 +179,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 	});
 
 	it("drops providers registered by extensions that disappear after a profile reload", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [{ id: "profile-provider-host-model", reasoning: false }],
 		});
 		const providerName = "profile-extension-provider";
@@ -232,7 +231,6 @@ describe("AgentSessionRuntime profile propagation", () => {
 		cleanups.push(() => {
 			modelRegistry.unregisterProvider(providerName);
 			session.dispose();
-			faux.unregister();
 		});
 
 		expect(modelRegistry.find(providerName, providerModelId)).toBeDefined();

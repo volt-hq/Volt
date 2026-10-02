@@ -1,16 +1,13 @@
 import { MODELS } from "./models.generated.ts";
 import type { Api, KnownProvider, Model, ModelThinkingLevel, Usage } from "./types.ts";
 
-const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
-
-// Initialize registry from MODELS on module load
-for (const [provider, models] of Object.entries(MODELS)) {
-	const providerModels = new Map<string, Model<Api>>();
-	for (const [id, model] of Object.entries(models)) {
-		providerModels.set(id, model as Model<Api>);
-	}
-	modelRegistry.set(provider, providerModels);
-}
+/** The generated catalog indexed by provider and model id. Never modified. */
+const generatedCatalog: ReadonlyMap<string, ReadonlyMap<string, Model<Api>>> = new Map(
+	Object.entries(MODELS).map(([provider, models]) => [
+		provider,
+		new Map(Object.entries(models).map(([id, model]) => [id, model as Model<Api>])),
+	]),
+);
 
 /** Model IDs present in the generated catalog for a known provider. */
 export type KnownModelId<TProvider extends KnownProvider> = keyof (typeof MODELS)[TProvider] & string;
@@ -24,18 +21,23 @@ export function getModel<TProvider extends KnownProvider, TModelId extends keyof
 	provider: TProvider,
 	modelId: TModelId,
 ): Model<ModelApi<TProvider, TModelId>> {
-	const providerModels = modelRegistry.get(provider);
+	const providerModels = generatedCatalog.get(provider);
 	return providerModels?.get(modelId as string) as Model<ModelApi<TProvider, TModelId>>;
 }
 
 export function getProviders(): KnownProvider[] {
-	return Array.from(modelRegistry.keys()) as KnownProvider[];
+	return Array.from(generatedCatalog.keys()) as KnownProvider[];
+}
+
+/** The generated model catalog, for `createAiClient({ models })`. */
+export function builtInModels(): Model<Api>[] {
+	return [...generatedCatalog.values()].flatMap((models) => [...models.values()]);
 }
 
 export function getModels<TProvider extends KnownProvider>(
 	provider: TProvider,
 ): Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[] {
-	const models = modelRegistry.get(provider);
+	const models = generatedCatalog.get(provider);
 	return models ? (Array.from(models.values()) as Model<ModelApi<TProvider, keyof (typeof MODELS)[TProvider]>>[]) : [];
 }
 

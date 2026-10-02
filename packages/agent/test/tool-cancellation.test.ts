@@ -1,5 +1,11 @@
 import { getEventListeners } from "node:events";
-import { fauxAssistantMessage, fauxToolCall, type Message, registerFauxProvider } from "@hansjm10/volt-ai";
+import {
+	createAiClient,
+	createFauxProvider,
+	fauxAssistantMessage,
+	fauxToolCall,
+	type Message,
+} from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { runAgentLoop } from "../src/agent-loop.ts";
@@ -19,8 +25,8 @@ describe("tool cancellation", () => {
 	] as const)(
 		"preserves cooperative cancellation output in %s execution when tools %s",
 		async (toolExecution, outcome) => {
-			const faux = registerFauxProvider();
-			cleanups.push(() => faux.unregister());
+			const faux = createFauxProvider();
+			const client = createAiClient({ providers: [faux] });
 			faux.setResponses([
 				fauxAssistantMessage(fauxToolCall("wait", {}), { stopReason: "toolUse" }),
 				fauxAssistantMessage("must not run"),
@@ -61,6 +67,7 @@ describe("tool cancellation", () => {
 					events.push(event);
 				},
 				controller.signal,
+				client.streamSimple,
 			);
 			await started.promise;
 			const settled = vi.fn();
@@ -93,8 +100,8 @@ describe("tool cancellation", () => {
 	);
 
 	it("does not start another prepared parallel tool after synchronous cancellation", async () => {
-		const faux = registerFauxProvider();
-		cleanups.push(() => faux.unregister());
+		const faux = createFauxProvider();
+		const client = createAiClient({ providers: [faux] });
 		faux.setResponses([
 			fauxAssistantMessage([fauxToolCall("cancel", {}), fauxToolCall("cancel", {})], { stopReason: "toolUse" }),
 		]);
@@ -113,6 +120,7 @@ describe("tool cancellation", () => {
 			{ model: faux.getModel(), apiKey: "faux-key", convertToLlm: (messages) => messages as Message[] },
 			() => {},
 			controller.signal,
+			client.streamSimple,
 		);
 		expect(execute).toHaveBeenCalledTimes(1);
 	});

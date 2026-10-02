@@ -3,11 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentLoopNextActionContext } from "@hansjm10/volt-agent-core";
 import {
+	createFauxProvider,
 	type FauxModelDefinition,
 	type FauxResponseStep,
 	fauxAssistantMessage,
 	fauxToolCall,
-	registerFauxProvider,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
@@ -139,7 +139,7 @@ describe("SubagentManager", () => {
 		const tempDir = join(tmpdir(), `subagent-manager-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider({ models: options.models });
+		const faux = createFauxProvider({ models: options.models });
 		if (options.models) {
 			writeFileSync(
 				join(tempDir, "models.json"),
@@ -191,6 +191,7 @@ describe("SubagentManager", () => {
 					noContextFiles: true,
 				},
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			if (options.settings) {
 				services.settingsManager.applyOverrides(options.settings);
 			}
@@ -243,7 +244,6 @@ describe("SubagentManager", () => {
 
 		cleanups.push(async () => {
 			await manager.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

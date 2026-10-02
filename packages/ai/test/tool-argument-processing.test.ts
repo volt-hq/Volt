@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../src/providers/faux.ts";
+import { createAiClient } from "../src/client.ts";
+import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "../src/providers/faux.ts";
 import type { AssistantStreamFragment } from "../src/stream/fragments.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 import {
@@ -8,7 +9,6 @@ import {
 	TOOL_ARGUMENT_BATCH_MAX_FRAGMENTS,
 	ToolArgumentCoalescer,
 } from "../src/stream/tool-argument-coalescer.ts";
-import { complete, completeSimple, stream } from "../src/stream.ts";
 import type { AssistantMessageEvent } from "../src/types.ts";
 import { EVENT_STREAM_MAX_QUEUED_EVENTS, EventStreamOverflowError } from "../src/utils/event-stream.ts";
 import * as jsonParse from "../src/utils/json-parse.ts";
@@ -154,25 +154,22 @@ describe("bounded argument processing (#354)", () => {
 	});
 
 	it("coalesces faux-provider tiny chunks for a slow consumer without losing the final arguments", async () => {
-		const faux = registerFauxProvider({ tokenSize: { min: 1, max: 1 } });
+		const faux = createFauxProvider({ tokenSize: { min: 1, max: 1 } });
+		const client = createAiClient({ providers: [faux] });
 		const args = { newText: "λ🌲\n".repeat(8192) };
 		faux.setResponses([
 			fauxAssistantMessage(fauxToolCall("edit", args, { id: "large-edit" }), { stopReason: "toolUse" }),
 		]);
-		try {
-			const response = stream(faux.getModel(), { messages: [] });
-			// Deliberately leave iteration idle until the producer finishes.
-			const result = await response.result();
-			expect(result.content[0]).toMatchObject({ arguments: args });
-			const deltas: string[] = [];
-			for await (const event of response) {
-				if (event.type === "toolcall_delta") deltas.push(event.argsTextDelta);
-			}
-			expect(deltas.join("")).toBe(JSON.stringify(args));
-			expect(deltas.length).toBeLessThan(32);
-		} finally {
-			faux.unregister();
+		const response = client.stream(faux.getModel(), { messages: [] });
+		// Deliberately leave iteration idle until the producer finishes.
+		const result = await response.result();
+		expect(result.content[0]).toMatchObject({ arguments: args });
+		const deltas: string[] = [];
+		for await (const event of response) {
+			if (event.type === "toolcall_delta") deltas.push(event.argsTextDelta);
 		}
+		expect(deltas.join("")).toBe(JSON.stringify(args));
+		expect(deltas.length).toBeLessThan(32);
 	});
 
 	it("settles timer-driven overflow as an error and releases all pending preview timers", async () => {
@@ -194,15 +191,12 @@ describe("bounded argument processing (#354)", () => {
 	});
 
 	it.each([false, true])("drains long result-only faux completions (simple: %s)", async (simple) => {
-		const faux = registerFauxProvider({ tokenSize: { min: 1, max: 1 } });
+		const faux = createFauxProvider({ tokenSize: { min: 1, max: 1 } });
+		const client = createAiClient({ providers: [faux] });
 		const text = "x".repeat(16 * 1024);
 		if (simple) faux.setSimpleResponses([fauxAssistantMessage(text)]);
 		else faux.setResponses([fauxAssistantMessage(text)]);
-		try {
-			const result = await (simple ? completeSimple : complete)(faux.getModel(), { messages: [] });
-			expect(result.content).toEqual([{ type: "text", text }]);
-		} finally {
-			faux.unregister();
-		}
+		const result = await (simple ? client.completeSimple : client.complete)(faux.getModel(), { messages: [] });
+		expect(result.content).toEqual([{ type: "text", text }]);
 	});
 });

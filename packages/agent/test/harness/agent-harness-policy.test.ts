@@ -1,17 +1,32 @@
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import {
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
+	fauxAssistantMessage,
+	fauxToolCall,
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { Session } from "../../src/harness/session/session.ts";
-import type { NextActionResolvedEvent } from "../../src/harness/types.ts";
+import type { AgentHarnessOptions, NextActionResolvedEvent } from "../../src/harness/types.ts";
 import type { AgentLoopNextActionContext, AgentMessage, AgentTool } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import { prompt, runPrompt } from "./harness-test-utils.ts";
 import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
-const registrations: Array<{ unregister(): void }> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 
 afterEach(() => {
-	for (const registration of registrations.splice(0)) registration.unregister();
+	for (const api of registeredApis.splice(0)) client.unregisterProvider(api);
 });
 
 function textOfContent(content: string | readonly { type: string; text?: string }[]): string {
@@ -23,14 +38,15 @@ function textOf(message: AgentMessage): string {
 	return "content" in message ? textOfContent(message.content) : "";
 }
 
-function createHarness(options: ConstructorParameters<typeof AgentHarness>[0]): AgentHarness {
-	return new AgentHarness(options);
+function createHarness(
+	options: Omit<AgentHarnessOptions, "streamFn"> & Partial<Pick<AgentHarnessOptions, "streamFn">>,
+): AgentHarness {
+	return new AgentHarness({ streamFn: client.streamSimple, ...options });
 }
 
 describe("AgentHarness finalized next-action policy", () => {
 	it("awaits ordered hooks and async scoped policies before publishing, dispatching, and settling", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const order: string[] = [];
 		registration.setResponses([
 			() => {
@@ -114,7 +130,6 @@ describe("AgentHarness finalized next-action policy", () => {
 		"attributes an explicit %s stop to policy even when the suggestion is already stop",
 		async (source) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			registration.setResponses([() => fauxAssistantMessage("done")]);
 			const harness = createHarness({
 				session: new Session(new InMemorySessionStorage()),
@@ -152,7 +167,6 @@ describe("AgentHarness finalized next-action policy", () => {
 		"publishes an explicit %s stop before settlement without dispatch",
 		async (source) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			registration.setResponses([() => fauxAssistantMessage("must not run")]);
 			const harness = createHarness({
 				session: new Session(new InMemorySessionStorage()),
@@ -191,7 +205,6 @@ describe("AgentHarness finalized next-action policy", () => {
 		"preserves tool stop provenance unless policy explicitly stops (explicit=%s)",
 		async (explicit) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			registration.setResponses([
 				() =>
 					fauxAssistantMessage(fauxToolCall("calculate", { expression: "1 + 1" }, { id: "stop-call" }), {
@@ -240,7 +253,6 @@ describe("AgentHarness finalized next-action policy", () => {
 		"allows later $override to override a $source stop without stale provenance",
 		async ({ source, override }) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			let continuationMessages: AgentMessage[] = [];
 			registration.setResponses([
 				() =>
@@ -306,7 +318,6 @@ describe("AgentHarness finalized next-action policy", () => {
 
 	it("isolates finalized hooks and passive subscribers from each other, dispatch, and persistence", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let providerMessages: AgentMessage[] = [];
 		registration.setResponses([
 			(context) => {
@@ -387,7 +398,6 @@ describe("AgentHarness finalized next-action policy", () => {
 		"publishes normalized final-response authority after policy returns %s",
 		async (decision) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			const finalRequests: Array<{ tools: string[]; systemPrompt: string; texts: string[] }> = [];
 			registration.setResponses([
 				() =>
@@ -470,7 +480,6 @@ describe("AgentHarness finalized next-action policy", () => {
 describe("AgentHarness host policy", () => {
 	it("allows model-less construction and rejects only model-backed preflight", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("ok")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = createHarness({
@@ -492,7 +501,6 @@ describe("AgentHarness host policy", () => {
 
 	it("applies structured per-run system prompts and ordered context reducers", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let providerSystemPrompt = "";
 		let providerMessages: unknown;
 		registration.setResponses([
@@ -535,7 +543,6 @@ describe("AgentHarness host policy", () => {
 
 	it("finalizes ordered message replacements before persistence and passive cloned subscribers", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("provider")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = createHarness({
@@ -573,7 +580,6 @@ describe("AgentHarness host policy", () => {
 
 	it("reduces tool policy in registration order before the continuation request", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let continuationMessages: unknown;
 		const providerSystemPrompts: Array<string | undefined> = [];
 		registration.setResponses([
@@ -623,7 +629,6 @@ describe("AgentHarness host policy", () => {
 
 	it("fails the run when canonical storage cannot own non-cloneable tool details", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([
 			() =>
 				fauxAssistantMessage(fauxToolCall("non_cloneable_details", { expression: "1 + 1" }, { id: "call-1" }), {
@@ -662,7 +667,6 @@ describe("AgentHarness host policy", () => {
 
 	it("allows scoped policy to deliver work from an assistant-tail continuation", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let continuationMessages: AgentMessage[] = [];
 		registration.setResponses([
 			() => fauxAssistantMessage("one"),
@@ -703,7 +707,6 @@ describe("AgentHarness host policy", () => {
 
 	it("isolates every next-action handler and policy projection and owns returned actions", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let continuationMessages: AgentMessage[] = [];
 		registration.setResponses([
 			() =>
@@ -803,7 +806,6 @@ describe("AgentHarness host policy", () => {
 
 	it("orders event and scoped next-action policy and unregisters scoped policy", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("one"), () => fauxAssistantMessage("two")]);
 		const harness = createHarness({
 			session: new Session(new InMemorySessionStorage()),

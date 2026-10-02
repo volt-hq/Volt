@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { completeSimple, getEnvApiKey, streamSimple } from "../src/stream.ts";
 import type { AssistantMessage, Context, Model } from "../src/types.ts";
+import { completeSimple, getEnvApiKey, streamSimple } from "./test-client.ts";
 
 const provider = "xiaomi-token-plan-ams";
 const apiKey = getEnvApiKey(provider);

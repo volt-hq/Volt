@@ -1,4 +1,10 @@
-import { fauxAssistantMessage, registerFauxProvider } from "@hansjm10/volt-ai";
+import {
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
+	fauxAssistantMessage,
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { Session } from "../../src/harness/session/session.ts";
@@ -11,10 +17,18 @@ import type {
 import { runPrompt } from "./harness-test-utils.ts";
 import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
-const registrations: Array<{ unregister(): void }> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 
 afterEach(() => {
-	for (const registration of registrations.splice(0)) registration.unregister();
+	for (const api of registeredApis.splice(0)) client.unregisterProvider(api);
 });
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -35,10 +49,10 @@ function getUserTexts(messages: readonly AgentMessage[]): string[] {
 
 function createHarness(options: { session?: Session; deliveryOwner?: AgentDeliveryOwner } = {}) {
 	const registration = registerFauxProvider();
-	registrations.push(registration);
 	const session = options.session ?? new Session(new InMemorySessionStorage());
 	return {
 		harness: new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 			...(options.deliveryOwner === undefined ? {} : { deliveryOwner: options.deliveryOwner }),

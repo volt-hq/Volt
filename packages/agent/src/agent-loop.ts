@@ -9,7 +9,6 @@ import {
 	createProviderError,
 	EventStream,
 	type JsonObject,
-	streamSimple,
 	type ToolResultMessage,
 	validateToolArguments,
 } from "@hansjm10/volt-ai";
@@ -66,8 +65,8 @@ export function agentLoop(
 	prompts: AgentMessage[],
 	context: AgentContext,
 	config: AgentLoopConfig,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	const stream = createAgentStream();
 
@@ -100,8 +99,8 @@ export function agentLoop(
 export function agentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -134,8 +133,8 @@ export async function runAgentLoop(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
 	const newMessages: AgentMessage[] = [];
 	const currentContext: AgentContext = { ...context, messages: [...context.messages] };
@@ -154,8 +153,8 @@ export async function runAgentLoopContinue(
 	context: AgentContext,
 	config: AgentLoopConfig,
 	emit: AgentEventSink,
-	signal?: AbortSignal,
-	streamFn?: StreamFn,
+	signal: AbortSignal | undefined,
+	streamFn: StreamFn,
 ): Promise<AgentMessage[]> {
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
@@ -190,7 +189,7 @@ async function runDispatchedLoop(
 	initialAction: AgentLoopNextAction,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
-	streamFn?: StreamFn,
+	streamFn: StreamFn,
 ): Promise<void> {
 	let currentContext = initialContext;
 	let config = initialConfig;
@@ -472,7 +471,7 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 	policy: StreamAssistantResponsePolicy,
-	streamFn?: StreamFn,
+	streamFn: StreamFn,
 ): Promise<AssistantMessage | undefined> {
 	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
 	let messages = context.messages;
@@ -495,20 +494,12 @@ async function streamAssistantResponse(
 		...(context.tools === undefined ? {} : { tools: context.tools }),
 	};
 
-	const streamFunction = streamFn || streamSimple;
-
-	// Resolve API key (important for expiring tokens)
-	const resolvedApiKey =
-		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
-	if (policy.cancelOnPreflightAbort && signal?.aborted) return undefined;
-
 	const streamOptions = {
 		...config,
-		...(resolvedApiKey === undefined ? {} : { apiKey: resolvedApiKey }),
 		...(signal === undefined ? {} : { signal }),
 	};
 	if (policy.cancelOnPreflightAbort && signal?.aborted) return undefined;
-	const response = await streamFunction(config.model, llmContext, streamOptions);
+	const response = await streamFn(config.model, llmContext, streamOptions);
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;

@@ -1,4 +1,4 @@
-import { registerImagesApiProvider } from "../../images-api-registry.ts";
+import type { ImagesApiProvider } from "../../client.ts";
 import type { AssistantImages, ImagesContext, ImagesFunction, ImagesModel, ImagesOptions } from "../../types.ts";
 import type { generateImagesOpenRouter as generateImagesOpenRouterFunction } from "./openrouter.ts";
 
@@ -40,11 +40,7 @@ export const generateImagesOpenRouter: ImagesFunction<"openrouter-images", Image
 	}
 };
 
-export function registerBuiltInImagesApiProviders(): void {
-	registerImagesApiProvider({
-		api: "openrouter-images",
-		generateImages: generateImagesOpenRouter,
-	});
+/** The built-in image generation implementations, for `createAiClient({ imagesProviders })`. */
+export function builtInImagesProviders(): ImagesApiProvider[] {
+	return [{ api: "openrouter-images", generateImages: generateImagesOpenRouter }];
 }
-
-registerBuiltInImagesApiProviders();

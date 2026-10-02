@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import {
@@ -67,15 +67,10 @@ async function poll(predicate: () => boolean, timeoutMs: number): Promise<boolea
 describe.runIf(isPosix && hasPerl)("bash stall detection end to end", () => {
 	let runtimeHost: AgentSessionRuntime | undefined;
 	let tempDir: string | undefined;
-	let unregisterFaux: (() => void) | undefined;
 
 	afterEach(async () => {
 		await runtimeHost?.dispose();
 		runtimeHost = undefined;
-		// Must not be left to the end of the test body: an assertion failure would
-		// leak a globally registered provider into every later test in the worker.
-		unregisterFaux?.();
-		unregisterFaux = undefined;
 		for (const pid of survivors()) {
 			try {
 				process.kill(pid, "SIGKILL");
@@ -91,8 +86,7 @@ describe.runIf(isPosix && hasPerl)("bash stall detection end to end", () => {
 		tempDir = join(tmpdir(), `volt-stall-e2e-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 
-		const faux = registerFauxProvider();
-		unregisterFaux = () => faux.unregister();
+		const faux = createFauxProvider();
 		// The command is silent, and its grandchild both ignores SIGTERM and moves
 		// itself into a new process group — the shape that survived for hours.
 		const hangingCommand = `perl -e '$SIG{TERM}="IGNORE"; setpgrp(0,0); exec("sleep","${MARKER}")' & sleep 120`;
@@ -122,6 +116,7 @@ describe.runIf(isPosix && hasPerl)("bash stall detection end to end", () => {
 					noThemes: true,
 				},
 			});
+			services.modelRegistry.client.registerProvider(faux);
 			return {
 				...(await createAgentSessionFromServices({
 					services,

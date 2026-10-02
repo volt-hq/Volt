@@ -7,15 +7,16 @@
  */
 import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "../src/providers/faux.ts";
-import { stream } from "../src/stream.ts";
+import { createAiClient } from "../src/client.ts";
+import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "../src/providers/faux.ts";
 import { AssistantStreamNormalizer } from "../src/stream/normalizer.ts";
 
 for (const argumentChars of [16 * 1024, 64 * 1024, 256 * 1024]) {
 	for (const chunkChars of [4, 256, 4096]) {
 		for (const calls of [1, 2]) {
 			for (const consumerDelayMs of [0, 1]) {
-				const faux = registerFauxProvider({ tokenSize: { min: chunkChars / 4, max: chunkChars / 4 } });
+				const faux = createFauxProvider({ tokenSize: { min: chunkChars / 4, max: chunkChars / 4 } });
+				const client = createAiClient({ providers: [faux] });
 				const argumentsValue = { newText: "x".repeat(argumentChars) };
 				faux.setResponses([fauxAssistantMessage(
 					Array.from({ length: calls }, (_, index) => fauxToolCall("edit", argumentsValue, { id: `call-${index}` })),
@@ -24,32 +25,28 @@ for (const argumentChars of [16 * 1024, 64 * 1024, 256 * 1024]) {
 				let previews = 0;
 				let parsedChars = 0;
 				const start = performance.now();
-				try {
-					const response = stream(faux.getModel(), { messages: [] });
-					for await (const event of response) {
-						if (event.type === "toolcall_delta") {
-							previews++;
-							parsedChars += event.toolState.find((state) => state.contentIndex === event.contentIndex)?.argsText.length ?? 0;
-						}
-						if (consumerDelayMs) await new Promise((resolve) => setTimeout(resolve, consumerDelayMs));
+				const response = client.stream(faux.getModel(), { messages: [] });
+				for await (const event of response) {
+					if (event.type === "toolcall_delta") {
+						previews++;
+						parsedChars += event.toolState.find((state) => state.contentIndex === event.contentIndex)?.argsText.length ?? 0;
 					}
-					const result = await response.result();
-					if (result.stopReason === "error") {
-						assert(result.diagnostics?.some((diagnostic) => diagnostic.type === "assistant_stream_queue_limit"));
-					} else {
-						assert.equal(result.stopReason, "toolUse");
-						assert.deepEqual(result.content, Array.from({ length: calls }, (_, index) => ({
-							type: "toolCall", id: `call-${index}`, name: "edit", arguments: argumentsValue,
-						})));
-					}
-					console.log(JSON.stringify({
-						argumentChars, chunkChars, calls, consumerDelayMs, observedPreviews: previews, observedParsedChars: parsedChars,
-						elapsedMs: Math.round(performance.now() - start), stopReason: result.stopReason,
-						failure: result.diagnostics?.at(-1)?.type,
-					}));
-				} finally {
-					faux.unregister();
+					if (consumerDelayMs) await new Promise((resolve) => setTimeout(resolve, consumerDelayMs));
 				}
+				const result = await response.result();
+				if (result.stopReason === "error") {
+					assert(result.diagnostics?.some((diagnostic) => diagnostic.type === "assistant_stream_queue_limit"));
+				} else {
+					assert.equal(result.stopReason, "toolUse");
+					assert.deepEqual(result.content, Array.from({ length: calls }, (_, index) => ({
+						type: "toolCall", id: `call-${index}`, name: "edit", arguments: argumentsValue,
+					})));
+				}
+				console.log(JSON.stringify({
+					argumentChars, chunkChars, calls, consumerDelayMs, observedPreviews: previews, observedParsedChars: parsedChars,
+					elapsedMs: Math.round(performance.now() - start), stopReason: result.stopReason,
+					failure: result.diagnostics?.at(-1)?.type,
+				}));
 			}
 		}
 	}

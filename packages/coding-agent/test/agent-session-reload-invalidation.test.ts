@@ -13,9 +13,9 @@ import { join } from "node:path";
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	createFauxProvider,
 	EventStream,
 	fauxAssistantMessage,
-	registerFauxProvider,
 } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -42,14 +42,14 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 		const agentDir = join(tempDir, "agent");
 		mkdirSync(agentDir, { recursive: true });
 
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [{ id: "faux-1", reasoning: false }],
 		});
 
-		// Reload rebuilds the API provider registry (resetApiProviders), which
-		// drops registerFauxProvider's global stream registration. Provide the
-		// stream via the extension ProviderConfig instead so each generation
-		// re-registers it, mirroring how real custom-API extensions work.
+		// Reload rebuilds the registry client's API providers, which drops
+		// providers registered on it directly. Provide the stream via the
+		// extension ProviderConfig instead so each generation re-registers it,
+		// mirroring how real custom-API extensions work.
 		const replies = ["first reply", "second reply"];
 		let replyIndex = 0;
 		const streamReply = (): EventStream<AssistantMessageEvent, AssistantMessage> => {
@@ -128,7 +128,6 @@ describe("AgentSession reload invalidates the previous extension generation", ()
 
 		cleanups.push(async () => {
 			await runtime.dispose();
-			faux.unregister();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}

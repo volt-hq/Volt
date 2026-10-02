@@ -1,28 +1,46 @@
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import {
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
+	fauxAssistantMessage,
+	fauxToolCall,
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { Session } from "../../src/harness/session/session.ts";
+import type { AgentHarnessOptions } from "../../src/harness/types.ts";
 import type { AgentMessage } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import { prompt, runPrompt } from "./harness-test-utils.ts";
 import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
-const registrations: Array<{ unregister(): void }> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 
 afterEach(() => {
-	for (const registration of registrations.splice(0)) registration.unregister();
+	for (const api of registeredApis.splice(0)) client.unregisterProvider(api);
 });
 
 function createHarness(
 	registration: ReturnType<typeof registerFauxProvider>,
-	options: Omit<ConstructorParameters<typeof AgentHarness>[0], "session" | "model"> & {
-		session?: Session;
-	} = {},
+	options: Omit<AgentHarnessOptions, "session" | "model" | "streamFn"> &
+		Partial<Pick<AgentHarnessOptions, "streamFn">> & {
+			session?: Session;
+		} = {},
 ): { harness: AgentHarness; session: Session } {
 	const session = options.session ?? new Session(new InMemorySessionStorage());
 	const { session: _session, ...harnessOptions } = options;
 	return {
 		harness: new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 			...harnessOptions,
@@ -53,7 +71,6 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 describe("AgentHarness continuation state", () => {
 	it("uses the approved synchronous projector and projection token contract", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const session = new Session(new InMemorySessionStorage());
 		const anchorLeafId = await session.appendMessage({
 			role: "user",
@@ -105,7 +122,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("rejects non-cloneable canonical mutations before changing projection", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([fauxAssistantMessage("must not run")]);
 		const session = new Session(new InMemorySessionStorage());
 		await session.appendMessage({ role: "user", content: "canonical", timestamp: Date.now() });
@@ -121,7 +137,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("lets canonical mode consume a branch rewrite between provider requests", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([
 			fauxAssistantMessage(fauxToolCall("calculate", { expression: "2 + 2" }, { id: "call-1" }), {
 				stopReason: "toolUse",
@@ -147,7 +162,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("reconciles metadata appended during a provider request before tool continuation", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const session = new Session(new InMemorySessionStorage());
 		const requestRoles: string[][] = [];
 		registration.setResponses([
@@ -182,7 +196,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("tails a legitimate canonical append before the next provider request", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const session = new Session(new InMemorySessionStorage());
 		registration.setResponses([
 			async () => {
@@ -204,7 +217,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("owns explicit continuation context before blocked canonical context resolution", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const session = new Session(new InMemorySessionStorage());
 		const contextStarted = deferred();
 		const releaseContext = deferred();
@@ -247,7 +259,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("keeps an explicit continuation projection through tool requests", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const session = new Session(new InMemorySessionStorage());
 		const canonicalUser = { role: "user", content: "retry this", timestamp: Date.now() } as const;
 		await session.appendMessage(canonicalUser);
@@ -288,7 +299,6 @@ describe("AgentHarness continuation state", () => {
 				{ id: "second", reasoning: true },
 			],
 		});
-		registrations.push(registration);
 		const secondModel = registration.getModel("second");
 		if (!secondModel) throw new Error("missing second faux model");
 		const captured: Array<{ modelId: string; reasoning: unknown; tools: string[] }> = [];
@@ -340,7 +350,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("preserves final-response authority across pause and ignores weaker policy", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const requests: Array<{ tools: string[]; systemPrompt: string }> = [];
 		registration.setResponses([
 			() =>
@@ -377,7 +386,6 @@ describe("AgentHarness continuation state", () => {
 
 	it("preserves final-response authority when an explicit retry projector removes the error", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const finalRequests: Array<{ texts: string[]; tools: string[] }> = [];
 		registration.setResponses([
 			() =>
@@ -422,12 +430,12 @@ describe("AgentHarness continuation state", () => {
 
 	it("completes assistant-tail no-ops without model-backed turn construction", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let systemPromptCalls = 0;
 		for (const model of [undefined, registration.getModel()]) {
 			const session = new Session(new InMemorySessionStorage());
 			await session.appendMessage(fauxAssistantMessage("already complete"));
 			const harness = new AgentHarness({
+				streamFn: client.streamSimple,
 				session,
 				...(model === undefined ? {} : { model }),
 				systemPrompt: () => {

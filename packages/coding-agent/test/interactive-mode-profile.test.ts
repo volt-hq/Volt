@@ -1,5 +1,5 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import { type Model, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, type Model } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
@@ -134,214 +134,202 @@ describe("InteractiveMode profile selector", () => {
 	});
 
 	it("reapplies the selected profile default model when switching profiles", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "profile-a-model", reasoning: false },
 				{ id: "profile-b-model", reasoning: false },
 			],
 		});
-		try {
-			const profileAModel = faux.getModel("profile-a-model");
-			const profileBModel = faux.getModel("profile-b-model");
-			if (!profileAModel || !profileBModel) {
-				throw new Error("Faux models were not registered");
-			}
-
-			let activeProfile = "profile-b";
-			const setModel = vi.fn<(model: Model<string>, options?: SetModelOptions) => Promise<void>>(async () => {});
-			const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
-			Object.defineProperties(context, {
-				settingsManager: {
-					value: {
-						getActiveProfile: () => activeProfile,
-						setActiveProfile: (profileName: string) => {
-							activeProfile = profileName;
-						},
-						getDefaultProvider: () => profileAModel.provider,
-						getDefaultModel: () => profileAModel.id,
-						getDefaultThinkingLevel: () => undefined,
-						getEnabledModels: () => undefined,
-						getWarnings: () => ({}),
-					},
-				},
-				reloadRuntimeResources: { value: vi.fn(async (_options: ReloadRuntimeResourcesOptions) => true) },
-				applyScopedModelsFromSettings: { value: vi.fn(async () => {}) },
-				session: {
-					value: {
-						model: profileBModel,
-						thinkingLevel: "off",
-						scopedModels: [],
-						modelRegistry: {
-							find: (provider: string, modelId: string) =>
-								[profileAModel, profileBModel].find(
-									(model) => model.provider === provider && model.id === modelId,
-								),
-							getAvailable: () => [profileAModel, profileBModel],
-							hasConfiguredAuth: () => true,
-						},
-						setModel,
-						setThinkingLevel: vi.fn(),
-					},
-				},
-				footer: { value: { invalidate: vi.fn() } },
-				updateEditorBorderColor: { value: vi.fn() },
-				showStatus: { value: vi.fn() },
-				showWarning: { value: vi.fn() },
-			});
-
-			await interactiveModePrototype.switchProfile.call(context, "profile-a");
-
-			expect(setModel).toHaveBeenCalledWith(profileAModel, { persistDefault: false });
-		} finally {
-			faux.unregister();
+		const profileAModel = faux.getModel("profile-a-model");
+		const profileBModel = faux.getModel("profile-b-model");
+		if (!profileAModel || !profileBModel) {
+			throw new Error("Faux models were not registered");
 		}
+
+		let activeProfile = "profile-b";
+		const setModel = vi.fn<(model: Model<string>, options?: SetModelOptions) => Promise<void>>(async () => {});
+		const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
+		Object.defineProperties(context, {
+			settingsManager: {
+				value: {
+					getActiveProfile: () => activeProfile,
+					setActiveProfile: (profileName: string) => {
+						activeProfile = profileName;
+					},
+					getDefaultProvider: () => profileAModel.provider,
+					getDefaultModel: () => profileAModel.id,
+					getDefaultThinkingLevel: () => undefined,
+					getEnabledModels: () => undefined,
+					getWarnings: () => ({}),
+				},
+			},
+			reloadRuntimeResources: { value: vi.fn(async (_options: ReloadRuntimeResourcesOptions) => true) },
+			applyScopedModelsFromSettings: { value: vi.fn(async () => {}) },
+			session: {
+				value: {
+					model: profileBModel,
+					thinkingLevel: "off",
+					scopedModels: [],
+					modelRegistry: {
+						find: (provider: string, modelId: string) =>
+							[profileAModel, profileBModel].find(
+								(model) => model.provider === provider && model.id === modelId,
+							),
+						getAvailable: () => [profileAModel, profileBModel],
+						hasConfiguredAuth: () => true,
+					},
+					setModel,
+					setThinkingLevel: vi.fn(),
+				},
+			},
+			footer: { value: { invalidate: vi.fn() } },
+			updateEditorBorderColor: { value: vi.fn() },
+			showStatus: { value: vi.fn() },
+			showWarning: { value: vi.fn() },
+		});
+
+		await interactiveModePrototype.switchProfile.call(context, "profile-a");
+
+		expect(setModel).toHaveBeenCalledWith(profileAModel, { persistDefault: false });
 	});
 
 	it("falls back to the first scoped model when a switched profile default is out of scope", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "scoped-model", reasoning: false },
 				{ id: "profile-default-model", reasoning: false },
 				{ id: "previous-model", reasoning: false },
 			],
 		});
-		try {
-			const scopedModel = faux.getModel("scoped-model");
-			const profileDefaultModel = faux.getModel("profile-default-model");
-			const previousModel = faux.getModel("previous-model");
-			if (!scopedModel || !profileDefaultModel || !previousModel) {
-				throw new Error("Faux models were not registered");
-			}
-
-			let activeProfile = "previous";
-			const scopedModels: ScopedModelUpdate[] = [];
-			const session = {
-				model: previousModel,
-				thinkingLevel: "off" as ThinkingLevel,
-				get scopedModels() {
-					return scopedModels;
-				},
-				modelRegistry: {
-					find: (provider: string, modelId: string) =>
-						[scopedModel, profileDefaultModel, previousModel].find(
-							(model) => model.provider === provider && model.id === modelId,
-						),
-					getAvailable: () => [scopedModel, profileDefaultModel, previousModel],
-					hasConfiguredAuth: () => true,
-				},
-				setModel: vi.fn(async (model: Model<string>, _options?: SetModelOptions) => {
-					session.model = model;
-				}),
-				setThinkingLevel: vi.fn(),
-			};
-			const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
-			Object.defineProperties(context, {
-				settingsManager: {
-					value: {
-						getActiveProfile: () => activeProfile,
-						setActiveProfile: (profileName: string) => {
-							activeProfile = profileName;
-						},
-						getDefaultProvider: () => profileDefaultModel.provider,
-						getDefaultModel: () => profileDefaultModel.id,
-						getDefaultThinkingLevel: () => undefined,
-						getEnabledModels: () => [scopedModel.id],
-						getWarnings: () => ({}),
-					},
-				},
-				reloadRuntimeResources: { value: vi.fn(async (_options: ReloadRuntimeResourcesOptions) => true) },
-				applyScopedModelsFromSettings: {
-					value: vi.fn(async () => {
-						scopedModels.splice(0, scopedModels.length, { model: scopedModel });
-					}),
-				},
-				session: { value: session },
-				footer: { value: { invalidate: vi.fn() } },
-				updateEditorBorderColor: { value: vi.fn() },
-				showStatus: { value: vi.fn() },
-				showWarning: { value: vi.fn() },
-			});
-
-			await interactiveModePrototype.switchProfile.call(context, "scoped");
-
-			expect(session.setModel).toHaveBeenCalledWith(scopedModel, { persistDefault: false });
-			expect(session.model).toBe(scopedModel);
-			expect(session.setModel).not.toHaveBeenCalledWith(profileDefaultModel, { persistDefault: false });
-		} finally {
-			faux.unregister();
+		const scopedModel = faux.getModel("scoped-model");
+		const profileDefaultModel = faux.getModel("profile-default-model");
+		const previousModel = faux.getModel("previous-model");
+		if (!scopedModel || !profileDefaultModel || !previousModel) {
+			throw new Error("Faux models were not registered");
 		}
+
+		let activeProfile = "previous";
+		const scopedModels: ScopedModelUpdate[] = [];
+		const session = {
+			model: previousModel,
+			thinkingLevel: "off" as ThinkingLevel,
+			get scopedModels() {
+				return scopedModels;
+			},
+			modelRegistry: {
+				find: (provider: string, modelId: string) =>
+					[scopedModel, profileDefaultModel, previousModel].find(
+						(model) => model.provider === provider && model.id === modelId,
+					),
+				getAvailable: () => [scopedModel, profileDefaultModel, previousModel],
+				hasConfiguredAuth: () => true,
+			},
+			setModel: vi.fn(async (model: Model<string>, _options?: SetModelOptions) => {
+				session.model = model;
+			}),
+			setThinkingLevel: vi.fn(),
+		};
+		const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
+		Object.defineProperties(context, {
+			settingsManager: {
+				value: {
+					getActiveProfile: () => activeProfile,
+					setActiveProfile: (profileName: string) => {
+						activeProfile = profileName;
+					},
+					getDefaultProvider: () => profileDefaultModel.provider,
+					getDefaultModel: () => profileDefaultModel.id,
+					getDefaultThinkingLevel: () => undefined,
+					getEnabledModels: () => [scopedModel.id],
+					getWarnings: () => ({}),
+				},
+			},
+			reloadRuntimeResources: { value: vi.fn(async (_options: ReloadRuntimeResourcesOptions) => true) },
+			applyScopedModelsFromSettings: {
+				value: vi.fn(async () => {
+					scopedModels.splice(0, scopedModels.length, { model: scopedModel });
+				}),
+			},
+			session: { value: session },
+			footer: { value: { invalidate: vi.fn() } },
+			updateEditorBorderColor: { value: vi.fn() },
+			showStatus: { value: vi.fn() },
+			showWarning: { value: vi.fn() },
+		});
+
+		await interactiveModePrototype.switchProfile.call(context, "scoped");
+
+		expect(session.setModel).toHaveBeenCalledWith(scopedModel, { persistDefault: false });
+		expect(session.model).toBe(scopedModel);
+		expect(session.setModel).not.toHaveBeenCalledWith(profileDefaultModel, { persistDefault: false });
 	});
 
 	it("falls back to the first scoped model when a switched profile has no default model", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "enabled-profile-model", reasoning: false },
 				{ id: "previous-model", reasoning: false },
 			],
 		});
-		try {
-			const enabledProfileModel = faux.getModel("enabled-profile-model");
-			const previousModel = faux.getModel("previous-model");
-			if (!enabledProfileModel || !previousModel) {
-				throw new Error("Faux models were not registered");
-			}
-
-			let activeProfile = "previous";
-			const scopedModels: ScopedModelUpdate[] = [];
-			const session = {
-				model: previousModel,
-				thinkingLevel: "off" as ThinkingLevel,
-				get scopedModels() {
-					return scopedModels;
-				},
-				modelRegistry: {
-					find: (provider: string, modelId: string) =>
-						[enabledProfileModel, previousModel].find(
-							(model) => model.provider === provider && model.id === modelId,
-						),
-					getAvailable: () => [enabledProfileModel, previousModel],
-					hasConfiguredAuth: () => true,
-				},
-				setModel: vi.fn(async (model: Model<string>, _options?: SetModelOptions) => {
-					session.model = model;
-				}),
-				setThinkingLevel: vi.fn(),
-			};
-			const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
-			Object.defineProperties(context, {
-				settingsManager: {
-					value: {
-						getActiveProfile: () => activeProfile,
-						setActiveProfile: (profileName: string) => {
-							activeProfile = profileName;
-						},
-						getDefaultProvider: () => undefined,
-						getDefaultModel: () => undefined,
-						getDefaultThinkingLevel: () => undefined,
-						getEnabledModels: () => [enabledProfileModel.id],
-						getWarnings: () => ({}),
-					},
-				},
-				reloadRuntimeResources: { value: vi.fn(async (_options: ReloadRuntimeResourcesOptions) => true) },
-				applyScopedModelsFromSettings: {
-					value: vi.fn(async () => {
-						scopedModels.splice(0, scopedModels.length, { model: enabledProfileModel });
-					}),
-				},
-				session: { value: session },
-				footer: { value: { invalidate: vi.fn() } },
-				updateEditorBorderColor: { value: vi.fn() },
-				showStatus: { value: vi.fn() },
-				showWarning: { value: vi.fn() },
-			});
-
-			await interactiveModePrototype.switchProfile.call(context, "enabled-only");
-
-			expect(session.setModel).toHaveBeenCalledWith(enabledProfileModel, { persistDefault: false });
-			expect(session.model).toBe(enabledProfileModel);
-		} finally {
-			faux.unregister();
+		const enabledProfileModel = faux.getModel("enabled-profile-model");
+		const previousModel = faux.getModel("previous-model");
+		if (!enabledProfileModel || !previousModel) {
+			throw new Error("Faux models were not registered");
 		}
+
+		let activeProfile = "previous";
+		const scopedModels: ScopedModelUpdate[] = [];
+		const session = {
+			model: previousModel,
+			thinkingLevel: "off" as ThinkingLevel,
+			get scopedModels() {
+				return scopedModels;
+			},
+			modelRegistry: {
+				find: (provider: string, modelId: string) =>
+					[enabledProfileModel, previousModel].find(
+						(model) => model.provider === provider && model.id === modelId,
+					),
+				getAvailable: () => [enabledProfileModel, previousModel],
+				hasConfiguredAuth: () => true,
+			},
+			setModel: vi.fn(async (model: Model<string>, _options?: SetModelOptions) => {
+				session.model = model;
+			}),
+			setThinkingLevel: vi.fn(),
+		};
+		const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
+		Object.defineProperties(context, {
+			settingsManager: {
+				value: {
+					getActiveProfile: () => activeProfile,
+					setActiveProfile: (profileName: string) => {
+						activeProfile = profileName;
+					},
+					getDefaultProvider: () => undefined,
+					getDefaultModel: () => undefined,
+					getDefaultThinkingLevel: () => undefined,
+					getEnabledModels: () => [enabledProfileModel.id],
+					getWarnings: () => ({}),
+				},
+			},
+			reloadRuntimeResources: { value: vi.fn(async (_options: ReloadRuntimeResourcesOptions) => true) },
+			applyScopedModelsFromSettings: {
+				value: vi.fn(async () => {
+					scopedModels.splice(0, scopedModels.length, { model: enabledProfileModel });
+				}),
+			},
+			session: { value: session },
+			footer: { value: { invalidate: vi.fn() } },
+			updateEditorBorderColor: { value: vi.fn() },
+			showStatus: { value: vi.fn() },
+			showWarning: { value: vi.fn() },
+		});
+
+		await interactiveModePrototype.switchProfile.call(context, "enabled-only");
+
+		expect(session.setModel).toHaveBeenCalledWith(enabledProfileModel, { persistDefault: false });
+		expect(session.model).toBe(enabledProfileModel);
 	});
 
 	it("does not persist inherited defaults while applying a switched profile model", async () => {
@@ -538,40 +526,36 @@ describe("InteractiveMode profile selector", () => {
 	});
 
 	it("keeps explicit CLI model scope ahead of profile model settings", async () => {
-		const faux = registerFauxProvider({
+		const faux = createFauxProvider({
 			models: [
 				{ id: "cli-model", reasoning: false },
 				{ id: "profile-model", reasoning: false },
 			],
 		});
-		try {
-			const cliModel = faux.getModel("cli-model");
-			const profileModel = faux.getModel("profile-model");
-			if (!cliModel || !profileModel) {
-				throw new Error("Faux models were not registered");
-			}
-			const setScopedModels = vi.fn<(scopedModels: ScopedModelUpdate[]) => void>();
-			const context: ApplyScopedModelsContext = {
-				options: { modelScopePatterns: [cliModel.id] },
-				settingsManager: {
-					getEnabledModels: () => [profileModel.id],
-				},
-				session: {
-					modelRegistry: {
-						getAvailable: () => [cliModel, profileModel],
-					},
-					setScopedModels,
-				},
-				updateAvailableProviderCount: vi.fn(async () => {}),
-				footer: { invalidate: vi.fn() },
-				updateEditorBorderColor: vi.fn(),
-			};
-
-			await interactiveModePrototype.applyScopedModelsFromSettings.call(context);
-
-			expect(setScopedModels).toHaveBeenCalledWith([{ model: cliModel, thinkingLevel: undefined }]);
-		} finally {
-			faux.unregister();
+		const cliModel = faux.getModel("cli-model");
+		const profileModel = faux.getModel("profile-model");
+		if (!cliModel || !profileModel) {
+			throw new Error("Faux models were not registered");
 		}
+		const setScopedModels = vi.fn<(scopedModels: ScopedModelUpdate[]) => void>();
+		const context: ApplyScopedModelsContext = {
+			options: { modelScopePatterns: [cliModel.id] },
+			settingsManager: {
+				getEnabledModels: () => [profileModel.id],
+			},
+			session: {
+				modelRegistry: {
+					getAvailable: () => [cliModel, profileModel],
+				},
+				setScopedModels,
+			},
+			updateAvailableProviderCount: vi.fn(async () => {}),
+			footer: { invalidate: vi.fn() },
+			updateEditorBorderColor: vi.fn(),
+		};
+
+		await interactiveModePrototype.applyScopedModelsFromSettings.call(context);
+
+		expect(setScopedModels).toHaveBeenCalledWith([{ model: cliModel, thinkingLevel: undefined }]);
 	});
 });

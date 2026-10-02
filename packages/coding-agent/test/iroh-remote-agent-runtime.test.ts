@@ -2,7 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { fauxAssistantMessage, fauxToolCall, registerFauxProvider } from "@hansjm10/volt-ai";
+import { createFauxProvider, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
@@ -15,6 +15,7 @@ import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "../src/modes/rpc/iroh-remote-agent-runtime.ts";
+import { registerOnCreatedModelRegistries } from "./utilities.ts";
 
 const SAVED_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "HOME"] as const;
 const PROXY_ENV_KEYS = ["HTTP_PROXY", "HTTPS_PROXY"] as const;
@@ -269,7 +270,7 @@ export default function (volt) {
 	});
 
 	it("creates persistent attachable child runtimes for tool-created remote subagents", async () => {
-		const faux = registerFauxProvider();
+		const faux = createFauxProvider();
 		const model = faux.getModel();
 		faux.setResponses([
 			// Spawning is two-phase: the first exact request only returns a registry
@@ -314,6 +315,8 @@ export default function (volt) {
 		writeAgent(join(agentDir, "agents"), "scout.md", "name: scout\ndescription: Scout child", "Scout prompt");
 		const subagentEvents: IrohRemoteSubagentRuntimeCreatedEvent[] = [];
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+		// Parent and child runtimes build their own registries; stream the faux models through them.
+		const registrySpy = registerOnCreatedModelRegistries(faux);
 
 		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
 		try {
@@ -362,7 +365,7 @@ export default function (volt) {
 			errorSpy.mockRestore();
 			await runtime?.dispose();
 			await subagentEvents[0]?.runtime.dispose().catch(() => undefined);
-			faux.unregister();
+			registrySpy.mockRestore();
 		}
 	});
 

@@ -1277,10 +1277,7 @@ export async function handleRpcCommand(
 		}
 
 		case "get_subscription_usage": {
-			const report = await context.subscriptionUsageService.fetch(
-				session.modelRegistry.authStorage,
-				session.model?.provider,
-			);
+			const report = await context.subscriptionUsageService.fetch(session.modelRegistry, session.model?.provider);
 			return createRpcSuccessResponse(id, "get_subscription_usage", projectSubscriptionUsageReport(report));
 		}
 

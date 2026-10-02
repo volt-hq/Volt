@@ -402,15 +402,12 @@ export async function compactContext(
 			compact(
 				{ ...preparation, settings: { ...preparation.settings, reserveTokens: COMPACTION_SUMMARY_TOKENS / 0.8 } },
 				model,
-				undefined,
-				undefined,
-				options.customInstructions,
-				signal,
-				fallbackReasoning === "off" ? undefined : fallbackReasoning,
 				// The chunked helper must only receive valid summaries or provider errors.
 				(requestModel, context, requestOptions) =>
 					boundedStream(requestModel, context, requestOptions, "chunked", summaryText),
-				undefined,
+				options.customInstructions,
+				signal,
+				fallbackReasoning === "off" ? undefined : fallbackReasoning,
 				retry,
 			),
 			signal,

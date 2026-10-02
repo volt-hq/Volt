@@ -32,6 +32,7 @@ import {
 } from "../../../src/daemon/worktree-manager.ts";
 import { main } from "../../../src/main.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
 
@@ -124,6 +125,7 @@ async function fixture(archive = true) {
 				noContextFiles: true,
 			},
 		});
+		services.modelRegistry.client.registerProvider(harness.faux);
 		return {
 			...(await createAgentSessionFromServices({
 				services,
@@ -762,6 +764,8 @@ describe("#442 local archived-worktree resume", () => {
 		vi.stubEnv("VOLT_OFFLINE", "1");
 		vi.stubEnv("VOLT_SKIP_VERSION_CHECK", "1");
 		const selector = vi.spyOn(startupUi, "showStartupSelector");
+		// The CLI builds its own registry; stream the faux models through it.
+		registerOnCreatedModelRegistries(f.harness.faux);
 		let reclamation: Awaited<ReturnType<WorktreeManager["create"]>> | undefined;
 		f.harness.setResponses([
 			async () => {

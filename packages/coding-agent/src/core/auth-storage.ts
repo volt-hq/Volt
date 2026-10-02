@@ -6,16 +6,13 @@
  * try to refresh tokens simultaneously.
  */
 
-import {
-	findEnvKeys,
-	getEnvApiKey,
-	type OAuthCredentials,
-	type OAuthLoginCallbacks,
-	type OAuthProviderId,
-	type SubscriptionUsageFetchOptions,
-	type SubscriptionUsageResult,
+import type {
+	OAuthCredentials,
+	OAuthLoginCallbacks,
+	OAuthProviderInterface,
+	SubscriptionUsageFetchOptions,
+	SubscriptionUsageResult,
 } from "@hansjm10/volt-ai";
-import { getOAuthApiKey, getOAuthProvider, getOAuthProviders } from "@hansjm10/volt-ai/oauth";
 import { existsSync, lstatSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -29,6 +26,7 @@ import {
 	PRIVATE_FILE_MODE,
 	writePrivateNewFileSync,
 } from "../utils/private-files.ts";
+import { findEnvKeys, getEnvApiKey } from "./env-api-keys.ts";
 import { resolveConfigValue } from "./resolve-config-value.ts";
 
 export type ApiKeyCredential = {
@@ -269,8 +267,17 @@ export class InMemoryAuthStorageBackend implements AuthStorageBackend {
 	}
 }
 
+export interface GetApiKeyOptions {
+	/** Resolve the models.json fallback. Default: true. */
+	includeFallback?: boolean;
+	/** OAuth implementation for a stored OAuth credential; without it an OAuth credential resolves no key. */
+	oauthProvider?: OAuthProviderInterface;
+}
+
 /**
- * Credential storage backed by a JSON file.
+ * Credential storage backed by a JSON file, and the credential resolution order. OAuth
+ * implementations come from the caller (ModelRegistry's AI client), so one storage can serve
+ * registries with different OAuth providers.
  */
 export class AuthStorage {
 	private data: AuthStorageData = {};
@@ -459,7 +466,7 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Get all credentials (for passing to getOAuthApiKey).
+	 * Get all credentials.
 	 */
 	getAll(): AuthStorageData {
 		return { ...this.data };
@@ -472,16 +479,11 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Login to an OAuth provider.
+	 * Login to an OAuth provider and store its credentials under the provider id.
 	 */
-	async login(providerId: OAuthProviderId, callbacks: OAuthLoginCallbacks): Promise<void> {
-		const provider = getOAuthProvider(providerId);
-		if (!provider) {
-			throw new Error(`Unknown OAuth provider: ${providerId}`);
-		}
-
+	async login(provider: OAuthProviderInterface, callbacks: OAuthLoginCallbacks): Promise<void> {
 		const credentials = await provider.login(callbacks);
-		this.set(providerId, { type: "oauth", ...credentials });
+		this.set(provider.id, { type: "oauth", ...credentials });
 	}
 
 	/**
@@ -495,18 +497,13 @@ export class AuthStorage {
 	 * Refresh OAuth token with backend locking to prevent race conditions.
 	 * Multiple volt instances may try to refresh simultaneously when tokens expire.
 	 */
-	private async refreshOAuthTokenWithLock(providerId: OAuthProviderId): Promise<OAuthCredentials | null> {
-		const provider = getOAuthProvider(providerId);
-		if (!provider) {
-			return null;
-		}
-
+	private async refreshOAuthTokenWithLock(provider: OAuthProviderInterface): Promise<OAuthCredentials | null> {
 		const result = await this.storage.withLockAsync(async (current) => {
 			const currentData = this.parseStorageData(current);
 			this.data = currentData;
 			this.loadError = null;
 
-			const cred = currentData[providerId];
+			const cred = currentData[provider.id];
 			if (cred?.type !== "oauth") {
 				return { result: null };
 			}
@@ -515,33 +512,30 @@ export class AuthStorage {
 				return { result: cred };
 			}
 
-			const oauthCreds: Record<string, OAuthCredentials> = {};
-			for (const [key, value] of Object.entries(currentData)) {
-				if (value.type === "oauth") {
-					oauthCreds[key] = value;
-				}
-			}
-
-			const refreshed = await getOAuthApiKey(providerId, oauthCreds);
-			if (!refreshed) {
-				return { result: null };
+			let refreshed: OAuthCredentials;
+			try {
+				refreshed = await provider.refreshToken(cred);
+			} catch {
+				throw new Error(`Failed to refresh OAuth token for ${provider.id}`);
 			}
 
 			const merged: AuthStorageData = {
 				...currentData,
-				[providerId]: { type: "oauth", ...refreshed.newCredentials },
+				[provider.id]: { type: "oauth", ...refreshed },
 			};
 			this.data = merged;
 			this.loadError = null;
-			return { result: refreshed.newCredentials, next: JSON.stringify(merged, null, 2) };
+			return { result: refreshed, next: JSON.stringify(merged, null, 2) };
 		});
 
 		return result;
 	}
 
-	private async resolveUsableOAuthCredentials(providerId: OAuthProviderId): Promise<OAuthCredentials | undefined> {
-		const credential = this.data[providerId];
-		if (credential?.type !== "oauth" || !getOAuthProvider(providerId)) {
+	private async resolveUsableOAuthCredentials(
+		provider: OAuthProviderInterface,
+	): Promise<OAuthCredentials | undefined> {
+		const credential = this.data[provider.id];
+		if (credential?.type !== "oauth") {
 			return undefined;
 		}
 
@@ -550,11 +544,11 @@ export class AuthStorage {
 		}
 
 		try {
-			return (await this.refreshOAuthTokenWithLock(providerId)) ?? undefined;
+			return (await this.refreshOAuthTokenWithLock(provider)) ?? undefined;
 		} catch (error) {
 			this.recordError(error);
 			this.reload();
-			const updatedCredential = this.data[providerId];
+			const updatedCredential = this.data[provider.id];
 			return updatedCredential?.type === "oauth" && Date.now() < updatedCredential.expires
 				? updatedCredential
 				: undefined;
@@ -566,11 +560,11 @@ export class AuthStorage {
 	 * Priority:
 	 * 1. Runtime override (CLI --api-key)
 	 * 2. API key from auth.json
-	 * 3. OAuth token from auth.json (auto-refreshed with locking)
+	 * 3. OAuth token from auth.json (auto-refreshed with locking by `options.oauthProvider`)
 	 * 4. Environment variable
 	 * 5. Fallback resolver (models.json custom providers)
 	 */
-	async getApiKey(providerId: string, options?: { includeFallback?: boolean }): Promise<string | undefined> {
+	async getApiKey(providerId: string, options?: GetApiKeyOptions): Promise<string | undefined> {
 		// Runtime override takes highest priority
 		const runtimeKey = this.runtimeOverrides.get(providerId);
 		if (runtimeKey) {
@@ -584,8 +578,8 @@ export class AuthStorage {
 		}
 
 		if (cred?.type === "oauth") {
-			const provider = getOAuthProvider(providerId);
-			const credentials = await this.resolveUsableOAuthCredentials(providerId);
+			const provider = options?.oauthProvider;
+			const credentials = provider ? await this.resolveUsableOAuthCredentials(provider) : undefined;
 			return provider && credentials ? provider.getApiKey(credentials) : undefined;
 		}
 
@@ -606,16 +600,15 @@ export class AuthStorage {
 	 * Returns undefined when no stored OAuth credential or provider capability exists.
 	 */
 	async fetchSubscriptionUsage(
-		providerId: OAuthProviderId,
+		provider: OAuthProviderInterface,
 		options: SubscriptionUsageFetchOptions = {},
 	): Promise<SubscriptionUsageResult | undefined> {
-		const credential = this.data[providerId];
-		const provider = getOAuthProvider(providerId);
-		if (credential?.type !== "oauth" || !provider?.fetchSubscriptionUsage) {
+		const credential = this.data[provider.id];
+		if (credential?.type !== "oauth" || !provider.fetchSubscriptionUsage) {
 			return undefined;
 		}
 
-		const credentials = await this.resolveUsableOAuthCredentials(providerId);
+		const credentials = await this.resolveUsableOAuthCredentials(provider);
 		if (!credentials) {
 			return {
 				status: "error",
@@ -624,12 +617,5 @@ export class AuthStorage {
 		}
 
 		return provider.fetchSubscriptionUsage(credentials, options);
-	}
-
-	/**
-	 * Get all registered OAuth providers
-	 */
-	getOAuthProviders() {
-		return getOAuthProviders();
 	}
 }

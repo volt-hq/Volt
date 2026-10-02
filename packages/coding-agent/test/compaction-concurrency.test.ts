@@ -1,20 +1,7 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import {
-	type Context,
-	type FauxProviderRegistration,
-	fauxAssistantMessage,
-	registerFauxProvider,
-} from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { type Context, createAiClient, createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { describe, expect, it } from "vitest";
 import { type CompactionPreparation, compact } from "../src/core/compaction/compaction.ts";
-
-const fauxRegistrations: FauxProviderRegistration[] = [];
-
-afterEach(() => {
-	while (fauxRegistrations.length > 0) {
-		fauxRegistrations.pop()?.unregister();
-	}
-});
 
 function createPreparation(): CompactionPreparation {
 	const history: AgentMessage = { role: "user", content: "history", timestamp: Date.now() };
@@ -30,10 +17,9 @@ function createPreparation(): CompactionPreparation {
 	};
 }
 
-function createFaux(): FauxProviderRegistration {
-	const faux = registerFauxProvider();
-	fauxRegistrations.push(faux);
-	return faux;
+function createFaux() {
+	const faux = createFauxProvider();
+	return { faux, client: createAiClient({ providers: [faux] }) };
 }
 
 function isTurnPrefixRequest(context: Context): boolean {
@@ -45,7 +31,7 @@ function isTurnPrefixRequest(context: Context): boolean {
 
 describe("split-turn compaction requests", () => {
 	it("serializes history and turn-prefix summaries", async () => {
-		const faux = createFaux();
+		const { faux, client } = createFaux();
 		let activeRequests = 0;
 		let maxActiveRequests = 0;
 		let releaseHistory!: () => void;
@@ -79,7 +65,7 @@ describe("split-turn compaction requests", () => {
 			},
 		]);
 
-		const compaction = compact(createPreparation(), faux.getModel(), "test-key");
+		const compaction = compact(createPreparation(), faux.getModel(), client.streamSimple);
 		await historyStarted;
 		expect(faux.state.simpleCallCount).toBe(1);
 		releaseHistory();
@@ -93,7 +79,7 @@ describe("split-turn compaction requests", () => {
 	});
 
 	it("does not start the turn-prefix summary after cancellation", async () => {
-		const faux = createFaux();
+		const { faux, client } = createFaux();
 		let markHistoryStarted!: () => void;
 		const historyStarted = new Promise<void>((resolve) => {
 			markHistoryStarted = resolve;
@@ -118,8 +104,7 @@ describe("split-turn compaction requests", () => {
 		const compaction = compact(
 			createPreparation(),
 			faux.getModel(),
-			"test-key",
-			undefined,
+			client.streamSimple,
 			undefined,
 			controller.signal,
 		);
@@ -132,7 +117,7 @@ describe("split-turn compaction requests", () => {
 	});
 
 	it("retries the history summary before starting the turn-prefix summary", async () => {
-		const faux = createFaux();
+		const { faux, client } = createFaux();
 		const requests: Array<"history" | "prefix"> = [];
 		const record = (context: Context): void => {
 			requests.push(isTurnPrefixRequest(context) ? "prefix" : "history");
@@ -158,10 +143,7 @@ describe("split-turn compaction requests", () => {
 		const result = await compact(
 			createPreparation(),
 			faux.getModel(),
-			"test-key",
-			undefined,
-			undefined,
-			undefined,
+			client.streamSimple,
 			undefined,
 			undefined,
 			undefined,

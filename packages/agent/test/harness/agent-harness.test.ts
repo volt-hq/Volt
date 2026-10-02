@@ -1,4 +1,12 @@
-import { fauxAssistantMessage, fauxToolCall, getModel, registerFauxProvider } from "@hansjm10/volt-ai";
+import {
+	createAiClient,
+	createFauxProvider,
+	type FauxProvider,
+	type FauxProviderOptions,
+	fauxAssistantMessage,
+	fauxToolCall,
+	getModel,
+} from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import { AgentHarness } from "../../src/harness/agent-harness.ts";
 import { Session } from "../../src/harness/session/session.ts";
@@ -8,7 +16,15 @@ import { getCurrentTimeTool } from "../utils/get-current-time.ts";
 import { prompt, runPrompt, userMessage } from "./harness-test-utils.ts";
 import { InMemorySessionStorage } from "./in-memory-session-storage.ts";
 
-const registrations: Array<{ unregister(): void }> = [];
+const client = createAiClient();
+const registeredApis: string[] = [];
+
+function registerFauxProvider(options?: FauxProviderOptions): FauxProvider {
+	const faux = createFauxProvider(options);
+	client.registerProvider(faux);
+	registeredApis.push(faux.api);
+	return faux;
+}
 
 function textFromUserMessages(messages: readonly AgentMessage[]): string[] {
 	return messages.flatMap((message) => {
@@ -36,8 +52,8 @@ function getReasoning(options: unknown): unknown {
 }
 
 afterEach(() => {
-	for (const registration of registrations.splice(0)) {
-		registration.unregister();
+	for (const api of registeredApis.splice(0)) {
+		client.unregisterProvider(api);
 	}
 });
 
@@ -46,6 +62,7 @@ describe("AgentHarness", () => {
 		const session = new Session(new InMemorySessionStorage());
 		const initialModel = getModel("anthropic", "claude-sonnet-4-5");
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: initialModel,
 			thinkingLevel: "high",
@@ -65,7 +82,6 @@ describe("AgentHarness", () => {
 
 	it("drains one queued steering message at a time and emits queue updates", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const userCounts: number[] = [];
 		registration.setResponses([
 			(context) => {
@@ -82,6 +98,7 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 			steeringMode: "one-at-a-time",
@@ -107,7 +124,6 @@ describe("AgentHarness", () => {
 
 	it("finalizes before leasing queued steering and processes it at the next boundary", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const requestSnapshots: Array<{ users: string[]; tools: string[] }> = [];
 		registration.setResponses([
 			(context) => {
@@ -135,6 +151,7 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
@@ -160,7 +177,6 @@ describe("AgentHarness", () => {
 
 	it("abort after a steering delivery begins preserves the committed payload", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let providerCalls = 0;
 		registration.setResponses([
 			() => {
@@ -170,6 +186,7 @@ describe("AgentHarness", () => {
 		]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 		});
@@ -201,10 +218,10 @@ describe("AgentHarness", () => {
 		"keeps a begun delivery authoritative despite a rejecting %s observer",
 		async (rejectedEvent, errorMessage) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 			const session = new Session(new InMemorySessionStorage());
 			const harness = new AgentHarness({
+				streamFn: client.streamSimple,
 				session,
 				model: registration.getModel(),
 			});
@@ -265,10 +282,10 @@ describe("AgentHarness", () => {
 
 	it("retains an initial prompt when agent_start observes abort intent", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 		});
@@ -293,10 +310,10 @@ describe("AgentHarness", () => {
 		"isolates an initial delivery %s observer rejection without duplicating its message",
 		async (rejectedEvent) => {
 			const registration = registerFauxProvider();
-			registrations.push(registration);
 			registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 			const session = new Session(new InMemorySessionStorage());
 			const harness = new AgentHarness({
+				streamFn: client.streamSimple,
 				session,
 				model: registration.getModel(),
 			});
@@ -343,7 +360,6 @@ describe("AgentHarness", () => {
 
 	it("prepares a queued request from the post-delivery session snapshot", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const requestPrompts: string[] = [];
 		registration.setResponses([
 			(context) => {
@@ -357,6 +373,7 @@ describe("AgentHarness", () => {
 		]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 			systemPrompt: async () => {
@@ -379,7 +396,6 @@ describe("AgentHarness", () => {
 
 	it("abort retains steer and follow-up queues until explicit revocation", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		let releaseFirstResponse: (() => void) | undefined;
 		let abortedSignal: AbortSignal | undefined;
 		const firstResponseReleased = new Promise<void>((resolve) => {
@@ -398,6 +414,7 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
@@ -432,9 +449,9 @@ describe("AgentHarness", () => {
 
 	it("settles with an aborted assistant when context preflight is aborted", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 		});
@@ -475,7 +492,6 @@ describe("AgentHarness", () => {
 
 	it("drains follow-up messages one at a time after the agent would otherwise stop", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		const userCounts: number[] = [];
 		registration.setResponses([
 			(context) => {
@@ -492,6 +508,7 @@ describe("AgentHarness", () => {
 			},
 		]);
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 			followUpMode: "one-at-a-time",
@@ -517,10 +534,10 @@ describe("AgentHarness", () => {
 
 	it("settles thrown hook failures with persisted assistant error messages", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("should not be used")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 		});
@@ -556,7 +573,6 @@ describe("AgentHarness", () => {
 				{ id: "second", reasoning: true },
 			],
 		});
-		registrations.push(registration);
 		const secondModel = registration.getModel("second");
 		if (!secondModel) throw new Error("missing second faux model");
 		const captured: Array<{ modelId: string; reasoning: unknown; systemPrompt: string; tools: string[] }> = [];
@@ -584,6 +600,7 @@ describe("AgentHarness", () => {
 		]);
 		let systemPrompt = "first prompt";
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 			thinkingLevel: "off",
@@ -609,10 +626,10 @@ describe("AgentHarness", () => {
 
 	it("orders pending listener session writes after agent-emitted messages", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("ok")]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 		});
@@ -636,10 +653,10 @@ describe("AgentHarness", () => {
 
 	it("waitForIdle waits for external run settlement and awaited listeners", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([() => fauxAssistantMessage("ok")]);
 		const barrier = deferred();
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session: new Session(new InMemorySessionStorage()),
 			model: registration.getModel(),
 		});
@@ -667,7 +684,6 @@ describe("AgentHarness", () => {
 
 	it("runs tool_call and tool_result hooks through the direct loop", async () => {
 		const registration = registerFauxProvider();
-		registrations.push(registration);
 		registration.setResponses([
 			() =>
 				fauxAssistantMessage(fauxToolCall("calculate", { expression: "2 + 2" }, { id: "call-1" }), {
@@ -676,6 +692,7 @@ describe("AgentHarness", () => {
 		]);
 		const session = new Session(new InMemorySessionStorage());
 		const harness = new AgentHarness({
+			streamFn: client.streamSimple,
 			session,
 			model: registration.getModel(),
 		});
@@ -717,7 +734,7 @@ describe("AgentHarness", () => {
 		type AppTool = AgentTool<typeof calculateTool.parameters> & { source: "builtin" | "extension" };
 		const inspectTool: AppTool = { ...calculateTool, name: "inspect", source: "builtin" };
 		const searchTool: AppTool = { ...calculateTool, name: "search", source: "extension" };
-		const harness = new AgentHarness<AppTool>({ session, model });
+		const harness = new AgentHarness<AppTool>({ session, model, streamFn: client.streamSimple });
 		await harness.setTools([inspectTool, searchTool], ["inspect"]);
 		const updates: Array<{
 			toolNames: string[];

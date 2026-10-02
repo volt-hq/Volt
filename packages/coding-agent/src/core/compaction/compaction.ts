@@ -7,12 +7,7 @@
 
 import type { AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, Context, JsonValue, Model, SimpleStreamOptions, Tool, Usage } from "@hansjm10/volt-ai";
-import {
-	classifyProviderError,
-	completeSimple,
-	drainEventStream,
-	estimateToolDefinitionTokens,
-} from "@hansjm10/volt-ai";
+import { classifyProviderError, drainEventStream, estimateToolDefinitionTokens } from "@hansjm10/volt-ai";
 import { sleep } from "../../utils/sleep.ts";
 import {
 	convertToLlm,
@@ -578,13 +573,10 @@ Keep each section concise. Preserve exact file paths, function names, and error 
 function createSummarizationOptions(
 	model: Model<any>,
 	maxTokens: number,
-	apiKey: string | undefined,
-	headers: Record<string, string> | undefined,
-	env: Record<string, string> | undefined,
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
 ): SimpleStreamOptions {
-	const options: SimpleStreamOptions = { maxTokens, signal, apiKey, headers, env };
+	const options: SimpleStreamOptions = { maxTokens, signal };
 	if (model.reasoning && thinkingLevel && thinkingLevel !== "off") {
 		options.reasoning = thinkingLevel;
 	}
@@ -627,11 +619,8 @@ async function completeSummarization(
 	model: Model<any>,
 	context: Context,
 	options: SimpleStreamOptions,
-	streamFn?: StreamFn,
+	streamFn: StreamFn,
 ): Promise<AssistantMessage> {
-	if (!streamFn) {
-		return completeSimple(model, context, options);
-	}
 	const stream = await streamFn(model, context, options);
 	return drainEventStream(stream);
 }
@@ -662,7 +651,7 @@ async function completeSummarizationText(
 	model: Model<any>,
 	context: Context,
 	options: SimpleStreamOptions,
-	streamFn: StreamFn | undefined,
+	streamFn: StreamFn,
 	retry: SummarizationRetryOptions | undefined,
 ): Promise<string> {
 	const maxRetries = Math.max(0, Math.floor(retry?.maxRetries ?? 0));
@@ -711,19 +700,18 @@ async function completeSummarizationText(
 /**
  * Generate a summary of the conversation using the LLM.
  * If previousSummary is provided, uses the update prompt to merge.
+ *
+ * @param streamFn - Stream function that sends the request, such as an `AiClient`'s `streamSimple`
  */
 export async function generateSummary(
 	currentMessages: AgentMessage[],
 	model: Model<any>,
 	reserveTokens: number,
-	apiKey: string | undefined,
-	headers?: Record<string, string>,
+	streamFn: StreamFn,
 	signal?: AbortSignal,
 	customInstructions?: string,
 	previousSummary?: string,
 	thinkingLevel?: ThinkingLevel,
-	streamFn?: StreamFn,
-	env?: Record<string, string>,
 	retry?: SummarizationRetryOptions,
 ): Promise<string> {
 	const requestedMaxTokens = Math.min(
@@ -771,15 +759,7 @@ export async function generateSummary(
 		},
 	];
 
-	const completionOptions = createSummarizationOptions(
-		model,
-		tokenPlan.maxTokens,
-		apiKey,
-		headers,
-		env,
-		signal,
-		tokenPlan.thinkingLevel,
-	);
+	const completionOptions = createSummarizationOptions(model, tokenPlan.maxTokens, signal, tokenPlan.thinkingLevel);
 
 	return completeSummarizationText(
 		"Summarization",
@@ -988,14 +968,11 @@ async function generateSummaryInChunks(
 	messages: AgentMessage[],
 	model: Model<any>,
 	reserveTokens: number,
-	apiKey: string | undefined,
-	headers: Record<string, string> | undefined,
+	streamFn: StreamFn,
 	signal: AbortSignal | undefined,
 	customInstructions: string | undefined,
 	previousSummary: string | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
-	streamFn: StreamFn | undefined,
-	env: Record<string, string> | undefined,
 	retry: SummarizationRetryOptions | undefined,
 ): Promise<string> {
 	const chunks = chunkMessagesForSummarization(messages, getSummarizationChunkBudget(model));
@@ -1004,14 +981,11 @@ async function generateSummaryInChunks(
 			[],
 			model,
 			reserveTokens,
-			apiKey,
-			headers,
+			streamFn,
 			signal,
 			customInstructions,
 			previousSummary,
 			thinkingLevel,
-			streamFn,
-			env,
 			retry,
 		);
 	}
@@ -1021,14 +995,11 @@ async function generateSummaryInChunks(
 			chunk,
 			model,
 			reserveTokens,
-			apiKey,
-			headers,
+			streamFn,
 			signal,
 			customInstructions,
 			summary,
 			thinkingLevel,
-			streamFn,
-			env,
 			retry,
 		);
 	}
@@ -1040,18 +1011,16 @@ async function generateSummaryInChunks(
  * Returns CompactionResult - SessionManager adds uuid/parentUuid when saving.
  *
  * @param preparation - Pre-calculated preparation from prepareCompaction()
+ * @param streamFn - Stream function that sends the summary requests, such as an `AiClient`'s `streamSimple`
  * @param customInstructions - Optional custom focus for the summary
  */
 export async function compact(
 	preparation: CompactionPreparation,
 	model: Model<any>,
-	apiKey: string | undefined,
-	headers?: Record<string, string>,
+	streamFn: StreamFn,
 	customInstructions?: string,
 	signal?: AbortSignal,
 	thinkingLevel?: ThinkingLevel,
-	streamFn?: StreamFn,
-	env?: Record<string, string>,
 	retry?: SummarizationRetryOptions,
 ): Promise<CompactionResult<CompactionDetails> & { details: CompactionDetails }> {
 	const {
@@ -1078,14 +1047,11 @@ export async function compact(
 						messagesToSummarize,
 						model,
 						settings.reserveTokens,
-						apiKey,
-						headers,
+						streamFn,
 						signal,
 						customInstructions,
 						previousSummary,
 						thinkingLevel,
-						streamFn,
-						env,
 						retry,
 					)
 				: "No prior history.";
@@ -1093,12 +1059,9 @@ export async function compact(
 			turnPrefixMessages,
 			model,
 			settings.reserveTokens,
-			apiKey,
-			headers,
-			env,
+			streamFn,
 			signal,
 			thinkingLevel,
-			streamFn,
 			retry,
 		);
 		// Merge into single summary
@@ -1109,14 +1072,11 @@ export async function compact(
 			messagesToSummarize,
 			model,
 			settings.reserveTokens,
-			apiKey,
-			headers,
+			streamFn,
 			signal,
 			customInstructions,
 			previousSummary,
 			thinkingLevel,
-			streamFn,
-			env,
 			retry,
 		);
 	}
@@ -1144,13 +1104,10 @@ async function generateTurnPrefixSummary(
 	messages: AgentMessage[],
 	model: Model<any>,
 	reserveTokens: number,
-	apiKey: string | undefined,
-	headers?: Record<string, string>,
-	env?: Record<string, string>,
-	signal?: AbortSignal,
-	thinkingLevel?: ThinkingLevel,
-	streamFn?: StreamFn,
-	retry?: SummarizationRetryOptions,
+	streamFn: StreamFn,
+	signal: AbortSignal | undefined,
+	thinkingLevel: ThinkingLevel | undefined,
+	retry: SummarizationRetryOptions | undefined,
 ): Promise<string> {
 	const chunks = chunkMessagesForSummarization(messages, getSummarizationChunkBudget(model));
 	let summary: string | undefined;
@@ -1159,12 +1116,9 @@ async function generateTurnPrefixSummary(
 			chunk,
 			model,
 			reserveTokens,
-			apiKey,
-			headers,
-			env,
+			streamFn,
 			signal,
 			thinkingLevel,
-			streamFn,
 			summary,
 			retry,
 		);
@@ -1176,12 +1130,9 @@ async function generateTurnPrefixSummaryChunk(
 	messages: AgentMessage[],
 	model: Model<any>,
 	reserveTokens: number,
-	apiKey: string | undefined,
-	headers: Record<string, string> | undefined,
-	env: Record<string, string> | undefined,
+	streamFn: StreamFn,
 	signal: AbortSignal | undefined,
 	thinkingLevel: ThinkingLevel | undefined,
-	streamFn: StreamFn | undefined,
 	previousSummary: string | undefined,
 	retry: SummarizationRetryOptions | undefined,
 ): Promise<string> {
@@ -1223,7 +1174,7 @@ async function generateTurnPrefixSummaryChunk(
 		"Turn prefix summarization",
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		createSummarizationOptions(model, tokenPlan.maxTokens, apiKey, headers, env, signal, tokenPlan.thinkingLevel),
+		createSummarizationOptions(model, tokenPlan.maxTokens, signal, tokenPlan.thinkingLevel),
 		streamFn,
 		retry,
 	);

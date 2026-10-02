@@ -56,7 +56,7 @@ async function createTestContext(options: {
 		const services = await createAgentSessionServices({
 			cwd,
 			// RPC watches this directory for catalog changes; shared tmpdir churn
-			// would refresh the registry and unregister the harness's faux API.
+			// would refresh the registry and drop the faux API registered below.
 			agentDir: child.tempDir,
 			authStorage: child.authStorage,
 			resourceLoaderOptions: {
@@ -67,6 +67,7 @@ async function createTestContext(options: {
 				noContextFiles: true,
 			},
 		});
+		services.modelRegistry.client.registerProvider(child.faux);
 		services.settingsManager.applyOverrides({ retry: { enabled: false } });
 		const created = await createAgentSessionFromServices({
 			services,

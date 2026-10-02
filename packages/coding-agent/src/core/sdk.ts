@@ -4,9 +4,7 @@ import {
 	clampThinkingLevel,
 	type Message,
 	type Model,
-	type PromptCacheRefreshFunction,
-	refreshPromptCache,
-	streamSimple,
+	type PromptCacheRefresher,
 	type ToolArgumentLimits,
 } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
@@ -575,16 +573,27 @@ async function createAgentSessionWithTrackedResources(
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
 	const inferenceAccounting = options.inferenceAccounting;
-	// Stream and prompt-cache refresh requests must resolve identical provider options.
-	const providerRequestOptions = async (
+	// Requests stream through the registry's client, which resolves their credentials and configured
+	// headers. Stream and prompt-cache refresh requests must apply identical provider options.
+	const client = modelRegistry.client;
+	// The client merges the model's configured headers under the request's own. Attribution defaults
+	// apply only to header names that configuration leaves unset.
+	const providerRequestHeaders = (
 		model: Parameters<StreamFn>[0],
 		options: Parameters<StreamFn>[2],
-	): Promise<NonNullable<Parameters<StreamFn>[2]>> => {
-		const auth = await modelRegistry.getApiKeyAndHeaders(model);
-		if (!auth.ok) {
-			throw new Error(auth.error);
-		}
-		const env = auth.env || options?.env ? { ...(auth.env ?? {}), ...(options?.env ?? {}) } : undefined;
+	): Record<string, string> | undefined => {
+		const configured = new Set(modelRegistry.getConfiguredHeaderNames(model));
+		const attribution = Object.entries(
+			mergeProviderAttributionHeaders(model, settingsManager, options?.sessionId) ?? {},
+		).filter(([name]) => !configured.has(name));
+		return attribution.length > 0 || options?.headers
+			? { ...Object.fromEntries(attribution), ...options?.headers }
+			: undefined;
+	};
+	const providerRequestOptions = (
+		model: Parameters<StreamFn>[0],
+		options: Parameters<StreamFn>[2],
+	): NonNullable<Parameters<StreamFn>[2]> => {
 		const providerRetrySettings = settingsManager.getProviderRetrySettings();
 		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
 		// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
@@ -592,35 +601,31 @@ async function createAgentSessionWithTrackedResources(
 		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
 		return {
 			...options,
-			apiKey: auth.apiKey,
-			env,
 			timeoutMs: options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
 			websocketConnectTimeoutMs:
 				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
 			toolArgumentLimits: { ...settingsManager.getToolArgumentLimits(), ...options?.toolArgumentLimits },
 			maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-			headers: mergeProviderAttributionHeaders(
-				model,
-				settingsManager,
-				options?.sessionId,
-				auth.headers,
-				options?.headers,
-			),
+			headers: providerRequestHeaders(model, options),
 		};
 	};
-	const streamFn: StreamFn = async (model, context, options) => {
-		const requestOptions = await providerRequestOptions(model, options);
-		const dispatch = (signal: AbortSignal | undefined) => streamSimple(model, context, { ...requestOptions, signal });
+	const streamFn: StreamFn = (model, context, options) => {
+		const requestOptions = providerRequestOptions(model, options);
+		const dispatch = (signal: AbortSignal | undefined) =>
+			client.streamSimple(model, context, { ...requestOptions, signal });
 		return inferenceAccounting
 			? accountInference(model, dispatch, inferenceAccounting, options?.signal)
 			: dispatch(options?.signal);
 	};
 	// Accounted sessions report every provider request to their sink; refreshes bypass it, so they stay off.
-	const refreshPromptCacheFn: PromptCacheRefreshFunction | undefined = inferenceAccounting
+	const promptCacheRefresh: PromptCacheRefresher | undefined = inferenceAccounting
 		? undefined
-		: async (model, context, options) =>
-				await refreshPromptCache(model, context, await providerRequestOptions(model, options));
+		: {
+				supportsPromptCacheRefresh: (model, options) => client.supportsPromptCacheRefresh(model, options),
+				refreshPromptCache: (model, context, options) =>
+					client.refreshPromptCache(model, context, providerRequestOptions(model, options)),
+			};
 	const transport = settingsManager.getTransport();
 	const streamOptions: AgentHarnessStreamOptions = {
 		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
@@ -649,7 +654,7 @@ async function createAgentSessionWithTrackedResources(
 		...(model === undefined ? {} : { model }),
 		thinkingLevel,
 		streamFn,
-		...(refreshPromptCacheFn === undefined ? {} : { refreshPromptCacheFn }),
+		...(promptCacheRefresh === undefined ? {} : { promptCacheRefresh }),
 		convertToLlm: convertToLlmWithBlockImages,
 		streamOptions,
 		steeringMode: settingsManager.getSteeringMode(),
