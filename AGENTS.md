@@ -56,6 +56,12 @@
 
 Multiple volt sessions may be running in this cwd at the same time, each modifying different files. Git operations that touch unstaged, staged, or untracked files outside your own changes will stomp on other sessions' work. Follow these rules:
 
+GitHub identity:
+
+- Where the `volt-agent` wrapper is installed, agents act on GitHub as `volt-agent[bot]`, a GitHub App limited to `volt-hq/Volt` and `volt-hq/volt-app`. Run every command that commits or talks to GitHub through it, for example `volt-agent git commit ...`, `volt-agent git push ...`, and `volt-agent gh pr create ...`. It supplies a short-lived token and the bot's commit identity.
+- Do not use the maintainer's personal `gh` or git credentials for agent work while the wrapper is available.
+- The bot cannot change repository settings, rulesets, secrets, environments, or releases. If a task needs one of those, ask the maintainer.
+
 Committing and pushing:
 
 - You may commit your own completed work without explicit user consent when a commit is a useful checkpoint or natural outcome of the task.
