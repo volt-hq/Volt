@@ -85,6 +85,7 @@ import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
 import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
+import { observeCompactionFailures } from "./compaction-failure-log.ts";
 import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	CONTROL_WORKTREES_CAPABILITY,
@@ -941,6 +942,7 @@ class IrohDaemonService {
 		IntegratedRuntimeEntry,
 		{ binding: GitContextObservationBinding; unsubscribeSessionReplaced: () => void }
 	>();
+	private readonly runtimeCompactionFailureObservers = new Map<IntegratedRuntimeEntry, () => void>();
 	private readonly tuiWorkAuthorities = new Map<string, TuiWorkAuthorityClaim>();
 	private readonly tuiWorkRetirementTasks = new Set<Promise<void>>();
 	private tuiWorkReceiptRevision = 0n;
@@ -1131,12 +1133,22 @@ class IrohDaemonService {
 					validateWorkspace: () => this.validateReviewWorkspace(parent),
 				});
 			},
-			onRuntimePublished: (entry) => this.startRuntimeWorkObservation(entry),
+			onRuntimePublished: (entry) => {
+				this.startRuntimeWorkObservation(entry);
+				if (!this.runtimeCompactionFailureObservers.has(entry)) {
+					this.runtimeCompactionFailureObservers.set(
+						entry,
+						observeCompactionFailures(entry.runtime, entry.workspaceName, services.logger.child("compaction")),
+					);
+				}
+			},
 			onRuntimeSessionRekeyed: (entry, previousSessionId) => {
 				this.rekeyRuntimeWorkObservation(entry, previousSessionId);
 			},
 			onRuntimeDisposed: (entry) => {
 				this.stopRuntimeWorkObservation(entry);
+				this.runtimeCompactionFailureObservers.get(entry)?.();
+				this.runtimeCompactionFailureObservers.delete(entry);
 				if (entry.worktreeId !== undefined) {
 					this.worktreeRetention.onRuntimeDisposed(entry.workspaceName, entry.worktreeId);
 				}
