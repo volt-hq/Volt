@@ -1,6 +1,6 @@
 # RFC: Volt Architecture Rewrite
 
-- Status: Draft (proposed). Open questions resolved 2026-10-02 (§14).
+- Status: Draft (proposed). Open questions resolved 2026-10-02 (§14). §6.1 amended 2026-10-04 (live-lane scoping, history query, long resume gaps).
 - Date: 2026-10-02
 - Scope: all four packages (`packages/ai`, `packages/agent`, `packages/tui`, `packages/coding-agent`) plus a new `packages/protocol`. `volt-hq/volt-app` adapts through filed issues.
 - Release: ships in the next release (0.3.0), together with the removal of Pi extension compatibility (#573). There is no intermediate release.
@@ -220,8 +220,10 @@ Deleted outright:
 - **Subscribe.** `subscribe{conversation, after, profile}` streams projected entries as `entry{ordinal, ...}`.
   - **Resume.** A reconnecting client sends `after` = the last ordinal it applied.
   - **Snapshot.** `after: "snapshot"` returns a fold snapshot at ordinal N, then entries after N.
+  - **Long gaps (amended).** A profile with bounded replay (the remote profile) may answer a resume whose gap exceeds its replay limit with a snapshot at the current ordinal instead of every entry. The semantics are those of `after: "snapshot"`; there are no reason codes.
   - **Removed:** `report_stream_discontinuity` and the bootstrap reasons `resync`, `overflow`, and `session_rebind`.
-- **Live lane.** `live{basedOn, seq, ...}` frames carry ephemeral state: assistant deltas, tool progress, fine-grained work progress, extension UI declarations, and pending dialogs. A client discards the live lane whenever `basedOn` changes. On attach, the host replays its current live state.
+- **Live lane.** `live{basedOn, seq, ...}` frames carry ephemeral state: assistant deltas, tool progress, fine-grained work progress, extension UI declarations, and pending dialogs. On attach, the host replays its current live state.
+  - **Scoping (amended).** `basedOn` scopes only streaming items (assistant deltas and tool progress): a client discards those when `basedOn` changes or when it applies the entry that commits them. Keyed state (extension UI declarations, pending dialogs, phase) persists until the host clears or replaces it, so a commit never drops a pending dialog.
 - **Intents.** One namespace: `{type, intentId, expectedOrdinal?, ...}`. A result is either `accepted{ordinals}` or `rejected{reason}`.
   - Typed commands and UI action ids merge.
   - Intent descriptors carry the input schema, availability, and remote safety, replacing UI action descriptors.
@@ -229,6 +231,7 @@ Deleted outright:
 - **Queries** cover only what is not in a conversation log:
   - the catalogs (models, intents, sessions, MCP, extensions, settings schemas and values);
   - content fetch by id (images, entry text, work output).
+  - **History (amended).** A bounded read of the projected log (`history{before, limit, branch}`), a pure function of (log, profile), lets a client with a bounded snapshot page older entries.
 - **Host requests.** Dialogs, forms, and approvals live in the live lane until answered. `get_pending_host_actions` is removed.
 
 ### 6.2 One contract
