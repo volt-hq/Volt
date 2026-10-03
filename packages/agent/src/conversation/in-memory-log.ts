@@ -15,6 +15,7 @@ import {
 	ConversationLogLostError,
 	type ConversationLogPage,
 } from "./log.ts";
+import { deepFreeze } from "./runtime-support.ts";
 
 /** Most entries one `read` returns. */
 export const CONVERSATION_LOG_READ_LIMIT_MAX = 1_000;
@@ -23,14 +24,6 @@ interface CommitRecord {
 	readonly expectedOrdinal: number;
 	readonly entries: readonly ConversationLogEntryDraft[];
 	readonly result: ConversationLogAppendResult & { readonly status: "committed" };
-}
-
-function deepFreeze<T>(value: T): T {
-	if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
-		for (const nested of Object.values(value)) deepFreeze(nested);
-		Object.freeze(value);
-	}
-	return value;
 }
 
 /** Structural equality of JSON data; object key order does not matter. */

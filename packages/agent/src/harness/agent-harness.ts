@@ -1,12 +1,8 @@
 import {
-	type AssistantMessage,
 	type AssistantMessageDiagnostic,
 	applyReplayPolicy,
 	type Context,
-	classifyProviderError,
 	createAssistantMessageDiagnostic,
-	createAssistantMessageEventStream,
-	createProviderError,
 	type JsonValue,
 	type Message,
 	type Model,
@@ -15,6 +11,15 @@ import {
 	type UserMessage,
 } from "@hansjm10/volt-ai";
 import { runAgentLoop } from "../agent-loop.ts";
+import {
+	cloneAgentMessages,
+	cloneNextAction,
+	cloneNextActionContext,
+	cloneStreamOptions,
+	createAbortedAssistantStream,
+	createFailureMessage,
+	withRuntimeAbortDiagnostic,
+} from "../conversation/runtime-support.ts";
 import { DeliveryInbox, type DeliveryLease, type InboxDelivery } from "../delivery-inbox.ts";
 import type {
 	AgentAbortAcceptance,
@@ -67,10 +72,6 @@ import type {
 } from "./types.ts";
 import { AgentHarnessError, SessionError, toError } from "./types.ts";
 
-function cloneAgentMessages(messages: readonly AgentMessage[]): AgentMessage[] {
-	return messages.map((message) => structuredClone(message));
-}
-
 function areStructurallyEqual(left: unknown, right: unknown): boolean {
 	if (Object.is(left, right)) return true;
 	if (typeof left !== "object" || left === null || typeof right !== "object" || right === null) return false;
@@ -97,94 +98,6 @@ function cloneRunOptions(options: AgentHarnessRunOptions): AgentHarnessRunOption
 		...(options.systemPrompt === undefined ? {} : { systemPrompt: options.systemPrompt }),
 		...(options.context === undefined ? {} : { context: cloneAgentMessages(options.context) }),
 		...(options.deliveryOwner === undefined ? {} : { deliveryOwner: options.deliveryOwner }),
-	};
-}
-
-function cloneNextAction(action: AgentLoopNextAction): AgentLoopNextAction {
-	if (action.type === "stop") return { type: "stop" };
-	if (action.type === "pause") {
-		return {
-			type: "pause",
-			...(action.requestAuthority === undefined ? {} : { requestAuthority: action.requestAuthority }),
-		};
-	}
-	return {
-		type: "request",
-		reason: action.reason,
-		...(action.deliveries === undefined
-			? {}
-			: {
-					deliveries: action.deliveries.map((delivery) => ({
-						...(delivery.deliveryId === undefined ? {} : { deliveryId: delivery.deliveryId }),
-						messages: cloneAgentMessages(delivery.messages),
-					})),
-				}),
-	};
-}
-
-function cloneNextActionContext(
-	context: AgentLoopNextActionContext,
-	defaultAction: AgentLoopNextAction,
-): AgentLoopNextActionContext {
-	return {
-		context: {
-			systemPrompt: context.context.systemPrompt,
-			messages: cloneAgentMessages(context.context.messages),
-			...(context.context.tools === undefined ? {} : { tools: [...context.context.tools] }),
-		},
-		newMessages: cloneAgentMessages(context.newMessages),
-		...(context.completedTurn === undefined
-			? {}
-			: {
-					completedTurn: {
-						message: structuredClone(context.completedTurn.message),
-						toolResults: context.completedTurn.toolResults.map((message) => structuredClone(message)),
-						disposition: context.completedTurn.disposition,
-					},
-				}),
-		requestAuthority: context.requestAuthority,
-		defaultAction: cloneNextAction(defaultAction),
-	};
-}
-
-function createFailureMessage(model: Model<any>, error: unknown, aborted: boolean): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text: "" }],
-		api: model.api,
-		provider: model.provider,
-		model: model.id,
-		stopReason: aborted ? "aborted" : "error",
-		error: aborted
-			? createProviderError("aborted", error instanceof Error ? error.message : String(error))
-			: classifyProviderError(error),
-		timestamp: Date.now(),
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-	};
-}
-
-function createAbortedAssistantStream(model: Model<any>) {
-	const stream = createAssistantMessageEventStream();
-	const message = createFailureMessage(model, new Error("Request was aborted"), true);
-	stream.push({ type: "error", seq: 0, reason: "aborted", error: message });
-	return stream;
-}
-
-function cloneStreamOptions(streamOptions?: AgentHarnessStreamOptions): AgentHarnessStreamOptions {
-	return {
-		...streamOptions,
-		...(streamOptions?.headers ? { headers: { ...streamOptions.headers } } : {}),
-		...(streamOptions?.metadata ? { metadata: { ...streamOptions.metadata } } : {}),
-		...(streamOptions?.env ? { env: { ...streamOptions.env } } : {}),
-		...(streamOptions?.thinkingBudgets ? { thinkingBudgets: { ...streamOptions.thinkingBudgets } } : {}),
-		...(streamOptions?.toolArgumentLimits ? { toolArgumentLimits: { ...streamOptions.toolArgumentLimits } } : {}),
 	};
 }
 
@@ -1735,17 +1648,11 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 			state.operation.abortSource !== undefined &&
 			state.operation.diagnosticTimestamp !== undefined
 		) {
-			message = {
-				...message,
-				diagnostics: [
-					...(message.diagnostics ?? []).filter((diagnostic) => diagnostic.type !== "runtime_abort"),
-					{
-						type: "runtime_abort",
-						timestamp: state.operation.diagnosticTimestamp,
-						details: { source: state.operation.abortSource },
-					},
-				],
-			};
+			message = withRuntimeAbortDiagnostic(
+				message,
+				state.operation.abortSource,
+				state.operation.diagnosticTimestamp,
+			);
 		}
 		if (state.settlementStarted && state.deliveryFailureDiagnostic) {
 			message = {
@@ -2152,7 +2059,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 
 	cancelReservedRun(reservation: AgentHarnessRunReservation): boolean {
 		const operation = this.runReservations.get(reservation.reservationId);
-		if (!operation || this.operations.current !== operation || operation.phase !== "admitted") return false;
+		if (!operation || this.operations.current !== operation || operation.stage !== "admitted") return false;
 		this.runReservations.delete(reservation.reservationId);
 		this.operations.finish(operation);
 		return true;
@@ -2164,7 +2071,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 		strategy: (context: AgentHarnessStructuralOperationContext) => Promise<TResult> | TResult,
 	): Promise<{ result: TResult; reservation: AgentHarnessRunReservation }> {
 		const operation = this.runReservations.get(reservation.reservationId);
-		if (!operation || this.operations.current !== operation || operation.phase !== "admitted") {
+		if (!operation || this.operations.current !== operation || operation.stage !== "admitted") {
 			throw new AgentHarnessError("invalid_state", "Harness run reservation is not active");
 		}
 		this.runReservations.delete(reservation.reservationId);
@@ -2202,7 +2109,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 		options: AgentHarnessRunOptions = {},
 	): Promise<AgentRunResult> {
 		const operation = this.runReservations.get(reservation.reservationId);
-		if (!operation || this.operations.current !== operation || operation.phase !== "admitted") {
+		if (!operation || this.operations.current !== operation || operation.stage !== "admitted") {
 			throw new AgentHarnessError("invalid_state", "Harness run reservation is not active");
 		}
 		this.runReservations.delete(reservation.reservationId);
@@ -2221,7 +2128,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 		options: { drainFollowUps?: boolean; context?: readonly AgentMessage[] } = {},
 	): Promise<AgentRunResult> {
 		const operation = this.runReservations.get(reservation.reservationId);
-		if (!operation || this.operations.current !== operation || operation.phase !== "admitted") {
+		if (!operation || this.operations.current !== operation || operation.stage !== "admitted") {
 			throw new AgentHarnessError("invalid_state", "Harness run reservation is not active");
 		}
 		this.runReservations.delete(reservation.reservationId);
@@ -2388,7 +2295,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 		if (!this.operations.requestClose(source)) return;
 		for (const [reservationId, reservation] of this.runReservations) {
 			this.runReservations.delete(reservationId);
-			if (this.operations.current === reservation && reservation.phase === "admitted") {
+			if (this.operations.current === reservation && reservation.stage === "admitted") {
 				this.operations.finish(reservation);
 			}
 		}
@@ -2567,7 +2474,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 		// Prompt preflight owns an admitted reservation but has not crossed into
 		// canonical/provider work. Revoke it synchronously so navigation can commit
 		// the new generation; its eventual runReserved call then fails closed.
-		if (current.kind === "turn" && current.phase === "admitted") {
+		if (current.kind === "turn" && current.stage === "admitted") {
 			for (const [reservationId, operation] of this.runReservations) {
 				if (operation === current) this.runReservations.delete(reservationId);
 			}
@@ -2841,7 +2748,7 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 	abort(source?: AgentAbortSource): AgentAbortAcceptance {
 		const operation = this.operations.current;
 		const acceptance = this.operations.requestAbort(source);
-		if (operation?.kind === "turn" && operation.phase === "admitted") {
+		if (operation?.kind === "turn" && operation.stage === "admitted") {
 			let cancelledReservation = false;
 			for (const [reservationId, reservation] of this.runReservations) {
 				if (reservation !== operation) continue;
