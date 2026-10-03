@@ -244,7 +244,12 @@ describe("CustomMessageComponent", () => {
 		async (tuiMode) => {
 			const message = createReviewMessage();
 			const sessionManager = SessionManager.inMemory();
-			sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
+			await sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
 			const transcript = new Container();
 			const terminal = new VirtualTerminal(80, 24);
 			const ui = createInteractiveTui({ tuiMode, terminal, showHardwareCursor: false, logDirectory: "/tmp" });

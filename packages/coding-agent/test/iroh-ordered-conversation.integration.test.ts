@@ -328,8 +328,7 @@ describe("Iroh ordered conversation integration", () => {
 			emitTextUpdate(fixture.emit, 3, "Hello", "lo");
 			const finalMessage = fauxAssistantMessage("Hello", { timestamp: 4 });
 			fixture.emit({ type: "message_end", message: finalMessage });
-			const committedEntryId = fixture.manager.appendMessage(finalMessage);
-			await fixture.manager.flush();
+			const committedEntryId = await fixture.manager.appendMessage(finalMessage);
 
 			const persisted = await loadPersistedSessionSnapshot(fixture.manager);
 			expect(persisted.entries.some((entry) => entry.id === committedEntryId)).toBe(true);
@@ -430,7 +429,7 @@ describe("Iroh ordered conversation integration", () => {
 			emitTextUpdate(fixture.emit, 2, "1\n2\n3", "\n3");
 			const finalMessage = fauxAssistantMessage("1\n2\n3", { timestamp: 3 });
 			fixture.emit({ type: "message_end", message: finalMessage });
-			const committedEntryId = fixture.manager.appendMessage(finalMessage);
+			const committedEntryId = await fixture.manager.appendMessage(finalMessage);
 
 			await vi.waitFor(() => {
 				expect(
@@ -468,7 +467,6 @@ describe("Iroh ordered conversation integration", () => {
 				},
 				final: true,
 			});
-			await fixture.manager.flush();
 			const persisted = await loadPersistedSessionSnapshot(fixture.manager);
 			const committed = persisted.entries.find((entry) => entry.id === committedEntryId);
 			expect(JSON.stringify(committed?.payload)).toContain('"text":"1\\n2\\n3"');

@@ -1462,10 +1462,10 @@ See [send-user-message.ts](../examples/extensions/send-user-message.ts) for a co
 
 ### volt.appendEntry(customType, data?)
 
-Persist extension state (does NOT participate in LLM context).
+Persist extension state (does NOT participate in LLM context). Resolves after the entry commits.
 
 ```typescript
-volt.appendEntry("my-state", { count: 42 }); // Plain JSON data; omit absent properties
+await volt.appendEntry("my-state", { count: 42 }); // Plain JSON data; omit absent properties
 
 // Restore on reload
 volt.on("session_start", async (_event, ctx) => {
@@ -1479,10 +1479,10 @@ volt.on("session_start", async (_event, ctx) => {
 
 ### volt.setSessionName(name)
 
-Set the session display name (shown in session selector instead of first message).
+Set the session display name (shown in session selector instead of first message). Resolves after the name commits.
 
 ```typescript
-volt.setSessionName("Refactor auth module");
+await volt.setSessionName("Refactor auth module");
 ```
 
 ### volt.getSessionName()
@@ -1498,14 +1498,14 @@ if (name) {
 
 ### volt.setLabel(entryId, label)
 
-Set or clear a label on an entry. Labels are user-defined markers for bookmarking and navigation (shown in `/tree` selector).
+Set or clear a label on an entry. Labels are user-defined markers for bookmarking and navigation (shown in `/tree` selector). Resolves after the label commits.
 
 ```typescript
 // Set a label
-volt.setLabel(entryId, "checkpoint-before-refactor");
+await volt.setLabel(entryId, "checkpoint-before-refactor");
 
 // Clear a label
-volt.setLabel(entryId, undefined);
+await volt.setLabel(entryId, undefined);
 
 // Read labels via sessionManager
 const label = ctx.sessionManager.getLabel(entryId);

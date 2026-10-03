@@ -127,14 +127,14 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			});
 
 			// The real subagent tool records these at the publish commit point.
-			harness.sessionManager.appendSubagentSpawn({
+			await harness.sessionManager.appendSubagentSpawn({
 				toolCallId: "tc-subagent-1",
 				subagentId: "sa_one",
 				agent: "researcher",
 				childSessionId: "child-session-1",
 				requestKey: "rk-1",
 			});
-			harness.sessionManager.appendSubagentSpawn({
+			await harness.sessionManager.appendSubagentSpawn({
 				toolCallId: "tc-subagent-1",
 				subagentId: "sa_two",
 				agent: "researcher",
@@ -334,7 +334,12 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		const flushGate = new Promise<void>((resolve) => {
 			releaseFlush = resolve;
 		});
-		const flush = vi.spyOn(harness.sessionManager, "flush").mockReturnValue(flushGate);
+		const reserve = harness.sessionManager.reserveClientInput.bind(harness.sessionManager);
+		const flush = vi.spyOn(harness.sessionManager, "reserveClientInput").mockImplementation(async (...args) => {
+			const reservation = await reserve(...args);
+			await flushGate;
+			return reservation;
+		});
 		try {
 			const prompt = harness.session.prompt("admission race", { clientMessageId: "dispose-admission-race" });
 			await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
@@ -358,7 +363,11 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		const flushGate = new Promise<void>((resolve) => {
 			releaseFlush = resolve;
 		});
-		vi.spyOn(harness.sessionManager, "flush").mockReturnValue(flushGate);
+		const closePersistence = harness.sessionManager.closePersistence.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "closePersistence").mockImplementation(async () => {
+			await flushGate;
+			await closePersistence();
+		});
 		try {
 			let settled = false;
 			harness.session.dispose();

@@ -16,6 +16,7 @@ import {
 } from "@hansjm10/volt-agent-core";
 import * as fc from "fast-check";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { ConversationLock, ConversationLockedError } from "../../src/core/conversation-log/conversation-lock.ts";
 import { SqliteConversationLog } from "../../src/core/conversation-log/sqlite-conversation-log.ts";
 import {
 	acquireSharedSQLiteSessionStore,
@@ -432,9 +433,11 @@ describe("SqliteConversationLog", () => {
 			first: 1,
 			last: 2,
 		});
+		const written = await log.read(0, 10);
+		await log.close();
 		const reopened = await openLog(log);
 		expect(reopened.head()).toBe(2);
-		expect(await reopened.read(0, 10)).toEqual(await log.read(0, 10));
+		expect(await reopened.read(0, 10)).toEqual(written);
 		const next = drafts(state, [{ kind: "transition", pick: 0, choice: 0, error: null }]);
 		expect(
 			await reopened.append({ expectedOrdinal: 2, commitId: commitIdFor(reopened, "c2"), entries: next }),
@@ -443,12 +446,32 @@ describe("SqliteConversationLog", () => {
 			first: 3,
 			last: 3,
 		});
+		await reopened.close();
 		await expect(SqliteConversationLog.open({ ...log.ref, sessionGeneration: "other" })).rejects.toThrow(
 			/Session not found/,
 		);
 		await expect(SqliteConversationLog.open({ ...log.ref, storeId: "other-store" })).rejects.toThrow(
 			/different store/,
 		);
+	});
+
+	it("holds the session's writer lock from open or create until close", async () => {
+		const log = await createLog();
+		await expect(SqliteConversationLog.open(log.ref)).rejects.toBeInstanceOf(ConversationLockedError);
+		await expect(
+			SqliteConversationLog.create({ sessionDirectory, cwd: CWD, id: log.conversationId }),
+		).rejects.toMatchObject({ code: "conversation_locked", holder: "this_process" });
+		await log.close();
+		// A failed open releases the lock it took.
+		await expect(SqliteConversationLog.open({ ...log.ref, sessionGeneration: "other" })).rejects.toThrow(
+			/Session not found/,
+		);
+		const reopened = await openLog(log);
+		await expect(SqliteConversationLog.open(log.ref)).rejects.toBeInstanceOf(ConversationLockedError);
+		await reopened.close();
+		const acquisition = ConversationLock.tryAcquire(sessionDirectory, log.conversationId);
+		expect(acquisition.status).toBe("acquired");
+		if (acquisition.status === "acquired") acquisition.lock.close();
 	});
 
 	it("rolls back entries the session store does not hold and stays writable", async () => {
@@ -471,8 +494,10 @@ describe("SqliteConversationLog", () => {
 	});
 
 	it("loses the log on a fence conflict with another writer", async () => {
-		const writer = await createLog();
-		const stale = await openLog(writer);
+		const stale = await createLog();
+		// An OS lock gives no loss signal: lose the stale writer's lock so another writer can open the log.
+		(Reflect.get(stale, "lock") as ConversationLock).close();
+		const writer = await openLog(stale);
 		await writer.append({
 			expectedOrdinal: 0,
 			commitId: commitIdFor(writer, "c1"),
@@ -493,16 +518,22 @@ describe("SqliteConversationLog", () => {
 
 	it("loses the log with reason storage when its session is deleted", async () => {
 		const log = await createLog();
-		const reader = await openLog(log);
-		await log.append({ expectedOrdinal: 0, commitId: commitIdFor(log, "c1"), entries: [customDraft("a", null)] });
+		const reader = await createLog();
 		const client = await sharedClient();
-		expect(
-			await client.deleteSession({
-				sessionId: log.ref.sessionId,
-				sessionGeneration: log.ref.sessionGeneration,
-				expectedOrdinal: 1,
-			}),
-		).toEqual({ status: "deleted" });
+		for (const deleted of [log, reader]) {
+			await deleted.append({
+				expectedOrdinal: 0,
+				commitId: commitIdFor(deleted, "c1"),
+				entries: [customDraft("a", null)],
+			});
+			expect(
+				await client.deleteSession({
+					sessionId: deleted.ref.sessionId,
+					sessionGeneration: deleted.ref.sessionGeneration,
+					expectedOrdinal: 1,
+				}),
+			).toEqual({ status: "deleted" });
+		}
 		await expect(
 			log.append({ expectedOrdinal: 1, commitId: commitIdFor(log, "c2"), entries: [customDraft("b", "a")] }),
 		).rejects.toMatchObject({ reason: "storage" });
@@ -551,6 +582,7 @@ describe("SqliteConversationLog", () => {
 				first: 3,
 				last: 3,
 			});
+			await log.close();
 			const reopened = await openLog(log);
 			expect((await reopened.read(0, 10)).entries.map((entry) => entry.id)).toEqual(["e-1", "e-2", "e-3"]);
 		});

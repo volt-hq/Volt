@@ -60,7 +60,7 @@ async function setup(options: HarnessOptions = {}) {
 		...options,
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("Shared abort admission regression");
+	await harness.session.setSessionName("Shared abort admission regression");
 	await tool(harness, "bash").execute("original-job", { command: "controlled work", background: true });
 	await started.promise;
 	if (!signal) throw new Error("Missing background cancellation signal");
@@ -308,7 +308,7 @@ describe("PR #380: shared session abort admission", () => {
 				],
 			});
 			harnesses.push(harness);
-			harness.session.setSessionName("Preflight gate regression");
+			await harness.session.setSessionName("Preflight gate regression");
 			const prompt = harness.session.prompt("old preflight");
 			const rejected = expect(prompt).rejects.toThrow(/aborted/);
 			await reached.promise;
@@ -338,7 +338,7 @@ describe("PR #380: shared session abort admission", () => {
 			],
 		});
 		harnesses.push(harness);
-		harness.session.setSessionName("Successor gate regression");
+		await harness.session.setSessionName("Successor gate regression");
 		harness.setResponses([
 			async () => {
 				reached.resolve();

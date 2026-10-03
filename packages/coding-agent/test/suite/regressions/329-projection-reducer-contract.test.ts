@@ -59,15 +59,6 @@ function errorMessage(error: unknown): string | undefined {
 	return error instanceof Error ? error.message : undefined;
 }
 
-function captureError(operation: () => unknown): unknown {
-	try {
-		operation();
-		return undefined;
-	} catch (error) {
-		return error;
-	}
-}
-
 function messageText(message: unknown): string {
 	if (!message || typeof message !== "object" || !("content" in message)) return "";
 	const content = (message as { content?: string | Array<{ type: string; text?: string }> }).content;
@@ -368,7 +359,6 @@ function replayComparableState(manager: SessionManager, targetId: string, client
 }
 
 async function expectReplayMatches(manager: SessionManager, targetId: string, clientMessageId?: string): Promise<void> {
-	await manager.flush();
 	const ref = manager.getSessionRef();
 	if (!ref) throw new Error("Expected persisted session reference");
 	const reopened = await SessionManager.openReadOnly(ref);
@@ -561,7 +551,7 @@ async function runProjectionPropertyPartition(
 	const sessionId = `property-${caseId}-${variant}`;
 	mkdirSync(cwd, { recursive: true });
 	const manager = await SessionManager.create(cwd, sessionDir, { id: sessionId });
-	const rootEntryId = manager.appendMessage({
+	const rootEntryId = await manager.appendMessage({
 		role: "user",
 		content: "partition root",
 		timestamp: Date.parse(CREATED_AT),
@@ -578,11 +568,11 @@ async function runProjectionPropertyPartition(
 		await expectReplayMatches(manager, rootEntryId);
 	}
 
-	manager.appendFastModeChange(scenario.fastModeEnabled);
+	await manager.appendFastModeChange(scenario.fastModeEnabled);
 	await expectReplayMatches(manager, rootEntryId);
-	expect(manager.recordStartingGitContext(manager.getSessionId(), propertyGitContext(scenario))).toBe(true);
+	expect(await manager.recordStartingGitContext(manager.getSessionId(), propertyGitContext(scenario))).toBe(true);
 	await expectReplayMatches(manager, rootEntryId);
-	manager.appendSubagentSpawn({
+	await manager.appendSubagentSpawn({
 		toolCallId: `property-call-${caseId}`,
 		subagentId: `sa_property_${caseId}`,
 		agent: "researcher",
@@ -591,28 +581,28 @@ async function runProjectionPropertyPartition(
 	});
 	await expectReplayMatches(manager, rootEntryId);
 	const clientMessageId = `property-client-${caseId}`;
-	manager.reserveClientInput(clientMessageId, "steer", { message: scenario.clientInputMessage });
+	await manager.reserveClientInput(clientMessageId, "steer", { message: scenario.clientInputMessage });
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	manager.markClientInputQueued(clientMessageId, {
+	await manager.markClientInputQueued(clientMessageId, {
 		delivery: "steer",
 		message: scenario.clientInputMessage,
 	});
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	manager.transitionClientInput(clientMessageId, "started");
+	await manager.transitionClientInput(clientMessageId, "started");
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	manager.rollbackClientInput(clientMessageId);
+	await manager.rollbackClientInput(clientMessageId);
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	manager.transitionClientInput(clientMessageId, "started");
+	await manager.transitionClientInput(clientMessageId, "started");
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
 	if (scenario.completeClientInput) {
-		manager.appendMessage({
+		await manager.appendMessage({
 			role: "user",
 			content: scenario.clientInputMessage,
 			timestamp: Date.parse(SECOND_AT),
 			clientMessageId,
 		});
 	} else {
-		manager.transitionClientInput(clientMessageId, "failed", scenario.failure);
+		await manager.transitionClientInput(clientMessageId, "failed", scenario.failure);
 	}
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
 
@@ -701,9 +691,11 @@ describe("PR #329 projection reducer contract", () => {
 
 			const incrementalOracle = SessionManager.inMemory(root);
 			for (let index = 0; index < CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES; index++) {
-				incrementalOracle.reserveClientInput(`count-oracle-${index}`, "steer", { message: `message-${index}` });
+				await incrementalOracle.reserveClientInput(`count-oracle-${index}`, "steer", {
+					message: `message-${index}`,
+				});
 			}
-			const oracleError = captureError(() =>
+			const oracleError = await captureAsyncError(() =>
 				incrementalOracle.reserveClientInput("count-oracle-overflow", "steer", { message: "overflow" }),
 			);
 
@@ -767,18 +759,18 @@ describe("PR #329 projection reducer contract", () => {
 
 			const incrementalOracle = SessionManager.inMemory(root);
 			for (let index = 0; index < atLimit.length; index++) {
-				incrementalOracle.reserveClientInput(`bytes-oracle-${index}`, "steer", {
+				await incrementalOracle.reserveClientInput(`bytes-oracle-${index}`, "steer", {
 					message: LARGE_CLIENT_INPUT_TEXT,
 				});
-				incrementalOracle.markClientInputQueued(`bytes-oracle-${index}`, {
+				await incrementalOracle.markClientInputQueued(`bytes-oracle-${index}`, {
 					delivery: "steer",
 					message: LARGE_CLIENT_INPUT_TEXT,
 				});
 			}
-			incrementalOracle.reserveClientInput("bytes-oracle-overflow", "steer", {
+			await incrementalOracle.reserveClientInput("bytes-oracle-overflow", "steer", {
 				message: LARGE_CLIENT_INPUT_TEXT,
 			});
-			const oracleError = captureError(() =>
+			const oracleError = await captureAsyncError(() =>
 				incrementalOracle.markClientInputQueued("bytes-oracle-overflow", {
 					delivery: "steer",
 					message: LARGE_CLIENT_INPUT_TEXT,
@@ -890,9 +882,8 @@ describe("PR #329 projection reducer contract", () => {
 			const sessionDir = join(root, `corruption-${component}-sessions`);
 			mkdirSync(cwd, { recursive: true });
 			const manager = await SessionManager.create(cwd, sessionDir, { id: `malformed-${component}` });
-			manager.appendMessage({ role: "user", content: "searchable", timestamp: Date.parse(CREATED_AT) });
-			manager.reserveClientInput(`pending-${component}`, "prompt", { message: "pending" });
-			await manager.flush();
+			await manager.appendMessage({ role: "user", content: "searchable", timestamp: Date.parse(CREATED_AT) });
+			await manager.reserveClientInput(`pending-${component}`, "prompt", { message: "pending" });
 			const ref = manager.getSessionRef();
 			if (!ref) throw new Error("Expected persisted corruption reference");
 			await manager.closePersistence();
@@ -970,13 +961,11 @@ describe("PR #329 projection reducer contract", () => {
 			const corrupted = await SessionManager.create(cwd, sessionDir, {
 				id: `corrupted-${testCase.slug}`,
 			});
-			corrupted.appendMessage({ role: "user", content: "corrupt me", timestamp: Date.parse(CREATED_AT) });
-			await corrupted.flush();
+			await corrupted.appendMessage({ role: "user", content: "corrupt me", timestamp: Date.parse(CREATED_AT) });
 			const corruptedRef = corrupted.getSessionRef();
 			if (!corruptedRef) throw new Error("Expected a persisted corrupted-session reference");
 			const healthy = await SessionManager.create(cwd, sessionDir, { id: `healthy-${corruptedRef.sessionId}` });
-			healthy.appendMessage({ role: "user", content: "healthy sibling", timestamp: Date.parse(SECOND_AT) });
-			await healthy.flush();
+			await healthy.appendMessage({ role: "user", content: "healthy sibling", timestamp: Date.parse(SECOND_AT) });
 			const healthyRef = healthy.getSessionRef();
 			if (!healthyRef) throw new Error("Expected a persisted healthy-session reference");
 			await Promise.all([corrupted.closePersistence(), healthy.closePersistence()]);
@@ -1177,14 +1166,13 @@ describe("PR #329 projection reducer contract", () => {
 			const sourceDir = join(root, "fork-source-sessions");
 			mkdirSync(cwd, { recursive: true });
 			const source = await SessionManager.create(cwd, sourceDir, { id: "clear-label-fork-source" });
-			const targetId = source.appendMessage({
+			const targetId = await source.appendMessage({
 				role: "user",
 				content: "fork retained",
 				timestamp: Date.parse(CREATED_AT),
 			});
-			source.appendLabelChange(targetId, "temporary");
-			source.appendLabelChange(targetId, undefined);
-			await source.flush();
+			await source.appendLabelChange(targetId, "temporary");
+			await source.appendLabelChange(targetId, undefined);
 			const committedPrefix = clearedLabelState(source, targetId);
 			const sourceRef = source.getSessionRef();
 			if (!sourceRef) throw new Error("Expected source reference");
@@ -1193,7 +1181,6 @@ describe("PR #329 projection reducer contract", () => {
 			const forkDir = join(root, "fork-target-sessions");
 			mkdirSync(forkCwd, { recursive: true });
 			const forked = await SessionManager.forkFrom(sourceRef, forkCwd, forkDir, { id: "clear-label-fork" });
-			await forked.flush();
 			const reopened = await SessionManager.openReadOnly(forked.getSessionRef()!);
 
 			expect(committedPrefix).toEqual({
@@ -1220,14 +1207,13 @@ describe("PR #329 projection reducer contract", () => {
 			const sourceDir = join(root, "import-source-sessions");
 			mkdirSync(cwd, { recursive: true });
 			const source = await SessionManager.create(cwd, sourceDir, { id: "clear-label-import-source" });
-			const targetId = source.appendMessage({
+			const targetId = await source.appendMessage({
 				role: "user",
 				content: "import retained",
 				timestamp: Date.parse(CREATED_AT),
 			});
-			source.appendLabelChange(targetId, "temporary");
-			source.appendLabelChange(targetId, "");
-			await source.flush();
+			await source.appendLabelChange(targetId, "temporary");
+			await source.appendLabelChange(targetId, "");
 			const committedPrefix = clearedLabelState(source, targetId);
 			const sourceRef = source.getSessionRef();
 			if (!sourceRef) throw new Error("Expected source reference");
@@ -1240,7 +1226,6 @@ describe("PR #329 projection reducer contract", () => {
 			const imported = await SessionManager.importFromJsonl(snapshotPath, importCwd, importDir, {
 				id: "clear-label-import",
 			});
-			await imported.flush();
 			const reopened = await SessionManager.openReadOnly(imported.getSessionRef()!);
 
 			expect(committedPrefix).toEqual({

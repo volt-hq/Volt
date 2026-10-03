@@ -104,7 +104,7 @@ describe("createAgentSession session manager defaults", () => {
 		if (!manager) throw new Error("Expected the default session manager to be closed");
 		const sessionRef = manager.getSessionRef();
 		if (!sessionRef) throw new Error("Expected a persisted session reference");
-		expect(() => manager.appendSessionInfo("late write")).toThrow("Session persistence is closed");
+		await expect(manager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
 		const reopened = await SessionManager.open(sessionRef);
 		await reopened.closePersistence();
 		expect(await SessionManager.list(cwd, sessionRef.sessionDirectory)).toEqual([]);
@@ -124,10 +124,9 @@ describe("createAgentSession session manager defaults", () => {
 
 		await expect(createAgentSession({ cwd, agentDir, sessionManager, disableMcp: true })).rejects.toBe(setupError);
 
-		expect(() => sessionManager.appendSessionInfo("late write")).toThrow("Session persistence is closed");
+		await expect(sessionManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
 		const reopened = await SessionManager.open(sessionRef);
-		reopened.appendSessionInfo("reopened after failed setup");
-		await reopened.flush();
+		await reopened.appendSessionInfo("reopened after failed setup");
 		await reopened.closePersistence();
 		expect(
 			await SessionManager.list(cwd, sessionRef.sessionDirectory, undefined, {
@@ -367,7 +366,7 @@ describe("createAgentSession session manager defaults", () => {
 			models: faux.models,
 		});
 		const sessionManager = await SessionManager.create(cwd, agentDir);
-		sessionManager.appendFastModeChange(true);
+		await sessionManager.appendFastModeChange(true);
 
 		const { session } = await createAgentSession({
 			cwd,
@@ -437,7 +436,7 @@ describe("createAgentSession session manager defaults", () => {
 			models: faux.models,
 		});
 		const sessionManager = SessionManager.inMemory(cwd);
-		sessionManager.appendFastModeChange(true);
+		await sessionManager.appendFastModeChange(true);
 
 		const { session } = await createAgentSession({
 			cwd,

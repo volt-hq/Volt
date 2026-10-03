@@ -178,8 +178,7 @@ describe("session_contexts workspace discovery", () => {
 		temporaryDirectories.push(directory);
 		const persistedId = "session-persisted";
 		const persisted = await SessionManager.create("/workspace", directory, { id: persistedId });
-		persisted.recordStartingGitContext(persistedId, gitContext);
-		await persisted.flush();
+		await persisted.recordStartingGitContext(persistedId, gitContext);
 		const listSpy = vi.spyOn(SessionManager, "list");
 		const workLookups: string[] = [];
 		const sessionBackend = createIrohRemoteSessionContextsRpcBackend({
@@ -208,11 +207,9 @@ describe("session_contexts workspace discovery", () => {
 		temporaryDirectories.push(directory);
 		const sessionId = "session-a";
 		const target = await SessionManager.create("/workspace", directory, { id: sessionId });
-		target.recordStartingGitContext(sessionId, gitContext);
-		await target.flush();
+		await target.recordStartingGitContext(sessionId, gitContext);
 		const unrelated = await SessionManager.create("/workspace", directory, { id: "session-unrelated" });
-		unrelated.recordStartingGitContext("session-unrelated", null);
-		await unrelated.flush();
+		await unrelated.recordStartingGitContext("session-unrelated", null);
 		const listSpy = vi.spyOn(SessionManager, "list");
 
 		const contexts = await SessionManager.readStartingGitContexts(directory, [sessionId, "session-missing"]);

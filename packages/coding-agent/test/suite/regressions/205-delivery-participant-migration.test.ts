@@ -2,6 +2,7 @@ import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
+import { appendsEntryType, injectFaultyLog } from "../../utilities/faulty-log.ts";
 import { createHarness, getMessageText, getUserTexts, type Harness } from "../harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -120,8 +121,8 @@ describe("regression #205: coding-agent delivery participant migration", () => {
 				},
 			}),
 		});
-		const rootId = harness.sessionManager.appendMessage(createUserMessage("abandoned branch root"));
-		harness.sessionManager.appendMessage(fauxAssistantMessage("abandoned branch assistant"));
+		const rootId = await harness.sessionManager.appendMessage(createUserMessage("abandoned branch root"));
+		await harness.sessionManager.appendMessage(fauxAssistantMessage("abandoned branch assistant"));
 		const providerTexts: string[][] = [];
 		harness.setResponses([
 			(context) => {
@@ -177,15 +178,11 @@ describe("regression #205: coding-agent delivery participant migration", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
-	it("rolls back a direct RPC attempt when canonical append rejects synchronously", async () => {
+	it("rolls back a direct RPC attempt when its canonical commit rolls back", async () => {
 		harness = await createHarness();
 		harness.setResponses([fauxAssistantMessage("committed after append retry")]);
 		const clientMessageId = "participant-sync-append-failure";
-		const appendMessage = harness.sessionManager.appendMessage.bind(harness.sessionManager);
-		const appendFailure = new Error("injected synchronous canonical append failure");
-		const appendSpy = vi.spyOn(harness.sessionManager, "appendMessage").mockImplementationOnce(() => {
-			throw appendFailure;
-		});
+		injectFaultyLog(harness.sessionManager).failNext("rolled_back", appendsEntryType("message"));
 		const firstPreflight: PromptPreflightResult[] = [];
 
 		await expect(
@@ -194,13 +191,12 @@ describe("regression #205: coding-agent delivery participant migration", () => {
 				source: "rpc",
 				preflightResult: (result) => firstPreflight.push(result),
 			}),
-		).rejects.toThrow(appendFailure.message);
+		).rejects.toThrow("Session commit was rolled back: Injected rollback");
 		expect(firstPreflight).toEqual([{ success: false }]);
 		expect(harness.sessionManager.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
 		expect(harness.control.hasPendingPrompt()).toBe(true);
 		expect(harness.getPendingResponseCount()).toBe(1);
 
-		appendSpy.mockImplementation(appendMessage);
 		await harness.session.prompt("append retry", { clientMessageId, source: "rpc" });
 		expect(harness.sessionManager.getClientInput(clientMessageId)).toMatchObject({ state: "completed" });
 		expect(harness.control.hasPendingPrompt()).toBe(false);

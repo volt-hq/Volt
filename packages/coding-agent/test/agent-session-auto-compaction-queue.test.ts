@@ -148,7 +148,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 	});
 
 	it("should resume after threshold compaction when only agent-level queued messages exist", async () => {
-		sessionManager.appendMessage({ role: "user", content: "compaction seed", timestamp: Date.now() });
+		await sessionManager.appendMessage({ role: "user", content: "compaction seed", timestamp: Date.now() });
 		control.queueFollowUp({
 			role: "custom",
 			customType: "test",
@@ -737,17 +737,23 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: staleAssistantTimestamp,
 		};
 
-		sessionManager.appendMessage({
+		await sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: staleAssistantTimestamp - 1000,
 		});
-		sessionManager.appendMessage(staleAssistant);
+		await sessionManager.appendMessage(staleAssistant);
 
 		const firstKeptEntryId = sessionManager.getEntries()[0]!.id;
-		sessionManager.appendCompaction("summary", firstKeptEntryId, staleAssistant.usage.totalTokens, undefined, false);
+		await sessionManager.appendCompaction(
+			"summary",
+			firstKeptEntryId,
+			staleAssistant.usage.totalTokens,
+			undefined,
+			false,
+		);
 
-		sessionManager.appendMessage({
+		await sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "session recovery payload" }],
 			timestamp: Date.now(),
@@ -826,7 +832,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 			},
 			errorAssistant,
 		]) {
-			sessionManager.appendMessage(message);
+			await sessionManager.appendMessage(message);
 		}
 
 		const runAutoCompactionSpy = vi
@@ -872,12 +878,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now(),
 		};
 
-		sessionManager.appendMessage({
+		await sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "hello" }],
 			timestamp: Date.now() - 1000,
 		});
-		sessionManager.appendMessage(errorAssistant);
+		await sessionManager.appendMessage(errorAssistant);
 
 		const runAutoCompactionSpy = vi
 			.spyOn(
@@ -923,14 +929,20 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 
 		// Record the kept assistant in the session and create a compaction after it
-		sessionManager.appendMessage({
+		await sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: preCompactionTimestamp - 1000,
 		});
-		sessionManager.appendMessage(keptAssistant);
+		await sessionManager.appendMessage(keptAssistant);
 		const firstKeptEntryId = sessionManager.getEntries()[0]!.id;
-		sessionManager.appendCompaction("summary", firstKeptEntryId, keptAssistant.usage.totalTokens, undefined, false);
+		await sessionManager.appendCompaction(
+			"summary",
+			firstKeptEntryId,
+			keptAssistant.usage.totalTokens,
+			undefined,
+			false,
+		);
 
 		// Post-compaction error message
 		const errorAssistant: AssistantMessage = {
@@ -953,12 +965,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 		};
 
 		// Canonical context has only new post-compaction work after the summary.
-		sessionManager.appendMessage({
+		await sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "new prompt" }],
 			timestamp: Date.now() - 500,
 		});
-		sessionManager.appendMessage(errorAssistant);
+		await sessionManager.appendMessage(errorAssistant);
 
 		const runAutoCompactionSpy = vi
 			.spyOn(

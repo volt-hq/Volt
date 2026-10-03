@@ -25,7 +25,7 @@ describe("Fast mode host action", () => {
 	it("delegates each toggle without changing thinking", async () => {
 		const thinkingLevel = "high" as const;
 		let fastModeEnabled = false;
-		const setFastModeEnabled = vi.fn((enabled: boolean) => {
+		const setFastModeEnabled = vi.fn(async (enabled: boolean) => {
 			fastModeEnabled = enabled;
 		});
 		const session = {
@@ -44,7 +44,7 @@ describe("Fast mode host action", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled,
 		};
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
@@ -65,7 +65,7 @@ describe("Fast mode host action", () => {
 
 	it("keeps an enabled Fast toggle available after switching to an unsupported model", async () => {
 		let fastModeEnabled = true;
-		const setFastModeEnabled = vi.fn((enabled: boolean) => {
+		const setFastModeEnabled = vi.fn(async (enabled: boolean) => {
 			fastModeEnabled = enabled;
 		});
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
@@ -83,7 +83,7 @@ describe("Fast mode host action", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled,
 		};
 
@@ -125,7 +125,7 @@ describe("Fast mode host action", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled: vi.fn(),
 		};
 

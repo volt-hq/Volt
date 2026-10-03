@@ -95,17 +95,17 @@ function assistantMessage(text: string, timestamp: number): AssistantMessage {
 test("get_session_tree pages sanitized branch topology without raw session entries", async () => {
 	const harness = await createHarness();
 	try {
-		const rootId = harness.sessionManager.appendMessage({
+		const rootId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: `inspect ${join(harness.tempDir, "secret.txt")}`,
 			timestamp: 1,
 		});
-		const inactiveId = harness.sessionManager.appendMessage(assistantMessage("old branch", 2));
-		harness.sessionManager.branch(rootId);
-		const structuralId = harness.sessionManager.appendCustomEntry("provider-private", {
+		const inactiveId = await harness.sessionManager.appendMessage(assistantMessage("old branch", 2));
+		await harness.sessionManager.branch(rootId);
+		const structuralId = await harness.sessionManager.appendCustomEntry("provider-private", {
 			providerPayload: "must-not-cross-wire",
 		});
-		const activeId = harness.sessionManager.appendMessage(assistantMessage("active branch", 3));
+		const activeId = await harness.sessionManager.appendMessage(assistantMessage("active branch", 3));
 
 		const runtime: ConversationCommandRuntime = {
 			session: {
@@ -171,9 +171,9 @@ test("get_session_tree pages sanitized branch topology without raw session entri
 test("local session tree projects transcript content only for admitted nodes", async () => {
 	const harness = await createHarness();
 	try {
-		const firstId = harness.sessionManager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const firstId = await harness.sessionManager.appendMessage({ role: "user", content: "first", timestamp: 1 });
 		const offPageMessage = { role: "user" as const, content: "off-page", timestamp: 2 };
-		harness.sessionManager.appendMessage(offPageMessage);
+		await harness.sessionManager.appendMessage(offPageMessage);
 		let offPageContentReads = 0;
 		Object.defineProperty(offPageMessage, "content", {
 			configurable: true,
@@ -199,13 +199,13 @@ test("session tree resolves reused tool-call ids within each branch", async () =
 	const harness = await createHarness();
 	try {
 		const toolCallId = "call_1";
-		const appendReadCall = (path: string, timestamp: number): string =>
+		const appendReadCall = (path: string, timestamp: number): Promise<string> =>
 			harness.sessionManager.appendMessage({
 				...assistantMessage("", timestamp),
 				content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path } }],
 				stopReason: "toolUse",
 			});
-		const appendReadResult = (timestamp: number): string =>
+		const appendReadResult = (timestamp: number): Promise<string> =>
 			harness.sessionManager.appendMessage({
 				role: "toolResult",
 				toolCallId,
@@ -215,14 +215,14 @@ test("session tree resolves reused tool-call ids within each branch", async () =
 				timestamp,
 			});
 
-		const rootId = harness.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
-		appendReadCall("branch-a.txt", 2);
-		const branchAResultId = appendReadResult(3);
-		appendReadCall("branch-a-later.txt", 4);
-		const branchALaterResultId = appendReadResult(5);
-		harness.sessionManager.branch(rootId);
-		const branchBCallId = appendReadCall("branch-b.txt", 6);
-		const branchBResultId = appendReadResult(7);
+		const rootId = await harness.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		await appendReadCall("branch-a.txt", 2);
+		const branchAResultId = await appendReadResult(3);
+		await appendReadCall("branch-a-later.txt", 4);
+		const branchALaterResultId = await appendReadResult(5);
+		await harness.sessionManager.branch(rootId);
+		const branchBCallId = await appendReadCall("branch-b.txt", 6);
+		const branchBResultId = await appendReadResult(7);
 
 		const runtime: ConversationCommandRuntime = {
 			session: {
@@ -303,19 +303,19 @@ test("local session tree tracks truncation without parsing projected text", asyn
 	const harness = await createHarness();
 	try {
 		const literalSuffix = "complete\n[truncated]";
-		const literalUserId = harness.sessionManager.appendMessage({
+		const literalUserId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: literalSuffix,
 			timestamp: 1,
 		});
-		const literalAssistantId = harness.sessionManager.appendMessage(assistantMessage(literalSuffix, 2));
-		const longUserId = harness.sessionManager.appendMessage({
+		const literalAssistantId = await harness.sessionManager.appendMessage(assistantMessage(literalSuffix, 2));
+		const longUserId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: "x".repeat(16_001),
 			timestamp: 3,
 		});
 		const toolCallId = "long-summary";
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			...assistantMessage("", 4),
 			content: [
 				{
@@ -327,7 +327,7 @@ test("local session tree tracks truncation without parsing projected text", asyn
 			],
 			stopReason: "toolUse",
 		});
-		const longToolSummaryId = harness.sessionManager.appendMessage({
+		const longToolSummaryId = await harness.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId,
 			toolName: "read",
@@ -354,9 +354,9 @@ test("local session tree tracks truncation without parsing projected text", asyn
 test("inactive tree-node continuation metadata remains recoverable", async () => {
 	const harness = await createHarness();
 	try {
-		const rootId = harness.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const rootId = await harness.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
 		const longText = `${"x".repeat(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS)}END`;
-		const inactiveId = harness.sessionManager.appendMessage({
+		const inactiveId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [
 				{ type: "text", text: longText },
@@ -365,7 +365,7 @@ test("inactive tree-node continuation metadata remains recoverable", async () =>
 			timestamp: 2,
 		});
 		const inactiveToolCallId = "inactive-image-call";
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			...assistantMessage("", 3),
 			content: [
 				{
@@ -376,7 +376,7 @@ test("inactive tree-node continuation metadata remains recoverable", async () =>
 				},
 			],
 		});
-		const inactiveToolId = harness.sessionManager.appendMessage({
+		const inactiveToolId = await harness.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: inactiveToolCallId,
 			toolName: "read",
@@ -387,13 +387,13 @@ test("inactive tree-node continuation metadata remains recoverable", async () =>
 			isError: false,
 			timestamp: 4,
 		});
-		harness.sessionManager.branch(rootId);
-		const activeImageId = harness.sessionManager.appendMessage({
+		await harness.sessionManager.branch(rootId);
+		const activeImageId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "image", data: "YWN0aXZl", mimeType: "image/jpeg" }],
 			timestamp: 5,
 		});
-		harness.sessionManager.appendMessage(assistantMessage("active branch", 6));
+		await harness.sessionManager.appendMessage(assistantMessage("active branch", 6));
 
 		const runtime: ConversationCommandRuntime = {
 			session: {

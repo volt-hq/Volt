@@ -985,8 +985,7 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	if (requestedSessionName) {
 		try {
-			sessionManagerOwner.current.appendSessionInfo(requestedSessionName);
-			await sessionManagerOwner.current.flush();
+			await sessionManagerOwner.current.appendSessionInfo(requestedSessionName);
 		} catch (error) {
 			return await sessionManagerOwner.fail(error, "Session naming failed and its manager could not be closed");
 		}

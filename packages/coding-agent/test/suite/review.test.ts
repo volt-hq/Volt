@@ -2169,24 +2169,22 @@ describe("review pipeline", () => {
 		snapshots.push(snapshot);
 		const originManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "origin-sessions"));
 		const originRef = originManager.getSessionRef()!;
-		const originalMaterialize = originManager.materialize.bind(originManager);
-		let markMaterializeStarted!: () => void;
-		const materializeStarted = new Promise<void>((resolve) => {
-			markMaterializeStarted = resolve;
+		const originalAppendCustomEntry = originManager.appendCustomEntry.bind(originManager);
+		let markCommitStarted!: () => void;
+		const commitStarted = new Promise<void>((resolve) => {
+			markCommitStarted = resolve;
 		});
-		let releaseMaterialize!: () => void;
-		const materializeGate = new Promise<void>((resolve) => {
-			releaseMaterialize = resolve;
+		let releaseCommit!: () => void;
+		const commitGate = new Promise<void>((resolve) => {
+			releaseCommit = resolve;
 		});
-		vi.spyOn(originManager, "materialize").mockImplementation(async () => {
+		vi.spyOn(originManager, "appendCustomEntry").mockImplementation(async (customType, data) => {
+			const entryId = await originalAppendCustomEntry(customType, data);
 			// Initial accounting is durable before inference; race only the terminal commit.
-			if (getReviewRun(originManager, "review:durable-origin")?.status === "unfinished") {
-				await originalMaterialize();
-				return;
-			}
-			markMaterializeStarted();
-			await materializeGate;
-			await originalMaterialize();
+			if (getReviewRun(originManager, "review:durable-origin")?.status === "unfinished") return entryId;
+			markCommitStarted();
+			await commitGate;
+			return entryId;
 		});
 		harness.setResponses([
 			fauxAssistantMessage(fauxToolCall("review_changed_files", {}), { stopReason: "toolUse" }),
@@ -2240,13 +2238,13 @@ describe("review pipeline", () => {
 			},
 		});
 		started.launch();
-		await materializeStarted;
+		await commitStarted;
 		try {
 			expect(settled).toBe(false);
 			expect(originManager.getSessionRef()).toEqual(originRef);
 			manager.cancel(workflowId);
 		} finally {
-			releaseMaterialize();
+			releaseCommit();
 		}
 
 		await manager.waitForIdle();

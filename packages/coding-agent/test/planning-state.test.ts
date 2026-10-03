@@ -218,13 +218,13 @@ describe("native planning state", () => {
 		expect(updatePlanTool?.description).toContain("without the planning transcript");
 		expect(submitPlanTool?.description).toContain("sufficient for execution without the planning transcript");
 
-		const initial = session.updatePlan({
+		const initial = await session.updatePlan({
 			title: "Make Plan-mode handoffs self-contained",
 			summary:
 				"Volt's Plan-mode prompt currently describes rolling drafts but must also preserve execution context across session strategies.",
 			steps: [{ text: "Revise the model-facing planning policy" }, { text: "Verify draft behavior" }],
 		});
-		const refined = session.updatePlan({
+		const refined = await session.updatePlan({
 			planId: initial.id,
 			expectedRevision: initial.revision,
 			title: initial.title,
@@ -245,8 +245,8 @@ describe("native planning state", () => {
 		"returns queued %s feedback to draft and preserves same-generation research",
 		async (streamingBehavior) => {
 			const { session } = await createPlanningSession();
-			session.setSessionName("Queued plan feedback");
-			const draft = session.updatePlan({ steps: [{ text: "Implement the researched change" }] });
+			await session.setSessionName("Queued plan feedback");
+			const draft = await session.updatePlan({ steps: [{ text: "Implement the researched change" }] });
 			const researchCall = {
 				type: "toolCall" as const,
 				id: `feedback-research-${streamingBehavior}`,
@@ -391,7 +391,7 @@ describe("native planning state", () => {
 		"refreshes queued %s feedback from a ready Build plan onto the Plan tool surface",
 		async (streamingBehavior) => {
 			const { session } = await createPlanningSession();
-			const draft = session.updatePlan({ steps: [{ text: "Implement the approved change" }] });
+			const draft = await session.updatePlan({ steps: [{ text: "Implement the approved change" }] });
 			const initialResearchCall = {
 				type: "toolCall" as const,
 				id: `initial-build-feedback-research-${streamingBehavior}`,
@@ -410,7 +410,7 @@ describe("native planning state", () => {
 				result: { content: [{ type: "text", text: "agent/" }] },
 				isError: false,
 			} as never);
-			const ready = session.submitPlan({
+			const ready = await session.submitPlan({
 				planId: draft.id,
 				expectedRevision: draft.revision,
 				title: "Approved change",
@@ -546,9 +546,9 @@ describe("native planning state", () => {
 
 	it("requires fresh research after tree navigation restores a draft branch", async () => {
 		const { session } = await createPlanningSession();
-		const draft = session.updatePlan({ steps: [{ text: "Implement the researched change" }] });
-		session.sessionManager.appendMessage({ role: "user", content: "Prepare the plan", timestamp: 1 });
-		const branchPointId = session.sessionManager.appendMessage(
+		const draft = await session.updatePlan({ steps: [{ text: "Implement the researched change" }] });
+		await session.sessionManager.appendMessage({ role: "user", content: "Prepare the plan", timestamp: 1 });
+		const branchPointId = await session.sessionManager.appendMessage(
 			createAssistantMessage([{ type: "text", text: "I will research it." }], "stop"),
 		);
 		const researchCall = {
@@ -569,7 +569,7 @@ describe("native planning state", () => {
 			result: { content: [{ type: "text", text: "No diagnostics" }] },
 			isError: false,
 		} as never);
-		session.submitPlan({
+		await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Researched change",
@@ -674,7 +674,7 @@ describe("native planning state", () => {
 		});
 		await manager.connectServer("fake");
 		const { session } = await createPlanningSession({ mcpManager: manager });
-		const draft = session.updatePlan({ steps: [{ text: "Implement the researched change" }] });
+		const draft = await session.updatePlan({ steps: [{ text: "Implement the researched change" }] });
 		const toolEvents: Array<{ toolName: string; result: unknown; isError: boolean }> = [];
 		const unsubscribe = session.subscribe((event) => {
 			if (event.type === "tool_execution_end") {
@@ -824,8 +824,8 @@ describe("native planning state", () => {
 		const directToolName = "mcp__fake__read_note";
 		const { session } = await createPlanningSession({ mcpManager: manager, tools: ["mcp", directToolName] });
 		expect(session.getActiveToolNames()).not.toContain(directToolName);
-		const draft = session.updatePlan({ steps: [{ text: "Implement with the MCP context" }] });
-		const ready = session.submitPlan({
+		const draft = await session.updatePlan({ steps: [{ text: "Implement with the MCP context" }] });
+		const ready = await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Use restored MCP",
@@ -936,7 +936,7 @@ describe("native planning state", () => {
 
 	it("freezes approved scope, tracks progress separately, and requires reapproval for replanning", async () => {
 		const { session } = await createPlanningSession();
-		const draft = session.updatePlan({
+		const draft = await session.updatePlan({
 			title: "Implement native planning",
 			summary: "Wire the shared state through every surface.",
 			steps: [{ text: "Inspect the architecture" }, { text: "Implement the workflow" }],
@@ -947,7 +947,7 @@ describe("native planning state", () => {
 		expect(draftPolicy).toContain("[VOLT PLAN MODE — TRUSTED HOST POLICY]");
 		expect(draftPolicy).not.toContain(draft.id);
 		expect(draftPolicy).not.toContain("Revision:");
-		expect(() =>
+		await expect(
 			session.updatePlan({
 				planId: draft.id,
 				expectedRevision: draft.revision,
@@ -955,17 +955,17 @@ describe("native planning state", () => {
 				summary: draft.summary,
 				steps: draft.steps.map((step) => ({ id: step.id, text: step.text })),
 			}),
-		).toThrow("made no changes");
-		expect(() =>
+		).rejects.toThrow("made no changes");
+		await expect(
 			session.submitPlan({
 				planId: draft.id,
 				expectedRevision: 0,
 				title: "Implement native planning",
 				summary: "Wire the shared state through every surface.",
 			}),
-		).toThrow(StalePlanRevisionError);
+		).rejects.toThrow(StalePlanRevisionError);
 
-		const ready = session.submitPlan({
+		const ready = await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Implement native planning",
@@ -978,10 +978,10 @@ describe("native planning state", () => {
 		await session.setAgentMode("build");
 		expect(session.planningState.plan).toMatchObject({ id: draft.id, phase: "ready" });
 		await session.setAgentMode("plan");
-		const changed = session.changePlan(draft.id, ready.revision);
+		const changed = await session.changePlan(draft.id, ready.revision);
 		expect(changed).toMatchObject({ mode: "plan", plan: { phase: "draft", revision: 3 } });
 
-		const readyAgain = session.submitPlan({
+		const readyAgain = await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: 3,
 			title: "Implement native planning",
@@ -1003,13 +1003,13 @@ describe("native planning state", () => {
 		expect(session.getActiveToolNames()).toContain("request_replan");
 		expect(session.getActiveToolNames()).not.toContain("update_plan");
 		expect(session.getActiveToolNames()).not.toContain("submit_plan");
-		expect(() =>
+		await expect(
 			session.updatePlan({
 				planId: draft.id,
 				expectedRevision: activated.planning.plan!.revision,
 				steps: [{ text: "Replace the approved scope" }],
 			}),
-		).toThrow("only in Plan mode");
+		).rejects.toThrow("only in Plan mode");
 
 		const active = session.planningState.plan!;
 		const executionPolicy = session.state.systemPrompt;
@@ -1034,15 +1034,15 @@ describe("native planning state", () => {
 		expect(progressed.steps[0]).toMatchObject({ status: "completed", note: "Architecture inspected" });
 		expect(session.state.systemPrompt).toBe(executionPolicy);
 		expect(session.getActiveToolNames()).toEqual(executionTools);
-		expect(() =>
+		await expect(
 			session.updatePlanProgress({
 				planId: progressed.id,
 				expectedRevision: progressed.revision,
 				updates: [{ id: "unknown", status: "completed" }],
 			}),
-		).toThrow("unknown executable leaf id");
+		).rejects.toThrow("unknown executable leaf id");
 
-		const replanning = session.requestReplan({
+		const replanning = await session.requestReplan({
 			planId: progressed.id,
 			expectedRevision: progressed.revision,
 			reason: "Implementation revealed a required verification step",
@@ -1054,7 +1054,7 @@ describe("native planning state", () => {
 		expect(replanning.plan?.execution).toBeUndefined();
 		expect(() => parsePlanningState(replanning)).not.toThrow();
 
-		const revised = session.updatePlan({
+		const revised = await session.updatePlan({
 			planId: replanning.plan!.id,
 			expectedRevision: replanning.plan!.revision,
 			title: replanning.plan!.title,
@@ -1067,7 +1067,7 @@ describe("native planning state", () => {
 		expect(revised.steps[0]).toMatchObject({ status: "completed", note: "Architecture inspected" });
 		expect(revised.steps.at(-1)).toMatchObject({ status: "pending" });
 
-		const revisedReady = session.submitPlan({
+		const revisedReady = await session.submitPlan({
 			planId: revised.id,
 			expectedRevision: revised.revision,
 			title: revised.title!,
@@ -1082,7 +1082,7 @@ describe("native planning state", () => {
 		const executionCheckpoint = createPlanExecutionPrompt(reactivatedPlan);
 		expect(executionCheckpoint).toContain("[x] Inspect the architecture — Architecture inspected");
 		expect(executionCheckpoint).toContain(`Revision: ${reactivatedPlan.revision}`);
-		const completed = session.updatePlanProgress({
+		const completed = await session.updatePlanProgress({
 			planId: reactivatedPlan.id,
 			expectedRevision: reactivatedPlan.revision,
 			updates: reactivatedPlan.steps
@@ -1098,7 +1098,7 @@ describe("native planning state", () => {
 
 	it("tracks hierarchical substeps as executable leaves and derives group progress", async () => {
 		const { session } = await createPlanningSession();
-		const draft = session.updatePlan({
+		const draft = await session.updatePlan({
 			title: "Implement grouped planning",
 			summary: "Group related executable work without limiting checklist size.",
 			steps: [
@@ -1117,7 +1117,7 @@ describe("native planning state", () => {
 		detached.plan!.steps[0]!.substeps![0]!.text = "Mutated projection";
 		expect(session.planningState.plan!.steps[0]!.substeps![0]!.text).toBe("Persist substeps");
 
-		const ready = session.submitPlan({
+		const ready = await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: draft.title!,
@@ -1131,16 +1131,16 @@ describe("native planning state", () => {
 			targetSessionId: session.sessionId,
 		});
 		const active = activated.planning.plan!;
-		expect(() =>
+		await expect(
 			session.updatePlanProgress({
 				planId: active.id,
 				expectedRevision: active.revision,
 				updates: [{ id: active.steps[0]!.id, status: "completed" }],
 			}),
-		).toThrow("cannot update group outcome id");
+		).rejects.toThrow("cannot update group outcome id");
 
 		const firstSubstep = active.steps[0]!.substeps![0]!;
-		const started = session.updatePlanProgress({
+		const started = await session.updatePlanProgress({
 			planId: active.id,
 			expectedRevision: active.revision,
 			updates: [{ id: firstSubstep.id, status: "in_progress", note: "Started persistence" }],
@@ -1151,7 +1151,7 @@ describe("native planning state", () => {
 			note: "Started persistence",
 		});
 
-		const groupedComplete = session.updatePlanProgress({
+		const groupedComplete = await session.updatePlanProgress({
 			planId: started.id,
 			expectedRevision: started.revision,
 			updates: started.steps[0]!.substeps!.map((substep) => ({
@@ -1163,7 +1163,7 @@ describe("native planning state", () => {
 		expect(groupedComplete.steps[0]).toMatchObject({ status: "completed" });
 		expect(formatPlanCheckpoint({ mode: "build", plan: groupedComplete })).toContain("1.1. [x] Persist substeps");
 
-		const completed = session.updatePlanProgress({
+		const completed = await session.updatePlanProgress({
 			planId: groupedComplete.id,
 			expectedRevision: groupedComplete.revision,
 			updates: [{ id: groupedComplete.steps[1]!.id, status: "completed" }],
@@ -1176,18 +1176,18 @@ describe("native planning state", () => {
 
 	it("rejects id-less duplicate drafts and non-ready handoffs", async () => {
 		const { session } = await createPlanningSession();
-		const draft = session.updatePlan({
+		const draft = await session.updatePlan({
 			title: "Harden lifecycle",
 			summary: "Guard the transition boundaries.",
 			steps: [{ text: "Audit transitions" }, { text: "Add guards" }],
 		});
-		expect(() =>
+		await expect(
 			session.updatePlan({
 				planId: draft.id,
 				expectedRevision: draft.revision,
 				steps: draft.steps.map((step) => ({ text: step.text })),
 			}),
-		).toThrow("made no changes");
+		).rejects.toThrow("made no changes");
 		expect(session.planningState.plan).toMatchObject({ id: draft.id, revision: draft.revision });
 
 		const execution = {
@@ -1201,7 +1201,7 @@ describe("native planning state", () => {
 			"Only a ready plan can be handed off",
 		);
 
-		const ready = session.submitPlan({
+		const ready = await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Harden lifecycle",
@@ -1218,7 +1218,7 @@ describe("native planning state", () => {
 
 	it("refuses synchronous plan mutations while a queued transition is suspended", async () => {
 		const { session } = await createPlanningSession();
-		const draft = session.updatePlan({
+		const draft = await session.updatePlan({
 			title: "Guarded",
 			summary: "Synchronous mutators must not interleave with suspended transitions.",
 			steps: [{ text: "Hold the boundary" }],
@@ -1235,13 +1235,13 @@ describe("native planning state", () => {
 		};
 		const transition = session.setAgentMode("build");
 		await new Promise((resolve) => setImmediate(resolve));
-		expect(() =>
+		await expect(
 			session.updatePlan({
 				planId: draft.id,
 				expectedRevision: draft.revision,
 				steps: [{ text: "Rewrite mid-transition" }],
 			}),
-		).toThrow("while a planning transition is in progress");
+		).rejects.toThrow("while a planning transition is in progress");
 		release();
 		await transition;
 		expect(session.planningState).toMatchObject({ mode: "build", plan: { id: draft.id, revision: draft.revision } });
@@ -1252,8 +1252,8 @@ describe("native planning state", () => {
 	it("turns manual Plan-mode re-entry during execution into a valid draft", async () => {
 		const { session } = await createPlanningSession();
 		await session.setAgentMode("plan");
-		const draft = session.updatePlan({ steps: [{ text: "Implement the approved change" }] });
-		const ready = session.submitPlan({
+		const draft = await session.updatePlan({ steps: [{ text: "Implement the approved change" }] });
+		const ready = await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Approved change",
@@ -1290,8 +1290,8 @@ describe("native planning state", () => {
 		const sessionManager = SessionManager.inMemory(tempDir);
 		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
 		await resourceLoader.reload();
-		sessionManager.appendMessage({ role: "user", content: "Continue the active plan", timestamp: 1 });
-		sessionManager.appendPlanningState({
+		await sessionManager.appendMessage({ role: "user", content: "Continue the active plan", timestamp: 1 });
+		await sessionManager.appendPlanningState({
 			mode: "build",
 			plan: {
 				id: "restored-plan",

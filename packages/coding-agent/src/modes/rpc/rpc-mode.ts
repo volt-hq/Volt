@@ -1170,12 +1170,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		newSession: (newSessionOptions) =>
 			runtimeHost.newSession({ ...newSessionOptions, assertConversationGenerationCurrent }),
 		afterSessionSwitch: rebindSession,
-		renameSession: (name) => {
-			commandSession.setSessionName(name);
-		},
-		setFastModeEnabled: (enabled) => {
-			commandSession.setFastModeEnabled(enabled);
-		},
+		renameSession: (name) => commandSession.setSessionName(name),
+		setFastModeEnabled: (enabled) => commandSession.setFastModeEnabled(enabled),
 		setAgentMode: (mode) => {
 			assertConversationGenerationCurrent?.();
 			return commandSession.setAgentMode(mode);
@@ -1262,7 +1258,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				},
 				cancel: () => {
 					if (!launched) {
-						appendReviewRun(
+						// The cancelled run record is best-effort; a lost log ends the runtime.
+						void appendReviewRun(
 							commandSession.sessionManager,
 							createReviewRunRecord({
 								workflowId: prepared.workflowId,
@@ -1274,7 +1271,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 								usage: createEmptyReviewUsage(),
 								incrementalPlan: prepared.incrementalPlan,
 							}),
-						);
+						).catch(() => {});
 					}
 					runtimeHost.reviewWorkflows.cancel(descriptor.workflowId);
 				},
@@ -1314,15 +1311,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					assertConversationGenerationCurrent,
 					setup: async (sessionManager) => {
 						targetSessionManager = sessionManager;
-						appendReviewRun(sessionManager, record);
+						await appendReviewRun(sessionManager, record);
 					},
 					withSession: async (sessionContext) => {
 						await sessionContext.sendMessage(seedMessage);
 						if (!targetSessionManager) throw new Error("Review session was not initialized");
-						acknowledgedAt = acknowledgeReviewRun(
-							targetSessionManager,
-							record.runId,
-							record.acknowledgedAt ?? Date.now(),
+						acknowledgedAt = (
+							await acknowledgeReviewRun(targetSessionManager, record.runId, record.acknowledgedAt ?? Date.now())
 						).acknowledgedAt;
 					},
 				});
@@ -1335,8 +1330,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 						? await SessionManager.open(sourceSessionRef)
 						: sourceSessionManager;
 					try {
-						acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
-						await acknowledgmentManager.flush();
+						await acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
 					} catch (error) {
 						if (sourceSessionRef) {
 							try {
@@ -1398,7 +1392,6 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 						assertCurrent: assertConversationGenerationCurrent,
 					},
 				);
-				await commandSession.sessionManager.flush();
 				return {
 					action,
 					status: "completed",
@@ -1432,8 +1425,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			if (action === REVIEW_PUBLISH_ACTION_ID) {
 				if (!record) throw new Error(`Unknown durable review run: ${runId}`);
 				const published = await publishReviewRun(commandSession.sessionManager.getCwd(), record);
-				appendReviewPublication(commandSession.sessionManager, { runId: record.runId, ...published });
-				await commandSession.sessionManager.flush();
+				await appendReviewPublication(commandSession.sessionManager, { runId: record.runId, ...published });
 				return {
 					action,
 					status: "completed",

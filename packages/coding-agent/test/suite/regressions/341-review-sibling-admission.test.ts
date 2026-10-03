@@ -404,9 +404,8 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		try {
 			expect(tuiManager.getEntries()).toHaveLength(0);
 			expect((await f.source.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe("failed");
-			tuiManager.appendSessionInfo("TUI owns initialization");
 			// If the losing service had seeded first, this owner's revision would be stale.
-			await expect(tuiManager.flush()).resolves.toBeUndefined();
+			await tuiManager.appendSessionInfo("TUI owns initialization");
 			expect(f.registry.findOwner("ws", id)).toBeUndefined();
 			expect(f.broker.lookup("ws", id)?.state).toBe("tui-owned");
 		} finally {
@@ -506,8 +505,7 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		const originalId = canonical.getSessionId();
 		const coldRecord = { ...f.record, runId: "cold-run" };
 		await appendReviewRunDurably(canonical, coldRecord);
-		appendReviewRun(f.source.session.sessionManager, coldRecord);
-		await f.source.session.sessionManager.materialize();
+		await appendReviewRun(f.source.session.sessionManager, coldRecord);
 		await registerReviewHandoffAliases(canonical, f.source.session.sessionManager, ["cold-run"]);
 		await canonical.closePersistence();
 		let release!: () => void;

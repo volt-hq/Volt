@@ -307,8 +307,7 @@ async function interruptedLaunch(f: Awaited<ReturnType<typeof fixture>>, persist
 	const prepared = await host.checkouts.prepare(f.workspace, f.request, f.authority);
 	vi.spyOn(host.checkouts, "bind").mockImplementationOnce(async (_workspace, manager, placement) => {
 		if (persistBinding) {
-			manager.recordPrReviewBinding(placement);
-			await manager.flush();
+			await manager.recordPrReviewBinding(placement);
 		}
 		throw new Error("interrupted launch");
 	});
@@ -691,7 +690,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 			preserveReviewRunId: record.runId,
 			replaceReviewGeneral: true,
 			setup: async (manager) => {
-				appendReviewRun(manager, record);
+				await appendReviewRun(manager, record);
 			},
 		});
 		expect(await getReviewGeneral(runtime.session.sessionManager, record.runId)).toMatchObject({
@@ -703,7 +702,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		const generalId = runtime.session.sessionId;
 		await runtime.newSession({
 			setup: async (manager) => {
-				appendReviewRun(manager, record);
+				await appendReviewRun(manager, record);
 			},
 			withSession: async (context) => {
 				await context.sendMessage(createReviewSeedMessage(record, ["f1"]));

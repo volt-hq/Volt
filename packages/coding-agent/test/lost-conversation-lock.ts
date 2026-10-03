@@ -30,7 +30,6 @@ export async function loseConversationLock(manager: SessionManager): Promise<voi
 /** Lose `manager`'s lock and commit one write, so the manager loses its log now. */
 export async function loseLog(manager: SessionManager): Promise<ConversationLogLostError> {
 	await loseConversationLock(manager);
-	manager.appendCustomEntry("lost-lock-probe");
-	await manager.flush().catch(() => undefined);
+	await manager.appendCustomEntry("lost-lock-probe").catch(() => undefined);
 	return manager.lost;
 }

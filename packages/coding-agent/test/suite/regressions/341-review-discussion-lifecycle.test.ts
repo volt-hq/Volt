@@ -135,7 +135,7 @@ async function fixture(models?: FauxModelDefinition[]) {
 		agentDir: root,
 	});
 	runtimes.push(source);
-	source.session.setSessionName("Source");
+	await source.session.setSessionName("Source");
 	await appendReviewRunDurably(source.session.sessionManager, record());
 	const service = new HostReviewDiscussionService({
 		findRuntime: (ref) =>
@@ -337,8 +337,8 @@ describe("Regression #341 host sibling lifecycle", () => {
 		});
 		expect(readFileSync(join(root, "rpc.txt"), "utf8")).toBe("rpc-fixed");
 		await child.session.setAgentMode("plan");
-		let plan = child.session.updatePlan({ steps: [{ text: "Apply fix" }] });
-		plan = child.session.submitPlan({
+		let plan = await child.session.updatePlan({ steps: [{ text: "Apply fix" }] });
+		plan = await child.session.submitPlan({
 			planId: plan.id,
 			expectedRevision: plan.revision,
 			title: "Fix",
@@ -356,7 +356,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 			await handleRpcCommand({ type: "plan_change", planId: plan.id, expectedRevision: plan.revision }, context),
 		).toMatchObject({ success: true, data: { plan: { phase: "draft" } } });
 		plan = child.session.planningState.plan!;
-		plan = child.session.submitPlan({
+		plan = await child.session.submitPlan({
 			planId: plan.id,
 			expectedRevision: plan.revision,
 			title: "Fix",
@@ -527,17 +527,16 @@ describe("Regression #341 host sibling lifecycle", () => {
 			if (reset) await api.reset(first!.discussionId, first!.sessionId, "reset");
 			const child = runtimes.at(-1)!;
 			const manager = child.session.sessionManager;
-			manager.reserveClientInput("interrupted-follow-up", "follow_up", {
+			await manager.reserveClientInput("interrupted-follow-up", "follow_up", {
 				message: "Check another case",
 				images: [],
 			});
-			manager.markClientInputQueued("interrupted-follow-up", {
+			await manager.markClientInputQueued("interrupted-follow-up", {
 				delivery: "follow_up",
 				message: "Check another case",
 				images: [],
 			});
 			const ref = child.session.sessionRef!;
-			await manager.flush();
 			await child.dispose();
 			runtimes.splice(runtimes.indexOf(child), 1);
 			expect((await api.list("review-341")).discussions[0]!.status).toBe("interrupted");
@@ -566,15 +565,14 @@ describe("Regression #341 host sibling lifecycle", () => {
 		const manager = child.session.sessionManager;
 		// Persist the crash boundary after a newer steering request overtakes an
 		// older follow-up, but before the follow-up reaches canonical delivery.
-		manager.reserveClientInput("older-follow-up", "follow_up", { message: "Deferred work", images: [] });
-		manager.markClientInputQueued("older-follow-up", {
+		await manager.reserveClientInput("older-follow-up", "follow_up", { message: "Deferred work", images: [] });
+		await manager.markClientInputQueued("older-follow-up", {
 			delivery: "follow_up",
 			message: "Deferred work",
 			images: [],
 		});
 		await child.session.prompt("Newer steering request", { source: "rpc", clientMessageId: "newer" });
 		const ref = child.session.sessionRef!;
-		await manager.flush();
 		expect(manager.getClientInputRecoveryPlan().kind).toBe("replay");
 		await child.dispose();
 		runtimes.splice(1, 1);
@@ -623,8 +621,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 		const first = successful(await api.start("review-341", ["f1"], "start"))[0]!;
 		await runtimes[1]!.session.waitForIdle();
 		const target = await SessionManager.create(root, join(root, "sessions"));
-		appendReviewRun(target, record());
-		await target.materialize();
+		await appendReviewRun(target, record());
 		const alias = await createAgentSessionRuntime(factory, { sessionManager: target, cwd: root, agentDir: root });
 		runtimes.push(alias);
 		await expect(service.forRuntime(alias).list("review-341")).rejects.toThrow("not owned");
@@ -647,7 +644,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 		runtimes.splice(1, 1);
 		await source.newSession({
 			setup: async (manager) => {
-				appendReviewRun(manager, record());
+				await appendReviewRun(manager, record());
 			},
 		});
 		expect(source.session.sessionId).not.toBe(sourceId);

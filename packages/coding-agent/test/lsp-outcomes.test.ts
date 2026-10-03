@@ -279,7 +279,6 @@ it("persists failed explicit calls and successful writes with bounded evidence a
 		]);
 		await harness.session.prompt("Run the fixture checks");
 		expect(readFileSync(path, "utf8")).toBe("SECRET-SOURCE\n");
-		await sm.flush();
 	} finally {
 		await harness.cleanupAsync();
 	}

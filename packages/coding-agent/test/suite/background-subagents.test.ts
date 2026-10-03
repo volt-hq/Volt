@@ -137,7 +137,7 @@ async function setup(
 		disableMcp: true,
 		tools: [...new Set(["read", "subagent", "jobs", ...(options.childTools ?? [])])],
 	});
-	session.setSessionName("Background subagent test");
+	await session.setSessionName("Background subagent test");
 	return {
 		session,
 		parentFixture,

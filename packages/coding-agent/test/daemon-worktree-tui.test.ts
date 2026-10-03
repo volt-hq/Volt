@@ -808,7 +808,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		expect(fixture.runtime.session.sessionManager.getCwd()).toBe(worktreeCwd);
 		// §5.1.7 pin: the parent-dir listing includes the worktree session once it
 		// has persisted content (session files flush on the first assistant message).
-		fixture.runtime.session.sessionManager.appendMessage({
+		await fixture.runtime.session.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "worktree session" }],
 			api: "openai-completions",
@@ -825,7 +825,6 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
-		await fixture.runtime.session.sessionManager.flush();
 		const listed = await SessionManager.list(parentCwd, fixture.parentSessionDir);
 		expect(listed.some((info) => info.id === fixture.runtime.session.sessionManager.getSessionId())).toBe(true);
 	});

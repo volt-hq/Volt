@@ -44,14 +44,14 @@ function user(text: string, timestamp: number): UserMessage {
 }
 
 describe("RPC transcript projection", () => {
-	test("returns UI-ready transcript items without raw internal payloads", () => {
+	test("returns UI-ready transcript items without raw internal payloads", async () => {
 		const session = SessionManager.inMemory("/Users/jordan/project");
-		session.reserveClientInput("client-message-1", "prompt", {
+		await session.reserveClientInput("client-message-1", "prompt", {
 			message: "hello",
 			images: [{ type: "image", data: "image-bytes", mimeType: "image/png" }],
 		});
-		session.transitionClientInput("client-message-1", "started");
-		const firstUserEntryId = session.appendMessage({
+		await session.transitionClientInput("client-message-1", "started");
+		const firstUserEntryId = await session.appendMessage({
 			role: "user",
 			clientMessageId: "client-message-1",
 			content: [
@@ -60,7 +60,7 @@ describe("RPC transcript projection", () => {
 			],
 			timestamp: 10,
 		});
-		session.appendMessage(
+		await session.appendMessage(
 			assistant(
 				[
 					{ type: "thinking", thinking: "hidden thought" },
@@ -83,9 +83,9 @@ describe("RPC transcript projection", () => {
 			isError: false,
 			timestamp: 30,
 		};
-		session.appendMessage(readResult);
-		session.appendCompaction("summary ".repeat(500), firstUserEntryId, 1234);
-		session.appendMessage(
+		await session.appendMessage(readResult);
+		await session.appendCompaction("summary ".repeat(500), firstUserEntryId, 1234);
+		await session.appendMessage(
 			assistant(
 				[
 					{ type: "text", text: "I will edit it." },
@@ -108,7 +108,7 @@ describe("RPC transcript projection", () => {
 			isError: false,
 			timestamp: 50,
 		};
-		session.appendMessage(editResult);
+		await session.appendMessage(editResult);
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
 			command: "cat /Users/jordan/project/src/secret.ts",
@@ -118,7 +118,7 @@ describe("RPC transcript projection", () => {
 			truncated: false,
 			timestamp: 60,
 		};
-		session.appendMessage(bashMessage);
+		await session.appendMessage(bashMessage);
 
 		const transcript = projectSessionTranscript(session);
 
@@ -170,12 +170,12 @@ describe("RPC transcript projection", () => {
 		expect(serialized).not.toContain("image-bytes");
 	});
 
-	test("preserves assistant Markdown text across multiple text content parts", () => {
+	test("preserves assistant Markdown text across multiple text content parts", async () => {
 		const session = SessionManager.inMemory("/workspace");
 		const expectedText = ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join(
 			"\n",
 		);
-		const entryId = session.appendMessage(
+		const entryId = await session.appendMessage(
 			assistant(
 				[
 					{ type: "text", text: "Here is a plan:\n- Step one" },
@@ -196,9 +196,9 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("Here is a plan: - Step one - Step two");
 	});
 
-	test("projects bounded subagent args and details for rich remote transcript rendering", () => {
+	test("projects bounded subagent args and details for rich remote transcript rendering", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		session.appendMessage(
+		await session.appendMessage(
 			assistant(
 				[
 					{ type: "text", text: "Delegating." },
@@ -262,7 +262,7 @@ describe("RPC transcript projection", () => {
 			isError: false,
 			timestamp: 30,
 		};
-		session.appendMessage(subagentResult);
+		await session.appendMessage(subagentResult);
 
 		const transcript = projectSessionTranscript(session);
 		const toolItem = transcript.items.find((item) => item.role === "tool");
@@ -307,9 +307,9 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("confirmation-token");
 	});
 
-	test("projects standard subagent registry pagination arguments and summary", () => {
+	test("projects standard subagent registry pagination arguments and summary", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		session.appendMessage(
+		await session.appendMessage(
 			assistant(
 				[
 					{
@@ -322,7 +322,7 @@ describe("RPC transcript projection", () => {
 				20,
 			),
 		);
-		session.appendMessage({
+		await session.appendMessage({
 			role: "toolResult",
 			toolCallId: "subagent-list-call",
 			toolName: "subagent_registry",
@@ -357,9 +357,9 @@ describe("RPC transcript projection", () => {
 		});
 	});
 
-	test("projects standard subagent registry follow arguments", () => {
+	test("projects standard subagent registry follow arguments", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		session.appendMessage(
+		await session.appendMessage(
 			assistant(
 				[
 					{
@@ -372,7 +372,7 @@ describe("RPC transcript projection", () => {
 				20,
 			),
 		);
-		session.appendMessage({
+		await session.appendMessage({
 			role: "toolResult",
 			toolCallId: "subagent-follow-call",
 			toolName: "subagent_registry",
@@ -401,9 +401,9 @@ describe("RPC transcript projection", () => {
 		});
 	});
 
-	test("projects nested subagent delegation trees with live fields and a bounded depth", () => {
+	test("projects nested subagent delegation trees with live fields and a bounded depth", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		session.appendMessage(
+		await session.appendMessage(
 			assistant(
 				[
 					{
@@ -423,7 +423,7 @@ describe("RPC transcript projection", () => {
 			task: `level ${depth} task`,
 			...(depth < 7 ? { children: [makeNode(depth + 1)] } : {}),
 		});
-		session.appendMessage({
+		await session.appendMessage({
 			role: "toolResult",
 			toolCallId: "subagent-call",
 			toolName: "subagent",
@@ -479,15 +479,15 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("sa_depth_6");
 	});
 
-	test("projects displayed review seed messages so remote clients can continue from findings", () => {
+	test("projects displayed review seed messages so remote clients can continue from findings", async () => {
 		const privateMarker = "private-github-discussion-marker";
 		const session = SessionManager.inMemory("/workspace");
-		session.appendCustomMessageEntry("review", "Automated review result\n\nFindings:\n1. Fix the bug", true, {
+		await session.appendCustomMessageEntry("review", "Automated review result\n\nFindings:\n1. Fix the bug", true, {
 			findings: [{ title: "Fix the bug" }],
 			privateAnalysis: privateMarker,
 		});
-		session.appendCustomMessageEntry("review", "Hidden review context", false);
-		session.appendCustomMessageEntry("extension.note", "Displayed extension note", true);
+		await session.appendCustomMessageEntry("review", "Hidden review context", false);
+		await session.appendCustomMessageEntry("extension.note", "Displayed extension note", true);
 
 		const transcript = projectSessionTranscript(session);
 
@@ -502,10 +502,10 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("Displayed extension note");
 	});
 
-	test("caps limits and paginates older items with beforeEntryId", () => {
+	test("caps limits and paginates older items with beforeEntryId", async () => {
 		const session = SessionManager.inMemory("/workspace");
 		for (let index = 0; index < 205; index++) {
-			session.appendMessage(user(`message ${index}`, index));
+			await session.appendMessage(user(`message ${index}`, index));
 		}
 
 		const capped = projectSessionTranscript(session, { limit: 1_000 });
@@ -530,9 +530,9 @@ describe("RPC transcript projection", () => {
 		expect(older.nextBeforeEntryId).toBe(older.items[0].id);
 	});
 
-	test("advertises imageCount on user items and keeps image-only user messages", () => {
+	test("advertises imageCount on user items and keeps image-only user messages", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		const withTextEntryId = session.appendMessage({
+		const withTextEntryId = await session.appendMessage({
 			role: "user",
 			content: [
 				{ type: "text", text: "look at this" },
@@ -541,12 +541,12 @@ describe("RPC transcript projection", () => {
 			],
 			timestamp: 10,
 		});
-		const imageOnlyEntryId = session.appendMessage({
+		const imageOnlyEntryId = await session.appendMessage({
 			role: "user",
 			content: [{ type: "image", data: "b25seQ==", mimeType: "image/jpeg" }],
 			timestamp: 20,
 		});
-		session.appendMessage(user("plain", 30));
+		await session.appendMessage(user("plain", 30));
 
 		const transcript = projectSessionTranscript(session);
 
@@ -564,9 +564,9 @@ describe("RPC transcript projection", () => {
 		expect(JSON.stringify(transcript)).not.toContain("aGVsbG8=");
 	});
 
-	test("advertises imageCount on tool items with image results and keeps projections text-only", () => {
+	test("advertises imageCount on tool items with image results and keeps projections text-only", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		session.appendMessage(
+		await session.appendMessage(
 			assistant(
 				[
 					{
@@ -590,7 +590,7 @@ describe("RPC transcript projection", () => {
 			isError: false,
 			timestamp: 20,
 		};
-		const toolEntryId = session.appendMessage(imageReadResult);
+		const toolEntryId = await session.appendMessage(imageReadResult);
 		const textReadResult: ToolResultMessage = {
 			role: "toolResult",
 			toolCallId: "read-image-call",
@@ -599,7 +599,7 @@ describe("RPC transcript projection", () => {
 			isError: false,
 			timestamp: 30,
 		};
-		session.appendMessage(textReadResult);
+		await session.appendMessage(textReadResult);
 
 		const transcript = projectSessionTranscript(session);
 		const toolItems = transcript.items.filter((item) => item.role === "tool");
@@ -620,12 +620,12 @@ describe("message image recovery", () => {
 		return { type: "image", data: "A".repeat(projectedBytes - envelopeBytes), mimeType: "image/png" };
 	}
 
-	test("keeps an exact-budget image response below the app line cap and rejects one more component byte", () => {
+	test("keeps an exact-budget image response below the app line cap and rejects one more component byte", async () => {
 		const emptyProjectedImage = { type: "image", data: "", mimeType: "image/png", index: 0 };
 		const emptyProjectedBytes = Buffer.byteLength(JSON.stringify(emptyProjectedImage), "utf8");
 		const exactData = "A".repeat(MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES - emptyProjectedBytes);
 		const session = SessionManager.inMemory("/workspace");
-		const entryId = session.appendMessage({
+		const entryId = await session.appendMessage({
 			role: "user",
 			content: [{ type: "image", data: exactData, mimeType: "image/png" }],
 			timestamp: 10,
@@ -657,7 +657,7 @@ describe("message image recovery", () => {
 		);
 
 		const oversized = SessionManager.inMemory("/workspace");
-		const oversizedEntryId = oversized.appendMessage({
+		const oversizedEntryId = await oversized.appendMessage({
 			role: "user",
 			content: [{ type: "image", data: `${exactData}B`, mimeType: "image/png" }],
 			timestamp: 10,
@@ -668,7 +668,7 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("accepts the exact per-entry serialized image budget and rejects one more byte", () => {
+	test("accepts the exact per-entry serialized image budget and rejects one more byte", async () => {
 		const imageCount = 5;
 		const baseImageBytes = Math.floor(MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES / imageCount);
 		const imageByteTargets = Array.from({ length: imageCount }, (_, index) =>
@@ -679,7 +679,7 @@ describe("message image recovery", () => {
 		expect(Math.max(...imageByteTargets)).toBeLessThan(MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES);
 
 		const exact = SessionManager.inMemory("/workspace");
-		const exactEntryId = exact.appendMessage({
+		const exactEntryId = await exact.appendMessage({
 			role: "user",
 			content: imageByteTargets.map((bytes, index) => imageWithProjectedBytes(bytes, index)),
 			timestamp: 10,
@@ -694,7 +694,7 @@ describe("message image recovery", () => {
 		const oversized = SessionManager.inMemory("/workspace");
 		const oversizedTargets = [...imageByteTargets];
 		oversizedTargets[oversizedTargets.length - 1] += 1;
-		const oversizedEntryId = oversized.appendMessage({
+		const oversizedEntryId = await oversized.appendMessage({
 			role: "user",
 			content: oversizedTargets.map((bytes, index) => imageWithProjectedBytes(bytes, index)),
 			timestamp: 10,
@@ -705,9 +705,9 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("accepts the exact per-entry image count and rejects one more image", () => {
+	test("accepts the exact per-entry image count and rejects one more image", async () => {
 		const exact = SessionManager.inMemory("/workspace");
-		const exactEntryId = exact.appendMessage({
+		const exactEntryId = await exact.appendMessage({
 			role: "user",
 			content: Array.from({ length: MESSAGE_IMAGES_ENTRY_MAX_ITEMS }, (_, index) => ({
 				type: "image" as const,
@@ -724,7 +724,7 @@ describe("message image recovery", () => {
 		expect(exactResult.nextImageIndex).toBe(MESSAGE_IMAGES_PAGE_MAX_ITEMS);
 
 		const oversized = SessionManager.inMemory("/workspace");
-		const oversizedEntryId = oversized.appendMessage({
+		const oversizedEntryId = await oversized.appendMessage({
 			role: "user",
 			content: Array.from({ length: MESSAGE_IMAGES_ENTRY_MAX_ITEMS + 1 }, () => ({
 				type: "image" as const,
@@ -739,9 +739,9 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("returns the image blocks for an entry with paging metadata", () => {
+	test("returns the image blocks for an entry with paging metadata", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		const entryId = session.appendMessage({
+		const entryId = await session.appendMessage({
 			role: "user",
 			content: [
 				{ type: "text", text: "two shots" },
@@ -765,10 +765,10 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("pages under the serialized byte budget", () => {
+	test("pages under the serialized byte budget", async () => {
 		const session = SessionManager.inMemory("/workspace");
 		const bigImage = "A".repeat(100);
-		const entryId = session.appendMessage({
+		const entryId = await session.appendMessage({
 			role: "user",
 			content: [
 				{ type: "image", data: bigImage, mimeType: "image/jpeg" },
@@ -806,9 +806,9 @@ describe("message image recovery", () => {
 		expect(finalPage.nextImageIndex).toBeNull();
 	});
 
-	test("rejects cursors that cannot produce the next contiguous nonempty page", () => {
+	test("rejects cursors that cannot produce the next contiguous nonempty page", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		const entryId = session.appendMessage({
+		const entryId = await session.appendMessage({
 			role: "user",
 			content: [
 				{ type: "image", data: "Zmlyc3Q=", mimeType: "image/jpeg" },
@@ -825,9 +825,9 @@ describe("message image recovery", () => {
 		}
 	});
 
-	test("rejects a single image that cannot fit in a response page", () => {
+	test("rejects a single image that cannot fit in a response page", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		const entryId = session.appendMessage({
+		const entryId = await session.appendMessage({
 			role: "user",
 			content: [{ type: "image", data: "A".repeat(1_000), mimeType: "image/jpeg" }],
 			timestamp: 10,
@@ -839,9 +839,9 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("caps the number of images returned in one page", () => {
+	test("caps the number of images returned in one page", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		const entryId = session.appendMessage({
+		const entryId = await session.appendMessage({
 			role: "user",
 			content: Array.from({ length: 40 }, (_, index) => ({
 				type: "image" as const,
@@ -860,9 +860,9 @@ describe("message image recovery", () => {
 		expect(result.nextImageIndex).toBe(32);
 	});
 
-	test("returns an empty page for entries without images", () => {
+	test("returns an empty page for entries without images", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		const entryId = session.appendMessage(user("no images here", 10));
+		const entryId = await session.appendMessage(user("no images here", 10));
 
 		expect(projectMessageImages(session.getBranch(), entryId)).toEqual({
 			ok: true,
@@ -873,7 +873,7 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("recovers image blocks persisted on a tool result entry", () => {
+	test("recovers image blocks persisted on a tool result entry", async () => {
 		const session = SessionManager.inMemory("/workspace");
 		const toolResult: ToolResultMessage = {
 			role: "toolResult",
@@ -886,7 +886,7 @@ describe("message image recovery", () => {
 			isError: false,
 			timestamp: 10,
 		};
-		const entryId = session.appendMessage(toolResult);
+		const entryId = await session.appendMessage(toolResult);
 
 		expect(projectMessageImages(session.getBranch(), entryId)).toEqual({
 			ok: true,
@@ -897,9 +897,9 @@ describe("message image recovery", () => {
 		});
 	});
 
-	test("rejects unknown entries", () => {
+	test("rejects unknown entries", async () => {
 		const session = SessionManager.inMemory("/workspace");
-		session.appendMessage(user("hello", 10));
+		await session.appendMessage(user("hello", 10));
 
 		expect(projectMessageImages(session.getBranch(), "missing-entry")).toEqual({
 			ok: false,

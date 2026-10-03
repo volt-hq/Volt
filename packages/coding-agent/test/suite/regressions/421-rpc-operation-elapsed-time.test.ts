@@ -131,7 +131,7 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 				],
 			});
 			harnesses.push(harness);
-			harness.session.setSessionName("Reconnect timing regression");
+			await harness.session.setSessionName("Reconnect timing regression");
 			const runtime = new AgentSessionRuntime(
 				harness.session,
 				{

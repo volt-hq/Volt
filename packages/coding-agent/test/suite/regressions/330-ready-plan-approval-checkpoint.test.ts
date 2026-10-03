@@ -66,7 +66,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		const harness = await createHarness({ settings: { theme: "dark", retry: { enabled: false } } });
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", harness.tempDir);
 		await harness.session.setAgentMode("plan");
-		const draft = harness.session.updatePlan({
+		const draft = await harness.session.updatePlan({
 			title: PLAN_TITLE,
 			summary: PLAN_SUMMARY,
 			steps: [{ text: "Apply the approved change" }],
@@ -109,7 +109,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 		]);
 		const run = harness.session.prompt("Plan the change");
 		await entered.promise;
-		harness.session.submitPlan({
+		await harness.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: PLAN_TITLE,

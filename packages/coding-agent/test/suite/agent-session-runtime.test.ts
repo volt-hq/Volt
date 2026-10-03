@@ -412,7 +412,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 		const result = await runtime.newSession({
 			setup: async (sessionManager) => {
-				sessionManager.appendFastModeChange(true);
+				await sessionManager.appendFastModeChange(true);
 			},
 		});
 
@@ -426,9 +426,8 @@ describe("AgentSessionRuntime characterization", () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		const manager = runtime.session.sessionManager;
 		const messageTime = Date.now() - 60_000;
-		manager.appendMessage({ role: "user", content: "activity baseline", timestamp: messageTime });
-		runtime.session.setSessionName("renamed after activity");
-		await manager.flush();
+		await manager.appendMessage({ role: "user", content: "activity baseline", timestamp: messageTime });
+		await runtime.session.setSessionName("renamed after activity");
 
 		const stored = (await SessionManager.list(runtime.cwd, manager.getSessionDir())).find(
 			(session) => session.id === runtime.session.sessionId,
@@ -445,16 +444,22 @@ describe("AgentSessionRuntime characterization", () => {
 		const manager = runtime.session.sessionManager;
 		const firstMessageTime = Date.now() - 3_000;
 		const lastMessageTime = firstMessageTime + 1_000;
-		manager.appendCustomMessageEntry(
+		await manager.appendCustomMessageEntry(
 			"test.displayed",
 			"displayed fallback",
 			true,
 			undefined,
 			firstMessageTime - 1_000,
 		);
-		manager.appendMessage({ role: "user", content: "first user", timestamp: firstMessageTime });
-		manager.appendCustomMessageEntry("test.hidden", "hidden activity", false, undefined, lastMessageTime + 60_000);
-		manager.appendMessage({ role: "user", content: "second user", timestamp: lastMessageTime });
+		await manager.appendMessage({ role: "user", content: "first user", timestamp: firstMessageTime });
+		await manager.appendCustomMessageEntry(
+			"test.hidden",
+			"hidden activity",
+			false,
+			undefined,
+			lastMessageTime + 60_000,
+		);
+		await manager.appendMessage({ role: "user", content: "second user", timestamp: lastMessageTime });
 		const expected = summarizeSessionEntries(manager.getEntries());
 		expect(expected).toEqual({
 			messageCount: 3,
@@ -484,15 +489,14 @@ describe("AgentSessionRuntime characterization", () => {
 		const header = manager.getHeader();
 		if (!header) throw new Error("Expected current session header");
 		const createdAt = new Date(header.timestamp).toISOString();
-		manager.appendPlanningState({ mode: "plan", plan: null });
-		manager.appendCustomMessageEntry(
+		await manager.appendPlanningState({ mode: "plan", plan: null });
+		await manager.appendCustomMessageEntry(
 			"test.hidden-after-planning",
 			"hidden activity",
 			false,
 			undefined,
 			new Date(header.timestamp).getTime() + 60_000,
 		);
-		await manager.flush();
 
 		const stored = (await SessionManager.list(runtime.cwd, manager.getSessionDir())).find(
 			(session) => session.id === runtime.session.sessionId,
@@ -508,14 +512,14 @@ describe("AgentSessionRuntime characterization", () => {
 	it("lists current-workspace sessions and switches by session id", async () => {
 		const { runtime, tempDir } = await createRuntimeForTest(() => {});
 
-		runtime.session.setSessionName("First session");
+		await runtime.session.setSessionName("First session");
 		await runtime.session.prompt("first prompt");
 		const firstSessionId = runtime.session.sessionId;
 
 		const newSessionResult = await runtime.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
 		await runtime.session.bindExtensions({});
-		runtime.session.setSessionName("Second session");
+		await runtime.session.setSessionName("Second session");
 		await runtime.session.prompt("second prompt");
 		const secondSessionId = runtime.session.sessionId;
 
@@ -524,8 +528,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const foreignSession = await SessionManager.create(foreignCwd, runtime.session.sessionManager.getSessionDir(), {
 			id: "foreign-session",
 		});
-		foreignSession.appendMessage({ role: "user", content: "foreign prompt", timestamp: Date.now() });
-		await foreignSession.flush();
+		await foreignSession.appendMessage({ role: "user", content: "foreign prompt", timestamp: Date.now() });
 
 		const sessions = await runtime.listSessions();
 		expect(sessions).toEqual(
@@ -565,7 +568,7 @@ describe("AgentSessionRuntime characterization", () => {
 	it("switches by exact id to a message-free session without listing it", async () => {
 		const { runtime } = await createRuntimeForTest(() => {}, { bootstrapModel: false });
 		runtime.session.setThinkingLevel("high", { persistDefault: false });
-		runtime.session.setFastModeEnabled(true);
+		await runtime.session.setFastModeEnabled(true);
 		const fastSessionId = runtime.session.sessionId;
 
 		const newSessionResult = await runtime.newSession();
@@ -589,8 +592,7 @@ describe("AgentSessionRuntime characterization", () => {
 			id: "symlink-alias-session",
 		});
 		try {
-			target.appendMessage({ role: "user", content: "alias prompt", timestamp: Date.now() });
-			await target.flush();
+			await target.appendMessage({ role: "user", content: "alias prompt", timestamp: Date.now() });
 		} finally {
 			await target.closePersistence();
 		}
@@ -633,7 +635,11 @@ describe("AgentSessionRuntime characterization", () => {
 		const otherDir = join(tmpdir(), `volt-runtime-other-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(otherDir, { recursive: true });
 		const otherSession = await SessionManager.create(otherDir);
-		otherSession.appendMessage({ role: "user", content: [{ type: "text", text: "other" }], timestamp: Date.now() });
+		await otherSession.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "other" }],
+			timestamp: Date.now(),
+		});
 		const otherSessionRef = otherSession.getSessionRef();
 		cancelReason = "resume";
 		const resumeResult = await runtime.switchSession(otherSessionRef!);
@@ -658,9 +664,8 @@ describe("AgentSessionRuntime characterization", () => {
 		"rejects a malformed $name import without replacing or poisoning the current session",
 		async ({ importedId, entry, error }) => {
 			const { runtime, tempDir } = await createRuntimeForTest(() => {});
-			runtime.session.setThinkingLevel("high", { persistDefault: false });
-			runtime.session.setFastModeEnabled(true);
-			await runtime.session.sessionManager.flush();
+			await runtime.session.setThinkingLevel("high", { persistDefault: false });
+			await runtime.session.setFastModeEnabled(true);
 			const currentSessionRef = runtime.session.sessionRef;
 			if (!currentSessionRef) throw new Error("Expected current persisted session reference");
 			const snapshotPath = join(tempDir, `${importedId}.jsonl`);
@@ -1080,7 +1085,6 @@ describe("AgentSessionRuntime characterization", () => {
 			await otherRuntime.dispose();
 		});
 		await otherRuntime.session.prompt("other");
-		await otherRuntime.session.sessionManager.flush();
 		const otherSessionRef = otherRuntime.session.sessionRef!;
 		// A session is open for writing in one host at a time: the other runtime closes it first.
 		await otherRuntime.dispose();
@@ -1159,7 +1163,6 @@ describe("AgentSessionRuntime characterization", () => {
 		await otherRuntime.session.setModel(faux.getModel("faux-2")!);
 		otherRuntime.session.setThinkingLevel("off");
 		await otherRuntime.session.prompt("hello");
-		await otherRuntime.session.sessionManager.flush();
 		const targetSessionRef = otherRuntime.session.sessionRef!;
 		// A session is open for writing in one host at a time: the other runtime closes it first.
 		await otherRuntime.dispose();

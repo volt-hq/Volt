@@ -927,7 +927,6 @@ export class AgentSessionRuntime {
 					});
 					created = await options.create();
 					candidateSessionOwnsManager = true;
-					await created.session.sessionManager.flush();
 					this.applyReplacement(created);
 					applied = true;
 					await options.afterApply?.();
@@ -1073,11 +1072,6 @@ export class AgentSessionRuntime {
 				typeof sessionLike.subscribeConversationGenerationChanges === "function"
 					? sessionLike.subscribeConversationGenerationChanges(() => listener())
 					: () => {},
-			// Snapshots read the in-memory index, which can lead the committed log.
-			snapshotOrdinal: () =>
-				typeof session.sessionManager?.getIndexedOrdinal === "function"
-					? session.sessionManager.getIndexedOrdinal()
-					: 0,
 		};
 	}
 
@@ -1165,10 +1159,8 @@ export class AgentSessionRuntime {
 		}
 		if (withSession) {
 			await withSession(this.session.createReplacedSessionContext());
-			await this.session.sessionManager.flush();
 			return { seeded: true };
 		}
-		await this.session.sessionManager.flush();
 		return { seeded: false };
 	}
 
@@ -1443,7 +1435,6 @@ export class AgentSessionRuntime {
 			};
 			const result = await sourceSession.activatePlan(planId, expectedRevision, execution);
 			if (result.activated) {
-				await sourceSession.sessionManager.flush();
 				void sourceSession
 					.sendCustomMessage(
 						{
@@ -1473,7 +1464,7 @@ export class AgentSessionRuntime {
 		const replacement = await this.newSession({
 			...(sourceSessionRef ? { parentSessionRef: sourceSessionRef } : {}),
 			setup: async (sessionManager) => {
-				restoreReviewStateFromHandoff(sessionManager, sourceReviewState);
+				await restoreReviewStateFromHandoff(sessionManager, sourceReviewState);
 				execution = {
 					id: randomUUID(),
 					approvedRevision: expectedRevision,
@@ -1481,7 +1472,7 @@ export class AgentSessionRuntime {
 					sourceSessionId,
 					targetSessionId: sessionManager.getSessionId(),
 				};
-				sessionManager.appendPlanningState({
+				await sessionManager.appendPlanningState({
 					mode: "build",
 					plan: {
 						...clonePlanState(sourcePlan),
@@ -1491,23 +1482,23 @@ export class AgentSessionRuntime {
 					},
 				});
 				if (sourceModel) {
-					sessionManager.appendModelChange(sourceModel.provider, sourceModel.id);
+					await sessionManager.appendModelChange(sourceModel.provider, sourceModel.id);
 				}
-				sessionManager.appendThinkingLevelChange(sourceThinking);
+				await sessionManager.appendThinkingLevelChange(sourceThinking);
 				if (sourceFastMode) {
-					sessionManager.appendFastModeChange(true);
+					await sessionManager.appendFastModeChange(true);
 				}
 			},
 			withSession: async (context) => {
 				if (!execution) {
 					throw new Error("Plan execution session was not initialized");
 				}
-				// The source AgentSession has been disposed and its persistence lane
-				// sealed before this post-replacement handoff callback. Reopen persisted
-				// sources as the new exclusive writer; in-memory sources remain reusable.
+				// The source AgentSession has been disposed and its log closed before
+				// this post-replacement handoff callback. Reopen persisted sources as
+				// the new exclusive writer; in-memory sources remain reusable.
 				const handoffManager = sourceSessionRef ? await SessionManager.open(sourceSessionRef) : sourceManager;
 				try {
-					handoffManager.appendPlanningState({
+					await handoffManager.appendPlanningState({
 						mode: "build",
 						plan: {
 							...clonePlanState(sourcePlan),
@@ -1516,7 +1507,6 @@ export class AgentSessionRuntime {
 							execution,
 						},
 					});
-					await handoffManager.flush();
 				} catch (error) {
 					if (sourceSessionRef) {
 						try {
@@ -1598,7 +1588,7 @@ export class AgentSessionRuntime {
 		} else {
 			sessionManager = SessionManager.inMemory(cwd);
 			if (options?.parentSessionRef) {
-				sessionManager.newSession({ parentSession: options.parentSessionRef });
+				await sessionManager.newSession({ parentSession: options.parentSessionRef });
 			}
 		}
 		const ownsSessionManager = sessionManager !== this.session.sessionManager;
@@ -1615,7 +1605,6 @@ export class AgentSessionRuntime {
 				await options.setup(sessionManager);
 				this.assertStructuralOperationCurrent(operation);
 			}
-			await sessionManager.flush();
 			await registerReviewHandoffAliases(
 				this.session.sessionManager,
 				sessionManager,
@@ -1634,8 +1623,7 @@ export class AgentSessionRuntime {
 			this.assertStructuralOperationCurrent(operation);
 			if (binding) {
 				if (!sameFilesystemLocation(cwd, binding.cwd)) throw new Error(PR_CHECKOUT_CHANGED);
-				sessionManager.recordPrReviewBinding(binding);
-				await sessionManager.flush();
+				await sessionManager.recordPrReviewBinding(binding);
 				this.assertStructuralOperationCurrent(operation);
 			}
 
@@ -1754,8 +1742,6 @@ export class AgentSessionRuntime {
 				}
 			}
 
-			await this.session.sessionManager.flush();
-			this.assertStructuralOperationCurrent(operation);
 			const sessionManager = await this.openSessionManager(currentSessionRef);
 			let managerTransferred = false;
 			try {
@@ -1765,7 +1751,6 @@ export class AgentSessionRuntime {
 				if (!forkedSessionRef) {
 					throw new Error("Failed to create forked session");
 				}
-				await sessionManager.flush();
 				managerTransferred = true;
 				const replacement = await this.replaceCurrentSession({
 					operation,
@@ -1797,7 +1782,7 @@ export class AgentSessionRuntime {
 
 		const sessionManager = this.session.sessionManager;
 		if (!targetLeafId) {
-			sessionManager.newSession();
+			await sessionManager.newSession();
 		} else {
 			await sessionManager.createBranchedSession(targetLeafId);
 		}
@@ -1888,8 +1873,6 @@ export class AgentSessionRuntime {
 		this.assertNoActiveDetachedReview();
 
 		const previousSessionRef = this.session.sessionRef;
-		await this.session.sessionManager.flush();
-		this.assertStructuralOperationCurrent(operation);
 		const sessionManager = await this.createImportedSessionManager(resolvedPath, cwdOverride, () =>
 			this.assertStructuralOperationCurrent(operation),
 		);

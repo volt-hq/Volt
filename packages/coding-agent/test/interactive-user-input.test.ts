@@ -75,8 +75,8 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 	});
 	if (withPlan) {
 		await harness.session.setAgentMode("plan");
-		const draft = harness.session.updatePlan({ steps: [{ text: "Implement project search" }] });
-		harness.session.submitPlan({
+		const draft = await harness.session.updatePlan({ steps: [{ text: "Implement project search" }] });
+		await harness.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Search implementation plan",

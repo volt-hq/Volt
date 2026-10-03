@@ -496,7 +496,7 @@ describe("InteractiveMode profile selector", () => {
 		});
 		try {
 			const setModel = vi.spyOn(session, "setModel");
-			session.setFastModeEnabled(true);
+			await session.setFastModeEnabled(true);
 			const fastStates: boolean[] = [];
 			session.subscribe((event) => {
 				if (event.type === "ui_action_state_changed") fastStates.push(event.state.value === true);

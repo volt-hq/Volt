@@ -488,13 +488,15 @@ Use references returned by `getSessionRef()`, `SessionInfo.ref`, or another `Ses
 
 ### Instance Session Management
 
-- `newSession(options?)` - Start a new identity in the current manager. `options.parentSession` is a `SessionReference`.
+- `await newSession(options?)` - Start a new identity in the current manager. `options.parentSession` is a `SessionReference`.
 - `await createBranchedSession(leafId)` - Replace the manager with a new session containing the selected branch.
-- `await flush()` - Wait for queued persistence and surface store errors.
+- `await closePersistence()` - Wait for every write already called, then close the session's log and release its lock.
+
+Writes run one at a time and resolve after they commit. Reads return committed entries only.
 
 Session replacement across cwd-bound runtime services belongs to `AgentSessionRuntime`, which accepts `SessionReference` values.
 
-### Appending (all return an entry ID)
+### Appending (all resolve with an entry ID after the entry commits)
 
 - `appendMessage(message)`
 - `appendThinkingLevelChange(level)`
@@ -511,8 +513,8 @@ Session replacement across cwd-bound runtime services belongs to `AgentSessionRu
 - `getLeafId()`, `getLeafEntry()`, `getEntry(id)`
 - `getBranch(fromId?)`, `getTree()`, `getChildren(parentId)`
 - `getLabel(id)`
-- `branch(entryId)`, `resetLeaf()`
-- `branchWithSummary(entryId, summary, details?, fromHook?)`
+- `await branch(entryId)`, `await resetLeaf()`
+- `await branchWithSummary(entryId, summary, details?, fromHook?)`
 
 ### Context and Identity
 

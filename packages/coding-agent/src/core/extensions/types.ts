@@ -1347,21 +1347,27 @@ export interface ExtensionAPI {
 		options?: { deliverAs?: "steer" | "followUp" },
 	): void;
 
-	/** Append a custom entry to the session for state persistence (not sent to LLM). */
-	appendEntry<T>(customType: string, data?: JsonCompatibleInput<T>): void;
+	/**
+	 * Append a custom entry to the session for state persistence (not sent to LLM).
+	 * Resolves after the entry commits.
+	 */
+	appendEntry<T>(customType: string, data?: JsonCompatibleInput<T>): Promise<void>;
 
 	// =========================================================================
 	// Session Metadata
 	// =========================================================================
 
-	/** Set the session display name (shown in session selector). */
-	setSessionName(name: string): void;
+	/** Set the session display name (shown in session selector). Resolves after the name commits. */
+	setSessionName(name: string): Promise<void>;
 
 	/** Get the current session name, if set. */
 	getSessionName(): string | undefined;
 
-	/** Set or clear a label on an entry. Labels are user-defined markers for bookmarking/navigation. */
-	setLabel(entryId: string, label: string | undefined): void;
+	/**
+	 * Set or clear a label on an entry. Labels are user-defined markers for
+	 * bookmarking/navigation. Resolves after the label commits.
+	 */
+	setLabel(entryId: string, label: string | undefined): Promise<void>;
 
 	/** Bounded metadata for this extension's managed work; does not grant execution authority. */
 	getWorkStatus(): ExtensionWorkStatus;
@@ -1582,9 +1588,9 @@ export type SendUserMessageHandler = (
 	options?: { deliverAs?: "steer" | "followUp" },
 ) => void;
 
-export type AppendEntryHandler = <T>(customType: string, data?: JsonCompatibleInput<T>) => void;
+export type AppendEntryHandler = <T>(customType: string, data?: JsonCompatibleInput<T>) => Promise<void>;
 
-export type SetSessionNameHandler = (name: string) => void;
+export type SetSessionNameHandler = (name: string) => Promise<void>;
 
 export type GetSessionNameHandler = () => string | undefined;
 
@@ -1609,7 +1615,7 @@ export type GetThinkingLevelHandler = () => ThinkingLevel;
 
 export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
 
-export type SetLabelHandler = (entryId: string, label: string | undefined) => void;
+export type SetLabelHandler = (entryId: string, label: string | undefined) => Promise<void>;
 
 /**
  * Shared state created by loader, used during registration and runtime.

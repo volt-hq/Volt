@@ -354,12 +354,12 @@ export async function loadPersistedSessionSnapshot(manager: SessionManager): Pro
  * u4 -> a4              (another root)
  * ```
  */
-export function buildTestTree(
+export async function buildTestTree(
 	session: SessionManager,
 	structure: {
 		messages: Array<{ role: "user" | "assistant"; text: string; branchFrom?: string }>;
 	},
-): Map<string, string> {
+): Promise<Map<string, string>> {
 	const ids = new Map<string, string>();
 
 	for (const msg of structure.messages) {
@@ -368,11 +368,13 @@ export function buildTestTree(
 			if (!branchFromId) {
 				throw new Error(`Cannot branch from unknown entry: ${msg.branchFrom}`);
 			}
-			session.branch(branchFromId);
+			await session.branch(branchFromId);
 		}
 
 		const id =
-			msg.role === "user" ? session.appendMessage(userMsg(msg.text)) : session.appendMessage(assistantMsg(msg.text));
+			msg.role === "user"
+				? await session.appendMessage(userMsg(msg.text))
+				: await session.appendMessage(assistantMsg(msg.text));
 
 		ids.set(msg.text, id);
 	}

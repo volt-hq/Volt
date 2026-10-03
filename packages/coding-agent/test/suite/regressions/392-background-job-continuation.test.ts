@@ -45,7 +45,7 @@ async function setup(extra: HarnessOptions = {}) {
 		...extra,
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("Job continuation regression");
+	await harness.session.setSessionName("Job continuation regression");
 	const setResponses = harness.setResponses;
 	harness.setResponses = (responses) =>
 		setResponses(

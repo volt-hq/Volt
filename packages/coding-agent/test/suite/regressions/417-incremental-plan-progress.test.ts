@@ -31,11 +31,11 @@ describe("regression #417: incremental approved plan progress", () => {
 			settings: { compaction: { enabled: compact, keepRecentTokens: 1 } },
 		});
 		harnesses.push(harness);
-		harness.session.setSessionName("incremental plan progress regression");
-		harness.sessionManager.appendMessage({ role: "user", content: "Earlier context", timestamp: Date.now() });
-		harness.sessionManager.appendMessage(fauxAssistantMessage("Earlier response"));
+		await harness.session.setSessionName("incremental plan progress regression");
+		await harness.sessionManager.appendMessage({ role: "user", content: "Earlier context", timestamp: Date.now() });
+		await harness.sessionManager.appendMessage(fauxAssistantMessage("Earlier response"));
 		await harness.session.setAgentMode("plan");
-		const draft = harness.session.updatePlan({
+		const draft = await harness.session.updatePlan({
 			title: "Verify three outcomes",
 			summary: "Complete the first outcome, then two related outcomes together.",
 			steps: [
@@ -43,7 +43,7 @@ describe("regression #417: incremental approved plan progress", () => {
 				{ text: "Related outcomes", substeps: [{ text: "Second outcome" }, { text: "Third outcome" }] },
 			],
 		});
-		const ready = harness.session.submitPlan({
+		const ready = await harness.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: draft.title!,

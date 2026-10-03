@@ -23,8 +23,8 @@ function response(value: unknown): GitHubCliResult {
 	return { ok: true, stdout: Buffer.from(JSON.stringify(value)), stderr: "", outputLimited: false, timedOut: false };
 }
 
-function savedTarget() {
-	appendReviewRun(harness.sessionManager, record);
+async function savedTarget() {
+	await appendReviewRun(harness.sessionManager, record);
 	const saved = getReviewRun(harness.sessionManager, record.runId);
 	if (!saved) throw new Error("Missing saved review fixture");
 	return reviewTargetForRerun(saved);
@@ -32,7 +32,7 @@ function savedTarget() {
 
 async function prepareRerun() {
 	return prepareReviewWorkflow({
-		target: savedTarget(),
+		target: await savedTarget(),
 		cwd: harness.tempDir,
 		settingsManager: harness.settingsManager,
 		modelRegistry: harness.session.modelRegistry,
@@ -135,7 +135,7 @@ describe("#406 PR rerun identity", () => {
 			record.target.identity.pullRequest!.url = url;
 			git("config", "remote.upstream.gh-resolved", "base");
 			vi.stubEnv("GH_REPO", "parent/project");
-			const target = savedTarget();
+			const target = await savedTarget();
 			expect(target).toEqual({ kind: "pr", number: "42", expectedUrl: url });
 			if (target.kind !== "pr") throw new Error("Expected PR target");
 			expect(

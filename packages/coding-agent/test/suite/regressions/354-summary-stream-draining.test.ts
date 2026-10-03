@@ -19,7 +19,7 @@ describe("summary stream draining (#354)", () => {
 			const summary = "Summary λ🌲\n".repeat(4096);
 			harness.faux.setSimpleResponses([fauxAssistantMessage(summary)]);
 			const message = { role: "user" as const, content: "Summarize this branch", timestamp: 0 };
-			harness.sessionManager.appendMessage(message);
+			await harness.sessionManager.appendMessage(message);
 			const entries = harness.sessionManager.getBranch();
 			const model = harness.getModel();
 			const signal = new AbortController().signal;

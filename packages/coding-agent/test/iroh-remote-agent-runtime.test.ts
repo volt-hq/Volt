@@ -524,7 +524,7 @@ export default function (volt) {
 		let gitDisposeCalls = 0;
 		let failureInjected = false;
 		const createSessionManager = SessionManager.create.bind(SessionManager);
-		const flush = SessionManager.prototype.flush;
+		const appendThinkingLevelChange = SessionManager.prototype.appendThinkingLevelChange;
 		const closePersistence = SessionManager.prototype.closePersistence;
 		const disposeGitContext = GitContextProvider.prototype.dispose;
 		const createSpy = vi.spyOn(SessionManager, "create").mockImplementation(async (...args) => {
@@ -549,14 +549,15 @@ export default function (volt) {
 			disposeGitContext.call(this);
 			throw gitCleanupError;
 		});
-		const flushSpy = vi.spyOn(SessionManager.prototype, "flush").mockImplementation(function (
+		const appendSpy = vi.spyOn(SessionManager.prototype, "appendThinkingLevelChange").mockImplementation(function (
 			this: SessionManager,
-		): Promise<void> {
+			thinkingLevel,
+		): Promise<string> {
 			if (this === targetManager && serviceGitContext && !failureInjected) {
 				failureInjected = true;
 				return Promise.reject(setupError);
 			}
-			return flush.call(this);
+			return appendThinkingLevelChange.call(this, thinkingLevel);
 		});
 		const closeSpy = vi.spyOn(SessionManager.prototype, "closePersistence").mockImplementation(function (
 			this: SessionManager,
@@ -577,7 +578,7 @@ export default function (volt) {
 			createSpy.mockRestore();
 			refreshSpy.mockRestore();
 			disposeSpy.mockRestore();
-			flushSpy.mockRestore();
+			appendSpy.mockRestore();
 			closeSpy.mockRestore();
 		}
 
@@ -594,7 +595,7 @@ export default function (volt) {
 			expect(targetManager).toBeDefined();
 			expect(managerCloseCalls).toBe(1);
 			if (!targetManager) throw new Error("expected the consumed remote session manager");
-			await expect(targetManager.materialize()).rejects.toThrow("Session persistence is closed");
+			await expect(targetManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
 			const retainedRef = await SessionManager.findForResume(sessionDir, "failed-remote-services");
 			expect(retainedRef).toBeDefined();
 			if (!retainedRef) throw new Error("expected the committed remote session row");

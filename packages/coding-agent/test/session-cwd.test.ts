@@ -77,7 +77,7 @@ describe("session cwd handling", () => {
 			setupError,
 		);
 		expect(closePersistence).toHaveBeenCalledOnce();
-		expect(() => sessionManager.appendSessionInfo("late write")).toThrow("Session persistence is closed");
+		await expect(sessionManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
 		expect(await SessionManager.findForResume(sessionDir, ref.sessionId)).toEqual(ref);
 	});
 
@@ -123,7 +123,7 @@ describe("session cwd handling", () => {
 			}),
 		).rejects.toBeInstanceOf(MissingSessionCwdError);
 		expect(createRuntimeCalled).toBe(false);
-		expect(() => sessionManager.appendSessionInfo("late write")).toThrow("Session persistence is closed");
+		await expect(sessionManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
 		expect(await SessionManager.findForResume(sessionDir, ref.sessionId)).toEqual(ref);
 	});
 });

@@ -430,7 +430,7 @@ export default function presetExtension(volt: ExtensionAPI) {
 	// Persist preset state
 	volt.on("turn_start", async () => {
 		if (activePresetName) {
-			volt.appendEntry("preset-state", { name: activePresetName });
+			await volt.appendEntry("preset-state", { name: activePresetName });
 		}
 	});
 }

@@ -30,8 +30,7 @@ async function fixture(): Promise<{ agentDir: string; cwd: string; sessionDir: s
 	mkdirSync(cwd, { recursive: true });
 	mkdirSync(sessionDir, { recursive: true });
 	const manager = await SessionManager.create(cwd, sessionDir, { id: "phone-session" });
-	manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
-	await manager.flush();
+	await manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
 	const ref = manager.getSessionRef()!;
 	await manager.closePersistence();
 	return { agentDir, cwd, sessionDir, ref };

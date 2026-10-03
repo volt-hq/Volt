@@ -15,15 +15,6 @@ const managerOwner = createSessionManagerTestOwner();
 
 let root: string;
 
-function captureError(operation: () => unknown): unknown {
-	try {
-		operation();
-		return undefined;
-	} catch (error) {
-		return error;
-	}
-}
-
 async function captureAsyncError(operation: () => Promise<unknown>): Promise<unknown> {
 	try {
 		await operation();
@@ -79,9 +70,8 @@ describe("PR #329 canonical entry admission contract", () => {
 	it("rejects a schema-invalid branch summary before moving or persisting the leaf", async () => {
 		const sessionDir = join(root, "branch-store");
 		const manager = await SessionManager.create(root, sessionDir, { id: "branch-admission" });
-		const firstId = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		const secondId = manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
-		await manager.flush();
+		const firstId = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const secondId = await manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
@@ -90,7 +80,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		manager.subscribeEntries((entry) => entryNotifications.push(entry.id));
 		manager.subscribeBranchChanges((change) => branchNotifications.push(change));
 
-		const admissionError = captureError(() => manager.branchWithSummary(firstId, 42 as never));
+		const admissionError = await captureAsyncError(() => manager.branchWithSummary(firstId, 42 as never));
 		const stateAfterRejection = {
 			leafId: manager.getLeafId(),
 			entryIds: manager.getEntries().map((entry) => entry.id),
@@ -98,7 +88,6 @@ describe("PR #329 canonical entry admission contract", () => {
 			branchNotifications: [...branchNotifications],
 		};
 
-		await manager.flush();
 		const reopenedAfterRejection = await SessionManager.openReadOnly(ref);
 		const persistedAfterRejection = {
 			leafId: reopenedAfterRejection.getLeafId(),
@@ -107,8 +96,7 @@ describe("PR #329 canonical entry admission contract", () => {
 				.map((entry) => ({ id: entry.id, ordinal: entry.ordinal, parentId: entry.parentId })),
 		};
 
-		const nextId = manager.appendSessionInfo("after rejected branch");
-		await manager.flush();
+		const nextId = await manager.appendSessionInfo("after rejected branch");
 		const reopenedAfterNextAppend = await SessionManager.openReadOnly(ref);
 		const nextEntry = reopenedAfterNextAppend.getEntry(nextId);
 
@@ -140,7 +128,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		const overlongId = "s".repeat(SESSION_ID_MAX_CHARACTERS + 1);
 		const inMemory = SessionManager.inMemory(root);
 		const originalId = inMemory.getSessionId();
-		const replacementError = captureError(() => inMemory.newSession({ id: overlongId }));
+		const replacementError = await captureAsyncError(() => inMemory.newSession({ id: overlongId }));
 		const sessionDir = join(root, "public-id-store");
 		const creationError = await captureAsyncError(() => SessionManager.create(root, sessionDir, { id: overlongId }));
 
@@ -160,10 +148,9 @@ describe("PR #329 canonical entry admission contract", () => {
 	it("accepts a 512-character public session ID across replacement, creation, and reference open", async () => {
 		const boundaryId = "b".repeat(SESSION_ID_MAX_CHARACTERS);
 		const inMemory = SessionManager.inMemory(root);
-		inMemory.newSession({ id: boundaryId });
+		await inMemory.newSession({ id: boundaryId });
 		const sessionDir = join(root, "boundary-id-store");
 		const persisted = await SessionManager.create(root, sessionDir, { id: boundaryId });
-		await persisted.flush();
 		const ref = persisted.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted boundary session reference");
 		const reopened = await SessionManager.openReadOnly(ref);
@@ -192,7 +179,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		};
 		const inMemory = SessionManager.inMemory(root);
 		const originalId = inMemory.getSessionId();
-		const replacementError = captureError(() =>
+		const replacementError = await captureAsyncError(() =>
 			inMemory.newSession({ id: "reference-child", parentSession: overlongRef }),
 		);
 		const openError = await captureAsyncError(() => SessionManager.open(overlongRef));
@@ -242,13 +229,12 @@ describe("PR #329 canonical entry admission contract", () => {
 	it("rejects overlong subagent session IDs before entry admission or persistence", async () => {
 		const sessionDir = join(root, "subagent-store");
 		const manager = await SessionManager.create(root, sessionDir, { id: "subagent-parent" });
-		const parentEntryId = manager.appendMessage({ role: "user", content: "delegate", timestamp: 1 });
-		await manager.flush();
+		const parentEntryId = await manager.appendMessage({ role: "user", content: "delegate", timestamp: 1 });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 		const overlongId = "c".repeat(SESSION_ID_MAX_CHARACTERS + 1);
 
-		const admissionError = captureError(() =>
+		const admissionError = await captureAsyncError(() =>
 			manager.appendSubagentSpawn({
 				toolCallId: "call-overlong",
 				subagentId: "sa_overlong",
@@ -259,8 +245,7 @@ describe("PR #329 canonical entry admission contract", () => {
 			}),
 		);
 		const spawnsAfterRejection = manager.getSubagentSpawnEntries();
-		const nextId = manager.appendSessionInfo("after rejected spawn");
-		await manager.flush();
+		const nextId = await manager.appendSessionInfo("after rejected spawn");
 		const reopened = await SessionManager.openReadOnly(ref);
 		const nextEntry = reopened.getEntry(nextId);
 

@@ -540,10 +540,10 @@ export function decodeStoredSessionEntry(stored: StoredSessionEntryEnvelope): Se
 	return entry;
 }
 
-function validateEntryReferences(
-	entry: SessionEntry & { ordinal: number },
-	byId: ReadonlyMap<string, SessionEntry>,
-): void {
+/** Entries by id, as reference validation reads them. */
+export type SessionEntryIndex = Pick<ReadonlyMap<string, SessionEntry>, "get" | "has">;
+
+function validateEntryReferences(entry: SessionEntry & { ordinal: number }, byId: SessionEntryIndex): void {
 	if (byId.has(entry.id)) throw new Error(`Session entry ${entry.id} has a duplicate identity`);
 	if (entry.parentId !== null && !byId.has(entry.parentId)) {
 		throw new Error(`Session entry ${entry.id} has an invalid or forward parent`);
@@ -788,7 +788,7 @@ export function validatePersistedSessionEntrySequence(
 
 export function validateSessionEntryAdmissionReferences(
 	entry: SessionEntry,
-	byId: ReadonlyMap<string, SessionEntry>,
+	byId: SessionEntryIndex,
 	nextOrdinal: number,
 ): void {
 	validateEntryReferences({ ...entry, ordinal: nextOrdinal }, byId);

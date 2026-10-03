@@ -106,9 +106,9 @@ describe("InteractiveMode durable review actions", () => {
 		{ findingIds: " \t ", acknowledgedAt: 123 },
 	])("seeds all durable findings and preserves acknowledgment for blank findingIds $findingIds", async (testCase) => {
 		const manager = SessionManager.inMemory("/workspace");
-		appendReviewRun(manager, durableRecord());
+		await appendReviewRun(manager, durableRecord());
 		if (testCase.acknowledgedAt !== undefined) {
-			acknowledgeReviewRun(manager, "review:test", testCase.acknowledgedAt);
+			await acknowledgeReviewRun(manager, "review:test", testCase.acknowledgedAt);
 		}
 		const replacementManager = SessionManager.inMemory("/workspace");
 		const seedMessages: object[] = [];
@@ -155,7 +155,7 @@ describe("InteractiveMode durable review actions", () => {
 
 	test("reruns a durable branch through its stored locator and rejects missing locators", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		appendReviewRun(manager, durableBranchRecord());
+		await appendReviewRun(manager, durableBranchRecord());
 		const runInteractiveReviewWorkflow = vi.fn(async () => ({ status: "cancelled" as const }));
 		const fakeThis = {
 			session: { sessionManager: manager },
@@ -183,7 +183,7 @@ describe("InteractiveMode durable review actions", () => {
 
 		const missing = durableBranchRecord("review:missing-locator");
 		delete missing.target.branchBase;
-		appendReviewRun(manager, missing);
+		await appendReviewRun(manager, missing);
 		await expect(
 			runInteractiveReviewLifecycleAction.call(fakeThis, REVIEW_RERUN_ACTION_ID, {
 				runId: missing.runId,

@@ -1089,7 +1089,6 @@ describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () =
 		const session = await SessionManager.create(workspaceDir, getDefaultSessionDir(workspaceDir, agentDir), {
 			id: sessionId,
 		});
-		await session.materialize();
 		await session.closePersistence();
 
 		const oldPositiveGate = createDeferred();
@@ -1247,7 +1246,6 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 		const sessionDir = getDefaultSessionDir(workspaceDir, agentDir);
 		const sourceSession = await SessionManager.create(workspaceDir, sessionDir, { id: sourceSessionId });
 		const replacementSession = await SessionManager.create(workspaceDir, sessionDir, { id: replacementSessionId });
-		await Promise.all([sourceSession.materialize(), replacementSession.materialize()]);
 		await Promise.all([sourceSession.closePersistence(), replacementSession.closePersistence()]);
 
 		const faux = createFauxProvider();

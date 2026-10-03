@@ -1025,18 +1025,17 @@ try {
   const children = sm.getChildren(id);
 
   const label = sm.getLabel(id);
-  sm.appendLabelChange(id, "checkpoint");
+  await sm.appendLabelChange(id, "checkpoint");
 
-  sm.branch(entryId);
-  sm.branchWithSummary(id, "Summary...");
+  await sm.branch(entryId);
+  await sm.branchWithSummary(id, "Summary...");
   await sm.createBranchedSession(leafId);
-  await sm.flush();
 } finally {
   await sm.closePersistence();
 }
 ```
 
-Callers that directly own a persisted `SessionManager` must await `closePersistence()` before deleting its session directory or exiting. Static list, search, context lookup, export, and delete operations release their scoped store ownership before resolving.
+`SessionManager` writes (`appendMessage`, `appendLabelChange`, `branch`, `newSession`, and the other `append*` and client-input methods) run one at a time and resolve after their entries commit; reads return committed state only, and entry listeners see an entry only after it commits. Await each write. Callers that directly own a persisted `SessionManager` must await `closePersistence()` before deleting its session directory or exiting; it waits for writes already called. Static list, search, context lookup, export, and delete operations release their scoped store ownership before resolving.
 
 > See [examples/sdk/11-sessions.ts](../examples/sdk/11-sessions.ts) and [Session Format](session-format.md)
 

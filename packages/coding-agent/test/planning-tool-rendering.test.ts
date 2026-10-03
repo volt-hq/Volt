@@ -29,11 +29,10 @@ function createPlan(): PlanState {
 function createController(planning: PlanningState): PlanningToolController {
 	return {
 		getPlanningState: () => planning,
-		flushPlanningState: async () => undefined,
-		updatePlan: () => planning.plan!,
-		submitPlan: () => planning.plan!,
-		updatePlanProgress: () => planning.plan!,
-		requestReplan: () => planning,
+		updatePlan: async () => planning.plan!,
+		submitPlan: async () => planning.plan!,
+		updatePlanProgress: async () => planning.plan!,
+		requestReplan: async () => planning,
 	};
 }
 

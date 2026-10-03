@@ -26,11 +26,11 @@ async function setup(): Promise<Harness> {
 		],
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("threshold test");
+	await harness.session.setSessionName("threshold test");
 	const model = harness.getModel();
 	harness.settingsManager.setCompactionThresholdTokens(`${model.provider}/${model.id}`, 350_000);
 	// The faux provider reports prompt/cache usage for this large saved history.
-	harness.sessionManager.appendMessage({ role: "user", content: "older history ".repeat(65_000), timestamp: 1 });
+	await harness.sessionManager.appendMessage({ role: "user", content: "older history ".repeat(65_000), timestamp: 1 });
 	return harness;
 }
 

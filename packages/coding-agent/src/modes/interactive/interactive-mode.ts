@@ -3673,12 +3673,8 @@ export class InteractiveMode {
 			abortRun: () => this.session.abort("host_action"),
 			compactContext: (customInstructions) => this.session.compact(customInstructions),
 			newSession: (newSessionOptions) => this.runtimeHost.newSession(newSessionOptions),
-			renameSession: (name) => {
-				this.session.setSessionName(name);
-			},
-			setFastModeEnabled: (enabled) => {
-				this.session.setFastModeEnabled(enabled);
-			},
+			renameSession: (name) => this.session.setSessionName(name),
+			setFastModeEnabled: (enabled) => this.session.setFastModeEnabled(enabled),
 			setAgentMode: (mode) => this.session.setAgentMode(mode),
 			executePlan: (planId, expectedRevision, strategy) =>
 				this.runtimeHost.executePlan(planId, expectedRevision, strategy),
@@ -3807,7 +3803,7 @@ export class InteractiveMode {
 			}
 			if (text === "/plan-close") {
 				this.editor.setText("");
-				this.closeFinishedPlan();
+				await this.closeFinishedPlan();
 				return;
 			}
 			if (text === "/settings") {
@@ -5441,7 +5437,7 @@ export class InteractiveMode {
 		}
 	}
 
-	private closeFinishedPlan(): void {
+	private async closeFinishedPlan(): Promise<void> {
 		const plan = this.session.planningState.plan;
 		if (!plan) {
 			this.showStatus("No plan to close");
@@ -5468,7 +5464,7 @@ export class InteractiveMode {
 		}
 		try {
 			this.closePlanDetails();
-			this.session.discardPlan(plan.id, plan.revision);
+			await this.session.discardPlan(plan.id, plan.revision);
 			this.showStatus("Plan closed");
 		} catch (error: unknown) {
 			this.showError(error instanceof Error ? error.message : String(error));
@@ -5477,7 +5473,7 @@ export class InteractiveMode {
 
 	private async handlePlanDetailsAction(action: PlanDetailsAction): Promise<void> {
 		if (action === "close") {
-			this.closeFinishedPlan();
+			await this.closeFinishedPlan();
 			return;
 		}
 		const plan = this.session.planningState.plan;
@@ -5488,7 +5484,7 @@ export class InteractiveMode {
 		}
 		try {
 			if (action === "change") {
-				this.session.changePlan(plan.id, plan.revision);
+				await this.session.changePlan(plan.id, plan.revision);
 				this.closePlanDetails();
 				this.showStatus("Describe the changes you want in the normal composer");
 				return;
@@ -7676,8 +7672,10 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				(entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
-					this.ui.requestRender();
+					void this.sessionManager.appendLabelChange(entryId, label).then(
+						() => this.ui.requestRender(),
+						(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
+					);
 				},
 				initialSelectedId,
 				initialFilterMode,
@@ -7727,14 +7725,12 @@ export class InteractiveMode {
 							currentRef.sessionId === sessionRef.sessionId &&
 							currentRef.sessionGeneration === sessionRef.sessionGeneration
 						) {
-							this.session.setSessionName(next);
-							await this.sessionManager.flush();
+							await this.session.setSessionName(next);
 							return;
 						}
 						const manager = await SessionManager.open(sessionRef);
 						try {
-							manager.appendSessionInfo(next);
-							await manager.flush();
+							await manager.appendSessionInfo(next);
 						} catch (error) {
 							try {
 								await manager.closePersistence();
@@ -9123,7 +9119,7 @@ export class InteractiveMode {
 			);
 
 			// Record the result in session
-			this.session.recordBashResult(command, result, { excludeFromContext });
+			await this.session.recordBashResult(command, result, { excludeFromContext });
 			this.bashComponent = undefined;
 			this.ui.requestRender();
 			return;
@@ -9614,15 +9610,13 @@ export class InteractiveMode {
 			const opened = await this.runtimeHost.newSession({
 				setup: async (sessionManager) => {
 					targetSessionManager = sessionManager;
-					appendReviewRun(sessionManager, record);
+					await appendReviewRun(sessionManager, record);
 				},
 				withSession: async (context) => {
 					await context.sendMessage(seedMessage);
 					if (!targetSessionManager) throw new Error("Review session was not initialized");
-					acknowledgedAt = acknowledgeReviewRun(
-						targetSessionManager,
-						record.runId,
-						record.acknowledgedAt ?? Date.now(),
+					acknowledgedAt = (
+						await acknowledgeReviewRun(targetSessionManager, record.runId, record.acknowledgedAt ?? Date.now())
 					).acknowledgedAt;
 				},
 			});
@@ -9635,8 +9629,7 @@ export class InteractiveMode {
 					? await SessionManager.open(sourceSessionRef)
 					: sourceSessionManager;
 				try {
-					acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
-					await acknowledgmentManager.flush();
+					await acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
 				} catch (error) {
 					if (sourceSessionRef) {
 						try {
@@ -9699,7 +9692,6 @@ export class InteractiveMode {
 					assertCurrent,
 				},
 			);
-			await this.session.sessionManager.flush();
 			return {
 				action,
 				status: "completed",
@@ -9739,8 +9731,7 @@ export class InteractiveMode {
 			if (!current) throw new Error(`Unknown durable review run: ${record.runId}`);
 			const published = await publishReviewRun(session.sessionManager.getCwd(), current);
 			assertCurrent();
-			appendReviewPublication(session.sessionManager, { runId: record.runId, ...published });
-			await session.sessionManager.flush();
+			await appendReviewPublication(session.sessionManager, { runId: record.runId, ...published });
 			return {
 				action,
 				status: "completed",

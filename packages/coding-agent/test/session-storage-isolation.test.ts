@@ -17,7 +17,6 @@ it("keeps default persisted session storage inside the Vitest agent sandbox", as
 	let manager: SessionManager | undefined;
 	try {
 		manager = await SessionManager.create(cwd);
-		await manager.materialize();
 		const reference = manager.getSessionRef();
 		if (!reference) throw new Error("Expected a persisted session reference");
 

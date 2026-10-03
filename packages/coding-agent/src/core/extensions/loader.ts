@@ -289,14 +289,14 @@ function createExtensionAPI(
 			runtime.sendUserMessage(content, options);
 		},
 
-		appendEntry<T>(customType: string, data?: JsonCompatibleInput<T>): void {
+		appendEntry<T>(customType: string, data?: JsonCompatibleInput<T>): Promise<void> {
 			runtime.assertActive();
-			runtime.appendEntry(customType, data);
+			return runtime.appendEntry(customType, data);
 		},
 
-		setSessionName(name: string): void {
+		setSessionName(name: string): Promise<void> {
 			runtime.assertActive();
-			runtime.setSessionName(name);
+			return runtime.setSessionName(name);
 		},
 
 		getSessionName(): string | undefined {
@@ -304,9 +304,9 @@ function createExtensionAPI(
 			return runtime.getSessionName();
 		},
 
-		setLabel(entryId: string, label: string | undefined): void {
+		setLabel(entryId: string, label: string | undefined): Promise<void> {
 			runtime.assertActive();
-			runtime.setLabel(entryId, label);
+			return runtime.setLabel(entryId, label);
 		},
 
 		getWorkStatus() {

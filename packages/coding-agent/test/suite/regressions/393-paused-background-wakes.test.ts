@@ -38,7 +38,7 @@ async function setup(exitCode = 0, options: HarnessOptions = {}) {
 		...options,
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("Paused background wake regression");
+	await harness.session.setSessionName("Paused background wake regression");
 	harness.setResponses([
 		fauxAssistantMessage(fauxToolCall("bash", { command: "controlled work", background: true }), {
 			stopReason: "toolUse",

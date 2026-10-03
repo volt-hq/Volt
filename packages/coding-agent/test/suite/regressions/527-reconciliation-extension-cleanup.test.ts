@@ -107,7 +107,6 @@ describe("regression #527: extension cleanup when a session ends", () => {
 			});
 		});
 		await runtime.getRebindSession()?.(runtime.session);
-		await runtime.session.sessionManager.flush();
 		return { runtime, harness, lifecycle, resources, errors, shutdown, eventBus };
 	}
 
@@ -154,8 +153,8 @@ describe("regression #527: extension cleanup when a session ends", () => {
 
 		expect(signal.aborted).toBe(true);
 		expect(signal.reason).toBe(lost);
-		expect(() => oldVolt!.appendEntry("forbidden", {})).toThrow(lost.message);
-		expect(() => oldVolt!.setSessionName("forbidden")).toThrow(lost.message);
+		await expect(oldVolt!.appendEntry("forbidden", {})).rejects.toThrow(lost.message);
+		await expect(oldVolt!.setSessionName("forbidden")).rejects.toThrow(lost.message);
 		oldVolt!.sendUserMessage("forbidden");
 		await vi.waitFor(() =>
 			expect(errors).toContainEqual(expect.objectContaining({ event: "send_user_message", error: lost.message })),
@@ -179,7 +178,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 				volt.on("session_shutdown", async (_event, ctx) => {
 					if (timing === "during") await loseLog(runtime.session.sessionManager);
 					try {
-						volt.appendEntry("shutdown-write", {});
+						await volt.appendEntry("shutdown-write", {});
 					} catch (error) {
 						writeErrors.push(error);
 					}
@@ -196,7 +195,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 			expect(results).toEqual([0]);
 			expect(existsSync(resource)).toBe(false);
 			expect(writeErrors).toHaveLength(1);
-			expect(writeErrors[0]).toMatchObject({ message: expect.stringContaining("Session ordinal changed") });
+			expect(writeErrors[0]).toMatchObject({ message: expect.stringContaining("but the log head is") });
 			expect(errors).toEqual([]);
 		},
 	);
@@ -278,11 +277,13 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		).toBe(false);
 		// Other owners of the same bus and the new generation remain usable.
 		eventBus.emit("mutate-new", {});
-		expect(
-			runtime.session.sessionManager
-				.getEntries()
-				.some((entry) => entry.type === "custom" && entry.customType === "bus-write"),
-		).toBe(true);
+		await vi.waitFor(() =>
+			expect(
+				runtime.session.sessionManager
+					.getEntries()
+					.some((entry) => entry.type === "custom" && entry.customType === "bus-write"),
+			).toBe(true),
+		);
 	});
 
 	it("revokes captured UI objects and methods after replacement without losing the draft", async () => {

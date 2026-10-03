@@ -1,7 +1,11 @@
 import {
 	type AgentMessage,
+	type ConversationLog,
+	type ConversationLogAppendResult,
+	type ConversationLogEntryDraft,
 	type ConversationLogLossReason,
 	ConversationLogLostError,
+	InMemoryConversationLog,
 	uuidv7,
 } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonCompatibleInput, JsonValue, Message, TextContent } from "@hansjm10/volt-ai";
@@ -47,6 +51,8 @@ import {
 } from "../utils/private-files.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { ConversationLock } from "./conversation-log/conversation-lock.ts";
+import { toLogEntryDraft } from "./conversation-log/entry-codec.ts";
+import { SqliteConversationLog } from "./conversation-log/sqlite-conversation-log.ts";
 import {
 	type BashExecutionMessage,
 	type ClientUserMessage,
@@ -71,7 +77,6 @@ import {
 	isValidSessionId,
 	normalizeClientInputPayload,
 	normalizeClientInputQueuedPayload,
-	parsePersistedSessionEntry,
 	parseSessionEntryForAdmission,
 	parseSessionReference,
 	parseSessionSnapshotHeader,
@@ -82,17 +87,11 @@ import {
 import type { PRODUCT_SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import {
 	acquireSharedSQLiteSessionStore,
-	digestSessionStoreTransactionPayload,
 	SESSION_STORE_DATABASE_FILENAME,
 	SESSION_STORE_READ_ENTRIES_MAX,
-	type SessionStoreApplyTransactionInput,
-	type SessionStoreEntryWrite,
-	type SessionStoreJsonValue,
 	type SessionStoreReviewDiscussionLookup,
-	type SessionStoreSessionProjection,
 	type SessionStoreSessionSummary,
 	type SessionStoreSnapshot,
-	type SessionStoreTransactionPayload,
 	type SQLiteSessionStoreClient,
 	type SQLiteSessionStoreLease,
 } from "./session-store/index.ts";
@@ -110,9 +109,6 @@ import {
 	requireStartedClientInputReceipt,
 	type SessionDerivedState,
 	sessionEntrySummary,
-	sessionStoreClientInputsForEntries,
-	sessionStoreProjection,
-	sessionStoreSearchChunksForEntries,
 	verifySessionStoreProjections,
 } from "./session-store/projection.ts";
 
@@ -162,10 +158,11 @@ export interface SessionSnapshotHeader {
 /** How a session came to exist. Absent means a user-initiated session. */
 export type SessionOrigin = "subagent";
 
-export type SessionAtomicAppendEffect = "not_started" | "rolled_back";
+export type SessionAtomicAppendEffect = "rolled_back";
 
 /**
- * An atomic append that definitely did not commit. The log is unchanged and the
+ * A commit that definitely did not happen: the log rolled it back, or an atomic
+ * batch failed validation. The log and the manager are unchanged and the
  * manager stays writable. A commit that cannot be confirmed instead loses the
  * log and throws `ConversationLogLostError`.
  */
@@ -1190,13 +1187,422 @@ export interface SessionListOptions {
 
 let importSessionFromJsonlInMemoryImpl: (inputPath: string, targetCwd?: string) => Promise<SessionManager>;
 
+/** Entries by id: the committed index, or a write's staged entries over it. */
+interface SessionEntryLookup {
+	get(id: string): SessionEntry | undefined;
+	has(id: string): boolean;
+}
+
 /**
- * Manages conversation sessions as append-only trees stored in SQLite.
+ * Walk from `startId` to the root, returning the public entries in path order
+ * and passing transparently across host-only parents.
+ */
+function branchPath(lookup: SessionEntryLookup, startId: string | null): SessionEntry[] {
+	const path: SessionEntry[] = [];
+	const visited = new Set<string>();
+	const start = startId ? lookup.get(startId) : undefined;
+	let current = start && !isHostOnlySessionEntry(start) ? start : undefined;
+	while (current) {
+		if (visited.has(current.id)) throw new Error("Session branch contains a parent cycle");
+		visited.add(current.id);
+		if (!isHostOnlySessionEntry(current)) path.push(current);
+		current = current.parentId ? lookup.get(current.parentId) : undefined;
+	}
+	return path.reverse();
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function parseNewSessionOptions(options: NewSessionOptions | undefined): NewSessionOptions {
+	if (options?.id !== undefined) assertValidSessionId(options.id);
+	if (options?.origin !== undefined && options.origin !== "subagent") {
+		throw new Error("Session origin is invalid");
+	}
+	return {
+		...(options?.id === undefined ? {} : { id: options.id }),
+		...(options?.parentSession === undefined
+			? {}
+			: { parentSession: parseSessionReference(options.parentSession, "Parent session reference") }),
+		...(options?.origin === undefined ? {} : { origin: options.origin }),
+	};
+}
+
+/** Placeholder envelope of an entry admitted before the lane assigns its id and parent. */
+const PENDING_ENTRY_ID = "pending";
+
+/**
+ * Admit an entry when its write is called: the write then owns a canonical
+ * copy of the caller's values, and invalid values are refused before the
+ * write is queued. The lane assigns the entry's id and parent when it commits.
+ */
+function admitEntry<T extends SessionEntry>(entry: T): T {
+	return parseSessionEntryForAdmission(entry, `Session ${entry.type} entry`) as T;
+}
+
+function pendingEnvelope(timestamp = new Date().toISOString()): { id: string; parentId: null; timestamp: string } {
+	return { id: PENDING_ENTRY_ID, parentId: null, timestamp };
+}
+
+function messageEntry(
+	message: Message | ClientUserMessage | CustomMessage | BashExecutionMessage,
+): SessionMessageEntry {
+	return admitEntry<SessionMessageEntry>({
+		type: "message",
+		...pendingEnvelope(),
+		// The client input identity moves from the runtime message to the entry envelope.
+		...("clientMessageId" in message
+			? { message: withoutClientMessageId(message), clientMessageId: message.clientMessageId }
+			: { message }),
+	});
+}
+
+function thinkingLevelEntry(thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"]): ThinkingLevelChangeEntry {
+	return admitEntry<ThinkingLevelChangeEntry>({ type: "thinking_level_change", ...pendingEnvelope(), thinkingLevel });
+}
+
+function fastModeEntry(enabled: boolean): FastModeChangeEntry {
+	return admitEntry<FastModeChangeEntry>({ type: "fast_mode_change", ...pendingEnvelope(), enabled });
+}
+
+function modelEntry(provider: string, modelId: string): ModelChangeEntry {
+	return admitEntry<ModelChangeEntry>({ type: "model_change", ...pendingEnvelope(), provider, modelId });
+}
+
+function planningEntry(planning: PlanningState): PlanningStateChangeEntry {
+	return admitEntry<PlanningStateChangeEntry>({
+		type: "planning_state_change",
+		...pendingEnvelope(),
+		planning: parsePlanningState(planning),
+	});
+}
+
+function compactionEntry(
+	summary: string,
+	firstKeptEntryId: string,
+	tokensBefore: number,
+	details?: JsonValue,
+	fromHook?: boolean,
+): CompactionEntry {
+	return admitEntry<CompactionEntry>({
+		type: "compaction",
+		...pendingEnvelope(),
+		summary,
+		firstKeptEntryId,
+		tokensBefore,
+		...(details === undefined ? {} : { details }),
+		...(fromHook === undefined ? {} : { fromHook }),
+	});
+}
+
+function customEntry(customType: string, data?: JsonValue): CustomEntry {
+	return admitEntry<CustomEntry>({
+		type: "custom",
+		customType,
+		...(data === undefined ? {} : { data }),
+		...pendingEnvelope(),
+	});
+}
+
+function sessionInfoEntry(name: string): SessionInfoEntry {
+	return admitEntry<SessionInfoEntry>({ type: "session_info", ...pendingEnvelope(), name: name.trim() });
+}
+
+function customMessageEntry(
+	customType: string,
+	content: string | (TextContent | ImageContent)[],
+	display: boolean,
+	details?: JsonValue,
+	timestamp?: number,
+): CustomMessageEntry {
+	return admitEntry<CustomMessageEntry>({
+		type: "custom_message",
+		customType,
+		content,
+		display,
+		...(details === undefined ? {} : { details }),
+		...pendingEnvelope(timestamp === undefined ? undefined : new Date(timestamp).toISOString()),
+	});
+}
+
+function labelEntry(targetId: string, label: string | undefined): LabelEntry {
+	return admitEntry<LabelEntry>({
+		type: "label",
+		...pendingEnvelope(),
+		targetId,
+		...(label === undefined ? {} : { label }),
+	});
+}
+
+function subagentSpawnEntry(spawn: SubagentSpawnInput): SubagentSpawnEntry {
+	return admitEntry<SubagentSpawnEntry>({
+		type: "subagent_spawn",
+		...pendingEnvelope(),
+		toolCallId: spawn.toolCallId,
+		subagentId: spawn.subagentId,
+		agent: spawn.agent,
+		childSessionId: spawn.childSessionId,
+		...(spawn.childSessionRef !== undefined ? { childSessionRef: spawn.childSessionRef } : {}),
+		requestKey: spawn.requestKey,
+	});
+}
+
+function branchSummaryEntry(
+	branchFromId: string | null,
+	summary: string,
+	details?: JsonValue,
+	fromHook?: boolean,
+): BranchSummaryEntry {
+	return admitEntry<BranchSummaryEntry>({
+		type: "branch_summary",
+		...pendingEnvelope(),
+		fromId: branchFromId ?? "root",
+		summary,
+		...(details === undefined ? {} : { details }),
+		...(fromHook === undefined ? {} : { fromHook }),
+	});
+}
+
+/**
+ * One batch of entries built against the committed state. Each entry is
+ * admitted and applied to a clone of the derived state, so a batch that fails
+ * validation or does not commit leaves its manager unchanged.
+ */
+class SessionWrite implements SessionEntryLookup {
+	readonly entries: CommittedSessionEntry[] = [];
+	readonly state: SessionDerivedState;
+	private readonly committed: SessionEntryLookup;
+	private readonly staged = new Map<string, CommittedSessionEntry>();
+
+	constructor(committed: SessionEntryLookup, state: SessionDerivedState) {
+		this.committed = committed;
+		this.state = cloneSessionDerivedState(state);
+	}
+
+	get(id: string): SessionEntry | undefined {
+		return this.staged.get(id) ?? this.committed.get(id);
+	}
+
+	has(id: string): boolean {
+		return this.staged.has(id) || this.committed.has(id);
+	}
+
+	get leafId(): string | null {
+		return this.state.leafId;
+	}
+
+	/** A public entry, staged or committed. */
+	getEntry(id: string): SessionEntry | undefined {
+		const entry = this.get(id);
+		return entry && !isHostOnlySessionEntry(entry) ? entry : undefined;
+	}
+
+	/** Admit one entry at the next ordinal and apply it to the staged state. Returns its id. */
+	append(entry: SessionEntry): string {
+		const canonical = parseSessionEntryForAdmission(entry, `Session ${entry.type} entry`);
+		validateSessionEntryAdmissionReferences(canonical, this, this.state.nextOrdinal);
+		canonical.ordinal = this.state.nextOrdinal;
+		const staged = canonical as CommittedSessionEntry;
+		applySessionEntry(this.state, staged);
+		this.staged.set(staged.id, staged);
+		this.entries.push(staged);
+		return staged.id;
+	}
+
+	/** Append an admitted entry with a new id, as a child of `parentId` (the staged leaf by default). */
+	place(entry: SessionEntry, parentId: string | null = this.leafId): string {
+		return this.append({ ...entry, id: generateId(this), parentId });
+	}
+
+	/** Envelope fields for a new child of the staged leaf. */
+	private child(): { id: string; parentId: string | null; timestamp: string } {
+		return { id: generateId(this), parentId: this.leafId, timestamp: new Date().toISOString() };
+	}
+
+	message(entry: SessionMessageEntry): string {
+		if (entry.clientMessageId !== undefined) {
+			requireStartedClientInputReceipt(this.state.clientInputsById, entry.clientMessageId);
+		}
+		return this.place(entry);
+	}
+
+	label(entry: LabelEntry): string {
+		if (!this.getEntry(entry.targetId)) throw new Error(`Entry ${entry.targetId} not found`);
+		return this.place(entry);
+	}
+
+	/** Move the active leaf; a leaf entry is a child of the leaf it replaces. */
+	leaf(nextLeafId: string | null): void {
+		if (this.leafId === nextLeafId) return;
+		this.append({ type: "leaf", ...this.child(), targetId: nextLeafId });
+	}
+
+	branch(branchFromId: string): void {
+		if (!this.getEntry(branchFromId)) throw new Error(`Entry ${branchFromId} not found`);
+		this.leaf(branchFromId);
+	}
+
+	/** Move the leaf to `branchFromId` and append the summary of the branch left behind as its child. */
+	branchWithSummary(branchFromId: string | null, entry: BranchSummaryEntry): string {
+		if (branchFromId !== null && !this.getEntry(branchFromId)) {
+			throw new Error(`Entry ${branchFromId} not found`);
+		}
+		this.leaf(branchFromId);
+		return this.place(entry, branchFromId);
+	}
+
+	canonical(entry: SessionCanonicalAppend): string {
+		switch (entry.type) {
+			case "message":
+				if (entry.message.role === "branchSummary" || entry.message.role === "compactionSummary") {
+					throw new Error(`${entry.message.role} messages require their canonical session entry type`);
+				}
+				return this.message(messageEntry(entry.message));
+			case "thinking_level_change":
+				return this.place(thinkingLevelEntry(entry.thinkingLevel));
+			case "model_change":
+				return this.place(modelEntry(entry.provider, entry.modelId));
+			case "planning_state_change":
+				return this.place(planningEntry(entry.planning));
+			case "compaction":
+				return this.place(
+					compactionEntry(
+						entry.summary,
+						entry.firstKeptEntryId,
+						entry.tokensBefore,
+						entry.details,
+						entry.fromHook,
+					),
+				);
+			case "branch_summary":
+				return this.branchWithSummary(
+					entry.fromId,
+					branchSummaryEntry(entry.fromId, entry.summary, entry.details, entry.fromHook),
+				);
+			case "custom":
+				return this.place(customEntry(entry.customType, entry.data));
+			case "custom_message":
+				return this.place(
+					customMessageEntry(
+						entry.customType,
+						typeof entry.content === "string" ? entry.content : [...entry.content],
+						entry.display,
+						entry.details,
+					),
+				);
+			case "label":
+				return this.label(labelEntry(entry.targetId, entry.label));
+			case "session_info":
+				return this.place(sessionInfoEntry(entry.name ?? ""));
+		}
+	}
+
+	private clientInput(clientMessageId: string): ClientInputRecord {
+		const record = this.state.clientInputsById.get(clientMessageId);
+		if (!record) throw new Error(`Client input receipt not found: ${clientMessageId}`);
+		return record;
+	}
+
+	clientInputReceipt(
+		clientMessageId: string,
+		command: ClientInputCommand,
+		input: ClientInputPayload,
+		semanticDigest: string,
+	): ClientInputReservation {
+		const existing = this.state.clientInputsById.get(clientMessageId);
+		if (existing) return { record: cloneClientInputRecord(existing), created: false };
+		this.append({
+			type: "client_input_receipt",
+			...this.child(),
+			clientMessageId,
+			command,
+			semanticDigest,
+			input,
+		});
+		return { record: cloneClientInputRecord(this.clientInput(clientMessageId)), created: true };
+	}
+
+	clientInputQueued(clientMessageId: string, queuedInput: ClientInputQueuedPayload): ClientInputRecord {
+		const record = this.clientInput(clientMessageId);
+		if (record.state !== "accepted" && record.state !== "started") {
+			throw new Error(`Client input ${JSON.stringify(clientMessageId)} cannot be queued from ${record.state}`);
+		}
+		if (queuedInput.delivery !== expectedClientInputQueuedDelivery(record)) {
+			throw new Error(`Client input ${JSON.stringify(clientMessageId)} conflicts with its requested delivery`);
+		}
+		if (record.queuedInput) {
+			if (JSON.stringify(record.queuedInput) !== JSON.stringify(queuedInput)) {
+				throw new Error(`Client input ${JSON.stringify(clientMessageId)} has a conflicting queued payload`);
+			}
+			return cloneClientInputRecord(record);
+		}
+		this.append({
+			type: "client_input_queued",
+			...this.child(),
+			receiptId: record.receiptId,
+			clientMessageId,
+			queuedInput,
+		});
+		return cloneClientInputRecord(this.clientInput(clientMessageId));
+	}
+
+	clientInputRollback(clientMessageId: string): ClientInputRecord {
+		const record = this.clientInput(clientMessageId);
+		if (record.state !== "started") return cloneClientInputRecord(record);
+		this.append({
+			type: "client_input_state",
+			...this.child(),
+			receiptId: record.receiptId,
+			clientMessageId,
+			state: "accepted",
+		});
+		return cloneClientInputRecord(this.clientInput(clientMessageId));
+	}
+
+	clientInputTransition(
+		clientMessageId: string,
+		state: Exclude<ClientInputState, "accepted">,
+		error?: string,
+	): ClientInputRecord {
+		const record = this.clientInput(clientMessageId);
+		if (record.state === "completed" || record.state === "failed") return cloneClientInputRecord(record);
+		if (state === "started" && record.state !== "accepted") return cloneClientInputRecord(record);
+		this.append({
+			type: "client_input_state",
+			...this.child(),
+			receiptId: record.receiptId,
+			clientMessageId,
+			state,
+			...(state === "failed" && error !== undefined ? { error: boundClientInputError(error) } : {}),
+		});
+		return cloneClientInputRecord(this.clientInput(clientMessageId));
+	}
+}
+
+/** A durable spawn edge's fields, as `appendSubagentSpawn` takes them. */
+export interface SubagentSpawnInput {
+	toolCallId: string;
+	subagentId: string;
+	agent: string;
+	childSessionId: string;
+	childSessionRef?: SessionReference;
+	requestKey: string;
+}
+
+/**
+ * Manages conversation sessions as append-only trees stored in a conversation
+ * log: SQLite for persisted sessions, memory for in-memory ones.
  *
  * Each session entry has an id and parentId forming a tree structure. The "leaf"
  * pointer tracks the current position. Appending creates a child of the current leaf.
  * Branching moves the leaf to an earlier entry, allowing new branches without
  * modifying history.
+ *
+ * Writes run one at a time on a serialized lane. Each builds its entries
+ * against the committed state, commits them to the log, then installs and
+ * publishes them; a write's promise settles after its commit. Reads always
+ * return committed state.
  *
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
@@ -1209,14 +1615,14 @@ export class SessionManager {
 	private sessionDir: string;
 	private cwd: string;
 	private persist: boolean;
-	/** The per-log writer lock, held from open or creation until persistence closes. */
-	private conversationLock: ConversationLock | undefined;
+	/**
+	 * The log this manager writes. A persisted log holds the session's writer
+	 * lock until it closes. A read-only manager has none.
+	 */
+	private log: ConversationLog | undefined;
 	/** Opened by openReadOnly: the loaded session is never written and its lock is not taken. */
 	private readOnly = false;
-	private sessionStoreLease: SQLiteSessionStoreLease | undefined;
 	private storeId: string | undefined;
-	/** Newest ordinal whose commit completed; listeners have observed every public entry up to it. */
-	private committedOrdinal = 0;
 	private fileEntries: FileEntry[] = [];
 	private byId: Map<string, SessionEntry> = new Map();
 	private derivedState!: SessionDerivedState;
@@ -1232,41 +1638,25 @@ export class SessionManager {
 	private get leafId(): string | null {
 		return this.derivedState.leafId;
 	}
-	private get nextOrdinal(): number {
-		return this.derivedState.nextOrdinal;
-	}
 	/** The first loss of this manager's log. The manager accepts no writes after it. */
 	private lostError: ConversationLogLostError | undefined;
 	private readonly lostSignal = Promise.withResolvers<ConversationLogLostError>();
 	/**
 	 * Resolves once, when this manager loses its log: a commit it could not
 	 * confirm (a fence conflict, a missing session, or an outcome that could not
-	 * be resolved) or a write that failed after its entry was indexed. The
-	 * manager may no longer be the log's only writer, so it accepts no further
-	 * writes; its runtime ends. Never rejects.
+	 * be resolved). The manager may no longer be the log's only writer, so it
+	 * accepts no further writes; its runtime ends. Never rejects.
 	 */
 	readonly lost: Promise<ConversationLogLostError> = this.lostSignal.promise;
-	/** Prevents a disposed persisted session from accepting work after its final drain watermark. */
-	private persistenceClosed = false;
+	/** Set when a persisted manager starts closing; later writes are refused. */
+	private closed = false;
+	private closing: Promise<void> | undefined;
 	/** Only a session created by this manager may capture its first Git observation. */
 	private acceptsStartingGitContext = false;
-	/** Settled internal lane used to serialize immutable filesystem work. */
-	private persistenceQueue: Promise<void> = Promise.resolve();
-	/** Promise for all persistence work accepted through the latest synchronous mutation. */
-	private persistenceWatermark: Promise<void> = Promise.resolve();
-	/** Queue tasks admitted but not fully settled, including reconciliation. */
-	private unsettledPersistenceTasks = 0;
-	private persistenceClosePromise: Promise<void> | undefined;
+	/** Writes, session switches, and close run here one at a time, in call order. Never rejects. */
+	private lane: Promise<void> = Promise.resolve();
 	private readonly entryListeners = new Set<SessionEntryListener>();
 	private readonly branchListeners = new Set<SessionBranchListener>();
-	/** Entries staged by appendAtomically before one persistence operation is accepted. */
-	private atomicAppendEntries: CommittedSessionEntry[] | undefined;
-	/** Fences unrelated writers while an atomic replacement is settling. */
-	private atomicAppendInFlight = false;
-	/** Accepted host-only edges waiting for the current atomic projection to settle. */
-	private deferredSubagentSpawns:
-		| { entries: SubagentSpawnEntry[]; persisted: Promise<void>; settle: (persisted: Promise<void>) => void }
-		| undefined;
 	/** Unforgeable in-process delivery commit capabilities issued by this manager. */
 	private readonly deliveryCommitReceipts = new WeakMap<
 		SessionDeliveryCommitReceipt,
@@ -1278,25 +1668,11 @@ export class SessionManager {
 		SessionCanonicalProjection
 	>();
 
-	private constructor(
-		cwd: string,
-		sessionDir: string,
-		persist: boolean,
-		newSessionOptions?: NewSessionOptions,
-		sessionStoreLease?: SQLiteSessionStoreLease,
-		snapshot?: SessionStoreSnapshot,
-		reviewDiscussion: SessionStoreReviewDiscussionLookup | null = null,
-	) {
+	private constructor(cwd: string, sessionDir: string, persist: boolean) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = sessionDir;
 		this.persist = persist;
-		this.sessionStoreLease = sessionStoreLease;
-		this.storeId = sessionStoreLease?.client.info.storeId;
 		if (persist && this.sessionDir) ensurePrivateDirectorySync(this.sessionDir);
-		if (snapshot) {
-			this._loadStoreSnapshot(snapshot, cwd);
-			this.reviewDiscussion = deepFreezeCanonicalData(reviewDiscussion);
-		} else this.newSession(newSessionOptions);
 	}
 
 	private _loadStoreSnapshot(snapshot: SessionStoreSnapshot, cwdOverride?: string): void {
@@ -1332,77 +1708,84 @@ export class SessionManager {
 		this.acceptsStartingGitContext = false;
 		this._buildIndex();
 		this._verifyStoreProjections(snapshot);
-		this.committedOrdinal = this.nextOrdinal - 1;
 	}
 
-	/**
-	 * Start a new session in this manager. A persisted manager takes the new
-	 * session's lock before it releases the lock of the session it wrote, and a
-	 * read-only manager becomes the writer of the new session.
-	 */
-	newSession(options?: NewSessionOptions): SessionReference | undefined {
-		this._assertPersistenceHealthy(true);
-		if (this.reviewDiscussion) {
-			throw new Error("Finding discussion identity is source-linked; reset through the source session instead");
-		}
-		if (this.atomicAppendInFlight) throw new Error("Cannot create a new session during an atomic append");
-		if (this.unsettledPersistenceTasks > 0) {
-			throw new Error("Cannot create a new session while persistence is pending; await flush() first");
-		}
-		if (options?.id !== undefined) assertValidSessionId(options.id);
-		if (options?.origin !== undefined && options.origin !== "subagent") {
-			throw new Error("Session origin is invalid");
-		}
-		const parentSession =
-			options?.parentSession === undefined
-				? undefined
-				: parseSessionReference(options.parentSession, "Parent session reference");
-		const sessionId = options?.id ?? createSessionId();
-		const lock = this.persist ? ConversationLock.acquire(this.sessionDir, sessionId) : undefined;
-		this.conversationLock?.close();
-		this.conversationLock = lock;
+	/** Make `log` this manager's log; its loss, other than closing it, is the manager's loss. */
+	private _attachLog(log: ConversationLog): void {
+		this.log = log;
+		void log.lost.then((error) => {
+			if (this.log === log && error.reason !== "closed") this._lose(error);
+		});
+	}
+
+	/** Start an empty in-memory session at once; in-memory sessions have no store. */
+	private _startInMemorySession(options: NewSessionOptions): void {
+		const sessionId = options.id ?? createSessionId();
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: sessionId,
+			timestamp: new Date().toISOString(),
+			cwd: this.cwd,
+			...(options.parentSession === undefined ? {} : { parentSession: options.parentSession }),
+			...(options.origin === undefined ? {} : { origin: options.origin }),
+		};
+		const previous = this.log;
+		this._attachLog(new InMemoryConversationLog(sessionId));
 		this.readOnly = false;
 		this.sessionId = sessionId;
 		this.sessionGeneration = randomUUID();
 		this.reviewDiscussion = null;
-		const timestamp = new Date().toISOString();
-		const header: SessionHeader = {
-			type: "session",
-			version: CURRENT_SESSION_VERSION,
-			id: this.sessionId,
-			timestamp,
-			cwd: this.cwd,
-			...(parentSession === undefined ? {} : { parentSession }),
-			...(options?.origin === undefined ? {} : { origin: options.origin }),
-		};
 		this.fileEntries = [header];
-		this.byId.clear();
+		this.byId = new Map();
 		this.derivedState = createSessionDerivedState(header);
-		this.committedOrdinal = 0;
 		this.acceptsStartingGitContext = true;
+		void previous?.close();
+	}
 
-		if (this.persist) {
-			const store = this.sessionStoreLease?.client;
-			if (!store || !this.storeId) throw new Error("Persisted session requires an initialized session store");
-			const sessionId = this.sessionId;
-			const sessionGeneration = this.sessionGeneration;
-			const parent = parentSession;
-			this._enqueuePersistence(async () => {
-				await store.createHiddenSession({
-					id: sessionId,
-					sessionGeneration,
-					formatVersion: CURRENT_SESSION_VERSION,
-					cwd: this.cwd,
-					createdAt: timestamp,
-					parentSessionDirectory: parent?.sessionDirectory ?? null,
-					parentStoreId: parent?.storeId ?? null,
-					parentSessionId: parent?.sessionId ?? null,
-					parentSessionGeneration: parent?.sessionGeneration ?? null,
-					origin: options?.origin ?? null,
-				});
-			});
+	/**
+	 * Replace the current session with a new empty one. A persisted manager
+	 * creates the new session's log, which takes its lock, before it closes the
+	 * log it wrote, which releases that one.
+	 */
+	private async _startSession(options: NewSessionOptions | undefined): Promise<void> {
+		if (this.reviewDiscussion) {
+			throw new Error("Finding discussion identity is source-linked; reset through the source session instead");
 		}
-		return this.getSessionRef();
+		const parsed = parseNewSessionOptions(options);
+		if (!this.persist) {
+			this._startInMemorySession(parsed);
+			return;
+		}
+		const log = await SqliteConversationLog.create({ sessionDirectory: this.sessionDir, cwd: this.cwd, ...parsed });
+		const previous = this.log;
+		try {
+			this._loadStoreSnapshot(log.takeOpenedSnapshot(), this.cwd);
+		} catch (error) {
+			await log.close().catch(() => {});
+			throw error;
+		}
+		this._attachLog(log);
+		this.storeId = log.ref.storeId;
+		this.readOnly = false;
+		this.reviewDiscussion = null;
+		this.acceptsStartingGitContext = true;
+		await previous?.close();
+	}
+
+	/**
+	 * Start a new session in this manager after every earlier write settles. A
+	 * persisted manager takes the new session's lock before it releases the
+	 * lock of the session it wrote, and a read-only manager becomes the writer
+	 * of the new session.
+	 */
+	async newSession(options?: NewSessionOptions): Promise<SessionReference | undefined> {
+		this._assertWritable(true);
+		return this._enqueue(async () => {
+			this._assertNotLost();
+			await this._startSession(options);
+			return this.getSessionRef();
+		});
 	}
 
 	private _verifyStoreProjections(snapshot: SessionStoreSnapshot): void {
@@ -1416,34 +1799,6 @@ export class SessionManager {
 		this.fileEntries = [header, ...validatedEntries];
 		this.derivedState = replaySessionEntries(header, validatedEntries);
 		this.byId = new Map(validatedEntries.map((entry) => [entry.id, entry]));
-	}
-
-	private _enqueuePersistence(
-		write: () => Promise<void>,
-		failureHandling: "fail_stop" | "propagate" = "fail_stop",
-	): Promise<void> {
-		this.unsettledPersistenceTasks++;
-		const task = this.persistenceQueue
-			.then(async () => {
-				if (this.lostError) throw this.lostError;
-				try {
-					await write();
-				} catch (error) {
-					if (failureHandling === "propagate") throw error;
-					// The write's entries are already indexed, so the manager no longer matches its log.
-					throw this._lose(error);
-				}
-			})
-			.finally(() => {
-				this.unsettledPersistenceTasks--;
-			});
-		// Keep the serialization lane fulfilled so later accepted work can observe
-		// the loss and stop without touching disk. The public watermark retains
-		// rejection for flush callers.
-		this.persistenceQueue = task.catch(() => {});
-		this.persistenceWatermark = task;
-		void task.catch(() => {});
-		return task;
 	}
 
 	isPersisted(): boolean {
@@ -1485,7 +1840,7 @@ export class SessionManager {
 			this.lostError =
 				error instanceof ConversationLogLostError
 					? error
-					: new ConversationLogLostError(reason, error instanceof Error ? error.message : String(error), error);
+					: new ConversationLogLostError(reason, errorMessage(error), error);
 			this.lostSignal.resolve(this.lostError);
 		}
 		return this.lostError;
@@ -1495,199 +1850,87 @@ export class SessionManager {
 		if (this.lostError) throw this.lostError;
 	}
 
-	private _storeProjection(): SessionStoreSessionProjection {
-		return sessionStoreProjection(this.derivedState);
+	private _assertWritable(allowReadOnly = false): void {
+		this._assertNotLost();
+		if (this.readOnly && !allowReadOnly) {
+			throw new Error(`Session ${this.sessionId} was opened read-only`);
+		}
+		if (this.closed) {
+			throw new Error("Session persistence is closed");
+		}
 	}
 
-	private _storePayload(entries: readonly SessionEntry[]): SessionStoreTransactionPayload {
-		const storedEntries: SessionStoreEntryWrite[] = entries.map((entry) => ({
-			entry: parsePersistedSessionEntry(entry) as unknown as SessionStoreJsonValue,
-		}));
-		return {
-			session: this._storeProjection(),
-			entries: storedEntries,
-			clientInputs: sessionStoreClientInputsForEntries(this.derivedState, entries),
-			searchChunks: sessionStoreSearchChunksForEntries(this.derivedState, entries),
-		};
+	/** Run `task` on the lane after every earlier task settles. */
+	private _enqueue<T>(task: () => T | Promise<T>): Promise<T> {
+		const run = this.lane.then(task);
+		this.lane = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
 	}
 
 	/**
-	 * Commit one transaction at the committed head. Throws `SessionAtomicAppendError`
-	 * when it definitely did not commit, or the log's loss when its outcome cannot
-	 * be confirmed: a fence conflict, a missing session, or a worker failure whose
-	 * commit cannot be reconciled. A reconciled commit continues normally.
+	 * Build one batch against the committed state, commit it, then install and
+	 * publish it. Resolves with what `build` returned once the batch commits.
 	 */
-	private async _commitStorePayload(payload: SessionStoreTransactionPayload): Promise<void> {
-		if (!this.persist) return;
-		const currentLease = this.sessionStoreLease;
-		if (!currentLease || !this.storeId) {
-			throw this._lose(new Error("Persisted session requires an initialized session store lease"));
-		}
-		const commitId = randomUUID();
-		const digest = digestSessionStoreTransactionPayload(payload);
-		// The persistence lane is serialized, so the committed head is the store's head unless another writer appended.
-		const expectedOrdinal = this.committedOrdinal;
-		const input: SessionStoreApplyTransactionInput = {
-			sessionId: this.sessionId,
-			sessionGeneration: this.sessionGeneration,
-			expectedOrdinal,
-			commitId,
-			digest,
-			payload,
-		};
-		let store = currentLease.client;
+	private _commit<T>(build: (write: SessionWrite) => T, atomic = false): Promise<T> {
+		this._assertWritable();
+		return this._enqueue(() => this._commitNow(build, atomic));
+	}
+
+	/**
+	 * The commit itself; runs on the lane. A batch that fails validation, or
+	 * that the log rolls back, leaves the manager unchanged and writable; a
+	 * failure that leaves its outcome unknown loses the log. An atomic batch
+	 * reports a validation failure as a rolled-back `SessionAtomicAppendError`.
+	 */
+	private async _commitNow<T>(build: (write: SessionWrite) => T, atomic: boolean): Promise<T> {
+		this._assertNotLost();
+		const log = this.log;
+		if (!log) throw new Error(`Session ${this.sessionId} has no writable log`);
+		const write = new SessionWrite(this.byId, this.derivedState);
+		let result: T;
+		let drafts: ConversationLogEntryDraft[];
 		try {
-			const result = await store.applyTransaction(input);
-			if (result.status === "conflict") {
-				// Another writer appended: this manager no longer holds the session's lock.
-				throw this._lose(
-					new ConversationLogLostError(
-						"fence_conflict",
-						`Session ordinal changed from ${expectedOrdinal} to ${result.actualOrdinal}`,
-					),
-				);
-			}
-			return;
+			result = build(write);
+			drafts = write.entries.map(toLogEntryDraft);
 		} catch (error) {
-			if (error instanceof ConversationLogLostError) throw error;
-			let replacementLease: SQLiteSessionStoreLease | undefined;
-			let replacementInstalled = false;
-			try {
-				replacementLease = await acquireSharedSQLiteSessionStore(this.sessionDir);
-				if (replacementLease.client.info.storeId !== this.storeId) {
-					throw new Error("Replacement session store identity changed during reconciliation");
-				}
-				this.sessionStoreLease = replacementLease;
-				replacementInstalled = true;
-				store = replacementLease.client;
-				await currentLease.release();
-				const reconciliation = await store.reconcileCommit({
-					sessionId: this.sessionId,
-					sessionGeneration: this.sessionGeneration,
-					commitId,
-					digest,
-				});
-				if (reconciliation.status === "committed") {
-					const summary = await store.findSessionSummary(this.sessionId, this.sessionGeneration);
-					if (summary?.lastOrdinal !== reconciliation.evidence.afterOrdinal) {
-						throw this._lose(
-							new ConversationLogLostError(
-								"fence_conflict",
-								"SQLite session transaction committed but authoritative session state has changed",
-								error,
-							),
-						);
-					}
-					return;
-				}
-				const summary = await store.findSessionSummary(this.sessionId, this.sessionGeneration);
-				if (reconciliation.status === "not_found" && !summary) {
-					throw this._lose(
-						new ConversationLogLostError("fence_conflict", `Session ${this.sessionId} no longer exists`, error),
-					);
-				}
-				if (reconciliation.status === "not_found" && summary?.lastOrdinal === expectedOrdinal) {
-					throw new SessionAtomicAppendError("SQLite session transaction was rolled back", "rolled_back", {
-						cause: error,
-					});
-				}
-			} catch (reconciliationError) {
-				let effectiveError: unknown = reconciliationError;
-				if (replacementLease && !replacementInstalled) {
-					try {
-						await replacementLease.release();
-					} catch (releaseError) {
-						effectiveError = new AggregateError(
-							[reconciliationError, releaseError],
-							"Session store replacement failed and its lease could not be released",
-						);
-					}
-				}
-				if (
-					effectiveError instanceof ConversationLogLostError ||
-					effectiveError instanceof SessionAtomicAppendError
-				) {
-					throw effectiveError;
-				}
-				throw this._lose(
-					new ConversationLogLostError(
-						"uncertain_commit",
-						"SQLite session transaction outcome could not be reconciled",
-						effectiveError,
-					),
-				);
-			}
-			throw this._lose(
-				new ConversationLogLostError("uncertain_commit", "SQLite session transaction outcome is ambiguous", error),
-			);
+			if (!atomic || error instanceof SessionAtomicAppendError) throw error;
+			throw new SessionAtomicAppendError(errorMessage(error), "rolled_back", { cause: error });
 		}
-	}
-
-	/** Commit one ordinary append, then publish it. In-memory sessions commit at the append itself. */
-	private _commitThenPublish(entry: CommittedSessionEntry): void {
-		if (!this.persist) {
-			this._publishCommittedEntry(entry);
-			return;
-		}
-		const payload = this._storePayload([entry]);
-		this._enqueuePersistence(async () => {
-			await this._commitStorePayload(payload);
-			this._publishCommittedEntry(entry);
-		});
-	}
-
-	/** The serialized persistence lane commits ordinary appends one at a time, so this runs in ordinal order. */
-	private _publishCommittedEntry(entry: CommittedSessionEntry): void {
-		this.committedOrdinal = entry.ordinal;
-		// _setBranchLeaf appends a leaf entry as a child of the leaf it replaces.
-		if (entry.type === "leaf") this._notifyBranchListeners(entry.parentId, entry.targetId);
-		else this._notifyEntryListeners(entry);
-	}
-
-	private _appendEntry(entry: SessionEntry): void {
-		if (this.atomicAppendInFlight && !this.atomicAppendEntries) {
-			throw new Error("An atomic session append is already in progress");
-		}
-		this._assertPersistenceHealthy();
-		this._appendAcceptedEntry(entry);
-	}
-
-	/** Index an admitted entry; deferred spawn edges may drain after persistence is sealed. */
-	private _appendAcceptedEntry(entry: SessionEntry): void {
-		const canonicalEntry = parseSessionEntryForAdmission(entry, `Session ${entry.type} entry`);
-		validateSessionEntryAdmissionReferences(canonicalEntry, this.byId, this.nextOrdinal);
-		canonicalEntry.ordinal = this.nextOrdinal;
-		const indexedEntry = canonicalEntry as CommittedSessionEntry;
-		applySessionEntry(this.derivedState, indexedEntry);
-		this.fileEntries.push(indexedEntry);
-		this.byId.set(indexedEntry.id, indexedEntry);
-		if (this.atomicAppendEntries) {
-			this.atomicAppendEntries.push(indexedEntry);
-			return;
-		}
-		this._commitThenPublish(indexedEntry);
-	}
-
-	/** Release the atomic fence only after its projection and outcome are final. */
-	private _finishAtomicAppend(): void {
-		this.atomicAppendInFlight = false;
-		const deferred = this.deferredSubagentSpawns;
-		if (!deferred) return;
-		this.deferredSubagentSpawns = undefined;
+		if (drafts.length === 0) return result;
+		const expectedOrdinal = this.getOrdinal();
+		let outcome: ConversationLogAppendResult;
 		try {
-			this._assertNotLost();
-			// These entries were validated and owned before close. Never stage them
-			// in the parent transaction or derive their parentId from its new leaf.
-			for (const entry of deferred.entries) this._appendAcceptedEntry(entry);
+			outcome = await log.append({ expectedOrdinal, commitId: randomUUID(), entries: drafts });
 		} catch (error) {
-			// A deferred admission must not disappear behind the synchronous API:
-			// the log is lost, and flush/close expose it.
-			const lost = this._lose(error);
-			this._enqueuePersistence(async () => {
-				throw lost;
+			throw this._lose(error);
+		}
+		if (outcome.status === "rolled_back") {
+			throw new SessionAtomicAppendError(`Session commit was rolled back: ${outcome.error.message}`, "rolled_back", {
+				cause: outcome.error,
 			});
 		}
-		deferred.settle(this.persistenceWatermark);
+		if (outcome.first !== expectedOrdinal + 1 || outcome.last !== expectedOrdinal + drafts.length) {
+			throw this._lose(
+				new ConversationLogLostError(
+					"fence_conflict",
+					`Session commit after ordinal ${expectedOrdinal} was assigned ordinals ${outcome.first}-${outcome.last}`,
+				),
+			);
+		}
+		for (const entry of write.entries) {
+			this.fileEntries.push(entry);
+			this.byId.set(entry.id, entry);
+		}
+		this.derivedState = write.state;
+		for (const entry of write.entries) {
+			// A leaf entry is a child of the leaf it replaces.
+			if (entry.type === "leaf") this._notifyBranchListeners(entry.parentId, entry.targetId);
+			else this._notifyEntryListeners(entry);
+		}
+		return result;
 	}
 
 	private _notifyEntryListeners(entry: CommittedSessionEntry): void {
@@ -1696,19 +1939,24 @@ export class SessionManager {
 			try {
 				listener(cloneCanonicalData(entry, `Session ${entry.type} observer entry`));
 			} catch {
-				// Persistence is authoritative. A projection observer cannot make a
-				// successfully appended entry appear to have failed.
+				// The log is authoritative. A projection observer cannot make a
+				// committed entry appear to have failed.
 			}
 		}
 	}
 
-	private _captureCanonicalProjection(): SessionCanonicalProjection {
+	private _captureCanonicalProjection(
+		state: SessionDerivedState = this.derivedState,
+		lookup: SessionEntryLookup = this.byId,
+	): SessionCanonicalProjection {
 		const token = Object.freeze({ tokenId: randomUUID() });
-		const entries = deepFreezeCanonicalData(cloneCanonicalData(this.getBranch(), "Session canonical projection"));
+		const entries = deepFreezeCanonicalData(
+			cloneCanonicalData(branchPath(lookup, state.leafId), "Session canonical projection"),
+		);
 		const projection = Object.freeze({
 			token,
-			leafId: this.leafId,
-			leafEntryOrdinal: this.derivedState.leafEntryOrdinal,
+			leafId: state.leafId,
+			leafEntryOrdinal: state.leafEntryOrdinal,
 			entries,
 		});
 		this.canonicalProjectionTokens.set(token, projection);
@@ -1729,208 +1977,63 @@ export class SessionManager {
 	/** Issue an identity-authenticated raw projection guard for a later canonical command. */
 	issueCanonicalProjection(): SessionCanonicalProjection {
 		this._assertNotLost();
-		if (this.atomicAppendInFlight) {
-			throw new Error("Cannot issue a canonical projection while an atomic operation is in progress");
-		}
 		return this._cloneCanonicalProjection(this._captureCanonicalProjection());
 	}
 
-	private _appendCanonicalEntry(entry: SessionCanonicalAppend): string {
-		switch (entry.type) {
-			case "message":
-				if (entry.message.role === "branchSummary" || entry.message.role === "compactionSummary") {
-					throw new Error(`${entry.message.role} messages require their canonical session entry type`);
-				}
-				return this.appendMessage(entry.message);
-			case "thinking_level_change":
-				return this.appendThinkingLevelChange(entry.thinkingLevel);
-			case "model_change":
-				return this.appendModelChange(entry.provider, entry.modelId);
-			case "planning_state_change":
-				return this.appendPlanningState(entry.planning);
-			case "compaction":
-				return this.appendCompaction(
-					entry.summary,
-					entry.firstKeptEntryId,
-					entry.tokensBefore,
-					entry.details,
-					entry.fromHook,
-				);
-			case "branch_summary":
-				return this.branchWithSummary(entry.fromId, entry.summary, entry.details, entry.fromHook);
-			case "custom":
-				return this.appendCustomEntry(entry.customType, entry.data);
-			case "custom_message":
-				return this.appendCustomMessageEntry(
-					entry.customType,
-					typeof entry.content === "string" ? entry.content : [...entry.content],
-					entry.display,
-					entry.details,
-				);
-			case "label":
-				return this.appendLabelChange(entry.targetId, entry.label);
-			case "session_info":
-				return this.appendSessionInfo(entry.name ?? "");
-		}
-	}
-
 	/**
-	 * Validate a manager-issued guard, apply normalized mutations, and capture
-	 * immutable evidence entirely inside the manager's serialized append lane.
+	 * Validate a manager-issued guard against the committed branch, apply
+	 * normalized mutations, and capture immutable evidence in one commit.
 	 */
 	async commitCanonicalCommand(command: SessionCanonicalCommand): Promise<SessionCanonicalCommitEvidence> {
-		this._assertPersistenceHealthy();
+		this._assertWritable();
 		const basis = this.canonicalProjectionTokens.get(command.guard.token);
 		if (!basis)
 			throw new SessionCanonicalConflictError("Canonical projection guard was not issued by this SessionManager");
 		const mutations = cloneCanonicalData([...command.mutations], "Session canonical mutations");
-		let before: SessionCanonicalProjection | undefined;
-		let after: SessionCanonicalProjection | undefined;
-		let appendedEntryIds: readonly string[] = [];
-		await this.appendAtomically(
-			() => {
-				const firstAppendedIndex = this.fileEntries.length;
+		return this._enqueue(async () => {
+			const before = this._captureCanonicalProjection();
+			const exactMatch =
+				basis.leafEntryOrdinal === before.leafEntryOrdinal &&
+				basis.leafId === before.leafId &&
+				basis.entries.length === before.entries.length &&
+				basis.entries.every((entry, index) => entry.id === before.entries[index]?.id);
+			const guardMatches =
+				command.guard.kind === "exact"
+					? exactMatch
+					: basis.leafId === null || before.entries.some((entry) => entry.id === basis.leafId);
+			if (!guardMatches) throw new SessionCanonicalConflictError("Canonical branch changed before mutation commit");
+			const { after, appendedEntryIds } = await this._commitNow((write) => {
 				for (const mutation of mutations) {
-					if (mutation.kind === "move") {
-						if (mutation.leafId === null) this.resetLeaf();
-						else this.branch(mutation.leafId);
-					} else if (mutation.kind === "move_with_summary") {
-						if (mutation.summary === undefined) {
-							if (mutation.leafId === null) this.resetLeaf();
-							else this.branch(mutation.leafId);
-						} else {
-							const summaryId = this.branchWithSummary(
+					if (mutation.kind === "append") write.canonical(mutation.entry);
+					else if (mutation.kind === "move" || mutation.summary === undefined) {
+						if (mutation.leafId === null) write.leaf(null);
+						else write.branch(mutation.leafId);
+					} else {
+						const summaryId = write.branchWithSummary(
+							mutation.leafId,
+							branchSummaryEntry(
 								mutation.leafId,
 								mutation.summary.summary,
 								mutation.summary.details,
 								mutation.summary.fromHook,
-							);
-							if (mutation.summary.label !== undefined) {
-								this.appendLabelChange(summaryId, mutation.summary.label);
-							}
+							),
+						);
+						if (mutation.summary.label !== undefined) {
+							write.label(labelEntry(summaryId, mutation.summary.label));
 						}
-					} else {
-						this._appendCanonicalEntry(mutation.entry);
 					}
 				}
-				appendedEntryIds = Object.freeze(this.fileEntries.slice(firstAppendedIndex).map((entry) => entry.id));
-				after = this._captureCanonicalProjection();
-			},
-			() => {
-				before = this._captureCanonicalProjection();
-				const exactMatch =
-					basis.leafEntryOrdinal === before.leafEntryOrdinal &&
-					basis.leafId === before.leafId &&
-					basis.entries.length === before.entries.length &&
-					basis.entries.every((entry, index) => entry.id === before!.entries[index]?.id);
-				const guardMatches =
-					command.guard.kind === "exact"
-						? exactMatch
-						: basis.leafId === null || before.entries.some((entry) => entry.id === basis.leafId);
-				if (!guardMatches)
-					throw new SessionCanonicalConflictError("Canonical branch changed before mutation commit");
-			},
-		);
-		if (!before || !after) throw new Error("Canonical command did not capture commit evidence");
-		return Object.freeze({
-			before: this._cloneCanonicalProjection(before),
-			after: this._cloneCanonicalProjection(after),
-			appendedEntryIds,
+				return {
+					after: this._captureCanonicalProjection(write.state, write),
+					appendedEntryIds: Object.freeze(write.entries.map((entry) => entry.id)),
+				};
+			}, true);
+			return Object.freeze({
+				before: this._cloneCanonicalProjection(before),
+				after: this._cloneCanonicalProjection(after),
+				appendedEntryIds,
+			});
 		});
-	}
-
-	/** Stage synchronous append operations and publish them only after one SQLite transaction commits. */
-	private async appendAtomically(append: () => void, beforeStage: () => void = () => {}): Promise<void> {
-		this._assertPersistenceHealthy();
-		if (this.atomicAppendEntries || this.atomicAppendInFlight) {
-			throw new Error("Nested atomic session appends are not supported");
-		}
-		this.atomicAppendInFlight = true;
-		try {
-			await this.persistenceWatermark;
-			this._assertPersistenceHealthy();
-		} catch (error) {
-			this._finishAtomicAppend();
-			throw error;
-		}
-		const snapshot = {
-			fileEntries: [...this.fileEntries],
-			byId: new Map(this.byId),
-			derivedState: cloneSessionDerivedState(this.derivedState),
-		};
-		const restore = (): void => {
-			this.fileEntries = snapshot.fileEntries;
-			this.byId = snapshot.byId;
-			this.derivedState = snapshot.derivedState;
-		};
-		try {
-			beforeStage();
-		} catch (error) {
-			this._finishAtomicAppend();
-			if (error instanceof SessionCanonicalConflictError || error instanceof SessionAtomicAppendError) throw error;
-			throw new SessionAtomicAppendError(error instanceof Error ? error.message : String(error), "not_started", {
-				cause: error,
-			});
-		}
-
-		const entries: CommittedSessionEntry[] = [];
-		this.atomicAppendEntries = entries;
-		try {
-			append();
-		} catch (error) {
-			this.atomicAppendEntries = undefined;
-			restore();
-			this._finishAtomicAppend();
-			throw new SessionAtomicAppendError(error instanceof Error ? error.message : String(error), "rolled_back", {
-				cause: error,
-			});
-		}
-
-		const staged = {
-			fileEntries: this.fileEntries,
-			byId: this.byId,
-			derivedState: this.derivedState,
-		};
-		let payload: SessionStoreTransactionPayload | undefined;
-		try {
-			payload = entries.length > 0 && this.persist ? this._storePayload(entries) : undefined;
-		} catch (error) {
-			this.atomicAppendEntries = undefined;
-			restore();
-			this._finishAtomicAppend();
-			throw error;
-		}
-		this.atomicAppendEntries = undefined;
-		restore();
-
-		try {
-			if (payload) {
-				await this._enqueuePersistence(() => this._commitStorePayload(payload), "propagate");
-			}
-		} catch (error) {
-			if (error instanceof SessionAtomicAppendError) {
-				// Definitely not committed: the log is unchanged and stays writable.
-				this.persistenceWatermark = this.persistenceQueue;
-				this._finishAtomicAppend();
-				throw error;
-			}
-			const lost = this._lose(error);
-			this._finishAtomicAppend();
-			throw lost;
-		}
-
-		this.fileEntries = staged.fileEntries;
-		this.byId = staged.byId;
-		this.derivedState = staged.derivedState;
-		this.committedOrdinal = this.nextOrdinal - 1;
-		try {
-			for (const entry of entries) this._notifyEntryListeners(entry);
-			if (snapshot.derivedState.leafId !== staged.derivedState.leafId) {
-				this._notifyBranchListeners(snapshot.derivedState.leafId, staged.derivedState.leafId);
-			}
-		} finally {
-			this._finishAtomicAppend();
-		}
 	}
 
 	/**
@@ -1939,23 +2042,20 @@ export class SessionManager {
 	 * after this method returns.
 	 */
 	async commitDelivery(input: SessionDeliveryCommitInput): Promise<SessionDeliveryCommitReceipt> {
-		this._assertPersistenceHealthy();
+		this._assertWritable();
 		const messages = cloneCanonicalData([...input.messages], "Session delivery messages");
 		const planning = input.planning === undefined ? undefined : parsePlanningState(input.planning);
-		let beforeProjection: SessionCanonicalProjection | undefined;
-		let afterProjection: SessionCanonicalProjection | undefined;
-		const entryIds: string[] = [];
-		const clientMessageIds: string[] = [];
-
-		await this.appendAtomically(
-			() => {
+		return this._enqueue(async () => {
+			const beforeProjection = this._captureCanonicalProjection();
+			const { afterProjection, entryIds, clientMessageIds } = await this._commitNow((write) => {
+				const entryIds: string[] = [];
+				const clientMessageIds: string[] = [];
 				for (const message of messages) {
 					const clientMessageId = getClientMessageId(message);
 					if (clientMessageId === undefined) continue;
-					const record = this.clientInputsById.get(clientMessageId);
-					if (record?.state === "accepted") {
-						this.transitionClientInput(clientMessageId, "started");
-						const stateEntry = this.fileEntries.at(-1);
+					if (write.state.clientInputsById.get(clientMessageId)?.state === "accepted") {
+						write.clientInputTransition(clientMessageId, "started");
+						const stateEntry = write.entries.at(-1);
 						if (!stateEntry || stateEntry.type !== "client_input_state") {
 							throw new Error("Client input start transition was not staged");
 						}
@@ -1963,69 +2063,61 @@ export class SessionManager {
 					}
 					clientMessageIds.push(clientMessageId);
 				}
-				if (planning !== undefined) {
-					entryIds.push(this.appendPlanningState(planning));
-				}
+				if (planning !== undefined) entryIds.push(write.place(planningEntry(planning)));
 				for (const message of messages) {
 					if (message.role === "custom") {
 						entryIds.push(
-							this.appendCustomMessageEntry(
-								message.customType,
-								message.content,
-								message.display,
-								message.details,
-								message.timestamp,
+							write.place(
+								customMessageEntry(
+									message.customType,
+									message.content,
+									message.display,
+									message.details,
+									message.timestamp,
+								),
 							),
 						);
 					} else if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
-						entryIds.push(this.appendMessage(message));
+						entryIds.push(write.message(messageEntry(message)));
 					} else {
 						throw new Error(`Unsupported delivery message role: ${String(message.role)}`);
 					}
 				}
-				afterProjection = this._captureCanonicalProjection();
-			},
-			() => {
-				beforeProjection = this._captureCanonicalProjection();
-			},
-		);
-		if (!beforeProjection || !afterProjection) throw new Error("Atomic delivery commit did not capture evidence");
-		const receipt = Object.freeze({ receiptId: randomUUID() });
-		this.deliveryCommitReceipts.set(
-			receipt,
-			Object.freeze({
-				outcome: "committed" as const,
-				deliveryId: input.deliveryId,
-				epoch: input.epoch,
-				attemptId: input.attemptId,
-				sessionId: this.sessionId,
-				beforeLeafId: beforeProjection.leafId,
-				afterLeafId: afterProjection.leafId,
-				ordinal: this.committedOrdinal,
-				beforeProjection,
-				afterProjection,
-				entryIds: Object.freeze([...entryIds]),
-				messages: Object.freeze(cloneCanonicalData(messages, "Committed session delivery messages")),
-				clientMessageIds: Object.freeze([...new Set(clientMessageIds)]),
-				...(planning === undefined ? {} : { planning: clonePlanningState(planning) }),
-			}),
-		);
-		return receipt;
+				return {
+					afterProjection: this._captureCanonicalProjection(write.state, write),
+					entryIds,
+					clientMessageIds,
+				};
+			}, true);
+			const receipt = Object.freeze({ receiptId: randomUUID() });
+			this.deliveryCommitReceipts.set(
+				receipt,
+				Object.freeze({
+					outcome: "committed" as const,
+					deliveryId: input.deliveryId,
+					epoch: input.epoch,
+					attemptId: input.attemptId,
+					sessionId: this.sessionId,
+					beforeLeafId: beforeProjection.leafId,
+					afterLeafId: afterProjection.leafId,
+					ordinal: this.getOrdinal(),
+					beforeProjection,
+					afterProjection,
+					entryIds: Object.freeze([...entryIds]),
+					messages: Object.freeze(cloneCanonicalData(messages, "Committed session delivery messages")),
+					clientMessageIds: Object.freeze([...new Set(clientMessageIds)]),
+					...(planning === undefined ? {} : { planning: clonePlanningState(planning) }),
+				}),
+			);
+			return receipt;
+		});
 	}
 
-	/** Attest no effect at a serialized authority point without rewriting persistence. */
+	/** Attest no effect at a serialized point on the lane without writing. */
 	async attestDeliveryNoEffect(identity: SessionDeliveryAttemptIdentity): Promise<SessionDeliveryCommitReceipt> {
-		this._assertPersistenceHealthy();
-		if (this.atomicAppendInFlight) throw new Error("Another atomic session operation is already in progress");
-		this.atomicAppendInFlight = true;
-		try {
-			await this.persistenceWatermark;
-			this._assertPersistenceHealthy();
-		} catch (error) {
-			this._finishAtomicAppend();
-			throw error;
-		}
-		try {
+		this._assertWritable();
+		return this._enqueue(() => {
+			this._assertNotLost();
 			const projection = this._captureCanonicalProjection();
 			const receipt = Object.freeze({ receiptId: randomUUID() });
 			this.deliveryCommitReceipts.set(
@@ -2036,15 +2128,13 @@ export class SessionManager {
 					sessionId: this.sessionId,
 					beforeLeafId: projection.leafId,
 					afterLeafId: projection.leafId,
-					ordinal: this.committedOrdinal,
+					ordinal: this.getOrdinal(),
 					beforeProjection: projection,
 					afterProjection: projection,
 				}),
 			);
 			return receipt;
-		} finally {
-			this._finishAtomicAppend();
-		}
+		});
 	}
 
 	/** Roll delivery WAL state back while proving provider-visible context did not change. */
@@ -2052,48 +2142,47 @@ export class SessionManager {
 		identity: SessionDeliveryAttemptIdentity,
 		messages: readonly AgentMessage[],
 	): Promise<SessionDeliveryCommitReceipt> {
+		this._assertWritable();
 		const canonicalMessages = cloneCanonicalData([...messages], "Retained delivery messages");
-		let beforeProjection: SessionCanonicalProjection | undefined;
-		let afterProjection: SessionCanonicalProjection | undefined;
-		await this.appendAtomically(
-			() => {
+		return this._enqueue(async () => {
+			const beforeProjection = this._captureCanonicalProjection();
+			const afterProjection = await this._commitNow((write) => {
 				for (const message of canonicalMessages) {
 					const clientMessageId = getClientMessageId(message);
-					if (clientMessageId !== undefined && this.getClientInput(clientMessageId)?.state === "started") {
-						this.rollbackClientInput(clientMessageId);
+					if (
+						clientMessageId !== undefined &&
+						write.state.clientInputsById.get(clientMessageId)?.state === "started"
+					) {
+						write.clientInputRollback(clientMessageId);
 					}
 				}
-				afterProjection = this._captureCanonicalProjection();
-			},
-			() => {
-				beforeProjection = this._captureCanonicalProjection();
-			},
-		);
-		if (!beforeProjection || !afterProjection) throw new Error("Retained delivery did not capture evidence");
-		const beforeIds = beforeProjection.entries.map((entry) => entry.id);
-		const afterIds = afterProjection.entries.map((entry) => entry.id);
-		if (
-			beforeProjection.leafId !== afterProjection.leafId ||
-			beforeIds.length !== afterIds.length ||
-			beforeIds.some((id, index) => id !== afterIds[index])
-		) {
-			throw new Error("Retaining delivery changed provider-visible context");
-		}
-		const receipt = Object.freeze({ receiptId: randomUUID() });
-		this.deliveryCommitReceipts.set(
-			receipt,
-			Object.freeze({
-				outcome: "no_effect",
-				...identity,
-				sessionId: this.sessionId,
-				beforeLeafId: beforeProjection.leafId,
-				afterLeafId: afterProjection.leafId,
-				ordinal: this.committedOrdinal,
-				beforeProjection,
-				afterProjection,
-			}),
-		);
-		return receipt;
+				return this._captureCanonicalProjection(write.state, write);
+			}, true);
+			const beforeIds = beforeProjection.entries.map((entry) => entry.id);
+			const afterIds = afterProjection.entries.map((entry) => entry.id);
+			if (
+				beforeProjection.leafId !== afterProjection.leafId ||
+				beforeIds.length !== afterIds.length ||
+				beforeIds.some((id, index) => id !== afterIds[index])
+			) {
+				throw new Error("Retaining delivery changed provider-visible context");
+			}
+			const receipt = Object.freeze({ receiptId: randomUUID() });
+			this.deliveryCommitReceipts.set(
+				receipt,
+				Object.freeze({
+					outcome: "no_effect",
+					...identity,
+					sessionId: this.sessionId,
+					beforeLeafId: beforeProjection.leafId,
+					afterLeafId: afterProjection.leafId,
+					ordinal: this.getOrdinal(),
+					beforeProjection,
+					afterProjection,
+				}),
+			);
+			return receipt;
+		});
 	}
 
 	/**
@@ -2103,15 +2192,15 @@ export class SessionManager {
 	 */
 	async terminalizeDelivery(messages: readonly AgentMessage[], error: Error): Promise<void> {
 		const canonicalMessages = cloneCanonicalData([...messages], "Terminal delivery messages");
-		await this.appendAtomically(() => {
+		await this._commit((write) => {
 			const clientMessageIds = new Set(canonicalMessages.flatMap((message) => getClientMessageId(message) ?? []));
 			for (const clientMessageId of clientMessageIds) {
-				const record = this.getClientInput(clientMessageId);
-				if (record?.state === "accepted" || record?.state === "started") {
-					this.transitionClientInput(clientMessageId, "failed", error.message);
+				const state = write.state.clientInputsById.get(clientMessageId)?.state;
+				if (state === "accepted" || state === "started") {
+					write.clientInputTransition(clientMessageId, "failed", error.message);
 				}
 			}
-		});
+		}, true);
 	}
 
 	/** Verify that a delivery receipt was issued by this live manager instance. */
@@ -2137,80 +2226,19 @@ export class SessionManager {
 		};
 	}
 
-	private _releaseConversationLock(): void {
-		this.conversationLock?.close();
-		this.conversationLock = undefined;
-	}
-
-	private _assertPersistenceHealthy(allowReadOnly = false): void {
-		this._assertNotLost();
-		if (this.readOnly && !allowReadOnly) {
-			throw new Error(`Session ${this.sessionId} was opened read-only`);
-		}
-		if (this.persistenceClosed) {
-			throw new Error("Session persistence is closed");
-		}
-	}
-
-	/** Wait for the hidden or visible SQLite session row and all accepted mutations to be durable. */
-	async materialize(): Promise<void> {
-		this._assertPersistenceHealthy();
-		if (this.atomicAppendEntries || this.atomicAppendInFlight) {
-			throw new Error("Cannot materialize a session during an atomic append");
-		}
-		await this.persistenceWatermark;
-	}
-
-	/** Wait for every filesystem operation accepted before this call. */
-	flush(): Promise<void> {
-		if (!this.deferredSubagentSpawns) return this.persistenceWatermark;
-		// A failed parent transaction must not let close release the store lease
-		// while an independently accepted spawn edge is still draining.
-		return Promise.allSettled([this.persistenceWatermark, this.deferredSubagentSpawns.persisted]).then((results) => {
-			for (const result of results) if (result.status === "rejected") throw result.reason;
-		});
-	}
-
 	/**
-	 * Seal a persisted manager against later writes, wait for every accepted
-	 * write, and release its store lease and lock. Rejects when a write failed,
-	 * except for the loss of the log, which `lost` already reports.
+	 * Seal a persisted manager against later writes, wait for every write
+	 * called before this, and close its log, which releases the store lease and
+	 * the session's lock. Each write reports its own failure, so this rejects
+	 * only when the log cannot be closed. An in-memory manager stays writable.
 	 */
 	closePersistence(): Promise<void> {
-		if (this.persistenceClosePromise) return this.persistenceClosePromise;
-		if (this.persist) this.persistenceClosed = true;
-		const watermark = this.flush();
-		this.persistenceClosePromise = (async () => {
-			let persistenceError: unknown;
-			try {
-				await watermark;
-			} catch (error) {
-				if (!this.lostError) persistenceError = error;
-			}
-
-			const lease = this.sessionStoreLease;
-			let releaseError: unknown;
-			try {
-				await lease?.release();
-			} catch (error) {
-				releaseError = error;
-			} finally {
-				if (this.sessionStoreLease === lease) this.sessionStoreLease = undefined;
-				// Every write this manager accepted has settled; another host may now open the log.
-				this._releaseConversationLock();
-			}
-			if (releaseError !== undefined) {
-				if (persistenceError !== undefined) {
-					throw new AggregateError(
-						[persistenceError, releaseError],
-						"Session persistence failed and its store lease could not be released",
-					);
-				}
-				throw releaseError;
-			}
-			if (persistenceError !== undefined) throw persistenceError;
-		})();
-		return this.persistenceClosePromise;
+		if (this.closing) return this.closing;
+		if (this.persist) this.closed = true;
+		this.closing = this._enqueue(async () => {
+			if (this.persist) await this.log?.close();
+		});
+		return this.closing;
 	}
 
 	getClientInput(clientMessageId: string): ClientInputRecord | undefined {
@@ -2244,146 +2272,56 @@ export class SessionManager {
 
 	/** A finding conversation never automatically replays inputs left behind by a prior process. */
 	async terminalizeInterruptedReviewInputs(): Promise<string[]> {
-		this._assertPersistenceHealthy();
+		this._assertWritable();
 		if (!this.reviewDiscussion) throw new Error("Only finding discussions use explicit-only input recovery");
-		const ids = [...this.clientInputsById.values()]
-			.filter((record) => record.state === "accepted" || record.state === "started")
-			.map((record) => record.clientMessageId);
-		if (ids.length === 0) return [];
-		await this.appendAtomically(() => {
+		return this._commit((write) => {
+			const ids = [...write.state.clientInputsById.values()]
+				.filter((record) => record.state === "accepted" || record.state === "started")
+				.map((record) => record.clientMessageId);
 			for (const id of ids)
-				this.transitionClientInput(
+				write.clientInputTransition(
 					id,
 					"failed",
 					"Review discussion interrupted; submit a new prompt to retry explicitly.",
 				);
-		});
-		return ids;
+			return ids;
+		}, true);
 	}
 
-	reserveClientInput(
+	async reserveClientInput(
 		clientMessageId: string,
 		command: ClientInputCommand,
 		inputValue: ClientInputPayloadInput,
-	): ClientInputReservation {
-		this._assertPersistenceHealthy();
+	): Promise<ClientInputReservation> {
 		assertClientMessageId(clientMessageId);
 		const input = normalizeClientInputPayload(command, inputValue);
 		const semanticDigest = digestClientInputPayload(command, input);
-		const existing = this.clientInputsById.get(clientMessageId);
-		if (existing) {
-			return { record: cloneClientInputRecord(existing), created: false };
-		}
-		const entry: ClientInputReceiptEntry = {
-			type: "client_input_receipt",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			clientMessageId,
-			command,
-			semanticDigest,
-			input,
-		};
-		this._appendEntry(entry);
-		const record = this.clientInputsById.get(clientMessageId);
-		if (!record) {
-			throw new Error("Client input receipt was not indexed after persistence");
-		}
-		return { record: cloneClientInputRecord(record), created: true };
+		return this._commit((write) => write.clientInputReceipt(clientMessageId, command, input, semanticDigest));
 	}
 
-	markClientInputQueued(clientMessageId: string, queuedInputValue: ClientInputQueuedPayloadInput): ClientInputRecord {
-		this._assertPersistenceHealthy();
-		const record = this.clientInputsById.get(clientMessageId);
-		if (!record) {
-			throw new Error(`Client input receipt not found: ${clientMessageId}`);
-		}
-		if (record.state !== "accepted" && record.state !== "started") {
-			throw new Error(`Client input ${JSON.stringify(clientMessageId)} cannot be queued from ${record.state}`);
-		}
+	async markClientInputQueued(
+		clientMessageId: string,
+		queuedInputValue: ClientInputQueuedPayloadInput,
+	): Promise<ClientInputRecord> {
 		const queuedInput = normalizeClientInputQueuedPayload(queuedInputValue);
-		if (queuedInput.delivery !== expectedClientInputQueuedDelivery(record)) {
-			throw new Error(`Client input ${JSON.stringify(clientMessageId)} conflicts with its requested delivery`);
-		}
-		if (record.queuedInput) {
-			if (JSON.stringify(record.queuedInput) !== JSON.stringify(queuedInput)) {
-				throw new Error(`Client input ${JSON.stringify(clientMessageId)} has a conflicting queued payload`);
-			}
-			return cloneClientInputRecord(record);
-		}
-		const entry: ClientInputQueuedEntry = {
-			type: "client_input_queued",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			receiptId: record.receiptId,
-			clientMessageId,
-			queuedInput,
-		};
-		this._appendEntry(entry);
-		return cloneClientInputRecord(this.clientInputsById.get(clientMessageId)!);
+		return this._commit((write) => write.clientInputQueued(clientMessageId, queuedInput));
 	}
 
-	rollbackClientInput(clientMessageId: string): ClientInputRecord {
-		this._assertPersistenceHealthy();
-		const record = this.clientInputsById.get(clientMessageId);
-		if (!record) {
-			throw new Error(`Client input receipt not found: ${clientMessageId}`);
-		}
-		if (record.state !== "started") {
-			return cloneClientInputRecord(record);
-		}
-		const entry: ClientInputStateEntry = {
-			type: "client_input_state",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			receiptId: record.receiptId,
-			clientMessageId,
-			state: "accepted",
-		};
-		this._appendEntry(entry);
-		return cloneClientInputRecord(this.clientInputsById.get(clientMessageId)!);
+	async rollbackClientInput(clientMessageId: string): Promise<ClientInputRecord> {
+		return this._commit((write) => write.clientInputRollback(clientMessageId));
 	}
 
-	transitionClientInput(
+	async transitionClientInput(
 		clientMessageId: string,
 		state: Exclude<ClientInputState, "accepted">,
 		error?: string,
-	): ClientInputRecord {
-		this._assertPersistenceHealthy();
-		const record = this.clientInputsById.get(clientMessageId);
-		if (!record) {
-			throw new Error(`Client input receipt not found: ${clientMessageId}`);
-		}
-		if (record.state === "completed" || record.state === "failed") {
-			return cloneClientInputRecord(record);
-		}
-		if (state === "started" && record.state !== "accepted") {
-			return cloneClientInputRecord(record);
-		}
-		const entry: ClientInputStateEntry = {
-			type: "client_input_state",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			receiptId: record.receiptId,
-			clientMessageId,
-			state,
-			...(state === "failed" && error !== undefined ? { error: boundClientInputError(error) } : {}),
-		};
-		this._appendEntry(entry);
-		return cloneClientInputRecord(this.clientInputsById.get(clientMessageId)!);
+	): Promise<ClientInputRecord> {
+		return this._commit((write) => write.clientInputTransition(clientMessageId, state, error));
 	}
 
 	/** The log position: ordinal of the newest committed entry. */
-	getCommittedOrdinal(): number {
-		return this.committedOrdinal;
-	}
-
-	/** Ordinal of the newest indexed entry, including ordinary appends whose commit is still pending. */
-	getIndexedOrdinal(): number {
-		return this.nextOrdinal - 1;
+	getOrdinal(): number {
+		return this.derivedState.nextOrdinal - 1;
 	}
 
 	/** Read committed entries with ordinal > afterOrdinal in ordinal order, at most `limit` of them. */
@@ -2394,32 +2332,19 @@ export class SessionManager {
 		if (!Number.isSafeInteger(limit) || limit < 1 || limit > SESSION_STORE_READ_ENTRIES_MAX) {
 			throw new Error(`limit must be a safe integer from 1 to ${SESSION_STORE_READ_ENTRIES_MAX}`);
 		}
-		if (!this.persist) {
-			// fileEntries[0] is the header; entry ordinals are their contiguous indexes.
-			const end = Math.min(afterOrdinal + limit, this.committedOrdinal) + 1;
-			const entries = this.fileEntries.slice(afterOrdinal + 1, end) as CommittedSessionEntry[];
-			return { entries: cloneCanonicalData(entries, "Session entry page"), lastOrdinal: this.committedOrdinal };
-		}
-		const store = this.sessionStoreLease?.client;
-		if (!store) throw new Error("Persisted session requires an initialized session store lease");
-		const page = await store.readEntries({
-			sessionId: this.sessionId,
-			sessionGeneration: this.sessionGeneration,
-			afterOrdinal,
-			limit,
-		});
-		if (!page) throw new Error(`Session not found: ${this.sessionId}`);
-		return { entries: page.entries.map((entry) => decodeStoredSessionEntry(entry)), lastOrdinal: page.lastOrdinal };
+		const lastOrdinal = this.getOrdinal();
+		// fileEntries[0] is the header; entry ordinals are their contiguous indexes.
+		const end = Math.min(afterOrdinal + limit, lastOrdinal) + 1;
+		const entries = this.fileEntries.slice(afterOrdinal + 1, end) as CommittedSessionEntry[];
+		return { entries: cloneCanonicalData(entries, "Session entry page"), lastOrdinal };
 	}
 
 	/**
 	 * Observe public conversation entries in ordinal order, each only after its
-	 * store transaction commits; an entry whose commit fails is never delivered.
-	 * In-memory sessions deliver at the append itself. Persisted sessions deliver
-	 * asynchronously relative to the synchronous append API, so live events may
-	 * precede the commit; await flush() to wait for delivery of accepted appends.
-	 * Host-only sidecar records (admission WAL, subagent spawn edges) are
-	 * intentionally excluded.
+	 * commit, from inside the write that committed it: the manager's reads
+	 * already include the entry. An entry whose commit fails is never
+	 * delivered. Host-only sidecar records (admission WAL, subagent spawn
+	 * edges) are intentionally excluded.
 	 */
 	subscribeEntries(listener: SessionEntryListener): () => void {
 		this.entryListeners.add(listener);
@@ -2441,21 +2366,6 @@ export class SessionManager {
 		};
 	}
 
-	private _setBranchLeaf(nextLeafId: string | null): void {
-		if (this.atomicAppendInFlight && !this.atomicAppendEntries) {
-			throw new Error("Cannot change session branches during an atomic append");
-		}
-		const previousLeafId = this.leafId;
-		if (previousLeafId === nextLeafId) return;
-		this._appendEntry({
-			type: "leaf",
-			id: generateId(this.byId),
-			parentId: previousLeafId,
-			timestamp: new Date().toISOString(),
-			targetId: nextLeafId,
-		});
-	}
-
 	private _notifyBranchListeners(previousLeafId: string | null, nextLeafId: string | null): void {
 		for (const listener of this.branchListeners) {
 			try {
@@ -2466,178 +2376,120 @@ export class SessionManager {
 		}
 	}
 
-	/** Append a message as child of current leaf, then advance leaf. Returns entry id.
+	/** Append a message as child of current leaf, then advance leaf. Resolves with the entry id after it commits.
 	 * Does not allow writing CompactionSummaryMessage and BranchSummaryMessage directly.
 	 * Reason: we want these to be top-level entries in the session, not message session entries,
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | ClientUserMessage | CustomMessage | BashExecutionMessage): string {
-		if ("clientMessageId" in message) {
-			requireStartedClientInputReceipt(this.clientInputsById, message.clientMessageId);
-		}
-		const entry: SessionMessageEntry = {
-			type: "message",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			// The client input identity moves from the runtime message to the entry envelope.
-			...("clientMessageId" in message
-				? { message: withoutClientMessageId(message), clientMessageId: message.clientMessageId }
-				: { message }),
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	async appendMessage(message: Message | ClientUserMessage | CustomMessage | BashExecutionMessage): Promise<string> {
+		this._assertWritable();
+		const entry = messageEntry(message);
+		return this._commit((write) => write.message(entry));
 	}
 
-	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
-	appendThinkingLevelChange(thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"]): string {
-		const entry: ThinkingLevelChangeEntry = {
-			type: "thinking_level_change",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			thinkingLevel,
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	/** Append a thinking level change as child of current leaf, then advance leaf. Resolves with the entry id. */
+	async appendThinkingLevelChange(thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"]): Promise<string> {
+		this._assertWritable();
+		const entry = thinkingLevelEntry(thinkingLevel);
+		return this._commit((write) => write.place(entry));
 	}
 
-	/** Append a Fast mode policy change as child of current leaf, then advance leaf. Returns entry id. */
-	appendFastModeChange(enabled: boolean): string {
-		const entry: FastModeChangeEntry = {
-			type: "fast_mode_change",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			enabled,
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	/** Append a Fast mode policy change as child of current leaf, then advance leaf. Resolves with the entry id. */
+	async appendFastModeChange(enabled: boolean): Promise<string> {
+		this._assertWritable();
+		const entry = fastModeEntry(enabled);
+		return this._commit((write) => write.place(entry));
 	}
 
-	/** Append a model change as child of current leaf, then advance leaf. Returns entry id. */
-	appendModelChange(provider: string, modelId: string): string {
-		const entry: ModelChangeEntry = {
-			type: "model_change",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			provider,
-			modelId,
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	/** Append a model change as child of current leaf, then advance leaf. Resolves with the entry id. */
+	async appendModelChange(provider: string, modelId: string): Promise<string> {
+		this._assertWritable();
+		const entry = modelEntry(provider, modelId);
+		return this._commit((write) => write.place(entry));
 	}
 
 	/** Append one validated atomic Plan mode snapshot as a child of the current leaf. */
-	appendPlanningState(planning: PlanningState): string {
-		const entry: PlanningStateChangeEntry = {
-			type: "planning_state_change",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			planning: parsePlanningState(planning),
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	async appendPlanningState(planning: PlanningState): Promise<string> {
+		this._assertWritable();
+		const entry = planningEntry(planning);
+		return this._commit((write) => write.place(entry));
 	}
 
-	/** Append a compaction summary as child of current leaf, then advance leaf. Returns entry id. */
-	appendCompaction<T = JsonValue>(
+	/** Append a compaction summary as child of current leaf, then advance leaf. Resolves with the entry id. */
+	async appendCompaction<T = JsonValue>(
 		summary: string,
 		firstKeptEntryId: string,
 		tokensBefore: number,
 		details?: JsonCompatibleInput<T>,
 		fromHook?: boolean,
-	): string {
-		const entry: CompactionEntry = {
-			type: "compaction",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+	): Promise<string> {
+		this._assertWritable();
+		const entry = compactionEntry(
 			summary,
 			firstKeptEntryId,
 			tokensBefore,
-			...(details === undefined ? {} : { details: details as JsonValue }),
-			...(fromHook === undefined ? {} : { fromHook }),
-		};
-		this._appendEntry(entry);
-		return entry.id;
+			details as JsonValue | undefined,
+			fromHook,
+		);
+		return this._commit((write) => write.place(entry));
 	}
 
-	/** Append a custom entry (for extensions) as child of current leaf, then advance leaf. Returns entry id. */
-	appendCustomEntry<T = JsonValue>(customType: string, data?: JsonCompatibleInput<T>): string {
-		const entry: CustomEntry = {
-			type: "custom",
-			customType,
-			...(data === undefined ? {} : { data: data as JsonValue }),
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	/** Append a custom entry (for extensions) as child of current leaf, then advance leaf. Resolves with the entry id. */
+	async appendCustomEntry<T = JsonValue>(customType: string, data?: JsonCompatibleInput<T>): Promise<string> {
+		this._assertWritable();
+		const entry = customEntry(customType, data as JsonValue | undefined);
+		return this._commit((write) => write.place(entry));
 	}
 
-	/** Append a session info entry (e.g., display name). Returns entry id. */
-	appendSessionInfo(name: string): string {
-		const entry: SessionInfoEntry = {
-			type: "session_info",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			name: name.trim(),
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	/** Append a session info entry (e.g., display name). Resolves with the entry id. */
+	async appendSessionInfo(name: string): Promise<string> {
+		this._assertWritable();
+		const entry = sessionInfoEntry(name);
+		return this._commit((write) => write.place(entry));
 	}
 
 	/**
 	 * Record the first completed Git scan for this newly created session.
 	 * The expected id prevents a delayed scan from attaching to a replacement.
 	 */
-	recordStartingGitContext(expectedSessionId: string, gitContext: RpcGitContext | null): boolean {
+	async recordStartingGitContext(expectedSessionId: string, gitContext: RpcGitContext | null): Promise<boolean> {
 		if (!Check(Type.Union([RpcGitContextSchema, Type.Null()]), gitContext)) {
 			throw new Error("Cannot record invalid starting Git context metadata");
 		}
-		if (!this.acceptsStartingGitContext || this.sessionId !== expectedSessionId) {
-			return false;
-		}
-		if (this.derivedState.startingGitContext !== undefined) {
-			this.acceptsStartingGitContext = false;
-			return false;
-		}
-		this._appendEntry({
+		this._assertWritable();
+		const entry = admitEntry<SessionStartGitContextEntry>({
 			type: "session_start_git_context",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
+			...pendingEnvelope(),
 			gitContext,
 		});
-		this.acceptsStartingGitContext = false;
-		return true;
+		return this._enqueue(async () => {
+			if (!this.acceptsStartingGitContext || this.sessionId !== expectedSessionId) return false;
+			if (this.derivedState.startingGitContext !== undefined) {
+				this.acceptsStartingGitContext = false;
+				return false;
+			}
+			await this._commitNow((write) => write.place(entry), false);
+			this.acceptsStartingGitContext = false;
+			return true;
+		});
 	}
 
-	/** Host admission must flush this immutable entry before publishing the session. */
-	recordPrReviewBinding(placement: PrReviewPlacement): void {
-		this._assertPersistenceHealthy();
-		const entry = parseSessionEntryForAdmission({
-			type: "pr_review_binding",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			placement,
-		}) as PrReviewBindingEntry;
-		if (resolvePath(entry.placement.cwd) !== this.cwd) {
-			throw new Error("PR review binding cwd does not match the session");
-		}
-		const existing = this.derivedState.prReviewBinding;
-		if (existing) {
-			if (!isDeepStrictEqual(existing, entry.placement)) throw new Error("PR review binding is immutable");
-			return;
-		}
-		this._appendEntry(entry);
+	/** Host admission must await this immutable entry before publishing the session. */
+	async recordPrReviewBinding(placement: PrReviewPlacement): Promise<void> {
+		this._assertWritable();
+		const entry = admitEntry<PrReviewBindingEntry>({ type: "pr_review_binding", ...pendingEnvelope(), placement });
+		await this._commit((write) => {
+			if (resolvePath(entry.placement.cwd) !== this.cwd) {
+				throw new Error("PR review binding cwd does not match the session");
+			}
+			const existing = write.state.prReviewBinding;
+			if (existing) {
+				if (!isDeepStrictEqual(existing, entry.placement)) throw new Error("PR review binding is immutable");
+				return;
+			}
+			write.place(entry);
+		});
 	}
 
 	getPrReviewBinding(): PrReviewPlacement | undefined {
@@ -2666,27 +2518,18 @@ export class SessionManager {
 	 * @param content Message content (string or TextContent/ImageContent array)
 	 * @param display Whether to show in TUI (true = styled display, false = hidden)
 	 * @param details Optional extension-specific metadata (not sent to LLM)
-	 * @returns Entry id
+	 * @returns Entry id, after the entry commits
 	 */
-	appendCustomMessageEntry<T = JsonValue>(
+	async appendCustomMessageEntry<T = JsonValue>(
 		customType: string,
 		content: string | (TextContent | ImageContent)[],
 		display: boolean,
 		details?: JsonCompatibleInput<T>,
 		timestamp?: number,
-	): string {
-		const entry: CustomMessageEntry = {
-			type: "custom_message",
-			customType,
-			content,
-			display,
-			...(details === undefined ? {} : { details: details as JsonValue }),
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: timestamp === undefined ? new Date().toISOString() : new Date(timestamp).toISOString(),
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	): Promise<string> {
+		this._assertWritable();
+		const entry = customMessageEntry(customType, content, display, details as JsonValue | undefined, timestamp);
+		return this._commit((write) => write.place(entry));
 	}
 
 	// =========================================================================
@@ -2733,70 +2576,24 @@ export class SessionManager {
 	 * Labels are user-defined markers for bookmarking/navigation.
 	 * Pass undefined or empty string to clear the label.
 	 */
-	appendLabelChange(targetId: string, label: string | undefined): string {
-		if (!this.getEntry(targetId)) {
-			throw new Error(`Entry ${targetId} not found`);
-		}
-		const entry: LabelEntry = {
-			type: "label",
-			id: generateId(this.byId),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			targetId,
-			...(label === undefined ? {} : { label }),
-		};
-		this._appendEntry(entry);
-		return entry.id;
+	async appendLabelChange(targetId: string, label: string | undefined): Promise<string> {
+		this._assertWritable();
+		const entry = labelEntry(targetId, label);
+		return this._commit((write) => write.label(entry));
 	}
 
 	/**
 	 * Record a durable spawn edge for a subagent child whose first prompt was
 	 * accepted. Host metadata only: the entry never advances the branch leaf and
 	 * is invisible to getEntries()/getBranch()/context building. Read back with
-	 * getSubagentSpawnEntries() during registry hydration. During an atomic commit,
-	 * admission captures the current branch and flush()/closePersistence() drain
-	 * the edge after that commit settles, without changing its staged projection.
+	 * getSubagentSpawnEntries() during registry hydration. Like every write, it
+	 * commits after the writes called before it, including an in-flight
+	 * delivery.
 	 */
-	appendSubagentSpawn(spawn: {
-		toolCallId: string;
-		subagentId: string;
-		agent: string;
-		childSessionId: string;
-		childSessionRef?: SessionReference;
-		requestKey: string;
-	}): string {
-		this._assertPersistenceHealthy();
-		const entry: SubagentSpawnEntry = {
-			type: "subagent_spawn",
-			id: generateId({
-				has: (id) =>
-					this.byId.has(id) || this.deferredSubagentSpawns?.entries.some((entry) => entry.id === id) === true,
-			}),
-			parentId: this.leafId,
-			timestamp: new Date().toISOString(),
-			toolCallId: spawn.toolCallId,
-			subagentId: spawn.subagentId,
-			agent: spawn.agent,
-			childSessionId: spawn.childSessionId,
-			...(spawn.childSessionRef !== undefined ? { childSessionRef: spawn.childSessionRef } : {}),
-			requestKey: spawn.requestKey,
-		};
-		if (this.atomicAppendInFlight && !this.atomicAppendEntries) {
-			const owned = parseSessionEntryForAdmission(entry, "Session subagent_spawn entry") as SubagentSpawnEntry;
-			validateSessionEntryAdmissionReferences(owned, this.byId, this.nextOrdinal);
-			if (!this.deferredSubagentSpawns) {
-				let settle!: (persisted: Promise<void>) => void;
-				const persisted = new Promise<void>((resolve) => {
-					settle = resolve;
-				});
-				void persisted.catch(() => {});
-				this.deferredSubagentSpawns = { entries: [], persisted, settle };
-			}
-			this.deferredSubagentSpawns.entries.push(owned);
-		} else {
-			this._appendEntry(entry);
-		}
-		return entry.id;
+	async appendSubagentSpawn(spawn: SubagentSpawnInput): Promise<string> {
+		this._assertWritable();
+		const entry = subagentSpawnEntry(spawn);
+		return this._commit((write) => write.place(entry));
 	}
 
 	/** All durable spawn edges in file order, including edges recorded on other branches. */
@@ -2812,17 +2609,7 @@ export class SessionManager {
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
-		const path: SessionEntry[] = [];
-		const visited = new Set<string>();
-		const startId = fromId ?? this.getLeafId();
-		let current = startId ? this.getEntry(startId) : undefined;
-		while (current) {
-			if (visited.has(current.id)) throw new Error("Session branch contains a parent cycle");
-			visited.add(current.id);
-			if (!isHostOnlySessionEntry(current)) path.push(current);
-			current = current.parentId ? this.byId.get(current.parentId) : undefined;
-		}
-		return path.reverse();
+		return branchPath(this.byId, fromId ?? this.getLeafId());
 	}
 
 	/**
@@ -2968,11 +2755,8 @@ export class SessionManager {
 	 * will create a child of that entry, forming a new branch. Existing entries
 	 * are not modified or deleted.
 	 */
-	branch(branchFromId: string): void {
-		if (!this.getEntry(branchFromId)) {
-			throw new Error(`Entry ${branchFromId} not found`);
-		}
-		this._setBranchLeaf(branchFromId);
+	async branch(branchFromId: string): Promise<void> {
+		await this._commit((write) => write.branch(branchFromId));
 	}
 
 	/**
@@ -2980,42 +2764,24 @@ export class SessionManager {
 	 * The next appendXXX() call will create a new root entry (parentId = null).
 	 * Use this when navigating to re-edit the first user message.
 	 */
-	resetLeaf(): void {
-		this._setBranchLeaf(null);
+	async resetLeaf(): Promise<void> {
+		await this._commit((write) => write.leaf(null));
 	}
 
 	/**
 	 * Start a new branch with a summary of the abandoned path.
 	 * Same as branch(), but also appends a branch_summary entry that captures
-	 * context from the abandoned conversation path.
+	 * context from the abandoned conversation path, in the same commit.
 	 */
-	branchWithSummary<T = JsonValue>(
+	async branchWithSummary<T = JsonValue>(
 		branchFromId: string | null,
 		summary: string,
 		details?: JsonCompatibleInput<T>,
 		fromHook?: boolean,
-	): string {
-		if (branchFromId !== null && !this.getEntry(branchFromId)) {
-			throw new Error(`Entry ${branchFromId} not found`);
-		}
-		const entry = parseSessionEntryForAdmission(
-			{
-				type: "branch_summary",
-				id: generateId(this.byId),
-				parentId: branchFromId,
-				timestamp: new Date().toISOString(),
-				fromId: branchFromId ?? "root",
-				summary,
-				...(details === undefined ? {} : { details: details as JsonValue }),
-				...(fromHook === undefined ? {} : { fromHook }),
-			} satisfies BranchSummaryEntry,
-			"Session branch_summary entry",
-		);
-		validateSessionEntryAdmissionReferences(entry, this.byId, this.nextOrdinal);
-		this._assertPersistenceHealthy();
-		this._setBranchLeaf(branchFromId);
-		this._appendEntry(entry);
-		return entry.id;
+	): Promise<string> {
+		this._assertWritable();
+		const entry = branchSummaryEntry(branchFromId, summary, details as JsonValue | undefined, fromHook);
+		return this._commit((write) => write.branchWithSummary(branchFromId, entry));
 	}
 
 	/**
@@ -3023,63 +2789,48 @@ export class SessionManager {
 	 * A read-only manager may branch: it becomes the writer of the new session.
 	 */
 	async createBranchedSession(leafId: string): Promise<SessionReference | undefined> {
-		if (this.atomicAppendInFlight) throw new Error("Cannot create a branched session during an atomic append");
-		await this.persistenceWatermark;
-		this._assertPersistenceHealthy(true);
-		const previousSession = this.getSessionRef();
-		const path = this.getBranch(leafId);
-		if (path.length === 0) throw new Error(`Entry ${leafId} not found`);
+		this._assertWritable(true);
+		return this._enqueue(async () => {
+			this._assertNotLost();
+			const previousSession = this.getSessionRef();
+			const path = this.getBranch(leafId);
+			if (path.length === 0) throw new Error(`Entry ${leafId} not found`);
 
-		const retained: SessionEntry[] = [];
-		const retainedIds = new Set<string>();
-		let parentId: string | null = null;
-		for (const entry of path) {
-			if (entry.type === "label") continue;
-			const copy = withoutClientInputIdentity({ ...entry, parentId });
-			delete copy.ordinal;
-			retained.push(copy);
-			retainedIds.add(copy.id);
-			parentId = copy.id;
-		}
-		const labels = [...this.labelsById]
-			.filter(([targetId]) => retainedIds.has(targetId))
-			.map(([targetId, label]) => ({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! }));
-		const origin = this.getHeader()?.origin;
-		this.newSession({
-			...(previousSession === undefined ? {} : { parentSession: previousSession }),
-			...(origin === undefined ? {} : { origin }),
-		});
-		await this.persistenceWatermark;
-		await this.appendAtomically(() => {
-			for (const entry of retained) this._appendEntry(entry);
-			let labelParentId = retained.at(-1)?.id ?? null;
-			for (const { targetId, label, timestamp } of labels) {
-				const labelEntry: LabelEntry = {
-					type: "label",
-					id: generateId(this.byId),
-					parentId: labelParentId,
-					timestamp,
-					targetId,
-					label,
-				};
-				this._appendEntry(labelEntry);
-				labelParentId = labelEntry.id;
+			const retained: SessionEntry[] = [];
+			const retainedIds = new Set<string>();
+			let parentId: string | null = null;
+			for (const entry of path) {
+				if (entry.type === "label") continue;
+				const copy = withoutClientInputIdentity({ ...entry, parentId });
+				delete copy.ordinal;
+				retained.push(copy);
+				retainedIds.add(copy.id);
+				parentId = copy.id;
 			}
+			const labels = [...this.labelsById]
+				.filter(([targetId]) => retainedIds.has(targetId))
+				.map(([targetId, label]) => ({ targetId, label, timestamp: this.labelTimestampsById.get(targetId)! }));
+			const origin = this.getHeader()?.origin;
+			await this._startSession({
+				...(previousSession === undefined ? {} : { parentSession: previousSession }),
+				...(origin === undefined ? {} : { origin }),
+			});
+			await this._commitNow((write) => {
+				for (const entry of retained) write.append(entry);
+				let labelParentId = retained.at(-1)?.id ?? null;
+				for (const { targetId, label, timestamp } of labels) {
+					labelParentId = write.append({
+						type: "label",
+						id: generateId(write),
+						parentId: labelParentId,
+						timestamp,
+						targetId,
+						label,
+					});
+				}
+			}, true);
+			return this.getSessionRef();
 		});
-		return this.getSessionRef();
-	}
-
-	private static async _releaseLeaseAfterFailure(
-		lease: SQLiteSessionStoreLease,
-		error: unknown,
-		message: string,
-	): Promise<never> {
-		try {
-			await lease.release();
-		} catch (releaseError) {
-			throw new AggregateError([error, releaseError], message);
-		}
-		throw error;
 	}
 
 	private static async _store(dir: string): Promise<SQLiteSessionStoreLease> {
@@ -3109,87 +2860,74 @@ export class SessionManager {
 		return result;
 	}
 
-	/** Create and durably reserve a hidden persisted session. */
+	/**
+	 * Create and durably reserve a hidden persisted session. Its log takes the
+	 * session's lock and holds it until persistence closes.
+	 */
 	static async create(cwd: string, sessionDir?: string, options?: NewSessionOptions): Promise<SessionManager> {
 		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir(cwd);
-		const lease = await SessionManager._store(dir);
-		let manager: SessionManager | undefined;
-		try {
-			manager = new SessionManager(cwd, dir, true, options, lease);
-			await manager.flush();
-			return manager;
-		} catch (error) {
-			manager?._releaseConversationLock();
-			return await SessionManager._releaseLeaseAfterFailure(
-				lease,
-				error,
-				"Session creation failed and its store lease could not be released",
-			);
-		}
+		const manager = new SessionManager(cwd, dir, true);
+		await manager._startSession(options);
+		return manager;
 	}
 
 	/**
-	 * Open one authoritative SQLite session reference for writing. Takes the
-	 * session's lock before loading it and holds it until persistence closes;
-	 * throws `ConversationLockedError` while another host has it open.
+	 * Open one authoritative SQLite session reference for writing. Its log takes
+	 * the session's lock before loading it and holds it until persistence
+	 * closes; throws `ConversationLockedError` while another host has it open.
 	 */
 	static async open(ref: SessionReference, cwdOverride?: string): Promise<SessionManager> {
-		return SessionManager._openReference(ref, cwdOverride, false);
+		const log = await SqliteConversationLog.open(ref);
+		try {
+			const snapshot = log.takeOpenedSnapshot();
+			const discussion = await SessionManager._scopedStore(log.ref.sessionDirectory, (store) =>
+				store.findReviewDiscussionByChild({
+					sessionId: snapshot.session.id,
+					sessionGeneration: snapshot.session.sessionGeneration,
+				}),
+			);
+			const manager = new SessionManager(cwdOverride ?? snapshot.session.cwd, log.ref.sessionDirectory, true);
+			manager._loadStoreSnapshot(snapshot, cwdOverride ?? snapshot.session.cwd);
+			manager.reviewDiscussion = deepFreezeCanonicalData(discussion);
+			manager.storeId = log.ref.storeId;
+			manager._attachLog(log);
+			return manager;
+		} catch (error) {
+			try {
+				await log.close();
+			} catch (closeError) {
+				throw new AggregateError([error, closeError], "Session open failed and its log could not be closed");
+			}
+			throw error;
+		}
 	}
 
 	/**
-	 * Open one authoritative SQLite session reference to read it. Takes no lock,
-	 * so it works while the session is open elsewhere; every write throws.
+	 * Open one authoritative SQLite session reference to read it. Takes no lock
+	 * and opens no log, so it works while the session is open elsewhere; every
+	 * write throws.
 	 */
 	static async openReadOnly(ref: SessionReference, cwdOverride?: string): Promise<SessionManager> {
-		return SessionManager._openReference(ref, cwdOverride, true);
-	}
-
-	private static async _openReference(
-		ref: SessionReference,
-		cwdOverride: string | undefined,
-		readOnly: boolean,
-	): Promise<SessionManager> {
 		const canonicalRef = parseSessionReference(ref);
 		const dir = resolvePath(canonicalRef.sessionDirectory);
-		const lock = readOnly ? undefined : ConversationLock.acquire(dir, canonicalRef.sessionId);
-		let lease: SQLiteSessionStoreLease;
-		try {
-			lease = await SessionManager._store(dir);
-		} catch (error) {
-			lock?.close();
-			throw error;
-		}
-		try {
-			if (lease.client.info.storeId !== canonicalRef.storeId) {
+		const { snapshot, discussion, storeId } = await SessionManager._scopedStore(dir, async (store) => {
+			if (store.info.storeId !== canonicalRef.storeId) {
 				throw new Error("Session reference belongs to a different store");
 			}
-			const snapshot = await lease.client.loadSession(canonicalRef.sessionId, canonicalRef.sessionGeneration);
+			const snapshot = await store.loadSession(canonicalRef.sessionId, canonicalRef.sessionGeneration);
 			if (!snapshot) throw new Error(`Session not found: ${canonicalRef.sessionId}`);
-			const discussion = await lease.client.findReviewDiscussionByChild({
+			const discussion = await store.findReviewDiscussionByChild({
 				sessionId: snapshot.session.id,
 				sessionGeneration: snapshot.session.sessionGeneration,
 			});
-			const manager = new SessionManager(
-				cwdOverride ?? snapshot.session.cwd,
-				dir,
-				true,
-				undefined,
-				lease,
-				snapshot,
-				discussion,
-			);
-			manager.conversationLock = lock;
-			manager.readOnly = readOnly;
-			return manager;
-		} catch (error) {
-			lock?.close();
-			return await SessionManager._releaseLeaseAfterFailure(
-				lease,
-				error,
-				"Session open failed and its store lease could not be released",
-			);
-		}
+			return { snapshot, discussion, storeId: store.info.storeId };
+		});
+		const manager = new SessionManager(cwdOverride ?? snapshot.session.cwd, dir, true);
+		manager._loadStoreSnapshot(snapshot, cwdOverride ?? snapshot.session.cwd);
+		manager.reviewDiscussion = deepFreezeCanonicalData(discussion);
+		manager.storeId = storeId;
+		manager.readOnly = true;
+		return manager;
 	}
 
 	/** The most recent visible or pending-input session for a cwd, found without opening it. */
@@ -3245,7 +2983,9 @@ export class SessionManager {
 
 	/** Create an in-memory session (no persistence). */
 	static inMemory(cwd: string = process.cwd()): SessionManager {
-		return new SessionManager(cwd, "", false);
+		const manager = new SessionManager(cwd, "", false);
+		manager._startInMemorySession({});
+		return manager;
 	}
 
 	/** Import an explicit JSONL snapshot into SQLite; the JSONL file is never reopened as live storage. */
@@ -3322,17 +3062,15 @@ export class SessionManager {
 			...(header.origin === undefined ? {} : { origin: header.origin }),
 		};
 		const stage = async (manager: SessionManager): Promise<void> => {
-			await manager.appendAtomically(() => {
-				for (const entry of publicEntries) manager._appendEntry(entry);
-				if (finalLeafId !== manager.getLeafId()) {
-					if (finalLeafId === null) manager.resetLeaf();
-					else manager.branch(finalLeafId);
-				}
-			});
+			await manager._commit((write) => {
+				for (const entry of publicEntries) write.append(entry);
+				if (finalLeafId === null) write.leaf(null);
+				else if (finalLeafId !== write.leafId) write.branch(finalLeafId);
+			}, true);
 		};
 
 		const validationManager = SessionManager.inMemory(cwd);
-		validationManager.newSession(newSessionOptions);
+		await validationManager.newSession(newSessionOptions);
 		await stage(validationManager);
 		if (!persist) return validationManager;
 
@@ -3394,11 +3132,11 @@ export class SessionManager {
 					delete entry.ordinal;
 					return entry;
 				});
-			await target.appendAtomically(() => {
-				for (const entry of entries) target!._appendEntry(entry);
-				if (sourceLeafId === null) target!.resetLeaf();
-				else if (target!.getLeafId() !== sourceLeafId) target!.branch(sourceLeafId);
-			});
+			await target._commit((write) => {
+				for (const entry of entries) write.append(entry);
+				if (sourceLeafId === null) write.leaf(null);
+				else if (write.leafId !== sourceLeafId) write.branch(sourceLeafId);
+			}, true);
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
 			if (target) {
@@ -3524,7 +3262,7 @@ export class SessionManager {
 				directoryMode: PRIVATE_DIRECTORY_MODE,
 				fileMode: PRIVATE_FILE_MODE,
 			});
-			result = { lastOrdinal: manager.committedOrdinal };
+			result = { lastOrdinal: manager.getOrdinal() };
 		} catch (error) {
 			try {
 				await manager.closePersistence();

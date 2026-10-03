@@ -472,7 +472,7 @@ describe("subagent tool", () => {
 				model: faux.getModel(),
 				noTools: "all",
 			});
-			result.session.setSessionName("subagent tool test child");
+			await result.session.setSessionName("subagent tool test child");
 			return { ...result, services, diagnostics: services.diagnostics };
 		};
 

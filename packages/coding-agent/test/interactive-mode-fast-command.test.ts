@@ -42,7 +42,7 @@ function createModel(): Model<Api> {
 
 function createHarness(options: { busy?: boolean; fastModeEnabled?: boolean; model?: Model<Api> } = {}) {
 	let fastModeEnabled = options.fastModeEnabled ?? false;
-	const setFastModeEnabled = vi.fn((enabled: boolean) => {
+	const setFastModeEnabled = vi.fn(async (enabled: boolean) => {
 		fastModeEnabled = enabled;
 	});
 	const session: HostActionSessionState = {
@@ -62,7 +62,7 @@ function createHarness(options: { busy?: boolean; fastModeEnabled?: boolean; mod
 		abortRun: vi.fn(async () => {}),
 		compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
 		newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-		renameSession: vi.fn(() => {}),
+		renameSession: vi.fn(async () => {}),
 		setFastModeEnabled,
 	} as HostActionInvocationContext;
 	const harness: FastCommandHarness = {

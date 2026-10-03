@@ -16,7 +16,7 @@ export default function (volt: ExtensionAPI) {
 			const name = args.trim();
 
 			if (name) {
-				volt.setSessionName(name);
+				await volt.setSessionName(name);
 				ctx.ui.notify(`Session named: ${name}`, "info");
 			} else {
 				const current = volt.getSessionName();

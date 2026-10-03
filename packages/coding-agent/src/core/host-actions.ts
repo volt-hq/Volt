@@ -56,16 +56,16 @@ export interface HostActionInvocationContext extends HostActionDescriptorContext
 	compactContext(customInstructions?: string): Promise<HostActionCompactResult>;
 	newSession(options?: HostActionNewSessionOptions): Promise<HostActionNewSessionResult>;
 	afterSessionSwitch?: () => Promise<void>;
-	renameSession(name: string): void;
-	setFastModeEnabled?(enabled: boolean): void;
+	renameSession(name: string): Promise<void>;
+	setFastModeEnabled?(enabled: boolean): Promise<void>;
 	setAgentMode?(mode: AgentMode): Promise<PlanningState>;
 	executePlan?(
 		planId: string,
 		expectedRevision: number,
 		strategy: PlanExecutionStrategy,
 	): Promise<{ planning: PlanningState; selectedSessionId: string; started: boolean }>;
-	changePlan?(planId: string, expectedRevision: number): PlanningState;
-	discardPlan?(planId: string, expectedRevision: number): PlanningState;
+	changePlan?(planId: string, expectedRevision: number): Promise<PlanningState>;
+	discardPlan?(planId: string, expectedRevision: number): Promise<PlanningState>;
 	runReviewAction?(target: ReviewTarget, options: HostActionReviewOptions): Promise<ReviewWorkflowResult>;
 	runReviewLifecycleAction?(action: string, args: Record<string, unknown>): Promise<UiActionInvocationResponse>;
 }
@@ -352,12 +352,12 @@ export async function runContextCompactHostAction(
 	return context.compactContext(customInstructions);
 }
 
-export function runSessionRenameHostAction(context: HostActionInvocationContext, name: string): string {
+export async function runSessionRenameHostAction(context: HostActionInvocationContext, name: string): Promise<string> {
 	const trimmedName = name.trim();
 	if (!trimmedName) {
 		throw new Error("Session name cannot be empty");
 	}
-	context.renameSession(trimmedName);
+	await context.renameSession(trimmedName);
 	return trimmedName;
 }
 
@@ -893,7 +893,7 @@ async function invokePlanExecuteAction(
 	};
 }
 
-function invokePlanChangeAction(
+async function invokePlanChangeAction(
 	context: HostActionInvocationContext,
 	args: unknown,
 ): Promise<UiActionInvocationResponse> {
@@ -902,17 +902,17 @@ function invokePlanChangeAction(
 		throw new Error("Changing a plan is not available in this host");
 	}
 	const { planId, expectedRevision } = getPlanActionArgs(args, false);
-	changePlan(planId, expectedRevision);
-	return Promise.resolve({
+	await changePlan(planId, expectedRevision);
+	return {
 		action: PLAN_CHANGE_ACTION_ID,
 		status: "completed",
 		stateChanged: true,
 		actionsChanged: true,
 		message: "Plan returned to draft",
-	});
+	};
 }
 
-function invokePlanDiscardAction(
+async function invokePlanDiscardAction(
 	context: HostActionInvocationContext,
 	args: unknown,
 ): Promise<UiActionInvocationResponse> {
@@ -921,14 +921,14 @@ function invokePlanDiscardAction(
 		throw new Error("Discarding a plan is not available in this host");
 	}
 	const { planId, expectedRevision } = getPlanActionArgs(args, false);
-	discardPlan(planId, expectedRevision);
-	return Promise.resolve({
+	await discardPlan(planId, expectedRevision);
+	return {
 		action: PLAN_DISCARD_ACTION_ID,
 		status: "completed",
 		stateChanged: true,
 		actionsChanged: true,
 		message: "Plan discarded",
-	});
+	};
 }
 
 async function invokeSessionNewAction(
@@ -983,7 +983,7 @@ async function invokeSessionRenameAction(
 	args: unknown,
 ): Promise<UiActionInvocationResponse> {
 	const name = getRequiredStringArg(args, "name");
-	const trimmedName = runSessionRenameHostAction(context, name);
+	const trimmedName = await runSessionRenameHostAction(context, name);
 	return {
 		action: SESSION_RENAME_ACTION_ID,
 		status: "completed",
@@ -996,20 +996,20 @@ function invokeThinkingFastModeAction(
 	context: HostActionInvocationContext,
 	args: unknown,
 ): Promise<UiActionInvocationResponse> {
-	return Promise.resolve(runThinkingFastModeHostAction(context, getRequiredBooleanArg(args, "enabled")));
+	return runThinkingFastModeHostAction(context, getRequiredBooleanArg(args, "enabled"));
 }
 
-export function runThinkingFastModeHostAction(
+export async function runThinkingFastModeHostAction(
 	context: HostActionInvocationContext,
 	enabled: boolean,
-): UiActionInvocationResponse {
+): Promise<UiActionInvocationResponse> {
 	const setFastModeEnabled = context.setFastModeEnabled;
 	if (!setFastModeEnabled) {
 		throw new Error("Fast mode is not available in this host");
 	}
 
 	const wasEnabled = isThinkingFastModeEnabled(context.session);
-	setFastModeEnabled(enabled);
+	await setFastModeEnabled(enabled);
 	const changed = wasEnabled !== isThinkingFastModeEnabled(context.session);
 	return {
 		action: THINKING_FAST_MODE_ACTION_ID,

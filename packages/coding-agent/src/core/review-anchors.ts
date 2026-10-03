@@ -19,7 +19,6 @@ export async function resolveCanonicalReviewSource(
 	const ref = manager.getSessionRef();
 	if (!ref) return undefined;
 	const cwd = manager.getCwd();
-	await manager.flush();
 	const lease = await acquireSharedSQLiteSessionStore(ref.sessionDirectory);
 	try {
 		if (lease.client.info.storeId !== ref.storeId) throw new ReviewSourceUnavailableError();

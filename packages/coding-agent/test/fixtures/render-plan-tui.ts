@@ -154,11 +154,10 @@ inspector = new PlanInspectorComponent({
 const status = new PlanStatusComponent(planning);
 const controller: PlanningToolController = {
 	getPlanningState: () => planning,
-	flushPlanningState: async () => undefined,
-	updatePlan: () => plan,
-	submitPlan: () => plan,
-	updatePlanProgress: () => plan,
-	requestReplan: () => planning,
+	updatePlan: async () => plan,
+	submitPlan: async () => plan,
+	updatePlanProgress: async () => plan,
+	requestReplan: async () => planning,
 };
 const updatePlanDefinition = createPlanningToolDefinitions(controller)[0];
 const tool = new ToolExecutionComponent(

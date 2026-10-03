@@ -43,8 +43,7 @@ describe.skipIf(process.platform === "win32")("sensitive artifact permissions", 
 		const sessionDir = join(root, "sessions");
 		mkdirSync(sessionDir, { mode: 0o777 });
 		const manager = await SessionManager.create(cwd, sessionDir);
-		const leafId = manager.appendCustomMessageEntry("test", "secret", true);
-		await manager.flush();
+		const leafId = await manager.appendCustomMessageEntry("test", "secret", true);
 		const sessionRef = manager.getSessionRef();
 		expect(sessionRef).toBeDefined();
 		expect(mode(sessionDir)).toBe(0o700);
@@ -58,7 +57,6 @@ describe.skipIf(process.platform === "win32")("sensitive artifact permissions", 
 		expect(mode(databasePath(reopened))).toBe(0o600);
 
 		const branchedRef = await reopened.createBranchedSession(leafId);
-		await reopened.flush();
 		expect(branchedRef).toBeDefined();
 		expect(mode(databasePath(reopened))).toBe(0o600);
 
@@ -127,8 +125,7 @@ describe.skipIf(process.platform === "win32")("sensitive artifact permissions", 
 
 	it("writes HTML and JSONL exports privately without following destination symlinks", async () => {
 		const manager = await SessionManager.create(cwd, join(root, "sessions"));
-		manager.appendCustomMessageEntry("test", "secret", true);
-		await manager.flush();
+		await manager.appendCustomMessageEntry("test", "secret", true);
 
 		const exportDir = join(root, "exports", "nested");
 		const htmlPath = join(exportDir, "session.html");

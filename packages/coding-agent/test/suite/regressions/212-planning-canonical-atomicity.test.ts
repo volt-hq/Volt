@@ -12,11 +12,7 @@ import {
 import { loseConversationLock } from "../../lost-conversation-lock.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
-async function faultNextTransaction(
-	manager: SessionManager,
-	stage: "before" | "pause",
-	pause?: { started(): void; release: Promise<void> },
-): Promise<SQLiteSessionStoreLease> {
+async function faultNextTransaction(manager: SessionManager): Promise<SQLiteSessionStoreLease> {
 	const lease = await acquireSharedSQLiteSessionStore(manager.getSessionDir());
 	const store = lease.client;
 	const applyTransaction = store.applyTransaction.bind(store);
@@ -28,20 +24,9 @@ async function faultNextTransaction(
 		) {
 			return applyTransaction(input);
 		}
-		if (stage === "before") throw new Error("injected pre-commit transaction failure");
-		pause?.started();
-		await pause?.release;
-		return applyTransaction(input);
+		throw new Error("injected pre-commit transaction failure");
 	});
 	return lease;
-}
-
-function deferred(): { promise: Promise<void>; resolve(): void } {
-	let resolve = (): void => undefined;
-	const promise = new Promise<void>((promiseResolve) => {
-		resolve = promiseResolve;
-	});
-	return { promise, resolve };
 }
 
 interface PlanningSnapshot {
@@ -81,18 +66,17 @@ async function snapshotReopened(sessionRef: SessionReference): Promise<PlanningS
 
 async function createReadyPlan(harness: Harness): Promise<void> {
 	await harness.session.setAgentMode("plan");
-	const draft = harness.session.updatePlan({
+	const draft = await harness.session.updatePlan({
 		title: "Atomic planning feedback",
 		summary: "Commit plan state and canonical feedback together.",
 		steps: [{ text: "Apply feedback atomically" }],
 	});
-	harness.session.submitPlan({
+	await harness.session.submitPlan({
 		planId: draft.id,
 		expectedRevision: draft.revision,
 		title: draft.title!,
 		summary: draft.summary!,
 	});
-	await harness.sessionManager.flush();
 }
 
 describe("regression #212: planning and canonical delivery atomicity", () => {
@@ -144,41 +128,10 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		await harness.session.clearQueue();
 	}
 
-	it.each(["planning", "checkpoint", "canonical user"] as const)(
-		"rolls back every staged entry when the %s append fails",
-		async (stage) => {
-			const { harness, sessionRef, baseline } = await setup();
-			harness.setResponses([fauxAssistantMessage("must remain unused")]);
-			if (stage === "planning") {
-				const original = harness.sessionManager.appendPlanningState.bind(harness.sessionManager);
-				vi.spyOn(harness.sessionManager, "appendPlanningState").mockImplementation((planning) => {
-					if (planning.plan?.phase === "draft") throw new Error("injected planning append failure");
-					return original(planning);
-				});
-			} else if (stage === "checkpoint") {
-				const original = harness.sessionManager.appendCustomMessageEntry.bind(harness.sessionManager);
-				vi.spyOn(harness.sessionManager, "appendCustomMessageEntry").mockImplementation(
-					(customType, content, display, details) => {
-						if (customType === "volt-plan-checkpoint") throw new Error("injected checkpoint append failure");
-						return original(customType, content, display, details);
-					},
-				);
-			} else {
-				const original = harness.sessionManager.appendMessage.bind(harness.sessionManager);
-				vi.spyOn(harness.sessionManager, "appendMessage").mockImplementation((message) => {
-					if (message.role === "user") throw new Error("injected canonical user append failure");
-					return original(message);
-				});
-			}
-
-			await expectRetainedFailure(harness, sessionRef, baseline, `issue-212-${stage.replace(" ", "-")}`);
-		},
-	);
-
 	it("keeps the ready plan when the SQLite transaction rolls back", async () => {
 		const { harness, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
-		storeLeases.push(await faultNextTransaction(harness.sessionManager, "before"));
+		storeLeases.push(await faultNextTransaction(harness.sessionManager));
 
 		await expectRetainedFailure(harness, sessionRef, baseline, "issue-212-first-durability");
 	});
@@ -209,7 +162,6 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		const clientMessageId = "issue-212-stale-preimage";
 		await harness.session.steer("revise this ready plan", undefined, clientMessageId);
-		await harness.sessionManager.flush();
 		await loseConversationLock(harness.sessionManager);
 		await expect(harness.control.continue()).resolves.toMatchObject({
 			status: "delivery_failed",
@@ -248,62 +200,38 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
-	it("fences session replacement while atomic durability is pending", async () => {
-		const { harness } = await setup();
-		harness.setResponses([fauxAssistantMessage("feedback applied")]);
-		const started = deferred();
-		const release = deferred();
-		storeLeases.push(
-			await faultNextTransaction(harness.sessionManager, "pause", {
-				started: started.resolve,
-				release: release.promise,
-			}),
-		);
-
-		await harness.session.steer("revise this ready plan", undefined, "issue-212-session-replacement");
-		const attempt = harness.control.continue();
-		await started.promise;
-		expect(() => harness.sessionManager.newSession()).toThrow("Cannot create a new session during an atomic append");
-		await expect(harness.sessionManager.createBranchedSession(harness.sessionManager.getLeafId()!)).rejects.toThrow(
-			"Cannot create a branched session during an atomic append",
-		);
-		release.resolve();
-		await expect(attempt).resolves.toMatchObject({ status: "completed" });
-	});
-
-	it("publishes planning before transcript observers and fences nested writes", async () => {
+	it("publishes planning before transcript observers and commits nested writes after the delivery", async () => {
 		const { harness } = await setup();
 		harness.setResponses([fauxAssistantMessage("feedback applied")]);
 		const observedPhases: Array<string | undefined> = [];
-		const nestedWrites: string[] = [];
+		const nestedWrites: Promise<string>[] = [];
 		const unsubscribe = harness.sessionManager.subscribeEntries((entry) => {
 			if (
 				(entry.type === "custom_message" && entry.customType === "volt-plan-checkpoint") ||
 				(entry.type === "message" && entry.message.role === "user")
 			) {
 				observedPhases.push(harness.session.planningState.plan?.phase);
-				try {
-					harness.sessionManager.appendFastModeChange(true);
-					nestedWrites.push("accepted");
-				} catch {
-					nestedWrites.push("rejected");
-				}
+				nestedWrites.push(harness.sessionManager.appendFastModeChange(true));
 			}
 		});
 
 		await harness.session.steer("revise this ready plan", undefined, "issue-212-observer-order");
 		await harness.control.continue();
 		unsubscribe();
+		const nestedIds = await Promise.all(nestedWrites);
 
 		expect(observedPhases).toEqual(["draft", "draft"]);
-		expect(nestedWrites).toEqual(["rejected", "rejected"]);
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "fast_mode_change")).toHaveLength(0);
+		// Observer writes commit after the delivery instead of joining its batch.
+		const branch = harness.sessionManager.getBranch();
+		const userIndex = branch.findIndex((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(branch[userIndex - 1]).toMatchObject({ type: "custom_message", customType: "volt-plan-checkpoint" });
+		expect(branch.slice(userIndex + 1, userIndex + 3).map((entry) => entry.id)).toEqual(nestedIds);
 	});
 
 	it("retains an identified direct prompt after a proven pre-replacement failure", async () => {
 		const { harness, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
-		storeLeases.push(await faultNextTransaction(harness.sessionManager, "before"));
+		storeLeases.push(await faultNextTransaction(harness.sessionManager));
 		const clientMessageId = "issue-212-direct-pre-replacement";
 
 		await expect(
@@ -311,7 +239,7 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 				clientMessageId,
 				source: "rpc",
 			}),
-		).rejects.toThrow("SQLite session transaction was rolled back");
+		).rejects.toThrow("Session commit was rolled back");
 		expect(harness.sessionManager.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
 		expect(harness.control.hasQueuedMessages()).toBe(true);
 		expect(snapshotHarness(harness)).toEqual(baseline);
