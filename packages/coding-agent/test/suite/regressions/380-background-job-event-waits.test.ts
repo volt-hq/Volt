@@ -298,7 +298,7 @@ describe("multi-job presentation and collection", () => {
 		}
 	});
 
-	it.each(["valid", "provider-omitted", "model-error", "result-replaced", "payload-changed"])(
+	it.each(["valid", "no-payload", "model-error", "result-replaced", "payload-changed"])(
 		"acknowledges the multi-result envelope only with valid delivery: %s",
 		async (variant) => {
 			const { harness, finish, started, unsubscribe } = await setup(false, {
@@ -319,14 +319,10 @@ describe("multi-job presentation and collection", () => {
 			harness.setResponses = (responses) =>
 				setResponses(
 					responses.map((response) => async (context, options, state, model) => {
-						await options?.onPayload?.({ messages: structuredClone(context.messages) }, model, {
-							toolResultMessageIndices:
-								variant === "provider-omitted"
-									? []
-									: context.messages.flatMap((message, index) =>
-											message.role === "toolResult" ? [index] : [],
-										),
-						});
+						// A provider that builds no payload gives no evidence that it sent the results.
+						if (variant !== "no-payload") {
+							await options?.onPayload?.({ messages: structuredClone(context.messages) }, model);
+						}
 						return typeof response === "function" ? response(context, options, state, model) : response;
 					}),
 				);

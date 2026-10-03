@@ -10,6 +10,7 @@ import {
 	ClientInputOutcomeAmbiguousError,
 	QueueClearPersistenceError,
 } from "../src/core/agent-session.ts";
+import { getClientMessageId } from "../src/core/messages.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
@@ -253,7 +254,7 @@ describe("durable client input idempotency", () => {
 		await harness.session.prompt("identity", { clientMessageId: "transport-owned" });
 
 		const user = harness.session.messages.find((message) => message.role === "user");
-		expect(user?.clientMessageId).toBe("transport-owned");
+		expect(user && getClientMessageId(user)).toBe("transport-owned");
 		expect(harness.sessionManager.getClientInput("transport-owned")?.state).toBe("completed");
 		expect(harness.sessionManager.getClientInput("extension-hijack")).toBeUndefined();
 	});
@@ -316,7 +317,7 @@ describe("durable client input idempotency", () => {
 					volt.on("message_end", (event) => {
 						if (
 							event.message.role !== "user" ||
-							event.message.clientMessageId !== "queued-role-change-rejected"
+							getClientMessageId(event.message) !== "queued-role-change-rejected"
 						) {
 							return;
 						}
@@ -908,7 +909,7 @@ describe("durable client input idempotency", () => {
 			if (
 				event.type === "message_start" &&
 				event.message.role === "user" &&
-				event.message.clientMessageId === "client-consuming"
+				getClientMessageId(event.message) === "client-consuming"
 			) {
 				void harness.session.clearQueue();
 				stateImmediatelyAfterClear = harness.sessionManager.getClientInput("client-consuming")?.state;

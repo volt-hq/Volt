@@ -151,7 +151,7 @@ describe("stream runner lifecycle and hooks", () => {
 		const onResponse = vi.fn();
 		const { stream, sent } = scriptedStream({});
 		await stream(model, { messages: [] }, { onPayload, onResponse }).result();
-		expect(onPayload).toHaveBeenCalledWith({ prompt: "hello" }, model, undefined);
+		expect(onPayload).toHaveBeenCalledWith({ prompt: "hello" }, model);
 		expect(sent).toEqual([{ prompt: "replaced" }]);
 		expect(onResponse).toHaveBeenCalledWith({ status: 200, headers: { "x-test": "1" } }, model);
 	});

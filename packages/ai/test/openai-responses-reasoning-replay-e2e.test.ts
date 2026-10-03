@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
+import { applyReplayPolicy } from "../src/replay-policy.ts";
 import type { AssistantMessage, Context, Message, Tool, ToolCall } from "../src/types.ts";
 import { complete, getEnvApiKey } from "./test-client.ts";
 
@@ -65,7 +66,7 @@ describe.skipIf(!process.env.OPENAI_API_KEY || !process.env.ANTHROPIC_API_KEY)(
 
 			const context: Context = {
 				systemPrompt: "You are a helpful assistant.",
-				messages: [userMessage, corruptedAssistant, followUp],
+				messages: applyReplayPolicy([userMessage, corruptedAssistant, followUp]),
 				tools: [testTool],
 			};
 

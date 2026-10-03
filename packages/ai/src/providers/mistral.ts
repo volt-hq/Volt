@@ -28,7 +28,6 @@ import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import { resolvePromptCacheRetention } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 const MISTRAL_TOOL_CALL_ID_LENGTH = 9;
@@ -67,18 +66,11 @@ export const streamMistral: StreamFunction<"mistral-conversations", MistralOptio
 		});
 
 		const normalizeMistralToolCallId = createMistralToolCallIdNormalizer();
-		const toolResultPayload = new ToolResultPayloadTracker();
-		const transformedMessages = transformMessages(
-			context.messages,
-			model,
-			(id) => normalizeMistralToolCallId(id),
-			toolResultPayload,
-		);
+		const transformedMessages = transformMessages(context.messages, model, (id) => normalizeMistralToolCallId(id));
 
-		const payload = buildChatPayload(model, context, transformedMessages, options, toolResultPayload);
+		const payload = buildChatPayload(model, context, transformedMessages, options);
 		return {
 			payload,
-			metadata: toolResultPayload.metadata,
 			send: async (chatPayload) => ({
 				body: await mistral.chat.stream(chatPayload, buildRequestOptions(model, options)),
 			}),
@@ -196,7 +188,7 @@ function buildRequestOptions(model: Model<"mistral-conversations">, options?: Mi
 
 	// Mistral infrastructure uses `x-affinity` for KV-cache reuse (prefix caching).
 	// Respect explicit caller-provided header values.
-	const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
+	const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention);
 	if (cacheRetention !== "none" && options?.sessionId && !headers["x-affinity"]) {
 		headers["x-affinity"] = options.sessionId;
 	}
@@ -213,12 +205,11 @@ function buildChatPayload(
 	context: Context,
 	messages: Message[],
 	options?: MistralOptions,
-	toolResultPayload?: ToolResultPayloadTracker,
 ): ChatCompletionStreamRequest {
 	const payload: ChatCompletionStreamRequest = {
 		model: model.id,
 		stream: true,
-		messages: toChatMessages(messages, model.input.includes("image"), toolResultPayload),
+		messages: toChatMessages(messages, model.input.includes("image")),
 	};
 
 	if (context.tools?.length) payload.tools = toFunctionTools(context.tools);
@@ -478,11 +469,7 @@ function stripSymbolKeys(value: unknown): unknown {
 	return value;
 }
 
-function toChatMessages(
-	messages: Message[],
-	supportsImages: boolean,
-	toolResultPayload?: ToolResultPayloadTracker,
-): ChatCompletionStreamRequestMessage[] {
+function toChatMessages(messages: Message[], supportsImages: boolean): ChatCompletionStreamRequestMessage[] {
 	const result: ChatCompletionStreamRequestMessage[] = [];
 
 	for (const msg of messages) {
@@ -564,7 +551,6 @@ function toChatMessages(
 			name: msg.toolName,
 			content: toolContent,
 		});
-		toolResultPayload?.include(msg);
 	}
 
 	return result;

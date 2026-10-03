@@ -602,6 +602,44 @@ describe("AuthStorage", () => {
 				expires: 1,
 			});
 		});
+
+		test.each([
+			[undefined, undefined, undefined],
+			["0.0.0.0", undefined, "0.0.0.0"],
+			["0.0.0.0", "localhost", "localhost"],
+		])("login reads VOLT_OAUTH_CALLBACK_HOST=%s as the callback host (caller: %s)", async (env, caller, expected) => {
+			vi.stubEnv("VOLT_OAUTH_CALLBACK_HOST", env);
+			authStorage = AuthStorage.inMemory();
+			let callbackHost: string | undefined;
+			try {
+				await authStorage.login(
+					{
+						id: "custom-oauth",
+						name: "Custom OAuth",
+						async login(callbacks) {
+							callbackHost = callbacks.callbackHost;
+							return { access: "access", refresh: "refresh", expires: 1 };
+						},
+						async refreshToken(credentials) {
+							return credentials;
+						},
+						getApiKey(credentials) {
+							return credentials.access;
+						},
+					},
+					{
+						onAuth: () => {},
+						onDeviceCode: () => {},
+						onPrompt: async () => "",
+						onSelect: async () => undefined,
+						...(caller === undefined ? {} : { callbackHost: caller }),
+					},
+				);
+			} finally {
+				vi.unstubAllEnvs();
+			}
+			expect(callbackHost).toBe(expected);
+		});
 	});
 
 	describe("oauth lock compromise handling", () => {

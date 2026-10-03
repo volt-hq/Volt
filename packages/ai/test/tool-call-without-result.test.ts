@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
+import { applyReplayPolicy } from "../src/replay-policy.ts";
 import type { Api, Context, Model, StreamOptions, Tool } from "../src/types.ts";
 import { complete } from "./test-client.ts";
 
@@ -71,8 +72,8 @@ async function testToolCallWithoutResult<TApi extends Api>(model: Model<TApi>, o
 		timestamp: Date.now(),
 	});
 
-	// Step 5: The fix should filter out the orphaned tool call, and the request should succeed
-	const secondResponse = await complete(model, context, options);
+	// Step 5: The replay policy synthesizes the missing result, and the request should succeed
+	const secondResponse = await complete(model, { ...context, messages: applyReplayPolicy(context.messages) }, options);
 	console.log("Second response:", JSON.stringify(secondResponse, null, 2));
 
 	// The request should succeed (not error) - that's the main thing we're testing

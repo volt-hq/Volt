@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import { getClientMessageId } from "../src/core/messages.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
@@ -287,9 +288,7 @@ describe("RPC prompt response semantics", () => {
 					.getEntries()
 					.some(
 						(entry) =>
-							entry.type === "message" &&
-							entry.message.role === "user" &&
-							entry.message.clientMessageId === "client-b2",
+							entry.type === "message" && entry.message.role === "user" && entry.clientMessageId === "client-b2",
 					);
 		};
 
@@ -389,9 +388,7 @@ describe("RPC prompt response semantics", () => {
 			expect(
 				reopened
 					.buildSessionContext()
-					.messages.filter(
-						(message) => message.role === "user" && message.clientMessageId === command.clientMessageId,
-					),
+					.messages.filter((message) => getClientMessageId(message) === command.clientMessageId),
 			).toHaveLength(1);
 		} finally {
 			await first.cleanup();

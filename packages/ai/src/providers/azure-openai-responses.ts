@@ -18,7 +18,6 @@ import {
 } from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 const DEFAULT_AZURE_API_VERSION = "v1";
 const AZURE_TOOL_CALL_PROVIDERS = new Set(["openai", "openai-codex", "opencode", "azure-openai-responses"]);
@@ -89,11 +88,9 @@ export const streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses"
 			const apiKey = options.apiKey;
 			if (!apiKey) throw missingApiKeyError(model.provider);
 			const client = createClient(model, apiKey, options);
-			const toolResultPayload = new ToolResultPayloadTracker();
-			const payload = buildParams(model, context, options, deploymentName, toolResultPayload);
+			const payload = buildParams(model, context, options, deploymentName);
 			return {
 				payload,
-				metadata: toolResultPayload.metadata,
 				async send(params, { signal }) {
 					const { data, response } = await client.responses
 						.create(params, {
@@ -226,10 +223,9 @@ function buildParams(
 	context: Context,
 	options: AzureOpenAIResponsesOptions | undefined,
 	deploymentName: string,
-	toolResultPayload: ToolResultPayloadTracker,
 ) {
-	const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS, { toolResultPayload });
-	const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
+	const messages = convertResponsesMessages(model, context, AZURE_TOOL_CALL_PROVIDERS);
+	const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention);
 	const disableImplicitPromptCache = cacheRetention === "none" && supportsPromptCacheMode(model, "explicit");
 
 	const params: ResponseCreateParamsStreaming & { prompt_cache_options?: { mode: "explicit" } } = {

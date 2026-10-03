@@ -9,7 +9,7 @@ import {
 	type SimpleStreamOptions,
 	type ToolArgumentLimits,
 } from "@hansjm10/volt-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
 import { createAgentSession } from "../src/core/sdk.ts";
@@ -31,6 +31,7 @@ describe("createAgentSession stream options", () => {
 	});
 
 	afterEach(() => {
+		vi.unstubAllEnvs();
 		if (tempDir) {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
@@ -83,6 +84,7 @@ describe("createAgentSession stream options", () => {
 		},
 		requestOptions: SimpleStreamOptions = {},
 		startupLimits?: ToolArgumentLimits,
+		viaPrompt = startupLimits !== undefined,
 	): Promise<SimpleStreamOptions | undefined> {
 		const model = createModel(api);
 		const settingsManager = SettingsManager.inMemory(settings);
@@ -113,7 +115,7 @@ describe("createAgentSession stream options", () => {
 		});
 
 		try {
-			if (startupLimits) {
+			if (viaPrompt) {
 				await session.prompt("hello");
 			} else {
 				const stream = await createAgentSessionTestControl(session).getStreamFn()(
@@ -186,6 +188,34 @@ describe("createAgentSession stream options", () => {
 			{ maxBytes: 256, maxDurationMs: 1000 },
 		);
 		expect(options?.toolArgumentLimits).toEqual({ maxBytes: 256, maxTotalBytes: 512, maxDurationMs: 1000 });
+	});
+
+	it.each([
+		[undefined, undefined, false],
+		["0", undefined, false],
+		["1", undefined, true],
+		["1", false, false],
+	] as const)(
+		"reads VOLT_CODEX_REQUEST_DIAGNOSTICS=%s as requestDiagnostics (request: %s)",
+		async (env, requested, expected) => {
+			vi.stubEnv("VOLT_CODEX_REQUEST_DIAGNOSTICS", env);
+			const options = await captureStreamOptions(
+				"openai-codex-responses",
+				{},
+				requested === undefined ? {} : { requestDiagnostics: requested },
+			);
+			expect(options?.requestDiagnostics).toBe(expected);
+		},
+	);
+
+	it.each([
+		[undefined, undefined],
+		["short", undefined],
+		["long", "long"],
+	] as const)("reads VOLT_CACHE_RETENTION=%s as the session's cacheRetention", async (env, expected) => {
+		vi.stubEnv("VOLT_CACHE_RETENTION", env);
+		const options = await captureStreamOptions("openai-completions", {}, {}, undefined, true);
+		expect(options?.cacheRetention).toBe(expected);
 	});
 
 	it("isolates settings limit objects from callers and preserves omitted defaults", () => {

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
+import { applyReplayPolicy } from "../src/replay-policy.ts";
 import type { Api, Context, Model, StreamOptions } from "../src/types.ts";
 import { complete, stream } from "./test-client.ts";
 
@@ -51,7 +52,7 @@ async function testAbortSignal<TApi extends Api>(llm: Model<TApi>, options: Stre
 		timestamp: Date.now(),
 	});
 
-	const followUp = await complete(llm, context, options);
+	const followUp = await complete(llm, { ...context, messages: applyReplayPolicy(context.messages) }, options);
 	expect(followUp.stopReason).toBe("stop");
 	expect(followUp.content.length).toBeGreaterThan(0);
 }
@@ -93,7 +94,7 @@ async function testAbortThenNewMessage<TApi extends Api>(llm: Model<TApi>, optio
 		timestamp: Date.now(),
 	});
 
-	const followUp = await complete(llm, context, options);
+	const followUp = await complete(llm, { ...context, messages: applyReplayPolicy(context.messages) }, options);
 	expect(followUp.stopReason).toBe("stop");
 	expect(followUp.content.length).toBeGreaterThan(0);
 }

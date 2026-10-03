@@ -667,8 +667,8 @@ export function projectRemoteTranscriptEntry(
 			"preserve",
 			fullContentMaxScalars,
 		);
-		if (message.role === "user" && typeof message.clientMessageId === "string") {
-			item.clientMessageId = message.clientMessageId;
+		if (message.role === "user" && entry.clientMessageId !== undefined) {
+			item.clientMessageId = entry.clientMessageId;
 		}
 		if (parts.length > 0) {
 			item.parts = parts;

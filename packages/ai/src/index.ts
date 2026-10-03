@@ -22,6 +22,7 @@ export { supportsFastInference } from "./providers/openai-fast-inference.ts";
 export type { OpenAIResponsesOptions } from "./providers/openai-responses.ts";
 export { resolvePromptCacheRetention } from "./providers/prompt-cache.ts";
 export * from "./providers/register-builtins.ts";
+export { applyReplayPolicy } from "./replay-policy.ts";
 export * from "./schemas.ts";
 export * from "./session-resources.ts";
 export * from "./stream/fragments.ts";

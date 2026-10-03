@@ -576,6 +576,8 @@ async function createAgentSessionWithTrackedResources(
 	// Requests stream through the registry's client, which resolves their credentials and configured
 	// headers. Stream and prompt-cache refresh requests must apply identical provider options.
 	const client = modelRegistry.client;
+	// Volt reads its environment switches here and passes them to ai as request options.
+	const requestDiagnostics = process.env.VOLT_CODEX_REQUEST_DIAGNOSTICS === "1";
 	// The client merges the model's configured headers under the request's own. Attribution defaults
 	// apply only to header names that configuration leaves unset.
 	const providerRequestHeaders = (
@@ -608,6 +610,7 @@ async function createAgentSessionWithTrackedResources(
 			maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
 			maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
 			headers: providerRequestHeaders(model, options),
+			requestDiagnostics: options?.requestDiagnostics ?? requestDiagnostics,
 		};
 	};
 	const streamFn: StreamFn = (model, context, options) => {
@@ -629,6 +632,7 @@ async function createAgentSessionWithTrackedResources(
 	const transport = settingsManager.getTransport();
 	const streamOptions: AgentHarnessStreamOptions = {
 		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
+		...(process.env.VOLT_CACHE_RETENTION === "long" ? { cacheRetention: "long" } : {}),
 		...(transport === undefined ? {} : { transport }),
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
 		...(options.toolArgumentLimits === undefined ? {} : { toolArgumentLimits: { ...options.toolArgumentLimits } }),

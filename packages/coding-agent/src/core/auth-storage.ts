@@ -482,7 +482,8 @@ export class AuthStorage {
 	 * Login to an OAuth provider and store its credentials under the provider id.
 	 */
 	async login(provider: OAuthProviderInterface, callbacks: OAuthLoginCallbacks): Promise<void> {
-		const credentials = await provider.login(callbacks);
+		const callbackHost = callbacks.callbackHost ?? process.env.VOLT_OAUTH_CALLBACK_HOST;
+		const credentials = await provider.login(callbackHost ? { ...callbacks, callbackHost } : callbacks);
 		this.set(provider.id, { type: "oauth", ...credentials });
 	}
 

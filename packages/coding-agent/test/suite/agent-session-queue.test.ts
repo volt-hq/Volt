@@ -3,6 +3,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { getClientMessageId } from "../../src/core/messages.ts";
 import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -365,7 +366,7 @@ describe("AgentSession queue characterization", () => {
 		expect(
 			harness.session.messages
 				.filter((message) => message.role === "user")
-				.map((message) => message.clientMessageId),
+				.map((message) => getClientMessageId(message)),
 		).toEqual([undefined, "client-steer-1", "client-steer-2"]);
 		expect(getAssistantTexts(harness)).toEqual(["", "handled steer 1", "handled steer 2"]);
 	});
@@ -392,7 +393,7 @@ describe("AgentSession queue characterization", () => {
 		expect(
 			harness.session.messages
 				.filter((message) => message.role === "user")
-				.map((message) => message.clientMessageId),
+				.map((message) => getClientMessageId(message)),
 		).toEqual([undefined, "client-follow-up-1", "client-follow-up-2"]);
 		expect(getAssistantTexts(harness)).toEqual([
 			"",

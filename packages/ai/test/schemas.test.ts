@@ -22,7 +22,6 @@ const userText: UserMessage = { role: "user", content: "hello", timestamp: 1 };
 const userBlocks: UserMessage = {
 	role: "user",
 	content: [{ type: "text", text: "describe this" }, image],
-	clientMessageId: "client-1",
 	timestamp: 2,
 };
 
@@ -145,6 +144,10 @@ describe("ai message schemas", () => {
 		for (const [message, path] of cases) {
 			expect(Value.Check(MessageSchema, withExtra(message, path, { unexpected: true })), path.join(".")).toBe(false);
 		}
+	});
+
+	it("rejects product identity on user messages", () => {
+		expect(Value.Check(UserMessageSchema, { ...userBlocks, clientMessageId: "client-1" })).toBe(false);
 	});
 
 	it("rejects content blocks outside a role's content union", () => {

@@ -1,16 +1,13 @@
-import type { CacheRetention, Model, ProviderEnv } from "../types.ts";
-import { getProviderEnvValue } from "../utils/provider-env.ts";
+import type { CacheRetention, Model } from "../types.ts";
 
 export function resolvePromptCacheRetention(
 	model: Model<string>,
-	cacheRetention?: CacheRetention,
-	env?: ProviderEnv,
+	cacheRetention: CacheRetention = "short",
 	options: { forceShort?: boolean } = {},
 ): CacheRetention {
-	const requested = cacheRetention ?? (getProviderEnvValue("VOLT_CACHE_RETENTION", env) === "long" ? "long" : "short");
-	if (requested === "none") return "none";
+	if (cacheRetention === "none") return "none";
 	if (!model.promptCache) return options.forceShort ? "short" : "none";
-	if (requested === "long" && model.promptCache.retention.long) return "long";
+	if (cacheRetention === "long" && model.promptCache.retention.long) return "long";
 	return "short";
 }
 

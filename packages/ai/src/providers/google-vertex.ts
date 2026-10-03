@@ -35,7 +35,6 @@ import {
 	parseGoogleStream,
 } from "./google-shared.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 export interface GoogleVertexOptions extends StreamOptions {
 	toolChoice?: "auto" | "none" | "any";
@@ -73,11 +72,9 @@ export const streamGoogleVertex: StreamFunction<"google-vertex", GoogleVertexOpt
 		const client = apiKey
 			? createClientWithApiKey(model, apiKey, options.headers)
 			: createClient(model, resolveProject(options), resolveLocation(options), options.headers, options.env);
-		const toolResultPayload = new ToolResultPayloadTracker();
-		const payload = buildParams(model, context, options, toolResultPayload);
+		const payload = buildParams(model, context, options);
 		return {
 			payload,
-			metadata: toolResultPayload.metadata,
 			send: async (params) => ({ body: await client.models.generateContentStream(params) }),
 		};
 	},
@@ -233,9 +230,8 @@ function buildParams(
 	model: Model<"google-vertex">,
 	context: Context,
 	options: GoogleVertexOptions = {},
-	toolResultPayload?: ToolResultPayloadTracker,
 ): GenerateContentParameters {
-	const contents = convertMessages(model, context, toolResultPayload);
+	const contents = convertMessages(model, context);
 
 	const generationConfig: GenerateContentConfig = {};
 	if (options.temperature !== undefined) {

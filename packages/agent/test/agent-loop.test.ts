@@ -1,6 +1,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type Context,
 	EventStream,
 	type Message,
 	type Model,
@@ -234,6 +235,71 @@ describe("agentLoop with AgentMessage", () => {
 		expect(transformedMessages.length).toBe(2);
 		// Then convertToLlm receives the pruned messages
 		expect(convertedMessages.length).toBe(2);
+	});
+
+	it("applies the replay policy to the provider context without changing the transcript", async () => {
+		const completed = createAssistantMessage(
+			[{ type: "toolCall", id: "kept", name: "echo", arguments: { value: "a" } }],
+			"toolUse",
+		);
+		const interrupted = createAssistantMessage(
+			[{ type: "toolCall", id: "interrupted", name: "echo", arguments: { value: "b" } }],
+			"aborted",
+		);
+		const interruptedResult: Message = {
+			role: "toolResult",
+			toolCallId: "interrupted",
+			toolName: "echo",
+			content: [{ type: "text", text: "partial" }],
+			isError: true,
+			timestamp: 2,
+		};
+		const history: AgentMessage[] = [
+			createUserMessage("start"),
+			completed,
+			createUserMessage("interrupt"),
+			interrupted,
+			interruptedResult,
+		];
+		const context: AgentContext = { systemPrompt: "You are helpful.", messages: [...history], tools: [] };
+		let providerMessages: Message[] = [];
+		const streamFn = (_model: unknown, llmContext: Context) => {
+			providerMessages = llmContext.messages;
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage([{ type: "text", text: "Response" }]);
+				stream.push({ type: "done", seq: 1, reason: "stop", message });
+			});
+			return stream;
+		};
+
+		const prompt = createUserMessage("continue");
+		const stream = agentLoop(
+			[prompt],
+			context,
+			{ model: createModel(), convertToLlm: identityConverter },
+			undefined,
+			streamFn,
+		);
+		for await (const _ of stream) {
+			// consume
+		}
+
+		expect(providerMessages).toEqual([
+			history[0],
+			completed,
+			{
+				role: "toolResult",
+				toolCallId: "kept",
+				toolName: "echo",
+				content: [{ type: "text", text: "No result provided" }],
+				isError: true,
+				timestamp: completed.timestamp,
+			},
+			history[2],
+			prompt,
+		]);
+		expect(context.messages.slice(0, history.length)).toEqual(history);
 	});
 
 	it("should handle tool calls and results", async () => {

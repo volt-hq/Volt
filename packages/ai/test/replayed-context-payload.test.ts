@@ -1,12 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-	AssistantMessage,
-	Context,
-	KnownApi,
-	Model,
-	ProviderPayloadMetadata,
-	ToolResultMessage,
-} from "../src/types.ts";
+import { applyReplayPolicy } from "../src/replay-policy.ts";
+import type { AssistantMessage, Context, KnownApi, Model, ToolResultMessage } from "../src/types.ts";
 import { streamSimple } from "./test-client.ts";
 
 const apis: KnownApi[] = [
@@ -72,17 +66,15 @@ function result(toolCallId: string, text: string, isError = false): ToolResultMe
 	};
 }
 
-async function capture(model: Model<KnownApi>, context: Context) {
+async function capturePayload(model: Model<KnownApi>, context: Context): Promise<string> {
 	let payload: unknown;
-	let metadata: ProviderPayloadMetadata | undefined;
 	const response = await streamSimple(model, context, {
 		apiKey: fakeToken,
 		cacheRetention: "none",
 		transport: "sse",
 		env: { AWS_REGION: "us-east-1", AWS_BEDROCK_SKIP_AUTH: "1", AZURE_OPENAI_BASE_URL: model.baseUrl },
-		onPayload: (value, _model, evidence) => {
+		onPayload: (value) => {
 			payload = value;
-			metadata = evidence;
 			// Stop before any provider request. All endpoints and credentials are synthetic.
 			throw new Error("payload captured before request");
 		},
@@ -90,54 +82,72 @@ async function capture(model: Model<KnownApi>, context: Context) {
 	expect(response.stopReason).toBe("error");
 	expect(response.error?.message).toContain("payload captured before request");
 	expect(payload).toBeDefined();
-	expect(metadata).toBeDefined();
-	return { payload, metadata: metadata! };
+	return JSON.stringify(payload);
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
-describe.each(apis)("%s tool-result payload evidence", (api) => {
+describe.each(apis)("%s serializes the replayed context", (api) => {
 	it.each([
 		["error", false],
 		["error", true],
 		["aborted", false],
 		["aborted", true],
-	] as const)("tracks surviving source indices after %s replay (cross-model: %s)", async (stopReason, crossModel) => {
-		const fetch = vi.fn(() => {
-			throw new Error("Unexpected provider request");
-		});
-		vi.stubGlobal("fetch", fetch);
-		const model = modelFor(api);
-		const source = crossModel ? { ...model, provider: "source-provider", id: "source-model" } : model;
-		const reusedId = crossModel ? "call/reused|foreign/item" : "reused001";
-		const secondId = crossModel ? "call/second|foreign/other" : "second001";
-		const context: Context = {
-			messages: [
-				{ role: "user", content: "Inspect jobs", timestamp: 0 },
+	] as const)(
+		"sends every tool result of a context replayed after %s (cross-model: %s)",
+		async (stopReason, crossModel) => {
+			const fetch = vi.fn(() => {
+				throw new Error("Unexpected provider request");
+			});
+			vi.stubGlobal("fetch", fetch);
+			const model = modelFor(api);
+			const source = crossModel ? { ...model, provider: "source-provider", id: "source-model" } : model;
+			const reusedId = crossModel ? "call/reused|foreign/item" : "reused001";
+			const secondId = crossModel ? "call/second|foreign/other" : "second001";
+			const messages = [
+				{ role: "user" as const, content: "Inspect jobs", timestamp: 0 },
 				assistant(source, stopReason, reusedId),
 				result(reusedId, "dropped-result"),
 				assistant(source, "toolUse", reusedId, secondId),
 				result(reusedId, "delivered-result"),
 				result(secondId, "delivered-failure", true),
 				assistant(source, "toolUse", "missing01"),
+				{ role: "user" as const, content: "Continue", timestamp: 3 },
+			];
+			const replayed = applyReplayPolicy(messages);
+			const original = structuredClone(replayed);
+
+			const encoded = await capturePayload(model, { messages: replayed });
+
+			expect(encoded).not.toContain("dropped-result");
+			for (const message of replayed) {
+				if (message.role !== "toolResult") continue;
+				const text = message.content[0]?.type === "text" ? message.content[0].text : "";
+				expect(encoded).toContain(text);
+			}
+			expect(encoded).toContain("No result provided");
+			expect(replayed).toEqual(original);
+			expect(fetch).not.toHaveBeenCalled();
+		},
+	);
+
+	it("does not apply the replay policy itself", async () => {
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(() => {
+				throw new Error("Unexpected provider request");
+			}),
+		);
+		const model = modelFor(api);
+		const encoded = await capturePayload(model, {
+			messages: [
+				{ role: "user", content: "Inspect jobs", timestamp: 0 },
+				assistant(model, "aborted", "aborted01"),
+				result("aborted01", "unreplayed-result"),
 				{ role: "user", content: "Continue", timestamp: 3 },
 			],
-		};
-		const original = structuredClone(context);
-		const { payload, metadata } = await capture(model, context);
-		expect(metadata.toolResultMessageIndices).toEqual([4, 5]);
-		const encoded = JSON.stringify(payload);
-		expect(encoded).not.toContain("dropped-result");
-		expect(encoded).toContain("delivered-result");
-		expect(encoded).toContain("delivered-failure");
-		expect(encoded).toContain("No result provided");
-		expect(encoded).not.toContain("toolResultMessageIndices");
-		expect(context).toEqual(original);
-		expect(Object.isFrozen(metadata)).toBe(true);
-		expect(Object.isFrozen(metadata.toolResultMessageIndices)).toBe(true);
-		const empty = await capture(model, { messages: [{ role: "user", content: "No results", timestamp: 0 }] });
-		expect(empty.metadata.toolResultMessageIndices).toEqual([]);
-		expect(metadata.toolResultMessageIndices).toEqual([4, 5]);
-		expect(fetch).not.toHaveBeenCalled();
+		});
+		// Replay would drop the aborted turn and its result; the provider sends what it is handed.
+		expect(encoded).toContain("unreplayed-result");
 	});
 });

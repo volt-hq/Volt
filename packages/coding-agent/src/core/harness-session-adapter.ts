@@ -14,6 +14,7 @@ import {
 	type SessionStorageCommitResult,
 	uuidv7,
 } from "@hansjm10/volt-agent-core";
+import { withClientMessageId } from "./messages.ts";
 import {
 	SessionAtomicAppendError,
 	type SessionCanonicalAppend,
@@ -73,7 +74,15 @@ function toHarnessEntry(entry: SessionEntry, parentId: string | null): HarnessSe
 	const base = { id: entry.id, parentId, timestamp: entry.timestamp };
 	switch (entry.type) {
 		case "message":
-			return { ...base, type: "message", message: structuredClone(entry.message) };
+			return {
+				...base,
+				type: "message",
+				// The runtime carries a client input identity on the message; storage keeps it beside.
+				message:
+					entry.clientMessageId !== undefined && entry.message.role === "user"
+						? withClientMessageId(structuredClone(entry.message), entry.clientMessageId)
+						: structuredClone(entry.message),
+			};
 		case "thinking_level_change":
 			return { ...base, type: "thinking_level_change", thinkingLevel: entry.thinkingLevel };
 		case "model_change":

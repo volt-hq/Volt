@@ -1219,7 +1219,7 @@ function clientMessageIdForEntry(entry: SessionEntry): string | undefined {
 	) {
 		return entry.clientMessageId;
 	}
-	return entry.type === "message" && entry.message.role === "user" ? entry.message.clientMessageId : undefined;
+	return entry.type === "message" ? entry.clientMessageId : undefined;
 }
 
 function loadTransactionClientInputs(
