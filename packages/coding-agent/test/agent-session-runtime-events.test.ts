@@ -812,6 +812,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		);
 		const collisionRef = collisionManager.getSessionRef();
 		expect(collisionRef).toBeDefined();
+		await collisionManager.closePersistence();
 		const prepare = vi.fn(async () => undefined);
 		const rebind = vi.fn(async () => {});
 		const replaced = vi.fn();
@@ -1241,6 +1242,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await targetManager.flush();
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
+		// The runtime opens the target for writing once its creator released the lock.
+		await targetManager.closePersistence();
 		faux.setResponses([fauxAssistantMessage("older done"), fauxAssistantMessage("fresh done")]);
 		await runtimeHost.startRecoveredClientInputs();
 		const phases: string[] = [];
@@ -1279,6 +1282,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			message: "older durable input",
 		});
 		await targetManager.flush();
+		// The runtime opens the target for writing once its creator released the lock.
+		await targetManager.closePersistence();
 		await runtimeHost.startRecoveredClientInputs();
 		const withSession = vi.fn(async () => {});
 		const replay = vi

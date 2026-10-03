@@ -1,3 +1,4 @@
+import { ConversationLockedError } from "../core/conversation-log/conversation-lock.ts";
 import { isIrohRemoteSessionId } from "../core/remote/iroh/handshake.ts";
 import {
 	IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE,
@@ -7,12 +8,34 @@ import {
 import { SessionManager, type SessionReference } from "../core/session-manager.ts";
 import { SessionStoreError } from "../core/session-store/types.ts";
 
-function sessionTargetFailure(error: unknown, workspace: string, sessionId: string): IrohRemoteOutcomeError {
+/**
+ * Map a session open or create failure to a phone-facing outcome. Messages are
+ * constant: the cause (which can name host paths) stays on `cause` only.
+ */
+function sessionTargetFailure(error: unknown, workspace: string, sessionId?: string): IrohRemoteOutcomeError {
+	const identity = sessionId === undefined ? { workspace } : { workspace, sessionId };
+	if (error instanceof ConversationLockedError) {
+		// A lock held by this daemon belongs to a runtime that is still being created or retired here.
+		return error.holder === "this_process"
+			? Object.assign(
+					new IrohRemoteOutcomeError(
+						"duplicate_conversation_connection",
+						"conversation runtime is changing; retry",
+					),
+					{ cause: error, ...identity, retryAfterMs: 500 },
+				)
+			: Object.assign(
+					new IrohRemoteOutcomeError(
+						"conversation_locked",
+						"conversation is open in another Volt process on the host",
+					),
+					{ cause: error, ...identity },
+				);
+	}
 	if (isIrohRemoteHostStorageFullError(error) || (error instanceof SessionStoreError && error.code === "store_full")) {
 		return Object.assign(new IrohRemoteOutcomeError("host_storage_full", IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE), {
 			cause: error,
-			workspace,
-			sessionId,
+			...identity,
 		});
 	}
 	if (
@@ -39,8 +62,7 @@ function sessionTargetFailure(error: unknown, workspace: string, sessionId: stri
 	}
 	return Object.assign(new IrohRemoteOutcomeError("session_unavailable", "session state is corrupt or ambiguous"), {
 		cause: error,
-		workspace,
-		sessionId,
+		...identity,
 	});
 }
 
@@ -69,6 +91,8 @@ export interface ResolvedSessionTarget {
 export interface SessionTargetSessionHandle {
 	getSessionId(): string;
 	getSessionRef(): SessionReference | undefined;
+	/** Release the handle, including the session lock a writer holds. */
+	closePersistence(): Promise<void>;
 }
 
 /** Minimal session-store surface consumed by target resolution — injectable for tests. */
@@ -118,16 +142,25 @@ export async function resolveIrohRemoteSessionTarget<H extends SessionTargetSess
 		};
 	};
 
+	// Creating takes the new session's lock; its failures are mapped like an open's.
+	const create = async (sessionId?: string): Promise<H> => {
+		try {
+			return await sessions.create(sessionId);
+		} catch (error) {
+			throw sessionTargetFailure(error, workspace.name, sessionId);
+		}
+	};
+
 	const requestedSessionId = target.kind === "last" ? target.resumeSessionId : target.sessionId;
 	if (requestedSessionId === undefined) {
-		return resolved(await sessions.create(), "created");
+		return resolved(await create(), "created");
 	}
 
 	if (!isIrohRemoteSessionId(requestedSessionId)) {
 		if (target.kind === "session" || target.kind === "new") {
 			throw new IrohRemoteOutcomeError("session_unavailable", "session not found in workspace");
 		}
-		return resolved(await sessions.create(), "created_after_missing", requestedSessionId);
+		return resolved(await create(), "created_after_missing", requestedSessionId);
 	}
 
 	let existingSessionRef: SessionReference | undefined;
@@ -146,13 +179,14 @@ export async function resolveIrohRemoteSessionTarget<H extends SessionTargetSess
 			throw new IrohRemoteOutcomeError("session_unavailable", "session not found in workspace");
 		}
 		if (target.kind === "new") {
-			return resolved(await sessions.create(requestedSessionId), "created");
+			return resolved(await create(requestedSessionId), "created");
 		}
-		return resolved(await sessions.create(), "created_after_missing", requestedSessionId);
+		return resolved(await create(), "created_after_missing", requestedSessionId);
 	}
 
+	let sessionManager: H | undefined;
 	try {
-		const sessionManager = await sessions.open(existingSessionRef);
+		sessionManager = await sessions.open(existingSessionRef);
 		if (sessionManager.getSessionId() !== requestedSessionId) {
 			throw new Error("session identity changed while opening resume target");
 		}
@@ -160,16 +194,21 @@ export async function resolveIrohRemoteSessionTarget<H extends SessionTargetSess
 	} catch (error) {
 		// Lookup and open cannot be atomic across an arbitrary injected store. Fail
 		// closed if the target disappears, is replaced, or no longer claims the
-		// requested durable idempotency domain between those operations.
+		// requested durable idempotency domain between those operations, releasing
+		// what was opened (and its session lock) first.
+		await sessionManager?.closePersistence().catch(() => {});
 		throw sessionTargetFailure(error, workspace.name, requestedSessionId);
 	}
 }
 
-/** Real SessionManager-backed store for a workspace cwd + session dir. */
+/**
+ * Real SessionManager-backed store for a workspace cwd + session dir. Existing
+ * sessions open for writing (taking their lock) unless `readOnly` is set.
+ */
 export function createSessionManagerTargetStore(
 	cwd: string,
 	sessionDir: string,
-	options: { listAll?: boolean; preserveSessionCwd?: boolean } = {},
+	options: { listAll?: boolean; preserveSessionCwd?: boolean; readOnly?: boolean } = {},
 ): SessionTargetSessionStore<SessionManager> {
 	return {
 		async find(sessionId) {
@@ -182,7 +221,10 @@ export function createSessionManagerTargetStore(
 			return sessions.map((session) => ({ id: session.id, ref: session.ref }));
 		},
 		async open(ref) {
-			return SessionManager.open(ref, options.preserveSessionCwd ? undefined : cwd);
+			const cwdOverride = options.preserveSessionCwd ? undefined : cwd;
+			return options.readOnly
+				? SessionManager.openReadOnly(ref, cwdOverride)
+				: SessionManager.open(ref, cwdOverride);
 		},
 		async create(sessionId) {
 			return SessionManager.create(cwd, sessionDir, sessionId === undefined ? undefined : { id: sessionId });

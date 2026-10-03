@@ -906,6 +906,7 @@ describe("Iroh remote core helpers", () => {
 			"session_unavailable",
 			"duplicate_conversation_connection",
 			"conversation_in_use",
+			"conversation_locked",
 			"host_identity_mismatch",
 			"saved_host_invalid",
 		]);
@@ -926,6 +927,7 @@ describe("Iroh remote core helpers", () => {
 			"session_unavailable",
 			"duplicate_conversation_connection",
 			"conversation_in_use",
+			"conversation_locked",
 		]);
 		expect(Array.from(IROH_REMOTE_RPC_PASSTHROUGH_TYPES)).toEqual([
 			"prompt",

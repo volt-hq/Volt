@@ -129,7 +129,7 @@ function canonicalAppend(operation: GeneratedOperation): SessionCanonicalAppend 
 async function expectReplayMatches(manager: SessionManager, clientMessageIds: readonly string[] = []): Promise<void> {
 	const ref = manager.getSessionRef();
 	if (!ref) throw new Error("Expected a persisted property-test session");
-	const reopened = await SessionManager.open(ref);
+	const reopened = await SessionManager.openReadOnly(ref);
 	try {
 		expect(reopened.getEntries()).toEqual(manager.getEntries());
 		expect(reopened.getLeafId()).toBe(manager.getLeafId());

@@ -212,6 +212,7 @@ describe("subagent recovery notice", () => {
 			...createTestResourceLoader(),
 			getSubagents: () => ({ definitions: [definition], diagnostics: [] }),
 		};
+		await parent.closePersistence();
 		const reopened = await SessionManager.open(parent.getSessionRef()!);
 		const manager = new SubagentManager({
 			createRuntime: async () => {

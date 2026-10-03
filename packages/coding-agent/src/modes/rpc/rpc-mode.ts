@@ -659,6 +659,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	let session = runtimeHost.session;
 	let lastNotifiedSession: AgentSession | undefined;
 	let unsubscribe: (() => void) | undefined;
+	let unsubscribeConversationLoss: (() => void) | undefined;
 	let unsubscribeBackpressure: (() => void) | undefined;
 	let sessionProjector: StreamProjector | undefined;
 	let stopModelCatalogWatcher: () => void = () => {};
@@ -1002,6 +1003,8 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		});
 	}
 	const restoreRebindSession = (): void => {
+		unsubscribeConversationLoss?.();
+		unsubscribeConversationLoss = undefined;
 		detachSessionReplacement?.();
 		detachSessionWillProject?.();
 		detachOrderedAuthorityChanges?.();
@@ -1041,6 +1044,22 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		unsubscribeConversationGenerationChanges = undefined;
 		await rpcSubagents.disposeAll();
 		session = runtimeHost.session;
+		unsubscribeConversationLoss?.();
+		// A runtime this RPC host owns ends when its session loses its log; a
+		// host that shares the runtime (the daemon, a relaying TUI) ends it instead.
+		const boundSession = session;
+		unsubscribeConversationLoss =
+			shouldDisposeRuntimeOnClose &&
+			typeof session.sessionManager?.subscribeConversationAuthorityChanges === "function"
+				? session.sessionManager.subscribeConversationAuthorityChanges((status) => {
+						const cause = status.error.cause instanceof Error ? status.error.cause.message : status.error.message;
+						console.error(
+							`Volt stopped session ${boundSession.sessionId} because its saved state could not be confirmed: ${cause}`,
+						);
+						// The listener runs inside the failing write; shut down once it has unwound.
+						queueMicrotask(() => void shutdown(1, undefined, { error: status.error }).catch(() => {}));
+					})
+				: undefined;
 		const sessionWithConversationGeneration = session as AgentSession & {
 			subscribeConversationGenerationChanges?: (listener: () => void) => () => void;
 		};

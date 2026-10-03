@@ -151,7 +151,7 @@ describe("AgentSession cache-preserving compaction", () => {
 		]);
 		await harness.session.prompt("Continue the current task");
 		await harness.sessionManager.flush();
-		const reopened = await SessionManager.open(harness.sessionManager.getSessionRef()!);
+		const reopened = await SessionManager.openReadOnly(harness.sessionManager.getSessionRef()!);
 		try {
 			expect(
 				reopened
@@ -284,7 +284,7 @@ describe("AgentSession cache-preserving compaction", () => {
 		harness.setResponses([response]);
 		await harness.session.prompt("Warm the prefix");
 		await harness.sessionManager.flush();
-		const reopened = await SessionManager.open(harness.sessionManager.getSessionRef()!);
+		const reopened = await SessionManager.openReadOnly(harness.sessionManager.getSessionRef()!);
 		try {
 			expect(reopened.buildSessionContext().messages.at(-1)).toMatchObject({
 				role: "assistant",

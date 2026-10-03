@@ -371,7 +371,7 @@ async function expectReplayMatches(manager: SessionManager, targetId: string, cl
 	await manager.flush();
 	const ref = manager.getSessionRef();
 	if (!ref) throw new Error("Expected persisted session reference");
-	const reopened = await SessionManager.open(ref);
+	const reopened = await SessionManager.openReadOnly(ref);
 	try {
 		expect(replayComparableState(reopened, targetId, clientMessageId)).toEqual(
 			replayComparableState(manager, targetId, clientMessageId),
@@ -1194,7 +1194,7 @@ describe("PR #329 projection reducer contract", () => {
 			mkdirSync(forkCwd, { recursive: true });
 			const forked = await SessionManager.forkFrom(sourceRef, forkCwd, forkDir, { id: "clear-label-fork" });
 			await forked.flush();
-			const reopened = await SessionManager.open(forked.getSessionRef()!);
+			const reopened = await SessionManager.openReadOnly(forked.getSessionRef()!);
 
 			expect(committedPrefix).toEqual({
 				label: undefined,
@@ -1241,7 +1241,7 @@ describe("PR #329 projection reducer contract", () => {
 				id: "clear-label-import",
 			});
 			await imported.flush();
-			const reopened = await SessionManager.open(imported.getSessionRef()!);
+			const reopened = await SessionManager.openReadOnly(imported.getSessionRef()!);
 
 			expect(committedPrefix).toEqual({
 				label: undefined,

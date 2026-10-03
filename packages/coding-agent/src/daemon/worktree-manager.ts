@@ -1355,7 +1355,7 @@ export class WorktreeManager {
 	): Promise<() => void> {
 		// Local sessions can live in checkout-keyed or custom stores. Validate the
 		// exact store and generation even when an ID-only daemon binding exists.
-		const session = await SessionManager.open(sessionRef);
+		const session = await SessionManager.openReadOnly(sessionRef);
 		let storedCwd: string;
 		try {
 			storedCwd = session.getCwd();
@@ -1435,7 +1435,7 @@ export class WorktreeManager {
 		try {
 			const sessionRef = await SessionManager.findForResume(sessionDir, sessionId);
 			if (sessionRef === undefined) return undefined;
-			const manager = await SessionManager.open(sessionRef);
+			const manager = await SessionManager.openReadOnly(sessionRef);
 			try {
 				storedCwd = manager.getCwd();
 			} finally {

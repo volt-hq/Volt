@@ -20,6 +20,7 @@ import type {
 	ExtensionFactory,
 	ExtensionUIContext,
 } from "../../../src/index.ts";
+import { loseConversationLock } from "../../lost-conversation-lock.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
 describe("regression #527: extension cleanup after conversation authority loss", () => {
@@ -118,6 +119,8 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		const manager = runtime.session.sessionManager;
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session");
+		// Simulate a lost lock: a second writer appends, and the stale write fails the ordinal fence.
+		loseConversationLock(manager);
 		const other = await SessionManager.open(ref);
 		try {
 			other.appendMessage({ role: "user", content: "authoritative input", timestamp: Date.now() });
@@ -131,27 +134,23 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		return ref;
 	}
 
-	it.each(["switch", "reload"] as const)(
-		"cleans the conflicted instance before %s and starts a fresh one",
-		async (operation) => {
-			const { runtime, harness, lifecycle, resources } = await createRuntimeForTest();
-			const oldSession = runtime.session;
-			const ref = await conflict(runtime);
-			if (operation === "switch") await runtime.switchSession(ref);
-			else await runtime.reloadCurrentSessionFromStore({ expectedSessionId: oldSession.sessionId });
+	it("cleans the conflicted instance before a switch and starts a fresh one", async () => {
+		const { runtime, harness, lifecycle, resources } = await createRuntimeForTest();
+		const oldSession = runtime.session;
+		const ref = await conflict(runtime);
+		await runtime.switchSession(ref);
 
-			expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume"]);
-			expect(resources.map((resource) => resource.signal.aborted)).toEqual([true, false]);
-			expect(runtime.session).not.toBe(oldSession);
-			expect(runtime.session.messages.map(getMessageText)).toEqual(["authoritative input"]);
-			harness.setResponses([fauxAssistantMessage("new reply")]);
-			await runtime.session.prompt("new input");
-			await runtime.dispose();
-			await runtime.dispose();
-			expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume", "2:shutdown:quit"]);
-			expect(resources.every((resource) => resource.signal.aborted)).toBe(true);
-		},
-	);
+		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume"]);
+		expect(resources.map((resource) => resource.signal.aborted)).toEqual([true, false]);
+		expect(runtime.session).not.toBe(oldSession);
+		expect(runtime.session.messages.map(getMessageText)).toEqual(["authoritative input"]);
+		harness.setResponses([fauxAssistantMessage("new reply")]);
+		await runtime.session.prompt("new input");
+		await runtime.dispose();
+		await runtime.dispose();
+		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume", "2:shutdown:quit"]);
+		expect(resources.every((resource) => resource.signal.aborted)).toBe(true);
+	});
 
 	it("cleans up once on quit while preserving the original persistence failure", async () => {
 		const { runtime, lifecycle, resources } = await createRuntimeForTest();
@@ -546,15 +545,15 @@ describe("regression #527: extension cleanup after conversation authority loss",
 			release.resolve();
 		});
 		const manager = runtime.session.sessionManager;
-		const reload = runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId });
+		const replacement = runtime.newSession();
 		await entered.promise;
 		expect(manager.getConversationAuthorityStatus().status).toBe("available");
 		manager.retireConversationAuthority(new Error("uncertain shutdown write"));
 		expect(() => oldVolt!.registerCommand("forbidden", { handler: async () => {} })).toThrow(/stale/);
 		release.resolve();
-		await expect(reload).resolves.toEqual({ reloaded: true });
+		await expect(replacement).resolves.toEqual({ cancelled: false, seeded: false });
 		expect(writeError).toBeInstanceOf(Error);
-		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume"]);
+		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:new", "2:start:new"]);
 		expect(resources.map((resource) => resource.signal.aborted)).toEqual([true, false]);
 		expect(errors).toEqual([]);
 	});

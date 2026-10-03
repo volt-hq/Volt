@@ -1796,7 +1796,7 @@ describe("review pipeline", () => {
 			record: { errorMessage: expect.stringContaining("Review presentation report validation failed") },
 		});
 		expect(JSON.stringify(outcome.record)).not.toContain(privateMarker);
-		const reopened = await SessionManager.open(sessionManager.getSessionRef()!);
+		const reopened = await SessionManager.openReadOnly(sessionManager.getSessionRef()!);
 		expect(getReviewRun(reopened, "review:private-presentation-failure")).toMatchObject({
 			status: "failed",
 			errorMessage: expect.stringContaining("Review presentation report validation failed"),
@@ -1862,7 +1862,7 @@ describe("review pipeline", () => {
 			record: { errorMessage: expect.stringContaining("Review discovery model request failed") },
 		});
 		expect(JSON.stringify(remoteOutcome)).not.toContain(privateDiagnostic);
-		const reopened = await SessionManager.open(sessionManager.getSessionRef()!);
+		const reopened = await SessionManager.openReadOnly(sessionManager.getSessionRef()!);
 		expect(getReviewRun(reopened, "review:remote-provider-failure")).toMatchObject({
 			status: "failed",
 			errorMessage: expect.stringContaining("Review discovery model request failed"),
@@ -2260,7 +2260,7 @@ describe("review pipeline", () => {
 			status: "completed",
 			message: expect.stringContaining("Review incomplete"),
 		});
-		const reopened = await SessionManager.open(originRef);
+		const reopened = await SessionManager.openReadOnly(originRef);
 		expect(getReviewRun(reopened, workflowId)).toMatchObject({
 			runId: workflowId,
 			status: "incomplete",

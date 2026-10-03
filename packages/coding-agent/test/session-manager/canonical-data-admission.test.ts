@@ -50,7 +50,7 @@ describe("SessionManager canonical data admission", () => {
 		await manager.flush();
 		expect(manager.getEntry(id)?.ordinal).toBe(1);
 		expect(observed).toEqual([id]);
-		expect((await SessionManager.open(ref)).getEntries()).toHaveLength(1);
+		expect((await SessionManager.openReadOnly(ref)).getEntries()).toHaveLength(1);
 	});
 
 	it("rejects out-of-range message timestamps before state or persistence changes", async () => {
@@ -85,7 +85,7 @@ describe("SessionManager canonical data admission", () => {
 		expect(observed).toEqual([]);
 		await manager.flush();
 
-		const persistedBeforeValidAppend = await SessionManager.open(ref);
+		const persistedBeforeValidAppend = await SessionManager.openReadOnly(ref);
 		expect(persistedBeforeValidAppend.getEntries()).toEqual([]);
 		expect(persistedBeforeValidAppend.getLeafId()).toBeNull();
 
@@ -107,7 +107,7 @@ describe("SessionManager canonical data admission", () => {
 		expect(manager.getEntry(validUserId)?.ordinal).toBe(1);
 		expect(manager.getEntry(validToolResultId)?.ordinal).toBe(2);
 		expect(observed).toEqual([validUserId, validToolResultId]);
-		const persisted = await SessionManager.open(ref);
+		const persisted = await SessionManager.openReadOnly(ref);
 		expect(persisted.getEntries().map((entry) => entry.id)).toEqual([validUserId, validToolResultId]);
 		expect(persisted.getLeafId()).toBe(validToolResultId);
 	});
@@ -164,7 +164,7 @@ describe("SessionManager canonical data admission", () => {
 		expect(failed.error?.endsWith("…")).toBe(true);
 		await manager.flush();
 
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getClientInput("long-error")?.error).toBe(failed.error);
 	});
 
@@ -186,7 +186,7 @@ describe("SessionManager canonical data admission", () => {
 		if (inMemory?.type !== "custom") throw new Error("Expected custom entry");
 		expect(inMemory.data).toEqual(expected);
 
-		const persisted = (await SessionManager.open(ref)).getEntry(id);
+		const persisted = (await SessionManager.openReadOnly(ref)).getEntry(id);
 		expect(persisted?.type).toBe("custom");
 		if (persisted?.type !== "custom") throw new Error("Expected reopened custom entry");
 		expect(persisted.data).toEqual(expected);

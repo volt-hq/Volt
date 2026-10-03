@@ -293,7 +293,7 @@ describe("SubagentManager", () => {
 			throw new Error("expected persisted child session reference");
 		}
 		expect(stats.sessionRef.sessionDirectory).toBe(parentSessionManager.getSessionDir());
-		const reopened = await SessionManager.open(stats.sessionRef);
+		const reopened = await SessionManager.openReadOnly(stats.sessionRef);
 		cleanups.push(() => reopened.drainPersistence().then(() => undefined));
 		expect(reopened.getHeader()).toMatchObject({
 			type: "session",

@@ -82,6 +82,8 @@ describe("SessionManager starting Git context", () => {
 
 		const sessionRef = session.getSessionRef();
 		if (!sessionRef) throw new Error("Expected a persisted session reference");
+		// The reopened writer must refuse a later observation, so the first writer closes first.
+		await session.closePersistence();
 		const reopened = await SessionManager.open(sessionRef);
 		expect(reopened.getStartingGitContext()).toEqual(STARTING_GIT_CONTEXT);
 		expect(reopened.recordStartingGitContext(reopened.getSessionId(), null)).toBe(false);
@@ -110,7 +112,7 @@ describe("SessionManager starting Git context", () => {
 		session.appendSessionInfo("trigger another projection write");
 		await session.flush();
 
-		const reopened = await SessionManager.open(session.getSessionRef()!);
+		const reopened = await SessionManager.openReadOnly(session.getSessionRef()!);
 		expect(reopened.getStartingGitContext()).toEqual(STARTING_GIT_CONTEXT);
 	});
 

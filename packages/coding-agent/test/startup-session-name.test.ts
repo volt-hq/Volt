@@ -39,7 +39,7 @@ interface CliResult {
 }
 
 async function readSessionInfoNames(sessionRef: SessionReference): Promise<string[]> {
-	const manager = await SessionManager.open(sessionRef);
+	const manager = await SessionManager.openReadOnly(sessionRef);
 	return manager
 		.getEntries()
 		.filter((entry) => entry.type === "session_info")
@@ -91,6 +91,8 @@ async function setup(): Promise<CliDirs> {
 	await manager.flush();
 	const sessionRef = manager.getSessionRef();
 	if (!sessionRef) throw new Error("expected persisted startup session reference");
+	// The CLI process under test opens the session for writing.
+	await manager.closePersistence();
 	return { agentDir, projectDir, sessionDir, sessionRef };
 }
 

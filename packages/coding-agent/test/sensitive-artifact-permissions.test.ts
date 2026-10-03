@@ -52,6 +52,7 @@ describe.skipIf(process.platform === "win32")("sensitive artifact permissions", 
 
 		chmodSync(sessionDir, 0o777);
 		chmodSync(databasePath(manager), 0o666);
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(sessionRef!);
 		expect(mode(sessionDir)).toBe(0o700);
 		expect(mode(databasePath(reopened))).toBe(0o600);

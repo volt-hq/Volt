@@ -64,7 +64,7 @@ describe("SessionManager Fast mode policy", () => {
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.buildSessionContext().fastMode).toEqual({ enabled: true });
 		expect(await SessionManager.list(dir, dir)).toEqual([]);
 		expect(await SessionManager.list(dir, dir, undefined, { includeMessageFreeDurable: true })).toMatchObject([
@@ -85,7 +85,7 @@ describe("SessionManager Fast mode policy", () => {
 		await manager.flush();
 		if (!branchedRef) throw new Error("Expected a persisted branched reference");
 
-		const reopened = await SessionManager.open(branchedRef);
+		const reopened = await SessionManager.openReadOnly(branchedRef);
 		expect(reopened.getSessionId()).toBe(manager.getSessionId());
 		expect(reopened.buildSessionContext()).toMatchObject({
 			thinkingLevel: "high",
@@ -102,7 +102,7 @@ describe("SessionManager Fast mode policy", () => {
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
-		expect((await SessionManager.open(ref)).buildSessionContext().fastMode).toEqual({ enabled: false });
+		expect((await SessionManager.openReadOnly(ref)).buildSessionContext().fastMode).toEqual({ enabled: false });
 	});
 
 	it("honors options passed as the second listAll argument", async () => {

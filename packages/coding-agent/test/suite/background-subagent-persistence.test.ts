@@ -15,6 +15,7 @@ import { parsePersistedSessionEntry } from "../../src/core/session-entry-codec.t
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/index.ts";
 import { createBuiltInSubagentDefinitions, SubagentManager } from "../../src/core/subagents/index.ts";
+import { loseConversationLock } from "../lost-conversation-lock.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createFauxModelRegistry, createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -266,7 +267,7 @@ describe("background subagent spawn persistence", () => {
 					kind === "command" ? ["leaf", "message"] : ["message"],
 					["subagent_spawn"],
 				]);
-				const reopened = await SessionManager.open(context.parent.getSessionRef()!);
+				const reopened = await SessionManager.openReadOnly(context.parent.getSessionRef()!);
 				try {
 					expect(reopened.getSubagentSpawnEntries()).toEqual(edges);
 					expect(reopened.getEntries()).toEqual(entries);
@@ -415,6 +416,8 @@ describe("background subagent spawn persistence", () => {
 			await context.published.promise;
 			context.finishChild.resolve();
 			await context.wait(jobId);
+			// Simulates a lost lock: a second writer appends behind the parent's back.
+			loseConversationLock(context.parent);
 			const other = await SessionManager.open(ref);
 			other.appendSessionInfo("another writer");
 			await other.closePersistence();
@@ -424,7 +427,7 @@ describe("background subagent spawn persistence", () => {
 			await flush;
 			expect(await context.parent.drainPersistence()).toMatchObject({ status: "reconciliation_required" });
 			expect(() => context.parent.appendSessionInfo("must reject")).toThrow(/reconciliation/);
-			const reopened = await SessionManager.open(ref);
+			const reopened = await SessionManager.openReadOnly(ref);
 			try {
 				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
 				expect(reopened.getSessionName()).toBe("another writer");

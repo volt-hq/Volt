@@ -10,6 +10,7 @@ import {
 	createAgentSessionRuntime,
 	type SubagentRuntimeContext,
 } from "../agent-session-runtime.ts";
+import { ConversationLockedError } from "../conversation-log/conversation-lock.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
@@ -1029,7 +1030,8 @@ export class SubagentManager {
 			let resumedManager: SessionManager;
 			try {
 				resumedManager = await SessionManager.open(claim.childSessionRef);
-			} catch {
+			} catch (error) {
+				if (error instanceof ConversationLockedError) throw error;
 				throw new Error("The interrupted run's transcript no longer exists; it cannot be resumed.");
 			}
 			handle = await this.startByName(claim.agentName, {
@@ -2075,7 +2077,7 @@ export class SubagentManager {
 			await new Promise((resolve) => setImmediate(resolve));
 			let child: SessionManager;
 			try {
-				child = await SessionManager.open(childSessionRef);
+				child = await SessionManager.openReadOnly(childSessionRef);
 			} catch {
 				if (!settled) {
 					registry.hydrate({

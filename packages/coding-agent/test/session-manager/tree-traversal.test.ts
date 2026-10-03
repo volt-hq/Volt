@@ -481,7 +481,7 @@ describe("createBranchedSession", () => {
 			session.appendMessage(assistantMsg("new answer"));
 			await session.flush();
 
-			const reopened = await SessionManager.open(branchedRef);
+			const reopened = await SessionManager.openReadOnly(branchedRef);
 			const entryIds = reopened.getEntries().map((entry) => entry.id);
 			expect(new Set(entryIds).size).toBe(entryIds.length);
 			expect(reopened.buildSessionContext().messages).toMatchObject([{ role: "user" }, { role: "assistant" }]);
@@ -508,7 +508,7 @@ describe("createBranchedSession", () => {
 			if (!branchedRef) throw new Error("Expected a persisted branched reference");
 			await session.flush();
 
-			const reopened = await SessionManager.open(branchedRef);
+			const reopened = await SessionManager.openReadOnly(branchedRef);
 			expect(reopened.getEntries().map((entry) => entry.id)).toEqual([id1, id2]);
 			expect(reopened.buildSessionContext().messages).toHaveLength(2);
 		} finally {

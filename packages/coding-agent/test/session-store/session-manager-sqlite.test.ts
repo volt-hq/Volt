@@ -10,6 +10,7 @@ import {
 	SESSION_STORE_SCHEMA_VERSION,
 	type SQLiteSessionStoreLease,
 } from "../../src/core/session-store/index.ts";
+import { loseConversationLock } from "../lost-conversation-lock.ts";
 import { createHarness } from "../suite/harness.ts";
 import { createDirectorySymlinkSync } from "../symlink-utils.ts";
 
@@ -68,7 +69,7 @@ describe("SQLite-backed SessionManager", () => {
 		expect(listed).toMatchObject([{ id: manager.getSessionId(), firstMessage: "hello sqlite", messageCount: 1 }]);
 		expect(listed[0]?.ref).toEqual(ref);
 
-		const reopened = await own(SessionManager.open(ref!));
+		const reopened = await own(SessionManager.openReadOnly(ref!));
 		expect(reopened.buildSessionContext().messages).toMatchObject([{ role: "user", content: "hello sqlite" }]);
 	});
 
@@ -181,6 +182,8 @@ describe("SQLite-backed SessionManager", () => {
 		await manager.flush();
 
 		expect(await SessionManager.list(cwd, sessionDir)).toEqual([]);
+		// Continuing opens the session for writing, so its first writer closes first.
+		await manager.closePersistence();
 		const continued = await own(SessionManager.continueRecent(cwd, sessionDir));
 		expect(continued.getSessionRef()).toEqual(manager.getSessionRef());
 		expect(continued.getClientInput("accepted-retry")).toMatchObject({
@@ -206,6 +209,8 @@ describe("SQLite-backed SessionManager", () => {
 			"newer-visible-conversation",
 			"queued-continuation",
 		]);
+		// Continuing opens the session for writing, so its first writer closes first.
+		await pending.closePersistence();
 		const continued = await own(SessionManager.continueRecent(cwd, sessionDir));
 		expect(continued.getSessionRef()).toEqual(pending.getSessionRef());
 		expect(continued.getClientInputRecoveryPlan()).toMatchObject({
@@ -222,6 +227,8 @@ describe("SQLite-backed SessionManager", () => {
 		await manager.flush();
 
 		expect(await SessionManager.list(cwd, sessionDir)).toEqual([]);
+		// Continuing opens the session for writing, so its first writer closes first.
+		await manager.closePersistence();
 		const continued = await own(SessionManager.continueRecent(cwd, sessionDir));
 		expect(continued.getSessionRef()).toEqual(manager.getSessionRef());
 		expect(continued.getClientInputRecoveryPlan()).toMatchObject({
@@ -251,6 +258,8 @@ describe("SQLite-backed SessionManager", () => {
 
 		const listed = await SessionManager.list(cwd, sessionDir);
 		const searched = await SessionManager.search(cwd, "filesystem-alias-needle", sessionDir);
+		// Continuing opens the session for writing, so its first writer closes first.
+		await manager.closePersistence();
 		const continued = await own(SessionManager.continueRecent(cwd, sessionDir));
 
 		expect(listed).toMatchObject([{ id: "filesystem-alias", cwd: cwdAlias }]);
@@ -280,6 +289,8 @@ describe("SQLite-backed SessionManager", () => {
 			await manager.flush();
 			const createdRef = manager.getSessionRef();
 			if (!createdRef) throw new Error("Expected a persisted session reference");
+			// Each writer below closes before the next opens the session.
+			await manager.closePersistence();
 
 			const opened = await own(
 				SessionManager.open({
@@ -287,7 +298,9 @@ describe("SQLite-backed SessionManager", () => {
 					sessionDirectory: relativeSessionDir,
 				}),
 			);
+			await opened.closePersistence();
 			const continued = await own(SessionManager.continueRecent(cwd, relativeSessionDir));
+			await continued.closePersistence();
 			const listedRef = (await SessionManager.list(cwd, relativeSessionDir)).find(
 				(session) => session.id === createdRef.sessionId,
 			)?.ref;
@@ -457,6 +470,8 @@ describe("SQLite-backed SessionManager", () => {
 		original.appendMessage({ role: "user", content: "original", timestamp: Date.now() });
 		await original.flush();
 		const originalRef = original.getSessionRef()!;
+		// Simulates a lost lock: the session is deleted and recreated under a still-live writer.
+		loseConversationLock(original);
 		expect(await SessionManager.delete(originalRef, 1)).toBe(true);
 
 		const replacement = await own(SessionManager.create(cwd, sessionDir, { id: "reused-id" }));
@@ -475,9 +490,11 @@ describe("SQLite-backed SessionManager", () => {
 		const child = await own(SessionManager.forkFrom(parent.getSessionRef()!, second.cwd, second.sessionDir));
 		const childInfo = (await SessionManager.list(second.cwd, second.sessionDir))[0]!;
 		expect(childInfo.parentSessionRef).toEqual(parent.getSessionRef());
-		const reopenedParent = await own(SessionManager.open(childInfo.parentSessionRef!));
+		const reopenedParent = await own(SessionManager.openReadOnly(childInfo.parentSessionRef!));
 		expect(reopenedParent).toBeInstanceOf(SessionManager);
 		expect(child.getSessionId()).toBe(childInfo.id);
+		// Deleting takes the session's lock, so the child's writer closes first.
+		await child.closePersistence();
 
 		const snapshotPath = join(second.root, "child-snapshot.jsonl");
 		const snapshot = await SessionManager.exportJsonlSnapshot(childInfo.ref, snapshotPath);
@@ -489,6 +506,8 @@ describe("SQLite-backed SessionManager", () => {
 	it("keeps another manager usable when reconciliation replaces a same-store lease", async () => {
 		const { cwd, sessionDir } = fixture();
 		const first = await own(SessionManager.create(cwd, sessionDir));
+		// Simulates a lost lock: a second writer shares the session and its store lease.
+		loseConversationLock(first);
 		const second = await own(SessionManager.open(first.getSessionRef()!));
 		const faultLease = await acquireSharedSQLiteSessionStore(sessionDir);
 		storeLeases.push(faultLease);
@@ -540,9 +559,13 @@ describe("SQLite-backed SessionManager", () => {
 		const ref = stale.getSessionRef();
 		expect(ref).toBeDefined();
 
+		// Simulates a lost lock: a second writer advances the session past the stale manager.
+		loseConversationLock(stale);
 		const advancing = await own(SessionManager.open(ref!));
 		advancing.appendSessionInfo("advanced owner");
 		await advancing.flush();
+		// Deleting takes the session's lock, so the advancing writer closes first.
+		await advancing.closePersistence();
 
 		await expect(SessionManager.delete(ref!, 1)).rejects.toThrow("Session changed before deletion (ordinal 2)");
 		const reopened = await own(SessionManager.open(ref!));
@@ -555,6 +578,8 @@ describe("SQLite-backed SessionManager", () => {
 		const first = await own(SessionManager.create(cwd, sessionDir));
 		first.appendMessage({ role: "user", content: "shared owner", timestamp: Date.now() });
 		await first.flush();
+		// Simulates a lost lock: a second writer opens the session while the first is still open.
+		loseConversationLock(first);
 		const second = await own(SessionManager.open(first.getSessionRef()!));
 
 		await first.closePersistence();

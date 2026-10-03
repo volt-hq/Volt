@@ -24,6 +24,7 @@ import type { CustomEditor } from "../../../src/modes/interactive/components/cus
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
+import { loseConversationLock } from "../../lost-conversation-lock.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -48,7 +49,7 @@ type InteractiveAccess = {
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
 };
 
-describe("regression #525: recovering a session whose saved state could not be confirmed", () => {
+describe("regression #525: ending a session whose saved state could not be confirmed", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
 	beforeAll(() => {
@@ -132,7 +133,8 @@ describe("regression #525: recovering a session whose saved state could not be c
 		}
 
 		cleanups.push(async () => {
-			await runtime.dispose();
+			// A runtime whose session lost authority cannot close its persistence cleanly.
+			await runtime.dispose().catch(() => {});
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -146,12 +148,13 @@ describe("regression #525: recovering a session whose saved state could not be c
 		return sessionRef;
 	}
 
-	/** Write through a second store handle, as another owner of the session does. */
+	/** Write as a second owner after the runtime's lock was lost; its next commit fails the ordinal fence. */
 	async function appendAsOtherOwner(
-		sessionRef: SessionReference,
+		runtime: AgentSessionRuntime,
 		write: (manager: SessionManager) => Promise<void> | void,
 	): Promise<void> {
-		const manager = await SessionManager.open(sessionRef);
+		loseConversationLock(runtime.session.sessionManager);
+		const manager = await SessionManager.open(requireSessionRef(runtime));
 		try {
 			await write(manager);
 			await manager.flush();
@@ -161,7 +164,7 @@ describe("regression #525: recovering a session whose saved state could not be c
 	}
 
 	async function readStoredMessageTexts(sessionRef: SessionReference): Promise<string[]> {
-		const manager = await SessionManager.open(sessionRef);
+		const manager = await SessionManager.openReadOnly(sessionRef);
 		try {
 			return manager.buildSessionContext().messages.map(getMessageText);
 		} finally {
@@ -224,7 +227,7 @@ describe("regression #525: recovering a session whose saved state could not be c
 		return { access, terminal, handleFatalRuntimeError, exit };
 	}
 
-	it("keeps the footer rendering, wakes busy waiters, and reloads the session from the store", async () => {
+	it("keeps the footer rendering and wakes busy waiters after a lost lock fails the next commit", async () => {
 		const unhandledRejections: unknown[] = [];
 		const onUnhandledRejection = (reason: unknown) => {
 			unhandledRejections.push(reason);
@@ -234,27 +237,22 @@ describe("regression #525: recovering a session whose saved state could not be c
 			process.off("unhandledRejection", onUnhandledRejection);
 		});
 
-		const { runtime } = await createRuntimeForTest(["tui reply", "after reload"]);
+		const { runtime } = await createRuntimeForTest(["tui reply", "never sent"]);
 		await runtime.session.prompt("tui prompt");
 		const sessionRef = requireSessionRef(runtime);
 		const staleSession = runtime.session;
 		const renderedFooter = new FooterComponent(staleSession, createFooterData());
 		expect(stripAnsi(renderedFooter.render(120).lines[0])).toContain("faux-1");
 
-		await appendAsOtherOwner(sessionRef, (manager) => {
+		await appendAsOtherOwner(runtime, (manager) => {
 			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
 			manager.appendMessage(fauxAssistantMessage("phone reply"));
 		});
 
-		// Start recovery the way interactive mode does: from the authority-loss
-		// listener, which runs synchronously inside the failing write.
+		// The authority-loss listener runs synchronously inside the failing write.
 		let waitWhileBusy: Promise<void> | undefined;
-		let reload: Promise<{ reloaded: boolean }> | undefined;
 		const unsubscribe = staleSession.sessionManager.subscribeConversationAuthorityChanges(() => {
 			if (staleSession.isBusy) waitWhileBusy = staleSession.waitForNotBusy();
-			queueMicrotask(() => {
-				reload = runtime.reloadCurrentSessionFromStore({ expectedSessionId: staleSession.sessionId });
-			});
 		});
 		cleanups.push(unsubscribe);
 
@@ -268,33 +266,19 @@ describe("regression #525: recovering a session whose saved state could not be c
 
 		expect(waitWhileBusy).toBeDefined();
 		await withinTimeout(waitWhileBusy!, "waitForNotBusy()");
-		expect(reload).toBeDefined();
-		await expect(withinTimeout(reload!, "reloadCurrentSessionFromStore()")).resolves.toEqual({ reloaded: true });
-
-		expect(runtime.session).not.toBe(staleSession);
-		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
-		expect(runtime.session.messages.map(getMessageText)).toEqual([
-			"tui prompt",
-			"tui reply",
-			"phone prompt",
-			"phone reply",
-		]);
-
-		await runtime.session.prompt("after reload prompt");
+		// The store keeps what the other owner committed; the stale prompt never landed.
 		expect(await readStoredMessageTexts(sessionRef)).toEqual([
 			"tui prompt",
 			"tui reply",
 			"phone prompt",
 			"phone reply",
-			"after reload prompt",
-			"after reload",
 		]);
 
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandledRejections).toEqual([]);
 	});
 
-	it("reloads in interactive mode, replacing an extension footer that reads the lost session", async () => {
+	it("ends the interactive session, rendering an extension footer that reads the lost session until it exits", async () => {
 		const extensionFooter = (volt: ExtensionAPI) => {
 			volt.on("session_start", (_event, ctx) => {
 				ctx.ui.setFooter(() => ({
@@ -312,41 +296,32 @@ describe("regression #525: recovering a session whose saved state could not be c
 
 		await runtime.session.prompt("tui prompt");
 		await terminal.waitForRender();
-		const entriesBefore = extensionFooterEntries(terminal);
-		expect(entriesBefore).toBeGreaterThan(0);
+		expect(extensionFooterEntries(terminal)).toBeGreaterThan(0);
 
-		const sessionRef = requireSessionRef(runtime);
 		const staleSession = runtime.session;
-		await appendAsOtherOwner(sessionRef, (manager) => {
+		await appendAsOtherOwner(runtime, (manager) => {
 			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
-			manager.appendMessage(fauxAssistantMessage("phone reply"));
 		});
 		access.editor.setText("unsent draft");
 
 		await Promise.allSettled([staleSession.prompt("stale prompt")]);
 		expect(staleSession.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+		access.ui.requestRender(true);
+		await terminal.waitForRender();
 
-		await vi.waitFor(() => expect(viewport(terminal)).toContain("Reloaded the session from the store."), {
-			timeout: 5_000,
-		});
-		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
+		await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+		const [prefix, error, options] = handleFatalRuntimeError.mock.calls[0] as unknown as [
+			string,
+			Error,
+			{ unsentDraft?: string },
+		];
+		expect(prefix).toBe("Volt stopped this session because its saved state could not be confirmed");
+		expect(error.message).toContain("/resume");
+		expect(options).toEqual({ unsentDraft: "unsent draft" });
 		expect(exit).not.toHaveBeenCalled();
-		expect(runtime.session).not.toBe(staleSession);
-		expect(runtime.session.messages.map(getMessageText)).toEqual([
-			"tui prompt",
-			"tui reply",
-			"phone prompt",
-			"phone reply",
-		]);
-		const recovered = viewport(terminal);
-		expect(recovered).toContain("Could not confirm the session's saved state");
-		expect(recovered).toContain("phone reply");
-		// The extension reinstalled its footer for the reloaded session, which has the other owner's turns.
-		expect(extensionFooterEntries(terminal)).toBeGreaterThanOrEqual(entriesBefore + 2);
-		expect(access.editor.getText()).toBe("unsent draft");
 	});
 
-	it("dismisses a command's pending select and still reloads the session", async () => {
+	it("dismisses a command's pending select and ends the session", async () => {
 		const selection = Promise.withResolvers<string | undefined>();
 		const selectorShown = Promise.withResolvers<void>();
 		const pickCommand = (volt: ExtensionAPI) => {
@@ -377,18 +352,13 @@ describe("regression #525: recovering a session whose saved state could not be c
 
 		await expect(withinTimeout(selection.promise, "ctx.ui.select()")).resolves.toBeUndefined();
 		await expect(withinTimeout(command, "prompt('/pick')")).resolves.toBeUndefined();
-		await vi.waitFor(() => expect(viewport(terminal)).toContain("Reloaded the session from the store."), {
-			timeout: 5_000,
-		});
-		expect(viewport(terminal)).not.toContain("Pick a target");
+		await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1), { timeout: 5_000 });
 		expect(access.activeView).toBe(access.conversationView);
-		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
+		expect(access.extensionSelector).toBeUndefined();
 		expect(exit).not.toHaveBeenCalled();
-		expect(runtime.session).not.toBe(staleSession);
-		expect(runtime.session.messages.map(getMessageText)).toEqual(["tui prompt", "tui reply"]);
 	});
 
-	it("reloads the session while a command that ignores its signal never finishes", async () => {
+	it("ends the session while a command that ignores its signal never finishes", async () => {
 		const commandStarted = Promise.withResolvers<AbortSignal>();
 		const stuckCommand = (volt: ExtensionAPI) => {
 			volt.registerCommand("stuck", {
@@ -403,7 +373,7 @@ describe("regression #525: recovering a session whose saved state could not be c
 			extensionFactory: stuckCommand,
 			interactive: true,
 		});
-		const { terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(runtime, tempDir);
+		const { handleFatalRuntimeError, exit } = await startInteractiveMode(runtime, tempDir);
 		const staleSession = runtime.session;
 
 		void staleSession.prompt("/stuck");
@@ -412,13 +382,9 @@ describe("regression #525: recovering a session whose saved state could not be c
 
 		staleSession.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
 
-		await vi.waitFor(() => expect(viewport(terminal)).toContain("Reloaded the session from the store."), {
-			timeout: 5_000,
-		});
+		await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1), { timeout: 5_000 });
 		expect(commandSignal.aborted).toBe(true);
-		expect(handleFatalRuntimeError).not.toHaveBeenCalled();
 		expect(exit).not.toHaveBeenCalled();
-		expect(runtime.session).not.toBe(staleSession);
 	});
 
 	it("settles every pending extension dialog when extension UI is reset", async () => {

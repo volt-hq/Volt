@@ -14,8 +14,15 @@ type BindExtensionOptions = {
 	commandContextActions: { waitForIdle(): Promise<void> };
 };
 
+type AuthorityListener = (status: { status: "reconciliation_required"; error: Error }) => void;
+
 type FakeSession = {
-	sessionManager: { getHeader: () => object | undefined };
+	sessionId: string;
+	sessionManager: {
+		getHeader: () => object | undefined;
+		subscribeConversationAuthorityChanges: (listener: AuthorityListener) => () => void;
+		loseConversation(cause: Error): void;
+	};
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
@@ -66,9 +73,21 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	};
 
 	const state = { messages: [assistantMessage] };
+	const authorityListeners = new Set<AuthorityListener>();
 
 	const session: FakeSession = {
-		sessionManager: { getHeader: () => undefined },
+		sessionId: "print-session",
+		sessionManager: {
+			getHeader: () => undefined,
+			subscribeConversationAuthorityChanges: (listener) => {
+				authorityListeners.add(listener);
+				return () => authorityListeners.delete(listener);
+			},
+			loseConversation: (cause) => {
+				const error = Object.assign(new Error("Session conversation authority requires reconciliation"), { cause });
+				for (const listener of authorityListeners) listener({ status: "reconciliation_required", error });
+			},
+		},
 		waitForIdle: vi.fn(async () => undefined),
 		state,
 		extensionRunner,
@@ -148,5 +167,28 @@ describe("runPrintMode", () => {
 		expect(errorSpy).toHaveBeenCalledWith("provider failure");
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+	});
+
+	it("ends the run with an error when the session loses its log, skipping later prompts", async () => {
+		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
+		const { session } = runtimeHost;
+		session.prompt.mockImplementationOnce(async () => {
+			session.sessionManager.loseConversation(new Error("Expected log ordinal 4, but the log head is 5"));
+		});
+		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+
+		const exitCode = await runPrintMode(runtimeHost as unknown as Parameters<typeof runPrintMode>[0], {
+			mode: "text",
+			initialMessage: "first",
+			messages: ["second"],
+		});
+
+		expect(exitCode).toBe(1);
+		expect(session.prompt).toHaveBeenCalledTimes(1);
+		expect(errorSpy).toHaveBeenCalledWith(
+			"Volt stopped session print-session because its saved state could not be confirmed: Expected log ordinal 4, but the log head is 5",
+		);
+		// The runtime is disposed, which releases the session's lock.
+		expect(runtimeHost.dispose).toHaveBeenCalledTimes(1);
 	});
 });

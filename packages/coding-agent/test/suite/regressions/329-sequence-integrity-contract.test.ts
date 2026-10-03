@@ -67,7 +67,7 @@ describe("PR #329 canonical sequence integrity contract", () => {
 				await healthy.flush();
 				const healthyRef = healthy.getSessionRef();
 				if (!healthyRef) throw new Error("Expected a healthy session reference");
-				const reopened = await SessionManager.open(healthyRef);
+				const reopened = await SessionManager.openReadOnly(healthyRef);
 				try {
 					expect(reopened.getEntries()).toEqual(healthy.getEntries());
 				} finally {

@@ -569,7 +569,7 @@ async function readCanonicalReviewState<T>(
 	if (!ref) return read(manager);
 	let source: SessionManager;
 	try {
-		source = await SessionManager.open(ref);
+		source = await SessionManager.openReadOnly(ref);
 	} catch (cause) {
 		throw new ReviewSourceUnavailableError(undefined, { cause });
 	}

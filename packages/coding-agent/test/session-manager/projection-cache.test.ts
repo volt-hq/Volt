@@ -105,6 +105,8 @@ describe("SessionManager projection cache", () => {
 			modified: new Date(BASE_TIME + 3_000),
 		});
 
+		// Continuing opens the session for writing, so its first writer closes first.
+		await manager.closePersistence();
 		const continued = await SessionManager.continueRecent(cwd, sessionDir);
 		continued.appendMessage({ role: "user", content: "first user", timestamp: BASE_TIME + 1_000 });
 		await continued.flush();
@@ -144,6 +146,8 @@ describe("SessionManager projection cache", () => {
 			startingGitContext: null,
 		});
 
+		// The reopen writes next, so the first writer closes first.
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!);
 		expect(reopened.getSessionName()).toBe("Named session");
 		expect(reopened.getStartingGitContext()).toBeNull();
@@ -203,7 +207,7 @@ describe("SessionManager projection cache", () => {
 			reset ? [] : [{ role: "user", content: "first", timestamp: BASE_TIME }],
 		);
 
-		const reopened = await SessionManager.open(forked.getSessionRef()!);
+		const reopened = await SessionManager.openReadOnly(forked.getSessionRef()!);
 		expect(reopened.getLeafId()).toBe(reset ? null : firstId);
 		expect(reopened.buildSessionContext()).toEqual(forked.buildSessionContext());
 	});
@@ -249,7 +253,7 @@ describe("SessionManager projection cache", () => {
 		const forkBranchRef = await forked.createBranchedSession(labeledMessageId);
 		if (!forkBranchRef) throw new Error("Expected fork branch session reference");
 		expectProjectedLabel(forked);
-		expectProjectedLabel(await SessionManager.open(forkBranchRef));
+		expectProjectedLabel(await SessionManager.openReadOnly(forkBranchRef));
 
 		const snapshotPath = join(root, "projection-source.jsonl");
 		await SessionManager.exportJsonlSnapshot(sourceRef, snapshotPath);
@@ -268,7 +272,7 @@ describe("SessionManager projection cache", () => {
 		const importBranchRef = await imported.createBranchedSession(labeledMessageId);
 		if (!importBranchRef) throw new Error("Expected import branch session reference");
 		expectProjectedLabel(imported);
-		expectProjectedLabel(await SessionManager.open(importBranchRef));
+		expectProjectedLabel(await SessionManager.openReadOnly(importBranchRef));
 	});
 
 	it("does not filter historical file entries for direct or canonical transaction payloads", async () => {

@@ -65,7 +65,7 @@ describe("ConversationLock", () => {
 		expect(lock?.path).toBe(
 			join(directory, "locks", `${createHash("sha256").update("session-1").digest("hex")}.lock`),
 		);
-		expect(ConversationLock.tryAcquire(directory, "session-1")).toEqual({ status: "held" });
+		expect(ConversationLock.tryAcquire(directory, "session-1")).toEqual({ status: "held", holder: "this_process" });
 		expect(acquire(directory, "session-2")).toBeDefined();
 		lock!.close();
 		lock!.close();
@@ -84,7 +84,10 @@ describe("ConversationLock", () => {
 		lock!.close();
 		const accepted = await holder(directory, "session-1");
 		expect(accepted.status).toBe("acquired");
-		expect(acquire(directory, "session-1")).toBeUndefined();
+		expect(ConversationLock.tryAcquire(directory, "session-1")).toEqual({
+			status: "held",
+			holder: "another_process",
+		});
 		await exit(accepted);
 	});
 

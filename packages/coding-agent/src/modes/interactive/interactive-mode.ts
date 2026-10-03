@@ -65,7 +65,6 @@ import {
 	getAuthPath,
 	getDocsPath,
 	getShareViewerUrl,
-	isStandaloneBinary,
 	VERSION,
 } from "../../config.ts";
 import {
@@ -75,6 +74,7 @@ import {
 	QueueClearPersistenceError,
 } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type {
 	AutocompleteProviderFactory,
 	EditorFactory,
@@ -156,7 +156,6 @@ import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
-import { DaemonClientClosedError } from "../../daemon/control-client.ts";
 import { RELAY_RPC_COMMAND_TYPES } from "../../daemon/control-protocol.ts";
 import {
 	getRpcResponseId,
@@ -244,11 +243,11 @@ import {
 	type DaemonRelayOffer,
 	type DaemonWorktreeControl,
 	getRelayServingSanitizerOptions,
+	isDaemonAttachSupported,
 	type OpenedRelay,
 	openDaemonWorktreeControl,
 	type RelayWorkspaceUnregisterRetirement,
 } from "./daemon-attach.ts";
-import { DrainViewerComponent } from "./drain-viewer.ts";
 import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
 import { adaptRelaySocketToIrohStream } from "./relay-stream-adapter.ts";
 
@@ -453,6 +452,12 @@ export interface InteractiveModeOptions {
 	verbose?: boolean;
 	/** TUI layout mode for this invocation. */
 	tuiMode?: TuiMode;
+	/**
+	 * Daemon integration started before the session was opened. It already holds
+	 * the session's conversation lease: the lease is what frees the session's lock
+	 * when the daemon hosts it.
+	 */
+	daemonAttach?: DaemonAttach;
 }
 
 interface InteractiveTuiOptions {
@@ -664,17 +669,10 @@ export class InteractiveMode {
 	 */
 	private readonly relayStateManager = new IrohRemoteHostStateManager();
 	private daemonLeaseSessionId: string | undefined;
+	/** The current session lost conversation authority and the TUI is ending it. */
+	private endingLostSession = false;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
 	private localThemeOverride = false;
-	/** Read-only attach overlay while a remote turn drains (§6.3). */
-	private drainViewer: DrainViewerComponent | undefined;
-	private drainViewerFeedId: string | undefined;
-	/** Handoff reloads in flight; editor submissions stay held until they finish. */
-	private handoffReloadsPending = 0;
-	/** Reloads after conversation authority loss; editor submissions stay held until they finish. */
-	private authorityRecoveriesPending = 0;
-	/** Sessions whose authority-loss reload already started. */
-	private readonly authorityRecoveryStarted = new WeakSet<AgentSession>();
 	private dismissSubagentInspector: (() => void) | undefined;
 	/** Confirmation belongs to the work that was active when the warning appeared. */
 	private quitConfirmation:
@@ -2034,18 +2032,23 @@ export class InteractiveMode {
 	/**
 	 * Start the daemon integration (conversation leases + byte relay). On
 	 * supported platforms, remote.background controls auto-start only; the TUI
-	 * still waits for a daemon started later by another process.
+	 * still waits for a daemon started later by another process. An integration
+	 * started before the session was opened is adopted as is.
 	 */
 	private async initDaemonAttach(): Promise<void> {
-		const remoteBackground = this.settingsManager.getRemoteSettings().background === true;
-		if (process.platform === "win32" || isStandaloneBinary) {
-			return;
+		const started = this.options.daemonAttach;
+		if (started) {
+			this.daemonAttach = started;
+		} else {
+			if (!isDaemonAttachSupported()) {
+				return;
+			}
+			this.daemonAttach = createDaemonAttach({
+				cwd: this.sessionManager.getCwd(),
+				agentDir: getAgentDir(),
+				autoStart: this.settingsManager.getRemoteSettings().background === true,
+			});
 		}
-		this.daemonAttach = createDaemonAttach({
-			cwd: this.sessionManager.getCwd(),
-			agentDir: getAgentDir(),
-			autoStart: remoteBackground,
-		});
 		this.daemonAttach.onRelayOffer((offer, openRelay) => {
 			void this.serveRelayConversation(offer, openRelay);
 		});
@@ -2057,18 +2060,8 @@ export class InteractiveMode {
 			if (event.type === "theme_snapshot") {
 				this.applyDaemonThemeSnapshot(event.themeName);
 			}
-			if (event.type === "viewer_event" && event.viewerFeedId === this.drainViewerFeedId) {
-				this.drainViewer?.handleViewerEvent(event.event);
-			}
-			if (
-				event.type === "viewer_end" &&
-				event.viewerFeedId === this.drainViewerFeedId &&
-				event.reason !== "granted"
-			) {
-				this.exitDrainViewer(event.reason);
-			}
 		});
-		await this.daemonAttach.start();
+		if (!started) await this.daemonAttach.start();
 		const acquireOutcome = await this.acquireCurrentSessionLease();
 		this.bindDaemonWorkObservation(this.session);
 		this.runtimeHost.setPrepareSessionReplacement(async ({ previousSessionId, sessionId, cwd }) => {
@@ -2096,6 +2089,11 @@ export class InteractiveMode {
 		}
 	}
 
+	/**
+	 * Point the daemon lease at the open session. This TUI holds the session's
+	 * lock, so the daemon cannot host the session: the lease is granted without a
+	 * handoff or denied, never pending, and nothing else wrote the session.
+	 */
 	private async acquireCurrentSessionLease(): Promise<AcquireOutcome> {
 		if (this.daemonAttach.connectionState() === "disabled") {
 			return { kind: "noop" };
@@ -2104,141 +2102,19 @@ export class InteractiveMode {
 		this.daemonLeaseSessionId = sessionId;
 		const outcome = await this.daemonAttach.acquire(sessionId);
 		if (outcome.kind === "denied") {
-			// Multi-TUI is a non-goal: another TUI owns the session. Continue in a
-			// plain read-from-file open (no live view); the user may retry on action.
+			// Multi-TUI is a non-goal: another TUI holds the lease. Phones cannot
+			// reach this session through the daemon until it is released.
 			this.showWarning("This conversation is open in another desktop window; live sharing is disabled here.");
-		}
-		if (outcome.kind === "pending") {
-			this.enterDrainViewer(outcome, sessionId);
 		}
 		this.updatePhoneFooterIndicator();
 		return outcome;
 	}
 
-	private async handleReacquireOutcome(sessionId: string, outcome: AcquireOutcome): Promise<void> {
-		if (outcome.kind === "granted" && (outcome.handoff === "warm" || outcome.handoff === "cold")) {
-			// The daemon spun up a runtime during the reconnect gap (or owned the
-			// conversation this desktop just switched to); absorb what it appended.
-			await this.absorbRemoteSessionChangesFromDisk(sessionId);
-			this.renderCurrentSessionState();
-			this.ui.requestRender();
-		}
-		if (outcome.kind === "pending") {
-			// A remote turn is mid-flight; watch it finish behind the current
-			// transcript, then take over warm.
-			this.enterDrainViewer(outcome, sessionId);
-		}
+	private async handleReacquireOutcome(_sessionId: string, outcome: AcquireOutcome): Promise<void> {
 		if (outcome.kind === "granted") {
 			await this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
 			void this.session.gitContextProvider.refresh();
 		}
-	}
-
-	/**
-	 * Read-only attach overlay while the daemon drains a mid-flight remote turn
-	 * (§6.3): viewer events render through the normal message/tool components;
-	 * the editor keeps accepting text but never submits; esc stops the remote
-	 * turn. On grant the session is reloaded from the store (authoritative) and
-	 * whatever was typed stays in the editor, un-submitted.
-	 */
-	private enterDrainViewer(pending: Extract<AcquireOutcome, { kind: "pending" }>, sessionId: string): void {
-		if (this.drainViewer) {
-			return;
-		}
-		this.drainViewerFeedId = pending.viewerFeedId;
-		this.drainViewer = new DrainViewerComponent(this.ui, {
-			markdownTheme: this.getMarkdownThemeWithSettings(),
-			hideThinkingBlock: this.hideThinkingBlock,
-			hiddenThinkingLabel: this.hiddenThinkingLabel,
-			showImages: this.settingsManager.getShowImages(),
-			imageWidthCells: this.settingsManager.getImageWidthCells(),
-			cwd: this.sessionManager.getCwd(),
-			getToolDefinition: (toolName) => this.getRegisteredToolDefinition(toolName),
-		});
-		this.chatContainer.addChild(this.drainViewer);
-		this.ui.requestRender();
-		void this.daemonAttach.viewerSubscribe(pending.viewerFeedId);
-		pending.granted.then(
-			() => {
-				void this.finishDrainViewerGrant(sessionId);
-			},
-			(error: unknown) => {
-				// A transient control-socket drop rejects the grant with
-				// DaemonClientClosedError, but the reconnect path
-				// (ensureLeaseAfterConnected) re-acquires and re-enters the drain
-				// viewer. Tear down the current overlay so that re-enter's guard
-				// passes, but do NOT tell the user the handoff failed — it is still in
-				// progress. Only a genuine drain failure (a plain Error) surfaces.
-				this.exitDrainViewer(error instanceof DaemonClientClosedError ? "reconnecting" : "error");
-			},
-		);
-	}
-
-	/**
-	 * Absorb transcript entries another owner (the daemon, during a drain handoff
-	 * or a reconnect gap) appended to the session. session.reload() only reloads
-	 * settings/resources — NOT the conversation — so reopen the session from the
-	 * store at its current revision, rebuilding the in-process transcript and
-	 * model context. Keeping the outdated copy would fail the next append on a
-	 * revision conflict, so a failed reload is fatal. The runtime waits out local
-	 * work (runs, reviews) before reopening; editor submissions stay held until the
-	 * reload finishes. Sessions without a store reference only reload settings.
-	 */
-	private async absorbRemoteSessionChangesFromDisk(sessionId: string): Promise<void> {
-		this.handoffReloadsPending++;
-		try {
-			if (!this.session.sessionRef) {
-				await this.session.reload().catch(() => {});
-				return;
-			}
-			await this.runtimeHost.reloadCurrentSessionFromStore({
-				expectedSessionId: sessionId,
-				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
-			});
-		} catch (error: unknown) {
-			// Shutdown disposes the runtime and owns the exit.
-			if (this.isShuttingDown) return;
-			await this.handleFatalRuntimeError("Failed to reload the session after the daemon handoff", error, {
-				unsentDraft: this.editor.getText(),
-			});
-		} finally {
-			this.handoffReloadsPending--;
-		}
-	}
-
-	private async finishDrainViewerGrant(sessionId: string): Promise<void> {
-		const viewer = this.drainViewer;
-		this.drainViewer = undefined;
-		this.drainViewerFeedId = undefined;
-		viewer?.finish("Remote turn finished — taking over…");
-		// Load what the remote turn wrote; the store is the source of truth. The
-		// re-render drops the viewer component; editor text survives un-submitted.
-		// Input stays held: the reload marks itself pending before its first await.
-		await this.absorbRemoteSessionChangesFromDisk(sessionId);
-		this.renderCurrentSessionState();
-		this.showStatus("Attached — the remote turn finished and this desktop now owns the session.");
-		this.ui.requestRender();
-		await this.runtimeHost.startRecoveredClientInputs().catch(() => undefined);
-	}
-
-	private exitDrainViewer(reason: "cancelled" | "error" | "reconnecting"): void {
-		const viewer = this.drainViewer;
-		if (!viewer) {
-			return;
-		}
-		this.drainViewer = undefined;
-		this.drainViewerFeedId = undefined;
-		viewer.finish();
-		if (reason === "error") {
-			this.showWarning(
-				"Attaching failed while a remote turn was streaming; the phone keeps the session. Use /reload to retry.",
-			);
-		}
-		this.ui.requestRender();
-	}
-
-	private isDrainViewerActive(): boolean {
-		return this.drainViewer !== undefined;
 	}
 
 	/**
@@ -3673,16 +3549,6 @@ export class InteractiveMode {
 		// Set up handlers on defaultEditor - they use this.editor for text access
 		// so they work correctly regardless of which editor is active
 		this.defaultEditor.onEscape = () => {
-			if (this.isDrainViewerActive()) {
-				// Stop the draining remote turn (non-destructive abort); the drain
-				// then completes and the handoff proceeds.
-				const feedId = this.drainViewerFeedId;
-				if (feedId) {
-					void this.daemonAttach.viewerAbort(feedId);
-					this.showStatus("Stopping the remote turn…");
-				}
-				return;
-			}
 			// Preserve foreground Bash's interrupt priority when only background jobs remain.
 			if (this.session.isStreaming || (!this.session.isBashRunning && this.session.hasBackgroundJobs)) {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "keyboard_interrupt" }).catch((error) => {
@@ -3924,21 +3790,6 @@ export class InteractiveMode {
 			if (text === "/jobs") {
 				this.editor.setText("");
 				this.showBackgroundJobsInspector();
-				return;
-			}
-
-			if (this.isDrainViewerActive() || this.handoffReloadsPending > 0 || this.authorityRecoveriesPending > 0) {
-				// Read-only while the remote turn drains or the session reloads from the
-				// store: put the text back in the editor (it lands un-submitted once the
-				// reload completes).
-				this.editor.setText(text);
-				this.showStatus(
-					this.isDrainViewerActive()
-						? "Attaching — input will stay in the editor until the remote turn finishes."
-						: this.authorityRecoveriesPending > 0
-							? "Reloading the session — input will stay in the editor until it finishes."
-							: "Loading the remote turn — input will stay in the editor until it finishes.",
-				);
 				return;
 			}
 
@@ -4240,49 +4091,30 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * A write this session could not prove persisted retired its conversation
-	 * authority, so its in-memory copy is unusable. Reopen it from the store, the
-	 * source of truth, as after a daemon handoff. Editor submissions stay held until
-	 * the reload finishes. A failed reload is fatal, as is a session that cannot be
-	 * reloaded (no store reference).
+	 * A commit this session could not confirm (a fence conflict, a missing
+	 * session, or an outcome that could not be resolved) means it may no longer be
+	 * the only writer of its log, so the runtime ends: it is disposed, which
+	 * releases the session's lock, and the TUI exits. The store keeps what was
+	 * committed; /resume reopens it.
 	 */
 	private async handleConversationAuthorityLoss(
 		session: AgentSession,
 		error: SessionConversationStateUnavailableError,
 	): Promise<void> {
-		if (this.isShuttingDown || session !== this.session || this.authorityRecoveryStarted.has(session)) return;
-		this.authorityRecoveryStarted.add(session);
-		this.authorityRecoveriesPending++;
+		if (this.isShuttingDown || this.endingLostSession || session !== this.session) return;
+		this.endingLostSession = true;
+		const unsentDraft = this.editor.getText();
 		const cause = error.cause instanceof Error ? error.cause.message : error.message;
-		const failure = `Could not confirm the session's saved state: ${cause}`;
-		// Extension UI can read the lost session while rendering. Replacement removes it
-		// anyway, and extensions reinstall it on session_start after the reload. Pending
-		// dialogs settle as dismissed, so no caller waits on UI that is gone.
+		// Extension UI can read the lost session while rendering. Pending dialogs
+		// settle as dismissed, so no caller waits on UI that is gone.
 		this.resetExtensionUI();
-		this.showError(`${failure}. Reloading the session from the store…`);
-		try {
-			await this.runtimeHost.reloadCurrentSessionFromStore({
-				expectedSessionId: session.sessionId,
-				projectTrustContextFactory: (cwd) => this.createProjectTrustContext(cwd),
-			});
-			const status = this.session.sessionManager.getConversationAuthorityStatus();
-			if (status.status === "reconciliation_required") throw status.error;
-			if (this.isShuttingDown) return;
-			this.stopWorkingLoader();
-			this.renderCurrentSessionState();
-			this.showError(failure);
-			this.showStatus("Reloaded the session from the store. Check the transcript before resending anything.");
-		} catch (reloadError: unknown) {
-			// Shutdown disposes the runtime and owns the exit.
-			if (this.isShuttingDown) return;
-			await this.handleFatalRuntimeError(
-				"Failed to reload the session after its state could not be saved",
-				reloadError,
-				{ unsentDraft: this.editor.getText() },
-			);
-		} finally {
-			this.authorityRecoveriesPending--;
-		}
+		await this.disposeRuntimeHost().catch(() => {});
+		await this.releaseDaemonLeaseOnQuit().catch(() => {});
+		await this.handleFatalRuntimeError(
+			"Volt stopped this session because its saved state could not be confirmed",
+			new Error(`${cause}. Run volt again and /resume the session to continue from what was saved.`),
+			{ unsentDraft },
+		);
 	}
 
 	/** Put submitted input back in the editor when its session lost conversation authority. */
@@ -5306,13 +5138,15 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Whether an uncaught error is a conversation-authority failure that session
-	 * recovery owns: a reader of the fail-stopped session threw. Recovery starts if
-	 * the current session lost authority; otherwise the error came from a session
-	 * that was already replaced and is dropped.
+	 * Whether an uncaught error is a conversation-authority failure that ending
+	 * the lost session owns: a reader of the fail-stopped session threw. The
+	 * session ends if the current session lost authority; otherwise the error came
+	 * from a session that was already replaced and is dropped.
 	 */
 	private recoverUncaughtAuthorityError(error: unknown): boolean {
-		if (!(error instanceof SessionConversationStateUnavailableError) || this.isShuttingDown) return false;
+		if (!(error instanceof SessionConversationStateUnavailableError)) return false;
+		if (this.endingLostSession) return true;
+		if (this.isShuttingDown) return false;
 		if (this.session.sessionManager.getConversationAuthorityStatus().status === "reconciliation_required") {
 			void this.handleConversationAuthorityLoss(this.session, error);
 		}
@@ -8000,7 +7834,11 @@ export class InteractiveMode {
 			this.showStatus("Resumed session");
 			return result;
 		} catch (error: unknown) {
-			if (error instanceof LocalSessionWorktreeRestoreError) {
+			// Another Volt process has the target open: its lock was refused before this session closed.
+			if (
+				error instanceof LocalSessionWorktreeRestoreError ||
+				(error instanceof ConversationLockedError && error.sessionId !== this.session.sessionId)
+			) {
 				this.showError(error.message);
 				return { cancelled: true, seeded: false };
 			}

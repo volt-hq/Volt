@@ -299,7 +299,7 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		await runtime.importFromJsonl(snapshotPath);
 		const importedRef = runtime.session.sessionRef;
 		if (!importedRef) throw new Error("Expected a persisted imported session");
-		const reopened = await SessionManager.open(importedRef);
+		const reopened = await SessionManager.openReadOnly(importedRef);
 		openedManagers.push(reopened);
 		const entries = reopened.getEntries();
 		const rootEntry = entries.find((entry) => entry.type === "message" && entryText(entry) === "labeled root");
@@ -372,7 +372,7 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		await runtime.importFromJsonl(snapshotPath);
 		const importedRef = runtime.session.sessionRef;
 		if (!importedRef) throw new Error("Expected a persisted imported session");
-		const reopened = await SessionManager.open(importedRef);
+		const reopened = await SessionManager.openReadOnly(importedRef);
 		openedManagers.push(reopened);
 		const importedBranchSummary = reopened
 			.getEntries()
@@ -470,7 +470,7 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		await runtime.importFromJsonl(snapshotPath);
 		const importedRef = runtime.session.sessionRef;
 		if (!importedRef) throw new Error("Expected a persisted imported session");
-		const reopened = await SessionManager.open(importedRef);
+		const reopened = await SessionManager.openReadOnly(importedRef);
 		openedManagers.push(reopened);
 		const tree = flattenTree(reopened.getTree());
 		const rootNode = tree.find((node) => node.entry.type === "message" && entryText(node.entry) === "root");

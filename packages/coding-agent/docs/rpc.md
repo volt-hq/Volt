@@ -1396,6 +1396,13 @@ If an extension cancelled the switch:
 {"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": true}}
 ```
 
+If another Volt process has the session open for writing, the switch fails and the current session stays active:
+```json
+{"type": "response", "command": "switch_session", "success": false, "error": "Session abc123 is open in another Volt process. ...", "errorCode": "conversation_locked"}
+```
+
+The same `conversation_locked` error code applies to every command that opens another session for writing, such as `switch_session_by_id`. If the RPC host's own session loses its saved state (a commit it cannot confirm), the RPC process prints the cause to stderr and exits with code 1.
+
 #### switch_session_by_id
 
 Load another session from the current workspace by stable ID. It has the same path-free request semantics as `switch_session`. Conversation-bound mobile streams reject direct retargeting; select the session when opening the stream instead.

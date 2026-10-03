@@ -41,6 +41,7 @@ import {
 	PRIVATE_FILE_MODE,
 } from "../utils/private-files.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
+import { ConversationLock } from "./conversation-log/conversation-lock.ts";
 import {
 	type BashExecutionMessage,
 	type ClientUserMessage,
@@ -1252,6 +1253,10 @@ export class SessionManager {
 	private sessionDir: string;
 	private cwd: string;
 	private persist: boolean;
+	/** The per-log writer lock, held from open or creation until persistence closes. */
+	private conversationLock: ConversationLock | undefined;
+	/** Opened by openReadOnly: the loaded session is never written and its lock is not taken. */
+	private readOnly = false;
 	private sessionStoreLease: SQLiteSessionStoreLease | undefined;
 	private storeId: string | undefined;
 	/** Newest ordinal whose commit completed; listeners have observed every public entry up to it. */
@@ -1368,8 +1373,13 @@ export class SessionManager {
 		this.committedOrdinal = this.nextOrdinal - 1;
 	}
 
+	/**
+	 * Start a new session in this manager. A persisted manager takes the new
+	 * session's lock before it releases the lock of the session it wrote, and a
+	 * read-only manager becomes the writer of the new session.
+	 */
 	newSession(options?: NewSessionOptions): SessionReference | undefined {
-		this._assertPersistenceHealthy();
+		this._assertPersistenceHealthy(true);
 		if (this.reviewDiscussion) {
 			throw new Error("Finding discussion identity is source-linked; reset through the source session instead");
 		}
@@ -1385,7 +1395,12 @@ export class SessionManager {
 			options?.parentSession === undefined
 				? undefined
 				: parseSessionReference(options.parentSession, "Parent session reference");
-		this.sessionId = options?.id ?? createSessionId();
+		const sessionId = options?.id ?? createSessionId();
+		const lock = this.persist ? ConversationLock.acquire(this.sessionDir, sessionId) : undefined;
+		this.conversationLock?.close();
+		this.conversationLock = lock;
+		this.readOnly = false;
+		this.sessionId = sessionId;
 		this.sessionGeneration = randomUUID();
 		this.reviewDiscussion = null;
 		const timestamp = new Date().toISOString();
@@ -2216,8 +2231,16 @@ export class SessionManager {
 		};
 	}
 
-	private _assertPersistenceHealthy(): void {
+	private _releaseConversationLock(): void {
+		this.conversationLock?.close();
+		this.conversationLock = undefined;
+	}
+
+	private _assertPersistenceHealthy(allowReadOnly = false): void {
 		this.assertConversationAuthorityAvailable();
+		if (this.readOnly && !allowReadOnly) {
+			throw new Error(`Session ${this.sessionId} was opened read-only`);
+		}
 		if (this.persistenceClosed) {
 			throw new Error("Session persistence is closed");
 		}
@@ -2279,6 +2302,8 @@ export class SessionManager {
 				releaseError = error;
 			} finally {
 				if (this.sessionStoreLease === lease) this.sessionStoreLease = undefined;
+				// Every write this manager accepted has settled; another host may now open the log.
+				this._releaseConversationLock();
 			}
 			if (releaseError !== undefined) {
 				const authoritativeError =
@@ -3136,11 +3161,14 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Replace this manager with a new session containing only the selected branch. */
+	/**
+	 * Replace this manager with a new session containing only the selected branch.
+	 * A read-only manager may branch: it becomes the writer of the new session.
+	 */
 	async createBranchedSession(leafId: string): Promise<SessionReference | undefined> {
 		if (this.atomicAppendInFlight) throw new Error("Cannot create a branched session during an atomic append");
 		await this.persistenceWatermark;
-		this._assertPersistenceHealthy();
+		this._assertPersistenceHealthy(true);
 		const previousSession = this.getSessionRef();
 		const path = this.getBranch(leafId);
 		if (path.length === 0) throw new Error(`Entry ${leafId} not found`);
@@ -3231,11 +3259,13 @@ export class SessionManager {
 	static async create(cwd: string, sessionDir?: string, options?: NewSessionOptions): Promise<SessionManager> {
 		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir(cwd);
 		const lease = await SessionManager._store(dir);
+		let manager: SessionManager | undefined;
 		try {
-			const manager = new SessionManager(cwd, dir, true, options, lease);
+			manager = new SessionManager(cwd, dir, true, options, lease);
 			await manager.flush();
 			return manager;
 		} catch (error) {
+			manager?._releaseConversationLock();
 			return await SessionManager._releaseLeaseAfterFailure(
 				lease,
 				error,
@@ -3244,11 +3274,38 @@ export class SessionManager {
 		}
 	}
 
-	/** Open one authoritative SQLite session reference. */
+	/**
+	 * Open one authoritative SQLite session reference for writing. Takes the
+	 * session's lock before loading it and holds it until persistence closes;
+	 * throws `ConversationLockedError` while another host has it open.
+	 */
 	static async open(ref: SessionReference, cwdOverride?: string): Promise<SessionManager> {
+		return SessionManager._openReference(ref, cwdOverride, false);
+	}
+
+	/**
+	 * Open one authoritative SQLite session reference to read it. Takes no lock,
+	 * so it works while the session is open elsewhere; every write throws.
+	 */
+	static async openReadOnly(ref: SessionReference, cwdOverride?: string): Promise<SessionManager> {
+		return SessionManager._openReference(ref, cwdOverride, true);
+	}
+
+	private static async _openReference(
+		ref: SessionReference,
+		cwdOverride: string | undefined,
+		readOnly: boolean,
+	): Promise<SessionManager> {
 		const canonicalRef = parseSessionReference(ref);
 		const dir = resolvePath(canonicalRef.sessionDirectory);
-		const lease = await SessionManager._store(dir);
+		const lock = readOnly ? undefined : ConversationLock.acquire(dir, canonicalRef.sessionId);
+		let lease: SQLiteSessionStoreLease;
+		try {
+			lease = await SessionManager._store(dir);
+		} catch (error) {
+			lock?.close();
+			throw error;
+		}
 		try {
 			if (lease.client.info.storeId !== canonicalRef.storeId) {
 				throw new Error("Session reference belongs to a different store");
@@ -3259,7 +3316,7 @@ export class SessionManager {
 				sessionId: snapshot.session.id,
 				sessionGeneration: snapshot.session.sessionGeneration,
 			});
-			return new SessionManager(
+			const manager = new SessionManager(
 				cwdOverride ?? snapshot.session.cwd,
 				dir,
 				true,
@@ -3268,7 +3325,11 @@ export class SessionManager {
 				snapshot,
 				discussion,
 			);
+			manager.conversationLock = lock;
+			manager.readOnly = readOnly;
+			return manager;
 		} catch (error) {
+			lock?.close();
 			return await SessionManager._releaseLeaseAfterFailure(
 				lease,
 				error,
@@ -3277,32 +3338,24 @@ export class SessionManager {
 		}
 	}
 
-	/** Continue the most recent visible or pending-input session for a cwd, or create one. */
-	static async continueRecent(cwd: string, sessionDir?: string): Promise<SessionManager> {
+	/** The most recent visible or pending-input session for a cwd, found without opening it. */
+	static async findContinuation(cwd: string, sessionDir?: string): Promise<SessionReference | undefined> {
 		const dir = sessionDir ? resolvePath(sessionDir) : getDefaultSessionDir(cwd);
-		const lease = await SessionManager._store(dir);
-		try {
+		return SessionManager._scopedStore(dir, async (store) => {
 			const filterCwd = sessionDir !== undefined && !isDefaultShapedSessionDir(dir, cwd);
-			const latest = await lease.client.findContinuationSession(filterCwd ? resolvePath(cwd) : undefined);
-			if (!latest) {
-				const manager = new SessionManager(cwd, dir, true, undefined, lease);
-				await manager.flush();
-				return manager;
-			}
-			const snapshot = await lease.client.loadSession(latest.id, latest.sessionGeneration);
-			if (!snapshot) throw new Error(`Session not found: ${latest.id}`);
-			const discussion = await lease.client.findReviewDiscussionByChild({
-				sessionId: snapshot.session.id,
-				sessionGeneration: snapshot.session.sessionGeneration,
-			});
-			return new SessionManager(snapshot.session.cwd, dir, true, undefined, lease, snapshot, discussion);
-		} catch (error) {
-			return await SessionManager._releaseLeaseAfterFailure(
-				lease,
-				error,
-				"Session continuation failed and its store lease could not be released",
-			);
-		}
+			const latest = await store.findContinuationSession(filterCwd ? resolvePath(cwd) : undefined);
+			return latest ? sessionReference(dir, store.info.storeId, latest.id, latest.sessionGeneration) : undefined;
+		});
+	}
+
+	/**
+	 * Continue the most recent visible or pending-input session for a cwd, or
+	 * create one. Throws `ConversationLockedError` while the most recent session
+	 * is open elsewhere.
+	 */
+	static async continueRecent(cwd: string, sessionDir?: string): Promise<SessionManager> {
+		const latest = await SessionManager.findContinuation(cwd, sessionDir);
+		return latest ? SessionManager.open(latest) : SessionManager.create(cwd, sessionDir);
 	}
 
 	static async readStartingGitContexts(
@@ -3459,7 +3512,7 @@ export class SessionManager {
 		sessionDir?: string,
 		options?: NewSessionOptions,
 	): Promise<SessionManager> {
-		const source = await SessionManager.open(sourceRef);
+		const source = await SessionManager.openReadOnly(sourceRef);
 		let target: SessionManager | undefined;
 		try {
 			if (source.getReviewDiscussion()) {
@@ -3613,7 +3666,7 @@ export class SessionManager {
 	}
 
 	static async exportJsonlSnapshot(ref: SessionReference, outputPath: string): Promise<{ lastOrdinal: number }> {
-		const manager = await SessionManager.open(ref);
+		const manager = await SessionManager.openReadOnly(ref);
 		let result: { lastOrdinal: number };
 		try {
 			const header = manager.getHeader();
@@ -3636,24 +3689,30 @@ export class SessionManager {
 		return result;
 	}
 
+	/** Delete a stored session. Throws `ConversationLockedError` while the session is open for writing. */
 	static async delete(ref: SessionReference, expectedOrdinal?: number): Promise<boolean> {
 		const canonicalRef = parseSessionReference(ref);
-		return SessionManager._scopedStore(canonicalRef.sessionDirectory, async (store) => {
-			if (store.info.storeId !== canonicalRef.storeId) {
-				throw new Error("Session reference belongs to a different store");
-			}
-			const summary = await store.findSessionSummary(canonicalRef.sessionId, canonicalRef.sessionGeneration);
-			if (!summary) return false;
-			const result = await store.deleteSession({
-				sessionId: canonicalRef.sessionId,
-				sessionGeneration: canonicalRef.sessionGeneration,
-				expectedOrdinal: expectedOrdinal ?? summary.lastOrdinal,
+		const lock = ConversationLock.acquire(resolvePath(canonicalRef.sessionDirectory), canonicalRef.sessionId);
+		try {
+			return await SessionManager._scopedStore(canonicalRef.sessionDirectory, async (store) => {
+				if (store.info.storeId !== canonicalRef.storeId) {
+					throw new Error("Session reference belongs to a different store");
+				}
+				const summary = await store.findSessionSummary(canonicalRef.sessionId, canonicalRef.sessionGeneration);
+				if (!summary) return false;
+				const result = await store.deleteSession({
+					sessionId: canonicalRef.sessionId,
+					sessionGeneration: canonicalRef.sessionGeneration,
+					expectedOrdinal: expectedOrdinal ?? summary.lastOrdinal,
+				});
+				if (result.status === "conflict") {
+					throw new Error(`Session changed before deletion (ordinal ${result.actualOrdinal})`);
+				}
+				return result.status === "deleted";
 			});
-			if (result.status === "conflict") {
-				throw new Error(`Session changed before deletion (ordinal ${result.actualOrdinal})`);
-			}
-			return result.status === "deleted";
-		});
+		} finally {
+			lock.close();
+		}
 	}
 
 	static async listAll(onProgress?: SessionListProgress, options?: SessionListOptions): Promise<SessionInfo[]>;

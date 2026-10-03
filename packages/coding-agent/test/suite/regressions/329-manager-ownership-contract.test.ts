@@ -165,13 +165,15 @@ describe("PR #329 manager ownership contract", () => {
 	it("closes and retains a continued manager when missing-cwd selection is cancelled", async () => {
 		const args = prepareCli("interactive");
 		const seeded = await seedMissingCwdSession("cancelled-missing-cwd");
-		const continueRecent = SessionManager.continueRecent.bind(SessionManager);
+		const open = SessionManager.open.bind(SessionManager);
 		const closePersistence = SessionManager.prototype.closePersistence;
 		let selectedManager: SessionManager | undefined;
 		let closeCalls = 0;
-		const continueSpy = vi.spyOn(SessionManager, "continueRecent").mockImplementation(async (...callArgs) => {
-			selectedManager = await continueRecent(...callArgs);
-			return selectedManager;
+		// --continue finds the most recent session, then opens it for writing.
+		const openSpy = vi.spyOn(SessionManager, "open").mockImplementation(async (...callArgs) => {
+			const manager = await open(...callArgs);
+			if (callArgs[0].sessionId === seeded.ref.sessionId) selectedManager = manager;
+			return manager;
 		});
 		const closeSpy = vi.spyOn(SessionManager.prototype, "closePersistence").mockImplementation(function (
 			this: SessionManager,
@@ -192,7 +194,7 @@ describe("PR #329 manager ownership contract", () => {
 			expect(await SessionManager.findForResume(seeded.sessionDir, seeded.ref.sessionId)).toEqual(seeded.ref);
 		} finally {
 			selectorSpy.mockRestore();
-			continueSpy.mockRestore();
+			openSpy.mockRestore();
 			closeSpy.mockRestore();
 			if (selectedManager && !(await isPersistenceClosed(selectedManager))) {
 				await closePersistence.call(selectedManager);
@@ -206,7 +208,6 @@ describe("PR #329 manager ownership contract", () => {
 		const initializationError = new Error("injected post-replacement initialization failure");
 		const originalCloseGate = createDeferred();
 		const originalCloseStarted = createDeferred();
-		const continueRecent = SessionManager.continueRecent.bind(SessionManager);
 		const open = SessionManager.open.bind(SessionManager);
 		const closePersistence = SessionManager.prototype.closePersistence;
 		const flush = SessionManager.prototype.flush;
@@ -214,16 +215,17 @@ describe("PR #329 manager ownership contract", () => {
 		let replacementManager: SessionManager | undefined;
 		let originalCloseFinished = false;
 		let replacementUsedBeforeOriginalClose = false;
+		let replacementOpenedBeforeOriginalClose = false;
 		let originalCloseCalls = 0;
 		let replacementCloseCalls = 0;
-		const continueSpy = vi.spyOn(SessionManager, "continueRecent").mockImplementation(async (...callArgs) => {
-			originalManager = await continueRecent(...callArgs);
-			return originalManager;
-		});
+		// --continue opens the most recent session; the cwd choice reopens it with the selected cwd.
 		const openSpy = vi.spyOn(SessionManager, "open").mockImplementation(async (...callArgs) => {
+			const reopening = callArgs[0].sessionId === seeded.ref.sessionId && callArgs[1] === seeded.fallbackCwd;
+			if (reopening && !originalCloseFinished) replacementOpenedBeforeOriginalClose = true;
 			const manager = await open(...callArgs);
-			if (callArgs[0].sessionId === seeded.ref.sessionId && callArgs[1] === seeded.fallbackCwd) {
-				replacementManager = manager;
+			if (callArgs[0].sessionId === seeded.ref.sessionId) {
+				if (reopening) replacementManager = manager;
+				else originalManager = manager;
 			}
 			return manager;
 		});
@@ -254,13 +256,15 @@ describe("PR #329 manager ownership contract", () => {
 		try {
 			await originalCloseStarted.promise;
 			expect(originalManager).toBeDefined();
-			expect(replacementManager).toBeDefined();
-			expect(replacementUsedBeforeOriginalClose).toBe(false);
+			// The replacement reopens the same session, so it waits for the original to release its lock.
+			expect(replacementManager).toBeUndefined();
 			originalCloseGate.resolve();
 			const thrown = await running;
 			expect(thrown).toBe(initializationError);
 			expect(originalCloseFinished).toBe(true);
 			expect(originalCloseCalls).toBe(1);
+			expect(replacementManager).toBeDefined();
+			expect(replacementOpenedBeforeOriginalClose).toBe(false);
 			expect(replacementUsedBeforeOriginalClose).toBe(false);
 			expect(replacementCloseCalls).toBe(1);
 			expect(replacementManager?.getCwd()).toBe(seeded.fallbackCwd);
@@ -269,7 +273,6 @@ describe("PR #329 manager ownership contract", () => {
 			originalCloseGate.resolve();
 			selectorSpy.mockRestore();
 			initSpy.mockRestore();
-			continueSpy.mockRestore();
 			openSpy.mockRestore();
 			closeSpy.mockRestore();
 			flushSpy.mockRestore();

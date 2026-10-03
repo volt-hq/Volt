@@ -714,7 +714,7 @@ describe("AgentSessionRuntime characterization", () => {
 				includeMessageFreeDurable: true,
 			});
 			expect(sessions.some((session) => session.id === importedId)).toBe(false);
-			const reopened = await SessionManager.open(currentSessionRef);
+			const reopened = await SessionManager.openReadOnly(currentSessionRef);
 			try {
 				expect(reopened.buildSessionContext()).toMatchObject({
 					thinkingLevel: "high",
@@ -1113,6 +1113,8 @@ describe("AgentSessionRuntime characterization", () => {
 		await otherRuntime.session.prompt("other");
 		await otherRuntime.session.sessionManager.flush();
 		const otherSessionRef = otherRuntime.session.sessionRef!;
+		// A session is open for writing in one host at a time: the other runtime closes it first.
+		await otherRuntime.dispose();
 
 		await runtime.switchSession(otherSessionRef);
 
@@ -1190,6 +1192,8 @@ describe("AgentSessionRuntime characterization", () => {
 		await otherRuntime.session.prompt("hello");
 		await otherRuntime.session.sessionManager.flush();
 		const targetSessionRef = otherRuntime.session.sessionRef!;
+		// A session is open for writing in one host at a time: the other runtime closes it first.
+		await otherRuntime.dispose();
 
 		await runtime.switchSession(targetSessionRef);
 

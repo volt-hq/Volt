@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionConversationStateUnavailableError, SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/index.ts";
+import { loseConversationLock } from "../lost-conversation-lock.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
 
 const cleanups: string[] = [];
@@ -34,7 +35,7 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		expect(await SessionManager.list(root, root, undefined, { includeMessageFreeDurable: true })).toMatchObject([
 			{ id: "hidden-session", ref },
 		]);
-		expect((await SessionManager.open(ref)).getSessionId()).toBe("hidden-session");
+		expect((await SessionManager.openReadOnly(ref)).getSessionId()).toBe("hidden-session");
 	});
 
 	it("preserves append order and ordinals after flush and reopen", async () => {
@@ -55,7 +56,7 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getEntries().map((entry) => entry.id)).toEqual([first, second, third]);
 		expect(reopened.getEntries().map((entry) => entry.ordinal)).toEqual([1, 2, 3]);
 	});
@@ -68,7 +69,7 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		await manager.materialize();
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getEntry(customEntryId)).toMatchObject({
 			type: "custom",
 			customType: "test",
@@ -94,8 +95,8 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		if (!replacementRef) throw new Error("Expected a persisted replacement reference");
 		await manager.flush();
 
-		expect((await SessionManager.open(sourceRef)).getSessionName()).toBe("queued source write");
-		expect((await SessionManager.open(replacementRef)).getEntries()).toEqual([]);
+		expect((await SessionManager.openReadOnly(sourceRef)).getSessionName()).toBe("queued source write");
+		expect((await SessionManager.openReadOnly(replacementRef)).getEntries()).toEqual([]);
 	});
 
 	it("rejects replacement until an in-flight commit result settles", async () => {
@@ -139,8 +140,8 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 			manager.appendSessionInfo("replacement write");
 			await manager.flush();
 
-			expect((await SessionManager.open(sourceRef)).getSessionName()).toBe("in-flight source write");
-			expect((await SessionManager.open(replacementRef)).getSessionName()).toBe("replacement write");
+			expect((await SessionManager.openReadOnly(sourceRef)).getSessionName()).toBe("in-flight source write");
+			expect((await SessionManager.openReadOnly(replacementRef)).getSessionName()).toBe("replacement write");
 		} finally {
 			releaseCommitResult();
 			applySpy.mockRestore();
@@ -160,11 +161,11 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		const firstRef = first.getSessionRef();
 		const secondRef = second.getSessionRef();
 		if (!firstRef || !secondRef) throw new Error("Expected persisted session references");
-		expect((await SessionManager.open(firstRef)).getSessionName()).toBeUndefined();
-		expect((await SessionManager.open(firstRef)).buildSessionContext().messages).toMatchObject([
+		expect((await SessionManager.openReadOnly(firstRef)).getSessionName()).toBeUndefined();
+		expect((await SessionManager.openReadOnly(firstRef)).buildSessionContext().messages).toMatchObject([
 			{ role: "custom", content: "first entry" },
 		]);
-		expect((await SessionManager.open(secondRef)).buildSessionContext().messages).toMatchObject([
+		expect((await SessionManager.openReadOnly(secondRef)).buildSessionContext().messages).toMatchObject([
 			{ role: "custom", content: "second entry" },
 		]);
 	});
@@ -204,6 +205,8 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 			watermark = manager.flush();
 			await reconciliationStarted;
 
+			// Simulates a lost lock: a second writer opens while the reconciling manager still writes.
+			loseConversationLock(manager);
 			const descendant = await SessionManager.open(ref);
 			expect(descendant.getEntry(committedId)).toMatchObject({
 				type: "custom",
@@ -222,7 +225,7 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 				SessionConversationStateUnavailableError,
 			);
 
-			const reopened = await SessionManager.open(ref);
+			const reopened = await SessionManager.openReadOnly(ref);
 			expect(reopened.getEntries().map((entry) => entry.id)).toEqual([committedId, descendantId]);
 			expect(reopened.getEntries().map((entry) => (entry.type === "custom" ? entry.data : undefined))).toEqual([
 				{ writer: "reconciling-manager" },
@@ -244,7 +247,10 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		await seed.flush();
 		const ref = seed.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
+		await seed.closePersistence();
 		const first = await SessionManager.open(ref);
+		// Simulates a lost lock: a stale second writer opens the same log concurrently.
+		loseConversationLock(first);
 		const stale = await SessionManager.open(ref);
 
 		const firstId = first.appendCustomEntry("test", { writer: "first" });
@@ -254,7 +260,7 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		expect(stale.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 		expect(() => stale.getEntries()).toThrow("requires reconciliation");
 
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getEntry(firstId)).toMatchObject({ type: "custom", data: { writer: "first" } });
 		expect(reopened.getEntries()).not.toContainEqual(
 			expect.objectContaining({ type: "custom", data: { writer: "stale" } }),
@@ -288,7 +294,7 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		expect(readFileSync(snapshotPath, "utf8")).toBe(snapshotBytes);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		expect((await SessionManager.open(ref)).buildSessionContext().messages).toMatchObject([
+		expect((await SessionManager.openReadOnly(ref)).buildSessionContext().messages).toMatchObject([
 			{ role: "custom", content: "SQLite entry" },
 		]);
 	});

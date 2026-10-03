@@ -23,6 +23,16 @@ Session listing, exact-ID resolution, continuation candidate selection, and remo
 
 For storage, snapshots, and the `SessionManager` API, see [Session Format](session-format.md).
 
+### One Volt Process per Session
+
+A session can be open for writing in only one Volt process at a time: the interactive TUI, `volt -p`, `--mode json`, `--mode rpc`, an SDK embedding, a subagent, or a daemon conversation a phone is using. Each takes an exclusive lock on `<session dir>/locks/<sha256(session id)>.lock` before it opens the session and holds it until it closes the session; the operating system releases it if the process exits. Opening a session that is already open elsewhere fails with an error naming the session (`conversation_locked`). Quit the session in the other process, or switch that process to another session, then retry.
+
+Listing, searching, exporting, and forking from a session read it without the lock and keep working while it is open elsewhere. Renaming or deleting another session from the picker takes its lock briefly and fails while that session is open in another process.
+
+When the interactive TUI opens a session that the daemon is hosting for a phone, it first takes the daemon's conversation lease. If the phone's turn is still running, the TUI prints a waiting line until the turn finishes and the daemon closes its copy: the interrupt key (Escape by default) stops that turn, and Ctrl+C cancels opening the session. If another TUI has the session open, it refuses with a message.
+
+If a session's saved state cannot be confirmed (for example, a commit finds that another writer changed the session), Volt stops that session instead of continuing: the TUI exits with an error that suggests `/resume`, print and RPC runs exit with an error, and the daemon closes the conversation. Reopen the session to continue from what was saved.
+
 ## Session Commands
 
 | Command | Description |

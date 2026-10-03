@@ -60,6 +60,7 @@ export {
 	serializeConversation,
 	shouldCompact,
 } from "./core/compaction/index.ts";
+export { ConversationLockedError, type ConversationLockHolder } from "./core/conversation-log/conversation-lock.ts";
 export { createEventBus, type EventBus, type EventBusController } from "./core/event-bus.ts";
 // Extension system
 export type {
