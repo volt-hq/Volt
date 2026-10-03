@@ -1,4 +1,5 @@
 import type { AgentMessage, ConversationLogAppend } from "@hansjm10/volt-agent-core";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
@@ -252,7 +253,7 @@ describe("regression #205: coding-agent delivery on the conversation kernel", ()
 		expect(harness.getPendingResponseCount()).toBe(1);
 		expect(harness.sessionManager.getConversationState().context.messages).toEqual([]);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("accepted");
-		expect(harness.sessionManager.getClientInputRecoveryPlan()).toMatchObject({
+		expect(clientInputRecovery(harness.sessionManager.getConversationState())).toMatchObject({
 			kind: "replay",
 			records: [{ clientMessageId }],
 		});

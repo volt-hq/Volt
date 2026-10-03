@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import * as fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RpcGitContext } from "../../../src/core/rpc/types.ts";
@@ -395,7 +396,7 @@ function replayComparableState(manager: SessionManager, targetId: string, client
 		label: manager.getLabel(targetId),
 		subagentSpawns: manager.getSubagentSpawnEntries(),
 		clientInput: clientMessageId === undefined ? undefined : manager.getClientInput(clientMessageId),
-		recovery: manager.getClientInputRecoveryPlan(),
+		recovery: clientInputRecovery(manager.getConversationState()),
 	};
 }
 
@@ -576,7 +577,7 @@ function partitionFinalState(manager: SessionManager, rootEntryId: string, clien
 						state: clientInput.state,
 						error: clientInput.error,
 					},
-		recoveryKind: manager.getClientInputRecoveryPlan().kind,
+		recoveryKind: clientInputRecovery(manager.getConversationState()).kind,
 	};
 }
 

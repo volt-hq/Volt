@@ -209,7 +209,7 @@ describe("regression #211: delivery payload isolation", () => {
 		await activeRun;
 		await harness.session.waitForIdle();
 		expect(harness.control.hasQueuedMessages()).toBe(true);
-		expect(harness.session.getSteeringMessages()).toEqual([{ queueEntryId: clientMessageId, clientMessageId, text }]);
+		expect(harness.session.getSteeringMessages()).toEqual([{ clientMessageId, text }]);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("accepted");
 
 		await harness.control.continue();

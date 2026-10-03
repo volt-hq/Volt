@@ -1,7 +1,7 @@
 import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { CustomMessageInput } from "../../../src/core/messages.ts";
 import { createHarness, getUserTexts, type Harness } from "../harness.ts";
@@ -410,13 +410,16 @@ describe("regression #213: AgentSession observer isolation", () => {
 			});
 		});
 
+		// Hold the conversation as a running turn does, so each steer changes the queue once.
+		const turn = harness.control.conversation.reserve();
 		queueEvent = 1;
 		await harness.session.steer("first");
 		queueEvent = 2;
 		await harness.session.steer("second");
+		await vi.waitFor(() => expect(addedListenerEvents).toEqual([2]));
 
 		expect(originalListenerEvents).toEqual([1]);
-		expect(addedListenerEvents).toEqual([2]);
+		turn.cancel();
 	});
 
 	it("skips an invalid optional before_agent_start message", async () => {

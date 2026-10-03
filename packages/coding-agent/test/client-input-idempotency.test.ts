@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentTool, ConversationLogEntryDraft, ConversationTurnReservation } from "@hansjm10/volt-agent-core";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -460,7 +461,7 @@ describe("durable client input idempotency", () => {
 
 		await expect(run).rejects.toMatchObject({ code: "extension_message_role_mismatch" });
 		expect(harness.sessionManager.getClientInput("queued-role-change-rejected")?.state).toBe("failed");
-		expect(harness.sessionManager.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+		expect(clientInputRecovery(harness.sessionManager.getConversationState())).toEqual({ kind: "idle", records: [] });
 		expect(terminalOutcomes).toEqual([
 			{
 				type: "client_input_outcome",
@@ -572,7 +573,10 @@ describe("durable client input idempotency", () => {
 			});
 			expect(sideEffects).toBe(0);
 			expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("failed");
-			expect(harness.sessionManager.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+			expect(clientInputRecovery(harness.sessionManager.getConversationState())).toEqual({
+				kind: "idle",
+				records: [],
+			});
 			expect(getUserTexts(harness)).toEqual([]);
 			expect(harness.getPendingResponseCount()).toBe(1);
 		},
@@ -596,11 +600,9 @@ describe("durable client input idempotency", () => {
 			harness.session.followUp("follow once", undefined, "client-follow"),
 		]);
 
-		expect(harness.session.getSteeringMessages()).toEqual([
-			{ queueEntryId: "client-steer", clientMessageId: "client-steer", text: "steer once" },
-		]);
+		expect(harness.session.getSteeringMessages()).toEqual([{ clientMessageId: "client-steer", text: "steer once" }]);
 		expect(harness.session.getFollowUpMessages()).toEqual([
-			{ queueEntryId: "client-follow", clientMessageId: "client-follow", text: "follow once" },
+			{ clientMessageId: "client-follow", text: "follow once" },
 		]);
 		await expect(harness.session.followUp("steer once", undefined, "client-steer")).rejects.toBeInstanceOf(
 			ClientInputConflictError,
@@ -762,20 +764,24 @@ describe("durable client input idempotency", () => {
 		await expect(harness.session.followUp("restore follow-up", undefined, "clear-closed-follow")).rejects.toThrow();
 	});
 
-	it("keeps local runtime queue identities outside the forgeable client ID domain", async () => {
+	it("queues local input under the durable identity the session gave it", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		holdConversation(harness);
 		await harness.session.steer("local queued input");
-		const localQueueId = harness.session.getSteeringMessages()[0]?.queueEntryId;
-		if (!localQueueId) throw new Error("missing local queue identity");
-		expect(localQueueId).toMatch(/^local-queue:/);
-		expect(isValidClientMessageId(localQueueId)).toBe(false);
+		const [entry] = harness.session.getSteeringMessages();
+		if (!entry) throw new Error("missing local queue entry");
+		expect(entry.clientMessageId).toMatch(/^local-/);
+		expect(harness.sessionManager.getClientInput(entry.clientMessageId)).toMatchObject({
+			state: "accepted",
+			queuedInput: { delivery: "steer", message: "local queued input" },
+		});
 
-		await expect(harness.session.steer("forged remote collision", undefined, localQueueId)).rejects.toThrow(
-			"invalid client input identity",
-		);
-		expect(harness.session.getSteeringMessages().map((entry) => entry.text)).toEqual(["local queued input"]);
+		// The identity is durable: other input cannot take it over.
+		await expect(
+			harness.session.steer("forged remote collision", undefined, entry.clientMessageId),
+		).rejects.toBeInstanceOf(ClientInputConflictError);
+		expect(harness.session.getSteeringMessages()).toEqual([entry]);
 		expect(harness.control.hasQueuedMessages()).toBe(true);
 	});
 
@@ -798,7 +804,7 @@ describe("durable client input idempotency", () => {
 
 		await expect(queue()).rejects.toThrow("Injected rollback");
 		expect(harness.sessionManager.getClientInput(clientMessageId)).toBeUndefined();
-		expect(harness.sessionManager.getRecoverableQueuedClientInputs()).toEqual([]);
+		expect(clientInputRecovery(harness.sessionManager.getConversationState()).records).toEqual([]);
 		expect(harness.session.getSteeringMessages()).toEqual([]);
 		expect(harness.session.getFollowUpMessages()).toEqual([]);
 		expect(harness.control.hasQueuedMessages()).toBe(false);
@@ -821,12 +827,12 @@ describe("durable client input idempotency", () => {
 
 		await expect(harness.session.steer("survives observer", undefined, "observer-safe")).resolves.toBeUndefined();
 		expect(harness.sessionManager.getClientInput("observer-safe")).toMatchObject({ state: "accepted" });
-		expect(harness.sessionManager.getRecoverableQueuedClientInputs()).toMatchObject([
+		expect(clientInputRecovery(harness.sessionManager.getConversationState()).records).toMatchObject([
 			{ clientMessageId: "observer-safe", queuedInput: { delivery: "steer", message: "survives observer" } },
 		]);
 		await vi.waitFor(() =>
 			expect(harness.session.getSteeringMessages()).toEqual([
-				{ queueEntryId: "observer-safe", clientMessageId: "observer-safe", text: "survives observer" },
+				{ clientMessageId: "observer-safe", text: "survives observer" },
 			]),
 		);
 		expect(harness.control.hasQueuedMessages()).toBe(true);
@@ -892,7 +898,7 @@ describe("durable client input idempotency", () => {
 			harness.sessionManager.getSessionRef()!,
 			harness.sessionManager.getCwd(),
 		);
-		expect(reopened.getRecoverableQueuedClientInputs()).toMatchObject([
+		expect(clientInputRecovery(reopened.getConversationState()).records).toMatchObject([
 			{ clientMessageId: "hook-queue-pass", queuedInput: { message: "queued pass" } },
 			{ clientMessageId: "hook-queue-transform", queuedInput: { message: "queued transformed" } },
 		]);
@@ -1013,7 +1019,7 @@ describe("durable client input idempotency", () => {
 		expect(queuedEntries).toHaveLength(2);
 
 		const reopened = await SessionManager.openReadOnly(manager.getSessionRef()!, tempDir);
-		expect(reopened.getRecoverableQueuedClientInputs()).toMatchObject([
+		expect(clientInputRecovery(reopened.getConversationState()).records).toMatchObject([
 			{
 				clientMessageId: "queued-b",
 				command: "prompt",
@@ -1049,7 +1055,7 @@ describe("durable client input idempotency", () => {
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		const reopened = harness.sessionManager;
-		expect(reopened.getClientInputRecoveryPlan()).toMatchObject({
+		expect(clientInputRecovery(reopened.getConversationState())).toMatchObject({
 			kind: "blocked",
 			blocker: { clientMessageId: "ambiguous-a", state: "started" },
 			records: [{ clientMessageId: "queued-b", state: "accepted" }],
@@ -1083,7 +1089,7 @@ describe("durable client input idempotency", () => {
 		});
 		harnesses.push(harness);
 
-		expect(harness.sessionManager.getClientInputRecoveryPlan()).toMatchObject({ kind: "blocked" });
+		expect(clientInputRecovery(harness.sessionManager.getConversationState())).toMatchObject({ kind: "blocked" });
 		expect(harness.session.getFollowUpMessages()).toMatchObject([{ clientMessageId: "queued-b", text: "later b" }]);
 	});
 
@@ -1103,12 +1109,12 @@ describe("durable client input idempotency", () => {
 		const reopened = harness.sessionManager;
 		expect(reopened.getClientInput("recover-steer")?.state).toBe("accepted");
 		expect(reopened.getClientInput("recover-follow")?.state).toBe("accepted");
-		expect(reopened.getRecoverableQueuedClientInputs()).toHaveLength(2);
+		expect(clientInputRecovery(reopened.getConversationState()).records).toHaveLength(2);
 		expect(harness.session.getSteeringMessages()).toEqual([
-			{ queueEntryId: "recover-steer", clientMessageId: "recover-steer", text: "steer original" },
+			{ clientMessageId: "recover-steer", text: "steer original" },
 		]);
 		expect(harness.session.getFollowUpMessages()).toEqual([
-			{ queueEntryId: "recover-follow", clientMessageId: "recover-follow", text: "follow original" },
+			{ clientMessageId: "recover-follow", text: "follow original" },
 		]);
 		expect(getUserTexts(harness)).toEqual([]);
 	});
@@ -1158,7 +1164,7 @@ describe("durable client input idempotency", () => {
 			state: "failed",
 			error: expect.stringContaining("cannot change the role"),
 		});
-		expect(reopened.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+		expect(clientInputRecovery(reopened.getConversationState())).toEqual({ kind: "idle", records: [] });
 		expect(reopened.getConversationState().context.messages.filter((message) => message.role === "user")).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 		// The same-ID retry replays the definitive failure; it is neither ambiguous nor re-dispatched.
@@ -1200,6 +1206,41 @@ describe("durable client input idempotency", () => {
 		]);
 	});
 
+	it("reports clearing recovered queued input to its client", async () => {
+		const harness = await createHarness({
+			log: "sqlite",
+			seed: (seed) =>
+				seed
+					.clientInput(
+						"recover-cleared",
+						"follow_up",
+						{ message: "cleared after restart" },
+						{ queued: "follow_up" },
+					)
+					.clientInput("local-recovered", "steer", { message: "local after restart" }, { queued: "steer" }),
+		});
+		harnesses.push(harness);
+		expect(harness.session.getFollowUpMessages()).toEqual([
+			{ clientMessageId: "recover-cleared", text: "cleared after restart" },
+		]);
+
+		await expect(harness.session.clearQueue()).resolves.toEqual({
+			steering: ["local after restart"],
+			followUp: ["cleared after restart"],
+		});
+		expect(harness.sessionManager.getClientInput("recover-cleared")?.state).toBe("withdrawn");
+		expect(harness.sessionManager.getClientInput("local-recovered")?.state).toBe("withdrawn");
+		// Input queued before the restart reports its outcome like input queued now; local input has no client.
+		expect(harness.eventsOfType("client_input_outcome")).toEqual([
+			{
+				type: "client_input_outcome",
+				clientMessageId: "recover-cleared",
+				outcome: "failed",
+				reason: "queue_cleared",
+			},
+		]);
+	});
+
 	it("rejects and restores recovery when the recovered turn is aborted before delivery", async () => {
 		const harness = await createHarness({
 			log: "sqlite",
@@ -1219,9 +1260,9 @@ describe("durable client input idempotency", () => {
 
 		await expect(harness.session.resumeRecoveredClientInputs()).rejects.toThrow();
 		expect(reopened.getClientInput("recover-silent-cancel")?.state).toBe("accepted");
-		expect(reopened.getRecoverableQueuedClientInputs()).toHaveLength(1);
+		expect(clientInputRecovery(reopened.getConversationState()).records).toHaveLength(1);
 		expect(harness.session.getSteeringMessages()).toEqual([
-			{ queueEntryId: "recover-silent-cancel", clientMessageId: "recover-silent-cancel", text: "original" },
+			{ clientMessageId: "recover-silent-cancel", text: "original" },
 		]);
 	});
 
@@ -1242,7 +1283,7 @@ describe("durable client input idempotency", () => {
 
 		const reopened = await SessionManager.open(sessionRef);
 		expect(reopened.getClientInput("recover-committed")?.state).toBe("completed");
-		expect(reopened.getRecoverableQueuedClientInputs()).toEqual([]);
+		expect(clientInputRecovery(reopened.getConversationState()).records).toEqual([]);
 		expect(reopened.getConversationState().context.messages).toMatchObject([
 			{ role: "user", clientMessageId: "recover-committed" },
 		]);
@@ -1269,7 +1310,7 @@ describe("durable client input idempotency", () => {
 		).rejects.toThrow("serialized limit");
 		expect(manager.getClientInput("queued-oversized")?.state).toBe("accepted");
 		expect(manager.getClientInput("queued-oversized")?.queuedInput).toBeUndefined();
-		expect(manager.getRecoverableQueuedClientInputs()).toEqual([]);
+		expect(clientInputRecovery(manager.getConversationState()).records).toEqual([]);
 	});
 
 	it("bounds aggregate outstanding receipt and queued payload memory", async () => {
@@ -1290,8 +1331,8 @@ describe("durable client input idempotency", () => {
 		}
 
 		expect(aggregateError?.message).toContain("aggregate limit");
-		expect(manager.getRecoverableQueuedClientInputs().length).toBeGreaterThan(1);
-		expect(manager.getRecoverableQueuedClientInputs().length).toBeLessThan(128);
+		expect(clientInputRecovery(manager.getConversationState()).records.length).toBeGreaterThan(1);
+		expect(clientInputRecovery(manager.getConversationState()).records.length).toBeLessThan(128);
 	});
 
 	it("caps tiny live receipts while input preflight is stalled", async () => {
@@ -1623,7 +1664,7 @@ describe("durable client input idempotency", () => {
 
 		const fork = await SessionManager.forkFrom(source.getSessionRef()!, targetDir, targetDir);
 		expect(fork.getClientInput("source-queued")).toBeUndefined();
-		expect(fork.getRecoverableQueuedClientInputs()).toEqual([]);
+		expect(clientInputRecovery(fork.getConversationState()).records).toEqual([]);
 		const forkSnapshot = await loadPersistedSessionSnapshot(fork);
 		expect(forkSnapshot.entries).toEqual([]);
 		expect(forkSnapshot.clientInputs).toEqual([]);

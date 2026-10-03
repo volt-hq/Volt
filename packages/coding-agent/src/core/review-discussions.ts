@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@hansjm10/volt-ai";
 import type {
 	RpcListReviewDiscussions,
@@ -629,7 +630,7 @@ export class HostReviewDiscussionService {
 				session.isBusy ||
 				session.pendingMessageCount > 0 ||
 				session.isCompacting ||
-				session.sessionManager.getClientInputRecoveryPlan().kind !== "idle"
+				clientInputRecovery(session.sessionManager.getConversationState()).kind !== "idle"
 			)
 				return { requestId, status: "busy", discussion: await this.project(runtime, store, ref, row) };
 			return reset();

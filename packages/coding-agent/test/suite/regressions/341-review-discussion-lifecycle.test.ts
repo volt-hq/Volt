@@ -1,6 +1,7 @@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { type FauxModelDefinition, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { RpcReviewDiscussionLinkSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
@@ -579,7 +580,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 					.assistant("Newer steering answer"),
 			{ model: harness.getModel() },
 		);
-		expect(manager.getClientInputRecoveryPlan().kind).toBe("replay");
+		expect(clientInputRecovery(manager.getConversationState()).kind).toBe("replay");
 		expect((await api.list("review-341")).discussions[0]!.status).toBe("interrupted");
 		const reopened = await source.createReviewDiscussionSibling(manager);
 		runtimes.push(reopened);
