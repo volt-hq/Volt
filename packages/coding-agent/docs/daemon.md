@@ -308,7 +308,8 @@ conversation at a time:
   which serves it from its in-process session. Prompts from either side appear
   on both; the TUI footer shows `📱 n` while phones are attached.
 - **daemon-draining** — a TUI asked to take over while a remote turn is
-  streaming. The TUI prints a waiting line, phones get transient
+  streaming. The TUI prints a waiting line (the interrupt key stops the remote
+  turn, Ctrl+C cancels the open), phones get transient
   `lease_draining` errors on new prompts, and ownership transfers at the turn
   boundary.
 

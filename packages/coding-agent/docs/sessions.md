@@ -29,7 +29,7 @@ A session can be open for writing in only one Volt process at a time: the intera
 
 Listing, searching, exporting, and forking from a session read it without the lock and keep working while it is open elsewhere. Renaming or deleting another session from the picker takes its lock briefly and fails while that session is open in another process.
 
-When the interactive TUI opens a session that the daemon is hosting for a phone, it first takes the daemon's conversation lease. If the phone's turn is still running, the TUI prints a waiting line until the turn finishes and the daemon closes its copy; if another TUI has the session open, it refuses with a message.
+When the interactive TUI opens a session that the daemon is hosting for a phone, it first takes the daemon's conversation lease. If the phone's turn is still running, the TUI prints a waiting line until the turn finishes and the daemon closes its copy: the interrupt key (Escape by default) stops that turn, and Ctrl+C cancels opening the session. If another TUI has the session open, it refuses with a message.
 
 If a session's saved state cannot be confirmed (for example, a commit finds that another writer changed the session), Volt stops that session instead of continuing: the TUI exits with an error that suggests `/resume`, print and RPC runs exit with an error, and the daemon closes the conversation. Reopen the session to continue from what was saved.
 

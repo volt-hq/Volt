@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it, vi } from "vitest";
+import { ConversationLockedError } from "../src/core/conversation-log/conversation-lock.ts";
 import { IrohRemoteOutcomeError } from "../src/core/remote/iroh/protocol.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import { SQLiteSessionStoreClient } from "../src/core/session-store/index.ts";
@@ -18,6 +19,7 @@ import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 interface FakeHandle {
 	getSessionId(): string;
 	getSessionRef(): SessionReference | undefined;
+	closePersistence(): Promise<void>;
 }
 
 interface FakeStore extends SessionTargetSessionStore<FakeHandle> {
@@ -46,6 +48,7 @@ function createFakeStore(existing: Array<{ id: string; ref: SessionReference }> 
 			return {
 				getSessionId: () => session.id,
 				getSessionRef: () => session.ref,
+				closePersistence: async () => {},
 			};
 		},
 		async create(requestedId) {
@@ -54,6 +57,7 @@ function createFakeStore(existing: Array<{ id: string; ref: SessionReference }> 
 			return {
 				getSessionId: () => id,
 				getSessionRef: () => undefined,
+				closePersistence: async () => {},
 			};
 		},
 	};
@@ -125,7 +129,11 @@ describe("resolveIrohRemoteSessionTarget", () => {
 		}
 		expect(store.createdIds).toEqual([]);
 		store.find = async () => source;
-		store.open = async () => ({ getSessionId: () => "existing", getSessionRef: () => source });
+		store.open = async () => ({
+			getSessionId: () => "existing",
+			getSessionRef: () => source,
+			closePersistence: async () => {},
+		});
 		expect(await resolve({ kind: "session", sessionId: "existing" }, store)).toMatchObject({
 			selection: "resumed",
 			sessionRef: source,
@@ -266,14 +274,43 @@ describe("resolveIrohRemoteSessionTarget", () => {
 		const expectedRef = ref("expected");
 		const store = createFakeStore([{ id: "expected", ref: expectedRef }]);
 		store.find = async () => expectedRef;
+		const closePersistence = vi.fn(async () => {});
 		store.open = async () => ({
 			getSessionId: () => "replacement",
 			getSessionRef: () => ref("replacement"),
+			closePersistence,
 		});
 
 		const error = await resolve({ kind: "session", sessionId: "expected" }, store).catch((thrown) => thrown);
 		expect(error).toBeInstanceOf(IrohRemoteOutcomeError);
 		expect((error as IrohRemoteOutcomeError).outcome).toBe("session_unavailable");
+		// The opened replacement is released, with the session lock it holds.
+		expect(closePersistence).toHaveBeenCalledTimes(1);
+	});
+
+	it("maps create failures to constant outcomes that never carry host paths", async () => {
+		const store = createFakeStore([]);
+		const lockPath = "/home/user/.volt/agent/sessions/project/locks/0123.lock";
+		store.create = async () => {
+			throw new Error(`EMFILE: too many open files, open '${lockPath}'`);
+		};
+		for (const target of [
+			{ kind: "last" } as const,
+			{ kind: "last", resumeSessionId: "missing" } as const,
+			{ kind: "new", sessionId: "named" } as const,
+		]) {
+			const error = await resolve(target, store).catch((thrown) => thrown);
+			expect(error).toBeInstanceOf(IrohRemoteOutcomeError);
+			expect(error).toMatchObject({ outcome: "session_unavailable", workspace: "volt" });
+			expect((error as Error).message).toBe("session_unavailable: session state is corrupt or ambiguous");
+			expect((error as Error).message).not.toContain(lockPath);
+		}
+
+		store.create = async (requestedId) => {
+			throw new ConversationLockedError(requestedId ?? "fresh", "another_process");
+		};
+		const locked = await resolve({ kind: "new", sessionId: "named" }, store).catch((thrown) => thrown);
+		expect(locked).toMatchObject({ outcome: "conversation_locked", workspace: "volt", sessionId: "named" });
 	});
 
 	it("fails closed when strict lookup reports corrupt or ambiguous state", async () => {

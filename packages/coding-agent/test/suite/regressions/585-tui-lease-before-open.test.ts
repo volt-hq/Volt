@@ -9,6 +9,7 @@ import {
 	createDisabledDaemonAttach,
 	type DaemonAttach,
 	DaemonLeaseUnavailableError,
+	type DaemonLeaseWait,
 	openSessionWithDaemonLease,
 } from "../../../src/modes/interactive/daemon-attach.ts";
 
@@ -45,6 +46,9 @@ function fakeAttach(acquire: () => Promise<AcquireOutcome>) {
 		dispose: vi.fn(async () => {
 			steps.push("dispose");
 		}),
+		viewerAbort: vi.fn(async (viewerFeedId: string) => {
+			steps.push(`abort:${viewerFeedId}`);
+		}),
 	};
 	return { attach, steps };
 }
@@ -67,15 +71,18 @@ describe("regression #585: the TUI takes its daemon lease before opening a sessi
 			};
 		});
 		const { attach, steps } = fakeAttach(async () => ({ kind: "pending", viewerFeedId: "vf-1", granted }));
-		const onWaiting = vi.fn(() => {
+		const onWaiting = vi.fn((wait: DaemonLeaseWait) => {
 			steps.push("waiting");
+			// The user stops the phone's turn; the daemon then disposes its runtime and grants.
+			wait.abortRemoteTurn();
 			queueMicrotask(grant);
+			return () => steps.push("wait ended");
 		});
 
 		const opened = await openSessionWithDaemonLease(ref, { createAttach: () => attach, onWaiting });
 		keep(opened);
 
-		expect(steps).toEqual(["start", `acquire:${ref.sessionId}`, "waiting"]);
+		expect(steps).toEqual(["start", `acquire:${ref.sessionId}`, "waiting", "abort:vf-1", "wait ended"]);
 		expect(onWaiting).toHaveBeenCalledTimes(1);
 		expect(opened.manager.getSessionId()).toBe(ref.sessionId);
 		// The integration keeps the lease for interactive mode.
@@ -90,7 +97,10 @@ describe("regression #585: the TUI takes its daemon lease before opening a sessi
 		const { sessionDir, ref } = await storedSession();
 		const { attach, steps } = fakeAttach(async () => ({ kind: "denied", reason: "held_by_tui" }));
 
-		const error = await openSessionWithDaemonLease(ref, { createAttach: () => attach, onWaiting: () => {} }).then(
+		const error = await openSessionWithDaemonLease(ref, {
+			createAttach: () => attach,
+			onWaiting: () => () => {},
+		}).then(
 			(opened) => {
 				keep(opened);
 				return undefined;
@@ -117,16 +127,44 @@ describe("regression #585: the TUI takes its daemon lease before opening a sessi
 		}));
 
 		await expect(
-			openSessionWithDaemonLease(ref, { createAttach: () => attach, onWaiting: () => {} }),
+			openSessionWithDaemonLease(ref, { createAttach: () => attach, onWaiting: () => () => {} }),
 		).rejects.toThrow(`Could not take session ${ref.sessionId} over from the daemon: drain cancelled`);
 		expect(steps.at(-1)).toBe("dispose");
+	});
+
+	it("cancels the open while waiting, leaving the session to the daemon", async () => {
+		const { sessionDir, ref } = await storedSession();
+		const daemonRuntimeLock = ConversationLock.acquire(sessionDir, ref.sessionId);
+		cleanups.push(() => daemonRuntimeLock.close());
+		const { attach, steps } = fakeAttach(async () => ({
+			kind: "pending",
+			viewerFeedId: "vf-3",
+			granted: new Promise<never>(() => {}),
+		}));
+
+		await expect(
+			openSessionWithDaemonLease(ref, {
+				createAttach: () => attach,
+				onWaiting: (wait) => {
+					queueMicrotask(() => wait.cancel());
+					return () => steps.push("wait ended");
+				},
+			}),
+		).rejects.toThrow(
+			new DaemonLeaseUnavailableError(`Cancelled opening session ${ref.sessionId}; the daemon keeps it.`),
+		);
+		// Disposing the integration closes its connection, which cancels the daemon's drain.
+		expect(steps).toEqual(["start", `acquire:${ref.sessionId}`, "wait ended", "dispose"]);
 	});
 
 	it("opens without a lease when the daemon is unavailable, and reports a lock held elsewhere", async () => {
 		const { sessionDir, ref } = await storedSession();
 		const noop = fakeAttach(async () => ({ kind: "noop" }));
 
-		const opened = await openSessionWithDaemonLease(ref, { createAttach: () => noop.attach, onWaiting: () => {} });
+		const opened = await openSessionWithDaemonLease(ref, {
+			createAttach: () => noop.attach,
+			onWaiting: () => () => {},
+		});
 		expect(opened.attach).toBeUndefined();
 		expect(noop.steps).toEqual(["start", `acquire:${ref.sessionId}`, "dispose"]);
 		await opened.manager.closePersistence();
@@ -136,7 +174,7 @@ describe("regression #585: the TUI takes its daemon lease before opening a sessi
 		cleanups.push(() => elsewhere.close());
 		const granted = fakeAttach(async () => ({ kind: "granted", handoff: "none" }));
 		await expect(
-			openSessionWithDaemonLease(ref, { createAttach: () => granted.attach, onWaiting: () => {} }),
+			openSessionWithDaemonLease(ref, { createAttach: () => granted.attach, onWaiting: () => () => {} }),
 		).rejects.toBeInstanceOf(ConversationLockedError);
 		expect(granted.steps.at(-1)).toBe("dispose");
 	});

@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { createSessionId } from "@hansjm10/volt-agent-core";
 import { type ImageContent, modelsAreEqual } from "@hansjm10/volt-ai";
+import { ProcessTerminal, setKeybindings } from "@hansjm10/volt-tui";
 import chalk from "chalk";
 import { type Args, type Mode, parseArgs, printHelp } from "./cli/args.ts";
 import { processFileArguments } from "./cli/file-processor.ts";
@@ -45,6 +46,7 @@ import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { GitContextProviderPool } from "./core/git-context-provider-pool.ts";
 import { applyHttpProxySettings, configureHttpDispatcher } from "./core/http-dispatcher.ts";
+import { KeybindingsManager } from "./core/keybindings.ts";
 import { LspServerPool } from "./core/lsp/server-pool.ts";
 import type { ModelRegistry } from "./core/model-registry.ts";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.ts";
@@ -78,10 +80,12 @@ import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemo
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
+import { keyDisplayText } from "./modes/interactive/components/keybinding-hints.ts";
 import {
 	createDaemonAttach,
 	type DaemonAttach,
 	DaemonLeaseUnavailableError,
+	type DaemonLeaseWait,
 	isDaemonAttachSupported,
 	openSessionWithDaemonLease,
 } from "./modes/interactive/daemon-attach.ts";
@@ -396,6 +400,40 @@ async function forkSessionOrExit(
 }
 
 /**
+ * Print the waiting line for a pending startup lease and read keys until the
+ * wait ends: the interrupt binding stops the daemon's turn, and the clear or
+ * exit binding cancels the open. Returns the function that stops reading keys.
+ */
+function watchDaemonLeaseWait(sessionId: string, wait: DaemonLeaseWait): () => void {
+	const keybindings = KeybindingsManager.create();
+	setKeybindings(keybindings);
+	console.log(
+		chalk.dim(
+			`Waiting for the remote turn in session ${sessionId} to finish before opening it here. ${keyDisplayText("app.interrupt")} stops that turn; ${keyDisplayText("app.clear")} cancels.`,
+		),
+	);
+	// Piped input is read later as the prompt; only a terminal is read for keys.
+	if (!process.stdin.isTTY) return () => {};
+	const terminal = new ProcessTerminal();
+	let stopping = false;
+	terminal.start(
+		(data) => {
+			if (keybindings.matches(data, "app.interrupt")) {
+				if (stopping) return;
+				stopping = true;
+				// Raw mode turns off newline translation.
+				process.stdout.write(`${chalk.dim("Stopping the remote turn...")}\r\n`);
+				wait.abortRemoteTurn();
+			} else if (keybindings.matches(data, "app.clear") || keybindings.matches(data, "app.exit")) {
+				wait.cancel();
+			}
+		},
+		() => {},
+	);
+	return () => terminal.stop();
+}
+
+/**
  * The interactive TUI takes its daemon conversation lease before it opens an
  * existing session for writing (see openSessionWithDaemonLease). The leased
  * integration is handed to interactive mode, or released when the session is
@@ -417,13 +455,7 @@ class StartupDaemonLease {
 		if (cwd === undefined || !existsSync(cwd)) return SessionManager.open(ref);
 		const opened = await openSessionWithDaemonLease(ref, {
 			createAttach: () => createDaemonAttach({ cwd, agentDir: this.agentDir, autoStart: this.autoStart }),
-			onWaiting: () => {
-				console.log(
-					chalk.dim(
-						`Waiting for the remote turn in session ${ref.sessionId} to finish before opening it here (Ctrl+C cancels)...`,
-					),
-				);
-			},
+			onWaiting: (wait) => watchDaemonLeaseWait(ref.sessionId, wait),
 		});
 		this.attach = opened.attach;
 		return opened.manager;

@@ -416,11 +416,22 @@ export class DaemonLeaseUnavailableError extends Error {
 	}
 }
 
+/** Controls for a lease that waits for the daemon's current turn to finish. */
+export interface DaemonLeaseWait {
+	/** Stop the daemon's running turn (a non-destructive abort), so the lease is granted when it ends. */
+	abortRemoteTurn(): void;
+	/** Stop waiting and do not open the session; the daemon keeps it. */
+	cancel(): void;
+}
+
 export interface OpenSessionWithDaemonLeaseOptions {
 	/** Create the daemon integration for the session's workspace; the caller owns what is returned. */
 	createAttach: () => DaemonAttach;
-	/** Called once while the lease waits for the daemon's current turn to finish. */
-	onWaiting: () => void;
+	/**
+	 * Called once when the lease waits for the daemon's current turn to finish.
+	 * Returns a function that ends what the wait started (for example, key input).
+	 */
+	onWaiting: (wait: DaemonLeaseWait) => () => void;
 }
 
 /**
@@ -445,12 +456,32 @@ export async function openSessionWithDaemonLease(
 			);
 		}
 		if (outcome.kind === "pending") {
-			options.onWaiting();
-			await outcome.granted.catch((error: unknown) => {
-				throw new DaemonLeaseUnavailableError(
-					`Could not take session ${ref.sessionId} over from the daemon: ${error instanceof Error ? error.message : String(error)}`,
-				);
+			let cancelOpen = (): void => {};
+			const cancelled = new Promise<never>((_, reject) => {
+				cancelOpen = () =>
+					reject(
+						new DaemonLeaseUnavailableError(`Cancelled opening session ${ref.sessionId}; the daemon keeps it.`),
+					);
 			});
+			cancelled.catch(() => {});
+			const endWait = options.onWaiting({
+				abortRemoteTurn: () => {
+					void attach.viewerAbort(outcome.viewerFeedId);
+				},
+				cancel: () => cancelOpen(),
+			});
+			try {
+				await Promise.race([
+					outcome.granted.catch((error: unknown) => {
+						throw new DaemonLeaseUnavailableError(
+							`Could not take session ${ref.sessionId} over from the daemon: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}),
+					cancelled,
+				]);
+			} finally {
+				endWait();
+			}
 		}
 		const manager = await SessionManager.open(ref);
 		if (outcome.kind !== "noop") return { manager, attach };
