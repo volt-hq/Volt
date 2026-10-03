@@ -126,7 +126,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 			await other.closePersistence();
 		}
 		write();
-		await expect(manager.flush()).rejects.toThrow("Session revision changed");
+		await expect(manager.flush()).rejects.toThrow("Session ordinal changed");
 		expect(manager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 		return ref;
 	}
@@ -158,7 +158,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		await conflict(runtime);
 		const disposal = runtime.dispose();
 		expect(runtime.dispose()).toBe(disposal);
-		await expect(disposal).rejects.toThrow("Session revision changed");
+		await expect(disposal).rejects.toThrow("Session ordinal changed");
 		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:quit"]);
 		expect(resources[0].signal.aborted).toBe(true);
 	});
@@ -434,7 +434,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 			await writeFile(secondResource, "owned by the second extension");
 			await writeFile(cleanupScript, 'import { unlink } from "node:fs/promises"; await unlink(process.argv[2]);');
 			if (timing === "before") await conflict(runtime);
-			await expect(runtime.dispose()).rejects.toThrow("Session revision changed");
+			await expect(runtime.dispose()).rejects.toThrow("Session ordinal changed");
 			expect(results).toEqual([0, 0]);
 			expect(directories).toEqual([harness.tempDir]);
 			expect(existsSync(firstResource)).toBe(false);

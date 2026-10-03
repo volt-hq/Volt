@@ -117,7 +117,8 @@ type TransactionFaultMode =
 	| "uncertain_committed";
 
 interface TransactionFaultEvidence {
-	expectedRevision?: number;
+	expectedOrdinal?: number;
+	appendedEntries?: number;
 	applyResult?: SessionStoreTransactionResult;
 	reconcileCalls: number;
 }
@@ -143,7 +144,8 @@ async function faultNextPlanningTransaction(
 			return applyTransaction(input);
 		}
 		intercepted = true;
-		evidence.expectedRevision = input.expectedRevision;
+		evidence.expectedOrdinal = input.expectedOrdinal;
+		evidence.appendedEntries = input.payload.entries.length;
 		if (mode === "rollback" || mode === "uncertain_rollback") {
 			throw new Error("injected transaction request failure");
 		}
@@ -341,7 +343,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		expect(prepareReplacement).not.toHaveBeenCalled();
 	});
 
-	it("rejects a stale manager at the revision boundary without changing the committed winner", async () => {
+	it("rejects a stale manager at the ordinal fence without changing the committed winner", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-217-stale-manager-"));
 		tempDirs.push(tempDir);
 		const current = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
@@ -358,11 +360,11 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		await expect(commitPlanningState(stale, "build")).rejects.toMatchObject({
 			effect: "not_started",
 			authority: "reconciliation_required",
-			message: expect.stringMatching(/Session revision changed from \d+ to \d+/),
+			message: expect.stringMatching(/Session ordinal changed from \d+ to \d+/),
 		});
 
 		expect(await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration)).toMatchObject({
-			revision: winner?.revision,
+			lastOrdinal: winner?.lastOrdinal,
 		});
 		expect(stale.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 		expect(() => stale.getEntries()).toThrow(SessionConversationStateUnavailableError);
@@ -456,7 +458,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			sessionRef.sessionId,
 			sessionRef.sessionGeneration,
 		);
-		expect(summary?.revision).toBe(evidence.expectedRevision);
+		expect(summary?.lastOrdinal).toBe(evidence.expectedOrdinal);
 		expect(evidence.applyResult).toBeUndefined();
 		expect(evidence.reconcileCalls).toBe(1);
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -488,14 +490,14 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		expect(evidence.reconcileCalls).toBe(1);
 		if (evidence.applyResult?.status !== "committed") throw new Error("Expected committed transaction evidence");
 		expect(evidence.applyResult.evidence).toMatchObject({
-			beforeRevision: evidence.expectedRevision,
-			afterRevision: (evidence.expectedRevision ?? Number.NaN) + 1,
+			beforeOrdinal: evidence.expectedOrdinal,
+			afterOrdinal: (evidence.expectedOrdinal ?? Number.NaN) + (evidence.appendedEntries ?? Number.NaN),
 		});
 		const summary = await (await trackedStore(sessionRef.sessionDirectory)).findSessionSummary(
 			sessionRef.sessionId,
 			sessionRef.sessionGeneration,
 		);
-		expect(summary?.revision).toBeGreaterThanOrEqual(evidence.applyResult.evidence.afterRevision);
+		expect(summary?.lastOrdinal).toBeGreaterThanOrEqual(evidence.applyResult.evidence.afterOrdinal);
 		expect(preflight).toEqual([{ success: true, outcome: "admitted" }]);
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
@@ -614,8 +616,8 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		current.appendSessionInfo("newer manager generation");
 		await current.flush();
 		const store = await trackedStore(sessionRef.sessionDirectory);
-		const winnerRevision = (await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))
-			?.revision;
+		const winnerOrdinal = (await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))
+			?.lastOrdinal;
 
 		await expect(harness.control.continue()).resolves.toMatchObject({
 			status: "delivery_failed",
@@ -623,8 +625,8 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		});
 
 		expect(harness.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
-		expect((await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))?.revision).toBe(
-			winnerRevision,
+		expect((await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))?.lastOrdinal).toBe(
+			winnerOrdinal,
 		);
 		expect(harness.control.hasPendingPrompt()).toBe(false);
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -758,10 +760,10 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			expect(evidence.reconcileCalls).toBe(1);
 			const store = await trackedStore(sessionRef.sessionDirectory);
 			const summary = await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration);
-			expect(summary?.revision).toBe(
+			expect(summary?.lastOrdinal).toBe(
 				authoritativeOutcome === "committed"
-					? (evidence.expectedRevision ?? Number.NaN) + 1
-					: evidence.expectedRevision,
+					? (evidence.expectedOrdinal ?? Number.NaN) + (evidence.appendedEntries ?? Number.NaN)
+					: evidence.expectedOrdinal,
 			);
 			expect(evidence.applyResult).toEqual(
 				authoritativeOutcome === "committed" ? expect.objectContaining({ status: "committed" }) : undefined,

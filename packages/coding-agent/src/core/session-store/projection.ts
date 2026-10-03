@@ -53,9 +53,10 @@ export interface SessionDerivedState {
 	searchChunks: SessionStoreSearchChunkWrite[];
 	searchChunkByEntryId: Map<string, SessionStoreSearchChunkWrite>;
 	leafId: string | null;
+	/** Ordinal of the newest `leaf` entry; 0 before the first navigation. */
+	leafEntryOrdinal: number;
 	nextOrdinal: number;
 	nextSearchChunkIndex: number;
-	canonicalRevision: number;
 }
 
 export interface SessionEntrySummary {
@@ -93,9 +94,9 @@ function createEmptySessionDerivedState(headerTimestamp: string): SessionDerived
 		searchChunks: [],
 		searchChunkByEntryId: new Map(),
 		leafId: null,
+		leafEntryOrdinal: 0,
 		nextOrdinal: 1,
 		nextSearchChunkIndex: 0,
-		canonicalRevision: 0,
 	};
 }
 
@@ -202,9 +203,9 @@ export function cloneSessionDerivedState(state: SessionDerivedState): SessionDer
 		searchChunks: [...state.searchChunks],
 		searchChunkByEntryId: new Map(state.searchChunkByEntryId),
 		leafId: state.leafId,
+		leafEntryOrdinal: state.leafEntryOrdinal,
 		nextOrdinal: state.nextOrdinal,
 		nextSearchChunkIndex: state.nextSearchChunkIndex,
-		canonicalRevision: state.canonicalRevision,
 	};
 }
 
@@ -513,9 +514,10 @@ export function applySessionEntry(state: SessionDerivedState, entry: SessionEntr
 		state.searchChunkByEntryId.set(entry.id, searchChunk);
 		state.nextSearchChunkIndex++;
 	}
-	if (entry.type === "leaf") state.leafId = entry.targetId;
-	else if (!isHostOnlySessionEntryType(entry.type)) state.leafId = entry.id;
-	if (entry.type === "leaf" || !isHostOnlySessionEntryType(entry.type)) state.canonicalRevision++;
+	if (entry.type === "leaf") {
+		state.leafId = entry.targetId;
+		state.leafEntryOrdinal = entry.ordinal;
+	} else if (!isHostOnlySessionEntryType(entry.type)) state.leafId = entry.id;
 	state.nextOrdinal++;
 }
 

@@ -810,7 +810,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 					encoding: "utf8",
 				});
 				movedToTrash = trash.status === 0;
-				await SessionManager.delete(sessionRef, snapshot.revision);
+				await SessionManager.delete(sessionRef, snapshot.lastOrdinal);
 				if (this.currentSessions) {
 					this.currentSessions = this.currentSessions.filter(
 						(session) => !sessionRefsEqual(session.ref, sessionRef),

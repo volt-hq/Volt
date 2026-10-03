@@ -189,14 +189,14 @@ function namedPayload(name: string): SessionStoreTransactionPayload {
 
 function transaction(
 	sessionId: string,
-	expectedRevision: number,
+	expectedOrdinal: number,
 	commitId: string,
 	payload: SessionStoreTransactionPayload,
 ): SessionStoreApplyTransactionInput {
 	return {
 		sessionId,
 		sessionGeneration: generationFor(sessionId),
-		expectedRevision,
+		expectedOrdinal,
 		commitId,
 		digest: digestSessionStoreTransactionPayload(payload),
 		payload,
@@ -290,6 +290,8 @@ async function addContinuationSession(
 			canonicalEntryId: null,
 		});
 	}
+	// A transaction appends at least one entry; an entry-free fixture stays the created hidden session.
+	if (entries.length === 0) return;
 	const payload: SessionStoreTransactionPayload = {
 		...emptyPayload({
 			updatedAt: fixture.visible ? fixture.updatedAt : CREATED_AT,
@@ -784,7 +786,7 @@ describe("SQLite session store", () => {
 			id: "session-1",
 			parentStoreId: null,
 			visible: false,
-			revision: 0,
+			lastOrdinal: 0,
 			startingGitContextRecorded: false,
 			startingGitContext: null,
 		});
@@ -909,7 +911,7 @@ describe("SQLite session store", () => {
 		expect(listed[0]).toMatchObject({
 			id: "session-1",
 			name: "Foundation",
-			revision: 1,
+			lastOrdinal: 7,
 			messageCount: 1,
 			startingGitContextRecorded: true,
 			startingGitContext: null,
@@ -1045,7 +1047,7 @@ describe("SQLite session store", () => {
 			client.applyTransaction(transaction("session-1", 0, "invalid-parent", payload)),
 		).rejects.toMatchObject({ code: "constraint_failed" });
 		expect(await client.findSessionSummary("session-1", generationFor("session-1"))).toMatchObject({
-			revision: 0,
+			lastOrdinal: 0,
 			leafId: null,
 		});
 		expect((await client.loadSession("session-1", generationFor("session-1")))?.entries).toEqual([]);
@@ -1126,7 +1128,7 @@ describe("SQLite session store", () => {
 			client.applyTransaction(transaction("session-1", 1, "invalid-client-transition", invalidTransition)),
 		).rejects.toMatchObject({ code: "constraint_failed" });
 		const snapshot = await client.loadSession("session-1", generationFor("session-1"));
-		expect(snapshot?.session.revision).toBe(1);
+		expect(snapshot?.session.lastOrdinal).toBe(1);
 		expect(snapshot?.entries.map((entry) => entry.id)).toEqual(["receipt"]);
 	});
 
@@ -1135,7 +1137,7 @@ describe("SQLite session store", () => {
 		await client.createHiddenSession(createInput());
 		const input = { message: "orphan", images: [] };
 		const payload = {
-			...emptyPayload(),
+			...namedPayload("orphan"),
 			clientInputs: [
 				{
 					clientMessageId: "client-orphan",
@@ -1155,7 +1157,9 @@ describe("SQLite session store", () => {
 		await expect(
 			client.applyTransaction(transaction("session-1", 0, "orphan-client-projection", payload)),
 		).rejects.toMatchObject({ code: "constraint_failed" });
-		expect(await client.findSessionSummary("session-1", generationFor("session-1"))).toMatchObject({ revision: 0 });
+		expect(await client.findSessionSummary("session-1", generationFor("session-1"))).toMatchObject({
+			lastOrdinal: 0,
+		});
 	});
 
 	it("persists cross-store parent identity", async () => {
@@ -1275,18 +1279,30 @@ describe("SQLite session store", () => {
 		expect(tied[0]!.score).toBe(tied[1]!.score);
 	});
 
-	it("rejects stale revisions without changing session state", async () => {
+	it("rejects stale ordinals without changing session state", async () => {
 		const client = await openStore();
 		await client.createHiddenSession(createInput());
 		const firstPayload = namedPayload("winner");
 		await client.applyTransaction(transaction("session-1", 0, "commit-winner", firstPayload));
 
-		const stalePayload = emptyPayload({ name: "stale", updatedAt: "2026-08-31T12:02:00.000Z" });
+		const stalePayload = namedPayload("stale");
 		const conflict = await client.applyTransaction(transaction("session-1", 0, "commit-stale", stalePayload));
-		expect(conflict).toEqual({ status: "conflict", actualRevision: 1 });
+		expect(conflict).toEqual({ status: "conflict", actualOrdinal: 1 });
 		expect(await client.findSessionSummary("session-1", generationFor("session-1"))).toMatchObject({
-			revision: 1,
+			lastOrdinal: 1,
 			name: "winner",
+		});
+	});
+
+	it("rejects transactions that append no entries", async () => {
+		const client = await openStore();
+		await client.createHiddenSession(createInput());
+		await expect(
+			client.applyTransaction(transaction("session-1", 0, "commit-empty", emptyPayload({ name: "empty" }))),
+		).rejects.toMatchObject({ code: "invalid_request" });
+		expect(await client.findSessionSummary("session-1", generationFor("session-1"))).toMatchObject({
+			lastOrdinal: 0,
+			name: null,
 		});
 	});
 
@@ -1305,7 +1321,7 @@ describe("SQLite session store", () => {
 			await replacingClient.deleteSession({
 				sessionId,
 				sessionGeneration: staleGeneration,
-				expectedRevision: 1,
+				expectedOrdinal: 1,
 			}),
 		).toEqual({ status: "deleted" });
 		await replacingClient.createHiddenSession(createInput(sessionId, replacementGeneration));
@@ -1325,29 +1341,29 @@ describe("SQLite session store", () => {
 			await staleClient.deleteSession({
 				sessionId,
 				sessionGeneration: staleGeneration,
-				expectedRevision: 1,
+				expectedOrdinal: 1,
 			}),
 		).toEqual({ status: "not_found" });
 		expect(await replacingClient.findSessionSummary(sessionId, replacementGeneration)).toMatchObject({
 			sessionGeneration: replacementGeneration,
-			revision: 0,
+			lastOrdinal: 0,
 		});
 	});
 
-	it("returns a conflict instead of deleting a newer revision", async () => {
+	it("returns a conflict instead of deleting a log past the expected ordinal", async () => {
 		const client = await openStore();
 		await client.createHiddenSession(createInput());
-		await client.applyTransaction(transaction("session-1", 0, "commit-before-delete", emptyPayload()));
+		await client.applyTransaction(transaction("session-1", 0, "commit-before-delete", namedPayload("kept")));
 
 		expect(
 			await client.deleteSession({
 				sessionId: "session-1",
 				sessionGeneration: generationFor("session-1"),
-				expectedRevision: 0,
+				expectedOrdinal: 0,
 			}),
-		).toEqual({ status: "conflict", actualRevision: 1 });
+		).toEqual({ status: "conflict", actualOrdinal: 1 });
 		expect(await client.findSessionSummary("session-1", generationFor("session-1"))).toMatchObject({
-			revision: 1,
+			lastOrdinal: 1,
 		});
 	});
 
@@ -1362,21 +1378,21 @@ describe("SQLite session store", () => {
 		let writerFinished = false;
 		const writeTransactions = (async () => {
 			try {
-				for (let revision = 0; revision < 40; revision += 1) {
-					const entryId = `entry-${revision + 1}`;
+				for (let ordinal = 0; ordinal < 40; ordinal += 1) {
+					const entryId = `entry-${ordinal + 1}`;
 					const payload: SessionStoreTransactionPayload = {
 						...emptyPayload({
 							updatedAt: UPDATED_AT,
 							visible: true,
 							leafId: entryId,
-							messageCount: revision + 1,
+							messageCount: ordinal + 1,
 							firstMessage: "entry-1",
 						}),
-						entries: [userMessageEntry(entryId, revision + 1, UPDATED_AT, entryId)],
-						searchChunks: [{ chunkIndex: revision, entryId, text: entryId }],
+						entries: [userMessageEntry(entryId, ordinal + 1, UPDATED_AT, entryId)],
+						searchChunks: [{ chunkIndex: ordinal, entryId, text: entryId }],
 					};
 					const result = await writer.applyTransaction(
-						transaction(sessionId, revision, `snapshot-commit-${revision + 1}`, payload),
+						transaction(sessionId, ordinal, `snapshot-commit-${ordinal + 1}`, payload),
 					);
 					expect(result.status).toBe("committed");
 				}
@@ -1389,9 +1405,9 @@ describe("SQLite session store", () => {
 				const snapshot = await reader.loadSession(sessionId, sessionGeneration);
 				expect(snapshot).not.toBeNull();
 				if (!snapshot) continue;
-				expect(snapshot.entries).toHaveLength(snapshot.session.revision);
-				expect(snapshot.searchChunks).toHaveLength(snapshot.session.revision);
-				expect(snapshot.session.messageCount).toBe(snapshot.session.revision);
+				expect(snapshot.entries).toHaveLength(snapshot.session.lastOrdinal);
+				expect(snapshot.searchChunks).toHaveLength(snapshot.session.lastOrdinal);
+				expect(snapshot.session.messageCount).toBe(snapshot.session.lastOrdinal);
 			} while (!writerFinished);
 		})();
 		await Promise.all([writeTransactions, readSnapshots]);
@@ -1403,21 +1419,21 @@ describe("SQLite session store", () => {
 		const sessionId = "paged-session";
 		const sessionGeneration = generationFor(sessionId);
 		await client.createHiddenSession(createInput(sessionId));
-		for (let revision = 0; revision < 9; revision += 1) {
-			const entryId = `entry-${revision + 1}`;
+		for (let ordinal = 0; ordinal < 9; ordinal += 1) {
+			const entryId = `entry-${ordinal + 1}`;
 			const payload: SessionStoreTransactionPayload = {
 				...emptyPayload({
 					updatedAt: UPDATED_AT,
 					visible: true,
 					leafId: entryId,
-					messageCount: revision + 1,
+					messageCount: ordinal + 1,
 					firstMessage: "entry-1",
 				}),
-				entries: [userMessageEntry(entryId, revision + 1, UPDATED_AT, entryId)],
-				searchChunks: [{ chunkIndex: revision, entryId, text: entryId }],
+				entries: [userMessageEntry(entryId, ordinal + 1, UPDATED_AT, entryId)],
+				searchChunks: [{ chunkIndex: ordinal, entryId, text: entryId }],
 			};
 			expect(
-				(await client.applyTransaction(transaction(sessionId, revision, `page-commit-${revision + 1}`, payload)))
+				(await client.applyTransaction(transaction(sessionId, ordinal, `page-commit-${ordinal + 1}`, payload)))
 					.status,
 			).toBe("committed");
 		}
@@ -1477,22 +1493,39 @@ describe("SQLite session store", () => {
 		}
 	});
 
-	it("retains durable commit evidence across later revisions and reconciles idempotent retries", async () => {
+	it("retains durable commit evidence across later appends and reconciles idempotent retries", async () => {
 		const client = await openStore();
 		await client.createHiddenSession(createInput());
-		const payload = emptyPayload();
+		const payload = namedPayload("first");
 		const request = transaction("session-1", 0, "commit-evidence-a", payload);
 		const committed = await client.applyTransaction(request);
 		if (committed.status !== "committed") throw new Error("Expected committed transaction");
-		const laterRequest = transaction(
-			"session-1",
-			1,
-			"commit-evidence-b",
-			emptyPayload({ updatedAt: "2026-08-31T12:02:00.000Z" }),
-		);
+		expect(committed.evidence).toMatchObject({ beforeOrdinal: 0, afterOrdinal: 1 });
+		const laterRequest = transaction("session-1", 1, "commit-evidence-b", {
+			...emptyPayload({ name: "later", leafId: "session-info-later" }),
+			entries: [
+				entryWrite({
+					type: "session_info",
+					id: "session-info-later",
+					parentId: "session-info",
+					timestamp: UPDATED_AT,
+					ordinal: 2,
+					name: "later",
+				}),
+				entryWrite({
+					type: "label",
+					id: "label-later",
+					parentId: "session-info-later",
+					timestamp: UPDATED_AT,
+					ordinal: 3,
+					targetId: "session-info",
+					label: "first",
+				}),
+			],
+		});
 		expect(await client.applyTransaction(laterRequest)).toMatchObject({
 			status: "committed",
-			evidence: { afterRevision: 2 },
+			evidence: { beforeOrdinal: 1, afterOrdinal: 3 },
 		});
 
 		const retry = await client.applyTransaction(request);
@@ -1513,11 +1546,11 @@ describe("SQLite session store", () => {
 					.prepare(
 						`INSERT INTO transaction_commits (
 							commit_id, session_id, session_generation, digest,
-							before_revision, after_revision, committed_at
+							before_ordinal, after_ordinal, committed_at
 						) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 					)
 					.run(
-						"commit-evidence-duplicate-revision",
+						"commit-evidence-duplicate-ordinal",
 						"session-1",
 						generationFor("session-1"),
 						request.digest,
@@ -1530,7 +1563,7 @@ describe("SQLite session store", () => {
 			direct.close();
 		}
 
-		const otherDigest = digestSessionStoreTransactionPayload(emptyPayload({ updatedAt: "2026-08-31T12:03:00.000Z" }));
+		const otherDigest = digestSessionStoreTransactionPayload(namedPayload("other"));
 		expect(
 			await client.reconcileCommit({
 				sessionId: "session-1",
@@ -1561,13 +1594,13 @@ describe("SQLite session store", () => {
 	it("deletes sessions and their transaction evidence", async () => {
 		const client = await openStore();
 		await client.createHiddenSession(createInput());
-		const request = transaction("session-1", 0, "commit-delete", emptyPayload());
+		const request = transaction("session-1", 0, "commit-delete", namedPayload("deleted"));
 		await client.applyTransaction(request);
 
 		const deleteInput = {
 			sessionId: "session-1",
 			sessionGeneration: generationFor("session-1"),
-			expectedRevision: 1,
+			expectedOrdinal: 1,
 		};
 		expect(await client.deleteSession(deleteInput)).toEqual({ status: "deleted" });
 		expect(await client.findSessionSummary("session-1", generationFor("session-1"))).toBeNull();

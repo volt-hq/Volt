@@ -2,8 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { parseCanonicalSessionStoreJson, stringifyCanonicalSessionStoreJson } from "./canonical-json.ts";
 import { REVIEW_DISCUSSION_SCHEMA_SQL } from "./discussion-schema.ts";
-import { SESSION_STORE_SCHEMA_ID, SESSION_STORE_SCHEMA_SQL } from "./schema.ts";
+import {
+	SESSION_STORE_SCHEMA_ID,
+	SESSION_STORE_SCHEMA_SQL,
+	SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL,
+} from "./schema.ts";
 import { SESSION_STORE_V1_SCHEMA_ID, SESSION_STORE_V1_SCHEMA_SQL } from "./schema-v1.ts";
+import { SESSION_STORE_V2_SCHEMA_ID, SESSION_STORE_V2_SCHEMA_SQL } from "./schema-v2.ts";
 import { SESSION_STORE_SCHEMA_VERSION, SessionStoreError } from "./types.ts";
 
 function schemaDigest(db: DatabaseSync): string {
@@ -29,16 +34,18 @@ function expectedDigest(sql: string): string {
 	}
 }
 
-const V1_DIGEST = expectedDigest(SESSION_STORE_V1_SCHEMA_SQL);
-const V2_DIGEST = expectedDigest(SESSION_STORE_SCHEMA_SQL);
+const SCHEMAS = {
+	1: { schemaId: SESSION_STORE_V1_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V1_SCHEMA_SQL) },
+	2: { schemaId: SESSION_STORE_V2_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V2_SCHEMA_SQL) },
+	3: { schemaId: SESSION_STORE_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_SCHEMA_SQL) },
+} as const;
 
 function mismatch(message: string): never {
 	throw new SessionStoreError("store_schema_mismatch", message);
 }
 
-function validateSchema(db: DatabaseSync, version: 1 | 2): string {
-	const digest = version === 1 ? V1_DIGEST : V2_DIGEST;
-	const schemaId = version === 1 ? SESSION_STORE_V1_SCHEMA_ID : SESSION_STORE_SCHEMA_ID;
+function validateSchema(db: DatabaseSync, version: keyof typeof SCHEMAS): string {
+	const { digest, schemaId } = SCHEMAS[version];
 	if (db.prepare("PRAGMA user_version").get()?.user_version !== version || schemaDigest(db) !== digest) {
 		mismatch("Session store DDL, views, triggers or version do not match the exact supported schema");
 	}
@@ -82,7 +89,7 @@ function validateIntegrity(db: DatabaseSync): void {
 	}
 }
 
-/** Only the exact frozen v1 schema can upgrade. All DDL and metadata commit together. */
+/** Only the exact frozen v1 and v2 schemas can upgrade. All DDL and metadata commit together. */
 export function initializeSessionStoreSchema(db: DatabaseSync): string {
 	// Re-read after the write lock: another opener may have initialized/upgraded while we waited.
 	db.exec("BEGIN IMMEDIATE");
@@ -96,20 +103,25 @@ export function initializeSessionStoreSchema(db: DatabaseSync): string {
 			const insert = db.prepare("INSERT INTO store_metadata (key, value_json) VALUES (?, ?)");
 			for (const [key, value] of Object.entries({
 				schema_id: SESSION_STORE_SCHEMA_ID,
-				schema_digest: V2_DIGEST,
+				schema_digest: SCHEMAS[3].digest,
 				store_id: randomUUID(),
 				schema_version: SESSION_STORE_SCHEMA_VERSION,
 				created_at: new Date().toISOString(),
 			}))
 				insert.run(key, stringifyCanonicalSessionStoreJson(value, "Store metadata"));
 			db.exec(`PRAGMA user_version = ${SESSION_STORE_SCHEMA_VERSION}`);
-		} else if (version === 1) {
-			validateSchema(db, 1);
+		} else if (version === 1 || version === 2) {
+			validateSchema(db, version);
 			validateIntegrity(db);
-			db.exec(REVIEW_DISCUSSION_SCHEMA_SQL);
+			if (version === 1) db.exec(REVIEW_DISCUSSION_SCHEMA_SQL);
+			// v3 fences on entry ordinals. Revision-keyed commit evidence has no ordinal form; it only
+			// reconciles a live writer's uncertain commit, and no pre-v3 writer can commit after this.
+			db.exec("ALTER TABLE sessions DROP COLUMN revision");
+			db.exec("DROP TABLE transaction_commits");
+			db.exec(SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL);
 			const update = db.prepare("UPDATE store_metadata SET value_json = ? WHERE key = ?");
 			update.run(stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_ID, "Schema id"), "schema_id");
-			update.run(stringifyCanonicalSessionStoreJson(V2_DIGEST, "Schema digest"), "schema_digest");
+			update.run(stringifyCanonicalSessionStoreJson(SCHEMAS[3].digest, "Schema digest"), "schema_digest");
 			update.run(
 				stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_VERSION, "Schema version"),
 				"schema_version",
@@ -119,7 +131,7 @@ export function initializeSessionStoreSchema(db: DatabaseSync): string {
 		} else if (version !== SESSION_STORE_SCHEMA_VERSION) {
 			mismatch(`Session store schema version ${String(version)} is unsupported`);
 		}
-		const storeId = validateSchema(db, 2);
+		const storeId = validateSchema(db, SESSION_STORE_SCHEMA_VERSION);
 		db.exec("COMMIT");
 		return storeId;
 	} catch (error) {

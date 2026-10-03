@@ -256,7 +256,7 @@ describe("session selector path/delete interactions", () => {
 		expect(searchCalls).toBe(1);
 		expect(list.getSelectedSessionRef()?.sessionId).toBe("target");
 
-		const exportSnapshot = vi.spyOn(SessionManager, "exportJsonlSnapshot").mockResolvedValue({ revision: 1 });
+		const exportSnapshot = vi.spyOn(SessionManager, "exportJsonlSnapshot").mockResolvedValue({ lastOrdinal: 1 });
 		const deleteSession = vi.spyOn(SessionManager, "delete").mockImplementation(async () => {
 			deleted = true;
 			return true;

@@ -5,19 +5,37 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createClientInputSemanticDigest, SessionManager } from "../../src/core/session-manager.ts";
-import { stringifyCanonicalSessionStoreJson } from "../../src/core/session-store/canonical-json.ts";
+import {
+	digestSessionStoreTransactionPayload,
+	stringifyCanonicalSessionStoreJson,
+} from "../../src/core/session-store/canonical-json.ts";
 import { REVIEW_DISCUSSION_SCHEMA_SQL } from "../../src/core/session-store/discussion-schema.ts";
-import { SQLiteSessionStoreClient } from "../../src/core/session-store/index.ts";
+import {
+	type SessionStoreApplyTransactionInput,
+	type SessionStoreTransactionPayload,
+	SQLiteSessionStoreClient,
+} from "../../src/core/session-store/index.ts";
+import {
+	SESSION_STORE_SCHEMA_SQL,
+	SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL,
+} from "../../src/core/session-store/schema.ts";
 import { initializeSessionStoreSchema } from "../../src/core/session-store/schema-migration.ts";
-import { SESSION_STORE_V1_SCHEMA_SQL, SESSION_STORE_V1_TABLE_NAMES } from "../../src/core/session-store/schema-v1.ts";
+import { SESSION_STORE_V1_SCHEMA_SQL } from "../../src/core/session-store/schema-v1.ts";
+import { SESSION_STORE_V2_SCHEMA_SQL } from "../../src/core/session-store/schema-v2.ts";
 
 const NOW = "2026-09-05T12:00:00.000Z";
+const VERSIONS = [1, 2] as const;
+type LegacyVersion = (typeof VERSIONS)[number];
+const LEGACY_SCHEMA_SQL: Record<LegacyVersion, string> = {
+	1: SESSION_STORE_V1_SCHEMA_SQL,
+	2: SESSION_STORE_V2_SCHEMA_SQL,
+};
 const roots: string[] = [];
 const clients: SQLiteSessionStoreClient[] = [];
 const canonical = (value: unknown): string => stringifyCanonicalSessionStoreJson(value, "Fixture");
 
 function directory(): string {
-	const root = mkdtempSync(join(tmpdir(), "volt-review-migration-"));
+	const root = mkdtempSync(join(tmpdir(), "volt-store-migration-"));
 	roots.push(root);
 	return join(root, "sessions");
 }
@@ -30,7 +48,18 @@ function schemaObjects(db: DatabaseSync): Record<string, unknown>[] {
 		.map((row) => ({ ...row }));
 }
 
-function seedV1(dir: string, ddl = SESSION_STORE_V1_SCHEMA_SQL): string {
+function freshSchemaObjects(): Record<string, unknown>[] {
+	const db = new DatabaseSync(":memory:");
+	try {
+		db.exec(SESSION_STORE_SCHEMA_SQL);
+		return schemaObjects(db);
+	} finally {
+		db.close();
+	}
+}
+
+/** Seeds an exact pre-v3 store whose sessions carry revisions and revision-keyed commit evidence. */
+function seed(dir: string, version: LegacyVersion, ddl = LEGACY_SCHEMA_SQL[version]): string {
 	mkdirSync(dir, { recursive: true, mode: 0o700 });
 	const path = join(dir, "sessions.sqlite");
 	const db = new DatabaseSync(path);
@@ -40,15 +69,15 @@ function seedV1(dir: string, ddl = SESSION_STORE_V1_SCHEMA_SQL): string {
 			.update(canonical(schemaObjects(db)))
 			.digest("hex")}`;
 		for (const [key, value] of Object.entries({
-			schema_id: "volt-session-store-v1",
+			schema_id: `volt-session-store-v${version}`,
 			schema_digest: digest,
-			schema_version: 1,
+			schema_version: version,
 			store_id: "original-store",
 			created_at: NOW,
 		})) {
 			db.prepare("INSERT INTO store_metadata VALUES (?, ?)").run(key, canonical(value));
 		}
-		db.exec("PRAGMA user_version = 1");
+		db.exec(`PRAGMA user_version = ${version}`);
 		db.prepare(`INSERT INTO sessions (id, session_generation, format_version, cwd, created_at, updated_at,
 			visible, revision, leaf_entry_id, message_count, first_message) VALUES (?, ?, 5, ?, ?, ?, 1, 1, 'message', 1, 'preserved')`).run(
 			"source",
@@ -102,19 +131,68 @@ function seedV1(dir: string, ddl = SESSION_STORE_V1_SCHEMA_SQL): string {
 			`sha256:${"a".repeat(64)}`,
 			NOW,
 		);
+		if (version === 2) {
+			db.prepare(`INSERT INTO review_anchors (run_id, source_session_id, source_session_generation, cwd,
+				general_session_id, general_session_generation, general_revision, created_at)
+				VALUES ('run', 'source', 'source-generation', ?, 'source', 'source-generation', 0, ?)`).run(dir, NOW);
+		}
 	} finally {
 		db.close();
 	}
 	return path;
 }
 
+function tableRows(db: DatabaseSync): Record<string, unknown[]> {
+	return Object.fromEntries(
+		schemaObjects(db)
+			.filter((object) => object.type === "table" && object.name !== "store_metadata")
+			.map(({ name }) => [String(name), db.prepare(`SELECT * FROM ${String(name)}`).all()]),
+	);
+}
+
 function dump(db: DatabaseSync): unknown {
 	return {
 		version: db.prepare("PRAGMA user_version").get(),
 		objects: schemaObjects(db),
-		tables: Object.fromEntries(
-			SESSION_STORE_V1_TABLE_NAMES.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]),
-		),
+		metadata: db.prepare("SELECT * FROM store_metadata ORDER BY key").all(),
+		tables: tableRows(db),
+	};
+}
+
+function sessionInfoTransaction(expectedOrdinal: number, commitId: string): SessionStoreApplyTransactionInput {
+	const payload: SessionStoreTransactionPayload = {
+		session: {
+			updatedAt: NOW,
+			startingGitContextRecorded: false,
+			startingGitContext: null,
+			name: "after upgrade",
+			visible: true,
+			leafId: "session-info",
+			messageCount: 1,
+			firstMessage: "preserved",
+		},
+		entries: [
+			{
+				entry: {
+					type: "session_info",
+					id: "session-info",
+					parentId: "message",
+					timestamp: NOW,
+					ordinal: 3,
+					name: "after upgrade",
+				},
+			},
+		],
+		clientInputs: [],
+		searchChunks: [],
+	};
+	return {
+		sessionId: "source",
+		sessionGeneration: "source-generation",
+		expectedOrdinal,
+		commitId,
+		digest: digestSessionStoreTransactionPayload(payload),
+		payload,
 	};
 }
 
@@ -130,70 +208,91 @@ afterEach(async () => {
 	for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-describe("Regression #341 exact v1 to v2 migration", () => {
-	it("preserves every populated v1 row, identity, transcript, receipt and commit evidence", async () => {
-		const dir = directory();
-		const path = seedV1(dir);
-		const beforeDb = new DatabaseSync(path);
-		const tables = SESSION_STORE_V1_TABLE_NAMES.filter((name) => name !== "store_metadata");
-		const before = Object.fromEntries(
-			tables.map((table) => [table, beforeDb.prepare(`SELECT * FROM ${table}`).all()]),
-		);
-		beforeDb.close();
-		const client = await open(dir);
-		expect(client.info).toMatchObject({ storeId: "original-store", schemaVersion: 2 });
-		const db = new DatabaseSync(path);
-		try {
-			expect(Object.fromEntries(tables.map((table) => [table, db.prepare(`SELECT * FROM ${table}`).all()]))).toEqual(
-				before,
-			);
-			expect(db.prepare("SELECT value_json FROM store_metadata WHERE key = 'created_at'").get()?.value_json).toBe(
-				canonical(NOW),
-			);
-			expect(db.prepare("PRAGMA integrity_check").get()?.integrity_check).toBe("ok");
-			expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
-		} finally {
-			db.close();
-		}
-		expect(await client.loadSession("source", "source-generation")).toMatchObject({
-			session: { id: "source", sessionGeneration: "source-generation", revision: 1 },
-			entries: [{ id: "receipt" }, { id: "message" }],
-			clientInputs: [{ clientMessageId: "client", state: "accepted" }],
-		});
-		expect(
-			await client.reconcileCommit({
-				sessionId: "source",
-				sessionGeneration: "source-generation",
-				commitId: "commit",
-				digest: `sha256:${"a".repeat(64)}`,
-			}),
-		).toMatchObject({ status: "committed", evidence: { beforeRevision: 0, afterRevision: 1 } });
-		expect(await client.listReviewDiscussions("absent")).toEqual([]);
-		const manager = await SessionManager.open({
-			sessionDirectory: dir,
-			storeId: "original-store",
-			sessionId: "related",
-			sessionGeneration: "related-generation",
-		});
-		try {
-			expect(manager.getHeader()?.parentSession).toMatchObject({
-				storeId: "original-store",
-				sessionId: "source",
-				sessionGeneration: "source-generation",
+describe("exact v1 and v2 to v3 session store migration", () => {
+	it.each(VERSIONS)(
+		"upgrades v%i in place, dropping revisions and revision-keyed commit evidence",
+		async (version) => {
+			const dir = directory();
+			const path = seed(dir, version);
+			const beforeDb = new DatabaseSync(path);
+			const before = tableRows(beforeDb);
+			beforeDb.close();
+			const client = await open(dir);
+			expect(client.info).toMatchObject({ storeId: "original-store", schemaVersion: 3 });
+			const db = new DatabaseSync(path);
+			try {
+				const after = tableRows(db);
+				expect(Object.fromEntries(Object.keys(before).map((table) => [table, after[table]]))).toEqual({
+					...before,
+					sessions: before.sessions!.map((row) => {
+						const { revision: _revision, ...rest } = row as Record<string, unknown>;
+						return rest;
+					}),
+					transaction_commits: [],
+				});
+				expect(schemaObjects(db)).toEqual(freshSchemaObjects());
+				expect(db.prepare("SELECT value_json FROM store_metadata WHERE key = 'created_at'").get()?.value_json).toBe(
+					canonical(NOW),
+				);
+				expect(db.prepare("SELECT value_json FROM store_metadata WHERE key = 'schema_id'").get()?.value_json).toBe(
+					canonical("volt-session-store-v3"),
+				);
+				expect(db.prepare("PRAGMA integrity_check").get()?.integrity_check).toBe("ok");
+				expect(db.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+			} finally {
+				db.close();
+			}
+			expect(await client.loadSession("source", "source-generation")).toMatchObject({
+				session: { id: "source", sessionGeneration: "source-generation", lastOrdinal: 2 },
+				entries: [{ id: "receipt" }, { id: "message" }],
+				clientInputs: [{ clientMessageId: "client", state: "accepted" }],
 			});
-		} finally {
-			await manager.closePersistence();
-		}
-		await client.close();
-		const reopened = await open(dir);
-		expect(reopened.info.storeId).toBe("original-store");
-		expect(await reopened.loadSession("source", "source-generation")).not.toBeNull();
-	});
+			expect(
+				await client.reconcileCommit({
+					sessionId: "source",
+					sessionGeneration: "source-generation",
+					commitId: "commit",
+					digest: `sha256:${"a".repeat(64)}`,
+				}),
+			).toEqual({ status: "not_found" });
+			expect(await client.applyTransaction(sessionInfoTransaction(1, "stale"))).toEqual({
+				status: "conflict",
+				actualOrdinal: 2,
+			});
+			expect(await client.applyTransaction(sessionInfoTransaction(2, "upgraded"))).toMatchObject({
+				status: "committed",
+				evidence: { commitId: "upgraded", beforeOrdinal: 2, afterOrdinal: 3 },
+			});
+			expect(await client.listReviewDiscussions("absent")).toEqual([]);
+			if (version === 2) expect(await client.findReviewAnchor("run")).toMatchObject({ generalRevision: 0 });
+			const manager = await SessionManager.open({
+				sessionDirectory: dir,
+				storeId: "original-store",
+				sessionId: "related",
+				sessionGeneration: "related-generation",
+			});
+			try {
+				expect(manager.getHeader()?.parentSession).toMatchObject({
+					storeId: "original-store",
+					sessionId: "source",
+					sessionGeneration: "source-generation",
+				});
+			} finally {
+				await manager.closePersistence();
+			}
+			await client.close();
+			const reopened = await open(dir);
+			expect(reopened.info.storeId).toBe("original-store");
+			expect(await reopened.loadSession("source", "source-generation")).toMatchObject({
+				session: { lastOrdinal: 3, name: "after upgrade" },
+			});
+		},
+	);
 
-	it("creates fresh v2 stores and leaves repeat opens unchanged", async () => {
+	it("creates fresh v3 stores and leaves repeat opens unchanged", async () => {
 		const dir = directory();
 		const client = await open(dir);
-		expect(client.info.schemaVersion).toBe(2);
+		expect(client.info.schemaVersion).toBe(3);
 		await client.close();
 		const db = new DatabaseSync(client.info.databasePath);
 		const before = dump(db);
@@ -208,53 +307,60 @@ describe("Regression #341 exact v1 to v2 migration", () => {
 		}
 	});
 
-	it("converges across simultaneous independent worker upgrades", async () => {
+	it.each(VERSIONS)("converges across simultaneous independent worker upgrades from v%i", async (version) => {
 		const dir = directory();
-		seedV1(dir);
+		seed(dir, version);
 		const results = await Promise.allSettled(Array.from({ length: 8 }, () => open(dir)));
 		// Settle every opener before cleanup, including when one reports an error.
 		expect(results.filter((result) => result.status === "rejected")).toEqual([]);
 		const opened = results.flatMap((result) => (result.status === "fulfilled" ? [result.value] : []));
 		expect(new Set(opened.map((client) => client.info.storeId))).toEqual(new Set(["original-store"]));
-		expect(opened.every((client) => client.info.schemaVersion === 2)).toBe(true);
+		expect(opened.every((client) => client.info.schemaVersion === 3)).toBe(true);
 		for (const client of opened)
 			expect((await client.loadSession("source", "source-generation"))?.entries).toHaveLength(2);
 	});
 
-	it.each(["ddl", "version", "commit"])("rolls back %s failures completely and permits a clean retry", (phase) => {
-		const path = seedV1(directory());
+	it.each([
+		[1, "discussion DDL", REVIEW_DISCUSSION_SCHEMA_SQL],
+		[1, "revision drop", "ALTER TABLE sessions DROP COLUMN revision"],
+		[1, "version", "PRAGMA user_version = 3"],
+		[1, "commit", "COMMIT"],
+		[2, "revision drop", "ALTER TABLE sessions DROP COLUMN revision"],
+		[2, "evidence drop", "DROP TABLE transaction_commits"],
+		[2, "evidence DDL", SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL],
+		[2, "version", "PRAGMA user_version = 3"],
+		[2, "commit", "COMMIT"],
+	] as const)("rolls back a v%i %s failure completely and permits a clean retry", (version, _phase, failingSql) => {
+		const path = seed(directory(), version);
 		const db = new DatabaseSync(path);
 		try {
+			db.exec("PRAGMA foreign_keys = ON");
 			const before = dump(db);
 			const exec = db.exec.bind(db);
 			const spy = vi.spyOn(db, "exec").mockImplementation((sql) => {
-				if (phase === "commit" && sql === "COMMIT") throw new Error("injected commit failure");
+				if (sql === "COMMIT" && failingSql === "COMMIT") throw new Error("injected commit failure");
 				exec(sql);
-				if (
-					(phase === "ddl" && sql === REVIEW_DISCUSSION_SCHEMA_SQL) ||
-					(phase === "version" && sql === "PRAGMA user_version = 2")
-				)
-					throw new Error("injected upgrade failure");
+				if (sql === failingSql) throw new Error("injected upgrade failure");
 			});
 			expect(() => initializeSessionStoreSchema(db)).toThrow(/injected/);
 			expect(db.isTransaction).toBe(false);
 			expect(dump(db)).toEqual(before);
 			spy.mockRestore();
 			expect(initializeSessionStoreSchema(db)).toBe("original-store");
-			expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+			expect(db.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
 		} finally {
 			db.close();
 		}
 	});
 
-	it("rolls back failed v2 postvalidation including metadata and retries from v1", () => {
-		const db = new DatabaseSync(seedV1(directory()));
+	it.each(VERSIONS)("rolls back failed v3 postvalidation including metadata and retries from v%i", (version) => {
+		const db = new DatabaseSync(seed(directory(), version));
 		try {
 			const before = dump(db);
 			const exec = db.exec.bind(db);
 			const spy = vi.spyOn(db, "exec").mockImplementation((sql) => {
 				exec(sql);
-				if (sql === "PRAGMA user_version = 2") exec("CREATE VIEW unexpected_post_upgrade AS SELECT 1");
+				if (sql === "PRAGMA user_version = 3") exec("CREATE VIEW unexpected_post_upgrade AS SELECT 1");
 			});
 			expect(() => initializeSessionStoreSchema(db)).toThrow(/exact supported schema/);
 			expect(db.isTransaction).toBe(false);
@@ -266,20 +372,24 @@ describe("Regression #341 exact v1 to v2 migration", () => {
 		}
 	});
 
-	it.each([
-		"DROP INDEX entries_parent_idx",
-		"CREATE TRIGGER unexpected AFTER UPDATE ON sessions BEGIN SELECT 1; END",
-		"CREATE VIEW unexpected AS SELECT 1",
-		"UPDATE store_metadata SET value_json = '\"tampered\"' WHERE key = 'schema_digest'",
-		"UPDATE store_metadata SET value_json = '\"other\"' WHERE key = 'schema_id'",
-		"INSERT INTO store_metadata VALUES ('extra', 'true')",
-		"UPDATE store_metadata SET value_json = ' 1' WHERE key = 'schema_version'",
-		"PRAGMA user_version = 7",
-		"PRAGMA foreign_keys = OFF; INSERT INTO search_chunks VALUES ('missing', 0, NULL, 'orphan')",
-		"PRAGMA ignore_check_constraints = ON; UPDATE sessions SET format_version = 0",
-	])("rejects tampering without partial upgrade: %s", async (sql) => {
+	it.each(
+		VERSIONS.flatMap((version) =>
+			[
+				"DROP INDEX entries_parent_idx",
+				"CREATE TRIGGER unexpected AFTER UPDATE ON sessions BEGIN SELECT 1; END",
+				"CREATE VIEW unexpected AS SELECT 1",
+				"UPDATE store_metadata SET value_json = '\"tampered\"' WHERE key = 'schema_digest'",
+				"UPDATE store_metadata SET value_json = '\"other\"' WHERE key = 'schema_id'",
+				"INSERT INTO store_metadata VALUES ('extra', 'true')",
+				"UPDATE store_metadata SET value_json = ' 1' WHERE key = 'schema_version'",
+				"PRAGMA user_version = 7",
+				"PRAGMA foreign_keys = OFF; INSERT INTO search_chunks VALUES ('missing', 0, NULL, 'orphan')",
+				"PRAGMA ignore_check_constraints = ON; UPDATE sessions SET format_version = 0",
+			].map((sql) => [version, sql] as const),
+		),
+	)("rejects v%i tampering without partial upgrade: %s", async (version, sql) => {
 		const dir = directory();
-		const path = seedV1(dir);
+		const path = seed(dir, version);
 		const db = new DatabaseSync(path);
 		db.exec(sql);
 		const before = dump(db);
@@ -293,9 +403,9 @@ describe("Regression #341 exact v1 to v2 migration", () => {
 		}
 	});
 
-	it("rejects weakened v1 DDL even when its metadata digest is recomputed", async () => {
+	it.each(VERSIONS)("rejects weakened v%i DDL even when its metadata digest is recomputed", async (version) => {
 		const dir = directory();
-		seedV1(dir, SESSION_STORE_V1_SCHEMA_SQL.replace("format_version >= 1", "format_version >= 0"));
+		seed(dir, version, LEGACY_SCHEMA_SQL[version].replace("format_version >= 1", "format_version >= 0"));
 		await expect(SQLiteSessionStoreClient.open(dir)).rejects.toMatchObject({ code: "store_schema_mismatch" });
 	});
 });

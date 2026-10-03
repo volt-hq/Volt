@@ -236,7 +236,8 @@ export interface SessionCanonicalProjectionToken {
 export interface SessionCanonicalProjection {
 	readonly token: SessionCanonicalProjectionToken;
 	readonly leafId: string | null;
-	readonly revision: number;
+	/** Ordinal of the newest `leaf` entry. With leafId it changes exactly when the branch changes. */
+	readonly leafEntryOrdinal: number;
 	readonly entries: readonly SessionEntry[];
 }
 
@@ -310,7 +311,8 @@ interface VerifiedSessionDeliveryBase extends SessionDeliveryAttemptIdentity {
 	readonly sessionId: string;
 	readonly beforeLeafId: string | null;
 	readonly afterLeafId: string | null;
-	readonly revision: number;
+	/** Committed log position when the receipt was issued. */
+	readonly ordinal: number;
 	readonly beforeProjection: SessionCanonicalProjection;
 	readonly afterProjection: SessionCanonicalProjection;
 }
@@ -1252,7 +1254,6 @@ export class SessionManager {
 	private persist: boolean;
 	private sessionStoreLease: SQLiteSessionStoreLease | undefined;
 	private storeId: string | undefined;
-	private storeRevision = 0;
 	/** Newest ordinal whose commit completed; listeners have observed every public entry up to it. */
 	private committedOrdinal = 0;
 	private fileEntries: FileEntry[] = [];
@@ -1272,9 +1273,6 @@ export class SessionManager {
 	}
 	private get nextOrdinal(): number {
 		return this.derivedState.nextOrdinal;
-	}
-	private get canonicalRevision(): number {
-		return this.derivedState.canonicalRevision;
 	}
 	/** First uncertain persistence failure. This manager remains fail-stopped until reloaded. */
 	private persistenceError: Error | undefined;
@@ -1363,7 +1361,6 @@ export class SessionManager {
 		this.cwd = resolvePath(cwdOverride ?? summary.cwd);
 		this.sessionId = summary.id;
 		this.sessionGeneration = summary.sessionGeneration;
-		this.storeRevision = summary.revision;
 		this.fileEntries = [header, ...snapshot.entries.map(storedEntryToSessionEntry)];
 		this.acceptsStartingGitContext = false;
 		this._buildIndex();
@@ -1404,7 +1401,6 @@ export class SessionManager {
 		this.fileEntries = [header];
 		this.byId.clear();
 		this.derivedState = createSessionDerivedState(header);
-		this.storeRevision = 0;
 		this.committedOrdinal = 0;
 		this.acceptsStartingGitContext = true;
 
@@ -1576,11 +1572,12 @@ export class SessionManager {
 		}
 		const commitId = randomUUID();
 		const digest = digestSessionStoreTransactionPayload(payload);
-		const expectedRevision = this.storeRevision;
+		// The persistence lane is serialized, so the committed head is the store's head unless another writer appended.
+		const expectedOrdinal = this.committedOrdinal;
 		const input: SessionStoreApplyTransactionInput = {
 			sessionId: this.sessionId,
 			sessionGeneration: this.sessionGeneration,
-			expectedRevision,
+			expectedOrdinal,
 			commitId,
 			digest,
 			payload,
@@ -1590,12 +1587,11 @@ export class SessionManager {
 			const result = await store.applyTransaction(input);
 			if (result.status === "conflict") {
 				throw new AtomicAppendPersistenceFailure(
-					`Session revision changed from ${expectedRevision} to ${result.actualRevision}`,
+					`Session ordinal changed from ${expectedOrdinal} to ${result.actualOrdinal}`,
 					"not_started",
 					"reconciliation_required",
 				);
 			}
-			this.storeRevision = result.evidence.afterRevision;
 			return;
 		} catch (error) {
 			if (error instanceof AtomicAppendPersistenceFailure) throw error;
@@ -1618,7 +1614,7 @@ export class SessionManager {
 				});
 				if (reconciliation.status === "committed") {
 					const summary = await store.findSessionSummary(this.sessionId, this.sessionGeneration);
-					if (summary?.revision !== reconciliation.evidence.afterRevision) {
+					if (summary?.lastOrdinal !== reconciliation.evidence.afterOrdinal) {
 						throw new AtomicAppendPersistenceFailure(
 							"SQLite session transaction committed but authoritative session state has changed",
 							"committed",
@@ -1626,11 +1622,10 @@ export class SessionManager {
 							{ cause: error },
 						);
 					}
-					this.storeRevision = reconciliation.evidence.afterRevision;
 					return;
 				}
 				const summary = await store.findSessionSummary(this.sessionId, this.sessionGeneration);
-				if (reconciliation.status === "not_found" && summary?.revision === expectedRevision) {
+				if (reconciliation.status === "not_found" && summary?.lastOrdinal === expectedOrdinal) {
 					throw new AtomicAppendPersistenceFailure(
 						"SQLite session transaction was rolled back",
 						"rolled_back",
@@ -1760,7 +1755,7 @@ export class SessionManager {
 		const projection = Object.freeze({
 			token,
 			leafId: this.leafId,
-			revision: this.canonicalRevision,
+			leafEntryOrdinal: this.derivedState.leafEntryOrdinal,
 			entries,
 		});
 		this.canonicalProjectionTokens.set(token, projection);
@@ -1771,7 +1766,7 @@ export class SessionManager {
 		return Object.freeze({
 			token: projection.token,
 			leafId: projection.leafId,
-			revision: projection.revision,
+			leafEntryOrdinal: projection.leafEntryOrdinal,
 			entries: deepFreezeCanonicalData(
 				cloneCanonicalData([...projection.entries], "Detached session canonical projection"),
 			),
@@ -1872,7 +1867,7 @@ export class SessionManager {
 			() => {
 				before = this._captureCanonicalProjection();
 				const exactMatch =
-					basis.revision === before.revision &&
+					basis.leafEntryOrdinal === before.leafEntryOrdinal &&
 					basis.leafId === before.leafId &&
 					basis.entries.length === before.entries.length &&
 					basis.entries.every((entry, index) => entry.id === before!.entries[index]?.id);
@@ -2081,7 +2076,7 @@ export class SessionManager {
 				sessionId: this.sessionId,
 				beforeLeafId: beforeProjection.leafId,
 				afterLeafId: afterProjection.leafId,
-				revision: afterProjection.revision,
+				ordinal: this.committedOrdinal,
 				beforeProjection,
 				afterProjection,
 				entryIds: Object.freeze([...entryIds]),
@@ -2116,7 +2111,7 @@ export class SessionManager {
 					sessionId: this.sessionId,
 					beforeLeafId: projection.leafId,
 					afterLeafId: projection.leafId,
-					revision: projection.revision,
+					ordinal: this.committedOrdinal,
 					beforeProjection: projection,
 					afterProjection: projection,
 				}),
@@ -2169,7 +2164,7 @@ export class SessionManager {
 				sessionId: this.sessionId,
 				beforeLeafId: beforeProjection.leafId,
 				afterLeafId: afterProjection.leafId,
-				revision: afterProjection.revision,
+				ordinal: this.committedOrdinal,
 				beforeProjection,
 				afterProjection,
 			}),
@@ -3617,9 +3612,9 @@ export class SessionManager {
 		return result.map(({ session }) => session);
 	}
 
-	static async exportJsonlSnapshot(ref: SessionReference, outputPath: string): Promise<{ revision: number }> {
+	static async exportJsonlSnapshot(ref: SessionReference, outputPath: string): Promise<{ lastOrdinal: number }> {
 		const manager = await SessionManager.open(ref);
-		let result: { revision: number };
+		let result: { lastOrdinal: number };
 		try {
 			const header = manager.getHeader();
 			if (!header) throw new Error("Cannot export a session without a header");
@@ -3628,7 +3623,7 @@ export class SessionManager {
 				directoryMode: PRIVATE_DIRECTORY_MODE,
 				fileMode: PRIVATE_FILE_MODE,
 			});
-			result = { revision: manager.storeRevision };
+			result = { lastOrdinal: manager.committedOrdinal };
 		} catch (error) {
 			try {
 				await manager.closePersistence();
@@ -3641,7 +3636,7 @@ export class SessionManager {
 		return result;
 	}
 
-	static async delete(ref: SessionReference, expectedRevision?: number): Promise<boolean> {
+	static async delete(ref: SessionReference, expectedOrdinal?: number): Promise<boolean> {
 		const canonicalRef = parseSessionReference(ref);
 		return SessionManager._scopedStore(canonicalRef.sessionDirectory, async (store) => {
 			if (store.info.storeId !== canonicalRef.storeId) {
@@ -3652,10 +3647,10 @@ export class SessionManager {
 			const result = await store.deleteSession({
 				sessionId: canonicalRef.sessionId,
 				sessionGeneration: canonicalRef.sessionGeneration,
-				expectedRevision: expectedRevision ?? summary.revision,
+				expectedOrdinal: expectedOrdinal ?? summary.lastOrdinal,
 			});
 			if (result.status === "conflict") {
-				throw new Error(`Session changed before deletion (revision ${result.actualRevision})`);
+				throw new Error(`Session changed before deletion (ordinal ${result.actualOrdinal})`);
 			}
 			return result.status === "deleted";
 		});

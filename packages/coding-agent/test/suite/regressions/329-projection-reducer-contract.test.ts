@@ -125,14 +125,14 @@ function storePayload(
 function transaction(
 	sessionId: string,
 	sessionGeneration: string,
-	expectedRevision: number,
+	expectedOrdinal: number,
 	commitId: string,
 	payload: SessionStoreTransactionPayload,
 ): SessionStoreApplyTransactionInput {
 	return {
 		sessionId,
 		sessionGeneration,
-		expectedRevision,
+		expectedOrdinal,
 		commitId,
 		digest: digestSessionStoreTransactionPayload(payload),
 		payload,
@@ -715,7 +715,13 @@ describe("PR #329 projection reducer contract", () => {
 			);
 			const lowLevelError = await captureAsyncError(() =>
 				store.client.applyTransaction(
-					transaction(store.sessionId, store.sessionGeneration, 1, "count-overflow", fixturesPayload([overflow])),
+					transaction(
+						store.sessionId,
+						store.sessionGeneration,
+						CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES,
+						"count-overflow",
+						fixturesPayload([overflow]),
+					),
 				),
 			);
 			const snapshot = await store.client.loadSession(store.sessionId, store.sessionGeneration);
@@ -724,7 +730,7 @@ describe("PR #329 projection reducer contract", () => {
 				seedStatus: seeded.status,
 				oracleRejected: oracleError instanceof Error,
 				lowLevelErrorCode: errorCode(lowLevelError),
-				revision: snapshot?.session.revision,
+				lastOrdinal: snapshot?.session.lastOrdinal,
 				clientInputCount: snapshot?.clientInputs.length,
 				hasOverflow: snapshot?.clientInputs.some(
 					(record) => record.clientMessageId === overflow.projection.clientMessageId,
@@ -733,7 +739,7 @@ describe("PR #329 projection reducer contract", () => {
 				seedStatus: "committed",
 				oracleRejected: true,
 				lowLevelErrorCode: "constraint_failed",
-				revision: 1,
+				lastOrdinal: CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES,
 				clientInputCount: CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES,
 				hasOverflow: false,
 			});
@@ -781,7 +787,13 @@ describe("PR #329 projection reducer contract", () => {
 
 			const lowLevelError = await captureAsyncError(() =>
 				store.client.applyTransaction(
-					transaction(store.sessionId, store.sessionGeneration, 1, "bytes-overflow", fixturesPayload([overflow])),
+					transaction(
+						store.sessionId,
+						store.sessionGeneration,
+						atLimit.length * 2,
+						"bytes-overflow",
+						fixturesPayload([overflow]),
+					),
 				),
 			);
 			const summary = await store.client.findSessionSummary(store.sessionId, store.sessionGeneration);
@@ -790,12 +802,12 @@ describe("PR #329 projection reducer contract", () => {
 				seedStatus: seeded.status,
 				oracleRejected: oracleError instanceof Error,
 				lowLevelErrorCode: errorCode(lowLevelError),
-				revision: summary?.revision,
+				lastOrdinal: summary?.lastOrdinal,
 			}).toEqual({
 				seedStatus: "committed",
 				oracleRejected: true,
 				lowLevelErrorCode: "constraint_failed",
-				revision: 1,
+				lastOrdinal: atLimit.length * 2,
 			});
 		}, 60_000);
 
@@ -814,7 +826,13 @@ describe("PR #329 projection reducer contract", () => {
 			const overflow = queuedReceiptFixture("queue", sharedBound, sharedBound * 2 + 1, "overflow");
 			const lowLevelError = await captureAsyncError(() =>
 				store.client.applyTransaction(
-					transaction(store.sessionId, store.sessionGeneration, 1, "queue-overflow", fixturesPayload([overflow])),
+					transaction(
+						store.sessionId,
+						store.sessionGeneration,
+						sharedBound * 2,
+						"queue-overflow",
+						fixturesPayload([overflow]),
+					),
 				),
 			);
 			const snapshot = await store.client.loadSession(store.sessionId, store.sessionGeneration);
@@ -825,12 +843,12 @@ describe("PR #329 projection reducer contract", () => {
 			expect({
 				seedStatus: seeded.status,
 				lowLevelErrorCode: errorCode(lowLevelError),
-				revision: snapshot?.session.revision,
+				lastOrdinal: snapshot?.session.lastOrdinal,
 				recoverableCount,
 			}).toEqual({
 				seedStatus: "committed",
 				lowLevelErrorCode: "constraint_failed",
-				revision: 1,
+				lastOrdinal: sharedBound * 2,
 				recoverableCount: sharedBound,
 			});
 		});
@@ -1032,7 +1050,7 @@ describe("PR #329 projection reducer contract", () => {
 
 			expect({
 				errorCode: errorCode(rejection),
-				rejectedRevision: afterRejection?.session.revision,
+				rejectedOrdinal: afterRejection?.session.lastOrdinal,
 				rejectedSummary: afterRejection
 					? {
 							visible: afterRejection.session.visible,
@@ -1044,7 +1062,7 @@ describe("PR #329 projection reducer contract", () => {
 				rejectedEntryIds: afterRejection?.entries.map((entry) => entry.id),
 				rejectedChunks: afterRejection?.searchChunks,
 				correctedStatus: corrected.status,
-				correctedRevision: afterCorrected?.session.revision,
+				correctedOrdinal: afterCorrected?.session.lastOrdinal,
 				correctedSummary: afterCorrected
 					? {
 							visible: afterCorrected.session.visible,
@@ -1057,12 +1075,12 @@ describe("PR #329 projection reducer contract", () => {
 				correctedChunks: afterCorrected?.searchChunks,
 			}).toEqual({
 				errorCode: "constraint_failed",
-				rejectedRevision: 0,
+				rejectedOrdinal: 0,
 				rejectedSummary: { visible: false, leafId: null, messageCount: 0, firstMessage: "" },
 				rejectedEntryIds: [],
 				rejectedChunks: [],
 				correctedStatus: "committed",
-				correctedRevision: 1,
+				correctedOrdinal: 1,
 				correctedSummary: {
 					visible: true,
 					leafId: "message-1",
@@ -1081,11 +1099,23 @@ describe("PR #329 projection reducer contract", () => {
 			await seedSearchableMessage(store);
 			const rewritePayload = storePayload({
 				session: {
+					updatedAt: SECOND_AT,
+					name: "renamed",
 					visible: true,
-					leafId: "message-1",
+					leafId: "session-info-2",
 					messageCount: 1,
 					firstMessage: "first searchable",
 				},
+				entries: [
+					entryWrite({
+						type: "session_info",
+						id: "session-info-2",
+						parentId: "message-1",
+						timestamp: SECOND_AT,
+						ordinal: 2,
+						name: "renamed",
+					}),
+				],
 				searchChunks: [{ chunkIndex: 0, entryId: "message-1", text: "rewritten text" }],
 			});
 			const rewriteError = await captureAsyncError(() =>
@@ -1097,11 +1127,11 @@ describe("PR #329 projection reducer contract", () => {
 
 			expect({
 				errorCode: errorCode(rewriteError),
-				revision: snapshot?.session.revision,
+				lastOrdinal: snapshot?.session.lastOrdinal,
 				chunks: snapshot?.searchChunks,
 			}).toEqual({
 				errorCode: "constraint_failed",
-				revision: 1,
+				lastOrdinal: 1,
 				chunks: [{ chunkIndex: 0, entryId: "message-1", text: "first searchable" }],
 			});
 		});
@@ -1129,12 +1159,12 @@ describe("PR #329 projection reducer contract", () => {
 
 			expect({
 				errorCode: errorCode(identityError),
-				revision: snapshot?.session.revision,
+				lastOrdinal: snapshot?.session.lastOrdinal,
 				entryIds: snapshot?.entries.map((entry) => entry.id),
 				chunks: snapshot?.searchChunks,
 			}).toEqual({
 				errorCode: "constraint_failed",
-				revision: 1,
+				lastOrdinal: 1,
 				entryIds: ["message-1"],
 				chunks: [{ chunkIndex: 0, entryId: "message-1", text: "first searchable" }],
 			});

@@ -250,7 +250,7 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		const firstId = first.appendCustomEntry("test", { writer: "first" });
 		await first.flush();
 		stale.appendCustomEntry("test", { writer: "stale" });
-		await expect(stale.flush()).rejects.toThrow("Session revision changed");
+		await expect(stale.flush()).rejects.toThrow("Session ordinal changed");
 		expect(stale.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 		expect(() => stale.getEntries()).toThrow("requires reconciliation");
 

@@ -1,5 +1,5 @@
 export const SESSION_STORE_DATABASE_FILENAME = "sessions.sqlite";
-export const SESSION_STORE_SCHEMA_VERSION = 2;
+export const SESSION_STORE_SCHEMA_VERSION = 3;
 export const SESSION_STORE_REVIEW_CONTEXT_MAX_BYTES = 65_536;
 export const SESSION_STORE_REVIEW_LIST_MAX = 100;
 export const SESSION_STORE_READ_ENTRIES_MAX = 1_000;
@@ -64,7 +64,8 @@ export interface SessionStoreSessionSummary {
 	readonly startingGitContext: SessionStoreJsonValue | null;
 	readonly name: string | null;
 	readonly visible: boolean;
-	readonly revision: number;
+	/** Ordinal of the newest committed entry; 0 for an empty log. */
+	readonly lastOrdinal: number;
 	readonly leafId: string | null;
 	readonly messageCount: number;
 	readonly firstMessage: string;
@@ -125,7 +126,7 @@ export interface SessionStoreSessionProjection {
 	readonly firstMessage: string;
 }
 
-/** Serializable mutations applied under one session revision guard. */
+/** Serializable mutations committed as one log append of at least one entry. */
 export interface SessionStoreTransactionPayload {
 	readonly session: SessionStoreSessionProjection;
 	readonly entries: readonly SessionStoreEntryWrite[];
@@ -136,7 +137,8 @@ export interface SessionStoreTransactionPayload {
 export interface SessionStoreApplyTransactionInput {
 	readonly sessionId: string;
 	readonly sessionGeneration: string;
-	readonly expectedRevision: number;
+	/** The writer's committed head; the commit is fenced on it still being the log's last ordinal. */
+	readonly expectedOrdinal: number;
 	readonly commitId: string;
 	readonly digest: string;
 	readonly payload: SessionStoreTransactionPayload;
@@ -147,8 +149,8 @@ export interface SessionStoreCommitEvidence {
 	readonly sessionGeneration: string;
 	readonly commitId: string;
 	readonly digest: string;
-	readonly beforeRevision: number;
-	readonly afterRevision: number;
+	readonly beforeOrdinal: number;
+	readonly afterOrdinal: number;
 	readonly committedAt: string;
 }
 
@@ -159,7 +161,7 @@ export type SessionStoreTransactionResult =
 	  }
 	| {
 			readonly status: "conflict";
-			readonly actualRevision: number;
+			readonly actualOrdinal: number;
 	  };
 
 export interface SessionStoreReconcileCommitInput {
@@ -177,13 +179,13 @@ export type SessionStoreCommitReconciliation =
 export interface SessionStoreDeleteSessionInput {
 	readonly sessionId: string;
 	readonly sessionGeneration: string;
-	readonly expectedRevision: number;
+	readonly expectedOrdinal: number;
 }
 
 export type SessionStoreDeleteSessionResult =
 	| { readonly status: "deleted" }
 	| { readonly status: "not_found" }
-	| { readonly status: "conflict"; readonly actualRevision: number };
+	| { readonly status: "conflict"; readonly actualOrdinal: number };
 
 export interface SessionStoreSnapshot {
 	readonly session: SessionStoreSessionSummary;

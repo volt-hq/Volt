@@ -218,7 +218,7 @@ describe("regression #524: reloading the current session after another owner wro
 		}
 	}
 
-	it("absorbs the other owner's turns and persists the next prompt without a revision conflict", async () => {
+	it("absorbs the other owner's turns and persists the next prompt without an ordinal conflict", async () => {
 		const { runtime } = await createRuntimeForTest(["tui reply", "after handoff"]);
 		await runtime.session.prompt("tui prompt");
 		const sessionRef = requireSessionRef(runtime);
@@ -328,7 +328,7 @@ describe("regression #524: reloading the current session after another owner wro
 		const sessionRef = requireSessionRef(runtime);
 
 		// No other owner wrote: a warm grant still reloads, and the shutdown write
-		// advances the store past the revision a pre-teardown read would pin.
+		// advances the store past the ordinal a pre-teardown read would pin.
 		await expect(
 			runtime.reloadCurrentSessionFromStore({ expectedSessionId: runtime.session.sessionId }),
 		).resolves.toEqual({ reloaded: true });
@@ -607,7 +607,7 @@ describe("regression #524: reloading the current session after another owner wro
 		});
 		const staleManager = runtime.session.sessionManager;
 		staleManager.appendCustomEntry("test", { writer: "stale" });
-		await expect(staleManager.flush()).rejects.toThrow("Session revision changed");
+		await expect(staleManager.flush()).rejects.toThrow("Session ordinal changed");
 		expect(staleManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 
 		await expect(runtime.switchSession(sessionRef)).resolves.toMatchObject({ cancelled: false });

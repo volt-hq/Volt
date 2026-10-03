@@ -403,9 +403,11 @@ function parseSearchChunk(value: unknown, path: string): SessionStoreSearchChunk
 function parseTransactionPayload(value: unknown, path: string): SessionStoreTransactionPayload {
 	const input = record(value, path);
 	exactKeys(input, path, ["session", "entries", "clientInputs", "searchChunks"]);
+	const entries = arrayValue(input.entries, `${path}.entries`, parseEntryWrite);
+	if (entries.length === 0) fail(`${path}.entries`, "a transaction must append at least one entry");
 	return {
 		session: parseSessionProjection(input.session, `${path}.session`),
-		entries: arrayValue(input.entries, `${path}.entries`, parseEntryWrite),
+		entries,
 		clientInputs: arrayValue(input.clientInputs, `${path}.clientInputs`, parseClientInput),
 		searchChunks: arrayValue(input.searchChunks, `${path}.searchChunks`, parseSearchChunk),
 	};
@@ -413,12 +415,12 @@ function parseTransactionPayload(value: unknown, path: string): SessionStoreTran
 
 function parseApplyTransaction(value: unknown, path: string): SessionStoreApplyTransactionInput {
 	const input = record(value, path);
-	exactKeys(input, path, ["sessionId", "sessionGeneration", "expectedRevision", "commitId", "digest", "payload"]);
+	exactKeys(input, path, ["sessionId", "sessionGeneration", "expectedOrdinal", "commitId", "digest", "payload"]);
 	if (!isSessionStoreCommitDigest(input.digest)) fail(`${path}.digest`, "expected a sha256 commit digest");
 	return {
 		sessionId: idValue(input.sessionId, `${path}.sessionId`),
 		sessionGeneration: idValue(input.sessionGeneration, `${path}.sessionGeneration`),
-		expectedRevision: safeInteger(input.expectedRevision, `${path}.expectedRevision`),
+		expectedOrdinal: safeInteger(input.expectedOrdinal, `${path}.expectedOrdinal`),
 		commitId: idValue(input.commitId, `${path}.commitId`),
 		digest: input.digest,
 		payload: parseTransactionPayload(input.payload, `${path}.payload`),
@@ -439,11 +441,11 @@ function parseReconcileInput(value: unknown, path: string): SessionStoreReconcil
 
 function parseDeleteInput(value: unknown, path: string): SessionStoreDeleteSessionInput {
 	const input = record(value, path);
-	exactKeys(input, path, ["sessionId", "sessionGeneration", "expectedRevision"]);
+	exactKeys(input, path, ["sessionId", "sessionGeneration", "expectedOrdinal"]);
 	return {
 		sessionId: idValue(input.sessionId, `${path}.sessionId`),
 		sessionGeneration: idValue(input.sessionGeneration, `${path}.sessionGeneration`),
-		expectedRevision: safeInteger(input.expectedRevision, `${path}.expectedRevision`),
+		expectedOrdinal: safeInteger(input.expectedOrdinal, `${path}.expectedOrdinal`),
 	};
 }
 
@@ -806,7 +808,7 @@ function parseSummary(value: unknown, path: string): SessionStoreSessionSummary 
 		"startingGitContext",
 		"name",
 		"visible",
-		"revision",
+		"lastOrdinal",
 		"leafId",
 		"messageCount",
 		"firstMessage",
@@ -851,7 +853,7 @@ function parseSummary(value: unknown, path: string): SessionStoreSessionSummary 
 		startingGitContext,
 		name: nullableString(input.name, `${path}.name`),
 		visible: booleanValue(input.visible, `${path}.visible`),
-		revision: safeInteger(input.revision, `${path}.revision`),
+		lastOrdinal: safeInteger(input.lastOrdinal, `${path}.lastOrdinal`),
 		leafId: nullableId(input.leafId, `${path}.leafId`),
 		messageCount: safeInteger(input.messageCount, `${path}.messageCount`),
 		firstMessage: stringValue(input.firstMessage, `${path}.firstMessage`),
@@ -874,18 +876,19 @@ function parseEvidence(value: unknown, path: string): SessionStoreCommitEvidence
 		"sessionGeneration",
 		"commitId",
 		"digest",
-		"beforeRevision",
-		"afterRevision",
+		"beforeOrdinal",
+		"afterOrdinal",
 		"committedAt",
 	]);
 	if (!isSessionStoreCommitDigest(input.digest)) fail(`${path}.digest`, "expected a sha256 commit digest");
+	const beforeOrdinal = safeInteger(input.beforeOrdinal, `${path}.beforeOrdinal`);
 	return {
 		sessionId: idValue(input.sessionId, `${path}.sessionId`),
 		sessionGeneration: idValue(input.sessionGeneration, `${path}.sessionGeneration`),
 		commitId: idValue(input.commitId, `${path}.commitId`),
 		digest: input.digest,
-		beforeRevision: safeInteger(input.beforeRevision, `${path}.beforeRevision`),
-		afterRevision: safeInteger(input.afterRevision, `${path}.afterRevision`, 1),
+		beforeOrdinal,
+		afterOrdinal: safeInteger(input.afterOrdinal, `${path}.afterOrdinal`, beforeOrdinal + 1),
 		committedAt: timestampValue(input.committedAt, `${path}.committedAt`),
 	};
 }
@@ -898,8 +901,8 @@ function parseTransactionResult(value: unknown, path: string): SessionStoreTrans
 		return { status, evidence: parseEvidence(input.evidence, `${path}.evidence`) };
 	}
 	if (status === "conflict") {
-		exactKeys(input, path, ["status", "actualRevision"]);
-		return { status, actualRevision: safeInteger(input.actualRevision, `${path}.actualRevision`) };
+		exactKeys(input, path, ["status", "actualOrdinal"]);
+		return { status, actualOrdinal: safeInteger(input.actualOrdinal, `${path}.actualOrdinal`) };
 	}
 	return fail(`${path}.status`, "unsupported transaction status");
 }
@@ -912,8 +915,8 @@ function parseDeleteResult(value: unknown, path: string): SessionStoreDeleteSess
 		return { status };
 	}
 	if (status === "conflict") {
-		exactKeys(input, path, ["status", "actualRevision"]);
-		return { status, actualRevision: safeInteger(input.actualRevision, `${path}.actualRevision`) };
+		exactKeys(input, path, ["status", "actualOrdinal"]);
+		return { status, actualOrdinal: safeInteger(input.actualOrdinal, `${path}.actualOrdinal`) };
 	}
 	return fail(`${path}.status`, "unsupported delete status");
 }
@@ -992,8 +995,12 @@ function parseSnapshot(value: unknown, path: string): SessionStoreSnapshot {
 			{ cause: error },
 		);
 	}
+	const session = parseSummary(input.session, `${path}.session`);
+	if (session.lastOrdinal !== (entries.at(-1)?.ordinal ?? 0)) {
+		fail(`${path}.session.lastOrdinal`, "must be the ordinal of the last snapshot entry");
+	}
 	return {
-		session: parseSummary(input.session, `${path}.session`),
+		session,
 		entries,
 		clientInputs: arrayValue(
 			input.clientInputs,

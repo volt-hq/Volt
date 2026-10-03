@@ -146,7 +146,7 @@ describe("Regression #341 durable review discussions", () => {
 		await first.deleteSession({
 			sessionId: general.sessionId,
 			sessionGeneration: general.sessionGeneration,
-			expectedRevision: 0,
+			expectedOrdinal: 0,
 		});
 		await first.createHiddenSession({ ...child("general", cwd), sessionGeneration: "reused" });
 		expect(await first.resolveReviewGeneral("run", source)).toMatchObject({
@@ -200,7 +200,7 @@ describe("Regression #341 durable review discussions", () => {
 		expect(await first.listSessionSummaries()).toEqual([]);
 		expect(await first.listSessionSummaries({ includeHidden: true })).toHaveLength(2);
 		const snapshot = await first.loadSession(a.current.child.sessionId, a.current.child.sessionGeneration);
-		expect(snapshot).toMatchObject({ session: { revision: 0, visible: false }, entries: [], clientInputs: [] });
+		expect(snapshot).toMatchObject({ session: { lastOrdinal: 0, visible: false }, entries: [], clientInputs: [] });
 		expect(await first.findReviewDiscussion("run", "finding")).toEqual(a);
 		expect(await first.findReviewDiscussionByChild(a.current.child)).toEqual({ discussion: a, child: a.current });
 		expect(await first.findReviewDiscussionByChild({ ...a.current.child, sessionGeneration: "wrong" })).toBeNull();
@@ -267,7 +267,7 @@ describe("Regression #341 durable review discussions", () => {
 		expect(
 			await first.applyTransaction({
 				...initial.current.child,
-				expectedRevision: 0,
+				expectedOrdinal: 0,
 				commitId: "seed",
 				digest: digestSessionStoreTransactionPayload(payload),
 				payload,
@@ -306,7 +306,7 @@ describe("Regression #341 durable review discussions", () => {
 	it("preserves deleted history without rebinding reused ids and can reset an unavailable current child", async () => {
 		const { first, second, input, source, anchor } = await fixture();
 		const discussion = await first.createOrGetReviewDiscussion(input);
-		await second.deleteSession({ ...discussion.current.child, expectedRevision: 0 });
+		await second.deleteSession({ ...discussion.current.child, expectedOrdinal: 0 });
 		await expect(second.createHiddenSession(input.child)).rejects.toMatchObject({ code: "review_identity_conflict" });
 		await second.createHiddenSession({ ...input.child, sessionGeneration: "replacement" });
 		expect((await first.findReviewDiscussion("run", "finding"))?.current.available).toBe(false);
@@ -321,7 +321,7 @@ describe("Regression #341 durable review discussions", () => {
 		await second.deleteSession({
 			sessionId: source.sessionId,
 			sessionGeneration: source.sessionGeneration,
-			expectedRevision: 0,
+			expectedOrdinal: 0,
 		});
 		await expect(second.createHiddenSession(child("source", source.cwd))).rejects.toMatchObject({
 			code: "review_identity_conflict",
@@ -411,7 +411,7 @@ describe("Regression #341 durable review discussions", () => {
 		await first.deleteSession({
 			sessionId: input.child.id,
 			sessionGeneration: input.child.sessionGeneration,
-			expectedRevision: 0,
+			expectedOrdinal: 0,
 		});
 		await first.createOrGetReviewDiscussion(input);
 		const db = new DatabaseSync(first.info.databasePath);

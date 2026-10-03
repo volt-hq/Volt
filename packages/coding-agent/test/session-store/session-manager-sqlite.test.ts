@@ -481,7 +481,7 @@ describe("SQLite-backed SessionManager", () => {
 
 		const snapshotPath = join(second.root, "child-snapshot.jsonl");
 		const snapshot = await SessionManager.exportJsonlSnapshot(childInfo.ref, snapshotPath);
-		expect(await SessionManager.delete(childInfo.ref, snapshot.revision)).toBe(true);
+		expect(await SessionManager.delete(childInfo.ref, snapshot.lastOrdinal)).toBe(true);
 		const restored = await own(SessionManager.importFromJsonl(snapshotPath, second.cwd, second.sessionDir));
 		expect(restored.getHeader()?.parentSession).toEqual(parent.getSessionRef());
 	});
@@ -532,7 +532,7 @@ describe("SQLite-backed SessionManager", () => {
 		await expect(manager.closePersistence()).resolves.toBeUndefined();
 	});
 
-	it("preserves a session when explicit deletion uses a stale revision", async () => {
+	it("preserves a session when explicit deletion uses a stale ordinal", async () => {
 		const { cwd, sessionDir } = fixture();
 		const stale = await own(SessionManager.create(cwd, sessionDir));
 		stale.appendPlanningState({ mode: "plan", plan: null });
@@ -544,7 +544,7 @@ describe("SQLite-backed SessionManager", () => {
 		advancing.appendSessionInfo("advanced owner");
 		await advancing.flush();
 
-		await expect(SessionManager.delete(ref!, 1)).rejects.toThrow("Session changed before deletion (revision 2)");
+		await expect(SessionManager.delete(ref!, 1)).rejects.toThrow("Session changed before deletion (ordinal 2)");
 		const reopened = await own(SessionManager.open(ref!));
 		expect(reopened.getSessionRef()).toEqual(ref);
 		expect(reopened.getSessionName()).toBe("advanced owner");
