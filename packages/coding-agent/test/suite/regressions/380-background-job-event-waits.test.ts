@@ -241,7 +241,7 @@ async function setup(diagnostics = false, extra: HarnessOptions = {}) {
 		...extra,
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("Wait regression");
+	await harness.session.setSessionName("Wait regression");
 	const started = deferred();
 	const unsubscribe = harness.session.backgroundJobs.subscribe(() => {
 		if (harness.session.backgroundJobs.listWaits().length) started.resolve();

@@ -29,17 +29,17 @@ describe("issue #25 trailing tool-result compaction", () => {
 		});
 		harnesses.push(harness);
 
-		harness.sessionManager.appendMessage(userMsg("research the issue"));
-		const previousBoundaryId = harness.sessionManager.appendMessage(assistantMsg("older retained work"));
-		harness.sessionManager.appendCompaction("previous summary", previousBoundaryId, 250_000);
+		await harness.sessionManager.appendMessage(userMsg("research the issue"));
+		const previousBoundaryId = await harness.sessionManager.appendMessage(assistantMsg("older retained work"));
+		await harness.sessionManager.appendCompaction("previous summary", previousBoundaryId, 250_000);
 
 		const toolCall = fauxToolCall("read", { path: "large.txt" });
-		const recentAssistantId = harness.sessionManager.appendMessage({
+		const recentAssistantId = await harness.sessionManager.appendMessage({
 			...assistantMsg(""),
 			content: [toolCall],
 			stopReason: "toolUse",
 		});
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: toolCall.id,
 			toolName: toolCall.name,

@@ -115,7 +115,7 @@ async function setup(withConfiguredAuth = true) {
 	await session.prompt("prepare independent work");
 	// Settle one-time startup metadata before intercepting the parent transaction.
 	await session.gitContextProvider.refresh();
-	await parent.flush();
+	await vi.waitFor(() => expect(parent.getStartingGitContext()).not.toBeUndefined());
 	const storeLease = await acquireSharedSQLiteSessionStore(parent.getSessionDir());
 	const jobs = session.state.tools.find((tool) => tool.name === "jobs")!;
 	return {
@@ -237,33 +237,29 @@ describe("background subagent spawn persistence", () => {
 				expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
 				expect(context.parent.getLeafId()).toBe(leaf);
 				expect(observed).toEqual([]);
-				expect(() => context.parent.appendSessionInfo("illegal nested append")).toThrow(/atomic/);
-				await expect(commitParent(context.parent, "delivery")).rejects.toThrow(/Nested atomic/);
-				let flushed = false;
-				const flush = context.parent.flush().then(() => {
-					flushed = true;
-				});
 				barrier.release.resolve();
 				await commit;
 				await barrier.spawnStarted.promise;
 				await setImmediate();
-				expect(flushed).toBe(false);
+				// The edge commits after the parent commit; it is not visible while its own commit is in flight.
+				expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
 				const finalLeaf = context.parent.getLeafId();
 				const entries = context.parent.getEntries();
 				const branch = context.parent.getBranch();
 				const projection = context.parent.issueCanonicalProjection();
 				barrier.releaseSpawn.resolve();
-				await flush;
+				await vi.waitFor(() => expect(context.parent.getSubagentSpawnEntries()).toHaveLength(1));
 				const edges = context.parent.getSubagentSpawnEntries();
 				expect(edges).toHaveLength(1);
-				expect(edges[0]).toMatchObject({ toolCallId: "background-spawn", parentId: leaf });
+				expect(edges[0]).toMatchObject({ toolCallId: "background-spawn", parentId: finalLeaf });
 				expect(context.parent.getEntry(edges[0].id)).toBeUndefined();
 				expect(context.parent.getLeafId()).toBe(finalLeaf);
 				expect(context.parent.getEntries()).toEqual(entries);
 				expect(context.parent.getBranch()).toEqual(branch);
 				expect(context.parent.issueCanonicalProjection().leafEntryOrdinal).toBe(projection.leafEntryOrdinal);
 				expect(observed).toEqual(["message"]);
-				expect(branches).toEqual([{ previousLeafId: leaf, nextLeafId: finalLeaf }]);
+				// Only the command's leaf entry moves the branch; appends advance the leaf without a branch change.
+				expect(branches).toEqual(kind === "command" ? [{ previousLeafId: leaf, nextLeafId: null }] : []);
 				expect(barrier.writes).toEqual([
 					kind === "command" ? ["leaf", "message"] : ["message"],
 					["subagent_spawn"],
@@ -331,23 +327,27 @@ describe("background subagent spawn persistence", () => {
 						return error;
 					},
 				);
-				expect(() => context.parent.appendSubagentSpawn(spawn)).toThrow(/closed/);
+				await expect(context.parent.appendSubagentSpawn(spawn)).rejects.toThrow(/closed/);
 				barrier.release.resolve();
 				const result = await commit;
 				if (outcome === "rollback") expect(result).toMatchObject({ effect: "rolled_back" });
 				else expect(result).toBeUndefined();
+				// The edges commit after the parent command, under its committed leaf.
+				const edgeParent = context.parent.getLeafId();
+				if (outcome === "rollback") expect(edgeParent).toBe(leaf);
 				await barrier.spawnStarted.promise;
 				await setImmediate();
 				expect(closed).toBe(false);
 				barrier.releaseSpawn.resolve();
-				const closeResult = await close;
-				if (outcome === "rollback") expect(closeResult).toMatchObject({ effect: "rolled_back" });
-				else expect(closeResult).toBeUndefined();
+				// An earlier write's failure is reported by that write, not by close.
+				expect(await close).toBeUndefined();
+				const firstId = await first;
+				const secondId = await second;
 				const reopened = await SessionManager.open(ref);
 				try {
 					expect(reopened.getSubagentSpawnEntries()).toMatchObject([
-						{ id: first, parentId: leaf, requestKey: "owned-request", childSessionRef: childRef },
-						{ id: second, parentId: leaf, subagentId: "sa_second" },
+						{ id: firstId, parentId: edgeParent, requestKey: "owned-request", childSessionRef: childRef },
+						{ id: secondId, parentId: edgeParent, subagentId: "sa_second" },
 					]);
 					if (outcome === "rollback") expect(reopened.getLeafId()).toBe(leaf);
 				} finally {
@@ -357,9 +357,7 @@ describe("background subagent spawn persistence", () => {
 				barrier.release.resolve();
 				barrier.releaseSpawn.resolve();
 				barrier.restore();
-				const cleanupError = await context.cleanup(outcome === "rollback");
-				if (outcome === "rollback") expect(cleanupError).toMatchObject({ effect: "rolled_back" });
-				else expect(cleanupError).toBeUndefined();
+				expect(await context.cleanup()).toBeUndefined();
 			}
 		},
 	);
@@ -388,7 +386,8 @@ describe("background subagent spawn persistence", () => {
 				barrier.release.resolve();
 				barrier.releaseSpawn.resolve();
 				await commit;
-				await context.parent.flush();
+				// Close waits for every write already called, including an edge written after the commit.
+				await context.parent.closePersistence();
 				expect(context.parent.getSubagentSpawnEntries()).toHaveLength(phase === "aborted-after" ? 1 : 0);
 				expect(context.manager.listDelegations()).toHaveLength(phase === "aborted-after" ? 1 : 0);
 			} finally {
@@ -407,20 +406,19 @@ describe("background subagent spawn persistence", () => {
 			const jobId = await context.start();
 			const ref = context.parent.getSessionRef()!;
 			const commit = commitParent(context.parent, "delivery");
-			const rejectedCommit = expect(commit).rejects.toThrow(/ordinal changed/);
+			const rejectedCommit = expect(commit).rejects.toThrow(/but the log head is/);
 			await barrier.started.promise;
 			context.allowPrompt.resolve();
 			await context.published.promise;
 			context.finishChild.resolve();
 			await context.wait(jobId);
-			const flush = expect(context.parent.flush()).rejects.toThrow(/ordinal changed/);
 			barrier.release.resolve();
 			await rejectedCommit;
-			await flush;
 			await expect(context.parent.lost).resolves.toMatchObject({ reason: "fence_conflict" });
-			// Closing reports nothing new: `lost` already did.
+			// Closing reports nothing new: `lost` already did. It waits for the queued edge, which the loss rejects.
 			await expect(context.parent.closePersistence()).resolves.toBeUndefined();
-			expect(() => context.parent.appendSessionInfo("must reject")).toThrow(/ordinal changed/);
+			expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
+			await expect(context.parent.appendSessionInfo("must reject")).rejects.toThrow(/but the log head is/);
 			const reopened = await SessionManager.openReadOnly(ref);
 			try {
 				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
@@ -443,9 +441,8 @@ describe("background subagent spawn persistence", () => {
 			try {
 				const jobId = await context.start();
 				const token = context.parent.issueCanonicalProjection().token;
-				context.parent.appendSessionInfo("earlier write");
+				const earlier = context.parent.appendSessionInfo("earlier write");
 				await barrier.started.promise;
-				const leaf = context.parent.getLeafId();
 				const atomic =
 					operation === "no-effect"
 						? context.parent.attestDeliveryNoEffect({ deliveryId: "none", epoch: 1, attemptId: "none" })
@@ -461,14 +458,17 @@ describe("background subagent spawn persistence", () => {
 				await context.published.promise;
 				context.finishChild.resolve();
 				await context.wait(jobId);
-				const drain = operation === "close" ? context.parent.closePersistence() : context.parent.flush();
+				const drain = operation === "close" ? context.parent.closePersistence() : undefined;
 				barrier.release.resolve();
+				await earlier;
+				const leaf = context.parent.getLeafId();
 				const result = await atomicResult;
-				if (operation === "close") expect(result).toMatchObject({ message: "Session persistence is closed" });
-				else if (operation === "guard") expect(result).toMatchObject({ name: "SessionCanonicalConflictError" });
-				else expect(result).toBeUndefined();
+				// Close waits for the writes called before it; the earlier write moved the guarded branch.
+				if (operation === "no-effect") expect(result).toBeUndefined();
+				else expect(result).toMatchObject({ name: "SessionCanonicalConflictError" });
 				barrier.releaseSpawn.resolve();
 				await drain;
+				await vi.waitFor(() => expect(context.parent.getSubagentSpawnEntries()).toHaveLength(1));
 				expect(context.parent.getSubagentSpawnEntries()).toMatchObject([{ parentId: leaf }]);
 				expect(context.parent.getSubagentSpawnEntries()).toHaveLength(1);
 				expect(context.parent.getLeafId()).toBe(leaf);
@@ -482,7 +482,7 @@ describe("background subagent spawn persistence", () => {
 		},
 	);
 
-	it("surfaces a deferred edge write failure without claiming durable recovery", async () => {
+	it("rolls back a failed edge write without claiming durable recovery", async () => {
 		const context = await setup();
 		const barrier = pauseParent(context, "commit", true);
 		try {
@@ -494,14 +494,15 @@ describe("background subagent spawn persistence", () => {
 			await context.published.promise;
 			context.finishChild.resolve();
 			await context.wait(jobId);
-			const flush = expect(context.parent.flush()).rejects.toThrow(/rolled back/);
 			barrier.release.resolve();
 			await commit;
+			await barrier.spawnStarted.promise;
 			barrier.releaseSpawn.resolve();
-			await flush;
-			// The edge was indexed when it failed, so the parent no longer matches its log.
-			await expect(context.parent.lost).resolves.toMatchObject({ reason: "storage" });
+			// Close waits for the failed edge write; that failure is the write's own, not close's.
 			await expect(context.parent.closePersistence()).resolves.toBeUndefined();
+			// The edge was rolled back, so the parent still matches its log and was not lost.
+			expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
+			await expect(Promise.race([context.parent.lost, setImmediate("live")])).resolves.toBe("live");
 			const reopened = await SessionManager.open(ref);
 			try {
 				expect(reopened.getSubagentSpawnEntries()).toEqual([]);

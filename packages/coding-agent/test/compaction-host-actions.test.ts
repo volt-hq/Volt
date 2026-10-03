@@ -54,7 +54,7 @@ function setup(global: Settings = {}, project: Settings = {}, profile?: string, 
 		abortRun: async () => {},
 		compactContext: async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 }),
 		newSession: async () => ({ cancelled: true, seeded: false }),
-		renameSession: () => {},
+		renameSession: async () => {},
 	};
 	const descriptor = (action: string) => registry.getDescriptor(action, context)!;
 	const invoke = (action: string, value: boolean | number, target = capturedTarget(descriptor(action))) =>

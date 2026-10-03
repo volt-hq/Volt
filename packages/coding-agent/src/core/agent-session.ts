@@ -1244,11 +1244,10 @@ export class AgentSession {
 			gitContextSubscriptionFinalizers.push(
 				this.gitContextProvider.subscribeObservations((observation) => {
 					if (observation.status !== "definitive") return;
-					try {
-						this.sessionManager.recordStartingGitContext(startingGitContextSessionId, observation.gitContext);
-					} catch {
-						// Git replacement delivery remains independent from metadata persistence.
-					}
+					// Git replacement delivery remains independent from metadata persistence.
+					void this.sessionManager
+						.recordStartingGitContext(startingGitContextSessionId, observation.gitContext)
+						.catch(() => {});
 				}),
 			);
 			gitContextSubscriptionFinalizers.push(
@@ -2827,9 +2826,8 @@ export class AgentSession {
 			if (handledEvent.deliveryId !== undefined) {
 				const notice = this._backgroundNotificationDeliveries.get(handledEvent.deliveryId);
 				if (notice) {
-					// Finalized Harness events follow canonical append. Wait for its
-					// durable watermark before consuming the pending notification.
-					await this.sessionManager.flush();
+					// Finalized Harness events follow the canonical commit, so the
+					// notification is durable before it is consumed.
 					if (!this._disposed && notice.generation === this._conversationGenerationRevision) {
 						this._backgroundJobs.acknowledgeNotifications(notice.jobIds);
 					}
@@ -2839,7 +2837,6 @@ export class AgentSession {
 			}
 			const admittedClientMessageId = getClientMessageId(handledEvent.message);
 			if (admittedClientMessageId !== undefined) {
-				await this.sessionManager.flush();
 				this._completeLiveClientInput(admittedClientMessageId, "admitted");
 			}
 			if (handledEvent.message.role === "assistant") {
@@ -3327,8 +3324,8 @@ export class AgentSession {
 				this._readyPlanTransitionDeliveryId = undefined;
 				// Harness has settled its active canonical producer. Provider-visible
 				// cleanup can now run without racing delivery settlement.
-				this._persistAbortedResultsForDanglingToolCalls();
-				this._flushPendingBashMessages();
+				await this._persistAbortedResultsForDanglingToolCalls();
+				await this._flushPendingBashMessages();
 			} catch (error) {
 				cleanupError = error;
 			} finally {
@@ -3398,7 +3395,7 @@ export class AgentSession {
 	 * events are emitted (dispose is tearing the listeners down), and the agent
 	 * loop's own late aborted results are dropped by the _disposed guard.
 	 */
-	private _persistAbortedResultsForDanglingToolCalls(): void {
+	private async _persistAbortedResultsForDanglingToolCalls(): Promise<void> {
 		try {
 			const context = this.sessionManager.buildSessionContext();
 			const resolvedToolCallIds = new Set<string>();
@@ -3435,7 +3432,7 @@ export class AgentSession {
 						isError: true,
 						timestamp: Date.now(),
 					};
-					this.sessionManager.appendMessage(abortedResult);
+					await this.sessionManager.appendMessage(abortedResult);
 				}
 			}
 		} catch {
@@ -3690,10 +3687,6 @@ export class AgentSession {
 
 	getPlanningState(): PlanningState {
 		return this.planningState;
-	}
-
-	flushPlanningState(): Promise<void> {
-		return this.sessionManager.flush();
 	}
 
 	/** Whether the session is processing a response or a session-level continuation. */
@@ -4073,14 +4066,14 @@ export class AgentSession {
 		};
 	}
 
-	private _deliverPlanningCheckpoint(state: PlanningState): void {
+	private async _deliverPlanningCheckpoint(state: PlanningState): Promise<void> {
 		const message = this._createPlanningCheckpointMessage(state);
 		if (!message) return;
 		if (this.isStreaming) {
 			this._harness.queueSteer(message);
 			return;
 		}
-		this.sessionManager.appendCustomMessageEntry(
+		await this.sessionManager.appendCustomMessageEntry(
 			message.customType,
 			message.content,
 			message.display,
@@ -4090,13 +4083,15 @@ export class AgentSession {
 		this._emit({ type: "message_end", message });
 	}
 
-	private _commitPlanningState(next: PlanningState): PlanningState {
+	/** Commit a Plan mode snapshot, then publish it. Runs inside a planning transition. */
+	private async _commitPlanningState(next: PlanningState): Promise<PlanningState> {
 		this._assertActive();
 		const parsed = parsePlanningState(next);
 		if (parsed.mode === "plan" && this._backgroundJobs.hasActive) {
 			throw new Error("Cannot enter Plan mode while background jobs are active; abort or wait for them to finish");
 		}
-		this.sessionManager.appendPlanningState(parsed);
+		await this.sessionManager.appendPlanningState(parsed);
+		this._assertActive();
 		this._planningState = clonePlanningState(parsed);
 		this._syncPlanningRuntime();
 		const snapshot = clonePlanningState(this._planningState);
@@ -4117,10 +4112,10 @@ export class AgentSession {
 	}
 
 	/**
-	 * Queued transitions may suspend at an await (MCP restoration) while the
-	 * event loop keeps running, so they must re-validate planning state after
-	 * every await before committing, and the synchronous mutators refuse to
-	 * commit while a queued transition is suspended mid-flight.
+	 * Planning transitions run one at a time. They may suspend at an await (MCP
+	 * restoration, the planning commit) while the event loop keeps running, so
+	 * they re-validate planning state after every await before committing, and
+	 * a plan mutation called while one is suspended mid-flight is refused.
 	 */
 	private _enqueuePlanningTransition<T>(transition: () => Promise<T>): Promise<T> {
 		this._assertActive();
@@ -4164,16 +4159,16 @@ export class AgentSession {
 			this._planResearchGeneration = undefined;
 		}
 		if (mode === "plan" && plan?.phase === "active") {
-			const next = this._commitPlanningState({ mode, plan: this._draftFromExecutedPlan(plan) });
-			this._deliverPlanningCheckpoint(next);
+			const next = await this._commitPlanningState({ mode, plan: this._draftFromExecutedPlan(plan) });
+			await this._deliverPlanningCheckpoint(next);
 			return next;
 		}
 		if (mode === "plan" && (plan?.phase === "completed" || plan?.phase === "handed_off")) {
 			return this._commitPlanningState({ mode, plan: null });
 		}
-		const next = this._commitPlanningState({ ...clonePlanningState(this._planningState), mode });
+		const next = await this._commitPlanningState({ ...clonePlanningState(this._planningState), mode });
 		if (mode === "plan" && next.plan?.phase === "draft") {
-			this._deliverPlanningCheckpoint(next);
+			await this._deliverPlanningCheckpoint(next);
 		}
 		return next;
 	}
@@ -4182,14 +4177,25 @@ export class AgentSession {
 		return this._enqueuePlanningTransition(() => this._setAgentMode(this.agentMode === "plan" ? "build" : "plan"));
 	}
 
-	updatePlan(input: {
+	/** Commit a draft plan update; resolves after the new revision commits. */
+	async updatePlan(input: {
 		planId?: string;
 		expectedRevision?: number;
 		title?: string;
 		summary?: string;
 		steps: PlanStepInput[];
-	}): PlanState {
+	}): Promise<PlanState> {
 		this._assertNoPlanningTransitionInFlight("update_plan");
+		return this._enqueuePlanningTransition(() => this._updatePlan(input));
+	}
+
+	private async _updatePlan(input: {
+		planId?: string;
+		expectedRevision?: number;
+		title?: string;
+		summary?: string;
+		steps: PlanStepInput[];
+	}): Promise<PlanState> {
 		if (this._planningState.mode !== "plan") {
 			throw new Error("update_plan is available only in Plan mode");
 		}
@@ -4226,16 +4232,25 @@ export class AgentSession {
 			...(summary ? { summary } : {}),
 			steps,
 		};
-		this._commitPlanningState({ mode: "plan", plan });
+		await this._commitPlanningState({ mode: "plan", plan });
 		return clonePlanState(plan);
 	}
 
-	updatePlanProgress(input: {
+	/** Commit approved plan progress; resolves after the new revision commits. */
+	async updatePlanProgress(input: {
 		planId: string;
 		expectedRevision: number;
 		updates: Array<{ id: string; status: PlanStepStatus; note?: string }>;
-	}): PlanState {
+	}): Promise<PlanState> {
 		this._assertNoPlanningTransitionInFlight("update_plan_progress");
+		return this._enqueuePlanningTransition(() => this._updatePlanProgress(input));
+	}
+
+	private async _updatePlanProgress(input: {
+		planId: string;
+		expectedRevision: number;
+		updates: Array<{ id: string; status: PlanStepStatus; note?: string }>;
+	}): Promise<PlanState> {
 		if (this._planningState.mode !== "build" || this._planningState.plan?.phase !== "active") {
 			throw new Error("update_plan_progress is available only during approved plan execution");
 		}
@@ -4289,12 +4304,21 @@ export class AgentSession {
 			phase: getPlanLeafSteps({ steps }).every((step) => step.status === "completed") ? "completed" : "active",
 			steps,
 		};
-		this._commitPlanningState({ mode: "build", plan });
+		await this._commitPlanningState({ mode: "build", plan });
 		return clonePlanState(plan);
 	}
 
-	requestReplan(input: { planId: string; expectedRevision: number; reason: string }): PlanningState {
+	/** Return approved execution to a draft; resolves after the draft commits. */
+	async requestReplan(input: { planId: string; expectedRevision: number; reason: string }): Promise<PlanningState> {
 		this._assertNoPlanningTransitionInFlight("request_replan");
+		return this._enqueuePlanningTransition(async () => this._requestReplan(input));
+	}
+
+	private async _requestReplan(input: {
+		planId: string;
+		expectedRevision: number;
+		reason: string;
+	}): Promise<PlanningState> {
 		if (this._planningState.mode !== "build" || this._planningState.plan?.phase !== "active") {
 			throw new Error("request_replan is available only during approved plan execution");
 		}
@@ -4309,8 +4333,23 @@ export class AgentSession {
 		});
 	}
 
-	submitPlan(input: { planId: string; expectedRevision: number; title: string; summary: string }): PlanState {
+	/** Submit a draft plan for approval; resolves after the ready plan commits. */
+	async submitPlan(input: {
+		planId: string;
+		expectedRevision: number;
+		title: string;
+		summary: string;
+	}): Promise<PlanState> {
 		this._assertNoPlanningTransitionInFlight("submit_plan");
+		return this._enqueuePlanningTransition(() => this._submitPlan(input));
+	}
+
+	private async _submitPlan(input: {
+		planId: string;
+		expectedRevision: number;
+		title: string;
+		summary: string;
+	}): Promise<PlanState> {
 		if (this._planningState.mode !== "plan") {
 			throw new Error("submit_plan is available only in Plan mode");
 		}
@@ -4331,20 +4370,21 @@ export class AgentSession {
 			title: input.title.trim(),
 			summary: input.summary.trim(),
 		};
-		this._commitPlanningState({ mode: "plan", plan });
+		await this._commitPlanningState({ mode: "plan", plan });
 		return clonePlanState(plan);
 	}
 
-	changePlan(planId: string, expectedRevision: number): PlanningState {
-		return this._changeReadyPlanToDraft(planId, expectedRevision, true);
+	/** Return a ready plan to a draft; resolves after the draft commits. */
+	async changePlan(planId: string, expectedRevision: number): Promise<PlanningState> {
+		this._assertNoPlanningTransitionInFlight("changePlan");
+		return this._enqueuePlanningTransition(() => this._changeReadyPlanToDraft(planId, expectedRevision, true));
 	}
 
-	private _changeReadyPlanToDraft(
+	private async _changeReadyPlanToDraft(
 		planId: string,
 		expectedRevision: number,
 		deliverCheckpoint: boolean,
-	): PlanningState {
-		this._assertNoPlanningTransitionInFlight("changePlan");
+	): Promise<PlanningState> {
 		assertPlanRevision(this._planningState, planId, expectedRevision);
 		if (this._planningState.plan.phase !== "ready") {
 			throw new Error("Only a ready plan can be changed");
@@ -4357,7 +4397,7 @@ export class AgentSession {
 		) {
 			this._planResearchGeneration = undefined;
 		}
-		const next = this._commitPlanningState({
+		const next = await this._commitPlanningState({
 			mode: "plan",
 			plan: {
 				...this._planningState.plan,
@@ -4366,16 +4406,19 @@ export class AgentSession {
 			},
 		});
 		if (deliverCheckpoint) {
-			this._deliverPlanningCheckpoint(next);
+			await this._deliverPlanningCheckpoint(next);
 		}
 		return next;
 	}
 
-	discardPlan(planId: string, expectedRevision: number): PlanningState {
+	/** Discard the plan; resolves after the cleared planning state commits. */
+	async discardPlan(planId: string, expectedRevision: number): Promise<PlanningState> {
 		this._assertNoPlanningTransitionInFlight("discardPlan");
-		assertPlanRevision(this._planningState, planId, expectedRevision);
-		this._planResearchGeneration = undefined;
-		return this._commitPlanningState({ mode: this._planningState.mode, plan: null });
+		return this._enqueuePlanningTransition(async () => {
+			assertPlanRevision(this._planningState, planId, expectedRevision);
+			this._planResearchGeneration = undefined;
+			return this._commitPlanningState({ mode: this._planningState.mode, plan: null });
+		});
 	}
 
 	activatePlan(
@@ -4422,7 +4465,7 @@ export class AgentSession {
 			throw new Error("Only a ready plan can be executed");
 		}
 		return {
-			planning: this._commitPlanningState({
+			planning: await this._commitPlanningState({
 				mode: "build",
 				plan: {
 					...this._planningState.plan,
@@ -4621,48 +4664,52 @@ export class AgentSession {
 			return { kind: "live", operation: live };
 		}
 
-		const reservation = this.sessionManager.reserveClientInput(clientMessageId, command, input);
-		const record = reservation.record;
-		if (record.command !== command || record.semanticDigest !== semanticDigest) {
-			throw new ClientInputConflictError(
-				`client_input_conflict: ${JSON.stringify(clientMessageId)} was already used for different input`,
-			);
-		}
-		if (record.state === "completed") {
-			return { kind: "completed" };
-		}
-		if (record.state === "failed") {
-			throw new Error(record.error ?? "client_input_failed: the original input failed before commit");
-		}
-		if (record.state === "started") {
-			throw new ClientInputOutcomeAmbiguousError(
-				`client_input_outcome_ambiguous: ${JSON.stringify(clientMessageId)} started before the host restarted but has no durable terminal record; it was not replayed`,
-			);
-		}
-
 		// Accepted remains recoverable throughout abortable preflight. Immediate
 		// and queued input complete only through their canonical identified user
 		// append, so a daemon restart never guesses whether provider work began.
+		// The live owner is registered before the receipt commits, so a retry of
+		// the same identity meanwhile attaches to it instead of admitting twice.
 		const operation = this._createLiveClientInputOperation(command, semanticDigest, command === "prompt");
 		this._liveClientInputs.set(clientMessageId, operation);
+		let record: ClientInputRecord;
 		try {
-			// A newly accepted remote identity is not acknowledged until its receipt
-			// and every earlier commit have reached the durable queue watermark.
-			await this.sessionManager.flush();
-			if (this._disposed) {
+			// A newly accepted remote identity is not acknowledged until its receipt commits.
+			record = (await this.sessionManager.reserveClientInput(clientMessageId, command, input)).record;
+			if (record.command !== command || record.semanticDigest !== semanticDigest) {
+				throw new ClientInputConflictError(
+					`client_input_conflict: ${JSON.stringify(clientMessageId)} was already used for different input`,
+				);
+			}
+			if (record.state === "failed") {
+				throw new Error(record.error ?? "client_input_failed: the original input failed before commit");
+			}
+			if (record.state === "started") {
+				throw new ClientInputOutcomeAmbiguousError(
+					`client_input_outcome_ambiguous: ${JSON.stringify(clientMessageId)} started before the host restarted but has no durable terminal record; it was not replayed`,
+				);
+			}
+			if (record.state !== "completed" && this._disposed) {
 				throw new Error("Session disposed before client input admission completed");
 			}
-			if (abortGeneration !== this._abortGeneration) {
+			if (record.state !== "completed" && abortGeneration !== this._abortGeneration) {
 				throw new Error("Client input admission was aborted before its receipt became durable");
 			}
 		} catch (error) {
 			if (this._liveClientInputs.get(clientMessageId) === operation) {
 				this._liveClientInputs.delete(clientMessageId);
 			}
-			const persistenceError = error instanceof Error ? error : new Error(String(error));
-			operation.rejectAccepted(persistenceError);
-			operation.rejectCompletion(persistenceError);
-			throw persistenceError;
+			const admissionError = error instanceof Error ? error : new Error(String(error));
+			operation.rejectAccepted(admissionError);
+			operation.rejectCompletion(admissionError);
+			throw admissionError;
+		}
+		if (record.state === "completed") {
+			if (this._liveClientInputs.get(clientMessageId) === operation) {
+				this._liveClientInputs.delete(clientMessageId);
+			}
+			operation.resolveAccepted("completed");
+			operation.attachCompletion(Promise.resolve());
+			return { kind: "completed" };
 		}
 		return { kind: "start", operation };
 	}
@@ -4743,8 +4790,7 @@ export class AgentSession {
 		let reportedError = error;
 		let terminalPersisted = false;
 		try {
-			const record = this.sessionManager.transitionClientInput(clientMessageId, "failed", error.message);
-			await this.sessionManager.flush();
+			const record = await this.sessionManager.transitionClientInput(clientMessageId, "failed", error.message);
 			terminalPersisted = record.state === "failed";
 		} catch (transitionError) {
 			reportedError =
@@ -4790,8 +4836,7 @@ export class AgentSession {
 		// persist a second started boundary even though the in-memory operation saw
 		// the earlier one.
 		if (record?.state === "accepted") {
-			this.sessionManager.transitionClientInput(clientMessageId, "started");
-			await this.sessionManager.flush();
+			await this.sessionManager.transitionClientInput(clientMessageId, "started");
 			if (this._disposed) {
 				throw new Error("Session disposed before client input dispatch");
 			}
@@ -5061,7 +5106,7 @@ export class AgentSession {
 				this._agentConversationMutationInFlight = false;
 				this._activeAgentRun = undefined;
 				this._activeAgentOperation = undefined;
-				this._flushPendingBashMessages();
+				await this._flushPendingBashMessages();
 			}
 		} finally {
 			this._emitAgentSettledIfIdle();
@@ -5412,8 +5457,7 @@ export class AgentSession {
 			// terminal write fails, `started` remains the truthful ambiguous outcome.
 			if (operation && clientMessageId && outcome === "handled") {
 				this._assertActive();
-				this.sessionManager.transitionClientInput(clientMessageId, "completed");
-				await this.sessionManager.flush();
+				await this.sessionManager.transitionClientInput(clientMessageId, "completed");
 				this._completeLiveClientInput(clientMessageId, "completed");
 			} else if (!operation && outcome === "handled" && !this._disposed) {
 				// Local/prompt-backed UI actions have no durable client identity, but
@@ -5556,7 +5600,7 @@ export class AgentSession {
 
 			// Flush any pending bash messages before the new prompt
 			assertConversationGenerationCurrent();
-			this._flushPendingBashMessages();
+			await this._flushPendingBashMessages();
 
 			// Validate model
 			if (!this.model) {
@@ -5632,7 +5676,7 @@ export class AgentSession {
 					this._agentConversationMutationInFlight = false;
 					this._activeAgentOperation = undefined;
 					try {
-						this._flushPendingBashMessages();
+						await this._flushPendingBashMessages();
 					} finally {
 						this._emitAgentSettledIfIdle();
 					}
@@ -5916,15 +5960,15 @@ export class AgentSession {
 		if (operation === undefined || this._liveClientInputs.get(clientMessageId) !== operation) {
 			throw new Error("Client input lost queue admission ownership before persistence");
 		}
-		this.sessionManager.markClientInputQueued(clientMessageId, {
+		const committed = this.sessionManager.markClientInputQueued(clientMessageId, {
 			delivery,
 			message: text,
 			...(images === undefined ? {} : { images }),
 		});
-		// clearQueue must see the admission before the durability await so its
+		// clearQueue must see the admission before the commit await so its
 		// successful return also revokes work that has not reached agent-core yet.
 		operation.queued = true;
-		await this.sessionManager.flush();
+		await committed;
 		if (this._disposed) {
 			throw new Error("Session disposed before queued input admission completed");
 		}
@@ -6092,7 +6136,7 @@ export class AgentSession {
 			}
 			await this._runAgentPrompt(appMessage, this._abortGeneration);
 		} else {
-			this.sessionManager.appendCustomMessageEntry(
+			await this.sessionManager.appendCustomMessageEntry(
 				appMessage.customType,
 				appMessage.content,
 				appMessage.display,
@@ -6196,13 +6240,11 @@ export class AgentSession {
 		const terminalError = new Error("client_input_failed: queued input was cleared before canonical consumption");
 		let persistenceError: Error | undefined;
 
-		try {
-			for (const [clientMessageId] of queuedOperations) {
-				this.sessionManager.transitionClientInput(clientMessageId, "failed", terminalError.message);
-			}
-		} catch (error) {
-			persistenceError = error instanceof Error ? error : new Error(String(error));
-		}
+		// The terminal writes commit in this order on the session's lane; their
+		// outcome is awaited after runtime ownership is revoked below.
+		const terminalWrites = queuedOperations.map(([clientMessageId]) =>
+			this.sessionManager.transitionClientInput(clientMessageId, "failed", terminalError.message),
+		);
 
 		this._steeringMessages = this._steeringMessages.filter((entry) => !revokedQueueEntryIds.has(entry.queueEntryId));
 		this._followUpMessages = this._followUpMessages.filter((entry) => !revokedQueueEntryIds.has(entry.queueEntryId));
@@ -6216,15 +6258,10 @@ export class AgentSession {
 		}
 
 		// Runtime-only queue entries carry a local-queue identity and never reach the
-		// WAL, so clearing them appends nothing. Awaiting the durable watermark in
-		// that case records no cancellation and only inherits an unrelated earlier
-		// failure, which would fail the one action a session that lost its log still
-		// owes the user: handing their unsent text back.
-		if (queuedOperations.length > 0 && persistenceError === undefined) {
-			try {
-				await this.sessionManager.flush();
-			} catch (error) {
-				persistenceError = error instanceof Error ? error : new Error(String(error));
+		// WAL, so clearing them writes nothing and cannot fail.
+		for (const result of await Promise.allSettled(terminalWrites)) {
+			if (result.status === "rejected" && persistenceError === undefined) {
+				persistenceError = result.reason instanceof Error ? result.reason : new Error(String(result.reason));
 			}
 		}
 
@@ -6552,13 +6589,14 @@ export class AgentSession {
 	}
 
 	/** Commit a branch-local Fast mode transition before publishing its settled state. */
-	setFastModeEnabled(enabled: boolean): void {
+	async setFastModeEnabled(enabled: boolean): Promise<void> {
 		this._assertActive();
 		if (enabled === this._fastModeEnabled) {
 			return;
 		}
 
-		this.sessionManager.appendFastModeChange(enabled);
+		await this.sessionManager.appendFastModeChange(enabled);
+		this._assertActive();
 		this._fastModeEnabled = enabled;
 		this._applyHarnessMutation(
 			this._setHarnessStreamOptions({
@@ -7567,17 +7605,15 @@ export class AgentSession {
 						});
 					});
 				},
-				appendEntry: (customType, data) => {
-					this.sessionManager.appendCustomEntry(customType, data);
+				appendEntry: async (customType, data) => {
+					await this.sessionManager.appendCustomEntry(customType, data);
 				},
-				setSessionName: (name) => {
-					this.setSessionName(name);
-				},
+				setSessionName: (name) => this.setSessionName(name),
 				getSessionName: () => {
 					return this.sessionManager.getSessionName();
 				},
-				setLabel: (entryId, label) => {
-					this.sessionManager.appendLabelChange(entryId, label);
+				setLabel: async (entryId, label) => {
+					await this.sessionManager.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
@@ -8094,8 +8130,6 @@ export class AgentSession {
 			const previousFlagValues = this._extensionRunner.getFlagValues();
 			await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
 			this._assertActive();
-			await this.sessionManager.flush();
-			this._assertActive();
 			await this.settingsManager.reload();
 			this._assertActive();
 			await this.syncAgentRuntimeSettingsFromSettings();
@@ -8138,8 +8172,6 @@ export class AgentSession {
 				await this.extendResourcesFromExtensions("reload");
 				this._assertActive();
 			}
-			await this.sessionManager.flush();
-			this._assertActive();
 		} finally {
 			this._reloadInProgress = false;
 			this._activityChanged();
@@ -8344,7 +8376,7 @@ export class AgentSession {
 				},
 			);
 
-			this.recordBashResult(command, result, options);
+			await this.recordBashResult(command, result, options);
 			return result;
 		} finally {
 			this._bashAbortController = undefined;
@@ -8355,8 +8387,14 @@ export class AgentSession {
 	/**
 	 * Record a bash execution result in session history.
 	 * Used by executeBash and by extensions that handle bash execution themselves.
+	 * Resolves after the result commits, or at once when it is deferred until
+	 * the streaming turn ends.
 	 */
-	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
+	async recordBashResult(
+		command: string,
+		result: BashResult,
+		options?: { excludeFromContext?: boolean },
+	): Promise<void> {
 		this._assertActive();
 		if (this._disposed) return;
 		const bashMessage: BashExecutionMessage = {
@@ -8376,7 +8414,7 @@ export class AgentSession {
 			// Queue for later - will be flushed on agent_end
 			this._pendingBashMessages.push(bashMessage);
 		} else {
-			this.sessionManager.appendMessage(bashMessage);
+			await this.sessionManager.appendMessage(bashMessage);
 		}
 		this.gitContextProvider.scheduleRefresh();
 	}
@@ -8402,15 +8440,15 @@ export class AgentSession {
 	 * Flush pending bash messages to agent state and session.
 	 * Called after agent turn completes to maintain proper message ordering.
 	 */
-	private _flushPendingBashMessages(): void {
+	private async _flushPendingBashMessages(): Promise<void> {
 		if (this._pendingBashMessages.length === 0) return;
 		this._assertNotLost();
 
-		for (const bashMessage of this._pendingBashMessages) {
-			this.sessionManager.appendMessage(bashMessage);
-		}
-
+		const pending = this._pendingBashMessages;
 		this._pendingBashMessages = [];
+		for (const bashMessage of pending) {
+			await this.sessionManager.appendMessage(bashMessage);
+		}
 	}
 
 	// =========================================================================
@@ -8418,11 +8456,11 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Set a display name for the current session.
+	 * Set a display name for the current session. Resolves after the name commits.
 	 */
-	setSessionName(name: string): void {
+	async setSessionName(name: string): Promise<void> {
 		this._assertActive();
-		this.sessionManager.appendSessionInfo(name);
+		await this.sessionManager.appendSessionInfo(name);
 		const resolvedName = this.sessionManager.getSessionName();
 		this._emit({
 			type: "session_info_changed",
@@ -8475,7 +8513,7 @@ export class AgentSession {
 				);
 				assertConversationGenerationCurrent?.();
 				if (name && !this._disposed && !this.sessionManager.getSessionName()) {
-					this.setSessionName(name);
+					await this.setSessionName(name);
 				}
 			} catch {
 				// Naming is cosmetic; the session keeps its id-derived fallback.
@@ -9137,7 +9175,6 @@ export class AgentSession {
 	 */
 	async exportToHtml(outputPath?: string): Promise<string> {
 		this._assertActive();
-		await this.sessionManager.flush();
 		const configuredThemeName = this.settingsManager.getTheme();
 		const themeName = configuredThemeName && getThemeByName(configuredThemeName) ? configuredThemeName : undefined;
 

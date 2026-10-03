@@ -30,7 +30,7 @@ async function setup(options: HarnessOptions) {
 		...options,
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("remaining foundation test");
+	await harness.session.setSessionName("remaining foundation test");
 	return harness;
 }
 function consumer(run: (task: ExtensionWorkTaskContext) => Promise<void>, extra?: ExtensionFactory) {

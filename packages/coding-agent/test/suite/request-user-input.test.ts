@@ -42,7 +42,7 @@ describe("native structured questions", () => {
 			...options,
 		});
 		harnesses.push(harness);
-		harness.session.setSessionName("Structured question tests");
+		await harness.session.setSessionName("Structured question tests");
 		return harness;
 	}
 
@@ -174,8 +174,8 @@ describe("native structured questions", () => {
 		const h = await setup();
 		await bind(h);
 		await h.session.setAgentMode("plan");
-		const draft = h.session.updatePlan({ steps: [{ text: "Implement the requested change" }] });
-		const ready = h.session.submitPlan({
+		const draft = await h.session.updatePlan({ steps: [{ text: "Implement the requested change" }] });
+		const ready = await h.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Question authority",

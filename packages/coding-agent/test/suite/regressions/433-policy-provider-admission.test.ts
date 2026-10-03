@@ -87,7 +87,7 @@ describe("#433 provider handoff diagnostics", () => {
 				],
 			});
 			try {
-				harness.session.setSessionName("handoff diagnostics");
+				await harness.session.setSessionName("handoff diagnostics");
 				policy = harness.session.registerTurnPolicy({ beforeToolCall: () => undefined });
 				const stream = harness.control.getStreamFn();
 				harness.control.setStreamFn((model, context, options) => {
@@ -183,7 +183,7 @@ describe("#433 managed task result exposure", () => {
 			],
 		});
 		try {
-			harness.session.setSessionName("task result fence");
+			await harness.session.setSessionName("task result fence");
 			if (layer === "host") {
 				const original: AgentSessionTurnPolicy = {
 					beforeToolCall: () => (restricted ? { block: true } : undefined),
@@ -240,7 +240,7 @@ describe("#433 host policy ownership", () => {
 			// Foreground and managed callers must use the same owned snapshot.
 			const gate = deferred();
 			const release = deferred();
-			harness.session.setSessionName("policy ownership");
+			await harness.session.setSessionName("policy ownership");
 			harness.setResponses([
 				async () => {
 					gate.resolve();
@@ -404,7 +404,7 @@ describe.each(["collection", "snapshot"] as const)("#433 policy authorization du
 			],
 		});
 		try {
-			harness.session.setSessionName("versioned policy admission");
+			await harness.session.setSessionName("versioned policy admission");
 			if (layer === "host") {
 				const original: AgentSessionTurnPolicy = {
 					beforeToolCall: (event) =>

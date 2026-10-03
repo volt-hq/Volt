@@ -276,7 +276,7 @@ describe("Jobs RPC contract and projection", () => {
 		expect(Compile(RPC_RESPONSE_SCHEMAS.list_jobs).Errors(response)).toEqual([]);
 	});
 
-	it("projects historical job identity and notices without exposing output in metadata", () => {
+	it("projects historical job identity and notices without exposing output in metadata", async () => {
 		const access = createIrohRemotePresetAccess("coding");
 		const authorization: IrohRemoteClientAuthorizationSuccess = {
 			ok: true,
@@ -341,7 +341,7 @@ describe("Jobs RPC contract and projection", () => {
 			projectRpcBackgroundJobDetails({ backgroundJob: { ...backgroundJob, output: undefined } }),
 		).toBeUndefined();
 		const manager = SessionManager.inMemory();
-		manager.appendCustomMessageEntry("background_job_notification", "Job job_123 completed", true);
+		await manager.appendCustomMessageEntry("background_job_notification", "Job job_123 completed", true);
 		expect(projectSessionTranscript(manager).items).toEqual([
 			expect.objectContaining({ role: "system", text: "Job job_123 completed" }),
 		]);

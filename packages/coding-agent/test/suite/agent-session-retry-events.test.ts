@@ -590,7 +590,7 @@ describe("AgentSession retry and event characterization", () => {
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 		});
 		harnesses.push(harness);
-		harness.session.setSessionName("resumed recovery test");
+		await harness.session.setSessionName("resumed recovery test");
 
 		const previousUser = {
 			role: "user",
@@ -601,8 +601,8 @@ describe("AgentSession retry and event characterization", () => {
 			stopReason: "error",
 			error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
 		});
-		harness.sessionManager.appendMessage(previousUser);
-		harness.sessionManager.appendMessage(overflow);
+		await harness.sessionManager.appendMessage(previousUser);
+		await harness.sessionManager.appendMessage(overflow);
 		harness.faux.setSimpleResponses([fauxAssistantMessage("compacted context")]);
 		harness.setResponses([fauxAssistantMessage("recovered previous turn")]);
 

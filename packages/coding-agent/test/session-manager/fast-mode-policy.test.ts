@@ -23,19 +23,19 @@ afterEach(async () => {
 });
 
 describe("SessionManager Fast mode policy", () => {
-	it("reduces Fast independently from thinking and model changes", () => {
+	it("reduces Fast independently from thinking and model changes", async () => {
 		const manager = SessionManager.inMemory();
-		manager.appendThinkingLevelChange("high");
+		await manager.appendThinkingLevelChange("high");
 		expect(manager.buildSessionContext().fastMode).toEqual({ enabled: false });
 
-		manager.appendFastModeChange(true);
+		await manager.appendFastModeChange(true);
 		expect(manager.buildSessionContext()).toMatchObject({
 			thinkingLevel: "high",
 			fastMode: { enabled: true },
 		});
 
-		manager.appendModelChange("openai-codex", "gpt-codex");
-		manager.appendThinkingLevelChange("medium");
+		await manager.appendModelChange("openai-codex", "gpt-codex");
+		await manager.appendThinkingLevelChange("medium");
 		expect(manager.buildSessionContext()).toMatchObject({
 			thinkingLevel: "medium",
 			model: { provider: "openai-codex", modelId: "gpt-codex" },
@@ -43,13 +43,13 @@ describe("SessionManager Fast mode policy", () => {
 		});
 	});
 
-	it("keeps sibling branch states independent", () => {
+	it("keeps sibling branch states independent", async () => {
 		const manager = SessionManager.inMemory();
-		const baseId = manager.appendThinkingLevelChange("high");
-		const enabledId = manager.appendFastModeChange(true);
+		const baseId = await manager.appendThinkingLevelChange("high");
+		const enabledId = await manager.appendFastModeChange(true);
 
-		manager.branch(baseId);
-		const disabledId = manager.appendFastModeChange(false);
+		await manager.branch(baseId);
+		const disabledId = await manager.appendFastModeChange(false);
 
 		expect(buildSessionContext(manager.getEntries(), enabledId).fastMode).toEqual({ enabled: true });
 		expect(buildSessionContext(manager.getEntries(), disabledId).fastMode).toEqual({ enabled: false });
@@ -58,9 +58,8 @@ describe("SessionManager Fast mode policy", () => {
 	it("durably stores first-turn Fast state without exposing an empty session in normal lists", async () => {
 		const dir = createTempDir();
 		const manager = await SessionManager.create(dir, dir);
-		manager.appendThinkingLevelChange("high");
-		manager.appendFastModeChange(true);
-		await manager.flush();
+		await manager.appendThinkingLevelChange("high");
+		await manager.appendFastModeChange(true);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
@@ -78,11 +77,10 @@ describe("SessionManager Fast mode policy", () => {
 	it("durably stores a message-free branched session with Fast state", async () => {
 		const dir = createTempDir();
 		const manager = await SessionManager.create(dir, dir);
-		manager.appendThinkingLevelChange("high");
-		const fastEntryId = manager.appendFastModeChange(true);
+		await manager.appendThinkingLevelChange("high");
+		const fastEntryId = await manager.appendFastModeChange(true);
 
 		const branchedRef = await manager.createBranchedSession(fastEntryId);
-		await manager.flush();
 		if (!branchedRef) throw new Error("Expected a persisted branched reference");
 
 		const reopened = await SessionManager.openReadOnly(branchedRef);
@@ -96,9 +94,8 @@ describe("SessionManager Fast mode policy", () => {
 	it("round-trips both Fast policy states through SQLite", async () => {
 		const dir = createTempDir();
 		const manager = await SessionManager.create(dir, dir);
-		manager.appendFastModeChange(true);
-		manager.appendFastModeChange(false);
-		await manager.flush();
+		await manager.appendFastModeChange(true);
+		await manager.appendFastModeChange(false);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
@@ -111,8 +108,7 @@ describe("SessionManager Fast mode policy", () => {
 		const sessionDir = join(agentDir, "sessions", "workspace-sessions");
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", agentDir);
 		const manager = await SessionManager.create(cwd, sessionDir);
-		manager.appendFastModeChange(true);
-		await manager.flush();
+		await manager.appendFastModeChange(true);
 
 		expect(await SessionManager.listAll()).toEqual([]);
 		expect(await SessionManager.listAll(undefined, { includeMessageFreeDurable: true })).toMatchObject([

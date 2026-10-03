@@ -233,11 +233,11 @@ describe("durable review state", () => {
 		for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 	});
 
-	it("hydrates paginated runs and applies branch-local finding transitions", () => {
+	it("hydrates paginated runs and applies branch-local finding transitions", async () => {
 		const manager = SessionManager.inMemory("/tmp/review-state");
-		const branchPoint = manager.appendCustomEntry("test.branch-point", { value: true });
-		appendReviewRun(manager, record("run-1", 1));
-		appendReviewFindingTransition(manager, {
+		const branchPoint = await manager.appendCustomEntry("test.branch-point", { value: true });
+		await appendReviewRun(manager, record("run-1", 1));
+		await appendReviewFindingTransition(manager, {
 			runId: "run-1",
 			findingId: "finding-1",
 			status: "dismissed",
@@ -245,7 +245,7 @@ describe("durable review state", () => {
 		});
 		expect(listReviewRuns(manager).runs[0]?.result?.findings[0]?.status).toBe("dismissed");
 		expect(exportReviewFeedback(manager).outcomes).toHaveLength(1);
-		appendReviewPublication(manager, {
+		await appendReviewPublication(manager, {
 			runId: "run-1",
 			reviewId: 42,
 			url: "https://example.test/review/42",
@@ -259,26 +259,26 @@ describe("durable review state", () => {
 		});
 		expect(exportReviewFeedback(manager).outcomes).toHaveLength(1);
 
-		manager.branch(branchPoint);
-		appendReviewRun(manager, record("run-2", 2));
+		await manager.branch(branchPoint);
+		await appendReviewRun(manager, record("run-2", 2));
 		expect(listReviewRuns(manager).runs.map((run) => run.runId)).toEqual(["run-2"]);
 	});
 
-	it("captures bounded effective review state without copying model context", () => {
+	it("captures bounded effective review state without copying model context", async () => {
 		const source = SessionManager.inMemory("/tmp/review-handoff-source");
-		source.appendMessage({ role: "user", content: "SOURCE_ONLY_DISCUSSION", timestamp: 1 });
+		await source.appendMessage({ role: "user", content: "SOURCE_ONLY_DISCUSSION", timestamp: 1 });
 		for (let index = 0; index < MAX_HYDRATED_REVIEW_RUNS + 2; index++) {
-			appendReviewRun(source, record(`run-${index}`, index));
+			await appendReviewRun(source, record(`run-${index}`, index));
 		}
 		const retainedRunId = `run-${MAX_HYDRATED_REVIEW_RUNS + 1}`;
-		acknowledgeReviewRun(source, retainedRunId, 123);
-		appendReviewFindingTransition(source, {
+		await acknowledgeReviewRun(source, retainedRunId, 123);
+		await appendReviewFindingTransition(source, {
 			runId: retainedRunId,
 			findingId: "finding-1",
 			status: "accepted",
 			createdAt: 10,
 		});
-		appendReviewFindingTransition(source, {
+		await appendReviewFindingTransition(source, {
 			runId: retainedRunId,
 			findingId: "finding-1",
 			status: "dismissed",
@@ -286,13 +286,13 @@ describe("durable review state", () => {
 			note: "Verified against the current branch.",
 			createdAt: 20,
 		});
-		appendReviewFindingTransition(source, {
+		await appendReviewFindingTransition(source, {
 			runId: "run-0",
 			findingId: "finding-1",
 			status: "fixed",
 			createdAt: 30,
 		});
-		source.appendCustomEntry(REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE, {
+		await source.appendCustomEntry(REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE, {
 			schemaVersion: 1,
 			runId: retainedRunId,
 			acknowledgedAt: "invalid",
@@ -319,7 +319,7 @@ describe("durable review state", () => {
 		]);
 
 		const target = SessionManager.inMemory("/tmp/review-handoff-target");
-		restoreReviewStateFromHandoff(target, snapshot);
+		await restoreReviewStateFromHandoff(target, snapshot);
 
 		expect(listReviewRuns(target, { limit: 50 }).runs).toHaveLength(MAX_HYDRATED_REVIEW_RUNS);
 		expect(getReviewRun(target, "run-0")).toBeUndefined();
@@ -371,8 +371,7 @@ describe("durable review state", () => {
 			});
 			await appendReviewRunDurably(manager, run);
 			const seed = createReviewSeedMessage(run);
-			manager.appendCustomMessageEntry(seed.customType, seed.content, seed.display, seed.details);
-			await manager.flush();
+			await manager.appendCustomMessageEntry(seed.customType, seed.content, seed.display, seed.details);
 			const ref = manager.getSessionRef()!;
 			await manager.closePersistence();
 			const reopened = await SessionManager.open(ref);
@@ -462,20 +461,20 @@ describe("durable review state", () => {
 		directories.push(root);
 		const manager = await SessionManager.create(root, join(root, "sessions"));
 		await appendReviewRunDurably(manager, record("run-acknowledged", 1));
-		const branchPoint = manager.appendCustomEntry("test.branch-point", { value: true });
-		manager.appendCustomEntry(REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE, {
+		const branchPoint = await manager.appendCustomEntry("test.branch-point", { value: true });
+		await manager.appendCustomEntry(REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE, {
 			schemaVersion: 1,
 			runId: "run-acknowledged",
 			acknowledgedAt: "not-a-number",
 		});
 		expect(getReviewRun(manager, "run-acknowledged")?.acknowledgedAt).toBeUndefined();
 
-		expect(acknowledgeReviewRun(manager, "run-acknowledged", 123)).toEqual({
+		expect(await acknowledgeReviewRun(manager, "run-acknowledged", 123)).toEqual({
 			schemaVersion: 1,
 			runId: "run-acknowledged",
 			acknowledgedAt: 123,
 		});
-		expect(acknowledgeReviewRun(manager, "run-acknowledged", 456).acknowledgedAt).toBe(123);
+		expect((await acknowledgeReviewRun(manager, "run-acknowledged", 456)).acknowledgedAt).toBe(123);
 		expect(
 			manager
 				.getBranch()
@@ -486,7 +485,6 @@ describe("durable review state", () => {
 						typeof (entry.data as { acknowledgedAt?: unknown } | undefined)?.acknowledgedAt === "number",
 				).length,
 		).toBe(1);
-		await manager.flush();
 
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
@@ -498,12 +496,12 @@ describe("durable review state", () => {
 		});
 
 		const copied = SessionManager.inMemory("/tmp/review-ack-copy");
-		appendReviewRun(copied, getReviewRun(reopened, "run-acknowledged")!);
+		await appendReviewRun(copied, getReviewRun(reopened, "run-acknowledged")!);
 		expect(getReviewRun(copied, "run-acknowledged")?.acknowledgedAt).toBeUndefined();
 
-		manager.branch(branchPoint);
+		await manager.branch(branchPoint);
 		expect(getReviewRun(manager, "run-acknowledged")?.acknowledgedAt).toBeUndefined();
-		expect(() => acknowledgeReviewRun(manager, "missing", 789)).toThrow("Unknown durable review run");
+		await expect(acknowledgeReviewRun(manager, "missing", 789)).rejects.toThrow("Unknown durable review run");
 	});
 
 	it("survives session-manager restart and paginates with opaque cursors", async () => {
@@ -513,8 +511,8 @@ describe("durable review state", () => {
 		mkdirSync(join(root, "sessions"), { recursive: true });
 		const manager = await SessionManager.create(root, join(root, "sessions"));
 		const messageTimestamp = Date.now();
-		manager.appendMessage({ role: "user", content: "Review the branch", timestamp: messageTimestamp });
-		manager.appendMessage({
+		await manager.appendMessage({ role: "user", content: "Review the branch", timestamp: messageTimestamp });
+		await manager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "Starting review" }],
 			api: "openai-responses",
@@ -531,9 +529,8 @@ describe("durable review state", () => {
 			stopReason: "stop",
 			timestamp: messageTimestamp + 1,
 		});
-		appendReviewRun(manager, record("run-1", 1));
-		appendReviewRun(manager, record("run-2", 2));
-		await manager.flush();
+		await appendReviewRun(manager, record("run-1", 1));
+		await appendReviewRun(manager, record("run-2", 2));
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 		const reopened = await SessionManager.openReadOnly(ref);
@@ -543,9 +540,9 @@ describe("durable review state", () => {
 		expect(listReviewRuns(reopened, { cursor: first.nextCursor, limit: 1 }).runs[0]?.runId).toBe("run-1");
 	});
 
-	it("plans compatible incremental scope and reconciles durable finding ids", () => {
+	it("plans compatible incremental scope and reconciles durable finding ids", async () => {
 		const manager = SessionManager.inMemory("/tmp/review-state");
-		appendReviewRun(manager, record("run-1", 1, [finding({ status: "accepted" })]));
+		await appendReviewRun(manager, record("run-1", 1, [finding({ status: "accepted" })]));
 		const unchanged = planIncrementalReview(manager, snapshot("blob-run-1"), {
 			scope: [],
 			effort: "standard",
@@ -573,7 +570,7 @@ describe("durable review state", () => {
 
 		const boundedInventory = record("run-2", 2);
 		boundedInventory.target.files = [];
-		appendReviewRun(manager, boundedInventory);
+		await appendReviewRun(manager, boundedInventory);
 		expect(
 			planIncrementalReview(manager, snapshot("newer-blob", "newer-hunk"), {
 				scope: [],
@@ -584,7 +581,7 @@ describe("durable review state", () => {
 		).toMatchObject({ mode: "full", fallbackReason: expect.stringContaining("inventory exceeded") });
 	});
 
-	it("persists only PR context metadata and preserves incremental continuity until that context changes", () => {
+	it("persists only PR context metadata and preserves incremental continuity until that context changes", async () => {
 		const manager = SessionManager.inMemory("/tmp/review-state");
 		const rawMarker = "PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT";
 		const firstSnapshot = prSnapshot("blob-context", "1".repeat(64), rawMarker);
@@ -614,7 +611,7 @@ describe("durable review state", () => {
 			fingerprint: "1".repeat(64),
 		});
 		expect(JSON.stringify(firstRecord)).not.toContain(rawMarker);
-		appendReviewRun(manager, firstRecord);
+		await appendReviewRun(manager, firstRecord);
 
 		expect(
 			planIncrementalReview(manager, prSnapshot("blob-context", "1".repeat(64), "other", "c".repeat(40)), controls),
@@ -631,10 +628,10 @@ describe("durable review state", () => {
 		});
 	});
 
-	it("honors an explicitly requested incremental parent instead of the newest run", () => {
+	it("honors an explicitly requested incremental parent instead of the newest run", async () => {
 		const manager = SessionManager.inMemory("/tmp/review-state");
-		appendReviewRun(manager, record("run-1", 1));
-		appendReviewRun(manager, record("run-2", 2));
+		await appendReviewRun(manager, record("run-1", 1));
+		await appendReviewRun(manager, record("run-2", 2));
 		const plan = planIncrementalReview(
 			manager,
 			snapshot("blob-run-1"),
@@ -653,9 +650,9 @@ describe("durable review state", () => {
 		});
 	});
 
-	it("re-reviews files when Git metadata changes", () => {
+	it("re-reviews files when Git metadata changes", async () => {
 		const manager = SessionManager.inMemory("/tmp/review-state");
-		appendReviewRun(manager, record("run-1", 1));
+		await appendReviewRun(manager, record("run-1", 1));
 		const controls = {
 			scope: [],
 			effort: "standard" as const,
@@ -677,7 +674,7 @@ describe("durable review state", () => {
 		]);
 	});
 
-	it("does not inherit findings across prior-to-current rename lineages", () => {
+	it("does not inherit findings across prior-to-current rename lineages", async () => {
 		const manager = SessionManager.inMemory("/tmp/review-state");
 		const previous = record("renamed-run", 1, [
 			finding({ changeLocation: { path: "src/intermediate-value.ts", side: "head", startLine: 2, endLine: 2 } }),
@@ -688,7 +685,7 @@ describe("durable review state", () => {
 			previousPath: "src/value.ts",
 			status: "renamed",
 		};
-		appendReviewRun(manager, previous);
+		await appendReviewRun(manager, previous);
 		const controls = {
 			scope: [],
 			effort: "standard" as const,
@@ -728,7 +725,7 @@ describe("durable review state", () => {
 		expect(plan(typeChangedSource)).toMatchObject({ changedPaths: ["src/value.ts"], priorOpenFindings: [] });
 	});
 
-	it("falls back to full coverage for incomplete, narrower, or uncovered parents", () => {
+	it("falls back to full coverage for incomplete, narrower, or uncovered parents", async () => {
 		const manager = SessionManager.inMemory("/tmp/review-state");
 		const controls = {
 			scope: [],
@@ -739,7 +736,7 @@ describe("durable review state", () => {
 
 		const incomplete = record("incomplete", 1);
 		incomplete.status = "incomplete";
-		appendReviewRun(manager, incomplete);
+		await appendReviewRun(manager, incomplete);
 		expect(
 			planIncrementalReview(manager, snapshot("blob-incomplete"), controls, {
 				parentRunId: incomplete.runId,
@@ -748,7 +745,7 @@ describe("durable review state", () => {
 
 		const narrower = record("narrower", 2);
 		narrower.options.scope = ["src/value.ts"];
-		appendReviewRun(manager, narrower);
+		await appendReviewRun(manager, narrower);
 		expect(
 			planIncrementalReview(manager, snapshot("blob-narrower"), controls, {
 				parentRunId: narrower.runId,
@@ -757,7 +754,7 @@ describe("durable review state", () => {
 
 		const uncovered = record("uncovered", 3);
 		uncovered.result!.coverage.exclusions = [{ path: "src/value.ts", reason: "Excluded by prior scope." }];
-		appendReviewRun(manager, uncovered);
+		await appendReviewRun(manager, uncovered);
 		expect(
 			planIncrementalReview(manager, snapshot("blob-uncovered"), controls, {
 				parentRunId: uncovered.runId,

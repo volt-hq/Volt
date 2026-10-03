@@ -24,8 +24,7 @@ async function storedSession(): Promise<{ sessionDir: string; ref: SessionRefere
 	cleanups.push(() => rmSync(root, { recursive: true, force: true }));
 	const sessionDir = join(root, "sessions");
 	const manager = await SessionManager.create(root, sessionDir);
-	manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
-	await manager.flush();
+	await manager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
 	const ref = manager.getSessionRef()!;
 	await manager.closePersistence();
 	return { sessionDir, ref };

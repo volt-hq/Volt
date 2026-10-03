@@ -274,7 +274,7 @@ describe("SubagentManager", () => {
 		});
 		const parentSessionManager = await SessionManager.create(parentRoot, join(parentRoot, "sessions"));
 		cleanups.push(() => parentSessionManager.closePersistence());
-		parentSessionManager.appendMessage({
+		await parentSessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "parent prompt" }],
 			timestamp: 1,
@@ -679,8 +679,8 @@ describe("SubagentManager", () => {
 				fauxAssistantMessage("continued after compaction"),
 			],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("overflow child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("overflow child");
 				childSessionManager = event.runtime.session.sessionManager;
 			},
 		});
@@ -748,8 +748,8 @@ describe("SubagentManager", () => {
 			],
 			simpleResponses: [fauxAssistantMessage("compacted context")],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("settlement child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("settlement child");
 			},
 		});
 		const handle = await manager.start();
@@ -837,12 +837,12 @@ describe("SubagentManager", () => {
 		const finishTaskResponse = createDeferred();
 		const agentEnds: SubagentEndEvent[] = [];
 		const resumedSession = SessionManager.inMemory(tmpdir());
-		resumedSession.appendMessage({
+		await resumedSession.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "previous child task" }],
 			timestamp: Date.now() - 1,
 		});
-		resumedSession.appendMessage(
+		await resumedSession.appendMessage(
 			fauxAssistantMessage("", {
 				stopReason: "error",
 				error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
@@ -859,8 +859,8 @@ describe("SubagentManager", () => {
 				},
 			],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("resumed child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("resumed child");
 			},
 		});
 		cleanups.push(() => finishTaskResponse.resolve());
@@ -915,8 +915,8 @@ describe("SubagentManager", () => {
 				},
 			],
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("failing compaction child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("failing compaction child");
 				childSessionManager = event.runtime.session.sessionManager;
 			},
 		});
@@ -968,8 +968,8 @@ describe("SubagentManager", () => {
 				compaction: { enabled: false },
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
 			},
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("retry child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("retry child");
 			},
 		});
 		cleanups.push(() => finishRetryResponse.resolve());
@@ -1021,8 +1021,8 @@ describe("SubagentManager", () => {
 				compaction: { enabled: false },
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
 			},
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("aborted retry child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("aborted retry child");
 			},
 		});
 		const handle = await manager.start();
@@ -1078,8 +1078,8 @@ describe("SubagentManager", () => {
 				compaction: { enabled: false },
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 60_000 },
 			},
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("scope-aborted retry child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("scope-aborted retry child");
 			},
 		});
 		const handle = await manager.start({ delegationScope: scope });
@@ -1694,8 +1694,8 @@ describe("SubagentManager", () => {
 			onRuntimeCreated: async (event) => {
 				childSession = event.runtime.session;
 				await childSession.setAgentMode("plan");
-				const draft = childSession.updatePlan({ steps: [{ text: "Finish the delegated implementation" }] });
-				const ready = childSession.submitPlan({
+				const draft = await childSession.updatePlan({ steps: [{ text: "Finish the delegated implementation" }] });
+				const ready = await childSession.submitPlan({
 					planId: draft.id,
 					expectedRevision: draft.revision,
 					title: "Finish delegated implementation",
@@ -1780,8 +1780,8 @@ describe("SubagentManager", () => {
 			onRuntimeCreated: async (event) => {
 				childSession = event.runtime.session;
 				await childSession.setAgentMode("plan");
-				const draft = childSession.updatePlan({ steps: [{ text: "Finish the delegated implementation" }] });
-				const ready = childSession.submitPlan({
+				const draft = await childSession.updatePlan({ steps: [{ text: "Finish the delegated implementation" }] });
+				const ready = await childSession.submitPlan({
 					planId: draft.id,
 					expectedRevision: draft.revision,
 					title: "Finish delegated implementation",
@@ -3007,8 +3007,8 @@ describe("SubagentManager", () => {
 				compaction: { enabled: false },
 				retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 },
 			},
-			onRuntimeCreated: (event) => {
-				event.runtime.session.setSessionName("disposed retry child");
+			onRuntimeCreated: async (event) => {
+				await event.runtime.session.setSessionName("disposed retry child");
 				const waitForIdle = event.runtime.session.waitForIdle.bind(event.runtime.session);
 				event.runtime.session.waitForIdle = async () => {
 					await waitForIdle();

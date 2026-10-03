@@ -370,8 +370,7 @@ async function createAgentSessionWithTrackedResources(
 		sessionManager = await SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
 		onDefaultSessionManagerCreated(sessionManager);
 	}
-	seedReviewDiscussionSession(sessionManager);
-	await sessionManager.flush();
+	await seedReviewDiscussionSession(sessionManager);
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd: projectCwd, agentDir, settingsManager });
@@ -395,15 +394,13 @@ async function createAgentSessionWithTrackedResources(
 	// Check if session has existing branch state to restore, including message-free durable policy.
 	let existingSession = sessionManager.buildSessionContext();
 	if (options.agentMode !== undefined && existingSession.planning.mode !== options.agentMode) {
-		sessionManager.appendPlanningState({ ...existingSession.planning, mode: options.agentMode });
-		await sessionManager.flush();
+		await sessionManager.appendPlanningState({ ...existingSession.planning, mode: options.agentMode });
 		existingSession = sessionManager.buildSessionContext();
 	}
 	if (options.sessionStartEvent?.reason !== "new" && planningStateNeedsCheckpoint(existingSession.planning)) {
 		const checkpoint = formatPlanCheckpoint(existingSession.planning);
 		if (checkpoint && !hasCanonicalPlanningMessage(existingSession.messages, existingSession.planning, checkpoint)) {
-			sessionManager.appendCustomMessageEntry(PLAN_CHECKPOINT_CUSTOM_TYPE, checkpoint, false);
-			await sessionManager.flush();
+			await sessionManager.appendCustomMessageEntry(PLAN_CHECKPOINT_CUSTOM_TYPE, checkpoint, false);
 			existingSession = sessionManager.buildSessionContext();
 		}
 	}
@@ -641,12 +638,11 @@ async function createAgentSessionWithTrackedResources(
 	// Persist explicit startup overrides and fill any policy dimensions that were
 	// absent from setup-only sessions (for example a pre-seeded Fast policy).
 	if (model && (options.model !== undefined || existingSession.model === null)) {
-		sessionManager.appendModelChange(model.provider, model.id);
+		await sessionManager.appendModelChange(model.provider, model.id);
 	}
 	if (options.thinkingLevel !== undefined || !hasThinkingEntry) {
-		sessionManager.appendThinkingLevelChange(thinkingLevel);
+		await sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}
-	await sessionManager.flush();
 
 	const gitContextProvider = options.gitContextProvider ?? new GitContextProvider(cwd);
 	if (options.gitContextProvider === undefined) {

@@ -72,13 +72,12 @@ describe("SessionManager starting Git context", () => {
 		const sessionDir = join(cwd, "sessions");
 		const session = await SessionManager.create(cwd, sessionDir, { id: "starting-git-session" });
 
-		expect(session.recordStartingGitContext(session.getSessionId(), STARTING_GIT_CONTEXT)).toBe(true);
+		expect(await session.recordStartingGitContext(session.getSessionId(), STARTING_GIT_CONTEXT)).toBe(true);
 		expect(session.getStartingGitContext()).toEqual(STARTING_GIT_CONTEXT);
-		expect(session.recordStartingGitContext(session.getSessionId(), null)).toBe(false);
+		expect(await session.recordStartingGitContext(session.getSessionId(), null)).toBe(false);
 
-		session.appendMessage(assistantMessage("persist the session"));
+		await session.appendMessage(assistantMessage("persist the session"));
 		expect(session.buildSessionContext().messages).toHaveLength(1);
-		await session.flush();
 
 		const sessionRef = session.getSessionRef();
 		if (!sessionRef) throw new Error("Expected a persisted session reference");
@@ -86,42 +85,38 @@ describe("SessionManager starting Git context", () => {
 		await session.closePersistence();
 		const reopened = await SessionManager.open(sessionRef);
 		expect(reopened.getStartingGitContext()).toEqual(STARTING_GIT_CONTEXT);
-		expect(reopened.recordStartingGitContext(reopened.getSessionId(), null)).toBe(false);
+		expect(await reopened.recordStartingGitContext(reopened.getSessionId(), null)).toBe(false);
 
 		const infos = await SessionManager.list(cwd, sessionDir);
 		expect(infos).toHaveLength(1);
 		expect(infos[0]?.startingGitContext).toEqual(STARTING_GIT_CONTEXT);
 	});
 
-	it("owns starting Git context across input, getter, and queued projection mutation", async () => {
+	it("owns starting Git context across input and getter mutation", async () => {
 		const cwd = makeTempDir();
 		const sessionDir = join(cwd, "sessions");
 		const session = await SessionManager.create(cwd, sessionDir, { id: "starting-git-ownership" });
 		const supplied = structuredClone(STARTING_GIT_CONTEXT);
 
-		expect(session.recordStartingGitContext(session.getSessionId(), supplied)).toBe(true);
+		const recorded = session.recordStartingGitContext(session.getSessionId(), supplied);
 		supplied.repository = "mutated input";
-		const beforeFlush = session.getStartingGitContext();
-		if (!beforeFlush) throw new Error("Expected starting Git context before flush");
-		beforeFlush.repository = "mutated getter before flush";
-		await session.flush();
+		expect(await recorded).toBe(true);
 
-		const afterFlush = session.getStartingGitContext();
-		if (!afterFlush) throw new Error("Expected starting Git context after flush");
-		afterFlush.repository = "mutated getter after flush";
-		session.appendSessionInfo("trigger another projection write");
-		await session.flush();
+		const committed = session.getStartingGitContext();
+		if (!committed) throw new Error("Expected committed starting Git context");
+		committed.repository = "mutated getter";
+		await session.appendSessionInfo("trigger another projection write");
 
 		const reopened = await SessionManager.openReadOnly(session.getSessionRef()!);
 		expect(reopened.getStartingGitContext()).toEqual(STARTING_GIT_CONTEXT);
 	});
 
-	it("rejects a delayed observation for a replaced session id", () => {
+	it("rejects a delayed observation for a replaced session id", async () => {
 		const session = SessionManager.inMemory(makeTempDir());
 		const replacedSessionId = session.getSessionId();
-		session.newSession({ id: "replacement" });
+		await session.newSession({ id: "replacement" });
 
-		expect(session.recordStartingGitContext(replacedSessionId, STARTING_GIT_CONTEXT)).toBe(false);
+		expect(await session.recordStartingGitContext(replacedSessionId, STARTING_GIT_CONTEXT)).toBe(false);
 		expect(session.getStartingGitContext()).toBeUndefined();
 	});
 });

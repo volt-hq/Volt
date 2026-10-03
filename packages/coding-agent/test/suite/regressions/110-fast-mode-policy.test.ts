@@ -135,7 +135,7 @@ describe("issue #110: durable Fast mode state", () => {
 			const first = await createRuntime({ provider, explicitThinking: "high" });
 			const initialSettings = settingsSnapshot(first.settings);
 
-			first.session.setFastModeEnabled(true);
+			await first.session.setFastModeEnabled(true);
 			expect(first.session.fastModeEnabled).toBe(true);
 			expect(first.session.thinkingLevel).toBe("high");
 			expect(first.manager.buildSessionContext().fastMode).toEqual({ enabled: true });
@@ -156,7 +156,7 @@ describe("issue #110: durable Fast mode state", () => {
 			expect(resumed.session.thinkingLevel).toBe("high");
 			expect(fastDescriptorEnabled(resumed.session)).toBe(true);
 
-			resumed.session.setFastModeEnabled(false);
+			await resumed.session.setFastModeEnabled(false);
 			expect(resumed.session.fastModeEnabled).toBe(false);
 			expect(resumed.session.thinkingLevel).toBe("high");
 			expect(settingsSnapshot(first.settings)).toEqual(initialSettings);
@@ -172,7 +172,7 @@ describe("issue #110: durable Fast mode state", () => {
 			],
 			explicitThinking: "high",
 		});
-		first.session.setFastModeEnabled(true);
+		await first.session.setFastModeEnabled(true);
 		const sessionRef = first.manager.getSessionRef()!;
 		const secondModel = first.modelRegistry.find("openai", "second")!;
 		first.session.dispose();
@@ -202,7 +202,7 @@ describe("issue #110: durable Fast mode state", () => {
 			explicitThinking: "high",
 			settings: sharedSettings,
 		});
-		first.session.setFastModeEnabled(true);
+		await first.session.setFastModeEnabled(true);
 		const firstRef = first.manager.getSessionRef()!;
 		const secondRef = second.manager.getSessionRef()!;
 		first.session.dispose();
@@ -248,7 +248,7 @@ describe("issue #110: durable Fast mode state", () => {
 			if (event.type === "ui_action_state_changed") fastStates.push(event.state.value === true);
 		});
 
-		runtime.session.setFastModeEnabled(true);
+		await runtime.session.setFastModeEnabled(true);
 		await runtime.session.setThinkingLevel("medium", { persistDefault: false });
 		expect(runtime.session.fastModeEnabled).toBe(true);
 		expect(runtime.session.thinkingLevel).toBe("medium");
@@ -269,16 +269,16 @@ describe("issue #110: durable Fast mode state", () => {
 
 	it("restores branch-local Fast and thinking states before publishing navigation", async () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		const branchPoint = runtime.manager.appendMessage({
+		const branchPoint = await runtime.manager.appendMessage({
 			role: "user",
 			content: "branch point",
 			timestamp: Date.now(),
 		});
-		runtime.session.setFastModeEnabled(true);
+		await runtime.session.setFastModeEnabled(true);
 		const enabledLeaf = runtime.manager.getLeafId()!;
 
-		runtime.manager.branch(branchPoint);
-		runtime.session.setFastModeEnabled(false);
+		await runtime.manager.branch(branchPoint);
+		await runtime.session.setFastModeEnabled(false);
 		runtime.session.setThinkingLevel("medium", { persistDefault: false });
 		const generationSnapshots: Array<{ enabled: boolean; thinkingLevel: ThinkingLevel }> = [];
 		runtime.session.subscribeConversationGenerationChanges(() => {
@@ -301,14 +301,14 @@ describe("issue #110: durable Fast mode state", () => {
 		{ initial: true, next: false, error: "injected disable failure" },
 	])("keeps runtime state unchanged when a durable transition fails", async ({ initial, next, error }) => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		if (initial) runtime.session.setFastModeEnabled(true);
+		if (initial) await runtime.session.setFastModeEnabled(true);
 		const events: AgentSessionEvent[] = [];
 		runtime.session.subscribe((event) => events.push(event));
-		vi.spyOn(runtime.manager, "appendFastModeChange").mockImplementation(() => {
+		vi.spyOn(runtime.manager, "appendFastModeChange").mockImplementation(async () => {
 			throw new Error(error);
 		});
 
-		expect(() => runtime.session.setFastModeEnabled(next)).toThrow(error);
+		await expect(runtime.session.setFastModeEnabled(next)).rejects.toThrow(error);
 		expect(runtime.session.fastModeEnabled).toBe(initial);
 		expect(runtime.session.thinkingLevel).toBe("high");
 		expect(events).toEqual([]);
@@ -328,8 +328,8 @@ describe("issue #110: durable Fast mode state", () => {
 		});
 		runtime.session.subscribe((event) => secondEvents.push(event));
 
-		runtime.session.setFastModeEnabled(true);
-		runtime.session.setFastModeEnabled(true);
+		await runtime.session.setFastModeEnabled(true);
+		await runtime.session.setFastModeEnabled(true);
 
 		expect(firstEvents).toEqual([
 			{
@@ -351,7 +351,7 @@ describe("issue #110: durable Fast mode state", () => {
 		});
 		runtime.session.subscribe((event) => observed.push(event));
 
-		expect(() => runtime.session.setFastModeEnabled(true)).not.toThrow();
+		await runtime.session.setFastModeEnabled(true);
 		expect(runtime.session.fastModeEnabled).toBe(true);
 		expect(runtime.session.thinkingLevel).toBe("high");
 		expect(observed.filter((event) => event.type === "ui_action_state_changed")).toHaveLength(1);

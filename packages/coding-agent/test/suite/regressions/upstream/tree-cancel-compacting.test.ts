@@ -23,9 +23,9 @@ describe("issue #3688 tree cancellation compaction state", () => {
 		});
 		harnesses.push(harness);
 
-		const targetId = harness.sessionManager.appendMessage(userMsg("first"));
-		harness.sessionManager.appendMessage(assistantMsg("reply"));
-		const currentLeafId = harness.sessionManager.appendMessage(userMsg("second"));
+		const targetId = await harness.sessionManager.appendMessage(userMsg("first"));
+		await harness.sessionManager.appendMessage(assistantMsg("reply"));
+		const currentLeafId = await harness.sessionManager.appendMessage(userMsg("second"));
 
 		expect(harness.sessionManager.getLeafId()).toBe(currentLeafId);
 
@@ -51,9 +51,9 @@ describe("issue #3688 tree cancellation compaction state", () => {
 		});
 		harnesses.push(harness);
 
-		const targetId = harness.sessionManager.appendMessage(userMsg("first"));
-		harness.sessionManager.appendMessage(assistantMsg("reply"));
-		const currentLeafId = harness.sessionManager.appendMessage(userMsg("second"));
+		const targetId = await harness.sessionManager.appendMessage(userMsg("first"));
+		await harness.sessionManager.appendMessage(assistantMsg("reply"));
+		const currentLeafId = await harness.sessionManager.appendMessage(userMsg("second"));
 
 		await expect(harness.session.navigateTree(targetId, { summarize: true })).rejects.toThrow(
 			"Extension session_before_tree output",

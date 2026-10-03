@@ -65,18 +65,22 @@ describe("issue #24", () => {
 			const third = createAssistantMessage(harness.getModel(), "third", 50, 10, ["read-4"]);
 			const final = createAssistantMessage(harness.getModel(), "final", 0, 12, []);
 
-			harness.sessionManager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-			harness.sessionManager.appendMessage(first);
-			harness.sessionManager.appendMessage(createToolResult("read-1", 3));
-			harness.sessionManager.appendMessage(createToolResult("read-2", 4));
-			const keptUserId = harness.sessionManager.appendMessage({ role: "user", content: "second", timestamp: 5 });
-			harness.sessionManager.appendMessage(second);
-			harness.sessionManager.appendMessage(createToolResult("read-3", 7));
-			harness.sessionManager.appendCompaction("summary", keptUserId, 300);
-			harness.sessionManager.appendMessage({ role: "user", content: "third", timestamp: 9 });
-			harness.sessionManager.appendMessage(third);
-			harness.sessionManager.appendMessage(createToolResult("read-4", 11));
-			harness.sessionManager.appendMessage(final);
+			await harness.sessionManager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+			await harness.sessionManager.appendMessage(first);
+			await harness.sessionManager.appendMessage(createToolResult("read-1", 3));
+			await harness.sessionManager.appendMessage(createToolResult("read-2", 4));
+			const keptUserId = await harness.sessionManager.appendMessage({
+				role: "user",
+				content: "second",
+				timestamp: 5,
+			});
+			await harness.sessionManager.appendMessage(second);
+			await harness.sessionManager.appendMessage(createToolResult("read-3", 7));
+			await harness.sessionManager.appendCompaction("summary", keptUserId, 300);
+			await harness.sessionManager.appendMessage({ role: "user", content: "third", timestamp: 9 });
+			await harness.sessionManager.appendMessage(third);
+			await harness.sessionManager.appendMessage(createToolResult("read-4", 11));
+			await harness.sessionManager.appendMessage(final);
 
 			const definition: SubagentDefinition = {
 				name: "researcher",

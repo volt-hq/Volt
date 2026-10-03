@@ -2,6 +2,7 @@ import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
+import { SessionAtomicAppendError } from "../../../src/core/session-manager.ts";
 import { createHarness, getUserTexts, type Harness } from "../harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -22,12 +23,12 @@ function createUserMessage(text: string): Extract<AgentMessage, { role: "user" }
 
 async function createReadyPlan(harness: Harness): Promise<void> {
 	await harness.session.setAgentMode("plan");
-	const draft = harness.session.updatePlan({
+	const draft = await harness.session.updatePlan({
 		title: "Delivery transaction contract",
 		summary: "Keep planning feedback in the delivery transaction.",
 		steps: [{ text: "Apply the committed feedback" }],
 	});
-	harness.session.submitPlan({
+	await harness.session.submitPlan({
 		planId: draft.id,
 		expectedRevision: draft.revision,
 		title: draft.title!,
@@ -231,7 +232,7 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 		},
 	);
 
-	it("keeps transcript and planning unchanged when planning commit rejects synchronously, then discards explicitly", async () => {
+	it("keeps transcript and planning unchanged when the planning commit rolls back, then discards explicitly", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
 		await createReadyPlan(harness);
@@ -239,12 +240,12 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 		const checkpointBaseline = checkpointCount(harness);
 		const planningBaseline = planningChangeCount(harness);
 		const outcomes: object[] = [];
-		const appendPlanningState = harness.sessionManager.appendPlanningState.bind(harness.sessionManager);
-		vi.spyOn(harness.sessionManager, "appendPlanningState").mockImplementation((planning) => {
-			if (planning.plan?.phase === "draft") {
-				throw new Error("injected planning commit failure");
+		const commitDelivery = harness.sessionManager.commitDelivery.bind(harness.sessionManager);
+		vi.spyOn(harness.sessionManager, "commitDelivery").mockImplementation(async (input) => {
+			if (input.planning?.plan?.phase === "draft") {
+				throw new SessionAtomicAppendError("injected planning commit failure", "rolled_back");
 			}
-			return appendPlanningState(planning);
+			return commitDelivery(input);
 		});
 		harness.session.subscribe((event) => {
 			if (event.type === "client_input_outcome") outcomes.push(event);

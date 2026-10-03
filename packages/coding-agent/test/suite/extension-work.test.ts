@@ -54,7 +54,7 @@ async function setup(options: HarnessOptions = {}) {
 		...options,
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("extension work test");
+	await harness.session.setSessionName("extension work test");
 	return harness;
 }
 

@@ -117,11 +117,11 @@ function assistant(
 	};
 }
 
-function user(session: SessionManager, text: string): string {
+async function user(session: SessionManager, text: string): Promise<string> {
 	return session.appendMessage({ role: "user", content: text, timestamp: assistantTimestamp++ });
 }
 
-function toolResult(session: SessionManager, toolCallId: string, isError = false): string {
+async function toolResult(session: SessionManager, toolCallId: string, isError = false): Promise<string> {
 	return session.appendMessage({
 		role: "toolResult",
 		toolCallId,
@@ -140,13 +140,13 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	it("model, thinking, fast mode, and planning changes", async () => {
 		const session = SessionManager.inMemory();
 		await expectParity(session);
-		session.appendModelChange("openai", "gpt-test");
-		session.appendThinkingLevelChange("high");
-		user(session, "hello");
-		session.appendFastModeChange(true);
-		session.appendMessage(assistant("hi", { provider: "google", model: "gemini-test" }));
-		session.appendPlanningState({ mode: "plan", plan: null });
-		session.appendThinkingLevelChange("low");
+		await session.appendModelChange("openai", "gpt-test");
+		await session.appendThinkingLevelChange("high");
+		await user(session, "hello");
+		await session.appendFastModeChange(true);
+		await session.appendMessage(assistant("hi", { provider: "google", model: "gemini-test" }));
+		await session.appendPlanningState({ mode: "plan", plan: null });
+		await session.appendThinkingLevelChange("low");
 		const state = await expectParity(session);
 		expect(state.context.model).toEqual({ provider: "google", modelId: "gemini-test" });
 		expect(state.context.thinkingLevel).toBe("low");
@@ -156,56 +156,56 @@ describe("conversation kernel parity with coding-agent context building", () => 
 
 	it("compaction keeps the entries from firstKeptEntryId", async () => {
 		const session = SessionManager.inMemory();
-		user(session, "one");
-		session.appendMessage(assistant("reply one"));
-		const kept = user(session, "two");
-		session.appendMessage(assistant("reply two", { toolCallIds: ["call-a"] }));
-		toolResult(session, "call-a");
-		session.appendCompaction("summary of one", kept, 1234);
-		user(session, "three");
-		session.appendCompaction("summary of everything", session.getLeafId()!, 4321, { structured: true }, true);
-		user(session, "four");
+		await user(session, "one");
+		await session.appendMessage(assistant("reply one"));
+		const kept = await user(session, "two");
+		await session.appendMessage(assistant("reply two", { toolCallIds: ["call-a"] }));
+		await toolResult(session, "call-a");
+		await session.appendCompaction("summary of one", kept, 1234);
+		await user(session, "three");
+		await session.appendCompaction("summary of everything", session.getLeafId()!, 4321, { structured: true }, true);
+		await user(session, "four");
 		const state = await expectParity(session);
 		expect(llmRoles(state.context.messages)).toEqual(["compactionSummary", "user", "user"]);
 	});
 
 	it("branch summaries, navigation via leaf entries, and resets", async () => {
 		const session = SessionManager.inMemory();
-		const first = user(session, "first");
-		session.appendMessage(assistant("first reply"));
-		user(session, "abandoned");
-		session.appendMessage(assistant("abandoned reply"));
-		session.branchWithSummary(first, "tried something else");
+		const first = await user(session, "first");
+		await session.appendMessage(assistant("first reply"));
+		await user(session, "abandoned");
+		await session.appendMessage(assistant("abandoned reply"));
+		await session.branchWithSummary(first, "tried something else");
 		await expectParity(session);
-		session.appendMessage(assistant("after summary"));
-		session.branch(first);
+		await session.appendMessage(assistant("after summary"));
+		await session.branch(first);
 		await expectParity(session);
-		session.resetLeaf();
+		await session.resetLeaf();
 		await expectParity(session);
-		session.branchWithSummary(null, "root summary");
-		user(session, "fresh start");
-		session.branchWithSummary(session.getLeafId(), "");
+		await session.branchWithSummary(null, "root summary");
+		await user(session, "fresh start");
+		await session.branchWithSummary(session.getLeafId(), "");
 		const state = await expectParity(session);
 		expect(llmRoles(state.context.messages)).toEqual(["branchSummary", "user"]);
 	});
 
 	it("custom messages, custom entries, labels, names, and host product entries", async () => {
 		const session = SessionManager.inMemory();
-		expect(session.recordStartingGitContext(session.getSessionId(), null)).toBe(true);
-		const greeting = user(session, "hello");
-		session.appendCustomMessageEntry("note", "plain note", true, { source: "test" });
-		session.appendCustomMessageEntry("hidden", [{ type: "text", text: "hidden note" }], false);
-		session.appendMessage({
+		expect(await session.recordStartingGitContext(session.getSessionId(), null)).toBe(true);
+		const greeting = await user(session, "hello");
+		await session.appendCustomMessageEntry("note", "plain note", true, { source: "test" });
+		await session.appendCustomMessageEntry("hidden", [{ type: "text", text: "hidden note" }], false);
+		await session.appendMessage({
 			role: "custom",
 			customType: "inline",
 			content: "custom role message",
 			display: true,
 			timestamp: assistantTimestamp++,
 		});
-		session.appendCustomEntry("state", { count: 1 });
-		session.appendLabelChange(greeting, "start");
-		session.appendSessionInfo("  Parity  ");
-		session.appendMessage({
+		await session.appendCustomEntry("state", { count: 1 });
+		await session.appendLabelChange(greeting, "start");
+		await session.appendSessionInfo("  Parity  ");
+		await session.appendMessage({
 			role: "bashExecution",
 			command: "ls",
 			output: "file",
@@ -214,7 +214,7 @@ describe("conversation kernel parity with coding-agent context building", () => 
 			truncated: false,
 			timestamp: assistantTimestamp++,
 		});
-		session.appendMessage({
+		await session.appendMessage({
 			role: "bashExecution",
 			command: "secret",
 			output: "hidden",
@@ -224,8 +224,8 @@ describe("conversation kernel parity with coding-agent context building", () => 
 			timestamp: assistantTimestamp++,
 			excludeFromContext: true,
 		});
-		session.appendLabelChange(greeting, undefined);
-		session.appendSubagentSpawn({
+		await session.appendLabelChange(greeting, undefined);
+		await session.appendSubagentSpawn({
 			toolCallId: "call-x",
 			subagentId: "sub-1",
 			agent: "worker",
@@ -241,17 +241,17 @@ describe("conversation kernel parity with coding-agent context building", () => 
 
 	it("errored and aborted turns, missing tool results, and rejected tool calls", async () => {
 		const session = SessionManager.inMemory();
-		user(session, "do it");
-		session.appendMessage(assistant("partial", { toolCallIds: ["call-1"], stopReason: "aborted" }));
-		toolResult(session, "call-1", true);
-		user(session, "retry");
-		session.appendMessage(
+		await user(session, "do it");
+		await session.appendMessage(assistant("partial", { toolCallIds: ["call-1"], stopReason: "aborted" }));
+		await toolResult(session, "call-1", true);
+		await user(session, "retry");
+		await session.appendMessage(
 			assistant("bad args", { toolCallIds: ["call-2"], stopReason: "error", invalidArguments: true }),
 		);
-		session.appendMessage(assistant("calling", { toolCallIds: ["call-3", "call-4"] }));
-		toolResult(session, "call-3");
-		user(session, "interrupt");
-		session.appendMessage(assistant("failed", { stopReason: "error" }));
+		await session.appendMessage(assistant("calling", { toolCallIds: ["call-3", "call-4"] }));
+		await toolResult(session, "call-3");
+		await user(session, "interrupt");
+		await session.appendMessage(assistant("failed", { stopReason: "error" }));
 		const state = await expectParity(session);
 		const llm = await buildContext(state, { convertToLlm });
 		expect(llmRoles(llm)).toEqual(["user", "user", "user", "assistant", "toolResult", "toolResult", "user"]);
@@ -260,27 +260,27 @@ describe("conversation kernel parity with coding-agent context building", () => 
 
 	it("client input lifecycles and the durable queue", async () => {
 		const session = SessionManager.inMemory();
-		session.reserveClientInput("client-prompt", "prompt", { message: "typed" });
-		session.transitionClientInput("client-prompt", "started");
+		await session.reserveClientInput("client-prompt", "prompt", { message: "typed" });
+		await session.transitionClientInput("client-prompt", "started");
 		await expectParity(session);
-		session.appendMessage({
+		await session.appendMessage({
 			role: "user",
 			content: "typed",
 			timestamp: assistantTimestamp++,
 			clientMessageId: "client-prompt",
 		});
-		session.reserveClientInput("client-steer", "steer", { message: "steer" });
-		session.markClientInputQueued("client-steer", { delivery: "steer", message: "steer" });
-		session.reserveClientInput("client-follow", "follow_up", { message: "follow" });
-		session.markClientInputQueued("client-follow", { delivery: "follow_up", message: "follow" });
-		session.reserveClientInput("client-failed", "prompt", { message: "nope" });
-		session.transitionClientInput("client-failed", "failed", "rejected");
+		await session.reserveClientInput("client-steer", "steer", { message: "steer" });
+		await session.markClientInputQueued("client-steer", { delivery: "steer", message: "steer" });
+		await session.reserveClientInput("client-follow", "follow_up", { message: "follow" });
+		await session.markClientInputQueued("client-follow", { delivery: "follow_up", message: "follow" });
+		await session.reserveClientInput("client-failed", "prompt", { message: "nope" });
+		await session.transitionClientInput("client-failed", "failed", "rejected");
 		let state = await expectParity(session);
 		expect(clientInputRecovery(state).kind).toBe("replay");
-		session.transitionClientInput("client-follow", "started");
+		await session.transitionClientInput("client-follow", "started");
 		state = await expectParity(session);
 		expect(clientInputRecovery(state).kind).toBe("blocked");
-		session.rollbackClientInput("client-follow");
+		await session.rollbackClientInput("client-follow");
 		state = await expectParity(session);
 		expect(state.clientInputs.queued).toEqual(["client-steer", "client-follow"]);
 	});
@@ -378,17 +378,17 @@ function queuedDelivery(command: ClientInputCommand, behavior: "steer" | "follow
 	return undefined;
 }
 
-function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inputs: string[]): void {
+async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inputs: string[]): Promise<void> {
 	const publicIds = session.getEntries().map((entry) => entry.id);
 	switch (op.kind) {
 		case "user":
-			user(session, op.text);
+			await user(session, op.text);
 			return;
 		case "assistant": {
 			const [provider, model] = MODELS[op.model % MODELS.length] ?? MODELS[0];
 			const ids = Array.from({ length: op.toolCalls }, (_, index) => `call-${toolCalls.length + index + 1}`);
 			toolCalls.push(...ids);
-			session.appendMessage(
+			await session.appendMessage(
 				assistant("text", {
 					toolCallIds: ids,
 					stopReason: op.stopReason,
@@ -400,10 +400,10 @@ function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inpu
 			return;
 		}
 		case "tool_result":
-			toolResult(session, choose(toolCalls, op.pick) ?? "call-unknown", op.isError);
+			await toolResult(session, choose(toolCalls, op.pick) ?? "call-unknown", op.isError);
 			return;
 		case "bash":
-			session.appendMessage({
+			await session.appendMessage({
 				role: "bashExecution",
 				command: "echo",
 				output: "out",
@@ -414,7 +414,7 @@ function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inpu
 			});
 			return;
 		case "custom_role":
-			session.appendMessage({
+			await session.appendMessage({
 				role: "custom",
 				customType: "inline",
 				content: "inline",
@@ -423,7 +423,7 @@ function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inpu
 			});
 			return;
 		case "custom_message":
-			session.appendCustomMessageEntry(
+			await session.appendCustomMessageEntry(
 				"note",
 				op.array ? [{ type: "text", text: "note" }] : "note",
 				op.display,
@@ -431,53 +431,53 @@ function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inpu
 			);
 			return;
 		case "custom":
-			session.appendCustomEntry("state", { at: publicIds.length });
+			await session.appendCustomEntry("state", { at: publicIds.length });
 			return;
 		case "label": {
 			const targetId = choose(publicIds, op.pick);
-			if (targetId !== undefined) session.appendLabelChange(targetId, op.label ?? undefined);
+			if (targetId !== undefined) await session.appendLabelChange(targetId, op.label ?? undefined);
 			return;
 		}
 		case "name":
-			session.appendSessionInfo(op.name);
+			await session.appendSessionInfo(op.name);
 			return;
 		case "model": {
 			const [provider, model] = MODELS[op.pick % MODELS.length] ?? MODELS[0];
-			session.appendModelChange(provider, model);
+			await session.appendModelChange(provider, model);
 			return;
 		}
 		case "thinking":
-			session.appendThinkingLevelChange(op.level);
+			await session.appendThinkingLevelChange(op.level);
 			return;
 		case "fast":
-			session.appendFastModeChange(op.enabled);
+			await session.appendFastModeChange(op.enabled);
 			return;
 		case "planning":
-			session.appendPlanningState({ mode: op.mode, plan: null });
+			await session.appendPlanningState({ mode: op.mode, plan: null });
 			return;
 		case "compaction": {
 			const firstKept = choose(
 				session.getBranch().map((entry) => entry.id),
 				op.pick,
 			);
-			if (firstKept !== undefined) session.appendCompaction(`summary at ${publicIds.length}`, firstKept, 100);
+			if (firstKept !== undefined) await session.appendCompaction(`summary at ${publicIds.length}`, firstKept, 100);
 			return;
 		}
 		case "branch": {
 			const targetId = choose(publicIds, op.pick);
-			if (targetId !== undefined) session.branch(targetId);
+			if (targetId !== undefined) await session.branch(targetId);
 			return;
 		}
 		case "reset":
-			session.resetLeaf();
+			await session.resetLeaf();
 			return;
 		case "branch_summary":
-			session.branchWithSummary(choose([null, ...publicIds], op.pick) ?? null, op.summary);
+			await session.branchWithSummary(choose([null, ...publicIds], op.pick) ?? null, op.summary);
 			return;
 		case "receipt": {
 			const id = `client-${inputs.length + 1}`;
 			const behavior = op.command === "prompt" ? op.behavior : null;
-			session.reserveClientInput(id, op.command, {
+			await session.reserveClientInput(id, op.command, {
 				message: id,
 				...(behavior === null ? {} : { streamingBehavior: behavior }),
 			});
@@ -497,7 +497,7 @@ function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inpu
 			const id = choose(candidates, op.pick);
 			const record = id === undefined ? undefined : session.getClientInput(id);
 			const delivery = record && queuedDelivery(record.command, record.input.streamingBehavior ?? null);
-			if (id !== undefined && delivery) session.markClientInputQueued(id, { delivery, message: id });
+			if (id !== undefined && delivery) await session.markClientInputQueued(id, { delivery, message: id });
 			return;
 		}
 		case "transition": {
@@ -514,9 +514,9 @@ function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inpu
 					: (["rollback", "completed", "failed"] as const),
 				op.choice,
 			);
-			if (next === "rollback") session.rollbackClientInput(id);
-			else if (next === "failed") session.transitionClientInput(id, "failed", "failed");
-			else if (next !== undefined) session.transitionClientInput(id, next);
+			if (next === "rollback") await session.rollbackClientInput(id);
+			else if (next === "failed") await session.transitionClientInput(id, "failed", "failed");
+			else if (next !== undefined) await session.transitionClientInput(id, next);
 			return;
 		}
 		case "complete": {
@@ -525,12 +525,17 @@ function runOp(session: SessionManager, op: SessionOp, toolCalls: string[], inpu
 				op.pick,
 			);
 			if (id !== undefined) {
-				session.appendMessage({ role: "user", content: id, timestamp: assistantTimestamp++, clientMessageId: id });
+				await session.appendMessage({
+					role: "user",
+					content: id,
+					timestamp: assistantTimestamp++,
+					clientMessageId: id,
+				});
 			}
 			return;
 		}
 		case "spawn":
-			session.appendSubagentSpawn({
+			await session.appendSubagentSpawn({
 				toolCallId: `call-${toolCalls.length}`,
 				subagentId: `sub-${publicIds.length}`,
 				agent: "worker",
@@ -549,7 +554,7 @@ describe("conversation kernel parity properties", () => {
 				const toolCalls: string[] = [];
 				const inputs: string[] = [];
 				for (const op of ops) {
-					runOp(session, op, toolCalls, inputs);
+					await runOp(session, op, toolCalls, inputs);
 					await expectParity(session);
 				}
 			}),

@@ -23,36 +23,36 @@ afterEach(async () => {
 });
 
 describe("SessionManager.newSession with custom id", () => {
-	it("uses the provided id instead of generating one", () => {
+	it("uses the provided id instead of generating one", async () => {
 		const session = SessionManager.inMemory();
-		session.newSession({ id: "my-custom-id" });
+		await session.newSession({ id: "my-custom-id" });
 		expect(session.getSessionId()).toBe("my-custom-id");
 	});
 
-	it("allows alphanumeric session ids with interior punctuation", () => {
+	it("allows alphanumeric session ids with interior punctuation", async () => {
 		const session = SessionManager.inMemory();
-		session.newSession({ id: "abc-123_def.456" });
+		await session.newSession({ id: "abc-123_def.456" });
 		expect(session.getSessionId()).toBe("abc-123_def.456");
 	});
 
-	it("rejects invalid custom session ids", () => {
+	it("rejects invalid custom session ids", async () => {
 		const invalidIds = ["", "-abc", "abc-", "_abc", "abc_", ".abc", "abc.", "abc/def", "abc\\def", "abc def"];
 
 		for (const id of invalidIds) {
 			const session = SessionManager.inMemory();
-			expect(() => session.newSession({ id })).toThrow(
+			await expect(session.newSession({ id })).rejects.toThrow(
 				"Session id must be non-empty, contain only alphanumeric characters",
 			);
 		}
 	});
 
-	it("generates a UUIDv7 id when no id is provided", () => {
+	it("generates a UUIDv7 id when no id is provided", async () => {
 		const session = SessionManager.inMemory();
-		session.newSession();
+		await session.newSession();
 		expect(session.getSessionId()).toMatch(UUID_V7_RE);
 	});
 
-	it("generates a UUIDv7 id when options are provided without an id", () => {
+	it("generates a UUIDv7 id when options are provided without an id", async () => {
 		const session = SessionManager.inMemory();
 		const parentSession: SessionReference = {
 			sessionDirectory: "/tmp/sessions",
@@ -60,14 +60,14 @@ describe("SessionManager.newSession with custom id", () => {
 			sessionGeneration: "generation-test",
 			sessionId: "parent",
 		};
-		session.newSession({ parentSession });
+		await session.newSession({ parentSession });
 		expect(session.getSessionId()).toMatch(UUID_V7_RE);
 		expect(session.getHeader()?.parentSession).toEqual(parentSession);
 	});
 
-	it("includes the custom id in the session header", () => {
+	it("includes the custom id in the session header", async () => {
 		const session = SessionManager.inMemory();
-		session.newSession({ id: "header-test-id" });
+		await session.newSession({ id: "header-test-id" });
 
 		expect(session.getHeader()).toMatchObject({ id: "header-test-id" });
 	});
@@ -93,7 +93,7 @@ describe("SessionManager.newSession with custom id", () => {
 
 	it("generates a UUIDv7 id when creating a branched session", async () => {
 		const session = SessionManager.inMemory();
-		const firstId = session.appendMessage({
+		const firstId = await session.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "hello" }],
 			timestamp: Date.now(),

@@ -1,10 +1,16 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type CommittedSessionEntry, isHostOnlySessionEntry, SessionManager } from "../../src/core/session-manager.ts";
-import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/index.ts";
+import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import {
+	type CommittedSessionEntry,
+	isHostOnlySessionEntry,
+	SessionAtomicAppendError,
+	SessionManager,
+} from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
+import { injectFaultyLog, lose } from "../utilities/faulty-log.ts";
 
 const cleanups: string[] = [];
 const managerOwner = createSessionManagerTestOwner();
@@ -31,84 +37,92 @@ afterEach(async () => {
 });
 
 describe("SessionManager commit-then-publish", () => {
-	it("publishes ordinary appends only after their store transactions resolve", async () => {
+	it("publishes and indexes a write only after its commit, and runs later writes after it", async () => {
 		const root = createTempDir();
 		const manager = await SessionManager.create(root, root);
 		const log = observe(manager);
-		const lease = await acquireSharedSQLiteSessionStore(root);
-		const applyTransaction = lease.client.applyTransaction.bind(lease.client);
-		let markDurable!: () => void;
-		const durable = new Promise<void>((resolve) => {
-			markDurable = resolve;
-		});
-		let releaseResult!: () => void;
-		const resultGate = new Promise<void>((resolve) => {
-			releaseResult = resolve;
-		});
-		const applySpy = vi.spyOn(lease.client, "applyTransaction").mockImplementation(async (input) => {
-			const result = await applyTransaction(input);
-			markDurable();
-			await resultGate;
-			return result;
-		});
+		const faulty = injectFaultyLog(manager);
+		const hold = faulty.holdNext();
 
-		try {
-			const first = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-			const second = manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
-			manager.branch(first);
-			const third = manager.appendMessage({ role: "user", content: "third", timestamp: 3 });
-			await durable;
+		const first = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const second = manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		await hold.started;
 
-			// The first transaction is durable but has not resolved; nothing is published.
-			expect(log).toEqual([]);
-			expect(manager.getCommittedOrdinal()).toBe(0);
-			expect(manager.getIndexedOrdinal()).toBe(4);
-			expect(manager.getLeafId()).toBe(third);
+		// The first commit is in flight: nothing is published or readable, and the second waits for it.
+		expect(log).toEqual([]);
+		expect(manager.getEntries()).toEqual([]);
+		expect(manager.getLeafId()).toBeNull();
+		expect(manager.getOrdinal()).toBe(0);
 
-			releaseResult();
-			await manager.flush();
-			expect(log).toEqual([
-				`entry:1:${first}`,
-				`entry:2:${second}`,
-				`branch:${second}->${first}`,
-				`entry:4:${third}`,
-			]);
-			expect(manager.getCommittedOrdinal()).toBe(4);
-		} finally {
-			releaseResult();
-			applySpy.mockRestore();
-			await lease.release();
-		}
+		hold.release();
+		const [firstId, secondId] = await Promise.all([first, second]);
+		expect(log).toEqual([`entry:1:${firstId}`, `entry:2:${secondId}`]);
+		expect(manager.getEntry(secondId)?.parentId).toBe(firstId);
+		expect(manager.getOrdinal()).toBe(2);
+
+		await manager.branch(firstId);
+		expect(log.at(-1)).toBe(`branch:${secondId}->${firstId}`);
+		expect(manager.getOrdinal()).toBe(3);
 	});
 
-	it("never publishes an entry whose commit fails", async () => {
+	it("leaves the session unchanged and writable after a rolled-back commit", async () => {
 		const root = createTempDir();
 		const manager = await SessionManager.create(root, root);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 		const log = observe(manager);
-		const lease = await acquireSharedSQLiteSessionStore(root);
-		const applySpy = vi
-			.spyOn(lease.client, "applyTransaction")
-			.mockRejectedValue(new Error("injected commit failure"));
+		const faulty = injectFaultyLog(manager);
+		faulty.failNext("rolled_back");
 
-		try {
-			const first = manager.appendMessage({ role: "user", content: "lost", timestamp: 1 });
-			manager.branch(first);
-			manager.appendCustomMessageEntry("test", "queued behind the failure", true);
-			await expect(manager.flush()).rejects.toThrow("rolled back");
-			expect(log).toEqual([]);
-			// The rolled-back entry is already indexed, so the manager no longer matches its log.
-			await expect(manager.lost).resolves.toMatchObject({ reason: "storage" });
-		} finally {
-			applySpy.mockRestore();
-			await lease.release();
-		}
+		const rolledBack = manager.appendMessage({ role: "user", content: "rolled back", timestamp: 1 });
+		await expect(rolledBack).rejects.toBeInstanceOf(SessionAtomicAppendError);
+		await expect(rolledBack).rejects.toMatchObject({ effect: "rolled_back" });
+		expect(log).toEqual([]);
+		expect(manager.getEntries()).toEqual([]);
+		expect(manager.getOrdinal()).toBe(0);
 
+		const kept = await manager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
+		expect(log).toEqual([`entry:1:${kept}`]);
 		const reopened = await SessionManager.openReadOnly(ref);
-		expect(reopened.getEntries()).toEqual([]);
-		expect(reopened.getCommittedOrdinal()).toBe(0);
+		expect(reopened.getEntries().map((entry) => entry.id)).toEqual([kept]);
+		expect(reopened.getOrdinal()).toBe(1);
 	});
+
+	it.each([
+		{ committed: false, durable: [] as string[] },
+		{ committed: true, durable: ["unconfirmed"] },
+	])(
+		"rejects the unconfirmed write and every later write once the log is lost (committed: $committed)",
+		async ({ committed, durable }) => {
+			const root = createTempDir();
+			const manager = await SessionManager.create(root, root);
+			const ref = manager.getSessionRef();
+			if (!ref) throw new Error("Expected a persisted session reference");
+			const log = observe(manager);
+			const faulty = injectFaultyLog(manager);
+			faulty.failNext(lose("uncertain_commit", { committed }));
+
+			const unconfirmed = manager.appendMessage({ role: "user", content: "unconfirmed", timestamp: 1 });
+			const queued = manager.appendCustomEntry("queued-behind-the-loss");
+			await expect(unconfirmed).rejects.toBeInstanceOf(ConversationLogLostError);
+			await expect(queued).rejects.toBeInstanceOf(ConversationLogLostError);
+			await expect(manager.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
+			await expect(manager.appendSessionInfo("after the loss")).rejects.toBe(await manager.lost);
+			expect(log).toEqual([]);
+			expect(manager.getEntries()).toEqual([]);
+
+			// Closing a lost manager releases its lock; the log holds what actually committed.
+			await expect(manager.closePersistence()).resolves.toBeUndefined();
+			const reopened = await SessionManager.open(ref);
+			expect(
+				reopened
+					.getEntries()
+					.map((entry) =>
+						entry.type === "message" && entry.message.role === "user" ? entry.message.content : "",
+					),
+			).toEqual(durable);
+		},
+	);
 
 	it("delivers contiguous ordinals across ordinary and atomic commits that readEntries pages back", async () => {
 		const root = createTempDir();
@@ -116,11 +130,11 @@ describe("SessionManager commit-then-publish", () => {
 		const published: CommittedSessionEntry[] = [];
 		manager.subscribeEntries((entry) => published.push(entry));
 
-		const first = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		manager.reserveClientInput("ordinal-input", "prompt", { message: "host only" });
-		manager.appendCustomMessageEntry("test", "custom", true);
-		manager.branch(first);
-		manager.appendLabelChange(first, "bookmark");
+		const first = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		await manager.reserveClientInput("ordinal-input", "prompt", { message: "host only" });
+		await manager.appendCustomMessageEntry("test", "custom", true);
+		await manager.branch(first);
+		await manager.appendLabelChange(first, "bookmark");
 		await manager.commitCanonicalCommand({
 			guard: { kind: "exact", token: manager.issueCanonicalProjection().token },
 			mutations: [
@@ -128,15 +142,13 @@ describe("SessionManager commit-then-publish", () => {
 				{ kind: "append", entry: { type: "session_info", name: "atomic" } },
 			],
 		});
-		manager.appendSessionInfo("after atomic");
-		await manager.flush();
+		await manager.appendSessionInfo("after atomic");
 
-		const committedOrdinal = manager.getCommittedOrdinal();
-		expect(committedOrdinal).toBe(manager.getIndexedOrdinal());
+		const ordinal = manager.getOrdinal();
 		const log = await manager.readEntries(0, 1_000);
-		expect(log.lastOrdinal).toBe(committedOrdinal);
+		expect(log.lastOrdinal).toBe(ordinal);
 		expect(log.entries.map((entry) => entry.ordinal)).toEqual(
-			Array.from({ length: committedOrdinal }, (_, index) => index + 1),
+			Array.from({ length: ordinal }, (_, index) => index + 1),
 		);
 		expect(log.entries.some(isHostOnlySessionEntry)).toBe(true);
 		expect(published).toEqual(log.entries.filter((entry) => !isHostOnlySessionEntry(entry)));
@@ -149,18 +161,27 @@ describe("SessionManager commit-then-publish", () => {
 			cursor = page.entries.at(-1)!.ordinal;
 		}
 		expect(paged).toEqual(log.entries);
-		expect(await manager.readEntries(committedOrdinal, 10)).toEqual({ entries: [], lastOrdinal: committedOrdinal });
+		expect(await manager.readEntries(ordinal, 10)).toEqual({ entries: [], lastOrdinal: ordinal });
+
+		// The store holds exactly what was published.
+		const ref = manager.getSessionRef();
+		if (!ref) throw new Error("Expected a persisted session reference");
+		await manager.closePersistence();
+		const reopened = await SessionManager.openReadOnly(ref);
+		expect(await reopened.readEntries(0, 1_000)).toEqual(log);
 	});
 
-	it("publishes in-memory appends at the append and pages their log", async () => {
+	it("commits in-memory writes through the same lane and pages their log", async () => {
 		const manager = SessionManager.inMemory("/tmp/ws");
 		const log = observe(manager);
-		const first = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const pending = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		expect(log).toEqual([]);
+		const first = await pending;
 		expect(log).toEqual([`entry:1:${first}`]);
-		const second = manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
-		manager.branch(first);
+		const second = await manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		await manager.branch(first);
 		expect(log).toEqual([`entry:1:${first}`, `entry:2:${second}`, `branch:${second}->${first}`]);
-		expect(manager.getCommittedOrdinal()).toBe(3);
+		expect(manager.getOrdinal()).toBe(3);
 
 		expect((await manager.readEntries(1, 1)).entries.map((entry) => entry.id)).toEqual([second]);
 		const all = await manager.readEntries(0, 10);

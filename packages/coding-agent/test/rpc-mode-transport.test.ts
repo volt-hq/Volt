@@ -1310,7 +1310,7 @@ describe("RPC mode caller-provided transports", () => {
 			close: vi.fn(async () => {}),
 		};
 		const sessionManager = SessionManager.inMemory("/workspace");
-		sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 10 });
+		await sessionManager.appendMessage({ role: "user", content: [{ type: "text", text: "hello" }], timestamp: 10 });
 		const currentSession = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 			bindExtensions: vi.fn(async () => {}),

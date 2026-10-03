@@ -411,8 +411,7 @@ describe("PR #329 remote integrity-error privacy", () => {
 				storeId: targetRef.storeId,
 				sessionGeneration: targetRef.sessionGeneration,
 			};
-			target.appendMessage({ role: "user", content: JSON.stringify(leakSentinels), timestamp: 1 });
-			await target.flush();
+			await target.appendMessage({ role: "user", content: JSON.stringify(leakSentinels), timestamp: 1 });
 			await closeTrackedManager(target);
 			corruptTargetForOpen(sessionDir, target.getSessionId(), corruption, leakSentinels);
 
@@ -462,13 +461,11 @@ describe("PR #329 exact-ID discovery isolation", () => {
 	it("opens one exact target even when an unrelated summary is malformed", async () => {
 		const { cwd, sessionDir } = createStoreFixture("volt-329-exact-api-");
 		const target = await ownManager(SessionManager.create(cwd, sessionDir, { id: "exact-api-target-329" }));
-		target.appendMessage({ role: "user", content: "exact target transcript", timestamp: 1 });
-		await target.flush();
+		await target.appendMessage({ role: "user", content: "exact target transcript", timestamp: 1 });
 		const targetRef = target.getSessionRef();
 		if (!targetRef) throw new Error("Expected an exact target reference");
 		const malformed = await ownManager(SessionManager.create(cwd, sessionDir, { id: "unrelated-malformed-api-329" }));
-		malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
-		await malformed.flush();
+		await malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
 		await Promise.all([closeTrackedManager(target), closeTrackedManager(malformed)]);
 		corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
 
@@ -488,8 +485,7 @@ describe("PR #329 exact-ID discovery isolation", () => {
 			const target = await ownManager(
 				SessionManager.create(cwd, sessionDir, { id: `exact-corrupt-${corruption.split(" ")[0]}-329` }),
 			);
-			target.appendMessage({ role: "user", content: "target to corrupt", timestamp: 1 });
-			await target.flush();
+			await target.appendMessage({ role: "user", content: "target to corrupt", timestamp: 1 });
 			const targetRef = target.getSessionRef();
 			if (!targetRef) throw new Error("Expected a corruption target reference");
 			await closeTrackedManager(target);
@@ -505,16 +501,13 @@ describe("PR #329 exact-ID discovery isolation", () => {
 	it("switches the runtime by exact ID without enumerating unrelated summaries", async () => {
 		const { cwd, sessionDir } = createStoreFixture("volt-329-exact-runtime-");
 		const current = await ownManager(SessionManager.create(cwd, sessionDir, { id: "runtime-current-329" }));
-		current.appendMessage({ role: "user", content: "current", timestamp: 1 });
-		await current.flush();
+		await current.appendMessage({ role: "user", content: "current", timestamp: 1 });
 		const target = await ownManager(SessionManager.create(cwd, sessionDir, { id: "runtime-target-329" }));
-		target.appendMessage({ role: "user", content: "runtime exact target", timestamp: 2 });
-		await target.flush();
+		await target.appendMessage({ role: "user", content: "runtime exact target", timestamp: 2 });
 		const malformed = await ownManager(
 			SessionManager.create(cwd, sessionDir, { id: "runtime-unrelated-malformed-329" }),
 		);
-		malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 3 });
-		await malformed.flush();
+		await malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 3 });
 		await Promise.all([closeTrackedManager(target), closeTrackedManager(malformed)]);
 		corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
 
@@ -550,15 +543,13 @@ describe("PR #329 exact-ID discovery isolation", () => {
 			const target = await ownManager(
 				SessionManager.create(cwd, sessionDir, { id: `cli-${sessionFlag.slice(2)}-target-329` }),
 			);
-			target.appendMessage({ role: "user", content: "CLI seed", timestamp: 1 });
-			await target.flush();
+			await target.appendMessage({ role: "user", content: "CLI seed", timestamp: 1 });
 			const targetRef = target.getSessionRef();
 			if (!targetRef) throw new Error("Expected a CLI target reference");
 			const malformed = await ownManager(
 				SessionManager.create(cwd, sessionDir, { id: `cli-${sessionFlag.slice(2)}-unrelated-malformed-329` }),
 			);
-			malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
-			await malformed.flush();
+			await malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
 			await Promise.all([closeTrackedManager(target), closeTrackedManager(malformed)]);
 			corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
 
@@ -599,14 +590,12 @@ describe("PR #329 exact-ID discovery isolation", () => {
 		mkdirSync(globalCwd, { recursive: true });
 		mkdirSync(malformedCwd, { recursive: true });
 		const target = await ownManager(SessionManager.create(globalCwd, sessionDir, { id: "cli-global-target-329" }));
-		target.appendMessage({ role: "user", content: "global CLI seed", timestamp: 1 });
-		await target.flush();
+		await target.appendMessage({ role: "user", content: "global CLI seed", timestamp: 1 });
 		const targetRef = target.getSessionRef();
 		if (!targetRef) throw new Error("Expected a global CLI target reference");
 		const malformed = await ownManager(
 			SessionManager.create(malformedCwd, sessionDir, { id: "cli-global-unrelated-malformed-329" }),
 		);
-		await malformed.flush();
 		expect(await SessionManager.list(malformedCwd, sessionDir)).toEqual([]);
 		await Promise.all([closeTrackedManager(target), closeTrackedManager(malformed)]);
 		corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
@@ -684,13 +673,13 @@ describe("PR #329 deep-search behavior", () => {
 		const searchablePadding = "s".repeat(192 * 1024);
 		const nonSearchablePadding = "n".repeat(192 * 1024);
 		const visible = await ownManager(SessionManager.create(cwd, sessionDir, { id: "metadata-session-329" }));
-		visible.appendSessionInfo("obsolete-name-marker-329");
-		visible.appendMessage({ role: "user", content: "boundary-alpha-329 order-user-329", timestamp: 10 });
-		visible.appendCustomEntry("opaque-growth", {
+		await visible.appendSessionInfo("obsolete-name-marker-329");
+		await visible.appendMessage({ role: "user", content: "boundary-alpha-329 order-user-329", timestamp: 10 });
+		await visible.appendCustomEntry("opaque-growth", {
 			marker: "non-searchable-growth-marker-329",
 			padding: nonSearchablePadding,
 		});
-		visible.appendMessage({
+		await visible.appendMessage({
 			role: "toolResult",
 			toolCallId: "search-tool-call-329",
 			toolName: "read",
@@ -698,33 +687,31 @@ describe("PR #329 deep-search behavior", () => {
 			isError: false,
 			timestamp: 11,
 		});
-		visible.appendCustomMessageEntry("hidden-search-text", "undisplayed-marker-329", false);
-		visible.appendMessage(fauxAssistantMessage("order-assistant-329 assistant-only-marker-329", { timestamp: 12 }));
-		visible.appendCustomMessageEntry(
+		await visible.appendCustomMessageEntry("hidden-search-text", "undisplayed-marker-329", false);
+		await visible.appendMessage(
+			fauxAssistantMessage("order-assistant-329 assistant-only-marker-329", { timestamp: 12 }),
+		);
+		await visible.appendCustomMessageEntry(
 			"displayed-search-text",
 			`order-custom-329 boundary-omega-329 ${searchablePadding} searchable-growth-tail-329 cross-session-left-329`,
 			true,
 		);
-		visible.appendSessionInfo("latest-name-marker-329");
-		await visible.flush();
+		await visible.appendSessionInfo("latest-name-marker-329");
 
 		const other = await ownManager(SessionManager.create(cwd, sessionDir, { id: "other-searchable-session-329" }));
-		other.appendMessage({
+		await other.appendMessage({
 			role: "user",
 			content: `cross-session-right-329 ${searchablePadding} second-session-tail-329`,
 			timestamp: 12,
 		});
-		await other.flush();
 
 		const hidden = await ownManager(SessionManager.create(cwd, sessionDir, { id: "hidden-session-329" }));
-		hidden.appendSessionInfo("hidden-summary-marker-329");
-		hidden.appendCustomEntry("hidden-opaque", { marker: "hidden-custom-marker-329" });
-		await hidden.flush();
+		await hidden.appendSessionInfo("hidden-summary-marker-329");
+		await hidden.appendCustomEntry("hidden-opaque", { marker: "hidden-custom-marker-329" });
 
 		const planning = await ownManager(SessionManager.create(cwd, sessionDir, { id: "planning-session-329" }));
-		planning.appendSessionInfo("planning-visible-marker-329");
-		planning.appendPlanningState({ mode: "plan", plan: null });
-		await planning.flush();
+		await planning.appendSessionInfo("planning-visible-marker-329");
+		await planning.appendPlanningState({ mode: "plan", plan: null });
 
 		const ids = async (query: string, includeMessageFreeDurable = false): Promise<string[]> =>
 			(

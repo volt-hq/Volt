@@ -34,10 +34,9 @@ describe("review custom-message sessions", () => {
 		expect(sessionRef).toBeDefined();
 		expect(existsSync(join(sessionDir, "sessions.sqlite"))).toBe(true);
 
-		session.appendCustomMessageEntry("review", "Automated review result\n\nFindings:\n1. Fix the bug", true, {
+		await session.appendCustomMessageEntry("review", "Automated review result\n\nFindings:\n1. Fix the bug", true, {
 			findings: [{ title: "Fix the bug" }],
 		});
-		await session.flush();
 
 		const sessions = await SessionManager.list(cwd, sessionDir);
 		const summary = sessions.find((item) => item.id === session.getSessionId());
@@ -54,7 +53,7 @@ describe("review custom-message sessions", () => {
 
 	it("uses displayed review custom messages in the current runtime summary", async () => {
 		const sessionManager = await SessionManager.create(cwd, sessionDir);
-		sessionManager.appendCustomMessageEntry("review", "Automated review result\n\nNo issues found.", true);
+		await sessionManager.appendCustomMessageEntry("review", "Automated review result\n\nNo issues found.", true);
 
 		const runtimeHost = new AgentSessionRuntime(
 			{

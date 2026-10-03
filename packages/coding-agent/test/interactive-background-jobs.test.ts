@@ -200,8 +200,8 @@ async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixtur
 		timestamp: Date.now(),
 	};
 	const result = backgroundJobResult(job);
-	harness.sessionManager.appendMessage(assistant);
-	harness.sessionManager.appendMessage({
+	await harness.sessionManager.appendMessage(assistant);
+	await harness.sessionManager.appendMessage({
 		...result,
 		role: "toolResult",
 		toolCallId: job.toolCallId,
@@ -349,7 +349,7 @@ describe("interactive background jobs", () => {
 				details: { jobs: [{ ...snapshot }] },
 				timestamp: Date.now(),
 			};
-			harness.sessionManager.appendCustomMessageEntry(
+			await harness.sessionManager.appendCustomMessageEntry(
 				notice.customType,
 				notice.content,
 				notice.display,
@@ -365,13 +365,13 @@ describe("interactive background jobs", () => {
 			if (!launch || launch.role !== "assistant") throw new Error("Expected launch message");
 			const args = { action: "wait" as const, ids: [job.id] };
 			const toolCallId = "collect-failed-job";
-			harness.sessionManager.appendMessage({
+			await harness.sessionManager.appendMessage({
 				...launch,
 				content: [{ type: "toolCall", name: "jobs", id: toolCallId, arguments: args }],
 			});
 			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
 			const result = await createJobsTool({ manager: jobs }).execute(toolCallId, args);
-			harness.sessionManager.appendMessage({
+			await harness.sessionManager.appendMessage({
 				...result,
 				role: "toolResult",
 				toolName: "jobs",
@@ -552,7 +552,7 @@ describe("interactive background jobs", () => {
 			if (!assistant || assistant.role !== "assistant") throw new Error("Expected launch message");
 			const toolCallId = "pending-job-wait";
 			const args = { action: "wait" as const, ids: [job.id] };
-			harness.sessionManager.appendMessage({
+			await harness.sessionManager.appendMessage({
 				...assistant,
 				content: [{ type: "toolCall", id: toolCallId, name: "jobs", arguments: args }],
 			});

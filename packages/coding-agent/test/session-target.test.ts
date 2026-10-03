@@ -73,10 +73,9 @@ describe("resolveIrohRemoteSessionTarget", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-session-target-recovery-"));
 		try {
 			const manager = await SessionManager.create(tempDir, tempDir, { id: "preserved-session" });
-			manager.reserveClientInput("handled-input", "prompt", { message: "/handled" });
-			manager.transitionClientInput("handled-input", "started");
-			manager.transitionClientInput("handled-input", "completed");
-			await manager.flush();
+			await manager.reserveClientInput("handled-input", "prompt", { message: "/handled" });
+			await manager.transitionClientInput("handled-input", "started");
+			await manager.transitionClientInput("handled-input", "completed");
 			const originalRef = manager.getSessionRef();
 			await manager.closePersistence();
 			const db = new DatabaseSync(join(tempDir, "sessions.sqlite"));
@@ -331,10 +330,9 @@ describe("resolveIrohRemoteSessionTarget", () => {
 		managerOwner.start();
 		try {
 			const manager = await SessionManager.create(tempDir, tempDir, { id: "wal-only-resume" });
-			manager.reserveClientInput("handled-terminal", "prompt", { message: "/handled" });
-			manager.transitionClientInput("handled-terminal", "started");
-			manager.transitionClientInput("handled-terminal", "completed");
-			await manager.flush();
+			await manager.reserveClientInput("handled-terminal", "prompt", { message: "/handled" });
+			await manager.transitionClientInput("handled-terminal", "started");
+			await manager.transitionClientInput("handled-terminal", "completed");
 			const managerRef = manager.getSessionRef();
 			if (!managerRef) throw new Error("Expected a persisted session reference");
 			expect(await SessionManager.listAll(tempDir)).toEqual([]);

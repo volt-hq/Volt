@@ -55,7 +55,7 @@ describe("HostActionRegistry", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 		};
 
 		expect(registry.getDescriptors(context)).toEqual([
@@ -91,7 +91,7 @@ describe("HostActionRegistry", () => {
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession,
 			afterSessionSwitch,
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 		};
 
 		expect(registry.getSlashCommand(SESSION_NEW_SLASH_ALIAS)).toEqual({
@@ -153,7 +153,7 @@ describe("HostActionRegistry", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 		};
 
 		await expect(
@@ -188,7 +188,7 @@ describe("HostActionRegistry", () => {
 	test("registers cancel, compact, and rename built-ins", async () => {
 		const abortRun = vi.fn(async () => {});
 		const compactContext = vi.fn(async () => createCompactionResult());
-		const renameSession = vi.fn(() => {});
+		const renameSession = vi.fn(async () => {});
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
 		const context = {
 			session: { isStreaming: true, isCompacting: false },
@@ -277,7 +277,7 @@ describe("HostActionRegistry", () => {
 
 	test("registers Fast mode as a remote-safe session-local priority toggle", async () => {
 		let fastModeEnabled = false;
-		const setFastModeEnabled = vi.fn((enabled: boolean) => {
+		const setFastModeEnabled = vi.fn(async (enabled: boolean) => {
 			fastModeEnabled = enabled;
 		});
 		const session = {
@@ -294,7 +294,7 @@ describe("HostActionRegistry", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled,
 		};
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
@@ -349,7 +349,7 @@ describe("HostActionRegistry", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 			runReviewAction,
 		};
 
@@ -461,7 +461,7 @@ describe("HostActionRegistry", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 			runReviewLifecycleAction,
 		};
 
@@ -494,7 +494,7 @@ describe("HostActionRegistry", () => {
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
 			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
-			renameSession: vi.fn(() => {}),
+			renameSession: vi.fn(async () => {}),
 		};
 
 		await expect(registry.invoke(RUN_CANCEL_ACTION_ID, idleContext, {})).rejects.toThrow("No active run to cancel");
@@ -533,7 +533,7 @@ describe("HostActionRegistry", () => {
 						model: createModel(),
 						thinkingLevel: "high",
 					},
-					setFastModeEnabled: vi.fn(() => {}),
+					setFastModeEnabled: vi.fn(async () => {}),
 				},
 				{ enabled: "yes" },
 			),

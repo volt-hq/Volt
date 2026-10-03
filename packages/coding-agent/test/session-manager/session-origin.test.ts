@@ -49,12 +49,11 @@ describe("SessionManager session origin", () => {
 		const sessionDir = join(cwd, "sessions");
 
 		const userSession = await SessionManager.create(cwd, sessionDir);
-		userSession.appendMessage(assistantMessage("user session reply"));
+		await userSession.appendMessage(assistantMessage("user session reply"));
 
 		const subagentSession = await SessionManager.create(cwd, sessionDir, { origin: "subagent" });
-		subagentSession.appendMessage(assistantMessage("delegated run reply"));
+		await subagentSession.appendMessage(assistantMessage("delegated run reply"));
 		expect(subagentSession.getHeader()?.origin).toBe("subagent");
-		await Promise.all([userSession.flush(), subagentSession.flush()]);
 
 		const infos = await SessionManager.list(cwd, sessionDir);
 		const byId = new Map(infos.map((info) => [info.id, info]));
@@ -65,7 +64,7 @@ describe("SessionManager session origin", () => {
 	it("keeps the subagent origin on branched sessions", async () => {
 		const cwd = makeTempDir();
 		const session = await SessionManager.create(cwd, join(cwd, "sessions"), { origin: "subagent" });
-		const entryId = session.appendMessage({
+		const entryId = await session.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "delegated task" }],
 			timestamp: 1,
@@ -76,9 +75,9 @@ describe("SessionManager session origin", () => {
 		expect(session.getHeader()?.origin).toBe("subagent");
 	});
 
-	it("does not write an origin for plain sessions", () => {
+	it("does not write an origin for plain sessions", async () => {
 		const session = SessionManager.inMemory();
-		session.newSession();
+		await session.newSession();
 		expect(session.getHeader()?.origin).toBeUndefined();
 	});
 });

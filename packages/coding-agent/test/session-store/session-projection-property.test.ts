@@ -156,30 +156,30 @@ async function applyStatefulOperation(
 	const firstEntry = manager.getEntries()[0];
 	switch (operation.kind) {
 		case "branch_first":
-			if (firstEntry) manager.branch(firstEntry.id);
+			if (firstEntry) await manager.branch(firstEntry.id);
 			break;
 		case "reset":
-			manager.resetLeaf();
+			await manager.resetLeaf();
 			break;
 		case "label_first":
-			if (firstEntry) manager.appendLabelChange(firstEntry.id, operation.clear ? undefined : operation.label);
+			if (firstEntry) await manager.appendLabelChange(firstEntry.id, operation.clear ? undefined : operation.label);
 			break;
 		case "client_input": {
 			const clientMessageId = `property-client-${index}`;
 			clientMessageIds.push(clientMessageId);
-			manager.reserveClientInput(clientMessageId, "steer", { message: operation.message });
-			manager.markClientInputQueued(clientMessageId, { delivery: "steer", message: operation.message });
-			manager.transitionClientInput(clientMessageId, "started");
-			manager.transitionClientInput(clientMessageId, "completed");
+			await manager.reserveClientInput(clientMessageId, "steer", { message: operation.message });
+			await manager.markClientInputQueued(clientMessageId, { delivery: "steer", message: operation.message });
+			await manager.transitionClientInput(clientMessageId, "started");
+			await manager.transitionClientInput(clientMessageId, "completed");
 			break;
 		}
 		case "starting_git_null":
 			if (manager.getStartingGitContext() === undefined) {
-				manager.recordStartingGitContext(manager.getSessionId(), null);
+				await manager.recordStartingGitContext(manager.getSessionId(), null);
 			}
 			break;
 		case "subagent":
-			manager.appendSubagentSpawn({
+			await manager.appendSubagentSpawn({
 				toolCallId: `call-${index}`,
 				subagentId: `sa_${operation.suffix}`,
 				agent: "researcher",
@@ -189,11 +189,11 @@ async function applyStatefulOperation(
 			break;
 		case "compaction": {
 			const branch = manager.getBranch();
-			if (branch.length > 0) manager.appendCompaction("summary", branch[0]!.id, 1);
+			if (branch.length > 0) await manager.appendCompaction("summary", branch[0]!.id, 1);
 			break;
 		}
 		case "branch_summary":
-			manager.branchWithSummary(manager.getLeafId(), "branch summary");
+			await manager.branchWithSummary(manager.getLeafId(), "branch summary");
 			break;
 		case "rollback": {
 			const before = manager.getEntries();
@@ -211,7 +211,6 @@ async function applyStatefulOperation(
 			break;
 		}
 	}
-	await manager.flush();
 }
 
 describe("session projection reducer properties", () => {
@@ -264,8 +263,7 @@ describe("session projection reducer properties", () => {
 						try {
 							manager = await SessionManager.create(cwd, sessionDir);
 							expect(manager.getEntries()).toEqual([]);
-							manager.appendMessage({ role: "user", content: "seed", timestamp: 1_700_000_000_000 });
-							await manager.flush();
+							await manager.appendMessage({ role: "user", content: "seed", timestamp: 1_700_000_000_000 });
 							for (const [index, operation] of operations.entries()) {
 								await applyStatefulOperation(manager, operation, index, clientMessageIds);
 								await expectReplayMatches(manager, clientMessageIds);

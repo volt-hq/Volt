@@ -242,7 +242,12 @@ describe("background job completion notices", () => {
 		async (tuiMode) => {
 			const message = JSON.parse(JSON.stringify(createNotice())) as CustomMessage;
 			const sessionManager = SessionManager.inMemory();
-			sessionManager.appendCustomMessageEntry(message.customType, message.content, message.display, message.details);
+			await sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+			);
 			const transcript = new Container();
 			const terminal = new VirtualTerminal(80, 24);
 			const ui = createInteractiveTui({ tuiMode, terminal, showHardwareCursor: false, logDirectory: "/tmp" });

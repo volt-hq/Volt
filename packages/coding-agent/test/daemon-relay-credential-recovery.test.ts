@@ -495,8 +495,7 @@ describe("managed relay credential recovery", () => {
 			).toMatchObject({ type: "lease_granted" });
 			const sessionDir = getDefaultSessionDir(fixture.agentDir, fixture.agentDir);
 			const localSession = await SessionManager.create(fixture.agentDir, sessionDir, { id: "local-session" });
-			localSession.appendSessionInfo("Preserved local session");
-			await localSession.materialize();
+			await localSession.appendSessionInfo("Preserved local session");
 			await localSession.closePersistence();
 			const before = await status(fixture.control);
 			const beforeWorktrees = fixture.readState().worktrees;

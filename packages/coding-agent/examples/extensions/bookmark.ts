@@ -20,7 +20,7 @@ export default function (volt: ExtensionAPI) {
 			for (let i = entries.length - 1; i >= 0; i--) {
 				const entry = entries[i];
 				if (entry.type === "message" && entry.message.role === "assistant") {
-					volt.setLabel(entry.id, label);
+					await volt.setLabel(entry.id, label);
 					ctx.ui.notify(`Bookmarked as: ${label}`, "info");
 					return;
 				}
@@ -39,7 +39,7 @@ export default function (volt: ExtensionAPI) {
 				const entry = entries[i];
 				const label = ctx.sessionManager.getLabel(entry.id);
 				if (label) {
-					volt.setLabel(entry.id, undefined);
+					await volt.setLabel(entry.id, undefined);
 					ctx.ui.notify(`Removed bookmark: ${label}`, "info");
 					return;
 				}

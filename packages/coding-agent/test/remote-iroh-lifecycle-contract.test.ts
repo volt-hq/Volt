@@ -139,7 +139,7 @@ function createPromptRuntime(
 				): Promise<void> => {
 					promptOptions?.preflightResult?.({ success: true, outcome: "admitted" });
 					await promptRelease.promise;
-					sessionManager.appendMessage({
+					await sessionManager.appendMessage({
 						role: "assistant",
 						content: [{ type: "text", text: completionText }],
 						api: "anthropic-messages",

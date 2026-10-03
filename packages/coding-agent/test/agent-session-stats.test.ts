@@ -80,12 +80,12 @@ function createSession() {
 }
 
 describe("AgentSession.getSessionStats", () => {
-	it("exposes the current context usage alongside token totals", () => {
+	it("exposes the current context usage alongside token totals", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
-			sessionManager.appendMessage(createUserMessage("hello", 1));
-			sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+			await sessionManager.appendMessage(createUserMessage("hello", 1));
+			await sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
 
 			const stats = session.getSessionStats();
 			expect(stats.contextUsage).toEqual(session.getContextUsage());
@@ -97,16 +97,16 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
-	it("reports unknown current context usage immediately after compaction", () => {
+	it("reports unknown current context usage immediately after compaction", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
-			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
-			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
-			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
+			await sessionManager.appendMessage(createUserMessage("first", 1));
+			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
+			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
+			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
+			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
+			await sessionManager.appendMessage(createUserMessage("third", 5));
 
 			const stats = session.getSessionStats();
 			expect(stats).toMatchObject({
@@ -126,17 +126,17 @@ describe("AgentSession.getSessionStats", () => {
 		}
 	});
 
-	it("uses post-compaction usage for current context instead of stale kept usage", () => {
+	it("uses post-compaction usage for current context instead of stale kept usage", async () => {
 		const { session, sessionManager } = createSession();
 
 		try {
-			sessionManager.appendMessage(createUserMessage("first", 1));
-			sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
-			const keptUserId = sessionManager.appendMessage(createUserMessage("second", 3));
-			sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
-			sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			sessionManager.appendMessage(createUserMessage("third", 5));
-			sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6, 1));
+			await sessionManager.appendMessage(createUserMessage("first", 1));
+			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
+			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
+			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
+			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
+			await sessionManager.appendMessage(createUserMessage("third", 5));
+			await sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6, 1));
 
 			const stats = session.getSessionStats();
 			expect(stats).toMatchObject({

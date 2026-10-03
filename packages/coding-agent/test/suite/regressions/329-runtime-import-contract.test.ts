@@ -59,9 +59,8 @@ async function createRuntimeFixture(options: { persisted?: boolean } = {}): Prom
 			? SessionManager.inMemory(cwd)
 			: await SessionManager.create(cwd, sessionDir, { id: "runtime-source" });
 	const model = fauxHarness.getModel();
-	initialManager.appendModelChange(model.provider, model.id);
-	initialManager.appendThinkingLevelChange("off");
-	await initialManager.flush();
+	await initialManager.appendModelChange(model.provider, model.id);
+	await initialManager.appendThinkingLevelChange("off");
 
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd: runtimeCwd,

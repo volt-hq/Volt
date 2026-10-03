@@ -70,7 +70,7 @@ async function setup(
 		],
 	});
 	harnesses.push(harness);
-	harness.session.setSessionName("preparation evaluation");
+	await harness.session.setSessionName("preparation evaluation");
 	await mkdir(join(harness.tempDir, "src"));
 	await writeFile(
 		join(harness.tempDir, "src/invoice.ts"),

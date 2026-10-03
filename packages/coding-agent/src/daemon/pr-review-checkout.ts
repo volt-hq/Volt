@@ -530,8 +530,7 @@ export class PrReviewCheckoutManager {
 			authority.assertCurrent();
 			if (!isDeepStrictEqual(manager.getSessionRef(), ref))
 				throw new PrReviewCheckoutError("review_preparation_conflict");
-			manager.recordPrReviewBinding(placement);
-			await manager.flush();
+			await manager.recordPrReviewBinding(placement);
 			authority.assertCurrent();
 			return {
 				result: undefined,

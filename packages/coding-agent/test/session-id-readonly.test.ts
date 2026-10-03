@@ -101,8 +101,7 @@ async function hasSessionWithId(result: CliResult, sessionId: string): Promise<b
 }
 
 async function writeSession(sessionDir: string, cwd: string, id: string): Promise<void> {
-	const manager = await SessionManager.create(cwd, sessionDir, { id });
-	await manager.flush();
+	await SessionManager.create(cwd, sessionDir, { id });
 }
 
 function writeSnapshot(path: string, cwd: string, id: string): void {

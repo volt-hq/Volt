@@ -125,23 +125,23 @@ export interface PlanStepInput {
 	substeps?: PlanSubstepInput[];
 }
 
+/** Plan mutations resolve after the new planning state commits. */
 export interface PlanningToolController {
 	getPlanningState(): PlanningState;
-	flushPlanningState(): Promise<void>;
 	updatePlan(input: {
 		planId?: string;
 		expectedRevision?: number;
 		title?: string;
 		summary?: string;
 		steps: PlanStepInput[];
-	}): PlanState;
-	submitPlan(input: { planId: string; expectedRevision: number; title: string; summary: string }): PlanState;
+	}): Promise<PlanState>;
+	submitPlan(input: { planId: string; expectedRevision: number; title: string; summary: string }): Promise<PlanState>;
 	updatePlanProgress(input: {
 		planId: string;
 		expectedRevision: number;
 		updates: Array<{ id: string; status: PlanStepStatus; note?: string }>;
-	}): PlanState;
-	requestReplan(input: { planId: string; expectedRevision: number; reason: string }): PlanningState;
+	}): Promise<PlanState>;
+	requestReplan(input: { planId: string; expectedRevision: number; reason: string }): Promise<PlanningState>;
 }
 
 function stateResultText(state: PlanningState): string {
@@ -386,7 +386,7 @@ export function createPlanningToolDefinitions(
 				return renderPlanningResult(result, options, currentTheme, context, false);
 			},
 			async execute(_toolCallId, input) {
-				controller.updatePlan({
+				await controller.updatePlan({
 					...input,
 					steps: input.steps.map((step) => ({
 						id: step.id?.trim() || undefined,
@@ -401,7 +401,6 @@ export function createPlanningToolDefinitions(
 							: {}),
 					})),
 				});
-				await controller.flushPlanningState();
 				const planning = controller.getPlanningState();
 				return {
 					content: [{ type: "text", text: stateResultText(planning) }],
@@ -429,13 +428,12 @@ export function createPlanningToolDefinitions(
 			},
 			renderResult: renderPlanningResult,
 			async execute(_toolCallId, input) {
-				controller.submitPlan({
+				await controller.submitPlan({
 					planId: input.planId,
 					expectedRevision: input.expectedRevision,
 					title: input.title.trim(),
 					summary: input.summary.trim(),
 				});
-				await controller.flushPlanningState();
 				const planning = controller.getPlanningState();
 				return {
 					content: [{ type: "text", text: stateResultText(planning) }],
@@ -465,7 +463,7 @@ export function createPlanningToolDefinitions(
 				return renderPlanningResult(result, options, currentTheme, context, false);
 			},
 			async execute(_toolCallId, input) {
-				const plan = controller.updatePlanProgress({
+				const plan = await controller.updatePlanProgress({
 					planId: input.planId,
 					expectedRevision: input.expectedRevision,
 					updates: input.updates.map((update) => ({
@@ -474,7 +472,6 @@ export function createPlanningToolDefinitions(
 						...(update.note === undefined ? {} : { note: update.note.trim() }),
 					})),
 				});
-				await controller.flushPlanningState();
 				const planning = controller.getPlanningState();
 				return {
 					content: [{ type: "text", text: stateResultText(planning) }],
@@ -503,12 +500,11 @@ export function createPlanningToolDefinitions(
 			},
 			renderResult: renderPlanningResult,
 			async execute(_toolCallId, input) {
-				controller.requestReplan({
+				await controller.requestReplan({
 					planId: input.planId,
 					expectedRevision: input.expectedRevision,
 					reason: input.reason.trim(),
 				});
-				await controller.flushPlanningState();
 				const planning = controller.getPlanningState();
 				return {
 					content: [{ type: "text", text: stateResultText(planning) }],

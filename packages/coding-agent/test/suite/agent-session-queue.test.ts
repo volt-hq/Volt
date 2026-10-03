@@ -755,21 +755,17 @@ describe("AgentSession queue characterization", () => {
 		harness.appendResponses([fauxAssistantMessage("handled late follow-up")]);
 		const { sessionManager } = harness;
 		const markClientInputQueued = sessionManager.markClientInputQueued.bind(sessionManager);
-		const flush = sessionManager.flush.bind(sessionManager);
 		const persistenceStarted = deferred();
 		const releasePersistence = deferred();
-		let holdNextFlush = false;
-		vi.spyOn(sessionManager, "markClientInputQueued").mockImplementation((...args) => {
-			holdNextFlush = true;
-			return markClientInputQueued(...args);
-		});
-		vi.spyOn(sessionManager, "flush").mockImplementation(async () => {
-			if (holdNextFlush) {
-				holdNextFlush = false;
+		let holdNextCommit = true;
+		vi.spyOn(sessionManager, "markClientInputQueued").mockImplementation(async (...args) => {
+			const record = await markClientInputQueued(...args);
+			if (holdNextCommit) {
+				holdNextCommit = false;
 				persistenceStarted.resolve();
 				await releasePersistence.promise;
 			}
-			return flush();
+			return record;
 		});
 
 		const prompt = harness.session.prompt("start");

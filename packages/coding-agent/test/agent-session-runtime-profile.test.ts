@@ -315,7 +315,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 		expect(extensionModel).toBeDefined();
 		await session.setModel(extensionModel!, { persistDefault: false });
 		session.setThinkingLevel("high", { persistDefault: false });
-		session.setFastModeEnabled(true);
+		await session.setFastModeEnabled(true);
 		expect(session.model?.provider).toBe(providerName);
 
 		await session.reload();

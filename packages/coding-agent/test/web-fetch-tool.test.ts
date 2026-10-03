@@ -598,12 +598,12 @@ describe("web_fetch session integration", () => {
 	it("permits user and web_search result URLs without trusting model-controlled tool output", async () => {
 		const { session } = await createSession();
 		const model = session.model!;
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: `Please read ${USER_URL}` }],
 			timestamp: Date.now(),
 		});
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: `I should also read ${ASSISTANT_URL}` }],
 			api: model.api,
@@ -620,7 +620,7 @@ describe("web_fetch session integration", () => {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-1",
 			toolName: "web_search",
@@ -633,7 +633,7 @@ describe("web_fetch session integration", () => {
 			isError: false,
 			timestamp: Date.now(),
 		});
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-2",
 			toolName: "bash",
@@ -641,7 +641,7 @@ describe("web_fetch session integration", () => {
 			isError: false,
 			timestamp: Date.now(),
 		});
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-3",
 			toolName: "web_search",
@@ -649,7 +649,7 @@ describe("web_fetch session integration", () => {
 			isError: true,
 			timestamp: Date.now(),
 		});
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-4",
 			toolName: "web_search",
@@ -690,12 +690,12 @@ describe("web_fetch session integration", () => {
 
 	it("does not trust a parent-model task URL in a delegated child session", async () => {
 		const { session } = await createSession({ subagentRuntime: true });
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: `Research ${USER_URL}` }],
 			timestamp: Date.now(),
 		});
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "toolResult",
 			toolCallId: "delegated-search",
 			toolName: "web_search",
@@ -728,12 +728,12 @@ describe("web_fetch session integration", () => {
 	it("preserves trusted URL provenance after compaction removes the source message from model context", async () => {
 		const { session } = await createSession();
 		const model = session.model!;
-		session.sessionManager.appendMessage({
+		await session.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: `Please read ${USER_URL}` }],
 			timestamp: Date.now(),
 		});
-		const firstKeptEntryId = session.sessionManager.appendMessage({
+		const firstKeptEntryId = await session.sessionManager.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "I will keep working." }],
 			api: model.api,
@@ -750,7 +750,11 @@ describe("web_fetch session integration", () => {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
-		session.sessionManager.appendCompaction("The earlier user message was summarized.", firstKeptEntryId, 1_000);
+		await session.sessionManager.appendCompaction(
+			"The earlier user message was summarized.",
+			firstKeptEntryId,
+			1_000,
+		);
 		expect(
 			session.state.messages.some(
 				(message) =>

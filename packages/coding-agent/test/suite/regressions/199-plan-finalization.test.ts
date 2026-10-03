@@ -22,12 +22,12 @@ function createUserMessage(text: string): Extract<AgentMessage, { role: "user" }
 
 async function createReadyPlan(harness: Harness): Promise<void> {
 	await harness.session.setAgentMode("plan");
-	const draft = harness.session.updatePlan({
+	const draft = await harness.session.updatePlan({
 		title: "Queued feedback",
 		summary: "Exercise transactional feedback admission.",
 		steps: [{ text: "Apply feedback" }],
 	});
-	harness.session.submitPlan({
+	await harness.session.submitPlan({
 		planId: draft.id,
 		expectedRevision: draft.revision,
 		title: draft.title!,
@@ -193,12 +193,12 @@ describe("regression #199: approved plan finalization", () => {
 		});
 		harnesses.push(harness);
 		await harness.session.setAgentMode("plan");
-		const draft = harness.session.updatePlan({
+		const draft = await harness.session.updatePlan({
 			title: "Complete issue 199",
 			summary: "Finalize the approved implementation visibly.",
 			steps: [{ text: "Finish implementation and verification" }],
 		});
-		const ready = harness.session.submitPlan({
+		const ready = await harness.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: draft.title!,
@@ -283,8 +283,8 @@ describe("regression #199: approved plan finalization", () => {
 		});
 		harnesses.push(harness);
 		await harness.session.setAgentMode("plan");
-		const draft = harness.session.updatePlan({ steps: [{ text: "Finish implementation" }] });
-		const ready = harness.session.submitPlan({
+		const draft = await harness.session.updatePlan({ steps: [{ text: "Finish implementation" }] });
+		const ready = await harness.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Finish implementation",
@@ -367,14 +367,14 @@ describe("regression #199: approved plan finalization", () => {
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 		});
 		harnesses.push(harness);
-		harness.session.setSessionName("final response compaction regression");
+		await harness.session.setSessionName("final response compaction regression");
 		const olderUser = createUserMessage("older compactable turn");
 		const olderAssistant = fauxAssistantMessage("older completed response");
-		harness.sessionManager.appendMessage(olderUser);
-		harness.sessionManager.appendMessage(olderAssistant);
+		await harness.sessionManager.appendMessage(olderUser);
+		await harness.sessionManager.appendMessage(olderAssistant);
 		await harness.session.setAgentMode("plan");
-		const draft = harness.session.updatePlan({ steps: [{ text: "Finish compacted implementation" }] });
-		const ready = harness.session.submitPlan({
+		const draft = await harness.session.updatePlan({ steps: [{ text: "Finish compacted implementation" }] });
+		const ready = await harness.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Finish compacted implementation",

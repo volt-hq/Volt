@@ -392,8 +392,7 @@ describe("JSONL snapshot import parsing", () => {
 		if (!ref) throw new Error("Expected imported session reference");
 
 		const sqliteMessageTimestamp = Date.now();
-		manager.appendMessage({ role: "user", content: "SQLite message", timestamp: sqliteMessageTimestamp });
-		await manager.flush();
+		await manager.appendMessage({ role: "user", content: "SQLite message", timestamp: sqliteMessageTimestamp });
 
 		expect(readFileSync(path, "utf8")).toBe(sourceBytes);
 		expect(existsSync(join(sessionDir, "sessions.sqlite"))).toBe(true);
@@ -430,8 +429,7 @@ describe("SessionManager SQLite session behavior", () => {
 
 	async function createVisibleSession(cwd: string, id: string, label: string): Promise<SessionManager> {
 		const session = await SessionManager.create(cwd, tempDir, { id });
-		session.appendMessage({ role: "user", content: label, timestamp: Date.now() });
-		await session.flush();
+		await session.appendMessage({ role: "user", content: label, timestamp: Date.now() });
 		return session;
 	}
 
@@ -456,8 +454,7 @@ describe("SessionManager SQLite session behavior", () => {
 
 	it("commits delivery receipts, messages, and planning as one verifiable transaction", async () => {
 		const manager = await SessionManager.create(projectA, tempDir);
-		manager.reserveClientInput("delivery-1", "prompt", { message: "hello" });
-		await manager.flush();
+		await manager.reserveClientInput("delivery-1", "prompt", { message: "hello" });
 		const planning = {
 			mode: "plan" as const,
 			plan: {
@@ -490,8 +487,7 @@ describe("SessionManager SQLite session behavior", () => {
 
 	it("attests a no-effect delivery without changing persisted entries", async () => {
 		const manager = await SessionManager.create(projectA, tempDir);
-		manager.appendPlanningState({ mode: "build", plan: null });
-		await manager.flush();
+		await manager.appendPlanningState({ mode: "build", plan: null });
 		const before = manager.getEntries();
 
 		const receipt = await manager.attestDeliveryNoEffect({
@@ -507,22 +503,19 @@ describe("SessionManager SQLite session behavior", () => {
 	it("restores navigation to an earlier entry and to root", async () => {
 		const manager = await SessionManager.create(projectA, tempDir);
 		const firstTimestamp = Date.now();
-		const firstId = manager.appendMessage({ role: "user", content: "first", timestamp: firstTimestamp });
-		manager.appendMessage({ role: "user", content: "second", timestamp: firstTimestamp + 1 });
-		await manager.flush();
+		const firstId = await manager.appendMessage({ role: "user", content: "first", timestamp: firstTimestamp });
+		await manager.appendMessage({ role: "user", content: "second", timestamp: firstTimestamp + 1 });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
 
-		manager.branch(firstId);
-		await manager.flush();
+		await manager.branch(firstId);
 		// Each reopen writes next, so the previous writer closes first.
 		await manager.closePersistence();
 		let reopened = await SessionManager.open(ref);
 		expect(reopened.getLeafId()).toBe(firstId);
 		expect(reopened.getEntries().map((entry) => entry.type)).toEqual(["message", "message"]);
 
-		reopened.resetLeaf();
-		await reopened.flush();
+		await reopened.resetLeaf();
 		await reopened.closePersistence();
 		reopened = await SessionManager.open(ref);
 		expect(reopened.getLeafId()).toBeNull();

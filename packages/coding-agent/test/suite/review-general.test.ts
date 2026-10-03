@@ -75,8 +75,7 @@ async function fixture() {
 	});
 	const runtime = await own(await SessionManager.create(root, directory));
 	const source = runtime.session.sessionManager;
-	source.appendSessionInfo("Review source");
-	await source.materialize();
+	await source.appendSessionInfo("Review source");
 	await registerDurableReviewAnchor(source, "run");
 	const original = source.getSessionRef()!;
 	const options = { preserveReviewRunId: "run", replaceReviewGeneral: true };
@@ -361,8 +360,7 @@ describe("durable review General publication", () => {
 			const result = await replaceReviewGeneral(request);
 			// A delayed callback retained by the replacement can run during the
 			// worker round trip, after the first candidate identity validation.
-			await runtime.session.sessionManager.flush();
-			runtime.session.sessionManager.newSession();
+			await runtime.session.sessionManager.newSession();
 			return result;
 		});
 		try {
@@ -421,8 +419,7 @@ describe("durable review General publication", () => {
 		const initial = await getReviewGeneral(source, "run");
 		runtime.setRebindSession(async () => {
 			expect(await getReviewGeneral(source, "run")).toEqual(initial);
-			await runtime.session.sessionManager.flush();
-			runtime.session.sessionManager.newSession();
+			await runtime.session.sessionManager.newSession();
 		});
 		await expect(runtime.newSession(options)).rejects.toThrow("changed before durable publication");
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);

@@ -75,7 +75,7 @@ async function setup() {
 	};
 	const harness = await createHarness(options);
 	harnesses.push(harness);
-	harness.session.setSessionName("RPC Jobs test");
+	await harness.session.setSessionName("RPC Jobs test");
 	const runtime = new AgentSessionRuntime(harness.session, services(harness), async ({ sessionManager }) => {
 		const next = await createHarness({ ...options, sessionManager });
 		harnesses.push(next);

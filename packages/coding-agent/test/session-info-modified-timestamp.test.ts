@@ -42,12 +42,10 @@ describe("SessionInfo.modified", () => {
 		tempDirs.push(sessionDir);
 		const manager = await SessionManager.create("/tmp", sessionDir, { id: "test-session" });
 		const firstMessageTime = Date.now();
-		manager.appendMessage(assistantMessage("first", firstMessageTime));
-		await manager.flush();
+		await manager.appendMessage(assistantMessage("first", firstMessageTime));
 
 		const msgTime = firstMessageTime + 1;
-		manager.appendMessage(assistantMessage("later", msgTime));
-		await manager.flush();
+		await manager.appendMessage(assistantMessage("later", msgTime));
 
 		const sessions = await SessionManager.list("/tmp", sessionDir);
 		const summary = sessions.find((session) => session.id === manager.getSessionId());

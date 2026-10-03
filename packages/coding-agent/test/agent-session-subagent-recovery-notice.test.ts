@@ -128,9 +128,14 @@ describe("subagent recovery notice", () => {
 		const harness = createHarness({ responses: ["ok"], subagentToolManager: manager });
 		try {
 			// A notice persisted by a previous process already offered sa_old.
-			harness.sessionManager.appendCustomMessageEntry(SUBAGENT_RECOVERY_NOTICE_CUSTOM_TYPE, "prior notice", true, {
-				subagentIds: ["sa_old"],
-			});
+			await harness.sessionManager.appendCustomMessageEntry(
+				SUBAGENT_RECOVERY_NOTICE_CUSTOM_TYPE,
+				"prior notice",
+				true,
+				{
+					subagentIds: ["sa_old"],
+				},
+			);
 
 			await harness.session.prompt("hello");
 
@@ -170,14 +175,13 @@ describe("subagent recovery notice", () => {
 	it("end to end: reopened transcript hydrates, offers, and follow returns the report", async () => {
 		const sessionDir = mkdtempSync(join(tmpdir(), "issue-129-e2e-"));
 		const parent = await SessionManager.create(tmpdir(), sessionDir);
-		parent.appendMessage(
+		await parent.appendMessage(
 			fauxAssistantMessage([fauxToolCall("subagent", {}, { id: "call_e2e" })], { stopReason: "toolUse" }),
 		);
 		const child = await SessionManager.create(tmpdir(), sessionDir);
-		child.appendMessage({ role: "user", content: "audit the daemon", timestamp: Date.now() });
-		child.appendMessage(fauxAssistantMessage("daemon audit report"));
-		await child.flush();
-		parent.appendSubagentSpawn({
+		await child.appendMessage({ role: "user", content: "audit the daemon", timestamp: Date.now() });
+		await child.appendMessage(fauxAssistantMessage("daemon audit report"));
+		await parent.appendSubagentSpawn({
 			toolCallId: "call_e2e",
 			subagentId: "sa_e2e",
 			agent: "researcher",
@@ -187,7 +191,7 @@ describe("subagent recovery notice", () => {
 		});
 		// The incident shape: dispose synthesized an abort marker, which is not
 		// settlement.
-		parent.appendMessage({
+		await parent.appendMessage({
 			role: "toolResult",
 			toolCallId: "call_e2e",
 			toolName: "subagent",
@@ -195,7 +199,6 @@ describe("subagent recovery notice", () => {
 			isError: true,
 			timestamp: Date.now(),
 		});
-		await parent.flush();
 
 		const definition: SubagentDefinition = {
 			name: "researcher",

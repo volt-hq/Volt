@@ -1278,7 +1278,7 @@ describe("InteractiveMode finished plan closing", () => {
 	const prototype = (
 		InteractiveMode as unknown as {
 			prototype: {
-				closeFinishedPlan: (this: unknown) => void;
+				closeFinishedPlan: (this: unknown) => Promise<void>;
 				handlePlanDetailsAction: (this: unknown, action: string) => Promise<void>;
 				handlePlanningStateChanged: (this: unknown, planning: unknown) => void;
 				refreshPlanningUi: (this: unknown, planning?: unknown) => void;
@@ -1292,7 +1292,7 @@ describe("InteractiveMode finished plan closing", () => {
 
 	function closeFixture(plan: ReturnType<typeof planState> | null, isStreaming = false) {
 		return {
-			session: { planningState: { mode: "build", plan }, isStreaming, discardPlan: vi.fn() },
+			session: { planningState: { mode: "build", plan }, isStreaming, discardPlan: vi.fn(async () => {}) },
 			closePlanDetails: vi.fn(),
 			showStatus: vi.fn(),
 			showWarning: vi.fn(),
@@ -1300,10 +1300,10 @@ describe("InteractiveMode finished plan closing", () => {
 		};
 	}
 
-	test("discards completed and handed-off plans at their exact revision", () => {
+	test("discards completed and handed-off plans at their exact revision", async () => {
 		for (const phase of ["completed", "handed_off"]) {
 			const fakeThis = closeFixture(planState(phase));
-			prototype.closeFinishedPlan.call(fakeThis);
+			await prototype.closeFinishedPlan.call(fakeThis);
 			expect(fakeThis.closePlanDetails).toHaveBeenCalledTimes(1);
 			expect(fakeThis.session.discardPlan).toHaveBeenCalledExactlyOnceWith("plan-1", 7);
 			expect(fakeThis.showStatus).toHaveBeenCalledWith("Plan closed");
@@ -1311,7 +1311,7 @@ describe("InteractiveMode finished plan closing", () => {
 		}
 	});
 
-	test("refuses unfinished plans and streaming runs without discarding", () => {
+	test("refuses unfinished plans and streaming runs without discarding", async () => {
 		const cases = [
 			{ plan: planState("draft"), streaming: false, warning: "still a draft" },
 			{ plan: planState("ready"), streaming: false, warning: "Execute Plan or Change Plan" },
@@ -1320,38 +1320,36 @@ describe("InteractiveMode finished plan closing", () => {
 		];
 		for (const { plan, streaming, warning } of cases) {
 			const fakeThis = closeFixture(plan, streaming);
-			prototype.closeFinishedPlan.call(fakeThis);
+			await prototype.closeFinishedPlan.call(fakeThis);
 			expect(fakeThis.session.discardPlan).not.toHaveBeenCalled();
 			expect(fakeThis.closePlanDetails).not.toHaveBeenCalled();
 			expect(fakeThis.showWarning).toHaveBeenCalledExactlyOnceWith(expect.stringContaining(warning));
 		}
 
 		const empty = closeFixture(null);
-		prototype.closeFinishedPlan.call(empty);
+		await prototype.closeFinishedPlan.call(empty);
 		expect(empty.session.discardPlan).not.toHaveBeenCalled();
 		expect(empty.showStatus).toHaveBeenCalledWith("No plan to close");
 	});
 
-	test("names configured keys in unfinished-plan warnings", () => {
+	test("names configured keys in unfinished-plan warnings", async () => {
 		setKeybindings(new KeybindingsManager({ "app.mode.toggle": "alt+m", "app.plan.togglePane": "alt+x" }));
 		try {
 			const active = closeFixture(planState("active"));
-			prototype.closeFinishedPlan.call(active);
+			await prototype.closeFinishedPlan.call(active);
 			expect(active.showWarning.mock.calls[0]?.[0]).toMatch(/(alt|option)\+m/);
 			const ready = closeFixture(planState("ready"));
-			prototype.closeFinishedPlan.call(ready);
+			await prototype.closeFinishedPlan.call(ready);
 			expect(ready.showWarning.mock.calls[0]?.[0]).toMatch(/(alt|option)\+x/);
 		} finally {
 			setKeybindings(new KeybindingsManager());
 		}
 	});
 
-	test("reports discard failures as errors", () => {
+	test("reports discard failures as errors", async () => {
 		const fakeThis = closeFixture(planState("completed"));
-		fakeThis.session.discardPlan.mockImplementation(() => {
-			throw new Error("Plan revision is stale");
-		});
-		prototype.closeFinishedPlan.call(fakeThis);
+		fakeThis.session.discardPlan.mockRejectedValue(new Error("Plan revision is stale"));
+		await prototype.closeFinishedPlan.call(fakeThis);
 		expect(fakeThis.showError).toHaveBeenCalledWith("Plan revision is stale");
 		expect(fakeThis.showStatus).not.toHaveBeenCalledWith("Plan closed");
 	});

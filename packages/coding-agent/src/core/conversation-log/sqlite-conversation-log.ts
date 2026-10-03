@@ -17,6 +17,10 @@
  * resolve loses the log (`uncertain_commit`). A fence conflict, or a session
  * that no longer exists, also loses the log; neither is reported as an append
  * result.
+ *
+ * Opening or creating a log takes the session's per-log writer lock
+ * (`ConversationLock`) before the store is touched; closing the log releases
+ * it after the last append settles.
  */
 
 import { randomUUID } from "node:crypto";
@@ -25,21 +29,18 @@ import {
 	type ConversationLog,
 	type ConversationLogAppend,
 	type ConversationLogAppendResult,
-	type ConversationLogEntry,
 	type ConversationLogEntryDraft,
 	type ConversationLogLossReason,
 	ConversationLogLostError,
 	type ConversationLogPage,
 	uuidv7,
 } from "@hansjm10/volt-agent-core";
-import { LOG_ENTRY_ENVELOPE_KEYS, type LogEntryType, type LogEntryVisibility } from "@hansjm10/volt-protocol/entries";
 import { resolvePath } from "../../utils/paths.ts";
-import { decodeStoredSessionEntry, parsePersistedSessionEntry, parseSessionReference } from "../session-entry-codec.ts";
-import { SESSION_ENTRY_TYPES } from "../session-entry-types.ts";
+import { decodeStoredSessionEntry, parseSessionReference } from "../session-entry-codec.ts";
 import {
 	assertValidSessionId,
+	type CommittedSessionEntry,
 	CURRENT_SESSION_VERSION,
-	type SessionEntry,
 	type SessionHeader,
 	type SessionOrigin,
 	type SessionReference,
@@ -66,8 +67,8 @@ import {
 	sessionStoreSearchChunksForEntries,
 	verifySessionStoreProjections,
 } from "../session-store/projection.ts";
-
-type StoredEntry = SessionEntry & { ordinal: number };
+import { ConversationLock } from "./conversation-lock.ts";
+import { toLogEntry, toSessionEntry } from "./entry-codec.ts";
 
 type CommittedResult = ConversationLogAppendResult & { readonly status: "committed" };
 
@@ -83,12 +84,6 @@ interface PreparedCommit {
 	readonly last: number;
 }
 
-interface EntryShape {
-	readonly visibility: LogEntryVisibility;
-	/** Fields stored beside the envelope that are not payload (the message entry's `clientMessageId`). */
-	readonly extensions: ReadonlySet<string>;
-}
-
 export interface SqliteConversationLogCreateOptions {
 	/** The session store directory. */
 	readonly sessionDirectory: string;
@@ -97,68 +92,6 @@ export interface SqliteConversationLogCreateOptions {
 	readonly id?: string;
 	readonly parentSession?: SessionReference;
 	readonly origin?: SessionOrigin;
-}
-
-const ENVELOPE_KEYS: ReadonlySet<string> = new Set(LOG_ENTRY_ENVELOPE_KEYS);
-const STORED_ENVELOPE_KEYS: ReadonlySet<string> = new Set(["type", "id", "parentId", "timestamp", "ordinal"]);
-const ENTRY_SHAPES: ReadonlyMap<string, EntryShape> = new Map(
-	Object.values(SESSION_ENTRY_TYPES).map((definition: LogEntryType) => [
-		definition.type,
-		{
-			visibility: definition.visibility,
-			extensions: new Set(Object.keys(definition.schema.properties).filter((key) => !ENVELOPE_KEYS.has(key))),
-		},
-	]),
-);
-
-function entryShape(type: string): EntryShape {
-	const shape = ENTRY_SHAPES.get(type);
-	if (!shape) throw new Error(`Entry type ${JSON.stringify(type)} is not stored in session logs`);
-	return shape;
-}
-
-/** The stored form of a draft: its envelope and extension fields flattened beside its payload fields. */
-function storedEntry(draft: ConversationLogEntryDraft, ordinal: number): StoredEntry {
-	const shape = entryShape(draft.type);
-	const { id, parentId, type, timestamp, visibility, payload, ...extensions } = draft;
-	if (visibility !== shape.visibility) {
-		throw new Error(`Entry type ${JSON.stringify(type)} has ${shape.visibility} visibility`);
-	}
-	for (const key of Object.keys(extensions)) {
-		if (!shape.extensions.has(key)) throw new Error(`Entry field ${JSON.stringify(key)} is not part of ${type}`);
-	}
-	const fields: unknown = payload;
-	if (fields === null || typeof fields !== "object" || Array.isArray(fields)) {
-		throw new Error(`Entry ${JSON.stringify(id)} payload must be an object`);
-	}
-	for (const key of Object.keys(fields)) {
-		if (ENVELOPE_KEYS.has(key) || shape.extensions.has(key)) {
-			throw new Error(`Entry ${JSON.stringify(id)} payload field ${JSON.stringify(key)} is an envelope field`);
-		}
-	}
-	return parsePersistedSessionEntry({ ...fields, ...extensions, type, id, parentId, timestamp, ordinal });
-}
-
-/** The log form of a stored entry: its envelope, its fixed visibility, and its payload. */
-function logEntry(entry: StoredEntry): ConversationLogEntry {
-	const shape = entryShape(entry.type);
-	const payload: Record<string, unknown> = {};
-	const extensions: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(entry)) {
-		if (STORED_ENVELOPE_KEYS.has(key)) continue;
-		if (shape.extensions.has(key)) extensions[key] = value;
-		else payload[key] = value;
-	}
-	return {
-		ordinal: entry.ordinal,
-		id: entry.id,
-		parentId: entry.parentId,
-		type: entry.type,
-		timestamp: entry.timestamp,
-		visibility: shape.visibility,
-		payload,
-		...extensions,
-	};
 }
 
 /** Structural equality of JSON data; object key order does not matter. */
@@ -201,7 +134,11 @@ function replaySnapshot(snapshot: SessionStoreSnapshot): SessionDerivedState {
 	return state;
 }
 
-async function releaseAfterFailure(lease: SQLiteSessionStoreLease, error: unknown): Promise<never> {
+async function releaseAfterFailure(
+	lease: SQLiteSessionStoreLease,
+	lock: ConversationLock,
+	error: unknown,
+): Promise<never> {
 	try {
 		await lease.release();
 	} catch (releaseError) {
@@ -209,8 +146,24 @@ async function releaseAfterFailure(lease: SQLiteSessionStoreLease, error: unknow
 			[error, releaseError],
 			"Opening the conversation log failed and its store lease could not be released",
 		);
+	} finally {
+		lock.close();
 	}
 	throw error;
+}
+
+/** Take the session's writer lock and a store lease, releasing the lock if the lease fails. */
+async function acquireForWriting(
+	sessionDirectory: string,
+	sessionId: string,
+): Promise<{ readonly lock: ConversationLock; readonly lease: SQLiteSessionStoreLease }> {
+	const lock = ConversationLock.acquire(sessionDirectory, sessionId);
+	try {
+		return { lock, lease: await acquireSharedSQLiteSessionStore(sessionDirectory) };
+	} catch (error) {
+		lock.close();
+		throw error;
+	}
 }
 
 export class SqliteConversationLog implements ConversationLog {
@@ -219,6 +172,10 @@ export class SqliteConversationLog implements ConversationLog {
 	readonly ref: SessionReference;
 	readonly lost: Promise<ConversationLogLostError>;
 	private lease: SQLiteSessionStoreLease;
+	/** The session's writer lock, held until the lease is released on close. */
+	private readonly lock: ConversationLock;
+	/** The snapshot this log was opened from, until its writer takes it. */
+	private openedSnapshot: SessionStoreSnapshot | undefined;
 	/** Derived state through the head; the next transaction's projections are computed from it. */
 	private state: SessionDerivedState;
 	private committedOrdinal: number;
@@ -231,10 +188,18 @@ export class SqliteConversationLog implements ConversationLog {
 	private lostError: ConversationLogLostError | undefined;
 	private resolveLost: (error: ConversationLogLostError) => void = () => {};
 
-	private constructor(ref: SessionReference, lease: SQLiteSessionStoreLease, state: SessionDerivedState) {
+	private constructor(
+		ref: SessionReference,
+		lease: SQLiteSessionStoreLease,
+		lock: ConversationLock,
+		snapshot: SessionStoreSnapshot,
+	) {
+		const state = replaySnapshot(snapshot);
 		this.conversationId = ref.sessionId;
 		this.ref = ref;
 		this.lease = lease;
+		this.lock = lock;
+		this.openedSnapshot = snapshot;
 		this.state = state;
 		this.committedOrdinal = state.nextOrdinal - 1;
 		this.lost = new Promise((resolve) => {
@@ -242,7 +207,11 @@ export class SqliteConversationLog implements ConversationLog {
 		});
 	}
 
-	/** Create a new hidden session in a store and open its empty log. */
+	/**
+	 * Create a new hidden session in a store and open its empty log. Takes the
+	 * session's writer lock first; throws `ConversationLockedError` if another
+	 * host holds it.
+	 */
 	static async create(options: SqliteConversationLogCreateOptions): Promise<SqliteConversationLog> {
 		const id = options.id ?? uuidv7();
 		assertValidSessionId(id);
@@ -251,7 +220,7 @@ export class SqliteConversationLog implements ConversationLog {
 				? undefined
 				: parseSessionReference(options.parentSession, "Parent session reference");
 		const sessionDirectory = resolvePath(options.sessionDirectory);
-		const lease = await acquireSharedSQLiteSessionStore(sessionDirectory);
+		const { lock, lease } = await acquireForWriting(sessionDirectory, id);
 		try {
 			const summary = await lease.client.createHiddenSession({
 				id,
@@ -271,29 +240,48 @@ export class SqliteConversationLog implements ConversationLog {
 				sessionId: summary.id,
 				sessionGeneration: summary.sessionGeneration,
 			});
-			return await SqliteConversationLog.load(lease, ref);
+			return await SqliteConversationLog.load(lease, lock, ref);
 		} catch (error) {
-			return await releaseAfterFailure(lease, error);
+			return await releaseAfterFailure(lease, lock, error);
 		}
 	}
 
-	/** Open the log of an existing session. */
+	/**
+	 * Open the log of an existing session. Takes the session's writer lock
+	 * before loading it; throws `ConversationLockedError` if another host holds
+	 * it.
+	 */
 	static async open(ref: SessionReference): Promise<SqliteConversationLog> {
 		const canonical = parseSessionReference(ref);
 		const sessionDirectory = resolvePath(canonical.sessionDirectory);
-		const lease = await acquireSharedSQLiteSessionStore(sessionDirectory);
+		const { lock, lease } = await acquireForWriting(sessionDirectory, canonical.sessionId);
 		try {
-			return await SqliteConversationLog.load(lease, Object.freeze({ ...canonical, sessionDirectory }));
+			return await SqliteConversationLog.load(lease, lock, Object.freeze({ ...canonical, sessionDirectory }));
 		} catch (error) {
-			return await releaseAfterFailure(lease, error);
+			return await releaseAfterFailure(lease, lock, error);
 		}
 	}
 
-	private static async load(lease: SQLiteSessionStoreLease, ref: SessionReference): Promise<SqliteConversationLog> {
+	private static async load(
+		lease: SQLiteSessionStoreLease,
+		lock: ConversationLock,
+		ref: SessionReference,
+	): Promise<SqliteConversationLog> {
 		if (lease.client.info.storeId !== ref.storeId) throw new Error("Session reference belongs to a different store");
 		const snapshot = await lease.client.loadSession(ref.sessionId, ref.sessionGeneration);
 		if (!snapshot) throw new Error(`Session not found: ${ref.sessionId}`);
-		return new SqliteConversationLog(ref, lease, replaySnapshot(snapshot));
+		return new SqliteConversationLog(ref, lease, lock, snapshot);
+	}
+
+	/**
+	 * The snapshot this log was opened from, handed over once so its writer can
+	 * index the committed session without loading it again.
+	 */
+	takeOpenedSnapshot(): SessionStoreSnapshot {
+		const snapshot = this.openedSnapshot;
+		if (!snapshot) throw new Error("The conversation log's opened snapshot was already taken");
+		this.openedSnapshot = undefined;
+		return snapshot;
 	}
 
 	head(): number {
@@ -337,17 +325,23 @@ export class SqliteConversationLog implements ConversationLog {
 		});
 		if (page === null) throw this.lose("storage", `Session ${JSON.stringify(this.ref.sessionId)} no longer exists`);
 		return {
-			entries: page.entries.map((entry) => logEntry(decodeStoredSessionEntry(entry))),
+			entries: page.entries.map((entry) => toLogEntry(decodeStoredSessionEntry(entry))),
 			lastOrdinal: page.lastOrdinal,
 		};
 	}
 
+	/** Stop accepting work, then release the store lease and the writer lock once the last append settles. */
 	async close(): Promise<void> {
 		if (!this.lostError) this.lose("closed", "The conversation log was closed");
+		this.openedSnapshot = undefined;
 		this.released ??= (async () => {
-			await this.appends;
-			await this.retiring;
-			await this.lease.release();
+			try {
+				await this.appends;
+				await this.retiring;
+				await this.lease.release();
+			} finally {
+				this.lock.close();
+			}
 		})();
 		return this.released;
 	}
@@ -387,7 +381,9 @@ export class SqliteConversationLog implements ConversationLog {
 
 	/** Validate the batch and compute its transaction: the entries plus the projections they derive. */
 	private prepare(batch: ConversationLogAppend): PreparedCommit {
-		const entries = batch.entries.map((draft, index) => storedEntry(draft, batch.expectedOrdinal + index + 1));
+		const entries: CommittedSessionEntry[] = batch.entries.map((draft: ConversationLogEntryDraft, index) =>
+			toSessionEntry(draft, batch.expectedOrdinal + index + 1),
+		);
 		const state = cloneSessionDerivedState(this.state);
 		for (const entry of entries) applySessionEntry(state, entry);
 		const payload: SessionStoreTransactionPayload = {

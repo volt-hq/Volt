@@ -613,9 +613,8 @@ describe("worktree session-dir keying (§5.1.7 filterCwd pin)", () => {
 				id: "s-worktree",
 			});
 			const parentSession = await SessionManager.create(parentPath, parentSessionDir, { id: "s-parent" });
-			worktreeSession.appendMessage({ role: "user", content: "worktree session", timestamp: Date.now() });
-			parentSession.appendMessage({ role: "user", content: "parent session", timestamp: Date.now() });
-			await Promise.all([worktreeSession.flush(), parentSession.flush()]);
+			await worktreeSession.appendMessage({ role: "user", content: "worktree session", timestamp: Date.now() });
+			await parentSession.appendMessage({ role: "user", content: "parent session", timestamp: Date.now() });
 
 			// The daemon's list_sessions call shape: parent cwd + parent default dir.
 			const sessions = await SessionManager.list(parentPath, parentSessionDir);

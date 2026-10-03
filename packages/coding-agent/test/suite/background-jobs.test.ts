@@ -167,7 +167,7 @@ describe("AgentSession background jobs", () => {
 					return typeof response === "function" ? response(delivered, options, state, model) : response;
 				}),
 			);
-		harness.session.setSessionName("Background jobs test");
+		await harness.session.setSessionName("Background jobs test");
 		harnesses.push(harness);
 		return harness;
 	}
@@ -1311,14 +1311,25 @@ describe("AgentSession background jobs", () => {
 		const acknowledge = vi.spyOn(BackgroundJobManager.prototype, "acknowledgeNotifications");
 		const durabilityReached = deferred();
 		const releaseDurability = deferred();
-		const flush = harness.sessionManager.flush.bind(harness.sessionManager);
-		const flushSpy = vi.spyOn(harness.sessionManager, "flush").mockImplementation(async () => {
-			if (notices(harness).length > 0) {
-				durabilityReached.resolve();
-				await releaseDurability.promise;
-			}
-			await flush();
-		});
+		const commit = harness.sessionManager.commitCanonicalCommand.bind(harness.sessionManager);
+		const commitSpy = vi
+			.spyOn(harness.sessionManager, "commitCanonicalCommand")
+			.mockImplementation(async (command) => {
+				const evidence = await commit(command);
+				if (
+					command.mutations.some(
+						(mutation) =>
+							mutation.kind === "append" &&
+							mutation.entry.type === "message" &&
+							mutation.entry.message.role === "custom" &&
+							mutation.entry.message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
+					)
+				) {
+					durabilityReached.resolve();
+					await releaseDurability.promise;
+				}
+				return evidence;
+			});
 		harness.setResponses([fauxAssistantMessage("Notice received.")]);
 		const prompt = harness.session.prompt("Collect the completion");
 		try {
@@ -1327,7 +1338,7 @@ describe("AgentSession background jobs", () => {
 			expect(harness.faux.state.callCount).toBe(2);
 		} finally {
 			releaseDurability.resolve();
-			await prompt.finally(() => flushSpy.mockRestore());
+			await prompt.finally(() => commitSpy.mockRestore());
 		}
 		expect(acknowledge).toHaveBeenCalledExactlyOnceWith([job.id]);
 	});

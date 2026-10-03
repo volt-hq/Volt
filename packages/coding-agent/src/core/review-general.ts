@@ -9,7 +9,6 @@ export async function getReviewGeneral(manager: SessionManager, runId: string): 
 	const ref = manager.getSessionRef();
 	if (!ref) throw new ReviewSourceUnavailableError("Review General requires a durable review anchor.");
 	const cwd = manager.getCwd();
-	await manager.flush();
 	const lease = await acquireSharedSQLiteSessionStore(ref.sessionDirectory);
 	try {
 		if (lease.client.info.storeId !== ref.storeId) throw new ReviewSourceUnavailableError();

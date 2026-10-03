@@ -132,7 +132,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		).rejects.toBe(constructionError);
 
 		expect(closePersistence).toHaveBeenCalledOnce();
-		expect(() => sessionManager.appendSessionInfo("late write")).toThrow("Session persistence is closed");
+		await expect(sessionManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
 		expect(await SessionManager.findForResume(tempDir, sessionRef.sessionId)).toEqual(sessionRef);
 	});
 
@@ -154,7 +154,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(runtimeHost.session.sessionManager.getStartingGitContext()).toBeNull();
 
 		const scheduleRefresh = vi.spyOn(runtimeHost.session.gitContextProvider, "scheduleRefresh");
-		runtimeHost.session.recordBashResult("touch changed", {
+		await runtimeHost.session.recordBashResult("touch changed", {
 			output: "",
 			exitCode: 0,
 			cancelled: false,
@@ -291,7 +291,6 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const originatingManager = originatingSession.sessionManager;
 		const originatingRef = originatingSession.sessionRef;
 		expect(originatingRef).toBeDefined();
-		await originatingManager.flush();
 		const originatingEntries = originatingManager.getEntries();
 		const originatingLeaf = originatingManager.getLeafId();
 		const originatingSessionFiles = readdirSync(originatingManager.getSessionDir()).sort();
@@ -349,8 +348,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			},
 			execute: async () => {
 				await reviewGate;
-				appendReviewRun(originatingManager, record);
-				await originatingManager.flush();
+				await appendReviewRun(originatingManager, record);
 				return {
 					status: "completed",
 					raw: record.result!.summary,
@@ -395,9 +393,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			originalSession.sessionManager.getSessionDir(),
 		);
-		targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
-		targetManager.appendMessage(fauxAssistantMessage("target assistant"));
-		await targetManager.flush();
+		await targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await targetManager.appendMessage(fauxAssistantMessage("target assistant"));
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 
@@ -421,9 +418,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			originalSession.sessionManager.getSessionDir(),
 		);
-		targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
-		targetManager.appendMessage(fauxAssistantMessage("target assistant"));
-		await targetManager.flush();
+		await targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await targetManager.appendMessage(fauxAssistantMessage("target assistant"));
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 
@@ -460,12 +456,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 	it("starts one revision-fenced retained-context plan execution", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		await runtimeHost.session.setAgentMode("plan");
-		const draft = runtimeHost.session.updatePlan({
+		const draft = await runtimeHost.session.updatePlan({
 			title: "Retain context",
 			summary: "Execute in the current session.",
 			steps: [{ text: "Implement the change" }],
 		});
-		const ready = runtimeHost.session.submitPlan({
+		const ready = await runtimeHost.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Retain context",
@@ -565,16 +561,16 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 		const olderReview = reviewRecord("review:older", 10, "Older finding");
 		const currentReview = reviewRecord("review:current", 20, "Current finding");
-		appendReviewRun(sourceManager, olderReview);
-		appendReviewRun(sourceManager, currentReview);
-		acknowledgeReviewRun(sourceManager, currentReview.runId, 123);
-		appendReviewFindingTransition(sourceManager, {
+		await appendReviewRun(sourceManager, olderReview);
+		await appendReviewRun(sourceManager, currentReview);
+		await acknowledgeReviewRun(sourceManager, currentReview.runId, 123);
+		await appendReviewFindingTransition(sourceManager, {
 			runId: currentReview.runId,
 			findingId: "finding-review:current",
 			status: "accepted",
 			createdAt: 30,
 		});
-		appendReviewFindingTransition(sourceManager, {
+		await appendReviewFindingTransition(sourceManager, {
 			runId: currentReview.runId,
 			findingId: "finding-review:current",
 			status: "dismissed",
@@ -585,12 +581,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const sourceFeedbackBefore = exportReviewFeedback(sourceManager).outcomes;
 
 		await runtimeHost.session.setAgentMode("plan");
-		const draft = runtimeHost.session.updatePlan({
+		const draft = await runtimeHost.session.updatePlan({
 			title: "Clear context",
 			summary: "Execute from only the approved plan.",
 			steps: [{ text: "Implement the isolated change" }],
 		});
-		const ready = runtimeHost.session.submitPlan({
+		const ready = await runtimeHost.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Clear context",
@@ -639,7 +635,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			result: { findings: [{ id: "finding-review:current", status: "dismissed" }] },
 		});
 		expect(exportReviewFeedback(targetManager).outcomes).toEqual([sourceFeedbackBefore.at(-1)]);
-		appendReviewFindingTransition(targetManager, {
+		await appendReviewFindingTransition(targetManager, {
 			runId: currentReview.runId,
 			findingId: "finding-review:current",
 			status: "fixed",
@@ -693,9 +689,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			originalSession.sessionManager.getSessionDir(),
 		);
-		targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
-		targetManager.appendMessage(fauxAssistantMessage("target assistant"));
-		await targetManager.flush();
+		await targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await targetManager.appendMessage(fauxAssistantMessage("target assistant"));
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 
@@ -804,7 +799,6 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const originalSession = runtimeHost.session;
 		const currentSessionRef = originalSession.sessionRef;
 		expect(currentSessionRef).toBeDefined();
-		await originalSession.sessionManager.flush();
 		const collisionManager = await SessionManager.create(
 			runtimeHost.cwd,
 			join(runtimeHost.cwd, "collision-sessions"),
@@ -889,7 +883,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await expect(
 			runtimeHost.newSession({
 				setup: async (sessionManager) => {
-					sessionManager.appendPlanningState({ mode: "plan", plan: null });
+					await sessionManager.appendPlanningState({ mode: "plan", plan: null });
 					preparedRef = sessionManager.getSessionRef();
 				},
 			}),
@@ -1234,12 +1228,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			runtimeHost.session.sessionManager.getSessionDir(),
 		);
-		targetManager.reserveClientInput("replacement-older", "steer", { message: "older durable input" });
-		targetManager.markClientInputQueued("replacement-older", {
+		await targetManager.reserveClientInput("replacement-older", "steer", { message: "older durable input" });
+		await targetManager.markClientInputQueued("replacement-older", {
 			delivery: "steer",
 			message: "older durable input",
 		});
-		await targetManager.flush();
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 		// The runtime opens the target for writing once its creator released the lock.
@@ -1276,12 +1269,11 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			runtimeHost.session.sessionManager.getSessionDir(),
 		);
-		targetManager.reserveClientInput("replacement-retry", "steer", { message: "older durable input" });
-		targetManager.markClientInputQueued("replacement-retry", {
+		await targetManager.reserveClientInput("replacement-retry", "steer", { message: "older durable input" });
+		await targetManager.markClientInputQueued("replacement-retry", {
 			delivery: "steer",
 			message: "older durable input",
 		});
-		await targetManager.flush();
 		// The runtime opens the target for writing once its creator released the lock.
 		await targetManager.closePersistence();
 		await runtimeHost.startRecoveredClientInputs();
@@ -1517,25 +1509,22 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const bootstrapCount = writes.length;
 		const manager = runtimeHost.session.sessionManager;
 
-		manager.reserveClientInput("runtime-private-wal", "prompt", { message: "runtime private WAL" });
-		manager.transitionClientInput("runtime-private-wal", "started");
-		await manager.flush();
+		await manager.reserveClientInput("runtime-private-wal", "prompt", { message: "runtime private WAL" });
+		await manager.transitionClientInput("runtime-private-wal", "started");
 		await subscription.flush();
 		expect(writes).toHaveLength(bootstrapCount);
 
-		manager.appendPlanningState({ mode: "plan", plan: null });
-		await manager.flush();
+		await manager.appendPlanningState({ mode: "plan", plan: null });
 		await subscription.flush();
 		expect(writes).toHaveLength(bootstrapCount);
 
-		manager.appendMessage({
+		await manager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "visible" }],
 			clientMessageId: "runtime-private-wal",
 			timestamp: Date.now(),
 		});
 		// Transcript commits publish after the store transaction commits.
-		await manager.flush();
 		await subscription.flush();
 		expect(writes.at(-1)).toMatchObject({
 			type: "visible-transcript-commit",
@@ -1773,7 +1762,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await expect(
 			runtimeHost.newSession({
 				setup: async (sessionManager) => {
-					sessionManager.appendPlanningState({ mode: "plan", plan: null });
+					await sessionManager.appendPlanningState({ mode: "plan", plan: null });
 					replacementRef = sessionManager.getSessionRef();
 				},
 			}),
@@ -1801,7 +1790,6 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 		await runtimeHost.session.prompt("source prompt");
 		const originalSession = runtimeHost.session;
-		const originalSessionId = originalSession.sessionId;
 		const targetEntry = originalSession.sessionManager
 			.getEntries()
 			.find((entry) => entry.type === "message" && entry.message.role === "assistant");
@@ -1809,21 +1797,23 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			throw new Error("Expected an assistant entry to fork");
 		}
 		const destinationFailure = new Error("ENOSPC: fork destination write failed");
-		const originalFlush = SessionManager.prototype.flush;
+		const originalCreateBranchedSession = SessionManager.prototype.createBranchedSession;
 		let persistenceFailureInjected = false;
-		// Fail preparation only; cleanup must still drain accepted writes.
-		const flush = vi.spyOn(SessionManager.prototype, "flush").mockImplementation(function (this: SessionManager) {
-			if (this.getSessionId() !== originalSessionId && !persistenceFailureInjected) {
-				persistenceFailureInjected = true;
-				return Promise.reject(destinationFailure);
-			}
-			return originalFlush.call(this);
-		});
+		// Fail preparation only; cleanup must still close the destination manager.
+		const createBranchedSession = vi
+			.spyOn(SessionManager.prototype, "createBranchedSession")
+			.mockImplementation(function (this: SessionManager, leafId: string) {
+				if (this !== originalSession.sessionManager && !persistenceFailureInjected) {
+					persistenceFailureInjected = true;
+					return Promise.reject(destinationFailure);
+				}
+				return originalCreateBranchedSession.call(this, leafId);
+			});
 
 		try {
 			await expect(runtimeHost.fork(targetEntry.id, { position: "at" })).rejects.toBe(destinationFailure);
 		} finally {
-			flush.mockRestore();
+			createBranchedSession.mockRestore();
 		}
 
 		expect(runtimeHost.session).toBe(originalSession);

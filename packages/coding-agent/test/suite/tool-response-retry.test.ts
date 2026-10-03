@@ -235,7 +235,7 @@ describe("tool response transport recovery", () => {
 					model: harness.getModel(),
 					noTools: "all",
 				});
-				created.session.setSessionName("tool response recovery child");
+				await created.session.setSessionName("tool response recovery child");
 				return { ...created, services, diagnostics: services.diagnostics };
 			};
 			const manager = new SubagentManager({ createRuntime, cwd: harness.tempDir, agentDir: harness.tempDir });

@@ -41,13 +41,13 @@ describe("SessionManager Harness adapter", () => {
 
 	it("filters Coding-only policy and WAL entries while preserving visible parent chains and context", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		const firstId = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		manager.appendFastModeChange(true);
-		manager.appendPlanningState(DEFAULT_PLANNING_STATE);
-		manager.reserveClientInput("adapter-private-wal", "prompt", { message: "private" });
-		manager.appendThinkingLevelChange("medium");
-		manager.appendModelChange("faux", "test-model");
-		const secondId = manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		const firstId = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		await manager.appendFastModeChange(true);
+		await manager.appendPlanningState(DEFAULT_PLANNING_STATE);
+		await manager.reserveClientInput("adapter-private-wal", "prompt", { message: "private" });
+		await manager.appendThinkingLevelChange("medium");
+		await manager.appendModelChange("faux", "test-model");
+		const secondId = await manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
 		const storage = new SessionManagerHarnessStorage(manager);
 		const session = createSessionManagerHarnessSession(manager);
 
@@ -77,11 +77,11 @@ describe("SessionManager Harness adapter", () => {
 
 	it("remaps filtered compaction boundaries to the first visible retained entry", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		manager.appendMessage({ role: "user", content: "summarized", timestamp: 1 });
-		const canonicalBoundaryId = manager.appendFastModeChange(true);
-		manager.appendPlanningState(DEFAULT_PLANNING_STATE);
-		const retainedId = manager.appendMessage({ role: "user", content: "retained", timestamp: 2 });
-		const compactionId = manager.appendCompaction("summary", canonicalBoundaryId, 100);
+		await manager.appendMessage({ role: "user", content: "summarized", timestamp: 1 });
+		const canonicalBoundaryId = await manager.appendFastModeChange(true);
+		await manager.appendPlanningState(DEFAULT_PLANNING_STATE);
+		const retainedId = await manager.appendMessage({ role: "user", content: "retained", timestamp: 2 });
+		const compactionId = await manager.appendCompaction("summary", canonicalBoundaryId, 100);
 		const storage = new SessionManagerHarnessStorage(manager);
 		const session = createSessionManagerHarnessSession(manager);
 
@@ -112,9 +112,9 @@ describe("SessionManager Harness adapter", () => {
 	it("maps generic leaf movement and summaries onto SessionManager branching", async () => {
 		const manager = SessionManager.inMemory("/workspace");
 		const session = createSessionManagerHarnessSession(manager);
-		const firstId = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		manager.appendFastModeChange(true);
-		const secondId = manager.appendMessage(fauxAssistantMessage("second"));
+		const firstId = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		await manager.appendFastModeChange(true);
+		const secondId = await manager.appendMessage(fauxAssistantMessage("second"));
 
 		expect(await session.getLeafId()).toBe(secondId);
 		await session.moveTo(null);
@@ -189,7 +189,7 @@ describe("SessionManager Harness adapter", () => {
 
 	it("bridges delivery attempts into Session mutation receipts", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		manager.reserveClientInput("client-1", "prompt", { message: "hello" });
+		await manager.reserveClientInput("client-1", "prompt", { message: "hello" });
 		const storage = new SessionManagerHarnessStorage(manager);
 		const identity = { deliveryId: "delivery-1", epoch: 1, attemptId: "attempt-1" };
 		const receipt = await storage.commitOwnedDelivery({
@@ -228,27 +228,28 @@ describe("SessionManager Harness adapter", () => {
 			],
 		});
 
-		expect(() => manager.appendMessage({ role: "user", content: "racing", timestamp: 2 })).toThrow(
-			"atomic session append",
-		);
+		// A direct write called during the guarded commit commits after it.
+		const racing = manager.appendMessage({ role: "user", content: "racing", timestamp: 2 });
 		const committed = await commit;
 		expect(committed.outcome).toBe("committed");
 		if (committed.outcome !== "committed") throw new Error("Expected commit");
 		const evidence = storage.resolveMutationReceipt(committed.receipt);
 		expect(evidence?.before.entries).toEqual([]);
 		expect(evidence?.after.entries.map((entry) => entry.type)).toEqual(["message"]);
+		const racingId = await racing;
+		expect(manager.getBranch().map((entry) => entry.id)).toEqual([...(evidence?.appendedEntryIds ?? []), racingId]);
 	});
 
 	it("rejects an exact guard after an unobserved A-to-B-to-A branch cycle", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		const firstId = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		const secondId = manager.appendMessage(fauxAssistantMessage("second"));
-		manager.branch(firstId);
+		const firstId = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const secondId = await manager.appendMessage(fauxAssistantMessage("second"));
+		await manager.branch(firstId);
 		const storage = new SessionManagerHarnessStorage(manager);
 		const basis = await storage.getBranchSnapshot();
 
-		manager.branch(secondId);
-		manager.branch(firstId);
+		await manager.branch(secondId);
+		await manager.branch(firstId);
 		const result = await storage.commitBatch({
 			guard: { kind: "exact", cursor: basis.cursor },
 			mutations: [

@@ -105,7 +105,7 @@ describe("managed context collection policy fence (#431)", () => {
 				],
 			});
 			try {
-				harness.session.setSessionName("collection policy fence");
+				await harness.session.setSessionName("collection policy fence");
 				policy = harness.session.registerTurnPolicy({ beforeToolCall: () => undefined });
 				for (const key of ["a", "b", "c"])
 					await writeFile(join(harness.tempDir, `${key}.txt`), `prepared source ${key}`);

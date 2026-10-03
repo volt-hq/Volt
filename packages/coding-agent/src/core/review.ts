@@ -1312,9 +1312,9 @@ interface ReviewPassResult<TReport> {
 
 async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Promise<ReviewPassResult<TReport>> {
 	const sessionManager = SessionManager.inMemory(options.cwd);
-	sessionManager.appendSessionInfo(`Review ${options.name} ${options.identity.passId}`);
+	await sessionManager.appendSessionInfo(`Review ${options.name} ${options.identity.passId}`);
 	let currentAttempt = 1;
-	if (options.fastModeEnabled) sessionManager.appendFastModeChange(true);
+	if (options.fastModeEnabled) await sessionManager.appendFastModeChange(true);
 	const { session } = await createAgentSession({
 		cwd: options.cwd,
 		agentDir: options.agentDir,
@@ -1853,8 +1853,7 @@ export async function executeReviewWorkflow(
 		source
 			? async (usage) => {
 					assertSource();
-					appendReviewUsageCheckpoint(source, prepared.workflowId, usage);
-					await source.flush();
+					await appendReviewUsageCheckpoint(source, prepared.workflowId, usage);
 					assertSource();
 				}
 			: undefined,
@@ -2000,8 +1999,8 @@ async function promoteCompletedReview(
 	const fastModeEnabled = options.session.fastModeEnabled === true;
 	const newSessionResult = await options.newSession({
 		setup: async (sessionManager) => {
-			if (fastModeEnabled) sessionManager.appendFastModeChange(true);
-			appendReviewRun(sessionManager, runRecord);
+			if (fastModeEnabled) await sessionManager.appendFastModeChange(true);
+			await appendReviewRun(sessionManager, runRecord);
 		},
 		withSession: async (context: ReplacedSessionContext) => {
 			await context.sendMessage(reviewMessage);

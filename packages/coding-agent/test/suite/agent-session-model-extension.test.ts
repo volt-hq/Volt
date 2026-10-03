@@ -131,15 +131,14 @@ describe("AgentSession model and extension characterization", () => {
 			isError: false,
 			timestamp: Date.now(),
 		};
-		harness.sessionManager.appendMessage(priorGeneratedResult);
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage(priorGeneratedResult);
+		await harness.sessionManager.appendMessage({
 			role: "custom",
 			customType: "reference_image",
 			content: [{ type: "image", mimeType: "image/png", data: customImageData }],
 			display: false,
 			timestamp: Date.now(),
 		});
-		await harness.sessionManager.flush();
 		await harness.session.prompt("Edit these attached references", {
 			images: [{ type: "image", mimeType: "image/png", data: rpcImageData }],
 			clientMessageId: "rpc-image-edit",
@@ -277,7 +276,7 @@ describe("AgentSession model and extension characterization", () => {
 		const modelTwo = harness.getModel("faux-2")!;
 
 		await harness.session.setThinkingLevel("high", { persistDefault: false });
-		harness.session.setFastModeEnabled(true);
+		await harness.session.setFastModeEnabled(true);
 		await harness.session.setThinkingLevel("low", { persistDefault: false });
 		expect(harness.session.fastModeEnabled).toBe(true);
 		expect(harness.session.thinkingLevel).toBe("low");
@@ -586,7 +585,7 @@ describe("AgentSession model and extension characterization", () => {
 			expect(harness.sessionManager.getSessionName()).toBeUndefined();
 			expect(harness.getPendingResponseCount()).toBe(1);
 
-			harness.session.setSessionName("accepted prompt");
+			await harness.session.setSessionName("accepted prompt");
 			await harness.session.prompt("accepted prompt");
 			expect(sawCarriedContext).toBe(true);
 		},

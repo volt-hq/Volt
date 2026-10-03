@@ -39,8 +39,7 @@ function temporaryDirectory(): string {
 /** Create a persisted session with one message and close it. */
 async function storedSession(sessionDir: string, cwd: string, text = "hello"): Promise<SessionReference> {
 	const manager = await SessionManager.create(cwd, sessionDir);
-	manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
-	await manager.flush();
+	await manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
 	const ref = manager.getSessionRef()!;
 	await manager.closePersistence();
 	return ref;
@@ -168,7 +167,7 @@ describe("regression #585: one writer per conversation log", () => {
 		// Readers take no lock.
 		const reader = await owned(await SessionManager.openReadOnly(ref));
 		expect(reader.getEntries().map((entry) => entry.type)).toEqual(["message"]);
-		expect(() => reader.appendMessage({ role: "user", content: "no", timestamp: Date.now() })).toThrow(
+		await expect(reader.appendMessage({ role: "user", content: "no", timestamp: Date.now() })).rejects.toThrow(
 			`Session ${ref.sessionId} was opened read-only`,
 		);
 		expect((await SessionManager.list(root, sessionDir)).map((session) => session.id)).toEqual([ref.sessionId]);
@@ -180,8 +179,7 @@ describe("regression #585: one writer per conversation log", () => {
 		expect(forked.getEntries().map((entry) => entry.type)).toEqual(["message"]);
 
 		// The writer is unaffected.
-		writer.appendMessage({ role: "user", content: "still mine", timestamp: Date.now() });
-		await writer.flush();
+		await writer.appendMessage({ role: "user", content: "still mine", timestamp: Date.now() });
 		expect(writer.getEntries()).toHaveLength(2);
 	});
 
@@ -387,7 +385,7 @@ describe("regression #585: one writer per conversation log", () => {
 		expect(consoleError).toHaveBeenCalledExactlyOnceWith(
 			`Volt stopped session ${ref.sessionId} because its saved state could not be confirmed: ${lost.message}`,
 		);
-		expect(lost.message).toMatch(/^Session ordinal changed from \d+ to \d+$/);
+		expect(lost.message).toMatch(/^Expected log ordinal \d+, but the log head is \d+$/);
 		// The RPC host owned the runtime: disposal released the session's lock.
 		expect(lockState(ref)).toBe("free");
 	});

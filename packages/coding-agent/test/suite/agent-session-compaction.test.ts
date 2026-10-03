@@ -105,14 +105,14 @@ function useSummaryResponses(
 	return () => callCount;
 }
 
-function seedCompactableSession(harness: Harness): void {
+async function seedCompactableSession(harness: Harness): Promise<void> {
 	const now = Date.now();
-	harness.sessionManager.appendMessage({
+	await harness.sessionManager.appendMessage({
 		role: "user",
 		content: [{ type: "text", text: "message to compact" }],
 		timestamp: now - 1000,
 	});
-	harness.sessionManager.appendMessage(
+	await harness.sessionManager.appendMessage(
 		createAssistant(harness, {
 			stopReason: "stop",
 			totalTokens: 100,
@@ -121,11 +121,11 @@ function seedCompactableSession(harness: Harness): void {
 	);
 }
 
-function appendMessages(
+async function appendMessages(
 	harness: Harness,
 	messages: ReadonlyArray<Parameters<SessionManager["appendMessage"]>[0]>,
-): void {
-	for (const message of messages) harness.sessionManager.appendMessage(message);
+): Promise<void> {
+	for (const message of messages) await harness.sessionManager.appendMessage(message);
 }
 
 describe("AgentSession compaction characterization", () => {
@@ -186,15 +186,14 @@ describe("AgentSession compaction characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 
 		await harness.session.compact();
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "after idle compaction" }],
 			timestamp: Date.now(),
 		});
-		await harness.sessionManager.flush();
 		let requestTexts: string[] = [];
 		harness.setResponses([
 			(context) => {
@@ -230,7 +229,7 @@ describe("AgentSession compaction characterization", () => {
 			],
 		});
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		const clientMessageId = "retained-manual-compaction";
 
 		await expect(
@@ -298,7 +297,7 @@ describe("AgentSession compaction characterization", () => {
 	it("manually compacts with a custom streamFn when registry auth is absent", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		const getStreamCallCount = useSummaryStreamFn(harness, "summary from custom stream");
 
 		const result = await harness.session.compact();
@@ -310,10 +309,10 @@ describe("AgentSession compaction characterization", () => {
 	it("appends the canonical active plan checkpoint after compaction", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		await harness.session.setAgentMode("plan");
-		const draft = harness.session.updatePlan({ steps: [{ text: "Finish after compaction" }] });
-		const ready = harness.session.submitPlan({
+		const draft = await harness.session.updatePlan({ steps: [{ text: "Finish after compaction" }] });
+		const ready = await harness.session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
 			title: "Compacted plan",
@@ -348,7 +347,7 @@ describe("AgentSession compaction characterization", () => {
 	it("auto-compacts with a custom streamFn when registry auth is absent", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		const getStreamCallCount = useSummaryStreamFn(harness, "auto summary from custom stream");
 		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
 
@@ -365,7 +364,7 @@ describe("AgentSession compaction characterization", () => {
 			models: [{ id: "reasoning-model", reasoning: true }],
 		});
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		await harness.control.setModel({
 			...harness.getModel(),
 			thinkingLevelMap: { off: "none", minimal: null, xhigh: "xhigh", max: "max" },
@@ -387,7 +386,7 @@ describe("AgentSession compaction characterization", () => {
 			settings: { retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		const getCallCount = useSummaryResponses(harness, [
 			fauxAssistantMessage("", {
 				stopReason: "error",
@@ -409,7 +408,7 @@ describe("AgentSession compaction characterization", () => {
 			settings: { retry: { enabled: true, maxRetries: 2, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		const getCallCount = useSummaryResponses(harness, [
 			fauxAssistantMessage("", {
 				stopReason: "error",
@@ -436,7 +435,7 @@ describe("AgentSession compaction characterization", () => {
 			settings: { retry: { enabled: true, maxRetries: 1, baseDelayMs: 1 } },
 		});
 		harnesses.push(harness);
-		seedCompactableSession(harness);
+		await seedCompactableSession(harness);
 		useSummaryResponses(harness, [
 			fauxAssistantMessage("", {
 				stopReason: "error",
@@ -486,8 +485,8 @@ describe("AgentSession compaction characterization", () => {
 	it("excludes a stripped trailing error message from estimatedTokensAfter when retrying", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
-		seedCompactableSession(harness);
-		harness.sessionManager.appendMessage({
+		await seedCompactableSession(harness);
+		await harness.sessionManager.appendMessage({
 			...createAssistant(harness, {
 				stopReason: "error",
 				error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
@@ -692,21 +691,21 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: staleTimestamp,
 		});
 
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: staleTimestamp - 1000,
 		});
-		harness.sessionManager.appendMessage(staleAssistant);
+		await harness.sessionManager.appendMessage(staleAssistant);
 		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
-		harness.sessionManager.appendCompaction(
+		await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
 			staleAssistant.usage.totalTokens,
 			undefined,
 			false,
 		);
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "after compaction" }],
 			timestamp: Date.now(),
@@ -733,7 +732,7 @@ describe("AgentSession compaction characterization", () => {
 			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now() + 1000,
 		});
-		appendMessages(harness, [
+		await appendMessages(harness, [
 			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
 			successfulAssistant,
 			{ role: "user", content: [{ type: "text", text: "retry" }], timestamp: Date.now() + 500 },
@@ -756,7 +755,7 @@ describe("AgentSession compaction characterization", () => {
 			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now(),
 		});
-		appendMessages(harness, [
+		await appendMessages(harness, [
 			{ role: "user", content: [{ type: "text", text: "hello" }], timestamp: Date.now() - 1000 },
 			errorAssistant,
 		]);
@@ -779,14 +778,14 @@ describe("AgentSession compaction characterization", () => {
 			timestamp: preCompactionTimestamp,
 		});
 
-		harness.sessionManager.appendMessage({
+		await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "before compaction" }],
 			timestamp: preCompactionTimestamp - 1000,
 		});
-		harness.sessionManager.appendMessage(keptAssistant);
+		await harness.sessionManager.appendMessage(keptAssistant);
 		const firstKeptEntryId = harness.sessionManager.getEntries()[0]!.id;
-		harness.sessionManager.appendCompaction(
+		await harness.sessionManager.appendCompaction(
 			"summary",
 			firstKeptEntryId,
 			keptAssistant.usage.totalTokens,
@@ -799,7 +798,7 @@ describe("AgentSession compaction characterization", () => {
 			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 			timestamp: Date.now(),
 		});
-		appendMessages(harness, [
+		await appendMessages(harness, [
 			{ role: "user", content: [{ type: "text", text: "new prompt" }], timestamp: Date.now() - 500 },
 			errorAssistant,
 		]);

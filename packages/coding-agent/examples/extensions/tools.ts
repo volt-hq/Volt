@@ -24,11 +24,13 @@ export default function toolsExtension(volt: ExtensionAPI) {
 	let enabledTools: Set<string> = new Set();
 	let allTools: ToolInfo[] = [];
 
-	// Persist current state
-	function persistState() {
-		volt.appendEntry<ToolsState>("tools-config", {
-			enabledTools: Array.from(enabledTools),
-		});
+	// Persist current state; the selection already applies, so a failed write is only reported.
+	function persistState(ctx: ExtensionContext) {
+		volt
+			.appendEntry<ToolsState>("tools-config", {
+				enabledTools: Array.from(enabledTools),
+			})
+			.catch((error: unknown) => ctx.ui.notify(`Could not save tool selection: ${String(error)}`, "error"));
 	}
 
 	// Apply current tool selection
@@ -107,7 +109,7 @@ export default function toolsExtension(volt: ExtensionAPI) {
 							enabledTools.delete(id);
 						}
 						applyTools();
-						persistState();
+						persistState(ctx);
 					},
 					() => {
 						// Close dialog

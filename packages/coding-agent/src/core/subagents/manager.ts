@@ -1741,7 +1741,6 @@ export class SubagentManager {
 					await runtime.session.waitForIdle();
 					await runtime.session.waitForBackgroundJobs();
 					await runtime.session.waitForIdle();
-					await runtime.session.sessionManager.flush();
 				},
 				isIdle: () =>
 					idleActivityRevision === runtime.session.activityRevision &&
@@ -1959,20 +1958,20 @@ export class SubagentManager {
 		// reference disagree.
 		const childSessionManager = runtime.session.sessionManager;
 		const childSessionRef = childSessionManager.getSessionRef();
-		try {
-			this.parentSessionManager.appendSubagentSpawn({
+		void this.parentSessionManager
+			.appendSubagentSpawn({
 				toolCallId: spawnRecord.toolCallId,
 				requestKey: spawnRecord.requestKey,
 				subagentId: id,
 				agent: definition?.name ?? "subagent",
 				childSessionId: childSessionManager.getSessionId(),
 				...(childSessionRef !== undefined ? { childSessionRef } : {}),
+			})
+			.catch(() => {
+				// The child is already running: losing the recovery edge must not turn
+				// an accepted spawn into a failure. A parent that lost its log has
+				// already lost recoverability wholesale.
 			});
-		} catch {
-			// The child is already running: losing the recovery edge must not turn
-			// an accepted spawn into a failure. A fail-stopped parent transcript has
-			// already lost recoverability wholesale.
-		}
 	}
 
 	/**

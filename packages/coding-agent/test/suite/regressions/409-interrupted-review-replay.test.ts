@@ -60,14 +60,12 @@ async function fixture() {
 	let manager = await SessionManager.create(cwd, join(cwd, "sessions"));
 	let h = await createHarness({ sessionManager: manager });
 	cleanups.push(() => h.cleanupAsync());
-	manager.appendCustomMessageEntry("test", "Original conversation", true);
-	await manager.materialize();
+	await manager.appendCustomMessageEntry("test", "Original conversation", true);
 	const record = unfinished();
 	await appendReviewRunDurably(manager, record);
 	const noticeId = manager.getLeafId()!;
 	const collector = new ReviewUsageCollector(async (checkpoint) => {
-		appendReviewUsageCheckpoint(manager, record.runId, checkpoint);
-		await manager.flush();
+		await appendReviewUsageCheckpoint(manager, record.runId, checkpoint);
 	});
 	setKeybindings(KeybindingsManager.create());
 	initTheme("dark", true);
@@ -114,16 +112,15 @@ describe("#409 interrupted review accounting replay", () => {
 		const request = await f.start();
 		const stale = f.collector.snapshot();
 		await request.observe(usage, 1, false, false);
-		appendReviewUsageCheckpoint(f.manager, f.record.runId, stale);
-		f.manager.appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, {
+		await appendReviewUsageCheckpoint(f.manager, f.record.runId, stale);
+		await f.manager.appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, {
 			runId: f.record.runId,
 			usage: { ...f.collector.snapshot(), revision: 999, summary: { status: "partial" } },
 		});
 		// Transcript hydration must not be limited to the recent-run listing window.
 		for (let index = 0; index < MAX_HYDRATED_REVIEW_RUNS; index++) {
-			appendReviewRun(f.manager, { ...unfinished(`newer-${index}`), startedAt: index + 2 });
+			await appendReviewRun(f.manager, { ...unfinished(`newer-${index}`), startedAt: index + 2 });
 		}
-		await f.manager.flush();
 		const reopened = await f.reopen();
 		const before = reopened.getEntries();
 		const messages = reopened.buildSessionContext().messages;
@@ -151,14 +148,13 @@ describe("#409 interrupted review accounting replay", () => {
 		const request = await f.start();
 		await request.observe(usage, 1, false, false);
 		const checkpointId = f.manager.getLeafId()!;
-		f.manager.branch(f.noticeId);
-		appendReviewRun(f.manager, unfinished("another-run"));
-		appendReviewUsageCheckpoint(f.manager, "another-run", f.collector.snapshot());
-		await f.manager.flush();
+		await f.manager.branch(f.noticeId);
+		await appendReviewRun(f.manager, unfinished("another-run"));
+		await appendReviewUsageCheckpoint(f.manager, "another-run", f.collector.snapshot());
 		const reopened = await f.reopen();
 		expect(f.render()).toContain("Initial review accounting: unavailable.");
 		expect(f.render()).not.toContain("Tokens:");
-		reopened.branch(checkpointId);
+		await reopened.branch(checkpointId);
 		expect(f.render()).toContain("Tokens: 10 input");
 	});
 
