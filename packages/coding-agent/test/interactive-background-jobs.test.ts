@@ -200,8 +200,8 @@ async function acknowledgeLaunch(fixture: Awaited<ReturnType<typeof createFixtur
 		timestamp: Date.now(),
 	};
 	const result = backgroundJobResult(job);
-	await harness.sessionManager.appendMessage(assistant);
-	await harness.sessionManager.appendMessage({
+	await harness.session.sessionWriter.appendMessage(assistant);
+	await harness.session.sessionWriter.appendMessage({
 		...result,
 		role: "toolResult",
 		toolCallId: job.toolCallId,
@@ -349,7 +349,7 @@ describe("interactive background jobs", () => {
 				details: { jobs: [{ ...snapshot }] },
 				timestamp: Date.now(),
 			};
-			await harness.sessionManager.appendCustomMessageEntry(
+			await harness.session.sessionWriter.appendCustomMessageEntry(
 				notice.customType,
 				notice.content,
 				notice.display,
@@ -360,18 +360,18 @@ describe("interactive background jobs", () => {
 			const notification = access.chatContainer.children.find((child) => child instanceof CustomMessageComponent);
 			expect(notification?.render(80).lines).toEqual([]);
 			const launch = harness.sessionManager
-				.buildSessionContext()
-				.messages.find((message) => message.role === "assistant");
+				.getConversationState()
+				.context.messages.find((message) => message.role === "assistant");
 			if (!launch || launch.role !== "assistant") throw new Error("Expected launch message");
 			const args = { action: "wait" as const, ids: [job.id] };
 			const toolCallId = "collect-failed-job";
-			await harness.sessionManager.appendMessage({
+			await harness.session.sessionWriter.appendMessage({
 				...launch,
 				content: [{ type: "toolCall", name: "jobs", id: toolCallId, arguments: args }],
 			});
 			await access.handleEvent({ type: "tool_execution_start", toolCallId, toolName: "jobs", args });
 			const result = await createJobsTool({ manager: jobs }).execute(toolCallId, args);
-			await harness.sessionManager.appendMessage({
+			await harness.session.sessionWriter.appendMessage({
 				...result,
 				role: "toolResult",
 				toolName: "jobs",
@@ -388,7 +388,7 @@ describe("interactive background jobs", () => {
 			expect(collapsed).toContain("jobs wait · 1 failed");
 			expect(collapsed).not.toContain("terminal (any)");
 			expect(terminal.getViewport().join("\n")).toContain("awaiting review");
-			const saved = harness.sessionManager.buildSessionContext();
+			const saved = harness.sessionManager.getConversationState().context;
 			terminal.sendInput("\x0f");
 			await terminal.waitForRender();
 			const expanded = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
@@ -400,7 +400,7 @@ describe("interactive background jobs", () => {
 			terminal.sendInput("\x0f");
 			access.renderCurrentSessionState();
 			expect(stripAnsi(access.chatContainer.render(80).lines.join("\n"))).toBe(collapsed);
-			expect(harness.sessionManager.buildSessionContext()).toEqual(saved);
+			expect(harness.sessionManager.getConversationState().context).toEqual(saved);
 			// Losing the live binding must not hide the only terminal notice behind a saved Running launch.
 			scope.allowed = false;
 			jobs.cancelInaccessible();
@@ -408,7 +408,7 @@ describe("interactive background jobs", () => {
 			const replay = stripAnsi(access.chatContainer.render(80).lines.join("\n"));
 			expect(replay).toContain("Running at capture");
 			expect(replay).toContain("Failed · Bash · Run focused integration checks");
-			expect(harness.sessionManager.buildSessionContext()).toEqual(saved);
+			expect(harness.sessionManager.getConversationState().context).toEqual(saved);
 		},
 	);
 
@@ -547,12 +547,12 @@ describe("interactive background jobs", () => {
 			const { access, terminal, harness, jobs, job, update, finish } = fixture;
 			await acknowledgeLaunch(fixture);
 			const assistant = harness.sessionManager
-				.buildSessionContext()
-				.messages.find((message) => message.role === "assistant");
+				.getConversationState()
+				.context.messages.find((message) => message.role === "assistant");
 			if (!assistant || assistant.role !== "assistant") throw new Error("Expected launch message");
 			const toolCallId = "pending-job-wait";
 			const args = { action: "wait" as const, ids: [job.id] };
-			await harness.sessionManager.appendMessage({
+			await harness.session.sessionWriter.appendMessage({
 				...assistant,
 				content: [{ type: "toolCall", id: toolCallId, name: "jobs", arguments: args }],
 			});
@@ -799,7 +799,7 @@ describe("interactive background jobs", () => {
 			const fixture = await createFixture("regular", 80, false, outcome);
 			const { access, harness, terminal, job, jobs, finish } = fixture;
 			const card = await acknowledgeLaunch(fixture);
-			const transcript = harness.sessionManager.buildSessionContext();
+			const transcript = harness.sessionManager.getConversationState().context;
 			const modelMessages = harness.session.messages;
 			finish();
 			await jobs.wait([job.id]);
@@ -813,7 +813,7 @@ describe("interactive background jobs", () => {
 				expect(output).not.toContain("Running at capture");
 				expect(access.ui.getFocusedComponent()).toBe(access.editor);
 			}
-			expect(harness.sessionManager.buildSessionContext()).toEqual(transcript);
+			expect(harness.sessionManager.getConversationState().context).toEqual(transcript);
 			expect(harness.session.messages).toEqual(modelMessages);
 			const invalidate = vi.spyOn(card, "invalidate");
 			const repaint = vi.spyOn(access.ui, "requestRender");

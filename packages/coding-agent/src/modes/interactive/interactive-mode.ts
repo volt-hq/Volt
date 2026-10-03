@@ -143,12 +143,7 @@ import {
 	resolveReviewAccountingMessage,
 } from "../../core/review-state.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
-import {
-	getDefaultSessionDir,
-	type SessionContext,
-	SessionManager,
-	type SessionReference,
-} from "../../core/session-manager.ts";
+import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
@@ -4702,13 +4697,13 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Render session context to chat. Used for initial load and rebuild after compaction.
-	 * @param sessionContext Session context to render
+	 * Render the branch's context messages to chat. Used for initial load and rebuild after compaction.
+	 * @param messages The branch's model context messages
 	 * @param options.updateFooter Update footer state
 	 * @param options.populateHistory Add user messages to editor history
 	 */
 	private renderSessionContext(
-		sessionContext: SessionContext,
+		messages: readonly AgentMessage[],
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		this.backgroundJobsRenderCoalescer?.flush();
@@ -4724,7 +4719,7 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 		}
 
-		for (const message of sessionContext.messages) {
+		for (const message of messages) {
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.addMessageToChat(message);
@@ -4793,9 +4788,7 @@ export class InteractiveMode {
 	}
 
 	renderInitialMessages(): void {
-		// Get aligned messages and entries from session context
-		const context = this.sessionManager.buildSessionContext();
-		this.renderSessionContext(context, {
+		this.renderSessionContext(this.session.messages, {
 			updateFooter: true,
 			populateHistory: true,
 		});
@@ -4846,8 +4839,7 @@ export class InteractiveMode {
 
 	private rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
-		const context = this.sessionManager.buildSessionContext();
-		this.renderSessionContext(context);
+		this.renderSessionContext(this.session.messages);
 	}
 
 	// =========================================================================
@@ -7324,8 +7316,8 @@ export class InteractiveMode {
 				sessionDir,
 				workspaceName: control.workspaceName,
 				baseRef: target.baseRef,
-				setup: async (sessionManager) => {
-					const bound = await control.bindSession(target.id, sessionManager.getSessionId());
+				setup: async (writer) => {
+					const bound = await control.bindSession(target.id, writer.sessionManager.getSessionId());
 					if (!bound) throw new Error(`Worktree ${target.id} is unavailable for session binding`);
 				},
 			});
@@ -7672,7 +7664,7 @@ export class InteractiveMode {
 					this.ui.requestRender();
 				},
 				(entryId, label) => {
-					void this.sessionManager.appendLabelChange(entryId, label).then(
+					void this.session.sessionWriter.appendLabelChange(entryId, label).then(
 						() => this.ui.requestRender(),
 						(error: unknown) => this.showError(error instanceof Error ? error.message : String(error)),
 					);
@@ -7730,7 +7722,7 @@ export class InteractiveMode {
 						}
 						const manager = await SessionManager.open(sessionRef);
 						try {
-							await manager.appendSessionInfo(next);
+							await manager.logWriter.appendSessionInfo(next);
 						} catch (error) {
 							try {
 								await manager.closePersistence();
@@ -9608,15 +9600,18 @@ export class InteractiveMode {
 			let targetSessionManager: SessionManager | undefined;
 			let acknowledgedAt: number | undefined;
 			const opened = await this.runtimeHost.newSession({
-				setup: async (sessionManager) => {
-					targetSessionManager = sessionManager;
-					await appendReviewRun(sessionManager, record);
+				setup: async (writer) => {
+					targetSessionManager = writer.sessionManager;
+					await appendReviewRun(writer, record);
 				},
 				withSession: async (context) => {
 					await context.sendMessage(seedMessage);
-					if (!targetSessionManager) throw new Error("Review session was not initialized");
+					const target = this.session;
+					if (!targetSessionManager || target.sessionManager !== targetSessionManager) {
+						throw new Error("Review session was not initialized");
+					}
 					acknowledgedAt = (
-						await acknowledgeReviewRun(targetSessionManager, record.runId, record.acknowledgedAt ?? Date.now())
+						await acknowledgeReviewRun(target.sessionWriter, record.runId, record.acknowledgedAt ?? Date.now())
 					).acknowledgedAt;
 				},
 			});
@@ -9629,7 +9624,7 @@ export class InteractiveMode {
 					? await SessionManager.open(sourceSessionRef)
 					: sourceSessionManager;
 				try {
-					await acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
+					await acknowledgeReviewRun(acknowledgmentManager.logWriter, record.runId, acknowledgedAt);
 				} catch (error) {
 					if (sourceSessionRef) {
 						try {
@@ -9674,7 +9669,7 @@ export class InteractiveMode {
 			)
 				throw new Error("Dismissed findings require an explicit reason.");
 			await recordReviewFindingOutcome(
-				session.sessionManager,
+				session.sessionWriter,
 				{
 					runId: record.runId,
 					findingId,
@@ -9731,7 +9726,7 @@ export class InteractiveMode {
 			if (!current) throw new Error(`Unknown durable review run: ${record.runId}`);
 			const published = await publishReviewRun(session.sessionManager.getCwd(), current);
 			assertCurrent();
-			await appendReviewPublication(session.sessionManager, { runId: record.runId, ...published });
+			await appendReviewPublication(session.sessionWriter, { runId: record.runId, ...published });
 			return {
 				action,
 				status: "completed",

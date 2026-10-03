@@ -137,7 +137,7 @@ async function fixture(models?: FauxModelDefinition[]) {
 	});
 	runtimes.push(source);
 	await source.session.setSessionName("Source");
-	await appendReviewRunDurably(source.session.sessionManager, record());
+	await appendReviewRunDurably(source.session.sessionWriter, record());
 	const service = new HostReviewDiscussionService({
 		findRuntime: (ref) =>
 			runtimes.find((runtime) => {
@@ -625,7 +625,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 		const first = successful(await api.start("review-341", ["f1"], "start"))[0]!;
 		await runtimes[1]!.session.waitForIdle();
 		const target = await SessionManager.create(root, join(root, "sessions"));
-		await appendReviewRun(target, record());
+		await appendReviewRun(target.logWriter, record());
 		const alias = await createAgentSessionRuntime(factory, { sessionManager: target, cwd: root, agentDir: root });
 		runtimes.push(alias);
 		await expect(service.forRuntime(alias).list("review-341")).rejects.toThrow("not owned");

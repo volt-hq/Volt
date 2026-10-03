@@ -14,7 +14,6 @@ import * as fc from "fast-check";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { toLogEntry } from "../src/core/conversation-log/entry-codec.ts";
 import { convertToLlm } from "../src/core/messages.ts";
-import { DEFAULT_PLANNING_STATE } from "../src/core/planning.ts";
 import { decodeStoredSessionEntry } from "../src/core/session-entry-codec.ts";
 import {
 	type ClientInputCommand,
@@ -25,10 +24,10 @@ import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreLease } from ".
 import { seedSession } from "./utilities/seed-log.ts";
 import { loadPersistedSessionSnapshot } from "./utilities.ts";
 
-// The kernel fold and context builder must reproduce coding-agent's
-// buildSessionContext + replay for every log SessionManager writes, and the
-// SQLite store's derived projections (client inputs, leaf, name) must equal
-// the fold of the entries the store holds.
+// The fold of every log SessionManager writes, re-read from the log, must equal
+// the manager's incrementally advanced view and its replayed provider context,
+// and the SQLite store's derived projections (client inputs, leaf, name) must
+// equal the fold of the entries the store holds.
 
 const PROPERTY_SEED = 5_850_201;
 
@@ -67,16 +66,17 @@ async function expectStoreParity(session: SessionManager, state: ConversationSta
 
 async function expectParity(session: SessionManager): Promise<ConversationState> {
 	const state = await foldSession(session);
-	const expected = session.buildSessionContext();
+	const view = session.getConversationState();
+	const expected = view.context;
 
 	expect(state.leafId).toBe(session.getLeafId());
 	expect(state.branch).toEqual(session.getBranch().map((entry) => entry.id));
 	expect(state.context.messages).toEqual(expected.messages);
 	expect(state.context.model).toEqual(expected.model);
 	expect(state.context.thinkingLevel).toBe(expected.thinkingLevel);
-	expect(state.context.fastMode).toBe(expected.fastMode.enabled);
-	expect(state.planning ?? DEFAULT_PLANNING_STATE).toEqual(expected.planning);
-	expect(await buildContext(state, { convertToLlm })).toEqual(applyReplayPolicy(convertToLlm(expected.messages)));
+	expect(state.context.fastMode).toBe(expected.fastMode);
+	expect(state.planning).toEqual(view.planning);
+	expect(await buildContext(state, { convertToLlm })).toEqual(applyReplayPolicy(convertToLlm([...expected.messages])));
 
 	expect(state.name ?? undefined).toBe(session.getSessionName());
 	for (const entry of session.getEntries()) {
@@ -261,11 +261,11 @@ function assistant(
 }
 
 async function user(session: SessionManager, text: string): Promise<string> {
-	return session.appendMessage({ role: "user", content: text, timestamp: assistantTimestamp++ });
+	return session.logWriter.appendMessage({ role: "user", content: text, timestamp: assistantTimestamp++ });
 }
 
 async function toolResult(session: SessionManager, toolCallId: string, isError = false): Promise<string> {
-	return session.appendMessage({
+	return session.logWriter.appendMessage({
 		role: "toolResult",
 		toolCallId,
 		toolName: "read",
@@ -283,13 +283,13 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	it("model, thinking, fast mode, and planning changes", async () => {
 		const session = await createSession();
 		await expectParity(session);
-		await session.appendModelChange("openai", "gpt-test");
-		await session.appendThinkingLevelChange("high");
+		await session.logWriter.appendModelChange("openai", "gpt-test");
+		await session.logWriter.appendThinkingLevelChange("high");
 		await user(session, "hello");
-		await session.appendFastModeChange(true);
-		await session.appendMessage(assistant("hi", { provider: "google", model: "gemini-test" }));
-		await session.appendPlanningState({ mode: "plan", plan: null });
-		await session.appendThinkingLevelChange("low");
+		await session.logWriter.appendFastModeChange(true);
+		await session.logWriter.appendMessage(assistant("hi", { provider: "google", model: "gemini-test" }));
+		await session.logWriter.appendPlanningState({ mode: "plan", plan: null });
+		await session.logWriter.appendThinkingLevelChange("low");
 		const state = await expectParity(session);
 		expect(state.context.model).toEqual({ provider: "google", modelId: "gemini-test" });
 		expect(state.context.thinkingLevel).toBe("low");
@@ -300,13 +300,19 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	it("compaction keeps the entries from firstKeptEntryId", async () => {
 		const session = await createSession();
 		await user(session, "one");
-		await session.appendMessage(assistant("reply one"));
+		await session.logWriter.appendMessage(assistant("reply one"));
 		const kept = await user(session, "two");
-		await session.appendMessage(assistant("reply two", { toolCallIds: ["call-a"] }));
+		await session.logWriter.appendMessage(assistant("reply two", { toolCallIds: ["call-a"] }));
 		await toolResult(session, "call-a");
-		await session.appendCompaction("summary of one", kept, 1234);
+		await session.logWriter.appendCompaction("summary of one", kept, 1234);
 		await user(session, "three");
-		await session.appendCompaction("summary of everything", session.getLeafId()!, 4321, { structured: true }, true);
+		await session.logWriter.appendCompaction(
+			"summary of everything",
+			session.getLeafId()!,
+			4321,
+			{ structured: true },
+			true,
+		);
 		await user(session, "four");
 		const state = await expectParity(session);
 		expect(llmRoles(state.context.messages)).toEqual(["compactionSummary", "user", "user"]);
@@ -315,40 +321,40 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	it("branch summaries, navigation via leaf entries, and resets", async () => {
 		const session = await createSession();
 		const first = await user(session, "first");
-		await session.appendMessage(assistant("first reply"));
+		await session.logWriter.appendMessage(assistant("first reply"));
 		await user(session, "abandoned");
-		await session.appendMessage(assistant("abandoned reply"));
-		await session.branchWithSummary(first, "tried something else");
+		await session.logWriter.appendMessage(assistant("abandoned reply"));
+		await session.logWriter.branchWithSummary(first, "tried something else");
 		await expectParity(session);
-		await session.appendMessage(assistant("after summary"));
-		await session.branch(first);
+		await session.logWriter.appendMessage(assistant("after summary"));
+		await session.logWriter.branch(first);
 		await expectParity(session);
-		await session.resetLeaf();
+		await session.logWriter.resetLeaf();
 		await expectParity(session);
-		await session.branchWithSummary(null, "root summary");
+		await session.logWriter.branchWithSummary(null, "root summary");
 		await user(session, "fresh start");
-		await session.branchWithSummary(session.getLeafId(), "");
+		await session.logWriter.branchWithSummary(session.getLeafId(), "");
 		const state = await expectParity(session);
 		expect(llmRoles(state.context.messages)).toEqual(["branchSummary", "user"]);
 	});
 
 	it("custom messages, custom entries, labels, names, and host product entries", async () => {
 		const session = await createSession();
-		expect(await session.recordStartingGitContext(session.getSessionId(), null)).toBe(true);
+		expect(await session.logWriter.recordStartingGitContext(null)).toBe(true);
 		const greeting = await user(session, "hello");
-		await session.appendCustomMessageEntry("note", "plain note", true, { source: "test" });
-		await session.appendCustomMessageEntry("hidden", [{ type: "text", text: "hidden note" }], false);
-		await session.appendMessage({
+		await session.logWriter.appendCustomMessageEntry("note", "plain note", true, { source: "test" });
+		await session.logWriter.appendCustomMessageEntry("hidden", [{ type: "text", text: "hidden note" }], false);
+		await session.logWriter.appendMessage({
 			role: "custom",
 			customType: "inline",
 			content: "custom role message",
 			display: true,
 			timestamp: assistantTimestamp++,
 		});
-		await session.appendCustomEntry("state", { count: 1 });
-		await session.appendLabelChange(greeting, "start");
-		await session.appendSessionInfo("  Parity  ");
-		await session.appendMessage({
+		await session.logWriter.appendCustomEntry("state", { count: 1 });
+		await session.logWriter.appendLabelChange(greeting, "start");
+		await session.logWriter.appendSessionInfo("  Parity  ");
+		await session.logWriter.appendMessage({
 			role: "bashExecution",
 			command: "ls",
 			output: "file",
@@ -357,7 +363,7 @@ describe("conversation kernel parity with coding-agent context building", () => 
 			truncated: false,
 			timestamp: assistantTimestamp++,
 		});
-		await session.appendMessage({
+		await session.logWriter.appendMessage({
 			role: "bashExecution",
 			command: "secret",
 			output: "hidden",
@@ -367,8 +373,8 @@ describe("conversation kernel parity with coding-agent context building", () => 
 			timestamp: assistantTimestamp++,
 			excludeFromContext: true,
 		});
-		await session.appendLabelChange(greeting, undefined);
-		await session.appendSubagentSpawn({
+		await session.logWriter.appendLabelChange(greeting, undefined);
+		await session.logWriter.appendSubagentSpawn({
 			toolCallId: "call-x",
 			subagentId: "sub-1",
 			agent: "worker",
@@ -385,16 +391,16 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	it("errored and aborted turns, missing tool results, and rejected tool calls", async () => {
 		const session = await createSession();
 		await user(session, "do it");
-		await session.appendMessage(assistant("partial", { toolCallIds: ["call-1"], stopReason: "aborted" }));
+		await session.logWriter.appendMessage(assistant("partial", { toolCallIds: ["call-1"], stopReason: "aborted" }));
 		await toolResult(session, "call-1", true);
 		await user(session, "retry");
-		await session.appendMessage(
+		await session.logWriter.appendMessage(
 			assistant("bad args", { toolCallIds: ["call-2"], stopReason: "error", invalidArguments: true }),
 		);
-		await session.appendMessage(assistant("calling", { toolCallIds: ["call-3", "call-4"] }));
+		await session.logWriter.appendMessage(assistant("calling", { toolCallIds: ["call-3", "call-4"] }));
 		await toolResult(session, "call-3");
 		await user(session, "interrupt");
-		await session.appendMessage(assistant("failed", { stopReason: "error" }));
+		await session.logWriter.appendMessage(assistant("failed", { stopReason: "error" }));
 		const state = await expectParity(session);
 		const llm = await buildContext(state, { convertToLlm });
 		expect(llmRoles(llm)).toEqual(["user", "user", "user", "assistant", "toolResult", "toolResult", "user"]);
@@ -407,7 +413,7 @@ describe("conversation kernel parity with coding-agent context building", () => 
 			seed.clientInput("client-prompt", "prompt", { message: "typed" }, { states: ["started"] }),
 		);
 		await expectParity(session);
-		await session.appendMessage({
+		await session.logWriter.appendMessage({
 			role: "user",
 			content: "typed",
 			timestamp: assistantTimestamp++,
@@ -534,7 +540,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			const [provider, model] = MODELS[op.model % MODELS.length] ?? MODELS[0];
 			const ids = Array.from({ length: op.toolCalls }, (_, index) => `call-${toolCalls.length + index + 1}`);
 			toolCalls.push(...ids);
-			await session.appendMessage(
+			await session.logWriter.appendMessage(
 				assistant("text", {
 					toolCallIds: ids,
 					stopReason: op.stopReason,
@@ -549,7 +555,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			await toolResult(session, choose(toolCalls, op.pick) ?? "call-unknown", op.isError);
 			return;
 		case "bash":
-			await session.appendMessage({
+			await session.logWriter.appendMessage({
 				role: "bashExecution",
 				command: "echo",
 				output: "out",
@@ -560,7 +566,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			});
 			return;
 		case "custom_role":
-			await session.appendMessage({
+			await session.logWriter.appendMessage({
 				role: "custom",
 				customType: "inline",
 				content: "inline",
@@ -569,7 +575,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			});
 			return;
 		case "custom_message":
-			await session.appendCustomMessageEntry(
+			await session.logWriter.appendCustomMessageEntry(
 				"note",
 				op.array ? [{ type: "text", text: "note" }] : "note",
 				op.display,
@@ -577,48 +583,49 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			);
 			return;
 		case "custom":
-			await session.appendCustomEntry("state", { at: publicIds.length });
+			await session.logWriter.appendCustomEntry("state", { at: publicIds.length });
 			return;
 		case "label": {
 			const targetId = choose(publicIds, op.pick);
-			if (targetId !== undefined) await session.appendLabelChange(targetId, op.label ?? undefined);
+			if (targetId !== undefined) await session.logWriter.appendLabelChange(targetId, op.label ?? undefined);
 			return;
 		}
 		case "name":
-			await session.appendSessionInfo(op.name);
+			await session.logWriter.appendSessionInfo(op.name);
 			return;
 		case "model": {
 			const [provider, model] = MODELS[op.pick % MODELS.length] ?? MODELS[0];
-			await session.appendModelChange(provider, model);
+			await session.logWriter.appendModelChange(provider, model);
 			return;
 		}
 		case "thinking":
-			await session.appendThinkingLevelChange(op.level);
+			await session.logWriter.appendThinkingLevelChange(op.level);
 			return;
 		case "fast":
-			await session.appendFastModeChange(op.enabled);
+			await session.logWriter.appendFastModeChange(op.enabled);
 			return;
 		case "planning":
-			await session.appendPlanningState({ mode: op.mode, plan: null });
+			await session.logWriter.appendPlanningState({ mode: op.mode, plan: null });
 			return;
 		case "compaction": {
 			const firstKept = choose(
 				session.getBranch().map((entry) => entry.id),
 				op.pick,
 			);
-			if (firstKept !== undefined) await session.appendCompaction(`summary at ${publicIds.length}`, firstKept, 100);
+			if (firstKept !== undefined)
+				await session.logWriter.appendCompaction(`summary at ${publicIds.length}`, firstKept, 100);
 			return;
 		}
 		case "branch": {
 			const targetId = choose(publicIds, op.pick);
-			if (targetId !== undefined) await session.branch(targetId);
+			if (targetId !== undefined) await session.logWriter.branch(targetId);
 			return;
 		}
 		case "reset":
-			await session.resetLeaf();
+			await session.logWriter.resetLeaf();
 			return;
 		case "branch_summary":
-			await session.branchWithSummary(choose([null, ...publicIds], op.pick) ?? null, op.summary);
+			await session.logWriter.branchWithSummary(choose([null, ...publicIds], op.pick) ?? null, op.summary);
 			return;
 		case "receipt": {
 			const id = `client-${inputs.length + 1}`;
@@ -670,7 +677,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 				op.pick,
 			);
 			if (id !== undefined) {
-				await session.appendMessage({
+				await session.logWriter.appendMessage({
 					role: "user",
 					content: id,
 					timestamp: assistantTimestamp++,
@@ -680,7 +687,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			return;
 		}
 		case "spawn":
-			await session.appendSubagentSpawn({
+			await session.logWriter.appendSubagentSpawn({
 				toolCallId: `call-${toolCalls.length}`,
 				subagentId: `sub-${publicIds.length}`,
 				agent: "worker",

@@ -56,6 +56,7 @@ import {
 	type SessionOrigin,
 	type SessionReference,
 } from "./session-manager.ts";
+import type { SessionWriter } from "./session-writer.ts";
 import type { SubagentDelegationScope } from "./subagents/delegation-scope.ts";
 import type { SubagentRegistry } from "./subagents/registry.ts";
 
@@ -1378,7 +1379,8 @@ export class AgentSessionRuntime {
 		workspaceName?: string;
 		/** Trusted managed-worktree base ref for the replacement Git context. */
 		baseRef?: string;
-		setup?: (sessionManager: SessionManager) => Promise<void>;
+		/** Write the new session before it opens, through its log writer. */
+		setup?: (writer: SessionWriter) => Promise<void>;
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 		/** Internal remote mutation lease revalidated at every awaited replacement boundary. */
 		assertConversationGenerationCurrent?: () => void;
@@ -1463,16 +1465,16 @@ export class AgentSessionRuntime {
 		let execution: PlanExecution | undefined;
 		const replacement = await this.newSession({
 			...(sourceSessionRef ? { parentSessionRef: sourceSessionRef } : {}),
-			setup: async (sessionManager) => {
-				await restoreReviewStateFromHandoff(sessionManager, sourceReviewState);
+			setup: async (writer) => {
+				await restoreReviewStateFromHandoff(writer, sourceReviewState);
 				execution = {
 					id: randomUUID(),
 					approvedRevision: expectedRevision,
 					strategy,
 					sourceSessionId,
-					targetSessionId: sessionManager.getSessionId(),
+					targetSessionId: writer.sessionManager.getSessionId(),
 				};
-				await sessionManager.appendPlanningState({
+				await writer.appendPlanningState({
 					mode: "build",
 					plan: {
 						...clonePlanState(sourcePlan),
@@ -1482,11 +1484,11 @@ export class AgentSessionRuntime {
 					},
 				});
 				if (sourceModel) {
-					await sessionManager.appendModelChange(sourceModel.provider, sourceModel.id);
+					await writer.appendModelChange(sourceModel.provider, sourceModel.id);
 				}
-				await sessionManager.appendThinkingLevelChange(sourceThinking);
+				await writer.appendThinkingLevelChange(sourceThinking);
 				if (sourceFastMode) {
-					await sessionManager.appendFastModeChange(true);
+					await writer.appendFastModeChange(true);
 				}
 			},
 			withSession: async (context) => {
@@ -1498,7 +1500,7 @@ export class AgentSessionRuntime {
 				// the new exclusive writer; in-memory sources remain reusable.
 				const handoffManager = sourceSessionRef ? await SessionManager.open(sourceSessionRef) : sourceManager;
 				try {
-					await handoffManager.appendPlanningState({
+					await handoffManager.logWriter.appendPlanningState({
 						mode: "build",
 						plan: {
 							...clonePlanState(sourcePlan),
@@ -1559,7 +1561,7 @@ export class AgentSessionRuntime {
 					sessionDir?: string;
 					workspaceName?: string;
 					baseRef?: string;
-					setup?: (sessionManager: SessionManager) => Promise<void>;
+					setup?: (writer: SessionWriter) => Promise<void>;
 					withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 					assertConversationGenerationCurrent?: () => void;
 			  }
@@ -1586,10 +1588,10 @@ export class AgentSessionRuntime {
 				options?.parentSessionRef === undefined ? undefined : { parentSession: options.parentSessionRef },
 			);
 		} else {
-			sessionManager = SessionManager.inMemory(cwd);
-			if (options?.parentSessionRef) {
-				await sessionManager.newSession({ parentSession: options.parentSessionRef });
-			}
+			sessionManager = SessionManager.inMemory(
+				cwd,
+				options?.parentSessionRef === undefined ? undefined : { parentSession: options.parentSessionRef },
+			);
 		}
 		const ownsSessionManager = sessionManager !== this.session.sessionManager;
 		let managerTransferred = false;
@@ -1602,7 +1604,7 @@ export class AgentSessionRuntime {
 				);
 			this.assertStructuralOperationCurrent(operation);
 			if (options?.setup) {
-				await options.setup(sessionManager);
+				await options.setup(sessionManager.logWriter);
 				this.assertStructuralOperationCurrent(operation);
 			}
 			await registerReviewHandoffAliases(
@@ -1623,7 +1625,7 @@ export class AgentSessionRuntime {
 			this.assertStructuralOperationCurrent(operation);
 			if (binding) {
 				if (!sameFilesystemLocation(cwd, binding.cwd)) throw new Error(PR_CHECKOUT_CHANGED);
-				await sessionManager.recordPrReviewBinding(binding);
+				await sessionManager.logWriter.recordPrReviewBinding(binding);
 				this.assertStructuralOperationCurrent(operation);
 			}
 
@@ -1742,15 +1744,10 @@ export class AgentSessionRuntime {
 				}
 			}
 
-			const sessionManager = await this.openSessionManager(currentSessionRef);
+			const sessionManager = await SessionManager.createBranched(this.session.sessionManager, targetLeafId);
 			let managerTransferred = false;
 			try {
 				this.assertStructuralOperationCurrent(operation);
-				const forkedSessionRef = await sessionManager.createBranchedSession(targetLeafId);
-				this.assertStructuralOperationCurrent(operation);
-				if (!forkedSessionRef) {
-					throw new Error("Failed to create forked session");
-				}
 				managerTransferred = true;
 				const replacement = await this.replaceCurrentSession({
 					operation,
@@ -1780,12 +1777,9 @@ export class AgentSessionRuntime {
 			}
 		}
 
-		const sessionManager = this.session.sessionManager;
-		if (!targetLeafId) {
-			await sessionManager.newSession();
-		} else {
-			await sessionManager.createBranchedSession(targetLeafId);
-		}
+		const sessionManager = targetLeafId
+			? await SessionManager.createBranched(this.session.sessionManager, targetLeafId)
+			: SessionManager.inMemory(this.cwd);
 		this.assertStructuralOperationCurrent(operation);
 		const replacement = await this.replaceCurrentSession({
 			operation,

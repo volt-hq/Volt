@@ -11,9 +11,9 @@ describe("SessionManager entry subscriptions", () => {
 			observed.push(entry.id);
 		});
 
-		const first = await session.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const first = await session.logWriter.appendMessage({ role: "user", content: "first", timestamp: 1 });
 		unsubscribe();
-		const second = await session.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		const second = await session.logWriter.appendMessage({ role: "user", content: "second", timestamp: 2 });
 
 		expect(observed).toEqual([first]);
 		expect(session.getEntry(second)?.id).toBe(second);
@@ -27,7 +27,7 @@ describe("SessionManager entry subscriptions", () => {
 		});
 		session.subscribeEntries(healthy);
 
-		const id = await session.appendMessage({ role: "user", content: "persisted", timestamp: 1 });
+		const id = await session.logWriter.appendMessage({ role: "user", content: "persisted", timestamp: 1 });
 
 		expect(session.getEntry(id)?.id).toBe(id);
 		expect(healthy).toHaveBeenCalledOnce();
@@ -35,13 +35,13 @@ describe("SessionManager entry subscriptions", () => {
 
 	it("assigns monotonic commit ordinals and reports branch rebases", async () => {
 		const session = SessionManager.inMemory();
-		const first = await session.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		const second = await session.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		const first = await session.logWriter.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const second = await session.logWriter.appendMessage({ role: "user", content: "second", timestamp: 2 });
 		const changes: Array<{ previousLeafId: string | null; nextLeafId: string | null }> = [];
 		session.subscribeBranchChanges((change) => changes.push(change));
 
-		await session.branch(first);
-		const fork = await session.appendMessage({ role: "user", content: "fork", timestamp: 3 });
+		await session.logWriter.branch(first);
+		const fork = await session.logWriter.appendMessage({ role: "user", content: "fork", timestamp: 3 });
 
 		expect(session.getEntry(first)?.ordinal).toBe(1);
 		expect(session.getEntry(second)?.ordinal).toBe(2);

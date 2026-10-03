@@ -24,7 +24,7 @@ function response(value: unknown): GitHubCliResult {
 }
 
 async function savedTarget() {
-	await appendReviewRun(harness.sessionManager, record);
+	await appendReviewRun(harness.session.sessionWriter, record);
 	const saved = getReviewRun(harness.sessionManager, record.runId);
 	if (!saved) throw new Error("Missing saved review fixture");
 	return reviewTargetForRerun(saved);

@@ -139,7 +139,7 @@ describe("issue #110: durable Fast mode state", () => {
 			await first.session.setFastModeEnabled(true);
 			expect(first.session.fastModeEnabled).toBe(true);
 			expect(first.session.thinkingLevel).toBe("high");
-			expect(first.manager.buildSessionContext().fastMode).toEqual({ enabled: true });
+			expect(first.manager.getConversationState().context.fastMode).toBe(true);
 			expect(buildRpcSessionState(first.session).fastModeEnabled).toBe(true);
 			const sessionRef = first.manager.getSessionRef()!;
 			first.session.dispose();
@@ -192,7 +192,7 @@ describe("issue #110: durable Fast mode state", () => {
 		expect(resumed.session.model?.id).toBe("second");
 		expect(resumed.session.thinkingLevel).toBe("medium");
 		expect(resumed.session.fastModeEnabled).toBe(true);
-		expect(resumed.manager.buildSessionContext().fastMode).toEqual({ enabled: true });
+		expect(resumed.manager.getConversationState().context.fastMode).toBe(true);
 	});
 
 	it("keeps separate sessions independent across reopen", async () => {
@@ -270,7 +270,7 @@ describe("issue #110: durable Fast mode state", () => {
 
 	it("restores branch-local Fast and thinking states before publishing navigation", async () => {
 		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
-		const branchPoint = await runtime.manager.appendMessage({
+		const branchPoint = await runtime.session.sessionWriter.appendMessage({
 			role: "user",
 			content: "branch point",
 			timestamp: Date.now(),
@@ -319,7 +319,7 @@ describe("issue #110: durable Fast mode state", () => {
 		expect(runtime.session.fastModeEnabled).toBe(initial);
 		expect(runtime.session.thinkingLevel).toBe("high");
 		expect(runtime.manager.getEntries()).toEqual(entries);
-		expect(runtime.manager.buildSessionContext().fastMode).toEqual({ enabled: initial });
+		expect(runtime.manager.getConversationState().context.fastMode).toBe(initial);
 		expect(events).toEqual([]);
 	});
 
@@ -331,7 +331,7 @@ describe("issue #110: durable Fast mode state", () => {
 		runtime.session.subscribe((event) => {
 			firstEvents.push(event);
 			if (event.type === "ui_action_state_changed") {
-				expect(runtime.manager.buildSessionContext().fastMode).toEqual({ enabled: true });
+				expect(runtime.manager.getConversationState().context.fastMode).toBe(true);
 				expect(runtime.session.thinkingLevel).toBe("high");
 			}
 		});

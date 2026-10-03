@@ -39,7 +39,7 @@ function temporaryDirectory(): string {
 /** Create a persisted session with one message and close it. */
 async function storedSession(sessionDir: string, cwd: string, text = "hello"): Promise<SessionReference> {
 	const manager = await SessionManager.create(cwd, sessionDir);
-	await manager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
+	await manager.logWriter.appendMessage({ role: "user", content: text, timestamp: Date.now() });
 	const ref = manager.getSessionRef()!;
 	await manager.closePersistence();
 	return ref;
@@ -167,9 +167,9 @@ describe("regression #585: one writer per conversation log", () => {
 		// Readers take no lock.
 		const reader = await owned(await SessionManager.openReadOnly(ref));
 		expect(reader.getEntries().map((entry) => entry.type)).toEqual(["message"]);
-		await expect(reader.appendMessage({ role: "user", content: "no", timestamp: Date.now() })).rejects.toThrow(
-			`Session ${ref.sessionId} was opened read-only`,
-		);
+		await expect(
+			reader.logWriter.appendMessage({ role: "user", content: "no", timestamp: Date.now() }),
+		).rejects.toThrow(`Session ${ref.sessionId} was opened read-only`);
 		expect((await SessionManager.list(root, sessionDir)).map((session) => session.id)).toEqual([ref.sessionId]);
 		const snapshot = join(root, "snapshot.jsonl");
 		await expect(SessionManager.exportJsonlSnapshot(ref, snapshot)).resolves.toEqual({ lastOrdinal: 1 });
@@ -179,7 +179,7 @@ describe("regression #585: one writer per conversation log", () => {
 		expect(forked.getEntries().map((entry) => entry.type)).toEqual(["message"]);
 
 		// The writer is unaffected.
-		await writer.appendMessage({ role: "user", content: "still mine", timestamp: Date.now() });
+		await writer.logWriter.appendMessage({ role: "user", content: "still mine", timestamp: Date.now() });
 		expect(writer.getEntries()).toHaveLength(2);
 	});
 
@@ -373,7 +373,7 @@ describe("regression #585: one writer per conversation log", () => {
 		void mode.catch(() => {});
 		await started;
 
-		const lost = await loseLog(runtime.session.sessionManager);
+		const lost = await loseLog(runtime.session.sessionWriter);
 
 		if (exitProcess) {
 			await expect(mode).resolves.toBeUndefined();

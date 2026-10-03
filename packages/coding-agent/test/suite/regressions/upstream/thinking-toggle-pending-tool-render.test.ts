@@ -5,7 +5,6 @@ import type { AssistantMessage, ToolResultMessage, Usage } from "@hansjm10/volt-
 import { Container, Text, type TUI } from "@hansjm10/volt-tui";
 import { beforeAll, describe, expect, test, vi } from "vitest";
 import type { AgentSessionEvent } from "../../../../src/core/agent-session.ts";
-import type { SessionContext } from "../../../../src/core/session-manager.ts";
 import { initTheme } from "../../../../src/core/theme/runtime.ts";
 import type { ToolExecutionComponent } from "../../../../src/modes/interactive/components/tool-execution.ts";
 import { InteractiveMode } from "../../../../src/modes/interactive/interactive-mode.ts";
@@ -51,7 +50,7 @@ type RenderSessionContextThis = {
 
 type RenderSessionContext = (
 	this: RenderSessionContextThis,
-	sessionContext: SessionContext,
+	messages: readonly AgentMessage[],
 	options?: { updateFooter?: boolean; populateHistory?: boolean },
 ) => void;
 
@@ -118,16 +117,6 @@ function createToolResultMessage(text: string): ToolResultMessage {
 	};
 }
 
-function createSessionContext(messages: AgentMessage[]): SessionContext {
-	return {
-		messages,
-		thinkingLevel: "off",
-		model: null,
-		fastMode: { enabled: false },
-		planning: { mode: "build", plan: null },
-	};
-}
-
 function renderChat(container: Container): string {
 	return stripAnsi(container.render(120).lines.join("\n"));
 }
@@ -144,7 +133,7 @@ describe("InteractiveMode.renderSessionContext", () => {
 		).renderSessionContext;
 		const handleEvent = (InteractiveMode.prototype as unknown as { handleEvent: HandleEvent }).handleEvent;
 
-		renderSessionContext.call(fakeThis, createSessionContext([createAssistantToolCallMessage()]));
+		renderSessionContext.call(fakeThis, [createAssistantToolCallMessage()]);
 
 		expect(fakeThis.pendingTools.has(TOOL_CALL_ID)).toBe(true);
 
@@ -166,10 +155,10 @@ describe("InteractiveMode.renderSessionContext", () => {
 			InteractiveMode.prototype as unknown as { renderSessionContext: RenderSessionContext }
 		).renderSessionContext;
 
-		renderSessionContext.call(
-			fakeThis,
-			createSessionContext([createAssistantToolCallMessage(), createToolResultMessage("HISTORICAL_RESULT")]),
-		);
+		renderSessionContext.call(fakeThis, [
+			createAssistantToolCallMessage(),
+			createToolResultMessage("HISTORICAL_RESULT"),
+		]);
 
 		expect(fakeThis.pendingTools.size).toBe(0);
 		expect(renderChat(fakeThis.chatContainer)).toContain("HISTORICAL_RESULT");

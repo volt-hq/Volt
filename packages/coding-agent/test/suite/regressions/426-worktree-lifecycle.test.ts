@@ -276,7 +276,7 @@ describe("#426 disposable checkout lifecycle", () => {
 			id: request.sessionId,
 		});
 		try {
-			await r.reviews.bind(f.workspace, session, record.prReviewLaunches![0].placement, r.authority);
+			await r.reviews.bind(f.workspace, session.logWriter, record.prReviewLaunches![0].placement, r.authority);
 		} finally {
 			await session.closePersistence();
 		}
@@ -306,7 +306,12 @@ describe("#426 disposable checkout lifecycle", () => {
 			const prepared = await r.reviews.prepare(f.workspace, request, r.authority);
 			const record = (await f.state.listWorktrees()).find((entry) => entry.id === prepared.worktreeId)!;
 			const sessionManager = await SessionManager.create(record.path, sessionDir, { id: request.sessionId });
-			await r.reviews.bind(f.workspace, sessionManager, record.prReviewLaunches![0].placement, r.authority);
+			await r.reviews.bind(
+				f.workspace,
+				sessionManager.logWriter,
+				record.prReviewLaunches![0].placement,
+				r.authority,
+			);
 			const runtime = await createHarness({ sessionManager, settings: { lsp: { enabled: false } } });
 			try {
 				runtime.setResponses([fauxAssistantMessage("Review complete: no findings.")]);
@@ -405,7 +410,7 @@ describe("#426 disposable checkout lifecycle", () => {
 		const session = await SessionManager.create(record.path, getDefaultSessionDirPath(f.source, f.agentDir), {
 			id: request.sessionId,
 		});
-		await r.reviews.bind(f.workspace, session, record.prReviewLaunches![0].placement, r.authority);
+		await r.reviews.bind(f.workspace, session.logWriter, record.prReviewLaunches![0].placement, r.authority);
 		await session.closePersistence();
 		expect(await f.manager.archiveDisposable(f.workspace.name, record.id)).toEqual({ removed: true });
 		expect(await r.reviews.prepare(f.workspace, request, r.authority)).toEqual(prepared);

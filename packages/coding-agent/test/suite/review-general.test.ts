@@ -22,7 +22,7 @@ import {
 import { getReviewGeneral } from "../../src/core/review-general.ts";
 import { appendReviewRunDurably } from "../../src/core/review-state.ts";
 import { buildRpcSessionState } from "../../src/core/rpc/session-state.ts";
-import { SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";
 import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "../../src/modes/rpc/rpc-command-validation.ts";
@@ -75,7 +75,7 @@ async function fixture() {
 	});
 	const runtime = await own(await SessionManager.create(root, directory));
 	const source = runtime.session.sessionManager;
-	await source.appendSessionInfo("Review source");
+	await runtime.session.sessionWriter.appendSessionInfo("Review source");
 	await registerDurableReviewAnchor(source, "run");
 	const original = source.getSessionRef()!;
 	const options = { preserveReviewRunId: "run", replaceReviewGeneral: true };
@@ -158,8 +158,8 @@ describe("durable review General publication", () => {
 			await expect(
 				runtime.newSession({
 					...options,
-					setup: async (manager) => {
-						candidate = manager;
+					setup: async (writer) => {
+						candidate = writer.sessionManager;
 						if (phase === "setup") await fail();
 					},
 					...(phase === "seed" ? { withSession: fail } : {}),
@@ -350,45 +350,6 @@ describe("durable review General publication", () => {
 		}
 	});
 
-	it("never bootstraps an identity changed while the durable General CAS is awaiting completion", async () => {
-		const { runtime, source, original, options, own } = await fixture();
-		const { writes } = await observe(runtime);
-		const lease = await acquireSharedSQLiteSessionStore(original.sessionDirectory);
-		const replaceReviewGeneral = lease.client.replaceReviewGeneral.bind(lease.client);
-		let committedTarget: SessionReference | undefined;
-		const commit = vi.spyOn(lease.client, "replaceReviewGeneral").mockImplementation(async (request) => {
-			const result = await replaceReviewGeneral(request);
-			// A delayed callback retained by the replacement can run during the
-			// worker round trip, after the first candidate identity validation.
-			await runtime.session.sessionManager.newSession();
-			return result;
-		});
-		try {
-			await expect(
-				runtime.newSession({
-					...options,
-					setup: async (manager) => {
-						committedTarget = manager.getSessionRef();
-					},
-				}),
-			).rejects.toThrow("changed during durable publication");
-			expect(writes).not.toContainEqual(expect.objectContaining({ reason: "session_rebind" }));
-			const general = await getReviewGeneral(source, "run");
-			expect(general).toMatchObject({
-				generalSessionId: committedTarget!.sessionId,
-				generalSessionGeneration: committedTarget!.sessionGeneration,
-				generalRevision: 1,
-				generalAvailable: true,
-			});
-			const reopened = await own(await SessionManager.open(committedTarget!));
-			await expect(reopened.session.prompt("Resume exact committed General")).resolves.toBeUndefined();
-			expect(await getReviewGeneral(reopened.session.sessionManager, "run")).toEqual(general);
-		} finally {
-			commit.mockRestore();
-			await lease.release();
-		}
-	});
-
 	it("does not promote cancelled or stale replacements and rejects same-source competitors", async () => {
 		const { runtime, source, options } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
@@ -412,17 +373,6 @@ describe("durable review General publication", () => {
 		const results = await Promise.allSettled([runtime.newSession(options), runtime.newSession(options)]);
 		expect(results.map((result) => result.status).sort()).toEqual(["fulfilled", "rejected"]);
 		expect(await getReviewGeneral(runtime.session.sessionManager, "run")).toMatchObject({ generalRevision: 1 });
-	});
-
-	it("rejects a candidate identity changed by a delayed replacement callback before durable publication", async () => {
-		const { runtime, source, options } = await fixture();
-		const initial = await getReviewGeneral(source, "run");
-		runtime.setRebindSession(async () => {
-			expect(await getReviewGeneral(source, "run")).toEqual(initial);
-			await runtime.session.sessionManager.newSession();
-		});
-		await expect(runtime.newSession(options)).rejects.toThrow("changed before durable publication");
-		expect(await getReviewGeneral(source, "run")).toEqual(initial);
 	});
 
 	it("authorizes RPC lookup from current and historical same-run children without canonical mutation authority", async () => {
@@ -512,8 +462,8 @@ describe("durable review General publication", () => {
 	});
 
 	it("serves the required RPC shape as a read, rejects malformed flags and forwards explicit General replacement", async () => {
-		const { runtime, source, original } = await fixture();
-		await appendReviewRunDurably(source, {
+		const { runtime, original } = await fixture();
+		await appendReviewRunDurably(runtime.session.sessionWriter, {
 			schemaVersion: 1,
 			runId: "run",
 			workflowAction: "review.uncommitted",

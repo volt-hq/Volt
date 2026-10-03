@@ -181,11 +181,11 @@ async function fixture() {
 		return runtime;
 	}
 	const source = await own(await SessionManager.create(root, directory));
-	await appendReviewRunDurably(source.session.sessionManager, review());
+	await appendReviewRunDurably(source.session.sessionWriter, review());
 	const aliases: AgentSessionRuntime[] = [];
 	for (let index = 0; index < 2; index++) {
 		const manager = await SessionManager.create(root, directory);
-		await appendReviewRun(manager, review());
+		await appendReviewRun(manager.logWriter, review());
 		await registerReviewHandoffAliases(source.session.sessionManager, manager, ["review:341"]);
 		aliases.push(await own(manager));
 	}
@@ -228,7 +228,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		await child.session.prompt("Fix this finding");
 		expect(readFileSync(path, "utf8")).toBe("fixed");
 		const outcome = { runId: "review:341", findingId: "f1", status: "fixed" } as const;
-		await expect(recordReviewFindingOutcome(child.session.sessionManager, outcome)).rejects.toThrow(
+		await expect(recordReviewFindingOutcome(child.session.sessionWriter, outcome)).rejects.toThrow(
 			"Canonical finding outcomes belong to the source review",
 		);
 		await expect(child.reviewDiscussions!.recordOutcome(outcome)).rejects.toThrow("requires the source review");
@@ -249,7 +249,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		const sourceManager = source.session.sessionManager;
 		const staleSource = await SessionManager.openReadOnly(sourceManager.getSessionRef()!);
 		managers.push(staleSource);
-		await acknowledgeReviewRun(aliases[0]!.session.sessionManager, "review:341", 123);
+		await acknowledgeReviewRun(aliases[0]!.session.sessionWriter, "review:341", 123);
 		for (const [index, status] of (["accepted", "fixed", "dismissed"] as const).entries()) {
 			const writer = [aliases[0]!, source, aliases[1]!][index]!;
 			const response = await dispatch(writer, {
@@ -306,7 +306,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 	it("uses canonical outcomes for incremental review and publishing, preserving local pagination", async () => {
 		const { source, aliases, dispatch } = await fixture();
 		const alias = aliases[0]!.session.sessionManager;
-		await appendReviewRun(alias, review("review:local", 1));
+		await appendReviewRun(aliases[0]!.session.sessionWriter, review("review:local", 1));
 		for (const [findingId, status] of [
 			["f1", "fixed"],
 			["f2", "dismissed"],
@@ -385,9 +385,9 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		const exported = join(root, "source.jsonl");
 		await SessionManager.exportJsonlSnapshot(ref, exported);
 		const local = await SessionManager.create(root, directory);
-		await appendReviewRun(local, review());
+		await appendReviewRun(local.logWriter, review());
 		const ephemeral = SessionManager.inMemory(root);
-		await appendReviewRun(ephemeral, review());
+		await appendReviewRun(ephemeral.logWriter, review());
 		const fork = await SessionManager.forkFrom(ref, root, directory);
 		const imported = await SessionManager.importFromJsonl(exported, root, directory, { id: randomUUID() });
 		const otherStore = await SessionManager.forkFrom(ref, root, join(root, "other-store"));
@@ -411,7 +411,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		).toBe("open");
 		const copied = await SessionManager.create(root, directory);
 		managers.push(copied);
-		await appendReviewRun(copied, review());
+		await appendReviewRun(copied.logWriter, review());
 		await registerReviewHandoffAliases(imported, copied, ["review:341"]);
 		expect(await resolveCanonicalReviewSource(copied, "review:341")).toBeUndefined();
 	});
@@ -420,11 +420,11 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		const { root, directory, aliases, managers } = await fixture();
 		const local = await SessionManager.create(root, directory);
 		managers.push(local);
-		await appendReviewRun(local, review());
-		await appendReviewRun(local, review("review:other", 3));
-		await recordReviewFindingOutcome(local, { runId: "review:341", findingId: "f1", status: "accepted" });
-		await recordReviewFindingOutcome(local, { runId: "review:other", findingId: "f2", status: "fixed" });
-		await recordReviewFindingOutcome(local, { runId: "review:341", findingId: "f1", status: "fixed" });
+		await appendReviewRun(local.logWriter, review());
+		await appendReviewRun(local.logWriter, review("review:other", 3));
+		await recordReviewFindingOutcome(local.logWriter, { runId: "review:341", findingId: "f1", status: "accepted" });
+		await recordReviewFindingOutcome(local.logWriter, { runId: "review:other", findingId: "f2", status: "fixed" });
+		await recordReviewFindingOutcome(local.logWriter, { runId: "review:341", findingId: "f1", status: "fixed" });
 		expect((await exportCanonicalReviewFeedback(local)).outcomes).toEqual(exportReviewFeedback(local).outcomes);
 		const moved = await SessionManager.openReadOnly(aliases[0]!.session.sessionRef!, join(root, "other-cwd"));
 		managers.push(moved);
@@ -432,7 +432,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			code: "review_source_unavailable",
 		});
 		await expect(
-			recordReviewFindingOutcome(moved, { runId: "review:341", findingId: "f1", status: "fixed" }),
+			recordReviewFindingOutcome(moved.logWriter, { runId: "review:341", findingId: "f1", status: "fixed" }),
 		).rejects.toMatchObject({ code: "review_source_unavailable" });
 	});
 
@@ -461,7 +461,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		expect(await SessionManager.delete(ref)).toBe(true);
 		const replacement = await SessionManager.create(root, directory, { id: ref.sessionId });
 		managers.push(replacement);
-		await appendReviewRun(replacement, review());
+		await appendReviewRun(replacement.logWriter, review());
 		expect(replacement.getSessionRef()!.sessionGeneration).not.toBe(ref.sessionGeneration);
 		for (const alias of aliases) {
 			expectErrorEnvelope(
@@ -506,22 +506,6 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		expect(
 			(await getCanonicalReviewRun(aliases[0]!.session.sessionManager, "review:341"))!.result!.findings[0]!.status,
 		).toBe("fixed");
-	});
-
-	it("rejects a conversation replacement during outcome lookup rather than writing into the replacement", async () => {
-		const { aliases } = await fixture();
-		const manager = aliases[0]!.session.sessionManager;
-		const original = SessionManager.open;
-		vi.spyOn(SessionManager, "open").mockImplementationOnce(async (ref) => {
-			const opened = await original(ref);
-			await manager.newSession();
-			await appendReviewRun(manager, review());
-			return opened;
-		});
-		await expect(
-			recordReviewFindingOutcome(manager, { runId: "review:341", findingId: "f1", status: "fixed" }),
-		).rejects.toMatchObject({ code: "review_source_unavailable" });
-		expect(exportReviewFeedback(manager).outcomes).toEqual([]);
 	});
 
 	it("routes the existing RPC review.feedback host action through canonical state", async () => {

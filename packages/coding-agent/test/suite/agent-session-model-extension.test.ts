@@ -133,8 +133,8 @@ describe("AgentSession model and extension characterization", () => {
 			isError: false,
 			timestamp: Date.now(),
 		};
-		await harness.sessionManager.appendMessage(priorGeneratedResult);
-		await harness.sessionManager.appendMessage({
+		await harness.session.sessionWriter.appendMessage(priorGeneratedResult);
+		await harness.session.sessionWriter.appendMessage({
 			role: "custom",
 			customType: "reference_image",
 			content: [{ type: "image", mimeType: "image/png", data: customImageData }],

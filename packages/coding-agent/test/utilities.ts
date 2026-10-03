@@ -366,13 +366,13 @@ export async function buildTestTree(
 			if (!branchFromId) {
 				throw new Error(`Cannot branch from unknown entry: ${msg.branchFrom}`);
 			}
-			await session.branch(branchFromId);
+			await session.logWriter.branch(branchFromId);
 		}
 
 		const id =
 			msg.role === "user"
-				? await session.appendMessage(userMsg(msg.text))
-				: await session.appendMessage(assistantMsg(msg.text));
+				? await session.logWriter.appendMessage(userMsg(msg.text))
+				: await session.logWriter.appendMessage(assistantMsg(msg.text));
 
 		ids.set(msg.text, id);
 	}

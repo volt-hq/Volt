@@ -3,6 +3,7 @@ import { REVIEW_FIX_ACTION_ID, REVIEW_RERUN_ACTION_ID } from "../src/core/host-a
 import type { ParsedReview } from "../src/core/review-report.ts";
 import { acknowledgeReviewRun, appendReviewRun, getReviewRun, type ReviewRunRecord } from "../src/core/review-state.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import type { SessionWriter } from "../src/core/session-writer.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 function durableRecord(): ReviewRunRecord {
@@ -106,21 +107,26 @@ describe("InteractiveMode durable review actions", () => {
 		{ findingIds: " \t ", acknowledgedAt: 123 },
 	])("seeds all durable findings and preserves acknowledgment for blank findingIds $findingIds", async (testCase) => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableRecord());
+		await appendReviewRun(manager.logWriter, durableRecord());
 		if (testCase.acknowledgedAt !== undefined) {
-			await acknowledgeReviewRun(manager, "review:test", testCase.acknowledgedAt);
+			await acknowledgeReviewRun(manager.logWriter, "review:test", testCase.acknowledgedAt);
 		}
 		const replacementManager = SessionManager.inMemory("/workspace");
 		const seedMessages: object[] = [];
 		const fakeThis = {
-			session: { sessionManager: manager },
+			session: { sessionManager: manager, sessionWriter: manager.logWriter as SessionWriter },
 			runtimeHost: {
 				newSession: vi.fn(
 					async (options: {
-						setup(sessionManager: SessionManager): Promise<void>;
+						setup(writer: SessionWriter): Promise<void>;
 						withSession(context: { sendMessage(message: object): Promise<void> }): Promise<void>;
 					}) => {
-						await options.setup(replacementManager);
+						await options.setup(replacementManager.logWriter);
+						// The replacement is the current session when `withSession` runs.
+						fakeThis.session = {
+							sessionManager: replacementManager,
+							sessionWriter: replacementManager.logWriter,
+						};
 						await options.withSession({
 							sendMessage: async (message) => {
 								seedMessages.push(message);
@@ -155,7 +161,7 @@ describe("InteractiveMode durable review actions", () => {
 
 	test("reruns a durable branch through its stored locator and rejects missing locators", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableBranchRecord());
+		await appendReviewRun(manager.logWriter, durableBranchRecord());
 		const runInteractiveReviewWorkflow = vi.fn(async () => ({ status: "cancelled" as const }));
 		const fakeThis = {
 			session: { sessionManager: manager },
@@ -183,7 +189,7 @@ describe("InteractiveMode durable review actions", () => {
 
 		const missing = durableBranchRecord("review:missing-locator");
 		delete missing.target.branchBase;
-		await appendReviewRun(manager, missing);
+		await appendReviewRun(manager.logWriter, missing);
 		await expect(
 			runInteractiveReviewLifecycleAction.call(fakeThis, REVIEW_RERUN_ACTION_ID, {
 				runId: missing.runId,

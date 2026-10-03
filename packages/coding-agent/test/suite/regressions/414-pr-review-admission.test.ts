@@ -28,6 +28,7 @@ import {
 } from "../../../src/core/review-state.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { getDefaultSessionDir, SessionManager } from "../../../src/core/session-manager.ts";
+import { ConversationSessionWriter } from "../../../src/core/session-writer.ts";
 import { IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationRequest } from "../../../src/daemon/pr-review-checkout.ts";
 import { createSessionManagerTargetStore, resolveIrohRemoteSessionTarget } from "../../../src/daemon/session-target.ts";
@@ -305,9 +306,9 @@ async function fixture(nested = false, workspaceName = "project") {
 async function interruptedLaunch(f: Awaited<ReturnType<typeof fixture>>, persistBinding = false) {
 	const host = f.host();
 	const prepared = await host.checkouts.prepare(f.workspace, f.request, f.authority);
-	vi.spyOn(host.checkouts, "bind").mockImplementationOnce(async (_workspace, manager, placement) => {
+	vi.spyOn(host.checkouts, "bind").mockImplementationOnce(async (_workspace, writer, placement) => {
 		if (persistBinding) {
-			await manager.recordPrReviewBinding(placement);
+			await writer.recordPrReviewBinding(placement);
 		}
 		throw new Error("interrupted launch");
 	});
@@ -515,9 +516,11 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		const f = await fixture();
 		const { prepared, placement } = await interruptedLaunch(f);
 		const restarted = f.host();
-		const record = vi.spyOn(SessionManager.prototype, "recordPrReviewBinding").mockImplementationOnce(() => {
-			throw new Error("binding persistence failed");
-		});
+		const record = vi
+			.spyOn(ConversationSessionWriter.prototype, "recordPrReviewBinding")
+			.mockImplementationOnce(() => {
+				throw new Error("binding persistence failed");
+			});
 		await expect(restarted.open({ target: "session", sessionId: prepared.sessionId })).rejects.toThrow(
 			"binding persistence failed",
 		);
@@ -685,7 +688,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 		const placement = runtime.session.sessionManager.getPrReviewBinding()!;
 		const sourceId = runtime.session.sessionId;
 		const record = reviewRecord(f.source, f.base, f.target);
-		await appendReviewRunDurably(runtime.session.sessionManager, record);
+		await appendReviewRunDurably(runtime.session.sessionWriter, record);
 		await runtime.newSession({
 			preserveReviewRunId: record.runId,
 			replaceReviewGeneral: true,

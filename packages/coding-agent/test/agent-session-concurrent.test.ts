@@ -204,10 +204,10 @@ describe("AgentSession concurrent prompt guard", () => {
 			resourceLoader: createTestResourceLoader(),
 		});
 
-		await sessionManager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
-		const firstAssistantId = await sessionManager.appendMessage(createAssistantMessage("first assistant"));
-		await sessionManager.appendMessage({ role: "user", content: "abandoned user", timestamp: 2 });
-		await sessionManager.appendMessage(createAssistantMessage("abandoned assistant"));
+		await session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+		const firstAssistantId = await session.sessionWriter.appendMessage(createAssistantMessage("first assistant"));
+		await session.sessionWriter.appendMessage({ role: "user", content: "abandoned user", timestamp: 2 });
+		await session.sessionWriter.appendMessage(createAssistantMessage("abandoned assistant"));
 
 		const prompt = session.prompt("active user");
 		await streamStarted;

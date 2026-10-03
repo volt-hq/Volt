@@ -32,8 +32,12 @@ describe("regression #417: incremental approved plan progress", () => {
 		});
 		harnesses.push(harness);
 		await harness.session.setSessionName("incremental plan progress regression");
-		await harness.sessionManager.appendMessage({ role: "user", content: "Earlier context", timestamp: Date.now() });
-		await harness.sessionManager.appendMessage(fauxAssistantMessage("Earlier response"));
+		await harness.session.sessionWriter.appendMessage({
+			role: "user",
+			content: "Earlier context",
+			timestamp: Date.now(),
+		});
+		await harness.session.sessionWriter.appendMessage(fauxAssistantMessage("Earlier response"));
 		await harness.session.setAgentMode("plan");
 		const draft = await harness.session.updatePlan({
 			title: "Verify three outcomes",

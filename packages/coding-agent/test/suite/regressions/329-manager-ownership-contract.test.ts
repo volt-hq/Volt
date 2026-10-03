@@ -12,6 +12,7 @@ import { McpOutputStore } from "../../../src/core/mcp/output-store.ts";
 import { restoreStdout } from "../../../src/core/output-guard.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/session-manager.ts";
+import { LogWriter } from "../../../src/core/session-writer.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { SubagentManager } from "../../../src/core/subagents/index.ts";
 import { stopThemeWatcher } from "../../../src/core/theme/runtime.ts";
@@ -42,7 +43,7 @@ function restoreProperty(target: object, property: PropertyKey, descriptor: Prop
 async function isPersistenceClosed(manager: SessionManager): Promise<boolean> {
 	try {
 		// A starting Git context for another session commits nothing; only the writability check can reject.
-		await manager.recordStartingGitContext("persistence-closed-probe", null);
+		await manager.logWriter.recordStartingGitContext(null);
 		return false;
 	} catch {
 		return true;
@@ -154,7 +155,7 @@ describe("PR #329 manager ownership contract", () => {
 		delete process.env[ENV_SESSION_DIR];
 		const sessionDir = getDefaultSessionDirPath(fallbackCwd);
 		const manager = await SessionManager.create(missingCwd, sessionDir, { id });
-		await manager.appendMessage({ role: "user", content: "missing cwd seed", timestamp: Date.now() });
+		await manager.logWriter.appendMessage({ role: "user", content: "missing cwd seed", timestamp: Date.now() });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted missing-cwd session reference");
 		await manager.closePersistence();
@@ -210,7 +211,7 @@ describe("PR #329 manager ownership contract", () => {
 		const originalCloseStarted = createDeferred();
 		const open = SessionManager.open.bind(SessionManager);
 		const closePersistence = SessionManager.prototype.closePersistence;
-		const buildSessionContext = SessionManager.prototype.buildSessionContext;
+		const getConversationState = SessionManager.prototype.getConversationState;
 		let originalManager: SessionManager | undefined;
 		let replacementManager: SessionManager | undefined;
 		let originalCloseFinished = false;
@@ -243,11 +244,11 @@ describe("PR #329 manager ownership contract", () => {
 			if (this === replacementManager) replacementCloseCalls++;
 			await closePersistence.call(this);
 		});
-		const buildSessionContextSpy = vi
-			.spyOn(SessionManager.prototype, "buildSessionContext")
+		const getConversationStateSpy = vi
+			.spyOn(SessionManager.prototype, "getConversationState")
 			.mockImplementation(function (this: SessionManager) {
 				if (this === replacementManager && !originalCloseFinished) replacementUsedBeforeOriginalClose = true;
-				return buildSessionContext.call(this);
+				return getConversationState.call(this);
 			});
 		const selectorSpy = vi.spyOn(startupUi, "showStartupSelector").mockResolvedValue(seeded.fallbackCwd as never);
 		const initSpy = vi.spyOn(InteractiveMode.prototype, "init").mockRejectedValue(initializationError);
@@ -275,7 +276,7 @@ describe("PR #329 manager ownership contract", () => {
 			initSpy.mockRestore();
 			openSpy.mockRestore();
 			closeSpy.mockRestore();
-			buildSessionContextSpy.mockRestore();
+			getConversationStateSpy.mockRestore();
 			if (originalManager && !(await isPersistenceClosed(originalManager))) {
 				await closePersistence.call(originalManager);
 			}
@@ -361,7 +362,7 @@ describe("PR #329 manager ownership contract", () => {
 		let managerClosed = false;
 		const harnessGitContext = harness.session.gitContextProvider;
 		const createSessionManager = SessionManager.create.bind(SessionManager);
-		const appendThinkingLevelChange = SessionManager.prototype.appendThinkingLevelChange;
+		const appendThinkingLevelChange = LogWriter.prototype.appendThinkingLevelChange;
 		const refreshGitContext = GitContextProvider.prototype.refresh;
 		const disposeGitContext = GitContextProvider.prototype.dispose;
 		vi.spyOn(SessionManager, "create").mockImplementation(async (...args) => {
@@ -381,11 +382,11 @@ describe("PR #329 manager ownership contract", () => {
 			disposeGitContext.call(this);
 		});
 		// Fail setup only; cleanup must still drain accepted writes.
-		vi.spyOn(SessionManager.prototype, "appendThinkingLevelChange").mockImplementation(function (
-			this: SessionManager,
+		vi.spyOn(LogWriter.prototype, "appendThinkingLevelChange").mockImplementation(function (
+			this: LogWriter,
 			thinkingLevel,
-		): Promise<string> {
-			if (this === cliManager && serviceGitContext && !persistenceFailureInjected) {
+		): Promise<void> {
+			if (this.sessionManager === cliManager && serviceGitContext && !persistenceFailureInjected) {
 				persistenceFailureInjected = true;
 				return Promise.reject(setupError);
 			}
@@ -457,7 +458,7 @@ describe("PR #329 manager ownership contract", () => {
 						: subagentManager.startByName("unused", { sessionManager });
 				await expect(start).rejects.toThrow("Subagent manager is disposed");
 				expect(closeCalls).toBe(1);
-				await expect(sessionManager.appendSessionInfo("after close")).rejects.toThrow(
+				await expect(sessionManager.logWriter.appendSessionInfo("after close")).rejects.toThrow(
 					"Session persistence is closed",
 				);
 				expect(await SessionManager.findForResume(sessionRef.sessionDirectory, sessionRef.sessionId)).toEqual(
@@ -503,9 +504,11 @@ describe("PR #329 manager ownership contract", () => {
 			if (this === sdkMcpManager) sdkMcpDisposeCalls++;
 			return disposeMcp.call(this);
 		});
-		const appendThinkingLevelChange = sessionManager.appendThinkingLevelChange.bind(sessionManager);
+		const appendThinkingLevelChange = sessionManager.logWriter.appendThinkingLevelChange.bind(
+			sessionManager.logWriter,
+		);
 		// Fail setup only; cleanup must still drain accepted writes.
-		vi.spyOn(sessionManager, "appendThinkingLevelChange").mockImplementation(async (thinkingLevel) => {
+		vi.spyOn(sessionManager.logWriter, "appendThinkingLevelChange").mockImplementation(async (thinkingLevel) => {
 			if (sdkMcpManager && !persistenceFailureInjected) {
 				persistenceFailureInjected = true;
 				throw setupError;

@@ -104,7 +104,7 @@ describe("createAgentSession session manager defaults", () => {
 		if (!manager) throw new Error("Expected the default session manager to be closed");
 		const sessionRef = manager.getSessionRef();
 		if (!sessionRef) throw new Error("Expected a persisted session reference");
-		await expect(manager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
+		await expect(manager.logWriter.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
 		const reopened = await SessionManager.open(sessionRef);
 		await reopened.closePersistence();
 		expect(await SessionManager.list(cwd, sessionRef.sessionDirectory)).toEqual([]);
@@ -124,9 +124,11 @@ describe("createAgentSession session manager defaults", () => {
 
 		await expect(createAgentSession({ cwd, agentDir, sessionManager, disableMcp: true })).rejects.toBe(setupError);
 
-		await expect(sessionManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
+		await expect(sessionManager.logWriter.appendSessionInfo("late write")).rejects.toThrow(
+			"Session persistence is closed",
+		);
 		const reopened = await SessionManager.open(sessionRef);
-		await reopened.appendSessionInfo("reopened after failed setup");
+		await reopened.logWriter.appendSessionInfo("reopened after failed setup");
 		await reopened.closePersistence();
 		expect(
 			await SessionManager.list(cwd, sessionRef.sessionDirectory, undefined, {
@@ -366,7 +368,7 @@ describe("createAgentSession session manager defaults", () => {
 			models: faux.models,
 		});
 		const sessionManager = await SessionManager.create(cwd, agentDir);
-		await sessionManager.appendFastModeChange(true);
+		await sessionManager.logWriter.appendFastModeChange(true);
 
 		const { session } = await createAgentSession({
 			cwd,
@@ -387,7 +389,7 @@ describe("createAgentSession session manager defaults", () => {
 
 		expect(session.model?.id).toBe(model.id);
 		expect(session.fastModeEnabled).toBe(true);
-		expect(sessionManager.buildSessionContext().model).toEqual({
+		expect(sessionManager.getConversationState().context.model).toEqual({
 			provider: model.provider,
 			modelId: model.id,
 		});
@@ -436,8 +438,8 @@ describe("createAgentSession session manager defaults", () => {
 			});
 		}
 		const sessionManager = await SessionManager.create(cwd, agentDir);
-		await sessionManager.appendModelChange(staleModel.provider, staleModel.id);
-		await sessionManager.appendMessage({ role: "user", content: "earlier work", timestamp: Date.now() });
+		await sessionManager.logWriter.appendModelChange(staleModel.provider, staleModel.id);
+		await sessionManager.logWriter.appendMessage({ role: "user", content: "earlier work", timestamp: Date.now() });
 		const sessionRef = sessionManager.getSessionRef()!;
 		await sessionManager.closePersistence();
 
@@ -483,7 +485,7 @@ describe("createAgentSession session manager defaults", () => {
 			models: faux.models,
 		});
 		const sessionManager = SessionManager.inMemory(cwd);
-		await sessionManager.appendFastModeChange(true);
+		await sessionManager.logWriter.appendFastModeChange(true);
 
 		const { session } = await createAgentSession({
 			cwd,
@@ -504,7 +506,7 @@ describe("createAgentSession session manager defaults", () => {
 		sessions.push(session);
 
 		expect(session.model?.id).toBe(scopedModel.id);
-		expect(sessionManager.buildSessionContext().model).toEqual({
+		expect(sessionManager.getConversationState().context.model).toEqual({
 			provider: scopedModel.provider,
 			modelId: scopedModel.id,
 		});

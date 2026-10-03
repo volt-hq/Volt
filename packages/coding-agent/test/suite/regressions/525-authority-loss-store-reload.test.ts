@@ -150,7 +150,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 	async function readStoredMessageTexts(sessionRef: SessionReference): Promise<string[]> {
 		const manager = await SessionManager.openReadOnly(sessionRef);
 		try {
-			return manager.buildSessionContext().messages.map(getMessageText);
+			return manager.getConversationState().context.messages.map(getMessageText);
 		} finally {
 			await manager.closePersistence();
 		}
@@ -317,7 +317,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		expect(viewport(terminal)).toContain("Pick a target");
 		expect(staleSession.isBusy).toBe(true);
 
-		await loseLog(staleSession.sessionManager);
+		await loseLog(staleSession.sessionWriter);
 
 		await expect(withinTimeout(selection.promise, "ctx.ui.select()")).resolves.toBeUndefined();
 		await expect(withinTimeout(command, "prompt('/pick')")).resolves.toBeUndefined();
@@ -349,7 +349,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const commandSignal = await commandStarted.promise;
 		expect(staleSession.isBusy).toBe(true);
 
-		await loseLog(staleSession.sessionManager);
+		await loseLog(staleSession.sessionWriter);
 
 		await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1), { timeout: 5_000 });
 		expect(commandSignal.aborted).toBe(true);

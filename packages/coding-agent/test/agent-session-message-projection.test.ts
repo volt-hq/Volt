@@ -66,7 +66,7 @@ describe("AgentSession message projection", () => {
 
 		const freshProjection = harness.session.messages;
 		expect(freshProjection.map(messageText)).toEqual(["user original", "assistant original"]);
-		expect(harness.sessionManager.buildSessionContext().messages.map(messageText)).toEqual([
+		expect(harness.sessionManager.getConversationState().context.messages.map(messageText)).toEqual([
 			"user original",
 			"assistant original",
 		]);

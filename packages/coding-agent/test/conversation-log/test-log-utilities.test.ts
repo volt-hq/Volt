@@ -102,9 +102,9 @@ describe("seedLog", () => {
 		expect(manager.getOrdinal()).toBe(state.ordinal);
 		expect(manager.getLeafId()).toBe(state.leafId);
 		expect(manager.getLabel("seed-6")).toBe("checkpoint");
-		expect(manager.buildSessionContext().messages).toEqual(state.context.messages);
+		expect(manager.getConversationState().context.messages).toEqual(state.context.messages);
 		// The manager writes through the log it was opened over.
-		await manager.appendCustomEntry("after-seed");
+		await manager.logWriter.appendCustomEntry("after-seed");
 		expect(log.head()).toBe(state.ordinal + 1);
 	});
 });
@@ -135,13 +135,13 @@ describe("FaultyConversationLog", () => {
 		const log = new FaultyConversationLog(new InMemoryConversationLog("faulty-manager"));
 		const manager = await SessionManager.openInMemory(log);
 		log.failNext("rolled_back");
-		await expect(manager.appendCustomEntry("rolled-back")).rejects.toThrow();
+		await expect(manager.logWriter.appendCustomEntry("rolled-back")).rejects.toThrow();
 		expect(manager.getEntries()).toEqual([]);
-		await manager.appendCustomEntry("committed");
+		await manager.logWriter.appendCustomEntry("committed");
 		expect(manager.getEntries()).toHaveLength(1);
 		log.failNext(lose("storage", { committed: true }));
-		await expect(manager.appendCustomEntry("lost")).rejects.toThrow();
+		await expect(manager.logWriter.appendCustomEntry("lost")).rejects.toThrow();
 		expect(await manager.lost).toMatchObject({ reason: "storage" });
-		await expect(manager.appendCustomEntry("after loss")).rejects.toThrow();
+		await expect(manager.logWriter.appendCustomEntry("after loss")).rejects.toThrow();
 	});
 });

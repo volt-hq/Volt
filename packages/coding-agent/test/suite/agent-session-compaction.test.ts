@@ -97,12 +97,12 @@ function useSummaryResponses(
 
 async function seedCompactableSession(harness: Harness): Promise<void> {
 	const now = Date.now();
-	await harness.sessionManager.appendMessage({
+	await harness.session.sessionWriter.appendMessage({
 		role: "user",
 		content: [{ type: "text", text: "message to compact" }],
 		timestamp: now - 1000,
 	});
-	await harness.sessionManager.appendMessage(
+	await harness.session.sessionWriter.appendMessage(
 		createAssistant(harness, {
 			stopReason: "stop",
 			totalTokens: 100,
@@ -206,7 +206,7 @@ describe("AgentSession compaction characterization", () => {
 		await seedCompactableSession(harness);
 
 		await harness.session.compact();
-		await harness.sessionManager.appendMessage({
+		await harness.session.sessionWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "after idle compaction" }],
 			timestamp: Date.now(),

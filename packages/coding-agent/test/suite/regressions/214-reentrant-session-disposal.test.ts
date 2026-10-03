@@ -58,7 +58,7 @@ describe("regression #214: reentrant session disposal", () => {
 		await closed;
 
 		expect(persistedMessageRoles(harness)).toEqual(["user", "assistant"]);
-		expect(harness.sessionManager.buildSessionContext().messages[0]).toMatchObject({
+		expect(harness.sessionManager.getConversationState().context.messages[0]).toMatchObject({
 			role: "user",
 			clientMessageId: "issue-214-fence-only-disposal",
 		});

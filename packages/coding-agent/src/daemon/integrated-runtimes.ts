@@ -26,6 +26,7 @@ import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/r
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { HostReviewDiscussionService } from "../core/review-discussions.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../core/session-manager.ts";
+import type { SessionWriter } from "../core/session-writer.ts";
 import type { SubagentRuntimeRegistration } from "../core/subagents/index.ts";
 import {
 	createIrohRemoteAgentRuntimeWithSessionSelection,
@@ -142,7 +143,7 @@ export interface IntegratedRuntimeRegistryOptions {
 		authorization: IrohRemoteClientAuthorizationSuccess,
 		hello: IrohRemoteHello,
 		signal?: AbortSignal,
-	) => Promise<((manager: SessionManager) => Promise<void>) | undefined>;
+	) => Promise<((writer: SessionWriter) => Promise<void>) | undefined>;
 	/** Persist the sessionId → worktree binding after a created worktree conversation. */
 	bindWorktreeSession?: (workspaceName: string, worktreeId: string, sessionId: string) => Promise<void>;
 	/** Lease-broker seam: invoked when a runtime's session id changes (rekey). */
@@ -887,7 +888,7 @@ export class IntegratedRuntimeRegistry {
 			runtime = runtimeResult.runtime;
 			sessionSelection = runtimeResult.sessionSelection;
 			assertAttachAdmissionOpen(options.signal);
-			await bindPrReview?.(runtime.session.sessionManager);
+			await bindPrReview?.(runtime.session.sessionWriter);
 			assertAttachAdmissionOpen(options.signal);
 			const runtimeDirectory = await waitForAttachAdmission(
 				resolveRuntimeWorkingDirectory(rootPath, runtime.cwd),

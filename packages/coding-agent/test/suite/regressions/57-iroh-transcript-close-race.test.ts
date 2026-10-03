@@ -101,7 +101,7 @@ test("closed Iroh stream does not crash on a queued transcript write", async () 
 			content: [{ type: "text", text: "queued transcript" }],
 			timestamp: Date.now(),
 		};
-		await harness.sessionManager.appendMessage(message);
+		await harness.session.sessionWriter.appendMessage(message);
 		transcriptListener({ type: "message_end", message });
 		await new Promise((resolve) => setImmediate(resolve));
 

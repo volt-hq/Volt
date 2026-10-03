@@ -120,9 +120,15 @@ describe("SessionManager projection cache", () => {
 	it("rebuilds fallback identity on load before a later user message overrides it", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await SessionManager.create(cwd, sessionDir, { id: "fallback-rebuild" });
-		await manager.appendCustomMessageEntry("displayed", "displayed fallback", true, undefined, BASE_TIME + 2_000);
-		await manager.appendMessage(assistantMessage("later assistant", BASE_TIME + 3_000));
-		await manager.appendCustomMessageEntry("hidden", "hidden newest", false, undefined, BASE_TIME + 9_000);
+		await manager.logWriter.appendCustomMessageEntry(
+			"displayed",
+			"displayed fallback",
+			true,
+			undefined,
+			BASE_TIME + 2_000,
+		);
+		await manager.logWriter.appendMessage(assistantMessage("later assistant", BASE_TIME + 3_000));
+		await manager.logWriter.appendCustomMessageEntry("hidden", "hidden newest", false, undefined, BASE_TIME + 9_000);
 
 		expect(await storedSummary(cwd, sessionDir, manager.getSessionId())).toMatchObject({
 			firstMessage: "displayed fallback",
@@ -133,7 +139,7 @@ describe("SessionManager projection cache", () => {
 		// Continuing opens the session for writing, so its first writer closes first.
 		await manager.closePersistence();
 		const continued = await SessionManager.continueRecent(cwd, sessionDir);
-		await continued.appendMessage({ role: "user", content: "first user", timestamp: BASE_TIME + 1_000 });
+		await continued.logWriter.appendMessage({ role: "user", content: "first user", timestamp: BASE_TIME + 1_000 });
 
 		expect(await storedSummary(cwd, sessionDir, continued.getSessionId())).toMatchObject({
 			firstMessage: "first user",
@@ -147,10 +153,10 @@ describe("SessionManager projection cache", () => {
 		const manager = await SessionManager.create(cwd, sessionDir, { id: "metadata-rebuild" });
 		const header = manager.getHeader();
 		if (!header) throw new Error("Expected session header");
-		await manager.appendPlanningState({ mode: "plan", plan: null });
-		await manager.appendSessionInfo("  Named session  ");
-		expect(await manager.recordStartingGitContext(manager.getSessionId(), null)).toBe(true);
-		await manager.appendCustomMessageEntry(
+		await manager.logWriter.appendPlanningState({ mode: "plan", plan: null });
+		await manager.logWriter.appendSessionInfo("  Named session  ");
+		expect(await manager.logWriter.recordStartingGitContext(null)).toBe(true);
+		await manager.logWriter.appendCustomMessageEntry(
 			"hidden",
 			"not visible activity",
 			false,
@@ -174,7 +180,7 @@ describe("SessionManager projection cache", () => {
 		const reopened = await SessionManager.open(manager.getSessionRef()!);
 		expect(reopened.getSessionName()).toBe("Named session");
 		expect(reopened.getStartingGitContext()).toBeNull();
-		await reopened.appendSessionInfo("   ");
+		await reopened.logWriter.appendSessionInfo("   ");
 
 		const cleared = await storedSummary(cwd, sessionDir, reopened.getSessionId());
 		expect(cleared.name).toBeUndefined();
@@ -185,11 +191,11 @@ describe("SessionManager projection cache", () => {
 	it("keeps lifetime summaries across leaf moves and rebuilds them from a retained branch", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await SessionManager.create(cwd, sessionDir, { id: "branch-projection" });
-		await manager.appendMessage({ role: "user", content: "root", timestamp: BASE_TIME + 1_000 });
-		const keptId = await manager.appendMessage(assistantMessage("kept", BASE_TIME + 2_000));
-		await manager.appendMessage({ role: "user", content: "abandoned", timestamp: BASE_TIME + 5_000 });
-		await manager.branch(keptId);
-		const activeId = await manager.appendMessage(assistantMessage("active", BASE_TIME + 4_000));
+		await manager.logWriter.appendMessage({ role: "user", content: "root", timestamp: BASE_TIME + 1_000 });
+		const keptId = await manager.logWriter.appendMessage(assistantMessage("kept", BASE_TIME + 2_000));
+		await manager.logWriter.appendMessage({ role: "user", content: "abandoned", timestamp: BASE_TIME + 5_000 });
+		await manager.logWriter.branch(keptId);
+		const activeId = await manager.logWriter.appendMessage(assistantMessage("active", BASE_TIME + 4_000));
 
 		expect(await storedSummary(cwd, sessionDir, manager.getSessionId())).toMatchObject({
 			firstMessage: "root",
@@ -197,10 +203,9 @@ describe("SessionManager projection cache", () => {
 			modified: new Date(BASE_TIME + 5_000),
 		});
 
-		const oldSessionId = manager.getSessionId();
-		await manager.createBranchedSession(activeId);
-		expect(manager.getSessionId()).not.toBe(oldSessionId);
-		expect(await storedSummary(cwd, sessionDir, manager.getSessionId())).toMatchObject({
+		const branched = await SessionManager.createBranched(manager, activeId);
+		expect(branched.getSessionId()).not.toBe(manager.getSessionId());
+		expect(await storedSummary(cwd, sessionDir, branched.getSessionId())).toMatchObject({
 			firstMessage: "root",
 			messageCount: 3,
 			modified: new Date(BASE_TIME + 4_000),
@@ -213,34 +218,35 @@ describe("SessionManager projection cache", () => {
 	])("preserves a source leaf moved to $name when forking", async ({ reset }) => {
 		const { root, cwd, sessionDir } = fixture();
 		const source = await SessionManager.create(cwd, sessionDir, { id: reset ? "reset-source" : "branch-source" });
-		const firstId = await source.appendMessage({ role: "user", content: "first", timestamp: BASE_TIME });
-		await source.appendMessage({ role: "user", content: "second", timestamp: BASE_TIME + 1_000 });
-		if (reset) await source.resetLeaf();
-		else await source.branch(firstId);
+		const firstId = await source.logWriter.appendMessage({ role: "user", content: "first", timestamp: BASE_TIME });
+		await source.logWriter.appendMessage({ role: "user", content: "second", timestamp: BASE_TIME + 1_000 });
+		if (reset) await source.logWriter.resetLeaf();
+		else await source.logWriter.branch(firstId);
 
 		const forkCwd = join(root, reset ? "reset-fork" : "branch-fork");
 		mkdirSync(forkCwd, { recursive: true });
 		const forked = await SessionManager.forkFrom(source.getSessionRef()!, forkCwd, join(root, "moved-leaf-forks"));
 		expect(forked.getLeafId()).toBe(reset ? null : firstId);
-		expect(forked.buildSessionContext().messages).toEqual(
+		expect(forked.getConversationState().context.messages).toEqual(
 			reset ? [] : [{ role: "user", content: "first", timestamp: BASE_TIME }],
 		);
 
 		const reopened = await SessionManager.openReadOnly(forked.getSessionRef()!);
 		expect(reopened.getLeafId()).toBe(reset ? null : firstId);
-		expect(reopened.buildSessionContext()).toEqual(forked.buildSessionContext());
+		expect(reopened.getConversationState().context).toEqual(forked.getConversationState().context);
 	});
 
 	it("derives forked and imported projections and preserves labels when branching immediately", async () => {
 		const { root, cwd, sessionDir } = fixture();
 		const source = await SessionManager.create(cwd, sessionDir, { id: "projection-source" });
-		await source.appendMessage(assistantMessage("fallback", BASE_TIME + 2_000));
-		const labeledMessageId = await source.appendMessage({
+		await source.logWriter.appendMessage(assistantMessage("fallback", BASE_TIME + 2_000));
+		const labeledMessageId = await source.logWriter.appendMessage({
 			role: "user",
 			content: "first user",
 			timestamp: BASE_TIME + 1_000,
 		});
-		const labelEntryId = await source.appendLabelChange(labeledMessageId, "checkpoint");
+		await source.logWriter.appendLabelChange(labeledMessageId, "checkpoint");
+		const labelEntryId = source.getLeafId()!;
 		const labelTimestamp = source.getEntry(labelEntryId)?.timestamp;
 		if (!labelTimestamp) throw new Error("Expected source label timestamp");
 		const sourceRef = source.getSessionRef();
@@ -268,9 +274,10 @@ describe("SessionManager projection cache", () => {
 			modified: new Date(BASE_TIME + 2_000),
 		});
 		expectProjectedLabel(forked);
-		const forkBranchRef = await forked.createBranchedSession(labeledMessageId);
+		const forkBranch = await SessionManager.createBranched(forked, labeledMessageId);
+		const forkBranchRef = forkBranch.getSessionRef();
 		if (!forkBranchRef) throw new Error("Expected fork branch session reference");
-		expectProjectedLabel(forked);
+		expectProjectedLabel(forkBranch);
 		expectProjectedLabel(await SessionManager.openReadOnly(forkBranchRef));
 
 		const snapshotPath = join(root, "projection-source.jsonl");
@@ -287,21 +294,22 @@ describe("SessionManager projection cache", () => {
 			modified: new Date(BASE_TIME + 2_000),
 		});
 		expectProjectedLabel(imported);
-		const importBranchRef = await imported.createBranchedSession(labeledMessageId);
+		const importBranch = await SessionManager.createBranched(imported, labeledMessageId);
+		const importBranchRef = importBranch.getSessionRef();
 		if (!importBranchRef) throw new Error("Expected import branch session reference");
-		expectProjectedLabel(imported);
+		expectProjectedLabel(importBranch);
 		expectProjectedLabel(await SessionManager.openReadOnly(importBranchRef));
 	});
 
 	it("does not filter historical file entries for direct or atomic batch payloads", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await SessionManager.create(cwd, sessionDir, { id: "bounded-projection" });
-		await manager.appendMessage({ role: "user", content: "historical", timestamp: BASE_TIME });
-		for (let index = 0; index < 8; index++) await manager.appendCustomEntry("history", { index });
+		await manager.logWriter.appendMessage({ role: "user", content: "historical", timestamp: BASE_TIME });
+		for (let index = 0; index < 8; index++) await manager.logWriter.appendCustomEntry("history", { index });
 
 		const direct = instrumentFileEntryFiltering(manager);
 		try {
-			await manager.appendSessionInfo("direct");
+			await manager.logWriter.appendSessionInfo("direct");
 			expect(direct.readVisits()).toBe(0);
 		} finally {
 			direct.restore();
@@ -322,14 +330,15 @@ describe("SessionManager projection cache", () => {
 	it("restores cached projection metadata after a proven atomic rollback", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await SessionManager.create(cwd, sessionDir, { id: "projection-rollback" });
-		const baselineId = await manager.appendCustomMessageEntry(
+		const baselineId = await manager.logWriter.appendCustomMessageEntry(
 			"baseline",
 			"baseline fallback",
 			true,
 			undefined,
 			BASE_TIME,
 		);
-		const baselineLabelId = await manager.appendLabelChange(baselineId, "baseline label");
+		await manager.logWriter.appendLabelChange(baselineId, "baseline label");
+		const baselineLabelId = manager.getLeafId()!;
 		const baselineLabelTimestamp = manager.getEntry(baselineLabelId)?.timestamp;
 		if (!baselineLabelTimestamp) throw new Error("Expected baseline label timestamp");
 
@@ -350,14 +359,14 @@ describe("SessionManager projection cache", () => {
 			]),
 		).rejects.toMatchObject({ effect: "rolled_back" });
 
-		await manager.appendCustomEntry("post-rollback", { durable: true });
+		await manager.logWriter.appendCustomEntry("post-rollback", { durable: true });
 		expect(await storedSummary(cwd, sessionDir, manager.getSessionId())).toMatchObject({
 			firstMessage: "baseline fallback",
 			messageCount: 1,
 			modified: new Date(BASE_TIME),
 		});
 		expect(manager.getSessionName()).toBeUndefined();
-		expect(manager.buildSessionContext().planning).toEqual({ mode: "build", plan: null });
+		expect(manager.getConversationState().planning).toBeNull();
 		expect(manager.getLabel(baselineId)).toBe("baseline label");
 		expect(manager.getTree()[0]).toMatchObject({
 			label: "baseline label",

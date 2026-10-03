@@ -315,8 +315,8 @@ describe("#421 operation elapsed timing", () => {
 		});
 		await expect(harness.session.prompt("No credentials")).rejects.toThrow();
 		expect(harness.eventsOfType("agent_start")).toEqual([]);
-		await harness.sessionManager.appendMessage({ role: "user", content: "old task", timestamp: Date.now() });
-		await harness.sessionManager.appendMessage(fauxAssistantMessage("old answer"));
+		await harness.session.sessionWriter.appendMessage({ role: "user", content: "old task", timestamp: Date.now() });
+		await harness.session.sessionWriter.appendMessage(fauxAssistantMessage("old answer"));
 		const states = observe(harness);
 		await harness.session.compact();
 		for (const state of states) {
@@ -348,8 +348,12 @@ describe("#421 operation elapsed timing", () => {
 					},
 				],
 			});
-			await harness.sessionManager.appendMessage({ role: "user", content: "previous task", timestamp: now - 1 });
-			await harness.sessionManager.appendMessage(
+			await harness.session.sessionWriter.appendMessage({
+				role: "user",
+				content: "previous task",
+				timestamp: now - 1,
+			});
+			await harness.session.sessionWriter.appendMessage(
 				fauxAssistantMessage("", {
 					stopReason: "error",
 					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },

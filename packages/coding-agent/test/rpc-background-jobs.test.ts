@@ -341,7 +341,7 @@ describe("Jobs RPC contract and projection", () => {
 			projectRpcBackgroundJobDetails({ backgroundJob: { ...backgroundJob, output: undefined } }),
 		).toBeUndefined();
 		const manager = SessionManager.inMemory();
-		await manager.appendCustomMessageEntry("background_job_notification", "Job job_123 completed", true);
+		await manager.logWriter.appendCustomMessageEntry("background_job_notification", "Job job_123 completed", true);
 		expect(projectSessionTranscript(manager).items).toEqual([
 			expect.objectContaining({ role: "system", text: "Job job_123 completed" }),
 		]);

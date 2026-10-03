@@ -75,27 +75,27 @@ describe("issue #24", () => {
 			const third = createAssistantMessage(harness.getModel(), "third", 50, 10, ["read-4"]);
 			const final = createAssistantMessage(harness.getModel(), "final", 0, 12, []);
 
-			await harness.sessionManager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-			await harness.sessionManager.appendMessage(first);
-			await harness.sessionManager.appendMessage(createToolResult("read-1", 3));
-			await harness.sessionManager.appendMessage(createToolResult("read-2", 4));
-			keptUserId = await harness.sessionManager.appendMessage({
+			await harness.session.sessionWriter.appendMessage({ role: "user", content: "first", timestamp: 1 });
+			await harness.session.sessionWriter.appendMessage(first);
+			await harness.session.sessionWriter.appendMessage(createToolResult("read-1", 3));
+			await harness.session.sessionWriter.appendMessage(createToolResult("read-2", 4));
+			keptUserId = await harness.session.sessionWriter.appendMessage({
 				role: "user",
 				content: "second",
 				timestamp: 5,
 			});
-			await harness.sessionManager.appendMessage(second);
-			await harness.sessionManager.appendMessage(createToolResult("read-3", 7));
+			await harness.session.sessionWriter.appendMessage(second);
+			await harness.session.sessionWriter.appendMessage(createToolResult("read-3", 7));
 			await harness.session.compact();
 			expect(harness.sessionManager.getLeafEntry()).toMatchObject({
 				type: "compaction",
 				summary: "summary",
 				firstKeptEntryId: keptUserId,
 			});
-			await harness.sessionManager.appendMessage({ role: "user", content: "third", timestamp: 9 });
-			await harness.sessionManager.appendMessage(third);
-			await harness.sessionManager.appendMessage(createToolResult("read-4", 11));
-			await harness.sessionManager.appendMessage(final);
+			await harness.session.sessionWriter.appendMessage({ role: "user", content: "third", timestamp: 9 });
+			await harness.session.sessionWriter.appendMessage(third);
+			await harness.session.sessionWriter.appendMessage(createToolResult("read-4", 11));
+			await harness.session.sessionWriter.appendMessage(final);
 
 			const definition: SubagentDefinition = {
 				name: "researcher",

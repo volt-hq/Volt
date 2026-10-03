@@ -16,6 +16,7 @@ import { PrReviewPreparationError, type PrReviewPreparationErrorCode } from "../
 import type { IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
+import type { SessionWriter } from "../core/session-writer.ts";
 import { isPrReviewCheckoutClean } from "../utils/pr-review-clean-checkout.ts";
 import { readPrReviewOperationPaths, readPrReviewRepositoryPaths } from "../utils/pr-review-git-paths.ts";
 import { getResolvedTargetSessionId } from "./integrated-runtimes.ts";
@@ -446,7 +447,7 @@ export class PrReviewCheckoutManager {
 		authorization: IrohRemoteClientAuthorizationSuccess,
 		hello: IrohRemoteHello,
 		authority: PrReviewPreparationAuthority,
-	): Promise<((manager: SessionManager) => Promise<void>) | undefined> {
+	): Promise<((writer: SessionWriter) => Promise<void>) | undefined> {
 		if (hello.mode !== "conversation") return undefined;
 		const sessionId = getResolvedTargetSessionId(hello, authorization);
 		if (sessionId === undefined) return undefined;
@@ -478,7 +479,7 @@ export class PrReviewCheckoutManager {
 			if (!hasIrohRemoteRpcCapability(authorization.client.rpcGrant, capability))
 				throw new PrReviewPreparationError("review_preparation_failed");
 		}
-		return (manager) => this.bind(authorization.workspace, manager, placement, authority);
+		return (writer) => this.bind(authorization.workspace, writer, placement, authority);
 	}
 
 	async admit(
@@ -508,11 +509,12 @@ export class PrReviewCheckoutManager {
 
 	async bind(
 		workspace: IrohRemoteWorkspace,
-		manager: SessionManager,
+		writer: SessionWriter,
 		placement: PrReviewPlacement,
 		authority: PrReviewPreparationAuthority,
 	): Promise<void> {
 		authority.assertCurrent();
+		const manager = writer.sessionManager;
 		const ref = manager.getSessionRef();
 		if (!ref || manager.getCwd() !== placement.cwd) throw new PrReviewCheckoutError("review_preparation_conflict");
 		await this.options.stateManager.runWorkspaceWorktreeLifecycle(workspace.name, async ({ worktrees }) => {
@@ -530,7 +532,7 @@ export class PrReviewCheckoutManager {
 			authority.assertCurrent();
 			if (!isDeepStrictEqual(manager.getSessionRef(), ref))
 				throw new PrReviewCheckoutError("review_preparation_conflict");
-			await manager.recordPrReviewBinding(placement);
+			await writer.recordPrReviewBinding(placement);
 			authority.assertCurrent();
 			return {
 				result: undefined,

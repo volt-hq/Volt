@@ -28,8 +28,8 @@ import {
 	prepareCompaction,
 } from "../src/core/compaction/compaction.ts";
 import { COMPACTION_SUMMARY_TOKENS, compactContext } from "../src/core/compaction/context-compaction.ts";
-import { convertToLlm } from "../src/core/messages.ts";
-import { buildSessionContext, type SessionEntry } from "../src/core/session-manager.ts";
+import { convertToLlm, createCompactionSummaryMessage } from "../src/core/messages.ts";
+import type { SessionEntry } from "../src/core/session-manager.ts";
 import { createQualityFixtures } from "../test/compaction-quality/fixtures.ts";
 import { getQualityInput, type QualityFixture, scoreQuality } from "../test/compaction-quality/scoring.ts";
 
@@ -290,13 +290,15 @@ export async function runPilotCase(
 			}
 			return { ...base, type: "message", message };
 		});
-		const source = buildSessionContext(entries).messages;
+		// The fixture's messages are the model context: a prior checkpoint opens it.
+		const source = input.messages.map(({ message }) => message);
 		const boundary = input.messages.findIndex(({ id }) => id === input.firstKeptMessageId);
 		const retained = input.messages.slice(boundary).map(({ message }) => message);
 		let messages = convertToLlm(source);
 		if (condition !== "full") {
 			const preparation = prepareCompaction(
 				entries,
+				source,
 				{
 					...DEFAULT_COMPACTION_SETTINGS,
 					keepRecentTokens: estimateMessagesTokens(retained),
@@ -332,20 +334,11 @@ export async function runPilotCase(
 				result.actualSummaryStrategies = (compacted.details.requests ?? []).map((request) => request.strategy);
 			result.summary = compacted.summary;
 			result.compactionCount = 1;
-			messages = convertToLlm(
-				buildSessionContext([
-					...entries,
-					{
-						type: "compaction",
-						id: `checkpoint-${sessionId}`,
-						parentId: entries.at(-1)!.id,
-						timestamp: new Date(0).toISOString(),
-						summary: compacted.summary,
-						firstKeptEntryId: compacted.firstKeptEntryId,
-						tokensBefore: compacted.tokensBefore,
-					},
-				]).messages,
-			);
+			// The checkpoint replaces the history before the retained suffix.
+			messages = convertToLlm([
+				createCompactionSummaryMessage(compacted.summary, compacted.tokensBefore, new Date(0).toISOString()),
+				...retained,
+			]);
 		}
 		stage = "continuation";
 		const context: Context = {

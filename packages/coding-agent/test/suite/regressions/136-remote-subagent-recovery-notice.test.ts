@@ -38,7 +38,7 @@ test("remote transcripts surface subagent recovery notices as system text", asyn
 	const harness = await createHarness();
 	try {
 		const noticeText = `Recovered result at ${harness.tempDir}/report.md`;
-		const recoveryEntryId = await harness.sessionManager.appendCustomMessageEntry(
+		const recoveryEntryId = await harness.session.sessionWriter.appendCustomMessageEntry(
 			"subagent_recovery",
 			noticeText,
 			true,
@@ -64,13 +64,17 @@ test("remote transcripts surface subagent recovery notices as system text", asyn
 			text: "Recovered result at /workspace/report.md",
 		});
 
-		const reviewEntryId = await harness.sessionManager.appendCustomMessageEntry("review", "Review result", true);
-		const hiddenRecoveryEntryId = await harness.sessionManager.appendCustomMessageEntry(
+		const reviewEntryId = await harness.session.sessionWriter.appendCustomMessageEntry(
+			"review",
+			"Review result",
+			true,
+		);
+		const hiddenRecoveryEntryId = await harness.session.sessionWriter.appendCustomMessageEntry(
 			"subagent_recovery",
 			"Hidden recovery",
 			false,
 		);
-		const extensionEntryId = await harness.sessionManager.appendCustomMessageEntry(
+		const extensionEntryId = await harness.session.sessionWriter.appendCustomMessageEntry(
 			"extension.note",
 			"Displayed extension note",
 			true,

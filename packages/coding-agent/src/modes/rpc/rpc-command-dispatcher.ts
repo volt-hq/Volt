@@ -47,6 +47,7 @@ import {
 	getUiActionDescriptors,
 } from "../../core/rpc/ui-actions.ts";
 import { SessionManager } from "../../core/session-manager.ts";
+import type { SessionWriter } from "../../core/session-writer.ts";
 import type { SubscriptionUsageReport, SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import type {
 	RpcCatalogModel,
@@ -419,11 +420,11 @@ export async function handleRpcCommand(
 				...(parentSessionRef ? { parentSessionRef } : {}),
 				...(preservedReviewRun
 					? {
-							setup: async (sessionManager: SessionManager) => {
-								await appendReviewRun(sessionManager, preservedReviewRun);
+							setup: async (writer: SessionWriter) => {
+								await appendReviewRun(writer, preservedReviewRun);
 								if (preservedReviewRun.acknowledgedAt !== undefined) {
 									await acknowledgeReviewRun(
-										sessionManager,
+										writer,
 										preservedReviewRun.runId,
 										preservedReviewRun.acknowledgedAt,
 									);
@@ -685,15 +686,18 @@ export async function handleRpcCommand(
 			let targetSessionManager: SessionManager | undefined;
 			let acknowledgedAt: number | undefined;
 			const result = await runSessionNewHostAction(context.createHostActionContext(), {
-				setup: async (sessionManager) => {
-					targetSessionManager = sessionManager;
-					await appendReviewRun(sessionManager, record);
+				setup: async (writer) => {
+					targetSessionManager = writer.sessionManager;
+					await appendReviewRun(writer, record);
 				},
 				withSession: async (sessionContext) => {
 					await sessionContext.sendMessage(seedMessage);
-					if (!targetSessionManager) throw new Error("Review session was not initialized");
+					const target = runtimeHost.session;
+					if (!targetSessionManager || target.sessionManager !== targetSessionManager) {
+						throw new Error("Review session was not initialized");
+					}
 					acknowledgedAt = (
-						await acknowledgeReviewRun(targetSessionManager, record.runId, record.acknowledgedAt ?? Date.now())
+						await acknowledgeReviewRun(target.sessionWriter, record.runId, record.acknowledgedAt ?? Date.now())
 					).acknowledgedAt;
 				},
 			});
@@ -711,7 +715,7 @@ export async function handleRpcCommand(
 					? await SessionManager.open(sourceSessionRef)
 					: sourceSessionManager;
 				try {
-					await acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
+					await acknowledgeReviewRun(acknowledgmentManager.logWriter, record.runId, acknowledgedAt);
 				} catch (error) {
 					if (sourceSessionRef) {
 						try {
@@ -731,7 +735,7 @@ export async function handleRpcCommand(
 		}
 
 		case "acknowledge_review": {
-			const acknowledgment = await acknowledgeReviewRun(session.sessionManager, command.runId);
+			const acknowledgment = await acknowledgeReviewRun(session.sessionWriter, command.runId);
 			return createRpcSuccessResponse(id, "acknowledge_review", {
 				runId: acknowledgment.runId,
 				acknowledgedAt: acknowledgment.acknowledgedAt,
@@ -761,7 +765,7 @@ export async function handleRpcCommand(
 				...(command.reason ? { reason: command.reason } : {}),
 				...(command.note ? { note: command.note } : {}),
 			};
-			const transition = await recordReviewFindingOutcome(session.sessionManager, outcome, {
+			const transition = await recordReviewFindingOutcome(session.sessionWriter, outcome, {
 				recordCanonicalOutcome: runtimeHost.reviewDiscussions?.recordOutcome,
 				assertCurrent: context.assertConversationGenerationCurrent,
 			});
@@ -798,7 +802,7 @@ export async function handleRpcCommand(
 			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
 			if (!record) return createRpcErrorResponse(id, "publish_review", `Unknown review run: ${command.runId}`);
 			const published = await publishReviewRun(session.sessionManager.getCwd(), record);
-			await appendReviewPublication(session.sessionManager, { runId: record.runId, ...published });
+			await appendReviewPublication(session.sessionWriter, { runId: record.runId, ...published });
 			return createRpcSuccessResponse(id, "publish_review", published);
 		}
 

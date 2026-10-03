@@ -114,10 +114,10 @@ describe("createAgentSession provider attribution headers", () => {
 			registeredProviders.push(model.provider);
 		}
 
-		const sessionManager = SessionManager.inMemory(cwd);
-		if (options.sessionId) {
-			await sessionManager.newSession({ id: options.sessionId });
-		}
+		const sessionManager = SessionManager.inMemory(
+			cwd,
+			options.sessionId === undefined ? undefined : { id: options.sessionId },
+		);
 
 		const { session } = await createAgentSession({
 			cwd,

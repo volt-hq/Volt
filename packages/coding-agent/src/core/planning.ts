@@ -227,6 +227,11 @@ export function clonePlanningState(state: PlanningState): PlanningState {
 	return { mode: state.mode, plan: state.plan === null ? null : clonePlanState(state.plan) };
 }
 
+/** A copy of a branch's latest Plan mode snapshot, or Build mode without a plan when it has none. */
+export function branchPlanningState(planning: PlanningState | null): PlanningState {
+	return clonePlanningState(planning ?? DEFAULT_PLANNING_STATE);
+}
+
 export function getPlanLeafSteps(plan: Pick<PlanState, "steps">): PlanItem[] {
 	return plan.steps.flatMap((step) => step.substeps ?? [step]);
 }

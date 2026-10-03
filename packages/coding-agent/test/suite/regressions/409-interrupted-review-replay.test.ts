@@ -17,6 +17,7 @@ import {
 } from "../../../src/core/review-state.ts";
 import { ReviewUsageCollector } from "../../../src/core/review-usage.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
+import type { SessionWriter } from "../../../src/core/session-writer.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
@@ -68,17 +69,20 @@ async function fixture() {
 		if (h) await h.cleanupAsync();
 		else await manager.closePersistence();
 	});
-	await manager.appendCustomMessageEntry("test", "Original conversation", true);
+	/** The open session's writer, or the manager's log writer while it is detached. */
+	const writer = (): SessionWriter => h?.session.sessionWriter ?? manager.logWriter;
+	await writer().appendCustomMessageEntry("test", "Original conversation", true);
 	const record = unfinished();
-	await appendReviewRunDurably(manager, record);
+	await appendReviewRunDurably(writer(), record);
 	const noticeId = manager.getLeafId()!;
 	const collector = new ReviewUsageCollector(async (checkpoint) => {
-		await appendReviewUsageCheckpoint(manager, record.runId, checkpoint);
+		await appendReviewUsageCheckpoint(writer(), record.runId, checkpoint);
 	});
 	setKeybindings(KeybindingsManager.create());
 	initTheme("dark", true);
 	return {
 		manager,
+		writer,
 		record,
 		noticeId,
 		collector,
@@ -132,18 +136,18 @@ describe("#409 interrupted review accounting replay", () => {
 		const request = await f.start();
 		const stale = f.collector.snapshot();
 		await request.observe(usage, 1, false, false);
-		await appendReviewUsageCheckpoint(f.manager, f.record.runId, stale);
-		await f.manager.appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, {
+		await appendReviewUsageCheckpoint(f.writer(), f.record.runId, stale);
+		await f.writer().appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, {
 			runId: f.record.runId,
 			usage: { ...f.collector.snapshot(), revision: 999, summary: { status: "partial" } },
 		});
 		// Transcript hydration must not be limited to the recent-run listing window.
 		for (let index = 0; index < MAX_HYDRATED_REVIEW_RUNS; index++) {
-			await appendReviewRun(f.manager, { ...unfinished(`newer-${index}`), startedAt: index + 2 });
+			await appendReviewRun(f.writer(), { ...unfinished(`newer-${index}`), startedAt: index + 2 });
 		}
 		const reopened = await f.reopen();
 		const before = reopened.getEntries();
-		const messages = reopened.buildSessionContext().messages;
+		const messages = reopened.getConversationState().context.messages;
 		const rendered = f.render(expanded);
 		expect(rendered).toContain("Original conversation");
 		expect(rendered).toContain("Initial review accounting: partial (unfinished).");
@@ -152,8 +156,8 @@ describe("#409 interrupted review accounting replay", () => {
 		expect(rendered).toContain("Model-priced estimate: $0.100000 USD (partial subtotal).");
 		expect(rendered.includes("Pass 1:")).toBe(expanded);
 		expect(reopened.getEntries()).toEqual(before);
-		expect(reopened.buildSessionContext().messages).toEqual(messages);
-		expect(JSON.stringify(convertToLlm(messages))).not.toContain("estimatedCost");
+		expect(reopened.getConversationState().context.messages).toEqual(messages);
+		expect(JSON.stringify(convertToLlm([...messages]))).not.toContain("estimatedCost");
 	});
 
 	it("keeps accounting unavailable when no checkpoint was persisted", async () => {
@@ -169,9 +173,9 @@ describe("#409 interrupted review accounting replay", () => {
 		await request.observe(usage, 1, false, false);
 		const checkpointId = f.manager.getLeafId()!;
 		const detached = await f.detach();
-		await detached.branch(f.noticeId);
-		await appendReviewRun(detached, unfinished("another-run"));
-		await appendReviewUsageCheckpoint(detached, "another-run", f.collector.snapshot());
+		await detached.logWriter.branch(f.noticeId);
+		await appendReviewRun(detached.logWriter, unfinished("another-run"));
+		await appendReviewUsageCheckpoint(detached.logWriter, "another-run", f.collector.snapshot());
 		await f.reopen();
 		expect(f.render()).toContain("Initial review accounting: unavailable.");
 		expect(f.render()).not.toContain("Tokens:");
@@ -183,7 +187,7 @@ describe("#409 interrupted review accounting replay", () => {
 		const f = await fixture();
 		const request = await f.start();
 		await request.observe({ ...usage, availability: "complete" }, 1, true, true);
-		await appendReviewRunDurably(f.manager, {
+		await appendReviewRunDurably(f.writer(), {
 			...f.record,
 			status,
 			endedAt: 2,

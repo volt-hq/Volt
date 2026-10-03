@@ -145,7 +145,7 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 	async function readStoredMessageTexts(sessionRef: SessionReference): Promise<string[]> {
 		const manager = await SessionManager.openReadOnly(sessionRef);
 		try {
-			return manager.buildSessionContext().messages.map(getMessageText);
+			return manager.getConversationState().context.messages.map(getMessageText);
 		} finally {
 			await manager.closePersistence();
 		}
@@ -230,7 +230,7 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 			const abort = cancelFirst ? staleSession.abort("keyboard_interrupt") : Promise.resolve();
 			if (cancelFirst) await vi.waitFor(() => expect(signal.aborted).toBe(true));
 			access.editor.setText("unsent draft");
-			await loseLog(staleSession.sessionManager);
+			await loseLog(staleSession.sessionWriter);
 			await withinTimeout(prompt, "aborted prompt");
 			await withinTimeout(abort, "prior cancellation");
 			// Disposal must not wait for the uncooperative tool before the TUI exits.

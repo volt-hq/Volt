@@ -1,8 +1,10 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fold } from "@hansjm10/volt-agent-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { buildSessionContext, SessionManager } from "../../src/core/session-manager.ts";
+import { toLogEntry } from "../../src/core/conversation-log/entry-codec.ts";
+import { type CommittedSessionEntry, SessionManager } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
 
 const tempDirs: string[] = [];
@@ -25,46 +27,56 @@ afterEach(async () => {
 describe("SessionManager Fast mode policy", () => {
 	it("reduces Fast independently from thinking and model changes", async () => {
 		const manager = SessionManager.inMemory();
-		await manager.appendThinkingLevelChange("high");
-		expect(manager.buildSessionContext().fastMode).toEqual({ enabled: false });
+		await manager.logWriter.appendThinkingLevelChange("high");
+		expect(manager.getConversationState().context.fastMode).toBe(false);
 
-		await manager.appendFastModeChange(true);
-		expect(manager.buildSessionContext()).toMatchObject({
+		await manager.logWriter.appendFastModeChange(true);
+		expect(manager.getConversationState().context).toMatchObject({
 			thinkingLevel: "high",
-			fastMode: { enabled: true },
+			fastMode: true,
 		});
 
-		await manager.appendModelChange("openai-codex", "gpt-codex");
-		await manager.appendThinkingLevelChange("medium");
-		expect(manager.buildSessionContext()).toMatchObject({
+		await manager.logWriter.appendModelChange("openai-codex", "gpt-codex");
+		await manager.logWriter.appendThinkingLevelChange("medium");
+		expect(manager.getConversationState().context).toMatchObject({
 			thinkingLevel: "medium",
 			model: { provider: "openai-codex", modelId: "gpt-codex" },
-			fastMode: { enabled: true },
+			fastMode: true,
 		});
 	});
 
 	it("keeps sibling branch states independent", async () => {
 		const manager = SessionManager.inMemory();
-		const baseId = await manager.appendThinkingLevelChange("high");
-		const enabledId = await manager.appendFastModeChange(true);
+		await manager.logWriter.appendThinkingLevelChange("high");
+		const baseId = manager.getLeafId()!;
+		await manager.logWriter.appendFastModeChange(true);
+		const enabledId = manager.getLeafId()!;
 
-		await manager.branch(baseId);
-		const disabledId = await manager.appendFastModeChange(false);
+		await manager.logWriter.branch(baseId);
+		await manager.logWriter.appendFastModeChange(false);
+		const disabledId = manager.getLeafId()!;
 
-		expect(buildSessionContext(manager.getEntries(), enabledId).fastMode).toEqual({ enabled: true });
-		expect(buildSessionContext(manager.getEntries(), disabledId).fastMode).toEqual({ enabled: false });
+		// Each branch folds to its own Fast mode, whichever is active.
+		const branchFastMode = (leafId: string): boolean =>
+			fold(
+				manager
+					.getBranch(leafId)
+					.map((entry, index) => toLogEntry({ ...entry, ordinal: index + 1 } as CommittedSessionEntry)),
+			).context.fastMode;
+		expect(branchFastMode(enabledId)).toBe(true);
+		expect(branchFastMode(disabledId)).toBe(false);
 	});
 
 	it("durably stores first-turn Fast state without exposing an empty session in normal lists", async () => {
 		const dir = createTempDir();
 		const manager = await SessionManager.create(dir, dir);
-		await manager.appendThinkingLevelChange("high");
-		await manager.appendFastModeChange(true);
+		await manager.logWriter.appendThinkingLevelChange("high");
+		await manager.logWriter.appendFastModeChange(true);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
 		const reopened = await SessionManager.openReadOnly(ref);
-		expect(reopened.buildSessionContext().fastMode).toEqual({ enabled: true });
+		expect(reopened.getConversationState().context.fastMode).toBe(true);
 		expect(await SessionManager.list(dir, dir)).toEqual([]);
 		expect(await SessionManager.list(dir, dir, undefined, { includeMessageFreeDurable: true })).toMatchObject([
 			{ id: manager.getSessionId(), ref },
@@ -77,29 +89,31 @@ describe("SessionManager Fast mode policy", () => {
 	it("durably stores a message-free branched session with Fast state", async () => {
 		const dir = createTempDir();
 		const manager = await SessionManager.create(dir, dir);
-		await manager.appendThinkingLevelChange("high");
-		const fastEntryId = await manager.appendFastModeChange(true);
+		await manager.logWriter.appendThinkingLevelChange("high");
+		await manager.logWriter.appendFastModeChange(true);
+		const fastEntryId = manager.getLeafId()!;
 
-		const branchedRef = await manager.createBranchedSession(fastEntryId);
+		const branched = await SessionManager.createBranched(manager, fastEntryId);
+		const branchedRef = branched.getSessionRef();
 		if (!branchedRef) throw new Error("Expected a persisted branched reference");
 
 		const reopened = await SessionManager.openReadOnly(branchedRef);
-		expect(reopened.getSessionId()).toBe(manager.getSessionId());
-		expect(reopened.buildSessionContext()).toMatchObject({
+		expect(reopened.getSessionId()).toBe(branched.getSessionId());
+		expect(reopened.getConversationState().context).toMatchObject({
 			thinkingLevel: "high",
-			fastMode: { enabled: true },
+			fastMode: true,
 		});
 	});
 
 	it("round-trips both Fast policy states through SQLite", async () => {
 		const dir = createTempDir();
 		const manager = await SessionManager.create(dir, dir);
-		await manager.appendFastModeChange(true);
-		await manager.appendFastModeChange(false);
+		await manager.logWriter.appendFastModeChange(true);
+		await manager.logWriter.appendFastModeChange(false);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
-		expect((await SessionManager.openReadOnly(ref)).buildSessionContext().fastMode).toEqual({ enabled: false });
+		expect((await SessionManager.openReadOnly(ref)).getConversationState().context.fastMode).toBe(false);
 	});
 
 	it("honors options passed as the second listAll argument", async () => {
@@ -108,7 +122,7 @@ describe("SessionManager Fast mode policy", () => {
 		const sessionDir = join(agentDir, "sessions", "workspace-sessions");
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", agentDir);
 		const manager = await SessionManager.create(cwd, sessionDir);
-		await manager.appendFastModeChange(true);
+		await manager.logWriter.appendFastModeChange(true);
 
 		expect(await SessionManager.listAll()).toEqual([]);
 		expect(await SessionManager.listAll(undefined, { includeMessageFreeDurable: true })).toMatchObject([

@@ -158,7 +158,9 @@ describe("regression #213: AgentSession observer isolation", () => {
 		expect(syncSubscriberEvents).toEqual(["delivery_start", "agent_end"]);
 		expect(laterSubscriberEvents).toEqual(["delivery_start", "agent_end"]);
 		expect(laterSubscriberUserTexts).toEqual(["authoritative observer input", "authoritative observer input"]);
-		expect(getUserText(harness.sessionManager.buildSessionContext().messages)).toBe("authoritative observer input");
+		expect(getUserText(harness.sessionManager.getConversationState().context.messages)).toBe(
+			"authoritative observer input",
+		);
 		expect(getUserText(harness.session.state.messages)).toBe("authoritative observer input");
 		expect(providerUserText).toBe("authoritative observer input");
 		expect(harness.control.hasQueuedMessages()).toBe(false);

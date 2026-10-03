@@ -87,7 +87,7 @@ describe("regression #211: delivery payload isolation", () => {
 		images[0]!.data = "bGF0ZSBjYWxsZXIgbXV0YXRpb24=";
 
 		const expectedContent = [{ type: "text", text: "immutable original" }, ORIGINAL_IMAGE];
-		const canonicalUser = findUser(harness.sessionManager.buildSessionContext().messages);
+		const canonicalUser = findUser(harness.sessionManager.getConversationState().context.messages);
 		const sessionUser = findUser(harness.session.state.messages);
 		expect(canonicalUser?.content).toEqual(expectedContent);
 		expect(sessionUser).toEqual(canonicalUser);
@@ -140,7 +140,7 @@ describe("regression #211: delivery payload isolation", () => {
 		// The failed attempt's output, mutated after the hook returned, reaches nothing.
 		mutateMessages(returned);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("accepted");
-		expect(findUser(harness.sessionManager.buildSessionContext().messages)).toBeUndefined();
+		expect(findUser(harness.sessionManager.getConversationState().context.messages)).toBeUndefined();
 
 		await harness.control.continue();
 
@@ -150,7 +150,7 @@ describe("regression #211: delivery payload isolation", () => {
 		];
 		// The retry prepares the durable queued input again, not the failed attempt's output.
 		expect(received).toEqual(["original", "original"]);
-		const canonicalUser = findUser(harness.sessionManager.buildSessionContext().messages);
+		const canonicalUser = findUser(harness.sessionManager.getConversationState().context.messages);
 		expect(canonicalUser?.content).toEqual(expected);
 		expect(getClientMessageId(canonicalUser!)).toBe(clientMessageId);
 		expect(findUser(harness.session.state.messages)).toEqual(canonicalUser);
@@ -215,16 +215,16 @@ describe("regression #211: delivery payload isolation", () => {
 		await harness.control.continue();
 
 		const canonicalUser = harness.sessionManager
-			.buildSessionContext()
-			.messages.find(
+			.getConversationState()
+			.context.messages.find(
 				(message): message is UserMessage =>
 					message.role === "user" && getClientMessageId(message) === clientMessageId,
 			);
 		expect(canonicalUser?.content).toEqual([{ type: "text", text }]);
 		expect(
 			harness.sessionManager
-				.buildSessionContext()
-				.messages.filter((message) => message.role === "user" && getMessageText(message) === text),
+				.getConversationState()
+				.context.messages.filter((message) => message.role === "user" && getMessageText(message) === text),
 		).toHaveLength(1);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("completed");
 		expect(harness.session.getSteeringMessages()).toEqual([]);

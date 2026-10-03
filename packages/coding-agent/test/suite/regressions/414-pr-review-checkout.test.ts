@@ -307,7 +307,12 @@ describe("#414 prepared PR checkouts", () => {
 			const firstRecord = (await f.state.listWorktrees())[0];
 			const firstSession = await SessionManager.create(firstRecord.path, f.sessionDir, { id: f.request.sessionId });
 			f.sessions.push(firstSession);
-			await f.manager.bind(f.workspace, firstSession, firstRecord.prReviewLaunches![0].placement, f.authority);
+			await f.manager.bind(
+				f.workspace,
+				firstSession.logWriter,
+				firstRecord.prReviewLaunches![0].placement,
+				f.authority,
+			);
 			expect(firstRecord.baseRef).toBe(f.head);
 			expect(git(f.source, "rev-parse", "main")).toBe(f.base);
 
@@ -369,7 +374,7 @@ describe("#414 prepared PR checkouts", () => {
 			try {
 				const session = await SessionManager.create(placement.cwd, f.sessionDir, { id: request.sessionId });
 				f.sessions.push(session);
-				await manager.bind(f.workspace, session, placement, f.authority);
+				await manager.bind(f.workspace, session.logWriter, placement, f.authority);
 				expect(session.getPrReviewBinding()).toEqual(placement);
 			} finally {
 				await reservation.release();
@@ -407,7 +412,7 @@ describe("#414 prepared PR checkouts", () => {
 		await expect(
 			f.worktrees.beginRuntimePreparation(f.workspace.name, prepared.worktreeId, f.request.sessionId),
 		).rejects.toThrow("unavailable");
-		await expect(f.manager.bind(f.workspace, session, placement, f.authority)).rejects.toMatchObject({
+		await expect(f.manager.bind(f.workspace, session.logWriter, placement, f.authority)).rejects.toMatchObject({
 			code: "review_preparation_conflict",
 		});
 	});
@@ -1001,7 +1006,7 @@ describe("#414 prepared PR checkouts", () => {
 			);
 			const session = await SessionManager.create(placement.cwd, f.sessionDir, { id: f.request.sessionId });
 			f.sessions.push(session);
-			await f.manager.bind(f.workspace, session, placement, f.authority);
+			await f.manager.bind(f.workspace, session.logWriter, placement, f.authority);
 			await reservation.release();
 			// Resuming reopens the session for writing once the first writer has closed it.
 			await session.closePersistence();

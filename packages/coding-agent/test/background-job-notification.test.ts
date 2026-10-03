@@ -242,7 +242,7 @@ describe("background job completion notices", () => {
 		async (tuiMode) => {
 			const message = JSON.parse(JSON.stringify(createNotice())) as CustomMessage;
 			const sessionManager = SessionManager.inMemory();
-			await sessionManager.appendCustomMessageEntry(
+			await sessionManager.logWriter.appendCustomMessageEntry(
 				message.customType,
 				message.content,
 				message.display,
@@ -257,6 +257,9 @@ describe("background job completion notices", () => {
 				runtimeHost: {
 					session: {
 						sessionManager,
+						get messages() {
+							return [...sessionManager.getConversationState().context.messages];
+						},
 						extensionRunner: { getMessageRenderer: () => undefined },
 						settingsManager: { getCodeBlockIndent: () => "  ", isProjectTrusted: () => true },
 					},

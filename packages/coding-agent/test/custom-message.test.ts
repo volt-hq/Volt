@@ -244,7 +244,7 @@ describe("CustomMessageComponent", () => {
 		async (tuiMode) => {
 			const message = createReviewMessage();
 			const sessionManager = SessionManager.inMemory();
-			await sessionManager.appendCustomMessageEntry(
+			await sessionManager.logWriter.appendCustomMessageEntry(
 				message.customType,
 				message.content,
 				message.display,
@@ -259,6 +259,9 @@ describe("CustomMessageComponent", () => {
 				runtimeHost: {
 					session: {
 						sessionManager,
+						get messages() {
+							return [...sessionManager.getConversationState().context.messages];
+						},
 						extensionRunner: { getMessageRenderer: () => undefined },
 						settingsManager: { getCodeBlockIndent: () => "  ", isProjectTrusted: () => true },
 					},

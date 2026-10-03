@@ -9,6 +9,7 @@ import { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { GitContextProvider } from "../src/core/git-context-provider.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS } from "../src/core/remote/iroh/index.ts";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../src/core/session-manager.ts";
+import { LogWriter } from "../src/core/session-writer.ts";
 import { DEFAULT_SUBAGENT_TURN_LIMITS, SubagentManager } from "../src/core/subagents/index.ts";
 import {
 	createIrohRemoteAgentRuntime,
@@ -524,7 +525,7 @@ export default function (volt) {
 		let gitDisposeCalls = 0;
 		let failureInjected = false;
 		const createSessionManager = SessionManager.create.bind(SessionManager);
-		const appendThinkingLevelChange = SessionManager.prototype.appendThinkingLevelChange;
+		const appendThinkingLevelChange = LogWriter.prototype.appendThinkingLevelChange;
 		const closePersistence = SessionManager.prototype.closePersistence;
 		const disposeGitContext = GitContextProvider.prototype.dispose;
 		const createSpy = vi.spyOn(SessionManager, "create").mockImplementation(async (...args) => {
@@ -549,11 +550,11 @@ export default function (volt) {
 			disposeGitContext.call(this);
 			throw gitCleanupError;
 		});
-		const appendSpy = vi.spyOn(SessionManager.prototype, "appendThinkingLevelChange").mockImplementation(function (
-			this: SessionManager,
+		const appendSpy = vi.spyOn(LogWriter.prototype, "appendThinkingLevelChange").mockImplementation(function (
+			this: LogWriter,
 			thinkingLevel,
-		): Promise<string> {
-			if (this === targetManager && serviceGitContext && !failureInjected) {
+		): Promise<void> {
+			if (this.sessionManager === targetManager && serviceGitContext && !failureInjected) {
 				failureInjected = true;
 				return Promise.reject(setupError);
 			}
@@ -595,7 +596,9 @@ export default function (volt) {
 			expect(targetManager).toBeDefined();
 			expect(managerCloseCalls).toBe(1);
 			if (!targetManager) throw new Error("expected the consumed remote session manager");
-			await expect(targetManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
+			await expect(targetManager.logWriter.appendSessionInfo("late write")).rejects.toThrow(
+				"Session persistence is closed",
+			);
 			const retainedRef = await SessionManager.findForResume(sessionDir, "failed-remote-services");
 			expect(retainedRef).toBeDefined();
 			if (!retainedRef) throw new Error("expected the committed remote session row");

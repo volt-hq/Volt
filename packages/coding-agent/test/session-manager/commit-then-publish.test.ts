@@ -45,8 +45,8 @@ describe("SessionManager commit-then-publish", () => {
 		const faulty = injectFaultyLog(manager);
 		const hold = faulty.holdNext();
 
-		const first = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		const second = manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		const first = manager.logWriter.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const second = manager.logWriter.appendMessage({ role: "user", content: "second", timestamp: 2 });
 		await hold.started;
 
 		// The first commit is in flight: nothing is published or readable, and the second waits for it.
@@ -61,7 +61,7 @@ describe("SessionManager commit-then-publish", () => {
 		expect(manager.getEntry(secondId)?.parentId).toBe(firstId);
 		expect(manager.getOrdinal()).toBe(2);
 
-		await manager.branch(firstId);
+		await manager.logWriter.branch(firstId);
 		expect(log.at(-1)).toBe(`branch:${secondId}->${firstId}`);
 		expect(manager.getOrdinal()).toBe(3);
 	});
@@ -75,14 +75,14 @@ describe("SessionManager commit-then-publish", () => {
 		const faulty = injectFaultyLog(manager);
 		faulty.failNext("rolled_back");
 
-		const rolledBack = manager.appendMessage({ role: "user", content: "rolled back", timestamp: 1 });
+		const rolledBack = manager.logWriter.appendMessage({ role: "user", content: "rolled back", timestamp: 1 });
 		await expect(rolledBack).rejects.toBeInstanceOf(SessionAtomicAppendError);
 		await expect(rolledBack).rejects.toMatchObject({ effect: "rolled_back" });
 		expect(log).toEqual([]);
 		expect(manager.getEntries()).toEqual([]);
 		expect(manager.getOrdinal()).toBe(0);
 
-		const kept = await manager.appendMessage({ role: "user", content: "kept", timestamp: 2 });
+		const kept = await manager.logWriter.appendMessage({ role: "user", content: "kept", timestamp: 2 });
 		expect(log).toEqual([`entry:1:${kept}`]);
 		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getEntries().map((entry) => entry.id)).toEqual([kept]);
@@ -103,12 +103,12 @@ describe("SessionManager commit-then-publish", () => {
 			const faulty = injectFaultyLog(manager);
 			faulty.failNext(lose("uncertain_commit", { committed }));
 
-			const unconfirmed = manager.appendMessage({ role: "user", content: "unconfirmed", timestamp: 1 });
-			const queued = manager.appendCustomEntry("queued-behind-the-loss");
+			const unconfirmed = manager.logWriter.appendMessage({ role: "user", content: "unconfirmed", timestamp: 1 });
+			const queued = manager.logWriter.appendCustomEntry("queued-behind-the-loss");
 			await expect(unconfirmed).rejects.toBeInstanceOf(ConversationLogLostError);
 			await expect(queued).rejects.toBeInstanceOf(ConversationLogLostError);
 			await expect(manager.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
-			await expect(manager.appendSessionInfo("after the loss")).rejects.toBe(await manager.lost);
+			await expect(manager.logWriter.appendSessionInfo("after the loss")).rejects.toBe(await manager.lost);
 			expect(log).toEqual([]);
 			expect(manager.getEntries()).toEqual([]);
 
@@ -131,11 +131,11 @@ describe("SessionManager commit-then-publish", () => {
 		const published: CommittedSessionEntry[] = [];
 		manager.subscribeEntries((entry) => published.push(entry));
 
-		const first = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const first = await manager.logWriter.appendMessage({ role: "user", content: "first", timestamp: 1 });
 		await seedSession(manager, (seed) => seed.clientInput("ordinal-input", "prompt", { message: "host only" }));
-		await manager.appendCustomMessageEntry("test", "custom", true);
-		await manager.branch(first);
-		await manager.appendLabelChange(first, "bookmark");
+		await manager.logWriter.appendCustomMessageEntry("test", "custom", true);
+		await manager.logWriter.branch(first);
+		await manager.logWriter.appendLabelChange(first, "bookmark");
 		// One atomic batch of several entries, host-only and public.
 		await seedSession(manager, (seed) =>
 			seed
@@ -143,7 +143,7 @@ describe("SessionManager commit-then-publish", () => {
 				.clientInput("atomic-input", "prompt", { message: "atomic" }, { states: ["started"] })
 				.user("atomic", { clientMessageId: "atomic-input" }),
 		);
-		await manager.appendSessionInfo("after atomic");
+		await manager.logWriter.appendSessionInfo("after atomic");
 
 		const ordinal = manager.getOrdinal();
 		const log = await manager.readEntries(0, 1_000);
@@ -175,12 +175,12 @@ describe("SessionManager commit-then-publish", () => {
 	it("commits in-memory writes through the same lane and pages their log", async () => {
 		const manager = SessionManager.inMemory("/tmp/ws");
 		const log = observe(manager);
-		const pending = manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const pending = manager.logWriter.appendMessage({ role: "user", content: "first", timestamp: 1 });
 		expect(log).toEqual([]);
 		const first = await pending;
 		expect(log).toEqual([`entry:1:${first}`]);
-		const second = await manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
-		await manager.branch(first);
+		const second = await manager.logWriter.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		await manager.logWriter.branch(first);
 		expect(log).toEqual([`entry:1:${first}`, `entry:2:${second}`, `branch:${second}->${first}`]);
 		expect(manager.getOrdinal()).toBe(3);
 

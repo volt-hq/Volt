@@ -90,10 +90,12 @@ describe("AgentSession conversation generation commits", () => {
 		});
 
 		const manager = runtime.session.sessionManager;
-		await manager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
-		const firstAssistantId = await manager.appendMessage(fauxAssistantMessage("first assistant"));
-		await manager.appendMessage({ role: "user", content: "second user", timestamp: 2 });
-		const oldLeafId = await manager.appendMessage(fauxAssistantMessage("second assistant"));
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+		const firstAssistantId = await runtime.session.sessionWriter.appendMessage(
+			fauxAssistantMessage("first assistant"),
+		);
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 2 });
+		const oldLeafId = await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant"));
 
 		const transcriptItems = (): RpcConversationTranscriptItem[] => {
 			const items: RpcConversationTranscriptItem[] = [];
@@ -250,14 +252,16 @@ describe("AgentSession conversation generation commits", () => {
 		});
 		await runtime.session.bindExtensions({});
 
-		await manager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
-		const firstAssistantId = await manager.appendMessage(fauxAssistantMessage("first assistant", { timestamp: 2 }));
-		await manager.appendMessage({ role: "user", content: "second user", timestamp: 3 });
-		await manager.appendMessage(fauxAssistantMessage("second assistant", { timestamp: 4 }));
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+		const firstAssistantId = await runtime.session.sessionWriter.appendMessage(
+			fauxAssistantMessage("first assistant", { timestamp: 2 }),
+		);
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 3 });
+		await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant", { timestamp: 4 }));
 		const targetManager = await SessionManager.create(tempDir, tempDir);
 		cleanups.push(() => targetManager.closePersistence());
-		await targetManager.appendMessage({ role: "user", content: "target user", timestamp: 5 });
-		await targetManager.appendMessage(fauxAssistantMessage("target assistant", { timestamp: 6 }));
+		await targetManager.logWriter.appendMessage({ role: "user", content: "target user", timestamp: 5 });
+		await targetManager.logWriter.appendMessage(fauxAssistantMessage("target assistant", { timestamp: 6 }));
 
 		let releaseUpdate = () => {};
 		const updateRelease = new Promise<void>((resolve) => {
@@ -368,10 +372,12 @@ describe("AgentSession conversation generation commits", () => {
 			}
 		});
 
-		await manager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
-		const firstAssistantId = await manager.appendMessage(fauxAssistantMessage("first assistant", { timestamp: 2 }));
-		await manager.appendMessage({ role: "user", content: "second user", timestamp: 3 });
-		await manager.appendMessage(fauxAssistantMessage("second assistant", { timestamp: 4 }));
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+		const firstAssistantId = await runtime.session.sessionWriter.appendMessage(
+			fauxAssistantMessage("first assistant", { timestamp: 2 }),
+		);
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 3 });
+		await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant", { timestamp: 4 }));
 
 		let releasePreflight = () => {};
 		const preflightRelease = new Promise<void>((resolve) => {
@@ -473,10 +479,12 @@ describe("AgentSession conversation generation commits", () => {
 			});
 
 			const manager = runtime.session.sessionManager;
-			await manager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
-			const firstAssistantId = await manager.appendMessage(fauxAssistantMessage("first assistant"));
-			await manager.appendMessage({ role: "user", content: "second user", timestamp: 2 });
-			await manager.appendMessage(fauxAssistantMessage("second assistant"));
+			await runtime.session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+			const firstAssistantId = await runtime.session.sessionWriter.appendMessage(
+				fauxAssistantMessage("first assistant"),
+			);
+			await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 2 });
+			await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant"));
 
 			let releaseBoundary = () => {};
 			const boundaryRelease = new Promise<void>((resolve) => {
@@ -605,8 +613,8 @@ describe("AgentSession conversation generation commits", () => {
 			sessionManager: activeManager,
 		});
 		const targetManager = await SessionManager.create(tempDir, tempDir);
-		await targetManager.appendMessage({ role: "user", content: "switch target", timestamp: 1 });
-		await targetManager.appendMessage(fauxAssistantMessage("switch target assistant"));
+		await targetManager.logWriter.appendMessage({ role: "user", content: "switch target", timestamp: 1 });
+		await targetManager.logWriter.appendMessage(fauxAssistantMessage("switch target assistant"));
 		const targetSessionId = targetManager.getSessionId();
 		let modePromise: Promise<void> | undefined;
 		let endMode: (() => void) | undefined;
@@ -620,10 +628,12 @@ describe("AgentSession conversation generation commits", () => {
 			}
 		});
 
-		await activeManager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
-		const firstAssistantId = await activeManager.appendMessage(fauxAssistantMessage("first assistant"));
-		await activeManager.appendMessage({ role: "user", content: "second user", timestamp: 2 });
-		await activeManager.appendMessage(fauxAssistantMessage("second assistant"));
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+		const firstAssistantId = await runtime.session.sessionWriter.appendMessage(
+			fauxAssistantMessage("first assistant"),
+		);
+		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 2 });
+		await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant"));
 		const originalSession = runtime.session;
 		const originalSessionId = originalSession.sessionId;
 
@@ -753,11 +763,11 @@ describe("AgentSession conversation generation commits", () => {
 				}
 			});
 
-			await manager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
-			const firstAssistantId = await manager.appendMessage(
+			await runtime.session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
+			const firstAssistantId = await runtime.session.sessionWriter.appendMessage(
 				fauxAssistantMessage("first assistant", { timestamp: 2 }),
 			);
-			await manager.appendMessage({ role: "user", content: "second user", timestamp: 3 });
+			await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 3 });
 			const secondAssistant = fauxAssistantMessage("second assistant", { timestamp: 4 });
 			secondAssistant.usage = {
 				input: initialUsageTokens,
@@ -767,7 +777,7 @@ describe("AgentSession conversation generation commits", () => {
 				totalTokens: initialUsageTokens,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
-			await manager.appendMessage(secondAssistant);
+			await runtime.session.sessionWriter.appendMessage(secondAssistant);
 			faux.setResponses([fauxAssistantMessage("fresh assistant")]);
 			vi.spyOn(runtime.session.settingsManager, "getCompactionSettings").mockReturnValue({
 				enabled: true,

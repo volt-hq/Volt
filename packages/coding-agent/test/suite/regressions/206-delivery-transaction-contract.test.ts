@@ -300,7 +300,7 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 			kind: "replay",
 			records: [{ clientMessageId }],
 		});
-		expect(harness.sessionManager.buildSessionContext().messages).toEqual([]);
+		expect(harness.sessionManager.getConversationState().context.messages).toEqual([]);
 		await expect(harness.session.steer("after the loss")).rejects.toMatchObject({ reason: "uncertain_commit" });
 	});
 
@@ -392,7 +392,7 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 				.at(-1)?.planning.plan?.phase,
 		).toBe("draft");
 		expect(checkpointCount(harness)).toBe(1);
-		const messages = harness.sessionManager.buildSessionContext().messages;
+		const messages = harness.sessionManager.getConversationState().context.messages;
 		expect(messages.filter((message) => message.role === "user").map(getMessageText)).toEqual([
 			"commit before disposal",
 		]);

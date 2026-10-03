@@ -53,7 +53,7 @@ async function createTestHarness(options: { extension?: ExtensionFactory; tools?
 
 /** The session's lock is lost, and its next commit finds that out. */
 function loseLock(harness: Harness): Promise<Error> {
-	return loseLog(harness.sessionManager);
+	return loseLog(harness.session.sessionWriter);
 }
 
 function withinTimeout<T>(promise: Promise<T>, label: string, ms = 5_000): Promise<T> {

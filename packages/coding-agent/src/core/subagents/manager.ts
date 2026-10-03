@@ -16,6 +16,7 @@ import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../rpc/types.ts";
 import { SessionManager, type SessionReference } from "../session-manager.ts";
+import type { SessionWriter } from "../session-writer.ts";
 import type {
 	SubagentCapacityLimitSnapshot,
 	SubagentSpawnCapacityConstraint,
@@ -202,6 +203,8 @@ export interface SubagentSpawnRecordContext {
 	toolCallId: string;
 	/** createSubagentSpawnRequestKey hash of the originating spawn request. */
 	requestKey: string;
+	/** Writer of the session whose tool call spawned the child: the edge commits there. */
+	writer: SessionWriter;
 }
 
 export interface SubagentStartByNameOptions extends SubagentStartOptions {
@@ -501,7 +504,7 @@ function deriveHydratedChildState(child: SessionManager, fallbackTime: number): 
 			break;
 		}
 	}
-	const messages = child.buildSessionContext().messages;
+	const messages = child.getConversationState().context.messages;
 	const last = messages.at(-1);
 	const finishedAt = typeof last?.timestamp === "number" ? last.timestamp : fallbackTime;
 	if (last?.role === "assistant") {
@@ -1952,13 +1955,13 @@ export class SubagentManager {
 		definition: SubagentDefinition | undefined,
 		runtime: AgentSessionRuntime,
 	): void {
-		if (!spawnRecord || !this.parentSessionManager?.isPersisted()) return;
+		if (!spawnRecord?.writer.sessionManager.isPersisted()) return;
 		// Both identity fields come from the runtime's own session manager: a
 		// factory that swaps managers must not produce an edge whose id and
 		// reference disagree.
 		const childSessionManager = runtime.session.sessionManager;
 		const childSessionRef = childSessionManager.getSessionRef();
-		void this.parentSessionManager
+		void spawnRecord.writer
 			.appendSubagentSpawn({
 				toolCallId: spawnRecord.toolCallId,
 				requestKey: spawnRecord.requestKey,

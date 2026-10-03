@@ -6,13 +6,13 @@ describe("SessionManager.saveCustomEntry", () => {
 		const session = SessionManager.inMemory();
 
 		// Save a message
-		const msgId = await session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const msgId = await session.logWriter.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 
 		// Save a custom entry
-		const customId = await session.appendCustomEntry("my_data", { foo: "bar" });
+		const customId = await session.logWriter.appendCustomEntry("my_data", { foo: "bar" });
 
 		// Save another message
-		const msg2Id = await session.appendMessage({
+		const msg2Id = await session.logWriter.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "hi" }],
 			api: "anthropic-messages",
@@ -49,7 +49,7 @@ describe("SessionManager.saveCustomEntry", () => {
 		expect(path[2].id).toBe(msg2Id);
 
 		// buildSessionContext should work (custom entries skipped in messages)
-		const ctx = session.buildSessionContext();
+		const ctx = session.getConversationState().context;
 		expect(ctx.messages).toHaveLength(2); // only message entries
 	});
 });

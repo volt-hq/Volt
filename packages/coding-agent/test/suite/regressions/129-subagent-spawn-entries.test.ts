@@ -115,7 +115,7 @@ async function createPersistedParent(): Promise<SessionManager> {
 	const parent = await SessionManager.create(tmpdir(), sessionDir);
 	// A real parent always has conversation content before a spawn (the
 	// assistant toolCall); the seeded message also materializes the file.
-	await parent.appendMessage(fauxAssistantMessage("delegating"));
+	await parent.logWriter.appendMessage(fauxAssistantMessage("delegating"));
 	return parent;
 }
 
@@ -144,7 +144,7 @@ describe("issue #129", () => {
 		const context = await createTestContext({ withConfiguredAuth: true, parentSessionManager: parent });
 		try {
 			const handle = await context.manager.startByName("researcher", {
-				spawnRecord: { toolCallId: "call_129", requestKey: "req_129" },
+				spawnRecord: { toolCallId: "call_129", requestKey: "req_129", writer: parent.logWriter },
 			});
 			expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
 
@@ -193,7 +193,7 @@ describe("issue #129", () => {
 			observedTypes.push(entry.type);
 		});
 		try {
-			const tool = createSubagentTool(tmpdir(), { manager: context.manager });
+			const tool = createSubagentTool(tmpdir(), { manager: context.manager, sessionWriter: parent.logWriter });
 			const parallelParams = {
 				tasks: [
 					{ agent: "researcher", task: "task one" },
@@ -247,7 +247,7 @@ describe("issue #129", () => {
 		const context = await createTestContext({ withConfiguredAuth: true, parentSessionManager: parent });
 		try {
 			const handle = await context.manager.startByName("researcher", {
-				spawnRecord: { toolCallId: "call_129", requestKey: "req_129" },
+				spawnRecord: { toolCallId: "call_129", requestKey: "req_129", writer: parent.logWriter },
 			});
 			const completion = handle.waitForEnd();
 			await handle.prompt("inspect the incident");
@@ -266,7 +266,7 @@ describe("issue #129", () => {
 		const context = await createTestContext({ withConfiguredAuth: false, parentSessionManager: parent });
 		try {
 			const handle = await context.manager.startByName("researcher", {
-				spawnRecord: { toolCallId: "call_129", requestKey: "req_129" },
+				spawnRecord: { toolCallId: "call_129", requestKey: "req_129", writer: parent.logWriter },
 			});
 			await expect(handle.prompt("inspect the incident")).rejects.toThrow(/API key/i);
 			await handle.dispose();
@@ -301,7 +301,7 @@ describe("issue #129", () => {
 			// Manager-level spawn: no toolResult ever settles in the parent, so
 			// this edge is dangling by construction — the incident shape.
 			const handle = await context.manager.startByName("researcher", {
-				spawnRecord: { toolCallId: "call_129", requestKey: "req_129" },
+				spawnRecord: { toolCallId: "call_129", requestKey: "req_129", writer: parent.logWriter },
 			});
 			handleId = handle.id;
 			const completion = handle.waitForEnd();
@@ -352,10 +352,10 @@ describe("issue #129", () => {
 		// interrupted before any assistant output persists as header-only and
 		// hydrates the same way, just without a task.)
 		const interruptedChild = await SessionManager.create(tmpdir(), sessionDir);
-		await interruptedChild.appendMessage({ role: "user", content: "dig into logs", timestamp: Date.now() });
-		await interruptedChild.appendMessage(fauxAssistantMessage("starting the dig"));
-		await interruptedChild.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
-		await parent.appendSubagentSpawn({
+		await interruptedChild.logWriter.appendMessage({ role: "user", content: "dig into logs", timestamp: Date.now() });
+		await interruptedChild.logWriter.appendMessage(fauxAssistantMessage("starting the dig"));
+		await interruptedChild.logWriter.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_a",
 			subagentId: "sa_interrupted",
 			agent: "researcher",
@@ -363,7 +363,7 @@ describe("issue #129", () => {
 			childSessionRef: interruptedChild.getSessionRef()!,
 			requestKey: "rk-a",
 		});
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_b",
 			subagentId: "sa_lost",
 			agent: "researcher",
@@ -397,13 +397,13 @@ describe("issue #129", () => {
 		const sessionDir = parent.getSessionDir();
 		const makeChild = async (task: string): Promise<SessionManager> => {
 			const child = await SessionManager.create(tmpdir(), sessionDir);
-			await child.appendMessage({ role: "user", content: task, timestamp: Date.now() });
-			await child.appendMessage(fauxAssistantMessage("finished cleanly"));
+			await child.logWriter.appendMessage({ role: "user", content: task, timestamp: Date.now() });
+			await child.logWriter.appendMessage(fauxAssistantMessage("finished cleanly"));
 			return child;
 		};
 		const settledChild = await makeChild("settled work");
 		const abortedCallChild = await makeChild("recoverable work");
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_settled",
 			subagentId: "sa_settled",
 			agent: "researcher",
@@ -411,7 +411,7 @@ describe("issue #129", () => {
 			childSessionRef: settledChild.getSessionRef()!,
 			requestKey: "rk-1",
 		});
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_aborted",
 			subagentId: "sa_recoverable",
 			agent: "researcher",
@@ -419,7 +419,7 @@ describe("issue #129", () => {
 			childSessionRef: abortedCallChild.getSessionRef()!,
 			requestKey: "rk-2",
 		});
-		await parent.appendMessage({
+		await parent.logWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call_settled",
 			toolName: "subagent",
@@ -427,7 +427,7 @@ describe("issue #129", () => {
 			isError: false,
 			timestamp: Date.now(),
 		});
-		await parent.appendMessage({
+		await parent.logWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call_aborted",
 			toolName: "subagent",
@@ -453,17 +453,17 @@ describe("issue #129", () => {
 		const sessionDir = parent.getSessionDir();
 		const makeChild = async (task: string, report: string): Promise<SessionManager> => {
 			const child = await SessionManager.create(tmpdir(), sessionDir);
-			await child.appendMessage({ role: "user", content: task, timestamp: Date.now() });
-			await child.appendMessage(fauxAssistantMessage(report));
+			await child.logWriter.appendMessage({ role: "user", content: task, timestamp: Date.now() });
+			await child.logWriter.appendMessage(fauxAssistantMessage(report));
 			return child;
 		};
 		const linkedChild = await makeChild("linked work", "linked report");
 		const strandedChild = await makeChild("stranded work", "stranded report");
 
-		await parent.appendMessage(
+		await parent.logWriter.appendMessage(
 			fauxAssistantMessage([fauxToolCall("subagent", {}, { id: "call_linked" })], { stopReason: "toolUse" }),
 		);
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_linked",
 			subagentId: "sa_linked",
 			agent: "researcher",
@@ -471,7 +471,7 @@ describe("issue #129", () => {
 			childSessionRef: linkedChild.getSessionRef()!,
 			requestKey: "rk-1",
 		});
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_gone",
 			subagentId: "sa_stranded",
 			agent: "researcher",
@@ -497,17 +497,17 @@ describe("issue #129", () => {
 		const sessionDir = parent.getSessionDir();
 
 		const grandchild = await SessionManager.create(tmpdir(), sessionDir);
-		await grandchild.appendMessage({ role: "user", content: "orphaned leaf work", timestamp: Date.now() });
-		await grandchild.appendMessage(fauxAssistantMessage("orphaned leaf report"));
+		await grandchild.logWriter.appendMessage({ role: "user", content: "orphaned leaf work", timestamp: Date.now() });
+		await grandchild.logWriter.appendMessage(fauxAssistantMessage("orphaned leaf report"));
 
 		// The child settled in the parent (its failure was captured as a task
 		// error), but its own toolCall to the grandchild never settled.
 		const child = await SessionManager.create(tmpdir(), sessionDir);
-		await child.appendMessage({ role: "user", content: "branch task", timestamp: Date.now() });
-		await child.appendMessage(
+		await child.logWriter.appendMessage({ role: "user", content: "branch task", timestamp: Date.now() });
+		await child.logWriter.appendMessage(
 			fauxAssistantMessage([fauxToolCall("subagent", {}, { id: "call_leaf" })], { stopReason: "toolUse" }),
 		);
-		await child.appendSubagentSpawn({
+		await child.logWriter.appendSubagentSpawn({
 			toolCallId: "call_leaf",
 			subagentId: "sa_orphaned_leaf",
 			agent: "general",
@@ -516,7 +516,7 @@ describe("issue #129", () => {
 			requestKey: "rk-leaf",
 		});
 
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_settled_branch",
 			subagentId: "sa_settled_branch",
 			agent: "researcher",
@@ -524,7 +524,7 @@ describe("issue #129", () => {
 			childSessionRef: child.getSessionRef()!,
 			requestKey: "rk-branch",
 		});
-		await parent.appendMessage({
+		await parent.logWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call_settled_branch",
 			toolName: "subagent",
@@ -554,13 +554,13 @@ describe("issue #129", () => {
 		const sessionDir = parent.getSessionDir();
 
 		const grandchild = await SessionManager.create(tmpdir(), sessionDir);
-		await grandchild.appendMessage({ role: "user", content: "leaf task", timestamp: Date.now() });
-		await grandchild.appendMessage(fauxAssistantMessage("leaf report"));
+		await grandchild.logWriter.appendMessage({ role: "user", content: "leaf task", timestamp: Date.now() });
+		await grandchild.logWriter.appendMessage(fauxAssistantMessage("leaf report"));
 
 		const child = await SessionManager.create(tmpdir(), sessionDir);
-		await child.appendMessage({ role: "user", content: "branch task", timestamp: Date.now() });
-		await child.appendMessage(fauxAssistantMessage("branch report"));
-		await child.appendSubagentSpawn({
+		await child.logWriter.appendMessage({ role: "user", content: "branch task", timestamp: Date.now() });
+		await child.logWriter.appendMessage(fauxAssistantMessage("branch report"));
+		await child.logWriter.appendSubagentSpawn({
 			toolCallId: "call_leaf",
 			subagentId: "sa_leaf",
 			agent: "general",
@@ -569,7 +569,7 @@ describe("issue #129", () => {
 			requestKey: "rk-leaf",
 		});
 
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_branch",
 			subagentId: "sa_branch",
 			agent: "researcher",
@@ -601,12 +601,12 @@ describe("issue #129", () => {
 		const parent = await createPersistedParent();
 		const sessionDir = parent.getSessionDir();
 		const interrupted = await SessionManager.create(tmpdir(), sessionDir);
-		await interrupted.appendMessage({ role: "user", content: "finish the audit", timestamp: Date.now() });
-		await interrupted.appendMessage(fauxAssistantMessage("starting the audit"));
-		await interrupted.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage({ role: "user", content: "finish the audit", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage(fauxAssistantMessage("starting the audit"));
+		await interrupted.logWriter.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
 		// The resume reopens the child transcript for writing.
 		await interrupted.closePersistence();
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_resume",
 			subagentId: "sa_resume",
 			agent: "researcher",
@@ -653,9 +653,9 @@ describe("issue #129", () => {
 		const parent = await createPersistedParent();
 		const sessionDir = parent.getSessionDir();
 		const completedChild = await SessionManager.create(tmpdir(), sessionDir);
-		await completedChild.appendMessage({ role: "user", content: "settled work", timestamp: Date.now() });
-		await completedChild.appendMessage(fauxAssistantMessage("finished report"));
-		await parent.appendSubagentSpawn({
+		await completedChild.logWriter.appendMessage({ role: "user", content: "settled work", timestamp: Date.now() });
+		await completedChild.logWriter.appendMessage(fauxAssistantMessage("finished report"));
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_completed",
 			subagentId: "sa_completed",
 			agent: "researcher",
@@ -679,12 +679,12 @@ describe("issue #129", () => {
 		const parent = await createPersistedParent();
 		const sessionDir = parent.getSessionDir();
 		const interrupted = await SessionManager.create(tmpdir(), sessionDir);
-		await interrupted.appendMessage({ role: "user", content: "auth-blocked work", timestamp: Date.now() });
-		await interrupted.appendMessage(fauxAssistantMessage("partial"));
-		await interrupted.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage({ role: "user", content: "auth-blocked work", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage(fauxAssistantMessage("partial"));
+		await interrupted.logWriter.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
 		// The resume reopens the child transcript for writing.
 		await interrupted.closePersistence();
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_auth",
 			subagentId: "sa_auth",
 			agent: "researcher",
@@ -711,10 +711,10 @@ describe("issue #129", () => {
 		const parent = await createPersistedParent();
 		const sessionDir = parent.getSessionDir();
 		const interrupted = await SessionManager.create(tmpdir(), sessionDir);
-		await interrupted.appendMessage({ role: "user", content: "interrupted work", timestamp: Date.now() });
-		await interrupted.appendMessage(fauxAssistantMessage("partial"));
-		await interrupted.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
-		await parent.appendSubagentSpawn({
+		await interrupted.logWriter.appendMessage({ role: "user", content: "interrupted work", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage(fauxAssistantMessage("partial"));
+		await interrupted.logWriter.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_abort_cleanup",
 			subagentId: "sa_abort_cleanup",
 			agent: "researcher",
@@ -763,8 +763,8 @@ describe("issue #129", () => {
 	it("resume is refused when child delegation policy denies a fresh start", async () => {
 		const sessionDir = mkdtempSync(join(tmpdir(), "issue-129-policy-"));
 		const interrupted = await SessionManager.create(tmpdir(), sessionDir);
-		await interrupted.appendMessage({ role: "user", content: "deep work", timestamp: Date.now() });
-		await interrupted.appendMessage(fauxAssistantMessage("partial"));
+		await interrupted.logWriter.appendMessage({ role: "user", content: "deep work", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage(fauxAssistantMessage("partial"));
 		// The resume reopens the child transcript for writing.
 		await interrupted.closePersistence();
 
@@ -853,13 +853,13 @@ describe("issue #129", () => {
 		const parent = await createPersistedParent();
 		const sessionDir = parent.getSessionDir();
 		const interrupted = await SessionManager.create(tmpdir(), sessionDir);
-		await interrupted.appendMessage({ role: "user", content: "ghost work", timestamp: Date.now() });
-		await interrupted.appendMessage(fauxAssistantMessage("partial"));
-		await interrupted.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage({ role: "user", content: "ghost work", timestamp: Date.now() });
+		await interrupted.logWriter.appendMessage(fauxAssistantMessage("partial"));
+		await interrupted.logWriter.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
 		// The resume reopens the child transcript for writing.
 		await interrupted.closePersistence();
 		// The agent definition no longer exists in the restarted process.
-		await parent.appendSubagentSpawn({
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_ghost",
 			subagentId: "sa_ghost",
 			agent: "ghost-agent",
@@ -883,7 +883,7 @@ describe("issue #129", () => {
 		const context = await createTestContext({ withConfiguredAuth: true, parentSessionManager: parent });
 		try {
 			const handle = await context.manager.startByName("researcher", {
-				spawnRecord: { toolCallId: "call_129", requestKey: "req_129" },
+				spawnRecord: { toolCallId: "call_129", requestKey: "req_129", writer: parent.logWriter },
 			});
 			const completion = handle.waitForEnd();
 			await handle.prompt("inspect the incident");

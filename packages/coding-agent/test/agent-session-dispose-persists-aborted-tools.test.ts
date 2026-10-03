@@ -60,7 +60,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			// and the tool is actually executing.
 			await vi.waitFor(() => {
 				expect(toolStarted).toBe(true);
-				const context = harness.sessionManager.buildSessionContext();
+				const context = harness.sessionManager.getConversationState().context;
 				const hasPersistedToolCall = context.messages.some(
 					(message) =>
 						message.role === "assistant" &&
@@ -75,7 +75,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			expect(harness.session.waitForClosed()).toBe(disposal);
 			await Promise.all([disposal, promptPromise]);
 
-			const context = harness.sessionManager.buildSessionContext();
+			const context = harness.sessionManager.getConversationState().context;
 			const toolResults = context.messages.filter((message) => message.role === "toolResult");
 			expect(toolResults).toHaveLength(1);
 			expect(toolResults[0]).toMatchObject({
@@ -119,7 +119,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			const promptPromise = harness.session.prompt("delegate the audits").catch(() => {});
 			await vi.waitFor(() => {
 				expect(toolStarted).toBe(true);
-				const context = harness.sessionManager.buildSessionContext();
+				const context = harness.sessionManager.getConversationState().context;
 				const hasPersistedToolCall = context.messages.some(
 					(message) =>
 						message.role === "assistant" &&
@@ -129,14 +129,14 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			});
 
 			// The real subagent tool records these at the publish commit point.
-			await harness.sessionManager.appendSubagentSpawn({
+			await harness.session.sessionWriter.appendSubagentSpawn({
 				toolCallId: "tc-subagent-1",
 				subagentId: "sa_one",
 				agent: "researcher",
 				childSessionId: "child-session-1",
 				requestKey: "rk-1",
 			});
-			await harness.sessionManager.appendSubagentSpawn({
+			await harness.session.sessionWriter.appendSubagentSpawn({
 				toolCallId: "tc-subagent-1",
 				subagentId: "sa_two",
 				agent: "researcher",
@@ -147,7 +147,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			harness.session.dispose();
 			await Promise.all([harness.session.waitForClosed(), promptPromise]);
 
-			const context = harness.sessionManager.buildSessionContext();
+			const context = harness.sessionManager.getConversationState().context;
 			const toolResults = context.messages.filter((message) => message.role === "toolResult");
 			expect(toolResults).toHaveLength(1);
 			expect(toolResults[0]).toMatchObject({
@@ -184,10 +184,10 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		const harness = await createHarness({ responses: ["ok"] });
 		try {
 			await harness.session.prompt("hello");
-			const before = harness.sessionManager.buildSessionContext().messages.length;
+			const before = harness.sessionManager.getConversationState().context.messages.length;
 			harness.session.dispose();
 			await harness.session.waitForClosed();
-			const after = harness.sessionManager.buildSessionContext().messages.length;
+			const after = harness.sessionManager.getConversationState().context.messages.length;
 			expect(after).toBe(before);
 		} finally {
 			harness.cleanup();
@@ -227,7 +227,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			harness.session.dispose();
 			await Promise.all([harness.session.waitForClosed(), promptPromise]);
 
-			const context = harness.sessionManager.buildSessionContext();
+			const context = harness.sessionManager.getConversationState().context;
 			const toolResults = context.messages.filter((message) => message.role === "toolResult");
 			const quickResults = toolResults.filter((result) => result.toolCallId === "tc-quick-1");
 			const hangResults = toolResults.filter((result) => result.toolCallId === "tc-hang-2");
@@ -274,14 +274,14 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 
 			releaseAssistant();
 			await Promise.all([disposal, prompt]);
-			const disposedMessages = harness.sessionManager.buildSessionContext().messages;
+			const disposedMessages = harness.sessionManager.getConversationState().context.messages;
 			expect(disposedMessages.map((message) => message.role)).toEqual(["user", "assistant"]);
 			expect(disposedMessages.at(-1)).toMatchObject({
 				role: "assistant",
 				stopReason: "stop",
 				diagnostics: [expect.objectContaining({ type: "runtime_abort", details: { source: "disposal" } })],
 			});
-			expect(harness.sessionManager.buildSessionContext().messages).toEqual(disposedMessages);
+			expect(harness.sessionManager.getConversationState().context.messages).toEqual(disposedMessages);
 		} finally {
 			releaseAssistant();
 			harness.cleanup();
@@ -318,7 +318,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			await prompt;
 			await harness.session.waitForClosed();
 
-			const messages = harness.sessionManager.buildSessionContext().messages;
+			const messages = harness.sessionManager.getConversationState().context.messages;
 			expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 			expect(messages.at(-1)).toMatchObject({
 				role: "assistant",

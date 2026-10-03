@@ -411,7 +411,7 @@ describe("PR #329 remote integrity-error privacy", () => {
 				storeId: targetRef.storeId,
 				sessionGeneration: targetRef.sessionGeneration,
 			};
-			await target.appendMessage({ role: "user", content: JSON.stringify(leakSentinels), timestamp: 1 });
+			await target.logWriter.appendMessage({ role: "user", content: JSON.stringify(leakSentinels), timestamp: 1 });
 			await closeTrackedManager(target);
 			corruptTargetForOpen(sessionDir, target.getSessionId(), corruption, leakSentinels);
 
@@ -461,11 +461,11 @@ describe("PR #329 exact-ID discovery isolation", () => {
 	it("opens one exact target even when an unrelated summary is malformed", async () => {
 		const { cwd, sessionDir } = createStoreFixture("volt-329-exact-api-");
 		const target = await ownManager(SessionManager.create(cwd, sessionDir, { id: "exact-api-target-329" }));
-		await target.appendMessage({ role: "user", content: "exact target transcript", timestamp: 1 });
+		await target.logWriter.appendMessage({ role: "user", content: "exact target transcript", timestamp: 1 });
 		const targetRef = target.getSessionRef();
 		if (!targetRef) throw new Error("Expected an exact target reference");
 		const malformed = await ownManager(SessionManager.create(cwd, sessionDir, { id: "unrelated-malformed-api-329" }));
-		await malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
+		await malformed.logWriter.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
 		await Promise.all([closeTrackedManager(target), closeTrackedManager(malformed)]);
 		corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
 
@@ -473,7 +473,7 @@ describe("PR #329 exact-ID discovery isolation", () => {
 		expect(found).toEqual(targetRef);
 		if (!found) throw new Error("Expected exact lookup to resolve its target");
 		const reopened = await ownManager(SessionManager.open(found));
-		expect(reopened.buildSessionContext().messages).toMatchObject([
+		expect(reopened.getConversationState().context.messages).toMatchObject([
 			{ role: "user", content: "exact target transcript" },
 		]);
 	});
@@ -485,7 +485,7 @@ describe("PR #329 exact-ID discovery isolation", () => {
 			const target = await ownManager(
 				SessionManager.create(cwd, sessionDir, { id: `exact-corrupt-${corruption.split(" ")[0]}-329` }),
 			);
-			await target.appendMessage({ role: "user", content: "target to corrupt", timestamp: 1 });
+			await target.logWriter.appendMessage({ role: "user", content: "target to corrupt", timestamp: 1 });
 			const targetRef = target.getSessionRef();
 			if (!targetRef) throw new Error("Expected a corruption target reference");
 			await closeTrackedManager(target);
@@ -501,13 +501,13 @@ describe("PR #329 exact-ID discovery isolation", () => {
 	it("switches the runtime by exact ID without enumerating unrelated summaries", async () => {
 		const { cwd, sessionDir } = createStoreFixture("volt-329-exact-runtime-");
 		const current = await ownManager(SessionManager.create(cwd, sessionDir, { id: "runtime-current-329" }));
-		await current.appendMessage({ role: "user", content: "current", timestamp: 1 });
+		await current.logWriter.appendMessage({ role: "user", content: "current", timestamp: 1 });
 		const target = await ownManager(SessionManager.create(cwd, sessionDir, { id: "runtime-target-329" }));
-		await target.appendMessage({ role: "user", content: "runtime exact target", timestamp: 2 });
+		await target.logWriter.appendMessage({ role: "user", content: "runtime exact target", timestamp: 2 });
 		const malformed = await ownManager(
 			SessionManager.create(cwd, sessionDir, { id: "runtime-unrelated-malformed-329" }),
 		);
-		await malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 3 });
+		await malformed.logWriter.appendMessage({ role: "user", content: "unrelated", timestamp: 3 });
 		await Promise.all([closeTrackedManager(target), closeTrackedManager(malformed)]);
 		corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
 
@@ -531,7 +531,7 @@ describe("PR #329 exact-ID discovery isolation", () => {
 			seeded: false,
 		});
 		expect(runtime.session.sessionId).toBe(target.getSessionId());
-		expect(runtime.session.sessionManager.buildSessionContext().messages).toMatchObject([
+		expect(runtime.session.sessionManager.getConversationState().context.messages).toMatchObject([
 			{ role: "user", content: "runtime exact target" },
 		]);
 	});
@@ -543,13 +543,13 @@ describe("PR #329 exact-ID discovery isolation", () => {
 			const target = await ownManager(
 				SessionManager.create(cwd, sessionDir, { id: `cli-${sessionFlag.slice(2)}-target-329` }),
 			);
-			await target.appendMessage({ role: "user", content: "CLI seed", timestamp: 1 });
+			await target.logWriter.appendMessage({ role: "user", content: "CLI seed", timestamp: 1 });
 			const targetRef = target.getSessionRef();
 			if (!targetRef) throw new Error("Expected a CLI target reference");
 			const malformed = await ownManager(
 				SessionManager.create(cwd, sessionDir, { id: `cli-${sessionFlag.slice(2)}-unrelated-malformed-329` }),
 			);
-			await malformed.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
+			await malformed.logWriter.appendMessage({ role: "user", content: "unrelated", timestamp: 2 });
 			await Promise.all([closeTrackedManager(target), closeTrackedManager(malformed)]);
 			corruptUnrelatedSummary(sessionDir, malformed.getSessionId());
 
@@ -576,8 +576,8 @@ describe("PR #329 exact-ID discovery isolation", () => {
 			const reopened = await ownManager(SessionManager.open(targetRef));
 			expect(
 				reopened
-					.buildSessionContext()
-					.messages.filter((message) => message.role === "user")
+					.getConversationState()
+					.context.messages.filter((message) => message.role === "user")
 					.map((message) => message.content),
 			).toContainEqual([{ type: "text", text: "CLI exact lookup prompt" }]);
 		},
@@ -590,7 +590,7 @@ describe("PR #329 exact-ID discovery isolation", () => {
 		mkdirSync(globalCwd, { recursive: true });
 		mkdirSync(malformedCwd, { recursive: true });
 		const target = await ownManager(SessionManager.create(globalCwd, sessionDir, { id: "cli-global-target-329" }));
-		await target.appendMessage({ role: "user", content: "global CLI seed", timestamp: 1 });
+		await target.logWriter.appendMessage({ role: "user", content: "global CLI seed", timestamp: 1 });
 		const targetRef = target.getSessionRef();
 		if (!targetRef) throw new Error("Expected a global CLI target reference");
 		const malformed = await ownManager(
@@ -625,8 +625,8 @@ describe("PR #329 exact-ID discovery isolation", () => {
 		expect(localSessions).toHaveLength(1);
 		const forked = await ownManager(SessionManager.open(localSessions[0]!.ref));
 		const userContent = forked
-			.buildSessionContext()
-			.messages.filter((message) => message.role === "user")
+			.getConversationState()
+			.context.messages.filter((message) => message.role === "user")
 			.map((message) => message.content);
 		expect(userContent).toContainEqual("global CLI seed");
 		expect(userContent).toContainEqual([{ type: "text", text: "global CLI exact lookup prompt" }]);
@@ -673,13 +673,17 @@ describe("PR #329 deep-search behavior", () => {
 		const searchablePadding = "s".repeat(192 * 1024);
 		const nonSearchablePadding = "n".repeat(192 * 1024);
 		const visible = await ownManager(SessionManager.create(cwd, sessionDir, { id: "metadata-session-329" }));
-		await visible.appendSessionInfo("obsolete-name-marker-329");
-		await visible.appendMessage({ role: "user", content: "boundary-alpha-329 order-user-329", timestamp: 10 });
-		await visible.appendCustomEntry("opaque-growth", {
+		await visible.logWriter.appendSessionInfo("obsolete-name-marker-329");
+		await visible.logWriter.appendMessage({
+			role: "user",
+			content: "boundary-alpha-329 order-user-329",
+			timestamp: 10,
+		});
+		await visible.logWriter.appendCustomEntry("opaque-growth", {
 			marker: "non-searchable-growth-marker-329",
 			padding: nonSearchablePadding,
 		});
-		await visible.appendMessage({
+		await visible.logWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "search-tool-call-329",
 			toolName: "read",
@@ -687,31 +691,31 @@ describe("PR #329 deep-search behavior", () => {
 			isError: false,
 			timestamp: 11,
 		});
-		await visible.appendCustomMessageEntry("hidden-search-text", "undisplayed-marker-329", false);
-		await visible.appendMessage(
+		await visible.logWriter.appendCustomMessageEntry("hidden-search-text", "undisplayed-marker-329", false);
+		await visible.logWriter.appendMessage(
 			fauxAssistantMessage("order-assistant-329 assistant-only-marker-329", { timestamp: 12 }),
 		);
-		await visible.appendCustomMessageEntry(
+		await visible.logWriter.appendCustomMessageEntry(
 			"displayed-search-text",
 			`order-custom-329 boundary-omega-329 ${searchablePadding} searchable-growth-tail-329 cross-session-left-329`,
 			true,
 		);
-		await visible.appendSessionInfo("latest-name-marker-329");
+		await visible.logWriter.appendSessionInfo("latest-name-marker-329");
 
 		const other = await ownManager(SessionManager.create(cwd, sessionDir, { id: "other-searchable-session-329" }));
-		await other.appendMessage({
+		await other.logWriter.appendMessage({
 			role: "user",
 			content: `cross-session-right-329 ${searchablePadding} second-session-tail-329`,
 			timestamp: 12,
 		});
 
 		const hidden = await ownManager(SessionManager.create(cwd, sessionDir, { id: "hidden-session-329" }));
-		await hidden.appendSessionInfo("hidden-summary-marker-329");
-		await hidden.appendCustomEntry("hidden-opaque", { marker: "hidden-custom-marker-329" });
+		await hidden.logWriter.appendSessionInfo("hidden-summary-marker-329");
+		await hidden.logWriter.appendCustomEntry("hidden-opaque", { marker: "hidden-custom-marker-329" });
 
 		const planning = await ownManager(SessionManager.create(cwd, sessionDir, { id: "planning-session-329" }));
-		await planning.appendSessionInfo("planning-visible-marker-329");
-		await planning.appendPlanningState({ mode: "plan", plan: null });
+		await planning.logWriter.appendSessionInfo("planning-visible-marker-329");
+		await planning.logWriter.appendPlanningState({ mode: "plan", plan: null });
 
 		const ids = async (query: string, includeMessageFreeDurable = false): Promise<string[]> =>
 			(

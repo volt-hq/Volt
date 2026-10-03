@@ -311,14 +311,14 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-217-stale-manager-"));
 		tempDirs.push(tempDir);
 		const current = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
-		await current.appendPlanningState({ mode: "build", plan: null });
-		await current.appendPlanningState({ mode: "plan", plan: null });
+		await current.logWriter.appendPlanningState({ mode: "build", plan: null });
+		await current.logWriter.appendPlanningState({ mode: "plan", plan: null });
 		const sessionRef = current.getSessionRef()!;
 		const store = await trackedStore(sessionRef.sessionDirectory);
 		const winner = await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration);
 		await loseConversationLock(current);
 
-		const commit = current.appendPlanningState({ mode: "build", plan: null });
+		const commit = current.logWriter.appendPlanningState({ mode: "build", plan: null });
 		await expect(commit).rejects.toBeInstanceOf(ConversationLogLostError);
 		await expect(commit).rejects.toMatchObject({
 			reason: "fence_conflict",
@@ -329,11 +329,11 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			lastOrdinal: winner?.lastOrdinal,
 		});
 		await expect(current.lost).resolves.toMatchObject({ reason: "fence_conflict" });
-		await expect(current.appendPlanningState({ mode: "build", plan: null })).rejects.toBeInstanceOf(
+		await expect(current.logWriter.appendPlanningState({ mode: "build", plan: null })).rejects.toBeInstanceOf(
 			ConversationLogLostError,
 		);
 		await expect(current.closePersistence()).resolves.toBeUndefined();
-		expect((await own(SessionManager.open(sessionRef, tempDir))).buildSessionContext().planning).toEqual({
+		expect((await own(SessionManager.open(sessionRef, tempDir))).getConversationState().planning).toEqual({
 			mode: "plan",
 			plan: null,
 		});
@@ -345,7 +345,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		const manager = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
 		const hold = injectFaultyLog(manager).holdNext(isPlanningCommit);
 
-		const committing = manager.appendPlanningState({ mode: "plan", plan: null });
+		const committing = manager.logWriter.appendPlanningState({ mode: "plan", plan: null });
 		await hold.started;
 		const draining = manager.closePersistence();
 		let drainSettled = false;
@@ -362,7 +362,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(drainSettled).toBe(false);
 			hold.release();
-			await expect(committing).resolves.toEqual(expect.any(String));
+			await expect(committing).resolves.toBeUndefined();
 			await expect(draining).resolves.toBeUndefined();
 		} finally {
 			hold.release();

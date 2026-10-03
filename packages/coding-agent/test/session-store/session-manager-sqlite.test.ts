@@ -62,24 +62,26 @@ describe("SQLite-backed SessionManager", () => {
 			1,
 		);
 
-		await manager.appendMessage({ role: "user", content: "hello sqlite", timestamp: Date.now() });
+		await manager.logWriter.appendMessage({ role: "user", content: "hello sqlite", timestamp: Date.now() });
 
 		const listed = await SessionManager.list(cwd, sessionDir);
 		expect(listed).toMatchObject([{ id: manager.getSessionId(), firstMessage: "hello sqlite", messageCount: 1 }]);
 		expect(listed[0]?.ref).toEqual(ref);
 
 		const reopened = await own(SessionManager.openReadOnly(ref!));
-		expect(reopened.buildSessionContext().messages).toMatchObject([{ role: "user", content: "hello sqlite" }]);
+		expect(reopened.getConversationState().context.messages).toMatchObject([
+			{ role: "user", content: "hello sqlite" },
+		]);
 	});
 
 	it("rejects a non-boolean host-only column without poisoning healthy sessions", async () => {
 		const { cwd, sessionDir } = fixture();
 		const corrupted = await own(SessionManager.create(cwd, sessionDir, { id: "corrupted-envelope" }));
-		await corrupted.appendMessage({ role: "user", content: "corrupt me", timestamp: Date.now() });
+		await corrupted.logWriter.appendMessage({ role: "user", content: "corrupt me", timestamp: Date.now() });
 		const corruptedRef = corrupted.getSessionRef();
 		if (!corruptedRef) throw new Error("Expected a corrupted-session reference");
 		const healthy = await own(SessionManager.create(cwd, sessionDir, { id: "healthy-envelope" }));
-		await healthy.appendMessage({ role: "user", content: "keep me", timestamp: Date.now() });
+		await healthy.logWriter.appendMessage({ role: "user", content: "keep me", timestamp: Date.now() });
 		const healthyRef = healthy.getSessionRef();
 		if (!healthyRef) throw new Error("Expected a healthy-session reference");
 		await Promise.all([corrupted.closePersistence(), healthy.closePersistence()]);
@@ -99,7 +101,7 @@ describe("SQLite-backed SessionManager", () => {
 			message: "Session store canonical entries are invalid or inconsistent",
 		});
 		const reopened = await own(SessionManager.open(healthyRef));
-		expect(reopened.buildSessionContext().messages).toMatchObject([{ role: "user", content: "keep me" }]);
+		expect(reopened.getConversationState().context.messages).toMatchObject([{ role: "user", content: "keep me" }]);
 	});
 
 	it.each([
@@ -124,12 +126,12 @@ describe("SQLite-backed SessionManager", () => {
 	])("rejects $component projection drift without repairing it", async ({ component, corrupt }) => {
 		const { cwd, sessionDir } = fixture();
 		const corrupted = await own(SessionManager.create(cwd, sessionDir, { id: `drift-${component}` }));
-		await corrupted.appendMessage({ role: "user", content: "searchable", timestamp: Date.now() });
+		await corrupted.logWriter.appendMessage({ role: "user", content: "searchable", timestamp: Date.now() });
 		await seedSession(corrupted, (seed) => seed.clientInput(`client-${component}`, "prompt", { message: "pending" }));
 		const corruptedRef = corrupted.getSessionRef();
 		if (!corruptedRef) throw new Error("Expected a corrupted projection reference");
 		const healthy = await own(SessionManager.create(cwd, sessionDir, { id: `healthy-${component}` }));
-		await healthy.appendMessage({ role: "user", content: "healthy", timestamp: Date.now() });
+		await healthy.logWriter.appendMessage({ role: "user", content: "healthy", timestamp: Date.now() });
 		const healthyRef = healthy.getSessionRef();
 		if (!healthyRef) throw new Error("Expected a healthy projection reference");
 		await Promise.all([corrupted.closePersistence(), healthy.closePersistence()]);
@@ -190,7 +192,7 @@ describe("SQLite-backed SessionManager", () => {
 		const { cwd, sessionDir } = fixture();
 		const now = Date.now();
 		const pending = await own(SessionManager.create(cwd, sessionDir, { id: "queued-continuation" }));
-		await pending.appendMessage({ role: "user", content: "older conversation", timestamp: now - 120_000 });
+		await pending.logWriter.appendMessage({ role: "user", content: "older conversation", timestamp: now - 120_000 });
 		await seedSession(
 			pending,
 			(seed) => seed.clientInput("queued-recovery", "steer", { message: "recover me" }, { queued: "steer" }),
@@ -198,7 +200,7 @@ describe("SQLite-backed SessionManager", () => {
 		);
 
 		const visible = await own(SessionManager.create(cwd, sessionDir, { id: "newer-visible-conversation" }));
-		await visible.appendMessage({ role: "user", content: "newer visible", timestamp: now - 60_000 });
+		await visible.logWriter.appendMessage({ role: "user", content: "newer visible", timestamp: now - 60_000 });
 
 		expect((await SessionManager.list(cwd, sessionDir)).map((session) => session.id)).toEqual([
 			"newer-visible-conversation",
@@ -247,7 +249,11 @@ describe("SQLite-backed SessionManager", () => {
 		expect(realpathSync(cwdAlias)).toBe(realpathSync(cwd));
 
 		const manager = await own(SessionManager.create(cwdAlias, sessionDir, { id: "filesystem-alias" }));
-		await manager.appendMessage({ role: "user", content: "filesystem-alias-needle", timestamp: Date.now() });
+		await manager.logWriter.appendMessage({
+			role: "user",
+			content: "filesystem-alias-needle",
+			timestamp: Date.now(),
+		});
 		expect(manager.getCwd()).toBe(cwdAlias);
 
 		const listed = await SessionManager.list(cwd, sessionDir);
@@ -279,7 +285,7 @@ describe("SQLite-backed SessionManager", () => {
 			process.chdir(creatorCwd);
 			const absoluteSessionDir = join(process.cwd(), relativeSessionDir);
 			const manager = await own(SessionManager.create(cwd, relativeSessionDir, { id: "portable-session" }));
-			await manager.appendMessage({ role: "user", content: "portableneedle", timestamp: Date.now() });
+			await manager.logWriter.appendMessage({ role: "user", content: "portableneedle", timestamp: Date.now() });
 			const createdRef = manager.getSessionRef();
 			if (!createdRef) throw new Error("Expected a persisted session reference");
 			// Each writer below closes before the next opens the session.
@@ -334,7 +340,7 @@ describe("SQLite-backed SessionManager", () => {
 	it("lists valid sessions without auditing unrelated foreign-key violations", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await own(SessionManager.create(cwd, sessionDir));
-		await manager.appendMessage({ role: "user", content: "valid session", timestamp: Date.now() });
+		await manager.logWriter.appendMessage({ role: "user", content: "valid session", timestamp: Date.now() });
 		const sessionId = manager.getSessionId();
 		await manager.closePersistence();
 
@@ -367,9 +373,9 @@ describe("SQLite-backed SessionManager", () => {
 	it("searches indexed history beyond the first message without loading transcript payloads", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await own(SessionManager.create(cwd, sessionDir));
-		await manager.appendMessage({ role: "user", content: "first message", timestamp: Date.now() });
-		await manager.appendCustomEntry("large-private-payload", { payload: "x".repeat(128 * 1024) });
-		await manager.appendMessage({ role: "user", content: "deep-only-needle", timestamp: Date.now() + 1 });
+		await manager.logWriter.appendMessage({ role: "user", content: "first message", timestamp: Date.now() });
+		await manager.logWriter.appendCustomEntry("large-private-payload", { payload: "x".repeat(128 * 1024) });
+		await manager.logWriter.appendMessage({ role: "user", content: "deep-only-needle", timestamp: Date.now() + 1 });
 
 		const matches = await SessionManager.search(cwd, "deep-only-needle", sessionDir);
 		expect(matches).toMatchObject([{ id: manager.getSessionId(), firstMessage: "first message" }]);
@@ -385,12 +391,12 @@ describe("SQLite-backed SessionManager", () => {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", join(root, "agent"));
 
 		const older = await own(SessionManager.create(olderCwd, undefined, { id: "rank-old" }));
-		await older.appendMessage({ role: "user", content: "summary a", timestamp: 1_700_000_000_000 });
-		await older.appendMessage({ role: "user", content: "rankneedle tail", timestamp: 1_700_000_000_001 });
+		await older.logWriter.appendMessage({ role: "user", content: "summary a", timestamp: 1_700_000_000_000 });
+		await older.logWriter.appendMessage({ role: "user", content: "rankneedle tail", timestamp: 1_700_000_000_001 });
 
 		const newer = await own(SessionManager.create(newerCwd, undefined, { id: "rank-new" }));
-		await newer.appendMessage({ role: "user", content: "summary b", timestamp: 1_700_000_001_000 });
-		await newer.appendMessage({ role: "user", content: "xxxx rankneedle", timestamp: 1_700_000_001_001 });
+		await newer.logWriter.appendMessage({ role: "user", content: "summary b", timestamp: 1_700_000_001_000 });
+		await newer.logWriter.appendMessage({ role: "user", content: "xxxx rankneedle", timestamp: 1_700_000_001_001 });
 
 		const matches = await SessionManager.searchAll('"rankneedle"');
 		expect(matches.map((session) => session.id)).toEqual(["rank-old", "rank-new"]);
@@ -407,12 +413,20 @@ describe("SQLite-backed SessionManager", () => {
 		vi.stubEnv("VOLT_CODING_AGENT_DIR", agentDir);
 
 		const older = await own(SessionManager.create(olderCwd, undefined, { id: "isolation-old" }));
-		await older.appendMessage({ role: "user", content: "summary a", timestamp: 1_700_000_000_000 });
-		await older.appendMessage({ role: "user", content: "isolationneedle tail", timestamp: 1_700_000_000_001 });
+		await older.logWriter.appendMessage({ role: "user", content: "summary a", timestamp: 1_700_000_000_000 });
+		await older.logWriter.appendMessage({
+			role: "user",
+			content: "isolationneedle tail",
+			timestamp: 1_700_000_000_001,
+		});
 
 		const newer = await own(SessionManager.create(newerCwd, undefined, { id: "isolation-new" }));
-		await newer.appendMessage({ role: "user", content: "summary b", timestamp: 1_700_000_001_000 });
-		await newer.appendMessage({ role: "user", content: "xxxx isolationneedle", timestamp: 1_700_000_001_001 });
+		await newer.logWriter.appendMessage({ role: "user", content: "summary b", timestamp: 1_700_000_001_000 });
+		await newer.logWriter.appendMessage({
+			role: "user",
+			content: "xxxx isolationneedle",
+			timestamp: 1_700_000_001_001,
+		});
 
 		const incompatibleStore = join(agentDir, "sessions", "incompatible");
 		seedIncompatibleStore(incompatibleStore);
@@ -454,7 +468,7 @@ describe("SQLite-backed SessionManager", () => {
 	it("loses the log of a writer whose session was deleted under it", async () => {
 		const { cwd, sessionDir } = fixture();
 		const original = await own(SessionManager.create(cwd, sessionDir, { id: "deleted-id" }));
-		await original.appendMessage({ role: "user", content: "original", timestamp: Date.now() });
+		await original.logWriter.appendMessage({ role: "user", content: "original", timestamp: Date.now() });
 		const originalRef = original.getSessionRef()!;
 		// The store does not enforce the lock: a host that ignores it deletes the session under the writer.
 		const lease = await acquireSharedSQLiteSessionStore(sessionDir);
@@ -467,7 +481,9 @@ describe("SQLite-backed SessionManager", () => {
 			}),
 		).resolves.toMatchObject({ status: "deleted" });
 
-		await expect(original.appendSessionInfo("stale write")).rejects.toThrow('Session "deleted-id" no longer exists');
+		await expect(original.logWriter.appendSessionInfo("stale write")).rejects.toThrow(
+			'Session "deleted-id" no longer exists',
+		);
 		await expect(original.lost).resolves.toMatchObject({ reason: "storage" });
 	});
 
@@ -475,7 +491,7 @@ describe("SQLite-backed SessionManager", () => {
 		const first = fixture();
 		const second = fixture();
 		const parent = await own(SessionManager.create(first.cwd, first.sessionDir));
-		await parent.appendMessage({ role: "user", content: "parent", timestamp: Date.now() });
+		await parent.logWriter.appendMessage({ role: "user", content: "parent", timestamp: Date.now() });
 		const child = await own(SessionManager.forkFrom(parent.getSessionRef()!, second.cwd, second.sessionDir));
 		const childInfo = (await SessionManager.list(second.cwd, second.sessionDir))[0]!;
 		expect(childInfo.parentSessionRef).toEqual(parent.getSessionRef());
@@ -502,8 +518,8 @@ describe("SQLite-backed SessionManager", () => {
 			new Error("injected pre-commit response failure"),
 		);
 
-		await expect(first.appendSessionInfo("rolled back")).rejects.toThrow("Session commit was rolled back");
-		await second.appendSessionInfo("surviving owner");
+		await expect(first.logWriter.appendSessionInfo("rolled back")).rejects.toThrow("Session commit was rolled back");
+		await second.logWriter.appendSessionInfo("surviving owner");
 		expect(second.getSessionName()).toBe("surviving owner");
 	});
 
@@ -517,7 +533,7 @@ describe("SQLite-backed SessionManager", () => {
 			new Error("injected pre-commit response failure"),
 		);
 
-		const write = manager.appendSessionInfo("rolled back during shutdown");
+		const write = manager.logWriter.appendSessionInfo("rolled back during shutdown");
 		// The write reports its own rollback; closing waits for it and still releases the lease.
 		await expect(manager.closePersistence()).resolves.toBeUndefined();
 		await expect(write).rejects.toThrow("Session commit was rolled back");
@@ -528,22 +544,21 @@ describe("SQLite-backed SessionManager", () => {
 	it("shares one idempotent close and seals writes synchronously", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await own(SessionManager.create(cwd, sessionDir));
-		await manager.appendSessionInfo("before close");
+		await manager.logWriter.appendSessionInfo("before close");
 
 		const firstClose = manager.closePersistence();
 		expect(manager.closePersistence()).toBe(firstClose);
-		await expect(manager.appendSessionInfo("after close")).rejects.toThrow("Session persistence is closed");
-		await expect(manager.newSession()).rejects.toThrow("Session persistence is closed");
+		await expect(manager.logWriter.appendSessionInfo("after close")).rejects.toThrow("Session persistence is closed");
 		await expect(firstClose).resolves.toBeUndefined();
 	});
 
 	it("preserves a session when explicit deletion uses a stale ordinal", async () => {
 		const { cwd, sessionDir } = fixture();
 		const writer = await own(SessionManager.create(cwd, sessionDir));
-		await writer.appendPlanningState({ mode: "plan", plan: null });
+		await writer.logWriter.appendPlanningState({ mode: "plan", plan: null });
 		const ref = writer.getSessionRef();
 		expect(ref).toBeDefined();
-		await writer.appendSessionInfo("advanced owner");
+		await writer.logWriter.appendSessionInfo("advanced owner");
 		// Deleting takes the session's lock, so the writer closes first.
 		await writer.closePersistence();
 
@@ -556,11 +571,11 @@ describe("SQLite-backed SessionManager", () => {
 	it("keeps another session's manager usable and permits immediate deletion after the final close", async () => {
 		const { root, cwd, sessionDir } = fixture();
 		const first = await own(SessionManager.create(cwd, sessionDir));
-		await first.appendMessage({ role: "user", content: "shared store", timestamp: Date.now() });
+		await first.logWriter.appendMessage({ role: "user", content: "shared store", timestamp: Date.now() });
 		const second = await own(SessionManager.create(cwd, sessionDir));
 
 		await first.closePersistence();
-		await second.appendSessionInfo("still open");
+		await second.logWriter.appendSessionInfo("still open");
 		await second.closePersistence();
 
 		rmSync(root, { recursive: true });

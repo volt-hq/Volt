@@ -40,7 +40,7 @@ describe("SessionManager canonical data admission", () => {
 			["undefined", { value: undefined }],
 			["shared-memory", { value: new SharedArrayBuffer(1) }],
 		] as const) {
-			await expect(manager.appendCustomEntry(label, data as never)).rejects.toThrow(
+			await expect(manager.logWriter.appendCustomEntry(label, data as never)).rejects.toThrow(
 				"Session custom entry must contain only JSON-compatible data",
 			);
 			expect(manager.getEntries()).toEqual([]);
@@ -48,7 +48,7 @@ describe("SessionManager canonical data admission", () => {
 			expect(observed).toEqual([]);
 		}
 
-		const id = await manager.appendCustomEntry("valid", { nested: { values: [1, "two", true, null] } });
+		const id = await manager.logWriter.appendCustomEntry("valid", { nested: { values: [1, "two", true, null] } });
 		expect(manager.getEntry(id)?.ordinal).toBe(1);
 		expect(observed).toEqual([id]);
 		expect((await SessionManager.openReadOnly(ref)).getEntries()).toHaveLength(1);
@@ -60,14 +60,14 @@ describe("SessionManager canonical data admission", () => {
 		manager.subscribeEntries((entry) => observed.push(entry.id));
 
 		await expect(
-			manager.appendMessage({
+			manager.logWriter.appendMessage({
 				role: "user",
 				content: "outside the upper Date boundary",
 				timestamp: Number.MAX_SAFE_INTEGER,
 			}),
 		).rejects.toThrow("Session message timestamp must be representable as a Date");
 		await expect(
-			manager.appendMessage({
+			manager.logWriter.appendMessage({
 				role: "toolResult",
 				toolCallId: "invalid-timestamp",
 				toolName: "test",
@@ -86,12 +86,12 @@ describe("SessionManager canonical data admission", () => {
 		expect(persistedBeforeValidAppend.getEntries()).toEqual([]);
 		expect(persistedBeforeValidAppend.getLeafId()).toBeNull();
 
-		const validUserId = await manager.appendMessage({
+		const validUserId = await manager.logWriter.appendMessage({
 			role: "user",
 			content: "exact upper Date boundary",
 			timestamp: 8_640_000_000_000_000,
 		});
-		const validToolResultId = await manager.appendMessage({
+		const validToolResultId = await manager.logWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "valid-timestamp",
 			toolName: "test",
@@ -114,21 +114,23 @@ describe("SessionManager canonical data admission", () => {
 		manager.subscribeEntries((entry) => observed.push(entry.id));
 
 		await expect(
-			manager.appendMessage({
+			manager.logWriter.appendMessage({
 				role: "user",
 				content: "unknown field",
 				timestamp: Date.now(),
 				unexpected: true,
 			} as never),
 		).rejects.toThrow("unknown property");
-		await expect(manager.appendThinkingLevelChange("turbo" as never)).rejects.toThrow("invalid thinking level");
-		await expect(manager.appendFastModeChange("yes" as never)).rejects.toThrow("invalid enabled state");
-		await expect(manager.appendModelChange("", "model")).rejects.toThrow("must not be empty");
+		await expect(manager.logWriter.appendThinkingLevelChange("turbo" as never)).rejects.toThrow(
+			"invalid thinking level",
+		);
+		await expect(manager.logWriter.appendFastModeChange("yes" as never)).rejects.toThrow("invalid enabled state");
+		await expect(manager.logWriter.appendModelChange("", "model")).rejects.toThrow("must not be empty");
 		await expect(
-			manager.appendCustomMessageEntry("custom", [{ type: "video", data: "nope" }] as never, true),
+			manager.logWriter.appendCustomMessageEntry("custom", [{ type: "video", data: "nope" }] as never, true),
 		).rejects.toThrow("unsupported user content type");
 		await expect(
-			manager.appendSubagentSpawn({
+			manager.logWriter.appendSubagentSpawn({
 				toolCallId: "call-1",
 				subagentId: "sa_child",
 				agent: "researcher",
@@ -147,7 +149,8 @@ describe("SessionManager canonical data admission", () => {
 		expect(manager.getSubagentSpawnEntries()).toEqual([]);
 		expect(manager.getLeafId()).toBeNull();
 		expect(observed).toEqual([]);
-		const validId = await manager.appendSessionInfo("valid");
+		await manager.logWriter.appendSessionInfo("valid");
+		const validId = manager.getLeafId()!;
 		expect(manager.getEntry(validId)?.ordinal).toBe(1);
 	});
 
@@ -180,8 +183,8 @@ describe("SessionManager canonical data admission", () => {
 			if (entry.type !== "custom") return;
 			(entry.data as { nested: { values: unknown[] } }).nested.values[0] = "observer mutation";
 		});
-		const appended = manager.appendCustomEntry("valid", data);
-		const materialized = manager.appendCustomMessageEntry("flush", "materialize session", true);
+		const appended = manager.logWriter.appendCustomEntry("valid", data);
+		const materialized = manager.logWriter.appendCustomMessageEntry("flush", "materialize session", true);
 		data.nested.values[0] = 99;
 
 		const id = await appended;
@@ -199,12 +202,12 @@ describe("SessionManager canonical data admission", () => {
 
 	it("prevalidates branch summaries before moving the active leaf", async () => {
 		const { manager } = await createManager();
-		const firstId = await manager.appendCustomMessageEntry("first", "first", true);
-		const secondId = await manager.appendCustomMessageEntry("second", "second", true);
+		const firstId = await manager.logWriter.appendCustomMessageEntry("first", "first", true);
+		const secondId = await manager.logWriter.appendCustomMessageEntry("second", "second", true);
 		expect(manager.getLeafId()).toBe(secondId);
 
 		await expect(
-			manager.branchWithSummary(firstId, "summary", { shared: new SharedArrayBuffer(1) } as never),
+			manager.logWriter.branchWithSummary(firstId, "summary", { shared: new SharedArrayBuffer(1) } as never),
 		).rejects.toThrow("Session branch_summary entry must contain only JSON-compatible data");
 		expect(manager.getLeafId()).toBe(secondId);
 		expect(manager.getEntries().map((entry) => entry.id)).toEqual([firstId, secondId]);

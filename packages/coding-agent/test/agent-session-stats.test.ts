@@ -84,8 +84,8 @@ async function createSession(seed: (sessionManager: SessionManager) => Promise<v
 describe("AgentSession.getSessionStats", () => {
 	it("exposes the current context usage alongside token totals", async () => {
 		const session = await createSession(async (sessionManager) => {
-			await sessionManager.appendMessage(createUserMessage("hello", 1));
-			await sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+			await sessionManager.logWriter.appendMessage(createUserMessage("hello", 1));
+			await sessionManager.logWriter.appendMessage(createAssistantMessage("hi", 200, 2));
 		});
 
 		try {
@@ -101,12 +101,12 @@ describe("AgentSession.getSessionStats", () => {
 
 	it("reports unknown current context usage immediately after compaction", async () => {
 		const session = await createSession(async (sessionManager) => {
-			await sessionManager.appendMessage(createUserMessage("first", 1));
-			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
-			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
-			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
-			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			await sessionManager.appendMessage(createUserMessage("third", 5));
+			await sessionManager.logWriter.appendMessage(createUserMessage("first", 1));
+			await sessionManager.logWriter.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
+			const keptUserId = await sessionManager.logWriter.appendMessage(createUserMessage("second", 3));
+			await sessionManager.logWriter.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
+			await sessionManager.logWriter.appendCompaction("summary", keptUserId, 195_000);
+			await sessionManager.logWriter.appendMessage(createUserMessage("third", 5));
 		});
 
 		try {
@@ -130,13 +130,13 @@ describe("AgentSession.getSessionStats", () => {
 
 	it("uses post-compaction usage for current context instead of stale kept usage", async () => {
 		const session = await createSession(async (sessionManager) => {
-			await sessionManager.appendMessage(createUserMessage("first", 1));
-			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
-			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
-			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
-			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
-			await sessionManager.appendMessage(createUserMessage("third", 5));
-			await sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6, 1));
+			await sessionManager.logWriter.appendMessage(createUserMessage("first", 1));
+			await sessionManager.logWriter.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
+			const keptUserId = await sessionManager.logWriter.appendMessage(createUserMessage("second", 3));
+			await sessionManager.logWriter.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
+			await sessionManager.logWriter.appendCompaction("summary", keptUserId, 195_000);
+			await sessionManager.logWriter.appendMessage(createUserMessage("third", 5));
+			await sessionManager.logWriter.appendMessage(createAssistantMessage("response3", 25_000, 6, 1));
 		});
 
 		try {

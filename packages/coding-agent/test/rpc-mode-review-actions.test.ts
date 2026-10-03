@@ -16,6 +16,7 @@ import {
 import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
 import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import type { SessionWriter } from "../src/core/session-writer.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
@@ -163,7 +164,7 @@ function durableBranchRecord(runId = "review:test"): ReviewRunRecord {
 
 interface ExecuteOptions {
 	prepared: { workflowId: string; action: string };
-	sessionManager?: SessionManager;
+	sessionWriter?: SessionWriter;
 	sanitizeRemoteErrors?: boolean;
 	signal?: AbortSignal;
 	onEvent?: (event: Record<string, unknown>) => void;
@@ -249,7 +250,7 @@ const reviewMocks = vi.hoisted(() => {
 				isError: false,
 			});
 			const record = durableRecord(options.prepared.workflowId);
-			if (options.sessionManager) await appendReviewRun(options.sessionManager, record);
+			if (options.sessionWriter) await appendReviewRun(options.sessionWriter, record);
 			return {
 				status: "completed" as const,
 				raw: record.result?.summary ?? "",
@@ -344,6 +345,7 @@ function makeSession(sessionId: string, sessionManager = SessionManager.inMemory
 		sessionFile: `/sessions/${sessionId}.jsonl`,
 		sessionId,
 		sessionManager,
+		sessionWriter: sessionManager.logWriter,
 	};
 }
 
@@ -360,11 +362,11 @@ function makeRuntimeHost(
 		reviewWorkflows: new ReviewWorkflowManager(),
 		newSession: vi.fn(
 			async (newSessionOptions?: {
-				setup?: (sessionManager: SessionManager) => Promise<void>;
+				setup?: (writer: SessionWriter) => Promise<void>;
 				withSession?: (ctx: { sendMessage(message: object): Promise<void> }) => Promise<void>;
 			}) => {
 				const sessionManager = SessionManager.inMemory("/workspace");
-				await newSessionOptions?.setup?.(sessionManager);
+				await newSessionOptions?.setup?.(sessionManager.logWriter);
 				options.replacementManagers?.push(sessionManager);
 				currentSession = makeSession("review-session", sessionManager);
 				await newSessionOptions?.withSession?.({
@@ -439,7 +441,7 @@ describe("RPC durable review actions", () => {
 			});
 			await gate;
 			const record = durableRecord();
-			if (options.sessionManager) await appendReviewRun(options.sessionManager, record);
+			if (options.sessionWriter) await appendReviewRun(options.sessionWriter, record);
 			return {
 				status: "completed",
 				raw: record.result!.summary,
@@ -481,7 +483,7 @@ describe("RPC durable review actions", () => {
 
 	test("hydrates durable paginated results and exposes structured context coverage without raw GitHub text", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableRecord("review:older"));
+		await appendReviewRun(manager.logWriter, durableRecord("review:older"));
 		const newer = { ...durablePullRequestRecord("review:newer"), endedAt: 3 };
 		newer.target.context = {
 			captureStatus: "complete",
@@ -502,7 +504,7 @@ describe("RPC durable review actions", () => {
 			discoveryInspectionComplete: true,
 			verificationInspectionComplete: true,
 		};
-		await appendReviewRun(manager, newer);
+		await appendReviewRun(manager.logWriter, newer);
 		const runtimeHost = makeRuntimeHost({ manager });
 		const collecting = createCollectingTransport();
 		const modePromise = await startMode(runtimeHost, collecting.transport);
@@ -594,7 +596,7 @@ describe("RPC durable review actions", () => {
 		};
 		const record = durableRecord();
 		record.result!.findings.push(second);
-		await appendReviewRun(manager, record);
+		await appendReviewRun(manager.logWriter, record);
 		const seedMessages: object[] = [];
 		const replacementManagers: SessionManager[] = [];
 		const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
@@ -666,7 +668,7 @@ describe("RPC durable review actions", () => {
 
 	test("opens an explicit empty selection without claiming the full run is clean", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableRecord());
+		await appendReviewRun(manager.logWriter, durableRecord());
 		const seedMessages: object[] = [];
 		const replacementManagers: SessionManager[] = [];
 		const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
@@ -695,7 +697,7 @@ describe("RPC durable review actions", () => {
 		"reopens the sole %s finding with historical verdicts and current status",
 		async (status) => {
 			const manager = SessionManager.inMemory("/workspace");
-			await appendReviewRun(manager, durableRecord());
+			await appendReviewRun(manager.logWriter, durableRecord());
 			const seedMessages: object[] = [];
 			const replacementManagers: SessionManager[] = [];
 			const runtimeHost = makeRuntimeHost({ manager, seedMessages, replacementManagers });
@@ -753,7 +755,7 @@ describe("RPC durable review actions", () => {
 
 	test("acknowledges full opens in source and target while retaining durable results", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableRecord());
+		await appendReviewRun(manager.logWriter, durableRecord());
 		const replacementManagers: SessionManager[] = [];
 		const runtimeHost = makeRuntimeHost({ manager, replacementManagers });
 		const collecting = createCollectingTransport();
@@ -793,7 +795,7 @@ describe("RPC durable review actions", () => {
 
 	test("explicit acknowledgment is idempotent and unsuccessful opens preserve the source", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableRecord());
+		await appendReviewRun(manager.logWriter, durableRecord());
 		const runtimeHost = makeRuntimeHost({ manager });
 		const collecting = createCollectingTransport();
 		const modePromise = await startMode(runtimeHost, collecting.transport);
@@ -812,7 +814,7 @@ describe("RPC durable review actions", () => {
 		).toHaveLength(1);
 
 		const unacknowledged = durableRecord("review:unacknowledged");
-		await appendReviewRun(manager, unacknowledged);
+		await appendReviewRun(manager.logWriter, unacknowledged);
 		vi.mocked(runtimeHost.newSession).mockResolvedValueOnce({ cancelled: true, seeded: false });
 		line(JSON.stringify({ id: "open-cancelled", type: "open_review_session", runId: unacknowledged.runId }));
 		await vi.waitFor(() => expect(response(collecting.writes, "open-cancelled")).toBeDefined());
@@ -886,8 +888,8 @@ describe("RPC durable review actions", () => {
 
 	test("preserves a durable review when starting a clear discussion session", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableRecord());
-		const acknowledgedAt = (await acknowledgeReviewRun(manager, "review:test")).acknowledgedAt;
+		await appendReviewRun(manager.logWriter, durableRecord());
+		const acknowledgedAt = (await acknowledgeReviewRun(manager.logWriter, "review:test")).acknowledgedAt;
 		const replacementManagers: SessionManager[] = [];
 		const runtimeHost = makeRuntimeHost({ manager, replacementManagers });
 		const collecting = createCollectingTransport();
@@ -943,7 +945,7 @@ describe("RPC durable review actions", () => {
 
 	test("accepts an incremental durable branch rerun through its host-only locator", async () => {
 		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager, durableBranchRecord());
+		await appendReviewRun(manager.logWriter, durableBranchRecord());
 		const runtimeHost = makeRuntimeHost({ manager });
 		const collecting = createCollectingTransport();
 		const modePromise = await startMode(runtimeHost, collecting.transport);
@@ -977,7 +979,7 @@ describe("RPC durable review actions", () => {
 		const manager = SessionManager.inMemory("/workspace");
 		const record = durableBranchRecord("review:missing-locator");
 		delete record.target.branchBase;
-		await appendReviewRun(manager, record);
+		await appendReviewRun(manager.logWriter, record);
 		const runtimeHost = makeRuntimeHost({ manager });
 		const collecting = createCollectingTransport();
 		const modePromise = await startMode(runtimeHost, collecting.transport);

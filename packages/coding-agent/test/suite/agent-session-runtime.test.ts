@@ -406,7 +406,7 @@ describe("AgentSessionRuntime characterization", () => {
 		});
 
 		expect(result).toEqual({ cancelled: false, seeded: false });
-		expect(runtime.session.sessionManager.buildSessionContext().fastMode.enabled).toBe(true);
+		expect(runtime.session.sessionManager.getConversationState().context.fastMode).toBe(true);
 		expect(runtime.session.fastModeEnabled).toBe(true);
 		expect(runtime.session.fastModeEnabled).toBe(true);
 	});
@@ -415,7 +415,11 @@ describe("AgentSessionRuntime characterization", () => {
 		const { runtime } = await createRuntimeForTest(() => {});
 		const manager = runtime.session.sessionManager;
 		const messageTime = Date.now() - 60_000;
-		await manager.appendMessage({ role: "user", content: "activity baseline", timestamp: messageTime });
+		await runtime.session.sessionWriter.appendMessage({
+			role: "user",
+			content: "activity baseline",
+			timestamp: messageTime,
+		});
 		await runtime.session.setSessionName("renamed after activity");
 
 		const stored = (await SessionManager.list(runtime.cwd, manager.getSessionDir())).find(
@@ -434,15 +438,23 @@ describe("AgentSessionRuntime characterization", () => {
 		// A live session's entries carry their commit time; message activity uses the messages' own times.
 		const firstMessageTime = Date.now() + 10_000;
 		const lastMessageTime = firstMessageTime + 1_000;
-		await manager.appendCustomMessageEntry("test.displayed", "displayed fallback", true);
-		await manager.appendMessage({ role: "user", content: "first user", timestamp: firstMessageTime });
+		await runtime.session.sessionWriter.appendCustomMessageEntry("test.displayed", "displayed fallback", true);
+		await runtime.session.sessionWriter.appendMessage({
+			role: "user",
+			content: "first user",
+			timestamp: firstMessageTime,
+		});
 		vi.useFakeTimers({ toFake: ["Date"], now: lastMessageTime + 60_000 });
 		try {
-			await manager.appendCustomMessageEntry("test.hidden", "hidden activity", false);
+			await runtime.session.sessionWriter.appendCustomMessageEntry("test.hidden", "hidden activity", false);
 		} finally {
 			vi.useRealTimers();
 		}
-		await manager.appendMessage({ role: "user", content: "second user", timestamp: lastMessageTime });
+		await runtime.session.sessionWriter.appendMessage({
+			role: "user",
+			content: "second user",
+			timestamp: lastMessageTime,
+		});
 		const expected = summarizeSessionEntries(manager.getEntries());
 		expect(expected).toEqual({
 			messageCount: 3,
@@ -472,8 +484,8 @@ describe("AgentSessionRuntime characterization", () => {
 		const header = manager.getHeader();
 		if (!header) throw new Error("Expected current session header");
 		const createdAt = new Date(header.timestamp).toISOString();
-		await manager.appendPlanningState({ mode: "plan", plan: null });
-		await manager.appendCustomMessageEntry(
+		await runtime.session.sessionWriter.appendPlanningState({ mode: "plan", plan: null });
+		await runtime.session.sessionWriter.appendCustomMessageEntry(
 			"test.hidden-after-planning",
 			"hidden activity",
 			false,
@@ -511,7 +523,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const foreignSession = await SessionManager.create(foreignCwd, runtime.session.sessionManager.getSessionDir(), {
 			id: "foreign-session",
 		});
-		await foreignSession.appendMessage({ role: "user", content: "foreign prompt", timestamp: Date.now() });
+		await foreignSession.logWriter.appendMessage({ role: "user", content: "foreign prompt", timestamp: Date.now() });
 
 		const sessions = await runtime.listSessions();
 		expect(sessions).toEqual(
@@ -575,7 +587,7 @@ describe("AgentSessionRuntime characterization", () => {
 			id: "symlink-alias-session",
 		});
 		try {
-			await target.appendMessage({ role: "user", content: "alias prompt", timestamp: Date.now() });
+			await target.logWriter.appendMessage({ role: "user", content: "alias prompt", timestamp: Date.now() });
 		} finally {
 			await target.closePersistence();
 		}
@@ -618,7 +630,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const otherDir = join(tmpdir(), `volt-runtime-other-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(otherDir, { recursive: true });
 		const otherSession = await SessionManager.create(otherDir);
-		await otherSession.appendMessage({
+		await otherSession.logWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "other" }],
 			timestamp: Date.now(),
@@ -673,9 +685,9 @@ describe("AgentSessionRuntime characterization", () => {
 			expect(sessions.some((session) => session.id === importedId)).toBe(false);
 			const reopened = await SessionManager.openReadOnly(currentSessionRef);
 			try {
-				expect(reopened.buildSessionContext()).toMatchObject({
+				expect(reopened.getConversationState().context).toMatchObject({
 					thinkingLevel: "high",
-					fastMode: { enabled: true },
+					fastMode: true,
 				});
 			} finally {
 				await reopened.closePersistence();
