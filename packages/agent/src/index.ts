@@ -2,6 +2,7 @@
 export * from "./agent-loop.ts";
 // Conversation kernel
 export * from "./conversation/context.ts";
+export * from "./conversation/coordinator.ts";
 export * from "./conversation/fold.ts";
 export * from "./conversation/in-memory-log.ts";
 export * from "./conversation/log.ts";
