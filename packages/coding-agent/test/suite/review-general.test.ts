@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { RPC_COMMAND_SCHEMAS, RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -20,8 +21,6 @@ import {
 } from "../../src/core/review-anchors.ts";
 import { getReviewGeneral } from "../../src/core/review-general.ts";
 import { appendReviewRunDurably } from "../../src/core/review-state.ts";
-import { RPC_COMMAND_SCHEMAS } from "../../src/core/rpc/schema/commands.ts";
-import { RPC_RESPONSE_SCHEMAS } from "../../src/core/rpc/schema/responses.ts";
 import { buildRpcSessionState } from "../../src/core/rpc/session-state.ts";
 import { SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";

@@ -9,6 +9,7 @@
 
 import { ImageContentSchema } from "@hansjm10/volt-ai/schemas";
 import { Type } from "typebox";
+import { stringEnum } from "./helpers.ts";
 import {
 	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
 	RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN,
@@ -17,8 +18,7 @@ import {
 	RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
 	RPC_CONVERSATION_INPUT_MAX_IMAGES,
 	RPC_WIRE_MAX_SAFE_INTEGER,
-} from "../wire-limits.ts";
-import { stringEnum } from "./helpers.ts";
+} from "./wire-limits.ts";
 
 /** Matches exactly the trimmed non-empty strings: no surrounding whitespace, at least one character. */
 export const RPC_TRIMMED_NON_EMPTY_PATTERN = "^\\S(?:[\\s\\S]*\\S)?$";

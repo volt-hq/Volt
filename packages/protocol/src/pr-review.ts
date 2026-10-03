@@ -1,7 +1,7 @@
 import { type Static, Type } from "typebox";
-import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES, RPC_GIT_CONTEXT_OID_PATTERN } from "../wire-limits.ts";
 import { stringEnum } from "./helpers.ts";
 import { RpcConversationIdentifierSchema } from "./primitives.ts";
+import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES, RPC_GIT_CONTEXT_OID_PATTERN } from "./wire-limits.ts";
 
 export const RPC_PR_REVIEW_ERROR_CODES = [
 	"review_preparation_failed",

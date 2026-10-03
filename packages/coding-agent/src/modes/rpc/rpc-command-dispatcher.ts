@@ -1,4 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
+import { RPC_STABLE_ERROR_CODES } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import {
@@ -45,7 +46,6 @@ import {
 	getUiActionCompletions,
 	getUiActionDescriptors,
 } from "../../core/rpc/ui-actions.ts";
-import { RPC_STABLE_ERROR_CODES } from "../../core/rpc/wire-limits.ts";
 import { SessionManager } from "../../core/session-manager.ts";
 import type { SubscriptionUsageReport, SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import type {

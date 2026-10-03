@@ -134,7 +134,7 @@ function createModelChangeEntry(provider: string, modelId: string): ModelChangeE
 	return entry;
 }
 
-function createThinkingLevelEntry(thinkingLevel: string): ThinkingLevelChangeEntry {
+function createThinkingLevelEntry(thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"]): ThinkingLevelChangeEntry {
 	const id = `test-id-${entryCounter++}`;
 	const entry: ThinkingLevelChangeEntry = {
 		type: "thinking_level_change",

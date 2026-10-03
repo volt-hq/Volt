@@ -1,72 +1,17 @@
 import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@hansjm10/volt-ai";
-import { type Static, Type } from "typebox";
+import {
+	ReviewServiceTierSchema,
+	type ReviewUsageAccounting,
+	ReviewUsageAccountingSchema,
+	ReviewUsageCostSchema,
+	type ReviewUsageSummary,
+	ReviewUsageTokensSchema,
+} from "@hansjm10/volt-protocol";
 import { Check } from "typebox/value";
 import type { InferenceAccountingRequest } from "./inference-accounting.ts";
 
-const count = Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER });
-const availability = Type.Union([Type.Literal("complete"), Type.Literal("partial"), Type.Literal("unavailable")]);
-const tier = Type.Union(["auto", "default", "flex", "scale", "priority"].map((value) => Type.Literal(value)));
-const tokens = Type.Object(
-	{ input: count, output: count, cacheRead: count, cacheWrite: count },
-	{ additionalProperties: false },
-);
-const cost = Type.Object(
-	{
-		input: Type.Number({ minimum: 0 }),
-		output: Type.Number({ minimum: 0 }),
-		cacheRead: Type.Number({ minimum: 0 }),
-		cacheWrite: Type.Number({ minimum: 0 }),
-		total: Type.Number({ minimum: 0 }),
-	},
-	{ additionalProperties: false },
-);
-const totals = {
-	requests: count,
-	turns: count,
-	pendingRequests: count,
-	unavailableRequests: count,
-	partialRequests: count,
-	tokens: Type.Optional(tokens),
-	estimatedCost: Type.Optional(cost),
-};
-export const ReviewUsageSummarySchema = Type.Object(
-	{
-		status: availability,
-		costBasis: Type.Literal("model-priced-usd"),
-		...totals,
-	},
-	{ additionalProperties: false },
-);
-const attempt = Type.Object(
-	{
-		passId: Type.Integer({ minimum: 1 }),
-		phase: Type.Union([Type.Literal("discovery"), Type.Literal("verification"), Type.Literal("presentation")]),
-		purpose: Type.Union([Type.Literal("findings"), Type.Literal("challenge")]),
-		round: Type.Integer({ minimum: 1 }),
-		attempt: Type.Integer({ minimum: 1 }),
-		kind: Type.Union([Type.Literal("turn"), Type.Literal("compaction")]),
-		provider: Type.String({ minLength: 1, maxLength: 256 }),
-		model: Type.String({ minLength: 1, maxLength: 256 }),
-		requestedTier: Type.Optional(tier),
-		effectiveTier: Type.Optional(tier),
-		...totals,
-	},
-	{ additionalProperties: false },
-);
-export const ReviewUsageAccountingSchema = Type.Object(
-	{
-		revision: count,
-		updatedAt: count,
-		finalized: Type.Boolean(),
-		summary: ReviewUsageSummarySchema,
-		attempts: Type.Array(attempt, { maxItems: 1024 }),
-	},
-	{ additionalProperties: false },
-);
-export type ReviewUsageAccounting = Static<typeof ReviewUsageAccountingSchema>;
-export type ReviewUsageSummary = Static<typeof ReviewUsageSummarySchema>;
-type Attempt = Static<typeof attempt>;
+type Attempt = ReviewUsageAccounting["attempts"][number];
 type Totals = Omit<ReviewUsageSummary, "status" | "costBasis">;
 export type ReviewUsageAttempt = Pick<Attempt, "passId" | "phase" | "purpose" | "round" | "attempt" | "kind">;
 
@@ -243,11 +188,14 @@ export class ReviewUsageCollector {
 						cacheRead: usage.cacheRead,
 						cacheWrite: usage.cacheWrite,
 					};
-					if (Check(tokens, observedTokens) && validNumbers(observedTokens)) entry.tokens = observedTokens;
-					if (entry.tokens && Check(cost, usage.cost) && validNumbers(usage.cost))
+					if (Check(ReviewUsageTokensSchema, observedTokens) && validNumbers(observedTokens))
+						entry.tokens = observedTokens;
+					if (entry.tokens && Check(ReviewUsageCostSchema, usage.cost) && validNumbers(usage.cost))
 						entry.estimatedCost = { ...usage.cost };
-					if (Check(tier, usage.serviceTier?.requested)) entry.requestedTier = usage.serviceTier.requested;
-					if (Check(tier, usage.serviceTier?.effective)) entry.effectiveTier = usage.serviceTier.effective;
+					if (Check(ReviewServiceTierSchema, usage.serviceTier?.requested))
+						entry.requestedTier = usage.serviceTier.requested;
+					if (Check(ReviewServiceTierSchema, usage.serviceTier?.effective))
+						entry.effectiveTier = usage.serviceTier.effective;
 				}
 				if (!entry.tokens) {
 					const previous = this.active.get(id);

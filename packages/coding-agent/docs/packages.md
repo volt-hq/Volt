@@ -166,7 +166,7 @@ If no `volt` manifest is present, volt auto-discovers resources from these direc
 
 Third party runtime dependencies belong in `dependencies` in `package.json`. Dependencies that do not register extensions, skills, prompt templates, or themes also belong in `dependencies`. When volt installs a package from npm or git, it runs `npm install`, so those dependencies are installed automatically.
 
-Volt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@hansjm10/volt-ai`, `@hansjm10/volt-agent-core`, `@hansjm10/volt-coding-agent`, `@hansjm10/volt-tui`, `typebox`.
+Volt bundles core packages for extensions and skills. If you import any of these, list them in `peerDependencies` with a `"*"` range and do not bundle them: `@hansjm10/volt-ai`, `@hansjm10/volt-protocol`, `@hansjm10/volt-agent-core`, `@hansjm10/volt-coding-agent`, `@hansjm10/volt-tui`, `typebox`.
 
 Other volt packages must be bundled in your tarball. Add them to `dependencies` and `bundledDependencies`, then reference their resources through `node_modules/` paths. Volt loads packages with separate module roots, so separate installs do not collide or share modules.
 

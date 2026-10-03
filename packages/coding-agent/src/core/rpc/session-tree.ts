@@ -1,11 +1,11 @@
 import { Buffer } from "node:buffer";
-import type { SessionEntry } from "../session-manager.ts";
-import type { RpcConversationTranscriptItem, RpcSessionTreeNode, RpcSessionTreePage } from "./types.ts";
 import {
 	RPC_SESSION_TREE_MAX_SERIALIZED_BYTES,
 	RPC_SESSION_TREE_PAGE_DEFAULT_ITEMS,
 	RPC_SESSION_TREE_PAGE_MAX_ITEMS,
-} from "./wire-limits.ts";
+} from "@hansjm10/volt-protocol";
+import type { SessionEntry } from "../session-manager.ts";
+import type { RpcConversationTranscriptItem, RpcSessionTreeNode, RpcSessionTreePage } from "./types.ts";
 
 export const RPC_SESSION_TREE_PROJECTION_VERSION = 1;
 

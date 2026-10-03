@@ -1,7 +1,6 @@
 import { Buffer } from "node:buffer";
+import { RPC_COMMAND_SCHEMAS, RpcSessionContextSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
-import { RPC_COMMAND_SCHEMAS } from "../../rpc/schema/commands.ts";
-import { RpcSessionContextSchema } from "../../rpc/schema/session.ts";
 import type { RpcGitContext, RpcSessionWorkContext } from "../../rpc/types.ts";
 import { SessionManager } from "../../session-manager.ts";
 import { IROH_REMOTE_SESSION_ID_PATTERN, isIrohRemoteWorkspaceName } from "./handshake.ts";

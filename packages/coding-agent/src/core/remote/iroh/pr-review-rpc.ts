@@ -1,6 +1,3 @@
-import { Compile } from "typebox/compile";
-import { isUsableRpcConversationIdentifier } from "../../rpc/correlation.ts";
-import { RPC_COMMAND_SCHEMAS } from "../../rpc/schema/commands.ts";
 import {
 	type PrReviewPreparationErrorCode,
 	type PrReviewPrepareRequest,
@@ -8,9 +5,12 @@ import {
 	type PrReviewPullRequest,
 	type PrReviewResolveResponse,
 	type PrReviewSourceRequest,
+	RPC_COMMAND_SCHEMAS,
 	RpcPreparePrReviewResponseSchema,
 	RpcResolvePrReviewResponseSchema,
-} from "../../rpc/schema/pr-review.ts";
+} from "@hansjm10/volt-protocol";
+import { Compile } from "typebox/compile";
+import { isUsableRpcConversationIdentifier } from "../../rpc/correlation.ts";
 import { isIrohRemoteWorkspaceName } from "./handshake.ts";
 import { isIrohRemoteWorkingDirectory } from "./protocol.ts";
 import { createIrohRemoteRpcErrorResponse, type IrohRemoteRpcErrorResponse } from "./rpc-command-filter.ts";
@@ -22,7 +22,7 @@ export type {
 	PrReviewPullRequest,
 	PrReviewResolveResponse,
 	PrReviewSourceRequest,
-} from "../../rpc/schema/pr-review.ts";
+} from "@hansjm10/volt-protocol";
 
 export interface IrohRemotePrReviewRpcBackend {
 	resolvePrReview(workspaceName: string, request: PrReviewSourceRequest): Promise<PrReviewResolveResponse>;

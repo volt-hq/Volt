@@ -40,6 +40,7 @@ const FORBIDDEN_PACKAGE_FIELDS = [
 const packageByName = new Map(RELEASE_PACKAGE_IDENTITIES.map((pkg) => [pkg.name, pkg]));
 export const BOOTSTRAP_PACKAGE_IDENTITIES = [
 	"@hansjm10/volt-ai",
+	"@hansjm10/volt-protocol",
 	"@hansjm10/volt-agent-core",
 	"@hansjm10/volt-tui",
 	"@hansjm10/volt-coding-agent",
@@ -162,21 +163,25 @@ export function inspectBootstrapPackage(pkg, run = runNpm) {
 	assertExactPlaceholderMetadata(pkg, metadata);
 	const versionsValue = metadata.versions;
 	const versions = typeof versionsValue === "string" ? [versionsValue] : versionsValue;
-	if (!Array.isArray(versions) || versions.length !== 1 || versions[0] !== PLACEHOLDER_VERSION) {
+	if (!Array.isArray(versions) || !versions.includes(PLACEHOLDER_VERSION)) {
 		throw new Error(
 			`${pkg.name} exists with unexpected versions (${Array.isArray(versions) ? versions.join(", ") : String(versions)}); refusing to publish`,
 		);
 	}
 
+	// A package that has shipped releases keeps its placeholder under `bootstrap`; it is never re-reserved.
+	const released = versions.length > 1;
 	const tags = metadata["dist-tags"];
 	const tagEntries = tags && typeof tags === "object" && !Array.isArray(tags) ? Object.entries(tags) : [];
 	if (
-		tagEntries.length !== 2 ||
-		tags[PLACEHOLDER_TAG] !== PLACEHOLDER_VERSION ||
-		tags.latest !== PLACEHOLDER_VERSION
+		released
+			? tags?.[PLACEHOLDER_TAG] !== PLACEHOLDER_VERSION || !versions.includes(tags.latest)
+			: tagEntries.length !== 2 || tags[PLACEHOLDER_TAG] !== PLACEHOLDER_VERSION || tags.latest !== PLACEHOLDER_VERSION
 	) {
 		throw new Error(
-			`${pkg.name} exists with unexpected dist-tags; expected ${PLACEHOLDER_TAG} and npm-required latest to point to ${PLACEHOLDER_VERSION}`,
+			released
+				? `${pkg.name} has releases but unexpected dist-tags; expected ${PLACEHOLDER_TAG} on ${PLACEHOLDER_VERSION} and latest on a published version`
+				: `${pkg.name} exists with unexpected dist-tags; expected ${PLACEHOLDER_TAG} and npm-required latest to point to ${PLACEHOLDER_VERSION}`,
 		);
 	}
 
@@ -196,16 +201,19 @@ export function inspectBootstrapPackage(pkg, run = runNpm) {
 		throw new Error(`${pkg.name} placeholder tarball contains unexpected files; refusing to publish`);
 	}
 
-	return { state: "placeholder" };
+	return { state: released ? "released" : "placeholder" };
 }
 
 function writePlaceholderPackage(root, pkg) {
 	const directory = join(root, pkg.name.slice(1).replaceAll("/", "-"));
 	mkdirSync(directory);
 	writeFileSync(join(directory, "package.json"), `${JSON.stringify(expectedPlaceholderManifest(pkg), null, 2)}\n`);
+	const releases = pkg.historicalBeta
+		? "Installable releases begin at `0.1.0` and use the `beta` dist-tag."
+		: "Installable releases are published by Volt's release workflow under the `latest` dist-tag.";
 	writeFileSync(
 		join(directory, "README.md"),
-		`# ${pkg.name}\n\nThis package only reserves the npm name for [Volt](https://github.com/volt-hq/Volt).\n\nInstallable releases begin at \`0.1.0\` and use the \`beta\` dist-tag.\n`,
+		`# ${pkg.name}\n\nThis package only reserves the npm name for [Volt](https://github.com/volt-hq/Volt).\n\n${releases}\n`,
 	);
 	writeFileSync(join(directory, "LICENSE"), readFileSync(LICENSE_PATH, "utf8"));
 	return directory;
@@ -238,7 +246,12 @@ export function bootstrapNpmPackages(options = {}) {
 
 	const states = BOOTSTRAP_PACKAGE_IDENTITIES.map((pkg) => ({ pkg, ...inspectBootstrapPackage(pkg, run) }));
 	for (const { pkg, state } of states) {
-		log(`${pkg.name}: ${state === "absent" ? "available" : `reserved at ${PLACEHOLDER_VERSION}`}`);
+		const description = {
+			absent: "available",
+			placeholder: `reserved at ${PLACEHOLDER_VERSION}`,
+			released: `released; placeholder ${PLACEHOLDER_VERSION} intact`,
+		}[state];
+		log(`${pkg.name}: ${description}`);
 	}
 
 	const absent = states.filter(({ state }) => state === "absent");
@@ -247,7 +260,7 @@ export function bootstrapNpmPackages(options = {}) {
 		return { published: [], states };
 	}
 	if (absent.length === 0) {
-		log("All npm package names already have the exact Volt bootstrap placeholder; nothing to publish.");
+		log("Every npm package name is already reserved or released; nothing to publish.");
 		return { published: [], states };
 	}
 	if (!interactive) {

@@ -15,6 +15,10 @@ const jiti = createJiti(import.meta.url, {
 		"@hansjm10/volt-ai": fileURLToPath(new URL("packages/ai/src/index.ts", repoRoot)),
 		"@hansjm10/volt-ai/oauth": fileURLToPath(new URL("packages/ai/src/oauth.ts", repoRoot)),
 		"@hansjm10/volt-ai/schemas": fileURLToPath(new URL("packages/ai/src/schemas.ts", repoRoot)),
+		"@hansjm10/volt-protocol": fileURLToPath(new URL("packages/protocol/src/index.ts", repoRoot)),
+		"@hansjm10/volt-protocol/entries": fileURLToPath(new URL("packages/protocol/src/entries.ts", repoRoot)),
+		"@hansjm10/volt-protocol/git-context": fileURLToPath(new URL("packages/protocol/src/git-context.ts", repoRoot)),
+		"@hansjm10/volt-protocol/wire-limits": fileURLToPath(new URL("packages/protocol/src/wire-limits.ts", repoRoot)),
 		"@hansjm10/volt-tui": fileURLToPath(new URL("packages/tui/src/index.ts", repoRoot)),
 	},
 });

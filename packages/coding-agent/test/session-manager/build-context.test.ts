@@ -53,7 +53,11 @@ function branchSummary(id: string, parentId: string | null, summary: string, fro
 	return { type: "branch_summary", id, parentId, timestamp: "2025-01-01T00:00:00Z", summary, fromId };
 }
 
-function thinkingLevel(id: string, parentId: string | null, level: string): ThinkingLevelChangeEntry {
+function thinkingLevel(
+	id: string,
+	parentId: string | null,
+	level: ThinkingLevelChangeEntry["thinkingLevel"],
+): ThinkingLevelChangeEntry {
 	return { type: "thinking_level_change", id, parentId, timestamp: "2025-01-01T00:00:00Z", thinkingLevel: level };
 }
 
@@ -300,8 +304,11 @@ describe("buildSessionContext", () => {
 	describe("edge cases", () => {
 		it("walks deep branches without front insertion", () => {
 			const entries: SessionEntry[] = [];
+			const levels = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 			for (let index = 0; index < 10_000; index++) {
-				entries.push(thinkingLevel(String(index), index === 0 ? null : String(index - 1), `level-${index}`));
+				entries.push(
+					thinkingLevel(String(index), index === 0 ? null : String(index - 1), levels[index % levels.length]!),
+				);
 			}
 
 			const result = (() => {
@@ -315,7 +322,7 @@ describe("buildSessionContext", () => {
 			})();
 
 			expect(result.frontInsertions).toBe(0);
-			expect(result.context.thinkingLevel).toBe("level-9999");
+			expect(result.context.thinkingLevel).toBe(levels[9_999 % levels.length]);
 		});
 
 		it("uses last entry when leafId not found", () => {

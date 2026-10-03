@@ -5,31 +5,31 @@ import {
 	type AssistantMessageEvent,
 	type Usage,
 } from "@hansjm10/volt-ai";
-import type { TSchema } from "typebox";
-import { Compile } from "typebox/compile";
-import { describe, expect, test } from "vitest";
-import { RPC_COMMAND_SCHEMAS } from "../src/core/rpc/schema/commands.ts";
 import {
+	RPC_COMMAND_SCHEMAS,
+	RPC_RESPONSE_SCHEMAS,
 	RpcConversationBootstrapEventSchema,
+	RpcErrorResponseSchema,
+	RpcExtensionUIRequestSchema,
+	RpcGitContextChangedEventSchema,
+	RpcGitContextSchema,
+	RpcHostActionRequestSchema,
+	RpcHostActionUpdateSchema,
 	RpcMessageEndFrameSchema,
 	RpcMessageStartFrameSchema,
 	RpcMessageUpdateFrameSchema,
-	RpcQueueUpdateEventSchema,
-	RpcTranscriptEntryEventSchema,
-} from "../src/core/rpc/schema/conversation.ts";
-import {
-	RpcExtensionUIRequestSchema,
-	RpcGitContextChangedEventSchema,
-	RpcHostActionRequestSchema,
-	RpcHostActionUpdateSchema,
 	RpcModelsChangedEventSchema,
-} from "../src/core/rpc/schema/events.ts";
-import { RpcGitContextSchema } from "../src/core/rpc/schema/git-context.ts";
-import { RpcPlanningStateChangedEventSchema } from "../src/core/rpc/schema/planning.ts";
-import { RpcWorkflowEventSchema } from "../src/core/rpc/schema/projections.ts";
-import { RPC_RESPONSE_SCHEMAS, RpcErrorResponseSchema } from "../src/core/rpc/schema/responses.ts";
-import { RpcSubscriptionUsageReportSchema } from "../src/core/rpc/schema/subscription-usage.ts";
-import { UiActionCapabilityFeatureSchema, UiActionDescriptorSchema } from "../src/core/rpc/schema/ui-actions.ts";
+	RpcPlanningStateChangedEventSchema,
+	RpcQueueUpdateEventSchema,
+	RpcSubscriptionUsageReportSchema,
+	RpcTranscriptEntryEventSchema,
+	RpcWorkflowEventSchema,
+	UiActionCapabilityFeatureSchema,
+	UiActionDescriptorSchema,
+} from "@hansjm10/volt-protocol";
+import type { TSchema } from "typebox";
+import { Compile } from "typebox/compile";
+import { describe, expect, test } from "vitest";
 import { projectRpcQueueUpdate } from "../src/core/rpc/session-state.ts";
 import { StreamProjector } from "../src/core/rpc/stream-projection.ts";
 import type {

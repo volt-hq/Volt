@@ -5,8 +5,14 @@
  */
 
 import { Type } from "typebox";
-import type { McpPromptSummary } from "../../mcp/types.ts";
 import { opaque, stringEnum } from "./helpers.ts";
+
+/** One MCP SDK prompt argument, as the SDK reports it. */
+export interface RpcMcpPromptArgument {
+	name: string;
+	description?: string;
+	required?: boolean;
+}
 
 export const RpcMcpRiskSchema = stringEnum(["read", "write", "destructive", "unknown"]);
 export const RpcMcpSourceScopeSchema = stringEnum(["user", "project", "temporary"]);
@@ -79,9 +85,7 @@ export const RpcMcpPromptSummarySchema = Type.Object(
 		name: Type.String(),
 		title: Type.Optional(Type.String()),
 		description: Type.Optional(Type.String()),
-		arguments: Type.Optional(
-			opaque<NonNullable<McpPromptSummary["arguments"]>>("MCP SDK prompt arguments; passed through verbatim"),
-		),
+		arguments: Type.Optional(opaque<RpcMcpPromptArgument[]>("MCP SDK prompt arguments; passed through verbatim")),
 	},
 	{ additionalProperties: false },
 );

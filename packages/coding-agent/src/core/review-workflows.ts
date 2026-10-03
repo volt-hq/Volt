@@ -16,7 +16,7 @@
  */
 
 import { Buffer } from "node:buffer";
-
+import type { ReviewUsageAccounting } from "@hansjm10/volt-protocol";
 // Types only: a runtime import edge from this module (reached via
 // AgentSessionRuntime) into review.ts would also defeat test doubles that
 // replace review.ts for the RPC modes.
@@ -28,7 +28,6 @@ import type {
 	ReviewWorkflowToolEvent,
 } from "./review.ts";
 import type { ReviewChangedFile, ReviewPullRequestIdentity, ReviewSnapshotIdentity } from "./review-snapshot.ts";
-import type { ReviewUsageAccounting } from "./review-usage.ts";
 
 /** Maximum concurrently running detached reviews per runtime. */
 export const MAX_ACTIVE_REVIEW_WORKFLOWS = 3;

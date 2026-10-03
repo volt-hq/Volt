@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RELEASE_PACKAGES, versionFromReleaseTag } from "./verify-release-provenance.mjs";
+import { RELEASE_PACKAGE_IDENTITIES, versionFromReleaseTag } from "./verify-release-provenance.mjs";
 
 export const BOOTSTRAP_VERSION = "0.0.0-bootstrap.0";
 export const INITIAL_BETA_VERSION = "0.1.0";
@@ -52,13 +52,17 @@ function validatePackageIdentity(expectedName, metadata) {
 	}
 }
 
-function verifyEstablishedPackageChannels(expectedName, versions, metadata) {
+function verifyEstablishedPackageChannels(expectedName, versions, metadata, historicalBeta) {
 	const distTags = metadata["dist-tags"];
 	if (!distTags || typeof distTags !== "object" || Array.isArray(distTags)) {
 		throw new Error(`${expectedName} has malformed npm dist-tags metadata`);
 	}
-	if (!versions.includes(INITIAL_BETA_VERSION) || distTags.beta !== INITIAL_BETA_VERSION) {
-		throw new Error(`${expectedName} must preserve the historical beta dist-tag on ${INITIAL_BETA_VERSION}`);
+	if (historicalBeta) {
+		if (!versions.includes(INITIAL_BETA_VERSION) || distTags.beta !== INITIAL_BETA_VERSION) {
+			throw new Error(`${expectedName} must preserve the historical beta dist-tag on ${INITIAL_BETA_VERSION}`);
+		}
+	} else if (Object.hasOwn(distTags, "beta") || versions.includes(INITIAL_BETA_VERSION)) {
+		throw new Error(`${expectedName} was added after the ${INITIAL_BETA_VERSION} beta and must have no beta release or dist-tag`);
 	}
 	if (distTags.bootstrap !== BOOTSTRAP_VERSION) {
 		throw new Error(`${expectedName} must keep bootstrap on the inert placeholder`);
@@ -68,6 +72,10 @@ function verifyEstablishedPackageChannels(expectedName, versions, metadata) {
 	}
 }
 
+/**
+ * `options.historicalBeta` (default true) says whether the package shipped the
+ * 0.1.0 beta; a package added later must never carry a beta release or tag.
+ */
 export function verifyPreflightPackageMetadata(expectedName, targetVersion, metadata, options = {}) {
 	validatePackageIdentity(expectedName, metadata);
 	const versions = normalizedVersions(metadata);
@@ -76,7 +84,7 @@ export function verifyPreflightPackageMetadata(expectedName, targetVersion, meta
 	}
 
 	if (!options.initial) {
-		verifyEstablishedPackageChannels(expectedName, versions, metadata);
+		verifyEstablishedPackageChannels(expectedName, versions, metadata, options.historicalBeta ?? true);
 		return;
 	}
 	if (versions.length !== 1 || versions[0] !== BOOTSTRAP_VERSION) {
@@ -97,9 +105,10 @@ export function verifyPreflightPackageMetadata(expectedName, targetVersion, meta
 	}
 }
 
-export function verifyTagWorkflowPackageMetadata(expectedName, targetVersion, metadata) {
+export function verifyTagWorkflowPackageMetadata(expectedName, targetVersion, metadata, options = {}) {
 	validatePackageIdentity(expectedName, metadata);
 	const versions = normalizedVersions(metadata);
+	const historicalBeta = options.historicalBeta ?? true;
 	if (targetVersion === INITIAL_BETA_VERSION) {
 		if (!versions.includes(targetVersion)) {
 			verifyPreflightPackageMetadata(expectedName, targetVersion, metadata, { initial: true });
@@ -117,7 +126,7 @@ export function verifyTagWorkflowPackageMetadata(expectedName, targetVersion, me
 		return;
 	}
 
-	verifyEstablishedPackageChannels(expectedName, versions, metadata);
+	verifyEstablishedPackageChannels(expectedName, versions, metadata, historicalBeta);
 	if (versions.includes(targetVersion) && metadata["dist-tags"].latest !== targetVersion) {
 		throw new Error(`${expectedName}@${targetVersion} is published but latest does not point to it`);
 	}
@@ -157,15 +166,18 @@ export function npmViewPackageMetadata(name, run = spawnSync) {
 
 function main() {
 	const options = parseBootstrapVerificationArgs(process.argv.slice(2));
-	for (const directory of RELEASE_PACKAGES) {
+	for (const { directory, name, historicalBeta } of RELEASE_PACKAGE_IDENTITIES) {
 		const manifest = JSON.parse(readFileSync(join(directory, "package.json"), "utf8"));
-		const metadata = npmViewPackageMetadata(manifest.name);
-		if (options.mode === "preflight") {
-			verifyPreflightPackageMetadata(manifest.name, options.version, metadata, { initial: options.initial });
-		} else {
-			verifyTagWorkflowPackageMetadata(manifest.name, options.version, metadata);
+		if (manifest.name !== name) {
+			throw new Error(`${directory}/package.json is named ${manifest.name}; expected ${name}`);
 		}
-		process.stdout.write(`npm ${options.mode} verification passed: ${manifest.name}@${options.version}\n`);
+		const metadata = npmViewPackageMetadata(name);
+		if (options.mode === "preflight") {
+			verifyPreflightPackageMetadata(name, options.version, metadata, { initial: options.initial, historicalBeta });
+		} else {
+			verifyTagWorkflowPackageMetadata(name, options.version, metadata, { historicalBeta });
+		}
+		process.stdout.write(`npm ${options.mode} verification passed: ${name}@${options.version}\n`);
 	}
 }
 

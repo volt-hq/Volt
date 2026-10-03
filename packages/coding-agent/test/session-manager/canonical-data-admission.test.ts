@@ -125,7 +125,7 @@ describe("SessionManager canonical data admission", () => {
 				unexpected: true,
 			} as never),
 		).toThrow("unknown property");
-		expect(() => manager.appendThinkingLevelChange("turbo")).toThrow("invalid thinking level");
+		expect(() => manager.appendThinkingLevelChange("turbo" as never)).toThrow("invalid thinking level");
 		expect(() => manager.appendFastModeChange("yes" as never)).toThrow("invalid enabled state");
 		expect(() => manager.appendModelChange("", "model")).toThrow("must not be empty");
 		expect(() =>

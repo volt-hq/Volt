@@ -10,11 +10,8 @@
 
 import { Buffer } from "node:buffer";
 import type { ImageContent } from "@hansjm10/volt-ai";
-import type { TObject, TSchema } from "typebox";
-import { Compile, type Validator } from "typebox/compile";
-import type { TLocalizedValidationError } from "typebox/error";
-import { RPC_COMMAND_SCHEMAS } from "../../core/rpc/schema/commands.ts";
 import {
+	RPC_COMMAND_SCHEMAS,
 	RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
 	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
 	RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
@@ -22,7 +19,10 @@ import {
 	RPC_CONVERSATION_INPUT_MAX_IMAGES,
 	RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES,
 	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
-} from "../../core/rpc/wire-limits.ts";
+} from "@hansjm10/volt-protocol";
+import type { TObject, TSchema } from "typebox";
+import { Compile, type Validator } from "typebox/compile";
+import type { TLocalizedValidationError } from "typebox/error";
 
 export {
 	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
@@ -30,7 +30,7 @@ export {
 	RPC_CONVERSATION_INPUT_MAX_IMAGES,
 	RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES,
 	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
-} from "../../core/rpc/wire-limits.ts";
+} from "@hansjm10/volt-protocol";
 
 const ERROR_PREFIX = "Invalid RPC command payload";
 

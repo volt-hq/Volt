@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type JsonValue, type Usage } from "@hansjm10/volt-ai";
+import { type ReviewUsageAccounting, RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeHostProvider } from "../../../src/core/code-host/index.ts";
@@ -32,12 +33,10 @@ import {
 import {
 	createEmptyReviewUsage,
 	parseReviewUsage,
-	type ReviewUsageAccounting,
 	type ReviewUsageAttempt,
 	ReviewUsageCollector,
 } from "../../../src/core/review-usage.ts";
 import { ReviewWorkflowManager } from "../../../src/core/review-workflows.ts";
-import { RPC_RESPONSE_SCHEMAS } from "../../../src/core/rpc/schema/responses.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";

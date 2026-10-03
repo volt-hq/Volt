@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import type { JsonValue } from "@hansjm10/volt-ai";
+import type { ReviewUsageAccounting } from "@hansjm10/volt-protocol";
 import { minimatch } from "minimatch";
 import type { CustomMessage } from "./messages.ts";
 import type { ReviewRunControls } from "./review.ts";
@@ -17,7 +18,7 @@ import type {
 	ReviewSnapshotIdentity,
 	ReviewSnapshotTreeEntry,
 } from "./review-snapshot.ts";
-import { parseReviewUsage, type ReviewUsageAccounting } from "./review-usage.ts";
+import { parseReviewUsage } from "./review-usage.ts";
 import { type CustomEntry, type SessionEntry, SessionManager } from "./session-manager.ts";
 
 export const REVIEW_RUN_CUSTOM_ENTRY_TYPE = "volt.review.run";

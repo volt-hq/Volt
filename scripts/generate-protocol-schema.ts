@@ -1,30 +1,31 @@
 /**
- * Generates the committed RPC contract artifact
- * (packages/coding-agent/contract/rpc-schema.json) from the TypeBox schema
+ * Generates the committed protocol contract artifact
+ * (packages/protocol/contract/protocol-schema.json) from the TypeBox schema
  * registry — the same definitions that produce the static types and runtime
  * validation, so the artifact cannot drift from the host.
  *
- *   node scripts/generate-rpc-schema.ts           # write the artifact
- *   node scripts/generate-rpc-schema.ts --check   # fail if it is stale
+ *   npm run contract:protocol         # write the artifact
+ *   npm run check:protocol-contract   # fail if it is stale
  *
  * Registered schemas referenced inside other schemas are emitted as
- * `#/$defs/<Name>` pointers (matched by object identity); the one recursive
- * definition (Type.Cyclic) has its inner $defs hoisted to the top level with
- * its name-style refs rewritten to standard JSON pointers.
+ * `#/$defs/<Name>` pointers (matched by object identity); recursive
+ * definitions (Type.Cyclic) have their inner $defs hoisted to the top level
+ * with their name-style refs rewritten to standard JSON pointers.
  */
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { RPC_SCHEMA_REGISTRY, RPC_WIRE_LIMITS } from "../packages/coding-agent/src/core/rpc/schema/index.ts";
+import { CONTRACT_LIMITS, CONTRACT_SCHEMA_REGISTRY } from "../packages/protocol/src/contract.ts";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
-const artifactPath = join(repoRoot, "packages", "coding-agent", "contract", "rpc-schema.json");
+const artifactRelativePath = "packages/protocol/contract/protocol-schema.json";
+const artifactPath = join(repoRoot, ...artifactRelativePath.split("/"));
 const checkOnly = process.argv.includes("--check");
 
 const namesBySchema = new Map<object, string>();
 const namesByContent = new Map<string, string>();
-for (const [name, schema] of RPC_SCHEMA_REGISTRY) {
+for (const [name, schema] of CONTRACT_SCHEMA_REGISTRY) {
 	if (!namesBySchema.has(schema)) {
 		namesBySchema.set(schema, name);
 	}
@@ -54,7 +55,7 @@ const defs: Record<string, unknown> = {};
 function ensureDef(name: string): void {
 	if (name in defs) return;
 	defs[name] = null; // reserve so reference cycles terminate
-	const schema = RPC_SCHEMA_REGISTRY.get(name);
+	const schema = CONTRACT_SCHEMA_REGISTRY.get(name);
 	if (schema === undefined) {
 		throw new Error(`Schema registry has no entry named ${name}`);
 	}
@@ -122,7 +123,7 @@ function serializeCyclicDef(node: unknown, innerNames: ReadonlySet<string>): unk
 	return out;
 }
 
-for (const name of RPC_SCHEMA_REGISTRY.keys()) {
+for (const name of CONTRACT_SCHEMA_REGISTRY.keys()) {
 	ensureDef(name);
 }
 
@@ -133,12 +134,12 @@ for (const name of Object.keys(defs).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)
 
 const artifact = {
 	$schema: "https://json-schema.org/draft/2020-12/schema",
-	title: "Volt RPC contract",
+	title: "Volt protocol contract",
 	"x-volt-generated":
-		"Generated from packages/coding-agent/src/core/rpc/schema — run `npm run contract:rpc`; do not edit by hand.",
+		"Generated from packages/protocol/src — run `npm run contract:protocol`; do not edit by hand.",
 	"x-volt-open-events":
 		"The RpcServerEvent union is the declared vocabulary; plain-mode hosts pass additional session events through verbatim. Clients must ignore unknown event types.",
-	"x-volt-limits": RPC_WIRE_LIMITS,
+	"x-volt-limits": CONTRACT_LIMITS,
 	$defs: sortedDefs,
 };
 
@@ -146,17 +147,17 @@ const content = `${JSON.stringify(artifact, null, "\t")}\n`;
 
 if (checkOnly) {
 	if (!existsSync(artifactPath)) {
-		console.error("packages/coding-agent/contract/rpc-schema.json is missing.");
-		console.error("Run: npm run contract:rpc");
+		console.error(`${artifactRelativePath} is missing.`);
+		console.error("Run: npm run contract:protocol");
 		process.exit(1);
 	}
 	const current = readFileSync(artifactPath, "utf8");
 	if (current !== content) {
-		console.error("packages/coding-agent/contract/rpc-schema.json is out of date.");
-		console.error("Run: npm run contract:rpc");
+		console.error(`${artifactRelativePath} is out of date.`);
+		console.error("Run: npm run contract:protocol");
 		process.exit(1);
 	}
-	console.log("packages/coding-agent/contract/rpc-schema.json is up to date.");
+	console.log(`${artifactRelativePath} is up to date.`);
 } else {
 	mkdirSync(dirname(artifactPath), { recursive: true });
 	writeFileSync(artifactPath, content);

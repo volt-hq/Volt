@@ -9,6 +9,8 @@ import { isFragmentPath, isProductSourcePath, suggestFragment, suggestSlug } fro
 test("product source paths cover package src and exclude tests, docs, and generated files", () => {
 	assert.equal(isProductSourcePath("packages/coding-agent/src/core/session.ts"), true);
 	assert.equal(isProductSourcePath("packages/tui/src/tui.ts"), true);
+	assert.equal(isProductSourcePath("packages/protocol/src/entries.ts"), true);
+	assert.equal(isProductSourcePath("packages/protocol/contract/protocol-schema.json"), false);
 	assert.equal(isProductSourcePath("packages/ai/src/models.generated.ts"), false);
 	assert.equal(isProductSourcePath("packages/coding-agent/test/session.test.ts"), false);
 	assert.equal(isProductSourcePath("packages/coding-agent/docs/lsp.md"), false);

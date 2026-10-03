@@ -1,0 +1,78 @@
+{
+	"name": "@hansjm10/volt-protocol",
+	"version": "0.2.3",
+	"description": "Volt protocol schemas: conversation log entries, wire frames, the UiNode UI schema, and the JSON Schema contract artifact",
+	"type": "module",
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"volt-source": "./src/index.ts",
+			"import": "./dist/index.js"
+		},
+		"./entries": {
+			"types": "./dist/entries.d.ts",
+			"volt-source": "./src/entries.ts",
+			"import": "./dist/entries.js"
+		},
+		"./git-context": {
+			"types": "./dist/git-context.d.ts",
+			"volt-source": "./src/git-context.ts",
+			"import": "./dist/git-context.js"
+		},
+		"./wire-limits": {
+			"types": "./dist/wire-limits.d.ts",
+			"volt-source": "./src/wire-limits.ts",
+			"import": "./dist/wire-limits.js"
+		},
+		"./contract/protocol-schema.json": "./contract/protocol-schema.json",
+		"./package.json": "./package.json"
+	},
+	"files": [
+		"dist",
+		"contract/protocol-schema.json",
+		"README.md",
+		"LICENSE"
+	],
+	"publishConfig": {
+		"access": "public",
+		"tag": "latest"
+	},
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsc -p tsconfig.build.json",
+		"test": "vitest --run",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"dependencies": {
+		"@hansjm10/volt-ai": "^0.2.3",
+		"typebox": "1.1.38"
+	},
+	"keywords": [
+		"volt",
+		"protocol",
+		"json-schema",
+		"typebox"
+	],
+	"contributors": [
+		"Mario Zechner",
+		"Jordan Hans"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/volt-hq/Volt.git",
+		"directory": "packages/protocol"
+	},
+	"homepage": "https://github.com/volt-hq/Volt#readme",
+	"bugs": {
+		"url": "https://github.com/volt-hq/Volt/issues"
+	},
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"devDependencies": {
+		"vitest": "5.0.2"
+	}
+}

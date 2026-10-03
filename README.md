@@ -75,6 +75,7 @@ This repository contains the open-source CLI, host daemon, shared libraries, web
 |---------|-------------|
 | **[@hansjm10/volt-coding-agent](packages/coding-agent)** | Coding agent CLI, host daemon, SDK, and RPC integration |
 | **[@hansjm10/volt-agent-core](packages/agent)** | Agent runtime with tool calling and state management |
+| **[@hansjm10/volt-protocol](packages/protocol)** | Conversation log, wire frame, and `UiNode` schemas, and the protocol contract artifact |
 | **[@hansjm10/volt-ai](packages/ai)** | Unified multi-provider LLM API |
 | **[@hansjm10/volt-tui](packages/tui)** | Terminal UI library with differential rendering |
 

@@ -1,10 +1,10 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, getSupportedThinkingLevels, type Model, supportsFastInference } from "@hansjm10/volt-ai";
+import { RPC_COMMAND_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import type { AgentSessionServices } from "../../agent-session-services.ts";
 import { DEFAULT_THINKING_LEVEL } from "../../defaults.ts";
 import { findInitialModel } from "../../model-resolver.ts";
-import { RPC_COMMAND_SCHEMAS } from "../../rpc/schema/commands.ts";
 import type { RpcAgentMode, RpcCatalogModel } from "../../rpc/types.ts";
 import { isIrohRemoteWorkspaceName } from "./handshake.ts";
 import { createIrohRemoteRpcErrorResponse, type IrohRemoteRpcErrorResponse } from "./rpc-command-filter.ts";

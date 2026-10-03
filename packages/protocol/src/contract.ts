@@ -1,10 +1,8 @@
 /**
- * The RPC contract registry: every named schema, the top-level wire unions,
- * and the numeric limits block — everything the JSON Schema artifact
- * (contract/rpc-schema.json) is generated from.
- *
- * Loaded only by the artifact generator (scripts/generate-rpc-schema.ts) and
- * tests; the runtime imports individual schema modules instead.
+ * The protocol contract: the top-level RPC wire unions, every named schema
+ * (wire frames, log entries, and `UiNode`), and the numeric limits block —
+ * everything the JSON Schema artifact (contract/protocol-schema.json) is
+ * generated from by scripts/generate-protocol-schema.ts.
  */
 
 import {
@@ -20,62 +18,11 @@ import {
 	TextContentSchema,
 	ThinkingContentSchema,
 	ToolCallSchema,
+	ToolResultMessageSchema,
 	UsageSchema,
+	UserMessageSchema,
 } from "@hansjm10/volt-ai/schemas";
 import { type TSchema, Type } from "typebox";
-import {
-	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
-	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
-	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
-	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
-	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
-	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
-	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
-	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
-	MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
-	REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
-	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
-	RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
-	RPC_CLIENT_MESSAGE_ID_MAX_CHARS,
-	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
-	RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN,
-	RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES,
-	RPC_CONVERSATION_INPUT_MAX_IMAGES,
-	RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES,
-	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
-	RPC_GIT_CONTEXT_OBSERVED_AT_MAX_CHARS,
-	RPC_GIT_CONTEXT_OID_MAX_CHARS,
-	RPC_GIT_CONTEXT_OID_PATTERN,
-	RPC_GIT_CONTEXT_REF_MAX_CHARS,
-	RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS,
-	RPC_PROJECTION_STRING_MAX_UTF8_BYTES,
-	RPC_REMOTE_ERROR_STRINGS,
-	RPC_RETRY_AFTER_MS_MAX,
-	RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX,
-	RPC_SESSION_ACTIVE_TOOLS_MAX_ITEMS,
-	RPC_SESSION_ACTIVE_TOOLS_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_MODEL_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_QUEUE_ID_MAX_UTF8_BYTES,
-	RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES,
-	RPC_SESSION_QUEUE_MAX_ITEMS,
-	RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_STATE_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_TREE_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_TREE_PAGE_DEFAULT_ITEMS,
-	RPC_SESSION_TREE_PAGE_MAX_ITEMS,
-	RPC_STABLE_ERROR_CODES,
-	RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS,
-	RPC_TRANSCRIPT_PAGE_MAX_ITEMS,
-	RPC_WIRE_MAX_SAFE_INTEGER,
-} from "../wire-limits.ts";
 import {
 	RpcAgentOptionsDefaultConfigSchema,
 	RpcAgentOptionsModelSelectionSchema,
@@ -107,6 +54,20 @@ import {
 	RpcSlimAssistantEventSchema,
 	RpcTranscriptEntryEventSchema,
 } from "./conversation.ts";
+import {
+	BashExecutionMessageSchema,
+	ClientInputCommandSchema,
+	ClientInputPayloadSchema,
+	ClientInputQueuedDeliverySchema,
+	ClientInputQueuedPayloadSchema,
+	ClientInputStateSchema,
+	CORE_LOG_ENTRY_TYPES,
+	CustomMessageSchema,
+	LogEntrySchema,
+	LogEntryVisibilitySchema,
+	LogMessageSchema,
+	SessionReferenceSchema,
+} from "./entries.ts";
 import {
 	RpcAgentStartEventSchema,
 	RpcBackgroundJobsChangedEventSchema,
@@ -296,9 +257,84 @@ import {
 	UiActionStateTypeSchema,
 	UiActionStreamingBehaviorSchema,
 } from "./ui-actions.ts";
-
-export { RPC_COMMAND_SCHEMAS } from "./commands.ts";
-export { RPC_RESPONSE_SCHEMAS, RpcErrorResponseSchema } from "./responses.ts";
+import {
+	UI_NODE_LIMITS,
+	UiActionsNodeSchema,
+	UiCodeNodeSchema,
+	UiDiffNodeSchema,
+	UiFormNodeSchema,
+	UiImageNodeSchema,
+	UiKeyValueNodeSchema,
+	UiMarkdownNodeSchema,
+	UiNodeActionSchema,
+	UiNodeFormFieldSchema,
+	UiNodeIntentSchema,
+	UiNodeSchema,
+	UiNodeStyledLineSchema,
+	UiNodeStyledSpanSchema,
+	UiNodeStyledTextSchema,
+	UiNodeTextSchema,
+	UiNodeTokenSchema,
+	UiProgressNodeSchema,
+	UiTableNodeSchema,
+	UiTerminalNodeSchema,
+	UiTextNodeSchema,
+	UiTreeItemSchema,
+	UiTreeNodeSchema,
+} from "./ui-node.ts";
+import {
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
+	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
+	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
+	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
+	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
+	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
+	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
+	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
+	MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
+	REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
+	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
+	RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
+	RPC_CLIENT_MESSAGE_ID_MAX_CHARS,
+	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
+	RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN,
+	RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_IMAGE_MIME_TYPE_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES,
+	RPC_CONVERSATION_INPUT_MAX_IMAGES,
+	RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES,
+	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
+	RPC_GIT_CONTEXT_OBSERVED_AT_MAX_CHARS,
+	RPC_GIT_CONTEXT_OID_MAX_CHARS,
+	RPC_GIT_CONTEXT_OID_PATTERN,
+	RPC_GIT_CONTEXT_REF_MAX_CHARS,
+	RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS,
+	RPC_PROJECTION_STRING_MAX_UTF8_BYTES,
+	RPC_REMOTE_ERROR_STRINGS,
+	RPC_RETRY_AFTER_MS_MAX,
+	RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX,
+	RPC_SESSION_ACTIVE_TOOLS_MAX_ITEMS,
+	RPC_SESSION_ACTIVE_TOOLS_MAX_SERIALIZED_BYTES,
+	RPC_SESSION_MODEL_MAX_SERIALIZED_BYTES,
+	RPC_SESSION_QUEUE_ID_MAX_UTF8_BYTES,
+	RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES,
+	RPC_SESSION_QUEUE_MAX_ITEMS,
+	RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES,
+	RPC_SESSION_STATE_MAX_SERIALIZED_BYTES,
+	RPC_SESSION_TREE_MAX_SERIALIZED_BYTES,
+	RPC_SESSION_TREE_PAGE_DEFAULT_ITEMS,
+	RPC_SESSION_TREE_PAGE_MAX_ITEMS,
+	RPC_STABLE_ERROR_CODES,
+	RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS,
+	RPC_TRANSCRIPT_PAGE_MAX_ITEMS,
+	RPC_WIRE_MAX_SAFE_INTEGER,
+} from "./wire-limits.ts";
 
 // ============================================================================
 // Top-level wire unions
@@ -585,14 +621,54 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcMcpPromptContentResponse: RpcMcpPromptContentResponseSchema,
 	RpcMcpRecentCallsResponse: RpcMcpRecentCallsResponseSchema,
 	RpcErrorResponse: RpcErrorResponseSchema,
+
+	// Conversation log: envelope vocabulary, stored messages, client input
+	LogEntryVisibility: LogEntryVisibilitySchema,
+	SessionReference: SessionReferenceSchema,
+	UserMessage: UserMessageSchema,
+	ToolResultMessage: ToolResultMessageSchema,
+	BashExecutionMessage: BashExecutionMessageSchema,
+	CustomMessage: CustomMessageSchema,
+	LogMessage: LogMessageSchema,
+	ClientInputCommand: ClientInputCommandSchema,
+	ClientInputState: ClientInputStateSchema,
+	ClientInputQueuedDelivery: ClientInputQueuedDeliverySchema,
+	ClientInputPayload: ClientInputPayloadSchema,
+	ClientInputQueuedPayload: ClientInputQueuedPayloadSchema,
+
+	// UiNode
+	UiNodeToken: UiNodeTokenSchema,
+	UiNodeText: UiNodeTextSchema,
+	UiNodeStyledSpan: UiNodeStyledSpanSchema,
+	UiNodeStyledText: UiNodeStyledTextSchema,
+	UiNodeStyledLine: UiNodeStyledLineSchema,
+	UiNodeIntent: UiNodeIntentSchema,
+	UiNodeAction: UiNodeActionSchema,
+	UiNodeFormField: UiNodeFormFieldSchema,
+	UiTextNode: UiTextNodeSchema,
+	UiMarkdownNode: UiMarkdownNodeSchema,
+	UiTableNode: UiTableNodeSchema,
+	UiKeyValueNode: UiKeyValueNodeSchema,
+	UiProgressNode: UiProgressNodeSchema,
+	UiFormNode: UiFormNodeSchema,
+	UiActionsNode: UiActionsNodeSchema,
+	UiDiffNode: UiDiffNodeSchema,
+	UiTerminalNode: UiTerminalNodeSchema,
+	UiCodeNode: UiCodeNodeSchema,
+	UiImageNode: UiImageNodeSchema,
+	UiTreeItem: UiTreeItemSchema,
+	UiTreeNode: UiTreeNodeSchema,
+	UiNode: UiNodeSchema,
 };
 
 /**
  * Every named definition of the artifact. Per-command and per-response
- * members are keyed `RpcCommand.<type>` / `RpcResponse.<command>`; the four
- * wire unions close the map.
+ * members are keyed `RpcCommand.<type>` / `RpcResponse.<command>`, and the
+ * four wire unions follow them. Each core log entry type contributes
+ * `LogEntryPayload.<type>` and `LogEntry.<type>`; the `LogEntry` union closes
+ * the map.
  */
-export const RPC_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
+export const CONTRACT_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 	const registry = new Map<string, TSchema>(Object.entries(SHARED_SCHEMAS));
 	for (const [type, schema] of Object.entries(RPC_COMMAND_SCHEMAS)) {
 		registry.set(`RpcCommand.${type}`, schema);
@@ -604,17 +680,22 @@ export const RPC_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 	registry.set("RpcClientMessage", RpcClientMessageSchema);
 	registry.set("RpcResponse", RpcResponseSchema);
 	registry.set("RpcServerEvent", RpcServerEventSchema);
+	for (const definition of Object.values(CORE_LOG_ENTRY_TYPES)) {
+		registry.set(`LogEntryPayload.${definition.type}`, definition.payload);
+		registry.set(`LogEntry.${definition.type}`, definition.schema);
+	}
+	registry.set("LogEntry", LogEntrySchema);
 	return registry;
 })();
 
 // ============================================================================
-// Wire limits block (x-volt-limits)
+// Limits block (x-volt-limits)
 // ============================================================================
 
 /**
- * The numeric bounds and stable vocabularies clients mirror, exported into
- * the artifact as `x-volt-limits`. Values come from the same constants the
- * host enforces — the artifact cannot drift from the runtime.
+ * The numeric bounds and stable vocabularies of the RPC wire that clients
+ * mirror. Values come from the same constants the host enforces — the
+ * artifact cannot drift from the runtime.
  */
 export const RPC_WIRE_LIMITS = {
 	conversationIdentifierMaxUtf8Bytes: RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
@@ -690,3 +771,6 @@ export const RPC_WIRE_LIMITS = {
 	stableErrorCodes: RPC_STABLE_ERROR_CODES,
 	remoteErrorStrings: RPC_REMOTE_ERROR_STRINGS,
 } as const;
+
+/** Everything exported into the artifact as `x-volt-limits`: the RPC wire limits plus the `UiNode` bounds. */
+export const CONTRACT_LIMITS = { ...RPC_WIRE_LIMITS, uiNode: UI_NODE_LIMITS } as const;

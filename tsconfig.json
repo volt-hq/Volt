@@ -8,6 +8,8 @@
 			"@hansjm10/volt-ai/oauth": ["./packages/ai/src/oauth.ts"],
 			"@hansjm10/volt-ai/*": ["./packages/ai/src/*.ts", "./packages/ai/src/providers/*.ts"],
 			"@hansjm10/volt-ai/dist/*": ["./packages/ai/src/*"],
+			"@hansjm10/volt-protocol": ["./packages/protocol/src/index.ts"],
+			"@hansjm10/volt-protocol/*": ["./packages/protocol/src/*.ts"],
 			"@hansjm10/volt-agent-core": ["./packages/agent/src/index.ts"],
 			"@hansjm10/volt-agent-core/*": ["./packages/agent/src/*"],
 			"@hansjm10/volt-coding-agent": ["./packages/coding-agent/src/index.ts"],

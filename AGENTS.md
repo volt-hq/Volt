@@ -219,10 +219,11 @@ intended default provider for both install forms.
    **Publish Release** at that tag.
 5. Confirm npm trusted publishing succeeds before the draft GitHub Release is
    published. Confirm the published release contains only the approved assets,
-   and verify all four npm versions and provenance, `latest` on the new stable
-   version, `beta` on the historical `0.1.0`, and `bootstrap` on the inert
-   placeholder. For the first stable release, only then update public installers
-   and installation docs from `@beta` to unqualified stable installs.
+   and verify all five npm versions and provenance, `latest` on the new stable
+   version, `beta` on the historical `0.1.0` (`@hansjm10/volt-protocol`, added
+   after the beta, has no `beta`), and `bootstrap` on the inert placeholder.
+   For the first stable release, only then update public installers and
+   installation docs from `@beta` to unqualified stable installs.
 
 Normal release automation never pushes directly to `main`, creates a tag from
 an ordinary `GITHUB_TOKEN`, publishes npm locally, stores an npm token, rebuilds

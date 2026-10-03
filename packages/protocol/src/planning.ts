@@ -1,6 +1,48 @@
 import { Type } from "typebox";
-import type { PlanState } from "../../planning.ts";
 import { stringEnum } from "./helpers.ts";
+
+export type AgentMode = "build" | "plan";
+export type PlanPhase = "draft" | "ready" | "active" | "completed" | "handed_off";
+export type PlanStepStatus = "pending" | "in_progress" | "completed";
+export type PlanExecutionStrategy = "retain_context" | "new_session";
+
+export interface PlanItem {
+	id: string;
+	text: string;
+	status: PlanStepStatus;
+	note?: string;
+}
+
+export type PlanSubstep = PlanItem;
+
+export interface PlanStep extends PlanItem {
+	/** Optional executable children. Group status is derived from these leaves. */
+	substeps?: PlanSubstep[];
+}
+
+export interface PlanExecution {
+	id: string;
+	approvedRevision: number;
+	strategy: PlanExecutionStrategy;
+	sourceSessionId: string;
+	targetSessionId: string;
+}
+
+export interface PlanState {
+	id: string;
+	revision: number;
+	phase: PlanPhase;
+	title?: string;
+	summary?: string;
+	steps: PlanStep[];
+	execution?: PlanExecution;
+}
+
+/** Complete branch-local Plan mode snapshot. */
+export interface PlanningState {
+	mode: AgentMode;
+	plan: PlanState | null;
+}
 
 export const RpcAgentModeSchema = stringEnum(["build", "plan"]);
 export const RpcPlanPhaseSchema = stringEnum(["draft", "ready", "active", "completed", "handed_off"]);

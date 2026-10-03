@@ -497,6 +497,7 @@ test("GitHub-native release phases preserve their mutation boundaries end to end
 		execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 	const packageIdentities = [
 		["ai", "@hansjm10/volt-ai"],
+		["protocol", "@hansjm10/volt-protocol"],
 		["tui", "@hansjm10/volt-tui"],
 		["agent", "@hansjm10/volt-agent-core"],
 		["coding-agent", "@hansjm10/volt-coding-agent"],
@@ -552,7 +553,7 @@ test("GitHub-native release phases preserve their mutation boundaries end to end
 const { readFileSync, writeFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 if (args[0] === "run" && args[1] === "version:patch") {
-	for (const directory of ["ai", "tui", "agent", "coding-agent"]) {
+	for (const directory of ["ai", "protocol", "tui", "agent", "coding-agent"]) {
 		const path = "packages/" + directory + "/package.json";
 		const manifest = JSON.parse(readFileSync(path, "utf8"));
 		manifest.version = "0.1.1";
@@ -832,6 +833,99 @@ test("tag workflow verification supports the historical beta and idempotent stab
 	);
 });
 
+test("packages added after the beta reserve a placeholder and never carry a beta dist-tag", () => {
+	const name = "@hansjm10/volt-protocol";
+	const reserved = {
+		name,
+		versions: [BOOTSTRAP_VERSION],
+		"dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: BOOTSTRAP_VERSION },
+	};
+	const options = { historicalBeta: false };
+	assert.doesNotThrow(() => verifyPreflightPackageMetadata(name, "0.3.0", reserved, options));
+	assert.throws(() => verifyPreflightPackageMetadata(name, "0.3.0", reserved), /preserve the historical beta/);
+	assert.doesNotThrow(() => verifyTagWorkflowPackageMetadata(name, "0.3.0", reserved, options));
+	const published = {
+		...reserved,
+		versions: [BOOTSTRAP_VERSION, "0.3.0"],
+		"dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: "0.3.0" },
+	};
+	assert.doesNotThrow(() => verifyTagWorkflowPackageMetadata(name, "0.3.0", published, options));
+	assert.doesNotThrow(() => verifyPreflightPackageMetadata(name, "0.3.1", published, options));
+	assert.throws(
+		() =>
+			verifyTagWorkflowPackageMetadata(
+				name,
+				"0.3.0",
+				{ ...published, "dist-tags": { ...published["dist-tags"], latest: BOOTSTRAP_VERSION } },
+				options,
+			),
+		/latest does not point to it/,
+	);
+	assert.throws(
+		() =>
+			verifyTagWorkflowPackageMetadata(
+				name,
+				"0.3.0",
+				{ ...published, "dist-tags": { ...published["dist-tags"], beta: "0.3.0" } },
+				options,
+			),
+		/must have no beta release or dist-tag/,
+	);
+	assert.throws(
+		() =>
+			verifyPreflightPackageMetadata(
+				name,
+				"0.3.0",
+				{ ...reserved, "dist-tags": { bootstrap: "0.2.0", latest: BOOTSTRAP_VERSION } },
+				options,
+			),
+		/bootstrap on the inert placeholder/,
+	);
+
+	const release = {
+		name,
+		version: "0.3.0",
+		directory: "packages/protocol",
+		sourceCommit: "a".repeat(40),
+		packed: { integrity: "sha512-release" },
+		historicalBeta: false,
+		metadata: {
+			name,
+			version: "0.3.0",
+			repository: { url: "git+https://github.com/volt-hq/Volt.git", directory: "packages/protocol" },
+			"dist-tags": { bootstrap: BOOTSTRAP_VERSION, latest: "0.3.0" },
+			dist: {
+				integrity: "sha512-release",
+				attestations: {
+					url: "https://registry.npmjs.org/-/npm/v1/attestations/example",
+					provenance: { predicateType: NPM_PROVENANCE_PREDICATE_TYPE },
+				},
+			},
+		},
+	};
+	assert.doesNotThrow(() => assertPublishedPackageMatchesRelease(release));
+	assert.throws(
+		() => assertPublishedPackageMatchesRelease({ ...release, historicalBeta: true }),
+		/preserve the historical beta/,
+	);
+	assert.throws(
+		() =>
+			assertPublishedPackageMatchesRelease({
+				...release,
+				metadata: { ...release.metadata, "dist-tags": { ...release.metadata["dist-tags"], beta: "0.3.0" } },
+			}),
+		/must have no beta dist-tag/,
+	);
+	assert.throws(
+		() =>
+			assertPublishedPackageMatchesRelease({
+				...release,
+				metadata: { ...release.metadata, dist: { integrity: "sha512-release" } },
+			}),
+		/no valid npm provenance/,
+	);
+});
+
 test("release package versions and the product changelog must match the tag", () => {
 	const files = new Map();
 	for (const { directory, name } of RELEASE_PACKAGE_IDENTITIES) {
@@ -944,8 +1038,8 @@ test("shipped packages and standalone archives contain no development workflow t
 	const expectedFiles = {
 		"packages/agent": ["dist", "README.md", "LICENSE"],
 		"packages/ai": ["dist", "README.md", "LICENSE"],
+		"packages/protocol": ["dist", "contract/protocol-schema.json", "README.md", "LICENSE"],
 		"packages/coding-agent": [
-			"contract",
 			"dist",
 			"native/workspace-fs/prebuilds/manifest.json",
 			"native/workspace-fs/prebuilds/darwin-arm64/workspace-fs.node",
@@ -1037,12 +1131,38 @@ test("published docs are user-facing: docs.json navigation is the allowlist for 
 
 test("release tooling publishes only the canonical Volt package identities under the latest dist-tag", () => {
 	assert.deepEqual(RELEASE_PACKAGE_IDENTITIES, [
-		{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
-		{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
-		{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
-		{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
+		{ directory: "packages/ai", name: "@hansjm10/volt-ai", historicalBeta: true },
+		{ directory: "packages/protocol", name: "@hansjm10/volt-protocol", historicalBeta: false },
+		{ directory: "packages/tui", name: "@hansjm10/volt-tui", historicalBeta: true },
+		{ directory: "packages/agent", name: "@hansjm10/volt-agent-core", historicalBeta: true },
+		{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent", historicalBeta: true },
 	]);
 	const publishScript = readFileSync("scripts/publish.mjs", "utf8");
+	const publishedNames = [...publishScript.matchAll(/name: "(@hansjm10\/volt-[a-z-]+)"/g)].map((match) => match[1]);
+	assert.deepEqual(
+		publishedNames,
+		[
+			"@hansjm10/volt-ai",
+			"@hansjm10/volt-protocol",
+			"@hansjm10/volt-agent-core",
+			"@hansjm10/volt-tui",
+			"@hansjm10/volt-coding-agent",
+		],
+		"publish.mjs publishes every release package once, each after the workspace packages it depends on",
+	);
+	assert.match(publishScript, /must publish every release package identity/);
+	assert.equal(publishScript.match(/historicalBeta: pkg\.historicalBeta/g)?.length, 3);
+	for (const { directory, name } of RELEASE_PACKAGE_IDENTITIES) {
+		const manifest = JSON.parse(readFileSync(`${directory}/package.json`, "utf8"));
+		for (const dependency of Object.keys(manifest.dependencies ?? {}).filter((dependencyName) =>
+			dependencyName.startsWith("@hansjm10/volt-") && dependencyName !== "@hansjm10/volt-iroh",
+		)) {
+			assert.ok(
+				publishedNames.indexOf(dependency) < publishedNames.indexOf(name),
+				`${name} must publish after its dependency ${dependency}`,
+			);
+		}
+	}
 	assert.match(publishScript, /const NPM_DIST_TAG = "latest";/);
 	assert.match(publishScript, /"--tag", NPM_DIST_TAG/);
 	assert.ok(publishScript.indexOf('run("npm", ["publish"') < publishScript.lastIndexOf("verifyPublishedPackageAfterPublish({"));

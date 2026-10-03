@@ -1,10 +1,34 @@
 import { type AgentMessage, uuidv7 } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonCompatibleInput, JsonValue, Message, TextContent } from "@hansjm10/volt-ai";
+import {
+	type BranchSummaryEntryPayload,
+	type ClientInputQueuedEntryPayload,
+	type ClientInputReceiptEntryPayload,
+	type ClientInputStateEntryPayload,
+	type CompactionEntryPayload,
+	type CustomEntryPayload,
+	type CustomMessageEntryPayload,
+	type FastModeChangeEntryPayload,
+	type LabelEntryPayload,
+	type LeafEntryPayload,
+	type ModelChangeEntryPayload,
+	type PlanningStateChangeEntryPayload,
+	type ClientInputCommand as ProtocolClientInputCommand,
+	type ClientInputPayload as ProtocolClientInputPayload,
+	type ClientInputQueuedDelivery as ProtocolClientInputQueuedDelivery,
+	type ClientInputQueuedPayload as ProtocolClientInputQueuedPayload,
+	type ClientInputState as ProtocolClientInputState,
+	RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX,
+	RpcGitContextSchema,
+	type SessionInfoEntryPayload,
+	type SubagentSpawnEntryPayload,
+	type ThinkingLevelChangeEntryPayload,
+} from "@hansjm10/volt-protocol";
 import { randomUUID } from "crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync } from "fs";
 import { readdir } from "fs/promises";
 import { basename, join } from "path";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import { Check } from "typebox/value";
 import { isDeepStrictEqual, TextDecoder } from "util";
 import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -30,9 +54,7 @@ import {
 } from "./messages.ts";
 import { clonePlanningState, DEFAULT_PLANNING_STATE, type PlanningState, parsePlanningState } from "./planning.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
-import { RpcGitContextSchema } from "./rpc/schema/git-context.ts";
 import type { RpcGitContext } from "./rpc/types.ts";
-import { RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX } from "./rpc/wire-limits.ts";
 import {
 	assertClientMessageId,
 	boundClientInputError,
@@ -51,6 +73,7 @@ import {
 	validatePersistedSessionEntrySequence,
 	validateSessionEntryAdmissionReferences,
 } from "./session-entry-codec.ts";
+import type { PRODUCT_SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import {
 	acquireSharedSQLiteSessionStore,
 	digestSessionStoreTransactionPayload,
@@ -219,7 +242,7 @@ export interface SessionCanonicalProjection {
 
 export type SessionCanonicalAppend =
 	| { readonly type: "message"; readonly message: AgentMessage }
-	| { readonly type: "thinking_level_change"; readonly thinkingLevel: string }
+	| { readonly type: "thinking_level_change"; readonly thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"] }
 	| { readonly type: "model_change"; readonly provider: string; readonly modelId: string }
 	| { readonly type: "planning_state_change"; readonly planning: PlanningState }
 	| {
@@ -328,6 +351,11 @@ export interface NewSessionOptions {
 	origin?: SessionOrigin;
 }
 
+/**
+ * The stored form of a protocol log entry (@hansjm10/volt-protocol): the
+ * envelope fields flattened beside the payload fields. `visibility` is not
+ * stored; it is fixed per entry type.
+ */
 export interface SessionEntryBase {
 	type: string;
 	id: string;
@@ -339,22 +367,22 @@ export interface SessionEntryBase {
 
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
-	/** The stored message. A user message never carries its client input identity here. */
+	/**
+	 * The stored message. Typed as the runtime's open message union; the log
+	 * stores the protocol's message roles. A user message never carries its
+	 * client input identity here.
+	 */
 	message: AgentMessage;
 	/** Client input identity of a client-submitted user message, stored beside the message. */
 	clientMessageId?: string;
 }
 
-export type ClientInputCommand = "prompt" | "steer" | "follow_up";
-export type ClientInputState = "accepted" | "started" | "completed" | "failed";
-export type ClientInputStreamingBehavior = "steer" | "followUp";
-export type ClientInputQueuedDelivery = "steer" | "follow_up";
-
-export interface ClientInputPayload {
-	message: string;
-	images: ImageContent[];
-	streamingBehavior?: ClientInputStreamingBehavior;
-}
+export type ClientInputCommand = ProtocolClientInputCommand;
+/** The protocol's client input states this store writes; `withdrawn` arrives with the kernel's delivery queue. */
+export type ClientInputState = Exclude<ProtocolClientInputState, "withdrawn">;
+export type ClientInputStreamingBehavior = NonNullable<ProtocolClientInputPayload["streamingBehavior"]>;
+export type ClientInputQueuedDelivery = ProtocolClientInputQueuedDelivery;
+export type ClientInputPayload = ProtocolClientInputPayload;
 
 export interface ClientInputPayloadInput {
 	message: string;
@@ -362,11 +390,7 @@ export interface ClientInputPayloadInput {
 	streamingBehavior?: ClientInputStreamingBehavior;
 }
 
-export interface ClientInputQueuedPayload {
-	delivery: ClientInputQueuedDelivery;
-	message: string;
-	images: ImageContent[];
-}
+export type ClientInputQueuedPayload = ProtocolClientInputQueuedPayload;
 
 export interface ClientInputQueuedPayloadInput {
 	delivery: ClientInputQueuedDelivery;
@@ -385,29 +409,19 @@ export interface ClientInputQueuedPayloadInput {
  * user-message commits imply `completed`; handled non-message inputs append an
  * explicit terminal.
  */
-export interface ClientInputReceiptEntry extends SessionEntryBase {
+export interface ClientInputReceiptEntry extends SessionEntryBase, ClientInputReceiptEntryPayload {
 	type: "client_input_receipt";
-	clientMessageId: string;
-	command: ClientInputCommand;
-	semanticDigest: string;
-	input: ClientInputPayload;
 }
 
 /** Exact post-preflight queue intent, durable before queue admission is acknowledged. */
-export interface ClientInputQueuedEntry extends SessionEntryBase {
+export interface ClientInputQueuedEntry extends SessionEntryBase, ClientInputQueuedEntryPayload {
 	type: "client_input_queued";
-	receiptId: string;
-	clientMessageId: string;
-	queuedInput: ClientInputQueuedPayload;
 }
 
 /** Append-only state transition for a client input receipt. */
-export interface ClientInputStateEntry extends SessionEntryBase {
+export interface ClientInputStateEntry extends SessionEntryBase, Omit<ClientInputStateEntryPayload, "state"> {
 	type: "client_input_state";
-	receiptId: string;
-	clientMessageId: string;
 	state: ClientInputState;
-	error?: string;
 }
 
 export interface ClientInputRecord {
@@ -439,47 +453,31 @@ export interface ClientInputReservation {
 	created: boolean;
 }
 
-export interface ThinkingLevelChangeEntry extends SessionEntryBase {
+export interface ThinkingLevelChangeEntry extends SessionEntryBase, ThinkingLevelChangeEntryPayload {
 	type: "thinking_level_change";
-	thinkingLevel: string;
 }
 
-export interface FastModeChangeEntry extends SessionEntryBase {
+export interface FastModeChangeEntry extends SessionEntryBase, FastModeChangeEntryPayload {
 	type: "fast_mode_change";
-	enabled: boolean;
 }
 
-export interface ModelChangeEntry extends SessionEntryBase {
+export interface ModelChangeEntry extends SessionEntryBase, ModelChangeEntryPayload {
 	type: "model_change";
-	provider: string;
-	modelId: string;
 }
 
 /** Complete branch-local Plan mode snapshot. */
-export interface PlanningStateChangeEntry extends SessionEntryBase {
+export interface PlanningStateChangeEntry extends SessionEntryBase, PlanningStateChangeEntryPayload {
 	type: "planning_state_change";
-	planning: PlanningState;
 }
 
-export interface CompactionEntry extends SessionEntryBase {
+/** `details` is extension-specific JSON (e.g. structured-compaction markers); `fromHook` marks extension summaries. */
+export interface CompactionEntry extends SessionEntryBase, CompactionEntryPayload {
 	type: "compaction";
-	summary: string;
-	firstKeptEntryId: string;
-	tokensBefore: number;
-	/** Extension-specific JSON data (e.g., ArtifactIndex, version markers for structured compaction) */
-	details?: JsonValue;
-	/** True if generated by an extension, undefined/false if volt-generated (backward compatible) */
-	fromHook?: boolean;
 }
 
-export interface BranchSummaryEntry extends SessionEntryBase {
+/** `details` is extension-specific JSON that never reaches the model; `fromHook` marks extension summaries. */
+export interface BranchSummaryEntry extends SessionEntryBase, BranchSummaryEntryPayload {
 	type: "branch_summary";
-	fromId: string;
-	summary: string;
-	/** Extension-specific JSON data (not sent to LLM) */
-	details?: JsonValue;
-	/** True if generated by an extension, false if volt-generated */
-	fromHook?: boolean;
 }
 
 /**
@@ -492,32 +490,28 @@ export interface BranchSummaryEntry extends SessionEntryBase {
  * Does NOT participate in LLM context (ignored by buildSessionContext).
  * For injecting content into context, see CustomMessageEntry.
  */
-export interface CustomEntry extends SessionEntryBase {
+export interface CustomEntry extends SessionEntryBase, CustomEntryPayload {
 	type: "custom";
-	customType: string;
-	data?: JsonValue;
 }
 
 /** Label entry for user-defined bookmarks/markers on entries. */
-export interface LabelEntry extends SessionEntryBase {
+export interface LabelEntry extends SessionEntryBase, LabelEntryPayload {
 	type: "label";
-	targetId: string;
-	label?: string;
 }
 
 /** Session metadata entry (e.g., user-defined display name). */
-export interface SessionInfoEntry extends SessionEntryBase {
+export interface SessionInfoEntry extends SessionEntryBase, SessionInfoEntryPayload {
 	type: "session_info";
-	name?: string;
 }
 
 /**
  * First path-free Git observation for a newly created session. Host metadata
  * only: it never advances the conversation branch or enters model context.
  */
-export interface SessionStartGitContextEntry extends SessionEntryBase {
+export interface SessionStartGitContextEntry
+	extends SessionEntryBase,
+		Static<typeof PRODUCT_SESSION_ENTRY_TYPES.session_start_git_context.payload> {
 	type: "session_start_git_context";
-	gitContext: RpcGitContext | null;
 }
 
 /** Immutable host-owned PR checkout identity. Never imported, exported, or sent to the model. */
@@ -527,9 +521,8 @@ export interface PrReviewBindingEntry extends SessionEntryBase {
 }
 
 /** Durable host-only active-branch pointer. Never projected into conversation history. */
-export interface LeafEntry extends SessionEntryBase {
+export interface LeafEntry extends SessionEntryBase, LeafEntryPayload {
 	type: "leaf";
-	targetId: string | null;
 }
 
 /**
@@ -544,12 +537,8 @@ export interface LeafEntry extends SessionEntryBase {
  * - false: hidden entirely
  * - true: rendered with distinct styling (different from user messages)
  */
-export interface CustomMessageEntry extends SessionEntryBase {
+export interface CustomMessageEntry extends SessionEntryBase, CustomMessageEntryPayload {
 	type: "custom_message";
-	customType: string;
-	content: string | (TextContent | ImageContent)[];
-	details?: JsonValue;
-	display: boolean;
 }
 
 /**
@@ -565,16 +554,8 @@ export interface CustomMessageEntry extends SessionEntryBase {
  * reads these entries together with the named child transcripts to recover
  * results after a crash or runtime disposal (issue #129).
  */
-export interface SubagentSpawnEntry extends SessionEntryBase {
+export interface SubagentSpawnEntry extends SessionEntryBase, SubagentSpawnEntryPayload {
 	type: "subagent_spawn";
-	toolCallId: string;
-	subagentId: string;
-	agent: string;
-	childSessionId: string;
-	/** Durable child reference. Absent for in-memory children. */
-	childSessionRef?: SessionReference;
-	/** Dedup request key of the originating spawn request. Never projected to clients. */
-	requestKey: string;
 }
 
 /** Session entry - has id/parentId for tree structure (returned by "read" methods in SessionManager) */
@@ -2624,7 +2605,7 @@ export class SessionManager {
 	}
 
 	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
-	appendThinkingLevelChange(thinkingLevel: string): string {
+	appendThinkingLevelChange(thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"]): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			id: generateId(this.byId),

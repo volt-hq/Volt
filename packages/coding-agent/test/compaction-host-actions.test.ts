@@ -1,4 +1,5 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
+import { RpcUiActionStateChangedEventSchema, UiActionDescriptorSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
@@ -15,8 +16,6 @@ import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-gra
 import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
 import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
 import { subscribeRpcSessionEvents } from "../src/core/rpc/background-jobs.ts";
-import { RpcUiActionStateChangedEventSchema } from "../src/core/rpc/schema/events.ts";
-import { UiActionDescriptorSchema } from "../src/core/rpc/schema/ui-actions.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { UiActionDescriptor } from "../src/core/rpc/types.ts";
 import { getUiActionDescriptors } from "../src/core/rpc/ui-actions.ts";

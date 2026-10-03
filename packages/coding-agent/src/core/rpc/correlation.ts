@@ -1,5 +1,5 @@
 import { Buffer } from "node:buffer";
-import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "./wire-limits.ts";
+import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "@hansjm10/volt-protocol";
 
 export interface RpcErrorResponseTarget {
 	id: string | undefined;

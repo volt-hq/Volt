@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
+import { RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN } from "@hansjm10/volt-protocol";
 import * as fc from "fast-check";
 import { describe, expect, test } from "vitest";
 import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "../src/core/rpc/types.ts";
-import { RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN } from "../src/core/rpc/wire-limits.ts";
 import { isValidClientMessageId } from "../src/core/session-manager.ts";
 import {
 	RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,

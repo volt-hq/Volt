@@ -1,13 +1,13 @@
 import { Type } from "typebox";
+import { stringEnum } from "./helpers.ts";
+import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 import {
 	RPC_GIT_CONTEXT_OBSERVED_AT_MAX_CHARS,
 	RPC_GIT_CONTEXT_OID_MAX_CHARS,
 	RPC_GIT_CONTEXT_OID_PATTERN,
 	RPC_GIT_CONTEXT_REF_MAX_CHARS,
 	RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS,
-} from "../wire-limits.ts";
-import { stringEnum } from "./helpers.ts";
-import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
+} from "./wire-limits.ts";
 
 export const RpcGitObjectIdSchema = Type.String({
 	minLength: 40,

@@ -82,7 +82,7 @@ jobs:
         run: |
           ./test.sh run test:memory-benchmark
           ./test.sh run test:swebench-benchmark
-          ./test.sh test --workspace packages/agent --workspace packages/ai --workspace packages/tui --if-present
+          ./test.sh test --workspace packages/agent --workspace packages/ai --workspace packages/protocol --workspace packages/tui --if-present
           ./test.sh --prefix packages/coding-agent/examples/remote/firebase-push-relay/functions test
 
   test-linux:
@@ -222,7 +222,7 @@ jobs:
         run: |
           ./test.sh run test:memory-benchmark
           ./test.sh run test:swebench-benchmark
-          ./test.sh test --workspace packages/agent --workspace packages/ai --workspace packages/tui --if-present
+          ./test.sh test --workspace packages/agent --workspace packages/ai --workspace packages/protocol --workspace packages/tui --if-present
           ./test.sh --prefix packages/coding-agent/examples/remote/firebase-push-relay/functions test
 
       - name: Test coding-agent shard

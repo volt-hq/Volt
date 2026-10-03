@@ -5,105 +5,56 @@
  * Responses and events are emitted as JSON lines by the transport.
  *
  * Every type here is derived (`Static`) from the TypeBox contract schemas in
- * ./schema/ — the single source of truth shared by runtime validation and the
- * exported JSON Schema artifact (issue #90). The one exception is the
- * recursive RpcProjectionTruncation, which stays hand-written and is pinned
- * to its schema via `Type.Unsafe` in schema/projections.ts.
+ * @hansjm10/volt-protocol — the single source of truth shared by runtime
+ * validation and the exported JSON Schema artifact (issue #90). The one
+ * exception is the recursive RpcProjectionTruncation, which protocol keeps
+ * hand-written and pins to its schema via `Type.Unsafe`.
  */
 
 import type { Api, Model } from "@hansjm10/volt-ai";
-import type { Static } from "typebox";
 import type {
+	RPC_COMMAND_SCHEMAS,
+	RPC_RESPONSE_SCHEMAS,
+	RpcActiveAgentRunSchema,
+	RpcActiveCompactionSchema,
+	RpcActiveRetrySchema,
+	RpcActiveToolExecutionSchema,
+	RpcAgentModeSchema,
 	RpcAgentOptionsDefaultConfigSchema,
 	RpcAgentOptionsModelSelectionSchema,
 	RpcAgentOptionsSchema,
-} from "./schema/agent-options.ts";
-import type {
+	RpcAgentStartEventSchema,
+	RpcAssistantStreamPositionSchema,
 	RpcBackgroundJobSnapshotSchema,
 	RpcBackgroundJobSummarySchema,
+	RpcBackgroundJobsChangedEventSchema,
 	RpcCancelJobResponseSchema,
-	RpcListJobsResponseSchema,
-	RpcReadJobResponseSchema,
-} from "./schema/background-jobs.ts";
-import type { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema } from "./schema/commands.ts";
-import type {
+	RpcCatalogModelSchema,
+	RpcClientCapabilityFeatureSchema,
 	RpcConversationActiveAssistantSchema,
 	RpcConversationAssistantPartSchema,
+	RpcConversationAuthoritySchema,
 	RpcConversationBootstrapEventSchema,
+	RpcConversationBootstrapReasonSchema,
 	RpcConversationDeliveryPositionSchema,
+	RpcConversationDiscontinuityReasonSchema,
 	RpcConversationTranscriptItemSchema,
 	RpcConversationTranscriptPageSchema,
 	RpcConversationWorkflowSnapshotSchema,
-	RpcQueueUpdateEventSchema,
-	RpcSessionTreeNodeSchema,
-	RpcSessionTreePageSchema,
-	RpcTranscriptEntryEventSchema,
-} from "./schema/conversation.ts";
-import type {
-	RpcAgentStartEventSchema,
-	RpcBackgroundJobsChangedEventSchema,
+	RpcErrorResponseSchema,
 	RpcExtensionErrorEventSchema,
 	RpcExtensionUIRequestSchema,
 	RpcExtensionUIResponseSchema,
 	RpcGitContextChangedEventSchema,
+	RpcGitContextSchema,
 	RpcHostActionRequestSchema,
 	RpcHostActionResponseSchema,
 	RpcHostActionUpdateSchema,
-	RpcModelsChangedEventSchema,
-	RpcPendingHostActionsResponseSchema,
-	RpcPromptCacheChangedEventSchema,
-	RpcSubagentDisposedEventSchema,
-	RpcSubagentEndEventSchema,
-	RpcSubagentEventSchema,
-	RpcUiActionStateChangedEventSchema,
-} from "./schema/events.ts";
-import type { RpcGitContextSchema } from "./schema/git-context.ts";
-import type {
+	RpcKeepAwakeStatusSchema,
+	RpcListJobsResponseSchema,
+	RpcListSubagentsResponseSchema,
 	RpcMcpAuthResponseSchema,
 	RpcMcpCapabilitiesResponseSchema,
-	RpcSlashCommandSchema,
-} from "./schema/mcp.ts";
-import type {
-	RpcAgentModeSchema,
-	RpcPlanExecutionResultSchema,
-	RpcPlanExecutionSchema,
-	RpcPlanExecutionStrategySchema,
-	RpcPlanningStateChangedEventSchema,
-	RpcPlanningStateSchema,
-	RpcPlanPhaseSchema,
-	RpcPlanStateSchema,
-	RpcPlanStepSchema,
-	RpcPlanStepStatusSchema,
-} from "./schema/planning.ts";
-import type {
-	RpcAssistantStreamPositionSchema,
-	RpcConversationAuthoritySchema,
-	RpcConversationBootstrapReasonSchema,
-	RpcConversationDiscontinuityReasonSchema,
-	RpcPushPlatformSchema,
-	RpcPushProviderSchema,
-	RpcRegisterPushTargetArgsSchema,
-	RpcUiActionListScopeSchema,
-} from "./schema/primitives.ts";
-import type {
-	RpcProjectionCollectionTruncationSchema,
-	RpcReviewAcknowledgmentResponseSchema,
-	RpcReviewCompletionStatusSchema,
-	RpcReviewCorrectnessSchema,
-	RpcReviewFindingStatusSchema,
-	RpcReviewRunStatusSchema,
-	RpcReviewWorkflowDescriptorSchema,
-	RpcReviewWorkflowLifecycleStatusSchema,
-	RpcReviewWorkflowListResponseSchema,
-	RpcReviewWorkflowResultResponseSchema,
-	RpcWorkflowEventSchema,
-	RpcWorkflowKindSchema,
-	RpcWorkflowStatusSchema,
-	RpcWorkflowToolEventSchema,
-} from "./schema/projections.ts";
-import type {
-	RPC_RESPONSE_SCHEMAS,
-	RpcErrorResponseSchema,
 	RpcMcpPromptContentResponseSchema,
 	RpcMcpPromptsResponseSchema,
 	RpcMcpRecentCallsResponseSchema,
@@ -115,40 +66,69 @@ import type {
 	RpcMcpToolsResponseSchema,
 	RpcMessageImageSchema,
 	RpcMessageImagesResponseSchema,
-	RpcTranscriptEntryTextResponseSchema,
-} from "./schema/responses.ts";
-import type {
-	RpcActiveAgentRunSchema,
-	RpcActiveCompactionSchema,
-	RpcActiveRetrySchema,
-	RpcActiveToolExecutionSchema,
-	RpcCatalogModelSchema,
-	RpcKeepAwakeStatusSchema,
-	RpcListSubagentsResponseSchema,
+	RpcModelsChangedEventSchema,
+	RpcPendingHostActionsResponseSchema,
+	RpcPlanExecutionResultSchema,
+	RpcPlanExecutionSchema,
+	RpcPlanExecutionStrategySchema,
+	RpcPlanningStateChangedEventSchema,
+	RpcPlanningStateSchema,
+	RpcPlanPhaseSchema,
+	RpcPlanStateSchema,
+	RpcPlanStepSchema,
+	RpcPlanStepStatusSchema,
+	RpcProjectionCollectionTruncationSchema,
+	RpcPromptCacheChangedEventSchema,
 	RpcPromptCacheStatusSchema,
 	RpcPromptResponseSchema,
+	RpcPushPlatformSchema,
+	RpcPushProviderSchema,
 	RpcQueuedMessageSchema,
+	RpcQueueUpdateEventSchema,
 	RpcQueueUpdateProjectionSchema,
+	RpcReadJobResponseSchema,
+	RpcRegisterPushTargetArgsSchema,
 	RpcRegisterPushTargetResponseSchema,
+	RpcReviewAcknowledgmentResponseSchema,
+	RpcReviewCompletionStatusSchema,
+	RpcReviewCorrectnessSchema,
+	RpcReviewFindingStatusSchema,
+	RpcReviewRunStatusSchema,
+	RpcReviewWorkflowDescriptorSchema,
+	RpcReviewWorkflowLifecycleStatusSchema,
+	RpcReviewWorkflowListResponseSchema,
+	RpcReviewWorkflowResultResponseSchema,
 	RpcSessionListItemSchema,
 	RpcSessionStateProjectionSchema,
 	RpcSessionStateSchema,
+	RpcSessionTreeNodeSchema,
+	RpcSessionTreePageSchema,
 	RpcSessionWorkContextSchema,
 	RpcSessionWorkPullRequestSchema,
+	RpcSlashCommandSchema,
 	RpcSubagentDefinitionSchema,
 	RpcSubagentDefinitionSourceSchema,
+	RpcSubagentDisposedEventSchema,
+	RpcSubagentEndEventSchema,
+	RpcSubagentEventSchema,
 	RpcSubagentSourceInfoSchema,
 	RpcSubagentStartResponseSchema,
+	RpcSubscriptionUsageReportSchema,
+	RpcTranscriptEntryEventSchema,
+	RpcTranscriptEntryTextResponseSchema,
 	RpcTranscriptItemSchema,
 	RpcTranscriptResponseSchema,
 	RpcTranscriptSummaryItemSchema,
 	RpcTranscriptTextItemSchema,
 	RpcTranscriptToolItemSchema,
 	RpcTranscriptToolStatusSchema,
+	RpcUiActionListScopeSchema,
+	RpcUiActionStateChangedEventSchema,
 	RpcWebSearchStatusSchema,
-} from "./schema/session.ts";
-import type { RpcSubscriptionUsageReportSchema } from "./schema/subscription-usage.ts";
-import type {
+	RpcWorkflowEventSchema,
+	RpcWorkflowKindSchema,
+	RpcWorkflowStatusSchema,
+	RpcWorkflowToolEventSchema,
 	UiActionArgumentDescriptorSchema,
 	UiActionArgumentTypeSchema,
 	UiActionCapabilitiesSchema,
@@ -169,9 +149,10 @@ import type {
 	UiActionStateDescriptorSchema,
 	UiActionStateTypeSchema,
 	UiActionStreamingBehaviorSchema,
-} from "./schema/ui-actions.ts";
+} from "@hansjm10/volt-protocol";
+import type { Static } from "typebox";
 
-export { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "./wire-limits.ts";
+export { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES } from "@hansjm10/volt-protocol";
 
 export type RpcModel = Model<Api>;
 /** A model as reported to clients with host-owned selectable capabilities. */
@@ -195,7 +176,7 @@ export type RpcAgentOptions = Static<typeof RpcAgentOptionsSchema>;
 
 /**
  * The client→host command union, derived member-by-member from the TypeBox
- * contract schemas (schema/commands.ts). Every member carries a correlation
+ * contract schemas (RPC_COMMAND_SCHEMAS). Every member carries a correlation
  * `id` that is optional except where the command contract requires it
  * (invoke_ui_action and report_stream_discontinuity), plus an optional
  * `conversationAuthority`.
@@ -238,20 +219,7 @@ export type UiActionInvocationResponse = Static<typeof UiActionInvocationRespons
 export type RpcWorkflowKind = Static<typeof RpcWorkflowKindSchema>;
 export type RpcWorkflowStatus = Static<typeof RpcWorkflowStatusSchema>;
 
-/**
- * Describes a value whose wire projection was reduced to satisfy a byte
- * budget. Hand-written because it is recursive; schema/projections.ts pins
- * the schema to this exact type.
- */
-export interface RpcProjectionTruncation {
-	truncated: true;
-	/** UTF-8 JSON bytes before projection, or null when intentionally unmeasured or not JSON-serializable. */
-	originalBytes: number | null;
-	/** UTF-8 JSON bytes after projection, excluding this metadata record. */
-	projectedBytes: number;
-	omittedEntries?: number;
-	fields?: Record<string, RpcProjectionTruncation>;
-}
+export type { RpcProjectionTruncation } from "@hansjm10/volt-protocol";
 
 /** Describes a bounded ordered collection. Included entries always retain source order. */
 export type RpcProjectionCollectionTruncation = Static<typeof RpcProjectionCollectionTruncationSchema>;
@@ -422,7 +390,7 @@ export type RpcPromptResponse = Static<typeof RpcPromptResponseSchema>;
 
 /**
  * The host→client response union: one success member per command plus the
- * catch-all error member, derived from schema/responses.ts.
+ * catch-all error member, derived from RPC_RESPONSE_SCHEMAS.
  */
 export type RpcResponse =
 	| { [K in RpcCommandType]: Static<(typeof RPC_RESPONSE_SCHEMAS)[K]> }[RpcCommandType]

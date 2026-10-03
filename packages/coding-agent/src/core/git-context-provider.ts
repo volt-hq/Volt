@@ -1,10 +1,10 @@
 import type { ChildProcess } from "node:child_process";
 import { existsSync, type FSWatcher, readFileSync, statSync, watch } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { RPC_GIT_CONTEXT_REF_MAX_CHARS, RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS } from "@hansjm10/volt-protocol";
 import { spawnProcess } from "../utils/child-process.ts";
 import { discoverGitWorktree, type GitWorktreeLocation, getGitRepositoryDisplayName } from "./git-repository.ts";
 import type { RpcGitContext } from "./rpc/types.ts";
-import { RPC_GIT_CONTEXT_REF_MAX_CHARS, RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS } from "./rpc/wire-limits.ts";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 2500;
 const DEFAULT_MAX_STDOUT_BYTES = 1024 * 1024;

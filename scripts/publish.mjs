@@ -10,9 +10,12 @@ import {
 	TRANSIENT_NPM_REGISTRY_FAILURE,
 	verifyPublishedPackageAfterPublish,
 } from "./npm-publish-verification.mjs";
+import { RELEASE_PACKAGE_IDENTITIES } from "./verify-release-provenance.mjs";
 
+// Dependency order: a package publishes only after every workspace package it depends on.
 const packages = [
 	{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
+	{ directory: "packages/protocol", name: "@hansjm10/volt-protocol", requiredPackFiles: ["contract/protocol-schema.json"] },
 	{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
 	{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
 	{
@@ -20,7 +23,16 @@ const packages = [
 		name: "@hansjm10/volt-coding-agent",
 		requiredPackFiles: ["dist/remote/iroh-native-adapter.cjs"],
 	},
-];
+].map((pkg) => {
+	const identity = RELEASE_PACKAGE_IDENTITIES.find(({ name }) => name === pkg.name);
+	if (!identity || identity.directory !== pkg.directory) {
+		throw new Error(`${pkg.name} is not a release package identity`);
+	}
+	return { ...pkg, historicalBeta: identity.historicalBeta };
+});
+if (packages.length !== RELEASE_PACKAGE_IDENTITIES.length || new Set(packages.map(({ name }) => name)).size !== packages.length) {
+	throw new Error("scripts/publish.mjs must publish every release package identity");
+}
 const NPM_DIST_TAG = "latest";
 
 const dryRun = process.argv.includes("--dry-run");
@@ -137,6 +149,7 @@ for (const pkg of packages) {
 				sourceCommit,
 				packed,
 				metadata: publishedMetadata,
+				historicalBeta: pkg.historicalBeta,
 			});
 			console.log(`${pkg.name}@${version} is already published and matches this release.`);
 		} else {
@@ -154,6 +167,7 @@ for (const pkg of packages) {
 			sourceCommit,
 			packed,
 			metadata: publishedMetadata,
+			historicalBeta: pkg.historicalBeta,
 		});
 		console.log(`Skipping ${pkg.name}@${version}: already published from this exact release\n`);
 		continue;
@@ -168,6 +182,7 @@ for (const pkg of packages) {
 		directory: pkg.directory,
 		sourceCommit,
 		packed,
+		historicalBeta: pkg.historicalBeta,
 	}, getPublishedMetadata);
 	console.log();
 }

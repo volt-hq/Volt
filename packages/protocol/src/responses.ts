@@ -5,13 +5,11 @@
  * shape fails typecheck.
  */
 
-import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { JsonValue } from "@hansjm10/volt-ai";
 import { type TLiteral, type TObject, type TOptional, type TSchema, type TString, Type } from "typebox";
-import type { RpcCommandType } from "../types.ts";
-import { RPC_STABLE_ERROR_CODES } from "../wire-limits.ts";
 import { RpcAgentOptionsSchema } from "./agent-options.ts";
 import { RpcCancelJobResponseSchema, RpcListJobsResponseSchema, RpcReadJobResponseSchema } from "./background-jobs.ts";
+import type { RPC_COMMAND_SCHEMAS } from "./commands.ts";
 import { RpcSessionTreePageSchema } from "./conversation.ts";
 import { RpcPendingHostActionsResponseSchema } from "./events.ts";
 import { opaque, openStringEnum } from "./helpers.ts";
@@ -65,6 +63,9 @@ import {
 	UiActionInvocationResponseSchema,
 	UiActionListResponseSchema,
 } from "./ui-actions.ts";
+import { RPC_STABLE_ERROR_CODES } from "./wire-limits.ts";
+
+type RpcCommandType = keyof typeof RPC_COMMAND_SCHEMAS;
 
 // ============================================================================
 // Response data bodies for host-internal result types
@@ -559,7 +560,7 @@ export const RPC_RESPONSE_SCHEMAS = {
 		Type.Object(
 			{
 				messages: Type.Array(
-					opaque<AgentMessage>(
+					opaque<unknown>(
 						"open AgentMessage union (extensible via declaration merging); local-only command, remote-unsupported",
 					),
 				),

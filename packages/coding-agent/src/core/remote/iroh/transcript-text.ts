@@ -1,7 +1,7 @@
-import { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "../../rpc/wire-limits.ts";
+import { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "@hansjm10/volt-protocol";
 import { type IrohRemoteOutboundSanitizerOptions, sanitizeIrohRemoteOutbound } from "./outbound-filter.ts";
 
-export { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "../../rpc/wire-limits.ts";
+export { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "@hansjm10/volt-protocol";
 
 export type IrohRemoteTranscriptTextLayout = "preserve" | "summary";
 

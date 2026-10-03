@@ -1,4 +1,5 @@
 import { stripVTControlCharacters } from "node:util";
+import { RpcBackgroundJobSnapshotSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import type { BackgroundJobSource } from "../background-jobs.ts";
@@ -8,7 +9,6 @@ import {
 	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
 } from "../host-actions.ts";
 import { isUsableRpcConversationIdentifier } from "./correlation.ts";
-import { RpcBackgroundJobSnapshotSchema } from "./schema/background-jobs.ts";
 import type { RpcBackgroundJobSnapshot, RpcBackgroundJobSummary, RpcBackgroundJobsChangedEvent } from "./types.ts";
 
 /** Whitelist metadata; never copy retained output into state or change events. */
