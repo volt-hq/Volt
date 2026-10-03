@@ -98,13 +98,11 @@ function createRuntime(largePayload: string): AgentSessionRuntime {
 			activeToolExecutions: pendingToolExecutions,
 			getSteeringMessages: () =>
 				Array.from({ length: 3 }, (_, index) => ({
-					queueEntryId: `steering-${index}`,
 					clientMessageId: `steering-${index}`,
 					text: largePayload,
 				})),
 			getFollowUpMessages: () =>
 				Array.from({ length: 3 }, (_, index) => ({
-					queueEntryId: `follow-up-${index}`,
 					clientMessageId: `follow-up-${index}`,
 					text: largePayload,
 				})),
@@ -224,8 +222,8 @@ describe("conversation projection resource bounds", () => {
 		const projected = projectRpcQueueUpdate({
 			type: "queue_update",
 			steering: [
-				{ queueEntryId: "client-a", clientMessageId: "client-a", text: oversizedText },
-				{ queueEntryId: "client-b", clientMessageId: "client-b", text: oversizedText },
+				{ clientMessageId: "client-a", text: oversizedText },
+				{ clientMessageId: "client-b", text: oversizedText },
 			],
 			followUp: [],
 		}) as {
@@ -244,7 +242,7 @@ describe("conversation projection resource bounds", () => {
 		const steering = Array.from({ length: 128 }, (_, index) => {
 			const prefix = `client-${index}-`;
 			const clientMessageId = `${prefix}${"x".repeat(256 - prefix.length)}`;
-			return { queueEntryId: clientMessageId, clientMessageId, text: escapedText };
+			return { clientMessageId, text: escapedText };
 		});
 		const projected = projectRpcQueueUpdate({
 			type: "queue_update",
@@ -399,7 +397,6 @@ describe("conversation projection resource bounds", () => {
 	it("bounds projection traversal before omitted queue, tool, and workflow tails", () => {
 		const runtime = createRuntime("small");
 		const queue = Array.from({ length: 128 }, (_, index) => ({
-			queueEntryId: `queued-${index}`,
 			clientMessageId: `queued-${index}`,
 			text: `queued-${index}`,
 		}));

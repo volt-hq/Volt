@@ -15,7 +15,7 @@ type AgentSessionEvent =
   | Exclude<AgentEvent, { type: "agent_end" }>
   | { type: "agent_end"; messages: AgentMessage[]; willRetry: boolean }
   | { type: "agent_settled" }
-  | { type: "queue_update"; steering: readonly string[]; followUp: readonly string[] }
+  | { type: "queue_update"; steering: readonly { clientMessageId: string; text: string }[]; followUp: readonly { clientMessageId: string; text: string }[] }
   | { type: "compaction_start"; reason: "manual" | "threshold" | "overflow" }
   | { type: "compaction_end"; reason: "manual" | "threshold" | "overflow"; result: CompactionResult | undefined; aborted: boolean; willRetry: boolean; errorMessage?: string }
   | { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }

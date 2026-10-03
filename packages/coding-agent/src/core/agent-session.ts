@@ -223,7 +223,6 @@ import type { BranchSummaryEntry, ClientInputCommand, SessionEntry, SessionManag
 import {
 	CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES,
 	getLatestCompactionEntry,
-	RUNTIME_QUEUE_ENTRY_ID_PREFIX,
 	type SessionReference,
 	serializeSessionJsonlSnapshot,
 } from "./session-manager.ts";
@@ -305,22 +304,19 @@ export interface ActiveCompaction {
 }
 
 /**
- * One user message waiting in an agent queue.
- *
- * `queueEntryId` is the runtime dequeue identity for every producer. A remote
- * caller's durable idempotency identity is retained separately so locally
- * queued TUI input never accidentally becomes a durable client receipt.
+ * One user input waiting in the conversation's durable queue: its client
+ * input identity and its queued text. Input that arrived without an identity
+ * (local TUI, SDK, and extension input) carries the one the session gave it.
  */
 export interface AgentSessionQueuedMessage {
-	readonly queueEntryId: string;
-	readonly clientMessageId?: string;
+	readonly clientMessageId: string;
 	readonly text: string;
 }
 
 /**
  * Prefix of the durable identity the session gives input that arrives without
- * one (local TUI, SDK, and extension input). Every input is durable; only
- * caller-supplied identities are shown to clients.
+ * one (local TUI, SDK, and extension input). Every input is durable; outcomes
+ * are reported only for caller-supplied identities.
  */
 const LOCAL_CLIENT_INPUT_ID_PREFIX = "local-";
 
@@ -627,8 +623,6 @@ interface LiveClientInput {
 	readonly done: PromiseWithResolvers<void>;
 	/** The turn operation it was admitted to start: that turn delivers it, or it fails once that turn ended. */
 	operationId: string | undefined;
-	/** The caller saw it admitted. */
-	acknowledged: boolean;
 	/**
 	 * Input without a caller identity (local input, a message that triggers a
 	 * turn): when its turn or the session stops before delivering it, it is
@@ -775,12 +769,14 @@ export class AgentSession {
 	private _runtimeErrorMessage: string | undefined;
 	private _publishedPromptCacheStatus: { status: PromptCacheStatus | undefined } | undefined;
 
-	/** Pending steering input, projected from the conversation's durable queue for UI display. */
-	private _steeringMessages: AgentSessionQueuedMessage[] = [];
-	/** Pending follow-up input, projected from the conversation's durable queue for UI display. */
-	private _followUpMessages: AgentSessionQueuedMessage[] = [];
-	/** Queue text captured by the synchronous dispose fence for one final editor handback. */
+	/**
+	 * Queue text handed back once the queue can no longer be cleared durably:
+	 * captured by the synchronous dispose fence, or by the first clear after
+	 * the log is lost. Once it is set, the session shows no queue.
+	 */
 	private _disposedQueueHandback: { steering: string[]; followUp: string[] } | undefined;
+	/** The queue the session last published, serialized, so it publishes only changes. */
+	private _publishedQueue: string | undefined;
 	/** The ready plan a delivery claimed for its transition to draft, and the input that owns the claim. */
 	private _readyPlanClaim: { planKey: string; owner: string | undefined } | undefined;
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
@@ -1173,7 +1169,8 @@ export class AgentSession {
 			});
 			this._planningRuntimeInitialized = true;
 			this._syncPlanningRuntime();
-			this._projectQueue(this._conversation.queue);
+			this._publishQueue();
+			await this._readmitRecoveredInputs();
 			this._recoveredClientInputReplayPending = clientInputRecovery(this._conversation.state).kind !== "idle";
 			this._unsubscribeBackgroundJobs = this._backgroundJobs.subscribe(() => {
 				this._activityChanged();
@@ -2358,70 +2355,86 @@ export class AgentSession {
 		}
 	}
 
-	private _emitQueueUpdate(): void {
-		this._emit({
-			type: "queue_update",
-			steering: this._steeringMessages.map((entry) => ({ ...entry })),
-			followUp: this._followUpMessages.map((entry) => ({ ...entry })),
-		});
-	}
-
-	private _emitClientInputOutcome(
-		clientMessageId: string,
-		outcome: "failed",
-		reason: "queue_cleared" | "dispatch_failed",
-	): void {
-		this._emit({ type: "client_input_outcome", clientMessageId, outcome, reason });
-	}
-
 	private _ambiguousRecoveredClientInputError(clientMessageId: string): ClientInputOutcomeAmbiguousError {
 		return new ClientInputOutcomeAmbiguousError(
 			`client_input_outcome_ambiguous: ${JSON.stringify(clientMessageId)} crossed its durable dispatch boundary before restart but has no canonical or terminal record; later queued input remains fenced`,
 		);
 	}
 
-	/** The queue entry a queued user input projects for UI display; host messages project none. */
-	private _queuedEntry(message: AgentMessage): AgentSessionQueuedMessage[] {
-		if (message.role !== "user") return [];
-		const clientMessageId = getClientMessageId(message);
-		if (clientMessageId === undefined) return [];
-		return this._queueDisplayEntry(clientMessageId, messageText(message));
+	/**
+	 * The queue: the fold's queued client inputs with a client origin, in
+	 * admission order, that the conversation holds for delivery. Input being
+	 * delivered or withdrawn has left it. Recovered input fenced behind an
+	 * ambiguous predecessor stays visible, though nothing delivers it. Host
+	 * messages are queued too, but show no text.
+	 */
+	private _queueView(): { steering: AgentSessionQueuedMessage[]; followUp: AgentSessionQueuedMessage[] } {
+		const steering: AgentSessionQueuedMessage[] = [];
+		const followUp: AgentSessionQueuedMessage[] = [];
+		if (this._disposedQueueHandback) return { steering, followUp };
+		const state = this._conversation.state;
+		const queue = this._conversation.queue;
+		const held = new Set([...queue.steer, ...queue.followUp].flatMap((message) => getClientMessageId(message) ?? []));
+		const fenced = clientInputRecovery(state).kind === "blocked";
+		for (const clientMessageId of state.clientInputs.queued) {
+			const record = state.clientInputs.inputs.get(clientMessageId);
+			const queued = record?.queuedInput;
+			if (!queued || record.origin === "host" || (!fenced && !held.has(clientMessageId))) continue;
+			(queued.delivery === "steer" ? steering : followUp).push({ clientMessageId, text: queued.message });
+		}
+		return { steering, followUp };
 	}
 
-	private _queueDisplayEntry(clientMessageId: string, text: string): AgentSessionQueuedMessage[] {
-		return isLocalClientInputId(clientMessageId)
-			? [
-					{
-						queueEntryId: `${RUNTIME_QUEUE_ENTRY_ID_PREFIX}${clientMessageId.slice(LOCAL_CLIENT_INPUT_ID_PREFIX.length)}`,
-						text,
-					},
-				]
-			: [{ queueEntryId: clientMessageId, clientMessageId, text }];
+	/** Publish the queue when it changed since the session last published it. */
+	private _publishQueue(): void {
+		const queue = this._queueView();
+		const serialized = JSON.stringify(queue);
+		if (serialized === this._publishedQueue) return;
+		this._publishedQueue = serialized;
+		this._emit({ type: "queue_update", ...queue });
 	}
 
-	/** Project the conversation's pending steering and follow-up input for UI display. */
-	private _projectQueue(queue: ConversationQueue): void {
-		const steering = queue.steer.flatMap((message) => this._queuedEntry(message));
-		const followUp = queue.followUp.flatMap((message) => this._queuedEntry(message));
-		// Recovered input fenced behind an ambiguous predecessor stays visible, though nothing delivers it.
-		const recovery = clientInputRecovery(this._conversation.state);
-		if (recovery.kind === "blocked") {
-			const shown = new Set([...steering, ...followUp].map((entry) => entry.queueEntryId));
-			for (const record of recovery.records) {
-				const queued = record.queuedInput;
-				if (record.state !== "accepted" || queued === undefined || record.origin === "host") continue;
-				for (const entry of this._queueDisplayEntry(record.clientMessageId, queued.message)) {
-					if (shown.has(entry.queueEntryId)) continue;
-					(queued.delivery === "steer" ? steering : followUp).push(entry);
-				}
-			}
+	/**
+	 * Report the outcome of an identified input its client was told is queued:
+	 * when its admission completes withdrawn or failed, the client learns it
+	 * from `client_input_outcome`. Local input has no client to tell.
+	 */
+	private _reportQueuedOutcome(admission: ConversationInputAdmission): void {
+		const clientMessageId = admission.clientMessageId;
+		if (isLocalClientInputId(clientMessageId)) return;
+		void admission.completion.then(
+			(outcome) => {
+				if (outcome.state === "completed") return;
+				this._emit({
+					type: "client_input_outcome",
+					clientMessageId,
+					outcome: "failed",
+					reason: outcome.state === "withdrawn" ? "queue_cleared" : "dispatch_failed",
+				});
+			},
+			// A conversation that ended first reports no outcome; the input stays recoverable.
+			() => undefined,
+		);
+	}
+
+	/**
+	 * Admit again, as idempotent resubmissions that record nothing, the
+	 * identified inputs a previous runtime left queued or mid-dispatch, so
+	 * their clients learn their outcomes like those of input queued now.
+	 */
+	private async _readmitRecoveredInputs(): Promise<void> {
+		const { inputs, queued, started } = this._conversation.state.clientInputs;
+		for (const clientMessageId of [...started, ...queued]) {
+			const record = inputs.get(clientMessageId);
+			if (!record || record.origin !== undefined || isLocalClientInputId(clientMessageId)) continue;
+			const { message, images, streamingBehavior } = record.input;
+			const admission = await this._conversation.admitInput(
+				record.command,
+				{ clientMessageId, message, images, ...(streamingBehavior === undefined ? {} : { streamingBehavior }) },
+				{ deliver: false },
+			);
+			this._reportQueuedOutcome(admission);
 		}
-		if (isDeepStrictEqual(steering, this._steeringMessages) && isDeepStrictEqual(followUp, this._followUpMessages)) {
-			return;
-		}
-		this._steeringMessages = steering;
-		this._followUpMessages = followUp;
-		this._emitQueueUpdate();
 	}
 
 	/** Every conversation event, in publication order. */
@@ -2429,11 +2442,13 @@ export class AgentSession {
 		if (this._disposed) return;
 		switch (event.type) {
 			case "committed":
-				// The session manager's view already includes the batch.
+				// The session manager's view already includes the batch. A client input's
+				// state can change the queue without the conversation's queue changing.
+				if (event.entries.some((entry) => entry.type.startsWith("client_input_"))) this._publishQueue();
 				return;
 			case "queue_changed":
 				this._backgroundJobs.setSteeringPending(event.queue.steer.length > 0);
-				this._projectQueue(event.queue);
+				this._publishQueue();
 				return;
 			case "phase_changed":
 				await this._onPhaseChanged(event.phase);
@@ -2507,7 +2522,7 @@ export class AgentSession {
 		if (this._lostError) return;
 		for (const [clientMessageId, error] of [...this._failedDeliveryInputs]) {
 			this._failedDeliveryInputs.delete(clientMessageId);
-			await this._failClientInput(clientMessageId, error, "dispatch_failed");
+			await this._failClientInput(clientMessageId, error);
 		}
 		for (const clientMessageId of this._extensionInputIds) {
 			const state = this._conversation.state.clientInputs.inputs.get(clientMessageId)?.state;
@@ -2526,7 +2541,6 @@ export class AgentSession {
 			await this._failClientInput(
 				clientMessageId,
 				fatalError ?? new Error("Client input stopped before its canonical user message committed"),
-				"dispatch_failed",
 				fatalError === undefined,
 			);
 		}
@@ -2543,16 +2557,11 @@ export class AgentSession {
 	}
 
 	/**
-	 * Record a client input's failure: its pending delivery is withdrawn, a
-	 * prompt that admitted it rejects, and an acknowledged input reports the
-	 * outcome.
+	 * Record a client input's failure: its pending delivery is withdrawn and a
+	 * prompt that admitted it rejects. A client told its input was queued
+	 * learns the outcome from the input's admission.
 	 */
-	private async _failClientInput(
-		clientMessageId: string,
-		error: Error,
-		reason: "queue_cleared" | "dispatch_failed",
-		interrupted = false,
-	): Promise<void> {
+	private async _failClientInput(clientMessageId: string, error: Error, interrupted = false): Promise<void> {
 		const live = this._liveClientInputs.get(clientMessageId);
 		const state = this._conversation.state.clientInputs.inputs.get(clientMessageId)?.state;
 		// Local input a stop interrupted before delivery is withdrawn, as a cancelled run is.
@@ -2565,11 +2574,6 @@ export class AgentSession {
 					withdraw ? { state: "withdrawn" } : { state: "failed", error: boundClientInputError(error.message) },
 				);
 				if (withdraw) reported = undefined;
-				// A client that was told its input was admitted (or recovered) learns the outcome here;
-				// a caller still awaiting admission gets the error itself.
-				else if (!isLocalClientInputId(clientMessageId) && (live === undefined || live.acknowledged)) {
-					this._emitClientInputOutcome(clientMessageId, "failed", reason);
-				}
 			} catch (settleError) {
 				reported = settleError instanceof Error ? settleError : new Error(String(settleError));
 			}
@@ -2737,13 +2741,7 @@ export class AgentSession {
 		if (event.type === "message_end" && delivered) {
 			this._acknowledgeDeliveredNotice(event.message);
 			const clientMessageId = getClientMessageId(event.message);
-			if (clientMessageId !== undefined) {
-				const live = this._liveClientInputs.get(clientMessageId);
-				if (live) {
-					live.acknowledged = true;
-					live.accepted.resolve("admitted");
-				}
-			}
+			if (clientMessageId !== undefined) this._liveClientInputs.get(clientMessageId)?.accepted.resolve("admitted");
 		}
 	}
 
@@ -3022,10 +3020,7 @@ export class AgentSession {
 			this._backgroundStartAcknowledgements.clear();
 			this._streamingMessage = undefined;
 			this._pendingToolExecutions.clear();
-			this._disposedQueueHandback = {
-				steering: this._steeringMessages.map((entry) => entry.text),
-				followUp: this._followUpMessages.map((entry) => entry.text),
-			};
+			this._disposedQueueHandback = this._queueText();
 			this._fenceExtensionGeneration();
 			let resolveDisposal!: () => void;
 			let rejectDisposal!: (reason: unknown) => void;
@@ -4439,7 +4434,6 @@ export class AgentSession {
 			accepted: Promise.withResolvers<PromptAdmissionOutcome>(),
 			done: Promise.withResolvers<void>(),
 			operationId: undefined,
-			acknowledged: false,
 			local,
 		};
 		void live.accepted.promise.catch(() => {});
@@ -4550,7 +4544,7 @@ export class AgentSession {
 		} catch (error) {
 			const admissionError = this._clientInputError(error);
 			if (this._liveClientInputs.get(clientMessageId) === started) {
-				await this._failClientInput(clientMessageId, admissionError, "dispatch_failed");
+				await this._failClientInput(clientMessageId, admissionError);
 			}
 			started.accepted.reject(admissionError);
 			started.done.reject(admissionError);
@@ -4582,7 +4576,6 @@ export class AgentSession {
 		const live = this._liveClientInputs.get(clientMessageId);
 		if (!live) return;
 		this._liveClientInputs.delete(clientMessageId);
-		live.acknowledged = true;
 		live.accepted.resolve(outcome);
 		live.done.resolve();
 	}
@@ -4633,9 +4626,6 @@ export class AgentSession {
 					});
 					this._assertActive();
 					if (abortGeneration !== this._abortGeneration) throw new Error("Review recovery was aborted");
-					if (!isLocalClientInputId(record.clientMessageId)) {
-						this._emitClientInputOutcome(record.clientMessageId, "failed", "dispatch_failed");
-					}
 				}
 				this._recoveredClientInputReplayPending = false;
 				return;
@@ -4823,11 +4813,7 @@ export class AgentSession {
 		} catch (error) {
 			reservation?.cancel();
 			if (admission?.kind === "start" && clientMessageId !== undefined) {
-				await this._failClientInput(
-					clientMessageId,
-					error instanceof Error ? error : new Error(String(error)),
-					"dispatch_failed",
-				);
+				await this._failClientInput(clientMessageId, error instanceof Error ? error : new Error(String(error)));
 			}
 			throw error;
 		}
@@ -4871,7 +4857,7 @@ export class AgentSession {
 			// Leaving `started` would misreport it as a lost owner and fence every
 			// later input after a reload.
 			if (live && clientMessageId !== undefined) {
-				await this._failClientInput(clientMessageId, normalized, "dispatch_failed");
+				await this._failClientInput(clientMessageId, normalized);
 			}
 			throw normalized;
 		}
@@ -5017,11 +5003,10 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
-				if (this.pendingMessageCount >= AGENT_SESSION_MAX_QUEUED_MESSAGES) {
-					throw new Error(`Agent queue is limited to ${AGENT_SESSION_MAX_QUEUED_MESSAGES} messages`);
-				}
+				this._assertQueueCapacity();
 				if (options.streamingBehavior === "steer") this._invalidateExtensionWork();
-				await this._trackQueueAdmission(this._conversation.prompt(input));
+				const admission = await this._trackQueueAdmission(this._conversation.prompt(input));
+				if (admission.ordinals.length > 0) this._reportQueuedOutcome(admission);
 				if (identifiedClientMessageId !== undefined) {
 					this._completeLiveClientInput(identifiedClientMessageId, "admitted");
 				}
@@ -5139,7 +5124,6 @@ export class AgentSession {
 			// Unidentified local/UI-action prompts still need a bounded admission
 			// signal so their caller need not hold lifecycle ownership for the full
 			// provider turn.
-			tracked.acknowledged = true;
 			preflightResult?.({ success: true, outcome: "admitted" });
 		}
 		void admitted.completion.then(
@@ -5322,9 +5306,7 @@ export class AgentSession {
 		if (text.startsWith("/")) {
 			this._throwIfExtensionCommand(text);
 		}
-		if (this.pendingMessageCount >= AGENT_SESSION_MAX_QUEUED_MESSAGES) {
-			throw new Error(`Agent queue is limited to ${AGENT_SESSION_MAX_QUEUED_MESSAGES} messages`);
-		}
+		this._assertQueueCapacity();
 
 		// Expand skill commands and prompt templates
 		let expandedText = this._expandSkillCommand(text);
@@ -5333,15 +5315,25 @@ export class AgentSession {
 			...input,
 			prepared: { message: expandedText, ...(images === undefined ? {} : { images }) },
 		};
+		let admission: ConversationInputAdmission;
 		try {
 			if (command === "steer") {
 				this._invalidateExtensionWork();
-				await this._trackQueueAdmission(this._conversation.steer(prepared));
+				admission = await this._trackQueueAdmission(this._conversation.steer(prepared));
 			} else {
-				await this._trackQueueAdmission(this._conversation.followUp(prepared));
+				admission = await this._trackQueueAdmission(this._conversation.followUp(prepared));
 			}
 		} catch (error) {
 			throw this._clientInputError(error);
+		}
+		// A concurrent duplicate joins the first admission, which reports the outcome.
+		if (admission.ordinals.length > 0) this._reportQueuedOutcome(admission);
+	}
+
+	/** The durable queue holds at most {@link AGENT_SESSION_MAX_QUEUED_MESSAGES} inputs, host messages included. */
+	private _assertQueueCapacity(): void {
+		if (this._conversation.state.clientInputs.queued.length >= AGENT_SESSION_MAX_QUEUED_MESSAGES) {
+			throw new Error(`Agent queue is limited to ${AGENT_SESSION_MAX_QUEUED_MESSAGES} messages`);
 		}
 	}
 
@@ -5447,7 +5439,6 @@ export class AgentSession {
 				await this._failClientInput(
 					admission.clientMessageId,
 					new Error("The turn for the message could not start"),
-					"dispatch_failed",
 				);
 			}
 			void admission.completion.then(
@@ -5540,62 +5531,49 @@ export class AgentSession {
 	 */
 	async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
 		if (this._disposed || this._lostError !== undefined) {
-			const handback = this._disposedQueueHandback ?? {
-				steering: this._steeringMessages.map((entry) => entry.text),
-				followUp: this._followUpMessages.map((entry) => entry.text),
-			};
+			const handback = this._disposedQueueHandback ?? this._queueText();
 			this._disposedQueueHandback = { steering: [], followUp: [] };
-			this._steeringMessages = [];
-			this._followUpMessages = [];
 			return { steering: [...handback.steering], followUp: [...handback.followUp] };
 		}
 		// Input still being admitted is part of the queue being cleared.
 		await Promise.allSettled([...this._queueAdmissions]);
-		const steering = this._steeringMessages.map((entry) => entry.text);
-		const followUp = this._followUpMessages.map((entry) => entry.text);
+		const queued = this._queueText();
 		let cleared: ConversationQueue;
 		try {
 			cleared = await this._conversation.clearQueue();
 		} catch (error) {
-			// The thrown error carries the text back; the queue display hands it over once.
-			this._steeringMessages = [];
-			this._followUpMessages = [];
-			this._emitQueueUpdate();
-			throw new QueueClearPersistenceError(error instanceof Error ? error : new Error(String(error)), {
-				steering,
-				followUp,
-			});
+			// The conversation no longer holds the input, so the thrown error carries its text back.
+			throw new QueueClearPersistenceError(error instanceof Error ? error : new Error(String(error)), queued);
 		}
-		const entries = (messages: readonly AgentMessage[]) => messages.flatMap((message) => this._queuedEntry(message));
-		const clearedSteering = entries(cleared.steer);
-		const clearedFollowUp = entries(cleared.followUp);
-		for (const entry of [...clearedSteering, ...clearedFollowUp]) {
-			if (entry.clientMessageId !== undefined) {
-				this._emitClientInputOutcome(entry.clientMessageId, "failed", "queue_cleared");
-			}
-		}
-		return {
-			steering: clearedSteering.map((entry) => entry.text),
-			followUp: clearedFollowUp.map((entry) => entry.text),
-		};
+		// Client input delivers a user message with its identity; host messages show no text.
+		const text = (messages: readonly AgentMessage[]) =>
+			messages.flatMap((message) => (getClientMessageId(message) === undefined ? [] : [messageText(message)]));
+		return { steering: text(cleared.steer), followUp: text(cleared.followUp) };
+	}
+
+	/** The queue's text, as an editor takes it back. */
+	private _queueText(): { steering: string[]; followUp: string[] } {
+		const { steering, followUp } = this._queueView();
+		return { steering: steering.map((entry) => entry.text), followUp: followUp.map((entry) => entry.text) };
 	}
 
 	/** Number of pending messages (includes both steering and follow-up) */
 	get pendingMessageCount(): number {
 		this._assertNotDisposed();
-		return this._steeringMessages.length + this._followUpMessages.length;
+		const { steering, followUp } = this._queueView();
+		return steering.length + followUp.length;
 	}
 
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly AgentSessionQueuedMessage[] {
 		this._assertNotDisposed();
-		return this._steeringMessages;
+		return this._queueView().steering;
 	}
 
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly AgentSessionQueuedMessage[] {
 		this._assertNotDisposed();
-		return this._followUpMessages;
+		return this._queueView().followUp;
 	}
 
 	get resourceLoader(): ResourceLoader {

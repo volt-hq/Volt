@@ -7,6 +7,7 @@ import {
 	type ConversationLogEntry,
 	type ConversationLogLostError,
 	type ConversationLogPage,
+	clientInputRecovery,
 	InMemoryConversationLog,
 	uuidv7,
 } from "@hansjm10/volt-agent-core";
@@ -296,7 +297,7 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 		});
 		// Nothing can record an outcome after the loss; the durable input stays recoverable for the next writer.
 		expect(harness.sessionManager.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
-		expect(harness.sessionManager.getClientInputRecoveryPlan()).toMatchObject({
+		expect(clientInputRecovery(harness.sessionManager.getConversationState())).toMatchObject({
 			kind: "replay",
 			records: [{ clientMessageId }],
 		});

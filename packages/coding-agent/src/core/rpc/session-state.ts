@@ -14,7 +14,7 @@ import {
 import type { AgentSession, AgentSessionQueuedMessage } from "../agent-session.ts";
 import { DEFAULT_PLANNING_STATE } from "../planning.ts";
 import { projectReviewDiscussionLink } from "../review-discussions.ts";
-import { isRuntimeQueueEntryId, isValidClientMessageId } from "../session-manager.ts";
+import { isValidClientMessageId } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
 import { listRpcBackgroundJobs } from "./background-jobs.ts";
 import { projectSubagentDetails } from "./transcript.ts";
@@ -332,15 +332,11 @@ export function projectRpcQueuedMessages(values: readonly AgentSessionQueuedMess
 } {
 	const sources: Array<{ clientMessageId: string; text: string }> = [];
 	for (let index = 0; index < values.length && index < RPC_SESSION_QUEUE_MAX_ITEMS; index++) {
-		const source = values[index]!;
-		const clientMessageId = source.clientMessageId ?? source.queueEntryId;
-		if (
-			(source.clientMessageId === undefined && !isRuntimeQueueEntryId(clientMessageId)) ||
-			(source.clientMessageId !== undefined && !isValidClientMessageId(clientMessageId))
-		) {
+		const { clientMessageId, text } = values[index]!;
+		if (!isValidClientMessageId(clientMessageId)) {
 			throw new Error("RPC queue projection received an invalid queue identity");
 		}
-		sources.push({ clientMessageId, text: source.text });
+		sources.push({ clientMessageId, text });
 	}
 
 	// Reserve the complete identity skeleton before spending any budget on

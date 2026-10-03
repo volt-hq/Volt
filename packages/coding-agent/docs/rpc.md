@@ -1869,10 +1869,12 @@ Emitted whenever the pending steering or follow-up queue changes.
 ```json
 {
   "type": "queue_update",
-  "steering": ["Focus on error handling"],
-  "followUp": ["After that, summarize the result"]
+  "steering": [{"clientMessageId": "msg-7", "text": "Focus on error handling"}],
+  "followUp": [{"clientMessageId": "local-0b6f2c4e-8d1a-4f5e-9c3b-2a7d6e1f4b90", "text": "After that, summarize the result"}]
 }
 ```
+
+Each entry is a queued input's `clientMessageId` and its queued text. Input that arrived without a client identity (typed in the terminal or sent by an extension) carries the `local-` identity the host gave it.
 
 ### compaction_start / compaction_end
 

@@ -1,7 +1,12 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type AgentMessage, type ConversationLogAppend, ConversationLogLostError } from "@hansjm10/volt-agent-core";
+import {
+	type AgentMessage,
+	type ConversationLogAppend,
+	ConversationLogLostError,
+	clientInputRecovery,
+} from "@hansjm10/volt-agent-core";
 import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
@@ -493,7 +498,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 
 		const reopened = await own(SessionManager.open(sessionRef));
 		expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
-		expect(reopened.getClientInputRecoveryPlan()).toMatchObject({
+		expect(clientInputRecovery(reopened.getConversationState())).toMatchObject({
 			kind: "replay",
 			records: [{ clientMessageId }],
 		});
@@ -636,14 +641,14 @@ describe("regression #217: commits whose outcome is unknown", () => {
 					userTexts: ["unproven feedback"],
 				});
 				expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "completed" });
-				expect(reopened.getClientInputRecoveryPlan()).toMatchObject({
+				expect(clientInputRecovery(reopened.getConversationState())).toMatchObject({
 					kind: "replay",
 					records: [{ clientMessageId: laterClientMessageId }],
 				});
 			} else {
 				expect(snapshotEntries(reopened.getBranch())).toEqual(baseline);
 				expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
-				expect(reopened.getClientInputRecoveryPlan()).toMatchObject({
+				expect(clientInputRecovery(reopened.getConversationState())).toMatchObject({
 					kind: "replay",
 					records: [{ clientMessageId }, { clientMessageId: laterClientMessageId }],
 				});

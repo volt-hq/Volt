@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import type { RpcReviewDiscussionLink } from "@hansjm10/volt-protocol";
 import {
 	closeLocalSessionManager,
@@ -495,7 +496,7 @@ export class AgentSessionRuntime {
 			})
 			.catch((error: unknown) => {
 				if (!state.cancellationRequested && this.session === session && !this.sessionInvalidated) {
-					const recovery = session.sessionManager.getClientInputRecoveryPlan();
+					const recovery = clientInputRecovery(session.sessionManager.getConversationState());
 					const message =
 						recovery.kind === "blocked"
 							? `Client input ${JSON.stringify(recovery.blocker.clientMessageId)} has an ambiguous post-restart outcome; later durable queued input remains visible but fenced from automatic replay.`
@@ -885,11 +886,11 @@ export class AgentSessionRuntime {
 			this.assertStructuralOperationCurrent(options.operation);
 			const previousSessionId = options.previousSessionId ?? this.session.sessionId;
 			const sessionId = options.sessionManager.getSessionId();
-			const clientInputRecovery = this.session.sessionManager.getClientInputRecoveryPlan();
-			if (clientInputRecovery.kind === "blocked") {
+			const recovery = clientInputRecovery(this.session.sessionManager.getConversationState());
+			if (recovery.kind === "blocked") {
 				throw new Error("Cannot replace the session while a durable client input outcome is ambiguous");
 			}
-			if (clientInputRecovery.kind === "replay") {
+			if (recovery.kind === "replay") {
 				throw new Error("Cannot replace the session while durable client input is still queued");
 			}
 			if (previousSessionId === sessionId) {

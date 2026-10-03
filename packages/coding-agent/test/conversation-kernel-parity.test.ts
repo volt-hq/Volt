@@ -86,7 +86,7 @@ async function expectParity(session: SessionManager): Promise<ConversationState>
 	for (const clientMessageId of state.clientInputs.inputs.keys()) {
 		expect(state.clientInputs.inputs.get(clientMessageId)).toEqual(session.getClientInput(clientMessageId));
 	}
-	expect(clientInputRecovery(state)).toEqual(session.getClientInputRecoveryPlan());
+	expect(clientInputRecovery(state)).toEqual(clientInputRecovery(session.getConversationState()));
 	if (session.isPersisted()) await expectStoreParity(session, state);
 	return state;
 }

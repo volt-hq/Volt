@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ConversationLogAppend } from "@hansjm10/volt-agent-core";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
@@ -85,7 +86,7 @@ describe("#474 live pre-commit client input failures are terminal", () => {
 		);
 		expect(failure).toBeInstanceOf(Error);
 		expect(manager.getClientInput("stuck")).toMatchObject({ state: "failed", error: failure!.message });
-		expect(manager.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+		expect(clientInputRecovery(manager.getConversationState())).toEqual({ kind: "idle", records: [] });
 
 		// A same-ID retry replays the definitive failure instead of dispatching again.
 		await expect(harness.session.prompt("Continue", { clientMessageId: "stuck" })).rejects.toThrow(failure!.message);
@@ -99,7 +100,7 @@ describe("#474 live pre-commit client input failures are terminal", () => {
 		await harness.session.waitForClosed();
 		const reopened = await SessionManager.open(ref, tempDir);
 		expect(reopened.getClientInput("stuck")?.state).toBe("failed");
-		expect(reopened.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+		expect(clientInputRecovery(reopened.getConversationState())).toEqual({ kind: "idle", records: [] });
 		const replacement = await createHarness({ sessionManager: reopened });
 		harnesses.push(replacement);
 		replacement.setResponses([fauxAssistantMessage("resumed reply")]);
@@ -153,7 +154,7 @@ describe("#474 live pre-commit client input failures are terminal", () => {
 
 		expect(await promptOutcome).toMatchObject({ message });
 		expect(manager.getClientInput(clientMessageId)?.state).toBe("failed");
-		expect(manager.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+		expect(clientInputRecovery(manager.getConversationState())).toEqual({ kind: "idle", records: [] });
 		expect(getUserTexts(harness)).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
@@ -194,7 +195,7 @@ describe("#474 live pre-commit client input failures are terminal", () => {
 		});
 		expect(preflight).toEqual([{ success: false }]);
 		expect(manager.getClientInput(clientMessageId)?.state).toBe("failed");
-		expect(manager.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
+		expect(clientInputRecovery(manager.getConversationState())).toEqual({ kind: "idle", records: [] });
 		expect(getUserTexts(harness)).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});

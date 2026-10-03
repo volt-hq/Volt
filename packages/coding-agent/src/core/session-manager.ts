@@ -31,7 +31,6 @@ import {
 	type ClientInputQueuedDelivery as ProtocolClientInputQueuedDelivery,
 	type ClientInputQueuedPayload as ProtocolClientInputQueuedPayload,
 	type ClientInputState as ProtocolClientInputState,
-	RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX,
 	RpcGitContextSchema,
 	type SessionInfoEntryPayload,
 	type SubagentSpawnEntryPayload,
@@ -251,16 +250,6 @@ export interface ClientInputRecord {
 	canonicalEntryId?: string;
 }
 
-/**
- * Durable automatic-recovery state. A started receipt without a canonical or
- * terminal boundary is an at-most-once ambiguity fence: queued receipts remain
- * visible, but none may be dispatched automatically past that uncertainty.
- */
-export type ClientInputRecoveryPlan =
-	| { kind: "idle"; records: [] }
-	| { kind: "replay"; records: ClientInputRecord[] }
-	| { kind: "blocked"; records: ClientInputRecord[]; blocker: ClientInputRecord };
-
 export interface ThinkingLevelChangeEntry extends SessionEntryBase, ThinkingLevelChangeEntryPayload {
 	type: "thinking_level_change";
 }
@@ -413,15 +402,9 @@ export {
 	CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES,
 	isValidClientMessageId,
 };
-export const RUNTIME_QUEUE_ENTRY_ID_PREFIX = RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Runtime-only dequeue identity. This namespace is never valid at paired-client ingress. */
-export function isRuntimeQueueEntryId(value: unknown): value is string {
-	return typeof value === "string" && value.startsWith(RUNTIME_QUEUE_ENTRY_ID_PREFIX) && value.length <= 64;
 }
 
 export function createClientInputSemanticDigest(command: ClientInputCommand, input: ClientInputPayloadInput): string {
@@ -1471,8 +1454,9 @@ export class SessionManager {
 	/**
 	 * The fold of the committed entries: the leaf, the branch context (messages,
 	 * model, thinking level, Fast mode), the plan state, labels, the name, and
-	 * client inputs. An immutable value; a later commit replaces it. Folded on
-	 * read, so a run of writes folds once.
+	 * client inputs, the durable queue among them (`clientInputRecovery` of it
+	 * is the recovery plan). An immutable value; a later commit replaces it.
+	 * Folded on read, so a run of writes folds once.
 	 */
 	getConversationState(): ConversationState {
 		const ordinal = this.getOrdinal();
@@ -1488,30 +1472,6 @@ export class SessionManager {
 	getClientInput(clientMessageId: string): ClientInputRecord | undefined {
 		const record = this.clientInputsById.get(clientMessageId);
 		return record ? cloneClientInputRecord(record) : undefined;
-	}
-
-	getClientInputRecoveryPlan(): ClientInputRecoveryPlan {
-		const commitOrdinal = (record: ClientInputRecord): number => {
-			const admissionEntry = record.queuedEntryId
-				? this.byId.get(record.queuedEntryId)
-				: this.byId.get(record.receiptId);
-			return admissionEntry?.ordinal ?? Number.MAX_SAFE_INTEGER;
-		};
-		const records = Array.from(this.clientInputsById.values())
-			.filter((record) => record.state === "accepted" && record.queuedInput !== undefined)
-			.sort((a, b) => commitOrdinal(a) - commitOrdinal(b))
-			.map(cloneClientInputRecord);
-		const blocker = Array.from(this.clientInputsById.values())
-			.filter((record) => record.state === "started")
-			.sort((a, b) => commitOrdinal(a) - commitOrdinal(b))[0];
-		if (blocker) {
-			return { kind: "blocked", records, blocker: cloneClientInputRecord(blocker) };
-		}
-		return records.length > 0 ? { kind: "replay", records } : { kind: "idle", records: [] };
-	}
-
-	getRecoverableQueuedClientInputs(): ClientInputRecord[] {
-		return this.getClientInputRecoveryPlan().records;
 	}
 
 	/** The log position: ordinal of the newest committed entry. */

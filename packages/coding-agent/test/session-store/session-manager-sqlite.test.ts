@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CURRENT_SESSION_VERSION, SessionManager } from "../../src/core/session-manager.ts";
 import {
@@ -210,7 +211,7 @@ describe("SQLite-backed SessionManager", () => {
 		await pending.closePersistence();
 		const continued = await own(SessionManager.continueRecent(cwd, sessionDir));
 		expect(continued.getSessionRef()).toEqual(pending.getSessionRef());
-		expect(continued.getClientInputRecoveryPlan()).toMatchObject({
+		expect(clientInputRecovery(continued.getConversationState())).toMatchObject({
 			kind: "replay",
 			records: [{ clientMessageId: "queued-recovery", state: "accepted" }],
 		});
@@ -228,7 +229,7 @@ describe("SQLite-backed SessionManager", () => {
 		await manager.closePersistence();
 		const continued = await own(SessionManager.continueRecent(cwd, sessionDir));
 		expect(continued.getSessionRef()).toEqual(manager.getSessionRef());
-		expect(continued.getClientInputRecoveryPlan()).toMatchObject({
+		expect(clientInputRecovery(continued.getConversationState())).toMatchObject({
 			kind: "blocked",
 			blocker: { clientMessageId: "started-recovery", state: "started" },
 		});

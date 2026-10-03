@@ -279,8 +279,8 @@ describe("RPC contract emission conformance", () => {
 	test("projectRpcQueueUpdate output validates against the queue_update schema", () => {
 		const projected = projectRpcQueueUpdate({
 			type: "queue_update",
-			steering: [{ queueEntryId: "local-queue:1", clientMessageId: "m-1", text: "steer this" }],
-			followUp: [{ queueEntryId: "local-queue:2", text: "later" }],
+			steering: [{ clientMessageId: "m-1", text: "steer this" }],
+			followUp: [{ clientMessageId: "local-2", text: "later" }],
 		});
 		expect(Compile(RpcQueueUpdateEventSchema).Errors(projected)).toEqual([]);
 	});

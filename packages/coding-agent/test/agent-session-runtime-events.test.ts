@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
@@ -1322,7 +1323,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		);
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(originalSession.sessionManager.getClientInput("replacement-queued-input")?.state).toBe("accepted");
-		expect(originalSession.sessionManager.getRecoverableQueuedClientInputs()).toHaveLength(1);
+		expect(clientInputRecovery(originalSession.sessionManager.getConversationState()).records).toHaveLength(1);
 		expect(originalSession.getSteeringMessages().map((entry) => entry.text)).toEqual([
 			"must stay with old conversation",
 		]);

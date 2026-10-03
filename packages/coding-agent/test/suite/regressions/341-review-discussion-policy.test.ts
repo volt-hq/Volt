@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -612,7 +613,7 @@ describe("Regression #341: persisted review discussion policy", () => {
 				state: "failed",
 				error: expect.stringContaining("interrupted"),
 			});
-		expect(item.sessionManager.getClientInputRecoveryPlan().kind).toBe("idle");
+		expect(clientInputRecovery(item.sessionManager.getConversationState()).kind).toBe("idle");
 		await item.session.prompt("Retry the discussion explicitly", { source: "rpc", clientMessageId: "fresh-retry" });
 		expect(respond).toHaveBeenCalledOnce();
 		expect(item.session.messages.filter((message) => message.role === "user")).toHaveLength(1);
