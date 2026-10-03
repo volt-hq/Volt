@@ -14,6 +14,7 @@ import {
 import { type Static, Type } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { SessionWriter } from "../session-writer.ts";
 import type {
 	SubagentActivity,
 	SubagentActivityListener,
@@ -360,6 +361,8 @@ export interface SubagentToolManager {
 
 export interface SubagentToolOptions {
 	manager: SubagentToolManager;
+	/** Writer of the session that runs this tool; each spawned child's durable spawn edge commits through it. */
+	sessionWriter?: SessionWriter;
 	/** Return the parent/session tool policy to clamp child tools at execution time. */
 	getAllowedTools?: () => string[] | undefined;
 	maxOutputBytes?: number;
@@ -2597,7 +2600,9 @@ export function createSubagentToolDefinition(
 								: delegationLease
 									? { delegationScope: delegationLease.scope }
 									: {}),
-							spawnRecord: { toolCallId, requestKey },
+							...(options.sessionWriter
+								? { spawnRecord: { toolCallId, requestKey, writer: options.sessionWriter } }
+								: {}),
 						});
 						void trackCleanup(
 							startPromise

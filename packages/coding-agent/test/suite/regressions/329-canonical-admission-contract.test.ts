@@ -70,8 +70,8 @@ describe("PR #329 canonical entry admission contract", () => {
 	it("rejects a schema-invalid branch summary before moving or persisting the leaf", async () => {
 		const sessionDir = join(root, "branch-store");
 		const manager = await SessionManager.create(root, sessionDir, { id: "branch-admission" });
-		const firstId = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		const secondId = await manager.appendMessage({ role: "user", content: "second", timestamp: 2 });
+		const firstId = await manager.logWriter.appendMessage({ role: "user", content: "first", timestamp: 1 });
+		const secondId = await manager.logWriter.appendMessage({ role: "user", content: "second", timestamp: 2 });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 
@@ -80,7 +80,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		manager.subscribeEntries((entry) => entryNotifications.push(entry.id));
 		manager.subscribeBranchChanges((change) => branchNotifications.push(change));
 
-		const admissionError = await captureAsyncError(() => manager.branchWithSummary(firstId, 42 as never));
+		const admissionError = await captureAsyncError(() => manager.logWriter.branchWithSummary(firstId, 42 as never));
 		const stateAfterRejection = {
 			leafId: manager.getLeafId(),
 			entryIds: manager.getEntries().map((entry) => entry.id),
@@ -96,7 +96,8 @@ describe("PR #329 canonical entry admission contract", () => {
 				.map((entry) => ({ id: entry.id, ordinal: entry.ordinal, parentId: entry.parentId })),
 		};
 
-		const nextId = await manager.appendSessionInfo("after rejected branch");
+		await manager.logWriter.appendSessionInfo("after rejected branch");
+		const nextId = manager.getLeafId()!;
 		const reopenedAfterNextAppend = await SessionManager.openReadOnly(ref);
 		const nextEntry = reopenedAfterNextAppend.getEntry(nextId);
 
@@ -124,31 +125,26 @@ describe("PR #329 canonical entry admission contract", () => {
 		});
 	});
 
-	it("rejects overlong public session IDs before replacing state or creating a SQLite row", async () => {
+	it("rejects overlong public session IDs before creating a session or a SQLite row", async () => {
 		const overlongId = "s".repeat(SESSION_ID_MAX_CHARACTERS + 1);
-		const inMemory = SessionManager.inMemory(root);
-		const originalId = inMemory.getSessionId();
-		const replacementError = await captureAsyncError(() => inMemory.newSession({ id: overlongId }));
+		const inMemoryError = await captureAsyncError(async () => SessionManager.inMemory(root, { id: overlongId }));
 		const sessionDir = join(root, "public-id-store");
 		const creationError = await captureAsyncError(() => SessionManager.create(root, sessionDir, { id: overlongId }));
 
 		expect({
-			replacementRejected: replacementError instanceof Error,
-			statePreserved: inMemory.getSessionId() === originalId && inMemory.getHeader()?.id === originalId,
+			inMemoryRejected: inMemoryError instanceof Error,
 			creationRejected: creationError instanceof Error,
 			rowIds: await durableSessionIds(root, sessionDir),
 		}).toEqual({
-			replacementRejected: true,
-			statePreserved: true,
+			inMemoryRejected: true,
 			creationRejected: true,
 			rowIds: [],
 		});
 	});
 
-	it("accepts a 512-character public session ID across replacement, creation, and reference open", async () => {
+	it("accepts a 512-character public session ID across in-memory creation, creation, and reference open", async () => {
 		const boundaryId = "b".repeat(SESSION_ID_MAX_CHARACTERS);
-		const inMemory = SessionManager.inMemory(root);
-		await inMemory.newSession({ id: boundaryId });
+		const inMemory = SessionManager.inMemory(root, { id: boundaryId });
 		const sessionDir = join(root, "boundary-id-store");
 		const persisted = await SessionManager.create(root, sessionDir, { id: boundaryId });
 		const ref = persisted.getSessionRef();
@@ -168,7 +164,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		});
 	});
 
-	it("rejects overlong session-reference IDs before state replacement or child-row creation", async () => {
+	it("rejects overlong session-reference IDs before session or child-row creation", async () => {
 		const sourceDir = join(root, "reference-source-store");
 		const source = await SessionManager.create(root, sourceDir, { id: "reference-seed" });
 		const sourceRef = source.getSessionRef();
@@ -177,10 +173,8 @@ describe("PR #329 canonical entry admission contract", () => {
 			...sourceRef,
 			sessionId: "r".repeat(SESSION_ID_MAX_CHARACTERS + 1),
 		};
-		const inMemory = SessionManager.inMemory(root);
-		const originalId = inMemory.getSessionId();
-		const replacementError = await captureAsyncError(() =>
-			inMemory.newSession({ id: "reference-child", parentSession: overlongRef }),
+		const inMemoryError = await captureAsyncError(async () =>
+			SessionManager.inMemory(root, { id: "reference-child", parentSession: overlongRef }),
 		);
 		const openError = await captureAsyncError(() => SessionManager.open(overlongRef));
 		const targetDir = join(root, "reference-target-store");
@@ -192,15 +186,13 @@ describe("PR #329 canonical entry admission contract", () => {
 		);
 
 		expect({
-			replacementRejected: replacementError instanceof Error,
-			statePreserved: inMemory.getSessionId() === originalId && inMemory.getHeader()?.id === originalId,
+			inMemoryRejected: inMemoryError instanceof Error,
 			openRejected: openError instanceof Error,
 			creationRejected: creationError instanceof Error,
 			sourceRowIds: await durableSessionIds(root, sourceDir),
 			targetRowIds: await durableSessionIds(root, targetDir),
 		}).toEqual({
-			replacementRejected: true,
-			statePreserved: true,
+			inMemoryRejected: true,
 			openRejected: true,
 			creationRejected: true,
 			sourceRowIds: ["reference-seed"],
@@ -229,13 +221,13 @@ describe("PR #329 canonical entry admission contract", () => {
 	it("rejects overlong subagent session IDs before entry admission or persistence", async () => {
 		const sessionDir = join(root, "subagent-store");
 		const manager = await SessionManager.create(root, sessionDir, { id: "subagent-parent" });
-		const parentEntryId = await manager.appendMessage({ role: "user", content: "delegate", timestamp: 1 });
+		const parentEntryId = await manager.logWriter.appendMessage({ role: "user", content: "delegate", timestamp: 1 });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 		const overlongId = "c".repeat(SESSION_ID_MAX_CHARACTERS + 1);
 
 		const admissionError = await captureAsyncError(() =>
-			manager.appendSubagentSpawn({
+			manager.logWriter.appendSubagentSpawn({
 				toolCallId: "call-overlong",
 				subagentId: "sa_overlong",
 				agent: "researcher",
@@ -245,7 +237,8 @@ describe("PR #329 canonical entry admission contract", () => {
 			}),
 		);
 		const spawnsAfterRejection = manager.getSubagentSpawnEntries();
-		const nextId = await manager.appendSessionInfo("after rejected spawn");
+		await manager.logWriter.appendSessionInfo("after rejected spawn");
+		const nextId = manager.getLeafId()!;
 		const reopened = await SessionManager.openReadOnly(ref);
 		const nextEntry = reopened.getEntry(nextId);
 

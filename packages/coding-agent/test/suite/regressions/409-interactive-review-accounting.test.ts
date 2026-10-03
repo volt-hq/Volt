@@ -97,7 +97,7 @@ describe("#409 interactive terminal review accounting", () => {
 						};
 					},
 				}) as InteractiveMode;
-				await manager.appendCustomMessageEntry("test", "Original conversation", true);
+				await h.session.sessionWriter.appendCustomMessageEntry("test", "Original conversation", true);
 				context.renderInitialMessages();
 				h.setResponses([
 					fauxAssistantMessage(

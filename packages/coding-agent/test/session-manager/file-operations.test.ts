@@ -393,12 +393,12 @@ describe("JSONL snapshot import parsing", () => {
 		const sessionDir = join(tempDir, "valid-modes-store");
 
 		const imported = await SessionManager.importFromJsonl(path, tempDir, sessionDir);
-		expect(imported.buildSessionContext()).toMatchObject({ thinkingLevel: "max", fastMode: { enabled: true } });
+		expect(imported.getConversationState().context).toMatchObject({ thinkingLevel: "max", fastMode: true });
 		const ref = imported.getSessionRef();
 		if (!ref) throw new Error("Expected imported session reference");
-		expect((await SessionManager.openReadOnly(ref)).buildSessionContext()).toMatchObject({
+		expect((await SessionManager.openReadOnly(ref)).getConversationState().context).toMatchObject({
 			thinkingLevel: "max",
-			fastMode: { enabled: true },
+			fastMode: true,
 		});
 	});
 
@@ -412,11 +412,15 @@ describe("JSONL snapshot import parsing", () => {
 		if (!ref) throw new Error("Expected imported session reference");
 
 		const sqliteMessageTimestamp = Date.now();
-		await manager.appendMessage({ role: "user", content: "SQLite message", timestamp: sqliteMessageTimestamp });
+		await manager.logWriter.appendMessage({
+			role: "user",
+			content: "SQLite message",
+			timestamp: sqliteMessageTimestamp,
+		});
 
 		expect(readFileSync(path, "utf8")).toBe(sourceBytes);
 		expect(existsSync(join(sessionDir, "sessions.sqlite"))).toBe(true);
-		expect((await SessionManager.openReadOnly(ref)).buildSessionContext().messages).toEqual([
+		expect((await SessionManager.openReadOnly(ref)).getConversationState().context.messages).toEqual([
 			{
 				role: "user",
 				content: "snapshot message",
@@ -449,7 +453,7 @@ describe("SessionManager SQLite session behavior", () => {
 
 	async function createVisibleSession(cwd: string, id: string, label: string): Promise<SessionManager> {
 		const session = await SessionManager.create(cwd, tempDir, { id });
-		await session.appendMessage({ role: "user", content: label, timestamp: Date.now() });
+		await session.logWriter.appendMessage({ role: "user", content: label, timestamp: Date.now() });
 		return session;
 	}
 
@@ -506,34 +510,38 @@ describe("SessionManager SQLite session behavior", () => {
 		faulty.failNext("rolled_back");
 		await expect(commitBatch(manager, delivery)).rejects.toMatchObject({ effect: "rolled_back" });
 		expect(manager.getClientInput("delivery-1")).toMatchObject({ state: "started" });
-		expect(manager.buildSessionContext()).toMatchObject({ messages: [], planning: { mode: "build", plan: null } });
+		expect(manager.getConversationState()).toMatchObject({ context: { messages: [] }, planning: null });
 
 		await commitBatch(manager, delivery);
 		expect(manager.getClientInput("delivery-1")).toMatchObject({ state: "completed" });
-		expect(manager.buildSessionContext()).toMatchObject({ messages: [message], planning });
+		expect(manager.getConversationState()).toMatchObject({ context: { messages: [message] }, planning });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
 		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getClientInput("delivery-1")).toMatchObject({ state: "completed" });
-		expect(reopened.buildSessionContext()).toMatchObject({ messages: [message], planning });
+		expect(reopened.getConversationState()).toMatchObject({ context: { messages: [message] }, planning });
 	});
 
 	it("restores navigation to an earlier entry and to root", async () => {
 		const manager = await SessionManager.create(projectA, tempDir);
 		const firstTimestamp = Date.now();
-		const firstId = await manager.appendMessage({ role: "user", content: "first", timestamp: firstTimestamp });
-		await manager.appendMessage({ role: "user", content: "second", timestamp: firstTimestamp + 1 });
+		const firstId = await manager.logWriter.appendMessage({
+			role: "user",
+			content: "first",
+			timestamp: firstTimestamp,
+		});
+		await manager.logWriter.appendMessage({ role: "user", content: "second", timestamp: firstTimestamp + 1 });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
 
-		await manager.branch(firstId);
+		await manager.logWriter.branch(firstId);
 		// Each reopen writes next, so the previous writer closes first.
 		await manager.closePersistence();
 		let reopened = await SessionManager.open(ref);
 		expect(reopened.getLeafId()).toBe(firstId);
 		expect(reopened.getEntries().map((entry) => entry.type)).toEqual(["message", "message"]);
 
-		await reopened.resetLeaf();
+		await reopened.logWriter.resetLeaf();
 		await reopened.closePersistence();
 		reopened = await SessionManager.open(ref);
 		expect(reopened.getLeafId()).toBeNull();
@@ -542,11 +550,11 @@ describe("SessionManager SQLite session behavior", () => {
 
 	it("persists planning state through a reference", async () => {
 		const manager = await SessionManager.create(projectA, tempDir);
-		await manager.appendPlanningState({ mode: "plan", plan: null });
+		await manager.logWriter.appendPlanningState({ mode: "plan", plan: null });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
 
-		expect((await SessionManager.openReadOnly(ref)).buildSessionContext().planning).toEqual({
+		expect((await SessionManager.openReadOnly(ref)).getConversationState().planning).toEqual({
 			mode: "plan",
 			plan: null,
 		});

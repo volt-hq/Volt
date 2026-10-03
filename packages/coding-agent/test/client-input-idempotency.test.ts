@@ -1159,7 +1159,7 @@ describe("durable client input idempotency", () => {
 			error: expect.stringContaining("cannot change the role"),
 		});
 		expect(reopened.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
-		expect(reopened.buildSessionContext().messages.filter((message) => message.role === "user")).toEqual([]);
+		expect(reopened.getConversationState().context.messages.filter((message) => message.role === "user")).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 		// The same-ID retry replays the definitive failure; it is neither ambiguous nor re-dispatched.
 		await expect(harness.session.steer("recover me", undefined, "recover-started")).rejects.toThrow(
@@ -1243,7 +1243,7 @@ describe("durable client input idempotency", () => {
 		const reopened = await SessionManager.open(sessionRef);
 		expect(reopened.getClientInput("recover-committed")?.state).toBe("completed");
 		expect(reopened.getRecoverableQueuedClientInputs()).toEqual([]);
-		expect(reopened.buildSessionContext().messages).toMatchObject([
+		expect(reopened.getConversationState().context.messages).toMatchObject([
 			{ role: "user", clientMessageId: "recover-committed" },
 		]);
 		const restarted = await createHarness({ sessionManager: reopened });
@@ -1251,7 +1251,9 @@ describe("durable client input idempotency", () => {
 		await expect(restarted.session.steer("recover me", undefined, "recover-committed")).resolves.toBeUndefined();
 		expect(restarted.session.getSteeringMessages()).toEqual([]);
 		expect(restarted.session.getFollowUpMessages()).toEqual([]);
-		expect(reopened.buildSessionContext().messages.filter((message) => message.role === "user")).toHaveLength(1);
+		expect(
+			reopened.getConversationState().context.messages.filter((message) => message.role === "user"),
+		).toHaveLength(1);
 	});
 
 	it("fails closed before persisting an oversized queued replay payload", async () => {
@@ -1463,7 +1465,7 @@ describe("durable client input idempotency", () => {
 
 		const reopened = await SessionManager.openReadOnly(sessionRef!, tempDir);
 		expect(reopened.getClientInput("client-canonical")?.state).toBe("completed");
-		expect(reopened.buildSessionContext().messages).toHaveLength(1);
+		expect(reopened.getConversationState().context.messages).toHaveLength(1);
 	});
 
 	it("replays completed and failed terminal outcomes after reopening SQLite", async () => {
@@ -1478,7 +1480,7 @@ describe("durable client input idempotency", () => {
 		completedHarness.setResponses([fauxAssistantMessage("must remain unused")]);
 		await completedHarness.session.prompt("already done", { clientMessageId: "persisted-complete" });
 		expect(completedHarness.getPendingResponseCount()).toBe(1);
-		expect(completedHarness.sessionManager.buildSessionContext().messages).toHaveLength(1);
+		expect(completedHarness.sessionManager.getConversationState().context.messages).toHaveLength(1);
 
 		const failedHarness = await createHarness({
 			log: "sqlite",
@@ -1523,11 +1525,15 @@ describe("durable client input idempotency", () => {
 		expect(manager.getTree()).toEqual([]);
 		expect(manager.getLeafId()).toBeNull();
 		expect(manager.getLabel(receiptId)).toBeUndefined();
-		expect(manager.buildSessionContext().messages).toEqual([]);
+		expect(manager.getConversationState().context.messages).toEqual([]);
 		expect(projectSessionTranscript(manager).items).toEqual([]);
-		await expect(manager.branch(receiptId)).rejects.toThrow(`Entry ${receiptId} not found`);
-		await expect(manager.branchWithSummary(receiptId, "hidden")).rejects.toThrow(`Entry ${receiptId} not found`);
-		await expect(manager.appendLabelChange(receiptId, "hidden")).rejects.toThrow(`Entry ${receiptId} not found`);
+		await expect(manager.logWriter.branch(receiptId)).rejects.toThrow(`Entry ${receiptId} not found`);
+		await expect(manager.logWriter.branchWithSummary(receiptId, "hidden")).rejects.toThrow(
+			`Entry ${receiptId} not found`,
+		);
+		await expect(manager.logWriter.appendLabelChange(receiptId, "hidden")).rejects.toThrow(
+			`Entry ${receiptId} not found`,
+		);
 
 		const runtime = {
 			session: { sessionId: manager.getSessionId(), sessionManager: manager },
@@ -1536,7 +1542,7 @@ describe("durable client input idempotency", () => {
 		const bootstrapBefore = createRemoteConversationTranscriptPage(createAuthorization(tempDir), runtime);
 		expect(bootstrapBefore).toMatchObject({ items: [], head: null });
 
-		const userEntryCommit = manager.appendMessage({
+		const userEntryCommit = manager.logWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "visible later" }],
 			clientMessageId: "private-wal",
@@ -1591,7 +1597,7 @@ describe("durable client input idempotency", () => {
 			state: "failed",
 			error: "preflight rejected",
 		});
-		await reopened.appendMessage({
+		await reopened.logWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "visible later" }],
 			timestamp: Date.now(),
@@ -1633,15 +1639,16 @@ describe("durable client input idempotency", () => {
 				.clientInput("source-canonical", "prompt", { message: "source canonical" }, { states: ["started"] })
 				.user("source canonical", { clientMessageId: "source-canonical" }),
 		);
-		const assistantId = await source.appendMessage(fauxAssistantMessage("source answer"));
+		const assistantId = await source.logWriter.appendMessage(fauxAssistantMessage("source answer"));
 
 		const fork = await SessionManager.forkFrom(source.getSessionRef()!, forkDir, forkDir);
-		expect(fork.buildSessionContext().messages[0]).not.toHaveProperty("clientMessageId");
+		expect(fork.getConversationState().context.messages[0]).not.toHaveProperty("clientMessageId");
 		await expect(SessionManager.openReadOnly(fork.getSessionRef()!, forkDir)).resolves.toBeInstanceOf(SessionManager);
 
-		const extractedRef = await source.createBranchedSession(assistantId);
+		const extracted = await SessionManager.createBranched(source, assistantId);
+		const extractedRef = extracted.getSessionRef();
 		expect(extractedRef).toBeDefined();
-		expect(source.buildSessionContext().messages[0]).not.toHaveProperty("clientMessageId");
+		expect(extracted.getConversationState().context.messages[0]).not.toHaveProperty("clientMessageId");
 		await expect(SessionManager.openReadOnly(extractedRef!, sourceDir)).resolves.toBeInstanceOf(SessionManager);
 	});
 

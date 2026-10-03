@@ -175,6 +175,7 @@ import type { Personality } from "./personality.ts";
 import {
 	type AgentMode,
 	assertPlanRevision,
+	branchPlanningState,
 	clonePlanningState,
 	clonePlanState,
 	derivePlanStepStatus,
@@ -218,21 +219,15 @@ import { retryDelayMs } from "./session/retry-policy.ts";
 import { type NextActionPolicy, reduceNextAction, reduceToolCall, type ToolCallPolicy } from "./session/turn-policy.ts";
 import { boundClientInputError, normalizeClientInputPayload } from "./session-entry-codec.ts";
 import { PRODUCT_SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
-import type {
-	BranchSummaryEntry,
-	ClientInputCommand,
-	SessionEntry,
-	SessionLiveWriter,
-	SessionManager,
-} from "./session-manager.ts";
+import type { BranchSummaryEntry, ClientInputCommand, SessionEntry, SessionManager } from "./session-manager.ts";
 import {
-	buildSessionContext,
 	CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES,
 	getLatestCompactionEntry,
 	RUNTIME_QUEUE_ENTRY_ID_PREFIX,
 	type SessionReference,
 	serializeSessionJsonlSnapshot,
 } from "./session-manager.ts";
+import { ConversationSessionWriter, type SessionWriter } from "./session-writer.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
@@ -719,6 +714,8 @@ export class AgentSession {
 	private _conversation!: Conversation<AgentTool>;
 	/** The log the conversation writes, held from `takeLog` until the conversation closes it. */
 	private _log: ConversationLog | undefined;
+	/** Writes of this session's log through its conversation. */
+	private _sessionWriter!: SessionWriter;
 	private readonly _streamFn: StreamFn;
 	private readonly _toolProgressDiagnostics: ToolProgressDiagnostics;
 	private readonly _backgroundDiagnostics: BackgroundJobDiagnostics;
@@ -1066,7 +1063,7 @@ export class AgentSession {
 		this._lexicalProjectCwd = resolvePath(config.projectCwd ?? this._cwd);
 		this._agentDir = resolvePath(config.agentDir ?? getAgentDir());
 		this._modelRegistry = config.modelRegistry;
-		this._planningState = clonePlanningState(this.sessionManager.buildSessionContext().planning);
+		this._planningState = branchPlanningState(this.sessionManager.getConversationState().planning);
 		this._extensionRunnerRef = config.extensionRunnerRef;
 		this._initialActiveToolNames = config.initialActiveToolNames;
 		this._allowedToolNames = config.allowedToolNames ? new Set(config.allowedToolNames) : undefined;
@@ -1129,7 +1126,7 @@ export class AgentSession {
 				policy: this._createPolicy(),
 				admissionGate: this._admissionGate,
 			});
-			this.sessionManager.bindLiveWriter(this._createLiveWriter());
+			this._sessionWriter = this._createSessionWriter();
 			void this.sessionManager.lost.then((error) => this._lose(error));
 			void this._conversation.ended.then((end) => {
 				if (end.reason !== "closed") this._lose(end.error);
@@ -1155,14 +1152,12 @@ export class AgentSession {
 					throw new AggregateError(cleanupErrors, "Git context subscription cleanup did not complete");
 				}
 			};
-			const startingGitContextSessionId = this.sessionManager.getSessionId();
+			const sessionWriter = this._sessionWriter;
 			gitContextSubscriptionFinalizers.push(
 				this.gitContextProvider.subscribeObservations((observation) => {
 					if (observation.status !== "definitive") return;
 					// Git replacement delivery remains independent from metadata persistence.
-					void this.sessionManager
-						.recordStartingGitContext(startingGitContextSessionId, observation.gitContext)
-						.catch(() => {});
+					void sessionWriter.recordStartingGitContext(observation.gitContext).catch(() => {});
 				}),
 			);
 			gitContextSubscriptionFinalizers.push(
@@ -1260,25 +1255,27 @@ export class AgentSession {
 	 * credentials is still the session's selection.
 	 */
 	private async _applyInitialSelection(config: AgentSessionConfig): Promise<void> {
-		const context = this.sessionManager.buildSessionContext();
+		const context = this.sessionManager.getConversationState().context;
 		const model = config.model;
 		if (model && (context.model?.provider !== model.provider || context.model.modelId !== model.id)) {
-			await this.sessionManager.appendModelChange(model.provider, model.id);
+			await this.sessionManager.logWriter.appendModelChange(model.provider, model.id);
 		}
 		if (config.thinkingLevel !== undefined && config.thinkingLevel !== context.thinkingLevel) {
-			await this.sessionManager.appendThinkingLevelChange(config.thinkingLevel);
+			await this.sessionManager.logWriter.appendThinkingLevelChange(config.thinkingLevel);
 		}
 	}
 
-	/** The session manager's writes while the session is open: each one is a conversation intent. */
-	private _createLiveWriter(): SessionLiveWriter {
+	/** The session's writer while it is open: each write is a conversation intent. */
+	private _createSessionWriter(): SessionWriter {
 		const conversation = this._conversation;
-		// Writes through the session manager end with the session; its own teardown writes go to the conversation.
+		// Writes end with the session, and a write after the log is lost reports the loss. The
+		// session's own teardown writes go to the conversation.
 		const active = (): Conversation<AgentTool> => {
+			this._assertNotLost();
 			this._assertNotDisposed();
 			return conversation;
 		};
-		return {
+		return new ConversationSessionWriter(this.sessionManager, {
 			append: async (entries) => await active().append(entries),
 			setModel: async (provider, modelId) => {
 				const model = this._findModel(provider, modelId);
@@ -1290,7 +1287,15 @@ export class AgentSession {
 			setPlanning: async (planning) => await active().setPlanning(planning),
 			setName: async (name) => await active().setName(name),
 			setLabel: async (targetId, label) => await active().setLabel(targetId, label),
-		};
+		});
+	}
+
+	/**
+	 * The writer of this session's log while the session is open: its writes
+	 * are conversation intents. Writes are refused once the session is disposed.
+	 */
+	get sessionWriter(): SessionWriter {
+		return this._sessionWriter;
 	}
 
 	/**
@@ -3172,7 +3177,7 @@ export class AgentSession {
 	 */
 	private async _persistAbortedResultsForDanglingToolCalls(): Promise<void> {
 		try {
-			const context = this.sessionManager.buildSessionContext();
+			const context = this.sessionManager.getConversationState().context;
 			const resolvedToolCallIds = new Set<string>();
 			for (const message of context.messages) {
 				if (message.role === "toolResult") {
@@ -3471,7 +3476,7 @@ export class AgentSession {
 
 	get planningState(): PlanningState {
 		this._assertNotDisposed();
-		return clonePlanningState(this.sessionManager.buildSessionContext().planning);
+		return branchPlanningState(this.sessionManager.getConversationState().planning);
 	}
 
 	getPlanningState(): PlanningState {
@@ -3841,7 +3846,7 @@ export class AgentSession {
 			await this._trackQueueAdmission(this._conversation.queueMessages("steer", [message]));
 			return;
 		}
-		await this.sessionManager.appendCustomMessageEntry(
+		await this._sessionWriter.appendCustomMessageEntry(
 			message.customType,
 			message.content,
 			message.display,
@@ -3862,7 +3867,7 @@ export class AgentSession {
 		if (parsed.mode === "plan" && this._backgroundJobs.hasActive) {
 			throw new Error("Cannot enter Plan mode while background jobs are active; abort or wait for them to finish");
 		}
-		await this.sessionManager.appendPlanningState(parsed);
+		await this._sessionWriter.appendPlanningState(parsed);
 		this._assertActive();
 		return clonePlanningState(this._planningState);
 	}
@@ -4297,7 +4302,7 @@ export class AgentSession {
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		this._assertNotDisposed();
-		return cloneAgentMessages(this.sessionManager.buildSessionContext().messages);
+		return cloneAgentMessages(this.sessionManager.getConversationState().context.messages);
 	}
 
 	/** Current steering mode */
@@ -5470,7 +5475,7 @@ export class AgentSession {
 			}
 			await this._conversation.waitForIdle();
 		} else {
-			await this.sessionManager.appendCustomMessageEntry(
+			await this._sessionWriter.appendCustomMessageEntry(
 				appMessage.customType,
 				appMessage.content,
 				appMessage.display,
@@ -5990,6 +5995,7 @@ export class AgentSession {
 		preparation: CompactionPreparation,
 		model: Model<Api>,
 		pathEntries: SessionEntry[],
+		messages: readonly AgentMessage[],
 		operation: { readonly stream: StreamFn; readonly signal: AbortSignal },
 		customInstructions?: string,
 	): Promise<CompactionResult> {
@@ -6002,7 +6008,6 @@ export class AgentSession {
 					entry.type === "custom_message" ||
 					(entry.type === "branch_summary" && entry.summary),
 			).length;
-		const messages = buildSessionContext(pathEntries).messages;
 		// Keep the full rebuilt conversation warm, including the latest response.
 		// Describe the retained suffix only in the appended checkpoint instruction.
 		return compactContext(preparation, model, {
@@ -6061,12 +6066,13 @@ export class AgentSession {
 		this._compactionSummary = undefined;
 		const model = request.model;
 		const pathEntries = this.sessionManager.getBranch();
+		const branchMessages = this.sessionManager.getConversationState().context.messages;
 		const settings = this.settingsManager.getCompactionSettings();
 		// A branch of settings entries alone (its model selection) has nothing to compact.
 		const preparation =
 			this._conversation.state.context.messages.length === 0
 				? undefined
-				: prepareCompaction(pathEntries, settings, {
+				: prepareCompaction(pathEntries, branchMessages, settings, {
 						tools: this._conversation.activeTools,
 						contextWindow: model.contextWindow,
 					});
@@ -6100,6 +6106,7 @@ export class AgentSession {
 				preparation,
 				model,
 				pathEntries,
+				branchMessages,
 				{ stream: request.stream, signal: request.signal },
 				request.instructions,
 			));
@@ -6511,14 +6518,14 @@ export class AgentSession {
 					});
 				},
 				appendEntry: async (customType, data) => {
-					await this.sessionManager.appendCustomEntry(customType, data);
+					await this._sessionWriter.appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => this.setSessionName(name),
 				getSessionName: () => {
 					return this.sessionManager.getSessionName();
 				},
 				setLabel: async (entryId, label) => {
-					await this.sessionManager.appendLabelChange(entryId, label);
+					await this._sessionWriter.appendLabelChange(entryId, label);
 				},
 				getActiveTools: () => this.getActiveToolNames(),
 				getAllTools: () => this.getAllTools(),
@@ -6871,6 +6878,7 @@ export class AgentSession {
 						? {
 								subagent: {
 									manager: subagentToolManager,
+									sessionWriter: this._sessionWriter,
 									getAllowedTools: () => {
 										const activeToolNames = this.getActiveToolNames();
 										if (
@@ -7269,7 +7277,7 @@ export class AgentSession {
 			// Queue for later - committed when the turn settles
 			this._pendingBashMessages.push(bashMessage);
 		} else {
-			await this.sessionManager.appendMessage(bashMessage);
+			await this._sessionWriter.appendMessage(bashMessage);
 		}
 		this.gitContextProvider.scheduleRefresh();
 	}
@@ -7313,7 +7321,7 @@ export class AgentSession {
 	 */
 	async setSessionName(name: string): Promise<void> {
 		this._assertActive();
-		await this.sessionManager.appendSessionInfo(name);
+		await this._sessionWriter.appendSessionInfo(name);
 		const resolvedName = this.sessionManager.getSessionName();
 		this._emit({
 			type: "session_info_changed",
@@ -7577,7 +7585,7 @@ export class AgentSession {
 		// Restore branch-local runtime policy from the committed branch: model,
 		// thinking level, and fast mode come from it; the plan state follows it.
 		const previousPlanningState = clonePlanningState(this._planningState);
-		this._planningState = clonePlanningState(this.sessionManager.buildSessionContext().planning);
+		this._planningState = branchPlanningState(this.sessionManager.getConversationState().planning);
 		this._syncPlanningRuntime();
 		if (JSON.stringify(previousPlanningState) !== JSON.stringify(this._planningState)) {
 			this._emit({ type: "planning_state_changed", planning: this.planningState });
@@ -7907,7 +7915,7 @@ export class AgentSession {
 			reason,
 			usage: result.usage,
 		};
-		void this.sessionManager.appendCustomEntry(PROMPT_CACHE_REFRESH_ENTRY_TYPE, data).catch(() => {
+		void this._sessionWriter.appendCustomEntry(PROMPT_CACHE_REFRESH_ENTRY_TYPE, data).catch(() => {
 			// The audit already holds the refresh; a failed append only omits it from session totals.
 		});
 		this._publishPromptCacheStatus();

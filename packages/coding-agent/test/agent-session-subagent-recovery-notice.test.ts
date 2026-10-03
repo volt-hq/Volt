@@ -128,7 +128,7 @@ describe("subagent recovery notice", () => {
 		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
 		try {
 			// A notice persisted by a previous process already offered sa_old.
-			await harness.sessionManager.appendCustomMessageEntry(
+			await harness.session.sessionWriter.appendCustomMessageEntry(
 				SUBAGENT_RECOVERY_NOTICE_CUSTOM_TYPE,
 				"prior notice",
 				true,
@@ -175,13 +175,13 @@ describe("subagent recovery notice", () => {
 	it("end to end: reopened transcript hydrates, offers, and follow returns the report", async () => {
 		const sessionDir = mkdtempSync(join(tmpdir(), "issue-129-e2e-"));
 		const parent = await SessionManager.create(tmpdir(), sessionDir);
-		await parent.appendMessage(
+		await parent.logWriter.appendMessage(
 			fauxAssistantMessage([fauxToolCall("subagent", {}, { id: "call_e2e" })], { stopReason: "toolUse" }),
 		);
 		const child = await SessionManager.create(tmpdir(), sessionDir);
-		await child.appendMessage({ role: "user", content: "audit the daemon", timestamp: Date.now() });
-		await child.appendMessage(fauxAssistantMessage("daemon audit report"));
-		await parent.appendSubagentSpawn({
+		await child.logWriter.appendMessage({ role: "user", content: "audit the daemon", timestamp: Date.now() });
+		await child.logWriter.appendMessage(fauxAssistantMessage("daemon audit report"));
+		await parent.logWriter.appendSubagentSpawn({
 			toolCallId: "call_e2e",
 			subagentId: "sa_e2e",
 			agent: "researcher",
@@ -191,7 +191,7 @@ describe("subagent recovery notice", () => {
 		});
 		// The incident shape: dispose synthesized an abort marker, which is not
 		// settlement.
-		await parent.appendMessage({
+		await parent.logWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call_e2e",
 			toolName: "subagent",

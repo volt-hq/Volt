@@ -553,8 +553,8 @@ describe("native planning state", () => {
 	it("requires fresh research after tree navigation restores a draft branch", async () => {
 		const { session } = await createPlanningSession();
 		const draft = await session.updatePlan({ steps: [{ text: "Implement the researched change" }] });
-		await session.sessionManager.appendMessage({ role: "user", content: "Prepare the plan", timestamp: 1 });
-		const branchPointId = await session.sessionManager.appendMessage(
+		await session.sessionWriter.appendMessage({ role: "user", content: "Prepare the plan", timestamp: 1 });
+		const branchPointId = await session.sessionWriter.appendMessage(
 			createAssistantMessage([{ type: "text", text: "I will research it." }], "stop"),
 		);
 		const researchCall = {
@@ -1300,8 +1300,8 @@ describe("native planning state", () => {
 		const sessionManager = SessionManager.inMemory(tempDir);
 		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
 		await resourceLoader.reload();
-		await sessionManager.appendMessage({ role: "user", content: "Continue the active plan", timestamp: 1 });
-		await sessionManager.appendPlanningState({
+		await sessionManager.logWriter.appendMessage({ role: "user", content: "Continue the active plan", timestamp: 1 });
+		await sessionManager.logWriter.appendPlanningState({
 			mode: "build",
 			plan: {
 				id: "restored-plan",

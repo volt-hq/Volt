@@ -119,7 +119,7 @@ async function fixture(maxWorktreesPerWorkspace = 1, runReviewGit?: WorktreeGitR
 			id: request.sessionId,
 		});
 		try {
-			await reviews.bind(workspace, session, record.prReviewLaunches![0].placement, authority);
+			await reviews.bind(workspace, session.logWriter, record.prReviewLaunches![0].placement, authority);
 		} finally {
 			await session.closePersistence();
 		}

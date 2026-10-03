@@ -106,7 +106,7 @@ async function fixture() {
 		authStorage: h.authStorage,
 		modelRegistry: h.session.modelRegistry,
 		settingsManager: h.settingsManager,
-		sessionManager: manager,
+		sessionWriter: manager.logWriter,
 	};
 	return { h, manager, options };
 }
@@ -246,9 +246,9 @@ describe("#409 initial review accounting", () => {
 		const directory = join(h.tempDir, "store");
 		const manager = await SessionManager.create(h.tempDir, directory);
 		const record = unfinished();
-		await appendReviewRunDurably(manager, record);
+		await appendReviewRunDurably(manager.logWriter, record);
 		const collector = new ReviewUsageCollector(async (value) => {
-			await appendReviewUsageCheckpoint(manager, record.runId, value);
+			await appendReviewUsageCheckpoint(manager.logWriter, record.runId, value);
 		});
 		const request = await collector.start(identity, h.getModel());
 		await request.observe(usage(5, "partial"), 1, false, false);
@@ -279,20 +279,20 @@ describe("#409 initial review accounting", () => {
 			() => alias.closePersistence(),
 		);
 		const record = unfinished();
-		await appendReviewRunDurably(source, record);
+		await appendReviewRunDurably(source.logWriter, record);
 		const collector = new ReviewUsageCollector(async (value) => {
-			await appendReviewUsageCheckpoint(source, record.runId, value);
+			await appendReviewUsageCheckpoint(source.logWriter, record.runId, value);
 		});
 		const request = await collector.start(identity, h.getModel());
 		await request.observe(usage(5, "partial"), 1, false, false);
 		const stale = collector.snapshot();
-		await restoreReviewStateFromHandoff(alias, captureReviewStateForHandoff(source));
+		await restoreReviewStateFromHandoff(alias.logWriter, captureReviewStateForHandoff(source));
 		await registerReviewHandoffAliases(source, alias, [record.runId]);
 		await request.observe(usage(10), 2, true, true);
 		const final = { ...record, status: "failed" as const, endedAt: 3, usage: await collector.finish() };
-		await appendReviewRunDurably(source, final);
-		await appendReviewUsageCheckpoint(source, record.runId, stale);
-		await appendReviewRun(source, record);
+		await appendReviewRunDurably(source.logWriter, final);
+		await appendReviewUsageCheckpoint(source.logWriter, record.runId, stale);
+		await appendReviewRun(source.logWriter, record);
 		expect(listReviewRuns(source).runs).toHaveLength(1);
 		expect(await getCanonicalReviewRun(alias, record.runId)).toEqual(final);
 		expect(getReviewRun(alias, record.runId)?.usage?.summary.tokens?.input).toBe(5);
@@ -483,7 +483,7 @@ describe("#409 initial review accounting", () => {
 		);
 		await Promise.all([
 			executeReviewWorkflow(options),
-			executeReviewWorkflow({ ...options, prepared, sessionManager: other }),
+			executeReviewWorkflow({ ...options, prepared, sessionWriter: other.logWriter }),
 		]);
 		for (const [source, runId] of [
 			[manager, options.prepared.workflowId],
@@ -511,7 +511,7 @@ describe("#409 initial review accounting", () => {
 	it("disposes the prepared snapshot when initial materialization fails", async () => {
 		const { h, manager, options } = await fixture();
 		const dispose = vi.spyOn(options.prepared.resolution, "dispose");
-		vi.spyOn(manager, "appendCustomEntry").mockRejectedValue(new Error("Initial write failed"));
+		vi.spyOn(manager.logWriter, "appendCustomEntry").mockRejectedValue(new Error("Initial write failed"));
 		await expect(executeReviewWorkflow(options)).rejects.toThrow("Initial write failed");
 		expect(dispose).toHaveBeenCalledOnce();
 		expect(h.faux.state.callCount).toBe(0);
@@ -540,8 +540,8 @@ describe("#409 initial review accounting", () => {
 
 	it("prevents provider dispatch if the source checkpoint fails", async () => {
 		const { h, manager, options } = await fixture();
-		const append = manager.appendCustomEntry.bind(manager);
-		vi.spyOn(manager, "appendCustomEntry").mockImplementation(async (type, data) => {
+		const append = manager.logWriter.appendCustomEntry.bind(manager.logWriter);
+		vi.spyOn(manager.logWriter, "appendCustomEntry").mockImplementation(async (type, data) => {
 			if (type === "volt.review.usage") throw new Error("Store unavailable");
 			return append(type, data);
 		});
@@ -590,9 +590,9 @@ describe("#409 initial review accounting", () => {
 		const request = await collector.start(identity, h.getModel());
 		await request.observe(usage(), 1, true, true);
 		const record = { ...unfinished(), status: "failed" as const, endedAt: 2, usage: await collector.finish() };
-		await appendReviewRun(h.sessionManager, record);
+		await appendReviewRun(h.session.sessionWriter, record);
 		const { usage: _usage, ...historical } = record;
-		await appendReviewRun(h.sessionManager, { ...historical, runId: "historical" });
+		await appendReviewRun(h.session.sessionWriter, { ...historical, runId: "historical" });
 		const context = {
 			session: h.session,
 			runtimeHost: { reviewWorkflows: new ReviewWorkflowManager() },
@@ -608,7 +608,7 @@ describe("#409 initial review accounting", () => {
 		});
 		const live = new ReviewUsageCollector();
 		await live.start(identity, h.getModel());
-		await appendReviewRun(h.sessionManager, { ...unfinished("interrupted"), usage: live.snapshot() });
+		await appendReviewRun(h.session.sessionWriter, { ...unfinished("interrupted"), usage: live.snapshot() });
 		const interrupted = await handleRpcCommand({ type: "get_review_result", runId: "interrupted" }, context);
 		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_result).Errors(interrupted)).toEqual([]);
 		expect(interrupted).toMatchObject({ data: { status: "unfinished", usage: { pendingRequests: 1 } } });
@@ -686,7 +686,7 @@ describe("#409 initial review accounting", () => {
 		const h = await harness();
 		const collector = new ReviewUsageCollector();
 		const manager = SessionManager.inMemory(h.tempDir);
-		await manager.appendSessionInfo("Named test session");
+		await manager.logWriter.appendSessionInfo("Named test session");
 		const created = await createAgentSession({
 			cwd: h.tempDir,
 			agentDir: h.tempDir,

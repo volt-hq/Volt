@@ -78,6 +78,7 @@ import type { ReviewPullRequestReference, ReviewWorkflowManager } from "./review
 import { createAgentSession } from "./sdk.ts";
 import { SessionManager } from "./session-manager.ts";
 import type { SessionUsageProjection, SessionUsageTotals } from "./session-usage.ts";
+import type { SessionWriter } from "./session-writer.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 
 export { createReviewSeedMessage } from "./review-presentation.ts";
@@ -772,7 +773,8 @@ export interface ReviewWorkflowSession {
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled?: boolean;
 	modelRegistry: ModelRegistry;
-	sessionManager?: SessionManager;
+	/** Writes the session's review records; its view is the session the review belongs to. */
+	sessionWriter?: SessionWriter;
 	resourceLoader: ResourceLoader;
 	sendCustomMessage<T>(
 		message: CustomMessageInput<T>,
@@ -922,7 +924,8 @@ export interface ExecuteReviewWorkflowOptions {
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
 	settingsManager: SettingsManager;
-	sessionManager?: SessionManager;
+	/** Writes the review's run records into the session that started it. */
+	sessionWriter?: SessionWriter;
 	thinkingLevel?: ThinkingLevel;
 	fastModeEnabled?: boolean;
 	parentResourceLoader?: ResourceLoader;
@@ -1312,9 +1315,9 @@ interface ReviewPassResult<TReport> {
 
 async function runReviewPass<TReport>(options: ReviewPassOptions<TReport>): Promise<ReviewPassResult<TReport>> {
 	const sessionManager = SessionManager.inMemory(options.cwd);
-	await sessionManager.appendSessionInfo(`Review ${options.name} ${options.identity.passId}`);
+	await sessionManager.logWriter.appendSessionInfo(`Review ${options.name} ${options.identity.passId}`);
 	let currentAttempt = 1;
-	if (options.fastModeEnabled) await sessionManager.appendFastModeChange(true);
+	if (options.fastModeEnabled) await sessionManager.logWriter.appendFastModeChange(true);
 	const { session } = await createAgentSession({
 		cwd: options.cwd,
 		agentDir: options.agentDir,
@@ -1842,11 +1845,15 @@ export async function executeReviewWorkflow(
 		status: "running",
 		startedAt: prepared.startedAt,
 	});
-	const source = options.sessionManager;
-	const sessionId = source?.getSessionId();
-	const generation = source?.getSessionRef()?.sessionGeneration;
+	const source = options.sessionWriter;
+	const sessionId = source?.sessionManager.getSessionId();
+	const generation = source?.sessionManager.getSessionRef()?.sessionGeneration;
 	const assertSource = (): void => {
-		if (source && (source.getSessionId() !== sessionId || source.getSessionRef()?.sessionGeneration !== generation))
+		if (
+			source &&
+			(source.sessionManager.getSessionId() !== sessionId ||
+				source.sessionManager.getSessionRef()?.sessionGeneration !== generation)
+		)
 			throw new Error("Review accounting source changed");
 	};
 	const accounting = new ReviewUsageCollector(
@@ -1860,7 +1867,10 @@ export async function executeReviewWorkflow(
 	);
 	try {
 		if (prepared.target.kind === "pr" && !options.signal?.aborted) {
-			const binding = await readPrReviewBinding(source, prepared.incrementalPlan?.previousRun?.runId);
+			const binding = await readPrReviewBinding(
+				source?.sessionManager,
+				prepared.incrementalPlan?.previousRun?.runId,
+			);
 			assertSource();
 			if (binding) {
 				const identity = prepared.resolution.identity.pullRequest;
@@ -1930,7 +1940,7 @@ export async function executeReviewWorkflow(
 			usage,
 			incrementalPlan: prepared.incrementalPlan,
 		});
-		if (options.sessionManager) await appendReviewRunDurably(options.sessionManager, record);
+		if (options.sessionWriter) await appendReviewRunDurably(options.sessionWriter, record);
 		return { status: "cancelled", record };
 	}
 	if (result.errorMessage || !result.parsed) {
@@ -1952,7 +1962,7 @@ export async function executeReviewWorkflow(
 			errorMessage: persistedErrorMessage,
 			incrementalPlan: prepared.incrementalPlan,
 		});
-		if (options.sessionManager) await appendReviewRunDurably(options.sessionManager, record);
+		if (options.sessionWriter) await appendReviewRunDurably(options.sessionWriter, record);
 		return { status: "failed", errorMessage, record };
 	}
 	options.onEvent?.({
@@ -1976,7 +1986,7 @@ export async function executeReviewWorkflow(
 		result: result.parsed,
 		incrementalPlan: prepared.incrementalPlan,
 	});
-	if (options.sessionManager) await appendReviewRunDurably(options.sessionManager, record);
+	if (options.sessionWriter) await appendReviewRunDurably(options.sessionWriter, record);
 	return {
 		status: "completed",
 		raw: result.raw,
@@ -1984,7 +1994,7 @@ export async function executeReviewWorkflow(
 		findingsCount: result.parsed.findings.length,
 		completionStatus: result.parsed.completionStatus,
 		record,
-		...(options.sessionManager ? { durableRecordCommitted: true as const } : {}),
+		...(options.sessionWriter ? { durableRecordCommitted: true as const } : {}),
 	};
 }
 
@@ -1998,9 +2008,9 @@ async function promoteCompletedReview(
 	const reviewMessage = createReviewSeedMessage(runRecord, undefined, result.parsed);
 	const fastModeEnabled = options.session.fastModeEnabled === true;
 	const newSessionResult = await options.newSession({
-		setup: async (sessionManager) => {
-			if (fastModeEnabled) await sessionManager.appendFastModeChange(true);
-			await appendReviewRun(sessionManager, runRecord);
+		setup: async (writer) => {
+			if (fastModeEnabled) await writer.appendFastModeChange(true);
+			await appendReviewRun(writer, runRecord);
 		},
 		withSession: async (context: ReplacedSessionContext) => {
 			await context.sendMessage(reviewMessage);
@@ -2109,7 +2119,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 						authStorage: options.authStorage,
 						modelRegistry: options.session.modelRegistry,
 						settingsManager: options.settingsManager,
-						sessionManager: options.session.sessionManager,
+						sessionWriter: options.session.sessionWriter,
 						thinkingLevel: options.session.thinkingLevel,
 						fastModeEnabled: options.session.fastModeEnabled,
 						parentResourceLoader: options.session.resourceLoader,
@@ -2158,7 +2168,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 				settingsManager: options.settingsManager,
 				modelRegistry: options.session.modelRegistry,
 				currentModel: options.session.model,
-				sessionManager: options.session.sessionManager,
+				sessionManager: options.session.sessionWriter?.sessionManager,
 				requireProjectTrust: options.requireProjectTrust,
 				signal: registeredWorkflow?.signal ?? hooks?.signal,
 				onProgress: hooks?.onProgress,
@@ -2196,7 +2206,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 				usage: createEmptyReviewUsage(),
 				incrementalPlan,
 			});
-			if (options.session.sessionManager) await appendReviewRunDurably(options.session.sessionManager, record);
+			if (options.session.sessionWriter) await appendReviewRunDurably(options.session.sessionWriter, record);
 			if (
 				registeredWorkflow &&
 				options.workflowManager?.get(registeredWorkflow.descriptor.workflowId)?.status === "running"
@@ -2247,7 +2257,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 						: String(error),
 				incrementalPlan: prepared.incrementalPlan,
 			});
-			if (options.session.sessionManager) await appendReviewRunDurably(options.session.sessionManager, record);
+			if (options.session.sessionWriter) await appendReviewRunDurably(options.session.sessionWriter, record);
 			throw error;
 		}
 
@@ -2285,7 +2295,7 @@ export async function runReviewWorkflow(options: ReviewWorkflowOptions): Promise
 				authStorage: options.authStorage,
 				modelRegistry: options.session.modelRegistry,
 				settingsManager: options.settingsManager,
-				sessionManager: options.session.sessionManager,
+				sessionWriter: options.session.sessionWriter,
 				thinkingLevel: options.session.thinkingLevel,
 				fastModeEnabled: options.session.fastModeEnabled,
 				parentResourceLoader: options.session.resourceLoader,

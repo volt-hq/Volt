@@ -200,8 +200,8 @@ describe("regression #352: active debug capture", () => {
 		await harness.session.prompt("dispose during preparation");
 		await harness.session.waitForClosed();
 		const results = harness.sessionManager
-			.buildSessionContext()
-			.messages.filter((message) => message.role === "toolResult");
+			.getConversationState()
+			.context.messages.filter((message) => message.role === "toolResult");
 		expect(results).toMatchObject([
 			{ toolCallId: "dispose-call", details: { execution: { state: "not_started", synthetic: true } } },
 		]);

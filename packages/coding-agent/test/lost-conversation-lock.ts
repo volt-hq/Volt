@@ -2,6 +2,7 @@ import type { ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { vi } from "vitest";
 import type { SessionManager } from "../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../src/core/session-store/index.ts";
+import type { SessionWriter } from "../src/core/session-writer.ts";
 
 /**
  * Simulate losing a live writer's lock. An OS lock gives no loss signal, so a
@@ -27,9 +28,9 @@ export async function loseConversationLock(manager: SessionManager): Promise<voi
 	}
 }
 
-/** Lose `manager`'s lock and commit one write, so the manager loses its log now. */
-export async function loseLog(manager: SessionManager): Promise<ConversationLogLostError> {
-	await loseConversationLock(manager);
-	await manager.appendCustomEntry("lost-lock-probe").catch(() => undefined);
-	return manager.lost;
+/** Lose the lock of `writer`'s session and commit one write through it, so the session loses its log now. */
+export async function loseLog(writer: SessionWriter): Promise<ConversationLogLostError> {
+	await loseConversationLock(writer.sessionManager);
+	await writer.appendCustomEntry("lost-lock-probe").catch(() => undefined);
+	return writer.sessionManager.lost;
 }

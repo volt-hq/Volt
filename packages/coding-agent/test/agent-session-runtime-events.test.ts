@@ -136,7 +136,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		).rejects.toBe(constructionError);
 
 		expect(closePersistence).toHaveBeenCalledOnce();
-		await expect(sessionManager.appendSessionInfo("late write")).rejects.toThrow("Session persistence is closed");
+		await expect(sessionManager.logWriter.appendSessionInfo("late write")).rejects.toThrow(
+			"Session persistence is closed",
+		);
 		expect(await SessionManager.findForResume(tempDir, sessionRef.sessionId)).toEqual(sessionRef);
 	});
 
@@ -352,7 +354,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			},
 			execute: async () => {
 				await reviewGate;
-				await appendReviewRun(originatingManager, record);
+				await appendReviewRun(originatingSession.sessionWriter, record);
 				return {
 					status: "completed",
 					raw: record.result!.summary,
@@ -397,8 +399,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			originalSession.sessionManager.getSessionDir(),
 		);
-		await targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
-		await targetManager.appendMessage(fauxAssistantMessage("target assistant"));
+		await targetManager.logWriter.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await targetManager.logWriter.appendMessage(fauxAssistantMessage("target assistant"));
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 
@@ -422,8 +424,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			originalSession.sessionManager.getSessionDir(),
 		);
-		await targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
-		await targetManager.appendMessage(fauxAssistantMessage("target assistant"));
+		await targetManager.logWriter.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await targetManager.logWriter.appendMessage(fauxAssistantMessage("target assistant"));
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 
@@ -565,16 +567,16 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 		const olderReview = reviewRecord("review:older", 10, "Older finding");
 		const currentReview = reviewRecord("review:current", 20, "Current finding");
-		await appendReviewRun(sourceManager, olderReview);
-		await appendReviewRun(sourceManager, currentReview);
-		await acknowledgeReviewRun(sourceManager, currentReview.runId, 123);
-		await appendReviewFindingTransition(sourceManager, {
+		await appendReviewRun(runtimeHost.session.sessionWriter, olderReview);
+		await appendReviewRun(runtimeHost.session.sessionWriter, currentReview);
+		await acknowledgeReviewRun(runtimeHost.session.sessionWriter, currentReview.runId, 123);
+		await appendReviewFindingTransition(runtimeHost.session.sessionWriter, {
 			runId: currentReview.runId,
 			findingId: "finding-review:current",
 			status: "accepted",
 			createdAt: 30,
 		});
-		await appendReviewFindingTransition(sourceManager, {
+		await appendReviewFindingTransition(runtimeHost.session.sessionWriter, {
 			runId: currentReview.runId,
 			findingId: "finding-review:current",
 			status: "dismissed",
@@ -618,7 +620,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			},
 		});
 		const sourceAfterHandoff = await SessionManager.open(sourceSessionRef!);
-		expect(sourceAfterHandoff.buildSessionContext().planning).toMatchObject({
+		expect(sourceAfterHandoff.getConversationState().planning).toMatchObject({
 			mode: "build",
 			plan: {
 				id: ready.id,
@@ -639,7 +641,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			result: { findings: [{ id: "finding-review:current", status: "dismissed" }] },
 		});
 		expect(exportReviewFeedback(targetManager).outcomes).toEqual([sourceFeedbackBefore.at(-1)]);
-		await appendReviewFindingTransition(targetManager, {
+		await appendReviewFindingTransition(runtimeHost.session.sessionWriter, {
 			runId: currentReview.runId,
 			findingId: "finding-review:current",
 			status: "fixed",
@@ -647,7 +649,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		});
 		expect(getReviewRun(targetManager, currentReview.runId)?.result?.findings[0]?.status).toBe("fixed");
 		expect(getReviewRun(sourceAfterHandoff, currentReview.runId)?.result?.findings[0]?.status).toBe("dismissed");
-		expect(JSON.stringify(targetManager.buildSessionContext().messages)).not.toContain(reviewOnlyMarker);
+		expect(JSON.stringify(targetManager.getConversationState().context.messages)).not.toContain(reviewOnlyMarker);
 
 		const childBranch = targetManager.getBranch();
 		expect(
@@ -693,8 +695,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			originalSession.sessionManager.getSessionDir(),
 		);
-		await targetManager.appendMessage({ role: "user", content: "target", timestamp: 1 });
-		await targetManager.appendMessage(fauxAssistantMessage("target assistant"));
+		await targetManager.logWriter.appendMessage({ role: "user", content: "target", timestamp: 1 });
+		await targetManager.logWriter.appendMessage(fauxAssistantMessage("target assistant"));
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 
@@ -891,9 +893,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		await expect(
 			runtimeHost.newSession({
-				setup: async (sessionManager) => {
-					await sessionManager.appendPlanningState({ mode: "plan", plan: null });
-					preparedRef = sessionManager.getSessionRef();
+				setup: async (writer) => {
+					await writer.appendPlanningState({ mode: "plan", plan: null });
+					preparedRef = writer.sessionManager.getSessionRef();
 				},
 			}),
 		).rejects.toThrow("target lease occupied");
@@ -1551,7 +1553,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(manager.getClientInput("runtime-private-wal")?.state).toBe("completed");
 		expect(transcriptCommits()).toEqual([]);
 
-		await manager.appendPlanningState({ mode: "plan", plan: null });
+		await runtimeHost.session.sessionWriter.appendPlanningState({ mode: "plan", plan: null });
 		await subscription.flush();
 		expect(transcriptCommits()).toEqual([]);
 
@@ -1792,16 +1794,16 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		await expect(
 			runtimeHost.newSession({
-				setup: async (sessionManager) => {
-					await sessionManager.appendPlanningState({ mode: "plan", plan: null });
-					replacementRef = sessionManager.getSessionRef();
+				setup: async (writer) => {
+					await writer.appendPlanningState({ mode: "plan", plan: null });
+					replacementRef = writer.sessionManager.getSessionRef();
 				},
 			}),
 		).rejects.toThrow("rebind failed");
 		expect(replacementRef).toBeDefined();
 		expect(ownershipPhases).toEqual(["commit", "finalize", "dispose"]);
 		const reopened = await SessionManager.open(replacementRef!);
-		expect(reopened.buildSessionContext().planning).toEqual({ mode: "plan", plan: null });
+		expect(reopened.getConversationState().planning).toEqual({ mode: "plan", plan: null });
 		expect(() =>
 			runtimeHost.conversationProjectionFeed.attach({
 				write: () => {},
@@ -1828,23 +1830,13 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			throw new Error("Expected an assistant entry to fork");
 		}
 		const destinationFailure = new Error("ENOSPC: fork destination write failed");
-		const originalCreateBranchedSession = SessionManager.prototype.createBranchedSession;
-		let persistenceFailureInjected = false;
-		// Fail preparation only; cleanup must still close the destination manager.
-		const createBranchedSession = vi
-			.spyOn(SessionManager.prototype, "createBranchedSession")
-			.mockImplementation(function (this: SessionManager, leafId: string) {
-				if (this !== originalSession.sessionManager && !persistenceFailureInjected) {
-					persistenceFailureInjected = true;
-					return Promise.reject(destinationFailure);
-				}
-				return originalCreateBranchedSession.call(this, leafId);
-			});
+		// Fail preparation of the destination only.
+		const createBranched = vi.spyOn(SessionManager, "createBranched").mockRejectedValueOnce(destinationFailure);
 
 		try {
 			await expect(runtimeHost.fork(targetEntry.id, { position: "at" })).rejects.toBe(destinationFailure);
 		} finally {
-			createBranchedSession.mockRestore();
+			createBranched.mockRestore();
 		}
 
 		expect(runtimeHost.session).toBe(originalSession);

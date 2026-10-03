@@ -53,8 +53,8 @@ describe("regression #536: cooperative cancellation retains tool output", () => 
 			await Promise.all([prompt, cancellation]);
 
 			const result = harness.sessionManager
-				.buildSessionContext()
-				.messages.find((message) => message.role === "toolResult");
+				.getConversationState()
+				.context.messages.find((message) => message.role === "toolResult");
 			expect(result).toMatchObject({ isError: true, toolName: "bash" });
 			const text = getMessageText(result);
 			expect(text).toContain("final cleanup output");

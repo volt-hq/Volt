@@ -340,7 +340,8 @@ export function assertSessionViewMatchesLog(
 	const folded = fold(entries);
 	const state = harness.control.conversation.state;
 	const { sessionManager } = harness;
-	const context = sessionManager.buildSessionContext();
+	const managerState = sessionManager.getConversationState();
+	const context = managerState.context;
 	const view = {
 		ordinal: state.ordinal,
 		managerOrdinal: sessionManager.getOrdinal(),
@@ -353,7 +354,10 @@ export function assertSessionViewMatchesLog(
 		thinkingLevel: state.context.thinkingLevel,
 		managerThinkingLevel: context.thinkingLevel,
 		fastMode: state.context.fastMode,
-		managerFastMode: context.fastMode.enabled,
+		managerFastMode: context.fastMode,
+		managerPlanning: managerState.planning,
+		managerName: sessionManager.getSessionName() ?? null,
+		managerLabels: [...managerState.labels],
 		clientInputs: [...state.clientInputs.inputs.values()].map((record) => [record.clientMessageId, record.state]),
 		managerClientInputs: [...folded.clientInputs.inputs.keys()].map((id) => [
 			id,
@@ -373,6 +377,9 @@ export function assertSessionViewMatchesLog(
 		managerThinkingLevel: folded.context.thinkingLevel,
 		fastMode: folded.context.fastMode,
 		managerFastMode: folded.context.fastMode,
+		managerPlanning: folded.planning,
+		managerName: folded.name,
+		managerLabels: [...folded.labels],
 		clientInputs: [...folded.clientInputs.inputs.values()].map((record) => [record.clientMessageId, record.state]),
 		managerClientInputs: [...folded.clientInputs.inputs.values()].map((record) => [
 			record.clientMessageId,

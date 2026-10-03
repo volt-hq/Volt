@@ -82,7 +82,7 @@ async function fixture(archive = true) {
 	const record = created.worktree;
 	const sessionDir = getDefaultSessionDirPath(source, agentDir);
 	const session = await SessionManager.create(record.path, sessionDir, { id: "local-session" });
-	await session.appendMessage({ role: "user", content: "Retained conversation", timestamp: Date.now() });
+	await session.logWriter.appendMessage({ role: "user", content: "Retained conversation", timestamp: Date.now() });
 	const ref = session.getSessionRef()!;
 	await session.closePersistence();
 	await manager.bindSession(workspace.name, record.id, ref.sessionId);

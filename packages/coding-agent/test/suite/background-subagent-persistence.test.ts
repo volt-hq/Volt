@@ -210,7 +210,8 @@ function pauseParent(context: Context, outcome: "commit" | "rollback" | "conflic
  * background job runs; the conversation's own leaf move does not.
  */
 function commitParent(context: Context, kind: "append" | "navigation"): Promise<unknown> {
-	if (kind === "append") return context.parent.appendMessage(fauxAssistantMessage("parent continuation"));
+	if (kind === "append")
+		return context.session.sessionWriter.appendMessage(fauxAssistantMessage("parent continuation"));
 	return context.control.conversation.navigate(null);
 }
 
@@ -307,10 +308,10 @@ describe("background subagent spawn persistence", () => {
 					childSessionRef: { ...childRef },
 					requestKey: "owned-request",
 				};
-				const first = context.parent.appendSubagentSpawn(spawn);
+				const first = context.session.sessionWriter.appendSubagentSpawn(spawn);
 				spawn.childSessionRef.sessionId = "mutated-child";
 				spawn.requestKey = "mutated-request";
-				const second = context.parent.appendSubagentSpawn({
+				const second = context.session.sessionWriter.appendSubagentSpawn({
 					...spawn,
 					childSessionRef: childRef,
 					subagentId: "sa_second",
@@ -339,8 +340,9 @@ describe("background subagent spawn persistence", () => {
 				barrier.releaseSpawn.resolve();
 				// An earlier write's failure is reported by that write, not by close.
 				expect(await close).toBeUndefined();
+				// The closed session's log refuses later writes.
 				await expect(
-					context.parent.appendSubagentSpawn({
+					context.parent.logWriter.appendSubagentSpawn({
 						...spawn,
 						childSessionRef: childRef,
 						subagentId: "sa_after_close",
@@ -423,7 +425,7 @@ describe("background subagent spawn persistence", () => {
 			// Closing reports nothing new: `lost` already did. It waits for the queued edge, which the loss rejects.
 			await expect(context.close()).resolves.toBeUndefined();
 			expect(context.parent.getSubagentSpawnEntries()).toEqual([]);
-			await expect(context.parent.appendSessionInfo("must reject")).rejects.toThrow(/but the log head is/);
+			await expect(context.parent.logWriter.appendSessionInfo("must reject")).rejects.toThrow(/but the log head is/);
 			const reopened = await SessionManager.openReadOnly(ref);
 			try {
 				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
@@ -443,7 +445,7 @@ describe("background subagent spawn persistence", () => {
 		const barrier = pauseParent(context);
 		try {
 			const jobId = await context.start();
-			const earlier = context.parent.appendSessionInfo("earlier write");
+			const earlier = context.session.sessionWriter.appendSessionInfo("earlier write");
 			await barrier.started.promise;
 			context.allowPrompt.resolve();
 			await context.published.promise;
@@ -492,7 +494,7 @@ describe("background subagent spawn persistence", () => {
 			const reopened = await SessionManager.open(ref);
 			try {
 				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
-				expect(getMessageText(reopened.buildSessionContext().messages.at(-1))).toBe("parent continuation");
+				expect(getMessageText(reopened.getConversationState().context.messages.at(-1))).toBe("parent continuation");
 			} finally {
 				await reopened.closePersistence();
 			}

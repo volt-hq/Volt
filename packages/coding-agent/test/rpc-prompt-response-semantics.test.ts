@@ -387,8 +387,8 @@ describe("RPC prompt response semantics", () => {
 			expect(second.getStreamCallCount()).toBe(0);
 			expect(
 				reopened
-					.buildSessionContext()
-					.messages.filter((message) => getClientMessageId(message) === command.clientMessageId),
+					.getConversationState()
+					.context.messages.filter((message) => getClientMessageId(message) === command.clientMessageId),
 			).toHaveLength(1);
 		} finally {
 			await first.cleanup();

@@ -27,8 +27,10 @@ describe("PR #329 canonical sequence integrity contract", () => {
 		const sessionDir = join(root, "sessions");
 		const manager = await SessionManager.create(root, sessionDir);
 		harness = await createHarness({ sessionManager: manager });
-		await manager.appendMessage({ role: "user", content: "hello", timestamp: 1 });
-		const entryId = await manager.appendMessage(fauxAssistantMessage("hello", { timestamp: 2 }));
+		await harness.session.sessionWriter.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		const entryId = await harness.session.sessionWriter.appendMessage(
+			fauxAssistantMessage("hello", { timestamp: 2 }),
+		);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 		await harness.cleanupAsync();
@@ -62,7 +64,7 @@ describe("PR #329 canonical sequence integrity contract", () => {
 
 			const healthy = await SessionManager.create(root, sessionDir);
 			try {
-				await healthy.appendMessage({ role: "user", content: "still usable", timestamp: 3 });
+				await healthy.logWriter.appendMessage({ role: "user", content: "still usable", timestamp: 3 });
 				const healthyRef = healthy.getSessionRef();
 				if (!healthyRef) throw new Error("Expected a healthy session reference");
 				const reopened = await SessionManager.openReadOnly(healthyRef);

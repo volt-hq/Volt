@@ -156,7 +156,7 @@ async function expectReplayMatches(manager: SessionManager, clientMessageIds: re
 		expect(reopened.getSessionEntrySummary()).toEqual(manager.getSessionEntrySummary());
 		expect(reopened.getSessionName()).toBe(manager.getSessionName());
 		expect(reopened.getStartingGitContext()).toEqual(manager.getStartingGitContext());
-		expect(reopened.buildSessionContext()).toEqual(manager.buildSessionContext());
+		expect(reopened.getConversationState().context).toEqual(manager.getConversationState().context);
 		expect(reopened.getTree()).toEqual(manager.getTree());
 		expect(reopened.getSubagentSpawnEntries()).toEqual(manager.getSubagentSpawnEntries());
 		for (const clientMessageId of clientMessageIds) {
@@ -176,13 +176,14 @@ async function applyStatefulOperation(
 	const firstEntry = manager.getEntries()[0];
 	switch (operation.kind) {
 		case "branch_first":
-			if (firstEntry) await manager.branch(firstEntry.id);
+			if (firstEntry) await manager.logWriter.branch(firstEntry.id);
 			break;
 		case "reset":
-			await manager.resetLeaf();
+			await manager.logWriter.resetLeaf();
 			break;
 		case "label_first":
-			if (firstEntry) await manager.appendLabelChange(firstEntry.id, operation.clear ? undefined : operation.label);
+			if (firstEntry)
+				await manager.logWriter.appendLabelChange(firstEntry.id, operation.clear ? undefined : operation.label);
 			break;
 		case "client_input": {
 			const clientMessageId = `property-client-${index}`;
@@ -199,11 +200,11 @@ async function applyStatefulOperation(
 		}
 		case "starting_git_null":
 			if (manager.getStartingGitContext() === undefined) {
-				await manager.recordStartingGitContext(manager.getSessionId(), null);
+				await manager.logWriter.recordStartingGitContext(null);
 			}
 			break;
 		case "subagent":
-			await manager.appendSubagentSpawn({
+			await manager.logWriter.appendSubagentSpawn({
 				toolCallId: `call-${index}`,
 				subagentId: `sa_${operation.suffix}`,
 				agent: "researcher",
@@ -213,11 +214,11 @@ async function applyStatefulOperation(
 			break;
 		case "compaction": {
 			const branch = manager.getBranch();
-			if (branch.length > 0) await manager.appendCompaction("summary", branch[0]!.id, 1);
+			if (branch.length > 0) await manager.logWriter.appendCompaction("summary", branch[0]!.id, 1);
 			break;
 		}
 		case "branch_summary":
-			await manager.branchWithSummary(manager.getLeafId(), "branch summary");
+			await manager.logWriter.branchWithSummary(manager.getLeafId(), "branch summary");
 			break;
 		case "rollback": {
 			// A batch with one invalid entry commits nothing.
@@ -276,7 +277,11 @@ describe("session projection reducer properties", () => {
 						try {
 							manager = await SessionManager.create(cwd, sessionDir);
 							expect(manager.getEntries()).toEqual([]);
-							await manager.appendMessage({ role: "user", content: "seed", timestamp: 1_700_000_000_000 });
+							await manager.logWriter.appendMessage({
+								role: "user",
+								content: "seed",
+								timestamp: 1_700_000_000_000,
+							});
 							for (const [index, operation] of operations.entries()) {
 								await applyStatefulOperation(manager, operation, index, clientMessageIds);
 								await expectReplayMatches(manager, clientMessageIds);

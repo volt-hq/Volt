@@ -1130,8 +1130,8 @@ const kickoff = "Continue in the replacement session";
 
 const result = await ctx.newSession({
   ...(parentSessionRef ? { parentSessionRef } : {}),
-  setup: async (sm) => {
-    sm.appendMessage({
+  setup: async (writer) => {
+    await writer.appendMessage({
       role: "user",
       content: [{ type: "text", text: "Context from previous session..." }],
       timestamp: Date.now(),
@@ -1154,7 +1154,7 @@ if (result.cancelled) {
 
 Options:
 - `parentSessionRef`: persisted parent identity to record for the new session
-- `setup`: mutate the new session's `SessionManager` before `withSession` runs
+- `setup`: write the new session before it opens, through its async `SessionWriter` (`writer.sessionManager` reads it), before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `volt` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
 Result:

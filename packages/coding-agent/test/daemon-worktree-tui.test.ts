@@ -708,6 +708,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		const makeSessionDouble = (sessionManager: SessionManager): AgentSession =>
 			({
 				sessionManager,
+				sessionWriter: sessionManager.logWriter,
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 				extensionRunner: { hasHandlers: () => false },
 				disposeSubagentToolManager: vi.fn(),
@@ -808,7 +809,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 		expect(fixture.runtime.session.sessionManager.getCwd()).toBe(worktreeCwd);
 		// §5.1.7 pin: the parent-dir listing includes the worktree session once it
 		// has persisted content (session files flush on the first assistant message).
-		await fixture.runtime.session.sessionManager.appendMessage({
+		await fixture.runtime.session.sessionWriter.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "worktree session" }],
 			api: "openai-completions",

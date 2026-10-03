@@ -207,6 +207,8 @@ async function fixture() {
 		cwd,
 		directory,
 		manager,
+		/** The open harness session's writer: `manager` is that session's view. */
+		writer: harness.session.sessionWriter,
 		managers,
 		harness,
 		placement,
@@ -265,7 +267,7 @@ async function runtimeFixture() {
 
 describe("#414 host-owned PR review bindings", () => {
 	it("persists once, survives reopen, and stays out of every portable conversation view", async () => {
-		const { manager, placement, root, cwd, directory, managers } = await fixture();
+		const { manager, writer, placement, root, cwd, directory, managers } = await fixture();
 		const listener = vi.fn();
 		manager.subscribeEntries(listener);
 		// The open session's own entries (its model selection), which the binding must not join.
@@ -273,9 +275,9 @@ describe("#414 host-owned PR review bindings", () => {
 		const tree = manager.getTree();
 		const branch = manager.getBranch();
 		const leafId = manager.getLeafId();
-		expect(manager.buildSessionContext().messages).toEqual([]);
-		const recorded = manager.recordPrReviewBinding(placement);
-		const repeated = manager.recordPrReviewBinding(structuredClone(placement));
+		expect(manager.getConversationState().context.messages).toEqual([]);
+		const recorded = writer.recordPrReviewBinding(placement);
+		const repeated = writer.recordPrReviewBinding(structuredClone(placement));
 		// The write owns its input from the call, before it commits.
 		placement.pullRequest.title = "caller mutation";
 		await Promise.all([recorded, repeated]);
@@ -283,13 +285,13 @@ describe("#414 host-owned PR review bindings", () => {
 		const detached = manager.getPrReviewBinding()!;
 		detached.pullRequest.title = "reader mutation";
 		expect(manager.getPrReviewBinding()!.pullRequest.title).toBe("Review");
-		await expect(manager.recordPrReviewBinding(placement)).rejects.toThrow("immutable");
+		await expect(writer.recordPrReviewBinding(placement)).rejects.toThrow("immutable");
 		expect(listener).not.toHaveBeenCalled();
 		expect(manager.getEntries()).toEqual(entries);
 		expect(manager.getTree()).toEqual(tree);
 		expect(manager.getBranch()).toEqual(branch);
 		expect(manager.getLeafId()).toBe(leafId);
-		expect(manager.buildSessionContext().messages).toEqual([]);
+		expect(manager.getConversationState().context.messages).toEqual([]);
 		const reopened = await SessionManager.openReadOnly(manager.getSessionRef()!);
 		managers.push(reopened);
 		expect(reopened.getPrReviewBinding()).toEqual(manager.getPrReviewBinding());
@@ -336,8 +338,8 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it("pins omitted and explicit targets to the original authorized source cwd", async () => {
-		const { manager, placement, prepare, capture, source, snapshot } = await fixture();
-		await manager.recordPrReviewBinding(placement);
+		const { writer, placement, prepare, capture, source, snapshot } = await fixture();
+		await writer.recordPrReviewBinding(placement);
 		for (const target of [
 			{ kind: "pr" } as const,
 			{ kind: "pr", number: "414", expectedUrl: placement.pullRequest.url } as const,
@@ -352,9 +354,9 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it("accepts GitHub repository casing without changing the authorized source identity", async () => {
-		const { manager, placement, prepare, capture } = await fixture();
+		const { writer, placement, prepare, capture } = await fixture();
 		placement.pullRequest.url = "https://github.com/Volt-HQ/Project/pull/414";
-		await manager.recordPrReviewBinding(placement);
+		await writer.recordPrReviewBinding(placement);
 		await expect(
 			prepare({ kind: "pr", expectedUrl: placement.pullRequest.url.toLowerCase() }),
 		).resolves.toMatchObject({ target: { expectedUrl: placement.pullRequest.url } });
@@ -365,8 +367,8 @@ describe("#414 host-owned PR review bindings", () => {
 		{ kind: "pr", number: "415" } as const,
 		{ kind: "pr", expectedUrl: "https://github.com/attacker/project/pull/414" } as const,
 	])("rejects a different explicit target without capture or inference", async (target) => {
-		const { manager, placement, prepare, capture, harness } = await fixture();
-		await manager.recordPrReviewBinding(placement);
+		const { writer, placement, prepare, capture, harness } = await fixture();
+		await writer.recordPrReviewBinding(placement);
 		harness.setResponses([fauxAssistantMessage("unused")]);
 		await expect(prepare(target)).rejects.toThrow("different PR");
 		expect(capture).not.toHaveBeenCalled();
@@ -376,8 +378,8 @@ describe("#414 host-owned PR review bindings", () => {
 	it.each(["dirty", "head", "untracked", "unreadable", "operation"])(
 		"rejects %s checkout before capture or inference",
 		async (mutation) => {
-			const { manager, placement, cwd, base, prepare, capture, harness } = await fixture();
-			await manager.recordPrReviewBinding(placement);
+			const { writer, placement, cwd, base, prepare, capture, harness } = await fixture();
+			await writer.recordPrReviewBinding(placement);
 			if (mutation === "dirty") writeFileSync(join(cwd, "value.txt"), "changed\n");
 			if (mutation === "untracked") writeFileSync(join(cwd, "untracked.txt"), "new\n");
 			if (mutation === "head") git(cwd, "checkout", "--detach", base);
@@ -394,8 +396,8 @@ describe("#414 host-owned PR review bindings", () => {
 	);
 
 	it("rechecks cleanliness after capture and disposes the snapshot before any inference", async () => {
-		const { manager, placement, cwd, prepare, capture, captured, snapshot, harness } = await fixture();
-		await manager.recordPrReviewBinding(placement);
+		const { writer, placement, cwd, prepare, capture, captured, snapshot, harness } = await fixture();
+		await writer.recordPrReviewBinding(placement);
 		capture.mockImplementationOnce(async () => {
 			writeFileSync(join(cwd, "value.txt"), "changed during capture\n");
 			return captured;
@@ -407,8 +409,8 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it.each(["dirty", "remote-head"])("rejects %s movement after preparation but before execution", async (mutation) => {
-		const { manager, placement, cwd, source, prepare, snapshot, harness } = await fixture();
-		await manager.recordPrReviewBinding(placement);
+		const { writer, placement, cwd, source, prepare, snapshot, harness } = await fixture();
+		await writer.recordPrReviewBinding(placement);
 		const prepared = await prepare();
 		const verify = vi.spyOn(githubCliCodeHostProvider, "verifyPullRequestHead").mockResolvedValue();
 		if (mutation === "dirty") writeFileSync(join(cwd, "value.txt"), "late edit\n");
@@ -419,7 +421,7 @@ describe("#414 host-owned PR review bindings", () => {
 				prepared,
 				cwd,
 				agentDir: source,
-				sessionManager: manager,
+				sessionWriter: writer,
 				authStorage: harness.authStorage,
 				modelRegistry: harness.session.modelRegistry,
 				settingsManager: harness.settingsManager,
@@ -432,22 +434,22 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it("rejects a moved remote PR head instead of resetting the established checkout", async () => {
-		const { manager, placement, cwd, prepare, capture, captured, base } = await fixture();
-		await manager.recordPrReviewBinding(placement);
+		const { writer, placement, cwd, prepare, capture, captured, base } = await fixture();
+		await writer.recordPrReviewBinding(placement);
 		capture.mockResolvedValueOnce({ ...captured, pullRequest: { ...captured.pullRequest, headRefOid: base } });
 		await expect(prepare()).rejects.toThrow(PR_CHECKOUT_CHANGED);
 		expect(git(cwd, "rev-parse", "HEAD")).toBe(placement.pullRequest.headRefOid);
 	});
 
 	it("resolves official handoff aliases through the exact canonical source, never copied entries", async () => {
-		const { manager, placement, cwd, directory, managers, record, prepare, root } = await fixture();
-		await manager.recordPrReviewBinding(placement);
-		await appendReviewRunDurably(manager, record);
+		const { manager, writer, placement, cwd, directory, managers, record, prepare, root } = await fixture();
+		await writer.recordPrReviewBinding(placement);
+		await appendReviewRunDurably(writer, record);
 		const alias = await SessionManager.create(cwd, directory);
 		const copied = await SessionManager.create(cwd, directory);
 		managers.push(alias, copied);
-		await appendReviewRun(alias, record);
-		await appendReviewRun(copied, record);
+		await appendReviewRun(alias.logWriter, record);
+		await appendReviewRun(copied.logWriter, record);
 		await registerReviewHandoffAliases(manager, alias, [record.runId]);
 		expect(alias.getPrReviewBinding()).toBeUndefined();
 		expect(await readPrReviewBinding(alias, record.runId)).toEqual(placement);
@@ -465,8 +467,8 @@ describe("#414 host-owned PR review bindings", () => {
 		"preserves bound checkout enforcement after handoff, repeated reruns and reopen: %s",
 		async (mutation) => {
 			const f = await runtimeFixture();
-			const { manager, placement, runtime, cwd, base, harness, capture } = f;
-			await manager.recordPrReviewBinding(placement);
+			const { manager, writer, placement, runtime, cwd, base, harness, capture } = f;
+			await writer.recordPrReviewBinding(placement);
 			let record: ReviewRunRecord = {
 				...f.record,
 				status: "completed",
@@ -488,7 +490,7 @@ describe("#414 host-owned PR review bindings", () => {
 					},
 				},
 			};
-			await appendReviewRunDurably(manager, record);
+			await appendReviewRunDurably(writer, record);
 			const original = manager.getSessionRef()!;
 			// The binding must already be durable when the replacement becomes observable.
 			const unsubscribe = runtime.subscribeSessionWillProject(async (session) => {
@@ -521,7 +523,7 @@ describe("#414 host-owned PR review bindings", () => {
 					previousRun: { runId: record.runId },
 				});
 				record = { ...record, runId: prepared.workflowId, parentRunId: record.runId, endedAt: 2 + index };
-				await appendReviewRunDurably(target, record);
+				await appendReviewRunDurably(runtime.session.sessionWriter, record);
 				await prepared.resolution.dispose();
 				expect(await resolveCanonicalReviewSource(target, record.runId)).toEqual(target.getSessionRef());
 			}
@@ -541,7 +543,7 @@ describe("#414 host-owned PR review bindings", () => {
 						prepared,
 						cwd,
 						agentDir: f.root,
-						sessionManager: reopened,
+						sessionWriter: reopened.logWriter,
 						authStorage: harness.authStorage,
 						modelRegistry: harness.session.modelRegistry,
 						settingsManager: harness.settingsManager,
@@ -558,9 +560,9 @@ describe("#414 host-owned PR review bindings", () => {
 	);
 
 	it("persists the binding through repeated General replacements without changing the canonical source", async () => {
-		const { manager, placement, runtime, record } = await runtimeFixture();
-		await manager.recordPrReviewBinding(placement);
-		await appendReviewRunDurably(manager, record);
+		const { manager, writer, placement, runtime, record } = await runtimeFixture();
+		await writer.recordPrReviewBinding(placement);
+		await appendReviewRunDurably(writer, record);
 		const original = manager.getSessionRef();
 		for (const _ of [1, 2]) {
 			await runtime.newSession({
@@ -574,9 +576,9 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it.each(["empty", "copied", "unbound"])("leaves %s session handoffs unbound", async (kind) => {
-		const { manager, placement, runtime, record } = await runtimeFixture();
-		if (kind !== "unbound") await manager.recordPrReviewBinding(placement);
-		if (kind === "unbound") await appendReviewRunDurably(manager, record);
+		const { writer, placement, runtime, record } = await runtimeFixture();
+		if (kind !== "unbound") await writer.recordPrReviewBinding(placement);
+		if (kind === "unbound") await appendReviewRunDurably(writer, record);
 		await runtime.newSession({
 			setup: async (target) => {
 				if (kind !== "empty") await appendReviewRun(target, record);
@@ -587,8 +589,8 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it("ignores injected Git environment and does not restrict ordinary discussion writes", async () => {
-		const { manager, placement, cwd, source, prepare, harness } = await fixture();
-		await manager.recordPrReviewBinding(placement);
+		const { writer, placement, cwd, source, prepare, harness } = await fixture();
+		await writer.recordPrReviewBinding(placement);
 		vi.stubEnv("GIT_DIR", join(source, ".git"));
 		vi.stubEnv("GIT_WORK_TREE", source);
 		vi.stubEnv("GIT_CONFIG_COUNT", "1");
@@ -608,10 +610,10 @@ describe("#414 host-owned PR review bindings", () => {
 	});
 
 	it("leaves unbound PR and non-PR preparation behavior unchanged", async () => {
-		const { manager, placement, cwd, prepare, capture, resolve } = await fixture();
+		const { writer, placement, cwd, prepare, capture, resolve } = await fixture();
 		await prepare();
 		expect(capture).toHaveBeenLastCalledWith(expect.objectContaining({ cwd, number: undefined }));
-		await manager.recordPrReviewBinding(placement);
+		await writer.recordPrReviewBinding(placement);
 		writeFileSync(join(cwd, "value.txt"), "dirty\n");
 		await expect(prepare({ kind: "uncommitted" })).resolves.toMatchObject({ target: { kind: "uncommitted" } });
 		expect(resolve).toHaveBeenLastCalledWith(

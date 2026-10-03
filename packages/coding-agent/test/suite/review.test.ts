@@ -913,7 +913,7 @@ describe("review pipeline", () => {
 					authStorage: harness.authStorage,
 					modelRegistry: harness.session.modelRegistry,
 					settingsManager: harness.settingsManager,
-					sessionManager,
+					sessionWriter: sessionManager.logWriter,
 					signal: AbortSignal.any([signal, controller.signal]),
 					onDiagnosticRetentionWarning,
 					onEvent: (event) => events.push(event),
@@ -1416,7 +1416,7 @@ describe("review pipeline", () => {
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
-			sessionManager,
+			sessionWriter: sessionManager.logWriter,
 			onEvent: (event) => workflowEvents.push(event),
 		});
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
@@ -1787,7 +1787,7 @@ describe("review pipeline", () => {
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
-			sessionManager,
+			sessionWriter: sessionManager.logWriter,
 		});
 		snapshots.splice(snapshots.indexOf(snapshot), 1);
 		expect(outcome).toMatchObject({
@@ -1852,7 +1852,7 @@ describe("review pipeline", () => {
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
-			sessionManager,
+			sessionWriter: sessionManager.logWriter,
 			sanitizeRemoteErrors: true,
 		});
 		snapshots.splice(snapshots.indexOf(remoteSnapshot), 1);
@@ -2096,7 +2096,7 @@ describe("review pipeline", () => {
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
-			sessionManager,
+			sessionWriter: harness.session.sessionWriter,
 		});
 		snapshots.splice(snapshots.indexOf(priorSnapshot), 1);
 		expect(priorOutcome.status).toBe("completed");
@@ -2148,7 +2148,7 @@ describe("review pipeline", () => {
 			authStorage: harness.authStorage,
 			modelRegistry: harness.session.modelRegistry,
 			settingsManager: harness.settingsManager,
-			sessionManager,
+			sessionWriter: harness.session.sessionWriter,
 		});
 		snapshots.splice(snapshots.indexOf(prepared.resolution), 1);
 		expect(currentOutcome.status).toBe("completed");
@@ -2169,7 +2169,7 @@ describe("review pipeline", () => {
 		snapshots.push(snapshot);
 		const originManager = await SessionManager.create(harness.tempDir, join(harness.tempDir, "origin-sessions"));
 		const originRef = originManager.getSessionRef()!;
-		const originalAppendCustomEntry = originManager.appendCustomEntry.bind(originManager);
+		const originalAppendCustomEntry = originManager.logWriter.appendCustomEntry.bind(originManager.logWriter);
 		let markCommitStarted!: () => void;
 		const commitStarted = new Promise<void>((resolve) => {
 			markCommitStarted = resolve;
@@ -2178,7 +2178,7 @@ describe("review pipeline", () => {
 		const commitGate = new Promise<void>((resolve) => {
 			releaseCommit = resolve;
 		});
-		vi.spyOn(originManager, "appendCustomEntry").mockImplementation(async (customType, data) => {
+		vi.spyOn(originManager.logWriter, "appendCustomEntry").mockImplementation(async (customType, data) => {
 			const entryId = await originalAppendCustomEntry(customType, data);
 			// Initial accounting is durable before inference; race only the terminal commit.
 			if (getReviewRun(originManager, "review:durable-origin")?.status === "unfinished") return entryId;
@@ -2229,7 +2229,7 @@ describe("review pipeline", () => {
 					authStorage: harness.authStorage,
 					modelRegistry: harness.session.modelRegistry,
 					settingsManager: harness.settingsManager,
-					sessionManager: originManager,
+					sessionWriter: originManager.logWriter,
 					signal: hooks.signal,
 					onEvent: hooks.onEvent,
 				});

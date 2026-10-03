@@ -151,7 +151,7 @@ async function fixture() {
 			},
 		},
 	};
-	await appendReviewRunDurably(source.session.sessionManager, record);
+	await appendReviewRunDurably(source.session.sessionWriter, record);
 	const validate = vi.fn(async () => {});
 	const published = vi.fn((_entry: IntegratedRuntimeEntry) => {});
 	const createRuntime = vi.fn(async () => ({
@@ -405,7 +405,7 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 			expect(tuiManager.getEntries()).toHaveLength(0);
 			expect((await f.source.reviewDiscussions!.start("run", ["f1"], "retry")).results[0]!.outcome).toBe("failed");
 			// If the losing service had seeded first, this owner's revision would be stale.
-			await tuiManager.appendSessionInfo("TUI owns initialization");
+			await tuiManager.logWriter.appendSessionInfo("TUI owns initialization");
 			expect(f.registry.findOwner("ws", id)).toBeUndefined();
 			expect(f.broker.lookup("ws", id)?.state).toBe("tui-owned");
 		} finally {
@@ -504,8 +504,8 @@ describe("Regression #341 real daemon sibling broker admission", () => {
 		const canonical = await SessionManager.create(f.root, join(f.root, "sessions"));
 		const originalId = canonical.getSessionId();
 		const coldRecord = { ...f.record, runId: "cold-run" };
-		await appendReviewRunDurably(canonical, coldRecord);
-		await appendReviewRun(f.source.session.sessionManager, coldRecord);
+		await appendReviewRunDurably(canonical.logWriter, coldRecord);
+		await appendReviewRun(f.source.session.sessionWriter, coldRecord);
 		await registerReviewHandoffAliases(canonical, f.source.session.sessionManager, ["cold-run"]);
 		await canonical.closePersistence();
 		let release!: () => void;

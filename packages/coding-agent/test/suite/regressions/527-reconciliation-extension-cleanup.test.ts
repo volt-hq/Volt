@@ -112,7 +112,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 
 	/** The session's lock is lost and its next commit finds out: the runtime ends. */
 	async function loseRuntimeLog(runtime: AgentSessionRuntime): Promise<Error> {
-		const lost = await loseLog(runtime.session.sessionManager);
+		const lost = await loseLog(runtime.session.sessionWriter);
 		await expect(runtime.lost).resolves.toBe(lost);
 		return lost;
 	}
@@ -176,7 +176,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 			const { runtime, harness, errors } = await createRuntimeForTest((volt, instance) => {
 				if (instance !== 1) return;
 				volt.on("session_shutdown", async (_event, ctx) => {
-					if (timing === "during") await loseLog(runtime.session.sessionManager);
+					if (timing === "during") await loseLog(runtime.session.sessionWriter);
 					try {
 						await volt.appendEntry("shutdown-write", {});
 					} catch (error) {
@@ -220,7 +220,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		const outgoing = runtime.session;
 		const replacement = runtime.newSession();
 		await entered.promise;
-		await loseLog(outgoing.sessionManager);
+		await loseLog(outgoing.sessionWriter);
 		await expect(outgoing.lost).resolves.toBeInstanceOf(Error);
 		release.resolve();
 

@@ -568,7 +568,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 					{ states: ["started"] },
 				),
 			);
-			await manager.appendMessage({
+			await manager.logWriter.appendMessage({
 				role: "user",
 				clientMessageId: "client-message-42",
 				content: [{ type: "text", text: `Read ${workspacePath}/fixture.txt` }],
@@ -577,7 +577,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			const entry = manager.getLeafEntry()!;
 			// Session files are intentionally deferred until conversation content
 			// beyond the first user prompt exists.
-			await manager.appendCustomMessageEntry("test.flush", "flush", true);
+			await manager.logWriter.appendCustomMessageEntry("test.flush", "flush", true);
 			const runtime: ConversationCommandRuntime = {
 				session: { sessionId: manager.getSessionId(), sessionManager: manager },
 				listSessions: async () => [],
@@ -604,7 +604,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 
 	it("preserves identity-only aborted assistant truth in live entries and bootstrap", async () => {
 		const manager = SessionManager.inMemory("/tmp/ws");
-		await manager.appendMessage({
+		await manager.logWriter.appendMessage({
 			role: "assistant",
 			content: [],
 			api: "faux",
@@ -811,9 +811,9 @@ describe("handleIntegratedConversationRpcCommand", () => {
 	it("walks a very deep branch with bounded ancestor work", async () => {
 		const manager = SessionManager.inMemory("/tmp/ws");
 		for (let index = 0; index < 50_000; index++) {
-			await manager.appendCustomEntry("deep-history", { index });
+			await manager.logWriter.appendCustomEntry("deep-history", { index });
 		}
-		await manager.appendMessage({ role: "user", content: [{ type: "text", text: "tail" }], timestamp: 1 });
+		await manager.logWriter.appendMessage({ role: "user", content: [{ type: "text", text: "tail" }], timestamp: 1 });
 		const getBranch = vi.spyOn(manager, "getBranch").mockImplementation(() => {
 			throw new Error("full branch materialization is forbidden");
 		});
@@ -919,7 +919,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 
 	it("resolves tool metadata for a commit published after later appends moved the leaf", async () => {
 		const manager = SessionManager.inMemory("/tmp/ws");
-		await manager.appendMessage({
+		await manager.logWriter.appendMessage({
 			role: "assistant",
 			content: [{ type: "toolCall", id: "tc-late", name: "read", arguments: { path: "/tmp/ws/file" } }],
 			api: "faux",
@@ -936,7 +936,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			stopReason: "toolUse",
 			timestamp: 1,
 		});
-		const resultId = await manager.appendMessage({
+		const resultId = await manager.logWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "tc-late",
 			toolName: "read",
@@ -944,7 +944,7 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			isError: false,
 			timestamp: 2,
 		});
-		await manager.appendMessage({ role: "user", content: "next prompt", timestamp: 3 });
+		await manager.logWriter.appendMessage({ role: "user", content: "next prompt", timestamp: 3 });
 		const runtime: ConversationCommandRuntime = {
 			session: { sessionId: "s-late-commit", sessionManager: manager },
 			listSessions: async () => [],
@@ -1484,8 +1484,8 @@ describe("handleIntegratedConversationRpcCommand", () => {
 			mkdirSync(subfolderPath, { recursive: true });
 			const sessionDir = getDefaultSessionDir(workspacePath, agentDir);
 			const rootManager = await SessionManager.create(workspacePath, sessionDir, { id: "s-root" });
-			await rootManager.appendMessage({ role: "user", content: "root session", timestamp: 1 });
-			await rootManager.appendCustomMessageEntry("test.persist", "persist root session", false);
+			await rootManager.logWriter.appendMessage({ role: "user", content: "root session", timestamp: 1 });
+			await rootManager.logWriter.appendCustomMessageEntry("test.persist", "persist root session", false);
 			const runtime = createRuntime("s-subfolder");
 			runtime.listSessions = async () => [
 				{

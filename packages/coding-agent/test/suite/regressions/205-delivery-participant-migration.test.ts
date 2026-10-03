@@ -118,7 +118,7 @@ describe("regression #205: coding-agent delivery on the conversation kernel", ()
 		releasePreparation.resolve();
 		await Promise.all([prompting, disposal]);
 
-		expect(harness.sessionManager.buildSessionContext().messages).toEqual([]);
+		expect(harness.sessionManager.getConversationState().context.messages).toEqual([]);
 		expect(append.mock.calls.filter(([batch]) => deliversUserMessage(batch))).toEqual([]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
@@ -250,7 +250,7 @@ describe("regression #205: coding-agent delivery on the conversation kernel", ()
 
 		await expect(harness.control.continue()).rejects.toThrow("The conversation has ended");
 		expect(harness.getPendingResponseCount()).toBe(1);
-		expect(harness.sessionManager.buildSessionContext().messages).toEqual([]);
+		expect(harness.sessionManager.getConversationState().context.messages).toEqual([]);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("accepted");
 		expect(harness.sessionManager.getClientInputRecoveryPlan()).toMatchObject({
 			kind: "replay",

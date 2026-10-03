@@ -268,7 +268,7 @@ describe("SubagentManager", () => {
 		});
 		const parentSessionManager = await SessionManager.create(parentRoot, join(parentRoot, "sessions"));
 		cleanups.push(() => parentSessionManager.closePersistence());
-		await parentSessionManager.appendMessage({
+		await parentSessionManager.logWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "parent prompt" }],
 			timestamp: 1,
@@ -831,12 +831,12 @@ describe("SubagentManager", () => {
 		const finishTaskResponse = createDeferred();
 		const agentEnds: SubagentEndEvent[] = [];
 		const resumedSession = SessionManager.inMemory(tmpdir());
-		await resumedSession.appendMessage({
+		await resumedSession.logWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "previous child task" }],
 			timestamp: Date.now() - 1,
 		});
-		await resumedSession.appendMessage(
+		await resumedSession.logWriter.appendMessage(
 			fauxAssistantMessage("", {
 				stopReason: "error",
 				error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },

@@ -1,13 +1,14 @@
+import { type ConversationLogEntry, type ConversationState, fold } from "@hansjm10/volt-agent-core";
 import { describe, expect, it, vi } from "vitest";
-import {
-	type BranchSummaryEntry,
-	buildSessionContext,
-	type CompactionEntry,
-	type ModelChangeEntry,
-	type PlanningStateChangeEntry,
-	type SessionEntry,
-	type SessionMessageEntry,
-	type ThinkingLevelChangeEntry,
+import { toLogEntry } from "../../src/core/conversation-log/entry-codec.ts";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	ModelChangeEntry,
+	PlanningStateChangeEntry,
+	SessionEntry,
+	SessionMessageEntry,
+	ThinkingLevelChangeEntry,
 } from "../../src/core/session-manager.ts";
 
 function msg(id: string, parentId: string | null, role: "user" | "assistant", text: string): SessionMessageEntry {
@@ -49,8 +50,16 @@ function compaction(id: string, parentId: string | null, summary: string, firstK
 	};
 }
 
-function branchSummary(id: string, parentId: string | null, summary: string, fromId: string): BranchSummaryEntry {
-	return { type: "branch_summary", id, parentId, timestamp: "2025-01-01T00:00:00Z", summary, fromId };
+/** A summary of the branch left behind, appended where the branch resumes: its source is its parent. */
+function branchSummary(id: string, parentId: string | null, summary: string): BranchSummaryEntry {
+	return {
+		type: "branch_summary",
+		id,
+		parentId,
+		timestamp: "2025-01-01T00:00:00Z",
+		summary,
+		fromId: parentId ?? "root",
+	};
 }
 
 function thinkingLevel(
@@ -89,10 +98,34 @@ function planning(
 	};
 }
 
-describe("buildSessionContext", () => {
+/** The fold of `entries`, in order, with the leaf moved to `leafId` when given. */
+function foldEntries(entries: readonly SessionEntry[], leafId?: string): ConversationState {
+	const logEntries: ConversationLogEntry[] = entries.map((entry, index) =>
+		toLogEntry({ ...entry, ordinal: index + 1 }),
+	);
+	if (leafId !== undefined) {
+		logEntries.push({
+			ordinal: entries.length + 1,
+			id: "leaf",
+			parentId: entries.at(-1)?.id ?? null,
+			type: "leaf",
+			timestamp: "2025-01-01T00:00:00Z",
+			visibility: "host",
+			payload: { targetId: leafId },
+		});
+	}
+	return fold(logEntries);
+}
+
+function buildContext(entries: readonly SessionEntry[], leafId?: string) {
+	const state = foldEntries(entries, leafId);
+	return { ...state.context, planning: state.planning };
+}
+
+describe("branch context fold over session entries", () => {
 	describe("trivial cases", () => {
 		it("empty entries returns empty context", () => {
-			const ctx = buildSessionContext([]);
+			const ctx = buildContext([]);
 			expect(ctx.messages).toEqual([]);
 			expect(ctx.thinkingLevel).toBe("off");
 			expect(ctx.model).toBeNull();
@@ -100,7 +133,7 @@ describe("buildSessionContext", () => {
 
 		it("single user message", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello")];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 			expect(ctx.messages).toHaveLength(1);
 			expect(ctx.messages[0].role).toBe("user");
 		});
@@ -112,7 +145,7 @@ describe("buildSessionContext", () => {
 				msg("3", "2", "user", "how are you"),
 				msg("4", "3", "assistant", "great"),
 			];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 			expect(ctx.messages).toHaveLength(4);
 			expect(ctx.messages.map((m) => m.role)).toEqual(["user", "assistant", "user", "assistant"]);
 		});
@@ -123,7 +156,7 @@ describe("buildSessionContext", () => {
 				thinkingLevel("2", "1", "high"),
 				msg("3", "2", "assistant", "thinking hard"),
 			];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 			expect(ctx.thinkingLevel).toBe("high");
 			expect(ctx.messages).toHaveLength(2);
 		});
@@ -134,7 +167,7 @@ describe("buildSessionContext", () => {
 				msg("2", "1", "user", "feedback"),
 				planning("3", "2", 2, "ready"),
 			];
-			expect(buildSessionContext(entries).planning).toMatchObject({
+			expect(buildContext(entries).planning).toMatchObject({
 				mode: "plan",
 				plan: { id: "plan-1", revision: 2, phase: "ready" },
 			});
@@ -142,7 +175,7 @@ describe("buildSessionContext", () => {
 
 		it("tracks model from assistant message", () => {
 			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
 		});
 
@@ -152,7 +185,7 @@ describe("buildSessionContext", () => {
 				modelChange("2", "1", "openai", "gpt-4"),
 				msg("3", "2", "assistant", "hi"),
 			];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 			// Assistant message overwrites model change
 			expect(ctx.model).toEqual({ provider: "anthropic", modelId: "claude-test" });
 		});
@@ -167,8 +200,8 @@ describe("buildSessionContext", () => {
 				compaction("4", "3", "Summary", "2"),
 				planning("5", "4", 2, "ready"),
 			];
-			const context = buildSessionContext(entries);
-			expect(context.planning.plan).toMatchObject({ revision: 2, phase: "ready" });
+			const context = buildContext(entries);
+			expect(context.planning?.plan).toMatchObject({ revision: 2, phase: "ready" });
 			expect(context.messages[0]).toMatchObject({ role: "compactionSummary" });
 		});
 		it("includes summary before kept messages", () => {
@@ -181,7 +214,7 @@ describe("buildSessionContext", () => {
 				msg("6", "5", "user", "third"),
 				msg("7", "6", "assistant", "response3"),
 			];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 
 			// Should have: summary + kept (3,4) + after (6,7) = 5 messages
 			expect(ctx.messages).toHaveLength(5);
@@ -199,7 +232,7 @@ describe("buildSessionContext", () => {
 				compaction("3", "2", "Empty summary", "1"),
 				msg("4", "3", "user", "second"),
 			];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 
 			// Summary + all messages (1,2,4)
 			expect(ctx.messages).toHaveLength(4);
@@ -216,7 +249,7 @@ describe("buildSessionContext", () => {
 				compaction("6", "5", "Second summary", "4"),
 				msg("7", "6", "user", "e"),
 			];
-			const ctx = buildSessionContext(entries);
+			const ctx = buildContext(entries);
 
 			// Should use second summary, keep from 4
 			expect(ctx.messages).toHaveLength(4);
@@ -236,11 +269,11 @@ describe("buildSessionContext", () => {
 				msg("4", "2", "user", "branch B"),
 			];
 
-			const ctxA = buildSessionContext(entries, "3");
+			const ctxA = buildContext(entries, "3");
 			expect(ctxA.messages).toHaveLength(3);
 			expect((ctxA.messages[2] as any).content).toBe("branch A");
 
-			const ctxB = buildSessionContext(entries, "4");
+			const ctxB = buildContext(entries, "4");
 			expect(ctxB.messages).toHaveLength(3);
 			expect((ctxB.messages[2] as any).content).toBe("branch B");
 		});
@@ -250,10 +283,10 @@ describe("buildSessionContext", () => {
 				msg("1", null, "user", "start"),
 				msg("2", "1", "assistant", "response"),
 				msg("3", "2", "user", "abandoned path"),
-				branchSummary("4", "2", "Summary of abandoned work", "3"),
+				branchSummary("4", "2", "Summary of abandoned work"),
 				msg("5", "4", "user", "new direction"),
 			];
-			const ctx = buildSessionContext(entries, "5");
+			const ctx = buildContext(entries, "5");
 
 			expect(ctx.messages).toHaveLength(4);
 			expect((ctx.messages[2] as any).summary).toContain("Summary of abandoned work");
@@ -277,12 +310,12 @@ describe("buildSessionContext", () => {
 				msg("8", "3", "user", "wrong path"),
 				msg("9", "8", "assistant", "wrong response"),
 				// Branch summary resuming from 3
-				branchSummary("10", "3", "Tried wrong approach", "9"),
+				branchSummary("10", "3", "Tried wrong approach"),
 				msg("11", "10", "user", "better approach"),
 			];
 
 			// Main path to 7: summary + kept(3,4) + after(6,7)
-			const ctxMain = buildSessionContext(entries, "7");
+			const ctxMain = buildContext(entries, "7");
 			expect(ctxMain.messages).toHaveLength(5);
 			expect((ctxMain.messages[0] as any).summary).toContain("Compacted history");
 			expect((ctxMain.messages[1] as any).content).toBe("q2");
@@ -291,7 +324,7 @@ describe("buildSessionContext", () => {
 			expect((ctxMain.messages[4] as any).content[0].text).toBe("r3");
 
 			// Branch path to 11: 1,2,3 + branch_summary + 11
-			const ctxBranch = buildSessionContext(entries, "11");
+			const ctxBranch = buildContext(entries, "11");
 			expect(ctxBranch.messages).toHaveLength(5);
 			expect((ctxBranch.messages[0] as any).content).toBe("start");
 			expect((ctxBranch.messages[1] as any).content[0].text).toBe("r1");
@@ -314,7 +347,7 @@ describe("buildSessionContext", () => {
 			const result = (() => {
 				const unshift = vi.spyOn(Array.prototype, "unshift");
 				try {
-					const context = buildSessionContext(entries);
+					const context = buildContext(entries);
 					return { context, frontInsertions: unshift.mock.calls.length };
 				} finally {
 					unshift.mockRestore();
@@ -323,22 +356,6 @@ describe("buildSessionContext", () => {
 
 			expect(result.frontInsertions).toBe(0);
 			expect(result.context.thinkingLevel).toBe(levels[9_999 % levels.length]);
-		});
-
-		it("uses last entry when leafId not found", () => {
-			const entries: SessionEntry[] = [msg("1", null, "user", "hello"), msg("2", "1", "assistant", "hi")];
-			const ctx = buildSessionContext(entries, "nonexistent");
-			expect(ctx.messages).toHaveLength(2);
-		});
-
-		it("handles orphaned entries gracefully", () => {
-			const entries: SessionEntry[] = [
-				msg("1", null, "user", "hello"),
-				msg("2", "missing", "assistant", "orphan"), // parent doesn't exist
-			];
-			const ctx = buildSessionContext(entries, "2");
-			// Should only get the orphan since parent chain is broken
-			expect(ctx.messages).toHaveLength(1);
 		});
 	});
 });

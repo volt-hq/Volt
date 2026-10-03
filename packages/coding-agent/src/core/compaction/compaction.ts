@@ -15,7 +15,7 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "../messages.ts";
-import { buildSessionContext, type CompactionEntry, type SessionEntry } from "../session-manager.ts";
+import type { CompactionEntry, SessionEntry } from "../session-manager.ts";
 import {
 	computeFileLists,
 	createFileOps,
@@ -209,7 +209,7 @@ export interface ContextUsageEstimate {
 	lastUsageIndex: number | null;
 }
 
-function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; index: number } | undefined {
+function getLastAssistantUsageInfo(messages: readonly AgentMessage[]): { usage: Usage; index: number } | undefined {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const usage = getAssistantUsage(messages[i]);
 		if (usage) return { usage, index: i };
@@ -222,7 +222,7 @@ function getLastAssistantUsageInfo(messages: AgentMessage[]): { usage: Usage; in
  * Use for rebuilt contexts (e.g. after compaction), where retained assistant
  * messages carry usage from the pre-compaction context that would be stale.
  */
-export function estimateMessagesTokens(messages: AgentMessage[]): number {
+export function estimateMessagesTokens(messages: readonly AgentMessage[]): number {
 	let tokens = 0;
 	for (const message of messages) {
 		tokens += estimateTokens(message);
@@ -236,7 +236,10 @@ export function estimateMessagesTokens(messages: AgentMessage[]): number {
  * Provider usage already includes the request's tool definitions, so active tools are
  * added only when no valid provider usage exists.
  */
-export function estimateContextTokens(messages: AgentMessage[], tools?: readonly Tool[]): ContextUsageEstimate {
+export function estimateContextTokens(
+	messages: readonly AgentMessage[],
+	tools?: readonly Tool[],
+): ContextUsageEstimate {
 	const usageInfo = getLastAssistantUsageInfo(messages);
 
 	if (!usageInfo) {
@@ -798,8 +801,14 @@ export interface CompactionPreparation {
 	settings: CompactionSettings;
 }
 
+/**
+ * Prepare compacting the branch `pathEntries`, root first. `messages` is that
+ * branch's model context (the fold's `context.messages` for it); it measures
+ * `tokensBefore`.
+ */
 export function prepareCompaction(
 	pathEntries: SessionEntry[],
+	messages: readonly AgentMessage[],
 	settings: CompactionSettings,
 	context: CompactionContextBudget = {},
 ): CompactionPreparation | undefined {
@@ -825,7 +834,7 @@ export function prepareCompaction(
 	}
 	const boundaryEnd = pathEntries.length;
 	const toolTokens = estimateToolDefinitionTokens(context.tools);
-	const tokensBefore = estimateContextTokens(buildSessionContext(pathEntries).messages, context.tools).tokens;
+	const tokensBefore = estimateContextTokens(messages, context.tools).tokens;
 	const retainedMessageTokens =
 		context.contextWindow !== undefined && context.contextWindow > 0
 			? Math.min(settings.keepRecentTokens, Math.max(0, context.contextWindow - settings.reserveTokens - toolTokens))

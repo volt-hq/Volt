@@ -96,7 +96,7 @@ describe("regression #537: a runtime that loses its log cancels only its own rev
 		const review = startReview(runtime, "review");
 		await review.started;
 
-		const lost = await loseLog(runtime.session.sessionManager);
+		const lost = await loseLog(runtime.session.sessionWriter);
 		await expect(runtime.lost).resolves.toBe(lost);
 
 		await vi.waitFor(() => expect(review.workflow.signal.aborted).toBe(true));
@@ -110,7 +110,7 @@ describe("regression #537: a runtime that loses its log cancels only its own rev
 	it("cancels a review registered before launch without starting its executor", async () => {
 		const runtime = await createRuntime();
 		const review = startReview(runtime, "not-launched", false);
-		await loseLog(runtime.session.sessionManager);
+		await loseLog(runtime.session.sessionWriter);
 		await expect(review.workflow.finished).resolves.toMatchObject({ status: "cancelled" });
 		expect(review.workflow.signal.aborted).toBe(true);
 	});

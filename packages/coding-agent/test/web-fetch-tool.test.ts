@@ -602,12 +602,12 @@ describe("web_fetch session integration", () => {
 	it("permits user and web_search result URLs without trusting model-controlled tool output", async () => {
 		const { session } = await createSession();
 		const model = session.model!;
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: `Please read ${USER_URL}` }],
 			timestamp: Date.now(),
 		});
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: `I should also read ${ASSISTANT_URL}` }],
 			api: model.api,
@@ -624,7 +624,7 @@ describe("web_fetch session integration", () => {
 			stopReason: "stop",
 			timestamp: Date.now(),
 		});
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-1",
 			toolName: "web_search",
@@ -637,7 +637,7 @@ describe("web_fetch session integration", () => {
 			isError: false,
 			timestamp: Date.now(),
 		});
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-2",
 			toolName: "bash",
@@ -645,7 +645,7 @@ describe("web_fetch session integration", () => {
 			isError: false,
 			timestamp: Date.now(),
 		});
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-3",
 			toolName: "web_search",
@@ -653,7 +653,7 @@ describe("web_fetch session integration", () => {
 			isError: true,
 			timestamp: Date.now(),
 		});
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "call-4",
 			toolName: "web_search",
@@ -694,12 +694,12 @@ describe("web_fetch session integration", () => {
 
 	it("does not trust a parent-model task URL in a delegated child session", async () => {
 		const { session } = await createSession({ subagentRuntime: true });
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: `Research ${USER_URL}` }],
 			timestamp: Date.now(),
 		});
-		await session.sessionManager.appendMessage({
+		await session.sessionWriter.appendMessage({
 			role: "toolResult",
 			toolCallId: "delegated-search",
 			toolName: "web_search",
@@ -733,12 +733,12 @@ describe("web_fetch session integration", () => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const { session } = await createSession({
 			seed: async (sessionManager) => {
-				await sessionManager.appendMessage({
+				await sessionManager.logWriter.appendMessage({
 					role: "user",
 					content: [{ type: "text", text: `Please read ${USER_URL}` }],
 					timestamp: Date.now(),
 				});
-				const firstKeptEntryId = await sessionManager.appendMessage({
+				const firstKeptEntryId = await sessionManager.logWriter.appendMessage({
 					role: "assistant",
 					content: [{ type: "text", text: "I will keep working." }],
 					api: model.api,
@@ -755,7 +755,11 @@ describe("web_fetch session integration", () => {
 					stopReason: "stop",
 					timestamp: Date.now(),
 				});
-				await sessionManager.appendCompaction("The earlier user message was summarized.", firstKeptEntryId, 1_000);
+				await sessionManager.logWriter.appendCompaction(
+					"The earlier user message was summarized.",
+					firstKeptEntryId,
+					1_000,
+				);
 			},
 		});
 		expect(session.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);

@@ -59,8 +59,8 @@ async function createRuntimeFixture(options: { persisted?: boolean } = {}): Prom
 			? SessionManager.inMemory(cwd)
 			: await SessionManager.create(cwd, sessionDir, { id: "runtime-source" });
 	const model = fauxHarness.getModel();
-	await initialManager.appendModelChange(model.provider, model.id);
-	await initialManager.appendThinkingLevelChange("off");
+	await initialManager.logWriter.appendModelChange(model.provider, model.id);
+	await initialManager.logWriter.appendThinkingLevelChange("off");
 
 	const createRuntime: CreateAgentSessionRuntimeFactory = async ({
 		cwd: runtimeCwd,
@@ -232,7 +232,7 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		const importedEntries = manager.getEntries().filter((entry) => entry.id.startsWith("in-memory-"));
 		const rootEntry = importedEntries.find((entry) => entry.id === "in-memory-root");
 		const rootNode = flattenTree(manager.getTree()).find((node) => node.entry.id === "in-memory-root");
-		const context = manager.buildSessionContext();
+		const context = manager.getConversationState().context;
 
 		expect.soft(runtime.session.sessionRef).toBeUndefined();
 		expect.soft(importedEntries.map((entry) => [entry.id, entry.timestamp])).toEqual([
@@ -476,7 +476,7 @@ describe("PR #329 AgentSessionRuntime JSONL import contract", () => {
 		const displayedEntry = reopened
 			.getEntries()
 			.find((entry) => entry.type === "custom_message" && entry.customType === "rfc.displayed");
-		const context = reopened.buildSessionContext();
+		const context = reopened.getConversationState().context;
 		const stored = (
 			await SessionManager.list(cwd, sessionDir, undefined, {
 				includeMessageFreeDurable: true,

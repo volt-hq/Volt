@@ -113,11 +113,6 @@ export function withoutClientMessageId(message: ClientUserMessage): UserMessage 
 	return userMessage;
 }
 
-/** A runtime user message carrying the client input identity its session entry stores beside it. */
-export function withClientMessageId(message: UserMessage, clientMessageId: string): ClientUserMessage {
-	return { ...message, clientMessageId };
-}
-
 /**
  * Convert a BashExecutionMessage to user message text for LLM context.
  */

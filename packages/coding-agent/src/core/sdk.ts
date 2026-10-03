@@ -32,6 +32,7 @@ import { ModelRegistry } from "./model-registry.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import {
 	type AgentMode,
+	branchPlanningState,
 	formatPlanCheckpoint,
 	PLAN_CHECKPOINT_CUSTOM_TYPE,
 	PLAN_EXECUTION_CUSTOM_TYPE,
@@ -66,7 +67,11 @@ import {
 	withFileMutationQueue,
 } from "./tools/index.ts";
 
-function hasCanonicalPlanningMessage(messages: AgentMessage[], planning: PlanningState, checkpoint: string): boolean {
+function hasCanonicalPlanningMessage(
+	messages: readonly AgentMessage[],
+	planning: PlanningState,
+	checkpoint: string,
+): boolean {
 	const plan = planning.plan;
 	if (!plan) return true;
 	return messages.some((message) => {
@@ -392,18 +397,19 @@ async function createAgentSessionWithTrackedResources(
 	}
 
 	// Check if session has existing branch state to restore, including message-free durable policy.
-	let existingSession = sessionManager.buildSessionContext();
-	if (options.agentMode !== undefined && existingSession.planning.mode !== options.agentMode) {
-		await sessionManager.appendPlanningState({ ...existingSession.planning, mode: options.agentMode });
-		existingSession = sessionManager.buildSessionContext();
+	let planning = branchPlanningState(sessionManager.getConversationState().planning);
+	if (options.agentMode !== undefined && planning.mode !== options.agentMode) {
+		await sessionManager.logWriter.appendPlanningState({ ...planning, mode: options.agentMode });
+		planning = branchPlanningState(sessionManager.getConversationState().planning);
 	}
-	if (options.sessionStartEvent?.reason !== "new" && planningStateNeedsCheckpoint(existingSession.planning)) {
-		const checkpoint = formatPlanCheckpoint(existingSession.planning);
-		if (checkpoint && !hasCanonicalPlanningMessage(existingSession.messages, existingSession.planning, checkpoint)) {
-			await sessionManager.appendCustomMessageEntry(PLAN_CHECKPOINT_CUSTOM_TYPE, checkpoint, false);
-			existingSession = sessionManager.buildSessionContext();
+	if (options.sessionStartEvent?.reason !== "new" && planningStateNeedsCheckpoint(planning)) {
+		const checkpoint = formatPlanCheckpoint(planning);
+		const messages = sessionManager.getConversationState().context.messages;
+		if (checkpoint && !hasCanonicalPlanningMessage(messages, planning, checkpoint)) {
+			await sessionManager.logWriter.appendCustomMessageEntry(PLAN_CHECKPOINT_CUSTOM_TYPE, checkpoint, false);
 		}
 	}
+	const existingSession = sessionManager.getConversationState().context;
 	const existingBranch = sessionManager.getBranch();
 	const hasExistingSessionState = existingBranch.length > 0;
 	const isNewSession = !hasExistingSessionState || options.sessionStartEvent?.reason === "new";
@@ -449,7 +455,7 @@ async function createAgentSessionWithTrackedResources(
 	// Restore branch-local thinking state even before the first conversation message.
 	if (thinkingLevel === undefined && hasExistingSessionState) {
 		thinkingLevel = hasThinkingEntry
-			? (existingSession.thinkingLevel as ThinkingLevel)
+			? existingSession.thinkingLevel
 			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
 	}
 
@@ -496,7 +502,7 @@ async function createAgentSessionWithTrackedResources(
 		if (!isSubagentRuntime) {
 			await manager
 				.startEagerServers(undefined, {
-					trustedReadsOnly: sessionManager.buildSessionContext().planning.mode === "plan",
+					trustedReadsOnly: sessionManager.getConversationState().planning?.mode === "plan",
 				})
 				.catch(() => undefined);
 		}
@@ -638,10 +644,10 @@ async function createAgentSessionWithTrackedResources(
 	// Persist explicit startup overrides and fill any policy dimensions that were
 	// absent from setup-only sessions (for example a pre-seeded Fast policy).
 	if (model && (options.model !== undefined || existingSession.model === null)) {
-		await sessionManager.appendModelChange(model.provider, model.id);
+		await sessionManager.logWriter.appendModelChange(model.provider, model.id);
 	}
 	if (options.thinkingLevel !== undefined || !hasThinkingEntry) {
-		await sessionManager.appendThinkingLevelChange(thinkingLevel);
+		await sessionManager.logWriter.appendThinkingLevelChange(thinkingLevel);
 	}
 
 	const gitContextProvider = options.gitContextProvider ?? new GitContextProvider(cwd);

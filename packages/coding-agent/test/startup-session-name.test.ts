@@ -86,8 +86,8 @@ async function setup(): Promise<CliDirs> {
 	mkdirSync(projectDirPath, { recursive: true });
 	const projectDir = realpathSync(projectDirPath);
 	const manager = await SessionManager.create(projectDir, sessionDir, { id: "existing-session" });
-	await manager.appendMessage({ role: "user", content: "existing session", timestamp: 1 });
-	await manager.appendCustomMessageEntry("test.persist", "persist existing session", false);
+	await manager.logWriter.appendMessage({ role: "user", content: "existing session", timestamp: 1 });
+	await manager.logWriter.appendCustomMessageEntry("test.persist", "persist existing session", false);
 	const sessionRef = manager.getSessionRef();
 	if (!sessionRef) throw new Error("expected persisted startup session reference");
 	// The CLI process under test opens the session for writing.

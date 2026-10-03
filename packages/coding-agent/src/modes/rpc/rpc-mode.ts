@@ -1223,7 +1223,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 								authStorage,
 								modelRegistry,
 								settingsManager,
-								sessionManager: commandSession.sessionManager,
+								sessionWriter: commandSession.sessionWriter,
 								sanitizeRemoteErrors: reviewOptions.remote,
 								thinkingLevel,
 								fastModeEnabled,
@@ -1260,7 +1260,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					if (!launched) {
 						// The cancelled run record is best-effort; a lost log ends the runtime.
 						void appendReviewRun(
-							commandSession.sessionManager,
+							commandSession.sessionWriter,
 							createReviewRunRecord({
 								workflowId: prepared.workflowId,
 								workflowAction: prepared.action,
@@ -1309,15 +1309,18 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				let acknowledgedAt: number | undefined;
 				const opened = await runtimeHost.newSession({
 					assertConversationGenerationCurrent,
-					setup: async (sessionManager) => {
-						targetSessionManager = sessionManager;
-						await appendReviewRun(sessionManager, record);
+					setup: async (writer) => {
+						targetSessionManager = writer.sessionManager;
+						await appendReviewRun(writer, record);
 					},
 					withSession: async (sessionContext) => {
 						await sessionContext.sendMessage(seedMessage);
-						if (!targetSessionManager) throw new Error("Review session was not initialized");
+						const target = runtimeHost.session;
+						if (!targetSessionManager || target.sessionManager !== targetSessionManager) {
+							throw new Error("Review session was not initialized");
+						}
 						acknowledgedAt = (
-							await acknowledgeReviewRun(targetSessionManager, record.runId, record.acknowledgedAt ?? Date.now())
+							await acknowledgeReviewRun(target.sessionWriter, record.runId, record.acknowledgedAt ?? Date.now())
 						).acknowledgedAt;
 					},
 				});
@@ -1330,7 +1333,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 						? await SessionManager.open(sourceSessionRef)
 						: sourceSessionManager;
 					try {
-						await acknowledgeReviewRun(acknowledgmentManager, record.runId, acknowledgedAt);
+						await acknowledgeReviewRun(acknowledgmentManager.logWriter, record.runId, acknowledgedAt);
 					} catch (error) {
 						if (sourceSessionRef) {
 							try {
@@ -1374,7 +1377,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				)
 					throw new Error("Dismissed findings require an explicit reason.");
 				await recordReviewFindingOutcome(
-					commandSession.sessionManager,
+					commandSession.sessionWriter,
 					{
 						runId: record.runId,
 						findingId,
@@ -1425,7 +1428,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			if (action === REVIEW_PUBLISH_ACTION_ID) {
 				if (!record) throw new Error(`Unknown durable review run: ${runId}`);
 				const published = await publishReviewRun(commandSession.sessionManager.getCwd(), record);
-				await appendReviewPublication(commandSession.sessionManager, { runId: record.runId, ...published });
+				await appendReviewPublication(commandSession.sessionWriter, { runId: record.runId, ...published });
 				return {
 					action,
 					status: "completed",

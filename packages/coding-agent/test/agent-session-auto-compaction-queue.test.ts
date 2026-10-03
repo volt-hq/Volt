@@ -725,14 +725,14 @@ describe("AgentSession auto-compaction queue resume", () => {
 		});
 		// The kept stale response is the branch tail the pre-prompt check reads.
 		await openSession(async (manager) => {
-			await manager.appendMessage({
+			await manager.logWriter.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: "before compaction" }],
 				timestamp: staleAssistantTimestamp - 1000,
 			});
-			await manager.appendMessage(staleAssistant);
+			await manager.logWriter.appendMessage(staleAssistant);
 			const firstKeptEntryId = manager.getEntries()[0]!.id;
-			await manager.appendCompaction(
+			await manager.logWriter.appendCompaction(
 				"summary",
 				firstKeptEntryId,
 				staleAssistant.usage.totalTokens,
@@ -774,7 +774,7 @@ describe("AgentSession auto-compaction queue resume", () => {
 				},
 				errorAssistant,
 			]) {
-				await manager.appendMessage(message);
+				await manager.logWriter.appendMessage(message);
 			}
 		});
 		const stream = useResponses([response([{ type: "text", text: "answered" }])]);
@@ -798,12 +798,12 @@ describe("AgentSession auto-compaction queue resume", () => {
 			error: { kind: "overloaded", retryable: true, message: "529 overloaded" },
 		});
 		await openSession(async (manager) => {
-			await manager.appendMessage({
+			await manager.logWriter.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: "hello" }],
 				timestamp: Date.now() - 1000,
 			});
-			await manager.appendMessage(errorAssistant);
+			await manager.logWriter.appendMessage(errorAssistant);
 		});
 		const stream = useResponses([response([{ type: "text", text: "answered" }])]);
 
@@ -828,21 +828,27 @@ describe("AgentSession auto-compaction queue resume", () => {
 			timestamp: Date.now() + 1000,
 		});
 		await openSession(async (manager) => {
-			await manager.appendMessage({
+			await manager.logWriter.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: "before compaction" }],
 				timestamp: preCompactionTimestamp - 1000,
 			});
-			await manager.appendMessage(keptAssistant);
+			await manager.logWriter.appendMessage(keptAssistant);
 			const firstKeptEntryId = manager.getEntries()[0]!.id;
-			await manager.appendCompaction("summary", firstKeptEntryId, keptAssistant.usage.totalTokens, undefined, false);
+			await manager.logWriter.appendCompaction(
+				"summary",
+				firstKeptEntryId,
+				keptAssistant.usage.totalTokens,
+				undefined,
+				false,
+			);
 			// Canonical context has only new post-compaction work after the summary.
-			await manager.appendMessage({
+			await manager.logWriter.appendMessage({
 				role: "user",
 				content: [{ type: "text", text: "new prompt" }],
 				timestamp: Date.now() + 500,
 			});
-			await manager.appendMessage(errorAssistant);
+			await manager.logWriter.appendMessage(errorAssistant);
 		});
 		const stream = useResponses([response([{ type: "text", text: "answered" }])]);
 

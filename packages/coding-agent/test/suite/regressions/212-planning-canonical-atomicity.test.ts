@@ -221,28 +221,32 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		const { harness } = await setup();
 		harness.setResponses([fauxAssistantMessage("feedback applied")]);
 		const observedPhases: Array<string | undefined> = [];
-		const nestedWrites: Promise<string>[] = [];
+		const nestedWrites: Promise<void>[] = [];
 		const unsubscribe = harness.sessionManager.subscribeEntries((entry) => {
 			if (
 				(entry.type === "custom_message" && entry.customType === "volt-plan-checkpoint") ||
 				(entry.type === "message" && entry.message.role === "user")
 			) {
 				observedPhases.push(harness.session.planningState.plan?.phase);
-				nestedWrites.push(harness.sessionManager.appendFastModeChange(true));
+				nestedWrites.push(harness.session.sessionWriter.appendFastModeChange(true));
 			}
 		});
 
 		await harness.session.steer("revise this ready plan", undefined, "issue-212-observer-order");
 		await harness.session.waitForIdle();
 		unsubscribe();
-		const nestedIds = await Promise.all(nestedWrites);
+		await Promise.all(nestedWrites);
 
 		expect(observedPhases).toEqual(["draft", "draft"]);
 		// Observer writes commit after the delivery instead of joining its batch.
 		const branch = harness.sessionManager.getBranch();
 		const userIndex = branch.findIndex((entry) => entry.type === "message" && entry.message.role === "user");
 		expect(branch[userIndex - 1]).toMatchObject({ type: "custom_message", customType: "volt-plan-checkpoint" });
-		expect(branch.slice(userIndex + 1, userIndex + 3).map((entry) => entry.id)).toEqual(nestedIds);
+		expect(branch.slice(userIndex + 1).map((entry) => entry.type)).toEqual([
+			"fast_mode_change",
+			"fast_mode_change",
+			"message",
+		]);
 	});
 
 	it("fails an identified direct prompt whose delivery transaction rolls back", async () => {

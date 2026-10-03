@@ -23,9 +23,9 @@ describe("issue #3688 tree cancellation compaction state", () => {
 		});
 		harnesses.push(harness);
 
-		const targetId = await harness.sessionManager.appendMessage(userMsg("first"));
-		await harness.sessionManager.appendMessage(assistantMsg("reply"));
-		const currentLeafId = await harness.sessionManager.appendMessage(userMsg("second"));
+		const targetId = await harness.session.sessionWriter.appendMessage(userMsg("first"));
+		await harness.session.sessionWriter.appendMessage(assistantMsg("reply"));
+		const currentLeafId = await harness.session.sessionWriter.appendMessage(userMsg("second"));
 
 		expect(harness.sessionManager.getLeafId()).toBe(currentLeafId);
 
@@ -51,16 +51,16 @@ describe("issue #3688 tree cancellation compaction state", () => {
 		});
 		harnesses.push(harness);
 
-		const targetId = await harness.sessionManager.appendMessage(userMsg("first"));
+		const targetId = await harness.session.sessionWriter.appendMessage(userMsg("first"));
 		// The reply names the session's model: the branch's latest response selects the model it summarizes with.
 		const model = harness.getModel();
-		await harness.sessionManager.appendMessage({
+		await harness.session.sessionWriter.appendMessage({
 			...assistantMsg("reply"),
 			api: model.api,
 			provider: model.provider,
 			model: model.id,
 		});
-		const currentLeafId = await harness.sessionManager.appendMessage(userMsg("second"));
+		const currentLeafId = await harness.session.sessionWriter.appendMessage(userMsg("second"));
 
 		await expect(harness.session.navigateTree(targetId, { summarize: true })).rejects.toThrow(
 			"Extension session_before_tree output",

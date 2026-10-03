@@ -20,6 +20,7 @@ import type {
 } from "./review-snapshot.ts";
 import { parseReviewUsage } from "./review-usage.ts";
 import { type CustomEntry, type SessionEntry, SessionManager } from "./session-manager.ts";
+import type { SessionWriter } from "./session-writer.ts";
 
 export const REVIEW_RUN_CUSTOM_ENTRY_TYPE = "volt.review.run";
 export const REVIEW_USAGE_CUSTOM_ENTRY_TYPE = "volt.review.usage";
@@ -468,15 +469,15 @@ export function captureReviewStateForHandoff(sessionManager: SessionManager): Re
 }
 
 export async function restoreReviewStateFromHandoff(
-	sessionManager: SessionManager,
+	writer: SessionWriter,
 	snapshot: ReviewStateHandoffSnapshot,
 ): Promise<void> {
-	for (const run of snapshot.runs) await appendReviewRun(sessionManager, run);
+	for (const run of snapshot.runs) await appendReviewRun(writer, run);
 	for (const acknowledgment of snapshot.acknowledgments) {
-		await acknowledgeReviewRun(sessionManager, acknowledgment.runId, acknowledgment.acknowledgedAt);
+		await acknowledgeReviewRun(writer, acknowledgment.runId, acknowledgment.acknowledgedAt);
 	}
 	for (const transition of snapshot.transitions) {
-		await appendReviewFindingTransition(sessionManager, transition);
+		await appendReviewFindingTransition(writer, transition);
 	}
 }
 
@@ -623,7 +624,7 @@ export async function listCanonicalReviewRuns(
 
 /** Use the runtime-owned writer for canonical aliases; never open a second unfenced writer. */
 export async function recordReviewFindingOutcome(
-	manager: SessionManager,
+	writer: SessionWriter,
 	transition: Omit<ReviewFindingTransitionRecord, "schemaVersion" | "createdAt">,
 	options: {
 		recordCanonicalOutcome?: (
@@ -632,6 +633,7 @@ export async function recordReviewFindingOutcome(
 		assertCurrent?: () => void;
 	} = {},
 ): Promise<ReviewFindingTransitionRecord> {
+	const manager = writer.sessionManager;
 	const assertCurrent = reviewConversationGuard(manager);
 	if (manager.getReviewDiscussion())
 		throw new Error("Canonical finding outcomes belong to the source review; record the outcome there.");
@@ -656,42 +658,42 @@ export async function recordReviewFindingOutcome(
 		if (ref?.sessionId !== source.sessionId || ref.sessionGeneration !== source.sessionGeneration)
 			throw new ReviewSourceUnavailableError("Open the canonical source review to record this outcome.");
 	}
-	return appendReviewFindingTransition(manager, transition);
+	return appendReviewFindingTransition(writer, transition);
 }
 
-export async function appendReviewRun(sessionManager: SessionManager, record: ReviewRunRecord): Promise<void> {
+export async function appendReviewRun(writer: SessionWriter, record: ReviewRunRecord): Promise<void> {
 	const persistedRecord = structuredClone(record) as HydratedReviewRunRecord;
 	delete persistedRecord.acknowledgedAt;
 	assertRecordSize(persistedRecord);
-	await sessionManager.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, persistedRecord);
+	await writer.appendCustomEntry(REVIEW_RUN_CUSTOM_ENTRY_TYPE, persistedRecord);
 }
 
 export async function appendReviewUsageCheckpoint(
-	sessionManager: SessionManager,
+	writer: SessionWriter,
 	runId: string,
 	usage: ReviewUsageAccounting,
 ): Promise<void> {
 	if (!parseReviewUsage(usage) || usage.finalized) throw new Error("Invalid review accounting checkpoint");
 	const record = { runId, usage };
 	assertRecordSize(record);
-	await sessionManager.appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, record);
+	await writer.appendCustomEntry(REVIEW_USAGE_CUSTOM_ENTRY_TYPE, record);
 }
 
-export async function appendReviewRunDurably(sessionManager: SessionManager, record: ReviewRunRecord): Promise<void> {
-	await appendReviewRun(sessionManager, record);
-	if (!record.result && (record.status !== "unfinished" || sessionManager.isPersisted())) {
+export async function appendReviewRunDurably(writer: SessionWriter, record: ReviewRunRecord): Promise<void> {
+	await appendReviewRun(writer, record);
+	if (!record.result && (record.status !== "unfinished" || writer.sessionManager.isPersisted())) {
 		const notice = createReviewAccountingMessage(record);
-		await sessionManager.appendCustomMessageEntry(notice.customType, notice.content, notice.display, notice.details);
+		await writer.appendCustomMessageEntry(notice.customType, notice.content, notice.display, notice.details);
 	}
-	await registerDurableReviewAnchor(sessionManager, record.runId);
+	await registerDurableReviewAnchor(writer.sessionManager, record.runId);
 }
 
 export async function acknowledgeReviewRun(
-	sessionManager: SessionManager,
+	writer: SessionWriter,
 	runId: string,
 	acknowledgedAt = Date.now(),
 ): Promise<ReviewAcknowledgmentRecord> {
-	const run = getReviewRun(sessionManager, runId);
+	const run = getReviewRun(writer.sessionManager, runId);
 	if (!run) throw new Error(`Unknown durable review run: ${runId}`);
 	if (!Number.isFinite(acknowledgedAt)) throw new Error("Review acknowledgment timestamp must be finite.");
 	if (run.acknowledgedAt !== undefined) {
@@ -703,12 +705,12 @@ export async function acknowledgeReviewRun(
 		acknowledgedAt,
 	};
 	assertRecordSize(record);
-	await sessionManager.appendCustomEntry(REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE, record);
+	await writer.appendCustomEntry(REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE, record);
 	return record;
 }
 
 export async function appendReviewFindingTransition(
-	sessionManager: SessionManager,
+	writer: SessionWriter,
 	transition: Omit<ReviewFindingTransitionRecord, "schemaVersion" | "createdAt"> & { createdAt?: number },
 ): Promise<ReviewFindingTransitionRecord> {
 	const record: ReviewFindingTransitionRecord = {
@@ -721,12 +723,12 @@ export async function appendReviewFindingTransition(
 		createdAt: transition.createdAt ?? Date.now(),
 	};
 	assertRecordSize(record);
-	await sessionManager.appendCustomEntry(REVIEW_FINDING_TRANSITION_CUSTOM_ENTRY_TYPE, record);
+	await writer.appendCustomEntry(REVIEW_FINDING_TRANSITION_CUSTOM_ENTRY_TYPE, record);
 	return record;
 }
 
 export async function appendReviewPublication(
-	sessionManager: SessionManager,
+	writer: SessionWriter,
 	publication: Omit<ReviewPublicationRecord, "schemaVersion" | "createdAt"> & { createdAt?: number },
 ): Promise<ReviewPublicationRecord> {
 	const record: ReviewPublicationRecord = {
@@ -739,7 +741,7 @@ export async function appendReviewPublication(
 		createdAt: publication.createdAt ?? Date.now(),
 	};
 	assertRecordSize(record);
-	await sessionManager.appendCustomEntry(REVIEW_PUBLICATION_CUSTOM_ENTRY_TYPE, record);
+	await writer.appendCustomEntry(REVIEW_PUBLICATION_CUSTOM_ENTRY_TYPE, record);
 	return record;
 }
 

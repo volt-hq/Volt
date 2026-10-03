@@ -162,9 +162,9 @@ describe("AgentSession cache-preserving compaction", () => {
 				details,
 			});
 			expect(reopened.getEntry(retainedEntry.id)).toEqual(retainedEntry);
-			expect(reopened.buildSessionContext().messages[1]).toEqual(latestAssistant);
+			expect(reopened.getConversationState().context.messages[1]).toEqual(latestAssistant);
 			// Usage and diagnostics stay host metadata, not part of the synthetic summary or provider context.
-			expect(reopened.buildSessionContext().messages[0]).toEqual({
+			expect(reopened.getConversationState().context.messages[0]).toEqual({
 				role: "compactionSummary",
 				summary: result.summary,
 				tokensBefore: result.tokensBefore,
@@ -206,6 +206,7 @@ describe("AgentSession cache-preserving compaction", () => {
 			const entriesBefore = harness.sessionManager.getEntries();
 			const preparation = prepareCompaction(
 				harness.sessionManager.getBranch(),
+				harness.sessionManager.getConversationState().context.messages,
 				harness.settingsManager.getCompactionSettings(),
 			);
 			expect(preparation).toMatchObject({
@@ -279,7 +280,7 @@ describe("AgentSession cache-preserving compaction", () => {
 		await harness.session.prompt("Warm the prefix");
 		const reopened = await SessionManager.openReadOnly(harness.sessionManager.getSessionRef()!);
 		try {
-			expect(reopened.buildSessionContext().messages.at(-1)).toMatchObject({
+			expect(reopened.getConversationState().context.messages.at(-1)).toMatchObject({
 				role: "assistant",
 				diagnostics: response.diagnostics,
 			});
@@ -401,16 +402,20 @@ describe("AgentSession cache-preserving compaction", () => {
 				],
 			});
 			harnesses.push(harness);
-			await harness.sessionManager.appendMessage({ role: "user", content: "Older goal ".repeat(100), timestamp: 1 });
-			await harness.sessionManager.appendMessage(fauxAssistantMessage("Older answer"));
-			const firstKeptEntryId = await harness.sessionManager.appendMessage({
+			await harness.session.sessionWriter.appendMessage({
+				role: "user",
+				content: "Older goal ".repeat(100),
+				timestamp: 1,
+			});
+			await harness.session.sessionWriter.appendMessage(fauxAssistantMessage("Older answer"));
+			const firstKeptEntryId = await harness.session.sessionWriter.appendMessage({
 				role: "user",
 				content: "RAW-RETAINED-REQUEST",
 				timestamp: 2,
 			});
-			await harness.sessionManager.appendMessage(fauxAssistantMessage("RAW-RETAINED-ANSWER"));
+			await harness.session.sessionWriter.appendMessage(fauxAssistantMessage("RAW-RETAINED-ANSWER"));
 			const savedEntries = harness.sessionManager.getEntries();
-			const originalHistory = harness.sessionManager.buildSessionContext().messages;
+			const originalHistory = harness.sessionManager.getConversationState().context.messages;
 			let calls = 0;
 			harness.setResponses([
 				(context) => {
@@ -446,7 +451,11 @@ describe("AgentSession cache-preserving compaction", () => {
 	it("keeps retained-only file operations out of the checkpoint despite including them in the native request", async () => {
 		const harness = await createHarness({ settings: { compaction: { keepRecentTokens: 1 } } });
 		harnesses.push(harness);
-		await harness.sessionManager.appendMessage({ role: "user", content: "Inspect and update files", timestamp: 1 });
+		await harness.session.sessionWriter.appendMessage({
+			role: "user",
+			content: "Inspect and update files",
+			timestamp: 1,
+		});
 		for (const calls of [
 			[
 				fauxToolCall("read", { path: "older-read.ts" }),
@@ -457,9 +466,9 @@ describe("AgentSession cache-preserving compaction", () => {
 				fauxToolCall("write", { path: "retained-write.ts", content: "new file" }),
 			],
 		]) {
-			await harness.sessionManager.appendMessage(fauxAssistantMessage(calls, { stopReason: "toolUse" }));
+			await harness.session.sessionWriter.appendMessage(fauxAssistantMessage(calls, { stopReason: "toolUse" }));
 			for (const call of calls) {
-				await harness.sessionManager.appendMessage({
+				await harness.session.sessionWriter.appendMessage({
 					role: "toolResult",
 					toolCallId: call.id,
 					toolName: call.name,
@@ -471,12 +480,12 @@ describe("AgentSession cache-preserving compaction", () => {
 		}
 		const savedEntries = harness.sessionManager.getEntries();
 		const retainedEntry = harness.sessionManager.getBranch().at(-3)!;
-		const originalHistory = harness.sessionManager.buildSessionContext().messages;
+		const originalHistory = harness.sessionManager.getConversationState().context.messages;
 		let calls = 0;
 		harness.setResponses([
 			(context) => {
 				calls++;
-				expect(context.messages.slice(0, -1)).toEqual(convertToLlm(originalHistory));
+				expect(context.messages.slice(0, -1)).toEqual(convertToLlm([...originalHistory]));
 				expect(getMessageText(context.messages.at(-1))).toContain("last 3 saved conversation messages");
 				return fauxAssistantMessage("file checkpoint");
 			},
@@ -506,9 +515,10 @@ describe("AgentSession cache-preserving compaction", () => {
 					.assistant("RETAINED-SUFFIX", { id: retainedEntryId }),
 		});
 		harnesses.push(harness);
-		const originalHistory = harness.sessionManager.buildSessionContext().messages;
+		const originalHistory = harness.sessionManager.getConversationState().context.messages;
 		const preparation = prepareCompaction(
 			harness.sessionManager.getBranch(),
+			harness.sessionManager.getConversationState().context.messages,
 			harness.settingsManager.getCompactionSettings(),
 		);
 		expect(preparation?.isSplitTurn).toBe(true);
@@ -516,7 +526,7 @@ describe("AgentSession cache-preserving compaction", () => {
 		harness.setResponses([
 			(context) => {
 				calls++;
-				expect(context.messages.slice(0, -1)).toEqual(convertToLlm(originalHistory));
+				expect(context.messages.slice(0, -1)).toEqual(convertToLlm([...originalHistory]));
 				expect(JSON.stringify(context.messages.slice(0, -1))).toContain("EARLY-PREFIX-CONTEXT");
 				expect(context.messages.at(-2)).toEqual(originalHistory.at(-1));
 				const instruction = getMessageText(context.messages.at(-1));

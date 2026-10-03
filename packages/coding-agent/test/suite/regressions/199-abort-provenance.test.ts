@@ -216,7 +216,7 @@ describe("regression #199: abort provenance persistence", () => {
 		});
 		await disposal;
 
-		const messages = harness.sessionManager.buildSessionContext().messages;
+		const messages = harness.sessionManager.getConversationState().context.messages;
 		expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 		expect(messages[0]).toMatchObject({
 			role: "user",
@@ -247,7 +247,7 @@ describe("regression #199: abort provenance persistence", () => {
 		await prompt;
 		await disposal;
 
-		const messages = harness.sessionManager.buildSessionContext().messages;
+		const messages = harness.sessionManager.getConversationState().context.messages;
 		expect(messages.map((message) => message.role)).toEqual(["user", "assistant"]);
 		expect(messages[0]).toMatchObject({
 			role: "user",
@@ -284,7 +284,7 @@ describe("regression #199: abort provenance persistence", () => {
 		await prompt;
 		await disposal;
 
-		const messages = harness.sessionManager.buildSessionContext().messages;
+		const messages = harness.sessionManager.getConversationState().context.messages;
 		expect(
 			messages.flatMap((message) => {
 				if (message.role !== "user" && message.role !== "custom") return [];
@@ -310,7 +310,7 @@ describe("regression #199: abort provenance persistence", () => {
 		await prompt.catch(() => undefined);
 		await disposal;
 
-		expect(harness.sessionManager.buildSessionContext().messages).toEqual([]);
+		expect(harness.sessionManager.getConversationState().context.messages).toEqual([]);
 	});
 
 	it("attributes manual compaction cancellation to the local host action", async () => {

@@ -357,8 +357,8 @@ describe("regression #199: approved plan finalization", () => {
 		await harness.session.setSessionName("final response compaction regression");
 		const olderUser = createUserMessage("older compactable turn");
 		const olderAssistant = fauxAssistantMessage("older completed response");
-		await harness.sessionManager.appendMessage(olderUser);
-		await harness.sessionManager.appendMessage(olderAssistant);
+		await harness.session.sessionWriter.appendMessage(olderUser);
+		await harness.session.sessionWriter.appendMessage(olderAssistant);
 		await harness.session.setAgentMode("plan");
 		const draft = await harness.session.updatePlan({ steps: [{ text: "Finish compacted implementation" }] });
 		const ready = await harness.session.submitPlan({

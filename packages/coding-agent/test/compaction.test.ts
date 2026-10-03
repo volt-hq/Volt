@@ -1,4 +1,4 @@
-import type { AgentMessage, StreamFn } from "@hansjm10/volt-agent-core";
+import { type AgentMessage, type ConversationContext, fold, type StreamFn } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, Tool, Usage } from "@hansjm10/volt-ai";
 import {
 	builtInProviders,
@@ -21,13 +21,13 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "../src/core/compaction/index.ts";
-import {
-	buildSessionContext,
-	type CompactionEntry,
-	type ModelChangeEntry,
-	type SessionEntry,
-	type SessionMessageEntry,
-	type ThinkingLevelChangeEntry,
+import { toLogEntry } from "../src/core/conversation-log/entry-codec.ts";
+import type {
+	CompactionEntry,
+	ModelChangeEntry,
+	SessionEntry,
+	SessionMessageEntry,
+	ThinkingLevelChangeEntry,
 } from "../src/core/session-manager.ts";
 
 // ============================================================================
@@ -147,7 +147,12 @@ function createThinkingLevelEntry(thinkingLevel: ThinkingLevelChangeEntry["think
 	return entry;
 }
 
-function extractText(messages: AgentMessage[]): string {
+/** The model context the conversation fold derives for a branch of entries, root first. */
+function pathContext(entries: readonly SessionEntry[]): ConversationContext {
+	return fold(entries.map((entry, index) => toLogEntry({ ...entry, ordinal: index + 1 }))).context;
+}
+
+function extractText(messages: readonly AgentMessage[]): string {
 	return messages
 		.map((message) => {
 			switch (message.role) {
@@ -390,7 +395,7 @@ describe("findCutPoint", () => {
 	});
 });
 
-describe("buildSessionContext", () => {
+describe("branch context fold", () => {
 	it("should load all messages when no compaction", () => {
 		const entries: SessionEntry[] = [
 			createMessageEntry(createUserMessage("1")),
@@ -399,7 +404,7 @@ describe("buildSessionContext", () => {
 			createMessageEntry(createAssistantMessage("b")),
 		];
 
-		const loaded = buildSessionContext(entries);
+		const loaded = pathContext(entries);
 		expect(loaded.messages.length).toBe(4);
 		expect(loaded.thinkingLevel).toBe("off");
 		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
@@ -417,7 +422,7 @@ describe("buildSessionContext", () => {
 
 		const entries: SessionEntry[] = [u1, a1, u2, a2, compaction, u3, a3];
 
-		const loaded = buildSessionContext(entries);
+		const loaded = pathContext(entries);
 		// summary + kept (u2, a2) + after (u3, a3) = 5
 		expect(loaded.messages.length).toBe(5);
 		expect(loaded.messages[0].role).toBe("compactionSummary");
@@ -441,7 +446,7 @@ describe("buildSessionContext", () => {
 
 		const entries: SessionEntry[] = [u1, a1, compact1, u2, b, u3, c, compact2, u4, d];
 
-		const loaded = buildSessionContext(entries);
+		const loaded = pathContext(entries);
 		// summary + kept from u3 (u3, c) + after (u4, d) = 5
 		expect(loaded.messages.length).toBe(5);
 		expect((loaded.messages[0] as any).summary).toContain("Second summary");
@@ -456,7 +461,7 @@ describe("buildSessionContext", () => {
 
 		const entries: SessionEntry[] = [u1, a1, compact1, u2, b];
 
-		const loaded = buildSessionContext(entries);
+		const loaded = pathContext(entries);
 		// summary + all messages (u1, a1, u2, b) = 5
 		expect(loaded.messages.length).toBe(5);
 	});
@@ -469,7 +474,7 @@ describe("buildSessionContext", () => {
 			createThinkingLevelEntry("high"),
 		];
 
-		const loaded = buildSessionContext(entries);
+		const loaded = pathContext(entries);
 		// model_change is later overwritten by assistant message's model info
 		expect(loaded.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
 		expect(loaded.thinkingLevel).toBe("high");
@@ -489,7 +494,7 @@ describe("prepareCompaction context budget", () => {
 			keepRecentTokens: 1,
 		};
 
-		const preparation = prepareCompaction([request, overflow], settings);
+		const preparation = prepareCompaction([request, overflow], pathContext([request, overflow]).messages, settings);
 
 		expect(preparation).toMatchObject({
 			firstKeptEntryId: overflow.id,
@@ -515,8 +520,11 @@ describe("prepareCompaction context budget", () => {
 		};
 		const contextWindow = 8000;
 
-		const withoutTools = prepareCompaction(entries, settings);
-		const withTools = prepareCompaction(entries, settings, { tools: [largeTool], contextWindow });
+		const withoutTools = prepareCompaction(entries, pathContext(entries).messages, settings);
+		const withTools = prepareCompaction(entries, pathContext(entries).messages, settings, {
+			tools: [largeTool],
+			contextWindow,
+		});
 
 		expect(withoutTools).toBeDefined();
 		expect(withTools).toBeDefined();
@@ -529,9 +537,7 @@ describe("prepareCompaction context budget", () => {
 			contextWindow - settings.reserveTokens - estimateToolDefinitionTokens([largeTool]),
 		);
 		expect(estimateMessagesTokens(retainedMessages)).toBeLessThanOrEqual(retainedMessageBudget);
-		expect(withTools!.tokensBefore).toBe(
-			estimateContextTokens(buildSessionContext(entries).messages, [largeTool]).tokens,
-		);
+		expect(withTools!.tokensBefore).toBe(estimateContextTokens(pathContext(entries).messages, [largeTool]).tokens);
 		expect(withTools!.tokensBefore - withoutTools!.tokensBefore).toBe(estimateToolDefinitionTokens([largeTool]));
 	});
 });
@@ -549,8 +555,12 @@ describe("prepareCompaction with previous compaction", () => {
 		const a4 = createMessageEntry(createAssistantMessage("assistant msg 4", createMockUsage(8000, 2000)));
 
 		const pathEntries = [u1, a1, u2, a2, u3, a3, compaction1, u4, a4];
-		const contextBefore = buildSessionContext(pathEntries);
-		const preparation = prepareCompaction(pathEntries, DEFAULT_COMPACTION_SETTINGS);
+		const contextBefore = pathContext(pathEntries);
+		const preparation = prepareCompaction(
+			pathEntries,
+			pathContext(pathEntries).messages,
+			DEFAULT_COMPACTION_SETTINGS,
+		);
 
 		expect(preparation).toBeDefined();
 		expect(preparation!.firstKeptEntryId).toBe(u2.id);
@@ -567,7 +577,7 @@ describe("prepareCompaction with previous compaction", () => {
 			firstKeptEntryId: preparation!.firstKeptEntryId,
 			tokensBefore: preparation!.tokensBefore,
 		};
-		const contextAfter = buildSessionContext([...pathEntries, compaction2]);
+		const contextAfter = pathContext([...pathEntries, compaction2]);
 		const contextAfterText = extractText(contextAfter.messages);
 
 		expect(contextAfterText).toContain("user msg 2 - kept by compaction1");
@@ -589,7 +599,11 @@ describe("prepareCompaction with previous compaction", () => {
 			...DEFAULT_COMPACTION_SETTINGS,
 			keepRecentTokens: 100,
 		};
-		const preparation = prepareCompaction([u1, a1, u2, a2, u3, a3, compaction1, u4, a4], settings);
+		const preparation = prepareCompaction(
+			[u1, a1, u2, a2, u3, a3, compaction1, u4, a4],
+			pathContext([u1, a1, u2, a2, u3, a3, compaction1, u4, a4]).messages,
+			settings,
+		);
 
 		expect(preparation).toBeDefined();
 		const summarizedText = extractText(preparation!.messagesToSummarize);
@@ -625,7 +639,7 @@ describe("Large session", () => {
 
 	it("should load session correctly", () => {
 		const entries = loadLargeSessionEntries();
-		const loaded = buildSessionContext(entries);
+		const loaded = pathContext(entries);
 
 		expect(loaded.messages.length).toBeGreaterThan(100);
 		expect(loaded.model).not.toBeNull();
@@ -645,7 +659,7 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 		const entries = loadLargeSessionEntries();
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
-		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
+		const preparation = prepareCompaction(entries, pathContext(entries).messages, DEFAULT_COMPACTION_SETTINGS);
 		expect(preparation).toBeDefined();
 
 		const compactionResult = await compact(preparation!, model, streamFn);
@@ -663,10 +677,10 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 
 	it("should produce valid session after compaction", async () => {
 		const entries = loadLargeSessionEntries();
-		const loaded = buildSessionContext(entries);
+		const loaded = pathContext(entries);
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 
-		const preparation = prepareCompaction(entries, DEFAULT_COMPACTION_SETTINGS);
+		const preparation = prepareCompaction(entries, pathContext(entries).messages, DEFAULT_COMPACTION_SETTINGS);
 		expect(preparation).toBeDefined();
 
 		const compactionResult = await compact(preparation!, model, streamFn);
@@ -682,7 +696,7 @@ describe.skipIf(!process.env.ANTHROPIC_OAUTH_TOKEN)("LLM summarization", () => {
 			...compactionResult,
 		};
 		const newEntries = [...entries, compactionEntry];
-		const reloaded = buildSessionContext(newEntries);
+		const reloaded = pathContext(newEntries);
 
 		// Should have summary + kept messages
 		expect(reloaded.messages.length).toBeLessThan(loaded.messages.length);

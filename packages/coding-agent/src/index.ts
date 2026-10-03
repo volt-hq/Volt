@@ -669,7 +669,6 @@ export {
 export {
 	assertCurrentSessionSnapshot,
 	type BranchSummaryEntry,
-	buildSessionContext,
 	type CompactionEntry,
 	CURRENT_SESSION_SNAPSHOT_VERSION,
 	CURRENT_SESSION_VERSION,
@@ -683,7 +682,6 @@ export {
 	type ModelChangeEntry,
 	type NewSessionOptions,
 	parseSessionEntries,
-	type SessionContext,
 	type SessionEntry,
 	type SessionEntryBase,
 	type SessionHeader,
@@ -697,6 +695,7 @@ export {
 	serializeSessionJsonlSnapshot,
 	type ThinkingLevelChangeEntry,
 } from "./core/session-manager.ts";
+export type { LogWriter, SessionWriter, SubagentSpawnInput } from "./core/session-writer.ts";
 export {
 	type CompactionSettings,
 	type DefaultProjectTrust,
