@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
 	CORE_LOG_ENTRY_TYPES,
 	type CoreLogEntryTypeName,
+	clientInputDigestMaterial,
 	defineLogEntryType,
 	LOG_ENTRY_ENVELOPE_KEYS,
 	type LogEntry,
@@ -135,6 +136,44 @@ describe("log entry envelope", () => {
 				}),
 			),
 		).toBe(false);
+	});
+
+	it("records a host origin and the messages a host input queues", () => {
+		const notice = { role: "custom", customType: "notice", content: "done", display: true, timestamp: 1 };
+		expect(
+			Check(
+				LogEntrySchema,
+				entryOf("client_input_receipt", { payload: { ...PAYLOADS.client_input_receipt, origin: "host" } }),
+			),
+		).toBe(true);
+		expect(
+			Check(
+				LogEntrySchema,
+				entryOf("client_input_receipt", { payload: { ...PAYLOADS.client_input_receipt, origin: "client" } }),
+			),
+		).toBe(false);
+		const queued = (messages: unknown[]) =>
+			entryOf("client_input_queued", {
+				payload: {
+					...PAYLOADS.client_input_queued,
+					queuedInput: { delivery: "steer", message: "", images: [], messages },
+				},
+			});
+		expect(Check(LogEntrySchema, queued([notice]))).toBe(true);
+		expect(Check(LogEntrySchema, queued([]))).toBe(false);
+		expect(Check(LogEntrySchema, queued([{ role: "compactionSummary", summary: "x", timestamp: 1 }]))).toBe(false);
+	});
+
+	it("digests client input from canonical material", () => {
+		const image = { data: "aW1n", mimeType: "image/png", type: "image" as const };
+		expect(
+			clientInputDigestMaterial("prompt", { message: "hi", images: [image], streamingBehavior: "followUp" }),
+		).toBe(
+			'{"command":"prompt","message":"hi","images":[{"type":"image","mimeType":"image/png","data":"aW1n"}],"streamingBehavior":"followUp"}',
+		);
+		expect(clientInputDigestMaterial("steer", { message: "", images: [] })).toBe(
+			'{"command":"steer","message":"","images":[]}',
+		);
 	});
 
 	it("rejects malformed envelope positions and identities", () => {

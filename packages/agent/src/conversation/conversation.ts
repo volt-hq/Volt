@@ -12,7 +12,8 @@
  *
  * Client input is durable: a receipt (and, for queued input, its queue
  * intent) commits before the input is acknowledged, and the pending set is
- * seeded from the fold's durable queue on open.
+ * seeded from the fold's durable queue on open. Messages the host queues are
+ * durable inputs with a host origin.
  */
 
 import {
@@ -31,7 +32,9 @@ import {
 import {
 	type ClientInputCommand,
 	type ClientInputPayload,
+	ClientInputQueuedPayloadSchema,
 	CORE_LOG_ENTRY_TYPES,
+	clientInputDigestMaterial,
 	type LogEntryType,
 } from "@hansjm10/volt-protocol/entries";
 import { Check } from "typebox/value";
@@ -57,11 +60,12 @@ import type {
 	StreamFn,
 } from "../types.ts";
 import {
+	type ConversationAdmitOptions,
 	type ConversationAgentEvent,
-	type ConversationBranchSummary,
 	type ConversationCompactionCause,
 	type ConversationCompactionDecision,
 	type ConversationCompactionResult,
+	type ConversationDeliveryKind,
 	type ConversationEnd,
 	type ConversationEntryInput,
 	ConversationError,
@@ -79,6 +83,7 @@ import {
 	type ConversationPhase,
 	type ConversationPolicy,
 	type ConversationPromptCacheRefreshResult,
+	type ConversationPromptOptions,
 	type ConversationQueue,
 	type ConversationQueueModes,
 	type ConversationRequestBoundary,
@@ -86,6 +91,7 @@ import {
 	type ConversationRequestDelivery,
 	type ConversationStreamOptions,
 	type ConversationSummarizer,
+	type ConversationTurnReservation,
 } from "./api.ts";
 import { buildContext } from "./context.ts";
 import { type ConversationActivityKind, OperationCoordinator, type OperationLease } from "./coordinator.ts";
@@ -105,6 +111,7 @@ import {
 	type ConversationLogEntry,
 	type ConversationLogEntryDraft,
 	ConversationLogLostError,
+	isCoreLogEntry,
 } from "./log.ts";
 import {
 	cloneAgentMessages,
@@ -130,6 +137,12 @@ const HOST_APPENDABLE_CORE_TYPES: ReadonlyMap<string, LogEntryType> = new Map(
 		CORE_LOG_ENTRY_TYPES[type],
 	]),
 );
+
+/** Core types `prepareDelivery` may commit with a delivery: the host-appendable ones and a planning snapshot. */
+const DELIVERY_ENTRY_CORE_TYPES: ReadonlyMap<string, LogEntryType> = new Map([
+	...HOST_APPENDABLE_CORE_TYPES,
+	["planning_state_change", CORE_LOG_ENTRY_TYPES.planning_state_change],
+]);
 
 type ClientUserMessage = UserMessage & { clientMessageId?: string };
 
@@ -157,6 +170,8 @@ interface DispatchStart {
 	readonly requestAuthority: AgentRequestAuthority;
 	readonly providerRequestPending: boolean;
 	readonly drainFollowUpsFirst: boolean;
+	/** The turn's first start: an assistant tail is checked for compaction before anything is requested. */
+	readonly checkTail?: boolean;
 }
 
 interface PreparedRequest {
@@ -167,14 +182,21 @@ interface PreparedRequest {
 	readonly boundary: Omit<ConversationRequestBoundary, "attemptId" | "basisOrdinal">;
 }
 
+/** A compaction the turn operation runs, and the assistant message it was decided on. */
+interface TurnCompaction {
+	readonly cause: "overflow" | "threshold";
+	readonly decision: ConversationCompactionDecision;
+	readonly message: AssistantMessage;
+	/** The message's entry, which a retry leaves out of its requests when it is a tool-free length stop. */
+	readonly entryId: string | undefined;
+	/** Before the turn's first request, between requests, or after its final message. */
+	readonly at: "start" | "between" | "end";
+}
+
 /** Work the turn operation does after its loop ends, decided before the loop's terminal event. */
 type TurnFollowUp =
 	| { readonly kind: "retry"; readonly delayMs: number; readonly message: AssistantMessage }
-	| {
-			readonly kind: "compact";
-			readonly cause: "overflow" | "threshold";
-			readonly decision: ConversationCompactionDecision;
-	  };
+	| { readonly kind: "compact"; readonly compaction: TurnCompaction };
 
 interface TurnRun {
 	readonly lease: OperationLease<ConversationOperationKind>;
@@ -191,8 +213,14 @@ interface TurnRun {
 	overflowRecovered: boolean;
 	retryRequest: boolean;
 	followUp: TurnFollowUp | undefined;
-	pendingCompaction: ConversationCompactionDecision | undefined;
+	pendingCompaction: TurnCompaction | undefined;
 	request: PreparedRequest | undefined;
+	/** The newest assistant message this operation committed. */
+	lastAssistantEntryId: string | undefined;
+	/** A retried request runs before a pending prompt is delivered. */
+	holdPrompts: boolean;
+	/** A tool-free length-stopped message this operation's requests leave out. */
+	dropEntryId: string | undefined;
 }
 
 interface RecordedRequest {
@@ -259,13 +287,19 @@ function clientUserMessage(text: string, images: readonly ImageContent[], client
 	};
 }
 
+/** Input images in their canonical stored form. */
+function canonicalImages(images: readonly ImageContent[]): ImageContent[] {
+	return images.map((image) => ({ type: "image", mimeType: image.mimeType, data: image.data }));
+}
+
 /** The default conversion: runtime messages to provider messages, without client identities. */
 function convertConversationMessages(messages: AgentMessage[]): Message[] {
 	return convertRuntimeMessages(messages.map(withoutClientMessageId));
 }
 
-async function semanticDigest(command: ClientInputCommand, input: ClientInputPayload): Promise<string> {
-	const bytes = new TextEncoder().encode(JSON.stringify({ command, ...input }));
+/** A client input's `semanticDigest`: hex SHA-256 of its {@link clientInputDigestMaterial}. */
+export async function clientInputDigest(command: ClientInputCommand, input: ClientInputPayload): Promise<string> {
+	const bytes = new TextEncoder().encode(clientInputDigestMaterial(command, input));
 	const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
 	return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -312,7 +346,11 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	private readonly deliveryMeta = new Map<string, DeliveryMeta>();
 	private readonly attemptIds = new Map<string, string>();
 	private readonly inputWaiters = new Map<string, InputWaiter>();
-	private readonly admitting = new Map<string, Promise<ConversationInputAdmission>>();
+	private readonly admitting = new Map<string, Promise<unknown>>();
+	/** Inputs admitted without delivery in this runtime that the host may still deliver. */
+	private readonly undelivered = new Set<string>();
+	/** Entries `prepareDelivery` returned, by prepared delivery, committed with it. */
+	private readonly deliveryEntries = new Map<string, readonly EntryBody[]>();
 	private readonly listeners = new Set<ConversationListener>();
 	private tools: TTool[];
 	private streamOptions: ConversationStreamOptions;
@@ -322,6 +360,9 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	private laneTail: Promise<unknown> = Promise.resolve();
 	private eventTail: Promise<void> = Promise.resolve();
 	private activeLease: DeliveryLease<AgentDeliveryKind, AgentMessage> | undefined;
+	private reservation:
+		| { readonly handle: ConversationTurnReservation; readonly lease: OperationLease<ConversationOperationKind> }
+		| undefined;
 	private successorTurn: ReturnType<OperationCoordinator<ConversationOperationKind>["reserveSuccessor"]>;
 	private continuation: ContinuationState | undefined;
 	private requestBatch: ConversationRequestBoundary["batch"];
@@ -484,29 +525,127 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	// Client input
 	// ==========================================================================
 
-	/** Admit a prompt. While a turn runs, a prompt needs `streamingBehavior` and is queued with it. */
-	prompt(input: ConversationInput): Promise<ConversationInputAdmission> {
-		return this.admitInput("prompt", input);
+	/**
+	 * Admit a prompt. While a turn runs, a prompt needs `streamingBehavior` and
+	 * is queued with it. With a reservation, the prompt's turn runs under it.
+	 */
+	async prompt(
+		input: ConversationInput,
+		options: ConversationPromptOptions = {},
+	): Promise<ConversationInputAdmission> {
+		this.assertActive();
+		const reserved = options.reservation === undefined ? undefined : this.takeReservation(options.reservation);
+		return await this.admit("prompt", input, { reserved });
 	}
 
 	steer(input: ConversationInput): Promise<ConversationInputAdmission> {
-		return this.admitInput("steer", input);
+		return this.admit("steer", input);
 	}
 
 	followUp(input: ConversationInput): Promise<ConversationInputAdmission> {
-		return this.admitInput("follow_up", input);
+		return this.admit("follow_up", input);
 	}
 
 	/**
-	 * Queue host messages (extension or background notices) that are not client
-	 * input. They stay in memory until a turn delivers them as one batch.
+	 * Claim the idle conversation for one turn while the host prepares its
+	 * input; pass the reservation to `prompt`, or cancel it.
 	 */
-	queueMessages(kind: "steer" | "followUp", messages: readonly AgentMessage[]): string {
+	reserve(): ConversationTurnReservation {
+		this.assertActive();
+		const lease = this.coordinator.reserve("turn");
+		if (!lease) throw new ConversationError("busy", "The conversation is busy");
+		const handle: ConversationTurnReservation = Object.freeze({
+			id: lease.id,
+			signal: lease.abortGate.signal,
+			cancel: () => {
+				if (this.reservation?.handle !== handle) return false;
+				this.releaseReservation();
+				if (this.inbox.hasPending()) this.startTurnForQueuedInput();
+				return true;
+			},
+		});
+		this.reservation = { handle, lease };
+		return handle;
+	}
+
+	/**
+	 * Admit an input without delivering it, for input the host runs itself (an
+	 * extension command). Mark it started before running it, then settle it, or
+	 * deliver it by submitting the same input to `prompt`, `steer`, or `followUp`.
+	 */
+	admitInput(
+		command: ClientInputCommand,
+		input: ConversationInput,
+		options: ConversationAdmitOptions,
+	): Promise<ConversationInputAdmission> {
+		return this.admit(command, input, { deliver: options.deliver });
+	}
+
+	/**
+	 * Record that the host started running an accepted input it was not asked to
+	 * deliver: the at-most-once fence. A started input without an outcome is
+	 * never run again; after a restart it blocks recovery as ambiguous.
+	 */
+	async markInputStarted(clientMessageId: string): Promise<void> {
+		this.assertActive();
+		await this.commit((drafts, state) => {
+			const record = state.clientInputs.inputs.get(clientMessageId);
+			const pending = [...this.deliveryMeta.values()].some((meta) => meta.clientMessageId === clientMessageId);
+			if (record?.state !== "accepted" || pending) {
+				throw new ConversationError(
+					"invalid_argument",
+					`Client input ${JSON.stringify(clientMessageId)} cannot be marked started`,
+				);
+			}
+			drafts.add({
+				type: "client_input_state",
+				visibility: "host",
+				payload: { receiptId: record.receiptId, clientMessageId, state: "started" },
+			});
+		});
+	}
+
+	/**
+	 * Queue host messages (extension messages, notices, checkpoints) as one
+	 * durable input with a host origin; a turn delivers them as one batch.
+	 */
+	async queueMessages(
+		kind: "steer" | "followUp",
+		messages: readonly AgentMessage[],
+	): Promise<ConversationInputAdmission> {
 		this.assertActive();
 		if (messages.length === 0) throw new ConversationError("invalid_argument", "A delivery needs a message");
-		const deliveryId = this.enqueueDelivery(kind, cloneAgentMessages(messages), { kind, requestInput: false });
+		const owned = cloneAgentMessages(messages).map(withoutClientMessageId);
+		const command = kind === "steer" ? "steer" : "follow_up";
+		const queuedInput = { delivery: command, message: "", images: [], messages: owned };
+		if (!Check(ClientInputQueuedPayloadSchema, queuedInput)) {
+			throw new ConversationError("invalid_argument", "Host messages must be log messages");
+		}
+		const clientMessageId = this.createId();
+		const input: ClientInputPayload = { message: "", images: [] };
+		const admission = await this.enqueueLane(async (): Promise<ConversationInputAdmission> => {
+			const digest = await clientInputDigest(command, input);
+			const entries = await this.commitInLane((drafts) => {
+				const receipt = drafts.add({
+					type: "client_input_receipt",
+					visibility: "host",
+					payload: { clientMessageId, command, semanticDigest: digest, input, origin: "host" },
+				});
+				drafts.add({
+					type: "client_input_queued",
+					visibility: "host",
+					payload: { receiptId: receipt.id, clientMessageId, queuedInput },
+				});
+			});
+			this.enqueueDelivery(kind, owned, { kind, clientMessageId, requestInput: false });
+			return {
+				clientMessageId,
+				ordinals: entries.map((entry) => entry.ordinal),
+				completion: this.createWaiter(clientMessageId).promise,
+			};
+		});
 		this.startTurnForQueuedInput();
-		return deliveryId;
+		return admission;
 	}
 
 	/** Withdraw every queued steer and follow-up; durable inputs record `withdrawn`. */
@@ -588,6 +727,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				},
 			});
 		});
+		this.undelivered.delete(clientMessageId);
 		this.settleWaiter(
 			clientMessageId,
 			outcome.state !== "completed"
@@ -601,83 +741,139 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		this.seedRecoveredInputs();
 	}
 
-	private async admitInput(
+	/** Take the held reservation for a prompt; it is consumed even when admission then fails. */
+	private takeReservation(handle: ConversationTurnReservation): OperationLease<ConversationOperationKind> {
+		const held = this.reservation;
+		if (held?.handle !== handle) throw new ConversationError("invalid_state", "The turn reservation is not held");
+		this.reservation = undefined;
+		return held.lease;
+	}
+
+	/** Release the held reservation, if any: cancelled by the host, or revoked. */
+	private releaseReservation(): void {
+		const held = this.reservation;
+		this.reservation = undefined;
+		if (held) this.coordinator.finish(held.lease);
+	}
+
+	private async admit(
 		command: ClientInputCommand,
 		input: ConversationInput,
+		options: {
+			readonly reserved?: OperationLease<ConversationOperationKind> | undefined;
+			readonly deliver?: boolean;
+		} = {},
 	): Promise<ConversationInputAdmission> {
-		this.assertActive();
-		if (command !== "prompt" && input.streamingBehavior !== undefined) {
-			throw new ConversationError("invalid_argument", "Only a prompt may set streamingBehavior");
+		const reserved = options.reserved;
+		const deliver = options.deliver !== false;
+		let lease = reserved;
+		let clientMessageId: string;
+		let payload: ClientInputPayload;
+		let immediate: boolean;
+		try {
+			this.assertActive();
+			if (command !== "prompt" && input.streamingBehavior !== undefined) {
+				throw new ConversationError("invalid_argument", "Only a prompt may set streamingBehavior");
+			}
+			if (reserved && !this.coordinator.canStart(reserved)) {
+				throw new ConversationError("busy", "Operation admission was revoked");
+			}
+			clientMessageId = input.clientMessageId ?? this.createId();
+			const inFlight = this.admitting.get(clientMessageId);
+			if (inFlight) {
+				await inFlight.catch(() => undefined);
+				return await this.admit(command, input, options);
+			}
+			payload = {
+				message: input.message,
+				images: canonicalImages(input.images ?? []),
+				...(input.streamingBehavior === undefined ? {} : { streamingBehavior: input.streamingBehavior }),
+			};
+			const existing = this.foldState.clientInputs.inputs.get(clientMessageId);
+			// A new input, or one admitted without delivery that the host now delivers.
+			const deliverable = deliver && (existing === undefined || this.undelivered.has(clientMessageId));
+			immediate = deliverable && command === "prompt" && (reserved !== undefined || !this.coordinator.current);
+			if (deliverable && command === "prompt" && !immediate && input.streamingBehavior === undefined) {
+				throw new ConversationError("busy", "The conversation is busy; queue the prompt with a streaming behavior");
+			}
+			if (immediate) {
+				this.requireModel();
+				lease ??= this.coordinator.reserve("turn");
+				if (!lease) throw new ConversationError("ended", "The conversation has ended");
+			}
+		} catch (error) {
+			if (lease) this.coordinator.finish(lease);
+			throw error;
 		}
-		const clientMessageId = input.clientMessageId ?? this.createId();
-		const inFlight = this.admitting.get(clientMessageId);
-		if (inFlight) {
-			await inFlight.catch(() => undefined);
-			return await this.admitInput(command, input);
-		}
-		const images = (input.images ?? []).map((image) => structuredClone(image));
-		const payload: ClientInputPayload = {
-			message: input.message,
-			images,
-			...(input.streamingBehavior === undefined ? {} : { streamingBehavior: input.streamingBehavior }),
-		};
-		const existing = this.foldState.clientInputs.inputs.get(clientMessageId);
-		const immediate = command === "prompt" && existing === undefined && this.coordinator.current === undefined;
-		if (command === "prompt" && !immediate && existing === undefined && input.streamingBehavior === undefined) {
-			throw new ConversationError("busy", "The conversation is busy; queue the prompt with a streaming behavior");
-		}
-		let lease: OperationLease<ConversationOperationKind> | undefined;
-		if (immediate) {
-			this.requireModel();
-			lease = this.coordinator.reserve("turn");
-			if (!lease) throw new ConversationError("ended", "The conversation has ended");
-		}
+		const origin = input.origin === "host" ? "host" : undefined;
 		const queuedDelivery =
 			command === "prompt" ? (input.streamingBehavior === "steer" ? "steer" : "follow_up") : command;
 		const delivery = immediate ? undefined : queuedDelivery;
 		const kind: AgentDeliveryKind = delivery === undefined ? "prompt" : delivery === "steer" ? "steer" : "followUp";
-		const prepared = input.prepared ?? { message: input.message, images };
-		const preparedImages = (prepared.images ?? []).map((image) => structuredClone(image));
+		const prepared = input.prepared ?? { message: input.message, images: payload.images };
+		const preparedImages = canonicalImages(prepared.images ?? []);
 		const attachments = cloneAgentMessages(input.attachments ?? []);
-		const admission = this.enqueueLane(async (): Promise<ConversationInputAdmission> => {
-			const digest = await semanticDigest(command, payload);
-			const record = this.foldState.clientInputs.inputs.get(clientMessageId);
-			if (record) return this.readmit(record, command, digest);
-			const entries = await this.commitInLane((drafts) => {
-				const receipt = drafts.add({
-					type: "client_input_receipt",
-					visibility: "host",
-					payload: { clientMessageId, command, semanticDigest: digest, input: payload },
-				});
-				if (delivery !== undefined) {
-					drafts.add({
-						type: "client_input_queued",
-						visibility: "host",
-						payload: {
-							receiptId: receipt.id,
-							clientMessageId,
-							queuedInput: { delivery, message: prepared.message, images: preparedImages },
-						},
-					});
+		const admission = this.enqueueLane(
+			async (): Promise<{ admission: ConversationInputAdmission; delivered: boolean }> => {
+				const digest = await clientInputDigest(command, payload);
+				const record = this.foldState.clientInputs.inputs.get(clientMessageId);
+				const pendingHostRun =
+					record !== undefined &&
+					this.undelivered.has(clientMessageId) &&
+					(record.state === "accepted" || record.state === "started");
+				if (record && (!deliver || !pendingHostRun)) {
+					return { admission: this.readmit(record, command, origin, digest), delivered: false };
 				}
-			});
-			this.enqueueDelivery(
-				kind,
-				[clientUserMessage(prepared.message, preparedImages, clientMessageId), ...attachments],
-				{
-					kind,
-					clientMessageId,
-					requestInput: true,
-				},
-			);
-			return {
-				clientMessageId,
-				ordinals: entries.map((entry) => entry.ordinal),
-				completion: this.createWaiter(clientMessageId).promise,
-			};
-		});
+				if (record) this.assertSameInput(record, command, origin, digest);
+				const entries = await this.commitInLane((drafts) => {
+					const receiptId =
+						record?.receiptId ??
+						drafts.add({
+							type: "client_input_receipt",
+							visibility: "host",
+							payload: {
+								clientMessageId,
+								command,
+								semanticDigest: digest,
+								input: payload,
+								...(origin === undefined ? {} : { origin }),
+							},
+						}).id;
+					if (deliver && delivery !== undefined) {
+						drafts.add({
+							type: "client_input_queued",
+							visibility: "host",
+							payload: {
+								receiptId,
+								clientMessageId,
+								queuedInput: { delivery, message: prepared.message, images: preparedImages },
+							},
+						});
+					}
+				});
+				if (deliver) {
+					this.undelivered.delete(clientMessageId);
+					this.enqueueDelivery(
+						kind,
+						[clientUserMessage(prepared.message, preparedImages, clientMessageId), ...attachments],
+						{ kind, clientMessageId, requestInput: true },
+					);
+				} else {
+					this.undelivered.add(clientMessageId);
+				}
+				const waiter = this.inputWaiters.get(clientMessageId) ?? this.createWaiter(clientMessageId);
+				return {
+					admission: {
+						clientMessageId,
+						ordinals: entries.map((entry) => entry.ordinal),
+						completion: waiter.promise,
+					},
+					delivered: deliver,
+				};
+			},
+		);
 		this.admitting.set(clientMessageId, admission);
-		let result: ConversationInputAdmission;
+		let result: Awaited<typeof admission>;
 		try {
 			result = await admission;
 		} catch (error) {
@@ -687,26 +883,40 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			if (this.admitting.get(clientMessageId) === admission) this.admitting.delete(clientMessageId);
 		}
 		if (lease) {
-			if (result.ordinals.length === 0) {
+			if (!result.delivered) {
 				this.coordinator.finish(lease);
 			} else {
 				// A new prompt starts fresh: a paused continuation does not carry over to it.
 				this.continuation = undefined;
 				void this.runTurn(lease, this.continueStart()).catch(() => undefined);
 			}
-		} else if (result.ordinals.length > 0) {
+		} else if (result.delivered) {
 			this.startTurnForQueuedInput();
 		}
-		return result;
+		return result.admission;
 	}
 
-	private readmit(record: ClientInputRecord, command: ClientInputCommand, digest: string): ConversationInputAdmission {
-		if (record.command !== command || record.semanticDigest !== digest) {
+	private assertSameInput(
+		record: ClientInputRecord,
+		command: ClientInputCommand,
+		origin: ClientInputRecord["origin"],
+		digest: string,
+	): void {
+		if (record.command !== command || record.origin !== origin || record.semanticDigest !== digest) {
 			throw new ConversationError(
 				"client_input_conflict",
 				`Client message ${JSON.stringify(record.clientMessageId)} was already used for different input`,
 			);
 		}
+	}
+
+	private readmit(
+		record: ClientInputRecord,
+		command: ClientInputCommand,
+		origin: ClientInputRecord["origin"],
+		digest: string,
+	): ConversationInputAdmission {
+		this.assertSameInput(record, command, origin, digest);
 		const resolved = (outcome: ConversationInputOutcome): ConversationInputAdmission => ({
 			clientMessageId: record.clientMessageId,
 			ordinals: [],
@@ -756,10 +966,13 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			const queued = record.queuedInput;
 			if (!queued || pending.has(record.clientMessageId)) continue;
 			const kind = queued.delivery === "steer" ? "steer" : "followUp";
-			this.enqueueDelivery(kind, [clientUserMessage(queued.message, queued.images, record.clientMessageId)], {
+			const messages = queued.messages
+				? cloneAgentMessages(queued.messages)
+				: [clientUserMessage(queued.message, queued.images, record.clientMessageId)];
+			this.enqueueDelivery(kind, messages, {
 				kind,
 				clientMessageId: record.clientMessageId,
-				requestInput: true,
+				requestInput: queued.messages === undefined,
 			});
 		}
 	}
@@ -828,11 +1041,16 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		await this.runTurn(lease, this.continueStart());
 	}
 
-	/** Abort the active operation. Queued input stays pending until it is delivered or cleared. */
+	/**
+	 * Abort the active operation, revoking a held reservation. Queued input
+	 * stays pending until it is delivered or cleared.
+	 */
 	abort(source?: AgentAbortSource): AgentAbortAcceptance {
 		this.successorTurn?.cancel();
 		this.successorTurn = undefined;
-		return this.coordinator.requestAbort(source);
+		const acceptance = this.coordinator.requestAbort(source);
+		this.releaseReservation();
+		return acceptance;
 	}
 
 	/** Revoke observational input identity for the next request boundary. */
@@ -871,9 +1089,12 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			followUp: undefined,
 			pendingCompaction: undefined,
 			request: undefined,
+			lastAssistantEntryId: undefined,
+			holdPrompts: false,
+			dropEntryId: undefined,
 		};
 		try {
-			let start = initial;
+			let start: DispatchStart = { ...initial, checkTail: true };
 			for (;;) {
 				const model = this.resolveModel(this.foldState);
 				if (!model) break;
@@ -898,12 +1119,17 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 
 	/** Retry backoff and compaction after a loop ends; returns how to continue, or undefined to finish. */
 	private async afterLoop(run: TurnRun): Promise<DispatchStart | undefined> {
+		const next = await this.nextStart(run);
+		if (next || !run.holdPrompts) return next;
+		// The retry that ran before a pending prompt ended without a paused continuation: deliver the prompt.
+		run.holdPrompts = false;
+		return this.continuation === undefined && this.inbox.hasPending("prompt") ? this.continueStart() : undefined;
+	}
+
+	private async nextStart(run: TurnRun): Promise<DispatchStart | undefined> {
 		const pendingCompaction = run.pendingCompaction;
 		run.pendingCompaction = undefined;
-		if (pendingCompaction) {
-			const result = await this.runCompaction(run.signal, "threshold", pendingCompaction.instructions, false);
-			return result.status === "compacted" ? this.continueStart() : undefined;
-		}
+		if (pendingCompaction) return await this.compactAndResume(run, pendingCompaction);
 		const followUp = run.followUp;
 		run.followUp = undefined;
 		if (!followUp) {
@@ -925,13 +1151,29 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			run.retryRequest = true;
 			return this.retryStart();
 		}
-		const result = await this.runCompaction(run.signal, followUp.cause, followUp.decision.instructions, false);
-		if (result.status !== "compacted") return undefined;
-		if (followUp.cause === "overflow") {
+		return await this.compactAndResume(run, followUp.compaction);
+	}
+
+	/**
+	 * Compact inside the turn, then resume as decided. A compaction that fails
+	 * before the turn's first request lets the turn proceed without it.
+	 */
+	private async compactAndResume(run: TurnRun, compaction: TurnCompaction): Promise<DispatchStart | undefined> {
+		const { cause, decision, message, at } = compaction;
+		const result = await this.runCompaction(run.signal, cause, decision.instructions, false);
+		if (result.status === "aborted" || run.signal.aborted) return undefined;
+		if (result.status !== "compacted") return at === "start" ? this.continueStart() : undefined;
+		const resume = cause === "overflow" ? "retry" : (decision.resume ?? (at === "end" ? undefined : "continue"));
+		// A length stop without tool calls is retried without it.
+		const lengthStop =
+			message.stopReason === "length" && !message.content.some((content) => content.type === "toolCall");
+		if (resume === "retry" && (lengthStop || message.stopReason === "error" || message.stopReason === "aborted")) {
 			run.retryRequest = true;
+			run.holdPrompts = at === "start";
+			if (lengthStop) run.dropEntryId = compaction.entryId;
 			return this.retryStart();
 		}
-		return followUp.decision.resume ? this.continueStart() : undefined;
+		return resume === undefined ? undefined : this.continueStart();
 	}
 
 	private publishRetryEnd(run: TurnRun, success: boolean, error?: string): Promise<void> {
@@ -968,6 +1210,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			await this.settleLoopFailure(run, model, error);
 		} finally {
 			this.rollbackLease();
+			this.deliveryEntries.clear();
 		}
 	}
 
@@ -1022,9 +1265,11 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			return resolved;
 		}
 
-		const prompts = this.inbox.select("prompt", "all");
-		let selected = [...prompts, ...this.inbox.select("steer", this.modes.steer)];
 		const hasIndependentRequest = runtimeAction.type === "request" && providerRequestPending;
+		// A retried request and its continuation run before a pending prompt is delivered.
+		if (!hasIndependentRequest) run.holdPrompts = false;
+		const prompts = run.holdPrompts ? [] : this.inbox.select("prompt", "all");
+		let selected = [...prompts, ...this.inbox.select("steer", this.modes.steer)];
 		if (selected.length === 0 && ((firstDecision && start.drainFollowUpsFirst) || !hasIndependentRequest)) {
 			selected = [...this.inbox.select("followUp", this.modes.followUp)];
 		}
@@ -1035,6 +1280,9 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					? runtimeAction
 					: { type: "stop" };
 
+		if (firstDecision && start.checkTail && (await this.shouldCompactTail(run, suggested.type === "request"))) {
+			return { type: "pause", requestAuthority };
+		}
 		if (suggested.type === "request" && context.completedTurn && (await this.shouldCompactMidTurn(run, context))) {
 			this.continuation = { requestAuthority, providerRequestPending: hasIndependentRequest };
 			return { type: "pause", requestAuthority };
@@ -1087,7 +1335,40 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			continuing: true,
 		});
 		if (!decision || run.signal.aborted) return false;
-		run.pendingCompaction = decision;
+		run.pendingCompaction = {
+			cause: "threshold",
+			decision,
+			message,
+			entryId: run.lastAssistantEntryId,
+			at: "between",
+		};
+		return true;
+	}
+
+	/**
+	 * A turn's first decision over a context that ends with an assistant
+	 * message (an earlier turn's overflow, abort, or large response): compact
+	 * before anything is requested when policy asks.
+	 */
+	private async shouldCompactTail(run: TurnRun, continuing: boolean): Promise<boolean> {
+		const hook = this.policy.compaction;
+		const state = this.foldState;
+		const message = state.context.messages.at(-1);
+		const model = this.resolveModel(state);
+		if (!hook || !this.summarizer || !model || message?.role !== "assistant") return false;
+		const sameModel = message.provider === model.provider && message.model === model.id;
+		const cause = sameModel && isContextOverflow(message, model.contextWindow) ? "overflow" : "threshold";
+		const decision = await hook(message.usage, cause, { message, model, state, continuing });
+		if (!decision || run.signal.aborted) return false;
+		if (cause === "overflow") run.overflowRecovered = true;
+		let entryId: string | undefined;
+		for (let index = state.branch.length - 1; index >= 0 && entryId === undefined; index--) {
+			const entry = state.tree.byId.get(state.branch[index] ?? "");
+			if (entry && isCoreLogEntry(entry) && entry.type === "message" && entry.payload.message === message) {
+				entryId = entry.id;
+			}
+		}
+		run.pendingCompaction = { cause, decision, message, entryId, at: "start" };
 		return true;
 	}
 
@@ -1119,7 +1400,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			this.attemptIds.set(delivery.deliveryId, attempt.attemptId);
 			let messages: AgentMessage[];
 			try {
-				messages = await this.reduceMessages(run, delivery.messages);
+				messages = await this.prepareDelivery(run, delivery.deliveryId, delivery.kind, delivery.messages);
 			} catch (error) {
 				lease.completePreparation(delivery.deliveryId, attempt.attemptId, "retained");
 				throw error;
@@ -1138,9 +1419,50 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		for (const delivery of deliveries) {
 			if (delivery.messages.length === 0) continue;
 			const deliveryId = `policy-delivery:${this.createId()}`;
-			prepared.push({ deliveryId, messages: await this.reduceMessages(run, delivery.messages) });
+			prepared.push({
+				deliveryId,
+				messages: await this.prepareDelivery(run, deliveryId, "policy", delivery.messages),
+			});
 		}
 		return prepared;
+	}
+
+	/**
+	 * `messageEnd` on each delivered message, then `prepareDelivery`: the
+	 * messages to commit. Entries the policy returns commit with them.
+	 */
+	private async prepareDelivery(
+		run: TurnRun,
+		deliveryId: string,
+		kind: ConversationDeliveryKind,
+		messages: readonly AgentMessage[],
+	): Promise<AgentMessage[]> {
+		const reduced = await this.reduceMessages(run, messages);
+		const hook = this.policy.prepareDelivery;
+		if (!hook) return reduced;
+		const clientMessageId = this.deliveryMeta.get(deliveryId)?.clientMessageId;
+		const record =
+			clientMessageId === undefined ? undefined : this.foldState.clientInputs.inputs.get(clientMessageId);
+		const prepared = await hook(
+			{
+				kind,
+				...(clientMessageId === undefined ? {} : { clientMessageId }),
+				...(record === undefined ? {} : { origin: record.origin ?? "client" }),
+				messages: cloneAgentMessages(reduced),
+			},
+			run.signal,
+		);
+		if (prepared === undefined) return reduced;
+		const owned = cloneAgentMessages(prepared.messages);
+		if (owned.length === 0) throw new ConversationError("invalid_argument", "A delivery needs a message");
+		const identified = (list: readonly AgentMessage[]) =>
+			list.filter((message) => clientMessageIdOf(message) === clientMessageId).length;
+		if (clientMessageId !== undefined && identified(owned) !== identified(reduced)) {
+			throw new ConversationError("invalid_argument", "prepareDelivery must keep the client input's user message");
+		}
+		const entries = (prepared.entries ?? []).map((entry) => this.entryBody(entry, DELIVERY_ENTRY_CORE_TYPES));
+		if (entries.length > 0) this.deliveryEntries.set(deliveryId, entries);
+		return owned;
 	}
 
 	/** Apply `messageEnd` to delivered messages before they commit; client identities survive replacement. */
@@ -1150,7 +1472,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			let current = structuredClone(message);
 			const hook = this.policy.messageEnd;
 			if (hook) {
-				const replacement = await hook(structuredClone(current), run.signal);
+				const replacement = await hook(structuredClone(current), run.signal, "delivery");
 				if (replacement !== undefined) {
 					if (replacement.role !== current.role) {
 						throw new ConversationError("invalid_argument", "messageEnd must preserve the message role");
@@ -1177,9 +1499,13 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		const attemptId = this.attemptIds.get(deliveryId);
 		const lease = this.activeLease;
 		if (attemptId !== undefined && !lease?.beginCommit(deliveryId, attemptId)) return { outcome: "revoked" };
+		const prepared = this.deliveryEntries.get(deliveryId) ?? [];
+		this.deliveryEntries.delete(deliveryId);
 		let entries: readonly ConversationLogEntry[];
 		try {
-			entries = await this.commit((drafts, state) => this.addDeliveryDrafts(drafts, state, delivery.messages, meta));
+			entries = await this.commit((drafts, state) =>
+				this.addDeliveryDrafts(drafts, state, delivery.messages, meta, prepared),
+			);
 		} catch (error) {
 			const retained = error instanceof ConversationError && error.code === "commit_rolled_back";
 			if (attemptId !== undefined)
@@ -1198,13 +1524,16 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		run.committedDelivery = true;
 		for (const message of delivery.messages) run.committedMessages.add(message);
 		if (meta.clientMessageId !== undefined) {
+			const clientMessageId = meta.clientMessageId;
 			const entry = entries.find(
 				(candidate) =>
-					candidate.type === "message" &&
-					"clientMessageId" in candidate &&
-					candidate.clientMessageId === meta.clientMessageId,
+					isCoreLogEntry(candidate) &&
+					((candidate.type === "message" && candidate.clientMessageId === clientMessageId) ||
+						(candidate.type === "client_input_state" &&
+							candidate.payload.clientMessageId === clientMessageId &&
+							candidate.payload.state === "completed")),
 			);
-			const waiter = this.inputWaiters.get(meta.clientMessageId);
+			const waiter = this.inputWaiters.get(clientMessageId);
 			if (entry && waiter) waiter.delivered = { entryId: entry.id, ordinal: entry.ordinal };
 			run.deliveredInputs.push(meta.clientMessageId);
 		}
@@ -1220,31 +1549,46 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		return { outcome: "committed" };
 	}
 
+	/**
+	 * One delivery's batch: the input's `started` transition, the prepared
+	 * entries, then its messages. An input delivered without its own user
+	 * message (queued host messages) completes with an explicit `completed`.
+	 */
 	private addDeliveryDrafts(
 		drafts: EntryDrafts,
 		state: ConversationState,
 		messages: readonly AgentMessage[],
 		meta: DeliveryMeta,
+		entries: readonly EntryBody[],
 	): void {
+		const clientMessageId = meta.clientMessageId;
+		const record = clientMessageId === undefined ? undefined : state.clientInputs.inputs.get(clientMessageId);
+		const identified = messages.some((message) => clientMessageIdOf(message) === clientMessageId);
+		if (record && identified && record.state === "accepted") {
+			drafts.add({
+				type: "client_input_state",
+				visibility: "host",
+				payload: { receiptId: record.receiptId, clientMessageId: record.clientMessageId, state: "started" },
+			});
+		}
+		for (const entry of entries) drafts.add(entry);
 		for (const message of messages) {
-			const clientMessageId = clientMessageIdOf(message);
-			if (clientMessageId === undefined || clientMessageId !== meta.clientMessageId) {
+			if (clientMessageId === undefined || clientMessageIdOf(message) !== clientMessageId) {
 				drafts.add(this.messageEntryBody(message));
 				continue;
-			}
-			const record = state.clientInputs.inputs.get(clientMessageId);
-			if (record?.state === "accepted") {
-				drafts.add({
-					type: "client_input_state",
-					visibility: "host",
-					payload: { receiptId: record.receiptId, clientMessageId, state: "started" },
-				});
 			}
 			drafts.add({
 				type: "message",
 				visibility: "public",
 				clientMessageId,
 				payload: { message: withoutClientMessageId(message) as UserMessage },
+			});
+		}
+		if (record && !identified && record.state === "accepted") {
+			drafts.add({
+				type: "client_input_state",
+				visibility: "host",
+				payload: { receiptId: record.receiptId, clientMessageId: record.clientMessageId, state: "completed" },
 			});
 		}
 	}
@@ -1317,10 +1661,18 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			},
 		};
 		return {
-			context: { systemPrompt, messages: [...state.context.messages], tools },
+			context: { systemPrompt, messages: [...this.requestMessages(run, state)], tools },
 			model,
 			thinkingLevel: state.context.thinkingLevel,
 		};
+	}
+
+	/** The branch messages a turn requests with: without a length-stopped message its retry leaves out. */
+	private requestMessages(run: TurnRun, state: ConversationState): readonly AgentMessage[] {
+		const entry = run.dropEntryId === undefined ? undefined : state.tree.byId.get(run.dropEntryId);
+		if (!entry || !isCoreLogEntry(entry) || entry.type !== "message") return state.context.messages;
+		const dropped = entry.payload.message;
+		return state.context.messages.filter((message) => message !== dropped);
 	}
 
 	private async resolveSystemPrompt(signal: AbortSignal): Promise<string> {
@@ -1346,7 +1698,10 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 						: undefined;
 					messages = appended
 						? [...messages, ...(await this.convertMessages(cloneAgentMessages(appended)))]
-						: await buildContext(state, this.contextOptions(signal));
+						: await buildContext(
+								{ ...state, context: { ...state.context, messages: this.requestMessages(run, state) } },
+								this.contextOptions(signal),
+							);
 					basis = state.context.messages;
 					if (signal?.aborted) return createAbortedAssistantStream(model);
 					continue;
@@ -1507,7 +1862,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				let message = this.withAbortDiagnostic(event.message, run);
 				const hook = this.policy.messageEnd;
 				if (hook) {
-					const replacement = await hook(structuredClone(message), run.signal);
+					const replacement = await hook(structuredClone(message), run.signal, "loop");
 					if (replacement !== undefined) {
 						if (replacement.role !== message.role) {
 							throw new ConversationError("invalid_argument", "messageEnd must preserve the message role");
@@ -1515,7 +1870,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 						message = this.withAbortDiagnostic(replacement, run);
 					}
 				}
-				await this.commit((drafts) => drafts.add(this.messageEntryBody(message)));
+				const [entry] = await this.commit((drafts) => drafts.add(this.messageEntryBody(message)));
+				if (message.role === "assistant") run.lastAssistantEntryId = entry?.id;
 				run.committedMessages.add(message);
 				run.newMessages.push(message);
 				if (run.terminalSettling && message.role === "assistant" && !run.signal.aborted) {
@@ -1564,7 +1920,12 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					state: this.foldState,
 					continuing: false,
 				});
-				return decision ? { kind: "compact", cause: "overflow", decision } : undefined;
+				return decision
+					? {
+							kind: "compact",
+							compaction: { cause: "overflow", decision, message, entryId: run.lastAssistantEntryId, at: "end" },
+						}
+					: undefined;
 			}
 			const delayMs = message.error ? this.policy.retry?.(message.error, run.retryAttempt + 1, message) : undefined;
 			if (delayMs !== undefined) return { kind: "retry", delayMs, message };
@@ -1578,7 +1939,12 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			state: this.foldState,
 			continuing: false,
 		});
-		return decision ? { kind: "compact", cause: "threshold", decision } : undefined;
+		return decision
+			? {
+					kind: "compact",
+					compaction: { cause: "threshold", decision, message, entryId: run.lastAssistantEntryId, at: "end" },
+				}
+			: undefined;
 	}
 
 	private withAbortDiagnostic(message: AgentMessage, run: TurnRun): AgentMessage {
@@ -1637,7 +2003,9 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	/**
 	 * Move the active branch to `targetId` (`null` for before the first entry),
 	 * optionally committing a summary of the abandoned branch in the same batch.
-	 * A turn whose request was accepted cannot be preempted.
+	 * `prepare` runs inside the operation first and may cancel the move, supply
+	 * the summary, or override the label and instructions. A turn whose request
+	 * was accepted cannot be preempted.
 	 */
 	async navigate(
 		targetId: string | null,
@@ -1647,8 +2015,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		if (targetId !== null && this.foldState.tree.byId.get(targetId)?.visibility !== "public") {
 			throw new ConversationError("invalid_argument", `Unknown conversation entry ${JSON.stringify(targetId)}`);
 		}
-		const summarizer = options.summarize ? this.summarizer : undefined;
-		if (options.summarize && !summarizer) {
+		const summarize = options.summarize === true;
+		if (summarize && !this.summarizer && !options.prepare) {
 			throw new ConversationError("invalid_state", "The conversation has no summarizer");
 		}
 		const lease = await this.acquireStructural("navigation");
@@ -1656,15 +2024,33 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			this.coordinator.start(lease);
 			const signal = lease.abortGate.signal;
 			const state = this.foldState;
-			let summary: ConversationBranchSummary | undefined;
-			if (summarizer && targetId !== state.leafId) {
-				const model = this.requireModel();
-				const abandoned = abandonedBranch(state, targetId);
+			const moving = targetId !== state.leafId;
+			const abandoned = abandonedBranch(state, targetId);
+			const plan = options.prepare
+				? await options.prepare({
+						state,
+						fromLeafId: state.leafId,
+						targetId,
+						...abandoned,
+						summarize,
+						...(options.instructions === undefined ? {} : { instructions: options.instructions }),
+						...(options.label === undefined ? {} : { label: options.label }),
+						signal,
+					})
+				: undefined;
+			if (signal.aborted) return { status: "aborted", leafId: this.foldState.leafId };
+			if (plan?.cancel) return { status: "cancelled", leafId: this.foldState.leafId };
+			const label = plan?.label ?? options.label;
+			const instructions = plan?.instructions ?? options.instructions;
+			let summary = moving ? plan?.summary : undefined;
+			if (!summary && summarize && moving) {
+				const summarizer = this.summarizer;
+				if (!summarizer) throw new ConversationError("invalid_state", "The conversation has no summarizer");
 				summary = await summarizer.summarizeBranch({
 					state,
-					model,
+					model: this.requireModel(),
 					thinkingLevel: state.context.thinkingLevel,
-					...(options.instructions === undefined ? {} : { instructions: options.instructions }),
+					...(instructions === undefined ? {} : { instructions }),
 					signal,
 					stream: this.structuralStream(),
 					fromLeafId: state.leafId,
@@ -1689,11 +2075,11 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					}).id;
 				}
 				const labelTarget = summaryEntryId ?? targetId;
-				if (options.label !== undefined && labelTarget !== null) {
+				if (label !== undefined && labelTarget !== null) {
 					drafts.add({
 						type: "label",
 						visibility: "public",
-						payload: { targetId: labelTarget, label: options.label },
+						payload: { targetId: labelTarget, label },
 					});
 				}
 			});
@@ -1731,6 +2117,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		if (!successor) throw new ConversationError("busy", "A successor operation is already reserved");
 		if (pendingTurn) this.successorTurn = undefined;
 		this.coordinator.requestAbort("host_action");
+		// A held reservation has done no conversation work yet; revoking it hands over at once.
+		this.releaseReservation();
 		await successor.ready;
 		if (this.coordinator.current !== successor.lease || !this.coordinator.isOpen) {
 			throw new ConversationError("busy", `The ${kind} reservation was cancelled`);
@@ -1768,7 +2156,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				end("skipped");
 				return { status: "skipped" };
 			}
-			const [entry] = await this.commit((drafts) =>
+			const [entry] = await this.commit((drafts) => {
 				drafts.add({
 					type: "compaction",
 					visibility: "public",
@@ -1779,8 +2167,9 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 						...(summary.details === undefined ? {} : { details: summary.details }),
 						...(summary.fromHook === undefined ? {} : { fromHook: summary.fromHook }),
 					},
-				}),
-			);
+				});
+				for (const message of summary.messages ?? []) drafts.add(this.messageEntryBody(message));
+			});
 			end("compacted");
 			return { status: "compacted", ...(entry === undefined ? {} : { entryId: entry.id }) };
 		} catch (error) {
@@ -1856,20 +2245,23 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	/** Append host entries in one batch: registered product types, or core `custom`, `custom_message`, `message`, `subagent_spawn`. */
 	async append(entries: readonly ConversationEntryInput[]): Promise<readonly ConversationLogEntry[]> {
 		this.assertActive();
-		const bodies = entries.map((entry): EntryBody => {
-			const definition = HOST_APPENDABLE_CORE_TYPES.get(entry.type) ?? this.productTypes.get(entry.type);
-			if (definition === undefined) {
-				throw new ConversationError("invalid_argument", `Entry type ${entry.type} cannot be appended`);
-			}
-			if (!Check(definition.payload, entry.payload)) {
-				throw new ConversationError("invalid_argument", `Entry payload does not match type ${entry.type}`);
-			}
-			return { type: entry.type, visibility: definition.visibility, payload: entry.payload } as EntryBody;
-		});
+		const bodies = entries.map((entry) => this.entryBody(entry, HOST_APPENDABLE_CORE_TYPES));
 		if (bodies.length === 0) return [];
 		return await this.commit((drafts) => {
 			for (const body of bodies) drafts.add(body);
 		});
+	}
+
+	/** A host entry checked against its type: one of `coreTypes`, or a registered product type. */
+	private entryBody(entry: ConversationEntryInput, coreTypes: ReadonlyMap<string, LogEntryType>): EntryBody {
+		const definition = coreTypes.get(entry.type) ?? this.productTypes.get(entry.type);
+		if (definition === undefined) {
+			throw new ConversationError("invalid_argument", `Entry type ${entry.type} cannot be appended`);
+		}
+		if (!Check(definition.payload, entry.payload)) {
+			throw new ConversationError("invalid_argument", `Entry payload does not match type ${entry.type}`);
+		}
+		return { type: entry.type, visibility: definition.visibility, payload: entry.payload } as EntryBody;
 	}
 
 	/** Run exclusive host work that may append entries; it cannot start while another operation runs. */
@@ -1961,6 +2353,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			this.successorTurn?.cancel();
 			this.successorTurn = undefined;
 			this.coordinator.requestClose("disposal");
+			this.releaseReservation();
 			await this.coordinator.waitForClosed();
 			await this.laneTail;
 			await this.log.close();
@@ -1977,6 +2370,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		this.successorTurn?.cancel();
 		this.successorTurn = undefined;
 		this.coordinator.requestClose("disposal");
+		this.releaseReservation();
 		for (const waiter of this.inputWaiters.values()) {
 			waiter.reject(new ConversationError("ended", "The conversation ended before the input settled", error));
 		}

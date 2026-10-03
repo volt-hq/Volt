@@ -78,6 +78,8 @@ export interface ClientInputRecord {
 	readonly clientMessageId: string;
 	readonly receiptId: string;
 	readonly command: ClientInputCommand;
+	/** `host` on input the host submitted itself, which may queue messages instead of a user message. */
+	readonly origin?: "host";
 	readonly semanticDigest: string;
 	readonly input: ClientInputPayload;
 	readonly queuedEntryId?: string;
@@ -113,6 +115,12 @@ export interface ConversationState {
 	readonly branch: readonly string[];
 	/** Ordinal of the newest entry that moved the leaf. */
 	readonly branchOrdinal: number;
+	/**
+	 * Ordinal of the newest entry that switched the branch: a `leaf` entry
+	 * that moved the leaf, or a public entry appended off the current leaf.
+	 * Work captured against a branch is stale once this ordinal changes.
+	 */
+	readonly branchSwitchOrdinal: number;
 	readonly context: ConversationContext;
 	/**
 	 * Ordinal of the newest entry that changed `context` or switched the
@@ -166,6 +174,7 @@ export interface ConversationSnapshot {
 	readonly entries: readonly ConversationLogEntry[];
 	readonly leafId: string | null;
 	readonly branchOrdinal: number;
+	readonly branchSwitchOrdinal: number;
 	readonly contextOrdinal: number;
 	readonly labels: readonly (readonly [string, ConversationLabel])[];
 	readonly name: string | null;
@@ -188,6 +197,7 @@ function emptyState(): ConversationState {
 		leafId: null,
 		branch: Object.freeze([]),
 		branchOrdinal: 0,
+		branchSwitchOrdinal: 0,
 		context: Object.freeze({ messages: Object.freeze([]), model: null, thinkingLevel: "off", fastMode: false }),
 		contextOrdinal: 0,
 		planning: null,
@@ -309,6 +319,7 @@ class StateBuilder {
 	private leafId: string | null;
 	private branch: readonly string[];
 	private branchOrdinal: number;
+	private branchSwitchOrdinal: number;
 	private messages: readonly AgentMessage[];
 	private model: ConversationModelRef | null;
 	private thinkingLevel: ThinkingLevel;
@@ -329,6 +340,7 @@ class StateBuilder {
 		this.leafId = base.leafId;
 		this.branch = base.branch;
 		this.branchOrdinal = base.branchOrdinal;
+		this.branchSwitchOrdinal = base.branchSwitchOrdinal;
 		this.messages = base.context.messages;
 		this.model = base.context.model;
 		this.thinkingLevel = base.context.thinkingLevel;
@@ -395,6 +407,7 @@ class StateBuilder {
 			leafId: this.leafId,
 			branch: this.branch,
 			branchOrdinal: this.branchOrdinal,
+			branchSwitchOrdinal: this.branchSwitchOrdinal,
 			context,
 			contextOrdinal: this.contextOrdinal,
 			planning: this.planning,
@@ -445,6 +458,7 @@ class StateBuilder {
 				clientMessageId: entry.payload.clientMessageId,
 				receiptId: entry.id,
 				command: entry.payload.command,
+				...(entry.payload.origin === undefined ? {} : { origin: entry.payload.origin }),
 				semanticDigest: entry.payload.semanticDigest,
 				input: entry.payload.input,
 				state: "accepted",
@@ -458,6 +472,9 @@ class StateBuilder {
 			if (existing.queuedInput) throw new ConversationFoldError(entry, "client input is already queued");
 			if (entry.payload.queuedInput.delivery !== expectedQueuedDelivery(existing)) {
 				throw new ConversationFoldError(entry, "queued delivery conflicts with the input's command");
+			}
+			if (entry.payload.queuedInput.messages !== undefined && existing.origin !== "host") {
+				throw new ConversationFoldError(entry, "only a host input queues messages");
 			}
 			return Object.freeze({
 				...withoutLifecycleFields(existing),
@@ -540,6 +557,7 @@ class StateBuilder {
 		if (targetId === this.leafId) return;
 		this.leafId = targetId;
 		this.branchOrdinal = ordinal;
+		this.branchSwitchOrdinal = ordinal;
 		this.rederiveBranch(targetId === null ? [] : this.pathTo(targetId), ordinal);
 	}
 
@@ -549,6 +567,7 @@ class StateBuilder {
 		this.leafId = entry.id;
 		this.branchOrdinal = entry.ordinal;
 		if (!extendsBranch) {
+			this.branchSwitchOrdinal = entry.ordinal;
 			this.rederiveBranch(this.pathTo(entry.id), entry.ordinal);
 			return;
 		}
@@ -665,6 +684,7 @@ export function snapshot(state: ConversationState): ConversationSnapshot {
 		entries: [...state.tree.byId.values()],
 		leafId: state.leafId,
 		branchOrdinal: state.branchOrdinal,
+		branchSwitchOrdinal: state.branchSwitchOrdinal,
 		contextOrdinal: state.contextOrdinal,
 		labels: [...state.labels],
 		name: state.name,
@@ -707,6 +727,7 @@ export function restore(value: ConversationSnapshot): ConversationState {
 		leafId: value.leafId,
 		branch: Object.freeze(branch),
 		branchOrdinal: value.branchOrdinal,
+		branchSwitchOrdinal: value.branchSwitchOrdinal,
 		context: derived.context,
 		contextOrdinal: value.contextOrdinal,
 		planning: derived.planning,

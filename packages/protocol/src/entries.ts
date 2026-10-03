@@ -222,16 +222,36 @@ export const ClientInputPayloadSchema = Type.Object(
 );
 export type ClientInputPayload = Static<typeof ClientInputPayloadSchema>;
 
-/** The queue intent persisted after preflight, before queue admission is acknowledged. */
+/**
+ * The queue intent persisted after preflight, before queue admission is
+ * acknowledged. A host input may queue the messages it delivers in `messages`
+ * instead of a user message; its `message` and `images` are then empty.
+ */
 export const ClientInputQueuedPayloadSchema = Type.Object(
 	{
 		delivery: ClientInputQueuedDeliverySchema,
 		message: Type.String(),
 		images: RpcConversationInputImagesSchema,
+		messages: Type.Optional(Type.Array(LogMessageSchema, { minItems: 1 })),
 	},
 	closed,
 );
 export type ClientInputQueuedPayload = Static<typeof ClientInputQueuedPayloadSchema>;
+
+/**
+ * The canonical text a client input's `semanticDigest` hashes: the JSON of
+ * `{command, message, images, streamingBehavior?}` with each image as
+ * `{type, mimeType, data}`. Every writer hashes this material (hex SHA-256 of
+ * its UTF-8 bytes), so the same input digests the same everywhere.
+ */
+export function clientInputDigestMaterial(command: ClientInputCommand, input: ClientInputPayload): string {
+	return JSON.stringify({
+		command,
+		message: input.message,
+		images: input.images.map((image) => ({ type: image.type, mimeType: image.mimeType, data: image.data })),
+		...(input.streamingBehavior === undefined ? {} : { streamingBehavior: input.streamingBehavior }),
+	});
+}
 
 // ============================================================================
 // Core entry payloads
@@ -239,14 +259,19 @@ export type ClientInputQueuedPayload = Static<typeof ClientInputQueuedPayloadSch
 
 export const MessageEntryPayloadSchema = Type.Object({ message: LogMessageSchema }, closed);
 
-/** Durable idempotency reservation for one client-originated input. Host metadata only. */
+/** Durable idempotency reservation for one input. Host metadata only. */
 export const ClientInputReceiptEntryPayloadSchema = Type.Object(
 	{
 		clientMessageId: RpcClientMessageIdSchema,
 		command: ClientInputCommandSchema,
-		/** Hex SHA-256 of the canonical `{command, ...input}` JSON. */
+		/** Hex SHA-256 of {@link clientInputDigestMaterial}. */
 		semanticDigest: Type.String({ pattern: "^[0-9a-f]{64}$" }),
 		input: ClientInputPayloadSchema,
+		/**
+		 * `host` on input the host submitted itself (extension messages,
+		 * background notices, plan checkpoints); client input has no origin.
+		 */
+		origin: Type.Optional(Type.Literal("host")),
 	},
 	closed,
 );

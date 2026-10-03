@@ -197,6 +197,13 @@
 				},
 				"images": {
 					"$ref": "#/$defs/RpcConversationInputImages"
+				},
+				"messages": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/LogMessage"
+					},
+					"minItems": 1
 				}
 			},
 			"additionalProperties": false
@@ -1342,6 +1349,10 @@
 				},
 				"input": {
 					"$ref": "#/$defs/ClientInputPayload"
+				},
+				"origin": {
+					"type": "string",
+					"const": "host"
 				}
 			},
 			"additionalProperties": false

@@ -110,6 +110,29 @@ describe("conversation fold properties", () => {
 		);
 	});
 
+	it("branchSwitchOrdinal is the newest leaf move or append off the current leaf", () => {
+		fc.assert(
+			fc.property(logArbitrary, (entries) => {
+				let state = fold([]);
+				let leafId: string | null = null;
+				let expected = 0;
+				for (const entry of entries) {
+					if (entry.type === "leaf") {
+						const { targetId } = entry.payload as { targetId: string | null };
+						if (targetId !== leafId) expected = entry.ordinal;
+						leafId = targetId;
+					} else if (entry.visibility === "public") {
+						if (entry.parentId !== leafId) expected = entry.ordinal;
+						leafId = entry.id;
+					}
+					state = apply(state, entry);
+					expect(state.branchSwitchOrdinal).toBe(expected);
+				}
+			}),
+			RUNS,
+		);
+	});
+
 	it("the context matches the harness builder over the branch path", () => {
 		fc.assert(
 			fc.property(logArbitrary, (entries) => {
@@ -179,10 +202,10 @@ describe("conversation fold", () => {
 
 	it("tracks the durable queue and its recovery", () => {
 		const entries = ops(
-			{ kind: "receipt", command: "follow_up", behavior: null, text: "later" },
-			{ kind: "receipt", command: "steer", behavior: null, text: "now" },
-			{ kind: "queue", pick: 1 },
-			{ kind: "queue", pick: 0 },
+			{ kind: "receipt", command: "follow_up", behavior: null, text: "later", origin: null },
+			{ kind: "receipt", command: "steer", behavior: null, text: "now", origin: null },
+			{ kind: "queue", pick: 1, messages: false },
+			{ kind: "queue", pick: 0, messages: false },
 		);
 		let state = fold(entries);
 		expect(state.clientInputs.queued).toEqual(["client-2", "client-1"]);
@@ -217,10 +240,49 @@ describe("conversation fold", () => {
 		expect(state.clientInputs.inputs.get("client-2")?.state).toBe("withdrawn");
 	});
 
+	it("advances branchSwitchOrdinal only when the branch switches", () => {
+		const entries = ops(
+			{ kind: "user", text: "one", array: false },
+			{ kind: "assistant", text: "two", toolCalls: 0, stopReason: "stop", model: 0, invalidArguments: false },
+			{ kind: "navigate", pick: 1, summary: "left two behind" },
+			{ kind: "user", text: "three", array: false },
+			{ kind: "fork", pick: 2, text: "off the branch" },
+		);
+		expect(entries.map((entry) => fold(entries.slice(0, entry.ordinal)).branchSwitchOrdinal)).toEqual([
+			0, 0, 3, 3, 3, 6,
+		]);
+	});
+
+	it("records input origins and accepts queued messages only from host input", () => {
+		const entries = ops(
+			{ kind: "receipt", command: "steer", behavior: null, text: "host", origin: "host" },
+			{ kind: "queue", pick: 0, messages: true },
+			{ kind: "receipt", command: "steer", behavior: null, text: "client", origin: null },
+		);
+		const state = fold(entries);
+		expect(state.clientInputs.inputs.get("client-1")).toMatchObject({
+			origin: "host",
+			queuedInput: { messages: [{ role: "custom", content: "host" }] },
+		});
+		expect(state.clientInputs.inputs.get("client-2")?.origin).toBeUndefined();
+		expect(() =>
+			apply(state, {
+				...entries[1]!,
+				ordinal: 4,
+				id: "e4",
+				payload: {
+					receiptId: "e3",
+					clientMessageId: "client-2",
+					queuedInput: { delivery: "steer", message: "", images: [], messages: [] },
+				},
+			} as ConversationLogEntry),
+		).toThrow(/only a host input queues messages/);
+	});
+
 	it("rejects entries that break the log's invariants", () => {
 		const entries = ops(
 			{ kind: "user", text: "one", array: false },
-			{ kind: "receipt", command: "prompt", behavior: null, text: "x" },
+			{ kind: "receipt", command: "prompt", behavior: null, text: "x", origin: null },
 		);
 		const state = fold(entries);
 		const base = entries[0]!;
