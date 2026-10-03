@@ -19,7 +19,7 @@ import { existsSync, mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type AssistantMessage, type AssistantMessageEvent, EventStream, getModel } from "@hansjm10/volt-ai";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ExtensionRunner } from "../src/core/extensions/runner.ts";
@@ -191,8 +191,8 @@ describe("AgentSession dispose inertness", () => {
 		expect(ref.current).toBe(session.extensionRunner);
 
 		const promptPromise = session.prompt("First message").catch(() => {});
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(session.isStreaming).toBe(true);
+		// The turn streams once the prompt's preflight finishes.
+		await vi.waitFor(() => expect(session.isStreaming).toBe(true));
 		expect(getStreamCalls()).toBe(1);
 
 		// Queue a durable steering input; if disposal let the turn continue, it

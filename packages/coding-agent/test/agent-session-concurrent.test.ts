@@ -14,7 +14,7 @@ import {
 	type TextContent,
 } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, type AgentSessionQueuedMessage } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
@@ -140,11 +140,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		// Start first prompt (don't await, it will block until abort)
 		const firstPrompt = session.prompt("First message");
 
-		// Wait a tick for isStreaming to be set
-		await new Promise((resolve) => setTimeout(resolve, 10));
-
-		// Verify we're streaming
-		expect(session.isStreaming).toBe(true);
+		// The turn streams once the prompt's preflight finishes.
+		await vi.waitFor(() => expect(session.isStreaming).toBe(true));
 
 		// Second prompt should reject
 		await expect(session.prompt("Second message")).rejects.toThrow(
@@ -370,8 +367,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		});
 
 		const firstPrompt = session.prompt("First message");
-		await new Promise((resolve) => setTimeout(resolve, 10));
-		expect(session.isStreaming).toBe(true);
+		// The turn streams once the prompt's preflight finishes.
+		await vi.waitFor(() => expect(session.isStreaming).toBe(true));
 
 		const volt = (
 			globalThis as typeof globalThis & {
