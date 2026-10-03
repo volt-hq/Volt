@@ -1,15 +1,29 @@
 /**
  * Projection-truncation metadata and workflow event schemas. The recursive
- * `RpcProjectionTruncation` keeps its hand-written interface in types.ts and
- * is pinned here via `Type.Unsafe` + `Type.Cyclic` — the one place recursion
- * makes a derived static type more fragile than the source of truth.
+ * `RpcProjectionTruncation` keeps its hand-written interface below and is
+ * pinned via `Type.Unsafe` + `Type.Cyclic` — the one place recursion makes a
+ * derived static type more fragile than the source of truth.
  */
 
 import { Type } from "typebox";
-import { ReviewUsageAccountingSchema, ReviewUsageSummarySchema } from "../../review-usage.ts";
-import type { RpcProjectionTruncation } from "../types.ts";
 import { openStringEnum, stringEnum } from "./helpers.ts";
 import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
+import { ReviewUsageAccountingSchema, ReviewUsageSummarySchema } from "./review-usage.ts";
+
+/**
+ * Describes a value whose wire projection was reduced to satisfy a byte
+ * budget. Hand-written because it is recursive; the schema below is pinned to
+ * this exact type.
+ */
+export interface RpcProjectionTruncation {
+	truncated: true;
+	/** UTF-8 JSON bytes before projection, or null when intentionally unmeasured or not JSON-serializable. */
+	originalBytes: number | null;
+	/** UTF-8 JSON bytes after projection, excluding this metadata record. */
+	projectedBytes: number;
+	omittedEntries?: number;
+	fields?: Record<string, RpcProjectionTruncation>;
+}
 
 export const RpcWorkflowKindSchema = openStringEnum(["review"]);
 export const RpcWorkflowStatusSchema = openStringEnum(["running", "finalizing", "completed", "cancelled", "failed"]);

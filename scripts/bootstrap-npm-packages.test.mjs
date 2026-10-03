@@ -49,21 +49,37 @@ test("bootstrap package inspection accepts only the exact placeholder", () => {
 		{ state: "placeholder" },
 	);
 
+	const withVersions = (versions, distTags) => (args) => {
+		if (args[0] === "view") {
+			return result(0, JSON.stringify({ ...expectedPlaceholderManifest(pkg), versions, "dist-tags": distTags }));
+		}
+		return expectedQueryResult(pkg, args);
+	};
+	assert.deepEqual(
+		inspectBootstrapPackage(
+			pkg,
+			withVersions([PLACEHOLDER_VERSION, "0.1.0", "0.2.0"], {
+				beta: "0.1.0",
+				bootstrap: PLACEHOLDER_VERSION,
+				latest: "0.2.0",
+			}),
+		),
+		{ state: "released" },
+	);
 	assert.throws(
 		() =>
-			inspectBootstrapPackage(pkg, (args) => {
-				if (args[0] === "view") {
-					return result(
-						0,
-						JSON.stringify({
-							...expectedPlaceholderManifest(pkg),
-							versions: [PLACEHOLDER_VERSION, "0.1.0"],
-							"dist-tags": { bootstrap: PLACEHOLDER_VERSION, latest: PLACEHOLDER_VERSION },
-						}),
-					);
-				}
-				return expectedQueryResult(pkg, args);
-			}),
+			inspectBootstrapPackage(
+				pkg,
+				withVersions([PLACEHOLDER_VERSION, "0.2.0"], { bootstrap: "0.2.0", latest: "0.2.0" }),
+			),
+		/has releases but unexpected dist-tags/,
+	);
+	assert.throws(
+		() => inspectBootstrapPackage(pkg, withVersions([PLACEHOLDER_VERSION, "0.2.0"], { bootstrap: PLACEHOLDER_VERSION, latest: "9.9.9" })),
+		/has releases but unexpected dist-tags/,
+	);
+	assert.throws(
+		() => inspectBootstrapPackage(pkg, withVersions(["0.2.0"], { bootstrap: PLACEHOLDER_VERSION, latest: "0.2.0" })),
 		/unexpected versions/,
 	);
 	assert.throws(
@@ -129,6 +145,54 @@ test("bootstrap defaults to a read-only preflight", () => {
 		assert.equal(commands[index][1], `${BOOTSTRAP_PACKAGE_IDENTITIES[index / 2].name}@${PLACEHOLDER_VERSION}`);
 		assert.equal(commands[index + 1][1], BOOTSTRAP_PACKAGE_IDENTITIES[index / 2].name);
 	}
+});
+
+test("explicit bootstrap reserves only absent names and leaves released packages alone", () => {
+	const [released, added] = BOOTSTRAP_PACKAGE_IDENTITIES;
+	const reserved = new Set();
+	const publishCalls = [];
+	const run = (args, options = {}) => {
+		if (args[0] === "whoami") return result(0, "hansjm10\n");
+		if (args[0] === "publish") {
+			const manifest = JSON.parse(readFileSync(`${options.cwd}/package.json`, "utf8"));
+			const readme = readFileSync(`${options.cwd}/README.md`, "utf8");
+			if (BOOTSTRAP_PACKAGE_IDENTITIES.find(({ name }) => name === manifest.name).historicalBeta) {
+				assert.match(readme, /use the `beta` dist-tag/);
+			} else {
+				assert.match(readme, /under the `latest` dist-tag/);
+				assert.doesNotMatch(readme, /beta/);
+			}
+			publishCalls.push(manifest.name);
+			reserved.add(manifest.name);
+			return result(0);
+		}
+		const name = args[1].split(`@${PLACEHOLDER_VERSION}`)[0];
+		const pkg = BOOTSTRAP_PACKAGE_IDENTITIES.find((candidate) => candidate.name === name);
+		if (pkg.name === added.name && !reserved.has(pkg.name)) return result(1, "", "npm error code E404");
+		if (args[0] === "view" && pkg.name !== added.name) {
+			const { files: _files, ...registryManifest } = expectedPlaceholderManifest(pkg);
+			return result(
+				0,
+				JSON.stringify({
+					...registryManifest,
+					versions: [PLACEHOLDER_VERSION, "0.1.0", "0.2.3"],
+					"dist-tags": { beta: "0.1.0", [PLACEHOLDER_TAG]: PLACEHOLDER_VERSION, latest: "0.2.3" },
+				}),
+			);
+		}
+		return expectedQueryResult(pkg, args);
+	};
+
+	const outcome = bootstrapNpmPackages({ publish: true, interactive: true, run, log: () => {} });
+	assert.equal(released.historicalBeta, true);
+	assert.equal(added.name, "@hansjm10/volt-protocol");
+	assert.equal(added.historicalBeta, false);
+	assert.deepEqual(publishCalls, [added.name]);
+	assert.deepEqual(outcome.published, [added.name]);
+	assert.deepEqual(
+		outcome.states.map(({ pkg, state }) => [pkg.name, state]),
+		BOOTSTRAP_PACKAGE_IDENTITIES.map(({ name }) => [name, name === added.name ? "absent" : "released"]),
+	);
 });
 
 test("explicit bootstrap publishes minimal placeholders in dependency order and verifies each one", () => {

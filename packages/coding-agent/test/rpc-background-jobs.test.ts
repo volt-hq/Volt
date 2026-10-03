@@ -1,4 +1,9 @@
 import type { AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
+import {
+	RPC_COMMAND_SCHEMAS,
+	RPC_RESPONSE_SCHEMAS,
+	RpcBackgroundJobsChangedEventSchema,
+} from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
@@ -15,9 +20,6 @@ import {
 	ConversationProjectionFeed,
 	type ConversationProjectionSnapshotBuilder,
 } from "../src/core/rpc/conversation-projection-feed.ts";
-import { RPC_COMMAND_SCHEMAS } from "../src/core/rpc/schema/commands.ts";
-import { RpcBackgroundJobsChangedEventSchema } from "../src/core/rpc/schema/events.ts";
-import { RPC_RESPONSE_SCHEMAS } from "../src/core/rpc/schema/responses.ts";
 import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
 import type { RpcSessionState } from "../src/core/rpc/types.ts";
 import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";

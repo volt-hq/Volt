@@ -6,13 +6,6 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { ModelSchema } from "@hansjm10/volt-ai/schemas";
 import { Type } from "typebox";
-import {
-	RPC_WORK_BRANCH_MAX_CHARS,
-	RPC_WORK_CHANGE_ID_MAX_CHARS,
-	RPC_WORK_PROVIDER_MAX_CHARS,
-	RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS,
-	RPC_WORK_REPOSITORY_MAX_CHARS,
-} from "../wire-limits.ts";
 import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, readonlyArrayOf, stringEnum } from "./helpers.ts";
@@ -20,6 +13,13 @@ import { RpcPlanningStateSchema } from "./planning.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
 import { RpcProjectionCollectionTruncationSchema, RpcProjectionTruncationSchema } from "./projections.ts";
 import { RpcReviewDiscussionLinkSchema } from "./review-discussions.ts";
+import {
+	RPC_WORK_BRANCH_MAX_CHARS,
+	RPC_WORK_CHANGE_ID_MAX_CHARS,
+	RPC_WORK_PROVIDER_MAX_CHARS,
+	RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS,
+	RPC_WORK_REPOSITORY_MAX_CHARS,
+} from "./wire-limits.ts";
 
 export const RpcSessionWorkPullRequestSchema = Type.Object(
 	{

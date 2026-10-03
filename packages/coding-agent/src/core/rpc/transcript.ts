@@ -1,6 +1,14 @@
 import { Buffer } from "node:buffer";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { ImageContent } from "@hansjm10/volt-ai";
+import {
+	RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS as DEFAULT_TRANSCRIPT_LIMIT,
+	RPC_TRANSCRIPT_PAGE_MAX_ITEMS as MAX_TRANSCRIPT_LIMIT,
+	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
+	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
+	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
+	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
+} from "@hansjm10/volt-protocol";
 import { type BashExecutionMessage, extractVisibleTextContent } from "../messages.ts";
 import type { ReadonlySessionManager, SessionEntry } from "../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../subagents/tool-names.ts";
@@ -15,14 +23,6 @@ import type {
 	RpcTranscriptToolItem,
 	RpcTranscriptToolStatus,
 } from "./types.ts";
-import {
-	RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS as DEFAULT_TRANSCRIPT_LIMIT,
-	RPC_TRANSCRIPT_PAGE_MAX_ITEMS as MAX_TRANSCRIPT_LIMIT,
-	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
-	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
-	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
-	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
-} from "./wire-limits.ts";
 
 const MESSAGE_TEXT_LIMIT = 16_000;
 const SUMMARY_TEXT_LIMIT = 1_000;
@@ -99,7 +99,7 @@ export {
 	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
 	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
 	MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
-} from "./wire-limits.ts";
+} from "@hansjm10/volt-protocol";
 
 export type ProjectMessageImagesResult =
 	| { ok: true; entryId: string; totalImages: number; images: RpcMessageImage[]; nextImageIndex: number | null }

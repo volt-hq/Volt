@@ -7,6 +7,11 @@
  */
 
 import { Type } from "typebox";
+import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
+import { RpcConversationDeliveryPositionSchema } from "./conversation.ts";
+import { RpcGitContextSchema } from "./git-context.ts";
+import { opaque, stringEnum } from "./helpers.ts";
+import { RpcPromptCacheStatusSchema } from "./session.ts";
 import {
 	RPC_UI_ACTION_ID_MAX_CHARS,
 	RPC_UI_ACTION_STATE_LABEL_MAX_CHARS,
@@ -16,12 +21,7 @@ import {
 	RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS,
 	RPC_UI_ACTION_STATE_TYPE_MAX_CHARS,
 	RPC_UI_ACTION_STATE_VALUE_MAX_CHARS,
-} from "../wire-limits.ts";
-import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
-import { RpcConversationDeliveryPositionSchema } from "./conversation.ts";
-import { RpcGitContextSchema } from "./git-context.ts";
-import { opaque, stringEnum } from "./helpers.ts";
-import { RpcPromptCacheStatusSchema } from "./session.ts";
+} from "./wire-limits.ts";
 
 // ============================================================================
 // Host actions

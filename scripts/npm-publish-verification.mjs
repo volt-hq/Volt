@@ -20,6 +20,7 @@ export class NpmRegistryUnavailableError extends Error {
 	}
 }
 
+/** `historicalBeta` (default true) says whether the package keeps the 0.1.0 beta dist-tag. */
 export function assertPublishedPackageMatchesRelease({
 	name,
 	version,
@@ -27,6 +28,7 @@ export function assertPublishedPackageMatchesRelease({
 	sourceCommit,
 	packed,
 	metadata,
+	historicalBeta = true,
 }) {
 	if (metadata.name !== name || metadata.version !== version) {
 		throw new Error(`npm returned unexpected package identity for ${name}@${version}`);
@@ -48,8 +50,11 @@ export function assertPublishedPackageMatchesRelease({
 	if (metadata["dist-tags"]?.bootstrap !== BOOTSTRAP_VERSION) {
 		throw new Error(`${name}@${version} must keep bootstrap on the inert placeholder`);
 	}
-	if (metadata["dist-tags"]?.beta !== INITIAL_BETA_VERSION) {
+	if (historicalBeta && metadata["dist-tags"]?.beta !== INITIAL_BETA_VERSION) {
 		throw new Error(`${name}@${version} must preserve the historical beta dist-tag on ${INITIAL_BETA_VERSION}`);
+	}
+	if (!historicalBeta && metadata["dist-tags"]?.beta !== undefined) {
+		throw new Error(`${name}@${version} was added after the ${INITIAL_BETA_VERSION} beta and must have no beta dist-tag`);
 	}
 	if (typeof packed.integrity !== "string" || metadata.dist?.integrity !== packed.integrity) {
 		throw new Error(`${name}@${version} registry tarball does not match the package built from the release tag`);

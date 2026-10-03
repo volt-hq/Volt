@@ -4,11 +4,17 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+/**
+ * Every lockstep npm package. `historicalBeta` marks the packages that shipped
+ * the 0.1.0 beta and keep `beta` on it; packages added later never carry a
+ * `beta` dist-tag.
+ */
 export const RELEASE_PACKAGE_IDENTITIES = [
-	{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
-	{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
-	{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
-	{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },
+	{ directory: "packages/ai", name: "@hansjm10/volt-ai", historicalBeta: true },
+	{ directory: "packages/protocol", name: "@hansjm10/volt-protocol", historicalBeta: false },
+	{ directory: "packages/tui", name: "@hansjm10/volt-tui", historicalBeta: true },
+	{ directory: "packages/agent", name: "@hansjm10/volt-agent-core", historicalBeta: true },
+	{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent", historicalBeta: true },
 ];
 export const RELEASE_PACKAGES = RELEASE_PACKAGE_IDENTITIES.map(({ directory }) => directory);
 export const RELEASE_CHANGELOG = "packages/coding-agent/CHANGELOG.md";

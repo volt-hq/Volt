@@ -2,6 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { type FauxModelDefinition, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { RpcReviewDiscussionLinkSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -20,7 +21,6 @@ import {
 	getReviewRun,
 	type ReviewRunRecord,
 } from "../../../src/core/review-state.ts";
-import { RpcReviewDiscussionLinkSchema } from "../../../src/core/rpc/schema/review-discussions.ts";
 import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";

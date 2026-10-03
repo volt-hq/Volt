@@ -1,7 +1,6 @@
+import { RpcServerEventSchema, RpcUiActionStateChangedEventSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { describe, expect, it } from "vitest";
-import { RpcUiActionStateChangedEventSchema } from "../src/core/rpc/schema/events.ts";
-import { RpcServerEventSchema } from "../src/core/rpc/schema/index.ts";
 import type { RpcUiActionStateChangedEvent } from "../src/core/rpc/types.ts";
 
 describe("ui_action_state_changed RPC contract", () => {

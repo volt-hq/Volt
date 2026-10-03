@@ -1,11 +1,11 @@
 import type { ActiveToolCallState, AssistantMessage } from "@hansjm10/volt-ai";
-import { measureRpcJsonBytesWithin, projectRpcUtf8Prefix } from "./session-state.ts";
 import {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
-} from "./wire-limits.ts";
+} from "@hansjm10/volt-protocol";
+import { measureRpcJsonBytesWithin, projectRpcUtf8Prefix } from "./session-state.ts";
 
 /** Mirrored by VoltRPCConversationProjectionLimits in volt-app. */
 export {
@@ -14,7 +14,7 @@ export {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
-} from "./wire-limits.ts";
+} from "@hansjm10/volt-protocol";
 
 export class ConversationProjectionLimitError extends Error {
 	readonly code: string;

@@ -1,19 +1,19 @@
 import { randomUUID } from "node:crypto";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@hansjm10/volt-ai";
-import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
-import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
-import { findInitialModel } from "./model-resolver.ts";
-import { appendReviewFindingTransition, getReviewRun, type ReviewFindingTransitionRecord } from "./review-state.ts";
 import type {
 	RpcListReviewDiscussions,
 	RpcResetReviewDiscussion,
 	RpcReviewDiscussion,
 	RpcReviewDiscussionLink,
 	RpcStartReviewDiscussions,
-} from "./rpc/schema/review-discussions.ts";
+} from "@hansjm10/volt-protocol";
+import type { AgentSessionRuntime } from "./agent-session-runtime.ts";
+import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
+import { findInitialModel } from "./model-resolver.ts";
+import { appendReviewFindingTransition, getReviewRun, type ReviewFindingTransitionRecord } from "./review-state.ts";
 import type { RpcCommand } from "./rpc/types.ts";
 import { decodeStoredSessionEntry } from "./session-entry-codec.ts";
-import { SessionManager, type SessionReference } from "./session-manager.ts";
+import { SessionManager, type SessionReference, type ThinkingLevelChangeEntry } from "./session-manager.ts";
 import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreClient } from "./session-store/client.ts";
 import type {
 	SessionStoreCreateSessionInput,
@@ -64,7 +64,7 @@ export function seedReviewDiscussionSession(manager: SessionManager): void {
 		return;
 	const snapshot = lookup.discussion.contextSnapshot as {
 		model?: { provider: string; id: string };
-		thinkingLevel?: string;
+		thinkingLevel?: ThinkingLevelChangeEntry["thinkingLevel"];
 		fastMode?: boolean;
 		finding?: unknown;
 		target?: unknown;

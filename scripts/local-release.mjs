@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 
 const packages = [
 	{ directory: "packages/ai", name: "@hansjm10/volt-ai" },
+	{ directory: "packages/protocol", name: "@hansjm10/volt-protocol" },
 	{ directory: "packages/tui", name: "@hansjm10/volt-tui" },
 	{ directory: "packages/agent", name: "@hansjm10/volt-agent-core" },
 	{ directory: "packages/coding-agent", name: "@hansjm10/volt-coding-agent" },

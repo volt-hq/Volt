@@ -3,6 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { RPC_RESPONSE_SCHEMAS, RPC_STABLE_ERROR_CODES, RpcErrorResponseSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -28,9 +29,7 @@ import {
 	type ReviewRunRecord,
 	recordReviewFindingOutcome,
 } from "../../../src/core/review-state.ts";
-import { RPC_RESPONSE_SCHEMAS, RpcErrorResponseSchema } from "../../../src/core/rpc/schema/responses.ts";
 import type { RpcCloseHandler, RpcLineHandler } from "../../../src/core/rpc/transport.ts";
-import { RPC_STABLE_ERROR_CODES } from "../../../src/core/rpc/wire-limits.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import {

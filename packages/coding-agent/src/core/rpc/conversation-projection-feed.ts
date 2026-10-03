@@ -1,12 +1,23 @@
 import { randomUUID } from "node:crypto";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import { ProviderErrorSchema } from "@hansjm10/volt-ai/schemas";
+import {
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
+	RPC_UI_ACTION_ID_MAX_CHARS,
+	RPC_UI_ACTION_STATE_LABEL_MAX_CHARS,
+	RPC_UI_ACTION_STATE_MAX_OPTIONS,
+	RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS,
+	RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS,
+	RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS,
+	RPC_UI_ACTION_STATE_TYPE_MAX_CHARS,
+	RPC_UI_ACTION_STATE_VALUE_MAX_CHARS,
+	RpcBackgroundJobsChangedEventSchema,
+} from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import {
 	ConversationProjectionLimitError,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
 } from "./conversation-projection-limits.ts";
-import { RpcBackgroundJobsChangedEventSchema } from "./schema/events.ts";
 import { measureRpcJsonBytesWithin, projectRpcUtf8Prefix } from "./session-state.ts";
 import {
 	assertConversationProjectionSourceAssistantEventWithinLimits,
@@ -25,18 +36,8 @@ import {
 	type RpcConversationBootstrapReason,
 	type RpcConversationDiscontinuityReason,
 } from "./types.ts";
-import {
-	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
-	RPC_UI_ACTION_ID_MAX_CHARS,
-	RPC_UI_ACTION_STATE_LABEL_MAX_CHARS,
-	RPC_UI_ACTION_STATE_MAX_OPTIONS,
-	RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS,
-	RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS,
-	RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS,
-	RPC_UI_ACTION_STATE_TYPE_MAX_CHARS,
-	RPC_UI_ACTION_STATE_VALUE_MAX_CHARS,
-} from "./wire-limits.ts";
 
+export { DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES } from "@hansjm10/volt-protocol";
 export {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
@@ -44,7 +45,6 @@ export {
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
 } from "./conversation-projection-limits.ts";
-export { DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES } from "./wire-limits.ts";
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_CHECKPOINT_REQUESTS = 128;
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_CHECKPOINTS_PER_WINDOW = 4;
 export const DEFAULT_CONVERSATION_PROJECTION_CHECKPOINT_WINDOW_MS = 10_000;

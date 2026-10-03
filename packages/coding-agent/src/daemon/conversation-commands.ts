@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 import { isAbsolute, relative, resolve, sep } from "node:path";
+import { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES, type RpcReviewDiscussionLink } from "@hansjm10/volt-protocol";
 import type { IrohRemoteAuditLogger } from "../core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../core/remote/iroh/authorization.ts";
 import { handleIrohRemoteDeviceLogUploadRpcCommand } from "../core/remote/iroh/device-log-rpc.ts";
@@ -37,7 +38,6 @@ import {
 } from "../core/rpc/conversation-projection-limits.ts";
 import { getRpcErrorResponseTarget } from "../core/rpc/correlation.ts";
 import { getRemoteVisibleCustomMessageRole } from "../core/rpc/custom-message-projection.ts";
-import type { RpcReviewDiscussionLink } from "../core/rpc/schema/review-discussions.ts";
 import { projectSessionTreePage } from "../core/rpc/session-tree.ts";
 import {
 	type ResolvedSessionToolCall,
@@ -52,7 +52,6 @@ import type {
 	RpcSessionTreePage,
 	RpcSessionWorkContext,
 } from "../core/rpc/types.ts";
-import { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES } from "../core/rpc/wire-limits.ts";
 import { getDefaultSessionDir, type SessionEntry, SessionManager } from "../core/session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../core/subagents/tool-names.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
@@ -100,7 +99,7 @@ const REMOTE_TRANSCRIPT_MAX_LIMIT = 200;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_BYTES = 2048;
 const REMOTE_TRANSCRIPT_CURSOR_MAX_SCALARS = 512;
 
-export { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES } from "../core/rpc/wire-limits.ts";
+export { REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES } from "@hansjm10/volt-protocol";
 
 const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MIN_ENTRIES = 256;
 const REMOTE_TRANSCRIPT_SOURCE_WINDOW_MAX_ENTRIES = 800;

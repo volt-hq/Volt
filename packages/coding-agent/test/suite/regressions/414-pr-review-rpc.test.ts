@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { RPC_COMMAND_SCHEMAS, RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import {
@@ -23,8 +24,6 @@ import {
 import { IROH_REMOTE_HOST_FEATURES } from "../../../src/core/remote/iroh/protocol.ts";
 import { getStaticIrohRemoteRpcFilterResult } from "../../../src/core/remote/iroh/rpc-command-filter.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../../../src/core/remote/iroh/worktree-rpc.ts";
-import { RPC_COMMAND_SCHEMAS } from "../../../src/core/rpc/schema/commands.ts";
-import { RPC_RESPONSE_SCHEMAS } from "../../../src/core/rpc/schema/responses.ts";
 import {
 	runWorkspaceDiscoveryStream,
 	runWorkspaceManagementStream,

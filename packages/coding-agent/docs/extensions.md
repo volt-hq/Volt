@@ -142,6 +142,7 @@ To share extensions via npm or git as volt packages, see [packages.md](packages.
 | `@hansjm10/volt-coding-agent` | Extension types (`ExtensionAPI`, `ExtensionContext`, events) |
 | `typebox` | Schema definitions for tool parameters |
 | `@hansjm10/volt-ai` | AI utilities (`StringEnum` for Google-compatible enums) |
+| `@hansjm10/volt-protocol` | Protocol schemas: log entries, wire frames, and `UiNode` |
 | `@hansjm10/volt-tui` | TUI components for custom rendering |
 
 npm dependencies work too. Add a `package.json` next to your extension (or in a parent directory), run `npm install`, and imports from `node_modules/` are resolved automatically.

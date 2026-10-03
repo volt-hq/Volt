@@ -1,6 +1,6 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS } from "./rpc/wire-limits.ts";
+import { RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS } from "@hansjm10/volt-protocol";
 
 const MAX_GIT_POINTER_BYTES = 4096;
 

@@ -44,7 +44,7 @@ with GitHub Actions OIDC.
 
 ## Security invariants
 
-- All four npm packages remain lockstep versioned.
+- All five npm packages remain lockstep versioned.
 - The designated release owner login is source-pinned to `hansjm10`; organization
   ownership is not treated as a user identity.
 - The release commit must be the exact current commit on protected `main`.
@@ -300,10 +300,12 @@ Publication is divided into least-privilege jobs:
    promotion artifact for downstream jobs. It has `contents: read` and
    `actions: read` only.
 2. **Publish npm** uses the `npm-publish` environment with `contents: read` and
-   `id-token: write`. It builds, checks, tests, packs, and publishes the four
-   packages in dependency order under `latest` through npm trusted publishing.
-   It preserves `bootstrap` on the inert placeholder and `beta` on the
-   historical `0.1.0`. Existing versions are skipped only after exact integrity,
+   `id-token: write`. It builds, checks, tests, packs, and publishes the five
+   packages in dependency order (`ai`, `protocol`, `agent-core`, `tui`,
+   `coding-agent`) under `latest` through npm trusted publishing. It preserves
+   `bootstrap` on the inert placeholder and `beta` on the historical `0.1.0`;
+   `@hansjm10/volt-protocol`, added after the beta, must have no `beta`
+   dist-tag. Existing versions are skipped only after exact integrity,
    provenance, repository, and dist-tag verification.
 3. **Publish GitHub Release** runs only after npm succeeds. It uses the
    `binary-release` environment and receives `contents: write`. It requires the
@@ -445,10 +447,18 @@ Configure each npm package's trusted publisher for:
 - workflow filename: `build-binaries.yml`
 - environment: `npm-publish`
 
-Keep the existing `build-binaries.yml` filename so all four npm trusted
-publishers remain aligned. If that filename is ever changed, update all four
+Keep the existing `build-binaries.yml` filename so all five npm trusted
+publishers remain aligned. If that filename is ever changed, update all five
 npm package settings together so a mixed configuration cannot partially
 publish a release.
+
+A package added to the lockstep set (as `@hansjm10/volt-protocol` was for
+`0.3.0`) must have its name reserved with the bootstrap placeholder and its
+trusted publisher configured before the first release that contains it. The
+tag workflow's npm verification fails closed on a package that has no
+placeholder, but npm reports a missing trusted publisher only when
+`npm publish` runs, after earlier packages in dependency order have published.
+See [Initial npm Release Bootstrap](npm-release-bootstrap.md#adding-a-package).
 
 #### binary-release
 
@@ -536,6 +546,13 @@ and build a new candidate for the new commit.
 
 ### Approve and tag
 
+Before approving a release that is the first to contain a package, confirm on
+npmjs.com that the package's trusted publisher is configured (see
+[Adding a package](npm-release-bootstrap.md#adding-a-package)). The workflows
+verify the placeholder but cannot see trusted-publisher settings; a missing one
+fails at `npm publish` after the packages before it have published, and the
+rerun at the same tag resumes once it is configured.
+
 1. Open **Actions → Approve Release → Run workflow**.
 2. Select branch `main`.
 3. Enter the canonical version, exact candidate commit, candidate run ID, and
@@ -557,13 +574,14 @@ Never create a parallel tag manually after approval has begun.
 1. Open the linked **Publish Release** run.
 2. Confirm it is running at `refs/tags/v<version>`, not `main`.
 3. Confirm candidate assembly and checksum verification pass.
-4. Confirm all four npm packages publish or are safely verified and skipped.
+4. Confirm all five npm packages publish or are safely verified and skipped.
 5. Confirm the GitHub Release remains a draft until npm succeeds and every
    release-asset digest is verified.
 6. Confirm the release publishes and displays GitHub's immutable indicator.
 7. Verify each npm package's exact version and provenance. Confirm `latest`
-   points to the new stable version, `beta` remains on historical `0.1.0`, and
-   `bootstrap` remains on the inert placeholder.
+   points to the new stable version, `beta` remains on historical `0.1.0`
+   (`@hansjm10/volt-protocol` has no `beta`), and `bootstrap` remains on the
+   inert placeholder.
 8. Confirm GitHub identifies the release as non-prerelease and latest, then
    verify the public archives against `SHA256SUMS` and the release attestation.
 9. For the first stable release only, update the public site, installers, and

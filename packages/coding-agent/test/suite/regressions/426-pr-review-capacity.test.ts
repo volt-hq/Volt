@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
+import { RpcErrorResponseSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
@@ -11,7 +12,6 @@ import {
 } from "../../../src/core/remote/iroh/pr-review-rpc.ts";
 import { createEmptyIrohRemoteHostState } from "../../../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
-import { RpcErrorResponseSchema } from "../../../src/core/rpc/schema/responses.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/session-manager.ts";
 import {
 	PrReviewCheckoutError,

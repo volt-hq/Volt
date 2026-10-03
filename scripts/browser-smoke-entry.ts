@@ -17,6 +17,7 @@ import {
 	streamProxy,
 	toError,
 } from "@hansjm10/volt-agent-core";
+import { CONTRACT_SCHEMA_REGISTRY, CORE_LOG_ENTRY_TYPES, UiNodeSchema } from "@hansjm10/volt-protocol";
 
 // Keep this entry browser-safe. It is bundled by scripts/check-browser-smoke.mjs
 // to catch accidental Node-only runtime imports in browser-facing package exports.
@@ -49,4 +50,7 @@ console.log(
 	}),
 	toError("boom").message,
 	typeof streamProxy,
+	CONTRACT_SCHEMA_REGISTRY.size,
+	Object.keys(CORE_LOG_ENTRY_TYPES).length,
+	typeof UiNodeSchema,
 );

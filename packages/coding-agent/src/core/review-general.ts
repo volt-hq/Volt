@@ -1,6 +1,6 @@
+import type { RpcReviewGeneral } from "@hansjm10/volt-protocol";
 import { canonicalizePath } from "../utils/paths.ts";
 import { ReviewSourceUnavailableError } from "./review-anchors.ts";
-import type { RpcReviewGeneral } from "./rpc/schema/review-discussions.ts";
 import type { SessionManager } from "./session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "./session-store/client.ts";
 

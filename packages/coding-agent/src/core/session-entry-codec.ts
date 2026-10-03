@@ -4,11 +4,8 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@hansjm10/volt-ai";
 import { AssistantMessageSchema } from "@hansjm10/volt-ai/schemas";
-import { Check } from "typebox/value";
-import { cloneCanonicalData } from "./canonical-data.ts";
-import { parsePlanningState } from "./planning.ts";
-import { RpcGitContextSchema } from "./rpc/schema/git-context.ts";
-import { RpcThinkingLevelSchema } from "./rpc/schema/primitives.ts";
+import { LOG_ENTRY_ENVELOPE_KEYS, LOG_ENTRY_ID_MAX_CHARS, type LogEntryType } from "@hansjm10/volt-protocol/entries";
+import { RpcGitContextSchema } from "@hansjm10/volt-protocol/git-context";
 import {
 	RPC_CLIENT_MESSAGE_ID_MAX_CHARS,
 	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
@@ -19,7 +16,11 @@ import {
 	RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES,
 	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
 	RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX,
-} from "./rpc/wire-limits.ts";
+} from "@hansjm10/volt-protocol/wire-limits";
+import { Check } from "typebox/value";
+import { cloneCanonicalData } from "./canonical-data.ts";
+import { parsePlanningState } from "./planning.ts";
+import { SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import type {
 	ClientInputCommand,
 	ClientInputPayload,
@@ -29,11 +30,43 @@ import type {
 	SessionSnapshotHeader,
 } from "./session-manager.ts";
 
-export const SESSION_ID_MAX_CHARACTERS = 512;
-const ENTRY_ID_MAX_CHARACTERS = SESSION_ID_MAX_CHARACTERS;
+export const SESSION_ID_MAX_CHARACTERS = LOG_ENTRY_ID_MAX_CHARS;
+const ENTRY_ID_MAX_CHARACTERS = LOG_ENTRY_ID_MAX_CHARS;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/;
 const CLIENT_INPUT_ID_PATTERN = new RegExp(`^${RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE}$`);
 export const CLIENT_INPUT_ERROR_MAX_SCALARS = 2_000;
+
+/** Stored entries are flat: the envelope fields beside the payload fields, without `visibility`. */
+interface StoredEntryKeys {
+	readonly required: readonly string[];
+	readonly optional: readonly string[];
+}
+
+const ENVELOPE_KEYS: ReadonlySet<string> = new Set(LOG_ENTRY_ENVELOPE_KEYS);
+
+/** The payload fields of a registered entry type, plus any envelope extension fields (`clientMessageId`). */
+function storedEntryKeys(definition: LogEntryType): StoredEntryKeys {
+	const payloadRequired: readonly string[] = definition.payload.required ?? [];
+	const envelopeRequired: readonly string[] = definition.schema.required ?? [];
+	const extensions = Object.keys(definition.schema.properties).filter((key) => !ENVELOPE_KEYS.has(key));
+	return {
+		required: [...payloadRequired, ...extensions.filter((key) => envelopeRequired.includes(key))],
+		optional: [
+			...Object.keys(definition.payload.properties).filter((key) => !payloadRequired.includes(key)),
+			...extensions.filter((key) => !envelopeRequired.includes(key)),
+		],
+	};
+}
+
+const STORED_ENTRY_KEYS: ReadonlyMap<string, StoredEntryKeys> = new Map(
+	Object.values(SESSION_ENTRY_TYPES).map((definition) => [definition.type, storedEntryKeys(definition)]),
+);
+const HOST_ONLY_ENTRY_TYPES: ReadonlySet<string> = new Set(
+	Object.values(SESSION_ENTRY_TYPES)
+		.filter((definition) => definition.visibility === "host")
+		.map((definition) => definition.type),
+);
+const THINKING_LEVEL_SCHEMA = SESSION_ENTRY_TYPES.thinking_level_change.payload.properties.thinkingLevel;
 
 interface StoredSessionEntryEnvelope {
 	readonly id: string;
@@ -344,10 +377,12 @@ function parseSessionEntry(
 	if (mode === "admission" && Object.hasOwn(entry, "ordinal")) {
 		fail("$.ordinal", "must be assigned by SessionManager");
 	}
+	const keys = STORED_ENTRY_KEYS.get(type);
+	if (!keys) fail("$.type", `unsupported entry type ${JSON.stringify(type)}`);
+	exactKeys(entry, "$", [...base, ...keys.required], [...optionalOrdinal, ...keys.optional]);
 
 	switch (type) {
 		case "message":
-			exactKeys(entry, "$", [...base, "message"], [...optionalOrdinal, "clientMessageId"]);
 			validateAgentMessage(entry.message, "$.message");
 			if (entry.clientMessageId !== undefined) {
 				assertClientMessageIdValue(entry.clientMessageId, "$.clientMessageId");
@@ -356,7 +391,6 @@ function parseSessionEntry(
 			}
 			break;
 		case "client_input_receipt": {
-			exactKeys(entry, "$", [...base, "clientMessageId", "command", "semanticDigest", "input"], optionalOrdinal);
 			assertClientMessageIdValue(entry.clientMessageId, "$.clientMessageId");
 			const command = parseClientInputCommand(entry.command, "$.command");
 			const input = normalizeClientInputPayload(command, entry.input);
@@ -367,7 +401,6 @@ function parseSessionEntry(
 			break;
 		}
 		case "client_input_queued":
-			exactKeys(entry, "$", [...base, "receiptId", "clientMessageId", "queuedInput"], optionalOrdinal);
 			idValue(entry.receiptId, "$.receiptId");
 			assertClientMessageIdValue(entry.clientMessageId, "$.clientMessageId");
 			if (!isDeepStrictEqual(normalizeClientInputQueuedPayload(entry.queuedInput), entry.queuedInput)) {
@@ -375,7 +408,6 @@ function parseSessionEntry(
 			}
 			break;
 		case "client_input_state":
-			exactKeys(entry, "$", [...base, "receiptId", "clientMessageId", "state"], [...optionalOrdinal, "error"]);
 			idValue(entry.receiptId, "$.receiptId");
 			assertClientMessageIdValue(entry.clientMessageId, "$.clientMessageId");
 			if (
@@ -394,86 +426,62 @@ function parseSessionEntry(
 			}
 			break;
 		case "thinking_level_change":
-			exactKeys(entry, "$", [...base, "thinkingLevel"], optionalOrdinal);
-			if (!Check(RpcThinkingLevelSchema, entry.thinkingLevel)) {
+			if (!Check(THINKING_LEVEL_SCHEMA, entry.thinkingLevel)) {
 				throw new Error(`Thinking level entry ${String(entry.id)} has an invalid thinking level`);
 			}
 			break;
 		case "fast_mode_change":
-			exactKeys(entry, "$", [...base, "enabled"], optionalOrdinal);
 			if (typeof entry.enabled !== "boolean") {
 				throw new Error(`Fast mode entry ${String(entry.id)} has an invalid enabled state`);
 			}
 			break;
 		case "model_change":
-			exactKeys(entry, "$", [...base, "provider", "modelId"], optionalOrdinal);
 			nonEmptyString(entry.provider, "$.provider");
 			nonEmptyString(entry.modelId, "$.modelId");
 			break;
 		case "planning_state_change": {
-			exactKeys(entry, "$", [...base, "planning"], optionalOrdinal);
 			const planning = parsePlanningState(entry.planning);
 			if (!isDeepStrictEqual(planning, entry.planning)) fail("$.planning", "is not in canonical planning form");
 			break;
 		}
 		case "compaction":
-			exactKeys(
-				entry,
-				"$",
-				[...base, "summary", "firstKeptEntryId", "tokensBefore"],
-				[...optionalOrdinal, "details", "fromHook"],
-			);
 			stringValue(entry.summary, "$.summary");
 			idValue(entry.firstKeptEntryId, "$.firstKeptEntryId");
 			nonNegativeFiniteNumber(entry.tokensBefore, "$.tokensBefore");
 			if (entry.fromHook !== undefined) booleanValue(entry.fromHook, "$.fromHook");
 			break;
 		case "branch_summary":
-			exactKeys(entry, "$", [...base, "fromId", "summary"], [...optionalOrdinal, "details", "fromHook"]);
 			idValue(entry.fromId, "$.fromId");
 			stringValue(entry.summary, "$.summary");
 			if (entry.fromHook !== undefined) booleanValue(entry.fromHook, "$.fromHook");
 			break;
 		case "custom":
-			exactKeys(entry, "$", [...base, "customType"], [...optionalOrdinal, "data"]);
 			nonEmptyString(entry.customType, "$.customType");
 			break;
 		case "custom_message":
-			exactKeys(entry, "$", [...base, "customType", "content", "display"], [...optionalOrdinal, "details"]);
 			nonEmptyString(entry.customType, "$.customType");
 			validateUserContent(entry.content, "$.content");
 			booleanValue(entry.display, "$.display");
 			break;
 		case "label":
-			exactKeys(entry, "$", [...base, "targetId"], [...optionalOrdinal, "label"]);
 			idValue(entry.targetId, "$.targetId");
 			if (entry.label !== undefined) stringValue(entry.label, "$.label");
 			break;
 		case "session_info":
-			exactKeys(entry, "$", base, [...optionalOrdinal, "name"]);
 			if (entry.name !== undefined) stringValue(entry.name, "$.name");
 			break;
 		case "session_start_git_context":
-			exactKeys(entry, "$", [...base, "gitContext"], optionalOrdinal);
 			if (entry.gitContext !== null && !Check(RpcGitContextSchema, entry.gitContext)) {
 				fail("$.gitContext", "invalid starting Git context");
 			}
 			break;
 		case "pr_review_binding":
-			exactKeys(entry, "$", [...base, "placement"], optionalOrdinal);
 			validatePrReviewPlacement(entry.placement);
 			break;
 		case "leaf":
-			exactKeys(entry, "$", [...base, "targetId"], optionalOrdinal);
 			if (entry.targetId !== null) idValue(entry.targetId, "$.targetId");
 			break;
 		case "subagent_spawn":
-			exactKeys(
-				entry,
-				"$",
-				[...base, "toolCallId", "subagentId", "agent", "childSessionId", "requestKey"],
-				[...optionalOrdinal, "childSessionRef"],
-			);
 			idValue(entry.toolCallId, "$.toolCallId");
 			idValue(entry.subagentId, "$.subagentId");
 			nonEmptyString(entry.agent, "$.agent");
@@ -502,15 +510,7 @@ export function parsePersistedSessionEntry(value: unknown): SessionEntry & { ord
 }
 
 export function isHostOnlySessionEntryType(type: string): boolean {
-	return (
-		type === "client_input_receipt" ||
-		type === "client_input_queued" ||
-		type === "client_input_state" ||
-		type === "session_start_git_context" ||
-		type === "pr_review_binding" ||
-		type === "subagent_spawn" ||
-		type === "leaf"
-	);
+	return HOST_ONLY_ENTRY_TYPES.has(type);
 }
 
 export function sessionEntryEnvelope(entry: SessionEntry & { ordinal: number }): SessionEntryEnvelope {

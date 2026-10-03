@@ -18,7 +18,7 @@ The authoritative runbook is `docs/github-release-automation.md`; the release ru
 
 1. `git fetch origin`; confirm the `origin/main` tip, `git log --oneline v<previous>..origin/main`, no open release PR, and no `v<version>` tag.
 2. Curate fragments with the `/cl` prompt (`.volt/prompts/cl.md`): `npm run changelog:preview`, then land wording fixes through a PR. Ask the owner which features get highlight billing.
-3. Work in a release worktree at the `origin/main` tip. Check `git worktree list` first, since an earlier session may have left `../.worktrees/release-<version>`. Reuse it only when `git status` is clean and nothing runs in it: `git checkout --detach origin/main`, rerun `npm ci --ignore-scripts` if `package-lock.json` changed, and rebuild whichever of `packages/tui`, `packages/ai`, `packages/agent` changed, in that order. Otherwise `git worktree add ../.worktrees/release-<version> origin/main`, then `npm ci --ignore-scripts` and build those three packages in that order. Wait for `git worktree add` to finish before starting the install.
+3. Work in a release worktree at the `origin/main` tip. Check `git worktree list` first, since an earlier session may have left `../.worktrees/release-<version>`. Reuse it only when `git status` is clean and nothing runs in it: `git checkout --detach origin/main`, rerun `npm ci --ignore-scripts` if `package-lock.json` changed, and rebuild whichever of `packages/tui`, `packages/ai`, `packages/protocol`, `packages/agent` changed, in that order. Otherwise `git worktree add ../.worktrees/release-<version> origin/main`, then `npm ci --ignore-scripts` and build those four packages in that order. Wait for `git worktree add` to finish before starting the install.
 4. Catch model-catalog drift now; Prepare Release regenerates models from live catalogs and fails on the result:
    ```bash
    npm --prefix packages/ai run generate-models && npm run check
@@ -27,7 +27,8 @@ The authoritative runbook is `docs/github-release-automation.md`; the release ru
    git checkout -- packages/ai/src/models.generated.ts
    ```
    `check-default-models.mjs` fails on any provider default missing from the regenerated catalog. `diff-model-catalog.mjs` compares the working tree with `HEAD` and lists each changed, added, or removed entry, plus the tests that quote each changed or removed model key. Fix type errors from retired model IDs and any newly missing default in a PR first (#503); ask the owner to pick replacement defaults. Discard the regenerated file afterwards; Prepare Release regenerates it.
-5. Local release smoke: `npm run release:local -- --out /tmp/volt-local-release-<version> --force`. Its packed-daemon smoke uses an isolated `VOLT_CODING_AGENT_DIR`, so a running `voltd` is safe. From `/tmp`, for both `node/volt` and `standalone/volt`: `--help`, `--version` (still the previous version), `--list-models`, `-p "Say exactly: ok"`, and one interactive prompt in tmux (see the `view-cli` skill).
+5. Confirm every release package is reserved on npm and has a trusted publisher. `node scripts/bootstrap-npm-packages.mjs` must report each package `released` or `reserved`, never `available`. For a package that has not shipped yet (`@hansjm10/volt-protocol` before its first release), ask the owner to confirm its trusted publisher (`volt-hq/Volt`, `build-binaries.yml`, environment `npm-publish`) before Approve Release: npm rejects a missing trusted publisher only at `npm publish`, after the packages before it in dependency order have published.
+6. Local release smoke: `npm run release:local -- --out /tmp/volt-local-release-<version> --force`. Its packed-daemon smoke uses an isolated `VOLT_CODING_AGENT_DIR`, so a running `voltd` is safe. From `/tmp`, for both `node/volt` and `standalone/volt`: `--help`, `--version` (still the previous version), `--list-models`, `-p "Say exactly: ok"`, and one interactive prompt in tmux (see the `view-cli` skill).
 
 ## 1. Prepare Release
 
@@ -42,7 +43,7 @@ A failed run pushes nothing; read `gh run view <run-id> --log-failed`, fix throu
 
 ## 2. Review and merge the release PR
 
-- The PR holds one commit, `Release v<version>`. Check lockstep versions in all four `packages/*/package.json`; `.changeset/` holds only `README.md` and `config.json`; the new `CHANGELOG.md` section opens with the unsigned-Windows disclosure; lockfile and shrinkwrap diffs are version bumps only (example extensions such as `sandbox` carry their own versions). For `models.generated.ts` drift, `git fetch origin <release-branch>` and run `node .volt/skills/release/diff-model-catalog.mjs <pre-release-main-sha> FETCH_HEAD`; check each test it names.
+- The PR holds one commit, `Release v<version>`. Check lockstep versions in all five `packages/*/package.json`; `.changeset/` holds only `README.md` and `config.json`; the new `CHANGELOG.md` section opens with the unsigned-Windows disclosure; lockfile and shrinkwrap diffs are version bumps only (example extensions such as `sandbox` carry their own versions). For `models.generated.ts` drift, `git fetch origin <release-branch>` and run `node .volt/skills/release/diff-model-catalog.mjs <pre-release-main-sha> FETCH_HEAD`; check each test it names.
 - Its CI run waits in `action_required`. Approve it:
   ```bash
   gh run list --branch <release-branch> --json databaseId,status,conclusion
@@ -107,7 +108,7 @@ The rerun repeats build, check, and tests (about 15 minutes), skips each package
 
 - `gh release view v<version> --json isDraft,isPrerelease,isImmutable,assets,body`: published, immutable, not a prerelease, exactly 8 assets, and notes that open with the disclosure. `gh api repos/volt-hq/Volt/releases/latest -q .tag_name` is the new tag.
 - `gh release download v<version> -D <dir>`, then `shasum -a 256 -c SHA256SUMS`, `cmp` each asset against the candidate, `gh release verify v<version>`, and `gh release verify-asset v<version> <file>` for every asset.
-- For `volt-ai`, `volt-tui`, `volt-agent-core`, and `volt-coding-agent`: `npm view @hansjm10/<pkg>@<version> version dist-tags gitHead dist.attestations.provenance.predicateType --json` shows `latest` on the new version, `beta` on `0.1.0`, `bootstrap` on `0.0.0-bootstrap.0`, `gitHead` equal to the release SHA, and SLSA provenance.
+- For `volt-ai`, `volt-protocol`, `volt-tui`, `volt-agent-core`, and `volt-coding-agent`: `npm view @hansjm10/<pkg>@<version> version dist-tags gitHead dist.attestations.provenance.predicateType --json` shows `latest` on the new version, `beta` on `0.1.0` (`volt-protocol` has no `beta`), `bootstrap` on `0.0.0-bootstrap.0`, `gitHead` equal to the release SHA, and SLSA provenance.
 - Clean install in a temporary directory (`npm init -y && npm install --ignore-scripts @hansjm10/volt-coding-agent@<version>`; a tarball 404 soon after publication is propagation, so wait and retry): `--version`, one `-p` prompt, `node scripts/check-iroh-native-load.mjs --from <dir>/node_modules/@hansjm10/volt-coding-agent` (the shrinkwrap nests `volt-iroh` under the package), and an isolated daemon with `VOLT_CODING_AGENT_DIR=<dir>/.agent VOLT_IROH_RELAY_MODE=disabled`: `daemon start`, poll `daemon status --json` until `remoteTransport.state` is `ready`, then `daemon stop`.
 
 ## 7. Clean up

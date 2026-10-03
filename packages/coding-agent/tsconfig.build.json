@@ -7,6 +7,8 @@
 			"@hansjm10/volt-agent-core/*": ["../agent/dist/*.d.ts"],
 			"@hansjm10/volt-ai": ["../ai/dist/index.d.ts"],
 			"@hansjm10/volt-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"],
+			"@hansjm10/volt-protocol": ["../protocol/dist/index.d.ts"],
+			"@hansjm10/volt-protocol/*": ["../protocol/dist/*.d.ts"],
 			"@hansjm10/volt-tui": ["../tui/dist/index.d.ts"],
 			"@hansjm10/volt-tui/*": ["../tui/dist/*.d.ts", "../tui/dist/components/*.d.ts"]
 		},

@@ -11,6 +11,7 @@ import * as _bundledVoltAgentCore from "@hansjm10/volt-agent-core";
 import type { JsonCompatibleInput } from "@hansjm10/volt-ai";
 import * as _bundledVoltAi from "@hansjm10/volt-ai";
 import * as _bundledVoltAiOauth from "@hansjm10/volt-ai/oauth";
+import * as _bundledVoltProtocol from "@hansjm10/volt-protocol";
 import type { KeyId } from "@hansjm10/volt-tui";
 import * as _bundledVoltTui from "@hansjm10/volt-tui";
 import { createJiti } from "jiti/static";
@@ -56,6 +57,7 @@ const VIRTUAL_MODULES: Record<string, unknown> = {
 	"@hansjm10/volt-tui": _bundledVoltTui,
 	"@hansjm10/volt-ai": _bundledVoltAi,
 	"@hansjm10/volt-ai/oauth": _bundledVoltAiOauth,
+	"@hansjm10/volt-protocol": _bundledVoltProtocol,
 	"@hansjm10/volt-coding-agent": _bundledVoltCodingAgent,
 };
 
@@ -118,6 +120,11 @@ function getAliases(): Record<string, string> {
 	const voltTuiEntry = resolveWorkspaceOrImport("tui/dist/index.js", "tui/src/index.ts", "@hansjm10/volt-tui");
 	const voltAiEntry = resolveWorkspaceOrImport("ai/dist/index.js", "ai/src/index.ts", "@hansjm10/volt-ai");
 	const voltAiOauthEntry = resolveWorkspaceOrImport("ai/dist/oauth.js", "ai/src/oauth.ts", "@hansjm10/volt-ai/oauth");
+	const voltProtocolEntry = resolveWorkspaceOrImport(
+		"protocol/dist/index.js",
+		"protocol/src/index.ts",
+		"@hansjm10/volt-protocol",
+	);
 
 	_aliases = {
 		"@hansjm10/volt-coding-agent": voltCodingAgentEntry,
@@ -125,6 +132,7 @@ function getAliases(): Record<string, string> {
 		"@hansjm10/volt-tui": voltTuiEntry,
 		"@hansjm10/volt-ai": voltAiEntry,
 		"@hansjm10/volt-ai/oauth": voltAiOauthEntry,
+		"@hansjm10/volt-protocol": voltProtocolEntry,
 		typebox: typeboxEntry,
 		"typebox/compile": typeboxCompileEntry,
 		"typebox/value": typeboxValueEntry,

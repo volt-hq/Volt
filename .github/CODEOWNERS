@@ -8,6 +8,7 @@
 /scripts/npm-publish-verification.mjs @hansjm10
 /scripts/verify-release-provenance.mjs @hansjm10
 /scripts/verify-npm-package-bootstrap.mjs @hansjm10
+/scripts/bootstrap-npm-packages.mjs @hansjm10
 /scripts/build-binaries.sh @hansjm10
 /scripts/build-standalone.mjs @hansjm10
 /scripts/pe-certificate.mjs @hansjm10
@@ -16,3 +17,5 @@
 /package.json @hansjm10
 /package-lock.json @hansjm10
 /packages/coding-agent/npm-shrinkwrap.json @hansjm10
+/packages/*/package.json @hansjm10
+/.changeset/config.json @hansjm10

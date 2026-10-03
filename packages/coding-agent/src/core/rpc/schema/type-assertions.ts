@@ -1,9 +1,10 @@
 /**
- * Compile-time drift tripwires pinning the contract schemas to the upstream
- * types they project onto the wire (volt-agent-core and host modules that own
- * the source shapes). volt-ai pins its own schemas, which the contract uses
- * directly. No runtime exports — `tsc --noEmit` and every build fail when an
- * upstream shape changes until the contract is updated consciously.
+ * Compile-time drift tripwires pinning the @hansjm10/volt-protocol schemas to
+ * the upstream types they project onto the wire (volt-agent-core and host
+ * modules that own the source shapes). volt-ai pins its own schemas, which the
+ * contract uses directly. No runtime exports — `tsc --noEmit` and every build
+ * fail when an upstream shape changes until the contract is updated
+ * consciously.
  *
  * Notes:
  * - MutualExtends tolerates *optional* additions: the stream-frame schemas
@@ -13,7 +14,39 @@
  *   sees JSON.stringify output, which drops undefined-valued keys.
  */
 
-import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type {
+	Assert,
+	JsonWireShape,
+	LogMessage,
+	MutualExtends,
+	RpcBashResultSchema,
+	RpcCompactionResultSchema,
+	RpcHostActionRequestSchema,
+	RpcHostActionUpdateSchema,
+	RpcMcpCapabilitiesResponseSchema,
+	RpcMcpOAuthBrowserCompleteResultSchema,
+	RpcMcpOAuthBrowserStartResultSchema,
+	RpcMcpOAuthDevicePollResultSchema,
+	RpcMcpOAuthDeviceStartResultSchema,
+	RpcMcpPromptSummarySchema,
+	RpcMcpRecentCallSummarySchema,
+	RpcMcpResourceSummarySchema,
+	RpcMcpServerSummarySchema,
+	RpcMcpToolSummarySchema,
+	RpcMessageEndFrameSchema,
+	RpcMessageStartFrameSchema,
+	RpcMessageUpdateFrameSchema,
+	RpcPromptCacheStatusSchema,
+	RpcReviewCoverageSchema,
+	RpcReviewFindingSchema,
+	RpcSessionStatsSchema,
+	RpcSlimAssistantEventSchema,
+	RpcSourceInfoSchema,
+	RpcSubscriptionUsageReportSchema,
+	RpcThinkingLevelSchema,
+	SessionReferenceSchema,
+} from "@hansjm10/volt-protocol";
 import type { Static } from "typebox";
 import type { SessionStats } from "../../agent-session.ts";
 import type { BashResult } from "../../bash-executor.ts";
@@ -35,6 +68,7 @@ import type {
 } from "../../mcp/types.ts";
 import type { PromptCacheStatus } from "../../prompt-cache-status.ts";
 import type { ReviewCoverage, ReviewFinding } from "../../review.ts";
+import type { SessionReference } from "../../session-manager.ts";
 import type { SourceInfo } from "../../source-info.ts";
 import type { SubscriptionUsageReport } from "../../subscription-usage.ts";
 import type {
@@ -43,32 +77,6 @@ import type {
 	ProjectedMessageUpdateFrame,
 	SlimAssistantEvent,
 } from "../stream-projection.ts";
-import type {
-	RpcMessageEndFrameSchema,
-	RpcMessageStartFrameSchema,
-	RpcMessageUpdateFrameSchema,
-	RpcSlimAssistantEventSchema,
-} from "./conversation.ts";
-import type { RpcHostActionRequestSchema, RpcHostActionUpdateSchema } from "./events.ts";
-import type { Assert, JsonWireShape, MutualExtends } from "./helpers.ts";
-import type {
-	RpcMcpCapabilitiesResponseSchema,
-	RpcMcpOAuthBrowserCompleteResultSchema,
-	RpcMcpOAuthBrowserStartResultSchema,
-	RpcMcpOAuthDevicePollResultSchema,
-	RpcMcpOAuthDeviceStartResultSchema,
-	RpcMcpPromptSummarySchema,
-	RpcMcpRecentCallSummarySchema,
-	RpcMcpResourceSummarySchema,
-	RpcMcpServerSummarySchema,
-	RpcMcpToolSummarySchema,
-	RpcSourceInfoSchema,
-} from "./mcp.ts";
-import type { RpcThinkingLevelSchema } from "./primitives.ts";
-import type { RpcReviewCoverageSchema, RpcReviewFindingSchema } from "./projections.ts";
-import type { RpcBashResultSchema, RpcCompactionResultSchema, RpcSessionStatsSchema } from "./responses.ts";
-import type { RpcPromptCacheStatusSchema } from "./session.ts";
-import type { RpcSubscriptionUsageReportSchema } from "./subscription-usage.ts";
 
 // volt-agent-core
 type _thinkingLevel = Assert<MutualExtends<Static<typeof RpcThinkingLevelSchema>, ThinkingLevel>>;
@@ -116,3 +124,8 @@ type _mcpDeviceStart = Assert<
 	MutualExtends<Static<typeof RpcMcpOAuthDeviceStartResultSchema>, McpOAuthDeviceStartResult>
 >;
 type _mcpDevicePoll = Assert<MutualExtends<Static<typeof RpcMcpOAuthDevicePollResultSchema>, McpOAuthDevicePollResult>>;
+
+// Session log: the runtime's open message union stores every protocol message role,
+// and the durable child reference matches the protocol's session reference.
+type _logMessage = Assert<[LogMessage] extends [AgentMessage] ? true : false>;
+type _sessionReference = Assert<MutualExtends<Static<typeof SessionReferenceSchema>, SessionReference>>;

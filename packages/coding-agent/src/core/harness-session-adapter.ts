@@ -27,6 +27,7 @@ import {
 	type SessionDeliveryCommitInput,
 	type SessionEntry,
 	type SessionManager,
+	type ThinkingLevelChangeEntry,
 } from "./session-manager.ts";
 
 function deepFreeze<T>(value: T): T {
@@ -252,7 +253,11 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 				}
 				return { type: "message", message: entry.message };
 			case "thinking_level_change":
-				return { type: "thinking_level_change", thinkingLevel: entry.thinkingLevel };
+				// Harness writes carry an unchecked string; the session entry codec rejects invalid levels at admission.
+				return {
+					type: "thinking_level_change",
+					thinkingLevel: entry.thinkingLevel as ThinkingLevelChangeEntry["thinkingLevel"],
+				};
 			case "model_change":
 				return { type: "model_change", provider: entry.provider, modelId: entry.modelId };
 			case "active_tools_change":

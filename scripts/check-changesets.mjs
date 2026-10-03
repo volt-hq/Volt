@@ -25,7 +25,7 @@ import { pathToFileURL } from "node:url";
 import { listChangesetFiles, readChangesets } from "./changelog.mjs";
 import { RELEASE_PACKAGE_IDENTITIES } from "./verify-release-provenance.mjs";
 
-const PRODUCT_SOURCE_RE = /^packages\/(?:ai|tui|agent|coding-agent)\/src\//;
+const PRODUCT_SOURCE_RE = /^packages\/(?:ai|protocol|tui|agent|coding-agent)\/src\//;
 const GENERATED_RE = /\.generated\./;
 const FRAGMENT_RE = /^\.changeset\/(?!README\.md$).+\.md$/i;
 const TITLE_RE = /^(\w+)(?:\(([^)]+)\))?!?:\s*(.+)$/;

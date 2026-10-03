@@ -1,12 +1,15 @@
 # Initial npm Release Bootstrap
 
-> Completed for all four packages and the `0.1.0` beta. This document retains
-> the one-time reservation rationale. Do not rerun bootstrap for normal
-> releases; use [GitHub-Native Release Automation](github-release-automation.md).
+> Completed for the four original packages and the `0.1.0` beta. This
+> document retains the one-time reservation rationale. Do not rerun bootstrap
+> for normal releases; use [GitHub-Native Release Automation](github-release-automation.md).
+> A package added later is reserved once with the same helper; see
+> [Adding a package](#adding-a-package).
 
-The four Volt package names are declared in their package manifests:
+The Volt package names are declared in their package manifests:
 
 - `@hansjm10/volt-ai`
+- `@hansjm10/volt-protocol` (added for `0.3.0`; see [Adding a package](#adding-a-package))
 - `@hansjm10/volt-agent-core`
 - `@hansjm10/volt-tui`
 - `@hansjm10/volt-coding-agent`
@@ -86,3 +89,37 @@ use the trusted publisher. Do not add a long-lived publish token to the
 workflow as a shortcut.
 See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/) and
 [publishing scoped public packages](https://docs.npmjs.com/creating-and-publishing-scoped-public-packages/).
+
+## Adding a package
+
+A package that joins the lockstep set after the beta, such as
+`@hansjm10/volt-protocol`, needs the same reservation before the first release
+that contains it. It never gets a `beta` dist-tag: its first real version goes
+straight to `latest`, and the release checks reject a `beta` tag on it.
+
+1. Run the read-only check. Released packages report `released; placeholder
+   0.0.0-bootstrap.0 intact` and are never published to again; the new name
+   reports `available`:
+
+   ```sh
+   node scripts/bootstrap-npm-packages.mjs
+   ```
+
+2. Authenticate interactively and reserve the new name:
+
+   ```sh
+   npm login --registry=https://registry.npmjs.org/
+   node scripts/bootstrap-npm-packages.mjs --publish
+   ```
+
+3. Configure the new package's trusted publisher exactly as in step 3 above
+   (repository `volt-hq/Volt`, workflow `build-binaries.yml`, environment
+   `npm-publish`), require two-factor authentication, and disallow tokens.
+4. Verify with
+   `npm view <name>@0.0.0-bootstrap.0 name versions license dist-tags repository --json`:
+   the only version is `0.0.0-bootstrap.0`, `bootstrap` and `latest` point to
+   it, and `beta` is absent.
+
+Prepare Release and the tag workflow fail closed until the placeholder exists.
+npm reports a missing trusted publisher only when `npm publish` runs, so
+configure it before approving the release.

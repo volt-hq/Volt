@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import type { RpcReviewDiscussionLink } from "@hansjm10/volt-protocol";
 import {
 	closeLocalSessionManager,
 	releaseLocalSessionWorktree,
@@ -38,7 +39,6 @@ import { captureReviewStateForHandoff, listReviewRuns, restoreReviewStateFromHan
 import { ReviewWorkflowManager } from "./review-workflows.ts";
 import { subscribeRpcSessionEvents } from "./rpc/background-jobs.ts";
 import { ConversationProjectionFeed, type ConversationProjectionSource } from "./rpc/conversation-projection-feed.ts";
-import type { RpcReviewDiscussionLink } from "./rpc/schema/review-discussions.ts";
 import type { RpcGitContext } from "./rpc/types.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists, MissingSessionCwdError } from "./session-cwd.ts";

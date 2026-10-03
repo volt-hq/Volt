@@ -167,7 +167,7 @@ describe("TreeSelectorComponent", () => {
 					id: "thinking-1",
 					parentId: "user-2",
 					timestamp: new Date().toISOString(),
-					thinkingLevel: "high",
+					thinkingLevel: "high" as const,
 				},
 				userMessage("user-3", "asst-1", "sibling branch"),
 			];

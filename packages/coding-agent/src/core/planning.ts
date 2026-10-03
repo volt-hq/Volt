@@ -1,46 +1,30 @@
 import { Buffer } from "node:buffer";
 
-export type AgentMode = "build" | "plan";
-export type PlanPhase = "draft" | "ready" | "active" | "completed" | "handed_off";
-export type PlanStepStatus = "pending" | "in_progress" | "completed";
-export type PlanExecutionStrategy = "retain_context" | "new_session";
+import type {
+	AgentMode,
+	PlanExecution,
+	PlanExecutionStrategy,
+	PlanItem,
+	PlanningState,
+	PlanPhase,
+	PlanState,
+	PlanStep,
+	PlanStepStatus,
+	PlanSubstep,
+} from "@hansjm10/volt-protocol";
 
-export interface PlanItem {
-	id: string;
-	text: string;
-	status: PlanStepStatus;
-	note?: string;
-}
-
-export type PlanSubstep = PlanItem;
-
-export interface PlanStep extends PlanItem {
-	/** Optional executable children. Group status is derived from these leaves. */
-	substeps?: PlanSubstep[];
-}
-
-export interface PlanExecution {
-	id: string;
-	approvedRevision: number;
-	strategy: PlanExecutionStrategy;
-	sourceSessionId: string;
-	targetSessionId: string;
-}
-
-export interface PlanState {
-	id: string;
-	revision: number;
-	phase: PlanPhase;
-	title?: string;
-	summary?: string;
-	steps: PlanStep[];
-	execution?: PlanExecution;
-}
-
-export interface PlanningState {
-	mode: AgentMode;
-	plan: PlanState | null;
-}
+export type {
+	AgentMode,
+	PlanExecution,
+	PlanExecutionStrategy,
+	PlanItem,
+	PlanningState,
+	PlanPhase,
+	PlanState,
+	PlanStep,
+	PlanStepStatus,
+	PlanSubstep,
+};
 
 export const DEFAULT_PLANNING_STATE: PlanningState = Object.freeze({ mode: "build", plan: null });
 export const PLAN_MAX_SERIALIZED_BYTES = 128 * 1024;

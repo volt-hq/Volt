@@ -1,3 +1,4 @@
+import { Check } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
 	decodeStoredSessionEntry,
@@ -8,6 +9,7 @@ import {
 	sessionEntryEnvelope,
 	validatePersistedSessionEntrySequence,
 } from "../src/core/session-entry-codec.ts";
+import { SESSION_ENTRY_TYPES } from "../src/core/session-entry-types.ts";
 import { CURRENT_SESSION_SNAPSHOT_VERSION, CURRENT_SESSION_VERSION } from "../src/core/session-manager.ts";
 
 const ENTRY_TIMESTAMP = "2026-09-03T12:00:00.000Z";
@@ -148,6 +150,48 @@ describe("session entry codec", () => {
 				].includes(String(value.type)),
 			});
 		}
+	});
+
+	it("stores the registered protocol entry shape with the envelope flattened beside the payload", () => {
+		const envelopeKeys = new Set(["type", "id", "parentId", "timestamp", "ordinal"]);
+		const identified = {
+			...base("message", "identified", 1),
+			message: { role: "user", content: "hello", timestamp: MESSAGE_TIMESTAMP },
+			clientMessageId: "client-1",
+		};
+		for (const value of [...validEntries(), identified]) {
+			const parsed = parsePersistedSessionEntry(value);
+			const definition = SESSION_ENTRY_TYPES[parsed.type];
+			const payloadKeys = new Set(Object.keys(definition.payload.properties));
+			const stored = Object.entries(parsed).filter(([key]) => !envelopeKeys.has(key));
+			const logEntry = {
+				ordinal: parsed.ordinal,
+				id: parsed.id,
+				parentId: parsed.parentId,
+				type: parsed.type,
+				timestamp: parsed.timestamp,
+				visibility: definition.visibility,
+				payload: Object.fromEntries(stored.filter(([key]) => payloadKeys.has(key))),
+				...Object.fromEntries(stored.filter(([key]) => !payloadKeys.has(key))),
+			};
+			expect(Check(definition.schema, logEntry), parsed.type).toBe(true);
+			expect(sessionEntryEnvelope(parsed).isHostOnly).toBe(definition.visibility === "host");
+		}
+		expect(Object.keys(SESSION_ENTRY_TYPES).sort()).toEqual(
+			[...Object.keys(REQUIRED_TYPE_FIELD), "pr_review_binding"].sort(),
+		);
+	});
+
+	it("rejects protocol entry types and states this store does not write yet", () => {
+		expect(() =>
+			parsePersistedSessionEntry({ ...base("forked_from", "fork", 1), sessionId: "source", entryId: "entry" }),
+		).toThrow('unsupported entry type "forked_from"');
+		expect(() =>
+			parsePersistedSessionEntry({
+				...validEntries().find((entry) => entry.type === "client_input_state"),
+				state: "withdrawn",
+			}),
+		).toThrow("invalid client input state");
 	});
 
 	it("rejects unknown and missing fields for every entry type", () => {
