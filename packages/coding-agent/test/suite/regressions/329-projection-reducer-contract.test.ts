@@ -6,11 +6,13 @@ import * as fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { RpcGitContext } from "../../../src/core/rpc/types.ts";
 import {
+	type BranchSummaryEntry,
 	CLIENT_INPUT_MAX_OUTSTANDING_BYTES,
 	CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES,
 	CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES,
 	createClientInputSemanticDigest,
-	type SessionCanonicalMutation,
+	type LabelEntry,
+	type SessionEntry,
 	SessionManager,
 	type SessionTreeNode,
 } from "../../../src/core/session-manager.ts";
@@ -28,6 +30,7 @@ import {
 	type SQLiteSessionStoreLease,
 } from "../../../src/core/session-store/index.ts";
 import { createSessionManagerTestOwner } from "../../session-manager-owner.ts";
+import { seedSession } from "../../utilities/seed-log.ts";
 
 const CREATED_AT = "2026-09-03T12:00:00.000Z";
 const SECOND_AT = "2026-09-03T12:01:00.000Z";
@@ -77,6 +80,42 @@ async function captureAsyncError(operation: () => Promise<unknown>): Promise<unk
 	} catch (error) {
 		return error;
 	}
+}
+
+/** The writes a session manager's own commit lane builds one batch from, before a live session takes its log. */
+interface SessionManagerWrite {
+	place(entry: SessionEntry): string;
+	label(entry: LabelEntry): string;
+	leaf(leafId: string | null): void;
+	branchWithSummary(branchFromId: string | null, entry: BranchSummaryEntry): string;
+}
+
+type SessionMutation = (write: SessionManagerWrite) => unknown;
+
+/** Commit `mutations` as one atomic batch through the manager's commit lane; ids and parents come from the lane. */
+async function commitBatch(manager: SessionManager, mutations: readonly SessionMutation[]): Promise<void> {
+	const internals = manager as unknown as {
+		_commit<T>(build: (write: SessionManagerWrite) => T, atomic?: boolean): Promise<T>;
+	};
+	await internals._commit((write) => {
+		for (const mutation of mutations) mutation(write);
+	}, true);
+}
+
+/** Commit one entry; returns its id. */
+async function commitEntry(manager: SessionManager, entry: SessionEntry): Promise<string> {
+	let id = "";
+	await commitBatch(manager, [
+		(write) => {
+			id = write.place(entry);
+		},
+	]);
+	return id;
+}
+
+/** Envelope fields the commit lane replaces: the id and parent of the new entry. */
+function envelope(): { id: string; parentId: null; timestamp: string } {
+	return { id: "pending", parentId: null, timestamp: CREATED_AT };
 }
 
 function generationFor(sessionId: string): string {
@@ -404,63 +443,61 @@ const projectionPropertyScenario: fc.Arbitrary<ProjectionPropertyScenario> = fc.
 	batchWidths: fc.array(fc.integer({ min: 1, max: 4 }), { minLength: 1, maxLength: 6 }),
 });
 
-function partitionMutations(rootEntryId: string, scenario: ProjectionPropertyScenario): SessionCanonicalMutation[] {
+function partitionMutations(rootEntryId: string, scenario: ProjectionPropertyScenario): SessionMutation[] {
 	return [
-		{ kind: "append", entry: { type: "label", targetId: rootEntryId, label: scenario.label } },
-		{ kind: "move", leafId: null },
-		{ kind: "move", leafId: rootEntryId },
-		{
-			kind: "move_with_summary",
-			leafId: rootEntryId,
-			summary: { summary: "retained branch summary", details: { source: "partition" }, fromHook: true },
-		},
-		{
-			kind: "append",
-			entry: { type: "thinking_level_change", thinkingLevel: scenario.thinkingLevel },
-		},
-		{ kind: "append", entry: { type: "model_change", provider: "property-provider", modelId: scenario.modelId } },
-		{
-			kind: "append",
-			entry: {
+		(write) => write.label({ type: "label", ...envelope(), targetId: rootEntryId, label: scenario.label }),
+		(write) => write.leaf(null),
+		(write) => write.leaf(rootEntryId),
+		(write) =>
+			write.branchWithSummary(rootEntryId, {
+				type: "branch_summary",
+				...envelope(),
+				fromId: rootEntryId,
+				summary: "retained branch summary",
+				details: { source: "partition" },
+				fromHook: true,
+			}),
+		(write) => write.place({ type: "thinking_level_change", ...envelope(), thinkingLevel: scenario.thinkingLevel }),
+		(write) =>
+			write.place({ type: "model_change", ...envelope(), provider: "property-provider", modelId: scenario.modelId }),
+		(write) =>
+			write.place({
 				type: "custom_message",
+				...envelope(),
 				customType: "partition-visible",
 				content: [{ type: "text", text: "partition visible text" }],
 				display: true,
 				details: { retained: true },
-			},
-		},
-		{
-			kind: "append",
-			entry: {
+			}),
+		(write) =>
+			write.place({
 				type: "custom_message",
+				...envelope(),
 				customType: "partition-hidden",
 				content: "partition hidden text",
 				display: false,
-			},
-		},
-		{ kind: "append", entry: { type: "session_info", name: "Partition name" } },
-		{ kind: "append", entry: { type: "session_info", name: "" } },
-		{ kind: "append", entry: { type: "planning_state_change", planning: { mode: "plan", plan: null } } },
-		{
-			kind: "append",
-			entry: {
+			}),
+		(write) => write.place({ type: "session_info", ...envelope(), name: "Partition name" }),
+		(write) => write.place({ type: "session_info", ...envelope(), name: "" }),
+		(write) => write.place({ type: "planning_state_change", ...envelope(), planning: { mode: "plan", plan: null } }),
+		(write) =>
+			write.label({
 				type: "label",
+				...envelope(),
 				targetId: rootEntryId,
 				...(scenario.clearWithEmpty ? { label: "" } : {}),
-			},
-		},
-		{ kind: "append", entry: { type: "custom", customType: "partition-data", data: { retained: true } } },
-		{
-			kind: "append",
-			entry: {
+			}),
+		(write) => write.place({ type: "custom", ...envelope(), customType: "partition-data", data: { retained: true } }),
+		(write) =>
+			write.place({
 				type: "compaction",
+				...envelope(),
 				summary: "partition compaction",
 				firstKeptEntryId: rootEntryId,
 				tokensBefore: 42,
 				details: { retained: true },
 				fromHook: true,
-			},
-		},
+			}),
 	];
 }
 
@@ -562,11 +599,7 @@ async function runProjectionPropertyPartition(
 
 	const mutations = partitionMutations(rootEntryId, scenario);
 	for (const batch of partitionByWidths(mutations, batchWidths)) {
-		const projection = manager.issueCanonicalProjection();
-		await manager.commitCanonicalCommand({
-			guard: { kind: "exact", token: projection.token },
-			mutations: batch,
-		});
+		await commitBatch(manager, batch);
 		await expectReplayMatches(manager, rootEntryId);
 	}
 
@@ -583,18 +616,31 @@ async function runProjectionPropertyPartition(
 	});
 	await expectReplayMatches(manager, rootEntryId);
 	const clientMessageId = `property-client-${caseId}`;
-	await manager.reserveClientInput(clientMessageId, "steer", { message: scenario.clientInputMessage });
-	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	await manager.markClientInputQueued(clientMessageId, {
-		delivery: "steer",
-		message: scenario.clientInputMessage,
+	const input = { message: scenario.clientInputMessage, images: [] };
+	const receiptId = await commitEntry(manager, {
+		type: "client_input_receipt",
+		...envelope(),
+		clientMessageId,
+		command: "steer",
+		semanticDigest: createClientInputSemanticDigest("steer", input),
+		input,
 	});
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	await manager.transitionClientInput(clientMessageId, "started");
+	await commitEntry(manager, {
+		type: "client_input_queued",
+		...envelope(),
+		receiptId,
+		clientMessageId,
+		queuedInput: { delivery: "steer", ...input },
+	});
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	await manager.rollbackClientInput(clientMessageId);
-	await expectReplayMatches(manager, rootEntryId, clientMessageId);
-	await manager.transitionClientInput(clientMessageId, "started");
+	await commitEntry(manager, {
+		type: "client_input_state",
+		...envelope(),
+		receiptId,
+		clientMessageId,
+		state: "started",
+	});
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
 	if (scenario.completeClientInput) {
 		await manager.appendMessage({
@@ -604,7 +650,14 @@ async function runProjectionPropertyPartition(
 			clientMessageId,
 		});
 	} else {
-		await manager.transitionClientInput(clientMessageId, "failed", scenario.failure);
+		await commitEntry(manager, {
+			type: "client_input_state",
+			...envelope(),
+			receiptId,
+			clientMessageId,
+			state: "failed",
+			error: scenario.failure,
+		});
 	}
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
 
@@ -620,19 +673,12 @@ async function runProjectionPropertyPartition(
 			}
 			return originalApplyTransaction.call(this, input);
 		});
-	const projection = manager.issueCanonicalProjection();
 	let rollbackError: unknown;
 	try {
 		rollbackError = await captureAsyncError(() =>
-			manager.commitCanonicalCommand({
-				guard: { kind: "exact", token: projection.token },
-				mutations: [
-					{
-						kind: "append",
-						entry: { type: "custom", customType: "must-roll-back", data: { caseId } },
-					},
-				],
-			}),
+			commitBatch(manager, [
+				(write) => write.place({ type: "custom", ...envelope(), customType: "must-roll-back", data: { caseId } }),
+			]),
 		);
 	} finally {
 		applyTransaction.mockRestore();
@@ -693,12 +739,14 @@ describe("PR #329 projection reducer contract", () => {
 
 			const incrementalOracle = SessionManager.inMemory(root);
 			for (let index = 0; index < CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES; index++) {
-				await incrementalOracle.reserveClientInput(`count-oracle-${index}`, "steer", {
-					message: `message-${index}`,
-				});
+				await seedSession(incrementalOracle, (seed) =>
+					seed.clientInput(`count-oracle-${index}`, "steer", { message: `message-${index}` }),
+				);
 			}
 			const oracleError = await captureAsyncError(() =>
-				incrementalOracle.reserveClientInput("count-oracle-overflow", "steer", { message: "overflow" }),
+				seedSession(incrementalOracle, (seed) =>
+					seed.clientInput("count-oracle-overflow", "steer", { message: "overflow" }),
+				),
 			);
 
 			const overflow = acceptedReceiptFixture(
@@ -760,24 +808,27 @@ describe("PR #329 projection reducer contract", () => {
 			);
 
 			const incrementalOracle = SessionManager.inMemory(root);
+			const largeInput = { message: LARGE_CLIENT_INPUT_TEXT, images: [] };
+			const queueLargeInput = (clientMessageId: string, receiptId: string) =>
+				commitEntry(incrementalOracle, {
+					type: "client_input_queued",
+					...envelope(),
+					receiptId,
+					clientMessageId,
+					queuedInput: { delivery: "steer", ...largeInput },
+				});
+			const receiveLargeInput = async (clientMessageId: string) => {
+				const [receipt] = await seedSession(incrementalOracle, (seed) =>
+					seed.clientInput(clientMessageId, "steer", largeInput),
+				);
+				return receipt!.id;
+			};
 			for (let index = 0; index < atLimit.length; index++) {
-				await incrementalOracle.reserveClientInput(`bytes-oracle-${index}`, "steer", {
-					message: LARGE_CLIENT_INPUT_TEXT,
-				});
-				await incrementalOracle.markClientInputQueued(`bytes-oracle-${index}`, {
-					delivery: "steer",
-					message: LARGE_CLIENT_INPUT_TEXT,
-				});
+				const clientMessageId = `bytes-oracle-${index}`;
+				await queueLargeInput(clientMessageId, await receiveLargeInput(clientMessageId));
 			}
-			await incrementalOracle.reserveClientInput("bytes-oracle-overflow", "steer", {
-				message: LARGE_CLIENT_INPUT_TEXT,
-			});
-			const oracleError = await captureAsyncError(() =>
-				incrementalOracle.markClientInputQueued("bytes-oracle-overflow", {
-					delivery: "steer",
-					message: LARGE_CLIENT_INPUT_TEXT,
-				}),
-			);
+			const overflowReceiptId = await receiveLargeInput("bytes-oracle-overflow");
+			const oracleError = await captureAsyncError(() => queueLargeInput("bytes-oracle-overflow", overflowReceiptId));
 
 			const lowLevelError = await captureAsyncError(() =>
 				store.client.applyTransaction(
@@ -885,7 +936,9 @@ describe("PR #329 projection reducer contract", () => {
 			mkdirSync(cwd, { recursive: true });
 			const manager = await SessionManager.create(cwd, sessionDir, { id: `malformed-${component}` });
 			await manager.appendMessage({ role: "user", content: "searchable", timestamp: Date.parse(CREATED_AT) });
-			await manager.reserveClientInput(`pending-${component}`, "prompt", { message: "pending" });
+			await seedSession(manager, (seed) =>
+				seed.clientInput(`pending-${component}`, "prompt", { message: "pending" }),
+			);
 			const ref = manager.getSessionRef();
 			if (!ref) throw new Error("Expected persisted corruption reference");
 			await manager.closePersistence();

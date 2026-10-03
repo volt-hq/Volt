@@ -438,7 +438,10 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 
 	it("fails explicitly when the canonical run is no longer on the source branch", async () => {
 		const { source, aliases, dispatch } = await fixture();
-		await source.session.sessionManager.resetLeaf();
+		// Move the live source's branch back to its first entry, before the run was recorded.
+		const [first] = source.session.sessionManager.getEntries();
+		await source.session.navigateTree(first!.id);
+		expect(getReviewRun(source.session.sessionManager, "review:341")).toBeUndefined();
 		const alias = aliases[0]!;
 		for (const command of [
 			{ type: "get_review_result", runId: "review:341" },

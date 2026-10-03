@@ -159,7 +159,9 @@ describe("AgentSession bash and persistence characterization", () => {
 		await harness.session.prompt("start");
 
 		const entries = harness.sessionManager.getEntries();
+		// The session's opening model selection comes first.
 		expect(entries.map((entry) => entry.type)).toEqual([
+			"model_change",
 			"custom_message",
 			"message",
 			"message",

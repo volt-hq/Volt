@@ -1,5 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { type Context, fauxAssistantMessage, fauxToolCall, type SimpleStreamOptions } from "@hansjm10/volt-ai";
@@ -10,20 +9,27 @@ import { SessionManager } from "../../src/core/session-manager.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
 
 const harnesses: Harness[] = [];
-const sessionDirectories: string[] = [];
 afterEach(async () => {
 	while (harnesses.length) await harnesses.pop()!.cleanupAsync();
-	while (sessionDirectories.length) {
-		await rm(sessionDirectories.pop()!, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
-	}
 });
+
+/** The message of a seeded message entry. */
+function seededMessage(harness: Harness, entryId: string): AgentMessage {
+	const entry = harness.sessionManager.getEntry(entryId);
+	if (entry?.type !== "message") throw new Error(`Expected message entry ${entryId}`);
+	return entry.message;
+}
 
 describe("AgentSession cache-preserving compaction", () => {
 	it("preserves the provider prefix and policy while persisting compaction request usage and diagnostics", async () => {
-		const sessionDirectory = await mkdtemp(join(tmpdir(), "volt-compaction-usage-"));
-		sessionDirectories.push(sessionDirectory);
+		// The prior compaction is seeded before the session opens; a live session refuses structural writes.
 		const harness = await createHarness({
-			sessionManager: await SessionManager.create(sessionDirectory, sessionDirectory),
+			log: "sqlite",
+			seed: (seed) =>
+				seed
+					.user("Early goal", { timestamp: 1 })
+					.compaction({ summary: "PRIOR-ONLY-CONSTRAINT", tokensBefore: 580_000 })
+					.user(`OLD-SOURCE-START\n${"native source content\n".repeat(28_000)}\nOLD-SOURCE-END`, { timestamp: 2 }),
 			models: [{ id: "large", reasoning: true, contextWindow: 1_000_000, maxTokens: 32_768 }],
 			settings: { compaction: { keepRecentTokens: 1 }, retry: { provider: { maxRetries: 9 } } },
 			extensionFactories: [
@@ -50,13 +56,6 @@ describe("AgentSession cache-preserving compaction", () => {
 		await harness.session.setThinkingLevel("high");
 		harness.session.setTransport("sse");
 		await harness.session.setFastModeEnabled(true);
-		const old = await harness.sessionManager.appendMessage({ role: "user", content: "Early goal", timestamp: 1 });
-		await harness.sessionManager.appendCompaction("PRIOR-ONLY-CONSTRAINT", old, 580_000);
-		await harness.sessionManager.appendMessage({
-			role: "user",
-			content: `OLD-SOURCE-START\n${"native source content\n".repeat(28_000)}\nOLD-SOURCE-END`,
-			timestamp: 2,
-		});
 		let normal: Context | undefined;
 		let normalOptions: SimpleStreamOptions | undefined;
 		harness.setResponses([
@@ -179,6 +178,9 @@ describe("AgentSession cache-preserving compaction", () => {
 	it.each(["preflight", "provider"] as const)(
 		"carries a previous checkpoint through a split-turn %s fallback with no complete history turns",
 		async (overflow) => {
+			const constraint = "Keep the public API unchanged; deployment is not authorized.";
+			const retainedId = "retained";
+			// The previous checkpoint keeps the current turn's user message; it is seeded before the session opens.
 			const harness = await createHarness({
 				models: [
 					{
@@ -189,23 +191,18 @@ describe("AgentSession cache-preserving compaction", () => {
 					},
 				],
 				settings: { compaction: { enabled: false, keepRecentTokens: 1 } },
+				seed: (seed) =>
+					seed
+						.user(constraint, { timestamp: 1 })
+						.user("Continue the implementation", { timestamp: 2 })
+						.compaction({ summary: constraint, tokensBefore: 50_000 })
+						.assistant("Investigating the implementation. ".repeat(100))
+						.assistant("Next implementation step", { id: retainedId }),
 			});
 			harnesses.push(harness);
 			await harness.session.setSessionName("repeated split compaction");
 			await harness.session.setThinkingLevel("high");
-			const constraint = "Keep the public API unchanged; deployment is not authorized.";
-			await harness.sessionManager.appendMessage({ role: "user", content: constraint, timestamp: 1 });
-			const currentTurn = await harness.sessionManager.appendMessage({
-				role: "user",
-				content: "Continue the implementation",
-				timestamp: 2,
-			});
-			await harness.sessionManager.appendCompaction(constraint, currentTurn, 50_000);
-			await harness.sessionManager.appendMessage(
-				fauxAssistantMessage("Investigating the implementation. ".repeat(100)),
-			);
-			const retained = fauxAssistantMessage("Next implementation step");
-			const retainedId = await harness.sessionManager.appendMessage(retained);
+			const retained = seededMessage(harness, retainedId);
 			const entriesBefore = harness.sessionManager.getEntries();
 			const preparation = prepareCompaction(
 				harness.sessionManager.getBranch(),
@@ -327,25 +324,38 @@ describe("AgentSession cache-preserving compaction", () => {
 	);
 
 	it("uses the same one-pass path for automatic compaction", async () => {
-		const harness = await createHarness({ settings: { compaction: { keepRecentTokens: 1 } } });
+		// The saved response's usage is over the threshold (128k window less the 16k reserve), so the
+		// next prompt's turn compacts before its first request.
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			seed: (seed) =>
+				seed
+					.user("Original", { timestamp: 1 })
+					.assistant("recent", { usage: { input: 120_000, totalTokens: 120_000 } }),
+		});
 		harnesses.push(harness);
-		await harness.sessionManager.appendMessage({ role: "user", content: "Original", timestamp: 1 });
-		await harness.sessionManager.appendMessage(fauxAssistantMessage("recent"));
 		let calls = 0;
+		let promptContext: Context | undefined;
 		harness.setResponses([
 			(context) => {
 				calls++;
 				expect(context.tools).toBeDefined();
+				expect(JSON.stringify(context.messages)).not.toContain("Next request");
 				return fauxAssistantMessage("automatic checkpoint");
 			},
+			(context) => {
+				promptContext = context;
+				return fauxAssistantMessage("after the checkpoint");
+			},
 		]);
-		const internal = harness.session as unknown as {
-			_runAutoCompaction: (reason: "threshold", willRetry: boolean) => Promise<boolean>;
-		};
-		await internal._runAutoCompaction("threshold", false);
+		await harness.session.prompt("Next request");
 		expect(calls).toBe(1);
+		expect(getMessageText(promptContext?.messages[0])).toContain("automatic checkpoint");
+		expect(getMessageText(promptContext?.messages.at(-1))).toBe("Next request");
 		expect(harness.eventsOfType("compaction_end").at(-1)).toMatchObject({
+			reason: "threshold",
 			aborted: false,
+			willRetry: false,
 			result: {
 				summary: "automatic checkpoint",
 				details: {
@@ -484,12 +494,18 @@ describe("AgentSession cache-preserving compaction", () => {
 	});
 
 	it("includes the split-turn suffix while ignoring empty branch summaries when locating the retained tail", async () => {
-		const harness = await createHarness({ settings: { compaction: { keepRecentTokens: 1 } } });
+		const retainedEntryId = "retained";
+		// The empty branch summary is seeded before the session opens; a live session refuses structural writes.
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			seed: (seed) =>
+				seed
+					.user("Original turn", { timestamp: 1 })
+					.branchSummary("")
+					.assistant("EARLY-PREFIX-CONTEXT")
+					.assistant("RETAINED-SUFFIX", { id: retainedEntryId }),
+		});
 		harnesses.push(harness);
-		const user = await harness.sessionManager.appendMessage({ role: "user", content: "Original turn", timestamp: 1 });
-		await harness.sessionManager.branchWithSummary(user, "", { readFiles: [], modifiedFiles: [] });
-		await harness.sessionManager.appendMessage(fauxAssistantMessage("EARLY-PREFIX-CONTEXT"));
-		const retainedEntryId = await harness.sessionManager.appendMessage(fauxAssistantMessage("RETAINED-SUFFIX"));
 		const originalHistory = harness.sessionManager.buildSessionContext().messages;
 		const preparation = prepareCompaction(
 			harness.sessionManager.getBranch(),

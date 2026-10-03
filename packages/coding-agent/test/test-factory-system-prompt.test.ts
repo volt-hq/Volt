@@ -12,7 +12,7 @@ afterEach(() => {
 
 describe("test factory system prompts", () => {
 	it("forwards explicit prompts through the general harness resource loader", async () => {
-		const harness = createHarness({
+		const harness = await createHarness({
 			systemPrompt: "GENERAL_PROMPT_SENTINEL",
 			responses: ["ok"],
 		});
@@ -39,10 +39,10 @@ describe("test factory system prompts", () => {
 		expect(capturedPrompt).toContain("SUITE_PROMPT_SENTINEL");
 	});
 
-	it("forwards explicit and default prompts through createTestSession resources", () => {
-		const explicit = createTestSession({ inMemory: true, systemPrompt: "UTILITY_PROMPT_SENTINEL" });
+	it("forwards explicit and default prompts through createTestSession resources", async () => {
+		const explicit = await createTestSession({ inMemory: true, systemPrompt: "UTILITY_PROMPT_SENTINEL" });
 		cleanups.push(explicit.cleanup);
-		const defaults = createTestSession({ inMemory: true });
+		const defaults = await createTestSession({ inMemory: true });
 		cleanups.push(defaults.cleanup);
 
 		expect(explicit.session.systemPrompt).toContain("UTILITY_PROMPT_SENTINEL");

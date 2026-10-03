@@ -1,219 +1,176 @@
 import type {
-	AgentDelivery,
-	AgentDeliveryCommitContext,
-	AgentDeliveryOwner,
-	AgentDeliveryPreparationContext,
-	AgentHarness,
 	AgentHarnessNextActionPolicy,
 	AgentMessage,
 	AgentTool,
+	AgentToolDisposition,
+	Conversation,
+	ConversationPolicy,
 	StreamFn,
+	ThinkingLevel,
 	ToolCallEvent,
 	ToolCallResult,
 	ToolResultEvent,
-	ToolResultPatch,
 } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonObject, JsonValue, Model, TextContent } from "@hansjm10/volt-ai";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import type { SessionManagerHarnessStorage } from "../src/core/harness-session-adapter.ts";
+import { reduceToolCall, type ToolCallPolicy } from "../src/core/session/turn-policy.ts";
 
-export type LegacyDeliveryParticipantOutcome =
-	| { outcome: "committed" }
-	| { outcome: "retained"; error: Error }
-	| { outcome: "terminally_failed"; error: Error };
-
-export interface LegacyDeliveryPreparation {
-	messages: readonly AgentMessage[];
-	participant?: {
-		settle(context: {
-			messages: readonly AgentMessage[];
-			systemPrompt: string;
-			tools: readonly AgentTool[];
-			signal: AbortSignal;
-			requestAbort: AgentDeliveryCommitContext["requestAbort"];
-			requestClose: AgentDeliveryCommitContext["requestClose"];
-		}): LegacyDeliveryParticipantOutcome | Promise<LegacyDeliveryParticipantOutcome>;
-	};
+/** A tool-result hook's patch, as the conversation's `afterToolCall` merges it. */
+export interface ToolResultPatch {
+	content?: Array<TextContent | ImageContent>;
+	details?: JsonValue;
+	isError?: boolean;
+	disposition?: AgentToolDisposition;
 }
-
-export type LegacyPrepareDelivery = (
-	delivery: AgentDelivery,
-	signal: AbortSignal,
-) => LegacyDeliveryPreparation | Promise<LegacyDeliveryPreparation>;
-
-type HarnessTestInternals = {
-	streamFn: StreamFn;
-	emitContext(messages: AgentMessage[]): Promise<AgentMessage[]>;
-	emitToolCall(event: ToolCallEvent): Promise<ToolCallResult | undefined>;
-	emitToolResult(
-		event: ToolResultEvent,
-	): Promise<
-		Required<Pick<ToolResultEvent, "content" | "isError">> &
-			Pick<ToolResultEvent, "details"> & { disposition?: "stop" | "final_response" }
-	>;
-};
 
 type SessionTestInternals = {
+	_conversation: Conversation<AgentTool>;
 	_streamFn: StreamFn;
-	_streamOptions: ReturnType<AgentHarness["getStreamOptions"]>;
-	_deliveryOwner: AgentDeliveryOwner;
-	_harnessSessionStorage: SessionManagerHarnessStorage;
-	_legacyDeliveryRevoked?: (delivery: AgentDelivery) => void;
+	_toolCallPolicies(signal: AbortSignal | undefined): Iterable<ToolCallPolicy<ToolCallEvent>>;
+	_handleToolResultPolicy(event: Omit<ToolResultEvent, "type">): Promise<ToolResultPatch | undefined>;
 };
 
-function getHarness(session: AgentSession): AgentHarness {
-	return (session as unknown as { _harness: AgentHarness })._harness;
-}
-
-function getHarnessInternals(session: AgentSession): HarnessTestInternals {
-	return getHarness(session) as unknown as HarnessTestInternals;
-}
-
-function getSessionInternals(session: AgentSession): SessionTestInternals {
+function internals(session: AgentSession): SessionTestInternals {
 	return session as unknown as SessionTestInternals;
 }
 
-/** Centralized test-only controls for faults and bounded Harness operations. */
+/** The session's conversation policy object, which the conversation reads at every turn. */
+function policyOf(session: AgentSession): { -readonly [K in keyof ConversationPolicy]: ConversationPolicy[K] } {
+	return (internals(session)._conversation as unknown as { policy: ConversationPolicy }).policy;
+}
+
+function messageText(message: AgentMessage): string {
+	if (message.role !== "user") return "";
+	return typeof message.content === "string"
+		? message.content
+		: message.content
+				.filter((part): part is TextContent => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+}
+
+function messageImages(message: AgentMessage): ImageContent[] {
+	if (message.role !== "user" || typeof message.content === "string") return [];
+	return message.content.filter((part): part is ImageContent => part.type === "image");
+}
+
+/**
+ * Test-only controls over a session's conversation: turns, the durable
+ * queue, the provider stream, and its policy hooks.
+ */
 export function createAgentSessionTestControl(session: AgentSession) {
-	const harness = getHarness(session);
-	const harnessInternals = getHarnessInternals(session);
-	const sessionInternals = getSessionInternals(session);
-	const baseOwner = sessionInternals._deliveryOwner;
-	const basePrepare = baseOwner.prepareLogical.bind(baseOwner);
-	const baseCommit = baseOwner.commitAttempt.bind(baseOwner);
-	const baseFinish = baseOwner.finish.bind(baseOwner);
-	const legacyPreparations = new Map<string, LegacyDeliveryPreparation>();
-	const deliveries = new Map<string, AgentDelivery>();
-	let prepareDelivery: LegacyPrepareDelivery | undefined;
-	baseOwner.prepareLogical = async (context: AgentDeliveryPreparationContext) => {
-		const delivery: AgentDelivery = {
-			deliveryId: context.deliveryId,
-			kind: context.kind,
-			messages: structuredClone(context.sourceMessages),
-			epoch: context.epoch,
-		};
-		deliveries.set(context.deliveryId, delivery);
-		if (!prepareDelivery) return await basePrepare(context);
-		const legacy = await prepareDelivery(delivery, context.signal);
-		legacyPreparations.set(context.deliveryId, {
-			...legacy,
-			messages: structuredClone(legacy.messages),
-		});
-		return await basePrepare({ ...context, sourceMessages: structuredClone(legacy.messages) });
-	};
-	baseOwner.commitAttempt = async (context) => {
-		const legacy = legacyPreparations.get(context.deliveryId);
-		const outcome = await legacy?.participant?.settle({
-			messages: structuredClone(context.preparedMessages),
-			systemPrompt: session.systemPrompt,
-			tools: session.state.tools,
-			signal: context.signal,
-			requestAbort: context.requestAbort,
-			requestClose: context.requestClose,
-		});
-		if (outcome?.outcome === "retained") {
-			return {
-				...outcome,
-				noEffectReceipt: await sessionInternals._harnessSessionStorage.retainOwnedDelivery(
-					context,
-					context.preparedMessages,
-				),
-			};
-		}
-		if (outcome?.outcome === "terminally_failed") return outcome;
-		return await baseCommit(context);
-	};
-	baseOwner.finish = async (context) => {
-		await baseFinish(context);
-		if (context.outcome === "revoked") {
-			const delivery = deliveries.get(context.deliveryId);
-			if (delivery) sessionInternals._legacyDeliveryRevoked?.(delivery);
-		}
-		if (context.outcome !== "retained") {
-			legacyPreparations.delete(context.deliveryId);
-			deliveries.delete(context.deliveryId);
-		}
-	};
+	const conversation = () => internals(session)._conversation;
+	/** The running operation's signal; outside one, a fresh signal, so registered turn policies apply. */
+	const policySignal = () => conversation().operation?.signal ?? new AbortController().signal;
 	return {
-		run: async (input: AgentMessage | readonly AgentMessage[]) =>
-			await harness.runReserved(harness.reserveRun(), input),
-		continue: (options?: { drainFollowUps?: boolean; context?: readonly AgentMessage[] }) =>
-			harness.continue(options),
-		queueSteer: (message: AgentMessage) => harness.queueSteer(message),
-		queueFollowUp: (message: AgentMessage) => harness.queueFollowUp(message),
-		failNextQueue: (kind: "steer" | "followUp", error: Error) => {
-			if (kind === "steer") {
-				const original = harness.queueSteer.bind(harness);
-				harness.queueSteer = (_message) => {
-					harness.queueSteer = original;
-					throw error;
-				};
-				return;
-			}
-			const original = harness.queueFollowUp.bind(harness);
-			harness.queueFollowUp = (_message) => {
-				harness.queueFollowUp = original;
-				throw error;
-			};
+		/** The session's conversation kernel. */
+		get conversation(): Conversation<AgentTool> {
+			return conversation();
 		},
-		hasQueuedMessages: () => harness.hasQueuedMessages(),
-		hasPendingPrompt: () => harness.hasPendingPrompt(),
-		revokeAllQueues: () => harness.revokeAllQueues(),
-		getStreamFn: () => sessionInternals._streamFn,
+		/**
+		 * Run a turn that delivers `input`: a user message as a prompt (later
+		 * messages attached to it), anything else as host messages. Resolves when
+		 * the turn settles.
+		 */
+		run: async (input: AgentMessage | readonly AgentMessage[]): Promise<void> => {
+			const messages = Array.isArray(input) ? [...input] : [input as AgentMessage];
+			const [first, ...rest] = messages;
+			if (!first) throw new Error("A run needs a message");
+			const admission =
+				first.role === "user"
+					? await conversation().prompt({
+							message: messageText(first),
+							images: messageImages(first),
+							attachments: rest,
+						})
+					: await conversation().queueMessages("steer", messages);
+			await admission.completion;
+			await conversation().waitForIdle();
+		},
+		/** Run a turn over pending input or the context's tail; resolves when it settles. */
+		continue: async (): Promise<void> => {
+			await conversation().continue();
+			await conversation().waitForIdle();
+		},
+		/** Queue durable host messages; while idle, the conversation starts a turn for them. */
+		queueSteer: async (message: AgentMessage): Promise<string> =>
+			(await conversation().queueMessages("steer", [message])).clientMessageId,
+		queueFollowUp: async (message: AgentMessage): Promise<string> =>
+			(await conversation().queueMessages("followUp", [message])).clientMessageId,
+		hasQueuedMessages: () => {
+			const queue = conversation().queue;
+			return queue.prompt.length + queue.steer.length + queue.followUp.length > 0;
+		},
+		hasPendingPrompt: () => conversation().queue.prompt.length > 0,
+		/** Withdraw every queued steer and follow-up; resolves with the withdrawn messages. */
+		clearQueue: async () => {
+			const cleared = await conversation().clearQueue();
+			return [...cleared.steer, ...cleared.followUp];
+		},
+		getStreamFn: () => internals(session)._streamFn,
+		/** Replace the provider stream the session's conversation sends requests through. */
 		setStreamFn: (streamFn: StreamFn) => {
-			sessionInternals._streamFn = streamFn;
-			harnessInternals.streamFn = streamFn;
+			internals(session)._streamFn = streamFn;
 		},
-		setPrepareDelivery: (nextPrepareDelivery: LegacyPrepareDelivery) => {
-			prepareDelivery = nextPrepareDelivery;
-		},
-		getDeliveryRevoked: () => sessionInternals._legacyDeliveryRevoked,
-		setDeliveryRevoked: (deliveryRevoked: ((delivery: AgentDelivery) => void) | undefined) => {
-			sessionInternals._legacyDeliveryRevoked = deliveryRevoked;
-		},
-		onToolCall: (
-			handler: (event: ToolCallEvent) => Promise<ToolCallResult | undefined> | ToolCallResult | undefined,
-		) => harness.on("tool_call", handler),
+		/** Run `handler` after the session's tool-result policy; its patch merges over the result. */
 		onToolResult: (
 			handler: (event: ToolResultEvent) => Promise<ToolResultPatch | undefined> | ToolResultPatch | undefined,
-		) => harness.on("tool_result", handler),
-		registerNextActionPolicy: (policy: AgentHarnessNextActionPolicy) => harness.registerNextActionPolicy(policy),
-		transformContext: (messages: AgentMessage[]) => harnessInternals.emitContext(messages),
-		evaluateToolCall: async (event: ToolCallEvent) => {
-			const result = await harnessInternals.emitToolCall(event);
-			return result?.block === undefined && result?.reason === undefined ? undefined : result;
+		) => {
+			const policy = policyOf(session);
+			const original = policy.afterToolCall;
+			policy.afterToolCall = async (context, signal) => {
+				const base = await original?.(context, signal);
+				const details = (base?.details ?? context.result.details) as JsonValue | undefined;
+				const event: ToolResultEvent = {
+					type: "tool_result",
+					toolCallId: context.toolCall.id,
+					toolName: context.toolCall.name,
+					input: context.args,
+					content: base?.content ?? context.result.content,
+					...(details === undefined ? {} : { details }),
+					isError: base?.isError ?? context.isError,
+				};
+				const patch = await handler(event);
+				if (!patch) return base;
+				return { ...base, ...patch };
+			};
+			return () => {
+				policy.afterToolCall = original;
+			};
+		},
+		/** Register a next-action policy after the session's own; returns its removal. */
+		registerNextActionPolicy: (policy: AgentHarnessNextActionPolicy) =>
+			session.registerTurnPolicy({ nextAction: policy }),
+		transformContext: async (messages: AgentMessage[]) =>
+			(await policyOf(session).transformContext?.(messages)) ?? messages,
+		/** The session's tool-call decision for `event`; undefined when nothing blocks or explains it. */
+		evaluateToolCall: async (event: ToolCallEvent): Promise<ToolCallResult | undefined> => {
+			const result = await reduceToolCall(event, internals(session)._toolCallPolicies(policySignal()));
+			return result.block === undefined && result.reason === undefined ? undefined : result;
 		},
 		evaluateToolCallRequest: async (input: { toolCall: { id: string; name: string }; args: JsonObject }) => {
-			const result = await harnessInternals.emitToolCall({
-				type: "tool_call",
-				toolCallId: input.toolCall.id,
-				toolName: input.toolCall.name,
-				input: input.args,
-			});
-			return result?.block === undefined && result?.reason === undefined ? undefined : result;
+			const result = await reduceToolCall<ToolCallEvent>(
+				{ type: "tool_call", toolCallId: input.toolCall.id, toolName: input.toolCall.name, input: input.args },
+				internals(session)._toolCallPolicies(policySignal()),
+			);
+			return result.block === undefined && result.reason === undefined ? undefined : result;
 		},
-		evaluateToolResult: (event: ToolResultEvent) => harnessInternals.emitToolResult(event),
-		evaluateToolResultRequest: (input: {
-			toolCall: { id: string; name: string };
-			args: JsonObject;
-			result: { content: Array<TextContent | ImageContent>; details?: JsonValue };
-			isError: boolean;
-		}) =>
-			harnessInternals.emitToolResult({
-				type: "tool_result",
-				toolCallId: input.toolCall.id,
-				toolName: input.toolCall.name,
-				input: input.args,
-				content: input.result.content,
-				...(input.result.details === undefined ? {} : { details: input.result.details }),
-				isError: input.isError,
-			}),
-
-		setModel: (model: Model<any> | undefined) => harness.setModel(model, { persist: false }),
-		setThinkingLevel: (level: Parameters<AgentHarness["setThinkingLevel"]>[0]) =>
-			harness.setThinkingLevel(level, { persist: false }),
-		getStreamOptions: () => structuredClone(sessionInternals._streamOptions),
-		getInferenceSpeed: () => sessionInternals._streamOptions.inferenceSpeed,
-		getActiveTools: () => harness.getActiveTools(),
+		evaluateToolResult: async (event: ToolResultEvent) => {
+			const { type: _type, ...rest } = event;
+			const patch = await internals(session)._handleToolResultPolicy(rest);
+			return {
+				content: patch?.content ?? event.content,
+				...((patch?.details ?? event.details) === undefined ? {} : { details: patch?.details ?? event.details }),
+				isError: patch?.isError ?? event.isError,
+			};
+		},
+		/** Commit a model change; the session's model comes from the log. */
+		setModel: async (model: Model<any>) => await conversation().setModel(model),
+		setThinkingLevel: async (level: ThinkingLevel) => await conversation().setThinkingLevel(level),
+		getStreamOptions: () => conversation().currentStreamOptions,
+		getInferenceSpeed: () => (conversation().state.context.fastMode ? "fast" : "standard"),
+		getActiveTools: () => conversation().activeTools,
 	};
 }
+
+export type AgentSessionTestControl = ReturnType<typeof createAgentSessionTestControl>;

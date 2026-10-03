@@ -167,12 +167,14 @@ describe("native planning state", () => {
 			args: { action: "diagnostics" },
 		} as never);
 		expect(readOnlyLsp).toBeUndefined();
-		await createAgentSessionTestControl(session).evaluateToolResultRequest({
-			toolCall: readOnlyLspCall,
-			args: { action: "diagnostics" },
-			result: { content: [{ type: "text", text: "No diagnostics" }] },
+		await createAgentSessionTestControl(session).evaluateToolResult({
+			type: "tool_result",
+			toolCallId: readOnlyLspCall.id,
+			toolName: readOnlyLspCall.name,
+			input: { action: "diagnostics" },
+			content: [{ type: "text", text: "No diagnostics" }],
 			isError: false,
-		} as never);
+		});
 		const submitAfterResearch = await createAgentSessionTestControl(session).evaluateToolCallRequest({
 			toolCall: { type: "toolCall", id: "submit-after-read", name: "submit_plan", arguments: {} },
 			args: {},
@@ -259,12 +261,14 @@ describe("native planning state", () => {
 					args: { action: "diagnostics" },
 				} as never),
 			).toBeUndefined();
-			await createAgentSessionTestControl(session).evaluateToolResultRequest({
-				toolCall: researchCall,
-				args: { action: "diagnostics" },
-				result: { content: [{ type: "text", text: "No diagnostics" }] },
+			await createAgentSessionTestControl(session).evaluateToolResult({
+				type: "tool_result",
+				toolCallId: researchCall.id,
+				toolName: researchCall.name,
+				input: { action: "diagnostics" },
+				content: [{ type: "text", text: "No diagnostics" }],
 				isError: false,
-			} as never);
+			});
 
 			const firstRequestStarted = createDeferred<void>();
 			const releaseFirstRequest = createDeferred<void>();
@@ -404,12 +408,14 @@ describe("native planning state", () => {
 					args: initialResearchCall.arguments,
 				} as never),
 			).toBeUndefined();
-			await createAgentSessionTestControl(session).evaluateToolResultRequest({
-				toolCall: initialResearchCall,
-				args: initialResearchCall.arguments,
-				result: { content: [{ type: "text", text: "agent/" }] },
+			await createAgentSessionTestControl(session).evaluateToolResult({
+				type: "tool_result",
+				toolCallId: initialResearchCall.id,
+				toolName: initialResearchCall.name,
+				input: initialResearchCall.arguments,
+				content: [{ type: "text", text: "agent/" }],
 				isError: false,
-			} as never);
+			});
 			const ready = await session.submitPlan({
 				planId: draft.id,
 				expectedRevision: draft.revision,
@@ -563,12 +569,14 @@ describe("native planning state", () => {
 				args: { action: "diagnostics" },
 			} as never),
 		).toBeUndefined();
-		await createAgentSessionTestControl(session).evaluateToolResultRequest({
-			toolCall: researchCall,
-			args: { action: "diagnostics" },
-			result: { content: [{ type: "text", text: "No diagnostics" }] },
+		await createAgentSessionTestControl(session).evaluateToolResult({
+			type: "tool_result",
+			toolCallId: researchCall.id,
+			toolName: researchCall.name,
+			input: { action: "diagnostics" },
+			content: [{ type: "text", text: "No diagnostics" }],
 			isError: false,
-		} as never);
+		});
 		await session.submitPlan({
 			planId: draft.id,
 			expectedRevision: draft.revision,
@@ -606,12 +614,14 @@ describe("native planning state", () => {
 				args: { action: "diagnostics" },
 			} as never),
 		).toBeUndefined();
-		await createAgentSessionTestControl(session).evaluateToolResultRequest({
-			toolCall: freshResearchCall,
-			args: { action: "diagnostics" },
-			result: { content: [{ type: "text", text: "No diagnostics" }] },
+		await createAgentSessionTestControl(session).evaluateToolResult({
+			type: "tool_result",
+			toolCallId: freshResearchCall.id,
+			toolName: freshResearchCall.name,
+			input: { action: "diagnostics" },
+			content: [{ type: "text", text: "No diagnostics" }],
 			isError: false,
-		} as never);
+		});
 		expect(
 			await createAgentSessionTestControl(session).evaluateToolCallRequest({
 				toolCall: submitCall,

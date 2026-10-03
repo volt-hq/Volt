@@ -3,7 +3,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
-import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
+import { createHarness, getUserTexts, type Harness, type HarnessOptions } from "../harness.ts";
 
 const harnesses: Harness[] = [];
 const releases: Array<() => void> = [];
@@ -217,16 +217,17 @@ describe("#421 operation elapsed timing", () => {
 	it("keeps a queued continuation in the same operation", async () => {
 		const harness = await setup();
 		const states = observe(harness);
-		let queued = false;
-		harness.session.subscribe((event) => {
-			if (event.type === "agent_end" && !queued) {
-				queued = true;
-				harness.control.queueFollowUp({ role: "user", content: "Follow up", timestamp: Date.now() });
-			}
-		});
-		harness.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("second")]);
+		harness.setResponses([
+			async () => {
+				// Queued while the turn runs: the turn delivers it before it ends.
+				await harness.control.queueFollowUp({ role: "user", content: "Follow up", timestamp: Date.now() });
+				return fauxAssistantMessage("first");
+			},
+			fauxAssistantMessage("second"),
+		]);
 		await harness.session.prompt("Begin");
-		expectOneOperation(harness, states, 2);
+		expect(harness.getPendingResponseCount()).toBe(0);
+		expectOneOperation(harness, states, 1);
 	});
 
 	it.each(["abort", "dispose"] as const)("clears timing on %s during retry backoff", async (action) => {
@@ -326,11 +327,10 @@ describe("#421 operation elapsed timing", () => {
 	});
 
 	it.each([false, true])(
-		"owns pre-prompt recovery separately from new input (preflight fails=%s)",
+		"runs pre-prompt recovery inside the prompt's operation (preflight fails=%s)",
 		async (failPreflight) => {
 			let now = Date.now();
 			vi.spyOn(Date, "now").mockImplementation(() => now);
-			const retry = deferred();
 			const harness = await setup({
 				settings: {
 					compaction: { enabled: true, keepRecentTokens: 1 },
@@ -357,8 +357,7 @@ describe("#421 operation elapsed timing", () => {
 			);
 			const states = observe(harness);
 			harness.session.subscribe((event) => {
-				if (event.type === "auto_retry_start") retry.resolve();
-				if (event.type === "agent_settled") now += 10_000;
+				if (event.type === "agent_start" || event.type === "compaction_end") now += 10_000;
 			});
 			if (failPreflight)
 				vi.spyOn(harness.session.extensionRunner, "emitBeforeAgentStart").mockRejectedValue(
@@ -371,29 +370,30 @@ describe("#421 operation elapsed timing", () => {
 				}),
 				fauxAssistantMessage("new response", { usage: usage(10) }),
 			]);
-			const result = harness.session.prompt("new input").then(
+			const error = await harness.session.prompt("new input").then(
 				() => undefined,
 				(error: unknown) => error,
 			);
-			await retry.promise;
-			let idleResolved = false;
-			const idle = harness.session.waitForIdle().then(() => {
-				idleResolved = true;
-			});
-			await Promise.resolve();
-			expect(idleResolved).toBe(false);
-			expect(harness.session.isStreaming).toBe(true);
-			harness.session.abortRetry();
-			const error = await result;
-			await idle;
-			if (failPreflight) expect(error).toMatchObject({ message: "preflight failed" });
-			else expect(error).toBeUndefined();
+			await harness.session.waitForIdle();
+			if (failPreflight) {
+				// Input that fails preflight starts no operation; recovery waits for the next admitted input.
+				expect(error).toMatchObject({ message: "preflight failed" });
+				expect(harness.eventsOfType("agent_start")).toEqual([]);
+				expect(harness.eventsOfType("compaction_start")).toEqual([]);
+				expect(harness.getPendingResponseCount()).toBe(2);
+				expectSettled(harness);
+				return;
+			}
+			// Recovery compacts and retries the overflowed request once; the pending prompt then runs
+			// instead of a backoff retry, all within one operation.
+			expect(error).toBeUndefined();
+			expect(harness.eventsOfType("compaction_start")).toMatchObject([{ reason: "overflow" }]);
+			expect(harness.eventsOfType("auto_retry_start")).toEqual([]);
+			expect(harness.getPendingResponseCount()).toBe(0);
+			expect(getUserTexts(harness)).toContain("new input");
 			const starts = harness.eventsOfType("agent_start");
-			expect(starts).toHaveLength(failPreflight ? 1 : 2);
-			if (!failPreflight) expect(starts[1]!.startedAt).toBeGreaterThan(starts[0]!.startedAt);
-			for (const state of states.filter((state) => state.type === "agent_settled"))
-				expect(state.timing).toBeUndefined();
-			expectSettled(harness);
+			expect(starts.length).toBeGreaterThan(1);
+			expectOneOperation(harness, states, starts.length);
 		},
 	);
 });

@@ -280,13 +280,11 @@ export function createTestResourceLoader(options: CreateTestResourceLoaderOption
  * Create an AgentSession for testing with proper setup and cleanup.
  * Use this for e2e tests that need real LLM calls.
  */
-export function createTestSession(options: TestSessionOptions & { inMemory: true }): TestSessionContext;
-export function createTestSession(options?: TestSessionOptions & { inMemory?: false }): Promise<TestSessionContext>;
-export function createTestSession(options: TestSessionOptions = {}): TestSessionContext | Promise<TestSessionContext> {
+export async function createTestSession(options: TestSessionOptions = {}): Promise<TestSessionContext> {
 	const tempDir = join(tmpdir(), `volt-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
-	const finish = (sessionManager: SessionManager): TestSessionContext => {
+	const finish = async (sessionManager: SessionManager): Promise<TestSessionContext> => {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 
@@ -297,7 +295,7 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 
-		const session = new AgentSession({
+		const session = await AgentSession.create({
 			sessionManager,
 			model,
 			thinkingLevel: "off",
@@ -327,7 +325,7 @@ export function createTestSession(options: TestSessionOptions = {}): TestSession
 		return { session, sessionManager, tempDir, cleanup };
 	};
 
-	return options.inMemory ? finish(SessionManager.inMemory()) : SessionManager.create(tempDir).then(finish);
+	return finish(options.inMemory ? SessionManager.inMemory() : await SessionManager.create(tempDir));
 }
 
 export async function loadPersistedSessionSnapshot(manager: SessionManager): Promise<SessionStoreSnapshot> {

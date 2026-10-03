@@ -250,17 +250,18 @@ describe("PR #380: shared session abort admission", () => {
 		finish.resolve();
 		await Promise.all([abort, closed]);
 		await expect(harness.session.sendCustomMessage(message, { triggerTurn: true })).rejects.toThrow(/disposed/);
-		await expect(harness.control.run({ role: "user", content: "denied", timestamp: 1 })).rejects.toThrow(/disposed/);
+		await expect(harness.control.run({ role: "user", content: "denied", timestamp: 1 })).rejects.toThrow(/ended/);
 		await expect(bash.execute("denied", { command: "denied", background: true })).rejects.toThrow(/stale|disposed/);
 		expect(harness.faux.state.callCount).toBe(0);
 	});
 
 	it("preserves queues and non-triggering messages while abort drains", async () => {
 		const { harness, finish } = await setup();
-		await harness.session.steer("retained steering");
-		await harness.session.followUp("retained follow-up");
 		const abort = harness.session.abort();
 		try {
+			// Queued while the stop drains, input waits; it would start a turn on the idle conversation otherwise.
+			await harness.session.steer("retained steering");
+			await harness.session.followUp("retained follow-up");
 			await harness.session.sendCustomMessage({ ...message, content: "cleanup note" });
 			await harness.session.sendCustomMessage(
 				{ ...message, content: "next-turn context" },

@@ -16,6 +16,7 @@ import {
 	projectSessionTranscript,
 } from "../src/core/rpc/transcript.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
+import { seedSession } from "./utilities/seed-log.ts";
 
 const emptyUsage = {
 	input: 0,
@@ -46,11 +47,14 @@ function user(text: string, timestamp: number): UserMessage {
 describe("RPC transcript projection", () => {
 	test("returns UI-ready transcript items without raw internal payloads", async () => {
 		const session = SessionManager.inMemory("/Users/jordan/project");
-		await session.reserveClientInput("client-message-1", "prompt", {
-			message: "hello",
-			images: [{ type: "image", data: "image-bytes", mimeType: "image/png" }],
-		});
-		await session.transitionClientInput("client-message-1", "started");
+		await seedSession(session, (seed) =>
+			seed.clientInput(
+				"client-message-1",
+				"prompt",
+				{ message: "hello", images: [{ type: "image", data: "image-bytes", mimeType: "image/png" }] },
+				{ states: ["started"] },
+			),
+		);
 		const firstUserEntryId = await session.appendMessage({
 			role: "user",
 			clientMessageId: "client-message-1",

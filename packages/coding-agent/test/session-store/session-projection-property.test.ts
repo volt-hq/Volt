@@ -1,11 +1,13 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ConversationLogEntryDraft } from "@hansjm10/volt-agent-core";
 import type { Message } from "@hansjm10/volt-ai";
 import * as fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { type SessionCanonicalAppend, SessionManager } from "../../src/core/session-manager.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";
+import { seedSession } from "../utilities/seed-log.ts";
 
 const PROPERTY_SEED = 329_003;
 
@@ -101,29 +103,47 @@ function assistantMessage(text: string, timestamp: number): Message {
 	};
 }
 
-function canonicalAppend(operation: GeneratedOperation): SessionCanonicalAppend {
+/** The log form of a generated entry; every generated type is public, so each extends the branch. */
+function logEntryBody(operation: GeneratedOperation): { type: string; payload: Record<string, unknown> } {
 	switch (operation.kind) {
 		case "user":
 			return {
 				type: "message",
-				message: { role: "user", content: operation.text, timestamp: operation.timestamp },
+				payload: { message: { role: "user", content: operation.text, timestamp: operation.timestamp } },
 			};
 		case "assistant":
-			return { type: "message", message: assistantMessage(operation.text, operation.timestamp) };
+			return { type: "message", payload: { message: assistantMessage(operation.text, operation.timestamp) } };
 		case "custom_message":
 			return {
 				type: "custom_message",
-				customType: "property",
-				content: operation.text,
-				display: operation.display,
+				payload: { customType: "property", content: operation.text, display: operation.display },
 			};
 		case "custom":
-			return { type: "custom", customType: "property", data: { value: operation.value } };
+			return { type: "custom", payload: { customType: "property", data: { value: operation.value } } };
 		case "name":
-			return { type: "session_info", name: operation.name };
+			return { type: "session_info", payload: { name: operation.name } };
 		case "planning":
-			return { type: "planning_state_change", planning: { mode: operation.mode, plan: null } };
+			return { type: "planning_state_change", payload: { planning: { mode: operation.mode, plan: null } } };
 	}
+}
+
+/** Commit `operations` to `manager` as one transaction, each entry a child of the one before. */
+async function commitBatch(manager: SessionManager, operations: readonly GeneratedOperation[]): Promise<void> {
+	const head = manager.getOrdinal();
+	let parentId = manager.getLeafId();
+	await seedSession(manager, (seed) => {
+		for (const [index, operation] of operations.entries()) {
+			const id = `batch-${head + index + 1}`;
+			seed.drafts.push({
+				...logEntryBody(operation),
+				id,
+				parentId,
+				timestamp: new Date().toISOString(),
+				visibility: "public",
+			} as ConversationLogEntryDraft);
+			parentId = id;
+		}
+	});
 }
 
 async function expectReplayMatches(manager: SessionManager, clientMessageIds: readonly string[] = []): Promise<void> {
@@ -167,10 +187,14 @@ async function applyStatefulOperation(
 		case "client_input": {
 			const clientMessageId = `property-client-${index}`;
 			clientMessageIds.push(clientMessageId);
-			await manager.reserveClientInput(clientMessageId, "steer", { message: operation.message });
-			await manager.markClientInputQueued(clientMessageId, { delivery: "steer", message: operation.message });
-			await manager.transitionClientInput(clientMessageId, "started");
-			await manager.transitionClientInput(clientMessageId, "completed");
+			await seedSession(manager, (seed) =>
+				seed.clientInput(
+					clientMessageId,
+					"steer",
+					{ message: operation.message },
+					{ queued: "steer", states: ["started", "completed"] },
+				),
+			);
 			break;
 		}
 		case "starting_git_null":
@@ -196,16 +220,12 @@ async function applyStatefulOperation(
 			await manager.branchWithSummary(manager.getLeafId(), "branch summary");
 			break;
 		case "rollback": {
+			// A batch with one invalid entry commits nothing.
 			const before = manager.getEntries();
-			const projection = manager.issueCanonicalProjection();
 			await expect(
-				manager.commitCanonicalCommand({
-					guard: { kind: "exact", token: projection.token },
-					mutations: [
-						{ kind: "append", entry: { type: "custom", customType: "rolled-back", data: { index } } },
-						{ kind: "append", entry: { type: "model_change", provider: "", modelId: "invalid" } },
-					],
-				}),
+				seedSession(manager, (seed) =>
+					seed.custom("rolled-back", { index }).model({ api: "test-api", provider: "", id: "invalid" }),
+				),
 			).rejects.toMatchObject({ effect: "rolled_back" });
 			expect(manager.getEntries()).toEqual(before);
 			break;
@@ -230,14 +250,7 @@ describe("session projection reducer properties", () => {
 							for (const [index, operation] of operations.entries()) {
 								batch.push(operation);
 								if (index !== operations.length - 1 && cuts[index % cuts.length] !== true) continue;
-								const projection = manager.issueCanonicalProjection();
-								await manager.commitCanonicalCommand({
-									guard: { kind: "exact", token: projection.token },
-									mutations: batch.map((entry) => ({
-										kind: "append" as const,
-										entry: canonicalAppend(entry),
-									})),
-								});
+								await commitBatch(manager, batch);
 								batch = [];
 								await expectReplayMatches(manager);
 							}

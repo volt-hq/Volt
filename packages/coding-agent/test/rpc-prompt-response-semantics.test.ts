@@ -110,18 +110,18 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function createRuntimeHost(options: {
+async function createRuntimeHost(options: {
 	withAuth: boolean;
 	responseDelayMs: number;
 	model?: Model<any>;
 	configureSession?: (session: AgentSession) => void;
 	sessionManager?: SessionManager;
-}): {
+}): Promise<{
 	runtimeHost: AgentSessionRuntime;
 	sessionManager: SessionManager;
 	getStreamCallCount: () => number;
 	cleanup: () => Promise<void>;
-} {
+}> {
 	const tempDir = join(tmpdir(), `volt-rpc-prompt-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 	mkdirSync(tempDir, { recursive: true });
 
@@ -154,7 +154,7 @@ function createRuntimeHost(options: {
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 	}
 
-	const session = new AgentSession({
+	const session = await AgentSession.create({
 		...runtimeConfig,
 		sessionManager,
 		settingsManager,
@@ -214,7 +214,7 @@ async function startRpcMode(options: {
 	rpcIo.lineHandler = undefined;
 	rpcIo.outputObserver = undefined;
 
-	const { runtimeHost, sessionManager, getStreamCallCount, cleanup } = createRuntimeHost(options);
+	const { runtimeHost, sessionManager, getStreamCallCount, cleanup } = await createRuntimeHost(options);
 	void runRpcMode(runtimeHost);
 	await vi.waitFor(() => expect(rpcIo.lineHandler).toBeDefined());
 

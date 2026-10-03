@@ -27,6 +27,7 @@ import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SQLiteSessionStoreClient } from "../../../src/core/session-store/client.ts";
 import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "../../../src/modes/rpc/rpc-command-validation.ts";
+import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -526,21 +527,21 @@ describe("Regression #341 host sibling lifecycle", () => {
 			await runtimes[1]!.session.waitForIdle();
 			if (reset) await api.reset(first!.discussionId, first!.sessionId, "reset");
 			const child = runtimes.at(-1)!;
-			const manager = child.session.sessionManager;
-			await manager.reserveClientInput("interrupted-follow-up", "follow_up", {
-				message: "Check another case",
-				images: [],
-			});
-			await manager.markClientInputQueued("interrupted-follow-up", {
-				delivery: "follow_up",
-				message: "Check another case",
-				images: [],
-			});
 			const ref = child.session.sessionRef!;
 			await child.dispose();
 			runtimes.splice(runtimes.indexOf(child), 1);
+			// The crash boundary: a follow-up was queued durably but never delivered.
+			const manager = await SessionManager.open(ref);
+			await seedSession(manager, (seed) =>
+				seed.clientInput(
+					"interrupted-follow-up",
+					"follow_up",
+					{ message: "Check another case" },
+					{ queued: "follow_up" },
+				),
+			);
 			expect((await api.list("review-341")).discussions[0]!.status).toBe("interrupted");
-			const reopened = await source.createReviewDiscussionSibling(await SessionManager.open(ref));
+			const reopened = await source.createReviewDiscussionSibling(manager);
 			runtimes.push(reopened);
 			reopened.reviewDiscussions = service.forRuntime(reopened);
 			await reopened.startRecoveredClientInputs();
@@ -558,26 +559,29 @@ describe("Regression #341 host sibling lifecycle", () => {
 
 	it("keeps an older undelivered follow-up visible after a newer input answers and recovery fails it", async () => {
 		const { api, harness, runtimes, source, service } = await fixture();
-		harness.setResponses([fauxAssistantMessage("Initial answer"), fauxAssistantMessage("Newer steering answer")]);
+		harness.setResponses([fauxAssistantMessage("Initial answer")]);
 		await api.start("review-341", ["f1"], "start");
 		const child = runtimes[1]!;
 		await child.session.waitForIdle();
-		const manager = child.session.sessionManager;
-		// Persist the crash boundary after a newer steering request overtakes an
-		// older follow-up, but before the follow-up reaches canonical delivery.
-		await manager.reserveClientInput("older-follow-up", "follow_up", { message: "Deferred work", images: [] });
-		await manager.markClientInputQueued("older-follow-up", {
-			delivery: "follow_up",
-			message: "Deferred work",
-			images: [],
-		});
-		await child.session.prompt("Newer steering request", { source: "rpc", clientMessageId: "newer" });
 		const ref = child.session.sessionRef!;
-		expect(manager.getClientInputRecoveryPlan().kind).toBe("replay");
 		await child.dispose();
 		runtimes.splice(1, 1);
+		// Persist the crash boundary after a newer steering request overtakes an
+		// older follow-up, but before the follow-up reaches canonical delivery.
+		const manager = await SessionManager.open(ref);
+		await seedSession(
+			manager,
+			(seed) =>
+				seed
+					.clientInput("older-follow-up", "follow_up", { message: "Deferred work" }, { queued: "follow_up" })
+					.clientInput("newer", "prompt", { message: "Newer steering request" }, { states: ["started"] })
+					.user("Newer steering request", { clientMessageId: "newer" })
+					.assistant("Newer steering answer"),
+			{ model: harness.getModel() },
+		);
+		expect(manager.getClientInputRecoveryPlan().kind).toBe("replay");
 		expect((await api.list("review-341")).discussions[0]!.status).toBe("interrupted");
-		const reopened = await source.createReviewDiscussionSibling(await SessionManager.open(ref));
+		const reopened = await source.createReviewDiscussionSibling(manager);
 		runtimes.push(reopened);
 		reopened.reviewDiscussions = service.forRuntime(reopened);
 		await reopened.startRecoveredClientInputs();

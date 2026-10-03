@@ -11,6 +11,7 @@ import {
 } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
 import { injectFaultyLog, lose } from "../utilities/faulty-log.ts";
+import { seedSession } from "../utilities/seed-log.ts";
 
 const cleanups: string[] = [];
 const managerOwner = createSessionManagerTestOwner();
@@ -131,17 +132,17 @@ describe("SessionManager commit-then-publish", () => {
 		manager.subscribeEntries((entry) => published.push(entry));
 
 		const first = await manager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		await manager.reserveClientInput("ordinal-input", "prompt", { message: "host only" });
+		await seedSession(manager, (seed) => seed.clientInput("ordinal-input", "prompt", { message: "host only" }));
 		await manager.appendCustomMessageEntry("test", "custom", true);
 		await manager.branch(first);
 		await manager.appendLabelChange(first, "bookmark");
-		await manager.commitCanonicalCommand({
-			guard: { kind: "exact", token: manager.issueCanonicalProjection().token },
-			mutations: [
-				{ kind: "append", entry: { type: "custom", customType: "atomic", data: { step: 1 } } },
-				{ kind: "append", entry: { type: "session_info", name: "atomic" } },
-			],
-		});
+		// One atomic batch of several entries, host-only and public.
+		await seedSession(manager, (seed) =>
+			seed
+				.custom("atomic", { step: 1 })
+				.clientInput("atomic-input", "prompt", { message: "atomic" }, { states: ["started"] })
+				.user("atomic", { clientMessageId: "atomic-input" }),
+		);
 		await manager.appendSessionInfo("after atomic");
 
 		const ordinal = manager.getOrdinal();

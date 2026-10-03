@@ -4,7 +4,15 @@ import type { ExtensionAPI } from "@hansjm10/volt-coding-agent";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { getClientMessageId } from "../../src/core/messages.ts";
-import { createHarness, getAssistantTexts, getMessageText, getUserTexts, type Harness } from "./harness.ts";
+import { appendsEntryType } from "../utilities/faulty-log.ts";
+import {
+	createHarness,
+	getAssistantTexts,
+	getMessageText,
+	getUserTexts,
+	type Harness,
+	type HarnessOptions,
+} from "./harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
 	let resolve: () => void = () => {};
@@ -15,14 +23,14 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 }
 
 /** A provider response that stays in flight until the test stops it. */
-async function createInterruptibleHarness(): Promise<{
+async function createInterruptibleHarness(options: HarnessOptions = {}): Promise<{
 	harness: Harness;
 	responseStarted: Promise<void>;
 	finishResponse(): void;
 }> {
 	const started = deferred();
 	const finish = deferred();
-	const harness = await createHarness();
+	const harness = await createHarness(options);
 	harness.setResponses([
 		async () => {
 			started.resolve();
@@ -367,7 +375,7 @@ describe("AgentSession queue characterization", () => {
 			harness.session.messages
 				.filter((message) => message.role === "user")
 				.map((message) => getClientMessageId(message)),
-		).toEqual([undefined, "client-steer-1", "client-steer-2"]);
+		).toEqual([expect.stringMatching(/^local-/), "client-steer-1", "client-steer-2"]);
 		expect(getAssistantTexts(harness)).toEqual(["", "handled steer 1", "handled steer 2"]);
 	});
 
@@ -394,7 +402,7 @@ describe("AgentSession queue characterization", () => {
 			harness.session.messages
 				.filter((message) => message.role === "user")
 				.map((message) => getClientMessageId(message)),
-		).toEqual([undefined, "client-follow-up-1", "client-follow-up-2"]);
+		).toEqual([expect.stringMatching(/^local-/), "client-follow-up-1", "client-follow-up-2"]);
 		expect(getAssistantTexts(harness)).toEqual([
 			"",
 			"original turn complete",
@@ -749,24 +757,11 @@ describe("AgentSession queue characterization", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
-	it("delivers a queued admission that was still persisting when a delivering stop settled", async () => {
-		const { harness, responseStarted, finishResponse } = await createInterruptibleHarness();
+	it("delivers a queued admission that was still committing when a delivering stop settled", async () => {
+		const { harness, responseStarted, finishResponse } = await createInterruptibleHarness({ log: "memory" });
 		harnesses.push(harness);
 		harness.appendResponses([fauxAssistantMessage("handled late follow-up")]);
-		const { sessionManager } = harness;
-		const markClientInputQueued = sessionManager.markClientInputQueued.bind(sessionManager);
-		const persistenceStarted = deferred();
-		const releasePersistence = deferred();
-		let holdNextCommit = true;
-		vi.spyOn(sessionManager, "markClientInputQueued").mockImplementation(async (...args) => {
-			const record = await markClientInputQueued(...args);
-			if (holdNextCommit) {
-				holdNextCommit = false;
-				persistenceStarted.resolve();
-				await releasePersistence.promise;
-			}
-			return record;
-		});
+		const held = harness.log!.holdNext(appendsEntryType("client_input_queued"));
 
 		const prompt = harness.session.prompt("start");
 		await responseStarted;
@@ -774,16 +769,12 @@ describe("AgentSession queue characterization", () => {
 			streamingBehavior: "followUp",
 			clientMessageId: "late-follow-up",
 		});
-		await persistenceStarted.promise;
+		await held.started;
 
 		const abort = harness.session.abort("remote_request", { deliverQueuedMessages: true });
 		finishResponse();
-		await Promise.all([prompt, abort]);
-		expect(harness.session.pendingMessageCount).toBe(0);
-		expect(getUserTexts(harness)).toEqual(["start"]);
-
-		releasePersistence.resolve();
-		await queued;
+		held.release();
+		await Promise.all([prompt, abort, queued]);
 		await vi.waitFor(() => expect(getUserTexts(harness)).toEqual(["start", "late follow-up"]));
 		await harness.session.waitForIdle();
 

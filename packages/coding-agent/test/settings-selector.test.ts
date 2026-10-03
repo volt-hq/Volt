@@ -153,8 +153,8 @@ describe("SettingsSelectorComponent", () => {
 		expect(onScrollbarChange.mock.calls.flat()).toEqual(["always", "hidden", "auto"]);
 	});
 
-	test("changes the active session personality", () => {
-		const { session, cleanup } = createTestSession({ inMemory: true });
+	test("changes the active session personality", async () => {
+		const { session, cleanup } = await createTestSession({ inMemory: true });
 		try {
 			session.settingsManager.ensureGlobalProfile("delivery");
 			session.settingsManager.setActiveProfile("delivery");

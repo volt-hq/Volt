@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
-import type { AgentEvent, AgentRunSnapshot } from "@hansjm10/volt-agent-core";
+import type { AgentAbortSource, AgentEvent } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, JsonObject } from "@hansjm10/volt-ai";
 import { writeToolProgressCapture } from "./tool-progress-capture.ts";
 
@@ -145,7 +145,7 @@ export class ToolProgressDiagnostics {
 		this.queueMetrics = reader;
 	}
 
-	observe(event: AgentEvent, activeRun?: Pick<AgentRunSnapshot, "source" | "diagnosticTimestamp">): void {
+	observe(event: AgentEvent, activeRun?: { source?: AgentAbortSource; diagnosticTimestamp?: number }): void {
 		if (this.disposed) return;
 		const now = Date.now();
 		if (event.type === "agent_start") {

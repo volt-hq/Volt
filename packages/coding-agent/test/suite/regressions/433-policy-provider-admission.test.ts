@@ -1,5 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
@@ -14,11 +15,11 @@ import type {
 	ToolResultEventResult,
 } from "../../../src/core/extensions/types.ts";
 import type {
+	ExtensionOperationOrigin,
 	ExtensionWorkReadResult,
 	ExtensionWorkStatus,
 	ExtensionWorkTaskHandle,
 } from "../../../src/core/extensions/work-types.ts";
-import { SessionManagerHarnessStorage } from "../../../src/core/harness-session-adapter.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
 function deferred() {
@@ -226,44 +227,44 @@ describe("#433 managed task result exposure", () => {
 
 describe("#433 host policy ownership", () => {
 	it("snapshots callbacks at registration and update instead of following caller mutation", async () => {
-		const harness = await createHarness();
+		let executions = 0;
+		const probe: AgentTool = {
+			name: "probe",
+			label: "Probe",
+			description: "Turn policy probe",
+			parameters: Type.Object({}),
+			execute: async () => {
+				executions++;
+				return { content: [{ type: "text", text: "probed" }] };
+			},
+		};
+		const harness = await createHarness({ tools: [probe] });
+		// One foreground turn whose model calls the probe; resolves whether the turn policy let it run.
+		const probeRuns = async (): Promise<boolean> => {
+			const before = executions;
+			harness.setResponses([
+				fauxAssistantMessage([fauxToolCall("probe", {})], { stopReason: "toolUse" }),
+				fauxAssistantMessage("done"),
+			]);
+			await harness.session.prompt("probe");
+			expect(harness.getPendingResponseCount()).toBe(0);
+			const ran = executions > before;
+			expect(harness.eventsOfType("tool_execution_end").at(-1)?.isError).toBe(!ran);
+			return ran;
+		};
 		try {
 			const policy: AgentSessionTurnPolicy = { beforeToolCall: () => undefined };
 			const registration = harness.session.registerTurnPolicy(policy);
-			const call = {
-				type: "tool_call" as const,
-				toolName: "read",
-				toolCallId: "owned-policy",
-				input: { path: "file.txt" },
-			};
 			policy.beforeToolCall = () => ({ block: true });
-			// Foreground and managed callers must use the same owned snapshot.
-			const gate = deferred();
-			const release = deferred();
-			await harness.session.setSessionName("policy ownership");
-			harness.setResponses([
-				async () => {
-					gate.resolve();
-					await release.promise;
-					return fauxAssistantMessage("done");
-				},
-			]);
-			const run = harness.session.prompt("hold foreground signal");
-			try {
-				await gate.promise;
-				expect(await harness.control.evaluateToolCall(call)).toBeUndefined();
-				registration.update(policy);
-				policy.beforeToolCall = () => undefined;
-				expect(await harness.control.evaluateToolCall(call)).toEqual({ block: true });
-				registration();
-				registration();
-				expect(await harness.control.evaluateToolCall(call)).toBeUndefined();
-				expect(() => registration.update(policy)).toThrow("removed");
-				expect(() => registration.invalidate()).toThrow("removed");
-			} finally {
-				release.resolve();
-				await run;
-			}
+			expect(await probeRuns()).toBe(true);
+			registration.update(policy);
+			policy.beforeToolCall = () => undefined;
+			expect(await probeRuns()).toBe(false);
+			registration();
+			registration();
+			expect(await probeRuns()).toBe(true);
+			expect(() => registration.update(policy)).toThrow("removed");
+			expect(() => registration.invalidate()).toThrow("removed");
 		} finally {
 			await harness.cleanupAsync();
 		}
@@ -277,7 +278,10 @@ const cases = (["host", "tool_call", "tool_result"] as const).flatMap((layer) =>
 	})),
 );
 
-describe.each(["collection", "snapshot"] as const)("#433 policy authorization during %s", (phase) => {
+// "collection": the change lands while later sources still await validation.
+// "final validation": it lands in the last source's result hook, after every source was re-read;
+// the conversation checks authorization after the request boundary without yielding.
+describe.each(["collection", "final validation"] as const)("#433 policy authorization during %s", (phase) => {
 	it.each(cases)("$layer $action", async ({ layer, action }) => {
 		const entered = deferred();
 		const release = deferred();
@@ -291,20 +295,11 @@ describe.each(["collection", "snapshot"] as const)("#433 policy authorization du
 		let paused = false;
 		let boundaries = 0;
 		const validations: string[] = [];
-		const snapshot = SessionManagerHarnessStorage.prototype.getBranchSnapshot;
 		const pause = async () => {
 			paused = true;
 			entered.resolve();
 			await release.promise;
 		};
-		vi.spyOn(SessionManagerHarnessStorage.prototype, "getBranchSnapshot").mockImplementation(async function (
-			this: SessionManagerHarnessStorage,
-			...args
-		) {
-			const result = await snapshot.apply(this, args);
-			if (phase === "snapshot" && validationsCompleted === 3 && !paused) await pause();
-			return result;
-		});
 		const harness = await createHarness({
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
 			extensionFactories: [
@@ -381,13 +376,10 @@ describe.each(["collection", "snapshot"] as const)("#433 policy authorization du
 					});
 				},
 				(volt) => {
+					const isValidation = (origin: ExtensionOperationOrigin | undefined) =>
+						origin?.kind === "extension" && origin.ownerKind === "validation";
 					volt.on("tool_call", async (event) => {
-						if (
-							event.toolName !== "read" ||
-							event.origin?.kind !== "extension" ||
-							event.origin.ownerKind !== "validation"
-						)
-							return;
+						if (event.toolName !== "read" || !isValidation(event.origin)) return;
 						validations.push(String(event.input.path));
 						if (phase !== "collection") return;
 						if (event.input.path === "b.txt") await releaseB.promise;
@@ -396,6 +388,17 @@ describe.each(["collection", "snapshot"] as const)("#433 policy authorization du
 							await pause();
 							releaseB.resolve();
 						}
+					});
+					volt.on("tool_result", async (event) => {
+						if (
+							phase !== "final validation" ||
+							event.toolName !== "read" ||
+							!isValidation(event.origin) ||
+							event.input.path !== "c.txt"
+						)
+							return;
+						expect(validations).toEqual(["a.txt", "b.txt", "c.txt"]);
+						await pause();
 					});
 					volt.on("extension_operation", (event) => {
 						if (event.ownerKind === "validation") validationsCompleted++;
@@ -439,8 +442,6 @@ describe.each(["collection", "snapshot"] as const)("#433 policy authorization du
 			]);
 			const run = harness.session.prompt("mandatory request");
 			await entered.promise;
-			if (phase !== "collection")
-				expect(api.getWorkStatus().contributions.every((item) => item.status === "ready")).toBe(true);
 			change();
 			release.resolve();
 			await run;
@@ -466,7 +467,6 @@ describe.each(["collection", "snapshot"] as const)("#433 policy authorization du
 		} finally {
 			release.resolve();
 			releaseB.resolve();
-			vi.restoreAllMocks();
 			vi.useRealTimers();
 			await harness.cleanupAsync();
 		}

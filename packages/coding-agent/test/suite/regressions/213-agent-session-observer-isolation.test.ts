@@ -4,7 +4,7 @@ import { Type } from "typebox";
 import { afterEach, describe, expect, expectTypeOf, it } from "vitest";
 import type { AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import type { CustomMessageInput } from "../../../src/core/messages.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import { createHarness, getUserTexts, type Harness } from "../harness.ts";
 
 function getUserText(messages: readonly AgentMessage[]): string | undefined {
 	const user = messages.find((message) => message.role === "user");
@@ -135,21 +135,25 @@ describe("regression #213: AgentSession observer isolation", () => {
 		});
 
 		process.on("unhandledRejection", onUnhandledRejection);
-		const result = await (async () => {
-			try {
-				const runResult = await harness!.control.run({
-					role: "user",
-					content: [{ type: "text", text: "authoritative observer input" }],
-					timestamp: 213,
-				});
-				await flushUnhandledRejections();
-				return runResult;
-			} finally {
-				process.off("unhandledRejection", onUnhandledRejection);
-			}
-		})();
+		try {
+			await harness.control.run({
+				role: "user",
+				content: [{ type: "text", text: "authoritative observer input" }],
+				timestamp: 213,
+			});
+			await flushUnhandledRejections();
+		} finally {
+			process.off("unhandledRejection", onUnhandledRejection);
+		}
 
-		expect(result).toMatchObject({ status: "completed", deliveries: [{ outcome: "committed" }] });
+		// The input's user message committed and its client input completed on it.
+		const userEntries = harness.sessionManager
+			.getEntries()
+			.filter((entry) => entry.type === "message" && entry.message.role === "user");
+		expect(userEntries).toHaveLength(1);
+		expect([...harness.control.conversation.state.clientInputs.inputs.values()]).toMatchObject([
+			{ state: "completed", canonicalEntryId: userEntries[0]!.id },
+		]);
 		expect(asyncSubscriberEvents).toEqual(["delivery_start", "agent_end"]);
 		expect(syncSubscriberEvents).toEqual(["delivery_start", "agent_end"]);
 		expect(laterSubscriberEvents).toEqual(["delivery_start", "agent_end"]);
@@ -463,13 +467,25 @@ describe("regression #213: AgentSession observer isolation", () => {
 		});
 		harness.setResponses([fauxAssistantMessage("must not run")]);
 
-		const result = await harness.control.run({
-			role: "user",
-			content: [{ type: "text", text: "original" }],
-			timestamp: 213,
-		});
+		// A durable prompt the conversation delivers directly; its completion settles only once delivered.
+		const admission = await harness.control.conversation.prompt({ message: "original" });
+		let settled = false;
+		void admission.completion.then(
+			() => {
+				settled = true;
+			},
+			() => {
+				settled = true;
+			},
+		);
+		await harness.control.conversation.waitForIdle();
 
-		expect(result).toMatchObject({ status: "delivery_failed", failure: { outcome: "retained" } });
+		// The turn failed on the replacement; the delivery was retained, neither committed nor failed.
+		expect(harness.session.state.errorMessage).toContain("must contain only JSON-compatible data");
+		expect(settled).toBe(false);
+		expect(harness.control.conversation.state.clientInputs.inputs.get(admission.clientMessageId)?.state).toBe(
+			"accepted",
+		);
 		expect(harness.control.hasPendingPrompt()).toBe(true);
 		expect(harness.getPendingResponseCount()).toBe(1);
 		expect(
@@ -513,10 +529,36 @@ describe("regression #213: AgentSession observer isolation", () => {
 			}
 		});
 
+		// Steering while idle starts a turn; hold one so the steer stays queued.
+		let markEntered!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			markEntered = resolve;
+		});
+		let releaseTurn!: () => void;
+		const turnGate = new Promise<void>((resolve) => {
+			releaseTurn = resolve;
+		});
+		harness.setResponses([
+			async () => {
+				markEntered();
+				await turnGate;
+				return fauxAssistantMessage("held");
+			},
+			fauxAssistantMessage("steered"),
+		]);
+		let queuedSteering: string[] = [];
 		let planningFailure: unknown;
 		process.on("unhandledRejection", onUnhandledRejection);
 		try {
-			await harness.session.steer("authoritative queue projection");
+			const run = harness.session.prompt("hold the turn");
+			try {
+				await entered;
+				await harness.session.steer("authoritative queue projection");
+				queuedSteering = harness.session.getSteeringMessages().map((entry) => entry.text);
+			} finally {
+				releaseTurn();
+				await run;
+			}
 			try {
 				await harness.session.setAgentMode("plan");
 			} catch (error) {
@@ -530,9 +572,9 @@ describe("regression #213: AgentSession observer isolation", () => {
 		expect(planningFailure).toBeUndefined();
 		expect(laterQueueTexts).toEqual(["authoritative queue projection"]);
 		expect(laterPlanningModes).toEqual(["plan"]);
-		expect(harness.session.getSteeringMessages().map((entry) => entry.text)).toEqual([
-			"authoritative queue projection",
-		]);
+		expect(queuedSteering).toEqual(["authoritative queue projection"]);
+		expect(getUserTexts(harness)).toEqual(["hold the turn", "authoritative queue projection"]);
+		expect(harness.getPendingResponseCount()).toBe(0);
 		expect(harness.session.planningState.mode).toBe("plan");
 		expect(unhandledRejections).toEqual([]);
 	});

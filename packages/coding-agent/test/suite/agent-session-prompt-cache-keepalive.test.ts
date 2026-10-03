@@ -441,19 +441,19 @@ describe("AgentSession prompt-cache keepalive", () => {
 		expect(refreshEntries(harness)).toEqual([expect.objectContaining({ reason: "idle" })]);
 	});
 
-	it("measures the idle window from the end of a tree navigation", async () => {
+	it("leaves the idle window unchanged by a navigation to the current leaf", async () => {
 		const harness = await create({ refresh: refreshed, settings: { promptCache: { keepAliveIdleMinutes: 10 } } });
 		harness.setResponses([fauxAssistantMessage("hello")]);
 		await settleFirstRequest(harness);
 		const settledUntil = retained(harness).keepAliveUntil!;
 
 		await vi.advanceTimersByTimeAsync(2 * MINUTE);
-		// Tree navigation holds a Harness lease but emits no agent or compaction events.
-		await harness.session.navigateTree(harness.sessionManager.getLeafId()!);
-		const navigatedAt = Date.now();
+		// Navigating to the current leaf runs no conversation operation, so the session stays idle.
+		await expect(harness.session.navigateTree(harness.sessionManager.getLeafId()!)).resolves.toEqual({
+			cancelled: false,
+		});
 
-		expect(retained(harness).keepAliveUntil).toBe(navigatedAt + 10 * MINUTE);
-		expect(navigatedAt + 10 * MINUTE).toBeGreaterThan(settledUntil);
+		expect(retained(harness).keepAliveUntil).toBe(settledUntil);
 	});
 
 	it("does not refresh when the provider cannot refresh", async () => {

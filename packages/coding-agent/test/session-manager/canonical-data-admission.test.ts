@@ -2,8 +2,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { boundClientInputError } from "../../src/core/session-entry-codec.ts";
 import { SessionManager, type SessionReference } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
+import { seedSession } from "../utilities/seed-log.ts";
 
 const cleanups: Array<{ manager: SessionManager; root: string }> = [];
 const managerOwner = createSessionManagerTestOwner();
@@ -56,7 +58,6 @@ describe("SessionManager canonical data admission", () => {
 		const { manager, ref } = await createManager();
 		const observed: string[] = [];
 		manager.subscribeEntries((entry) => observed.push(entry.id));
-		const before = manager.issueCanonicalProjection();
 
 		await expect(
 			manager.appendMessage({
@@ -76,9 +77,7 @@ describe("SessionManager canonical data admission", () => {
 			}),
 		).rejects.toThrow("Session message timestamp must be representable as a Date");
 
-		const after = manager.issueCanonicalProjection();
-		expect(after.leafEntryOrdinal).toBe(before.leafEntryOrdinal);
-		expect(after.entries).toEqual([]);
+		expect(manager.getOrdinal()).toBe(0);
 		expect(manager.getEntries()).toEqual([]);
 		expect(manager.getLeafId()).toBeNull();
 		expect(observed).toEqual([]);
@@ -154,14 +153,23 @@ describe("SessionManager canonical data admission", () => {
 
 	it("bounds client input errors to a codec-valid terminal entry", async () => {
 		const { manager, ref } = await createManager();
-		await manager.reserveClientInput("long-error", "prompt", { message: "fail" });
+		const failedInput = (error: string) =>
+			seedSession(manager, (seed) =>
+				seed.clientInput("long-error", "prompt", { message: "fail" }, { states: ["failed"], error }),
+			);
 
-		const failed = await manager.transitionClientInput("long-error", "failed", "x".repeat(2_001));
-		expect(Array.from(failed.error ?? "")).toHaveLength(2_000);
-		expect(failed.error?.endsWith("…")).toBe(true);
+		await expect(failedInput("x".repeat(2_001))).rejects.toThrow("invalid client input error");
+		expect(manager.getOrdinal()).toBe(0);
+		expect(manager.getClientInput("long-error")).toBeUndefined();
+
+		const bounded = boundClientInputError("x".repeat(2_001));
+		expect(Array.from(bounded)).toHaveLength(2_000);
+		expect(bounded.endsWith("…")).toBe(true);
+		await failedInput(bounded);
+		expect(manager.getClientInput("long-error")).toMatchObject({ state: "failed", error: bounded });
 
 		const reopened = await SessionManager.openReadOnly(ref);
-		expect(reopened.getClientInput("long-error")?.error).toBe(failed.error);
+		expect(reopened.getClientInput("long-error")?.error).toBe(bounded);
 	});
 
 	it("owns valid input and round-trips it exactly through SQLite reopen", async () => {

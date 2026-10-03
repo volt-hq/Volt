@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
+import { type AgentMessage, type ConversationLogAppend, ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
@@ -20,11 +20,10 @@ import {
 } from "../../../src/core/session-store/index.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionShutdownEvent } from "../../../src/index.ts";
-import { createAgentSessionTestControl } from "../../agent-session-test-control.ts";
 import { loseConversationLock } from "../../lost-conversation-lock.ts";
 import {
 	appendsEntryType,
-	type ConversationLogHold,
+	type ConversationLogFault,
 	type FaultyConversationLog,
 	injectFaultyLog,
 	lose,
@@ -53,14 +52,6 @@ async function trackedStore(sessionDirectory: string): Promise<SQLiteSessionStor
 	return lease.client;
 }
 
-async function commitPlanningState(manager: SessionManager, mode: "build" | "plan"): Promise<void> {
-	const projection = manager.issueCanonicalProjection();
-	await manager.commitCanonicalCommand({
-		guard: { kind: "exact", token: projection.token },
-		mutations: [{ kind: "append", entry: { type: "planning_state_change", planning: { mode, plan: null } } }],
-	});
-}
-
 interface PlanningSnapshot {
 	phase: string | undefined;
 	checkpoints: number;
@@ -87,14 +78,14 @@ function snapshotHarness(harness: Harness): PlanningSnapshot {
 	};
 }
 
-async function createReadyPlan(harness: Harness): Promise<void> {
-	await harness.session.setAgentMode("plan");
-	const draft = await harness.session.updatePlan({
+async function createReadyPlan(session: Harness["session"]): Promise<void> {
+	await session.setAgentMode("plan");
+	const draft = await session.updatePlan({
 		title: "Atomic append reconciliation",
 		summary: "Resolve a commit's outcome before publication.",
 		steps: [{ text: "Prove the commit outcome before publication" }],
 	});
-	await harness.session.submitPlan({
+	await session.submitPlan({
 		planId: draft.id,
 		expectedRevision: draft.revision,
 		title: draft.title!,
@@ -103,8 +94,8 @@ async function createReadyPlan(harness: Harness): Promise<void> {
 }
 
 /**
- * The outcome the next planning commit reports. The ready plan's delivery
- * commits its `planning_state_change` together with the delivered input.
+ * The outcome the next planning commit reports. While a plan is ready, the
+ * delivery of user input commits its `planning_state_change` in the same batch.
  */
 type PlanningCommitFault =
 	| "rolled_back"
@@ -114,27 +105,21 @@ type PlanningCommitFault =
 	| "fenced_committed";
 
 const UNCERTAIN_COMMIT_MESSAGE = "The planning commit's outcome could not be determined";
+const FENCED_COMMIT_MESSAGE = "Another writer appended after the planning commit";
 
 const isPlanningCommit = appendsEntryType("planning_state_change");
 
-function faultNextPlanningCommit(manager: SessionManager, fault: PlanningCommitFault): FaultyConversationLog {
-	const faulty = injectFaultyLog(manager);
-	faulty.failNext(
-		fault === "rolled_back"
-			? "rolled_back"
-			: fault === "fenced_committed"
-				? lose("fence_conflict", { committed: true, message: "Another writer appended after the planning commit" })
-				: lose("uncertain_commit", {
-						committed: fault === "uncertain_committed",
-						message: UNCERTAIN_COMMIT_MESSAGE,
-					}),
-		isPlanningCommit,
-	);
-	return faulty;
+function planningFault(fault: PlanningCommitFault): ConversationLogFault {
+	if (fault === "rolled_back") return "rolled_back";
+	if (fault === "fenced_committed") return lose("fence_conflict", { committed: true, message: FENCED_COMMIT_MESSAGE });
+	return lose("uncertain_commit", { committed: fault === "uncertain_committed", message: UNCERTAIN_COMMIT_MESSAGE });
 }
 
-function holdNextPlanningCommit(manager: SessionManager): ConversationLogHold {
-	return injectFaultyLog(manager).holdNext(isPlanningCommit);
+/** Whether a log batch delivers a user message: a turn's delivery commit. */
+function deliversUserMessage(batch: ConversationLogAppend): boolean {
+	return batch.entries.some(
+		(entry) => entry.type === "message" && (entry.payload as { message?: AgentMessage }).message?.role === "user",
+	);
 }
 
 /** The faulted batch's fence and size, from the faulty log's record. */
@@ -142,6 +127,26 @@ function faultedBatch(faulty: FaultyConversationLog): { expectedOrdinal: number;
 	const batch = faulty.faulted[0];
 	if (!batch) throw new Error("No planning commit was faulted");
 	return { expectedOrdinal: batch.expectedOrdinal, entries: batch.entries.length };
+}
+
+/** Queue inputs while a turn reservation holds the idle conversation; the returned start runs one turn for them. */
+async function queueBehindReservation(
+	harness: Harness,
+	inputs: () => Promise<void>,
+): Promise<{ start(): Promise<void> }> {
+	const reservation = harness.control.conversation.reserve();
+	try {
+		await inputs();
+	} catch (error) {
+		reservation.cancel();
+		throw error;
+	}
+	return {
+		async start() {
+			reservation.cancel();
+			await harness.session.waitForIdle();
+		},
+	};
 }
 
 describe("regression #217: commits whose outcome is unknown", () => {
@@ -167,6 +172,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 	): Promise<{
 		runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>;
 		faux: FauxProvider;
+		log: FaultyConversationLog;
 	}> {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-217-runtime-"));
 		tempDirs.push(tempDir);
@@ -220,52 +226,50 @@ describe("regression #217: commits whose outcome is unknown", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
+		const sessionManager = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
+		// Faults are injected below the session, before it takes the manager's log.
+		const log = injectFaultyLog(sessionManager);
 		const runtime = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: await own(SessionManager.create(tempDir, join(tempDir, "sessions"))),
+			sessionManager,
 		});
 		await runtime.session.bindExtensions({});
 		runtimeCleanups.push(async () => {
 			await runtime.dispose().catch(() => {});
 		});
-		return { runtime, faux };
+		return { runtime, faux, log };
 	}
 
-	async function loseRuntimeLog(runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>): Promise<void> {
-		await runtime.session.setAgentMode("plan");
-		const draft = await runtime.session.updatePlan({
-			title: "Runtime reconciliation",
-			summary: "End the runtime whose commit outcome is unknown.",
-			steps: [{ text: "Reopen authoritative SQLite state" }],
-		});
-		await runtime.session.submitPlan({
-			planId: draft.id,
-			expectedRevision: draft.revision,
-			title: draft.title!,
-			summary: draft.summary!,
-		});
+	async function loseRuntimeLog(
+		runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>,
+		log: FaultyConversationLog,
+	): Promise<void> {
+		await createReadyPlan(runtime.session);
+		log.failNext(planningFault("uncertain_committed"), isPlanningCommit);
 		await runtime.session.steer("end this runtime", undefined, "issue-217-runtime-replacement");
-		faultNextPlanningCommit(runtime.session.sessionManager, "uncertain_committed");
-		await expect(createAgentSessionTestControl(runtime.session).continue()).resolves.toMatchObject({
-			status: "delivery_failed",
-			failure: { outcome: "terminally_failed", phase: "settlement" },
-		});
+		await runtime.session.lost;
+		// The turn that lost the log unwinds before the runtime takes structural operations.
+		await runtime.session.waitForIdle();
 	}
 
 	async function setup(options: HarnessOptions = {}): Promise<{
 		harness: Harness;
+		log: FaultyConversationLog;
 		sessionRef: SessionReference;
 		baseline: PlanningSnapshot;
 	}> {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-217-"));
 		tempDirs.push(tempDir);
 		const sessionManager = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
+		// Faults are injected below the session, before it takes the manager's log.
+		const log = injectFaultyLog(sessionManager);
 		const harness = await createHarness({ ...options, sessionManager });
 		harnesses.push(harness);
-		await createReadyPlan(harness);
+		await createReadyPlan(harness.session);
 		return {
 			harness,
+			log,
 			sessionRef: sessionManager.getSessionRef()!,
 			baseline: snapshotHarness(harness),
 		};
@@ -273,10 +277,10 @@ describe("regression #217: commits whose outcome is unknown", () => {
 
 	it("ends a runtime whose commit outcome cannot be resolved", async () => {
 		const replacementHooks: string[] = [];
-		const { runtime } = await setupRuntime((event) => {
+		const { runtime, log } = await setupRuntime((event) => {
 			replacementHooks.push(event.type);
 		});
-		await loseRuntimeLog(runtime);
+		await loseRuntimeLog(runtime, log);
 
 		await expect(runtime.lost).resolves.toMatchObject({
 			reason: "uncertain_commit",
@@ -288,8 +292,8 @@ describe("regression #217: commits whose outcome is unknown", () => {
 	});
 
 	it("does not reload a lost session from the store", async () => {
-		const { runtime } = await setupRuntime();
-		await loseRuntimeLog(runtime);
+		const { runtime, log } = await setupRuntime();
+		await loseRuntimeLog(runtime, log);
 		await runtime.lost;
 		const previousSession = runtime.session;
 		const previousBranchEpoch = runtime.conversationProjectionFeed.branchEpoch;
@@ -314,7 +318,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		const winner = await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration);
 		await loseConversationLock(current);
 
-		const commit = commitPlanningState(current, "build");
+		const commit = current.appendPlanningState({ mode: "build", plan: null });
 		await expect(commit).rejects.toBeInstanceOf(ConversationLogLostError);
 		await expect(commit).rejects.toMatchObject({
 			reason: "fence_conflict",
@@ -339,9 +343,9 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-217-commit-drain-"));
 		tempDirs.push(tempDir);
 		const manager = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
-		const hold = holdNextPlanningCommit(manager);
+		const hold = injectFaultyLog(manager).holdNext(isPlanningCommit);
 
-		const committing = commitPlanningState(manager, "plan");
+		const committing = manager.appendPlanningState({ mode: "plan", plan: null });
 		await hold.started;
 		const draining = manager.closePersistence();
 		let drainSettled = false;
@@ -358,26 +362,25 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(drainSettled).toBe(false);
 			hold.release();
-			await expect(Promise.all([committing, draining])).resolves.toEqual([undefined, undefined]);
+			await expect(committing).resolves.toEqual(expect.any(String));
+			await expect(draining).resolves.toBeUndefined();
 		} finally {
 			hold.release();
 			await Promise.allSettled([committing, draining]);
 		}
 	});
 
-	it("retains delivery and client-input ownership when the commit is rolled back", async () => {
-		const { harness, sessionRef, baseline } = await setup();
+	it("leaves state unchanged and keeps the input queued when the delivery commit is rolled back", async () => {
+		const { harness, log, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		const clientMessageId = "issue-217-rolled-back";
-		await harness.session.steer("retain this feedback", undefined, clientMessageId);
-		const faulty = faultNextPlanningCommit(harness.sessionManager, "rolled_back");
+		log.failNext(planningFault("rolled_back"), isPlanningCommit);
 
-		await expect(harness.control.continue()).resolves.toMatchObject({
-			status: "delivery_failed",
-			failure: { outcome: "retained", phase: "settlement" },
-		});
+		await harness.session.steer("retain this feedback", undefined, clientMessageId);
+		await harness.session.waitForIdle();
 
 		expect(snapshotHarness(harness)).toEqual(baseline);
+		expect(harness.control.hasQueuedMessages()).toBe(true);
 		const reopened = await own(SessionManager.openReadOnly(sessionRef));
 		expect(snapshotEntries(reopened.getBranch())).toEqual(baseline);
 		expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
@@ -385,14 +388,14 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			sessionRef.sessionId,
 			sessionRef.sessionGeneration,
 		);
-		expect(summary?.lastOrdinal).toBe(faultedBatch(faulty).expectedOrdinal);
+		expect(summary?.lastOrdinal).toBe(faultedBatch(log).expectedOrdinal);
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
 	it("gates planning, delivery, RPC acceptance, and provider work until the delivery commit settles", async () => {
-		const { harness, baseline } = await setup();
+		const { harness, log, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("proof completed")]);
-		const hold = holdNextPlanningCommit(harness.sessionManager);
+		const hold = log.holdNext(isPlanningCommit);
 		const planningEventsBefore = harness.eventsOfType("planning_state_changed").length;
 		const deliveryEventsBefore = harness.eventsOfType("delivery_start").length;
 		const preflight: PromptPreflightResult[] = [];
@@ -420,9 +423,9 @@ describe("regression #217: commits whose outcome is unknown", () => {
 	});
 
 	it("ends a session whose commit became durable but another writer appended after it", async () => {
-		const { harness, sessionRef, baseline } = await setup();
+		const { harness, log, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
-		faultNextPlanningCommit(harness.sessionManager, "fenced_committed");
+		log.failNext(planningFault("fenced_committed"), isPlanningCommit);
 		const planningEventsBefore = harness.eventsOfType("planning_state_changed").length;
 		const deliveryEventsBefore = harness.eventsOfType("delivery_start").length;
 		const messageEventsBefore = harness.events.filter(
@@ -437,14 +440,9 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		});
 
 		try {
-			const authoritativeAfterCommit = {
-				phase: "draft",
-				checkpoints: baseline.checkpoints + 1,
-				userTexts: ["fence the stale manager"],
-			};
 			await expect(prompting).rejects.toMatchObject({
-				reason: "fence_conflict",
-				message: "Another writer appended after the planning commit",
+				message: "The session lost its log before the client input settled",
+				cause: { reason: "fence_conflict", message: FENCED_COMMIT_MESSAGE },
 			});
 
 			await expect(harness.session.lost).resolves.toBeInstanceOf(ConversationLogLostError);
@@ -456,35 +454,38 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			expect(preflight).toEqual([{ success: false }]);
 			expect(harness.getPendingResponseCount()).toBe(1);
 
+			// A reopened session sees exactly the committed entries.
 			const reopened = await own(SessionManager.openReadOnly(sessionRef));
-			expect(snapshotEntries(reopened.getBranch())).toEqual(authoritativeAfterCommit);
+			expect(snapshotEntries(reopened.getBranch())).toEqual({
+				phase: "draft",
+				checkpoints: baseline.checkpoints + 1,
+				userTexts: ["fence the stale manager"],
+			});
 			expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "completed" });
 		} finally {
 			await prompting.catch(() => undefined);
 		}
 	});
 
-	it("terminally consumes a stale-generation delivery and recovers it from a fresh manager", async () => {
-		const { harness, sessionRef } = await setup();
+	it("ends a session whose delivery meets a stale ordinal fence and recovers the input from a fresh manager", async () => {
+		const { harness, log, sessionRef } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		const clientMessageId = "issue-217-stale-generation";
-		await harness.session.steer("recover from the authoritative revision", undefined, clientMessageId);
+		const hold = log.holdNext(deliversUserMessage);
 
+		await harness.session.steer("recover from the authoritative revision", undefined, clientMessageId);
+		await hold.started;
+		// Another writer took the log after the input was admitted, before its delivery commits.
 		await loseConversationLock(harness.sessionManager);
 		const store = await trackedStore(sessionRef.sessionDirectory);
 		const winnerOrdinal = (await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))
 			?.lastOrdinal;
-
-		await expect(harness.control.continue()).resolves.toMatchObject({
-			status: "delivery_failed",
-			failure: { outcome: "terminally_failed", phase: "settlement" },
-		});
+		hold.release();
 
 		await expect(harness.session.lost).resolves.toMatchObject({ reason: "fence_conflict" });
 		expect((await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))?.lastOrdinal).toBe(
 			winnerOrdinal,
 		);
-		expect(harness.control.hasPendingPrompt()).toBe(false);
 		expect(harness.getPendingResponseCount()).toBe(1);
 		// The host ends the lost session, which releases its lock.
 		harness.session.dispose();
@@ -510,7 +511,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 
 	it("rejects new work before extension, MCP, bash, provider, queue, or planning effects after an unknown outcome", async () => {
 		let inputHookCalls = 0;
-		const { harness } = await setup({
+		const { harness, log } = await setup({
 			extensionFactories: [
 				(volt) => {
 					volt.on("input", () => {
@@ -527,15 +528,14 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			_mcpManager?: { startEagerServers(): Promise<void>; dispose(): Promise<void> };
 		};
 		internals._mcpManager = { startEagerServers: mcpStart, dispose: mcpDispose };
-		await harness.session.steer("fail authority", undefined, "issue-217-side-effect-fence");
-		await harness.session.followUp("hand back later input");
-		faultNextPlanningCommit(harness.sessionManager, "uncertain_rollback");
-
-		await expect(harness.control.continue()).resolves.toMatchObject({
-			status: "delivery_failed",
-			failure: { outcome: "terminally_failed", phase: "settlement" },
+		log.failNext(planningFault("uncertain_rollback"), isPlanningCommit);
+		const turn = await queueBehindReservation(harness, async () => {
+			await harness.session.steer("fail authority", undefined, "issue-217-side-effect-fence");
+			await harness.session.followUp("hand back later input");
 		});
+		await turn.start();
 
+		await expect(harness.session.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
 		const bashOperations: BashOperations = { exec: vi.fn(async () => ({ exitCode: 0 })) };
 		const planningEvents = harness.eventsOfType("planning_state_changed").length;
 		const messageEvents = harness.events.filter(
@@ -575,11 +575,13 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		).toHaveLength(messageEvents);
 
 		await expect(harness.session.abort()).resolves.toBeUndefined();
+		// The steer's outcome is unknown, so only the later input is handed back.
 		await expect(harness.session.clearQueue()).resolves.toEqual({
 			steering: [],
 			followUp: ["hand back later input"],
 		});
-		expect(harness.control.hasQueuedMessages()).toBe(false);
+		expect(harness.session.getSteeringMessages()).toEqual([]);
+		expect(harness.session.getFollowUpMessages()).toEqual([]);
 		harness.session.dispose();
 		// The loss was reported through `lost`; closing does not report it again.
 		await expect(harness.session.waitForClosed()).resolves.toBeUndefined();
@@ -587,33 +589,30 @@ describe("regression #217: commits whose outcome is unknown", () => {
 	});
 
 	it.each([
-		{ mode: "uncertain_committed" as const, authoritativeOutcome: "committed" as const },
-		{ mode: "uncertain_rollback" as const, authoritativeOutcome: "rolled_back" as const },
+		{ fault: "uncertain_committed" as const, authoritativeOutcome: "committed" as const },
+		{ fault: "uncertain_rollback" as const, authoritativeOutcome: "rolled_back" as const },
 	])(
 		"recovers from the authoritative $authoritativeOutcome commit after its outcome was unknown",
-		async ({ mode, authoritativeOutcome }) => {
-			const { harness, sessionRef, baseline } = await setup();
+		async ({ fault, authoritativeOutcome }) => {
+			const { harness, log, sessionRef, baseline } = await setup();
 			harness.setResponses([fauxAssistantMessage("must remain unused")]);
 			const clientMessageId = `issue-217-unavailable-${authoritativeOutcome}`;
 			const laterClientMessageId = `issue-217-later-${authoritativeOutcome}`;
-			await harness.session.steer("unproven feedback", undefined, clientMessageId);
-			await harness.session.followUp("later queued feedback", undefined, laterClientMessageId);
-			const faulty = faultNextPlanningCommit(harness.sessionManager, mode);
+			log.failNext(planningFault(fault), isPlanningCommit);
+			const turn = await queueBehindReservation(harness, async () => {
+				await harness.session.steer("unproven feedback", undefined, clientMessageId);
+				await harness.session.followUp("later queued feedback", undefined, laterClientMessageId);
+			});
 			const planningEventsBefore = harness.eventsOfType("planning_state_changed").length;
 			const deliveryEventsBefore = harness.eventsOfType("delivery_start").length;
-			const queueEventsBefore = harness.eventsOfType("queue_update").length;
+			await turn.start();
 
-			await expect(harness.control.continue()).resolves.toMatchObject({
-				status: "delivery_failed",
-				failure: { outcome: "terminally_failed", phase: "settlement" },
-			});
-
+			await expect(harness.sessionManager.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
+			await expect(harness.session.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
 			expect(harness.eventsOfType("planning_state_changed")).toHaveLength(planningEventsBefore);
 			expect(harness.eventsOfType("delivery_start")).toHaveLength(deliveryEventsBefore);
-			expect(harness.eventsOfType("queue_update")).toHaveLength(queueEventsBefore);
 			expect(harness.getPendingResponseCount()).toBe(1);
-			await expect(harness.sessionManager.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
-			const batch = faultedBatch(faulty);
+			const batch = faultedBatch(log);
 			const store = await trackedStore(sessionRef.sessionDirectory);
 			const summary = await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration);
 			expect(summary?.lastOrdinal).toBe(
@@ -622,11 +621,15 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			expect(harness.session.sessionRef).toEqual(sessionRef);
 			await expect(harness.sessionManager.closePersistence()).resolves.toBeUndefined();
 
+			// A reopened session sees exactly the committed entries.
 			const reopened = await own(SessionManager.open(sessionRef));
 			const replacement = await createHarness({ sessionManager: reopened });
 			harnesses.push(replacement);
+			replacement.setResponses([
+				fauxAssistantMessage("fresh recovery first"),
+				fauxAssistantMessage("fresh recovery later"),
+			]);
 			if (authoritativeOutcome === "committed") {
-				replacement.setResponses([fauxAssistantMessage("fresh recovery later")]);
 				expect(snapshotEntries(reopened.getBranch())).toEqual({
 					phase: "draft",
 					checkpoints: baseline.checkpoints + 1,
@@ -638,10 +641,6 @@ describe("regression #217: commits whose outcome is unknown", () => {
 					records: [{ clientMessageId: laterClientMessageId }],
 				});
 			} else {
-				replacement.setResponses([
-					fauxAssistantMessage("fresh recovery first"),
-					fauxAssistantMessage("fresh recovery later"),
-				]);
 				expect(snapshotEntries(reopened.getBranch())).toEqual(baseline);
 				expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
 				expect(reopened.getClientInputRecoveryPlan()).toMatchObject({
@@ -654,11 +653,8 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "completed" });
 			expect(reopened.getClientInput(laterClientMessageId)).toMatchObject({ state: "completed" });
 			expect(getUserTexts(replacement)).toEqual(["unproven feedback", "later queued feedback"]);
-			expect(getAssistantTexts(replacement)).toEqual(
-				authoritativeOutcome === "committed"
-					? ["fresh recovery later"]
-					: ["fresh recovery first", "fresh recovery later"],
-			);
+			// The steer, committed before the loss or replayed now, is answered before the follow-up is delivered.
+			expect(getAssistantTexts(replacement)).toEqual(["fresh recovery first", "fresh recovery later"]);
 			expect(replacement.getPendingResponseCount()).toBe(0);
 		},
 	);

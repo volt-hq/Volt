@@ -154,19 +154,20 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 			runtimes.push(runtime);
 			const initial = await connect(runtime);
 			harness.session.subscribe((event) => {
-				if (event.type === "auto_retry_start") {
-					vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-					recovery.resolve();
-				}
+				if (event.type === "auto_retry_start") recovery.resolve();
 			});
 			harness.setResponses([
-				fauxAssistantMessage("", {
-					stopReason: "error",
-					error:
-						kind === "compaction"
-							? { kind: "context_overflow", retryable: false, message: "prompt is too long" }
-							: { kind: "overloaded", retryable: true, message: "overloaded_error" },
-				}),
+				() => {
+					// The retry backoff is scheduled before the session observes auto_retry_start.
+					if (kind === "retry") vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+					return fauxAssistantMessage("", {
+						stopReason: "error",
+						error:
+							kind === "compaction"
+								? { kind: "context_overflow", retryable: false, message: "prompt is too long" }
+								: { kind: "overloaded", retryable: true, message: "overloaded_error" },
+					});
+				},
 				async () => {
 					continued.resolve();
 					await releaseContinuation.promise;

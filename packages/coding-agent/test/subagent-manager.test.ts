@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentLoopNextActionContext } from "@hansjm10/volt-agent-core";
 import {
 	createFauxProvider,
 	type FauxModelDefinition,
@@ -42,11 +41,6 @@ import { createTestResourceLoader } from "./utilities.ts";
 interface TestManagerContext {
 	manager: SubagentManager;
 	getDisposedSessionCount(): number;
-}
-
-interface ProactiveCompactionSessionInternals {
-	_proactiveCompactionState: "idle" | "scheduled" | "compacting";
-	_shouldStopForProactiveCompaction(context: AgentLoopNextActionContext): boolean;
 }
 
 interface CreateTestManagerOptions {
@@ -1609,11 +1603,10 @@ describe("SubagentManager", () => {
 	});
 
 	it("does not auto-continue after the turn budget overrides proactive compaction with a final report", async () => {
-		let proactiveCompactionStops = 0;
 		let providerTurns = 0;
 		let postRunCompactionRequests = 0;
 		let finalReportPromptSeen = false;
-		const turnStartCompactionStates: ProactiveCompactionSessionInternals["_proactiveCompactionState"][] = [];
+		const timeline: string[] = [];
 		const resourceLoader = createSubagentResourceLoader([createDefinition({ name: "researcher" })]);
 		const { manager } = await createTestManager({
 			resourceLoader,
@@ -1622,18 +1615,9 @@ describe("SubagentManager", () => {
 			turnLimits: { maxTurns: 1 },
 			settings: { compaction: { enabled: true, reserveTokens: 8_000, keepRecentTokens: 1 } },
 			onRuntimeCreated: (event) => {
-				const session = event.runtime.session as unknown as ProactiveCompactionSessionInternals;
 				event.runtime.session.subscribe((event) => {
-					if (event.type === "turn_start") {
-						turnStartCompactionStates.push(session._proactiveCompactionState);
-					}
+					if (event.type === "turn_start" || event.type === "compaction_start") timeline.push(event.type);
 				});
-				const shouldStopForProactiveCompaction = session._shouldStopForProactiveCompaction;
-				session._shouldStopForProactiveCompaction = (context) => {
-					const shouldStop = shouldStopForProactiveCompaction.call(session, context);
-					if (shouldStop) proactiveCompactionStops += 1;
-					return shouldStop;
-				};
 			},
 			responses: [
 				() => {
@@ -1671,8 +1655,10 @@ describe("SubagentManager", () => {
 		await handle.prompt("Reach the turn budget with enough context to trigger compaction");
 		const result = await completion;
 
-		expect(proactiveCompactionStops).toBe(1);
-		expect(turnStartCompactionStates).toEqual(["idle", "idle"]);
+		// The first turn crosses the compaction threshold, but the budget's final-report request
+		// takes the next turn: compaction waits until after the report.
+		expect(timeline.slice(0, 2)).toEqual(["turn_start", "turn_start"]);
+		expect(timeline).toContain("compaction_start");
 		expect(finalReportPromptSeen).toBe(true);
 		expect(providerTurns).toBe(2);
 		expect(postRunCompactionRequests).toBe(1);
@@ -2990,7 +2976,7 @@ describe("SubagentManager", () => {
 		const finishRetryResponse = createDeferred();
 		const runtimeStopStarted = createDeferred();
 		const finishRuntimeStop = createDeferred();
-		const settlementIdleCompleted = createDeferred();
+		let childSession: SubagentRuntimeCreatedEvent["runtime"]["session"] | undefined;
 		const { manager, getDisposedSessionCount } = await createTestManager({
 			responses: [
 				fauxAssistantMessage("", {
@@ -3009,11 +2995,7 @@ describe("SubagentManager", () => {
 			},
 			onRuntimeCreated: async (event) => {
 				await event.runtime.session.setSessionName("disposed retry child");
-				const waitForIdle = event.runtime.session.waitForIdle.bind(event.runtime.session);
-				event.runtime.session.waitForIdle = async () => {
-					await waitForIdle();
-					settlementIdleCompleted.resolve();
-				};
+				childSession = event.runtime.session;
 				const disposeRuntime = event.runtime.dispose.bind(event.runtime);
 				event.runtime.dispose = async () => {
 					runtimeStopStarted.resolve();
@@ -3056,7 +3038,8 @@ describe("SubagentManager", () => {
 		}
 
 		await Promise.all([disposal, concurrentDisposal]);
-		await settlementIdleCompleted.promise;
+		// The late retry response settles after disposal; wait for the child's turn to finish.
+		await childSession!.waitForIdle();
 		await Promise.resolve();
 		expect(getDisposedSessionCount()).toBe(1);
 		expect(completionResolved).toBe(false);

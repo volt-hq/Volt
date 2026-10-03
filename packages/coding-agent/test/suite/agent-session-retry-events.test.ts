@@ -234,11 +234,10 @@ describe("AgentSession retry and event characterization", () => {
 		harness.session.abortRetry();
 		await failedPrompt;
 
-		let queuedFollowUp = false;
+		let queuedFollowUp: Promise<string> | undefined;
 		const unsubscribe = harness.session.subscribe((event) => {
 			if (event.type !== "agent_end" || queuedFollowUp) return;
-			queuedFollowUp = true;
-			harness.control.queueFollowUp({
+			queuedFollowUp = harness.control.queueFollowUp({
 				role: "user",
 				content: "queued follow-up",
 				timestamp: Date.now(),
@@ -246,6 +245,9 @@ describe("AgentSession retry and event characterization", () => {
 		});
 		try {
 			await harness.session.prompt("fresh prompt");
+			// A follow-up queued as the turn ends runs as the next turn.
+			await queuedFollowUp;
+			await harness.session.waitForIdle();
 		} finally {
 			unsubscribe();
 		}
@@ -374,9 +376,9 @@ describe("AgentSession retry and event characterization", () => {
 
 		const checkCompaction = vi.spyOn(
 			harness.session as unknown as {
-				_checkCompaction: (message: unknown, skipAbortedCheck?: boolean) => Promise<boolean>;
+				_compactionDecision: (cause: unknown, check: unknown) => unknown;
 			},
-			"_checkCompaction",
+			"_compactionDecision",
 		);
 		const promptPromise = harness.session.prompt("first prompt");
 		await sawRetryStart;
@@ -585,7 +587,7 @@ describe("AgentSession retry and event characterization", () => {
 		]);
 	});
 
-	it("settles after resumed overflow recovery when new prompt construction fails", async () => {
+	it("runs no turn when a resumed overflow's next prompt fails its construction", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
 			seed: (log) =>
@@ -616,7 +618,10 @@ describe("AgentSession retry and event characterization", () => {
 			expect(harness.session.isBusy).toBe(true);
 			await expect(promptPromise).rejects.toThrow("message construction failed");
 			await expect(idlePromise).resolves.toBeUndefined();
-			expect(lifecycle).toEqual(["agent_end", "agent_settled"]);
+			// Overflow recovery runs inside the prompt's turn, which never started.
+			expect(lifecycle).toEqual([]);
+			expect(harness.faux.state.callCount).toBe(0);
+			expect(harness.session.isBusy).toBe(false);
 		} finally {
 			beforeAgentStart.mockRestore();
 		}

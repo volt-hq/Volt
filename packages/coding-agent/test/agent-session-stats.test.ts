@@ -62,12 +62,14 @@ function createUserMessage(text: string, timestamp: number) {
 	};
 }
 
-function createSession() {
+/** A session over the entries `seed` appends before it opens (structural writes are refused while live). */
+async function createSession(seed: (sessionManager: SessionManager) => Promise<void>) {
 	const settingsManager = SettingsManager.inMemory();
 	const sessionManager = SessionManager.inMemory();
+	await seed(sessionManager);
 	const authStorage = AuthStorage.inMemory();
 	authStorage.setRuntimeApiKey("anthropic", "test-key");
-	const session = new AgentSession({
+	const session = await AgentSession.create({
 		...createTestAgentSessionRuntimeConfig({ model, thinkingLevel: "high" }),
 		sessionManager,
 		settingsManager,
@@ -76,17 +78,17 @@ function createSession() {
 		resourceLoader: createTestResourceLoader(),
 	});
 
-	return { session, sessionManager };
+	return session;
 }
 
 describe("AgentSession.getSessionStats", () => {
 	it("exposes the current context usage alongside token totals", async () => {
-		const { session, sessionManager } = createSession();
-
-		try {
+		const session = await createSession(async (sessionManager) => {
 			await sessionManager.appendMessage(createUserMessage("hello", 1));
 			await sessionManager.appendMessage(createAssistantMessage("hi", 200, 2));
+		});
 
+		try {
 			const stats = session.getSessionStats();
 			expect(stats.contextUsage).toEqual(session.getContextUsage());
 			expect(stats.contextUsage?.tokens).toBe(200);
@@ -98,16 +100,16 @@ describe("AgentSession.getSessionStats", () => {
 	});
 
 	it("reports unknown current context usage immediately after compaction", async () => {
-		const { session, sessionManager } = createSession();
-
-		try {
+		const session = await createSession(async (sessionManager) => {
 			await sessionManager.appendMessage(createUserMessage("first", 1));
 			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
 			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
 			await sessionManager.appendMessage(createAssistantMessage("response2", 195_000, 4, 1));
 			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
 			await sessionManager.appendMessage(createUserMessage("third", 5));
+		});
 
+		try {
 			const stats = session.getSessionStats();
 			expect(stats).toMatchObject({
 				userMessages: 3,
@@ -127,9 +129,7 @@ describe("AgentSession.getSessionStats", () => {
 	});
 
 	it("uses post-compaction usage for current context instead of stale kept usage", async () => {
-		const { session, sessionManager } = createSession();
-
-		try {
+		const session = await createSession(async (sessionManager) => {
 			await sessionManager.appendMessage(createUserMessage("first", 1));
 			await sessionManager.appendMessage(createAssistantMessage("response1", 180_000, 2, 2));
 			const keptUserId = await sessionManager.appendMessage(createUserMessage("second", 3));
@@ -137,7 +137,9 @@ describe("AgentSession.getSessionStats", () => {
 			await sessionManager.appendCompaction("summary", keptUserId, 195_000);
 			await sessionManager.appendMessage(createUserMessage("third", 5));
 			await sessionManager.appendMessage(createAssistantMessage("response3", 25_000, 6, 1));
+		});
 
+		try {
 			const stats = session.getSessionStats();
 			expect(stats).toMatchObject({
 				userMessages: 3,

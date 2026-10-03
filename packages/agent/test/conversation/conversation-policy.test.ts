@@ -2,6 +2,8 @@ import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt
 import { describe, expect, it, vi } from "vitest";
 import type { ConversationEvent, ConversationPolicy, ConversationSummarizer } from "../../src/conversation/api.ts";
 import { fold } from "../../src/conversation/fold.ts";
+import { InMemoryConversationLog } from "../../src/conversation/in-memory-log.ts";
+import type { ConversationLog } from "../../src/conversation/log.ts";
 import type { AgentLoopNextAction, AgentMessage } from "../../src/types.ts";
 import { calculateTool } from "../utils/calculate.ts";
 import {
@@ -287,6 +289,43 @@ describe("Conversation retry", () => {
 	});
 });
 
+describe("Conversation retry and failed deliveries", () => {
+	it("ends a running retry unsuccessfully when the retried request's delivery rolls back", async () => {
+		const inner = new InMemoryConversationLog("retry-rollback");
+		// The batch delivering the steer rolls back; everything else commits.
+		const log: ConversationLog = {
+			conversationId: inner.conversationId,
+			lost: inner.lost,
+			head: () => inner.head(),
+			read: (after, limit) => inner.read(after, limit),
+			close: () => inner.close(),
+			append: async (batch) =>
+				batch.entries.some(
+					(entry) =>
+						entry.type === "message" &&
+						textOf((entry.payload as { message: AgentMessage }).message) === "steer during backoff",
+				)
+					? { status: "rolled_back", error: new Error("Injected rollback") }
+					: inner.append(batch),
+		};
+		const { conversation, faux, events } = await openConversation({ log, policy: { retry: () => 20 } });
+		faux.setResponses([
+			fauxAssistantMessage("", { stopReason: "error", error: { kind: "server", retryable: true, message: "down" } }),
+			fauxAssistantMessage("must remain unused"),
+		]);
+		conversation.subscribe((event) => {
+			if (event.type === "retry_start") void conversation.steer({ message: "steer during backoff" });
+		});
+		await promptAndSettle(conversation, "hello");
+		await conversation.waitForIdle();
+
+		expect(events.filter((event) => event.type === "retry_end")).toMatchObject([
+			{ success: false, error: "Injected rollback" },
+		]);
+		expect(faux.state.callCount).toBe(1);
+	});
+});
+
 describe("Conversation compaction", () => {
 	function compactingSummarizer(calls: string[]): ConversationSummarizer {
 		return {
@@ -381,5 +420,67 @@ describe("Conversation compaction", () => {
 			summarizer: { compact: async () => undefined, summarizeBranch: async () => undefined },
 		});
 		await expect(empty.conversation.compact()).resolves.toEqual({ status: "skipped" });
+	});
+	it("lets next-action policy act instead of a mid-turn compaction", async () => {
+		const calls: string[] = [];
+		const defaults: string[] = [];
+		const { conversation, faux } = await openConversation({
+			summarizer: compactingSummarizer(calls),
+			policy: {
+				compaction: (_usage, cause, check) => (cause === "threshold" && check.continuing ? {} : undefined),
+				nextAction: (context) => {
+					if (!context.completedTurn) return undefined;
+					defaults.push(context.defaultAction.type);
+					// A host that needs a final report requests it before any compaction.
+					return context.defaultAction.type === "pause"
+						? {
+								type: "request",
+								reason: "delivery",
+								deliveries: [{ messages: [{ role: "user", content: "report now", timestamp: Date.now() }] }],
+							}
+						: undefined;
+				},
+			},
+		});
+		conversation.setTools([calculateTool]);
+		let reported: string[] = [];
+		faux.setResponses([
+			toolCall("call-1"),
+			(context) => {
+				reported = userTexts(context.messages as AgentMessage[]);
+				return fauxAssistantMessage("final report");
+			},
+		]);
+		await promptAndSettle(conversation, "work");
+
+		expect(defaults[0]).toBe("pause");
+		expect(calls).toEqual([]);
+		expect(reported).toEqual(["work", "report now"]);
+		expect(textOf(lastAssistant(conversation)!)).toBe("final report");
+	});
+
+	it("compacts after a tool batch that stops the turn, without resuming", async () => {
+		const calls: string[] = [];
+		const checks: Array<{ continuing: boolean; stopReason: string }> = [];
+		const { conversation, faux, log } = await openConversation({
+			summarizer: compactingSummarizer(calls),
+			policy: {
+				afterToolCall: async () => ({ disposition: "stop" }),
+				compaction: (_usage, cause, check) => {
+					checks.push({ continuing: check.continuing, stopReason: check.message.stopReason });
+					return cause === "threshold" && !check.continuing ? {} : undefined;
+				},
+			},
+		});
+		conversation.setTools([calculateTool]);
+		faux.setResponses([toolCall("call-1"), fauxAssistantMessage("must remain unused")]);
+		await promptAndSettle(conversation, "work");
+
+		expect(checks).toEqual([{ continuing: false, stopReason: "toolUse" }]);
+		expect(calls).toEqual(["threshold"]);
+		expect(faux.state.callCount).toBe(1);
+		const entries = await readLog(log);
+		expect(entries.at(-1)?.type).toBe("compaction");
+		expect(conversation.state).toEqual(fold(entries));
 	});
 });

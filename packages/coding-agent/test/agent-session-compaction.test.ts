@@ -54,7 +54,7 @@ describe.skipIf(!API_KEY)("AgentSession compaction e2e", () => {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage);
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			sessionManager,
 			...createTestAgentSessionRuntimeConfig({
 				model,

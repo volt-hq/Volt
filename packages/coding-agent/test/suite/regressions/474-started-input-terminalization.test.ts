@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ConversationLogAppend } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
@@ -14,6 +15,14 @@ interface Gate {
 	released: Promise<void>;
 	markEntered(): void;
 	release(): void;
+}
+
+/** Whether a log batch delivers a user message: a turn's delivery commit. */
+function deliversUserMessage(batch: ConversationLogAppend): boolean {
+	return batch.entries.some(
+		(entry) =>
+			entry.type === "message" && (entry.payload as { message?: { role?: string } }).message?.role === "user",
+	);
 }
 
 function createGate(): Gate {
@@ -59,34 +68,36 @@ describe("#474 live pre-commit client input failures are terminal", () => {
 		return { harness, manager, tempDir };
 	}
 
-	it("fails a prompt whose pre-run compaction throws and admits fresh input after reopening", async () => {
-		const { harness, manager, tempDir } = await createPersistedHarness();
+	it("fails a prompt whose delivery commit rolls back and admits fresh input after reopening", async () => {
+		const harness = await createHarness({ log: "sqlite" });
+		harnesses.push(harness);
+		const manager = harness.sessionManager;
+		const tempDir = harness.tempDir;
 		harness.setResponses([fauxAssistantMessage("first reply")]);
 		await harness.session.prompt("Hello", { clientMessageId: "first" });
 
-		const internals = harness.session as unknown as { _checkCompaction(): Promise<boolean> };
-		internals._checkCompaction = async () => {
-			throw new Error("injected compaction failure");
-		};
+		harness.log!.failNext("rolled_back", deliversUserMessage);
 		harness.appendResponses([fauxAssistantMessage("must remain unused")]);
 
-		await expect(harness.session.prompt("Continue", { clientMessageId: "stuck" })).rejects.toThrow(
-			"injected compaction failure",
+		const failure = await harness.session.prompt("Continue", { clientMessageId: "stuck" }).then(
+			() => undefined,
+			(error: unknown) => error as Error,
 		);
-		expect(manager.getClientInput("stuck")).toMatchObject({ state: "failed", error: "injected compaction failure" });
+		expect(failure).toBeInstanceOf(Error);
+		expect(manager.getClientInput("stuck")).toMatchObject({ state: "failed", error: failure!.message });
 		expect(manager.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
 
 		// A same-ID retry replays the definitive failure instead of dispatching again.
-		await expect(harness.session.prompt("Continue", { clientMessageId: "stuck" })).rejects.toThrow(
-			"injected compaction failure",
-		);
+		await expect(harness.session.prompt("Continue", { clientMessageId: "stuck" })).rejects.toThrow(failure!.message);
 		expect(getUserTexts(harness)).toEqual(["Hello"]);
 		expect(harness.getPendingResponseCount()).toBe(1);
 
-		// Simulate the detached runtime stopping and a later resume.
-		harnesses.splice(harnesses.indexOf(harness), 1);
-		await harness.cleanupAsync();
-		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
+		// Simulate the detached runtime stopping and a later resume. The replacement
+		// is cleaned up first; the original harness then removes the shared directory.
+		const ref = manager.getSessionRef()!;
+		harness.session.dispose();
+		await harness.session.waitForClosed();
+		const reopened = await SessionManager.open(ref, tempDir);
 		expect(reopened.getClientInput("stuck")?.state).toBe("failed");
 		expect(reopened.getClientInputRecoveryPlan()).toEqual({ kind: "idle", records: [] });
 		const replacement = await createHarness({ sessionManager: reopened });
@@ -152,11 +163,14 @@ describe("#474 live pre-commit client input failures are terminal", () => {
 		const clientMessageId = "silently-cancelled-run";
 		const { harness, manager } = await createPersistedHarness();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
-		const internals = harness.session as unknown as { _maybeAppendSubagentRecoveryNotice(): Promise<void> };
-		internals._maybeAppendSubagentRecoveryNotice = async () => {
-			gate.markEntered();
-			await gate.released;
-		};
+		// The turn's first decision runs before it delivers the prompt.
+		harness.session.registerTurnPolicy({
+			nextAction: async () => {
+				gate.markEntered();
+				await gate.released;
+				return undefined;
+			},
+		});
 		const preflight: PromptPreflightResult[] = [];
 
 		const promptOutcome = harness.session

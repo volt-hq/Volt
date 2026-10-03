@@ -558,9 +558,13 @@ describe("web_fetch session integration", () => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	async function createSession(options: { subagentRuntime?: boolean } = {}) {
+	async function createSession(
+		options: { subagentRuntime?: boolean; seed?: (sessionManager: SessionManager) => Promise<void> } = {},
+	) {
 		const settingsManager = SettingsManager.create(tempDir, agentDir);
 		const sessionManager = SessionManager.inMemory(tempDir);
+		// Structural writes (compaction) are refused once the session takes the log.
+		await options.seed?.(sessionManager);
 		const resourceLoader = new DefaultResourceLoader({ cwd: tempDir, agentDir, settingsManager });
 		await resourceLoader.reload();
 		const subagentToolManager: SubagentToolManager | undefined = options.subagentRuntime
@@ -726,35 +730,35 @@ describe("web_fetch session integration", () => {
 	});
 
 	it("preserves trusted URL provenance after compaction removes the source message from model context", async () => {
-		const { session } = await createSession();
-		const model = session.model!;
-		await session.sessionManager.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: `Please read ${USER_URL}` }],
-			timestamp: Date.now(),
-		});
-		const firstKeptEntryId = await session.sessionManager.appendMessage({
-			role: "assistant",
-			content: [{ type: "text", text: "I will keep working." }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			usage: {
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 0,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		const model = getModel("anthropic", "claude-sonnet-4-5")!;
+		const { session } = await createSession({
+			seed: async (sessionManager) => {
+				await sessionManager.appendMessage({
+					role: "user",
+					content: [{ type: "text", text: `Please read ${USER_URL}` }],
+					timestamp: Date.now(),
+				});
+				const firstKeptEntryId = await sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "I will keep working." }],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				});
+				await sessionManager.appendCompaction("The earlier user message was summarized.", firstKeptEntryId, 1_000);
 			},
-			stopReason: "stop",
-			timestamp: Date.now(),
 		});
-		await session.sessionManager.appendCompaction(
-			"The earlier user message was summarized.",
-			firstKeptEntryId,
-			1_000,
-		);
+		expect(session.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(true);
 		expect(
 			session.state.messages.some(
 				(message) =>

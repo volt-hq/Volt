@@ -443,9 +443,8 @@ describe("AgentSession prompt characterization", () => {
 	});
 
 	it("throws when prompting without a model", async () => {
-		const harness = await createHarness();
+		const harness = await createHarness({ selectModel: false });
 		harnesses.push(harness);
-		await harness.control.setModel(undefined);
 
 		await expect(harness.session.prompt("hi")).rejects.toThrow("No model selected.");
 	});
@@ -457,5 +456,76 @@ describe("AgentSession prompt characterization", () => {
 		await expect(harness.session.prompt("hi")).rejects.toThrow(
 			`No API key found for ${harness.getModel().provider}.`,
 		);
+	});
+});
+
+describe("AgentSession hook order", () => {
+	const harnesses: Harness[] = [];
+
+	afterEach(() => {
+		while (harnesses.length > 0) harnesses.pop()?.cleanup();
+	});
+
+	it("runs input, before_agent_start, context, provider, message, tool_call, and tool_result hooks in order", async () => {
+		const order: string[] = [];
+		const record = (name: string) => {
+			if (order.at(-1) !== name) order.push(name);
+		};
+		const echo: AgentTool = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo a value",
+			parameters: Type.Object({}),
+			execute: async () => ({ content: [{ type: "text", text: "echoed" }], details: {} }),
+		};
+		const harness = await createHarness({
+			tools: [echo],
+			extensionFactories: [
+				(volt) => {
+					volt.on("input", () => {
+						record("input");
+						return { action: "continue" };
+					});
+					volt.on("before_agent_start", () => record("before_agent_start"));
+					volt.on("context", () => record("context"));
+					volt.on("before_provider_request", () => record("provider"));
+					volt.on("message_end", (event) => {
+						if (event.message.role === "assistant") record("message");
+					});
+					volt.on("tool_call", () => record("tool_call"));
+					volt.on("tool_result", () => record("tool_result"));
+				},
+			],
+		});
+		harnesses.push(harness);
+		// Faux requests carry no serialized payload; hand the provider hook a synthetic one, as a provider would.
+		const withPayload =
+			(message: ReturnType<typeof fauxAssistantMessage>) =>
+			async (
+				context: { messages: unknown[] },
+				options?: { onPayload?: (payload: unknown, model: never) => unknown },
+				_state?: unknown,
+				model?: unknown,
+			) => {
+				await options?.onPayload?.({ messages: context.messages }, model as never);
+				return message;
+			};
+		harness.setResponses([
+			withPayload(fauxAssistantMessage(fauxToolCall("echo", {}), { stopReason: "toolUse" })),
+			withPayload(fauxAssistantMessage("done")),
+		]);
+
+		await harness.session.prompt("run the hooks");
+
+		expect(order.slice(0, 7)).toEqual([
+			"input",
+			"before_agent_start",
+			"context",
+			"provider",
+			"message",
+			"tool_call",
+			"tool_result",
+		]);
+		expect(order.slice(7)).toEqual(["context", "provider", "message"]);
 	});
 });

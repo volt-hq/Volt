@@ -1,11 +1,37 @@
+import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message } from "@hansjm10/volt-ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { type FileEntry, type SessionInfo, SessionManager } from "../../src/core/session-manager.ts";
+import { toLogEntryDraft } from "../../src/core/conversation-log/entry-codec.ts";
+import { type FileEntry, type SessionEntry, type SessionInfo, SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreLease } from "../../src/core/session-store/index.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
+import { seedSession } from "../utilities/seed-log.ts";
+
+type BatchEntry = SessionEntry extends infer T
+	? T extends SessionEntry
+		? Omit<T, "id" | "parentId" | "timestamp" | "ordinal">
+		: never
+	: never;
+
+/** Commit `entries` to `manager` in one atomic batch, each conversation entry a child of the previous one. */
+function commitBatch(manager: SessionManager, entries: readonly BatchEntry[]): Promise<SessionEntry[]> {
+	return seedSession(manager, (seed) => {
+		let parentId = manager.getLeafId();
+		for (const entry of entries) {
+			const draft = toLogEntryDraft({
+				...entry,
+				id: randomUUID(),
+				parentId,
+				timestamp: new Date().toISOString(),
+			} as SessionEntry);
+			seed.drafts.push(draft);
+			if (draft.visibility === "public") parentId = draft.id;
+		}
+	});
+}
 
 const BASE_TIME = Date.parse("2026-01-01T00:00:00.000Z");
 
@@ -267,7 +293,7 @@ describe("SessionManager projection cache", () => {
 		expectProjectedLabel(await SessionManager.openReadOnly(importBranchRef));
 	});
 
-	it("does not filter historical file entries for direct or canonical transaction payloads", async () => {
+	it("does not filter historical file entries for direct or atomic batch payloads", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await SessionManager.create(cwd, sessionDir, { id: "bounded-projection" });
 		await manager.appendMessage({ role: "user", content: "historical", timestamp: BASE_TIME });
@@ -281,16 +307,15 @@ describe("SessionManager projection cache", () => {
 			direct.restore();
 		}
 
-		const projection = manager.issueCanonicalProjection();
-		const canonical = instrumentFileEntryFiltering(manager);
+		const atomic = instrumentFileEntryFiltering(manager);
 		try {
-			await manager.commitCanonicalCommand({
-				guard: { kind: "exact", token: projection.token },
-				mutations: [{ kind: "append", entry: { type: "custom", customType: "canonical" } }],
-			});
-			expect(canonical.readVisits()).toBe(0);
+			await commitBatch(manager, [
+				{ type: "custom", customType: "atomic" },
+				{ type: "session_info", name: "atomic" },
+			]);
+			expect(atomic.readVisits()).toBe(0);
 		} finally {
-			canonical.restore();
+			atomic.restore();
 		}
 	});
 
@@ -313,23 +338,16 @@ describe("SessionManager projection cache", () => {
 		vi.spyOn(faultLease.client, "applyTransaction").mockRejectedValueOnce(
 			new Error("injected pre-commit response failure"),
 		);
-		const failedProjection = manager.issueCanonicalProjection();
 		await expect(
-			manager.commitCanonicalCommand({
-				guard: { kind: "exact", token: failedProjection.token },
-				mutations: [
-					{
-						kind: "append",
-						entry: {
-							type: "message",
-							message: { role: "user", content: "rolled back user", timestamp: BASE_TIME + 10_000 },
-						},
-					},
-					{ kind: "append", entry: { type: "planning_state_change", planning: { mode: "plan", plan: null } } },
-					{ kind: "append", entry: { type: "session_info", name: "Rolled back" } },
-					{ kind: "append", entry: { type: "label", targetId: baselineId, label: "rolled back" } },
-				],
-			}),
+			commitBatch(manager, [
+				{
+					type: "message",
+					message: { role: "user", content: "rolled back user", timestamp: BASE_TIME + 10_000 },
+				},
+				{ type: "planning_state_change", planning: { mode: "plan", plan: null } },
+				{ type: "session_info", name: "Rolled back" },
+				{ type: "label", targetId: baselineId, label: "rolled back" },
+			]),
 		).rejects.toMatchObject({ effect: "rolled_back" });
 
 		await manager.appendCustomEntry("post-rollback", { durable: true });
@@ -346,21 +364,11 @@ describe("SessionManager projection cache", () => {
 			labelTimestamp: baselineLabelTimestamp,
 		});
 
-		const committedProjection = manager.issueCanonicalProjection();
-		await manager.commitCanonicalCommand({
-			guard: { kind: "exact", token: committedProjection.token },
-			mutations: [
-				{
-					kind: "append",
-					entry: {
-						type: "message",
-						message: { role: "user", content: "committed user", timestamp: BASE_TIME + 1_000 },
-					},
-				},
-				{ kind: "append", entry: { type: "planning_state_change", planning: { mode: "plan", plan: null } } },
-				{ kind: "append", entry: { type: "session_info", name: "Committed" } },
-			],
-		});
+		await commitBatch(manager, [
+			{ type: "message", message: { role: "user", content: "committed user", timestamp: BASE_TIME + 1_000 } },
+			{ type: "planning_state_change", planning: { mode: "plan", plan: null } },
+			{ type: "session_info", name: "Committed" },
+		]);
 		expect(await storedSummary(cwd, sessionDir, manager.getSessionId())).toMatchObject({
 			name: "Committed",
 			firstMessage: "committed user",
