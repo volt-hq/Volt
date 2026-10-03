@@ -1237,9 +1237,9 @@ describe("native planning state", () => {
 		const gate = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		const internals = session as unknown as { _prepareUnrestrictedMcpForBuild(): Promise<void> };
-		const original = internals._prepareUnrestrictedMcpForBuild.bind(session);
-		internals._prepareUnrestrictedMcpForBuild = async () => {
+		const tools = (session as unknown as { _tools: { prepareUnrestrictedMcpForBuild(): Promise<void> } })._tools;
+		const original = tools.prepareUnrestrictedMcpForBuild.bind(tools);
+		tools.prepareUnrestrictedMcpForBuild = async () => {
 			await gate;
 			await original();
 		};

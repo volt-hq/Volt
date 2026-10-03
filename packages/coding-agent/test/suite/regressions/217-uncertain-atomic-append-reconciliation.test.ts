@@ -530,9 +530,9 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		const mcpStart = vi.fn(async () => undefined);
 		const mcpDispose = vi.fn(async () => undefined);
 		const internals = harness.session as unknown as {
-			_mcpManager?: { startEagerServers(): Promise<void>; dispose(): Promise<void> };
+			_tools: { mcpManager?: { startEagerServers(): Promise<void>; dispose(): Promise<void> } };
 		};
-		internals._mcpManager = { startEagerServers: mcpStart, dispose: mcpDispose };
+		internals._tools.mcpManager = { startEagerServers: mcpStart, dispose: mcpDispose };
 		log.failNext(planningFault("uncertain_rollback"), isPlanningCommit);
 		const turn = await queueBehindReservation(harness, async () => {
 			await harness.session.steer("fail authority", undefined, "issue-217-side-effect-fence");

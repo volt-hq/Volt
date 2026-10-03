@@ -26,8 +26,10 @@ export interface ToolResultPatch {
 type SessionTestInternals = {
 	_conversation: Conversation<AgentTool>;
 	_streamFn: StreamFn;
-	_toolCallPolicies(signal: AbortSignal | undefined): Iterable<ToolCallPolicy<ToolCallEvent>>;
-	_handleToolResultPolicy(event: Omit<ToolResultEvent, "type">): Promise<ToolResultPatch | undefined>;
+	_turnPolicy: {
+		toolCallPolicies(signal: AbortSignal | undefined): Iterable<ToolCallPolicy<ToolCallEvent>>;
+		toolResult(event: Omit<ToolResultEvent, "type">): Promise<ToolResultPatch | undefined>;
+	};
 };
 
 function internals(session: AgentSession): SessionTestInternals {
@@ -145,19 +147,19 @@ export function createAgentSessionTestControl(session: AgentSession) {
 			(await policyOf(session).transformContext?.(messages)) ?? messages,
 		/** The session's tool-call decision for `event`; undefined when nothing blocks or explains it. */
 		evaluateToolCall: async (event: ToolCallEvent): Promise<ToolCallResult | undefined> => {
-			const result = await reduceToolCall(event, internals(session)._toolCallPolicies(policySignal()));
+			const result = await reduceToolCall(event, internals(session)._turnPolicy.toolCallPolicies(policySignal()));
 			return result.block === undefined && result.reason === undefined ? undefined : result;
 		},
 		evaluateToolCallRequest: async (input: { toolCall: { id: string; name: string }; args: JsonObject }) => {
 			const result = await reduceToolCall<ToolCallEvent>(
 				{ type: "tool_call", toolCallId: input.toolCall.id, toolName: input.toolCall.name, input: input.args },
-				internals(session)._toolCallPolicies(policySignal()),
+				internals(session)._turnPolicy.toolCallPolicies(policySignal()),
 			);
 			return result.block === undefined && result.reason === undefined ? undefined : result;
 		},
 		evaluateToolResult: async (event: ToolResultEvent) => {
 			const { type: _type, ...rest } = event;
-			const patch = await internals(session)._handleToolResultPolicy(rest);
+			const patch = await internals(session)._turnPolicy.toolResult(rest);
 			return {
 				content: patch?.content ?? event.content,
 				...((patch?.details ?? event.details) === undefined ? {} : { details: patch?.details ?? event.details }),
