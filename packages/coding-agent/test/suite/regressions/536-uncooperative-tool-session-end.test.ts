@@ -21,6 +21,7 @@ import { initTheme } from "../../../src/core/theme/runtime.ts";
 import type { ExtensionAPI, ExtensionFactory } from "../../../src/index.ts";
 import type { CustomEditor } from "../../../src/modes/interactive/components/custom-editor.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
+import { loseLog } from "../../lost-conversation-lock.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -127,7 +128,6 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 		}
 
 		cleanups.push(async () => {
-			// A runtime whose session lost authority cannot close its persistence cleanly.
 			await runtime.dispose().catch(() => {});
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
@@ -230,7 +230,7 @@ describe("regression #536: ending a lost session while an uncooperative tool is 
 			const abort = cancelFirst ? staleSession.abort("keyboard_interrupt") : Promise.resolve();
 			if (cancelFirst) await vi.waitFor(() => expect(signal.aborted).toBe(true));
 			access.editor.setText("unsent draft");
-			staleSession.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
+			await loseLog(staleSession.sessionManager);
 			await withinTimeout(prompt, "aborted prompt");
 			await withinTimeout(abort, "prior cancellation");
 			// Disposal must not wait for the uncooperative tool before the TUI exits.

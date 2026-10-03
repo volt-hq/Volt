@@ -1682,7 +1682,7 @@ describe("durable client input idempotency", () => {
 		await expect(SessionManager.openReadOnly(extractedRef!, sourceDir)).resolves.toBeInstanceOf(SessionManager);
 	});
 
-	it("fail-stops a dirty manager after an uncertain persistence failure", async () => {
+	it("loses the log of a dirty manager after an uncertain persistence failure", async () => {
 		const tempDir = createTempDir();
 		tempDirs.push(tempDir);
 		const manager = await SessionManager.create(tempDir, tempDir);
@@ -1698,13 +1698,12 @@ describe("durable client input idempotency", () => {
 		expect(manager.reserveClientInput("uncertain", "prompt", { message: "uncertain" }).record.state).toBe("accepted");
 		await expect(manager.flush()).rejects.toThrow("outcome could not be reconciled");
 		expect(reconcile).toHaveBeenCalledOnce();
-		expect(manager.getConversationAuthorityStatus()).toMatchObject({ status: "reconciliation_required" });
+		await expect(manager.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
 		const persisted = await loadPersistedSessionSnapshot(manager);
 		expect(persisted.entries).toEqual([]);
 		expect(persisted.clientInputs).toEqual([]);
-		expect(() => manager.getEntries()).toThrow("requires reconciliation");
 		expect(() => manager.reserveClientInput("later", "prompt", { message: "later" })).toThrow(
-			"requires reconciliation",
+			"outcome could not be reconciled",
 		);
 		await expect(manager.flush()).rejects.toThrow();
 

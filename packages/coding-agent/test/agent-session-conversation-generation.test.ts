@@ -255,7 +255,7 @@ describe("AgentSession conversation generation commits", () => {
 		manager.appendMessage({ role: "user", content: "second user", timestamp: 3 });
 		manager.appendMessage(fauxAssistantMessage("second assistant", { timestamp: 4 }));
 		const targetManager = await SessionManager.create(tempDir, tempDir);
-		cleanups.push(() => targetManager.drainPersistence().then(() => undefined));
+		cleanups.push(() => targetManager.closePersistence());
 		targetManager.appendMessage({ role: "user", content: "target user", timestamp: 5 });
 		targetManager.appendMessage(fauxAssistantMessage("target assistant", { timestamp: 6 }));
 

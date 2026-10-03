@@ -136,6 +136,7 @@ async function createFixture(
 		session: harness.session,
 		setBeforeSessionInvalidate: vi.fn(),
 		setRebindSession: vi.fn(),
+		lost: new Promise<Error>(() => {}),
 	};
 	const mode = new InteractiveMode(runtime as unknown as AgentSessionRuntime, { tuiMode });
 	const access = mode as unknown as InteractiveTestAccess;

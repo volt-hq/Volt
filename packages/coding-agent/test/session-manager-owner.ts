@@ -42,7 +42,7 @@ export function createSessionManagerTestOwner(): SessionManagerTestOwner {
 			const errors: unknown[] = [];
 			while (managers.length > 0) {
 				try {
-					await managers.pop()!.drainPersistence();
+					await managers.pop()!.closePersistence();
 				} catch (error) {
 					errors.push(error);
 				}

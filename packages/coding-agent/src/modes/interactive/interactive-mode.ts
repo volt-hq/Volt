@@ -146,7 +146,6 @@ import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../cor
 import {
 	getDefaultSessionDir,
 	type SessionContext,
-	SessionConversationStateUnavailableError,
 	SessionManager,
 	type SessionReference,
 } from "../../core/session-manager.ts";
@@ -669,7 +668,7 @@ export class InteractiveMode {
 	 */
 	private readonly relayStateManager = new IrohRemoteHostStateManager();
 	private daemonLeaseSessionId: string | undefined;
-	/** The current session lost conversation authority and the TUI is ending it. */
+	/** The runtime ended because its session lost its log, and the TUI is exiting. */
 	private endingLostSession = false;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
 	private localThemeOverride = false;
@@ -740,6 +739,7 @@ export class InteractiveMode {
 		this.runtimeHost.setRebindSession(async (session) => {
 			await this.rebindReplacementSession(session);
 		});
+		void this.runtimeHost.lost.then((error) => this.handleRuntimeLost(error));
 		this.version = VERSION;
 		this.renderer = createInteractiveTui({
 			tuiMode,
@@ -1236,11 +1236,7 @@ export class InteractiveMode {
 	 */
 	private updateTerminalTitle(): void {
 		const cwdBasename = path.basename(this.sessionManager.getCwd());
-		// Session replacement retitles while a session without conversation authority is still current.
-		const sessionName =
-			this.sessionManager.getConversationAuthorityStatus().status === "available"
-				? this.sessionManager.getSessionName()
-				: undefined;
+		const sessionName = this.sessionManager.getSessionName();
 		if (sessionName) {
 			this.ui.terminal.setTitle(`${APP_TITLE} - ${sessionName} - ${cwdBasename}`);
 		} else {
@@ -1350,17 +1346,13 @@ export class InteractiveMode {
 		// Main interactive loop
 		while (true) {
 			const userInput = await this.getUserInput();
-			let session = this.session;
 			try {
 				const images = await this.collectPromptImages(userInput);
-				session = this.session;
-				await session.prompt(userInput, images ? { images } : undefined);
+				await this.session.prompt(userInput, images ? { images } : undefined);
 			} catch (error: unknown) {
 				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 				this.showError(errorMessage);
 			}
-			// A failed delivery commit resolves the prompt (delivery_failed) instead of rejecting it.
-			this.restoreInputAfterAuthorityLoss(session, userInput);
 		}
 	}
 
@@ -2436,6 +2428,9 @@ export class InteractiveMode {
 		this.showError(`${prefix}: ${message}`);
 		stopThemeWatcher();
 		this.stop();
+		// Stopping the TUI cancels the render that would show the error, and the
+		// session behind the screen may already be disposed: print it instead.
+		process.stderr.write(`${prefix}: ${message}\n`);
 		const unsentDraft = options?.unsentDraft?.trim();
 		if (unsentDraft) {
 			// The editor dies with the process; hand the draft back for copying.
@@ -4025,13 +4020,7 @@ export class InteractiveMode {
 				if (this.isExtensionCommand(text)) {
 					this.editor.addToHistory?.(text);
 					this.editor.setText("");
-					const session = this.session;
-					try {
-						await session.prompt(text);
-					} catch (error: unknown) {
-						this.restoreInputAfterAuthorityLoss(session, text);
-						throw error;
-					}
+					await this.session.prompt(text);
 				} else {
 					this.queueCompactionMessage(text, "steer");
 				}
@@ -4044,13 +4033,7 @@ export class InteractiveMode {
 				this.editor.addToHistory?.(text);
 				this.editor.setText("");
 				const images = await this.collectPromptImages(text);
-				const session = this.session;
-				try {
-					await session.prompt(text, { streamingBehavior: "steer", images });
-				} catch (error: unknown) {
-					this.restoreInputAfterAuthorityLoss(session, text);
-					throw error;
-				}
+				await this.session.prompt(text, { streamingBehavior: "steer", images });
 				this.updatePendingMessagesDisplay();
 				this.ui.requestRender();
 				return;
@@ -4077,52 +4060,31 @@ export class InteractiveMode {
 	}
 
 	private subscribeToAgent(session: AgentSession): void {
-		const unsubscribeEvents = session.subscribe(async (event) => {
+		this.unsubscribe = session.subscribe(async (event) => {
 			await this.handleEvent(event);
 		});
-		// Runs synchronously inside the failing write; recover once it has unwound.
-		const unsubscribeAuthority = session.sessionManager.subscribeConversationAuthorityChanges((status) => {
-			queueMicrotask(() => void this.handleConversationAuthorityLoss(session, status.error));
-		});
-		this.unsubscribe = () => {
-			unsubscribeEvents();
-			unsubscribeAuthority();
-		};
 	}
 
 	/**
-	 * A commit this session could not confirm (a fence conflict, a missing
-	 * session, or an outcome that could not be resolved) means it may no longer be
-	 * the only writer of its log, so the runtime ends: it is disposed, which
-	 * releases the session's lock, and the TUI exits. The store keeps what was
-	 * committed; /resume reopens it.
+	 * The runtime ended: its session could not confirm a commit (a fence
+	 * conflict, a missing session, or an outcome that could not be resolved), so
+	 * it may no longer be the only writer of its log. The TUI disposes the
+	 * runtime, which releases the session's lock, and exits. The store keeps what
+	 * was committed; /resume reopens it.
 	 */
-	private async handleConversationAuthorityLoss(
-		session: AgentSession,
-		error: SessionConversationStateUnavailableError,
-	): Promise<void> {
-		if (this.isShuttingDown || this.endingLostSession || session !== this.session) return;
+	private async handleRuntimeLost(error: Error): Promise<void> {
+		if (this.isShuttingDown || this.endingLostSession) return;
 		this.endingLostSession = true;
 		const unsentDraft = this.editor.getText();
-		const cause = error.cause instanceof Error ? error.cause.message : error.message;
-		// Extension UI can read the lost session while rendering. Pending dialogs
-		// settle as dismissed, so no caller waits on UI that is gone.
+		// Pending dialogs settle as dismissed, so no caller waits on UI that is gone.
 		this.resetExtensionUI();
 		await this.disposeRuntimeHost().catch(() => {});
 		await this.releaseDaemonLeaseOnQuit().catch(() => {});
 		await this.handleFatalRuntimeError(
 			"Volt stopped this session because its saved state could not be confirmed",
-			new Error(`${cause}. Run volt again and /resume the session to continue from what was saved.`),
+			new Error(`${error.message}. Run volt again and /resume the session to continue from what was saved.`),
 			{ unsentDraft },
 		);
-	}
-
-	/** Put submitted input back in the editor when its session lost conversation authority. */
-	private restoreInputAfterAuthorityLoss(session: AgentSession, text: string): void {
-		if (session.sessionManager.getConversationAuthorityStatus().status !== "reconciliation_required") return;
-		if (this.editor.getText()) return;
-		this.editor.setText(text);
-		this.ui.requestRender();
 	}
 
 	private subscribeToBackgroundJobs(session: AgentSession): void {
@@ -5123,34 +5085,17 @@ export class InteractiveMode {
 		// Without this, an unhandled exception from extension code (or anywhere
 		// in volt) leaves the terminal in raw mode with no cursor.
 		const uncaughtExceptionHandler = (error: Error) => {
-			if (!this.recoverUncaughtAuthorityError(error)) this.uncaughtCrash(error);
+			this.uncaughtCrash(error);
 		};
 		process.prependListener("uncaughtException", uncaughtExceptionHandler);
 		this.signalCleanupHandlers.push(() => process.off("uncaughtException", uncaughtExceptionHandler));
 		// Registering a listener disables Node's default throw, so other reasons
 		// still crash exactly like an uncaught exception.
 		const unhandledRejectionHandler = (reason: unknown) => {
-			if (this.recoverUncaughtAuthorityError(reason)) return;
 			this.uncaughtCrash(reason instanceof Error ? reason : new Error(String(reason)));
 		};
 		process.prependListener("unhandledRejection", unhandledRejectionHandler);
 		this.signalCleanupHandlers.push(() => process.off("unhandledRejection", unhandledRejectionHandler));
-	}
-
-	/**
-	 * Whether an uncaught error is a conversation-authority failure that ending
-	 * the lost session owns: a reader of the fail-stopped session threw. The
-	 * session ends if the current session lost authority; otherwise the error came
-	 * from a session that was already replaced and is dropped.
-	 */
-	private recoverUncaughtAuthorityError(error: unknown): boolean {
-		if (!(error instanceof SessionConversationStateUnavailableError)) return false;
-		if (this.endingLostSession) return true;
-		if (this.isShuttingDown) return false;
-		if (this.session.sessionManager.getConversationAuthorityStatus().status === "reconciliation_required") {
-			void this.handleConversationAuthorityLoss(this.session, error);
-		}
-		return true;
 	}
 
 	private unregisterSignalHandlers(): void {

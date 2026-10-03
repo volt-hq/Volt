@@ -13,7 +13,6 @@ import { AuthStorage } from "../../src/core/auth-storage.ts";
 import {
 	CURRENT_SESSION_SNAPSHOT_VERSION,
 	CURRENT_SESSION_VERSION,
-	SessionConversationStateUnavailableError,
 	SessionManager,
 	type SessionReference,
 	summarizeSessionEntries,
@@ -406,36 +405,6 @@ describe("AgentSessionRuntime characterization", () => {
 			{ type: "session_shutdown", reason: "resume", targetSessionRef: originalSessionRef },
 			{ type: "session_start", reason: "resume", previousSessionRef: secondSessionRef },
 		]);
-	});
-
-	it("replaces a reconciliation-required runtime with cleanup but no before-switch hook", async () => {
-		const replacementHooks: string[] = [];
-		const { runtime } = await createRuntimeForTest((volt: ExtensionAPI) => {
-			volt.on("session_before_switch", (event) => {
-				replacementHooks.push(event.type);
-			});
-			volt.on("session_shutdown", (event) => {
-				replacementHooks.push(event.type);
-			});
-		});
-		const previousSession = runtime.session;
-		const authorityError = new SessionConversationStateUnavailableError({
-			cause: new Error("injected unresolved replacement"),
-		});
-		const authorityStatus = {
-			status: "reconciliation_required" as const,
-			error: authorityError,
-		};
-		vi.spyOn(previousSession.sessionManager, "getConversationAuthorityStatus").mockReturnValue(authorityStatus);
-		vi.spyOn(previousSession.sessionManager, "assertConversationAuthorityAvailable").mockImplementation(() => {
-			throw authorityError;
-		});
-
-		await expect(runtime.newSession()).resolves.toEqual({ cancelled: false, seeded: false });
-
-		expect(runtime.session).not.toBe(previousSession);
-		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
-		expect(replacementHooks).toEqual(["session_shutdown"]);
 	});
 
 	it("applies new-session setup before constructing the replacement session", async () => {

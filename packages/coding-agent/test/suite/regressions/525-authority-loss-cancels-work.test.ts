@@ -1,13 +1,18 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { ExtensionError, ExtensionFactory } from "../../../src/core/extensions/index.ts";
-import type { SessionConversationStateUnavailableError } from "../../../src/core/session-manager.ts";
+import { SessionManager } from "../../../src/core/session-manager.ts";
 import { ExtensionUIDismissedError } from "../../../src/index.ts";
+import { loseLog } from "../../lost-conversation-lock.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const harnesses: Harness[] = [];
+const directories: string[] = [];
 let unhandledRejections: unknown[] = [];
 const onUnhandledRejection = (reason: unknown) => {
 	unhandledRejections.push(reason);
@@ -22,6 +27,7 @@ afterEach(async () => {
 	for (const harness of harnesses.splice(0)) {
 		await harness.cleanupAsync().catch(() => {});
 	}
+	for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 	// Let late rejections of abandoned work surface before the check.
 	await new Promise((resolve) => setTimeout(resolve, 0));
 	process.off("unhandledRejection", onUnhandledRejection);
@@ -29,7 +35,10 @@ afterEach(async () => {
 });
 
 async function createTestHarness(options: { extension?: ExtensionFactory; tools?: AgentTool[] } = {}) {
+	const directory = mkdtempSync(join(tmpdir(), "volt-525-"));
+	directories.push(directory);
 	const harness = await createHarness({
+		sessionManager: await SessionManager.create(directory),
 		settings: { lsp: { enabled: false }, compaction: { enabled: false } },
 		...(options.extension ? { extensionFactories: [options.extension] } : {}),
 		...(options.tools ? { tools: options.tools } : {}),
@@ -42,8 +51,9 @@ async function createTestHarness(options: { extension?: ExtensionFactory; tools?
 	return { harness, extensionErrors };
 }
 
-function loseAuthority(harness: Harness): SessionConversationStateUnavailableError {
-	return harness.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
+/** The session's lock is lost, and its next commit finds that out. */
+function loseLock(harness: Harness): Promise<Error> {
+	return loseLog(harness.sessionManager);
 }
 
 function withinTimeout<T>(promise: Promise<T>, label: string, ms = 5_000): Promise<T> {
@@ -54,7 +64,7 @@ function withinTimeout<T>(promise: Promise<T>, label: string, ms = 5_000): Promi
 	return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
 
-describe("regression #525: a session that loses conversation authority cancels its own work", () => {
+describe("regression #525: a session that loses its log cancels its own work", () => {
 	it("stops waiting for a command that never settles and aborts its ctx.signal", async () => {
 		const started = Promise.withResolvers<AbortSignal>();
 		const { harness, extensionErrors } = await createTestHarness({
@@ -74,7 +84,7 @@ describe("regression #525: a session that loses conversation authority cancels i
 		expect(signal.aborted).toBe(false);
 		expect(harness.session.isBusy).toBe(true);
 
-		const lost = loseAuthority(harness);
+		const lost = await loseLock(harness);
 
 		await expect(withinTimeout(prompt, "prompt('/block')")).resolves.toBeUndefined();
 		await withinTimeout(harness.session.waitForNotBusy(), "waitForNotBusy()");
@@ -102,7 +112,7 @@ describe("regression #525: a session that loses conversation authority cancels i
 
 		const prompt = harness.session.prompt("/cooperative");
 		await started.promise;
-		loseAuthority(harness);
+		await loseLock(harness);
 
 		await expect(withinTimeout(prompt, "prompt('/cooperative')")).resolves.toBeUndefined();
 		await withinTimeout(harness.session.waitForNotBusy(), "waitForNotBusy()");
@@ -135,7 +145,7 @@ describe("regression #525: a session that loses conversation authority cancels i
 		const toolSignal = await toolStarted.promise;
 		expect(harness.session.isStreaming).toBe(true);
 
-		loseAuthority(harness);
+		await loseLock(harness);
 
 		await withinTimeout(Promise.allSettled([prompt]), "prompt('start')");
 		await withinTimeout(harness.session.waitForNotBusy(), "waitForNotBusy()");

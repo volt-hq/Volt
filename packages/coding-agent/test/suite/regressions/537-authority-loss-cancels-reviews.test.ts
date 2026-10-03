@@ -11,6 +11,7 @@ import {
 } from "../../../src/core/agent-session-runtime.ts";
 import type { ReviewWorkflowEvent, ReviewWorkflowToolEvent } from "../../../src/core/review.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
+import { loseLog } from "../../lost-conversation-lock.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => void | Promise<void>> = [];
@@ -51,7 +52,6 @@ async function createRuntime() {
 		sessionManager: manager,
 	});
 	cleanups.push(async () => {
-		// A runtime whose session lost authority cannot close its persistence cleanly.
 		await runtime.dispose().catch(() => {});
 		for (const harness of harnesses) await harness.cleanupAsync().catch(() => {});
 	});
@@ -86,7 +86,7 @@ function startReview(runtime: AgentSessionRuntime, workflowId: string, launched 
 	return { workflow, started: started.promise, finish: finished.resolve, releaseCleanup: cleanupFinished.resolve };
 }
 
-describe("regression #537: authority loss cancels only the owning runtime's reviews", () => {
+describe("regression #537: a runtime that loses its log cancels only its own reviews", () => {
 	it("cancels a running review and joins its cleanup, leaving other runtimes' reviews running", async () => {
 		const runtime = await createRuntime();
 		const otherRuntime = await createRuntime();
@@ -96,7 +96,8 @@ describe("regression #537: authority loss cancels only the owning runtime's revi
 		const review = startReview(runtime, "review");
 		await review.started;
 
-		runtime.session.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
+		const lost = await loseLog(runtime.session.sessionManager);
+		await expect(runtime.lost).resolves.toBe(lost);
 
 		await vi.waitFor(() => expect(review.workflow.signal.aborted).toBe(true));
 		expect(unrelated.workflow.signal.aborted).toBe(false);
@@ -109,7 +110,7 @@ describe("regression #537: authority loss cancels only the owning runtime's revi
 	it("cancels a review registered before launch without starting its executor", async () => {
 		const runtime = await createRuntime();
 		const review = startReview(runtime, "not-launched", false);
-		runtime.session.sessionManager.retireConversationAuthority(new Error("lost"));
+		await loseLog(runtime.session.sessionManager);
 		await expect(review.workflow.finished).resolves.toMatchObject({ status: "cancelled" });
 		expect(review.workflow.signal.aborted).toBe(true);
 	});

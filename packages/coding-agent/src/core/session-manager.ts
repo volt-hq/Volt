@@ -1,4 +1,9 @@
-import { type AgentMessage, uuidv7 } from "@hansjm10/volt-agent-core";
+import {
+	type AgentMessage,
+	type ConversationLogLossReason,
+	ConversationLogLostError,
+	uuidv7,
+} from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonCompatibleInput, JsonValue, Message, TextContent } from "@hansjm10/volt-ai";
 import {
 	type BranchSummaryEntryPayload,
@@ -157,55 +162,22 @@ export interface SessionSnapshotHeader {
 /** How a session came to exist. Absent means a user-initiated session. */
 export type SessionOrigin = "subagent";
 
-export type SessionAtomicAppendEffect = "not_started" | "rolled_back" | "uncertain" | "committed";
-export type SessionAtomicAppendAuthority = "available" | "reconciliation_required";
+export type SessionAtomicAppendEffect = "not_started" | "rolled_back";
 
+/**
+ * An atomic append that definitely did not commit. The log is unchanged and the
+ * manager stays writable. A commit that cannot be confirmed instead loses the
+ * log and throws `ConversationLogLostError`.
+ */
 export class SessionAtomicAppendError extends Error {
 	readonly effect: SessionAtomicAppendEffect;
-	readonly authority: SessionAtomicAppendAuthority;
 
-	constructor(
-		message: string,
-		effect: SessionAtomicAppendEffect,
-		authority: SessionAtomicAppendAuthority,
-		options?: ErrorOptions,
-	) {
+	constructor(message: string, effect: SessionAtomicAppendEffect, options?: ErrorOptions) {
 		super(message, options);
 		this.name = "SessionAtomicAppendError";
 		this.effect = effect;
-		this.authority = authority;
 	}
 }
-
-export class SessionConversationStateUnavailableError extends Error {
-	readonly code = "session_conversation_state_unavailable";
-
-	constructor(options?: ErrorOptions) {
-		super(
-			"Session conversation authority requires reconciliation because persisted state could not be proven; replace the runtime",
-			options,
-		);
-		this.name = "SessionConversationStateUnavailableError";
-	}
-}
-
-export type SessionConversationAuthorityStatus =
-	| { readonly status: "available" }
-	| {
-			readonly status: "reconciliation_required";
-			readonly error: SessionConversationStateUnavailableError;
-	  };
-
-export type SessionConversationAuthorityListener = (
-	status: Extract<SessionConversationAuthorityStatus, { status: "reconciliation_required" }>,
-) => void;
-
-export type SessionPersistenceDrainResult =
-	| { readonly status: "closed" }
-	| {
-			readonly status: "reconciliation_required";
-			readonly error: SessionConversationStateUnavailableError;
-	  };
 
 /**
  * Identity-only proof of one locally atomic client-input delivery commit.
@@ -331,22 +303,6 @@ export interface VerifiedSessionDeliveryNoEffect extends VerifiedSessionDelivery
 }
 
 export type VerifiedSessionDeliveryReceipt = VerifiedSessionDeliveryCommit | VerifiedSessionDeliveryNoEffect;
-
-class AtomicAppendPersistenceFailure extends Error {
-	readonly effect: SessionAtomicAppendEffect;
-	readonly authority: SessionAtomicAppendAuthority;
-
-	constructor(
-		message: string,
-		effect: SessionAtomicAppendEffect,
-		authority: SessionAtomicAppendAuthority,
-		options?: ErrorOptions,
-	) {
-		super(message, options);
-		this.effect = effect;
-		this.authority = authority;
-	}
-}
 
 export interface NewSessionOptions {
 	id?: string;
@@ -1279,10 +1235,17 @@ export class SessionManager {
 	private get nextOrdinal(): number {
 		return this.derivedState.nextOrdinal;
 	}
-	/** First uncertain persistence failure. This manager remains fail-stopped until reloaded. */
-	private persistenceError: Error | undefined;
-	/** Sticky authority state carrying the first unresolved atomic-replacement cause. */
-	private conversationAuthorityStatus: SessionConversationAuthorityStatus = { status: "available" };
+	/** The first loss of this manager's log. The manager accepts no writes after it. */
+	private lostError: ConversationLogLostError | undefined;
+	private readonly lostSignal = Promise.withResolvers<ConversationLogLostError>();
+	/**
+	 * Resolves once, when this manager loses its log: a commit it could not
+	 * confirm (a fence conflict, a missing session, or an outcome that could not
+	 * be resolved) or a write that failed after its entry was indexed. The
+	 * manager may no longer be the log's only writer, so it accepts no further
+	 * writes; its runtime ends. Never rejects.
+	 */
+	readonly lost: Promise<ConversationLogLostError> = this.lostSignal.promise;
 	/** Prevents a disposed persisted session from accepting work after its final drain watermark. */
 	private persistenceClosed = false;
 	/** Only a session created by this manager may capture its first Git observation. */
@@ -1293,10 +1256,9 @@ export class SessionManager {
 	private persistenceWatermark: Promise<void> = Promise.resolve();
 	/** Queue tasks admitted but not fully settled, including reconciliation. */
 	private unsettledPersistenceTasks = 0;
-	private persistenceDrainPromise: Promise<SessionPersistenceDrainResult> | undefined;
+	private persistenceClosePromise: Promise<void> | undefined;
 	private readonly entryListeners = new Set<SessionEntryListener>();
 	private readonly branchListeners = new Set<SessionBranchListener>();
-	private readonly conversationAuthorityListeners = new Set<SessionConversationAuthorityListener>();
 	/** Entries staged by appendAtomically before one persistence operation is accepted. */
 	private atomicAppendEntries: CommittedSessionEntry[] | undefined;
 	/** Fences unrelated writers while an atomic replacement is settling. */
@@ -1463,21 +1425,21 @@ export class SessionManager {
 		this.unsettledPersistenceTasks++;
 		const task = this.persistenceQueue
 			.then(async () => {
-				if (this.persistenceError) throw this.persistenceError;
+				if (this.lostError) throw this.lostError;
 				try {
 					await write();
 				} catch (error) {
 					if (failureHandling === "propagate") throw error;
-					this.persistenceError ??= error instanceof Error ? error : new Error(String(error));
-					throw this.persistenceError;
+					// The write's entries are already indexed, so the manager no longer matches its log.
+					throw this._lose(error);
 				}
 			})
 			.finally(() => {
 				this.unsettledPersistenceTasks--;
 			});
 		// Keep the serialization lane fulfilled so later accepted work can observe
-		// the sticky error and stop without touching disk. The public watermark
-		// retains rejection for flush callers.
+		// the loss and stop without touching disk. The public watermark retains
+		// rejection for flush callers.
 		this.persistenceQueue = task.catch(() => {});
 		this.persistenceWatermark = task;
 		void task.catch(() => {});
@@ -1514,53 +1476,23 @@ export class SessionManager {
 		return sessionReference(this.sessionDir, this.storeId, this.sessionId, this.sessionGeneration);
 	}
 
-	getConversationAuthorityStatus(): SessionConversationAuthorityStatus {
-		return this.conversationAuthorityStatus;
+	/**
+	 * Record the first loss of this manager's log and resolve `lost`; later
+	 * calls return that first loss.
+	 */
+	private _lose(error: unknown, reason: ConversationLogLossReason = "storage"): ConversationLogLostError {
+		if (!this.lostError) {
+			this.lostError =
+				error instanceof ConversationLogLostError
+					? error
+					: new ConversationLogLostError(reason, error instanceof Error ? error.message : String(error), error);
+			this.lostSignal.resolve(this.lostError);
+		}
+		return this.lostError;
 	}
 
-	subscribeConversationAuthorityChanges(listener: SessionConversationAuthorityListener): () => void {
-		this.conversationAuthorityListeners.add(listener);
-		if (this.conversationAuthorityStatus.status === "reconciliation_required") {
-			try {
-				listener(this.conversationAuthorityStatus);
-			} catch {
-				// Authority loss is already committed. A projection observer cannot
-				// make this manager available again.
-			}
-		}
-		return () => {
-			this.conversationAuthorityListeners.delete(listener);
-		};
-	}
-
-	assertConversationAuthorityAvailable(): void {
-		if (this.conversationAuthorityStatus.status === "reconciliation_required") {
-			throw this.conversationAuthorityStatus.error;
-		}
-	}
-
-	/** Fail-stop this manager when a committed canonical result cannot be interpreted safely. */
-	retireConversationAuthority(cause: Error): SessionConversationStateUnavailableError {
-		return this._requireConversationReconciliation(cause);
-	}
-
-	private _requireConversationReconciliation(cause: Error): SessionConversationStateUnavailableError {
-		if (this.conversationAuthorityStatus.status === "reconciliation_required") {
-			return this.conversationAuthorityStatus.error;
-		}
-		const status = {
-			status: "reconciliation_required",
-			error: new SessionConversationStateUnavailableError({ cause }),
-		} as const;
-		this.conversationAuthorityStatus = status;
-		for (const listener of this.conversationAuthorityListeners) {
-			try {
-				listener(status);
-			} catch {
-				// Authority loss is sticky. Projection cleanup cannot roll it back.
-			}
-		}
-		return status.error;
+	private _assertNotLost(): void {
+		if (this.lostError) throw this.lostError;
 	}
 
 	private _storeProjection(): SessionStoreSessionProjection {
@@ -1579,11 +1511,17 @@ export class SessionManager {
 		};
 	}
 
+	/**
+	 * Commit one transaction at the committed head. Throws `SessionAtomicAppendError`
+	 * when it definitely did not commit, or the log's loss when its outcome cannot
+	 * be confirmed: a fence conflict, a missing session, or a worker failure whose
+	 * commit cannot be reconciled. A reconciled commit continues normally.
+	 */
 	private async _commitStorePayload(payload: SessionStoreTransactionPayload): Promise<void> {
 		if (!this.persist) return;
 		const currentLease = this.sessionStoreLease;
 		if (!currentLease || !this.storeId) {
-			throw new Error("Persisted session requires an initialized session store lease");
+			throw this._lose(new Error("Persisted session requires an initialized session store lease"));
 		}
 		const commitId = randomUUID();
 		const digest = digestSessionStoreTransactionPayload(payload);
@@ -1601,15 +1539,17 @@ export class SessionManager {
 		try {
 			const result = await store.applyTransaction(input);
 			if (result.status === "conflict") {
-				throw new AtomicAppendPersistenceFailure(
-					`Session ordinal changed from ${expectedOrdinal} to ${result.actualOrdinal}`,
-					"not_started",
-					"reconciliation_required",
+				// Another writer appended: this manager no longer holds the session's lock.
+				throw this._lose(
+					new ConversationLogLostError(
+						"fence_conflict",
+						`Session ordinal changed from ${expectedOrdinal} to ${result.actualOrdinal}`,
+					),
 				);
 			}
 			return;
 		} catch (error) {
-			if (error instanceof AtomicAppendPersistenceFailure) throw error;
+			if (error instanceof ConversationLogLostError) throw error;
 			let replacementLease: SQLiteSessionStoreLease | undefined;
 			let replacementInstalled = false;
 			try {
@@ -1630,23 +1570,26 @@ export class SessionManager {
 				if (reconciliation.status === "committed") {
 					const summary = await store.findSessionSummary(this.sessionId, this.sessionGeneration);
 					if (summary?.lastOrdinal !== reconciliation.evidence.afterOrdinal) {
-						throw new AtomicAppendPersistenceFailure(
-							"SQLite session transaction committed but authoritative session state has changed",
-							"committed",
-							"reconciliation_required",
-							{ cause: error },
+						throw this._lose(
+							new ConversationLogLostError(
+								"fence_conflict",
+								"SQLite session transaction committed but authoritative session state has changed",
+								error,
+							),
 						);
 					}
 					return;
 				}
 				const summary = await store.findSessionSummary(this.sessionId, this.sessionGeneration);
-				if (reconciliation.status === "not_found" && summary?.lastOrdinal === expectedOrdinal) {
-					throw new AtomicAppendPersistenceFailure(
-						"SQLite session transaction was rolled back",
-						"rolled_back",
-						"available",
-						{ cause: error },
+				if (reconciliation.status === "not_found" && !summary) {
+					throw this._lose(
+						new ConversationLogLostError("fence_conflict", `Session ${this.sessionId} no longer exists`, error),
 					);
+				}
+				if (reconciliation.status === "not_found" && summary?.lastOrdinal === expectedOrdinal) {
+					throw new SessionAtomicAppendError("SQLite session transaction was rolled back", "rolled_back", {
+						cause: error,
+					});
 				}
 			} catch (reconciliationError) {
 				let effectiveError: unknown = reconciliationError;
@@ -1660,19 +1603,22 @@ export class SessionManager {
 						);
 					}
 				}
-				if (effectiveError instanceof AtomicAppendPersistenceFailure) throw effectiveError;
-				throw new AtomicAppendPersistenceFailure(
-					"SQLite session transaction outcome could not be reconciled",
-					"uncertain",
-					"reconciliation_required",
-					{ cause: effectiveError },
+				if (
+					effectiveError instanceof ConversationLogLostError ||
+					effectiveError instanceof SessionAtomicAppendError
+				) {
+					throw effectiveError;
+				}
+				throw this._lose(
+					new ConversationLogLostError(
+						"uncertain_commit",
+						"SQLite session transaction outcome could not be reconciled",
+						effectiveError,
+					),
 				);
 			}
-			throw new AtomicAppendPersistenceFailure(
-				"SQLite session transaction outcome is ambiguous",
-				"uncertain",
-				"reconciliation_required",
-				{ cause: error },
+			throw this._lose(
+				new ConversationLogLostError("uncertain_commit", "SQLite session transaction outcome is ambiguous", error),
 			);
 		}
 	}
@@ -1685,12 +1631,7 @@ export class SessionManager {
 		}
 		const payload = this._storePayload([entry]);
 		this._enqueuePersistence(async () => {
-			try {
-				await this._commitStorePayload(payload);
-			} catch (error) {
-				this._requireConversationReconciliation(error instanceof Error ? error : new Error(String(error)));
-				throw error;
-			}
+			await this._commitStorePayload(payload);
 			this._publishCommittedEntry(entry);
 		});
 	}
@@ -1727,26 +1668,23 @@ export class SessionManager {
 		this._commitThenPublish(indexedEntry);
 	}
 
-	/** Release the atomic fence only after its projection and authority are final. */
+	/** Release the atomic fence only after its projection and outcome are final. */
 	private _finishAtomicAppend(): void {
 		this.atomicAppendInFlight = false;
 		const deferred = this.deferredSubagentSpawns;
 		if (!deferred) return;
 		this.deferredSubagentSpawns = undefined;
 		try {
-			this.assertConversationAuthorityAvailable();
-			if (this.persistenceError) throw this.persistenceError;
+			this._assertNotLost();
 			// These entries were validated and owned before close. Never stage them
 			// in the parent transaction or derive their parentId from its new leaf.
 			for (const entry of deferred.entries) this._appendAcceptedEntry(entry);
 		} catch (error) {
-			// A deferred admission must not disappear behind the synchronous API.
-			// Preserve fail-stop semantics and expose failure through flush/close.
-			const authorityError = this._requireConversationReconciliation(
-				error instanceof Error ? error : new Error(String(error)),
-			);
+			// A deferred admission must not disappear behind the synchronous API:
+			// the log is lost, and flush/close expose it.
+			const lost = this._lose(error);
 			this._enqueuePersistence(async () => {
-				throw authorityError.cause instanceof Error ? authorityError.cause : authorityError;
+				throw lost;
 			});
 		}
 		deferred.settle(this.persistenceWatermark);
@@ -1790,7 +1728,7 @@ export class SessionManager {
 
 	/** Issue an identity-authenticated raw projection guard for a later canonical command. */
 	issueCanonicalProjection(): SessionCanonicalProjection {
-		this.assertConversationAuthorityAvailable();
+		this._assertNotLost();
 		if (this.atomicAppendInFlight) {
 			throw new Error("Cannot issue a canonical projection while an atomic operation is in progress");
 		}
@@ -1878,7 +1816,6 @@ export class SessionManager {
 				appendedEntryIds = Object.freeze(this.fileEntries.slice(firstAppendedIndex).map((entry) => entry.id));
 				after = this._captureCanonicalProjection();
 			},
-			() => {},
 			() => {
 				before = this._captureCanonicalProjection();
 				const exactMatch =
@@ -1903,11 +1840,7 @@ export class SessionManager {
 	}
 
 	/** Stage synchronous append operations and publish them only after one SQLite transaction commits. */
-	private async appendAtomically(
-		append: () => void,
-		beforePublish: () => void,
-		beforeStage: () => void = () => {},
-	): Promise<void> {
+	private async appendAtomically(append: () => void, beforeStage: () => void = () => {}): Promise<void> {
 		this._assertPersistenceHealthy();
 		if (this.atomicAppendEntries || this.atomicAppendInFlight) {
 			throw new Error("Nested atomic session appends are not supported");
@@ -1935,12 +1868,9 @@ export class SessionManager {
 		} catch (error) {
 			this._finishAtomicAppend();
 			if (error instanceof SessionCanonicalConflictError || error instanceof SessionAtomicAppendError) throw error;
-			throw new SessionAtomicAppendError(
-				error instanceof Error ? error.message : String(error),
-				"not_started",
-				"available",
-				{ cause: error },
-			);
+			throw new SessionAtomicAppendError(error instanceof Error ? error.message : String(error), "not_started", {
+				cause: error,
+			});
 		}
 
 		const entries: CommittedSessionEntry[] = [];
@@ -1951,12 +1881,9 @@ export class SessionManager {
 			this.atomicAppendEntries = undefined;
 			restore();
 			this._finishAtomicAppend();
-			throw new SessionAtomicAppendError(
-				error instanceof Error ? error.message : String(error),
-				"rolled_back",
-				"available",
-				{ cause: error },
-			);
+			throw new SessionAtomicAppendError(error instanceof Error ? error.message : String(error), "rolled_back", {
+				cause: error,
+			});
 		}
 
 		const staged = {
@@ -1981,20 +1908,15 @@ export class SessionManager {
 				await this._enqueuePersistence(() => this._commitStorePayload(payload), "propagate");
 			}
 		} catch (error) {
-			const failure =
-				error instanceof AtomicAppendPersistenceFailure
-					? error
-					: new AtomicAppendPersistenceFailure(
-							error instanceof Error ? error.message : String(error),
-							"uncertain",
-							"reconciliation_required",
-							{ cause: error },
-						);
-			if (failure.effect === "uncertain") this.persistenceError ??= failure;
-			else this.persistenceWatermark = this.persistenceQueue;
-			if (failure.authority === "reconciliation_required") this._requireConversationReconciliation(failure);
+			if (error instanceof SessionAtomicAppendError) {
+				// Definitely not committed: the log is unchanged and stays writable.
+				this.persistenceWatermark = this.persistenceQueue;
+				this._finishAtomicAppend();
+				throw error;
+			}
+			const lost = this._lose(error);
 			this._finishAtomicAppend();
-			throw new SessionAtomicAppendError(failure.message, failure.effect, failure.authority, { cause: failure });
+			throw lost;
 		}
 
 		this.fileEntries = staged.fileEntries;
@@ -2002,23 +1924,12 @@ export class SessionManager {
 		this.derivedState = staged.derivedState;
 		this.committedOrdinal = this.nextOrdinal - 1;
 		try {
-			beforePublish();
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			const committedFailure = new SessionAtomicAppendError(message, "committed", "reconciliation_required", {
-				cause: error,
-			});
-			this._requireConversationReconciliation(committedFailure);
-			throw committedFailure;
-		} finally {
-			try {
-				for (const entry of entries) this._notifyEntryListeners(entry);
-				if (snapshot.derivedState.leafId !== staged.derivedState.leafId) {
-					this._notifyBranchListeners(snapshot.derivedState.leafId, staged.derivedState.leafId);
-				}
-			} finally {
-				this._finishAtomicAppend();
+			for (const entry of entries) this._notifyEntryListeners(entry);
+			if (snapshot.derivedState.leafId !== staged.derivedState.leafId) {
+				this._notifyBranchListeners(snapshot.derivedState.leafId, staged.derivedState.leafId);
 			}
+		} finally {
+			this._finishAtomicAppend();
 		}
 	}
 
@@ -2074,7 +1985,6 @@ export class SessionManager {
 				}
 				afterProjection = this._captureCanonicalProjection();
 			},
-			() => {},
 			() => {
 				beforeProjection = this._captureCanonicalProjection();
 			},
@@ -2155,7 +2065,6 @@ export class SessionManager {
 				}
 				afterProjection = this._captureCanonicalProjection();
 			},
-			() => {},
 			() => {
 				beforeProjection = this._captureCanonicalProjection();
 			},
@@ -2194,18 +2103,15 @@ export class SessionManager {
 	 */
 	async terminalizeDelivery(messages: readonly AgentMessage[], error: Error): Promise<void> {
 		const canonicalMessages = cloneCanonicalData([...messages], "Terminal delivery messages");
-		await this.appendAtomically(
-			() => {
-				const clientMessageIds = new Set(canonicalMessages.flatMap((message) => getClientMessageId(message) ?? []));
-				for (const clientMessageId of clientMessageIds) {
-					const record = this.getClientInput(clientMessageId);
-					if (record?.state === "accepted" || record?.state === "started") {
-						this.transitionClientInput(clientMessageId, "failed", error.message);
-					}
+		await this.appendAtomically(() => {
+			const clientMessageIds = new Set(canonicalMessages.flatMap((message) => getClientMessageId(message) ?? []));
+			for (const clientMessageId of clientMessageIds) {
+				const record = this.getClientInput(clientMessageId);
+				if (record?.state === "accepted" || record?.state === "started") {
+					this.transitionClientInput(clientMessageId, "failed", error.message);
 				}
-			},
-			() => {},
-		);
+			}
+		});
 	}
 
 	/** Verify that a delivery receipt was issued by this live manager instance. */
@@ -2237,18 +2143,13 @@ export class SessionManager {
 	}
 
 	private _assertPersistenceHealthy(allowReadOnly = false): void {
-		this.assertConversationAuthorityAvailable();
+		this._assertNotLost();
 		if (this.readOnly && !allowReadOnly) {
 			throw new Error(`Session ${this.sessionId} was opened read-only`);
 		}
 		if (this.persistenceClosed) {
 			throw new Error("Session persistence is closed");
 		}
-		if (!this.persistenceError) return;
-		throw new Error(
-			"Session persistence is fail-stopped after an uncertain write; reload the session before retrying",
-			{ cause: this.persistenceError },
-		);
 	}
 
 	/** Wait for the hidden or visible SQLite session row and all accepted mutations to be durable. */
@@ -2270,28 +2171,21 @@ export class SessionManager {
 		});
 	}
 
-	/** Seal persistence and classify only this manager's recorded reconciliation failure. */
-	drainPersistence(): Promise<SessionPersistenceDrainResult> {
-		if (this.persistenceDrainPromise) return this.persistenceDrainPromise;
+	/**
+	 * Seal a persisted manager against later writes, wait for every accepted
+	 * write, and release its store lease and lock. Rejects when a write failed,
+	 * except for the loss of the log, which `lost` already reports.
+	 */
+	closePersistence(): Promise<void> {
+		if (this.persistenceClosePromise) return this.persistenceClosePromise;
 		if (this.persist) this.persistenceClosed = true;
 		const watermark = this.flush();
-		this.persistenceDrainPromise = (async () => {
-			let result: SessionPersistenceDrainResult | undefined;
+		this.persistenceClosePromise = (async () => {
 			let persistenceError: unknown;
 			try {
 				await watermark;
-				const authority = this.conversationAuthorityStatus;
-				result =
-					authority.status === "reconciliation_required"
-						? { status: "reconciliation_required", error: authority.error }
-						: { status: "closed" };
 			} catch (error) {
-				const authority = this.conversationAuthorityStatus;
-				if (authority.status === "reconciliation_required" && authority.error.cause === error) {
-					result = { status: "reconciliation_required", error: authority.error };
-				} else {
-					persistenceError = error;
-				}
+				if (!this.lostError) persistenceError = error;
 			}
 
 			const lease = this.sessionStoreLease;
@@ -2306,43 +2200,25 @@ export class SessionManager {
 				this._releaseConversationLock();
 			}
 			if (releaseError !== undefined) {
-				const authoritativeError =
-					persistenceError ??
-					(result?.status === "reconciliation_required"
-						? result.error.cause instanceof Error
-							? result.error.cause
-							: result.error
-						: undefined);
-				if (authoritativeError !== undefined) {
+				if (persistenceError !== undefined) {
 					throw new AggregateError(
-						[authoritativeError, releaseError],
+						[persistenceError, releaseError],
 						"Session persistence failed and its store lease could not be released",
 					);
 				}
 				throw releaseError;
 			}
 			if (persistenceError !== undefined) throw persistenceError;
-			return result ?? { status: "closed" };
 		})();
-		return this.persistenceDrainPromise;
-	}
-
-	/** Seal a persisted manager against later writes and reject on every failed watermark. */
-	async closePersistence(): Promise<void> {
-		const result = await this.drainPersistence();
-		if (result.status === "reconciliation_required") {
-			throw result.error.cause instanceof Error ? result.error.cause : result.error;
-		}
+		return this.persistenceClosePromise;
 	}
 
 	getClientInput(clientMessageId: string): ClientInputRecord | undefined {
-		this.assertConversationAuthorityAvailable();
 		const record = this.clientInputsById.get(clientMessageId);
 		return record ? cloneClientInputRecord(record) : undefined;
 	}
 
 	getClientInputRecoveryPlan(): ClientInputRecoveryPlan {
-		this.assertConversationAuthorityAvailable();
 		const commitOrdinal = (record: ClientInputRecord): number => {
 			const admissionEntry = record.queuedEntryId
 				? this.byId.get(record.queuedEntryId)
@@ -2374,17 +2250,14 @@ export class SessionManager {
 			.filter((record) => record.state === "accepted" || record.state === "started")
 			.map((record) => record.clientMessageId);
 		if (ids.length === 0) return [];
-		await this.appendAtomically(
-			() => {
-				for (const id of ids)
-					this.transitionClientInput(
-						id,
-						"failed",
-						"Review discussion interrupted; submit a new prompt to retry explicitly.",
-					);
-			},
-			() => {},
-		);
+		await this.appendAtomically(() => {
+			for (const id of ids)
+				this.transitionClientInput(
+					id,
+					"failed",
+					"Review discussion interrupted; submit a new prompt to retry explicitly.",
+				);
+		});
 		return ids;
 	}
 
@@ -2505,19 +2378,16 @@ export class SessionManager {
 
 	/** The log position: ordinal of the newest committed entry. */
 	getCommittedOrdinal(): number {
-		this.assertConversationAuthorityAvailable();
 		return this.committedOrdinal;
 	}
 
 	/** Ordinal of the newest indexed entry, including ordinary appends whose commit is still pending. */
 	getIndexedOrdinal(): number {
-		this.assertConversationAuthorityAvailable();
 		return this.nextOrdinal - 1;
 	}
 
 	/** Read committed entries with ordinal > afterOrdinal in ordinal order, at most `limit` of them. */
 	async readEntries(afterOrdinal: number, limit: number): Promise<SessionEntryPage> {
-		this.assertConversationAuthorityAvailable();
 		if (!Number.isSafeInteger(afterOrdinal) || afterOrdinal < 0) {
 			throw new Error("afterOrdinal must be a non-negative safe integer");
 		}
@@ -2552,7 +2422,6 @@ export class SessionManager {
 	 * intentionally excluded.
 	 */
 	subscribeEntries(listener: SessionEntryListener): () => void {
-		this.assertConversationAuthorityAvailable();
 		this.entryListeners.add(listener);
 		return () => {
 			this.entryListeners.delete(listener);
@@ -2566,7 +2435,6 @@ export class SessionManager {
 	 * AgentSession's conversation generation.
 	 */
 	subscribeBranchChanges(listener: SessionBranchListener): () => void {
-		this.assertConversationAuthorityAvailable();
 		this.branchListeners.add(listener);
 		return () => {
 			this.branchListeners.delete(listener);
@@ -2574,7 +2442,6 @@ export class SessionManager {
 	}
 
 	private _setBranchLeaf(nextLeafId: string | null): void {
-		this.assertConversationAuthorityAvailable();
 		if (this.atomicAppendInFlight && !this.atomicAppendEntries) {
 			throw new Error("Cannot change session branches during an atomic append");
 		}
@@ -2606,7 +2473,6 @@ export class SessionManager {
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
 	appendMessage(message: Message | ClientUserMessage | CustomMessage | BashExecutionMessage): string {
-		this.assertConversationAuthorityAvailable();
 		if ("clientMessageId" in message) {
 			requireStartedClientInputReceipt(this.clientInputsById, message.clientMessageId);
 		}
@@ -2775,7 +2641,6 @@ export class SessionManager {
 	}
 
 	getPrReviewBinding(): PrReviewPlacement | undefined {
-		this.assertConversationAuthorityAvailable();
 		const binding = this.derivedState.prReviewBinding;
 		return binding === undefined ? undefined : cloneCanonicalData(binding, "Session PR review binding");
 	}
@@ -2787,13 +2652,11 @@ export class SessionManager {
 
 	/** Get the incrementally maintained lifetime message summary for session listing. */
 	getSessionEntrySummary(): SessionEntrySummary {
-		this.assertConversationAuthorityAvailable();
 		return sessionEntrySummary(this.derivedState);
 	}
 
 	/** Get the current session name from the latest session_info entry, if any. */
 	getSessionName(): string | undefined {
-		this.assertConversationAuthorityAvailable();
 		return this.derivedState.name;
 	}
 
@@ -2831,7 +2694,6 @@ export class SessionManager {
 	// =========================================================================
 
 	getLeafId(): string | null {
-		this.assertConversationAuthorityAvailable();
 		return this.leafId;
 	}
 
@@ -2841,7 +2703,6 @@ export class SessionManager {
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
-		this.assertConversationAuthorityAvailable();
 		const entry = this.byId.get(id);
 		return entry && !isHostOnlySessionEntry(entry) ? entry : undefined;
 	}
@@ -2940,7 +2801,6 @@ export class SessionManager {
 
 	/** All durable spawn edges in file order, including edges recorded on other branches. */
 	getSubagentSpawnEntries(): SubagentSpawnEntry[] {
-		this.assertConversationAuthorityAvailable();
 		return [...this.derivedState.subagentSpawns];
 	}
 
@@ -2971,7 +2831,6 @@ export class SessionManager {
 	 * whether more history exists, then reverses only the bounded result.
 	 */
 	getBranchWindow(options: SessionBranchWindowOptions): SessionBranchWindow | undefined {
-		this.assertConversationAuthorityAvailable();
 		if (!Number.isSafeInteger(options.maxEntries) || options.maxEntries <= 0) {
 			throw new Error("maxEntries must be a positive safe integer");
 		}
@@ -3036,7 +2895,6 @@ export class SessionManager {
 	 * Get session header.
 	 */
 	getHeader(): SessionHeader | null {
-		this.assertConversationAuthorityAvailable();
 		const h = this.fileEntries.find((e) => e.type === "session");
 		return h ? (h as SessionHeader) : null;
 	}
@@ -3048,7 +2906,6 @@ export class SessionManager {
 	 * change the leaf pointer. Entries cannot be modified or deleted.
 	 */
 	getEntries(): SessionEntry[] {
-		this.assertConversationAuthorityAvailable();
 		return this.fileEntries.filter(
 			(entry): entry is SessionEntry => entry.type !== "session" && !isHostOnlySessionEntry(entry),
 		);
@@ -3193,25 +3050,22 @@ export class SessionManager {
 			...(origin === undefined ? {} : { origin }),
 		});
 		await this.persistenceWatermark;
-		await this.appendAtomically(
-			() => {
-				for (const entry of retained) this._appendEntry(entry);
-				let labelParentId = retained.at(-1)?.id ?? null;
-				for (const { targetId, label, timestamp } of labels) {
-					const labelEntry: LabelEntry = {
-						type: "label",
-						id: generateId(this.byId),
-						parentId: labelParentId,
-						timestamp,
-						targetId,
-						label,
-					};
-					this._appendEntry(labelEntry);
-					labelParentId = labelEntry.id;
-				}
-			},
-			() => {},
-		);
+		await this.appendAtomically(() => {
+			for (const entry of retained) this._appendEntry(entry);
+			let labelParentId = retained.at(-1)?.id ?? null;
+			for (const { targetId, label, timestamp } of labels) {
+				const labelEntry: LabelEntry = {
+					type: "label",
+					id: generateId(this.byId),
+					parentId: labelParentId,
+					timestamp,
+					targetId,
+					label,
+				};
+				this._appendEntry(labelEntry);
+				labelParentId = labelEntry.id;
+			}
+		});
 		return this.getSessionRef();
 	}
 
@@ -3468,16 +3322,13 @@ export class SessionManager {
 			...(header.origin === undefined ? {} : { origin: header.origin }),
 		};
 		const stage = async (manager: SessionManager): Promise<void> => {
-			await manager.appendAtomically(
-				() => {
-					for (const entry of publicEntries) manager._appendEntry(entry);
-					if (finalLeafId !== manager.getLeafId()) {
-						if (finalLeafId === null) manager.resetLeaf();
-						else manager.branch(finalLeafId);
-					}
-				},
-				() => {},
-			);
+			await manager.appendAtomically(() => {
+				for (const entry of publicEntries) manager._appendEntry(entry);
+				if (finalLeafId !== manager.getLeafId()) {
+					if (finalLeafId === null) manager.resetLeaf();
+					else manager.branch(finalLeafId);
+				}
+			});
 		};
 
 		const validationManager = SessionManager.inMemory(cwd);
@@ -3543,14 +3394,11 @@ export class SessionManager {
 					delete entry.ordinal;
 					return entry;
 				});
-			await target.appendAtomically(
-				() => {
-					for (const entry of entries) target!._appendEntry(entry);
-					if (sourceLeafId === null) target!.resetLeaf();
-					else if (target!.getLeafId() !== sourceLeafId) target!.branch(sourceLeafId);
-				},
-				() => {},
-			);
+			await target.appendAtomically(() => {
+				for (const entry of entries) target!._appendEntry(entry);
+				if (sourceLeafId === null) target!.resetLeaf();
+				else if (target!.getLeafId() !== sourceLeafId) target!.branch(sourceLeafId);
+			});
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
 			if (target) {

@@ -85,6 +85,7 @@ describe("regression #353: active quit protection and safe diagnostics", () => {
 			session: harness.session,
 			setBeforeSessionInvalidate: () => undefined,
 			setRebindSession: () => undefined,
+			lost: new Promise<Error>(() => {}),
 		} as unknown as AgentSessionRuntime;
 		mode = new InteractiveMode(runtimeHost);
 		control = mode as unknown as ModeControl;

@@ -59,6 +59,7 @@ describe("review custom-message sessions", () => {
 		const runtimeHost = new AgentSessionRuntime(
 			{
 				sessionManager,
+				lost: new Promise<Error>(() => {}),
 				get sessionId() {
 					return sessionManager.getSessionId();
 				},

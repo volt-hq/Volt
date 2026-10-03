@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, type FauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
@@ -12,12 +13,7 @@ import {
 } from "../../../src/core/agent-session-runtime.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { parsePersistedSessionEntry } from "../../../src/core/session-entry-codec.ts";
-import {
-	SessionConversationStateUnavailableError,
-	type SessionEntry,
-	SessionManager,
-	type SessionReference,
-} from "../../../src/core/session-manager.ts";
+import { type SessionEntry, SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import {
 	acquireSharedSQLiteSessionStore,
 	type SessionStoreTransactionResult,
@@ -181,7 +177,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 				.pop()!
 				.cleanupAsync()
 				.catch(() => {});
-		while (managers.length > 0) await managers.pop()!.drainPersistence();
+		while (managers.length > 0) await managers.pop()!.closePersistence();
 		vi.restoreAllMocks();
 		while (storeLeases.length > 0) await storeLeases.pop()!.release();
 		while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
@@ -257,13 +253,11 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		return { runtime, faux };
 	}
 
-	async function makeRuntimeAuthorityUncertain(
-		runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>,
-	): Promise<void> {
+	async function loseRuntimeLog(runtime: Awaited<ReturnType<typeof createAgentSessionRuntime>>): Promise<void> {
 		await runtime.session.setAgentMode("plan");
 		const draft = runtime.session.updatePlan({
 			title: "Runtime reconciliation",
-			summary: "Replace the retired manager generation.",
+			summary: "End the runtime whose commit outcome is unknown.",
 			steps: [{ text: "Reopen authoritative SQLite state" }],
 		});
 		runtime.session.submitPlan({
@@ -273,13 +267,12 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			summary: draft.summary!,
 		});
 		await runtime.session.sessionManager.flush();
-		await runtime.session.steer("retire this runtime", undefined, "issue-217-runtime-replacement");
+		await runtime.session.steer("end this runtime", undefined, "issue-217-runtime-replacement");
 		await faultNextPlanningTransaction(runtime.session.sessionManager, "uncertain_committed");
 		await expect(createAgentSessionTestControl(runtime.session).continue()).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: { outcome: "terminally_failed", phase: "settlement" },
 		});
-		expect(runtime.session.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 	}
 
 	async function setup(options: HarnessOptions = {}): Promise<{
@@ -300,48 +293,36 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		};
 	}
 
-	it("replaces a genuinely reconciliation-required runtime with cleanup but no before-switch hook", async () => {
+	it("ends a runtime whose commit outcome cannot be resolved", async () => {
 		const replacementHooks: string[] = [];
 		const { runtime } = await setupRuntime((event) => {
 			replacementHooks.push(event.type);
 		});
-		await makeRuntimeAuthorityUncertain(runtime);
-		const previousSession = runtime.session;
-		expect(() =>
-			runtime.conversationProjectionFeed.attach({
-				write: () => {},
-				buildSnapshot: () => {
-					throw new Error("must not snapshot stale authority");
-				},
-			}),
-		).toThrow(SessionConversationStateUnavailableError);
+		await loseRuntimeLog(runtime);
 
-		await expect(runtime.newSession()).resolves.toEqual({ cancelled: false, seeded: false });
-
-		expect(runtime.session).not.toBe(previousSession);
-		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
+		await expect(runtime.lost).resolves.toMatchObject({
+			reason: "uncertain_commit",
+			message: "SQLite session transaction outcome could not be reconciled",
+		});
+		// The host disposes the runtime; the loss is not reported again.
+		await expect(runtime.dispose()).resolves.toBeUndefined();
 		expect(replacementHooks).toEqual(["session_shutdown"]);
 	});
 
-	it("refreshes a reconciliation-required runtime from the same stable session reference", async () => {
+	it("does not reload a lost session from the store", async () => {
 		const { runtime } = await setupRuntime();
-		await makeRuntimeAuthorityUncertain(runtime);
+		await loseRuntimeLog(runtime);
+		await runtime.lost;
 		const previousSession = runtime.session;
-		const previousSessionRef = previousSession.sessionRef;
 		const previousBranchEpoch = runtime.conversationProjectionFeed.branchEpoch;
-		const prepareReplacement = vi.fn(async () => undefined);
-		runtime.setPrepareSessionReplacement(prepareReplacement);
 
 		await expect(runtime.switchSessionById(previousSession.sessionId)).resolves.toEqual({
 			cancelled: false,
 			seeded: false,
 		});
 
-		expect(runtime.session).not.toBe(previousSession);
-		expect(runtime.session.sessionRef).toEqual(previousSessionRef);
-		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
-		expect(runtime.conversationProjectionFeed.branchEpoch).not.toBe(previousBranchEpoch);
-		expect(prepareReplacement).not.toHaveBeenCalled();
+		expect(runtime.session).toBe(previousSession);
+		expect(runtime.conversationProjectionFeed.branchEpoch).toBe(previousBranchEpoch);
 	});
 
 	it("rejects a stale manager at the ordinal fence without changing the committed winner", async () => {
@@ -349,36 +330,33 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		tempDirs.push(tempDir);
 		const current = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
 		current.appendPlanningState({ mode: "build", plan: null });
-		await current.flush();
-		const sessionRef = current.getSessionRef()!;
-		// Simulates a lost lock: a second manager opens the session behind the current one.
-		loseConversationLock(current);
-		const stale = await own(SessionManager.open(sessionRef, tempDir));
-
 		current.appendPlanningState({ mode: "plan", plan: null });
 		await current.flush();
+		const sessionRef = current.getSessionRef()!;
 		const store = await trackedStore(sessionRef.sessionDirectory);
 		const winner = await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration);
+		await loseConversationLock(current);
 
-		await expect(commitPlanningState(stale, "build")).rejects.toMatchObject({
-			effect: "not_started",
-			authority: "reconciliation_required",
+		const commit = commitPlanningState(current, "build");
+		await expect(commit).rejects.toBeInstanceOf(ConversationLogLostError);
+		await expect(commit).rejects.toMatchObject({
+			reason: "fence_conflict",
 			message: expect.stringMatching(/Session ordinal changed from \d+ to \d+/),
 		});
 
 		expect(await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration)).toMatchObject({
 			lastOrdinal: winner?.lastOrdinal,
 		});
-		expect(stale.getConversationAuthorityStatus().status).toBe("reconciliation_required");
-		expect(() => stale.getEntries()).toThrow(SessionConversationStateUnavailableError);
-		await expect(stale.drainPersistence()).resolves.toMatchObject({ status: "reconciliation_required" });
+		await expect(current.lost).resolves.toMatchObject({ reason: "fence_conflict" });
+		expect(() => current.appendPlanningState({ mode: "build", plan: null })).toThrow(ConversationLogLostError);
+		await expect(current.closePersistence()).resolves.toBeUndefined();
 		expect((await own(SessionManager.open(sessionRef, tempDir))).buildSessionContext().planning).toEqual({
 			mode: "plan",
 			plan: null,
 		});
 	});
 
-	it("keeps flush and drain pending until an atomic transaction settles", async () => {
+	it("keeps flush and close pending until an atomic transaction settles", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-217-atomic-drain-"));
 		tempDirs.push(tempDir);
 		const manager = await own(SessionManager.create(tempDir, join(tempDir, "sessions")));
@@ -405,7 +383,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		const committing = commitPlanningState(manager, "plan");
 		await transactionStarted.promise;
 		const flushing = manager.flush();
-		const draining = manager.drainPersistence();
+		const draining = manager.closePersistence();
 		let flushSettled = false;
 		let drainSettled = false;
 		void flushing.then(
@@ -433,7 +411,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			await expect(Promise.all([committing, flushing, draining])).resolves.toEqual([
 				undefined,
 				undefined,
-				{ status: "closed" },
+				undefined,
 			]);
 		} finally {
 			releaseTransaction.resolve();
@@ -542,7 +520,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
-	it("retires a reconciled manager whose committed evidence trails a descendant", async () => {
+	it("ends a session whose reconciled commit trails a descendant", async () => {
 		const { harness, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		const proofStarted = deferred();
@@ -571,23 +549,26 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 				checkpoints: baseline.checkpoints + 1,
 				userTexts: ["fence the stale manager"],
 			};
-			// Simulates a lost lock: a descendant manager writes behind the harness.
-			loseConversationLock(harness.sessionManager);
-			const descendant = await own(SessionManager.open(sessionRef));
-			expect(snapshotEntries(descendant.getBranch())).toEqual(authoritativeAfterCommit);
-			const descendantId = descendant.appendSessionInfo("descendant manager state");
-			await descendant.flush();
+			// The commit is found, but the log has moved past it: another writer appended.
+			const store = await trackedStore(sessionRef.sessionDirectory);
+			const findSessionSummary = store.findSessionSummary.bind(store);
+			const summarySpy = vi
+				.spyOn(store, "findSessionSummary")
+				.mockImplementation(async (sessionId, sessionGeneration) => {
+					const summary = await findSessionSummary(sessionId, sessionGeneration);
+					return summary && { ...summary, lastOrdinal: summary.lastOrdinal + 1 };
+				});
 
 			releaseProof.resolve();
 			await expect(prompting).rejects.toMatchObject({
-				effect: "committed",
-				authority: "reconciliation_required",
+				reason: "fence_conflict",
+				message: "SQLite session transaction committed but authoritative session state has changed",
 			});
+			summarySpy.mockRestore();
 
 			expect(evidence.applyResult).toMatchObject({ status: "committed" });
 			expect(evidence.reconcileCalls).toBe(1);
-			expect(harness.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
-			expect(() => harness.sessionManager.getEntries()).toThrow(SessionConversationStateUnavailableError);
+			await expect(harness.session.lost).resolves.toBeInstanceOf(ConversationLogLostError);
 			expect(harness.eventsOfType("planning_state_changed")).toHaveLength(planningEventsBefore);
 			expect(harness.eventsOfType("delivery_start")).toHaveLength(deliveryEventsBefore);
 			expect(
@@ -598,11 +579,6 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 
 			const reopened = await own(SessionManager.openReadOnly(sessionRef));
 			expect(snapshotEntries(reopened.getBranch())).toEqual(authoritativeAfterCommit);
-			expect(reopened.getEntry(descendantId)).toMatchObject({
-				type: "session_info",
-				name: "descendant manager state",
-			});
-			expect(reopened.getSessionName()).toBe("descendant manager state");
 			expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "completed" });
 		} finally {
 			releaseProof.resolve();
@@ -617,12 +593,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		await harness.session.steer("recover from the authoritative revision", undefined, clientMessageId);
 		await harness.sessionManager.flush();
 
-		// Simulates a lost lock: a newer manager generation commits behind the harness.
-		loseConversationLock(harness.sessionManager);
-		const current = await own(SessionManager.open(sessionRef));
-		current.appendSessionInfo("newer manager generation");
-		await current.flush();
-		await current.closePersistence();
+		await loseConversationLock(harness.sessionManager);
 		const store = await trackedStore(sessionRef.sessionDirectory);
 		const winnerOrdinal = (await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))
 			?.lastOrdinal;
@@ -632,12 +603,15 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			failure: { outcome: "terminally_failed", phase: "settlement" },
 		});
 
-		expect(harness.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+		await expect(harness.session.lost).resolves.toMatchObject({ reason: "fence_conflict" });
 		expect((await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))?.lastOrdinal).toBe(
 			winnerOrdinal,
 		);
 		expect(harness.control.hasPendingPrompt()).toBe(false);
 		expect(harness.getPendingResponseCount()).toBe(1);
+		// The host ends the lost session, which releases its lock.
+		harness.session.dispose();
+		await harness.session.waitForClosed();
 
 		const reopened = await own(SessionManager.open(sessionRef));
 		expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
@@ -698,24 +672,20 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 				source: "rpc",
 				preflightResult: (result) => preflight.push(result),
 			}),
-		).rejects.toBeInstanceOf(SessionConversationStateUnavailableError);
-		await expect(harness.session.steer("must not queue")).rejects.toBeInstanceOf(
-			SessionConversationStateUnavailableError,
-		);
-		await expect(harness.session.followUp("must not queue")).rejects.toBeInstanceOf(
-			SessionConversationStateUnavailableError,
-		);
+		).rejects.toBeInstanceOf(ConversationLogLostError);
+		await expect(harness.session.steer("must not queue")).rejects.toBeInstanceOf(ConversationLogLostError);
+		await expect(harness.session.followUp("must not queue")).rejects.toBeInstanceOf(ConversationLogLostError);
 		await expect(
 			harness.session.executeBash("must-not-run", undefined, { operations: bashOperations }),
-		).rejects.toBeInstanceOf(SessionConversationStateUnavailableError);
-		expect(() => harness.session.setAgentMode("build")).toThrow(SessionConversationStateUnavailableError);
+		).rejects.toBeInstanceOf(ConversationLogLostError);
+		expect(() => harness.session.setAgentMode("build")).toThrow(ConversationLogLostError);
 		expect(() =>
 			harness.session.updatePlan({
 				title: "must not update",
 				summary: "must not update",
 				steps: [{ text: "must not update" }],
 			}),
-		).toThrow(SessionConversationStateUnavailableError);
+		).toThrow(ConversationLogLostError);
 
 		expect(preflight).toEqual([]);
 		expect(inputHookCalls).toBe(0);
@@ -734,7 +704,8 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		});
 		expect(harness.control.hasQueuedMessages()).toBe(false);
 		harness.session.dispose();
-		await expect(harness.session.waitForClosed()).rejects.toThrow("outcome could not be reconciled");
+		// The loss was reported through `lost`; closing does not report it again.
+		await expect(harness.session.waitForClosed()).resolves.toBeUndefined();
 		expect(mcpDispose).toHaveBeenCalledOnce();
 	});
 
@@ -764,7 +735,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			expect(harness.eventsOfType("delivery_start")).toHaveLength(deliveryEventsBefore);
 			expect(harness.eventsOfType("queue_update")).toHaveLength(queueEventsBefore);
 			expect(harness.getPendingResponseCount()).toBe(1);
-			expect(harness.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+			await expect(harness.sessionManager.lost).resolves.toMatchObject({ reason: "uncertain_commit" });
 			expect(evidence.reconcileCalls).toBe(1);
 			const store = await trackedStore(sessionRef.sessionDirectory);
 			const summary = await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration);
@@ -776,11 +747,8 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			expect(evidence.applyResult).toEqual(
 				authoritativeOutcome === "committed" ? expect.objectContaining({ status: "committed" }) : undefined,
 			);
-			expect(() => harness.sessionManager.getEntries()).toThrow(SessionConversationStateUnavailableError);
 			expect(harness.session.sessionRef).toEqual(sessionRef);
-			await expect(harness.sessionManager.drainPersistence()).resolves.toMatchObject({
-				status: "reconciliation_required",
-			});
+			await expect(harness.sessionManager.closePersistence()).resolves.toBeUndefined();
 
 			const reopened = await own(SessionManager.open(sessionRef));
 			const replacement = await createHarness({ sessionManager: reopened });

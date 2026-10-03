@@ -38,7 +38,6 @@ export async function readPrReviewBinding(
 	if (!ref) return undefined;
 	const cwd = manager.getCwd();
 	const assertCurrent = (): void => {
-		manager.assertConversationAuthorityAvailable();
 		if (!isDeepStrictEqual(ref, manager.getSessionRef()) || cwd !== manager.getCwd()) {
 			throw new ReviewSourceUnavailableError("The review conversation changed during lookup.");
 		}

@@ -77,6 +77,7 @@ describe("regression #330: ready plans are an explicit approval checkpoint", () 
 			setBeforeSessionInvalidate: () => undefined,
 			setRebindSession: () => undefined,
 			executePlan,
+			lost: new Promise<Error>(() => {}),
 		} as unknown as AgentSessionRuntime;
 		const mode = new InteractiveMode(runtimeHost);
 		const control = mode as unknown as ModeControl;

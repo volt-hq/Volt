@@ -111,7 +111,7 @@ export type { AppKeybinding, KeybindingsManager } from "../keybindings.ts";
 
 /**
  * Rejection of `ctx.ui.custom()` when Volt removes the component before it calls `done()`,
- * for example when the session is replaced, reloaded, or loses conversation authority.
+ * for example when the session is replaced, reloaded, or ends.
  */
 export class ExtensionUIDismissedError extends Error {
 	constructor() {
@@ -375,9 +375,10 @@ export interface ExtensionContext {
  */
 export interface ExtensionCommandContext extends ExtensionContext {
 	/**
-	 * Aborted when this command's session loses conversation authority or is disposed
-	 * (including replacement by newSession, fork, switchSession, or a reload from the store).
-	 * Unlike event-handler contexts, it is always defined and is not the agent run's signal.
+	 * Aborted when this command's session ends: it loses its log (a write could not be
+	 * confirmed as saved) or is disposed, including replacement by newSession, fork, or
+	 * switchSession. Unlike event-handler contexts, it is always defined and is not the agent
+	 * run's signal.
 	 */
 	signal: AbortSignal;
 

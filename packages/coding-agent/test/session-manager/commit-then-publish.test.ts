@@ -98,7 +98,8 @@ describe("SessionManager commit-then-publish", () => {
 			manager.appendCustomMessageEntry("test", "queued behind the failure", true);
 			await expect(manager.flush()).rejects.toThrow("rolled back");
 			expect(log).toEqual([]);
-			expect(manager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+			// The rolled-back entry is already indexed, so the manager no longer matches its log.
+			await expect(manager.lost).resolves.toMatchObject({ reason: "storage" });
 		} finally {
 			applySpy.mockRestore();
 			await lease.release();

@@ -1,7 +1,6 @@
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	type AgentSessionRuntime,
@@ -20,10 +19,10 @@ import type {
 	ExtensionFactory,
 	ExtensionUIContext,
 } from "../../../src/index.ts";
-import { loseConversationLock } from "../../lost-conversation-lock.ts";
-import { createHarness, getMessageText } from "../harness.ts";
+import { loseLog } from "../../lost-conversation-lock.ts";
+import { createHarness } from "../harness.ts";
 
-describe("regression #527: extension cleanup after conversation authority loss", () => {
+describe("regression #527: extension cleanup when a session ends", () => {
 	const cleanups: Array<() => Promise<void>> = [];
 
 	afterEach(async () => {
@@ -112,86 +111,33 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		return { runtime, harness, lifecycle, resources, errors, shutdown, eventBus };
 	}
 
-	async function conflict(
-		runtime: AgentSessionRuntime,
-		write: () => void = () => runtime.session.sessionManager.appendCustomEntry("stale-write", {}),
-	) {
-		const manager = runtime.session.sessionManager;
-		const ref = manager.getSessionRef();
-		if (!ref) throw new Error("Expected a persisted session");
-		// Simulate a lost lock: a second writer appends, and the stale write fails the ordinal fence.
-		loseConversationLock(manager);
-		const other = await SessionManager.open(ref);
-		try {
-			other.appendMessage({ role: "user", content: "authoritative input", timestamp: Date.now() });
-			await other.flush();
-		} finally {
-			await other.closePersistence();
-		}
-		write();
-		await expect(manager.flush()).rejects.toThrow("Session ordinal changed");
-		expect(manager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
-		return ref;
+	/** The session's lock is lost and its next commit finds out: the runtime ends. */
+	async function loseRuntimeLog(runtime: AgentSessionRuntime): Promise<Error> {
+		const lost = await loseLog(runtime.session.sessionManager);
+		await expect(runtime.lost).resolves.toBe(lost);
+		return lost;
 	}
 
-	it("cleans the conflicted instance before a switch and starts a fresh one", async () => {
-		const { runtime, harness, lifecycle, resources } = await createRuntimeForTest();
-		const oldSession = runtime.session;
-		const ref = await conflict(runtime);
-		await runtime.switchSession(ref);
+	it("cleans up once when the host disposes a runtime whose session lost its log", async () => {
+		const { runtime, lifecycle, resources, errors, shutdown } = await createRuntimeForTest();
+		const lostSession = runtime.session;
+		await loseRuntimeLog(runtime);
 
-		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume"]);
-		expect(resources.map((resource) => resource.signal.aborted)).toEqual([true, false]);
-		expect(runtime.session).not.toBe(oldSession);
-		expect(runtime.session.messages.map(getMessageText)).toEqual(["authoritative input"]);
-		harness.setResponses([fauxAssistantMessage("new reply")]);
-		await runtime.session.prompt("new input");
-		await runtime.dispose();
-		await runtime.dispose();
-		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume", "2:shutdown:quit"]);
-		expect(resources.every((resource) => resource.signal.aborted)).toBe(true);
-	});
-
-	it("cleans up once on quit while preserving the original persistence failure", async () => {
-		const { runtime, lifecycle, resources } = await createRuntimeForTest();
-		await conflict(runtime);
 		const disposal = runtime.dispose();
 		expect(runtime.dispose()).toBe(disposal);
-		await expect(disposal).rejects.toThrow("Session ordinal changed");
+		// The loss was reported through `lost`; disposal does not report it again.
+		await expect(disposal).resolves.toBeUndefined();
 		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:quit"]);
-		expect(resources[0].signal.aborted).toBe(true);
+		expect(resources.map((resource) => resource.signal.aborted)).toEqual([true]);
+		expect(runtime.session).toBe(lostSession);
+		expect(errors).toEqual([]);
+		expect(shutdown).not.toHaveBeenCalled();
 	});
 
-	it("revokes captured APIs before cleanup and keeps detached cleanup continuations fenced", async () => {
+	it("aborts command signals with the loss and rejects session writes until the runtime is disposed", async () => {
 		let oldVolt: ExtensionAPI | undefined;
 		let oldCommand: ExtensionCommandContext | undefined;
-		let shutdownContext: ExtensionContext | undefined;
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const lateRelease = Promise.withResolvers<void>();
-		let lateWork: Promise<unknown[]> | undefined;
-		const rejected = async (operation: () => unknown): Promise<unknown> => {
-			try {
-				await operation();
-				return undefined;
-			} catch (error) {
-				return error;
-			}
-		};
-		const attempts = () =>
-			Promise.all([
-				rejected(() => oldVolt!.appendEntry("forbidden", {})),
-				rejected(() => oldVolt!.sendUserMessage("forbidden")),
-				rejected(() => oldVolt!.setSessionName("forbidden")),
-				rejected(() => oldVolt!.registerProvider("forbidden", { baseUrl: "https://example.invalid" })),
-				rejected(() => oldVolt!.events.emit("forbidden", {})),
-				rejected(() => oldVolt!.events.on("forbidden", () => {})),
-				rejected(() => oldCommand!.newSession()),
-				rejected(() => oldCommand!.reload()),
-				rejected(() => oldCommand!.shutdown()),
-				rejected(() => shutdownContext!.compact()),
-			]);
-		const { runtime, harness, lifecycle, errors, shutdown } = await createRuntimeForTest((volt, instance) => {
+		const { runtime, harness, errors } = await createRuntimeForTest((volt, instance) => {
 			if (instance !== 1) return;
 			oldVolt = volt;
 			volt.registerCommand("capture", {
@@ -199,45 +145,96 @@ describe("regression #527: extension cleanup after conversation authority loss",
 					oldCommand = ctx;
 				},
 			});
-			volt.on("session_shutdown", async (_event, ctx) => {
-				shutdownContext = ctx;
-				lateWork = lateRelease.promise.then(attempts);
+		});
+		await runtime.session.prompt("/capture");
+		const signal = oldCommand!.signal;
+		expect(signal.aborted).toBe(false);
+
+		const lost = await loseRuntimeLog(runtime);
+
+		expect(signal.aborted).toBe(true);
+		expect(signal.reason).toBe(lost);
+		expect(() => oldVolt!.appendEntry("forbidden", {})).toThrow(lost.message);
+		expect(() => oldVolt!.setSessionName("forbidden")).toThrow(lost.message);
+		oldVolt!.sendUserMessage("forbidden");
+		await vi.waitFor(() =>
+			expect(errors).toContainEqual(expect.objectContaining({ event: "send_user_message", error: lost.message })),
+		);
+		expect(harness.faux.state.callCount).toBe(0);
+
+		await runtime.dispose();
+		expect(() => oldVolt!.appendEntry("forbidden", {})).toThrow(/stale/);
+		expect(() => oldCommand!.signal).toThrow(/stale/);
+	});
+
+	it.each(["before", "during"] as const)(
+		"lets shutdown handlers clean up owned resources when the session lost its log %s shutdown",
+		async (timing) => {
+			let resource: string;
+			let cleanupScript: string;
+			const results: number[] = [];
+			const writeErrors: unknown[] = [];
+			const { runtime, harness, errors } = await createRuntimeForTest((volt, instance) => {
+				if (instance !== 1) return;
+				volt.on("session_shutdown", async (_event, ctx) => {
+					if (timing === "during") await loseLog(runtime.session.sessionManager);
+					try {
+						volt.appendEntry("shutdown-write", {});
+					} catch (error) {
+						writeErrors.push(error);
+					}
+					results.push((await volt.exec(process.execPath, [cleanupScript, resource], { cwd: ctx.cwd })).code);
+				});
+			});
+			resource = join(harness.tempDir, "owned-resource");
+			cleanupScript = join(harness.tempDir, "cleanup.mjs");
+			await writeFile(resource, "owned by the extension");
+			await writeFile(cleanupScript, 'import { unlink } from "node:fs/promises"; await unlink(process.argv[2]);');
+			if (timing === "before") await loseRuntimeLog(runtime);
+
+			await expect(runtime.dispose()).resolves.toBeUndefined();
+			expect(results).toEqual([0]);
+			expect(existsSync(resource)).toBe(false);
+			expect(writeErrors).toHaveLength(1);
+			expect(writeErrors[0]).toMatchObject({ message: expect.stringContaining("Session ordinal changed") });
+			expect(errors).toEqual([]);
+		},
+	);
+
+	it("does not end the runtime when the outgoing session loses its log during a replacement", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { runtime, lifecycle, resources, errors } = await createRuntimeForTest((volt, instance) => {
+			if (instance !== 1) return;
+			volt.on("session_shutdown", async () => {
 				entered.resolve();
 				await release.promise;
-				throw new Error("cleanup failure must not suppress later cleanup handlers");
 			});
 		});
 		cleanups.push(async () => {
 			release.resolve();
-			lateRelease.resolve();
-			await lateWork;
 		});
-		await runtime.session.prompt("/capture");
-		expect(oldCommand).toBeDefined();
-		const ref = await conflict(runtime);
-		const reload = runtime.switchSession(ref);
-		const cleanupEntered = await Promise.race([entered.promise.then(() => true), reload.then(() => false)]);
-		expect(cleanupEntered).toBe(true);
-		const duringCleanup = await attempts();
+		let ended = false;
+		void runtime.lost.then(() => {
+			ended = true;
+		});
+		const outgoing = runtime.session;
+		const replacement = runtime.newSession();
+		await entered.promise;
+		await loseLog(outgoing.sessionManager);
+		await expect(outgoing.lost).resolves.toBeInstanceOf(Error);
 		release.resolve();
-		await reload;
-		lateRelease.resolve();
-		const afterReplacement = await lateWork;
-		for (const outcomes of [duringCleanup, afterReplacement]) {
-			expect(outcomes).toHaveLength(10);
-			for (const error of outcomes ?? [])
-				expect(error).toMatchObject({ message: expect.stringContaining("stale after conversation authority") });
-		}
-		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:resume", "2:start:resume"]);
+
+		await expect(replacement).resolves.toEqual({ cancelled: false, seeded: false });
+		expect(runtime.session).not.toBe(outgoing);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(ended).toBe(false);
+		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:new", "2:start:new"]);
+		expect(resources.map((resource) => resource.signal.aborted)).toEqual([true, false]);
 		expect(errors).toEqual([]);
-		expect(shutdown).not.toHaveBeenCalled();
-		expect(runtime.session.sessionId).toBe(ref.sessionId);
-		expect(runtime.session.messages.map(getMessageText)).toEqual(["authoritative input"]);
-		expect(harness.faux.state.callCount).toBe(0);
-		expect(runtime.session.sessionName).toBeUndefined();
 	});
 
-	it("fences shared event buses while allowing owned subscriptions to be removed", async () => {
+	it("fences shared event buses after replacement while allowing owned subscriptions to be removed", async () => {
 		const release = Promise.withResolvers<void>();
 		const oldListener = vi.fn();
 		const ownedListener = vi.fn();
@@ -266,15 +263,14 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		eventBus.emit("owned", {});
 		expect(oldListener).toHaveBeenCalledOnce();
 		expect(ownedListener).toHaveBeenCalledOnce();
-		const ref = await conflict(runtime);
-		await runtime.switchSession(ref);
+		await runtime.newSession();
 		eventBus.emit("probe", {});
 		eventBus.emit("owned", {});
 		expect(oldListener).toHaveBeenCalledOnce();
 		expect(ownedListener).toHaveBeenCalledOnce();
 		expect(() => oldEvents!.on("mutate-new", () => {})).toThrow(/stale/);
 		release.resolve();
-		expect(await lateWork).toMatchObject({ message: expect.stringContaining("stale after conversation authority") });
+		expect(await lateWork).toMatchObject({ message: expect.stringContaining("stale") });
 		expect(
 			runtime.session.sessionManager
 				.getEntries()
@@ -289,7 +285,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		).toBe(true);
 	});
 
-	it("revokes captured UI objects and methods without losing the replacement draft", async () => {
+	it("revokes captured UI objects and methods after replacement without losing the draft", async () => {
 		let draft = "initial draft";
 		const notify = vi.fn();
 		const unsubscribe = vi.fn();
@@ -297,7 +293,6 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		let capturedNotify: ExtensionUIContext["notify"];
 		let capturedInput: ExtensionUIContext["input"];
 		const input = vi.fn(async () => "answer");
-		const cleanupErrors: unknown[] = [];
 		const { runtime } = await createRuntimeForTest(
 			(volt, instance) => {
 				let removeListener: () => void;
@@ -309,19 +304,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 					removeListener = ctx.ui.onTerminalInput(() => undefined);
 				});
 				volt.on("session_shutdown", () => {
-					if (instance !== 1) return;
-					removeListener();
-					for (const operation of [
-						() => contexts[0].setEditorText("cleanup overwrote draft"),
-						() => capturedNotify("retired notification"),
-					]) {
-						try {
-							operation();
-							cleanupErrors.push(undefined);
-						} catch (error) {
-							cleanupErrors.push(error);
-						}
-					}
+					if (instance === 1) removeListener();
 				});
 			},
 			[],
@@ -340,10 +323,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		expect(contexts[0].notify).toBe(capturedNotify!);
 		capturedNotify!("active notification");
 		await expect(capturedInput!("active dialog")).resolves.toBe("answer");
-		const ref = await conflict(runtime);
-		await runtime.switchSession(ref);
-		expect(cleanupErrors).toHaveLength(2);
-		for (const error of cleanupErrors) expect(error).toMatchObject({ message: expect.stringContaining("stale") });
+		await runtime.newSession();
 		expect(unsubscribe).toHaveBeenCalledOnce();
 		expect(() => contexts[0].setEditorText("late callback overwrote draft")).toThrow(/stale/);
 		expect(() => capturedNotify!("late notification")).toThrow(/stale/);
@@ -355,7 +335,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		expect(draft).toBe("new generation draft");
 	});
 
-	it("revokes cached model and credential services while keeping the shared host services live", async () => {
+	it("revokes cached model and credential services after replacement while keeping the shared host services live", async () => {
 		let registry: ExtensionContext["modelRegistry"];
 		let credentials: ExtensionContext["modelRegistry"]["authStorage"];
 		const { runtime } = await createRuntimeForTest((volt, instance) => {
@@ -370,8 +350,7 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		const capturedRegister = registry!.registerProvider.bind(registry!);
 		const capturedGetKey = credentials!.getApiKey.bind(credentials!);
 		await expect(capturedGetKey("cleanup-probe")).resolves.toBe("active test credential");
-		const ref = await conflict(runtime);
-		await runtime.switchSession(ref);
+		await runtime.newSession();
 		expect(() => registry!.registerProvider("cleanup-probe", { name: "retired name" })).toThrow(/stale/);
 		expect(() => credentials!.setRuntimeApiKey("cleanup-probe", "retired test credential")).toThrow(/stale/);
 		expect(() => capturedRegister("cleanup-probe", { name: "retired name" })).toThrow(/stale/);
@@ -380,181 +359,5 @@ describe("regression #527: extension cleanup after conversation authority loss",
 		liveRegistry.registerProvider("cleanup-probe", { name: "live name" });
 		expect(liveRegistry.getProviderDisplayName("cleanup-probe")).toBe("live name");
 		await expect(liveRegistry.authStorage.getApiKey("cleanup-probe")).resolves.toBe("active test credential");
-	});
-
-	it.each(["before", "during"] as const)(
-		"allows process cleanup when authority is lost %s shutdown without restoring session access",
-		async (timing) => {
-			let firstResource: string;
-			let secondResource: string;
-			let cleanupScript: string;
-			const results: number[] = [];
-			const directories: string[] = [];
-			let firstVolt: ExtensionAPI;
-			const blocked: unknown[] = [];
-			const { runtime, harness, errors } = await createRuntimeForTest(
-				(volt, instance) => {
-					if (instance !== 1) return;
-					firstVolt = volt;
-					volt.on("session_shutdown", async () => {
-						if (timing === "during") await conflict(runtime, () => volt.appendEntry("shutdown-write", {}));
-						results.push((await volt.exec(process.execPath, [cleanupScript, firstResource])).code);
-					});
-				},
-				[
-					(volt) => {
-						volt.on("session_shutdown", async (_event, ctx) => {
-							directories.push(ctx.cwd);
-							for (const operation of [
-								() => volt.appendEntry("forbidden", {}),
-								() => volt.sendUserMessage("forbidden"),
-								() => ctx.sessionManager.getEntries(),
-								() => ctx.ui.notify("forbidden"),
-								() => firstVolt.exec(process.execPath, [cleanupScript, firstResource]),
-							]) {
-								try {
-									await operation();
-									blocked.push(undefined);
-								} catch (error) {
-									blocked.push(error);
-								}
-							}
-							results.push(
-								(await volt.exec(process.execPath, [cleanupScript, secondResource], { cwd: ctx.cwd })).code,
-							);
-						});
-					},
-				],
-			);
-			firstResource = join(harness.tempDir, "first-owned-resource");
-			secondResource = join(harness.tempDir, "second-owned-resource");
-			cleanupScript = join(harness.tempDir, "cleanup.mjs");
-			await writeFile(firstResource, "owned by the first extension");
-			await writeFile(secondResource, "owned by the second extension");
-			await writeFile(cleanupScript, 'import { unlink } from "node:fs/promises"; await unlink(process.argv[2]);');
-			if (timing === "before") await conflict(runtime);
-			await expect(runtime.dispose()).rejects.toThrow("Session ordinal changed");
-			expect(results).toEqual([0, 0]);
-			expect(directories).toEqual([harness.tempDir]);
-			expect(existsSync(firstResource)).toBe(false);
-			expect(existsSync(secondResource)).toBe(false);
-			expect(blocked).toHaveLength(5);
-			for (const error of blocked) expect(error).toMatchObject({ message: expect.stringContaining("stale") });
-			expect(errors).toEqual([]);
-		},
-	);
-
-	it("expires cleanup access per handler without opening concurrent or detached callbacks", async () => {
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		const secondEntered = Promise.withResolvers<void>();
-		const secondRelease = Promise.withResolvers<void>();
-		const detachedRelease = Promise.withResolvers<void>();
-		let oldVolt: ExtensionAPI;
-		let oldContext: ExtensionContext;
-		let detached: Promise<unknown[]> | undefined;
-		let synchronousDetached: Promise<unknown[]> | undefined;
-		let otherGenerationError: unknown;
-		const attempts = async () => {
-			const errors: unknown[] = [];
-			for (const operation of [() => oldContext.cwd, () => oldVolt.exec(process.execPath, ["--version"])]) {
-				try {
-					await operation();
-					errors.push(undefined);
-				} catch (error) {
-					errors.push(error);
-				}
-			}
-			return errors;
-		};
-		const { runtime } = await createRuntimeForTest((volt, instance) => {
-			if (instance !== 1) {
-				volt.on("session_shutdown", async () => {
-					try {
-						await oldVolt.exec(process.execPath, ["--version"]);
-					} catch (error) {
-						otherGenerationError = error;
-					}
-				});
-				return;
-			}
-			oldVolt = volt;
-			volt.on("session_shutdown", (_event, ctx) => {
-				oldContext = ctx;
-				synchronousDetached = Promise.resolve().then(attempts);
-			});
-			volt.on("session_shutdown", async (_event, ctx) => {
-				oldContext = ctx;
-				detached = detachedRelease.promise.then(attempts);
-				entered.resolve();
-				await release.promise;
-				throw new Error("cleanup failed");
-			});
-			volt.on("session_shutdown", async () => {
-				secondEntered.resolve();
-				await secondRelease.promise;
-			});
-		});
-		cleanups.push(async () => {
-			release.resolve();
-			secondRelease.resolve();
-			detachedRelease.resolve();
-			await detached;
-		});
-		const ref = await conflict(runtime);
-		const replacing = runtime.switchSession(ref);
-		await entered.promise;
-		const concurrentErrors = await attempts();
-		release.resolve();
-		await secondEntered.promise;
-		detachedRelease.resolve();
-		const detachedErrors = await detached;
-		secondRelease.resolve();
-		await replacing;
-		await runtime.dispose();
-		for (const error of [
-			...concurrentErrors,
-			...(detachedErrors ?? []),
-			...((await synchronousDetached) ?? []),
-			...(await attempts()),
-			otherGenerationError,
-		]) {
-			expect(error).toMatchObject({ message: expect.stringContaining("stale") });
-		}
-	});
-
-	it("revokes a shutdown handler that loses authority while awaiting cleanup", async () => {
-		const entered = Promise.withResolvers<void>();
-		const release = Promise.withResolvers<void>();
-		let oldVolt: ExtensionAPI | undefined;
-		let writeError: unknown;
-		const { runtime, lifecycle, resources, errors } = await createRuntimeForTest((volt, instance) => {
-			if (instance !== 1) return;
-			oldVolt = volt;
-			volt.on("session_shutdown", async () => {
-				entered.resolve();
-				await release.promise;
-				try {
-					volt.appendEntry("forbidden", {});
-				} catch (error) {
-					writeError = error;
-				}
-			});
-		});
-		cleanups.push(async () => {
-			release.resolve();
-		});
-		const manager = runtime.session.sessionManager;
-		const replacement = runtime.newSession();
-		await entered.promise;
-		expect(manager.getConversationAuthorityStatus().status).toBe("available");
-		manager.retireConversationAuthority(new Error("uncertain shutdown write"));
-		expect(() => oldVolt!.registerCommand("forbidden", { handler: async () => {} })).toThrow(/stale/);
-		release.resolve();
-		await expect(replacement).resolves.toEqual({ cancelled: false, seeded: false });
-		expect(writeError).toBeInstanceOf(Error);
-		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:new", "2:start:new"]);
-		expect(resources.map((resource) => resource.signal.aborted)).toEqual([true, false]);
-		expect(errors).toEqual([]);
 	});
 });

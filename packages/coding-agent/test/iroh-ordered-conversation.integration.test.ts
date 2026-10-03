@@ -206,6 +206,7 @@ async function createFixture(
 		...createIrohTestSession(sessionId, null),
 		sessionRef: manager.getSessionRef(),
 		sessionManager: manager,
+		lost: new Promise<Error>(() => {}),
 		gitContextProvider: {
 			getSnapshot: () => null,
 			retainObservation: () => () => undefined,

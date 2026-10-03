@@ -255,7 +255,7 @@ describe("createAgentSession session manager defaults", () => {
 		const setupError = new Error("injected resource reload failure");
 		const cleanupError = new Error("injected close failure");
 		vi.spyOn(DefaultResourceLoader.prototype, "reload").mockRejectedValue(setupError);
-		vi.spyOn(SessionManager.prototype, "closePersistence").mockRejectedValue(cleanupError);
+		const closePersistence = vi.spyOn(SessionManager.prototype, "closePersistence").mockRejectedValue(cleanupError);
 
 		let thrown: unknown;
 		try {
@@ -267,6 +267,8 @@ describe("createAgentSession session manager defaults", () => {
 		expect(thrown).toBeInstanceOf(AggregateError);
 		expect((thrown as AggregateError).message).toBe("Agent session setup failed and its manager could not be closed");
 		expect((thrown as AggregateError).errors).toEqual([setupError, cleanupError]);
+		// Let test cleanup close the manager for real.
+		closePersistence.mockRestore();
 	});
 
 	it("uses agentDir and session identity for generated image artifacts", async () => {
