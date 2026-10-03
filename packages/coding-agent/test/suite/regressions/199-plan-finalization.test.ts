@@ -1,16 +1,8 @@
-import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
+import type { AgentMessage, AgentTool, ConversationLogAppend } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import { createHarness, type Harness } from "../harness.ts";
-
-function deferred(): { promise: Promise<void>; resolve(): void } {
-	let resolve = () => {};
-	const promise = new Promise<void>((promiseResolve) => {
-		resolve = promiseResolve;
-	});
-	return { promise, resolve };
-}
 
 function createUserMessage(text: string): Extract<AgentMessage, { role: "user" }> {
 	return {
@@ -35,6 +27,24 @@ async function createReadyPlan(harness: Harness): Promise<void> {
 	});
 }
 
+/** Whether a log batch delivers a user message: a turn's delivery commit. */
+function deliversUserMessage(batch: ConversationLogAppend): boolean {
+	return batch.entries.some(
+		(entry) =>
+			entry.type === "message" && (entry.payload as { message?: { role?: string } }).message?.role === "user",
+	);
+}
+
+function planningEntries(harness: Harness) {
+	return harness.sessionManager.getBranch().filter((entry) => entry.type === "planning_state_change");
+}
+
+function checkpointEvents(harness: Harness) {
+	return harness
+		.eventsOfType("message_end")
+		.filter((event) => event.message.role === "custom" && event.message.customType === "volt-plan-checkpoint");
+}
+
 function createBuildMarkerTool(): AgentTool {
 	return {
 		name: "build_marker",
@@ -52,106 +62,93 @@ describe("regression #199: approved plan finalization", () => {
 		while (harnesses.length > 0) harnesses.pop()?.cleanup();
 	});
 
-	it("leaves a revoked first preparation without planning state or checkpoint side effects", async () => {
-		const preparationStarted = deferred();
-		const releasePreparation = deferred();
-		let preparationCount = 0;
-		const harness = await createHarness({
-			prepareDelivery: async (delivery) => {
-				preparationCount++;
-				if (preparationCount === 1) {
-					preparationStarted.resolve();
-					await releasePreparation.promise;
-				}
-				return { messages: [...delivery.messages] };
-			},
-		});
+	it("leaves a rolled-back first delivery without planning state or checkpoint side effects", async () => {
+		const harness = await createHarness({ log: "memory" });
 		harnesses.push(harness);
 		await createReadyPlan(harness);
-		harness.setResponses([
-			fauxAssistantMessage("revoked delivery omitted"),
-			fauxAssistantMessage("feedback admitted"),
-		]);
-		const planningEntryCount = harness.sessionManager
-			.getBranch()
-			.filter((entry) => entry.type === "planning_state_change").length;
+		harness.setResponses([fauxAssistantMessage("feedback admitted")]);
+		const planningEntryCount = planningEntries(harness).length;
 		const planningEventCount = harness.eventsOfType("planning_state_changed").length;
-		const checkpointEventCount = harness
-			.eventsOfType("message_end")
-			.filter(
-				(event) => event.message.role === "custom" && event.message.customType === "volt-plan-checkpoint",
-			).length;
-		harness.control.queueSteer(createUserMessage("revoked feedback"));
+		const checkpointEventCount = checkpointEvents(harness).length;
+		harness.log!.failNext("rolled_back", deliversUserMessage);
 
-		const firstRun = harness.control.continue();
-		await preparationStarted.promise;
-		expect(harness.control.revokeAllQueues()).toHaveLength(1);
-		releasePreparation.resolve();
-		await firstRun;
+		await harness.control.queueSteer(createUserMessage("rolled back feedback"));
+		await harness.session.waitForIdle();
 
 		expect(harness.session.planningState.plan?.phase).toBe("ready");
 		expect(harness.eventsOfType("planning_state_changed")).toHaveLength(planningEventCount);
-		expect(
-			harness
-				.eventsOfType("message_end")
-				.filter((event) => event.message.role === "custom" && event.message.customType === "volt-plan-checkpoint"),
-		).toHaveLength(checkpointEventCount);
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "planning_state_change")).toHaveLength(
-			planningEntryCount,
-		);
+		expect(checkpointEvents(harness)).toHaveLength(checkpointEventCount);
+		expect(planningEntries(harness)).toHaveLength(planningEntryCount);
 
-		harness.control.queueSteer(createUserMessage("admitted feedback"));
-		await harness.control.continue();
+		await harness.control.clearQueue();
+		await harness.control.queueSteer(createUserMessage("admitted feedback"));
+		await harness.session.waitForIdle();
 		expect(harness.session.planningState.plan?.phase).toBe("draft");
 		expect(harness.eventsOfType("planning_state_changed")).toHaveLength(planningEventCount + 1);
-		expect(
-			harness
-				.eventsOfType("message_end")
-				.filter((event) => event.message.role === "custom" && event.message.customType === "volt-plan-checkpoint"),
-		).toHaveLength(checkpointEventCount + 1);
+		expect(checkpointEvents(harness)).toHaveLength(checkpointEventCount + 1);
 	});
 
-	it("keeps preparation side effects behind settlement and composes predecessor messages", async () => {
-		let predecessorCommits = 0;
-		const harness = await createHarness({
-			prepareDelivery: (delivery) => ({
-				messages: [createUserMessage("predecessor"), ...delivery.messages],
-				participant: {
-					settle: () => {
-						predecessorCommits++;
-						return { outcome: "committed" };
-					},
-				},
-			}),
-		});
+	it("commits the ready-plan transition, its checkpoint, and the feedback in one delivery batch", async () => {
+		const harness = await createHarness({ log: "memory" });
 		harnesses.push(harness);
 		await createReadyPlan(harness);
-		const planningEntryCount = harness.sessionManager
-			.getBranch()
-			.filter((entry) => entry.type === "planning_state_change").length;
+		const planningEntryCount = planningEntries(harness).length;
 		const planningEventCount = harness.eventsOfType("planning_state_changed").length;
-
-		expect(harness.session.planningState.plan?.phase).toBe("ready");
-		expect(predecessorCommits).toBe(0);
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "planning_state_change")).toHaveLength(
-			planningEntryCount,
-		);
+		let deliveryBatch: string[] | undefined;
+		const hold = harness.log!.holdNext((batch) => {
+			if (!deliversUserMessage(batch)) return false;
+			deliveryBatch = batch.entries.map((entry) =>
+				entry.type === "custom_message"
+					? (entry.payload as { customType: string }).customType
+					: entry.type === "message"
+						? `message:${(entry.payload as { message: { role: string } }).message.role}`
+						: entry.type,
+			);
+			return true;
+		});
 
 		harness.setResponses([fauxAssistantMessage("feedback committed")]);
-		harness.control.queueSteer(createUserMessage("admitted feedback"));
-		await harness.control.continue();
+		const queued = harness.control.queueSteer(createUserMessage("admitted feedback"));
+		await hold.started;
+		// Nothing of the delivery is visible before its batch commits.
+		expect(harness.session.planningState.plan?.phase).toBe("ready");
+		expect(planningEntries(harness)).toHaveLength(planningEntryCount);
+		hold.release();
+		await queued;
+		await harness.session.waitForIdle();
 
-		expect(predecessorCommits).toBe(1);
+		expect(deliveryBatch).toEqual(
+			expect.arrayContaining(["planning_state_change", "volt-plan-checkpoint", "message:user"]),
+		);
 		expect(harness.session.planningState.plan?.phase).toBe("draft");
 		expect(
 			harness.session.state.messages
-				.slice(0, 3)
+				.slice(0, 2)
 				.map((message) => (message.role === "custom" ? message.customType : message.role)),
-		).toEqual(["volt-plan-checkpoint", "user", "user"]);
+		).toEqual(["volt-plan-checkpoint", "user"]);
 		expect(harness.eventsOfType("planning_state_changed")).toHaveLength(planningEventCount + 1);
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "planning_state_change")).toHaveLength(
-			planningEntryCount + 1,
-		);
+		expect(planningEntries(harness)).toHaveLength(planningEntryCount + 1);
+	});
+
+	it("runs the first request after a ready-plan prompt under the Plan policy", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		await createReadyPlan(harness);
+		await harness.session.setAgentMode("build");
+		expect(harness.session.planningState).toMatchObject({ mode: "build", plan: { phase: "ready" } });
+		const systemPrompts: string[] = [];
+		harness.setResponses([
+			(context) => {
+				systemPrompts.push(context.systemPrompt ?? "");
+				return fauxAssistantMessage("revising the plan");
+			},
+		]);
+
+		await harness.session.prompt("Please revise the plan");
+
+		expect(harness.session.planningState).toMatchObject({ mode: "plan", plan: { phase: "draft" } });
+		expect(systemPrompts).toHaveLength(1);
+		expect(systemPrompts[0]).toContain("[VOLT PLAN MODE — TRUSTED HOST POLICY]");
 	});
 
 	it("admits all-mode feedback with one ready-to-draft transition and checkpoint", async () => {
@@ -159,31 +156,21 @@ describe("regression #199: approved plan finalization", () => {
 		harnesses.push(harness);
 		await createReadyPlan(harness);
 		harness.session.setSteeringMode("all");
-		const planningEntryCount = harness.sessionManager
-			.getBranch()
-			.filter((entry) => entry.type === "planning_state_change").length;
+		const planningEntryCount = planningEntries(harness).length;
 		const planningEventCount = harness.eventsOfType("planning_state_changed").length;
-		const checkpointEventCount = harness
-			.eventsOfType("message_end")
-			.filter(
-				(event) => event.message.role === "custom" && event.message.customType === "volt-plan-checkpoint",
-			).length;
+		const checkpointEventCount = checkpointEvents(harness).length;
 		harness.setResponses([fauxAssistantMessage("feedback admitted")]);
-		harness.control.queueSteer(createUserMessage("first feedback"));
-		harness.control.queueSteer(createUserMessage("second feedback"));
-
-		await harness.control.continue();
+		// Both steers queue behind a held turn claim, so one delivery takes them together.
+		const claim = harness.control.conversation.reserve();
+		await harness.control.queueSteer(createUserMessage("first feedback"));
+		await harness.control.queueSteer(createUserMessage("second feedback"));
+		claim.cancel();
+		await harness.session.waitForIdle();
 
 		expect(harness.session.planningState.plan?.phase).toBe("draft");
-		expect(
-			harness
-				.eventsOfType("message_end")
-				.filter((event) => event.message.role === "custom" && event.message.customType === "volt-plan-checkpoint"),
-		).toHaveLength(checkpointEventCount + 1);
+		expect(checkpointEvents(harness)).toHaveLength(checkpointEventCount + 1);
 		expect(harness.eventsOfType("planning_state_changed")).toHaveLength(planningEventCount + 1);
-		expect(harness.sessionManager.getBranch().filter((entry) => entry.type === "planning_state_change")).toHaveLength(
-			planningEntryCount + 1,
-		);
+		expect(planningEntries(harness)).toHaveLength(planningEntryCount + 1);
 	});
 
 	it("persists one tool-free final response and restores Build tools for the next delivery", async () => {
@@ -315,7 +302,7 @@ describe("regression #199: approved plan finalization", () => {
 					tools: context.tools?.map((tool) => tool.name) ?? [],
 					systemPrompt: context.systemPrompt ?? "",
 				});
-				harness.control.queueFollowUp(createUserMessage("queued during final-response retry"));
+				void harness.control.queueFollowUp(createUserMessage("queued during final-response retry"));
 				return fauxAssistantMessage("", {
 					stopReason: "error",
 					error: { kind: "overloaded", retryable: true, message: "overloaded_error" },
@@ -329,7 +316,7 @@ describe("regression #199: approved plan finalization", () => {
 				retriedRequestContainedQueuedInput = JSON.stringify(context.messages).includes(
 					"queued during final-response retry",
 				);
-				clearedQueuedDeliveries = harness.control.revokeAllQueues().length;
+				clearedQueuedDeliveries = (await harness.control.clearQueue()).length;
 				return fauxAssistantMessage("Final response after retry");
 			},
 			(context) => {
@@ -405,7 +392,7 @@ describe("regression #199: approved plan finalization", () => {
 					tools: context.tools?.map((tool) => tool.name) ?? [],
 					systemPrompt: context.systemPrompt ?? "",
 				});
-				harness.control.queueFollowUp(createUserMessage("queued during final-response compaction"));
+				void harness.control.queueFollowUp(createUserMessage("queued during final-response compaction"));
 				return fauxAssistantMessage("", {
 					stopReason: "error",
 					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
@@ -420,7 +407,7 @@ describe("regression #199: approved plan finalization", () => {
 				compactedRequestContainedQueuedInput = JSON.stringify(context.messages).includes(
 					"queued during final-response compaction",
 				);
-				clearedQueuedDeliveries = harness.control.revokeAllQueues().length;
+				clearedQueuedDeliveries = (await harness.control.clearQueue()).length;
 				return fauxAssistantMessage("Final response after compaction");
 			},
 		]);

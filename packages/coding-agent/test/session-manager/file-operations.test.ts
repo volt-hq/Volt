@@ -1,21 +1,41 @@
+import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { toLogEntryDraft } from "../../src/core/conversation-log/entry-codec.ts";
 import {
 	CURRENT_SESSION_SNAPSHOT_VERSION,
 	CURRENT_SESSION_VERSION,
 	loadEntriesFromFile,
+	type SessionEntry,
 	SessionManager,
 } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
+import { injectFaultyLog } from "../utilities/faulty-log.ts";
+import { seedSession } from "../utilities/seed-log.ts";
 
-async function commitPlanningState(manager: SessionManager, mode: "build" | "plan"): Promise<void> {
-	const projection = manager.issueCanonicalProjection();
-	await manager.commitCanonicalCommand({
-		guard: { kind: "exact", token: projection.token },
-		mutations: [{ kind: "append", entry: { type: "planning_state_change", planning: { mode, plan: null } } }],
+type BatchEntry = SessionEntry extends infer T
+	? T extends SessionEntry
+		? Omit<T, "id" | "parentId" | "timestamp" | "ordinal">
+		: never
+	: never;
+
+/** Commit `entries` to `manager` in one atomic batch, each conversation entry a child of the previous one. */
+function commitBatch(manager: SessionManager, entries: readonly BatchEntry[]): Promise<SessionEntry[]> {
+	return seedSession(manager, (seed) => {
+		let parentId = manager.getLeafId();
+		for (const entry of entries) {
+			const draft = toLogEntryDraft({
+				...entry,
+				id: randomUUID(),
+				parentId,
+				timestamp: new Date().toISOString(),
+			} as SessionEntry);
+			seed.drafts.push(draft);
+			if (draft.visibility === "public") parentId = draft.id;
+		}
 	});
 }
 
@@ -452,9 +472,11 @@ describe("SessionManager SQLite session behavior", () => {
 		expect(continuedA.getSessionRef()).toEqual(sessionA.getSessionRef());
 	});
 
-	it("commits delivery receipts, messages, and planning as one verifiable transaction", async () => {
+	it("commits a client input delivery and its planning snapshot as one atomic batch", async () => {
 		const manager = await SessionManager.create(projectA, tempDir);
-		await manager.reserveClientInput("delivery-1", "prompt", { message: "hello" });
+		await seedSession(manager, (seed) =>
+			seed.clientInput("delivery-1", "prompt", { message: "hello" }, { states: ["started"] }),
+		);
 		const planning = {
 			mode: "plan" as const,
 			plan: {
@@ -470,34 +492,30 @@ describe("SessionManager SQLite session behavior", () => {
 			clientMessageId: "delivery-1",
 			timestamp: Date.now(),
 		};
-		const identity = { deliveryId: "delivery", epoch: 2, attemptId: "attempt-1" };
+		const delivery: BatchEntry[] = [
+			{
+				type: "message",
+				message: { role: "user", content: message.content, timestamp: message.timestamp },
+				clientMessageId: "delivery-1",
+			},
+			{ type: "planning_state_change", planning },
+		];
 
-		const receipt = await manager.commitDelivery({ ...identity, messages: [message], planning });
-		const verified = manager.verifyDeliveryReceipt(receipt);
+		// A rolled-back batch changes nothing; the input stays started.
+		const faulty = injectFaultyLog(manager);
+		faulty.failNext("rolled_back");
+		await expect(commitBatch(manager, delivery)).rejects.toMatchObject({ effect: "rolled_back" });
+		expect(manager.getClientInput("delivery-1")).toMatchObject({ state: "started" });
+		expect(manager.buildSessionContext()).toMatchObject({ messages: [], planning: { mode: "build", plan: null } });
 
+		await commitBatch(manager, delivery);
 		expect(manager.getClientInput("delivery-1")).toMatchObject({ state: "completed" });
 		expect(manager.buildSessionContext()).toMatchObject({ messages: [message], planning });
-		expect(verified).toMatchObject({ outcome: "committed", ...identity, messages: [message], planning });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
 		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getClientInput("delivery-1")).toMatchObject({ state: "completed" });
 		expect(reopened.buildSessionContext()).toMatchObject({ messages: [message], planning });
-	});
-
-	it("attests a no-effect delivery without changing persisted entries", async () => {
-		const manager = await SessionManager.create(projectA, tempDir);
-		await manager.appendPlanningState({ mode: "build", plan: null });
-		const before = manager.getEntries();
-
-		const receipt = await manager.attestDeliveryNoEffect({
-			deliveryId: "no-effect",
-			epoch: 1,
-			attemptId: "attempt-1",
-		});
-
-		expect(manager.verifyDeliveryReceipt(receipt)?.outcome).toBe("no_effect");
-		expect(manager.getEntries()).toEqual(before);
 	});
 
 	it("restores navigation to an earlier entry and to root", async () => {
@@ -522,9 +540,9 @@ describe("SessionManager SQLite session behavior", () => {
 		expect(reopened.getBranch()).toEqual([]);
 	});
 
-	it("persists canonical planning commands through a reference", async () => {
+	it("persists planning state through a reference", async () => {
 		const manager = await SessionManager.create(projectA, tempDir);
-		await commitPlanningState(manager, "plan");
+		await manager.appendPlanningState({ mode: "plan", plan: null });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
 

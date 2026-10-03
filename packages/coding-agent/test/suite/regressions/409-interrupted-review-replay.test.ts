@@ -20,7 +20,7 @@ import { SessionManager } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { createHarness } from "../harness.ts";
+import { createHarness, type Harness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
@@ -58,8 +58,16 @@ async function fixture() {
 	const cwd = mkdtempSync(join(tmpdir(), "volt-review-replay-"));
 	cleanups.push(() => rm(cwd, { recursive: true, force: true }));
 	let manager = await SessionManager.create(cwd, join(cwd, "sessions"));
-	let h = await createHarness({ sessionManager: manager });
-	cleanups.push(() => h.cleanupAsync());
+	// The live harness over `manager`; none while the manager is detached from any session.
+	let h: Harness | undefined = await createHarness({ sessionManager: manager });
+	const live = (): Harness => {
+		if (!h) throw new Error("The session is detached");
+		return h;
+	};
+	cleanups.push(async () => {
+		if (h) await h.cleanupAsync();
+		else await manager.closePersistence();
+	});
 	await manager.appendCustomMessageEntry("test", "Original conversation", true);
 	const record = unfinished();
 	await appendReviewRunDurably(manager, record);
@@ -77,20 +85,32 @@ async function fixture() {
 		async start() {
 			return collector.start(
 				{ passId: 1, phase: "discovery", purpose: "findings", round: 1, attempt: 1, kind: "turn" },
-				h.getModel(),
+				live().getModel(),
 			);
+		},
+		/** Close the session and reopen its manager without one, for structural writes a live session refuses. */
+		async detach() {
+			const ref = manager.getSessionRef()!;
+			await live().cleanupAsync();
+			h = undefined;
+			manager = await SessionManager.open(ref);
+			return manager;
 		},
 		async reopen() {
 			const ref = manager.getSessionRef()!;
-			await h.cleanupAsync();
+			if (h) await h.cleanupAsync();
+			else await manager.closePersistence();
 			manager = await SessionManager.open(ref);
 			h = await createHarness({ sessionManager: manager });
 			return manager;
 		},
+		navigate(targetId: string) {
+			return live().session.navigateTree(targetId);
+		},
 		render(expanded = false) {
 			const chatContainer = new Container();
 			const mode = Object.assign(Object.create(InteractiveMode.prototype), {
-				runtimeHost: { session: h.session, services: { agentDir: h.tempDir } },
+				runtimeHost: { session: live().session, services: { agentDir: live().tempDir } },
 				ui: { terminal: { rows: 24, columns: 120 }, requestRender: vi.fn() },
 				chatContainer,
 				editor: new Text("editor"),
@@ -148,13 +168,14 @@ describe("#409 interrupted review accounting replay", () => {
 		const request = await f.start();
 		await request.observe(usage, 1, false, false);
 		const checkpointId = f.manager.getLeafId()!;
-		await f.manager.branch(f.noticeId);
-		await appendReviewRun(f.manager, unfinished("another-run"));
-		await appendReviewUsageCheckpoint(f.manager, "another-run", f.collector.snapshot());
-		const reopened = await f.reopen();
+		const detached = await f.detach();
+		await detached.branch(f.noticeId);
+		await appendReviewRun(detached, unfinished("another-run"));
+		await appendReviewUsageCheckpoint(detached, "another-run", f.collector.snapshot());
+		await f.reopen();
 		expect(f.render()).toContain("Initial review accounting: unavailable.");
 		expect(f.render()).not.toContain("Tokens:");
-		await reopened.branch(checkpointId);
+		await f.navigate(checkpointId);
 		expect(f.render()).toContain("Tokens: 10 input");
 	});
 

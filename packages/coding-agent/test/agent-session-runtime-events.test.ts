@@ -32,6 +32,7 @@ import type {
 	SessionStartEvent,
 } from "../src/index.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
+import { type SeedLogBuild, seedSession } from "./utilities/seed-log.ts";
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -52,7 +53,8 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		for (const tempDir of tempDirs.splice(0)) rmSync(tempDir, { recursive: true, force: true });
 	});
 
-	async function createRuntimeHost(extensionFactory: ExtensionFactory) {
+	/** A runtime over a new persisted session; `seed` commits entries before the session opens. */
+	async function createRuntimeHost(extensionFactory: ExtensionFactory, seed?: SeedLogBuild) {
 		const tempDir = join(tmpdir(), `volt-runtime-events-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		tempDirs.push(tempDir);
@@ -91,10 +93,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				diagnostics: services.diagnostics,
 			};
 		};
+		const sessionManager = await SessionManager.create(tempDir);
+		if (seed) await seedSession(sessionManager, seed);
 		const runtimeHost = await createAgentSessionRuntime(createRuntime, {
 			cwd: tempDir,
 			agentDir: tempDir,
-			sessionManager: await SessionManager.create(tempDir),
+			sessionManager,
 		});
 		await runtimeHost.session.bindExtensions({});
 
@@ -777,14 +781,19 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			return originalEmit(event);
 		});
 
+		const lateEvents: string[] = [];
+		originalSession.subscribe((event) => lateEvents.push(event.type));
 		const compaction = originalSession.compact();
 		await compactionStarted;
 		originalSession.dispose();
+		lateEvents.length = 0;
 		const disposal = originalSession.waitForClosed();
 		releaseCompaction();
 
+		// Disposal cancels the compaction; nothing it settles reaches the disposed session's listeners.
 		await expect(compaction).rejects.toThrow("AgentSession is disposed");
 		await disposal;
+		expect(lateEvents).toEqual([]);
 		expect(originalSession.sessionManager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
 	});
 
@@ -1228,11 +1237,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			runtimeHost.session.sessionManager.getSessionDir(),
 		);
-		await targetManager.reserveClientInput("replacement-older", "steer", { message: "older durable input" });
-		await targetManager.markClientInputQueued("replacement-older", {
-			delivery: "steer",
-			message: "older durable input",
-		});
+		await seedSession(targetManager, (seed) =>
+			seed.clientInput("replacement-older", "steer", { message: "older durable input" }, { queued: "steer" }),
+		);
 		const targetRef = targetManager.getSessionRef();
 		expect(targetRef).toBeDefined();
 		// The runtime opens the target for writing once its creator released the lock.
@@ -1269,11 +1276,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			runtimeHost.cwd,
 			runtimeHost.session.sessionManager.getSessionDir(),
 		);
-		await targetManager.reserveClientInput("replacement-retry", "steer", { message: "older durable input" });
-		await targetManager.markClientInputQueued("replacement-retry", {
-			delivery: "steer",
-			message: "older durable input",
-		});
+		await seedSession(targetManager, (seed) =>
+			seed.clientInput("replacement-retry", "steer", { message: "older durable input" }, { queued: "steer" }),
+		);
 		// The runtime opens the target for writing once its creator released the lock.
 		await targetManager.closePersistence();
 		await runtimeHost.startRecoveredClientInputs();
@@ -1296,10 +1301,19 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		}
 	});
 
-	it("rejects structural replacement instead of orphaning acknowledged durable queue input", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
+	it("rejects structural replacement instead of orphaning recovered durable queue input", async () => {
+		// A durably queued steer that recovery has not replayed yet; an idle session runs live steers at once.
+		const { runtimeHost } = await createRuntimeHost(
+			() => {},
+			(seed) =>
+				seed.clientInput(
+					"replacement-queued-input",
+					"steer",
+					{ message: "must stay with old conversation" },
+					{ queued: "steer" },
+				),
+		);
 		const originalSession = runtimeHost.session;
-		await originalSession.steer("must stay with old conversation", undefined, "replacement-queued-input");
 
 		await expect(runtimeHost.newSession()).rejects.toThrow(
 			"Cannot replace the session while durable client input is still queued",
@@ -1312,13 +1326,25 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		]);
 	});
 
-	it("rechecks durable queue state after an in-flight prompt admission settles", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
+	it("rechecks the session after an in-flight prompt admission settles", async () => {
+		const { runtimeHost, faux } = await createRuntimeHost(() => {});
 		const originalSession = runtimeHost.session;
 		let releaseAdmission!: () => void;
 		const admissionGate = new Promise<void>((resolve) => {
 			releaseAdmission = resolve;
 		});
+		let releaseTurn!: () => void;
+		const turnGate = new Promise<void>((resolve) => {
+			releaseTurn = resolve;
+		});
+		// Released before the runtime disposes, should an assertion fail first.
+		cleanups.push(() => releaseTurn());
+		faux.setResponses([
+			async () => {
+				await turnGate;
+				return fauxAssistantMessage("late reply");
+			},
+		]);
 		await runtimeHost.runWithStableSession((stableSession) => {
 			const admission = (async () => {
 				await admissionGate;
@@ -1331,11 +1357,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(runtimeHost.session).toBe(originalSession);
 		releaseAdmission();
-		await expect(replacement).rejects.toThrow(
-			"Cannot replace the session while durable client input is still queued",
-		);
+		// The late steer starts a turn on the idle session, which the recheck refuses to replace.
+		await expect(replacement).rejects.toThrow("Cannot change sessions while an agent run is active");
 		expect(runtimeHost.session).toBe(originalSession);
-		expect(originalSession.sessionManager.getClientInput("late-admission-queue")?.state).toBe("accepted");
+		releaseTurn();
+		await originalSession.waitForIdle();
+		expect(originalSession.sessionManager.getClientInput("late-admission-queue")?.state).toBe("completed");
 	});
 
 	it("blocks session replacement from an identified extension command after dispatch starts", async () => {
@@ -1390,7 +1417,12 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 	it("fences the old feed before staging transcript commits and swapping the runtime session", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		const originalSession = runtimeHost.session;
-		vi.spyOn(SessionManager.prototype, "subscribeEntries").mockImplementationOnce(() => {
+		const subscribeEntries = SessionManager.prototype.subscribeEntries;
+		let replacementSubscriptions = 0;
+		const subscribe = vi.spyOn(SessionManager.prototype, "subscribeEntries");
+		subscribe.mockImplementation(function (this: SessionManager, listener) {
+			// The replacement session subscribes its own planning observer first; the runtime's transcript subscription is next.
+			if (++replacementSubscriptions !== 2) return subscribeEntries.call(this, listener);
 			expect(runtimeHost.session).toBe(originalSession);
 			expect(() =>
 				runtimeHost.conversationProjectionFeed.attach({
@@ -1413,6 +1445,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				},
 			}),
 		).toThrow(/disposed/);
+		subscribe.mockRestore();
 	});
 
 	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {
@@ -1462,7 +1495,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 	});
 
 	it("keeps an attached conversation projection healthy while host-only input WAL is committed", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
+		const { runtimeHost } = await createRuntimeHost((volt) => {
+			volt.registerCommand("private-wal", { handler: async () => {} });
+		});
 		const writes: object[] = [];
 		const subscription = runtimeHost.conversationProjectionFeed.attach({
 			write: (value) => {
@@ -1506,31 +1541,27 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			}),
 		});
 		await subscription.ready;
-		const bootstrapCount = writes.length;
 		const manager = runtimeHost.session.sessionManager;
+		const transcriptCommits = () =>
+			writes.filter((write) => (write as { type?: string }).type === "visible-transcript-commit");
 
-		await manager.reserveClientInput("runtime-private-wal", "prompt", { message: "runtime private WAL" });
-		await manager.transitionClientInput("runtime-private-wal", "started");
+		// A handled command commits only host-only input WAL: its receipt and states.
+		await runtimeHost.session.prompt("/private-wal", { clientMessageId: "runtime-private-wal" });
 		await subscription.flush();
-		expect(writes).toHaveLength(bootstrapCount);
+		expect(manager.getClientInput("runtime-private-wal")?.state).toBe("completed");
+		expect(transcriptCommits()).toEqual([]);
 
 		await manager.appendPlanningState({ mode: "plan", plan: null });
 		await subscription.flush();
-		expect(writes).toHaveLength(bootstrapCount);
+		expect(transcriptCommits()).toEqual([]);
 
-		await manager.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "visible" }],
-			clientMessageId: "runtime-private-wal",
-			timestamp: Date.now(),
-		});
+		await runtimeHost.session.prompt("visible", { clientMessageId: "runtime-visible" });
 		// Transcript commits publish after the store transaction commits.
 		await subscription.flush();
-		expect(writes.at(-1)).toMatchObject({
-			type: "visible-transcript-commit",
-			entryType: "message",
-			delivery: { subscriptionId: subscription.subscriptionId },
-		});
+		expect(transcriptCommits()).toMatchObject([
+			{ entryType: "message", delivery: { subscriptionId: subscription.subscriptionId } },
+			{ entryType: "message", delivery: { subscriptionId: subscription.subscriptionId } },
+		]);
 
 		subscription.requestCheckpoint({
 			requestId: "still-healthy",

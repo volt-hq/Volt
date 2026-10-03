@@ -320,14 +320,16 @@ describe("AgentSession conversation generation commits", () => {
 		expect(branchMessages.at(-1)?.parentId).toBe(branchMessages.at(-2)?.id);
 	});
 
-	it("fences a local prompt whose extension preflight crosses a branch rebase", async () => {
+	// A prompt reserves the conversation's turn before its extension preflight, so
+	// no branch rebase can interleave with it: the prompt commits on the branch it targeted.
+	it("refuses a branch rebase while a local prompt's extension preflight awaits", async () => {
 		const tempDir = join(
 			tmpdir(),
 			`volt-local-prompt-generation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
 		);
 		mkdirSync(tempDir, { recursive: true });
 		const faux = createFauxProvider();
-		faux.setResponses([fauxAssistantMessage("must not persist")]);
+		faux.setResponses([fauxAssistantMessage("targeted assistant")]);
 		const authStorage = AuthStorage.inMemory();
 		authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
@@ -368,8 +370,8 @@ describe("AgentSession conversation generation commits", () => {
 
 		await manager.appendMessage({ role: "user", content: "first user", timestamp: 1 });
 		const firstAssistantId = await manager.appendMessage(fauxAssistantMessage("first assistant", { timestamp: 2 }));
-		await manager.appendMessage({ role: "user", content: "abandoned user", timestamp: 3 });
-		await manager.appendMessage(fauxAssistantMessage("abandoned assistant", { timestamp: 4 }));
+		await manager.appendMessage({ role: "user", content: "second user", timestamp: 3 });
+		await manager.appendMessage(fauxAssistantMessage("second assistant", { timestamp: 4 }));
 
 		let releasePreflight = () => {};
 		const preflightRelease = new Promise<void>((resolve) => {
@@ -390,23 +392,37 @@ describe("AgentSession conversation generation commits", () => {
 			return undefined;
 		});
 
-		const prompt = runtime.session.prompt("must not enter the rebased branch");
+		const prompt = runtime.session.prompt("enters the targeted branch");
 		await preflightStarted;
-		await runtime.session.navigateTree(firstAssistantId, { summarize: false });
-		releasePreflight();
-		await expect(prompt).rejects.toThrow("Conversation generation changed during a branch-local mutation");
+		try {
+			await expect(runtime.session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
+				"Cannot navigate the session tree while an agent, bash run, or background job is active",
+			);
+		} finally {
+			releasePreflight();
+		}
+		await prompt;
 
 		expect(
 			manager
 				.getBranch()
 				.flatMap((entry) =>
-					entry.type === "message" && entry.message.role === "user" ? [messageText(entry.message)] : [],
+					entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant")
+						? [messageText(entry.message)]
+						: [],
 				),
-		).toEqual(["first user"]);
+		).toEqual([
+			"first user",
+			"first assistant",
+			"second user",
+			"second assistant",
+			"enters the targeted branch",
+			"targeted assistant",
+		]);
 	});
 
 	it.each(["input", "before_agent_start"] as const)(
-		"rejects remote prompt admission when %s awaits across a branch rebase",
+		"refuses a branch rebase while a remote prompt's %s hook awaits",
 		async (boundary) => {
 			const tempDir = join(
 				tmpdir(),
@@ -414,6 +430,7 @@ describe("AgentSession conversation generation commits", () => {
 			);
 			mkdirSync(tempDir, { recursive: true });
 			const faux = createFauxProvider();
+			faux.setResponses([fauxAssistantMessage("targeted assistant")]);
 			const authStorage = AuthStorage.inMemory();
 			authStorage.setRuntimeApiKey(faux.getModel().provider, "faux-key");
 			const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, sessionManager, sessionStartEvent }) => {
@@ -493,41 +510,40 @@ describe("AgentSession conversation generation commits", () => {
 			const authority = getCurrentConversationAuthority(mode.send);
 			mode.recv.pushLine(
 				JSON.stringify({
-					id: `stale-${boundary}`,
+					id: `targeted-${boundary}`,
 					type: "prompt",
-					clientMessageId: `stale-client-${boundary}`,
-					message: "must not enter the rebased branch",
+					clientMessageId: `targeted-client-${boundary}`,
+					message: "enters the targeted branch",
 					conversationAuthority: authority,
 				}),
 			);
 			await boundaryStarted;
 
-			await runtime.session.navigateTree(firstAssistantId, { summarize: false });
-			releaseBoundary();
+			try {
+				await expect(runtime.session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
+					"Cannot navigate the session tree while an agent, bash run, or background job is active",
+				);
+			} finally {
+				releaseBoundary();
+			}
 
 			await vi.waitFor(() => {
-				const frames = parseWrittenObjects(mode.send);
-				expect(frames).toContainEqual(
-					expect.objectContaining({
-						id: `stale-${boundary}`,
-						success: false,
-						errorCode: "stale_conversation_authority",
-					}),
+				expect(parseWrittenObjects(mode.send)).toContainEqual(
+					expect.objectContaining({ id: `targeted-${boundary}`, success: true }),
 				);
-				const rebaseIndex = frames.findIndex(
-					(frame) => frame.type === "conversation_bootstrap" && frame.reason === "branch_rebase",
-				);
-				const rejectionIndex = frames.findIndex((frame) => frame.id === `stale-${boundary}`);
-				expect(rebaseIndex).toBeGreaterThanOrEqual(0);
-				expect(rejectionIndex).toBeGreaterThan(rebaseIndex);
 			});
+			await runtime.session.waitForIdle();
+			const frames = parseWrittenObjects(mode.send);
+			expect(
+				frames.some((frame) => frame.type === "conversation_bootstrap" && frame.reason === "branch_rebase"),
+			).toBe(false);
 			expect(
 				manager
 					.getBranch()
 					.flatMap((entry) =>
 						entry.type === "message" && entry.message.role === "user" ? [messageText(entry.message)] : [],
 					),
-			).toEqual(["first user"]);
+			).toEqual(["first user", "second user", "enters the targeted branch"]);
 		},
 	);
 
@@ -678,16 +694,17 @@ describe("AgentSession conversation generation commits", () => {
 		).toEqual(["first user"]);
 	});
 
+	// Pre-admission auto-compaction runs inside the prompt's turn, before its first
+	// request, so no branch rebase can interleave with its hook.
 	it.each([
 		{
 			phase: "pre-admission",
 			initialUsageTokens: 100,
-			responseSuccess: false,
 			boundary: "session_before_compact" as const,
 		},
 	])(
-		"fences $phase auto-compaction when $boundary awaits across a branch rebase",
-		async ({ phase, initialUsageTokens, responseSuccess, boundary }) => {
+		"refuses a branch rebase while $phase auto-compaction's $boundary awaits",
+		async ({ initialUsageTokens, boundary }) => {
 			const tempDir = join(
 				tmpdir(),
 				`volt-compaction-authority-race-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -751,9 +768,7 @@ describe("AgentSession conversation generation commits", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			};
 			await manager.appendMessage(secondAssistant);
-			if (phase !== "pre-admission") {
-				faux.setResponses([fauxAssistantMessage("fresh assistant")]);
-			}
+			faux.setResponses([fauxAssistantMessage("fresh assistant")]);
 			vi.spyOn(runtime.session.settingsManager, "getCompactionSettings").mockReturnValue({
 				enabled: true,
 				reserveTokens: faux.getModel().contextWindow ?? 200_000,
@@ -784,7 +799,7 @@ describe("AgentSession conversation generation commits", () => {
 					}
 					return {
 						compaction: {
-							summary: "stale compaction must not persist",
+							summary: "hook compaction summary",
 							firstKeptEntryId: event.preparation.firstKeptEntryId,
 							tokensBefore: event.preparation.tokensBefore,
 						},
@@ -799,59 +814,44 @@ describe("AgentSession conversation generation commits", () => {
 			endMode = () => mode.recv.end();
 			mode.recv.pushLine(
 				JSON.stringify({
-					id: "stale-compaction",
+					id: "targeted-compaction",
 					type: "prompt",
-					clientMessageId: "stale-compaction-client",
-					message: "must not enter rebased branch",
+					clientMessageId: "targeted-compaction-client",
+					message: "enters the targeted branch",
 					conversationAuthority: getCurrentConversationAuthority(mode.send),
 				}),
 			);
 			await boundaryStarted;
 
-			const navigation = runtime.session.navigateTree(firstAssistantId, { summarize: false });
-			releaseBoundary();
-			await navigation;
-			await runtime.session.waitForIdle();
+			try {
+				await expect(runtime.session.navigateTree(firstAssistantId, { summarize: false })).rejects.toThrow(
+					"Cannot navigate the session tree while an agent, bash run, or background job is active",
+				);
+			} finally {
+				releaseBoundary();
+			}
 
 			await vi.waitFor(() => {
 				const frames = parseWrittenObjects(mode.send);
-				expect(frames).toContainEqual(
-					expect.objectContaining({
-						id: "stale-compaction",
-						success: responseSuccess,
-						...(responseSuccess ? {} : { errorCode: "stale_conversation_authority" }),
-					}),
-				);
-				if (boundary === "session_before_compact") {
-					expect(frames).toContainEqual(
-						expect.objectContaining({
-							type: "compaction_end",
-							aborted: true,
-						}),
-					);
-				} else {
-					expect(frames.some((frame) => frame.type === "compaction_start")).toBe(false);
-				}
-				const rebaseIndex = frames.findIndex(
-					(frame) => frame.type === "conversation_bootstrap" && frame.reason === "branch_rebase",
-				);
-				const responseIndex = frames.findIndex((frame) => frame.id === "stale-compaction");
-				expect(rebaseIndex).toBeGreaterThanOrEqual(0);
-				if (responseSuccess) {
-					expect(responseIndex).toBeLessThan(rebaseIndex);
-				} else {
-					expect(responseIndex).toBeGreaterThan(rebaseIndex);
-				}
+				expect(frames).toContainEqual(expect.objectContaining({ id: "targeted-compaction", success: true }));
+				expect(frames).toContainEqual(expect.objectContaining({ type: "compaction_end", aborted: false }));
 			});
-			expect(compactionHookCalls).toBe(boundary === "session_before_compact" ? 1 : 0);
-			expect(manager.getEntries().some((entry) => entry.type === "compaction")).toBe(false);
+			await runtime.session.waitForIdle();
+			const frames = parseWrittenObjects(mode.send);
+			expect(
+				frames.some((frame) => frame.type === "conversation_bootstrap" && frame.reason === "branch_rebase"),
+			).toBe(false);
+			expect(compactionHookCalls).toBe(1);
+			expect(manager.getBranch().flatMap((entry) => (entry.type === "compaction" ? [entry.summary] : []))).toEqual([
+				"hook compaction summary",
+			]);
 			expect(
 				manager
 					.getBranch()
 					.flatMap((entry) =>
 						entry.type === "message" && entry.message.role === "user" ? [messageText(entry.message)] : [],
 					),
-			).toEqual(["first user"]);
+			).toEqual(["first user", "second user", "enters the targeted branch"]);
 		},
 	);
 });

@@ -52,7 +52,14 @@ describe("issue #3688 tree cancellation compaction state", () => {
 		harnesses.push(harness);
 
 		const targetId = await harness.sessionManager.appendMessage(userMsg("first"));
-		await harness.sessionManager.appendMessage(assistantMsg("reply"));
+		// The reply names the session's model: the branch's latest response selects the model it summarizes with.
+		const model = harness.getModel();
+		await harness.sessionManager.appendMessage({
+			...assistantMsg("reply"),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+		});
 		const currentLeafId = await harness.sessionManager.appendMessage(userMsg("second"));
 
 		await expect(harness.session.navigateTree(targetId, { summarize: true })).rejects.toThrow(

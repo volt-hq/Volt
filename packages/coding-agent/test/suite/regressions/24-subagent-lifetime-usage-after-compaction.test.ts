@@ -58,7 +58,17 @@ function createToolResult(toolCallId: string, timestamp: number): ToolResultMess
 
 describe("issue #24", () => {
 	it("keeps completed subagent lifetime usage after child compaction", async () => {
-		const harness = await createHarness();
+		// A live session refuses direct compaction writes; it compacts itself, keeping its second prompt.
+		let keptUserId: string | undefined;
+		const harness = await createHarness({
+			extensionFactories: [
+				(volt) => {
+					volt.on("session_before_compact", () => ({
+						compaction: { summary: "summary", firstKeptEntryId: keptUserId!, tokensBefore: 300 },
+					}));
+				},
+			],
+		});
 		try {
 			const first = createAssistantMessage(harness.getModel(), "first", 100, 2, ["read-1", "read-2"]);
 			const second = createAssistantMessage(harness.getModel(), "second", 200, 6, ["read-3"]);
@@ -69,14 +79,19 @@ describe("issue #24", () => {
 			await harness.sessionManager.appendMessage(first);
 			await harness.sessionManager.appendMessage(createToolResult("read-1", 3));
 			await harness.sessionManager.appendMessage(createToolResult("read-2", 4));
-			const keptUserId = await harness.sessionManager.appendMessage({
+			keptUserId = await harness.sessionManager.appendMessage({
 				role: "user",
 				content: "second",
 				timestamp: 5,
 			});
 			await harness.sessionManager.appendMessage(second);
 			await harness.sessionManager.appendMessage(createToolResult("read-3", 7));
-			await harness.sessionManager.appendCompaction("summary", keptUserId, 300);
+			await harness.session.compact();
+			expect(harness.sessionManager.getLeafEntry()).toMatchObject({
+				type: "compaction",
+				summary: "summary",
+				firstKeptEntryId: keptUserId,
+			});
 			await harness.sessionManager.appendMessage({ role: "user", content: "third", timestamp: 9 });
 			await harness.sessionManager.appendMessage(third);
 			await harness.sessionManager.appendMessage(createToolResult("read-4", 11));

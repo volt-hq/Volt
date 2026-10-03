@@ -50,7 +50,7 @@ void assertReadonlyAgentSessionState;
 
 describe("AgentSession message projection", () => {
 	it("returns deep detached snapshots from messages and state", async () => {
-		harness = createHarness({ responses: ["assistant original"] });
+		harness = await createHarness({ responses: ["assistant original"] });
 		await harness.session.prompt("user original");
 
 		const messages = harness.session.messages;

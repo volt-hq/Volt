@@ -268,6 +268,12 @@ describe("#414 host-owned PR review bindings", () => {
 		const { manager, placement, root, cwd, directory, managers } = await fixture();
 		const listener = vi.fn();
 		manager.subscribeEntries(listener);
+		// The open session's own entries (its model selection), which the binding must not join.
+		const entries = manager.getEntries();
+		const tree = manager.getTree();
+		const branch = manager.getBranch();
+		const leafId = manager.getLeafId();
+		expect(manager.buildSessionContext().messages).toEqual([]);
 		const recorded = manager.recordPrReviewBinding(placement);
 		const repeated = manager.recordPrReviewBinding(structuredClone(placement));
 		// The write owns its input from the call, before it commits.
@@ -279,10 +285,10 @@ describe("#414 host-owned PR review bindings", () => {
 		expect(manager.getPrReviewBinding()!.pullRequest.title).toBe("Review");
 		await expect(manager.recordPrReviewBinding(placement)).rejects.toThrow("immutable");
 		expect(listener).not.toHaveBeenCalled();
-		expect(manager.getEntries()).toEqual([]);
-		expect(manager.getTree()).toEqual([]);
-		expect(manager.getBranch()).toEqual([]);
-		expect(manager.getLeafId()).toBeNull();
+		expect(manager.getEntries()).toEqual(entries);
+		expect(manager.getTree()).toEqual(tree);
+		expect(manager.getBranch()).toEqual(branch);
+		expect(manager.getLeafId()).toBe(leafId);
 		expect(manager.buildSessionContext().messages).toEqual([]);
 		const reopened = await SessionManager.openReadOnly(manager.getSessionRef()!);
 		managers.push(reopened);

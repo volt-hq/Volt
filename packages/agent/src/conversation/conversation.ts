@@ -1283,16 +1283,23 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		if (firstDecision && start.checkTail && (await this.shouldCompactTail(run, suggested.type === "request"))) {
 			return { type: "pause", requestAuthority };
 		}
-		if (suggested.type === "request" && context.completedTurn && (await this.shouldCompactMidTurn(run, context))) {
+		// A turn that would continue past the threshold pauses to compact, unless policy acts instead
+		// (a host that needs a final report first): policy sees the pause as the default action.
+		const midTurn =
+			suggested.type === "request" && context.completedTurn
+				? await this.thresholdCompaction(run, context.completedTurn.message, true, "between")
+				: undefined;
+		const defaultAction: AgentLoopNextAction = midTurn ? { type: "pause" } : suggested;
+		const { action, policyOverride } = await this.reduceNextAction(
+			run,
+			{ ...context, requestAuthority, defaultAction },
+			defaultAction,
+		);
+		if (midTurn && action.type === "pause") {
+			run.pendingCompaction = midTurn;
 			this.continuation = { requestAuthority, providerRequestPending: hasIndependentRequest };
 			return { type: "pause", requestAuthority };
 		}
-
-		const { action, policyOverride } = await this.reduceNextAction(
-			run,
-			{ ...context, requestAuthority, defaultAction: suggested },
-			suggested,
-		);
 		await this.publish({
 			type: "next_action_resolved",
 			action: cloneNextAction(action),
@@ -1313,7 +1320,14 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			return { ...action, requestAuthority: authority };
 		}
 		this.continuation = undefined;
-		if (action.type === "stop") return action;
+		if (action.type === "stop") {
+			// A turn a tool batch ended still compacts past the threshold, measured with its tool results.
+			const completed = context.completedTurn;
+			if (completed && completed.message.stopReason === "toolUse" && !run.pendingCompaction) {
+				run.pendingCompaction = await this.thresholdCompaction(run, completed.message, false, "end");
+			}
+			return action;
+		}
 		const deliveries = [
 			...(selected.length > 0 ? await this.prepareLeasedDeliveries(run, selected) : []),
 			...(await this.preparePolicyDeliveries(run, action.deliveries ?? [])),
@@ -1321,28 +1335,30 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		return { type: "request", reason: action.reason, ...(deliveries.length > 0 ? { deliveries } : {}) };
 	}
 
-	private async shouldCompactMidTurn(run: TurnRun, context: AgentLoopNextActionContext): Promise<boolean> {
+	/**
+	 * The threshold compaction policy decides on a completed request: between
+	 * requests of a continuing turn, or at the end of a turn a tool batch
+	 * stopped. Undefined when it does not compact.
+	 */
+	private async thresholdCompaction(
+		run: TurnRun,
+		message: AssistantMessage,
+		continuing: boolean,
+		at: "between" | "end",
+	): Promise<TurnCompaction | undefined> {
 		const hook = this.policy.compaction;
-		const message = context.completedTurn?.message;
-		if (!hook || !message || !this.summarizer) return false;
-		if (message.stopReason === "error" || message.stopReason === "aborted") return false;
+		if (!hook || !this.summarizer) return undefined;
+		if (message.stopReason === "error" || message.stopReason === "aborted") return undefined;
 		const model = this.resolveModel(this.foldState);
-		if (!model || message.provider !== model.provider || message.model !== model.id) return false;
+		if (!model || message.provider !== model.provider || message.model !== model.id) return undefined;
 		const decision = await hook(message.usage, "threshold", {
 			message,
 			model,
 			state: this.foldState,
-			continuing: true,
+			continuing,
 		});
-		if (!decision || run.signal.aborted) return false;
-		run.pendingCompaction = {
-			cause: "threshold",
-			decision,
-			message,
-			entryId: run.lastAssistantEntryId,
-			at: "between",
-		};
-		return true;
+		if (!decision || run.signal.aborted) return undefined;
+		return { cause: "threshold", decision, message, entryId: run.lastAssistantEntryId, at };
 	}
 
 	/**
@@ -1981,6 +1997,10 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			await attempt({ type: "turn_end", message: finalized, toolResults: [] });
 		}
 		if (!run.agentEnded) await attempt({ type: "agent_end", messages: [...run.newMessages] });
+		// A retry the failed loop was running ends unsuccessfully.
+		if (run.retryAttempt > 0) {
+			void this.publishRetryEnd(run, false, error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	// ==========================================================================

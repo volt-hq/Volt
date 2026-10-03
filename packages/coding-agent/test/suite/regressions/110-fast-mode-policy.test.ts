@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, type FauxProvider, type Model } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { THINKING_FAST_MODE_ACTION_ID } from "../../../src/core/host-actions.ts";
@@ -13,6 +13,7 @@ import { getUiActionDescriptors } from "../../../src/core/rpc/ui-actions.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
+import { appendsEntryType, injectFaultyLog } from "../../utilities/faulty-log.ts";
 import { createTestResourceLoader } from "../../utilities.ts";
 
 interface TestRuntime {
@@ -277,9 +278,12 @@ describe("issue #110: durable Fast mode state", () => {
 		await runtime.session.setFastModeEnabled(true);
 		const enabledLeaf = runtime.manager.getLeafId()!;
 
-		await runtime.manager.branch(branchPoint);
+		// A live session refuses direct leaf moves; navigating to the branch point's user message
+		// moves the leaf to its parent, where Fast is still off.
+		await runtime.session.navigateTree(branchPoint, { summarize: false });
 		await runtime.session.setFastModeEnabled(false);
-		runtime.session.setThinkingLevel("medium", { persistDefault: false });
+		await runtime.session.setThinkingLevel("medium", { persistDefault: false });
+		expect(runtime.session.fastModeEnabled).toBe(false);
 		const generationSnapshots: Array<{ enabled: boolean; thinkingLevel: ThinkingLevel }> = [];
 		runtime.session.subscribeConversationGenerationChanges(() => {
 			generationSnapshots.push({
@@ -297,20 +301,25 @@ describe("issue #110: durable Fast mode state", () => {
 	});
 
 	it.each([
-		{ initial: false, next: true, error: "injected enable failure" },
-		{ initial: true, next: false, error: "injected disable failure" },
-	])("keeps runtime state unchanged when a durable transition fails", async ({ initial, next, error }) => {
-		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high" });
+		{ initial: false, next: true },
+		{ initial: true, next: false },
+	])("keeps runtime state unchanged when a durable transition fails", async ({ initial, next }) => {
+		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-110-"));
+		const manager = await SessionManager.create(tempDir, tempDir);
+		const log = injectFaultyLog(manager);
+		const runtime = await createRuntime({ provider: "openai", explicitThinking: "high", manager, tempDir });
 		if (initial) await runtime.session.setFastModeEnabled(true);
+		const entries = runtime.manager.getEntries();
 		const events: AgentSessionEvent[] = [];
 		runtime.session.subscribe((event) => events.push(event));
-		vi.spyOn(runtime.manager, "appendFastModeChange").mockImplementation(async () => {
-			throw new Error(error);
-		});
+		log.failNext("rolled_back", appendsEntryType("fast_mode_change"));
 
-		await expect(runtime.session.setFastModeEnabled(next)).rejects.toThrow(error);
+		await expect(runtime.session.setFastModeEnabled(next)).rejects.toThrow("Injected rollback");
+		expect(log.faulted).toHaveLength(1);
 		expect(runtime.session.fastModeEnabled).toBe(initial);
 		expect(runtime.session.thinkingLevel).toBe("high");
+		expect(runtime.manager.getEntries()).toEqual(entries);
+		expect(runtime.manager.buildSessionContext().fastMode).toEqual({ enabled: initial });
 		expect(events).toEqual([]);
 	});
 

@@ -54,12 +54,14 @@ describe("AgentSession model and extension characterization", () => {
 
 		expect(harness.session.model?.id).toBe("faux-2");
 		expect(modelEvents).toEqual(["faux-1->faux-2:set"]);
+		// The session's opening selection is the first model change.
+		const initialModel = harness.getModel();
 		expect(
 			harness.sessionManager
 				.getEntries()
 				.filter((entry) => entry.type === "model_change")
 				.map((entry) => `${entry.provider}/${entry.modelId}`),
-		).toEqual([`${nextModel.provider}/${nextModel.id}`]);
+		).toEqual([`${initialModel.provider}/${initialModel.id}`, `${nextModel.provider}/${nextModel.id}`]);
 	});
 
 	it("exposes image_gen only for Codex models and preserves its requested state across switches", async () => {

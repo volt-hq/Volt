@@ -135,7 +135,7 @@ describe("AgentSession dispose inertness", () => {
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -184,7 +184,7 @@ describe("AgentSession dispose inertness", () => {
 		await disposal;
 	});
 
-	it("clears the shared runner ref, drains queues, and never continues after dispose", async () => {
+	it("clears the shared runner ref and never runs queued input after dispose", async () => {
 		const ref: { current?: ExtensionRunner } = {};
 		const { control, getStreamCalls } = await createSession({ extensionRunnerRef: ref });
 
@@ -195,23 +195,32 @@ describe("AgentSession dispose inertness", () => {
 		expect(session.isStreaming).toBe(true);
 		expect(getStreamCalls()).toBe(1);
 
-		// Queue a steering message; without dispose() draining queues, the
-		// post-run continuation would call agent.continue() and issue a fresh
-		// provider request from a dead session.
-		control.queueSteer({ role: "user", content: [{ type: "text", text: "steer me" }], timestamp: Date.now() });
+		// Queue a durable steering input; if disposal let the turn continue, it
+		// would deliver it and issue a fresh provider request from a dead session.
+		const steerId = await control.queueSteer({
+			role: "user",
+			content: [{ type: "text", text: "steer me" }],
+			timestamp: Date.now(),
+		});
 		expect(control.hasQueuedMessages()).toBe(true);
 
 		session.dispose();
 		const disposal = session.waitForClosed();
 
 		expect(ref.current).toBeUndefined();
-		expect(control.hasQueuedMessages()).toBe(false);
 
 		await promptPromise;
 		// Give any (buggy) continuation a chance to fire before asserting.
 		await new Promise((resolve) => setTimeout(resolve, 25));
 		expect(getStreamCalls()).toBe(1);
 		await disposal;
+		// The input stays durably queued for recovery; it was never started or delivered.
+		expect(control.conversation.state.clientInputs.inputs.get(steerId)?.state).toBe("accepted");
+		expect(
+			control.conversation.state.context.messages.some(
+				(message) => message.role === "user" && JSON.stringify(message.content).includes("steer me"),
+			),
+		).toBe(false);
 
 		// dispose() is idempotent.
 		expect(() => session.dispose()).not.toThrow();

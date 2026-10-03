@@ -1,17 +1,10 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
-import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionFactory } from "../../../src/index.ts";
-import { createHarness, type Harness } from "../harness.ts";
-
-type SessionWithCompactionInternals = {
-	_runAutoCompaction: (
-		reason: "overflow" | "threshold",
-		willRetry: boolean,
-		continueAfterCompaction?: boolean,
-	) => Promise<boolean>;
-};
+import type { SeedLogBuild } from "../../utilities/seed-log.ts";
+import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 interface RecordedCompactionEvent {
 	type: "session_before_compact" | "session_compact";
@@ -58,6 +51,31 @@ async function createThresholdHarness(recorded: RecordedCompactionEvent[], tools
 	});
 }
 
+/**
+ * A saved branch whose last response decides compaction before the next
+ * prompt. The 20k window with a 10k reserve compacts over 10k tokens, above
+ * what the small requests that follow report.
+ */
+async function createSavedBranchHarness(recorded: RecordedCompactionEvent[], seed: SeedLogBuild): Promise<Harness> {
+	return createHarness({
+		models: [{ id: "faux-1", contextWindow: 20_000, maxTokens: 100 }],
+		settings: { compaction: { reserveTokens: 10_000, keepRecentTokens: 1 } },
+		seed,
+		extensionFactories: [recordingExtension(recorded)],
+	});
+}
+
+/** Saved usage over the saved-branch threshold and under its window. */
+const SAVED_USAGE = { input: 12_000, totalTokens: 12_000 };
+
+/** Record each request's context and answer with `text`. */
+function recordRequest(requests: Context[], text: string) {
+	return (context: Context) => {
+		requests.push(context);
+		return fauxAssistantMessage(text);
+	};
+}
+
 function expectCompactionEvents(
 	harness: Harness,
 	recorded: RecordedCompactionEvent[],
@@ -94,37 +112,62 @@ describe("regression #239: compaction reason on extension events", () => {
 		expectCompactionEvents(harness, recorded, "manual", false);
 	});
 
-	it("reports threshold reason for auto-compaction", async () => {
+	it("reports threshold reason for pre-prompt compaction after an aborted response", async () => {
 		const recorded: RecordedCompactionEvent[] = [];
-		const harness = await createCompactionHarness(recorded);
+		const harness = await createSavedBranchHarness(recorded, (seed) =>
+			seed.user("first").assistant("partial", { stopReason: "aborted", usage: SAVED_USAGE }),
+		);
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const requests: Context[] = [];
+		harness.setResponses([recordRequest(requests, "answer")]);
 
-		await sessionInternals._runAutoCompaction("threshold", false);
+		await harness.session.prompt("second");
 
 		expectCompactionEvents(harness, recorded, "threshold", false);
+		expect(requests).toHaveLength(1);
+		expect(getMessageText(requests[0]?.messages[0])).toContain("summary from extension");
+		expect(getMessageText(requests[0]?.messages.at(-1))).toBe("second");
 	});
 
-	it("reports overflow reason and willRetry for overflow recovery", async () => {
+	it("reports overflow reason and willRetry for pre-prompt overflow recovery", async () => {
 		const recorded: RecordedCompactionEvent[] = [];
-		const harness = await createCompactionHarness(recorded);
+		const harness = await createSavedBranchHarness(recorded, (seed) =>
+			seed.user("first").assistant("", {
+				stopReason: "error",
+				error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+			}),
+		);
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const requests: Context[] = [];
+		harness.setResponses([recordRequest(requests, "recovered"), recordRequest(requests, "answer")]);
 
-		await sessionInternals._runAutoCompaction("overflow", true);
+		await harness.session.prompt("second");
 
 		expectCompactionEvents(harness, recorded, "overflow", true);
+		// The overflowed request is retried after compaction without its error, before the prompt is delivered.
+		expect(requests).toHaveLength(2);
+		expect(requests[0]?.messages.map((message) => message.role)).not.toContain("assistant");
+		expect(JSON.stringify(requests[0]?.messages)).not.toContain("second");
+		expect(getMessageText(requests[1]?.messages.at(-1))).toBe("second");
 	});
 
-	it("reports threshold continuation as a retry", async () => {
+	it("reports pre-prompt threshold continuation of an empty length-limited response as a retry", async () => {
 		const recorded: RecordedCompactionEvent[] = [];
-		const harness = await createCompactionHarness(recorded);
+		const harness = await createSavedBranchHarness(recorded, (seed) =>
+			seed.user("first").assistant("", { stopReason: "length", usage: SAVED_USAGE }),
+		);
 		harnesses.push(harness);
-		const sessionInternals = harness.session as unknown as SessionWithCompactionInternals;
+		const requests: Context[] = [];
+		harness.setResponses([recordRequest(requests, "continued after compaction"), recordRequest(requests, "answer")]);
 
-		await expect(sessionInternals._runAutoCompaction("threshold", false, true)).resolves.toBe(true);
+		await harness.session.prompt("second");
 
 		expectCompactionEvents(harness, recorded, "threshold", true);
+		// The truncated request is retried without its truncated response, before the prompt is delivered.
+		expect(requests).toHaveLength(2);
+		expect(requests[0]?.messages.map((message) => message.role)).not.toContain("assistant");
+		expect(JSON.stringify(requests[0]?.messages)).not.toContain("second");
+		expect(getMessageText(requests[1]?.messages.at(-1))).toBe("second");
 	});
 
 	it("reports retry metadata when an empty length-limited response continues after compaction", async () => {

@@ -73,7 +73,7 @@ describe("subagent recovery notice", () => {
 			record({ id: "sa_stranded", stranded: true }),
 			record({ id: "sa_live", hydrated: undefined, status: "completed" }),
 		]);
-		const harness = createHarness({ responses: ["ok", "ok"], subagentToolManager: manager });
+		const harness = await createHarness({ responses: ["ok", "ok"], subagentToolManager: manager });
 		try {
 			await harness.session.prompt("hello");
 
@@ -125,7 +125,7 @@ describe("subagent recovery notice", () => {
 
 	it("durably skips runs already offered by a persisted notice", async () => {
 		const { manager } = createStubManager([record({ id: "sa_old" }), record({ id: "sa_new", task: "new work" })]);
-		const harness = createHarness({ responses: ["ok"], subagentToolManager: manager });
+		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
 		try {
 			// A notice persisted by a previous process already offered sa_old.
 			await harness.sessionManager.appendCustomMessageEntry(
@@ -150,7 +150,7 @@ describe("subagent recovery notice", () => {
 
 	it("appends nothing when hydration recovers no unclaimed work", async () => {
 		const { manager } = createStubManager([record({ id: "sa_claimed", claimed: true })]);
-		const harness = createHarness({ responses: ["ok"], subagentToolManager: manager });
+		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
 		try {
 			await harness.session.prompt("hello");
 			expect(noticeEntries(harness)).toHaveLength(0);
@@ -163,7 +163,7 @@ describe("subagent recovery notice", () => {
 		const { manager } = createStubManager([record({ id: "sa_unclaimed" })]);
 		// baseToolsOverride replaces the toolset, so "subagent" is not active
 		// even though the manager is wired.
-		const harness = createHarness({ responses: ["ok"], subagentToolManager: manager, baseToolsOverride: {} });
+		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager, baseToolsOverride: {} });
 		try {
 			await harness.session.prompt("hello");
 			expect(noticeEntries(harness)).toHaveLength(0);
@@ -227,7 +227,7 @@ describe("subagent recovery notice", () => {
 			requestTimeoutMs: 5_000,
 			parentSessionManager: reopened,
 		});
-		const harness = createHarness({
+		const harness = await createHarness({
 			responses: ["ok"],
 			sessionManager: reopened,
 			subagentToolManager: manager,
@@ -256,7 +256,7 @@ describe("subagent recovery notice", () => {
 		const { manager, hydrateCalls } = createStubManager([record({ id: "sa_unclaimed" })], {
 			isSubagentRuntime: true,
 		});
-		const harness = createHarness({ responses: ["ok"], subagentToolManager: manager });
+		const harness = await createHarness({ responses: ["ok"], subagentToolManager: manager });
 		try {
 			await harness.session.prompt("do the delegated task");
 			expect(noticeEntries(harness)).toHaveLength(0);

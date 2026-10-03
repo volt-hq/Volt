@@ -364,11 +364,11 @@ function createTempDir(): string {
 	return tempDir;
 }
 
-function createHarnessWithResourceLoader(
+async function createHarnessWithResourceLoader(
 	options: HarnessOptions,
 	resourceLoader: ResourceLoader,
 	tempDir: string,
-): Harness {
+): Promise<Harness> {
 	const baseModel = options.model ?? fauxModel;
 	const model: Model<any> = options.contextWindow ? { ...baseModel, contextWindow: options.contextWindow } : baseModel;
 
@@ -385,7 +385,7 @@ function createHarnessWithResourceLoader(
 	authStorage.setRuntimeApiKey(model.provider, "faux-key");
 	const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 
-	const session = new AgentSession({
+	const session = await AgentSession.create({
 		sessionManager,
 		model,
 		thinkingLevel: "off",
@@ -428,7 +428,7 @@ function createHarnessWithResourceLoader(
 	};
 }
 
-export function createHarness(options: HarnessOptions = {}): Harness {
+export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	if (options.extensionFactories?.length) {
 		throw new Error("createHarness does not support extensionFactories. Use createHarnessWithExtensions().");
 	}

@@ -53,7 +53,7 @@ type SwitchProfileContext = {
 			hasConfiguredAuth: (model: Model<string>) => boolean;
 		};
 		setModel: (model: Model<string>, options?: SetModelOptions) => Promise<void>;
-		setThinkingLevel: (level: ThinkingLevel, options?: DefaultPersistenceOptions) => void;
+		setThinkingLevel: (level: ThinkingLevel, options?: DefaultPersistenceOptions) => Promise<void>;
 	};
 	footer: { invalidate: () => void };
 	updateEditorBorderColor: () => void;
@@ -382,7 +382,7 @@ describe("InteractiveMode profile selector", () => {
 			},
 			{ profile: "previous" },
 		);
-		const session = new AgentSession({
+		const session = await AgentSession.create({
 			...createTestAgentSessionRuntimeConfig({ model: previousModel }),
 			sessionManager: SessionManager.inMemory(),
 			settingsManager,
@@ -417,9 +417,8 @@ describe("InteractiveMode profile selector", () => {
 							hasConfiguredAuth: (model: Model<string>) => modelRegistry.hasConfiguredAuth(model),
 						},
 						setModel,
-						setThinkingLevel: (level: ThinkingLevel, options?: DefaultPersistenceOptions) => {
-							session.setThinkingLevel(level, options);
-						},
+						setThinkingLevel: (level: ThinkingLevel, options?: DefaultPersistenceOptions) =>
+							session.setThinkingLevel(level, options),
 					},
 				},
 				footer: { value: { invalidate: vi.fn() } },
@@ -486,7 +485,7 @@ describe("InteractiveMode profile selector", () => {
 			},
 			{ profile: "fast" },
 		);
-		const session = new AgentSession({
+		const session = await AgentSession.create({
 			...createTestAgentSessionRuntimeConfig({ model: reasoningModel, thinkingLevel: "low" }),
 			sessionManager: SessionManager.inMemory(),
 			settingsManager,

@@ -10,7 +10,7 @@ import {
 	type SQLiteSessionStoreLease,
 } from "../../../src/core/session-store/index.ts";
 import { loseConversationLock } from "../../lost-conversation-lock.ts";
-import { createHarness, getMessageText, type Harness } from "../harness.ts";
+import { createHarness, getMessageText, type Harness, type HarnessOptions } from "../harness.ts";
 
 async function faultNextTransaction(manager: SessionManager): Promise<SQLiteSessionStoreLease> {
 	const lease = await acquireSharedSQLiteSessionStore(manager.getSessionDir());
@@ -97,11 +97,16 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
 	});
 
-	async function setup(): Promise<{ harness: Harness; sessionRef: SessionReference; baseline: PlanningSnapshot }> {
+	async function setup(
+		extensionFactories?: HarnessOptions["extensionFactories"],
+	): Promise<{ harness: Harness; sessionRef: SessionReference; baseline: PlanningSnapshot }> {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-issue-212-"));
 		tempDirs.push(tempDir);
 		const sessionManager = await SessionManager.create(tempDir, join(tempDir, "sessions"));
-		const harness = await createHarness({ sessionManager });
+		const harness = await createHarness({
+			sessionManager,
+			...(extensionFactories === undefined ? {} : { extensionFactories }),
+		});
 		harnesses.push(harness);
 		await createReadyPlan(harness);
 		return {
@@ -117,11 +122,10 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		baseline: PlanningSnapshot,
 		clientMessageId: string,
 	): Promise<void> {
+		// An idle steer starts its turn; its delivery transaction rolls back and the steer stays queued.
 		await harness.session.steer("revise this ready plan", undefined, clientMessageId);
-		await expect(harness.control.continue()).resolves.toMatchObject({
-			status: "delivery_failed",
-			failure: { outcome: "retained", phase: "settlement" },
-		});
+		await harness.session.waitForIdle();
+		expect(harness.sessionManager.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
 		expect(snapshotHarness(harness)).toEqual(baseline);
 		expect(await snapshotReopened(sessionRef)).toEqual(baseline);
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -161,12 +165,11 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		const { harness, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		const clientMessageId = "issue-212-stale-preimage";
+		// The steer queues behind a held turn claim; the lock is lost before its turn delivers it.
+		const claim = harness.control.conversation.reserve();
 		await harness.session.steer("revise this ready plan", undefined, clientMessageId);
 		await loseConversationLock(harness.sessionManager);
-		await expect(harness.control.continue()).resolves.toMatchObject({
-			status: "delivery_failed",
-			failure: { outcome: "terminally_failed", phase: "settlement" },
-		});
+		claim.cancel();
 
 		await expect(harness.session.lost).resolves.toMatchObject({ reason: "fence_conflict" });
 		expect(harness.getPendingResponseCount()).toBe(1);
@@ -181,13 +184,27 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 	});
 
 	it("assigns one ready-plan transition across a mixed prompt and steer batch", async () => {
-		const { harness, sessionRef, baseline } = await setup();
+		const preparing = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { harness, sessionRef, baseline } = await setup([
+			(volt) => {
+				volt.on("before_agent_start", async () => {
+					preparing.resolve();
+					await release.promise;
+				});
+			},
+		]);
 		harness.setResponses([fauxAssistantMessage("both applied")]);
-		await harness.session.steer("queued steer", undefined, "issue-212-mixed-steer");
-		await harness.session.prompt("pending prompt", {
+		// The steer arrives while the prompt prepares its turn; the turn delivers both together.
+		const prompt = harness.session.prompt("pending prompt", {
 			clientMessageId: "issue-212-mixed-prompt",
 			source: "rpc",
 		});
+		await preparing.promise;
+		await harness.session.steer("queued steer", undefined, "issue-212-mixed-steer");
+		release.resolve();
+		await prompt;
+		await harness.session.waitForIdle();
 
 		const live = snapshotHarness(harness);
 		expect(live).toEqual({
@@ -216,7 +233,7 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		});
 
 		await harness.session.steer("revise this ready plan", undefined, "issue-212-observer-order");
-		await harness.control.continue();
+		await harness.session.waitForIdle();
 		unsubscribe();
 		const nestedIds = await Promise.all(nestedWrites);
 
@@ -228,7 +245,7 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		expect(branch.slice(userIndex + 1, userIndex + 3).map((entry) => entry.id)).toEqual(nestedIds);
 	});
 
-	it("retains an identified direct prompt after a proven pre-replacement failure", async () => {
+	it("fails an identified direct prompt whose delivery transaction rolls back", async () => {
 		const { harness, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		storeLeases.push(await faultNextTransaction(harness.sessionManager));
@@ -239,12 +256,12 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 				clientMessageId,
 				source: "rpc",
 			}),
-		).rejects.toThrow("Session commit was rolled back");
-		expect(harness.sessionManager.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
-		expect(harness.control.hasQueuedMessages()).toBe(true);
+		).rejects.toThrow();
+		// The prompt's caller learns the failure; nothing of the delivery or the plan transition persists.
+		expect(harness.sessionManager.getClientInput(clientMessageId)).toMatchObject({ state: "failed" });
+		expect(harness.control.hasQueuedMessages()).toBe(false);
 		expect(snapshotHarness(harness)).toEqual(baseline);
 		expect(await snapshotReopened(sessionRef)).toEqual(baseline);
 		expect(harness.getPendingResponseCount()).toBe(1);
-		await harness.session.clearQueue();
 	});
 });

@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { BACKGROUND_JOB_NOTIFICATION_TYPE } from "../../../src/core/background-jobs.ts";
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import * as nativeTools from "../../../src/core/tools/index.ts";
-import { createHarness, getMessageText, type Harness, type HarnessOptions } from "../harness.ts";
+import { createHarness, getMessageText, getUserTexts, type Harness, type HarnessOptions } from "../harness.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -185,15 +185,17 @@ describe("#392 background outcome continuation", () => {
 		const { harness, workers } = await setup();
 		await launch(harness);
 		const unregister = harness.session.registerTurnPolicy({ nextAction: () => ({ type: "stop" }) });
+		// The policy stops the turn before it delivers the prompt; the prompt is withdrawn.
 		await harness.session.prompt("A host policy forbids this request");
 		expect(harness.faux.state.callCount).toBe(2);
+		expect(getUserTexts(harness)).not.toContain("A host policy forbids this request");
 		workers.get("work")!.resolve();
 		await harness.session.waitForBackgroundJobs();
 		await harness.session.waitForIdle();
 		expect(harness.faux.state.callCount).toBe(2);
 		unregister();
 		harness.setResponses([fauxAssistantMessage("Explicitly authorized recovery.")]);
-		await harness.control.continue();
+		await harness.session.prompt("Recover explicitly");
 		expect(harness.faux.state.callCount).toBe(3);
 		expect(harness.session.getLastAssistantText()).toBe("Explicitly authorized recovery.");
 	});

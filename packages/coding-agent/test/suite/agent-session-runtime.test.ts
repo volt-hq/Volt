@@ -210,17 +210,6 @@ describe("AgentSessionRuntime characterization", () => {
 		expect(persistedAssistant.usage.cost.total).toBe(0.123);
 	});
 
-	it("rejects reinstalling the install-once agent tool hooks", async () => {
-		const { runtime } = await createRuntimeForTest(() => {});
-
-		// External wrappers (e.g. the SubagentManager turn budget) chain over
-		// agent.beforeToolCall/agent.nextAction and rely on AgentSession
-		// never reinstalling them; a reinstall must fail loudly instead of
-		// silently dropping those wrappers.
-		const session = runtime.session as unknown as { _installAgentToolHooks(): void };
-		expect(() => session._installAgentToolHooks()).toThrow(/installed exactly once per AgentSession/);
-	});
-
 	it("executes tool calls from a functional message_end replacement", async () => {
 		let replaced = false;
 		const { runtime, faux } = await createRuntimeForTest((volt: ExtensionAPI) => {
@@ -442,23 +431,17 @@ describe("AgentSessionRuntime characterization", () => {
 	it("builds live summaries from the cached projection without materializing history", async () => {
 		const { runtime } = await createRuntimeForTest(() => {}, { bootstrapModel: false });
 		const manager = runtime.session.sessionManager;
-		const firstMessageTime = Date.now() - 3_000;
+		// A live session's entries carry their commit time; message activity uses the messages' own times.
+		const firstMessageTime = Date.now() + 10_000;
 		const lastMessageTime = firstMessageTime + 1_000;
-		await manager.appendCustomMessageEntry(
-			"test.displayed",
-			"displayed fallback",
-			true,
-			undefined,
-			firstMessageTime - 1_000,
-		);
+		await manager.appendCustomMessageEntry("test.displayed", "displayed fallback", true);
 		await manager.appendMessage({ role: "user", content: "first user", timestamp: firstMessageTime });
-		await manager.appendCustomMessageEntry(
-			"test.hidden",
-			"hidden activity",
-			false,
-			undefined,
-			lastMessageTime + 60_000,
-		);
+		vi.useFakeTimers({ toFake: ["Date"], now: lastMessageTime + 60_000 });
+		try {
+			await manager.appendCustomMessageEntry("test.hidden", "hidden activity", false);
+		} finally {
+			vi.useRealTimers();
+		}
 		await manager.appendMessage({ role: "user", content: "second user", timestamp: lastMessageTime });
 		const expected = summarizeSessionEntries(manager.getEntries());
 		expect(expected).toEqual({

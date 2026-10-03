@@ -146,7 +146,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 				},
 			},
 		} satisfies Partial<Settings>);
-		const session = new AgentSession({
+		const session = await AgentSession.create({
 			...createTestAgentSessionRuntimeConfig({ model: faux.getModel(), thinkingLevel: "low" }),
 			streamOptions: {
 				transport: settingsManager.getTransport(),
@@ -219,7 +219,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 			{ profile: "withProvider" },
 		);
 		const modelRegistry = ModelRegistry.inMemory(AuthStorage.inMemory());
-		const session = new AgentSession({
+		const session = await AgentSession.create({
 			...createTestAgentSessionRuntimeConfig({ model: faux.getModel() }),
 			sessionManager: SessionManager.inMemory(),
 			settingsManager,
@@ -296,7 +296,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 		if (!initialModel) {
 			throw new Error("No initial model was registered");
 		}
-		const session = new AgentSession({
+		const session = await AgentSession.create({
 			...createTestAgentSessionRuntimeConfig({ model: initialModel }),
 			sessionManager: SessionManager.inMemory(),
 			settingsManager,
@@ -314,7 +314,7 @@ describe("AgentSessionRuntime profile propagation", () => {
 		const extensionModel = modelRegistry.find(providerName, providerModelId);
 		expect(extensionModel).toBeDefined();
 		await session.setModel(extensionModel!, { persistDefault: false });
-		session.setThinkingLevel("high", { persistDefault: false });
+		await session.setThinkingLevel("high", { persistDefault: false });
 		await session.setFastModeEnabled(true);
 		expect(session.model?.provider).toBe(providerName);
 

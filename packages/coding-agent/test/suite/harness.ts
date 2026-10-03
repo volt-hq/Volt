@@ -6,7 +6,15 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type AgentTool, type ConversationLog, InMemoryConversationLog, uuidv7 } from "@hansjm10/volt-agent-core";
+import {
+	type AgentTool,
+	CONVERSATION_LOG_READ_LIMIT_MAX,
+	type ConversationLog,
+	type ConversationLogEntry,
+	fold,
+	InMemoryConversationLog,
+	uuidv7,
+} from "@hansjm10/volt-agent-core";
 import {
 	createFauxProvider,
 	type FauxModelDefinition,
@@ -16,19 +24,21 @@ import {
 	type Model,
 	type PromptCacheRefreshCheck,
 } from "@hansjm10/volt-ai";
+import { expect } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
+import { toLogEntry } from "../../src/core/conversation-log/entry-codec.ts";
 import { SqliteConversationLog } from "../../src/core/conversation-log/sqlite-conversation-log.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import type { LspServerPool } from "../../src/core/lsp/server-pool.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
-import { SessionManager } from "../../src/core/session-manager.ts";
+import { type CommittedSessionEntry, type FileEntry, SessionManager } from "../../src/core/session-manager.ts";
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { SubagentToolManager } from "../../src/core/tools/subagent.ts";
 import type { ExtensionFactory, ExtensionWorkLimits, ResourceLoader } from "../../src/index.ts";
-import { createAgentSessionTestControl, type LegacyPrepareDelivery } from "../agent-session-test-control.ts";
+import { createAgentSessionTestControl } from "../agent-session-test-control.ts";
 import { FaultyConversationLog, injectFaultyLog } from "../utilities/faulty-log.ts";
 import { type SeedLogBuild, type SeedModel, seedLog } from "../utilities/seed-log.ts";
 import {
@@ -83,8 +93,9 @@ export interface HarnessOptions {
 	subagentToolManager?: SubagentToolManager;
 	resourceLoader?: ResourceLoader;
 	extensionFactories?: Array<ExtensionFactory | CreateTestExtensionsResultInput>;
-	prepareDelivery?: LegacyPrepareDelivery;
 	withConfiguredAuth?: boolean;
+	/** Select the faux model for the session (the default); without it the log names no model. */
+	selectModel?: boolean;
 	/** Inject a persisted manager when a test needs to exercise session reload behavior. */
 	sessionManager?: SessionManager;
 	/**
@@ -221,9 +232,9 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			systemPrompt: options.systemPrompt ?? "You are a test assistant.",
 		});
 
-	const session = new AgentSession({
+	const session = await AgentSession.create({
 		sessionManager,
-		model,
+		...(options.selectModel === false ? {} : { model }),
 		thinkingLevel: "off",
 		streamFn: modelRegistry.client.streamSimple,
 		...(options.refreshPromptCache === undefined ? {} : { promptCacheRefresh: modelRegistry.client }),
@@ -244,14 +255,13 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		extensionRunnerRef,
 	});
 	const control = createAgentSessionTestControl(session);
-	if (options.prepareDelivery) control.setPrepareDelivery(options.prepareDelivery);
 
 	const events: AgentSessionEvent[] = [];
 	session.subscribe((event) => {
 		events.push(event);
 	});
 
-	return {
+	const harness: Harness = {
 		session,
 		control,
 		sessionManager,
@@ -273,10 +283,12 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			if (sessionManager.isPersisted()) {
 				throw new Error("Persisted harness cleanup must await cleanupAsync()");
 			}
+			assertSessionViewMatchesLog(harness, sessionManagerLogEntries(sessionManager));
 			session.dispose();
 			if (existsSync(tempDir)) rmSync(tempDir, { recursive: true, force: true });
 		},
 		async cleanupAsync() {
+			assertSessionViewMatchesLog(harness, await rereadSessionLog(harness));
 			session.dispose();
 			try {
 				await session.waitForClosed();
@@ -289,4 +301,83 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 			}
 		},
 	};
+	return harness;
+}
+
+/** Whether the harness session still serves its log: not disposed, not lost, and quiescent. */
+function servesLog(harness: Harness): boolean {
+	const session = harness.session as unknown as { _disposed: boolean; _lostError: Error | undefined };
+	return !session._disposed && session._lostError === undefined && !harness.session.isBusy;
+}
+
+/** The session manager's committed entries in their log form. */
+function sessionManagerLogEntries(sessionManager: SessionManager): ConversationLogEntry[] {
+	const fileEntries = (sessionManager as unknown as { fileEntries: FileEntry[] }).fileEntries;
+	return fileEntries.slice(1).map((entry) => toLogEntry(entry as CommittedSessionEntry));
+}
+
+/** Every entry of the log the session's conversation writes, read back from the log. */
+async function rereadSessionLog(harness: Harness): Promise<ConversationLogEntry[] | undefined> {
+	if (!servesLog(harness)) return undefined;
+	const log = (harness.control.conversation as unknown as { log: ConversationLog }).log;
+	const entries: ConversationLogEntry[] = [];
+	for (;;) {
+		const page = await log.read(entries.length, CONVERSATION_LOG_READ_LIMIT_MAX);
+		entries.push(...page.entries);
+		if (page.entries.length === 0 || entries.length >= page.lastOrdinal) return entries;
+	}
+}
+
+/**
+ * The suite invariant: folding the session's log yields the session's view
+ * of it, both the conversation's state and the session manager's projection.
+ */
+export function assertSessionViewMatchesLog(
+	harness: Harness,
+	entries: readonly ConversationLogEntry[] | undefined,
+): void {
+	if (entries === undefined || !servesLog(harness)) return;
+	const folded = fold(entries);
+	const state = harness.control.conversation.state;
+	const { sessionManager } = harness;
+	const context = sessionManager.buildSessionContext();
+	const view = {
+		ordinal: state.ordinal,
+		managerOrdinal: sessionManager.getOrdinal(),
+		leafId: state.leafId,
+		managerLeafId: sessionManager.getLeafId(),
+		messages: state.context.messages,
+		managerMessages: context.messages,
+		model: state.context.model,
+		managerModel: context.model,
+		thinkingLevel: state.context.thinkingLevel,
+		managerThinkingLevel: context.thinkingLevel,
+		fastMode: state.context.fastMode,
+		managerFastMode: context.fastMode.enabled,
+		clientInputs: [...state.clientInputs.inputs.values()].map((record) => [record.clientMessageId, record.state]),
+		managerClientInputs: [...folded.clientInputs.inputs.keys()].map((id) => [
+			id,
+			sessionManager.getClientInput(id)?.state,
+		]),
+	};
+	const expected = {
+		ordinal: folded.ordinal,
+		managerOrdinal: folded.ordinal,
+		leafId: folded.leafId,
+		managerLeafId: folded.leafId,
+		messages: folded.context.messages,
+		managerMessages: folded.context.messages,
+		model: folded.context.model,
+		managerModel: folded.context.model,
+		thinkingLevel: folded.context.thinkingLevel,
+		managerThinkingLevel: folded.context.thinkingLevel,
+		fastMode: folded.context.fastMode,
+		managerFastMode: folded.context.fastMode,
+		clientInputs: [...folded.clientInputs.inputs.values()].map((record) => [record.clientMessageId, record.state]),
+		managerClientInputs: [...folded.clientInputs.inputs.values()].map((record) => [
+			record.clientMessageId,
+			record.state,
+		]),
+	};
+	expect(view, "the fold of the session's log equals the session's view").toEqual(expected);
 }

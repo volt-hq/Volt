@@ -689,6 +689,8 @@ describe("AgentSession background jobs", () => {
 			const harness = await setup();
 			const control = setupInteractive(harness);
 			const job = await startJob(harness);
+			// Input queued behind a held turn claim stays queued (an idle steer would start its own turn).
+			harness.control.conversation.reserve();
 			await harness.session.steer("queued steering");
 			await harness.session.followUp("queued follow-up");
 			control.defaultEditor.setText(draft);
@@ -1304,41 +1306,28 @@ describe("AgentSession background jobs", () => {
 
 	it("acknowledges notifications only after the canonical delivery durability barrier", async () => {
 		const backend = controlledBash();
-		const harness = await setup();
+		const harness = await setup({ log: "memory" });
 		const job = await startJob(harness);
 		backend.finish.resolve();
 		await waitJob(harness, job.id);
 		const acknowledge = vi.spyOn(BackgroundJobManager.prototype, "acknowledgeNotifications");
-		const durabilityReached = deferred();
-		const releaseDurability = deferred();
-		const commit = harness.sessionManager.commitCanonicalCommand.bind(harness.sessionManager);
-		const commitSpy = vi
-			.spyOn(harness.sessionManager, "commitCanonicalCommand")
-			.mockImplementation(async (command) => {
-				const evidence = await commit(command);
-				if (
-					command.mutations.some(
-						(mutation) =>
-							mutation.kind === "append" &&
-							mutation.entry.type === "message" &&
-							mutation.entry.message.role === "custom" &&
-							mutation.entry.message.customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
-					)
-				) {
-					durabilityReached.resolve();
-					await releaseDurability.promise;
-				}
-				return evidence;
-			});
+		// Hold the batch that delivers the notice until the test has checked acknowledgement.
+		const hold = harness.log!.holdNext((batch) =>
+			batch.entries.some(
+				(entry) =>
+					entry.type === "custom_message" &&
+					(entry.payload as { customType?: string }).customType === BACKGROUND_JOB_NOTIFICATION_TYPE,
+			),
+		);
 		harness.setResponses([fauxAssistantMessage("Notice received.")]);
 		const prompt = harness.session.prompt("Collect the completion");
 		try {
-			await durabilityReached.promise;
+			await hold.started;
 			expect(acknowledge).not.toHaveBeenCalled();
 			expect(harness.faux.state.callCount).toBe(2);
 		} finally {
-			releaseDurability.resolve();
-			await prompt.finally(() => commitSpy.mockRestore());
+			hold.release();
+			await prompt;
 		}
 		expect(acknowledge).toHaveBeenCalledExactlyOnceWith([job.id]);
 	});
@@ -1386,12 +1375,13 @@ describe("AgentSession background jobs", () => {
 		backend.finish.resolve();
 		await waitJob(harness, job.id);
 		const unregister = harness.session.registerTurnPolicy({ nextAction: () => ({ type: "stop" }) });
+		// The policy stops the turn before it delivers anything; the prompt is withdrawn.
 		await harness.session.prompt("Do not infer");
 		expect(harness.faux.state.callCount).toBe(2);
 		expect(notices(harness)).toHaveLength(0);
 		unregister();
 		harness.setResponses([fauxAssistantMessage("Now collect.")]);
-		await harness.control.continue();
+		await harness.session.prompt("Collect now");
 		expect(notices(harness)).toHaveLength(1);
 	});
 });

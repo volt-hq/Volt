@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import type { AgentMessage, ConversationLogAppend } from "@hansjm10/volt-agent-core";
 import { type AssistantMessage, type AssistantMessageDiagnostic, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
 import type { ExtensionHandler, MessageEndEvent, MessageEndEventResult } from "../../../src/core/extensions/types.ts";
@@ -12,12 +12,12 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
 	return { promise, resolve };
 }
 
-function createUserMessage(text: string): Extract<AgentMessage, { role: "user" }> {
-	return {
-		role: "user",
-		content: [{ type: "text", text }],
-		timestamp: Date.now(),
-	};
+/** Whether a log batch delivers a user message: a turn's delivery commit. */
+function deliversUserMessage(batch: ConversationLogAppend): boolean {
+	return batch.entries.some(
+		(entry) =>
+			entry.type === "message" && (entry.payload as { message?: { role?: string } }).message?.role === "user",
+	);
 }
 
 function persistedAssistantMessages(harness: Harness): AssistantMessage[] {
@@ -231,27 +231,20 @@ describe("regression #199: abort provenance persistence", () => {
 		});
 	});
 
-	it("persists a delivery when disposal runs inside participant settlement", async () => {
-		let harness: Harness;
-		let disposal: Promise<void> | undefined;
-		harness = await createHarness({
-			prepareDelivery: (delivery) => ({
-				messages: [...delivery.messages],
-				participant: {
-					settle: () => {
-						harness.session.dispose("disposal");
-						disposal = harness.session.waitForClosed();
-						return { outcome: "committed" };
-					},
-				},
-			}),
-		});
+	it("persists a delivery when disposal runs while it commits", async () => {
+		const harness = await createHarness({ log: "memory" });
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("never requested")]);
+		const hold = harness.log!.holdNext(deliversUserMessage);
 
-		await harness.session.prompt("commit before disposal", {
+		const prompt = harness.session.prompt("commit before disposal", {
 			clientMessageId: "dispose-during-delivery-commit",
 		});
+		await hold.started;
+		harness.session.dispose("disposal");
+		const disposal = harness.session.waitForClosed();
+		hold.release();
+		await prompt;
 		await disposal;
 
 		const messages = harness.sessionManager.buildSessionContext().messages;
@@ -268,63 +261,53 @@ describe("regression #199: abort provenance persistence", () => {
 		});
 	});
 
-	it("persists each prepared delivery message once when disposal runs during settlement", async () => {
-		let harness: Harness;
-		let disposal: Promise<void> | undefined;
-		harness = await createHarness({
-			prepareDelivery: (delivery) => ({
-				messages: [
-					createUserMessage("prepared predecessor"),
-					...delivery.messages,
-					createUserMessage("message composed during preparation"),
-				],
-				participant: {
-					settle: () => {
-						harness.session.dispose("disposal");
-						disposal = harness.session.waitForClosed();
-						return { outcome: "committed" };
-					},
+	it("persists each prepared delivery message once when disposal runs while it commits", async () => {
+		const harness = await createHarness({
+			log: "memory",
+			extensionFactories: [
+				(volt) => {
+					volt.on("before_agent_start", () => ({
+						message: { customType: "prepared", content: "message composed during preparation", display: false },
+					}));
 				},
-			}),
+			],
 		});
 		harnesses.push(harness);
 		harness.setResponses([fauxAssistantMessage("never requested")]);
+		const hold = harness.log!.holdNext(deliversUserMessage);
 
-		await harness.session.prompt("original admitted prompt");
+		const prompt = harness.session.prompt("original admitted prompt");
+		await hold.started;
+		harness.session.dispose("disposal");
+		const disposal = harness.session.waitForClosed();
+		hold.release();
+		await prompt;
 		await disposal;
 
 		const messages = harness.sessionManager.buildSessionContext().messages;
 		expect(
 			messages.flatMap((message) => {
-				if (message.role !== "user") return [];
+				if (message.role !== "user" && message.role !== "custom") return [];
 				if (typeof message.content === "string") return [message.content];
 				return message.content.flatMap((part) => (part.type === "text" ? [part.text] : []));
 			}),
-		).toEqual(["prepared predecessor", "original admitted prompt", "message composed during preparation"]);
+		).toEqual(["original admitted prompt", "message composed during preparation"]);
 		expect(messages.filter((message) => message.role === "assistant")).toHaveLength(1);
 		expect(runtimeAbortSources(harness)).toEqual(["disposal"]);
 	});
 
-	it("does not persist a delivery when a disposing participant retains", async () => {
-		let harness: Harness;
-		let disposal: Promise<void> | undefined;
-		harness = await createHarness({
-			prepareDelivery: (delivery) => ({
-				messages: [...delivery.messages],
-				participant: {
-					settle: () => {
-						harness.session.dispose("disposal");
-						disposal = harness.session.waitForClosed();
-						return { outcome: "retained", error: new Error("delivery settlement failed") };
-					},
-				},
-			}),
-		});
+	it("does not persist a delivery whose commit rolls back during disposal", async () => {
+		const harness = await createHarness({ log: "memory" });
 		harnesses.push(harness);
+		const hold = harness.log!.holdNext(deliversUserMessage);
+		harness.log!.failNext("rolled_back", deliversUserMessage);
 
-		// Retention is a settled, retryable delivery result rather than a thrown
-		// runtime failure. Disposal still drains that settlement before closing.
-		await expect(harness.session.prompt("do not admit this delivery")).resolves.toBeUndefined();
+		const prompt = harness.session.prompt("do not admit this delivery");
+		await hold.started;
+		harness.session.dispose("disposal");
+		const disposal = harness.session.waitForClosed();
+		hold.release();
+		await prompt.catch(() => undefined);
 		await disposal;
 
 		expect(harness.sessionManager.buildSessionContext().messages).toEqual([]);

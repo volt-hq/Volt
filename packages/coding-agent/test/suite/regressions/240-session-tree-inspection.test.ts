@@ -1,3 +1,4 @@
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import { expect, test } from "vitest";
@@ -23,7 +24,11 @@ import {
 	createRemoteGetTranscriptEntryTextRpcResponse,
 } from "../../../src/daemon/conversation-commands.ts";
 import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
+import type { SeedModel } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness } from "../harness.ts";
+
+/** The model the saved assistant messages name. */
+const TEST_MODEL: SeedModel = { api: "test-api", provider: "test-provider", id: "test-model" };
 
 function createAuthorization(workspacePath: string): IrohRemoteClientAuthorizationSuccess {
 	return {
@@ -93,20 +98,20 @@ function assistantMessage(text: string, timestamp: number): AssistantMessage {
 }
 
 test("get_session_tree pages sanitized branch topology without raw session entries", async () => {
-	const harness = await createHarness();
+	// The branches are seeded before the session opens: a live session refuses leaf moves. The workspace
+	// is a path the seed can name before the harness exists.
+	const workspacePath = join(tmpdir(), "volt-240-workspace");
+	const [rootId, inactiveId, structuralId, activeId] = ["root", "inactive", "structural", "active"];
+	const harness = await createHarness({
+		seed: (seed) =>
+			seed
+				.user(`inspect ${join(workspacePath, "secret.txt")}`, { id: rootId, timestamp: 1 })
+				.assistant("old branch", { id: inactiveId, model: TEST_MODEL, timestamp: 2 })
+				.leaf(rootId)
+				.custom("provider-private", { providerPayload: "must-not-cross-wire" }, { id: structuralId })
+				.assistant("active branch", { id: activeId, model: TEST_MODEL, timestamp: 3 }),
+	});
 	try {
-		const rootId = await harness.sessionManager.appendMessage({
-			role: "user",
-			content: `inspect ${join(harness.tempDir, "secret.txt")}`,
-			timestamp: 1,
-		});
-		const inactiveId = await harness.sessionManager.appendMessage(assistantMessage("old branch", 2));
-		await harness.sessionManager.branch(rootId);
-		const structuralId = await harness.sessionManager.appendCustomEntry("provider-private", {
-			providerPayload: "must-not-cross-wire",
-		});
-		const activeId = await harness.sessionManager.appendMessage(assistantMessage("active branch", 3));
-
 		const runtime: ConversationCommandRuntime = {
 			session: {
 				sessionId: harness.sessionManager.getSessionId(),
@@ -114,7 +119,7 @@ test("get_session_tree pages sanitized branch topology without raw session entri
 			},
 			listSessions: async () => [],
 		};
-		const authorization = createAuthorization(harness.tempDir);
+		const authorization = createAuthorization(workspacePath);
 		const first = getSuccessfulTree(
 			createRemoteGetSessionTreeRpcResponse(
 				{ id: "tree-1", type: "get_session_tree", limit: 2 },
@@ -147,7 +152,7 @@ test("get_session_tree pages sanitized branch topology without raw session entri
 		});
 		expect(nodes.find((node) => node.entryId === activeId)?.parentEntryId).toBe(structuralId);
 		expect(JSON.stringify({ first, second })).not.toContain("must-not-cross-wire");
-		expect(JSON.stringify({ first, second })).not.toContain(harness.tempDir);
+		expect(JSON.stringify({ first, second })).not.toContain(workspacePath);
 		expect(JSON.stringify({ first, second })).toContain("/workspace/secret.txt");
 
 		const entries = harness.sessionManager.getEntries();
@@ -171,11 +176,14 @@ test("get_session_tree pages sanitized branch topology without raw session entri
 test("local session tree projects transcript content only for admitted nodes", async () => {
 	const harness = await createHarness();
 	try {
+		// The log starts with the harness's model selection; page after it.
+		const afterOrdinal = harness.sessionManager.getOrdinal();
 		const firstId = await harness.sessionManager.appendMessage({ role: "user", content: "first", timestamp: 1 });
-		const offPageMessage = { role: "user" as const, content: "off-page", timestamp: 2 };
-		await harness.sessionManager.appendMessage(offPageMessage);
+		const offPageId = await harness.sessionManager.appendMessage({ role: "user", content: "off-page", timestamp: 2 });
+		const offPageEntry = harness.sessionManager.getEntry(offPageId);
+		if (offPageEntry?.type !== "message") throw new Error("Expected the off-page message entry");
 		let offPageContentReads = 0;
-		Object.defineProperty(offPageMessage, "content", {
+		Object.defineProperty(offPageEntry.message, "content", {
 			configurable: true,
 			get: () => {
 				offPageContentReads++;
@@ -184,7 +192,7 @@ test("local session tree projects transcript content only for admitted nodes", a
 		});
 
 		const tree = getSuccessfulTree(
-			await dispatchLocalRpcCommand({ id: "local-tree", type: "get_session_tree", limit: 1 }, harness),
+			await dispatchLocalRpcCommand({ id: "local-tree", type: "get_session_tree", afterOrdinal, limit: 1 }, harness),
 		);
 		expect(tree.nodes).toHaveLength(1);
 		expect(tree.nodes[0]).toMatchObject({ entryId: firstId, transcript: { text: "first" } });
@@ -196,34 +204,36 @@ test("local session tree projects transcript content only for admitted nodes", a
 });
 
 test("session tree resolves reused tool-call ids within each branch", async () => {
-	const harness = await createHarness();
+	const toolCallId = "call_1";
+	const [rootId, branchAResultId, branchALaterResultId, branchBCallId, branchBResultId] = [
+		"root",
+		"branch-a-result",
+		"branch-a-later-result",
+		"branch-b-call",
+		"branch-b-result",
+	];
+	// The branches are seeded before the session opens: a live session refuses leaf moves.
+	const harness = await createHarness({
+		seed: (seed) => {
+			const readCall = (path: string, timestamp: number, id?: string) =>
+				seed.assistant("", {
+					toolCalls: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path } }],
+					model: TEST_MODEL,
+					timestamp,
+					...(id === undefined ? {} : { id }),
+				});
+			const readResult = (timestamp: number, id: string) => seed.toolResult(toolCallId, "ok", { timestamp, id });
+			seed.user("root", { id: rootId, timestamp: 1 });
+			readCall("branch-a.txt", 2);
+			readResult(3, branchAResultId);
+			readCall("branch-a-later.txt", 4);
+			readResult(5, branchALaterResultId);
+			seed.leaf(rootId);
+			readCall("branch-b.txt", 6, branchBCallId);
+			readResult(7, branchBResultId);
+		},
+	});
 	try {
-		const toolCallId = "call_1";
-		const appendReadCall = (path: string, timestamp: number): Promise<string> =>
-			harness.sessionManager.appendMessage({
-				...assistantMessage("", timestamp),
-				content: [{ type: "toolCall", id: toolCallId, name: "read", arguments: { path } }],
-				stopReason: "toolUse",
-			});
-		const appendReadResult = (timestamp: number): Promise<string> =>
-			harness.sessionManager.appendMessage({
-				role: "toolResult",
-				toolCallId,
-				toolName: "read",
-				content: [{ type: "text", text: "ok" }],
-				isError: false,
-				timestamp,
-			});
-
-		const rootId = await harness.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
-		await appendReadCall("branch-a.txt", 2);
-		const branchAResultId = await appendReadResult(3);
-		await appendReadCall("branch-a-later.txt", 4);
-		const branchALaterResultId = await appendReadResult(5);
-		await harness.sessionManager.branch(rootId);
-		const branchBCallId = await appendReadCall("branch-b.txt", 6);
-		const branchBResultId = await appendReadResult(7);
-
 		const runtime: ConversationCommandRuntime = {
 			session: {
 				sessionId: harness.sessionManager.getSessionId(),
@@ -352,9 +362,12 @@ test("local session tree tracks truncation without parsing projected text", asyn
 });
 
 test("inactive tree-node continuation metadata remains recoverable", async () => {
-	const harness = await createHarness();
+	// The session selects its model after the seeded root; both branches hang off that selection. A live
+	// session refuses direct leaf moves, so the session navigates back to the branch point.
+	const harness = await createHarness({ seed: (seed) => seed.user("root", { timestamp: 1 }) });
 	try {
-		const rootId = await harness.sessionManager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const branchPointId = harness.sessionManager.getLeafId();
+		if (branchPointId === null) throw new Error("Expected the model selection entry");
 		const longText = `${"x".repeat(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS)}END`;
 		const inactiveId = await harness.sessionManager.appendMessage({
 			role: "user",
@@ -387,7 +400,7 @@ test("inactive tree-node continuation metadata remains recoverable", async () =>
 			isError: false,
 			timestamp: 4,
 		});
-		await harness.sessionManager.branch(rootId);
+		await harness.session.navigateTree(branchPointId, { summarize: false });
 		const activeImageId = await harness.sessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "image", data: "YWN0aXZl", mimeType: "image/jpeg" }],

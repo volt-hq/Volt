@@ -417,6 +417,53 @@ describe("createAgentSession session manager defaults", () => {
 		expect(resumed.session.fastModeEnabled).toBe(true);
 	});
 
+	it("commits a fallback model change when the resumed session's model has no credentials", async () => {
+		const unauthed = createFauxProvider({ provider: "unauthed-faux", models: [{ id: "stale-model" }] });
+		const faux = createFauxProvider({ models: [{ id: "fallback-model" }] });
+		const staleModel = unauthed.getModel("stale-model")!;
+		const fallback = faux.getModel("fallback-model")!;
+		const authStorage = AuthStorage.inMemory();
+		authStorage.setRuntimeApiKey(fallback.provider, "faux-key");
+		const modelRegistry = ModelRegistry.inMemory(authStorage);
+		for (const provider of [unauthed, faux]) {
+			const registered = provider.getModel();
+			modelRegistry.registerProvider(registered.provider, {
+				baseUrl: registered.baseUrl,
+				// The stale provider's key names an environment variable that is not set.
+				apiKey: provider === faux ? "faux-key" : "$VOLT_TEST_UNSET_STALE_PROVIDER_KEY",
+				api: provider.api,
+				models: provider.models,
+			});
+		}
+		const sessionManager = await SessionManager.create(cwd, agentDir);
+		await sessionManager.appendModelChange(staleModel.provider, staleModel.id);
+		await sessionManager.appendMessage({ role: "user", content: "earlier work", timestamp: Date.now() });
+		const sessionRef = sessionManager.getSessionRef()!;
+		await sessionManager.closePersistence();
+
+		const resumed = await createAgentSession({
+			cwd,
+			agentDir,
+			authStorage,
+			modelRegistry,
+			settingsManager: SettingsManager.inMemory({ defaultProvider: fallback.provider, defaultModel: fallback.id }),
+			resourceLoader: createTestResourceLoader(),
+			sessionManager: await SessionManager.open(sessionRef, agentDir),
+			disableMcp: true,
+			noTools: "all",
+		});
+		sessions.push(resumed.session);
+
+		expect(resumed.modelFallbackMessage).toContain(`Could not restore model ${staleModel.provider}/${staleModel.id}`);
+		expect(resumed.session.model).toMatchObject({ provider: fallback.provider, id: fallback.id });
+		// The fallback is a durable model change on the resumed branch, not a runtime-only override.
+		const modelChanges = resumed.session.sessionManager
+			.getBranch()
+			.filter((entry) => entry.type === "model_change")
+			.map((entry) => `${entry.provider}/${entry.modelId}`);
+		expect(modelChanges).toEqual([`${staleModel.provider}/${staleModel.id}`, `${fallback.provider}/${fallback.id}`]);
+	});
+
 	it("uses scoped-model bootstrap when Fast mode is pre-seeded for a new session", async () => {
 		const faux = createFauxProvider({
 			models: [

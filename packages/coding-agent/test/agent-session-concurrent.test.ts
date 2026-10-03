@@ -40,13 +40,16 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 	}
 }
 
+// Stub responses name the session's model: the conversation takes its model from the latest assistant message.
+const MOCK_MODEL_ID = getModel("anthropic", "claude-sonnet-4-5")!.id;
+
 function createAssistantMessage(text: string): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
 		api: "anthropic-messages",
 		provider: "anthropic",
-		model: "mock",
+		model: MOCK_MODEL_ID,
 		usage: {
 			input: 0,
 			output: 0,
@@ -81,7 +84,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		}
 	});
 
-	function createSession() {
+	async function createSession() {
 		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		let abortSignal: AbortSignal | undefined;
 
@@ -119,7 +122,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		// Set a runtime API key so validation passes
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -132,7 +135,7 @@ describe("AgentSession concurrent prompt guard", () => {
 	}
 
 	it("should throw when prompt() called while streaming", async () => {
-		createSession();
+		await createSession();
 
 		// Start first prompt (don't await, it will block until abort)
 		const firstPrompt = session.prompt("First message");
@@ -195,7 +198,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -248,14 +251,14 @@ describe("AgentSession concurrent prompt guard", () => {
 	});
 
 	it("should allow steer() while streaming", async () => {
-		createSession();
+		await createSession();
 
 		// Start first prompt
 		const firstPrompt = session.prompt("First message");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		// steer should work while streaming
-		expect(() => session.steer("Steering message")).not.toThrow();
+		// steer should work while streaming; it resolves once its queue intent commits
+		await expect(session.steer("Steering message")).resolves.toBeUndefined();
 		expect(session.pendingMessageCount).toBe(1);
 
 		// Cleanup
@@ -264,14 +267,14 @@ describe("AgentSession concurrent prompt guard", () => {
 	});
 
 	it("should allow followUp() while streaming", async () => {
-		createSession();
+		await createSession();
 
 		// Start first prompt
 		const firstPrompt = session.prompt("First message");
 		await new Promise((resolve) => setTimeout(resolve, 10));
 
-		// followUp should work while streaming
-		expect(() => session.followUp("Follow-up message")).not.toThrow();
+		// followUp should work while streaming; it resolves once its queue intent commits
+		await expect(session.followUp("Follow-up message")).resolves.toBeUndefined();
 		expect(session.pendingMessageCount).toBe(1);
 
 		// Cleanup
@@ -352,7 +355,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		]);
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -418,7 +421,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -469,7 +472,7 @@ describe("AgentSession concurrent prompt guard", () => {
 							content: [{ type: "text", text: "done" }],
 							api: "anthropic-messages",
 							provider: "anthropic",
-							model: "mock",
+							model: MOCK_MODEL_ID,
 							usage: {
 								input: 1,
 								output: 1,
@@ -494,7 +497,7 @@ describe("AgentSession concurrent prompt guard", () => {
 						],
 						api: "anthropic-messages",
 						provider: "anthropic",
-						model: "mock",
+						model: MOCK_MODEL_ID,
 						usage: {
 							input: 1,
 							output: 1,
@@ -534,7 +537,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		]);
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -585,7 +588,7 @@ describe("AgentSession concurrent prompt guard", () => {
 							content: [{ type: "text", text: "done" }],
 							api: "anthropic-messages",
 							provider: "anthropic",
-							model: "mock",
+							model: MOCK_MODEL_ID,
 							usage: {
 								input: 1,
 								output: 1,
@@ -610,7 +613,7 @@ describe("AgentSession concurrent prompt guard", () => {
 						],
 						api: "anthropic-messages",
 						provider: "anthropic",
-						model: "mock",
+						model: MOCK_MODEL_ID,
 						usage: {
 							input: 1,
 							output: 1,
@@ -646,7 +649,7 @@ describe("AgentSession concurrent prompt guard", () => {
 			},
 		]);
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,

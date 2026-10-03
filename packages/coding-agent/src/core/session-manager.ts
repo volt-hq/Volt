@@ -2,6 +2,7 @@ import {
 	type AgentMessage,
 	CONVERSATION_LOG_READ_LIMIT_MAX,
 	type ConversationLog,
+	type ConversationLogAppend,
 	type ConversationLogAppendResult,
 	type ConversationLogEntryDraft,
 	type ConversationLogLossReason,
@@ -61,7 +62,6 @@ import {
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
-	getClientMessageId,
 	withClientMessageId,
 	withoutClientMessageId,
 } from "./messages.ts";
@@ -69,16 +69,12 @@ import { clonePlanningState, DEFAULT_PLANNING_STATE, type PlanningState, parsePl
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
 import type { RpcGitContext } from "./rpc/types.ts";
 import {
-	assertClientMessageId,
-	boundClientInputError,
 	decodeStoredSessionEntry,
 	digestClientInputPayload,
 	isHostOnlySessionEntryType,
-	isTerminalClientInputState,
 	isValidClientMessageId,
 	isValidSessionId,
 	normalizeClientInputPayload,
-	normalizeClientInputQueuedPayload,
 	parseSessionEntryForAdmission,
 	parseSessionReference,
 	parseSessionSnapshotHeader,
@@ -105,7 +101,6 @@ import {
 	cloneClientInputRecord,
 	cloneSessionDerivedState,
 	createSessionDerivedState,
-	expectedClientInputQueuedDelivery,
 	summarizeSessionEntries as reduceSessionEntries,
 	replaySessionEntries,
 	requireStartedClientInputReceipt,
@@ -178,131 +173,6 @@ export class SessionAtomicAppendError extends Error {
 	}
 }
 
-/**
- * Identity-only proof of one locally atomic client-input delivery commit.
- *
- * Callers must pass this object back to the originating SessionManager for
- * verification. Its visible fields are diagnostic only and are never trusted
- * as proof of persistence.
- */
-export interface SessionDeliveryCommitReceipt {
-	readonly receiptId: string;
-}
-
-export interface SessionDeliveryAttemptIdentity {
-	readonly deliveryId: string;
-	readonly epoch: number;
-	readonly attemptId: string;
-}
-
-export interface SessionDeliveryCommitInput extends SessionDeliveryAttemptIdentity {
-	readonly messages: readonly AgentMessage[];
-	readonly planning?: PlanningState;
-}
-
-/** Identity-only canonical projection guard issued by one live SessionManager. */
-export interface SessionCanonicalProjectionToken {
-	readonly tokenId: string;
-}
-
-export interface SessionCanonicalProjection {
-	readonly token: SessionCanonicalProjectionToken;
-	readonly leafId: string | null;
-	/** Ordinal of the newest `leaf` entry. With leafId it changes exactly when the branch changes. */
-	readonly leafEntryOrdinal: number;
-	readonly entries: readonly SessionEntry[];
-}
-
-export type SessionCanonicalAppend =
-	| { readonly type: "message"; readonly message: AgentMessage }
-	| { readonly type: "thinking_level_change"; readonly thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"] }
-	| { readonly type: "model_change"; readonly provider: string; readonly modelId: string }
-	| { readonly type: "planning_state_change"; readonly planning: PlanningState }
-	| {
-			readonly type: "compaction";
-			readonly summary: string;
-			readonly firstKeptEntryId: string;
-			readonly tokensBefore: number;
-			readonly details?: JsonValue;
-			readonly fromHook?: boolean;
-	  }
-	| {
-			readonly type: "branch_summary";
-			readonly fromId: string | null;
-			readonly summary: string;
-			readonly details?: JsonValue;
-			readonly fromHook?: boolean;
-	  }
-	| { readonly type: "custom"; readonly customType: string; readonly data?: JsonValue }
-	| {
-			readonly type: "custom_message";
-			readonly customType: string;
-			readonly content: string | readonly (TextContent | ImageContent)[];
-			readonly display: boolean;
-			readonly details?: JsonValue;
-	  }
-	| { readonly type: "label"; readonly targetId: string; readonly label?: string }
-	| { readonly type: "session_info"; readonly name?: string };
-
-export type SessionCanonicalMutation =
-	| { readonly kind: "move"; readonly leafId: string | null }
-	| {
-			readonly kind: "move_with_summary";
-			readonly leafId: string | null;
-			readonly summary?: {
-				readonly summary: string;
-				readonly details?: JsonValue;
-				readonly fromHook?: boolean;
-				readonly label?: string;
-			};
-	  }
-	| { readonly kind: "append"; readonly entry: SessionCanonicalAppend };
-
-export interface SessionCanonicalCommand {
-	readonly guard: {
-		readonly kind: "exact" | "descendant";
-		readonly token: SessionCanonicalProjectionToken;
-	};
-	readonly mutations: readonly SessionCanonicalMutation[];
-}
-
-export interface SessionCanonicalCommitEvidence {
-	readonly before: SessionCanonicalProjection;
-	readonly after: SessionCanonicalProjection;
-	readonly appendedEntryIds: readonly string[];
-}
-
-export class SessionCanonicalConflictError extends Error {
-	constructor(message: string) {
-		super(message);
-		this.name = "SessionCanonicalConflictError";
-	}
-}
-
-interface VerifiedSessionDeliveryBase extends SessionDeliveryAttemptIdentity {
-	readonly sessionId: string;
-	readonly beforeLeafId: string | null;
-	readonly afterLeafId: string | null;
-	/** Committed log position when the receipt was issued. */
-	readonly ordinal: number;
-	readonly beforeProjection: SessionCanonicalProjection;
-	readonly afterProjection: SessionCanonicalProjection;
-}
-
-export interface VerifiedSessionDeliveryCommit extends VerifiedSessionDeliveryBase {
-	readonly outcome: "committed";
-	readonly entryIds: readonly string[];
-	readonly messages: readonly AgentMessage[];
-	readonly clientMessageIds: readonly string[];
-	readonly planning?: PlanningState;
-}
-
-export interface VerifiedSessionDeliveryNoEffect extends VerifiedSessionDeliveryBase {
-	readonly outcome: "no_effect";
-}
-
-export type VerifiedSessionDeliveryReceipt = VerifiedSessionDeliveryCommit | VerifiedSessionDeliveryNoEffect;
-
 export interface NewSessionOptions {
 	id?: string;
 	parentSession?: SessionReference;
@@ -348,12 +218,6 @@ export interface ClientInputPayloadInput {
 }
 
 export type ClientInputQueuedPayload = ProtocolClientInputQueuedPayload;
-
-export interface ClientInputQueuedPayloadInput {
-	delivery: ClientInputQueuedDelivery;
-	message: string;
-	images?: readonly ImageContent[];
-}
 
 /**
  * Durable idempotency reservation for one client-originated conversation input.
@@ -405,11 +269,6 @@ export type ClientInputRecoveryPlan =
 	| { kind: "idle"; records: [] }
 	| { kind: "replay"; records: ClientInputRecord[] }
 	| { kind: "blocked"; records: ClientInputRecord[]; blocker: ClientInputRecord };
-
-export interface ClientInputReservation {
-	record: ClientInputRecord;
-	created: boolean;
-}
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase, ThinkingLevelChangeEntryPayload {
 	type: "thinking_level_change";
@@ -1453,133 +1312,24 @@ class SessionWrite implements SessionEntryLookup {
 		this.leaf(branchFromId);
 		return this.place(entry, branchFromId);
 	}
+}
 
-	canonical(entry: SessionCanonicalAppend): string {
-		switch (entry.type) {
-			case "message":
-				if (entry.message.role === "branchSummary" || entry.message.role === "compactionSummary") {
-					throw new Error(`${entry.message.role} messages require their canonical session entry type`);
-				}
-				return this.message(messageEntry(entry.message));
-			case "thinking_level_change":
-				return this.place(thinkingLevelEntry(entry.thinkingLevel));
-			case "model_change":
-				return this.place(modelEntry(entry.provider, entry.modelId));
-			case "planning_state_change":
-				return this.place(planningEntry(entry.planning));
-			case "compaction":
-				return this.place(
-					compactionEntry(
-						entry.summary,
-						entry.firstKeptEntryId,
-						entry.tokensBefore,
-						entry.details,
-						entry.fromHook,
-					),
-				);
-			case "branch_summary":
-				return this.branchWithSummary(
-					entry.fromId,
-					branchSummaryEntry(entry.fromId, entry.summary, entry.details, entry.fromHook),
-				);
-			case "custom":
-				return this.place(customEntry(entry.customType, entry.data));
-			case "custom_message":
-				return this.place(
-					customMessageEntry(
-						entry.customType,
-						typeof entry.content === "string" ? entry.content : [...entry.content],
-						entry.display,
-						entry.details,
-					),
-				);
-			case "label":
-				return this.label(labelEntry(entry.targetId, entry.label));
-			case "session_info":
-				return this.place(sessionInfoEntry(entry.name ?? ""));
-		}
-	}
-
-	private clientInput(clientMessageId: string): ClientInputRecord {
-		const record = this.state.clientInputsById.get(clientMessageId);
-		if (!record) throw new Error(`Client input receipt not found: ${clientMessageId}`);
-		return record;
-	}
-
-	clientInputReceipt(
-		clientMessageId: string,
-		command: ClientInputCommand,
-		input: ClientInputPayload,
-		semanticDigest: string,
-	): ClientInputReservation {
-		const existing = this.state.clientInputsById.get(clientMessageId);
-		if (existing) return { record: cloneClientInputRecord(existing), created: false };
-		this.append({
-			type: "client_input_receipt",
-			...this.child(),
-			clientMessageId,
-			command,
-			semanticDigest,
-			input,
-		});
-		return { record: cloneClientInputRecord(this.clientInput(clientMessageId)), created: true };
-	}
-
-	clientInputQueued(clientMessageId: string, queuedInput: ClientInputQueuedPayload): ClientInputRecord {
-		const record = this.clientInput(clientMessageId);
-		if (record.state !== "accepted" && record.state !== "started") {
-			throw new Error(`Client input ${JSON.stringify(clientMessageId)} cannot be queued from ${record.state}`);
-		}
-		if (queuedInput.delivery !== expectedClientInputQueuedDelivery(record)) {
-			throw new Error(`Client input ${JSON.stringify(clientMessageId)} conflicts with its requested delivery`);
-		}
-		if (record.queuedInput) {
-			if (JSON.stringify(record.queuedInput) !== JSON.stringify(queuedInput)) {
-				throw new Error(`Client input ${JSON.stringify(clientMessageId)} has a conflicting queued payload`);
-			}
-			return cloneClientInputRecord(record);
-		}
-		this.append({
-			type: "client_input_queued",
-			...this.child(),
-			receiptId: record.receiptId,
-			clientMessageId,
-			queuedInput,
-		});
-		return cloneClientInputRecord(this.clientInput(clientMessageId));
-	}
-
-	clientInputRollback(clientMessageId: string): ClientInputRecord {
-		const record = this.clientInput(clientMessageId);
-		if (record.state !== "started") return cloneClientInputRecord(record);
-		this.append({
-			type: "client_input_state",
-			...this.child(),
-			receiptId: record.receiptId,
-			clientMessageId,
-			state: "accepted",
-		});
-		return cloneClientInputRecord(this.clientInput(clientMessageId));
-	}
-
-	clientInputTransition(
-		clientMessageId: string,
-		state: Exclude<ClientInputState, "accepted">,
-		error?: string,
-	): ClientInputRecord {
-		const record = this.clientInput(clientMessageId);
-		if (isTerminalClientInputState(record.state)) return cloneClientInputRecord(record);
-		if (state === "started" && record.state !== "accepted") return cloneClientInputRecord(record);
-		this.append({
-			type: "client_input_state",
-			...this.child(),
-			receiptId: record.receiptId,
-			clientMessageId,
-			state,
-			...(state === "failed" && error !== undefined ? { error: boundClientInputError(error) } : {}),
-		});
-		return cloneClientInputRecord(this.clientInput(clientMessageId));
-	}
+/**
+ * The conversation that writes a live session's log. While it runs, a
+ * manager's writes go through it, so the conversation stays the log's only
+ * writer; each batch it commits advances the manager's view (`takeLog`).
+ */
+export interface SessionLiveWriter {
+	/** Append host entries in one batch: a product type, or a core `custom`, `custom_message`, `message`, or `subagent_spawn`. */
+	append(
+		entries: readonly { readonly type: string; readonly payload: unknown }[],
+	): Promise<readonly { readonly id: string }[]>;
+	setModel(provider: string, modelId: string): Promise<void>;
+	setThinkingLevel(thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"]): Promise<void>;
+	setFastMode(enabled: boolean): Promise<void>;
+	setPlanning(planning: PlanningState): Promise<void>;
+	setName(name: string): Promise<void>;
+	setLabel(targetId: string, label: string | undefined): Promise<void>;
 }
 
 /** A durable spawn edge's fields, as `appendSubagentSpawn` takes them. */
@@ -1659,16 +1409,10 @@ export class SessionManager {
 	private lane: Promise<void> = Promise.resolve();
 	private readonly entryListeners = new Set<SessionEntryListener>();
 	private readonly branchListeners = new Set<SessionBranchListener>();
-	/** Unforgeable in-process delivery commit capabilities issued by this manager. */
-	private readonly deliveryCommitReceipts = new WeakMap<
-		SessionDeliveryCommitReceipt,
-		VerifiedSessionDeliveryReceipt
-	>();
-	/** Unforgeable raw projection guards issued by this manager generation. */
-	private readonly canonicalProjectionTokens = new WeakMap<
-		SessionCanonicalProjectionToken,
-		SessionCanonicalProjection
-	>();
+	/** The log was handed to a live session's conversation (`takeLog`); only that conversation appends to it. */
+	private logTaken = false;
+	/** The conversation that writes the taken log; the manager's writes go through it. */
+	private liveWriter: SessionLiveWriter | undefined;
 
 	private constructor(cwd: string, sessionDir: string, persist: boolean) {
 		this.cwd = resolvePath(cwd);
@@ -1715,6 +1459,8 @@ export class SessionManager {
 	/** Make `log` this manager's log; its loss, other than closing it, is the manager's loss. */
 	private _attachLog(log: ConversationLog): void {
 		this.log = log;
+		this.logTaken = false;
+		this.liveWriter = undefined;
 		void log.lost.then((error) => {
 			if (this.log === log && error.reason !== "closed") this._lose(error);
 		});
@@ -1878,7 +1624,131 @@ export class SessionManager {
 	 */
 	private _commit<T>(build: (write: SessionWrite) => T, atomic = false): Promise<T> {
 		this._assertWritable();
+		this._assertLogNotTaken();
 		return this._enqueue(() => this._commitNow(build, atomic));
+	}
+
+	private _assertLogNotTaken(): void {
+		if (this.logTaken) {
+			throw new Error(`Session ${this.sessionId} is written by its live session; change it through the session`);
+		}
+	}
+
+	/** The live session's writer while a conversation writes this manager's log; undefined when the manager writes it. */
+	private _live(): SessionLiveWriter | undefined {
+		if (!this.logTaken) return undefined;
+		this._assertWritable();
+		if (!this.liveWriter) throw new Error(`Session ${this.sessionId} is opening its live session`);
+		return this.liveWriter;
+	}
+
+	/** Append one admitted host entry through the live writer; resolves with its id after it commits. */
+	private async _appendLive(writer: SessionLiveWriter, entry: SessionEntry): Promise<string> {
+		const draft = toLogEntryDraft(entry);
+		const [committed] = await writer.append([{ type: draft.type, payload: draft.payload }]);
+		if (!committed) throw new Error(`Session ${entry.type} entry was not committed`);
+		return committed.id;
+	}
+
+	/** The id of the newest committed entry of `type`, after a live intent committed one. */
+	private _newestEntryId(type: SessionEntry["type"]): string {
+		for (let index = this.fileEntries.length - 1; index > 0; index--) {
+			const entry = this.fileEntries[index];
+			if (entry?.type === type) return (entry as SessionEntry).id;
+		}
+		throw new Error(`Session ${type} entry was not committed`);
+	}
+
+	/**
+	 * Hand this manager's log to the conversation of a live session, which
+	 * becomes its only writer. Each batch the returned log commits is validated
+	 * and installed in this manager's view, and reaches its listeners, before
+	 * the append resolves; a batch the manager cannot admit rolls back. Closing
+	 * the returned log closes a persisted session's log, which seals the
+	 * manager; an in-memory manager gets its log back and stays writable.
+	 * Until `bindLiveWriter`, writes through the manager are refused.
+	 */
+	takeLog(): ConversationLog {
+		this._assertWritable();
+		this._assertLogNotTaken();
+		const log = this.log;
+		if (!log) throw new Error(`Session ${this.sessionId} has no writable log`);
+		this.logTaken = true;
+		const released = Promise.withResolvers<ConversationLogLostError>();
+		let closing: Promise<void> | undefined;
+		return {
+			conversationId: log.conversationId,
+			lost: Promise.race([log.lost, released.promise]),
+			head: () => log.head(),
+			read: (afterOrdinal, limit) => log.read(afterOrdinal, limit),
+			append: (batch) => this._appendTaken(log, batch),
+			close: () => {
+				closing ??= (async () => {
+					if (this.log === log) {
+						this.logTaken = false;
+						this.liveWriter = undefined;
+						if (this.persist) this.closed = true;
+					}
+					if (this.persist) await log.close();
+					released.resolve(new ConversationLogLostError("closed", "The conversation log was closed"));
+				})();
+				return closing;
+			},
+		};
+	}
+
+	/** Route this manager's writes through the conversation that took its log. */
+	bindLiveWriter(writer: SessionLiveWriter): void {
+		if (!this.logTaken) throw new Error(`Session ${this.sessionId} log was not taken by a live session`);
+		this.liveWriter = writer;
+	}
+
+	/** One batch of the conversation that took the log: admitted against this view, committed, then installed. */
+	private async _appendTaken(
+		log: ConversationLog,
+		batch: ConversationLogAppend,
+	): Promise<ConversationLogAppendResult> {
+		this._assertNotLost();
+		if (this.log !== log || !this.logTaken) {
+			throw new ConversationLogLostError("closed", `Session ${this.sessionId} no longer writes this log`);
+		}
+		if (batch.expectedOrdinal !== this.getOrdinal()) {
+			throw this._lose(
+				new ConversationLogLostError(
+					"fence_conflict",
+					`Session commit expected ordinal ${batch.expectedOrdinal}, but the session is at ${this.getOrdinal()}`,
+				),
+			);
+		}
+		const write = new SessionWrite(this.byId, this.derivedState);
+		try {
+			for (const [index, draft] of batch.entries.entries()) {
+				const { ordinal: _ordinal, ...entry } = toSessionEntry(draft, batch.expectedOrdinal + index + 1);
+				write.append(entry);
+			}
+		} catch (error) {
+			return { status: "rolled_back", error: error instanceof Error ? error : new Error(errorMessage(error)) };
+		}
+		let outcome: ConversationLogAppendResult;
+		try {
+			outcome = await log.append(batch);
+		} catch (error) {
+			throw this._lose(error);
+		}
+		if (outcome.status === "rolled_back") return outcome;
+		if (
+			outcome.first !== batch.expectedOrdinal + 1 ||
+			outcome.last !== batch.expectedOrdinal + batch.entries.length
+		) {
+			throw this._lose(
+				new ConversationLogLostError(
+					"fence_conflict",
+					`Session commit after ordinal ${batch.expectedOrdinal} was assigned ordinals ${outcome.first}-${outcome.last}`,
+				),
+			);
+		}
+		this._install(write);
+		return outcome;
 	}
 
 	/**
@@ -1922,6 +1792,12 @@ export class SessionManager {
 				),
 			);
 		}
+		this._install(write);
+		return result;
+	}
+
+	/** Make a committed batch part of this manager's view, then publish it to listeners in ordinal order. */
+	private _install(write: SessionWrite): void {
 		for (const entry of write.entries) {
 			this.fileEntries.push(entry);
 			this.byId.set(entry.id, entry);
@@ -1932,7 +1808,6 @@ export class SessionManager {
 			if (entry.type === "leaf") this._notifyBranchListeners(entry.parentId, entry.targetId);
 			else this._notifyEntryListeners(entry);
 		}
-		return result;
 	}
 
 	private _notifyEntryListeners(entry: CommittedSessionEntry): void {
@@ -1945,287 +1820,6 @@ export class SessionManager {
 				// committed entry appear to have failed.
 			}
 		}
-	}
-
-	private _captureCanonicalProjection(
-		state: SessionDerivedState = this.derivedState,
-		lookup: SessionEntryLookup = this.byId,
-	): SessionCanonicalProjection {
-		const token = Object.freeze({ tokenId: randomUUID() });
-		const entries = deepFreezeCanonicalData(
-			cloneCanonicalData(branchPath(lookup, state.leafId), "Session canonical projection"),
-		);
-		const projection = Object.freeze({
-			token,
-			leafId: state.leafId,
-			leafEntryOrdinal: state.leafEntryOrdinal,
-			entries,
-		});
-		this.canonicalProjectionTokens.set(token, projection);
-		return projection;
-	}
-
-	private _cloneCanonicalProjection(projection: SessionCanonicalProjection): SessionCanonicalProjection {
-		return Object.freeze({
-			token: projection.token,
-			leafId: projection.leafId,
-			leafEntryOrdinal: projection.leafEntryOrdinal,
-			entries: deepFreezeCanonicalData(
-				cloneCanonicalData([...projection.entries], "Detached session canonical projection"),
-			),
-		});
-	}
-
-	/** Issue an identity-authenticated raw projection guard for a later canonical command. */
-	issueCanonicalProjection(): SessionCanonicalProjection {
-		this._assertNotLost();
-		return this._cloneCanonicalProjection(this._captureCanonicalProjection());
-	}
-
-	/**
-	 * Validate a manager-issued guard against the committed branch, apply
-	 * normalized mutations, and capture immutable evidence in one commit.
-	 */
-	async commitCanonicalCommand(command: SessionCanonicalCommand): Promise<SessionCanonicalCommitEvidence> {
-		this._assertWritable();
-		const basis = this.canonicalProjectionTokens.get(command.guard.token);
-		if (!basis)
-			throw new SessionCanonicalConflictError("Canonical projection guard was not issued by this SessionManager");
-		const mutations = cloneCanonicalData([...command.mutations], "Session canonical mutations");
-		return this._enqueue(async () => {
-			const before = this._captureCanonicalProjection();
-			const exactMatch =
-				basis.leafEntryOrdinal === before.leafEntryOrdinal &&
-				basis.leafId === before.leafId &&
-				basis.entries.length === before.entries.length &&
-				basis.entries.every((entry, index) => entry.id === before.entries[index]?.id);
-			const guardMatches =
-				command.guard.kind === "exact"
-					? exactMatch
-					: basis.leafId === null || before.entries.some((entry) => entry.id === basis.leafId);
-			if (!guardMatches) throw new SessionCanonicalConflictError("Canonical branch changed before mutation commit");
-			const { after, appendedEntryIds } = await this._commitNow((write) => {
-				for (const mutation of mutations) {
-					if (mutation.kind === "append") write.canonical(mutation.entry);
-					else if (mutation.kind === "move" || mutation.summary === undefined) {
-						if (mutation.leafId === null) write.leaf(null);
-						else write.branch(mutation.leafId);
-					} else {
-						const summaryId = write.branchWithSummary(
-							mutation.leafId,
-							branchSummaryEntry(
-								mutation.leafId,
-								mutation.summary.summary,
-								mutation.summary.details,
-								mutation.summary.fromHook,
-							),
-						);
-						if (mutation.summary.label !== undefined) {
-							write.label(labelEntry(summaryId, mutation.summary.label));
-						}
-					}
-				}
-				return {
-					after: this._captureCanonicalProjection(write.state, write),
-					appendedEntryIds: Object.freeze(write.entries.map((entry) => entry.id)),
-				};
-			}, true);
-			return Object.freeze({
-				before: this._cloneCanonicalProjection(before),
-				after: this._cloneCanonicalProjection(after),
-				appendedEntryIds,
-			});
-		});
-	}
-
-	/**
-	 * Commit a provider-visible delivery and its host-only receipt transitions in
-	 * one local transaction. Volatile queue/UI publication deliberately happens
-	 * after this method returns.
-	 */
-	async commitDelivery(input: SessionDeliveryCommitInput): Promise<SessionDeliveryCommitReceipt> {
-		this._assertWritable();
-		const messages = cloneCanonicalData([...input.messages], "Session delivery messages");
-		const planning = input.planning === undefined ? undefined : parsePlanningState(input.planning);
-		return this._enqueue(async () => {
-			const beforeProjection = this._captureCanonicalProjection();
-			const { afterProjection, entryIds, clientMessageIds } = await this._commitNow((write) => {
-				const entryIds: string[] = [];
-				const clientMessageIds: string[] = [];
-				for (const message of messages) {
-					const clientMessageId = getClientMessageId(message);
-					if (clientMessageId === undefined) continue;
-					if (write.state.clientInputsById.get(clientMessageId)?.state === "accepted") {
-						write.clientInputTransition(clientMessageId, "started");
-						const stateEntry = write.entries.at(-1);
-						if (!stateEntry || stateEntry.type !== "client_input_state") {
-							throw new Error("Client input start transition was not staged");
-						}
-						entryIds.push(stateEntry.id);
-					}
-					clientMessageIds.push(clientMessageId);
-				}
-				if (planning !== undefined) entryIds.push(write.place(planningEntry(planning)));
-				for (const message of messages) {
-					if (message.role === "custom") {
-						entryIds.push(
-							write.place(
-								customMessageEntry(
-									message.customType,
-									message.content,
-									message.display,
-									message.details,
-									message.timestamp,
-								),
-							),
-						);
-					} else if (message.role === "user" || message.role === "assistant" || message.role === "toolResult") {
-						entryIds.push(write.message(messageEntry(message)));
-					} else {
-						throw new Error(`Unsupported delivery message role: ${String(message.role)}`);
-					}
-				}
-				return {
-					afterProjection: this._captureCanonicalProjection(write.state, write),
-					entryIds,
-					clientMessageIds,
-				};
-			}, true);
-			const receipt = Object.freeze({ receiptId: randomUUID() });
-			this.deliveryCommitReceipts.set(
-				receipt,
-				Object.freeze({
-					outcome: "committed" as const,
-					deliveryId: input.deliveryId,
-					epoch: input.epoch,
-					attemptId: input.attemptId,
-					sessionId: this.sessionId,
-					beforeLeafId: beforeProjection.leafId,
-					afterLeafId: afterProjection.leafId,
-					ordinal: this.getOrdinal(),
-					beforeProjection,
-					afterProjection,
-					entryIds: Object.freeze([...entryIds]),
-					messages: Object.freeze(cloneCanonicalData(messages, "Committed session delivery messages")),
-					clientMessageIds: Object.freeze([...new Set(clientMessageIds)]),
-					...(planning === undefined ? {} : { planning: clonePlanningState(planning) }),
-				}),
-			);
-			return receipt;
-		});
-	}
-
-	/** Attest no effect at a serialized point on the lane without writing. */
-	async attestDeliveryNoEffect(identity: SessionDeliveryAttemptIdentity): Promise<SessionDeliveryCommitReceipt> {
-		this._assertWritable();
-		return this._enqueue(() => {
-			this._assertNotLost();
-			const projection = this._captureCanonicalProjection();
-			const receipt = Object.freeze({ receiptId: randomUUID() });
-			this.deliveryCommitReceipts.set(
-				receipt,
-				Object.freeze({
-					outcome: "no_effect",
-					...identity,
-					sessionId: this.sessionId,
-					beforeLeafId: projection.leafId,
-					afterLeafId: projection.leafId,
-					ordinal: this.getOrdinal(),
-					beforeProjection: projection,
-					afterProjection: projection,
-				}),
-			);
-			return receipt;
-		});
-	}
-
-	/** Roll delivery WAL state back while proving provider-visible context did not change. */
-	async retainDelivery(
-		identity: SessionDeliveryAttemptIdentity,
-		messages: readonly AgentMessage[],
-	): Promise<SessionDeliveryCommitReceipt> {
-		this._assertWritable();
-		const canonicalMessages = cloneCanonicalData([...messages], "Retained delivery messages");
-		return this._enqueue(async () => {
-			const beforeProjection = this._captureCanonicalProjection();
-			const afterProjection = await this._commitNow((write) => {
-				for (const message of canonicalMessages) {
-					const clientMessageId = getClientMessageId(message);
-					if (
-						clientMessageId !== undefined &&
-						write.state.clientInputsById.get(clientMessageId)?.state === "started"
-					) {
-						write.clientInputRollback(clientMessageId);
-					}
-				}
-				return this._captureCanonicalProjection(write.state, write);
-			}, true);
-			const beforeIds = beforeProjection.entries.map((entry) => entry.id);
-			const afterIds = afterProjection.entries.map((entry) => entry.id);
-			if (
-				beforeProjection.leafId !== afterProjection.leafId ||
-				beforeIds.length !== afterIds.length ||
-				beforeIds.some((id, index) => id !== afterIds[index])
-			) {
-				throw new Error("Retaining delivery changed provider-visible context");
-			}
-			const receipt = Object.freeze({ receiptId: randomUUID() });
-			this.deliveryCommitReceipts.set(
-				receipt,
-				Object.freeze({
-					outcome: "no_effect",
-					...identity,
-					sessionId: this.sessionId,
-					beforeLeafId: beforeProjection.leafId,
-					afterLeafId: afterProjection.leafId,
-					ordinal: this.getOrdinal(),
-					beforeProjection,
-					afterProjection,
-				}),
-			);
-			return receipt;
-		});
-	}
-
-	/**
-	 * Consume client-input WAL ownership after a delivery failure whose provider
-	 * effect cannot be replayed safely. This command is deliberately independent
-	 * of volatile owner finalization so a restart cannot recover terminal work.
-	 */
-	async terminalizeDelivery(messages: readonly AgentMessage[], error: Error): Promise<void> {
-		const canonicalMessages = cloneCanonicalData([...messages], "Terminal delivery messages");
-		await this._commit((write) => {
-			const clientMessageIds = new Set(canonicalMessages.flatMap((message) => getClientMessageId(message) ?? []));
-			for (const clientMessageId of clientMessageIds) {
-				const state = write.state.clientInputsById.get(clientMessageId)?.state;
-				if (state === "accepted" || state === "started") {
-					write.clientInputTransition(clientMessageId, "failed", error.message);
-				}
-			}
-		}, true);
-	}
-
-	/** Verify that a delivery receipt was issued by this live manager instance. */
-	verifyDeliveryReceipt(receipt: unknown): VerifiedSessionDeliveryReceipt | undefined {
-		if (typeof receipt !== "object" || receipt === null) return undefined;
-		const verified = this.deliveryCommitReceipts.get(receipt as SessionDeliveryCommitReceipt);
-		if (!verified) return undefined;
-		if (verified.outcome === "no_effect") {
-			return {
-				...verified,
-				beforeProjection: this._cloneCanonicalProjection(verified.beforeProjection),
-				afterProjection: this._cloneCanonicalProjection(verified.afterProjection),
-			};
-		}
-		return {
-			...verified,
-			beforeProjection: this._cloneCanonicalProjection(verified.beforeProjection),
-			afterProjection: this._cloneCanonicalProjection(verified.afterProjection),
-			entryIds: [...verified.entryIds],
-			messages: cloneCanonicalData([...verified.messages], "Verified session delivery messages"),
-			clientMessageIds: [...verified.clientMessageIds],
-			...(verified.planning === undefined ? {} : { planning: clonePlanningState(verified.planning) }),
-		};
 	}
 
 	/**
@@ -2270,55 +1864,6 @@ export class SessionManager {
 
 	getRecoverableQueuedClientInputs(): ClientInputRecord[] {
 		return this.getClientInputRecoveryPlan().records;
-	}
-
-	/** A finding conversation never automatically replays inputs left behind by a prior process. */
-	async terminalizeInterruptedReviewInputs(): Promise<string[]> {
-		this._assertWritable();
-		if (!this.reviewDiscussion) throw new Error("Only finding discussions use explicit-only input recovery");
-		return this._commit((write) => {
-			const ids = [...write.state.clientInputsById.values()]
-				.filter((record) => record.state === "accepted" || record.state === "started")
-				.map((record) => record.clientMessageId);
-			for (const id of ids)
-				write.clientInputTransition(
-					id,
-					"failed",
-					"Review discussion interrupted; submit a new prompt to retry explicitly.",
-				);
-			return ids;
-		}, true);
-	}
-
-	async reserveClientInput(
-		clientMessageId: string,
-		command: ClientInputCommand,
-		inputValue: ClientInputPayloadInput,
-	): Promise<ClientInputReservation> {
-		assertClientMessageId(clientMessageId);
-		const input = normalizeClientInputPayload(command, inputValue);
-		const semanticDigest = digestClientInputPayload(command, input);
-		return this._commit((write) => write.clientInputReceipt(clientMessageId, command, input, semanticDigest));
-	}
-
-	async markClientInputQueued(
-		clientMessageId: string,
-		queuedInputValue: ClientInputQueuedPayloadInput,
-	): Promise<ClientInputRecord> {
-		const queuedInput = normalizeClientInputQueuedPayload(queuedInputValue);
-		return this._commit((write) => write.clientInputQueued(clientMessageId, queuedInput));
-	}
-
-	async rollbackClientInput(clientMessageId: string): Promise<ClientInputRecord> {
-		return this._commit((write) => write.clientInputRollback(clientMessageId));
-	}
-
-	async transitionClientInput(
-		clientMessageId: string,
-		state: Exclude<ClientInputState, "accepted">,
-		error?: string,
-	): Promise<ClientInputRecord> {
-		return this._commit((write) => write.clientInputTransition(clientMessageId, state, error));
 	}
 
 	/** The log position: ordinal of the newest committed entry. */
@@ -2387,6 +1932,13 @@ export class SessionManager {
 	async appendMessage(message: Message | ClientUserMessage | CustomMessage | BashExecutionMessage): Promise<string> {
 		this._assertWritable();
 		const entry = messageEntry(message);
+		const live = this._live();
+		if (live) {
+			if (entry.clientMessageId !== undefined) {
+				throw new Error("A client input's message commits only with its delivery");
+			}
+			return this._appendLive(live, entry);
+		}
 		return this._commit((write) => write.message(entry));
 	}
 
@@ -2394,6 +1946,11 @@ export class SessionManager {
 	async appendThinkingLevelChange(thinkingLevel: ThinkingLevelChangeEntry["thinkingLevel"]): Promise<string> {
 		this._assertWritable();
 		const entry = thinkingLevelEntry(thinkingLevel);
+		const live = this._live();
+		if (live) {
+			await live.setThinkingLevel(entry.thinkingLevel);
+			return this._newestEntryId("thinking_level_change");
+		}
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2401,6 +1958,11 @@ export class SessionManager {
 	async appendFastModeChange(enabled: boolean): Promise<string> {
 		this._assertWritable();
 		const entry = fastModeEntry(enabled);
+		const live = this._live();
+		if (live) {
+			await live.setFastMode(entry.enabled);
+			return this._newestEntryId("fast_mode_change");
+		}
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2408,6 +1970,11 @@ export class SessionManager {
 	async appendModelChange(provider: string, modelId: string): Promise<string> {
 		this._assertWritable();
 		const entry = modelEntry(provider, modelId);
+		const live = this._live();
+		if (live) {
+			await live.setModel(entry.provider, entry.modelId);
+			return this._newestEntryId("model_change");
+		}
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2415,6 +1982,11 @@ export class SessionManager {
 	async appendPlanningState(planning: PlanningState): Promise<string> {
 		this._assertWritable();
 		const entry = planningEntry(planning);
+		const live = this._live();
+		if (live) {
+			await live.setPlanning(entry.planning);
+			return this._newestEntryId("planning_state_change");
+		}
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2434,6 +2006,7 @@ export class SessionManager {
 			details as JsonValue | undefined,
 			fromHook,
 		);
+		this._assertLogNotTaken();
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2441,6 +2014,8 @@ export class SessionManager {
 	async appendCustomEntry<T = JsonValue>(customType: string, data?: JsonCompatibleInput<T>): Promise<string> {
 		this._assertWritable();
 		const entry = customEntry(customType, data as JsonValue | undefined);
+		const live = this._live();
+		if (live) return this._appendLive(live, entry);
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2448,6 +2023,11 @@ export class SessionManager {
 	async appendSessionInfo(name: string): Promise<string> {
 		this._assertWritable();
 		const entry = sessionInfoEntry(name);
+		const live = this._live();
+		if (live) {
+			await live.setName(entry.name ?? "");
+			return this._newestEntryId("session_info");
+		}
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2465,6 +2045,19 @@ export class SessionManager {
 			...pendingEnvelope(),
 			gitContext,
 		});
+		const live = this._live();
+		if (live) {
+			if (!this.acceptsStartingGitContext || this.sessionId !== expectedSessionId) return false;
+			this.acceptsStartingGitContext = false;
+			if (this.derivedState.startingGitContext !== undefined) return false;
+			try {
+				await this._appendLive(live, entry);
+			} catch (error) {
+				this.acceptsStartingGitContext = true;
+				throw error;
+			}
+			return true;
+		}
 		return this._enqueue(async () => {
 			if (!this.acceptsStartingGitContext || this.sessionId !== expectedSessionId) return false;
 			if (this.derivedState.startingGitContext !== undefined) {
@@ -2481,6 +2074,22 @@ export class SessionManager {
 	async recordPrReviewBinding(placement: PrReviewPlacement): Promise<void> {
 		this._assertWritable();
 		const entry = admitEntry<PrReviewBindingEntry>({ type: "pr_review_binding", ...pendingEnvelope(), placement });
+		const live = this._live();
+		if (live) {
+			// One binding at most: concurrent calls run one at a time and see the earlier commit.
+			await this._enqueue(async () => {
+				if (resolvePath(entry.placement.cwd) !== this.cwd) {
+					throw new Error("PR review binding cwd does not match the session");
+				}
+				const existing = this.derivedState.prReviewBinding;
+				if (existing) {
+					if (!isDeepStrictEqual(existing, entry.placement)) throw new Error("PR review binding is immutable");
+					return;
+				}
+				await this._appendLive(live, entry);
+			});
+			return;
+		}
 		await this._commit((write) => {
 			if (resolvePath(entry.placement.cwd) !== this.cwd) {
 				throw new Error("PR review binding cwd does not match the session");
@@ -2531,6 +2140,8 @@ export class SessionManager {
 	): Promise<string> {
 		this._assertWritable();
 		const entry = customMessageEntry(customType, content, display, details as JsonValue | undefined, timestamp);
+		const live = this._live();
+		if (live) return this._appendLive(live, entry);
 		return this._commit((write) => write.place(entry));
 	}
 
@@ -2581,6 +2192,12 @@ export class SessionManager {
 	async appendLabelChange(targetId: string, label: string | undefined): Promise<string> {
 		this._assertWritable();
 		const entry = labelEntry(targetId, label);
+		const live = this._live();
+		if (live) {
+			if (!this.getEntry(entry.targetId)) throw new Error(`Entry ${entry.targetId} not found`);
+			await live.setLabel(entry.targetId, entry.label);
+			return this._newestEntryId("label");
+		}
 		return this._commit((write) => write.label(entry));
 	}
 
@@ -2595,6 +2212,8 @@ export class SessionManager {
 	async appendSubagentSpawn(spawn: SubagentSpawnInput): Promise<string> {
 		this._assertWritable();
 		const entry = subagentSpawnEntry(spawn);
+		const live = this._live();
+		if (live) return this._appendLive(live, entry);
 		return this._commit((write) => write.place(entry));
 	}
 

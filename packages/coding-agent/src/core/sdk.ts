@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import type { AgentHarnessStreamOptions, AgentMessage, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
+import type { AgentMessage, ConversationStreamOptions, StreamFn, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import {
 	clampThinkingLevel,
 	type Message,
@@ -627,8 +627,8 @@ async function createAgentSessionWithTrackedResources(
 					client.refreshPromptCache(model, context, providerRequestOptions(model, options)),
 			};
 	const transport = settingsManager.getTransport();
-	const streamOptions: AgentHarnessStreamOptions = {
-		inferenceSpeed: existingSession.fastMode.enabled ? "fast" : "standard",
+	// Fast mode comes from the session log.
+	const streamOptions: ConversationStreamOptions = {
 		...(process.env.VOLT_CACHE_RETENTION === "long" ? { cacheRetention: "long" } : {}),
 		...(transport === undefined ? {} : { transport }),
 		thinkingBudgets: settingsManager.getThinkingBudgets(),
@@ -649,7 +649,8 @@ async function createAgentSessionWithTrackedResources(
 		untransferredFinalizers.push(() => gitContextProvider.dispose());
 		void gitContextProvider.refresh();
 	}
-	const session = new AgentSession({
+	// The session commits the selected model when the branch names another, such as a fallback for an unavailable one.
+	const session = await AgentSession.create({
 		sessionManager,
 		...(model === undefined ? {} : { model }),
 		thinkingLevel,

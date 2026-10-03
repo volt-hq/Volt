@@ -25,13 +25,16 @@ class MockAssistantStream extends EventStream<AssistantMessageEvent, AssistantMe
 	}
 }
 
+const model = getModel("anthropic", "claude-sonnet-4-5")!;
+
+/** A response from the session's model: the conversation's active model is the one its latest response names. */
 function createAssistantMessage(text: string, overrides?: Partial<AssistantMessage>): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [{ type: "text", text }],
-		api: "anthropic-messages",
-		provider: "anthropic",
-		model: "mock",
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
 		usage: {
 			input: 0,
 			output: 0,
@@ -68,7 +71,7 @@ describe("AgentSession retry", () => {
 		}
 	});
 
-	function createSession(options?: {
+	async function createSession(options?: {
 		failCount?: number;
 		maxRetries?: number;
 		delayAssistantMessageEndMs?: number;
@@ -79,7 +82,6 @@ describe("AgentSession retry", () => {
 		const delayAssistantMessageEndMs = options?.delayAssistantMessageEndMs ?? 0;
 		let callCount = 0;
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const runtimeConfig = createTestAgentSessionRuntimeConfig({
 			model,
 			streamFn: () => {
@@ -109,9 +111,13 @@ describe("AgentSession retry", () => {
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries, baseDelayMs: 1 } });
+		// Overflow recovery is compaction's, not the retry policy's: keep it out of these retry decisions.
+		settingsManager.applyOverrides({
+			retry: { enabled: true, maxRetries, baseDelayMs: 1 },
+			compaction: { enabled: false },
+		});
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -135,7 +141,7 @@ describe("AgentSession retry", () => {
 	}
 
 	it("retries after a transient error and succeeds", async () => {
-		const created = createSession({ failCount: 1 });
+		const created = await createSession({ failCount: 1 });
 		const events: string[] = [];
 		created.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") events.push(`start:${event.attempt}`);
@@ -152,7 +158,7 @@ describe("AgentSession retry", () => {
 	it.each(["assistant_stream_processing_error", "assistant_stream_queue_limit"])(
 		"does not automatically retry %s even with transient-looking error text",
 		async (type) => {
-			const created = createSession({
+			const created = await createSession({
 				failure: {
 					error: { kind: "overloaded", retryable: true, message: "HTTP status 503: connection timeout" },
 					diagnostics: [{ type, timestamp: 0, details: {} }],
@@ -171,7 +177,7 @@ describe("AgentSession retry", () => {
 	);
 
 	it("continues to retry an ordinary 503 without a local processing diagnostic", async () => {
-		const created = createSession({
+		const created = await createSession({
 			failure: { error: { kind: "overloaded", retryable: true, message: "HTTP status 503: connection timeout" } },
 		});
 		await created.session.prompt("Test");
@@ -185,13 +191,13 @@ describe("AgentSession retry", () => {
 		[{ kind: "quota", retryable: false, message: "HTTP status 429: too many requests" }, 1],
 		[{ kind: "context_overflow", retryable: false, message: "overloaded_error" }, 1],
 	] as const)("decides retries from the typed error, not its text: %j", async (error, calls) => {
-		const created = createSession({ failure: { error } });
+		const created = await createSession({ failure: { error } });
 		await created.session.prompt("Test");
 		expect(created.getCallCount()).toBe(calls);
 	});
 
 	it("exhausts max retries and emits failure", async () => {
-		const created = createSession({ failCount: 99, maxRetries: 2 });
+		const created = await createSession({ failCount: 99, maxRetries: 2 });
 		const events: string[] = [];
 		created.session.subscribe((event) => {
 			if (event.type === "auto_retry_start") events.push(`start:${event.attempt}`);
@@ -208,7 +214,7 @@ describe("AgentSession retry", () => {
 	});
 
 	it("prompt waits for retry completion even when assistant message_end handling is delayed", async () => {
-		const created = createSession({ failCount: 1, delayAssistantMessageEndMs: 40 });
+		const created = await createSession({ failCount: 1, delayAssistantMessageEndMs: 40 });
 
 		await created.session.prompt("Test");
 
@@ -217,7 +223,7 @@ describe("AgentSession retry", () => {
 	});
 
 	it("retries provider network_error failures", async () => {
-		const created = createSession({ failCount: 0 });
+		const created = await createSession({ failCount: 0 });
 		let callCount = 0;
 		const streamFn = () => {
 			callCount++;
@@ -241,7 +247,6 @@ describe("AgentSession retry", () => {
 		};
 		created.session.dispose();
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const runtimeConfig = createTestAgentSessionRuntimeConfig({ model, streamFn });
 		const sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
@@ -249,7 +254,7 @@ describe("AgentSession retry", () => {
 		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } });
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,
@@ -289,7 +294,6 @@ describe("AgentSession retry", () => {
 			},
 		};
 
-		const model = getModel("anthropic", "claude-sonnet-4-5")!;
 		const runtimeConfig = createTestAgentSessionRuntimeConfig({
 			model,
 			streamFn: () => {
@@ -334,7 +338,7 @@ describe("AgentSession retry", () => {
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		settingsManager.applyOverrides({ retry: { enabled: true, maxRetries: 3, baseDelayMs: 1 } });
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...runtimeConfig,
 			sessionManager,
 			settingsManager,

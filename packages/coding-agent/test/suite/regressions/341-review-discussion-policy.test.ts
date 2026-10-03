@@ -20,6 +20,7 @@ import {
 import { createBuiltInSubagentDefinitions, type SubagentResult } from "../../../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../../../src/core/tools/subagent.ts";
 import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
+import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
 
 const roots: string[] = [];
@@ -598,13 +599,12 @@ describe("Regression #341: persisted review discussion policy", () => {
 	it("terminalizes interrupted inputs without replay and accepts only a new explicit retry", async () => {
 		const { childRef } = await fixture();
 		const manager = await open(childRef);
-		for (const id of ["accepted", "started", "queued"])
-			await manager.reserveClientInput(id, id === "queued" ? "follow_up" : "prompt", {
-				message: `old ${id}`,
-				images: [],
-			});
-		await manager.transitionClientInput("started", "started");
-		await manager.markClientInputQueued("queued", { delivery: "follow_up", message: "old queued", images: [] });
+		await seedSession(manager, (seed) =>
+			seed
+				.clientInput("accepted", "prompt", { message: "old accepted" })
+				.clientInput("started", "prompt", { message: "old started" }, { states: ["started"] })
+				.clientInput("queued", "follow_up", { message: "old queued" }, { queued: "follow_up" }),
+		);
 		await manager.closePersistence();
 		const item = await harness({ sessionManager: await open(childRef) });
 		const respond = vi.fn(() => fauxAssistantMessage("Explicit retry answer"));

@@ -13,7 +13,9 @@
 import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { type Static, Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { createHarness, createHarnessWithExtensions } from "./test-harness.ts";
+import { appendsEntryType, injectFaultyLog } from "./utilities/faulty-log.ts";
 
 const hangToolSchema = Type.Object({});
 
@@ -43,7 +45,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 		// The trailing "ok" is a terminal response for any post-abort provider
 		// call: the faux stream fn ignores abort signals and wraps around its
 		// response list, so an all-toolCall list would loop forever.
-		const harness = createHarness({
+		const harness = await createHarness({
 			responses: [{ toolCalls: [{ id: "tc-hang-1", name: "hang", args: {} }] }, "ok"],
 			baseToolsOverride: {
 				hang: createHangingTool(() => {
@@ -89,7 +91,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 
 	it("attaches child sessions from durable spawn edges to a dangling subagent call", async () => {
 		let toolStarted = false;
-		const harness = createHarness({
+		const harness = await createHarness({
 			responses: [
 				{
 					toolCalls: [
@@ -179,7 +181,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 	});
 
 	it("does not append tool results when disposing an idle session", async () => {
-		const harness = createHarness({ responses: ["ok"] });
+		const harness = await createHarness({ responses: ["ok"] });
 		try {
 			await harness.session.prompt("hello");
 			const before = harness.sessionManager.buildSessionContext().messages.length;
@@ -203,7 +205,7 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 			parameters: hangToolSchema,
 			execute: async () => ({ content: [{ type: "text", text: "done" }] }),
 		};
-		const harness = createHarness({
+		const harness = await createHarness({
 			responses: [
 				{ toolCalls: [{ id: "tc-quick-1", name: "quick", args: {} }] },
 				{ toolCalls: [{ id: "tc-hang-2", name: "hang", args: {} }] },
@@ -329,36 +331,33 @@ describe("AgentSession dispose with in-flight tool calls", () => {
 	});
 
 	it("prevents client-input WAL transitions after the final disposal watermark", async () => {
-		const harness = createHarness({ responses: ["ok"] });
-		let releaseFlush!: () => void;
-		const flushGate = new Promise<void>((resolve) => {
-			releaseFlush = resolve;
-		});
-		const reserve = harness.sessionManager.reserveClientInput.bind(harness.sessionManager);
-		const flush = vi.spyOn(harness.sessionManager, "reserveClientInput").mockImplementation(async (...args) => {
-			const reservation = await reserve(...args);
-			await flushGate;
-			return reservation;
-		});
+		const sessionManager = SessionManager.inMemory();
+		const log = injectFaultyLog(sessionManager);
+		const harness = await createHarness({ responses: ["ok"], sessionManager });
+		const receipt = log.holdNext(appendsEntryType("client_input_receipt"));
 		try {
 			const prompt = harness.session.prompt("admission race", { clientMessageId: "dispose-admission-race" });
-			await vi.waitFor(() => expect(flush).toHaveBeenCalledOnce());
+			await receipt.started;
 
 			harness.session.dispose();
 			const disposal = harness.session.waitForClosed();
-			expect(flush).toHaveBeenCalledOnce();
-			releaseFlush();
+			receipt.release();
 			await disposal;
 			await expect(prompt).rejects.toThrow("disposed");
-			expect(harness.sessionManager.getClientInput("dispose-admission-race")?.state).toBe("accepted");
+			expect(sessionManager.getClientInput("dispose-admission-race")?.state).toBe("accepted");
+			expect(
+				sessionManager
+					.getEntries()
+					.filter((entry) => entry.type === "client_input_state" || entry.type === "client_input_queued"),
+			).toEqual([]);
 		} finally {
-			releaseFlush();
+			receipt.release();
 			harness.cleanup();
 		}
 	});
 
 	it("does not resolve disposal until the persistence watermark drains", async () => {
-		const harness = createHarness({ responses: ["ok"] });
+		const harness = await createHarness({ responses: ["ok"] });
 		let releaseFlush!: () => void;
 		const flushGate = new Promise<void>((resolve) => {
 			releaseFlush = resolve;

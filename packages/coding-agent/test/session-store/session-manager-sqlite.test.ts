@@ -12,6 +12,7 @@ import {
 } from "../../src/core/session-store/index.ts";
 import { createHarness } from "../suite/harness.ts";
 import { createDirectorySymlinkSync } from "../symlink-utils.ts";
+import { seedSession } from "../utilities/seed-log.ts";
 
 const roots: string[] = [];
 const managers: SessionManager[] = [];
@@ -124,7 +125,7 @@ describe("SQLite-backed SessionManager", () => {
 		const { cwd, sessionDir } = fixture();
 		const corrupted = await own(SessionManager.create(cwd, sessionDir, { id: `drift-${component}` }));
 		await corrupted.appendMessage({ role: "user", content: "searchable", timestamp: Date.now() });
-		await corrupted.reserveClientInput(`client-${component}`, "prompt", { message: "pending" });
+		await seedSession(corrupted, (seed) => seed.clientInput(`client-${component}`, "prompt", { message: "pending" }));
 		const corruptedRef = corrupted.getSessionRef();
 		if (!corruptedRef) throw new Error("Expected a corrupted projection reference");
 		const healthy = await own(SessionManager.create(cwd, sessionDir, { id: `healthy-${component}` }));
@@ -172,7 +173,7 @@ describe("SQLite-backed SessionManager", () => {
 	it("continues a WAL-only accepted receipt for an exact client retry", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await own(SessionManager.create(cwd, sessionDir, { id: "accepted-only-continuation" }));
-		await manager.reserveClientInput("accepted-retry", "prompt", { message: "retry me" });
+		await seedSession(manager, (seed) => seed.clientInput("accepted-retry", "prompt", { message: "retry me" }));
 
 		expect(await SessionManager.list(cwd, sessionDir)).toEqual([]);
 		// Continuing opens the session for writing, so its first writer closes first.
@@ -190,8 +191,11 @@ describe("SQLite-backed SessionManager", () => {
 		const now = Date.now();
 		const pending = await own(SessionManager.create(cwd, sessionDir, { id: "queued-continuation" }));
 		await pending.appendMessage({ role: "user", content: "older conversation", timestamp: now - 120_000 });
-		await pending.reserveClientInput("queued-recovery", "steer", { message: "recover me" });
-		await pending.markClientInputQueued("queued-recovery", { delivery: "steer", message: "recover me" });
+		await seedSession(
+			pending,
+			(seed) => seed.clientInput("queued-recovery", "steer", { message: "recover me" }, { queued: "steer" }),
+			{ at: now },
+		);
 
 		const visible = await own(SessionManager.create(cwd, sessionDir, { id: "newer-visible-conversation" }));
 		await visible.appendMessage({ role: "user", content: "newer visible", timestamp: now - 60_000 });
@@ -213,8 +217,9 @@ describe("SQLite-backed SessionManager", () => {
 	it("continues a WAL-only started input so its ambiguity fence remains authoritative", async () => {
 		const { cwd, sessionDir } = fixture();
 		const manager = await own(SessionManager.create(cwd, sessionDir, { id: "started-continuation" }));
-		await manager.reserveClientInput("started-recovery", "prompt", { message: "do not replay" });
-		await manager.transitionClientInput("started-recovery", "started");
+		await seedSession(manager, (seed) =>
+			seed.clientInput("started-recovery", "prompt", { message: "do not replay" }, { states: ["started"] }),
+		);
 
 		expect(await SessionManager.list(cwd, sessionDir)).toEqual([]);
 		// Continuing opens the session for writing, so its first writer closes first.

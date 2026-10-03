@@ -15,6 +15,7 @@ import {
 	type SessionTargetSessionStore,
 } from "../src/daemon/session-target.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
+import { seedSession } from "./utilities/seed-log.ts";
 
 interface FakeHandle {
 	getSessionId(): string;
@@ -73,9 +74,9 @@ describe("resolveIrohRemoteSessionTarget", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "volt-session-target-recovery-"));
 		try {
 			const manager = await SessionManager.create(tempDir, tempDir, { id: "preserved-session" });
-			await manager.reserveClientInput("handled-input", "prompt", { message: "/handled" });
-			await manager.transitionClientInput("handled-input", "started");
-			await manager.transitionClientInput("handled-input", "completed");
+			await seedSession(manager, (seed) =>
+				seed.clientInput("handled-input", "prompt", { message: "/handled" }, { states: ["started", "completed"] }),
+			);
 			const originalRef = manager.getSessionRef();
 			await manager.closePersistence();
 			const db = new DatabaseSync(join(tempDir, "sessions.sqlite"));
@@ -330,9 +331,14 @@ describe("resolveIrohRemoteSessionTarget", () => {
 		managerOwner.start();
 		try {
 			const manager = await SessionManager.create(tempDir, tempDir, { id: "wal-only-resume" });
-			await manager.reserveClientInput("handled-terminal", "prompt", { message: "/handled" });
-			await manager.transitionClientInput("handled-terminal", "started");
-			await manager.transitionClientInput("handled-terminal", "completed");
+			await seedSession(manager, (seed) =>
+				seed.clientInput(
+					"handled-terminal",
+					"prompt",
+					{ message: "/handled" },
+					{ states: ["started", "completed"] },
+				),
+			);
 			const managerRef = manager.getSessionRef();
 			if (!managerRef) throw new Error("Expected a persisted session reference");
 			expect(await SessionManager.listAll(tempDir)).toEqual([]);

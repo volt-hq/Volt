@@ -1,42 +1,68 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
 	buildContext,
-	type ConversationLogEntry,
+	type ConversationLogEntryDraft,
 	type ConversationState,
 	clientInputRecovery,
 	fold,
 } from "@hansjm10/volt-agent-core";
 import { type AssistantMessage, applyReplayPolicy, type StopReason } from "@hansjm10/volt-ai";
+import type { ClientInputPayload, ClientInputQueuedPayload, ClientInputState } from "@hansjm10/volt-protocol/entries";
 import * as fc from "fast-check";
-import { describe, expect, it } from "vitest";
-import { createSessionManagerHarnessSession } from "../src/core/harness-session-adapter.ts";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { toLogEntry } from "../src/core/conversation-log/entry-codec.ts";
 import { convertToLlm } from "../src/core/messages.ts";
 import { DEFAULT_PLANNING_STATE } from "../src/core/planning.ts";
-import { SESSION_ENTRY_TYPES } from "../src/core/session-entry-types.ts";
-import { type ClientInputCommand, type CommittedSessionEntry, SessionManager } from "../src/core/session-manager.ts";
+import { decodeStoredSessionEntry } from "../src/core/session-entry-codec.ts";
+import {
+	type ClientInputCommand,
+	createClientInputSemanticDigest,
+	SessionManager,
+} from "../src/core/session-manager.ts";
+import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreLease } from "../src/core/session-store/index.ts";
+import { seedSession } from "./utilities/seed-log.ts";
+import { loadPersistedSessionSnapshot } from "./utilities.ts";
 
-// The kernel fold and context builder must reproduce today's coding-agent
-// buildSessionContext + replay (and the harness projection AgentSession turns
-// read) for every log SessionManager writes.
+// The kernel fold and context builder must reproduce coding-agent's
+// buildSessionContext + replay for every log SessionManager writes, and the
+// SQLite store's derived projections (client inputs, leaf, name) must equal
+// the fold of the entries the store holds.
 
 const PROPERTY_SEED = 5_850_201;
-
-/** A stored session entry in the protocol envelope: payload fields nested, visibility from its type. */
-function toLogEntry(entry: CommittedSessionEntry): ConversationLogEntry {
-	const definition = SESSION_ENTRY_TYPES[entry.type];
-	const payloadKeys = new Set(Object.keys(definition.payload.properties));
-	const envelope: Record<string, unknown> = { visibility: definition.visibility };
-	const payload: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(entry)) {
-		if (payloadKeys.has(key)) payload[key] = value;
-		else envelope[key] = value;
-	}
-	return { ...envelope, payload } as unknown as ConversationLogEntry;
-}
 
 async function foldSession(session: SessionManager): Promise<ConversationState> {
 	const page = await session.readEntries(0, 1_000);
 	expect(page.lastOrdinal).toBe(page.entries.length);
 	return fold(page.entries.map(toLogEntry));
+}
+
+/** The store's derived state for a persisted session equals the fold of the entries it stores. */
+async function expectStoreParity(session: SessionManager, state: ConversationState): Promise<void> {
+	const snapshot = await loadPersistedSessionSnapshot(session);
+	const stored = fold(snapshot.entries.map((entry) => toLogEntry(decodeStoredSessionEntry(entry))));
+	expect(stored.ordinal).toBe(state.ordinal);
+	expect(stored.leafId).toBe(state.leafId);
+	expect(stored.clientInputs).toEqual(state.clientInputs);
+	expect(snapshot.session.leafId).toBe(stored.leafId);
+	expect(snapshot.session.name).toBe(stored.name);
+	const folded = [...stored.clientInputs.inputs.values()]
+		.sort((left, right) => (left.clientMessageId < right.clientMessageId ? -1 : 1))
+		.map((record) => ({
+			clientMessageId: record.clientMessageId,
+			receiptEntryId: record.receiptId,
+			command: record.command,
+			origin: record.origin ?? null,
+			semanticDigest: record.semanticDigest,
+			input: record.input,
+			queuedEntryId: record.queuedEntryId ?? null,
+			queuedInput: record.queuedInput ?? null,
+			state: record.state,
+			error: record.error ?? null,
+			canonicalEntryId: record.canonicalEntryId ?? null,
+		}));
+	expect(snapshot.clientInputs).toEqual(folded);
 }
 
 async function expectParity(session: SessionManager): Promise<ConversationState> {
@@ -52,11 +78,6 @@ async function expectParity(session: SessionManager): Promise<ConversationState>
 	expect(state.planning ?? DEFAULT_PLANNING_STATE).toEqual(expected.planning);
 	expect(await buildContext(state, { convertToLlm })).toEqual(applyReplayPolicy(convertToLlm(expected.messages)));
 
-	const harness = await createSessionManagerHarnessSession(session).buildContext();
-	expect(state.context.messages).toEqual(harness.messages);
-	expect(state.context.model).toEqual(harness.model);
-	expect(state.context.thinkingLevel).toBe(harness.thinkingLevel);
-
 	expect(state.name ?? undefined).toBe(session.getSessionName());
 	for (const entry of session.getEntries()) {
 		expect(state.labels.get(entry.id)?.label).toBe(session.getLabel(entry.id));
@@ -66,7 +87,129 @@ async function expectParity(session: SessionManager): Promise<ConversationState>
 		expect(state.clientInputs.inputs.get(clientMessageId)).toEqual(session.getClientInput(clientMessageId));
 	}
 	expect(clientInputRecovery(state)).toEqual(session.getClientInputRecoveryPlan());
+	if (session.isPersisted()) await expectStoreParity(session, state);
 	return state;
+}
+
+type HostEntryBody =
+	| {
+			type: "client_input_receipt";
+			payload: {
+				clientMessageId: string;
+				command: ClientInputCommand;
+				semanticDigest: string;
+				input: ClientInputPayload;
+			};
+	  }
+	| {
+			type: "client_input_queued";
+			payload: { receiptId: string; clientMessageId: string; queuedInput: ClientInputQueuedPayload };
+	  }
+	| {
+			type: "client_input_state";
+			payload: { receiptId: string; clientMessageId: string; state: ClientInputState; error?: string };
+	  };
+
+/**
+ * Commit one client-input entry off the current leaf, for the shapes
+ * `LogSeed.clientInput` does not build one step at a time: a prompt's
+ * streaming behavior, a queued intent after its receipt, a return to `accepted`.
+ */
+async function appendClientInputEntry(session: SessionManager, body: HostEntryBody): Promise<void> {
+	const id = `client-entry-${session.getOrdinal() + 1}`;
+	const parentId = session.getLeafId();
+	await seedSession(session, (seed) => {
+		seed.drafts.push({
+			...body,
+			id,
+			parentId,
+			timestamp: new Date().toISOString(),
+			visibility: "host",
+		} as ConversationLogEntryDraft);
+	});
+}
+
+async function reserveClientInput(
+	session: SessionManager,
+	clientMessageId: string,
+	command: ClientInputCommand,
+	input: { message: string; streamingBehavior?: "steer" | "followUp" },
+): Promise<void> {
+	const payload: ClientInputPayload = { ...input, images: [] };
+	await appendClientInputEntry(session, {
+		type: "client_input_receipt",
+		payload: {
+			clientMessageId,
+			command,
+			semanticDigest: createClientInputSemanticDigest(command, payload),
+			input: payload,
+		},
+	});
+}
+
+function receiptId(session: SessionManager, clientMessageId: string): string {
+	const record = session.getClientInput(clientMessageId);
+	if (!record) throw new Error(`No client input ${clientMessageId}`);
+	return record.receiptId;
+}
+
+async function queueClientInput(
+	session: SessionManager,
+	clientMessageId: string,
+	delivery: "steer" | "follow_up",
+	message: string,
+): Promise<void> {
+	await appendClientInputEntry(session, {
+		type: "client_input_queued",
+		payload: {
+			receiptId: receiptId(session, clientMessageId),
+			clientMessageId,
+			queuedInput: { delivery, message, images: [] },
+		},
+	});
+}
+
+async function setClientInputState(
+	session: SessionManager,
+	clientMessageId: string,
+	state: ClientInputState,
+	error?: string,
+): Promise<void> {
+	await appendClientInputEntry(session, {
+		type: "client_input_state",
+		payload: {
+			receiptId: receiptId(session, clientMessageId),
+			clientMessageId,
+			state,
+			...(error === undefined ? {} : { error }),
+		},
+	});
+}
+
+let root: string;
+let storeLease: SQLiteSessionStoreLease;
+const sessions: SessionManager[] = [];
+
+// One store for every test keeps its worker up; each test or generated case creates a fresh session.
+beforeAll(async () => {
+	root = mkdtempSync(join(tmpdir(), "volt-kernel-parity-"));
+	storeLease = await acquireSharedSQLiteSessionStore(join(root, "sessions"));
+});
+
+afterEach(async () => {
+	while (sessions.length > 0) await sessions.pop()!.closePersistence();
+});
+
+afterAll(async () => {
+	await storeLease.release();
+	rmSync(root, { recursive: true, force: true });
+});
+
+/** A persisted session, so parity also covers the store's derived projections. */
+async function createSession(): Promise<SessionManager> {
+	const session = await SessionManager.create(mkdtempSync(join(root, "workspace-")), join(root, "sessions"));
+	sessions.push(session);
+	return session;
 }
 
 let assistantTimestamp = 1_700_000_000_000;
@@ -138,7 +281,7 @@ function llmRoles(messages: readonly { role: string }[]): string[] {
 
 describe("conversation kernel parity with coding-agent context building", () => {
 	it("model, thinking, fast mode, and planning changes", async () => {
-		const session = SessionManager.inMemory();
+		const session = await createSession();
 		await expectParity(session);
 		await session.appendModelChange("openai", "gpt-test");
 		await session.appendThinkingLevelChange("high");
@@ -155,7 +298,7 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	});
 
 	it("compaction keeps the entries from firstKeptEntryId", async () => {
-		const session = SessionManager.inMemory();
+		const session = await createSession();
 		await user(session, "one");
 		await session.appendMessage(assistant("reply one"));
 		const kept = await user(session, "two");
@@ -170,7 +313,7 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	});
 
 	it("branch summaries, navigation via leaf entries, and resets", async () => {
-		const session = SessionManager.inMemory();
+		const session = await createSession();
 		const first = await user(session, "first");
 		await session.appendMessage(assistant("first reply"));
 		await user(session, "abandoned");
@@ -190,7 +333,7 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	});
 
 	it("custom messages, custom entries, labels, names, and host product entries", async () => {
-		const session = SessionManager.inMemory();
+		const session = await createSession();
 		expect(await session.recordStartingGitContext(session.getSessionId(), null)).toBe(true);
 		const greeting = await user(session, "hello");
 		await session.appendCustomMessageEntry("note", "plain note", true, { source: "test" });
@@ -240,7 +383,7 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	});
 
 	it("errored and aborted turns, missing tool results, and rejected tool calls", async () => {
-		const session = SessionManager.inMemory();
+		const session = await createSession();
 		await user(session, "do it");
 		await session.appendMessage(assistant("partial", { toolCallIds: ["call-1"], stopReason: "aborted" }));
 		await toolResult(session, "call-1", true);
@@ -259,9 +402,10 @@ describe("conversation kernel parity with coding-agent context building", () => 
 	});
 
 	it("client input lifecycles and the durable queue", async () => {
-		const session = SessionManager.inMemory();
-		await session.reserveClientInput("client-prompt", "prompt", { message: "typed" });
-		await session.transitionClientInput("client-prompt", "started");
+		const session = await createSession();
+		await seedSession(session, (seed) =>
+			seed.clientInput("client-prompt", "prompt", { message: "typed" }, { states: ["started"] }),
+		);
 		await expectParity(session);
 		await session.appendMessage({
 			role: "user",
@@ -269,18 +413,20 @@ describe("conversation kernel parity with coding-agent context building", () => 
 			timestamp: assistantTimestamp++,
 			clientMessageId: "client-prompt",
 		});
-		await session.reserveClientInput("client-steer", "steer", { message: "steer" });
-		await session.markClientInputQueued("client-steer", { delivery: "steer", message: "steer" });
-		await session.reserveClientInput("client-follow", "follow_up", { message: "follow" });
-		await session.markClientInputQueued("client-follow", { delivery: "follow_up", message: "follow" });
-		await session.reserveClientInput("client-failed", "prompt", { message: "nope" });
-		await session.transitionClientInput("client-failed", "failed", "rejected");
+		await seedSession(session, (seed) =>
+			seed
+				.clientInput("client-steer", "steer", { message: "steer" }, { queued: "steer" })
+				.clientInput("client-follow", "follow_up", { message: "follow" }, { queued: "follow_up" })
+				.clientInput("client-failed", "prompt", { message: "nope" }, { states: ["failed"], error: "rejected" }),
+		);
 		let state = await expectParity(session);
+		expect(state.clientInputs.inputs.get("client-prompt")).toMatchObject({ state: "completed" });
 		expect(clientInputRecovery(state).kind).toBe("replay");
-		await session.transitionClientInput("client-follow", "started");
+		await setClientInputState(session, "client-follow", "started");
 		state = await expectParity(session);
 		expect(clientInputRecovery(state).kind).toBe("blocked");
-		await session.rollbackClientInput("client-follow");
+		// A started input returned to `accepted` is queued again in its admission order.
+		await setClientInputState(session, "client-follow", "accepted");
 		state = await expectParity(session);
 		expect(state.clientInputs.queued).toEqual(["client-steer", "client-follow"]);
 	});
@@ -477,7 +623,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 		case "receipt": {
 			const id = `client-${inputs.length + 1}`;
 			const behavior = op.command === "prompt" ? op.behavior : null;
-			await session.reserveClientInput(id, op.command, {
+			await reserveClientInput(session, id, op.command, {
 				message: id,
 				...(behavior === null ? {} : { streamingBehavior: behavior }),
 			});
@@ -497,7 +643,7 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			const id = choose(candidates, op.pick);
 			const record = id === undefined ? undefined : session.getClientInput(id);
 			const delivery = record && queuedDelivery(record.command, record.input.streamingBehavior ?? null);
-			if (id !== undefined && delivery) await session.markClientInputQueued(id, { delivery, message: id });
+			if (id !== undefined && delivery) await queueClientInput(session, id, delivery, id);
 			return;
 		}
 		case "transition": {
@@ -511,12 +657,11 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 			const next = choose(
 				state === "accepted"
 					? (["started", "completed", "failed"] as const)
-					: (["rollback", "completed", "failed"] as const),
+					: (["accepted", "completed", "failed"] as const),
 				op.choice,
 			);
-			if (next === "rollback") await session.rollbackClientInput(id);
-			else if (next === "failed") await session.transitionClientInput(id, "failed", "failed");
-			else if (next !== undefined) await session.transitionClientInput(id, next);
+			if (next === "failed") await setClientInputState(session, id, "failed", "failed");
+			else if (next !== undefined) await setClientInputState(session, id, next);
 			return;
 		}
 		case "complete": {
@@ -547,18 +692,22 @@ async function runOp(session: SessionManager, op: SessionOp, toolCalls: string[]
 }
 
 describe("conversation kernel parity properties", () => {
-	it("the fold reproduces SessionManager's context, labels, name, tree, and client inputs after every operation", async () => {
+	it("the fold reproduces SessionManager's context, labels, name, tree, and client inputs, and the store's projections, after every operation", async () => {
 		await fc.assert(
 			fc.asyncProperty(fc.array(sessionOpArbitrary, { maxLength: 40, size: "medium" }), async (ops) => {
-				const session = SessionManager.inMemory();
-				const toolCalls: string[] = [];
-				const inputs: string[] = [];
-				for (const op of ops) {
-					await runOp(session, op, toolCalls, inputs);
-					await expectParity(session);
+				const session = await createSession();
+				try {
+					const toolCalls: string[] = [];
+					const inputs: string[] = [];
+					for (const op of ops) {
+						await runOp(session, op, toolCalls, inputs);
+						await expectParity(session);
+					}
+				} finally {
+					await session.closePersistence();
 				}
 			}),
 			{ seed: PROPERTY_SEED, numRuns: 60 },
 		);
-	});
+	}, 120_000);
 });

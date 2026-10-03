@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
 	AgentMessage,
 	ConversationLog,
@@ -15,6 +15,15 @@ import type {
 	ToolCall,
 	Usage,
 } from "@hansjm10/volt-ai";
+import {
+	type ClientInputCommand,
+	type ClientInputPayload,
+	type ClientInputQueuedDelivery,
+	type ClientInputState,
+	clientInputDigestMaterial,
+} from "@hansjm10/volt-protocol/entries";
+import { toSessionEntry } from "../../src/core/conversation-log/entry-codec.ts";
+import type { SessionEntry, SessionManager } from "../../src/core/session-manager.ts";
 
 /** The model a seeded assistant message names. A `Model` satisfies it. */
 export interface SeedModel {
@@ -85,10 +94,87 @@ export class LogSeed {
 		return last.id;
 	}
 
-	user(text: string, options: SeedMessageOptions & { readonly images?: readonly ImageContent[] } = {}): this {
+	/** A user message; with `clientMessageId`, the delivery of that client input. */
+	user(
+		text: string,
+		options: SeedMessageOptions & {
+			readonly images?: readonly ImageContent[];
+			readonly clientMessageId?: string;
+		} = {},
+	): this {
 		const timestamp = options.timestamp ?? this.time();
 		const content = options.images?.length ? [{ type: "text" as const, text }, ...options.images] : text;
-		return this.message({ role: "user", content, timestamp }, options.id);
+		if (options.clientMessageId === undefined) return this.message({ role: "user", content, timestamp }, options.id);
+		return this.add(
+			{
+				type: "message",
+				visibility: "public",
+				clientMessageId: options.clientMessageId,
+				payload: { message: { role: "user", content, timestamp } },
+			} as EntryBody,
+			options.id,
+			"user",
+		);
+	}
+
+	/**
+	 * A client input: its receipt, its queue intent with `queued`, then each
+	 * state in `states` (`started`, `completed`, `failed`, `withdrawn`). A
+	 * delivered input's user message is seeded separately with `user()`.
+	 */
+	clientInput(
+		clientMessageId: string,
+		command: ClientInputCommand,
+		input: { readonly message: string; readonly images?: ClientInputPayload["images"] },
+		options: {
+			readonly queued?: ClientInputQueuedDelivery;
+			readonly states?: readonly Exclude<ClientInputState, "accepted">[];
+			readonly error?: string;
+			readonly origin?: "host";
+			readonly id?: string;
+		} = {},
+	): this {
+		const payload: ClientInputPayload = { message: input.message, images: [...(input.images ?? [])] };
+		const semanticDigest = createHash("sha256").update(clientInputDigestMaterial(command, payload)).digest("hex");
+		this.add(
+			{
+				type: "client_input_receipt",
+				visibility: "host",
+				payload: {
+					clientMessageId,
+					command,
+					semanticDigest,
+					input: payload,
+					...(options.origin === undefined ? {} : { origin: options.origin }),
+				},
+			},
+			options.id,
+		);
+		const receiptId = this.lastId;
+		if (options.queued !== undefined) {
+			this.add({
+				type: "client_input_queued",
+				visibility: "host",
+				payload: {
+					receiptId,
+					clientMessageId,
+					queuedInput: { delivery: options.queued, message: payload.message, images: payload.images },
+				},
+			});
+		}
+		for (const state of options.states ?? []) {
+			this.add({
+				type: "client_input_state",
+				visibility: "host",
+				payload: {
+					receiptId,
+					clientMessageId,
+					state,
+					...(state === "failed" ? { error: options.error ?? "Seeded failure" } : {}),
+				},
+			});
+		}
+		return this;
 	}
 
 	assistant(text: string, options: SeedAssistantOptions = {}): this {
@@ -256,6 +342,33 @@ export async function seedLog(
 	const result = await log.append({ expectedOrdinal: head, commitId: `seed:${randomUUID()}`, entries: seed.drafts });
 	if (result.status !== "committed") throw new Error("The seeded entries were rolled back", { cause: result.error });
 	return seed.drafts.map((draft, index) => ({ ...draft, ordinal: result.first + index }) as ConversationLogEntry);
+}
+
+/**
+ * Commit the entries `build` describes to `manager`'s log in one batch, as
+ * {@link seedLog} does, and install them in its view. The manager must still
+ * write its own log (no live session took it).
+ */
+export async function seedSession(
+	manager: SessionManager,
+	build: SeedLogBuild,
+	options: SeedLogOptions = {},
+): Promise<SessionEntry[]> {
+	const internals = manager as unknown as {
+		_commit<T>(build: (write: { append(entry: SessionEntry): string }) => T, atomic?: boolean): Promise<T>;
+	};
+	const head = manager.getOrdinal();
+	const seed = new LogSeed(head, manager.getLeafId(), options);
+	build(seed);
+	return internals._commit(
+		(write) =>
+			seed.drafts.map((draft, index) => {
+				const { ordinal: _ordinal, ...entry } = toSessionEntry(draft, head + index + 1);
+				write.append(entry as SessionEntry);
+				return entry as SessionEntry;
+			}),
+		true,
+	);
 }
 
 /** The leaf of the log's existing entries: the newest leaf move or conversation entry. */

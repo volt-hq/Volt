@@ -29,6 +29,7 @@ import {
 	TURN_INITIATING_RPC_TYPES,
 } from "../src/daemon/conversation-commands.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
+import { seedSession } from "./utilities/seed-log.ts";
 import { loadPersistedSessionSnapshot } from "./utilities.ts";
 
 const STARTING_GIT_CONTEXT: RpcGitContext = {
@@ -559,10 +560,14 @@ describe("handleIntegratedConversationRpcCommand", () => {
 		managerOwner.start();
 		try {
 			const manager = await SessionManager.create(workspacePath, sessionDir);
-			await manager.reserveClientInput("client-message-42", "prompt", {
-				message: `Read ${workspacePath}/fixture.txt`,
-			});
-			await manager.transitionClientInput("client-message-42", "started");
+			await seedSession(manager, (seed) =>
+				seed.clientInput(
+					"client-message-42",
+					"prompt",
+					{ message: `Read ${workspacePath}/fixture.txt` },
+					{ states: ["started"] },
+				),
+			);
 			await manager.appendMessage({
 				role: "user",
 				clientMessageId: "client-message-42",

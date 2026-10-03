@@ -99,7 +99,7 @@ describe.skipIf(!API_KEY)("Compaction extensions", () => {
 			getExtensions: () => ({ extensions, errors: [], runtime }),
 		};
 
-		session = new AgentSession({
+		session = await AgentSession.create({
 			...createTestAgentSessionRuntimeConfig({
 				model,
 				...(API_KEY === undefined ? {} : { apiKey: API_KEY }),
