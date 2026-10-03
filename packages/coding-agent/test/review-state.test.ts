@@ -341,7 +341,7 @@ describe("durable review state", () => {
 
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(listReviewRuns(reopened).runs).toMatchObject([{ runId: "run-before-prompt", status: "completed" }]);
 	});
 
@@ -431,7 +431,7 @@ describe("durable review state", () => {
 		);
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		const restored = getReviewRun(reopened, "review:inventory-limit");
 		if (!restored) throw new Error("Expected a restored review run");
 		expect(restored.target.files).toEqual([]);
@@ -490,7 +490,7 @@ describe("durable review state", () => {
 
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(getReviewRun(reopened, "run-acknowledged")).toMatchObject({
 			runId: "run-acknowledged",
 			acknowledgedAt: 123,
@@ -536,7 +536,7 @@ describe("durable review state", () => {
 		await manager.flush();
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		const first = listReviewRuns(reopened, { limit: 1 });
 		expect(first.runs[0]?.runId).toBe("run-2");
 		expect(first.nextCursor).toBeTruthy();

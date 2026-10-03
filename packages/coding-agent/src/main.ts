@@ -40,6 +40,7 @@ import {
 } from "./core/agent-session-services.ts";
 import { formatNoModelsAvailableMessage } from "./core/auth-guidance.ts";
 import { AuthStorage } from "./core/auth-storage.ts";
+import { ConversationLockedError } from "./core/conversation-log/conversation-lock.ts";
 import { exportFromFile } from "./core/export-html/index.ts";
 import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { GitContextProviderPool } from "./core/git-context-provider-pool.ts";
@@ -77,6 +78,13 @@ import { isPathUnderWorktreesRoot, resolveWorktreeParentCheckout } from "./daemo
 import { handleMcpCommand } from "./mcp-cli.ts";
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { InteractiveMode, runPrintMode, runRpcMode } from "./modes/index.ts";
+import {
+	createDaemonAttach,
+	type DaemonAttach,
+	DaemonLeaseUnavailableError,
+	isDaemonAttachSupported,
+	openSessionWithDaemonLease,
+} from "./modes/interactive/daemon-attach.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
 import { handleStoreCommand } from "./store/store-cli.ts";
 import { canonicalizePath, isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
@@ -387,11 +395,59 @@ async function forkSessionOrExit(
 	}
 }
 
+/**
+ * The interactive TUI takes its daemon conversation lease before it opens an
+ * existing session for writing (see openSessionWithDaemonLease). The leased
+ * integration is handed to interactive mode, or released when the session is
+ * not served interactively after all.
+ */
+class StartupDaemonLease {
+	private readonly agentDir: string;
+	private readonly autoStart: boolean;
+	private attach: DaemonAttach | undefined;
+
+	constructor(agentDir: string, autoStart: boolean) {
+		this.agentDir = agentDir;
+		this.autoStart = autoStart;
+	}
+
+	async open(ref: SessionReference): Promise<SessionManager> {
+		const cwd = (await findSessionInfoById(ref.sessionDirectory, ref.sessionId))?.cwd;
+		// A session whose cwd is gone has no daemon workspace to lease it in.
+		if (cwd === undefined || !existsSync(cwd)) return SessionManager.open(ref);
+		const opened = await openSessionWithDaemonLease(ref, {
+			createAttach: () => createDaemonAttach({ cwd, agentDir: this.agentDir, autoStart: this.autoStart }),
+			onWaiting: () => {
+				console.log(
+					chalk.dim(
+						`Waiting for the remote turn in session ${ref.sessionId} to finish before opening it here (Ctrl+C cancels)...`,
+					),
+				);
+			},
+		});
+		this.attach = opened.attach;
+		return opened.manager;
+	}
+
+	/** Hand the leased daemon integration to interactive mode. */
+	transfer(): DaemonAttach | undefined {
+		const attach = this.attach;
+		this.attach = undefined;
+		return attach;
+	}
+
+	/** Release the lease when the session is not served interactively after all. */
+	async dispose(): Promise<void> {
+		await this.transfer()?.dispose();
+	}
+}
+
 async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	sessionDir: string | undefined,
 	settingsManager: SettingsManager,
+	openSession: (ref: SessionReference) => Promise<SessionManager>,
 ): Promise<SessionManager> {
 	if (parsed.noSession || parsed.help || parsed.listModels !== undefined) {
 		return SessionManager.inMemory(cwd);
@@ -428,7 +484,7 @@ async function createSessionManager(
 				return SessionManager.importFromJsonl(resolved.path, undefined, sessionDir);
 
 			case "local":
-				return SessionManager.open(resolved.ref);
+				return openSession(resolved.ref);
 
 			case "global": {
 				console.log(chalk.yellow(`Session found in different project: ${resolved.cwd}`));
@@ -459,20 +515,21 @@ async function createSessionManager(
 				console.log(chalk.dim("No session selected"));
 				process.exit(0);
 			}
-			return SessionManager.open(selectedRef);
+			return openSession(selectedRef);
 		} finally {
 			stopThemeWatcher();
 		}
 	}
 
 	if (parsed.continue) {
-		return SessionManager.continueRecent(cwd, sessionDir);
+		const latest = await SessionManager.findContinuation(cwd, sessionDir);
+		return latest ? openSession(latest) : SessionManager.create(cwd, sessionDir);
 	}
 
 	if (parsed.sessionId) {
 		const existingSession = await findLocalSessionByExactId(parsed.sessionId, cwd, sessionDir);
 		if (existingSession) {
-			return SessionManager.open(existingSession.ref);
+			return openSession(existingSession.ref);
 		}
 	}
 
@@ -636,26 +693,15 @@ class CliSessionManagerOwner {
 		return throwAfterClosingSessionManager(manager, error, message);
 	}
 
-	async replace(replacement: SessionManager): Promise<void> {
+	/**
+	 * Close the current manager, releasing its session lock, then adopt the
+	 * manager `open` returns, which may reopen the same session.
+	 */
+	async replace(open: () => Promise<SessionManager>): Promise<void> {
 		const previous = this.release();
-		if (!previous) {
-			await closeLocalSessionManager(replacement);
-			throw new Error("Cannot replace a CLI session manager after ownership transferred");
-		}
-		try {
-			await closeLocalSessionManager(previous);
-		} catch (error) {
-			try {
-				await closeLocalSessionManager(replacement);
-			} catch (replacementCloseError) {
-				throw new AggregateError(
-					[error, replacementCloseError],
-					"CLI session manager replacement failed and neither manager closed cleanly",
-				);
-			}
-			throw error;
-		}
-		this.manager = replacement;
+		if (!previous) throw new Error("Cannot replace a CLI session manager after ownership transferred");
+		await closeLocalSessionManager(previous);
+		this.manager = await open();
 	}
 
 	transfer(): SessionManager {
@@ -843,12 +889,29 @@ export async function main(args: string[], options?: MainOptions) {
 		(parsed.sessionDir ? normalizePath(parsed.sessionDir) : undefined) ??
 		(envSessionDir ? expandTildePath(envSessionDir) : undefined) ??
 		startupSettingsManager.getSessionDir();
+	const startupDaemonLease =
+		appMode === "interactive" && isDaemonAttachSupported()
+			? new StartupDaemonLease(agentDir, startupSettingsManager.getRemoteSettings().background === true)
+			: undefined;
+	let initialSessionManager: SessionManager;
+	try {
+		initialSessionManager = await createSessionManager(
+			parsed,
+			cwd,
+			sessionDir,
+			startupSettingsManager,
+			(ref) => startupDaemonLease?.open(ref) ?? SessionManager.open(ref),
+		);
+	} catch (error) {
+		// Another process has the session open for writing, or another TUI holds its lease.
+		if (!(error instanceof ConversationLockedError) && !(error instanceof DaemonLeaseUnavailableError)) throw error;
+		console.error(chalk.red(`Error: ${error.message}`));
+		process.exit(1);
+	}
 	// From this point until createAgentSessionRuntime() is invoked, this is the sole
 	// owner/finalizer for the acquired manager. Replacement closes the old manager
 	// before adopting the new one; transfer relinquishes it at the runtime-factory boundary.
-	const sessionManagerOwner = new CliSessionManagerOwner(
-		await createSessionManager(parsed, cwd, sessionDir, startupSettingsManager),
-	);
+	const sessionManagerOwner = new CliSessionManagerOwner(initialSessionManager);
 	let missingSessionCwdIssue: SessionCwdIssue | undefined;
 	try {
 		await restoreLocalSessionWorktree(sessionManagerOwner.current, agentDir);
@@ -869,19 +932,13 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 			if (!selectedCwd) {
 				await sessionManagerOwner.close();
+				await startupDaemonLease?.dispose();
 				process.exitCode = 0;
 				return;
 			}
-			let replacementManager: SessionManager;
-			try {
-				replacementManager = await SessionManager.open(missingSessionCwdIssue.sessionRef!, selectedCwd);
-			} catch (error) {
-				return await sessionManagerOwner.fail(
-					error,
-					"Session cwd replacement failed and its original manager could not be closed",
-				);
-			}
-			await sessionManagerOwner.replace(replacementManager);
+			// The session is reopened with the selected cwd once the first copy released its lock.
+			const sessionRef = missingSessionCwdIssue.sessionRef!;
+			await sessionManagerOwner.replace(() => SessionManager.open(sessionRef, selectedCwd));
 		} else {
 			const error = new MissingSessionCwdError(missingSessionCwdIssue);
 			try {
@@ -1181,6 +1238,10 @@ export async function main(args: string[], options?: MainOptions) {
 			return;
 		}
 
+		if (appMode !== "interactive") {
+			// Piped stdin turned an interactive start into a print run; the daemon gets the session back.
+			await startupDaemonLease?.dispose();
+		}
 		if (appMode === "rpc") {
 			printTimings();
 			transferRuntime();
@@ -1200,6 +1261,7 @@ export async function main(args: string[], options?: MainOptions) {
 				initialMessages: parsed.messages,
 				verbose: parsed.verbose,
 				...(parsed.tuiMode !== undefined ? { tuiMode: parsed.tuiMode } : {}),
+				daemonAttach: startupDaemonLease?.transfer(),
 			});
 			if (startupBenchmark) {
 				await interactiveMode.init();
@@ -1235,5 +1297,5 @@ export async function main(args: string[], options?: MainOptions) {
 			}
 			return;
 		}
-	});
+	}).finally(() => startupDaemonLease?.dispose());
 }

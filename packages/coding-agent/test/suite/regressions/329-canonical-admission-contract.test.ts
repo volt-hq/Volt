@@ -99,7 +99,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		};
 
 		await manager.flush();
-		const reopenedAfterRejection = await SessionManager.open(ref);
+		const reopenedAfterRejection = await SessionManager.openReadOnly(ref);
 		const persistedAfterRejection = {
 			leafId: reopenedAfterRejection.getLeafId(),
 			entries: reopenedAfterRejection
@@ -109,7 +109,7 @@ describe("PR #329 canonical entry admission contract", () => {
 
 		const nextId = manager.appendSessionInfo("after rejected branch");
 		await manager.flush();
-		const reopenedAfterNextAppend = await SessionManager.open(ref);
+		const reopenedAfterNextAppend = await SessionManager.openReadOnly(ref);
 		const nextEntry = reopenedAfterNextAppend.getEntry(nextId);
 
 		expect({
@@ -166,7 +166,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		await persisted.flush();
 		const ref = persisted.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted boundary session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 
 		expect({
 			inMemoryId: inMemory.getSessionId(),
@@ -261,7 +261,7 @@ describe("PR #329 canonical entry admission contract", () => {
 		const spawnsAfterRejection = manager.getSubagentSpawnEntries();
 		const nextId = manager.appendSessionInfo("after rejected spawn");
 		await manager.flush();
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		const nextEntry = reopened.getEntry(nextId);
 
 		expect({

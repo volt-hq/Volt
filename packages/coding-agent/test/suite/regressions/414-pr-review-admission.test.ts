@@ -424,7 +424,7 @@ describe("#414 PR review admission and runtime lifecycle", () => {
 					expect(opened.entry.runtime.cwd).toBe(placement.cwd);
 					expect(opened.entry.worktreeId).toBe(prepared.worktreeId);
 					// A separate store reader must see the binding before ownership publication.
-					const reader = await SessionManager.open(ref);
+					const reader = await SessionManager.openReadOnly(ref);
 					try {
 						expect(await readPrReviewBinding(reader)).toEqual(placement);
 					} finally {

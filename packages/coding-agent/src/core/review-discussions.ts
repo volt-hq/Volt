@@ -396,7 +396,7 @@ export class HostReviewDiscussionService {
 			sessionGeneration: anchor.source.sessionGeneration,
 		};
 		const owner = this.host.findRuntime(sourceRef, runtime);
-		const manager = owner?.session.sessionManager ?? (await SessionManager.open(sourceRef));
+		const manager = owner?.session.sessionManager ?? (await SessionManager.openReadOnly(sourceRef));
 		let record: ReturnType<typeof getReviewRun>;
 		try {
 			record = getReviewRun(manager, runId);

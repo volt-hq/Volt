@@ -248,7 +248,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 	it("converges source and persisted aliases after every manual outcome, including reopened readers", async () => {
 		const { source, aliases, managers, dispatch } = await fixture();
 		const sourceManager = source.session.sessionManager;
-		const staleSource = await SessionManager.open(sourceManager.getSessionRef()!);
+		const staleSource = await SessionManager.openReadOnly(sourceManager.getSessionRef()!);
 		managers.push(staleSource);
 		acknowledgeReviewRun(aliases[0]!.session.sessionManager, "review:341", 123);
 		for (const [index, status] of (["accepted", "fixed", "dismissed"] as const).entries()) {
@@ -281,7 +281,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 				exportReviewFeedback(sourceManager).outcomes,
 			);
 		}
-		const reopened = await SessionManager.open(aliases[0]!.session.sessionRef!);
+		const reopened = await SessionManager.openReadOnly(aliases[0]!.session.sessionRef!);
 		managers.push(reopened);
 		expect((await getCanonicalReviewRun(reopened, "review:341"))!.result!.findings[0]!.status).toBe("dismissed");
 	});
@@ -429,7 +429,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		await recordReviewFindingOutcome(local, { runId: "review:other", findingId: "f2", status: "fixed" });
 		await recordReviewFindingOutcome(local, { runId: "review:341", findingId: "f1", status: "fixed" });
 		expect((await exportCanonicalReviewFeedback(local)).outcomes).toEqual(exportReviewFeedback(local).outcomes);
-		const moved = await SessionManager.open(aliases[0]!.session.sessionRef!, join(root, "other-cwd"));
+		const moved = await SessionManager.openReadOnly(aliases[0]!.session.sessionRef!, join(root, "other-cwd"));
 		managers.push(moved);
 		await expect(getCanonicalReviewRun(moved, "review:341")).rejects.toMatchObject({
 			code: "review_source_unavailable",

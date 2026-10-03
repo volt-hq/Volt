@@ -1,3 +1,4 @@
+import { ConversationLockedError } from "../core/conversation-log/conversation-lock.ts";
 import { isIrohRemoteSessionId } from "../core/remote/iroh/handshake.ts";
 import {
 	IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE,
@@ -8,6 +9,24 @@ import { SessionManager, type SessionReference } from "../core/session-manager.t
 import { SessionStoreError } from "../core/session-store/types.ts";
 
 function sessionTargetFailure(error: unknown, workspace: string, sessionId: string): IrohRemoteOutcomeError {
+	if (error instanceof ConversationLockedError) {
+		// A lock held by this daemon belongs to a runtime that is still being created or retired here.
+		return error.holder === "this_process"
+			? Object.assign(
+					new IrohRemoteOutcomeError(
+						"duplicate_conversation_connection",
+						"conversation runtime is changing; retry",
+					),
+					{ cause: error, workspace, sessionId, retryAfterMs: 500 },
+				)
+			: Object.assign(
+					new IrohRemoteOutcomeError(
+						"conversation_locked",
+						"conversation is open in another Volt process on the host",
+					),
+					{ cause: error, workspace, sessionId },
+				);
+	}
 	if (isIrohRemoteHostStorageFullError(error) || (error instanceof SessionStoreError && error.code === "store_full")) {
 		return Object.assign(new IrohRemoteOutcomeError("host_storage_full", IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE), {
 			cause: error,
@@ -165,11 +184,14 @@ export async function resolveIrohRemoteSessionTarget<H extends SessionTargetSess
 	}
 }
 
-/** Real SessionManager-backed store for a workspace cwd + session dir. */
+/**
+ * Real SessionManager-backed store for a workspace cwd + session dir. Existing
+ * sessions open for writing (taking their lock) unless `readOnly` is set.
+ */
 export function createSessionManagerTargetStore(
 	cwd: string,
 	sessionDir: string,
-	options: { listAll?: boolean; preserveSessionCwd?: boolean } = {},
+	options: { listAll?: boolean; preserveSessionCwd?: boolean; readOnly?: boolean } = {},
 ): SessionTargetSessionStore<SessionManager> {
 	return {
 		async find(sessionId) {
@@ -182,7 +204,10 @@ export function createSessionManagerTargetStore(
 			return sessions.map((session) => ({ id: session.id, ref: session.ref }));
 		},
 		async open(ref) {
-			return SessionManager.open(ref, options.preserveSessionCwd ? undefined : cwd);
+			const cwdOverride = options.preserveSessionCwd ? undefined : cwd;
+			return options.readOnly
+				? SessionManager.openReadOnly(ref, cwdOverride)
+				: SessionManager.open(ref, cwdOverride);
 		},
 		async create(sessionId) {
 			return SessionManager.create(cwd, sessionDir, sessionId === undefined ? undefined : { id: sessionId });

@@ -86,6 +86,7 @@ export const IROH_REMOTE_OUTCOMES = [
 	"session_unavailable",
 	"duplicate_conversation_connection",
 	"conversation_in_use",
+	"conversation_locked",
 	"host_identity_mismatch",
 	"saved_host_invalid",
 ] as const;
@@ -106,6 +107,7 @@ export const IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES = [
 	"session_unavailable",
 	"duplicate_conversation_connection",
 	"conversation_in_use",
+	"conversation_locked",
 ] as const;
 
 const IROH_REMOTE_UNSAFE_TOOL_NAME_SET = new Set<string>(IROH_REMOTE_UNSAFE_TOOL_NAMES);

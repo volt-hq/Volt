@@ -301,6 +301,8 @@ describe("resolveIrohRemoteSessionTarget", () => {
 			const managerRef = manager.getSessionRef();
 			if (!managerRef) throw new Error("Expected a persisted session reference");
 			expect(await SessionManager.listAll(tempDir)).toEqual([]);
+			// The daemon resumes the session once its creator released the lock.
+			await manager.closePersistence();
 
 			const loadSession = vi.spyOn(SQLiteSessionStoreClient.prototype, "loadSession");
 			try {

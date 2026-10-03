@@ -17,6 +17,7 @@ async function createSessionWithMissingCwd(sessionDir: string, missingCwd: strin
 	const manager = await SessionManager.create(missingCwd, sessionDir, { id: "session-id" });
 	const ref = manager.getSessionRef();
 	if (!ref) throw new Error("Expected a persisted session reference");
+	await manager.closePersistence();
 	return ref;
 }
 

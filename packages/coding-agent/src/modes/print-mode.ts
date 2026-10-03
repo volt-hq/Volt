@@ -35,6 +35,9 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;
+	let unsubscribeConversationLoss: (() => void) | undefined;
+	/** Set when the session lost its log: a commit it could not confirm ends the run. */
+	let conversationLoss: string | undefined;
 	let streamProjector: StreamProjector | undefined;
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
@@ -43,6 +46,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		if (disposed) return;
 		disposed = true;
 		unsubscribe?.();
+		unsubscribeConversationLoss?.();
 		reportProjectionDiagnostics("json-print", streamProjector?.endStream().diagnostics ?? []);
 		streamProjector = undefined;
 		await runtimeHost.dispose();
@@ -74,6 +78,12 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
+		unsubscribeConversationLoss?.();
+		const boundSession = session;
+		unsubscribeConversationLoss = session.sessionManager.subscribeConversationAuthorityChanges((status) => {
+			const cause = status.error.cause instanceof Error ? status.error.cause.message : status.error.message;
+			conversationLoss ??= `Volt stopped session ${boundSession.sessionId} because its saved state could not be confirmed: ${cause}`;
+		});
 		await session.bindExtensions({
 			mode: mode === "json" ? "json" : "print",
 			commandContextActions: {
@@ -137,7 +147,13 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		}
 
 		for (const message of messages) {
+			if (conversationLoss) break;
 			await session.prompt(message);
+		}
+
+		if (conversationLoss) {
+			console.error(conversationLoss);
+			return 1;
 		}
 
 		if (mode === "text") {
@@ -161,7 +177,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 		return exitCode;
 	} catch (error: unknown) {
-		console.error(error instanceof Error ? error.message : String(error));
+		console.error(conversationLoss ?? (error instanceof Error ? error.message : String(error)));
 		return 1;
 	} finally {
 		for (const cleanup of signalCleanupHandlers) {

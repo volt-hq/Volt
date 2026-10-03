@@ -9,6 +9,7 @@ import {
 	acquireSharedSQLiteSessionStore,
 	type SQLiteSessionStoreLease,
 } from "../../../src/core/session-store/index.ts";
+import { loseConversationLock } from "../../lost-conversation-lock.ts";
 import { createHarness, getMessageText, type Harness } from "../harness.ts";
 
 async function faultNextTransaction(
@@ -70,7 +71,7 @@ function snapshotHarness(harness: Harness): PlanningSnapshot {
 }
 
 async function snapshotReopened(sessionRef: SessionReference): Promise<PlanningSnapshot> {
-	const manager = await SessionManager.open(sessionRef);
+	const manager = await SessionManager.openReadOnly(sessionRef);
 	try {
 		return snapshotEntries(manager.getBranch());
 	} finally {
@@ -209,6 +210,8 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		const clientMessageId = "issue-212-stale-preimage";
 		await harness.session.steer("revise this ready plan", undefined, clientMessageId);
 		await harness.sessionManager.flush();
+		// Simulates a lost lock: another manager commits a newer revision behind the harness.
+		loseConversationLock(harness.sessionManager);
 		const otherManager = await SessionManager.open(sessionRef);
 		managers.push(otherManager);
 		otherManager.appendFastModeChange(true);
@@ -220,7 +223,7 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 
 		expect(harness.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 		expect(harness.getPendingResponseCount()).toBe(1);
-		const reopened = await SessionManager.open(sessionRef);
+		const reopened = await SessionManager.openReadOnly(sessionRef);
 		managers.push(reopened);
 		expect(snapshotEntries(reopened.getBranch())).toEqual(baseline);
 		expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });

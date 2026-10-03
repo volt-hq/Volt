@@ -27,6 +27,7 @@ import {
 import type { BashOperations } from "../../../src/core/tools/bash.ts";
 import type { ExtensionAPI, SessionBeforeSwitchEvent, SessionShutdownEvent } from "../../../src/index.ts";
 import { createAgentSessionTestControl } from "../../agent-session-test-control.ts";
+import { loseConversationLock } from "../../lost-conversation-lock.ts";
 import {
 	createHarness,
 	getAssistantTexts,
@@ -350,6 +351,8 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		current.appendPlanningState({ mode: "build", plan: null });
 		await current.flush();
 		const sessionRef = current.getSessionRef()!;
+		// Simulates a lost lock: a second manager opens the session behind the current one.
+		loseConversationLock(current);
 		const stale = await own(SessionManager.open(sessionRef, tempDir));
 
 		current.appendPlanningState({ mode: "plan", plan: null });
@@ -451,7 +454,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		});
 
 		expect(snapshotHarness(harness)).toEqual(baseline);
-		const reopened = await own(SessionManager.open(sessionRef));
+		const reopened = await own(SessionManager.openReadOnly(sessionRef));
 		expect(snapshotEntries(reopened.getBranch())).toEqual(baseline);
 		expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
 		const summary = await (await trackedStore(sessionRef.sessionDirectory)).findSessionSummary(
@@ -483,7 +486,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			userTexts: ["publish the reconciled commit"],
 		};
 		expect(snapshotHarness(harness)).toEqual(expected);
-		const reopened = await own(SessionManager.open(sessionRef));
+		const reopened = await own(SessionManager.openReadOnly(sessionRef));
 		expect(snapshotEntries(reopened.getBranch())).toEqual(expected);
 		expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "completed" });
 		expect(evidence.applyResult).toMatchObject({ status: "committed" });
@@ -568,6 +571,8 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 				checkpoints: baseline.checkpoints + 1,
 				userTexts: ["fence the stale manager"],
 			};
+			// Simulates a lost lock: a descendant manager writes behind the harness.
+			loseConversationLock(harness.sessionManager);
 			const descendant = await own(SessionManager.open(sessionRef));
 			expect(snapshotEntries(descendant.getBranch())).toEqual(authoritativeAfterCommit);
 			const descendantId = descendant.appendSessionInfo("descendant manager state");
@@ -591,7 +596,7 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 			expect(preflight).toEqual([{ success: false }]);
 			expect(harness.getPendingResponseCount()).toBe(1);
 
-			const reopened = await own(SessionManager.open(sessionRef));
+			const reopened = await own(SessionManager.openReadOnly(sessionRef));
 			expect(snapshotEntries(reopened.getBranch())).toEqual(authoritativeAfterCommit);
 			expect(reopened.getEntry(descendantId)).toMatchObject({
 				type: "session_info",
@@ -612,9 +617,12 @@ describe("regression #217: SQLite transaction reconciliation", () => {
 		await harness.session.steer("recover from the authoritative revision", undefined, clientMessageId);
 		await harness.sessionManager.flush();
 
+		// Simulates a lost lock: a newer manager generation commits behind the harness.
+		loseConversationLock(harness.sessionManager);
 		const current = await own(SessionManager.open(sessionRef));
 		current.appendSessionInfo("newer manager generation");
 		await current.flush();
+		await current.closePersistence();
 		const store = await trackedStore(sessionRef.sessionDirectory);
 		const winnerOrdinal = (await store.findSessionSummary(sessionRef.sessionId, sessionRef.sessionGeneration))
 			?.lastOrdinal;

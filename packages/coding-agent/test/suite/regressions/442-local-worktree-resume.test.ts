@@ -381,7 +381,7 @@ describe("#442 local archived-worktree resume", () => {
 		expect(existsSync(f.record.path)).toBe(false);
 	});
 
-	it("protects the checkout across a same-session store reload and releases it afterwards", async () => {
+	it("protects the checkout across a same-session store reopen and releases it afterwards", async () => {
 		const f = await fixture();
 		const replacementChecks: unknown[] = [];
 		const runtime = await createAgentSessionRuntime(
@@ -397,9 +397,10 @@ describe("#442 local archived-worktree resume", () => {
 			},
 		);
 		cleanups.push(() => runtime.dispose());
-		await expect(runtime.reloadCurrentSessionFromStore({ expectedSessionId: f.ref.sessionId })).resolves.toEqual({
-			reloaded: true,
-		});
+		// The remaining same-session reopen: reconciling a session that lost conversation authority.
+		runtime.session.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
+		await expect(runtime.switchSessionById(f.ref.sessionId)).resolves.toEqual({ cancelled: false, seeded: false });
+		expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
 		// The post-drain read inherits protection before the preflight read closes.
 		expect(replacementChecks).toEqual([{ removed: false, reason: "busy" }]);
 		expect(await f.manager.archiveDisposable(f.workspace.name, f.record.id)).toEqual({

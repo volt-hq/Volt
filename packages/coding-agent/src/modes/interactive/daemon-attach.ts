@@ -1,6 +1,6 @@
 import { basename, resolve } from "node:path";
 import type { Duplex } from "node:stream";
-import { VERSION } from "../../config.ts";
+import { isStandaloneBinary, VERSION } from "../../config.ts";
 import { parseIrohRemoteRpcGrant } from "../../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
 import type {
@@ -9,6 +9,7 @@ import type {
 } from "../../core/remote/iroh/push.ts";
 import type { IrohRemoteWorkspaceMetadataSnapshot } from "../../core/remote/iroh/workspace.ts";
 import type { RpcGitContext } from "../../core/rpc/types.ts";
+import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
 import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
@@ -166,6 +167,11 @@ export interface DaemonAttach {
 }
 
 const NOOP_OUTCOME: AcquireOutcome = { kind: "noop" };
+
+/** The TUI integrates with the daemon only where the daemon runs: not on Windows or in standalone builds. */
+export function isDaemonAttachSupported(): boolean {
+	return process.platform !== "win32" && !isStandaloneBinary;
+}
 
 /**
  * Resolve the registered workspace for a cwd against the daemon: longest
@@ -400,6 +406,60 @@ export function createDisabledDaemonAttach(): DaemonAttach {
 		},
 		async dispose() {},
 	};
+}
+
+/** The daemon would not hand an existing session to this TUI. */
+export class DaemonLeaseUnavailableError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "DaemonLeaseUnavailableError";
+	}
+}
+
+export interface OpenSessionWithDaemonLeaseOptions {
+	/** Create the daemon integration for the session's workspace; the caller owns what is returned. */
+	createAttach: () => DaemonAttach;
+	/** Called once while the lease waits for the daemon's current turn to finish. */
+	onWaiting: () => void;
+}
+
+/**
+ * Open an existing session for writing from the TUI, taking its daemon
+ * conversation lease first. While the daemon hosts the session, its runtime
+ * holds the session's lock; granting the lease disposes that runtime, which
+ * frees the lock. A pending lease waits for the daemon's current turn; a denied
+ * lease means another TUI has the session open. Returns the integration still
+ * holding the lease, or none when no daemon lease was taken.
+ */
+export async function openSessionWithDaemonLease(
+	ref: SessionReference,
+	options: OpenSessionWithDaemonLeaseOptions,
+): Promise<{ manager: SessionManager; attach?: DaemonAttach }> {
+	const attach = options.createAttach();
+	try {
+		await attach.start();
+		const outcome = await attach.acquire(ref.sessionId);
+		if (outcome.kind === "denied") {
+			throw new DaemonLeaseUnavailableError(
+				`Session ${ref.sessionId} is open in another Volt window (${outcome.reason}). Quit it there, then retry.`,
+			);
+		}
+		if (outcome.kind === "pending") {
+			options.onWaiting();
+			await outcome.granted.catch((error: unknown) => {
+				throw new DaemonLeaseUnavailableError(
+					`Could not take session ${ref.sessionId} over from the daemon: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			});
+		}
+		const manager = await SessionManager.open(ref);
+		if (outcome.kind !== "noop") return { manager, attach };
+		await attach.dispose();
+		return { manager };
+	} catch (error) {
+		await attach.dispose().catch(() => {});
+		throw error;
+	}
 }
 
 export interface CreateDaemonAttachOptions {

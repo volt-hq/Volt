@@ -19,6 +19,7 @@ const { session: newSession } = await createAgentSession({
 });
 console.log("New session reference:", newSession.sessionRef);
 newSession.dispose();
+await newSession.waitForClosed();
 
 // Continue most recent session (or create new if none)
 const { session: continued, modelFallbackMessage } = await createAgentSession({
@@ -26,7 +27,9 @@ const { session: continued, modelFallbackMessage } = await createAgentSession({
 });
 if (modelFallbackMessage) console.log("Note:", modelFallbackMessage);
 console.log("Continued session:", continued.sessionRef);
+// A session is open for writing in one place at a time; closing it releases its lock.
 continued.dispose();
+await continued.waitForClosed();
 
 // List and open specific session
 const sessions = await SessionManager.list(process.cwd());

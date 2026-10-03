@@ -11,6 +11,7 @@ export function createSessionManagerTestOwner(): SessionManagerTestOwner {
 	let spies: Array<{ mockRestore(): void }> = [];
 	const create = SessionManager.create.bind(SessionManager);
 	const open = SessionManager.open.bind(SessionManager);
+	const openReadOnly = SessionManager.openReadOnly.bind(SessionManager);
 	const continueRecent = SessionManager.continueRecent.bind(SessionManager);
 	const forkFrom = SessionManager.forkFrom.bind(SessionManager);
 	const importFromJsonl = SessionManager.importFromJsonl.bind(SessionManager);
@@ -25,6 +26,9 @@ export function createSessionManagerTestOwner(): SessionManagerTestOwner {
 			spies = [
 				vi.spyOn(SessionManager, "create").mockImplementation(async (...args) => track(await create(...args))),
 				vi.spyOn(SessionManager, "open").mockImplementation(async (...args) => track(await open(...args))),
+				vi
+					.spyOn(SessionManager, "openReadOnly")
+					.mockImplementation(async (...args) => track(await openReadOnly(...args))),
 				vi
 					.spyOn(SessionManager, "continueRecent")
 					.mockImplementation(async (...args) => track(await continueRecent(...args))),

@@ -179,6 +179,7 @@ export const RPC_STABLE_ERROR_CODES = [
 	"client_input_outcome_ambiguous",
 	"stale_plan_revision",
 	"stale_conversation_authority",
+	"conversation_locked",
 	"review_discussions_unavailable",
 	"review_source_unavailable",
 	"review_preparation_failed",

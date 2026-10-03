@@ -104,7 +104,7 @@ describe("SessionManager commit-then-publish", () => {
 			await lease.release();
 		}
 
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getEntries()).toEqual([]);
 		expect(reopened.getCommittedOrdinal()).toBe(0);
 	});

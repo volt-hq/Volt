@@ -117,6 +117,7 @@ import {
 	ConversationCoordinatorRegistry,
 	type ConversationCoordinatorRekeyReservation,
 } from "./conversation-coordinator.ts";
+import { observeConversationLoss } from "./conversation-loss.ts";
 import {
 	createRemoteConversationExternalProjector,
 	createRemoteConversationSnapshotBuilder,
@@ -943,6 +944,7 @@ class IrohDaemonService {
 		{ binding: GitContextObservationBinding; unsubscribeSessionReplaced: () => void }
 	>();
 	private readonly runtimeCompactionFailureObservers = new Map<IntegratedRuntimeEntry, () => void>();
+	private readonly runtimeConversationLossObservers = new Map<IntegratedRuntimeEntry, () => void>();
 	private readonly tuiWorkAuthorities = new Map<string, TuiWorkAuthorityClaim>();
 	private readonly tuiWorkRetirementTasks = new Set<Promise<void>>();
 	private tuiWorkReceiptRevision = 0n;
@@ -1141,6 +1143,15 @@ class IrohDaemonService {
 						observeCompactionFailures(entry.runtime, entry.workspaceName, services.logger.child("compaction")),
 					);
 				}
+				if (!this.runtimeConversationLossObservers.has(entry)) {
+					// A runtime that lost its log ends; a reconnecting phone reopens the session from the store.
+					this.runtimeConversationLossObservers.set(
+						entry,
+						observeConversationLoss(entry.runtime, () => {
+							void this.stopRuntimeEntryAfterStreams(entry, "daemon_runtime_owner_fenced").catch(() => {});
+						}),
+					);
+				}
 			},
 			onRuntimeSessionRekeyed: (entry, previousSessionId) => {
 				this.rekeyRuntimeWorkObservation(entry, previousSessionId);
@@ -1149,6 +1160,8 @@ class IrohDaemonService {
 				this.stopRuntimeWorkObservation(entry);
 				this.runtimeCompactionFailureObservers.get(entry)?.();
 				this.runtimeCompactionFailureObservers.delete(entry);
+				this.runtimeConversationLossObservers.get(entry)?.();
+				this.runtimeConversationLossObservers.delete(entry);
 				if (entry.worktreeId !== undefined) {
 					this.worktreeRetention.onRuntimeDisposed(entry.workspaceName, entry.worktreeId);
 				}
@@ -1490,7 +1503,7 @@ class IrohDaemonService {
 		try {
 			const sessionRef = await SessionManager.findForResume(sessionDir, request.sessionId);
 			if (sessionRef !== undefined) {
-				const manager = await SessionManager.open(sessionRef);
+				const manager = await SessionManager.openReadOnly(sessionRef);
 				try {
 					sessionCwd = manager.getCwd();
 				} finally {
@@ -4143,7 +4156,8 @@ class IrohDaemonService {
 				createSessionManagerTargetStore(
 					boundWorktree?.path ?? authorization.workspace.path,
 					getDefaultSessionDir(authorization.workspace.path, this.services.agentDir),
-					{ listAll: true, preserveSessionCwd: true },
+					// The owning TUI holds the session's lock; resolving the target only reads it.
+					{ listAll: true, preserveSessionCwd: true, readOnly: true },
 				),
 			);
 			try {

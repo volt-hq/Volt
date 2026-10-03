@@ -393,6 +393,9 @@ describe("createAgentSession session manager defaults", () => {
 
 		const sessionRef = sessionManager.getSessionRef();
 		if (!sessionRef) throw new Error("Expected a persisted session reference");
+		// Resume after the first session closed and released the session's lock.
+		session.dispose();
+		await session.waitForClosed();
 		const resumed = await createAgentSession({
 			cwd,
 			agentDir,

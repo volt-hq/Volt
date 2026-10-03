@@ -838,7 +838,7 @@ describe("durable client input idempotency", () => {
 		expect(harness.sessionManager.getClientInput("hook-queue-pass")?.state).toBe("accepted");
 		expect(harness.sessionManager.getClientInput("hook-queue-transform")?.state).toBe("accepted");
 		await harness.sessionManager.flush();
-		const reopened = await SessionManager.open(
+		const reopened = await SessionManager.openReadOnly(
 			harness.sessionManager.getSessionRef()!,
 			harness.sessionManager.getCwd(),
 		);
@@ -873,7 +873,7 @@ describe("durable client input idempotency", () => {
 						JSON.stringify(entry.payload).includes(`"clientMessageId":"${clientMessageId}"`),
 				),
 			).toBe(true);
-			const completed = await SessionManager.open(harness.sessionManager.getSessionRef()!);
+			const completed = await SessionManager.openReadOnly(harness.sessionManager.getSessionRef()!);
 			expect(completed.getClientInput(clientMessageId)?.state).toBe("completed");
 		}
 	});
@@ -935,6 +935,7 @@ describe("durable client input idempotency", () => {
 		const sessionRef = manager.getSessionRef();
 		expect(sessionRef).toBeDefined();
 
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(sessionRef!, tempDir);
 		const harness = await createHarness({ sessionManager: reopened });
 		harnesses.push(harness);
@@ -983,7 +984,7 @@ describe("durable client input idempotency", () => {
 			}),
 		).toThrow("conflicting queued payload");
 
-		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
+		const reopened = await SessionManager.openReadOnly(manager.getSessionRef()!, tempDir);
 		expect(reopened.getRecoverableQueuedClientInputs()).toMatchObject([
 			{
 				clientMessageId: "queued-b",
@@ -1020,6 +1021,7 @@ describe("durable client input idempotency", () => {
 		manager.transitionClientInput("ambiguous-a", "started");
 		await manager.flush();
 
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
 		expect(reopened.getClientInputRecoveryPlan()).toMatchObject({
 			kind: "blocked",
@@ -1058,6 +1060,7 @@ describe("durable client input idempotency", () => {
 		manager.reserveClientInput("recover-follow", "follow_up", { message: "follow original" });
 		manager.markClientInputQueued("recover-follow", { delivery: "follow_up", message: "follow expanded" });
 		await manager.flush();
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
 		const harness = await createHarness({ sessionManager: reopened });
 		harnesses.push(harness);
@@ -1098,6 +1101,7 @@ describe("durable client input idempotency", () => {
 		manager.reserveClientInput("recover-retained", "steer", { message: "recover retained" });
 		manager.markClientInputQueued("recover-retained", { delivery: "steer", message: "recover retained" });
 		await manager.flush();
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
 		let retain = true;
 		const harness = await createHarness({
@@ -1136,6 +1140,7 @@ describe("durable client input idempotency", () => {
 		manager.reserveClientInput("recover-started", "steer", { message: "recover me" });
 		manager.markClientInputQueued("recover-started", { delivery: "steer", message: "recover me" });
 		await manager.flush();
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
 		const harness = await createHarness({ sessionManager: reopened });
 		harnesses.push(harness);
@@ -1179,6 +1184,7 @@ describe("durable client input idempotency", () => {
 		manager.reserveClientInput("recover-silent-cancel", "steer", { message: "original" });
 		manager.markClientInputQueued("recover-silent-cancel", { delivery: "steer", message: "expanded" });
 		await manager.flush();
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
 		const harness = await createHarness({ sessionManager: reopened });
 		harnesses.push(harness);
@@ -1206,6 +1212,7 @@ describe("durable client input idempotency", () => {
 		manager.reserveClientInput("recover-committed", "steer", { message: "original" });
 		manager.markClientInputQueued("recover-committed", { delivery: "steer", message: "expanded" });
 		await manager.flush();
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
 		const harness = await createHarness({ sessionManager: reopened });
 		harnesses.push(harness);
@@ -1343,6 +1350,7 @@ describe("durable client input idempotency", () => {
 		manager.reserveClientInput("recovered-older", "steer", { message: "older" });
 		manager.markClientInputQueued("recovered-older", { delivery: "steer", message: "older" });
 		await manager.flush();
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(manager.getSessionRef()!, tempDir);
 		const harness = await createHarness({ sessionManager: reopened });
 		harnesses.push(harness);
@@ -1428,6 +1436,7 @@ describe("durable client input idempotency", () => {
 		const sessionRef = manager.getSessionRef();
 		expect(sessionRef).toBeDefined();
 
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(sessionRef!, tempDir);
 		const harness = await createHarness({ sessionManager: reopened });
 		harnesses.push(harness);
@@ -1451,7 +1460,7 @@ describe("durable client input idempotency", () => {
 		const sessionRef = manager.getSessionRef();
 		expect(sessionRef).toBeDefined();
 
-		const reopened = await SessionManager.open(sessionRef!, tempDir);
+		const reopened = await SessionManager.openReadOnly(sessionRef!, tempDir);
 		expect(reopened.getClientInput("client-retained")).toMatchObject({ state: "accepted" });
 	});
 
@@ -1471,7 +1480,7 @@ describe("durable client input idempotency", () => {
 		const sessionRef = manager.getSessionRef();
 		expect(sessionRef).toBeDefined();
 
-		const reopened = await SessionManager.open(sessionRef!, tempDir);
+		const reopened = await SessionManager.openReadOnly(sessionRef!, tempDir);
 		expect(reopened.getClientInput("client-canonical")?.state).toBe("completed");
 		expect(reopened.buildSessionContext().messages).toHaveLength(1);
 	});
@@ -1491,6 +1500,7 @@ describe("durable client input idempotency", () => {
 			timestamp: Date.now(),
 		});
 		await completed.flush();
+		await completed.closePersistence();
 		const reopenedCompleted = await SessionManager.open(completed.getSessionRef()!, completedDir);
 		const completedHarness = await createHarness({ sessionManager: reopenedCompleted });
 		harnesses.push(completedHarness);
@@ -1504,6 +1514,7 @@ describe("durable client input idempotency", () => {
 		failed.transitionClientInput("persisted-failed", "started");
 		failed.transitionClientInput("persisted-failed", "failed", "persisted precommit failure");
 		await failed.flush();
+		await failed.closePersistence();
 		const reopenedFailed = await SessionManager.open(failed.getSessionRef()!, failedDir);
 		const failedHarness = await createHarness({ sessionManager: reopenedFailed });
 		harnesses.push(failedHarness);
@@ -1601,6 +1612,7 @@ describe("durable client input idempotency", () => {
 
 		// Enumeration purity does not weaken recovery: an explicit reopen still
 		// sees the terminal receipt and can deterministically replay its outcome.
+		await manager.closePersistence();
 		const reopened = await SessionManager.open(sessionRef!, sessionDir);
 		expect(reopened.getClientInput("private-list-wal")).toMatchObject({
 			state: "failed",
@@ -1662,12 +1674,12 @@ describe("durable client input idempotency", () => {
 		const fork = await SessionManager.forkFrom(source.getSessionRef()!, forkDir, forkDir);
 		await fork.flush();
 		expect(fork.buildSessionContext().messages[0]).not.toHaveProperty("clientMessageId");
-		await expect(SessionManager.open(fork.getSessionRef()!, forkDir)).resolves.toBeInstanceOf(SessionManager);
+		await expect(SessionManager.openReadOnly(fork.getSessionRef()!, forkDir)).resolves.toBeInstanceOf(SessionManager);
 
 		const extractedRef = await source.createBranchedSession(assistantId);
 		expect(extractedRef).toBeDefined();
 		expect(source.buildSessionContext().messages[0]).not.toHaveProperty("clientMessageId");
-		await expect(SessionManager.open(extractedRef!, sourceDir)).resolves.toBeInstanceOf(SessionManager);
+		await expect(SessionManager.openReadOnly(extractedRef!, sourceDir)).resolves.toBeInstanceOf(SessionManager);
 	});
 
 	it("fail-stops a dirty manager after an uncertain persistence failure", async () => {

@@ -283,7 +283,7 @@ describe("#414 host-owned PR review bindings", () => {
 		expect(manager.getLeafId()).toBeNull();
 		expect(manager.buildSessionContext().messages).toEqual([]);
 		await manager.flush();
-		const reopened = await SessionManager.open(manager.getSessionRef()!);
+		const reopened = await SessionManager.openReadOnly(manager.getSessionRef()!);
 		managers.push(reopened);
 		expect(reopened.getPrReviewBinding()).toEqual(manager.getPrReviewBinding());
 		const path = join(root, "export.jsonl");
@@ -449,7 +449,7 @@ describe("#414 host-owned PR review bindings", () => {
 		expect(await readPrReviewBinding(alias)).toEqual(placement);
 		expect(await readPrReviewBinding(copied, record.runId)).toBeUndefined();
 		await expect(prepare({ kind: "pr", number: "415" }, alias)).rejects.toThrow("different PR");
-		const moved = await SessionManager.open(alias.getSessionRef()!, root);
+		const moved = await SessionManager.openReadOnly(alias.getSessionRef()!, root);
 		managers.push(moved);
 		await expect(readPrReviewBinding(moved, record.runId)).rejects.toMatchObject({
 			code: "review_source_unavailable",
@@ -487,7 +487,7 @@ describe("#414 host-owned PR review bindings", () => {
 			const original = manager.getSessionRef()!;
 			// The binding must already be durable when the replacement becomes observable.
 			const unsubscribe = runtime.subscribeSessionWillProject(async (session) => {
-				const reader = await SessionManager.open(session.sessionRef!);
+				const reader = await SessionManager.openReadOnly(session.sessionRef!);
 				try {
 					expect(reader.getPrReviewBinding()).toEqual(placement);
 				} finally {

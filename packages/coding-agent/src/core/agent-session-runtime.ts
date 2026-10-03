@@ -108,11 +108,6 @@ export interface AgentSessionSwitchOptions {
 	assertConversationGenerationCurrent?: () => void;
 }
 
-type ReloadCurrentSessionOptions = { expectedSessionId: string } & Pick<
-	AgentSessionSwitchOptions,
-	"projectTrustContextFactory"
->;
-
 export interface AgentSessionReplacementTransaction {
 	commit(): Promise<void>;
 	/** Finish host ownership before replacement callbacks and any durable publication barrier. */
@@ -254,6 +249,23 @@ async function closeOwnedSessionManager(manager: SessionManager, error: unknown,
 		throw new AggregateError([error, closeError], message);
 	}
 	throw error;
+}
+
+/** Roll back a host replacement transaction that no replacement took over; returns the error to report. */
+async function rollbackPreparedReplacement(
+	transaction: AgentSessionReplacementTransaction | undefined,
+	error: unknown,
+): Promise<unknown> {
+	if (!transaction) return error;
+	try {
+		await transaction.rollback();
+		return error;
+	} catch (rollbackError) {
+		return new AggregateError(
+			[error, rollbackError],
+			"Session replacement failed and its host transaction could not be rolled back",
+		);
+	}
 }
 
 async function finalizeRuntimeOwnedSession(
@@ -833,12 +845,19 @@ export class AgentSessionRuntime {
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 		/** RPC request correlated with the replacement bootstrap, when any. */
 		rebindRequestId?: string;
+		/**
+		 * The host replacement transaction, when the caller prepared it before
+		 * opening `sessionManager`. This call owns it from entry.
+		 */
+		transaction?: AgentSessionReplacementTransaction;
 	}): Promise<{ seeded: boolean }> {
 		const ownsCandidateManager = options.sessionManager !== this.session.sessionManager;
 		// The manager the replacement will own. A same-identity reopen swaps in a
 		// post-drain read before creating the replacement.
 		let candidateManager = options.sessionManager;
 		let candidateSessionOwnsManager = false;
+		// Rolled back here until the replacement below takes it over.
+		let preparedTransaction = options.transaction;
 		try {
 			// The entire public operation runs in the lifecycle actor. Re-check at the
 			// ownership boundary so a queued command can never prepare against the
@@ -897,13 +916,16 @@ export class AgentSessionRuntime {
 				retainLocalSessionWorktree(this.session.sessionManager, options.sessionManager);
 				await restoreLocalSessionWorktree(options.sessionManager, this.services.agentDir);
 				this.assertStructuralOperationCurrent(options.operation);
-				const transaction = sameSessionIdentity
-					? undefined
-					: await this.prepareSessionReplacement?.({
-							previousSessionId,
-							sessionId,
-							cwd: options.sessionManager.getCwd(),
-						});
+				const transaction =
+					preparedTransaction ??
+					(sameSessionIdentity
+						? undefined
+						: await this.prepareSessionReplacement?.({
+								previousSessionId,
+								sessionId,
+								cwd: options.sessionManager.getCwd(),
+							}));
+				preparedTransaction = undefined;
 				let invalidated = false;
 				let created: CreateAgentSessionRuntimeResult | undefined;
 				let applied = false;
@@ -916,9 +938,10 @@ export class AgentSessionRuntime {
 						this.lifecycleRevision++;
 					});
 					if (reopensSameSession) {
-						// The preflight read pinned the store revision before session_shutdown
-						// handlers and disposal wrote through the outgoing copy. Read again now
-						// that those writes are durable, handing worktree protection over first.
+						// The preflight read-only copy pinned the store revision before
+						// session_shutdown handlers and disposal wrote through the outgoing copy.
+						// Open the session for writing now that those writes are durable and the
+						// outgoing copy released its lock, handing worktree protection over first.
 						const preflightManager = candidateManager;
 						const replacementRef = preflightManager.getSessionRef();
 						if (!replacementRef) throw new Error("Reopened session is missing a session reference");
@@ -1014,14 +1037,15 @@ export class AgentSessionRuntime {
 				this.sessionReplacementInProgress = false;
 			}
 		} catch (error) {
+			const failure = await rollbackPreparedReplacement(preparedTransaction, error);
 			if (ownsCandidateManager && !candidateSessionOwnsManager) {
 				return await closeOwnedSessionManager(
 					candidateManager,
-					error,
+					failure,
 					"Session replacement failed and its owned manager could not be closed",
 				);
 			}
-			throw error;
+			throw failure;
 		}
 	}
 
@@ -1312,121 +1336,36 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * Reopen the current session from its store at the persisted revision, even
-	 * when this process still holds conversation authority. Another owner (the
-	 * daemon during a drain handoff or a reconnect gap) may have appended turns the
-	 * in-memory copy has not seen; keeping that copy would fail the next append on
-	 * a revision conflict.
-	 *
-	 * The reload keeps the session's current cwd, including a "continue in current
-	 * cwd" override that the store never recorded.
-	 *
-	 * Unlike switchSession, extensions cannot cancel the reload through
-	 * `session_before_switch`; `session_shutdown` and `session_start` still fire
-	 * with reason "resume". The replacement is read from the store only after the
-	 * outgoing copy drains, so what `session_shutdown` handlers and disposal write
-	 * is part of it. Resolves `{ reloaded: false }` without changes when the
-	 * current session is no longer `expectedSessionId` (a later switch superseded
-	 * the handoff) or has no store reference.
-	 *
-	 * Local work that the reopen would reject or tear down (agent runs, bash,
-	 * compaction, extension commands, detached reviews) is waited out rather than
-	 * failing the reload. Work that starts while the reload is queued defers it
-	 * again. A session that lost conversation authority cancels its own blocking
-	 * work (see AgentSession), and this runtime cancels its detached reviews; the
-	 * wait ends once that cancellation settles.
-	 *
-	 * Triggered by external lease events, so it always queues behind in-flight
-	 * lifecycle work instead of running re-entrantly. Do not await it from inside a
-	 * lifecycle operation: the FIFO cannot reach it until that operation settles.
-	 */
-	reloadCurrentSessionFromStore(options: ReloadCurrentSessionOptions): Promise<{ reloaded: boolean }> {
-		if (!this.acceptingStructuralOperations) {
-			return Promise.reject(new Error("Agent session runtime is no longer accepting structural operations"));
-		}
-		this.pendingStructuralOperationCount++;
-		return this.reloadCurrentSessionWhenIdle(options).finally(() => {
-			this.pendingStructuralOperationCount--;
-		});
-	}
-
-	private async reloadCurrentSessionWhenIdle(options: ReloadCurrentSessionOptions): Promise<{ reloaded: boolean }> {
-		while (true) {
-			// Wait outside the lifecycle FIFO: the work being waited for may itself
-			// need it (a finished review opens its findings session).
-			await this.waitForReplacementBlockingWork(options.expectedSessionId);
-			if (!this.acceptingStructuralOperations) {
-				throw new Error("Agent session runtime is no longer accepting structural operations");
-			}
-			const result = await this.enqueueLifecycleOperation(() => this.reloadCurrentSessionIfIdle(options));
-			if (result) return result;
-		}
-	}
-
-	/** Resolves `undefined` when local work started while the reload was queued. */
-	private async reloadCurrentSessionIfIdle(
-		options: ReloadCurrentSessionOptions,
-	): Promise<{ reloaded: boolean } | undefined> {
-		const sessionRef = this.session.sessionRef;
-		if (this.session.sessionId !== options.expectedSessionId || sessionRef === undefined) {
-			return { reloaded: false };
-		}
-		// An invalidated session fails the structural check below instead.
-		if (!this.sessionInvalidated && this.hasReplacementBlockingWork()) {
-			return undefined;
-		}
-		const operation: AgentSessionStructuralOperation = {
-			expectedSession: this.session,
-			expectedRevision: this.lifecycleRevision,
-			expectedConversationGenerationRevision: this.session.conversationGenerationRevision,
-		};
-		this.assertStructuralOperationCurrent(operation);
-		await this.reopenSessionWithinOperation(
-			sessionRef,
-			{ projectTrustContextFactory: options.projectTrustContextFactory },
-			operation,
-			true,
-		);
-		return { reloaded: true };
-	}
-
-	/**
-	 * Local work that replacing the current session would reject or tear down:
-	 * everything `AgentSession.isBusy` covers plus detached review workflows.
-	 */
-	private hasReplacementBlockingWork(): boolean {
-		return this.session.isBusy || this._reviewWorkflows?.hasActiveWorkflows === true;
-	}
-
-	private async waitForReplacementBlockingWork(expectedSessionId: string): Promise<void> {
-		while (
-			this.acceptingStructuralOperations &&
-			this.session.sessionId === expectedSessionId &&
-			this.hasReplacementBlockingWork()
-		) {
-			const session = this.session;
-			await session.waitForNotBusy();
-			// waitForNotBusy also returns once the session is disposed. The lifecycle
-			// operation disposing it decides what the queued reload observes.
-			if (session.isBusy) return;
-			await this._reviewWorkflows?.waitForIdle();
-		}
-	}
-
-	/**
 	 * Open a session reference, keeping the current session's cwd when the ref is
 	 * the current session. A cwd override ("continue in current cwd") lives only in
 	 * memory; the store keeps the original, possibly missing, cwd.
+	 *
+	 * The current session opens read-only: this runtime holds its lock until the
+	 * outgoing copy closes. Any other session opens for writing, taking its lock
+	 * while this runtime still holds the current one; locks never wait, so
+	 * holding both cannot deadlock.
 	 */
 	private openSessionManager(sessionRef: SessionReference, cwdOverride?: string): Promise<SessionManager> {
 		const currentSessionRef = this.session.sessionRef;
-		return SessionManager.open(
-			sessionRef,
-			cwdOverride ??
-				(currentSessionRef !== undefined && sessionRefsEqual(sessionRef, currentSessionRef)
-					? this.session.sessionManager.getCwd()
-					: undefined),
-		);
+		if (currentSessionRef !== undefined && sessionRefsEqual(sessionRef, currentSessionRef)) {
+			return SessionManager.openReadOnly(sessionRef, cwdOverride ?? this.session.sessionManager.getCwd());
+		}
+		return SessionManager.open(sessionRef, cwdOverride);
+	}
+
+	/**
+	 * Prepare the host replacement for an existing session before opening it. A
+	 * host lease (the TUI's daemon lease) can be what frees the target's lock: the
+	 * daemon disposes its runtime for the session before granting the lease.
+	 */
+	private async prepareExistingSessionReplacement(
+		sessionRef: SessionReference,
+		cwdOverride: string | undefined,
+	): Promise<AgentSessionReplacementTransaction | undefined> {
+		const prepare = this.prepareSessionReplacement;
+		if (!prepare) return undefined;
+		const cwd = cwdOverride ?? (await findSessionInfoById(sessionRef.sessionDirectory, sessionRef.sessionId))?.cwd;
+		return prepare({ previousSessionId: this.session.sessionId, sessionId: sessionRef.sessionId, cwd });
 	}
 
 	private async reopenSessionWithinOperation(
@@ -1438,7 +1377,18 @@ export class AgentSessionRuntime {
 		this.assertNoActiveDetachedReview();
 
 		const previousSessionRef = this.session.sessionRef;
-		const sessionManager = await this.openSessionManager(sessionRef, options?.cwdOverride);
+		// A same-identity reopen keeps its host lease; replaceCurrentSession rejects other same-id references.
+		const transaction =
+			sessionRef.sessionId === this.session.sessionId
+				? undefined
+				: await this.prepareExistingSessionReplacement(sessionRef, options?.cwdOverride);
+		let sessionManager: SessionManager;
+		try {
+			this.assertStructuralOperationCurrent(operation);
+			sessionManager = await this.openSessionManager(sessionRef, options?.cwdOverride);
+		} catch (error) {
+			throw await rollbackPreparedReplacement(transaction, error);
+		}
 		let managerTransferred = false;
 		try {
 			this.assertStructuralOperationCurrent(operation);
@@ -1451,6 +1401,7 @@ export class AgentSessionRuntime {
 				reason: "resume",
 				allowSameSessionIdentity,
 				sessionManager,
+				transaction,
 				create: (replacementManager) =>
 					this.createRuntime({
 						cwd: replacementManager.getCwd(),
@@ -1468,7 +1419,7 @@ export class AgentSessionRuntime {
 			if (managerTransferred) throw error;
 			return await closeOwnedSessionManager(
 				sessionManager,
-				error,
+				await rollbackPreparedReplacement(transaction, error),
 				"Session switch failed and its owned manager could not be closed",
 			);
 		}

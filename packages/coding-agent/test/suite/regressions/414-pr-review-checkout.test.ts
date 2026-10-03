@@ -1003,6 +1003,8 @@ describe("#414 prepared PR checkouts", () => {
 			f.sessions.push(session);
 			await f.manager.bind(f.workspace, session, placement, f.authority);
 			await reservation.release();
+			// Resuming reopens the session for writing once the first writer has closed it.
+			await session.closePersistence();
 			const reopened = await SessionManager.open(session.getSessionRef()!);
 			f.sessions.push(reopened);
 			expect(reopened.getPrReviewBinding()).toEqual(placement);

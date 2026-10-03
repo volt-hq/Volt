@@ -435,7 +435,7 @@ volt.on("session_before_switch", async (event, ctx) => {
 After a successful switch or new-session action, volt emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "new" | "resume"` and optional `previousSessionRef`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
-A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner opens the same session ID from the authoritative store and emits `session_start` (reason `"resume"`). A TUI that already has the session open first emits `session_shutdown` (reason `"resume"`) for its outdated instance, then reloads the session from the store. Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
+A live-shared-session handoff between the background daemon and a desktop TUI (see [Background daemon](daemon.md)) looks like an ordinary quit + resume from an extension's perspective: the losing owner emits `session_shutdown` (reason `"quit"`), and the gaining owner opens the same session ID from the authoritative store and emits `session_start` (reason `"resume"`). A TUI takes the daemon's lease before it opens a session the daemon may be hosting, so the two never have the same session open at once. Extensions need zero code changes for handoffs; keep `session_shutdown` idempotent and rebuild in-memory state on `session_start` as usual.
 
 #### session_before_fork
 
@@ -1080,7 +1080,7 @@ Command handlers receive `ExtensionCommandContext`, which extends `ExtensionCont
 
 In a command handler, `ctx.signal` is always defined. It is aborted when the command's session is disposed, including when `ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, or a reload replaces it. It is also aborted when the session loses conversation authority because a write could not be confirmed as saved. It is not the agent turn's signal, so a command started during a turn is not cancelled when that turn is.
 
-After authority is lost, volt stops waiting for the command, cancels the session's other work, and reloads the session from the store. Nothing the command does afterwards can be saved. Pass the signal to long-running work and dialogs so the command ends promptly:
+After authority is lost, volt stops waiting for the command, cancels the session's other work, and ends the session (`session_shutdown` with reason `"quit"`); the user reopens it with `/resume`. Nothing the command does afterwards can be saved. Pass the signal to long-running work and dialogs so the command ends promptly:
 
 ```typescript
 volt.registerCommand("deploy", {

@@ -308,9 +308,16 @@ conversation at a time:
   which serves it from its in-process session. Prompts from either side appear
   on both; the TUI footer shows `📱 n` while phones are attached.
 - **daemon-draining** — a TUI asked to take over while a remote turn is
-  streaming. The TUI shows a read-only "Attaching — finishing remote turn…"
-  viewer, phones get transient `lease_draining` errors on new prompts, and
-  ownership transfers at the turn boundary.
+  streaming. The TUI prints a waiting line, phones get transient
+  `lease_draining` errors on new prompts, and ownership transfers at the turn
+  boundary.
+
+Every process that writes a session holds that session's lock (see
+[Sessions](sessions.md#one-volt-process-per-session)), so the TUI takes the
+lease before it opens a session the daemon may be hosting: granting the lease
+closes the daemon's copy and frees the lock. A phone that attaches to a session
+another Volt process (for example `volt -p` or an SDK embedding) has open is
+rejected with `conversation_locked`.
 
 Handoffs are invisible on the phone: when a TUI takes over or quits, the
 daemon closes phone streams with reason `lease_transferred` and the app

@@ -41,7 +41,7 @@ type InteractiveAccess = {
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
 };
 
-describe("regression #536: reloading while an uncooperative tool is running", () => {
+describe("regression #536: ending a lost session while an uncooperative tool is running", () => {
 	const cleanups: Array<() => Promise<void> | void> = [];
 
 	beforeAll(() => {
@@ -127,7 +127,8 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 		}
 
 		cleanups.push(async () => {
-			await runtime.dispose();
+			// A runtime whose session lost authority cannot close its persistence cleanly.
+			await runtime.dispose().catch(() => {});
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
@@ -141,22 +142,8 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 		return sessionRef;
 	}
 
-	/** Write through a second store handle, as another owner of the session does. */
-	async function appendAsOtherOwner(
-		sessionRef: SessionReference,
-		write: (manager: SessionManager) => Promise<void> | void,
-	): Promise<void> {
-		const manager = await SessionManager.open(sessionRef);
-		try {
-			await write(manager);
-			await manager.flush();
-		} finally {
-			await manager.closePersistence();
-		}
-	}
-
 	async function readStoredMessageTexts(sessionRef: SessionReference): Promise<string[]> {
-		const manager = await SessionManager.open(sessionRef);
+		const manager = await SessionManager.openReadOnly(sessionRef);
 		try {
 			return manager.buildSessionContext().messages.map(getMessageText);
 		} finally {
@@ -212,7 +199,7 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 		["reject", true],
 		["never", true],
 	] as const)(
-		"preserves the draft and next prompt when abandoned output will %s (already cancelled: %s)",
+		"ends the session and hands back the draft when abandoned output will %s (already cancelled: %s)",
 		async (lateOutcome, cancelFirst) => {
 			const started = Promise.withResolvers<AbortSignal>();
 			const result = Promise.withResolvers<AgentToolResult>();
@@ -235,56 +222,36 @@ describe("regression #536: reloading while an uncooperative tool is running", ()
 			// Also releases the tool on a failed assertion so test teardown cannot hang.
 			cleanups.push(() => result.resolve({ content: [{ type: "text", text: "cleanup" }] }));
 			const { access, terminal, handleFatalRuntimeError, exit } = await startInteractiveMode(runtime, tempDir);
-			faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("stuck", {}), { stopReason: "toolUse" }),
-				fauxAssistantMessage("after reload"),
-			]);
+			faux.setResponses([fauxAssistantMessage(fauxToolCall("stuck", {}), { stopReason: "toolUse" })]);
 			const staleSession = runtime.session;
+			const sessionRef = requireSessionRef(runtime);
 			const prompt = Promise.allSettled([staleSession.prompt("start")]);
 			const signal = await started.promise;
 			const abort = cancelFirst ? staleSession.abort("keyboard_interrupt") : Promise.resolve();
 			if (cancelFirst) await vi.waitFor(() => expect(signal.aborted).toBe(true));
-			const sessionRef = requireSessionRef(runtime);
-			await staleSession.sessionManager.flush();
-			await appendAsOtherOwner(sessionRef, (manager) => {
-				manager.appendMessage({ role: "user", content: "other owner", timestamp: Date.now() });
-				manager.appendMessage(fauxAssistantMessage("other reply"));
-			});
 			access.editor.setText("unsent draft");
 			staleSession.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
 			await withinTimeout(prompt, "aborted prompt");
 			await withinTimeout(abort, "prior cancellation");
-			await vi.waitFor(() => expect(viewport(terminal)).toContain("Reloaded the session from the store."), {
-				timeout: 5_000,
-			});
+			// Disposal must not wait for the uncooperative tool before the TUI exits.
+			await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1), { timeout: 5_000 });
+			expect(handleFatalRuntimeError).toHaveBeenCalledWith(
+				"Volt stopped this session because its saved state could not be confirmed",
+				expect.objectContaining({ message: expect.stringContaining("/resume") }),
+				{ unsentDraft: "unsent draft" },
+			);
 			expect(signal.aborted).toBe(true);
 			expect(staleSession.isStreaming).toBe(false);
-			expect(runtime.session).not.toBe(staleSession);
-			expect(runtime.session.sessionManager.getConversationAuthorityStatus()).toEqual({ status: "available" });
-			expect(access.editor.getText()).toBe("unsent draft");
-			expect(runtime.session.messages.map(getMessageText)).toContain("other reply");
+			expect(exit).not.toHaveBeenCalled();
 
-			const replacementEvents: unknown[] = [];
-			const detach = runtime.session.subscribe((event) => replacementEvents.push(event));
-			cleanups.push(detach);
 			lateUpdate?.({ content: [{ type: "text", text: "late progress" }] });
 			if (lateOutcome === "resolve") result.resolve({ content: [{ type: "text", text: "late result" }] });
 			if (lateOutcome === "reject") result.reject(new Error("late rejection"));
 			await new Promise((resolve) => setTimeout(resolve, 0));
-			expect(replacementEvents).toEqual([]);
+			access.ui.requestRender(true);
+			await terminal.waitForRender();
 			expect(viewport(terminal)).not.toContain("late progress");
-
-			await runtime.session.prompt("after reload prompt");
-			expect(runtime.session.messages.at(-1), JSON.stringify(runtime.session.messages.at(-1))).toMatchObject({
-				stopReason: "stop",
-			});
-			await runtime.session.waitForNotBusy();
-			const stored = await readStoredMessageTexts(sessionRef);
-			expect(stored).toContain("other reply");
-			expect(stored.slice(-2)).toEqual(["after reload prompt", "after reload"]);
-			expect(stored).not.toContain("late result");
-			expect(handleFatalRuntimeError).not.toHaveBeenCalled();
-			expect(exit).not.toHaveBeenCalled();
+			expect(await readStoredMessageTexts(sessionRef)).not.toContain("late result");
 		},
 	);
 });

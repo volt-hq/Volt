@@ -177,7 +177,7 @@ describe("issue #129", () => {
 			await context.parent.flush();
 			const parentRef = context.parent.getSessionRef();
 			expect(parentRef).toBeDefined();
-			const reloaded = await SessionManager.open(parentRef!);
+			const reloaded = await SessionManager.openReadOnly(parentRef!);
 			expect(reloaded.getSubagentSpawnEntries()).toEqual(edges);
 			expect(reloaded.getLeafId()).toBe(seededLeafId);
 			expect(reloaded.getEntries().some((entry) => entry.type === "subagent_spawn")).toBe(false);
@@ -318,6 +318,8 @@ describe("issue #129", () => {
 
 		const parentRef = parent.getSessionRef();
 		expect(parentRef).toBeDefined();
+		// The restarted process reopens the parent once this one has closed it.
+		await parent.closePersistence();
 		const reopened = await SessionManager.open(parentRef!);
 		const restarted = createRestartedManager(reopened);
 		try {
@@ -619,6 +621,8 @@ describe("issue #129", () => {
 		interrupted.appendMessage(fauxAssistantMessage("starting the audit"));
 		interrupted.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
 		await interrupted.flush();
+		// The resume reopens the child transcript for writing.
+		await interrupted.closePersistence();
 		parent.appendSubagentSpawn({
 			toolCallId: "call_resume",
 			subagentId: "sa_resume",
@@ -628,6 +632,8 @@ describe("issue #129", () => {
 			requestKey: "rk-resume",
 		});
 		await parent.flush();
+		// The restarted process reopens the parent once this one has closed it.
+		await parent.closePersistence();
 
 		const reopened = await SessionManager.open(parent.getSessionRef()!);
 		const context = await createTestContext({ withConfiguredAuth: true, parentSessionManager: reopened });
@@ -645,7 +651,9 @@ describe("issue #129", () => {
 
 			// The resumed turn appended to the same child transcript.
 			await vi.waitFor(async () => {
-				const childEntries = (await SessionManager.open(interrupted.getSessionRef()!)).getEntries();
+				const child = await SessionManager.openReadOnly(interrupted.getSessionRef()!);
+				const childEntries = child.getEntries();
+				await child.closePersistence();
 				const hasResumedReport = childEntries.some(
 					(entry) =>
 						entry.type === "message" &&
@@ -695,6 +703,8 @@ describe("issue #129", () => {
 		interrupted.appendMessage(fauxAssistantMessage("partial"));
 		interrupted.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
 		await interrupted.flush();
+		// The resume reopens the child transcript for writing.
+		await interrupted.closePersistence();
 		parent.appendSubagentSpawn({
 			toolCallId: "call_auth",
 			subagentId: "sa_auth",
@@ -780,6 +790,8 @@ describe("issue #129", () => {
 		interrupted.appendMessage({ role: "user", content: "deep work", timestamp: Date.now() });
 		interrupted.appendMessage(fauxAssistantMessage("partial"));
 		await interrupted.flush();
+		// The resume reopens the child transcript for writing.
+		await interrupted.closePersistence();
 
 		const registry = new SubagentRegistry();
 		registry.hydrate({
@@ -870,6 +882,8 @@ describe("issue #129", () => {
 		interrupted.appendMessage(fauxAssistantMessage("partial"));
 		interrupted.appendMessage({ role: "user", content: "continue", timestamp: Date.now() });
 		await interrupted.flush();
+		// The resume reopens the child transcript for writing.
+		await interrupted.closePersistence();
 		// The agent definition no longer exists in the restarted process.
 		parent.appendSubagentSpawn({
 			toolCallId: "call_ghost",

@@ -952,6 +952,19 @@ if (selectedRef) {
     sessionManager: await SessionManager.open(selectedRef),
   });
   console.log(opened.sessionId);
+  // A session is open for writing in one place at a time; closing it releases its lock.
+  opened.dispose();
+  await opened.waitForClosed();
+}
+
+// Read a session without taking its lock, even while it is open elsewhere.
+if (selectedRef) {
+  const reader = await SessionManager.openReadOnly(selectedRef);
+  try {
+    console.log(reader.getEntries().length);
+  } finally {
+    await reader.closePersistence();
+  }
 }
 
 // Explicitly import or export a JSONL interchange snapshot
@@ -993,6 +1006,8 @@ await runtime.importFromJsonl("/path/to/session-snapshot.jsonl");
 ```
 
 `AgentSession.sessionRef` is the current persisted reference, or `undefined` for an in-memory session. `AgentSession.sessionId` is always available.
+
+A persisted session can be open for writing in only one place at a time, across processes and within one process. `SessionManager.create`, `open`, `continueRecent`, `forkFrom` (for the new session), `importFromJsonl`, and `delete` take the session's lock, and closing the manager (`closePersistence()`, or disposing the session or runtime that owns it) releases it. While another host has the session open they throw `ConversationLockedError` (`code: "conversation_locked"`). `SessionManager.openReadOnly` takes no lock and rejects writes. Runtime replacement takes the target's lock before it releases the current session's.
 
 **SessionManager tree API:**
 

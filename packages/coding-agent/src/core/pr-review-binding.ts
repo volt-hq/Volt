@@ -54,7 +54,7 @@ export async function readPrReviewBinding(
 			if (!sourceRef) continue;
 			let source: SessionManager;
 			try {
-				source = await SessionManager.open(sourceRef);
+				source = await SessionManager.openReadOnly(sourceRef);
 			} catch (cause) {
 				throw new ReviewSourceUnavailableError(undefined, { cause });
 			}

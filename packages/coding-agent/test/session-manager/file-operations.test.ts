@@ -376,7 +376,7 @@ describe("JSONL snapshot import parsing", () => {
 		expect(imported.buildSessionContext()).toMatchObject({ thinkingLevel: "max", fastMode: { enabled: true } });
 		const ref = imported.getSessionRef();
 		if (!ref) throw new Error("Expected imported session reference");
-		expect((await SessionManager.open(ref)).buildSessionContext()).toMatchObject({
+		expect((await SessionManager.openReadOnly(ref)).buildSessionContext()).toMatchObject({
 			thinkingLevel: "max",
 			fastMode: { enabled: true },
 		});
@@ -397,7 +397,7 @@ describe("JSONL snapshot import parsing", () => {
 
 		expect(readFileSync(path, "utf8")).toBe(sourceBytes);
 		expect(existsSync(join(sessionDir, "sessions.sqlite"))).toBe(true);
-		expect((await SessionManager.open(ref)).buildSessionContext().messages).toEqual([
+		expect((await SessionManager.openReadOnly(ref)).buildSessionContext().messages).toEqual([
 			{
 				role: "user",
 				content: "snapshot message",
@@ -448,6 +448,8 @@ describe("SessionManager SQLite session behavior", () => {
 			new Set([sessionA.getSessionRef()?.storeId, sessionB.getSessionRef()?.storeId]),
 		);
 
+		// Continuing opens the session for writing, so its first writer closes first.
+		await sessionA.closePersistence();
 		const continuedA = await SessionManager.continueRecent(projectA, tempDir);
 		expect(continuedA.getSessionRef()).toEqual(sessionA.getSessionRef());
 	});
@@ -481,7 +483,7 @@ describe("SessionManager SQLite session behavior", () => {
 		expect(verified).toMatchObject({ outcome: "committed", ...identity, messages: [message], planning });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
-		const reopened = await SessionManager.open(ref);
+		const reopened = await SessionManager.openReadOnly(ref);
 		expect(reopened.getClientInput("delivery-1")).toMatchObject({ state: "completed" });
 		expect(reopened.buildSessionContext()).toMatchObject({ messages: [message], planning });
 	});
@@ -513,12 +515,15 @@ describe("SessionManager SQLite session behavior", () => {
 
 		manager.branch(firstId);
 		await manager.flush();
+		// Each reopen writes next, so the previous writer closes first.
+		await manager.closePersistence();
 		let reopened = await SessionManager.open(ref);
 		expect(reopened.getLeafId()).toBe(firstId);
 		expect(reopened.getEntries().map((entry) => entry.type)).toEqual(["message", "message"]);
 
 		reopened.resetLeaf();
 		await reopened.flush();
+		await reopened.closePersistence();
 		reopened = await SessionManager.open(ref);
 		expect(reopened.getLeafId()).toBeNull();
 		expect(reopened.getBranch()).toEqual([]);
@@ -530,6 +535,9 @@ describe("SessionManager SQLite session behavior", () => {
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected persisted session reference");
 
-		expect((await SessionManager.open(ref)).buildSessionContext().planning).toEqual({ mode: "plan", plan: null });
+		expect((await SessionManager.openReadOnly(ref)).buildSessionContext().planning).toEqual({
+			mode: "plan",
+			plan: null,
+		});
 	});
 });
