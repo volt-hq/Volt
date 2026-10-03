@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Worker } from "node:worker_threads";
 import {
 	CONVERSATION_LOG_READ_LIMIT_MAX,
+	Conversation,
 	type ConversationLog,
 	type ConversationLogAppend,
 	type ConversationLogAppendResult,
@@ -12,6 +13,7 @@ import {
 	type ConversationLogLossReason,
 	ConversationLogLostError,
 	type ConversationLogPage,
+	fold,
 	InMemoryConversationLog,
 } from "@hansjm10/volt-agent-core";
 import * as fc from "fast-check";
@@ -24,6 +26,7 @@ import {
 	SQLiteSessionStoreClient,
 	type SQLiteSessionStoreLease,
 } from "../../src/core/session-store/index.ts";
+import { CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES } from "../../src/core/session-store/projection.ts";
 import {
 	buildDrafts,
 	type DraftLogState,
@@ -491,6 +494,116 @@ describe("SqliteConversationLog", () => {
 		expect(
 			await log.append({ expectedOrdinal: 0, commitId: commitIdFor(log, "c1"), entries: [customDraft("a", null)] }),
 		).toEqual({ status: "committed", first: 1, last: 1 });
+	});
+
+	it("stores the client inputs the kernel writes: host messages and withdrawn inputs", async () => {
+		const log = await createLog();
+		const conversation = await Conversation.open({
+			log,
+			stream: () => {
+				throw new Error("No request is expected");
+			},
+			resolveModel: () => undefined,
+		});
+		const notice = { role: "custom" as const, customType: "notice", content: "wake", display: true, timestamp: 1 };
+		const host = await conversation.queueMessages("followUp", [notice]);
+		const client = await conversation.followUp({ clientMessageId: "client-1", message: "later" });
+		await conversation.clearQueue();
+		expect(await host.completion).toEqual({ state: "withdrawn" });
+		expect(await client.completion).toEqual({ state: "withdrawn" });
+		await conversation.close();
+
+		const reopened = await openLog(log);
+		const projected = new Map(
+			reopened.takeOpenedSnapshot().clientInputs.map((input) => [input.clientMessageId, input]),
+		);
+		expect(projected.get(host.clientMessageId)).toMatchObject({
+			command: "follow_up",
+			origin: "host",
+			queuedInput: { delivery: "follow_up", message: "", images: [], messages: [notice] },
+			state: "withdrawn",
+		});
+		expect(projected.get("client-1")).toMatchObject({ origin: null, state: "withdrawn" });
+		const folded = fold((await reopened.read(0, 100)).entries).clientInputs.inputs;
+		expect(folded.get(host.clientMessageId)).toMatchObject({ origin: "host", state: "withdrawn" });
+		expect(folded.get("client-1")?.state).toBe("withdrawn");
+
+		// Nothing moves a withdrawn input, and only a host input queues messages.
+		const head = reopened.head();
+		const rejection = async (name: string, entries: ConversationLogEntryDraft[]): Promise<string> => {
+			const result = await reopened.append({
+				expectedOrdinal: head,
+				commitId: commitIdFor(reopened, name),
+				entries,
+			});
+			return result.status === "rolled_back" ? result.error.message : result.status;
+		};
+		const hostDraft = (id: string, type: string, payload: unknown): ConversationLogEntryDraft =>
+			({
+				id,
+				parentId: null,
+				type,
+				timestamp: "2026-01-01T00:00:00.000Z",
+				visibility: "host",
+				payload,
+			}) as ConversationLogEntryDraft;
+		const receiptId = folded.get("client-1")?.receiptId;
+		expect(
+			await rejection("c1", [
+				hostDraft("after", "client_input_state", { receiptId, clientMessageId: "client-1", state: "started" }),
+			]),
+		).toMatch("follows a terminal state");
+		const [receipt] = drafts(EMPTY_DRAFT_LOG, [{ kind: "receipt", command: "steer", behavior: null, text: "" }]);
+		const queuedInput = { delivery: "steer", message: "", images: [], messages: [notice] };
+		expect(
+			await rejection("c2", [
+				{
+					...receipt,
+					id: "client-2-receipt",
+					payload: { ...(receipt?.payload as object), clientMessageId: "client-2" },
+				} as ConversationLogEntryDraft,
+				hostDraft("client-2-queued", "client_input_queued", {
+					receiptId: "client-2-receipt",
+					clientMessageId: "client-2",
+					queuedInput,
+				}),
+			]),
+		).toMatch("only a host input may");
+		expect(reopened.head()).toBe(head);
+	});
+
+	it("counts withdrawn client inputs as settled toward the outstanding limit", async () => {
+		const log = await createLog();
+		const receipts = Array.from(
+			{ length: CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES },
+			(_, index): DraftOp => ({
+				kind: "receipt",
+				command: "steer",
+				behavior: null,
+				text: `input ${index}`,
+			}),
+		);
+		const admitted = buildDrafts(EMPTY_DRAFT_LOG, receipts);
+		let head = 0;
+		const append = async (name: string, entries: ConversationLogEntryDraft[]) => {
+			const result = await log.append({ expectedOrdinal: head, commitId: commitIdFor(log, name), entries });
+			if (result.status === "committed") head = result.last;
+			return result.status;
+		};
+		expect(await append("admit", admitted.drafts)).toBe("committed");
+		const oneMore = buildDrafts(admitted.state, [
+			{ kind: "receipt", command: "steer", behavior: null, text: "over" },
+		]);
+		expect(await append("over-limit", oneMore.drafts)).toBe("rolled_back");
+		const withdrawals = Array.from(
+			{ length: CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES },
+			(): DraftOp => ({ kind: "transition", pick: 0, choice: 3, error: null }),
+		);
+		const withdrawn = buildDrafts(admitted.state, withdrawals);
+		expect(withdrawn.state.inputs.every((input) => input.state === "withdrawn")).toBe(true);
+		expect(await append("withdraw", withdrawn.drafts)).toBe("committed");
+		const next = buildDrafts(withdrawn.state, [{ kind: "receipt", command: "steer", behavior: null, text: "next" }]);
+		expect(await append("after-withdrawal", next.drafts)).toBe("committed");
 	});
 
 	it("loses the log on a fence conflict with another writer", async () => {

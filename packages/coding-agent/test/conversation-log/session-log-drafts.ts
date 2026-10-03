@@ -21,6 +21,7 @@ export type DraftOp =
 	| { kind: "compaction"; pick: number; summary: string }
 	| { kind: "navigate"; pick: number; summary: string | null }
 	| { kind: "receipt"; command: ClientInputCommand; behavior: "steer" | "followUp" | null; text: string }
+	| { kind: "host_queue"; delivery: "steer" | "follow_up"; text: string }
 	| { kind: "queue"; pick: number }
 	| { kind: "transition"; pick: number; choice: number; error: string | null }
 	| { kind: "complete"; pick: number }
@@ -78,6 +79,11 @@ export const draftOpArbitrary: fc.Arbitrary<DraftOp> = fc.oneof(
 		}),
 	},
 	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("queue" as const), pick }) },
+	fc.record({
+		kind: fc.constant("host_queue" as const),
+		delivery: fc.constantFrom("steer" as const, "follow_up" as const),
+		text,
+	}),
 	{
 		weight: 3,
 		arbitrary: fc.record({
@@ -101,12 +107,13 @@ const MODELS = [
 	{ provider: "google", modelId: "gemini-c" },
 ] as const;
 
-/** Store-accepted client input transitions (`withdrawn` is not stored yet). */
+/** Client input transitions the store and the kernel fold accept. */
 const NEXT_CLIENT_INPUT_STATES: Record<ClientInputState, readonly ClientInputState[]> = {
-	accepted: ["started", "completed", "failed"],
+	accepted: ["started", "completed", "failed", "withdrawn"],
 	started: ["accepted", "completed", "failed"],
 	completed: [],
 	failed: [],
+	withdrawn: [],
 };
 
 interface ClientInputModel {
@@ -390,6 +397,48 @@ export function buildDrafts(
 					text: op.text,
 					state: "accepted",
 					queued: false,
+				});
+				break;
+			}
+			case "host_queue": {
+				// A host input queues the messages it delivers; its receipt input is empty.
+				const clientMessageId = `client-${inputs.length + 1}`;
+				const input = { message: "", images: [] };
+				const receiptId = append({
+					type: "client_input_receipt",
+					visibility: "host",
+					payload: {
+						clientMessageId,
+						command: op.delivery,
+						semanticDigest: digestClientInputPayload(op.delivery, input),
+						input,
+						origin: "host",
+					},
+				});
+				append({
+					type: "client_input_queued",
+					visibility: "host",
+					payload: {
+						receiptId,
+						clientMessageId,
+						queuedInput: {
+							delivery: op.delivery,
+							message: "",
+							images: [],
+							messages: [
+								{ role: "custom", customType: "ext-note", content: op.text, display: true, timestamp: at() },
+							],
+						},
+					},
+				});
+				inputs.push({
+					clientMessageId,
+					receiptId,
+					command: op.delivery,
+					behavior: null,
+					text: "",
+					state: "accepted",
+					queued: true,
 				});
 				break;
 			}

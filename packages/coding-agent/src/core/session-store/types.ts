@@ -1,5 +1,5 @@
 export const SESSION_STORE_DATABASE_FILENAME = "sessions.sqlite";
-export const SESSION_STORE_SCHEMA_VERSION = 3;
+export const SESSION_STORE_SCHEMA_VERSION = 4;
 export const SESSION_STORE_REVIEW_CONTEXT_MAX_BYTES = 65_536;
 export const SESSION_STORE_REVIEW_LIST_MAX = 100;
 export const SESSION_STORE_READ_ENTRIES_MAX = 1_000;
@@ -13,7 +13,9 @@ export type SessionStoreJsonValue =
 
 export type SessionStoreOrigin = "subagent";
 export type SessionStoreClientInputCommand = "prompt" | "steer" | "follow_up";
-export type SessionStoreClientInputState = "accepted" | "started" | "completed" | "failed";
+export type SessionStoreClientInputState = "accepted" | "started" | "completed" | "failed" | "withdrawn";
+/** `host` on input the host submitted itself; client input has no origin. */
+export type SessionStoreClientInputOrigin = "host";
 
 export interface SessionStoreInfo {
 	readonly storeId: string;
@@ -95,6 +97,7 @@ export interface SessionStoreClientInputWrite {
 	readonly clientMessageId: string;
 	readonly receiptEntryId: string;
 	readonly command: SessionStoreClientInputCommand;
+	readonly origin: SessionStoreClientInputOrigin | null;
 	readonly semanticDigest: string;
 	readonly input: SessionStoreJsonValue;
 	readonly queuedEntryId: string | null;

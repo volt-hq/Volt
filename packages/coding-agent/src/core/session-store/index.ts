@@ -5,6 +5,7 @@ export type {
 	SessionStoreApplyTransactionInput,
 	SessionStoreClientInput,
 	SessionStoreClientInputCommand,
+	SessionStoreClientInputOrigin,
 	SessionStoreClientInputState,
 	SessionStoreClientInputWrite,
 	SessionStoreCommitEvidence,

@@ -3,13 +3,28 @@ import { DatabaseSync } from "node:sqlite";
 import { parseCanonicalSessionStoreJson, stringifyCanonicalSessionStoreJson } from "./canonical-json.ts";
 import { REVIEW_DISCUSSION_SCHEMA_SQL } from "./discussion-schema.ts";
 import {
+	SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL,
 	SESSION_STORE_SCHEMA_ID,
 	SESSION_STORE_SCHEMA_SQL,
 	SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL,
 } from "./schema.ts";
 import { SESSION_STORE_V1_SCHEMA_ID, SESSION_STORE_V1_SCHEMA_SQL } from "./schema-v1.ts";
 import { SESSION_STORE_V2_SCHEMA_ID, SESSION_STORE_V2_SCHEMA_SQL } from "./schema-v2.ts";
+import { SESSION_STORE_V3_SCHEMA_ID, SESSION_STORE_V3_SCHEMA_SQL } from "./schema-v3.ts";
 import { SESSION_STORE_SCHEMA_VERSION, SessionStoreError } from "./types.ts";
+
+/** The v3 client input columns, copied into the rebuilt v4 table (which adds `origin`). */
+const V3_CLIENT_INPUT_COLUMNS =
+	"session_id, client_message_id, receipt_entry_id, command, semantic_digest, input_json, queued_entry_id, queued_input_json, state, error, canonical_entry_id";
+
+/** The v4 client input table steps, in order. SQLite cannot alter a CHECK constraint, so the table is rebuilt. */
+export const SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL = [
+	`CREATE TEMP TABLE client_inputs_v3 AS SELECT ${V3_CLIENT_INPUT_COLUMNS} FROM main.client_inputs`,
+	"DROP TABLE main.client_inputs",
+	SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL,
+	`INSERT INTO main.client_inputs (${V3_CLIENT_INPUT_COLUMNS}) SELECT ${V3_CLIENT_INPUT_COLUMNS} FROM temp.client_inputs_v3`,
+	"DROP TABLE temp.client_inputs_v3",
+] as const;
 
 function schemaDigest(db: DatabaseSync): string {
 	const objects = db
@@ -37,7 +52,8 @@ function expectedDigest(sql: string): string {
 const SCHEMAS = {
 	1: { schemaId: SESSION_STORE_V1_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V1_SCHEMA_SQL) },
 	2: { schemaId: SESSION_STORE_V2_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V2_SCHEMA_SQL) },
-	3: { schemaId: SESSION_STORE_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_SCHEMA_SQL) },
+	3: { schemaId: SESSION_STORE_V3_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_V3_SCHEMA_SQL) },
+	4: { schemaId: SESSION_STORE_SCHEMA_ID, digest: expectedDigest(SESSION_STORE_SCHEMA_SQL) },
 } as const;
 
 function mismatch(message: string): never {
@@ -89,7 +105,7 @@ function validateIntegrity(db: DatabaseSync): void {
 	}
 }
 
-/** Only the exact frozen v1 and v2 schemas can upgrade. All DDL and metadata commit together. */
+/** Only the exact frozen v1, v2, and v3 schemas can upgrade. All DDL and metadata commit together. */
 export function initializeSessionStoreSchema(db: DatabaseSync): string {
 	// Re-read after the write lock: another opener may have initialized/upgraded while we waited.
 	db.exec("BEGIN IMMEDIATE");
@@ -103,25 +119,29 @@ export function initializeSessionStoreSchema(db: DatabaseSync): string {
 			const insert = db.prepare("INSERT INTO store_metadata (key, value_json) VALUES (?, ?)");
 			for (const [key, value] of Object.entries({
 				schema_id: SESSION_STORE_SCHEMA_ID,
-				schema_digest: SCHEMAS[3].digest,
+				schema_digest: SCHEMAS[4].digest,
 				store_id: randomUUID(),
 				schema_version: SESSION_STORE_SCHEMA_VERSION,
 				created_at: new Date().toISOString(),
 			}))
 				insert.run(key, stringifyCanonicalSessionStoreJson(value, "Store metadata"));
 			db.exec(`PRAGMA user_version = ${SESSION_STORE_SCHEMA_VERSION}`);
-		} else if (version === 1 || version === 2) {
+		} else if (version === 1 || version === 2 || version === 3) {
 			validateSchema(db, version);
 			validateIntegrity(db);
 			if (version === 1) db.exec(REVIEW_DISCUSSION_SCHEMA_SQL);
-			// v3 fences on entry ordinals. Revision-keyed commit evidence has no ordinal form; it only
-			// reconciles a live writer's uncertain commit, and no pre-v3 writer can commit after this.
-			db.exec("ALTER TABLE sessions DROP COLUMN revision");
-			db.exec("DROP TABLE transaction_commits");
-			db.exec(SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL);
+			if (version !== 3) {
+				// v3 fences on entry ordinals. Revision-keyed commit evidence has no ordinal form; it only
+				// reconciles a live writer's uncertain commit, and no pre-v3 writer can commit after this.
+				db.exec("ALTER TABLE sessions DROP COLUMN revision");
+				db.exec("DROP TABLE transaction_commits");
+				db.exec(SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL);
+			}
+			// v4 client inputs record the receipt's origin and the terminal `withdrawn` state.
+			for (const sql of SESSION_STORE_V4_CLIENT_INPUT_UPGRADE_SQL) db.exec(sql);
 			const update = db.prepare("UPDATE store_metadata SET value_json = ? WHERE key = ?");
 			update.run(stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_ID, "Schema id"), "schema_id");
-			update.run(stringifyCanonicalSessionStoreJson(SCHEMAS[3].digest, "Schema digest"), "schema_digest");
+			update.run(stringifyCanonicalSessionStoreJson(SCHEMAS[4].digest, "Schema digest"), "schema_digest");
 			update.run(
 				stringifyCanonicalSessionStoreJson(SESSION_STORE_SCHEMA_VERSION, "Schema version"),
 				"schema_version",

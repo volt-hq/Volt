@@ -267,11 +267,7 @@ describe("AgentSession cache-preserving compaction", () => {
 	);
 
 	it("persists normal request diagnostics for comparison after reopening the session", async () => {
-		const sessionDirectory = await mkdtemp(join(tmpdir(), "volt-normal-request-diagnostics-"));
-		sessionDirectories.push(sessionDirectory);
-		const harness = await createHarness({
-			sessionManager: await SessionManager.create(sessionDirectory, sessionDirectory),
-		});
+		const harness = await createHarness({ log: "sqlite" });
 		harnesses.push(harness);
 		await harness.session.setSessionName("normal request diagnostics test");
 		const response = fauxAssistantMessage("Normal reply");
@@ -298,11 +294,12 @@ describe("AgentSession cache-preserving compaction", () => {
 	it.each(["length", "toolUse", "empty"] as const)(
 		"keeps the original branch intact after a %s summary",
 		async (failure) => {
-			const harness = await createHarness({ settings: { compaction: { keepRecentTokens: 1 } } });
+			const harness = await createHarness({
+				settings: { compaction: { keepRecentTokens: 1 } },
+				seed: (log) => log.user("Original request", { timestamp: 1 }).assistant("Recent answer"),
+			});
 			harnesses.push(harness);
 			await harness.session.setSessionName("compaction test");
-			await harness.sessionManager.appendMessage({ role: "user", content: "Original request", timestamp: 1 });
-			await harness.sessionManager.appendMessage(fauxAssistantMessage("Recent answer"));
 			const entries = harness.sessionManager.getEntries();
 			const leaf = harness.sessionManager.getLeafId();
 			harness.setResponses([

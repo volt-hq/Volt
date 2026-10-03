@@ -1,6 +1,5 @@
 import { fauxToolCall } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { assistantMsg, userMsg } from "../../utilities.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 describe("issue #25 trailing tool-result compaction", () => {
@@ -13,6 +12,7 @@ describe("issue #25 trailing tool-result compaction", () => {
 	});
 
 	it("advances beyond the previous boundary while preserving the latest tool batch", async () => {
+		const toolCall = fauxToolCall("read", { path: "large.txt" });
 		const harness = await createHarness({
 			settings: { compaction: { keepRecentTokens: 10 } },
 			extensionFactories: [
@@ -26,27 +26,21 @@ describe("issue #25 trailing tool-result compaction", () => {
 					}));
 				},
 			],
+			seed: (log) =>
+				log
+					.user("research the issue")
+					.assistant("older retained work", { id: "previous-boundary" })
+					.compaction({
+						summary: "previous summary",
+						firstKeptEntryId: "previous-boundary",
+						tokensBefore: 250_000,
+					})
+					.assistant("", { id: "recent-assistant", toolCalls: [toolCall] })
+					.toolResult(toolCall.id, "x".repeat(100)),
 		});
 		harnesses.push(harness);
-
-		await harness.sessionManager.appendMessage(userMsg("research the issue"));
-		const previousBoundaryId = await harness.sessionManager.appendMessage(assistantMsg("older retained work"));
-		await harness.sessionManager.appendCompaction("previous summary", previousBoundaryId, 250_000);
-
-		const toolCall = fauxToolCall("read", { path: "large.txt" });
-		const recentAssistantId = await harness.sessionManager.appendMessage({
-			...assistantMsg(""),
-			content: [toolCall],
-			stopReason: "toolUse",
-		});
-		await harness.sessionManager.appendMessage({
-			role: "toolResult",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			content: [{ type: "text", text: "x".repeat(100) }],
-			isError: false,
-			timestamp: Date.now(),
-		});
+		const previousBoundaryId = "previous-boundary";
+		const recentAssistantId = "recent-assistant";
 
 		const result = await harness.session.compact();
 

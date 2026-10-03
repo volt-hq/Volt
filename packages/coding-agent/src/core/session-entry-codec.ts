@@ -25,6 +25,7 @@ import type {
 	ClientInputCommand,
 	ClientInputPayload,
 	ClientInputQueuedPayload,
+	ClientInputState,
 	SessionEntry,
 	SessionReference,
 	SessionSnapshotHeader,
@@ -398,6 +399,7 @@ function parseSessionEntry(
 			if (entry.semanticDigest !== digestClientInputPayload(command, input)) {
 				fail("$.semanticDigest", "does not match the canonical client input");
 			}
+			if (entry.origin !== undefined && entry.origin !== "host") fail("$.origin", "invalid client input origin");
 			break;
 		}
 		case "client_input_queued":
@@ -410,14 +412,7 @@ function parseSessionEntry(
 		case "client_input_state":
 			idValue(entry.receiptId, "$.receiptId");
 			assertClientMessageIdValue(entry.clientMessageId, "$.clientMessageId");
-			if (
-				entry.state !== "accepted" &&
-				entry.state !== "started" &&
-				entry.state !== "completed" &&
-				entry.state !== "failed"
-			) {
-				fail("$.state", "invalid client input state");
-			}
+			if (!isClientInputState(entry.state)) fail("$.state", "invalid client input state");
 			if (entry.error !== undefined) {
 				const error = stringValue(entry.error, "$.error");
 				if (entry.state !== "failed" || Array.from(error).length > CLIENT_INPUT_ERROR_MAX_SCALARS) {
@@ -577,11 +572,12 @@ export interface ClientInputSequenceRecord {
 	readonly receiptId: string;
 	readonly clientMessageId: string;
 	readonly command: ClientInputCommand;
+	readonly origin?: "host";
 	readonly semanticDigest: string;
 	readonly input: ClientInputPayload;
 	queuedEntryId?: string;
 	queuedInput?: ClientInputQueuedPayload;
-	state: "accepted" | "started" | "completed" | "failed";
+	state: ClientInputState;
 	error?: string;
 	canonicalEntryId?: string;
 }
@@ -590,11 +586,12 @@ export interface ClientInputSequenceSeed {
 	readonly receiptId: string;
 	readonly clientMessageId: string;
 	readonly command: ClientInputCommand;
+	readonly origin?: "host";
 	readonly semanticDigest: string;
 	readonly input: unknown;
 	readonly queuedEntryId?: string;
 	readonly queuedInput?: unknown;
-	readonly state: "accepted" | "started" | "completed" | "failed";
+	readonly state: ClientInputState;
 	readonly error?: string;
 	readonly canonicalEntryId?: string;
 }
@@ -623,6 +620,7 @@ function validateClientInputSequenceEntry(entry: SessionEntry, records: Map<stri
 			receiptId: entry.id,
 			clientMessageId: entry.clientMessageId,
 			command: entry.command,
+			...(entry.origin === undefined ? {} : { origin: entry.origin }),
 			semanticDigest: entry.semanticDigest,
 			input,
 			state: "accepted",
@@ -641,6 +639,9 @@ function validateClientInputSequenceEntry(entry: SessionEntry, records: Map<stri
 		if (queuedInput.delivery !== expectedQueuedDelivery(record)) {
 			throw new Error(`Queued client input ${entry.id} conflicts with its requested delivery`);
 		}
+		if (queuedInput.messages !== undefined && record.origin !== "host") {
+			throw new Error(`Queued client input ${entry.id} queues messages, which only a host input may`);
+		}
 		if (record.queuedInput) {
 			throw new Error(`Client input id ${JSON.stringify(entry.clientMessageId)} has duplicate queued entries`);
 		}
@@ -655,7 +656,7 @@ function validateClientInputSequenceEntry(entry: SessionEntry, records: Map<stri
 		if (!record || record.receiptId !== entry.receiptId) {
 			throw new Error(`Client input state ${entry.id} has no matching receipt`);
 		}
-		if (record.state === "completed" || record.state === "failed") {
+		if (isTerminalClientInputState(record.state)) {
 			throw new Error(`Client input state ${entry.id} follows a terminal state`);
 		}
 		if (entry.state === "started" && record.state !== "accepted") {
@@ -663,6 +664,9 @@ function validateClientInputSequenceEntry(entry: SessionEntry, records: Map<stri
 		}
 		if (entry.state === "accepted" && record.state !== "started") {
 			throw new Error(`Client input state ${entry.id} cannot roll back from ${record.state}`);
+		}
+		if (entry.state === "withdrawn" && record.state !== "accepted") {
+			throw new Error(`Client input state ${entry.id} withdraws an input whose dispatch started`);
 		}
 		record.state = entry.state;
 		record.error = entry.state === "failed" ? entry.error : undefined;
@@ -695,13 +699,11 @@ export function createClientInputSequenceValidator(
 		if (records.has(seed.clientMessageId)) {
 			throw new Error(`Client input ${JSON.stringify(seed.clientMessageId)} has duplicate state`);
 		}
-		if (
-			seed.state !== "accepted" &&
-			seed.state !== "started" &&
-			seed.state !== "completed" &&
-			seed.state !== "failed"
-		) {
+		if (!isClientInputState(seed.state)) {
 			throw new Error(`Client input ${JSON.stringify(seed.clientMessageId)} has invalid state`);
+		}
+		if (seed.origin !== undefined && seed.origin !== "host") {
+			throw new Error(`Client input ${JSON.stringify(seed.clientMessageId)} has an invalid origin`);
 		}
 		const queuedInput =
 			seed.queuedInput === undefined ? undefined : normalizeClientInputQueuedPayload(seed.queuedInput);
@@ -709,6 +711,7 @@ export function createClientInputSequenceValidator(
 			receiptId: seed.receiptId,
 			clientMessageId: seed.clientMessageId,
 			command,
+			...(seed.origin === undefined ? {} : { origin: seed.origin }),
 			semanticDigest: seed.semanticDigest,
 			input,
 			state: seed.state,
@@ -722,6 +725,11 @@ export function createClientInputSequenceValidator(
 		}
 		if (record.queuedInput && record.queuedInput.delivery !== expectedQueuedDelivery(record)) {
 			throw new Error(`Client input ${JSON.stringify(seed.clientMessageId)} has conflicting queued state`);
+		}
+		if (record.queuedInput?.messages !== undefined && record.origin !== "host") {
+			throw new Error(
+				`Client input ${JSON.stringify(seed.clientMessageId)} queues messages, which only a host input may`,
+			);
 		}
 		if (
 			(record.state !== "failed" && record.error !== undefined) ||
@@ -927,6 +935,21 @@ function normalizeClientInputContent(message: unknown, images: unknown): { messa
 	return { message, images: normalizedImages };
 }
 
+function isClientInputState(value: unknown): value is ClientInputState {
+	return (
+		value === "accepted" ||
+		value === "started" ||
+		value === "completed" ||
+		value === "failed" ||
+		value === "withdrawn"
+	);
+}
+
+/** Completed, failed, and withdrawn inputs never change state again. */
+export function isTerminalClientInputState(state: ClientInputState): boolean {
+	return state === "completed" || state === "failed" || state === "withdrawn";
+}
+
 function parseClientInputCommand(value: unknown, path: string): ClientInputCommand {
 	if (value === "prompt" || value === "steer" || value === "follow_up") return value;
 	return fail(path, "invalid client input command");
@@ -950,11 +973,23 @@ export function normalizeClientInputPayload(command: ClientInputCommand, value: 
 export function normalizeClientInputQueuedPayload(value: unknown): ClientInputQueuedPayload {
 	const canonical = cloneCanonicalData(value, "Queued client input payload");
 	const input = record(canonical, "queuedInput");
-	exactKeys(input, "queuedInput", ["delivery", "message"], ["images"]);
+	exactKeys(input, "queuedInput", ["delivery", "message"], ["images", "messages"]);
 	if (input.delivery !== "steer" && input.delivery !== "follow_up") {
 		throw new Error("Client input queued delivery is invalid");
 	}
-	return { delivery: input.delivery, ...normalizeClientInputContent(input.message, input.images) };
+	const queued: ClientInputQueuedPayload = {
+		delivery: input.delivery,
+		...normalizeClientInputContent(input.message, input.images),
+	};
+	if (input.messages === undefined) return queued;
+	// A host input queues the messages it delivers, validated like message entries.
+	if (!Array.isArray(input.messages) || input.messages.length === 0) {
+		throw new Error("Client input queued messages must be a non-empty array");
+	}
+	for (const [index, message] of input.messages.entries()) {
+		validateAgentMessage(message, `queuedInput.messages[${index}]`);
+	}
+	return { ...queued, messages: input.messages as NonNullable<ClientInputQueuedPayload["messages"]> };
 }
 
 export function digestClientInputPayload(command: ClientInputCommand, input: ClientInputPayload): string {

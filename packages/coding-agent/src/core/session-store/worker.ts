@@ -946,14 +946,23 @@ function clientInputFromRow(row: Record<string, unknown>): SessionStoreClientInp
 		throw new Error("Invalid SQLite client input command");
 	}
 	const state = sqlString(row, "state");
-	if (state !== "accepted" && state !== "started" && state !== "completed" && state !== "failed") {
+	if (
+		state !== "accepted" &&
+		state !== "started" &&
+		state !== "completed" &&
+		state !== "failed" &&
+		state !== "withdrawn"
+	) {
 		throw new Error("Invalid SQLite client input state");
 	}
+	const origin = sqlNullableString(row, "origin");
+	if (origin !== null && origin !== "host") throw new Error("Invalid SQLite client input origin");
 	const queuedInputJson = sqlNullableString(row, "queuedInputJson");
 	return {
 		clientMessageId: sqlString(row, "clientMessageId"),
 		receiptEntryId: sqlString(row, "receiptEntryId"),
 		command,
+		origin,
 		semanticDigest: sqlString(row, "semanticDigest"),
 		input: parseCanonicalSessionStoreJson(sqlString(row, "inputJson"), "Stored client input"),
 		queuedEntryId: sqlNullableString(row, "queuedEntryId"),
@@ -1023,7 +1032,7 @@ function loadSession(sessionId: string, sessionGeneration: string): SessionStore
 		try {
 			clientInputs = db
 				.prepare(
-					`SELECT client_message_id AS clientMessageId, receipt_entry_id AS receiptEntryId, command,
+					`SELECT client_message_id AS clientMessageId, receipt_entry_id AS receiptEntryId, command, origin,
 					semantic_digest AS semanticDigest, input_json AS inputJson, queued_entry_id AS queuedEntryId,
 					queued_input_json AS queuedInputJson, state, error, canonical_entry_id AS canonicalEntryId
 				FROM client_inputs WHERE session_id = ? ORDER BY client_message_id`,
@@ -1229,7 +1238,7 @@ function loadTransactionClientInputs(
 	entries: readonly SessionEntry[],
 ): SessionStoreClientInput[] {
 	const selected = new Map<string, SessionStoreClientInput>();
-	const selectColumns = `client_message_id AS clientMessageId, receipt_entry_id AS receiptEntryId, command,
+	const selectColumns = `client_message_id AS clientMessageId, receipt_entry_id AS receiptEntryId, command, origin,
 		semantic_digest AS semanticDigest, input_json AS inputJson, queued_entry_id AS queuedEntryId,
 		queued_input_json AS queuedInputJson, state, error, canonical_entry_id AS canonicalEntryId`;
 	const retain = (row: Record<string, unknown>): void => {
@@ -1342,12 +1351,13 @@ function applyTransactionInCurrentTransaction(
 
 	const upsertClientInput = db.prepare(
 		`INSERT INTO client_inputs (
-			session_id, client_message_id, receipt_entry_id, command, semantic_digest, input_json,
+			session_id, client_message_id, receipt_entry_id, command, origin, semantic_digest, input_json,
 			queued_entry_id, queued_input_json, state, error, canonical_entry_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (session_id, client_message_id) DO UPDATE SET
 			receipt_entry_id = excluded.receipt_entry_id,
 			command = excluded.command,
+			origin = excluded.origin,
 			semantic_digest = excluded.semantic_digest,
 			input_json = excluded.input_json,
 			queued_entry_id = excluded.queued_entry_id,
@@ -1362,6 +1372,7 @@ function applyTransactionInCurrentTransaction(
 			clientInput.clientMessageId,
 			clientInput.receiptEntryId,
 			clientInput.command,
+			clientInput.origin,
 			clientInput.semanticDigest,
 			stringifyCanonicalSessionStoreJson(clientInput.input, "Client input"),
 			clientInput.queuedEntryId,

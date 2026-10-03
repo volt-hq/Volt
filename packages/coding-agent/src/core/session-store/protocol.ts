@@ -12,6 +12,7 @@ import {
 	type SessionStoreApplyTransactionInput,
 	type SessionStoreClientInput,
 	type SessionStoreClientInputCommand,
+	type SessionStoreClientInputOrigin,
 	type SessionStoreClientInputState,
 	type SessionStoreClientInputWrite,
 	type SessionStoreCommitEvidence,
@@ -246,8 +247,21 @@ function commandValue(value: unknown, path: string): SessionStoreClientInputComm
 }
 
 function stateValue(value: unknown, path: string): SessionStoreClientInputState {
-	if (value === "accepted" || value === "started" || value === "completed" || value === "failed") return value;
+	if (
+		value === "accepted" ||
+		value === "started" ||
+		value === "completed" ||
+		value === "failed" ||
+		value === "withdrawn"
+	) {
+		return value;
+	}
 	return fail(path, "unsupported client input state");
+}
+
+function clientInputOriginValue(value: unknown, path: string): SessionStoreClientInputOrigin | null {
+	if (value === null || value === "host") return value;
+	return fail(path, "expected null or host");
 }
 
 function jsonValue(value: unknown, path: string): SessionStoreJsonValue {
@@ -368,6 +382,7 @@ function parseClientInput(value: unknown, path: string): SessionStoreClientInput
 		"clientMessageId",
 		"receiptEntryId",
 		"command",
+		"origin",
 		"semanticDigest",
 		"input",
 		"queuedEntryId",
@@ -380,6 +395,7 @@ function parseClientInput(value: unknown, path: string): SessionStoreClientInput
 		clientMessageId: idValue(input.clientMessageId, `${path}.clientMessageId`),
 		receiptEntryId: idValue(input.receiptEntryId, `${path}.receiptEntryId`),
 		command: commandValue(input.command, `${path}.command`),
+		origin: clientInputOriginValue(input.origin, `${path}.origin`),
 		semanticDigest: nonEmptyString(input.semanticDigest, `${path}.semanticDigest`),
 		input: jsonValue(input.input, `${path}.input`),
 		queuedEntryId: nullableId(input.queuedEntryId, `${path}.queuedEntryId`),

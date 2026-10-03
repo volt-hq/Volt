@@ -1,85 +1,10 @@
 import { REVIEW_DISCUSSION_SCHEMA_SQL } from "./discussion-schema.ts";
+import { SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL } from "./schema.ts";
 
-export const SESSION_STORE_SCHEMA_ID = "volt-session-store-v4";
+// Frozen exact v3 DDL. Used only to validate the supported upgrade.
+export const SESSION_STORE_V3_SCHEMA_ID = "volt-session-store-v3";
 
-export const SESSION_STORE_TABLE_NAMES = [
-	"store_metadata",
-	"sessions",
-	"entries",
-	"client_inputs",
-	"search_chunks",
-	"transaction_commits",
-	"review_anchors",
-	"review_anchor_aliases",
-	"review_discussions",
-	"review_discussion_children",
-] as const;
-
-export const SESSION_STORE_INDEX_NAMES = [
-	"sessions_visible_updated_idx",
-	"entries_parent_idx",
-	"entries_type_idx",
-	"client_inputs_state_idx",
-	"search_chunks_entry_idx",
-	"transaction_commits_session_ordinal_idx",
-	"review_anchors_source_idx",
-	"review_discussions_run_idx",
-] as const;
-
-/** Commit evidence fenced on the session's last entry ordinal. Every commit appends at least one entry. */
-export const SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL = `
-CREATE TABLE transaction_commits (
-	commit_id TEXT PRIMARY KEY NOT NULL CHECK (length(commit_id) BETWEEN 1 AND 512),
-	session_id TEXT NOT NULL,
-	session_generation TEXT NOT NULL CHECK (length(session_generation) BETWEEN 1 AND 512),
-	digest TEXT NOT NULL CHECK (
-		length(digest) = 71 AND
-		substr(digest, 1, 7) = 'sha256:' AND
-		substr(digest, 8) NOT GLOB '*[^0-9a-f]*'
-	),
-	before_ordinal INTEGER NOT NULL CHECK (before_ordinal >= 0),
-	after_ordinal INTEGER NOT NULL CHECK (after_ordinal > before_ordinal),
-	committed_at TEXT NOT NULL,
-	FOREIGN KEY (session_id, session_generation) REFERENCES sessions(id, session_generation) ON DELETE CASCADE
-) STRICT, WITHOUT ROWID;
-
-CREATE UNIQUE INDEX transaction_commits_session_ordinal_idx
-	ON transaction_commits (session_id, session_generation, after_ordinal DESC);
-`;
-
-/**
- * One row per client input receipt, updated as the input moves through its
- * lifecycle. `origin` is the receipt's; a withdrawn input is terminal.
- */
-export const SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL = `
-CREATE TABLE client_inputs (
-	session_id TEXT NOT NULL,
-	client_message_id TEXT NOT NULL CHECK (length(client_message_id) BETWEEN 1 AND 512),
-	receipt_entry_id TEXT NOT NULL,
-	command TEXT NOT NULL CHECK (command IN ('prompt', 'steer', 'follow_up')),
-	origin TEXT CHECK (origin IS NULL OR origin = 'host'),
-	semantic_digest TEXT NOT NULL CHECK (length(semantic_digest) >= 1),
-	input_json TEXT NOT NULL CHECK (json_valid(input_json) = 1),
-	queued_entry_id TEXT,
-	queued_input_json TEXT CHECK (queued_input_json IS NULL OR json_valid(queued_input_json) = 1),
-	state TEXT NOT NULL CHECK (state IN ('accepted', 'started', 'completed', 'failed', 'withdrawn')),
-	error TEXT,
-	canonical_entry_id TEXT,
-	PRIMARY KEY (session_id, client_message_id),
-	CHECK ((queued_entry_id IS NULL) = (queued_input_json IS NULL)),
-	FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
-	FOREIGN KEY (session_id, receipt_entry_id) REFERENCES entries(session_id, entry_id)
-		DEFERRABLE INITIALLY DEFERRED,
-	FOREIGN KEY (session_id, queued_entry_id) REFERENCES entries(session_id, entry_id)
-		DEFERRABLE INITIALLY DEFERRED,
-	FOREIGN KEY (session_id, canonical_entry_id) REFERENCES entries(session_id, entry_id)
-		DEFERRABLE INITIALLY DEFERRED
-) STRICT, WITHOUT ROWID;
-
-CREATE INDEX client_inputs_state_idx ON client_inputs (session_id, state, client_message_id);
-`;
-
-export const SESSION_STORE_SCHEMA_SQL = `
+export const SESSION_STORE_V3_SCHEMA_SQL = `
 CREATE TABLE store_metadata (
 	key TEXT PRIMARY KEY NOT NULL,
 	value_json TEXT NOT NULL CHECK (json_valid(value_json) = 1)
@@ -145,7 +70,31 @@ CREATE TABLE entries (
 CREATE INDEX entries_parent_idx ON entries (session_id, parent_entry_id);
 CREATE INDEX entries_type_idx ON entries (session_id, entry_type, ordinal);
 
-${SESSION_STORE_CLIENT_INPUTS_SCHEMA_SQL}
+CREATE TABLE client_inputs (
+	session_id TEXT NOT NULL,
+	client_message_id TEXT NOT NULL CHECK (length(client_message_id) BETWEEN 1 AND 512),
+	receipt_entry_id TEXT NOT NULL,
+	command TEXT NOT NULL CHECK (command IN ('prompt', 'steer', 'follow_up')),
+	semantic_digest TEXT NOT NULL CHECK (length(semantic_digest) >= 1),
+	input_json TEXT NOT NULL CHECK (json_valid(input_json) = 1),
+	queued_entry_id TEXT,
+	queued_input_json TEXT CHECK (queued_input_json IS NULL OR json_valid(queued_input_json) = 1),
+	state TEXT NOT NULL CHECK (state IN ('accepted', 'started', 'completed', 'failed')),
+	error TEXT,
+	canonical_entry_id TEXT,
+	PRIMARY KEY (session_id, client_message_id),
+	CHECK ((queued_entry_id IS NULL) = (queued_input_json IS NULL)),
+	FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+	FOREIGN KEY (session_id, receipt_entry_id) REFERENCES entries(session_id, entry_id)
+		DEFERRABLE INITIALLY DEFERRED,
+	FOREIGN KEY (session_id, queued_entry_id) REFERENCES entries(session_id, entry_id)
+		DEFERRABLE INITIALLY DEFERRED,
+	FOREIGN KEY (session_id, canonical_entry_id) REFERENCES entries(session_id, entry_id)
+		DEFERRABLE INITIALLY DEFERRED
+) STRICT, WITHOUT ROWID;
+
+CREATE INDEX client_inputs_state_idx ON client_inputs (session_id, state, client_message_id);
+
 CREATE TABLE search_chunks (
 	session_id TEXT NOT NULL,
 	chunk_index INTEGER NOT NULL CHECK (chunk_index >= 0),
