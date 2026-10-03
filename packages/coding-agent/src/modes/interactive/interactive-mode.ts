@@ -67,12 +67,7 @@ import {
 	getShareViewerUrl,
 	VERSION,
 } from "../../config.ts";
-import {
-	type AgentSession,
-	type AgentSessionEvent,
-	parseSkillBlock,
-	QueueClearPersistenceError,
-} from "../../core/agent-session.ts";
+import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import { ConversationLockedError } from "../../core/conversation-log/conversation-lock.ts";
 import type {
@@ -142,6 +137,7 @@ import {
 	recordReviewFindingOutcome,
 	resolveReviewAccountingMessage,
 } from "../../core/review-state.ts";
+import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";

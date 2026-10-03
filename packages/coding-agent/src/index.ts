@@ -22,7 +22,6 @@ export {
 	type ParsedSkillBlock,
 	type PromptOptions,
 	parseSkillBlock,
-	QueueClearPersistenceError,
 	type SessionStats,
 } from "./core/agent-session.ts";
 // Auth and model registry
@@ -666,6 +665,7 @@ export {
 	type PromptTemplate,
 	type SubagentRuntimeContext,
 } from "./core/sdk.ts";
+export { QueueClearPersistenceError } from "./core/session/client-inputs.ts";
 export {
 	assertCurrentSessionSnapshot,
 	type BranchSummaryEntry,

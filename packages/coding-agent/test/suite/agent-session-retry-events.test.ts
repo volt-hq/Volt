@@ -375,10 +375,9 @@ describe("AgentSession retry and event characterization", () => {
 		});
 
 		const checkCompaction = vi.spyOn(
-			harness.session as unknown as {
-				_compactionDecision: (cause: unknown, check: unknown) => unknown;
-			},
-			"_compactionDecision",
+			(harness.session as unknown as { _compaction: { decision: (cause: unknown, check: unknown) => unknown } })
+				._compaction,
+			"decision",
 		);
 		const promptPromise = harness.session.prompt("first prompt");
 		await sawRetryStart;
