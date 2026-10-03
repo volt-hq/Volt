@@ -44,15 +44,13 @@ import { resolveCloudflareBaseUrl } from "./cloudflare.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions } from "./simple-options.ts";
-import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 function getCacheControl(
 	model: Model<"anthropic-messages">,
 	cacheRetention?: CacheRetention,
-	env?: ProviderEnv,
 ): { retention: CacheRetention; cacheControl?: CacheControlEphemeral } {
-	const retention = resolvePromptCacheRetention(model, cacheRetention, env);
+	const retention = resolvePromptCacheRetention(model, cacheRetention);
 	if (retention === "none" || !supportsPromptCacheMode(model, "explicit")) {
 		return { retention };
 	}
@@ -508,11 +506,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 >({
 	buildRequest({ model, context, options }) {
 		const { client, isOAuthToken: isOAuth } = createRequestClient(model, context, options);
-		const toolResultPayload = new ToolResultPayloadTracker();
-		const payload = buildParams(model, context, isOAuth, options, toolResultPayload);
+		const payload = buildParams(model, context, isOAuth, options);
 		return {
 			payload,
-			metadata: toolResultPayload.metadata,
 			async send(params, { signal }) {
 				const response = await client.messages
 					.create(
@@ -786,13 +782,12 @@ export const refreshPromptCacheAnthropic: PromptCacheRefreshFunction<"anthropic-
 		return { status: "unsupported", reason: "budget-based thinking cannot be refreshed without output" };
 	}
 	const options = resolveSimpleAnthropicOptions(model, simpleOptions);
-	if (!getCacheControl(model, options.cacheRetention, options.env).cacheControl) {
+	if (!getCacheControl(model, options.cacheRetention).cacheControl) {
 		return { status: "unsupported", reason: "request has no cache breakpoints" };
 	}
 	const { client, isOAuthToken } = createRequestClient(model, context, options);
-	const toolResultPayload = new ToolResultPayloadTracker();
-	let params = buildParams(model, context, isOAuthToken, options, toolResultPayload);
-	const nextParams = await options.onPayload?.(params, model, toolResultPayload.metadata);
+	let params = buildParams(model, context, isOAuthToken, options);
+	const nextParams = await options.onPayload?.(params, model);
 	if (nextParams !== undefined) {
 		params = nextParams as MessageCreateParamsStreaming;
 	}
@@ -963,7 +958,7 @@ function createClient(
 	}
 
 	// API-key cache affinity is disabled with caching; OAuth session identity above is not.
-	const cacheSessionId = resolvePromptCacheRetention(model, cacheRetention, env) === "none" ? undefined : sessionId;
+	const cacheSessionId = resolvePromptCacheRetention(model, cacheRetention) === "none" ? undefined : sessionId;
 	const sessionAffinityHeaders: Record<string, string | null> =
 		cacheSessionId && getAnthropicCompat(model).sendSessionAffinityHeaders
 			? { "x-session-affinity": cacheSessionId }
@@ -993,20 +988,12 @@ function buildParams(
 	context: Context,
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
-	toolResultPayload?: ToolResultPayloadTracker,
 ): MessageCreateParamsStreaming {
-	const { cacheControl } = getCacheControl(model, options?.cacheRetention, options?.env);
+	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const compat = getAnthropicCompat(model);
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
-		messages: convertMessages(
-			context.messages,
-			model,
-			isOAuthToken,
-			cacheControl,
-			compat.allowEmptySignature,
-			toolResultPayload,
-		),
+		messages: convertMessages(context.messages, model, isOAuthToken, cacheControl, compat.allowEmptySignature),
 		max_tokens: options?.maxTokens ?? model.maxTokens,
 		stream: true,
 	};
@@ -1112,12 +1099,11 @@ function convertMessages(
 	isOAuthToken: boolean,
 	cacheControl?: CacheControlEphemeral,
 	allowEmptySignature = false,
-	toolResultPayload?: ToolResultPayloadTracker,
 ): MessageParam[] {
 	const params: MessageParam[] = [];
 
 	// Transform messages for cross-provider compatibility
-	const transformedMessages = transformMessages(messages, model, normalizeToolCallId, toolResultPayload);
+	const transformedMessages = transformMessages(messages, model, normalizeToolCallId);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -1228,7 +1214,6 @@ function convertMessages(
 				content: convertContentBlocks(msg.content),
 				is_error: msg.isError,
 			});
-			toolResultPayload?.include(msg);
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
@@ -1240,7 +1225,6 @@ function convertMessages(
 					content: convertContentBlocks(nextMsg.content),
 					is_error: nextMsg.isError,
 				});
-				toolResultPayload?.include(nextMsg);
 				j++;
 			}
 

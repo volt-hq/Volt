@@ -297,7 +297,7 @@ export function createAiClient(options: AiClientOptions = {}): AiClient {
 		supportsPromptCacheRefresh(model, requestOptions) {
 			const provider = providers.get(model.api);
 			if (!provider?.refreshPromptCache || model.promptCache?.refreshesOnHit !== true) return false;
-			if (resolvePromptCacheRetention(model, requestOptions?.cacheRetention, requestOptions?.env) === "none") {
+			if (resolvePromptCacheRetention(model, requestOptions?.cacheRetention) === "none") {
 				return false;
 			}
 			return provider.canRefreshPromptCache?.(model, requestOptions) ?? true;
@@ -307,7 +307,7 @@ export function createAiClient(options: AiClientOptions = {}): AiClient {
 			if (!provider.refreshPromptCache || model.promptCache?.refreshesOnHit !== true) {
 				return { status: "unsupported", reason: "model does not support prompt-cache refresh" };
 			}
-			if (resolvePromptCacheRetention(model, requestOptions?.cacheRetention, requestOptions?.env) === "none") {
+			if (resolvePromptCacheRetention(model, requestOptions?.cacheRetention) === "none") {
 				return { status: "unsupported", reason: "prompt caching is disabled" };
 			}
 			let resolved: Credentials | undefined;

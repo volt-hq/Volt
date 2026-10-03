@@ -108,17 +108,6 @@ export interface ProviderResponse {
 	headers: Record<string, string>;
 }
 
-/** Provider-owned evidence for the payload supplied to onPayload, before caller replacements. */
-export interface ProviderPayloadMetadata {
-	/**
-	 * Zero-based indices in the original Context.messages of tool results represented
-	 * in this request. Record these when serializing results, after replay filtering.
-	 * Preserve source indices through ID normalization; never include synthetic results.
-	 * This metadata stays local and does not prove request success or survive payload changes.
-	 */
-	readonly toolResultMessageIndices: readonly number[];
-}
-
 /** Limits apply only while the model prepares tool arguments, before execution. */
 export interface ToolArgumentLimits {
 	/** Maximum UTF-8 argument bytes per call. Default: 1 MiB. */
@@ -148,6 +137,11 @@ export interface StreamOptions {
 	 */
 	cacheRetention?: CacheRetention;
 	/**
+	 * Record redacted diagnostics of each request sent, for providers that support them
+	 * (OpenAI Codex). Providers that do not support this option ignore it. Default: false.
+	 */
+	requestDiagnostics?: boolean;
+	/**
 	 * Optional session identifier for providers that support session-based caching.
 	 * Providers can use this to enable prompt caching, request routing, or other
 	 * session-aware features. Ignored by providers that don't support it.
@@ -155,14 +149,9 @@ export interface StreamOptions {
 	sessionId?: string;
 	/**
 	 * Optional callback for inspecting or replacing provider payloads before sending.
-	 * Return undefined to keep the payload unchanged. Metadata identifies tool results
-	 * included by the serializer; absent metadata provides no delivery evidence.
+	 * Return undefined to keep the payload unchanged.
 	 */
-	onPayload?: (
-		payload: unknown,
-		model: Model<Api>,
-		metadata?: ProviderPayloadMetadata,
-	) => unknown | undefined | Promise<unknown | undefined>;
+	onPayload?: (payload: unknown, model: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
 	/**
 	 * Optional callback invoked after an HTTP response is received and before
 	 * its body stream is consumed.
@@ -436,8 +425,6 @@ export interface ProviderError {
 export interface UserMessage {
 	role: "user";
 	content: string | (TextContent | ImageContent)[];
-	/** Stable identity minted by a remote client for optimistic transcript reconciliation. */
-	clientMessageId?: string;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

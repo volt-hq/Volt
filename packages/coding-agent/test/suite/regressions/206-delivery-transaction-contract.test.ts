@@ -94,7 +94,7 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 					(entry) =>
 						entry.type === "message" &&
 						entry.message.role === "user" &&
-						entry.message.clientMessageId === clientMessageId,
+						entry.clientMessageId === clientMessageId,
 				),
 		).toHaveLength(1);
 
@@ -110,7 +110,7 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 					(entry) =>
 						entry.type === "message" &&
 						entry.message.role === "user" &&
-						entry.message.clientMessageId === clientMessageId,
+						entry.clientMessageId === clientMessageId,
 				),
 		).toHaveLength(1);
 	});
@@ -144,7 +144,7 @@ describe("regression #206: coding-agent delivery transaction contract", () => {
 						(entry) =>
 							entry.type === "message" &&
 							entry.message.role === "user" &&
-							entry.message.clientMessageId === clientMessageId,
+							entry.clientMessageId === clientMessageId,
 					),
 			).toHaveLength(1);
 		},

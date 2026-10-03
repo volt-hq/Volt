@@ -5,6 +5,7 @@
 
 import {
 	type AssistantMessage,
+	applyReplayPolicy,
 	type Context,
 	createProviderError,
 	EventStream,
@@ -487,10 +488,10 @@ async function streamAssistantResponse(
 		throw new Error("Cannot request with an assistant message at the provider transcript tail");
 	}
 
-	// Build LLM context
+	// Build LLM context; providers apply only model-dependent normalization to the replayed messages.
 	const llmContext: Context = {
 		systemPrompt: context.systemPrompt,
-		messages: llmMessages,
+		messages: applyReplayPolicy(llmMessages),
 		...(context.tools === undefined ? {} : { tools: context.tools }),
 	};
 

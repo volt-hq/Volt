@@ -837,9 +837,9 @@ describe("SQLite session store", () => {
 					message: {
 						role: "user",
 						content: "hello sqlite",
-						clientMessageId: "client-1",
 						timestamp: Date.parse(UPDATED_AT),
 					},
+					clientMessageId: "client-1",
 				}),
 				entryWrite({
 					type: "session_start_git_context",
@@ -936,9 +936,9 @@ describe("SQLite session store", () => {
 			message: {
 				role: "user",
 				content: "hello sqlite",
-				clientMessageId: "client-1",
 				timestamp: Date.parse(UPDATED_AT),
 			},
+			clientMessageId: "client-1",
 		});
 		expect(snapshot?.entries[5]?.payload).toMatchObject({ targetId: "message-1", label: "start" });
 		expect(snapshot?.clientInputs[0]).toMatchObject({ clientMessageId: "client-1", state: "completed" });

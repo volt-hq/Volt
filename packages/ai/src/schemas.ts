@@ -192,7 +192,6 @@ export const UserMessageSchema = Type.Object(
 	{
 		role: Type.Literal("user"),
 		content: Type.Union([Type.String(), Type.Array(textOrImageContentSchema)]),
-		clientMessageId: Type.Optional(Type.String()),
 		timestamp: Type.Number(),
 	},
 	{ additionalProperties: false },

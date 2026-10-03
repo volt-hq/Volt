@@ -6,7 +6,14 @@
  */
 
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
-import type { ImageContent, JsonCompatibleInput, JsonValue, Message, TextContent } from "@hansjm10/volt-ai";
+import type {
+	ImageContent,
+	JsonCompatibleInput,
+	JsonValue,
+	Message,
+	TextContent,
+	UserMessage,
+} from "@hansjm10/volt-ai";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
 
@@ -75,14 +82,40 @@ export interface CompactionSummaryMessage {
 	timestamp: number;
 }
 
+/**
+ * A user message submitted by a client, carrying the client's input identity through the runtime.
+ * The identity is not part of the model message: its session entry stores it beside the message,
+ * and `convertToLlm` drops it.
+ */
+export interface ClientUserMessage extends UserMessage {
+	clientMessageId: string;
+}
+
 // Extend CustomAgentMessages via declaration merging
 declare module "@hansjm10/volt-agent-core" {
 	interface CustomAgentMessages {
+		clientUser: ClientUserMessage;
 		bashExecution: BashExecutionMessage;
 		custom: CustomMessage;
 		branchSummary: BranchSummaryMessage;
 		compactionSummary: CompactionSummaryMessage;
 	}
+}
+
+/** The client input identity of a runtime message, when a client submitted it. */
+export function getClientMessageId(message: AgentMessage): string | undefined {
+	return message.role === "user" && "clientMessageId" in message ? message.clientMessageId : undefined;
+}
+
+/** The model message of a client-submitted user message, without its client input identity. */
+export function withoutClientMessageId(message: ClientUserMessage): UserMessage {
+	const { clientMessageId: _clientMessageId, ...userMessage } = message;
+	return userMessage;
+}
+
+/** A runtime user message carrying the client input identity its session entry stores beside it. */
+export function withClientMessageId(message: UserMessage, clientMessageId: string): ClientUserMessage {
+	return { ...message, clientMessageId };
 }
 
 /**
@@ -210,6 +243,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				case "user":
+					return "clientMessageId" in m ? withoutClientMessageId(m) : m;
 				case "assistant":
 				case "toolResult":
 					return m;

@@ -38,7 +38,6 @@ import type { AssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { createAssistantMessageDiagnostic, formatThrownValue } from "../utils/diagnostics.ts";
 import { headersToRecord } from "../utils/headers.ts";
 import { resolveHttpProxyUrlForTarget } from "../utils/node-http-proxy.ts";
-import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { type CodexRequestDispatch, createCodexRequestDiagnostic } from "./openai-codex-request-diagnostics.ts";
 import { getFastInferenceServiceTier } from "./openai-fast-inference.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
@@ -54,7 +53,6 @@ import {
 } from "./openai-responses-shared.ts";
 import { resolvePromptCacheRetention } from "./prompt-cache.ts";
 import { buildBaseOptions } from "./simple-options.ts";
-import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 
 // ============================================================================
 // Configuration
@@ -173,12 +171,11 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			if (!apiKey) throw missingApiKeyError(model.provider);
 
 			const accountId = extractAccountId(apiKey);
-			const cacheRetention = resolvePromptCacheRetention(model, options.cacheRetention, options.env);
+			const cacheRetention = resolvePromptCacheRetention(model, options.cacheRetention);
 			const transportSessionId = options.sessionId;
 			const cacheSessionId = cacheRetention === "none" ? undefined : transportSessionId;
-			const toolResultPayload = new ToolResultPayloadTracker();
 			// Cached WebSocket continuation removes only a verified prefix already present in model context.
-			const payload = buildRequestBody(model, context, { ...options, sessionId: cacheSessionId }, toolResultPayload);
+			const payload = buildRequestBody(model, context, { ...options, sessionId: cacheSessionId });
 			const websocketRequestId = cacheSessionId || createCodexRequestId();
 			const sseHeaders = buildSSEHeaders(model.headers, options.headers, accountId, apiKey, cacheSessionId);
 			const websocketHeaders = buildWebSocketHeaders(
@@ -191,16 +188,13 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 			const idleTimeoutMs = normalizeTimeoutMs(options.timeoutMs);
 			const websocketConnectTimeoutMs = normalizeTimeoutMs(options.websocketConnectTimeoutMs);
 			const transport = options.transport || "auto";
-			const diagnosticsEnabled =
-				(options.env?.VOLT_CODEX_REQUEST_DIAGNOSTICS ?? getProviderEnvValue("VOLT_CODEX_REQUEST_DIAGNOSTICS")) ===
-				"1";
+			const diagnosticsEnabled = options.requestDiagnostics === true;
 			const requestDiagnostics: Promise<AssistantMessageDiagnostic | undefined>[] = [];
 			let websocketAttempted = false;
 			let cleanupResponseSignal: (() => void) | undefined;
 
 			return {
 				payload,
-				metadata: toolResultPayload.metadata,
 				async send(body, { signal }) {
 					const bodyJson = JSON.stringify(body);
 					const recordRequest = diagnosticsEnabled
@@ -386,11 +380,9 @@ function buildRequestBody(
 	model: Model<"openai-codex-responses">,
 	context: Context,
 	options: OpenAICodexResponsesOptions | undefined,
-	toolResultPayload: ToolResultPayloadTracker,
 ): RequestBody {
 	const messages = convertResponsesMessages(model, context, CODEX_TOOL_CALL_PROVIDERS, {
 		includeSystemPrompt: false,
-		toolResultPayload,
 	});
 
 	const body: RequestBody = {

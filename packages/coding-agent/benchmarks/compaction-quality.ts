@@ -214,7 +214,7 @@ export async function runPilotCase(
 							inferenceSpeed: "standard",
 							sessionId,
 							timeoutMs: options.caseTimeoutMs ?? CASE_TIMEOUT_MS,
-							env: { VOLT_CODEX_REQUEST_DIAGNOSTICS: "0" },
+							requestDiagnostics: false,
 							onPayload: (payload) => {
 								if (!requestSignal.aborted) record!.payloadJson = JSON.stringify(payload);
 							},

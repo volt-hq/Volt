@@ -499,10 +499,7 @@ function assertCanonicalSessionMessage(message: Record<string, unknown>): void {
 	}
 	switch (message.role) {
 		case "user":
-			if (
-				!isUserOrCustomContent(message.content) ||
-				(message.clientMessageId !== undefined && !isCanonicalExternalIdentifier(message.clientMessageId))
-			) {
+			if (!isUserOrCustomContent(message.content)) {
 				throw new Error("Conversation transcript user-message commit is malformed");
 			}
 			return;
@@ -575,7 +572,11 @@ function assertCanonicalTranscriptEntry(entry: Record<string, unknown>): void {
 	}
 	switch (entry.type) {
 		case "message":
-			if (!isRecord(entry.message)) {
+			if (
+				!isRecord(entry.message) ||
+				(entry.clientMessageId !== undefined &&
+					(entry.message.role !== "user" || !isCanonicalExternalIdentifier(entry.clientMessageId)))
+			) {
 				throw new Error("Conversation transcript message commit is malformed");
 			}
 			assertCanonicalSessionMessage(entry.message);

@@ -5,6 +5,7 @@ import {
 	type FauxProvider,
 	type FauxProviderOptions,
 	fauxAssistantMessage,
+	fauxToolCall,
 	type PromptCacheMetadata,
 	type PromptCacheRefreshCheck,
 	type SimpleStreamOptions,
@@ -99,6 +100,43 @@ describe("AgentHarness.refreshPromptCache", () => {
 		expect(refreshes[0]!.context).toEqual(requests[0]);
 		expect(refreshes[0]!.options?.sessionId).toBeTruthy();
 		expect(registration.state).toMatchObject({ callCount: 1, refreshCount: 1 });
+	});
+
+	it("sends and refreshes the replayed context", async () => {
+		const { harness, session, refreshes, requests } = createHarness();
+		const completed = fauxAssistantMessage([fauxToolCall("read", { path: "a" }, { id: "kept" })], {
+			stopReason: "toolUse",
+			timestamp: 5,
+		});
+		const interrupted = fauxAssistantMessage([fauxToolCall("read", { path: "b" }, { id: "cut" })], {
+			stopReason: "aborted",
+			timestamp: 6,
+		});
+		await session.appendMessage({ role: "user", content: "start", timestamp: 1 });
+		await session.appendMessage(completed);
+		await session.appendMessage({ role: "user", content: "interrupt", timestamp: 7 });
+		await session.appendMessage(interrupted);
+		await session.appendMessage({
+			role: "toolResult",
+			toolCallId: "cut",
+			toolName: "read",
+			content: [{ type: "text", text: "partial" }],
+			isError: true,
+			timestamp: 8,
+		});
+		await prompt(harness, "hello");
+
+		expect(requests[0]!.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+			"user",
+		]);
+		expect(requests[0]!.messages[2]).toMatchObject({ toolCallId: "kept", content: [{ text: "No result provided" }] });
+		expect(JSON.stringify(requests[0])).not.toContain("partial");
+		expect(await harness.refreshPromptCache()).toMatchObject({ status: "refreshed" });
+		expect(refreshes[0]!.context).toEqual(requests[0]);
 	});
 
 	it("sends nothing before a conversation request", async () => {

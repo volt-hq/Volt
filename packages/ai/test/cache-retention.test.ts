@@ -30,7 +30,7 @@ function stopAfterPayload<TPayload>(capture: (payload: TPayload) => void): (payl
 	};
 }
 
-describe("Cache Retention (VOLT_CACHE_RETENTION)", () => {
+describe("Cache Retention (cacheRetention)", () => {
 	const originalEnv = process.env.VOLT_CACHE_RETENTION;
 
 	beforeEach(() => {
@@ -52,7 +52,7 @@ describe("Cache Retention (VOLT_CACHE_RETENTION)", () => {
 
 	describe("Anthropic Provider", () => {
 		it.skipIf(!process.env.ANTHROPIC_API_KEY)(
-			"should use default cache TTL (no ttl field) when VOLT_CACHE_RETENTION is not set",
+			"should use default cache TTL (no ttl field) when cacheRetention is not set",
 			async () => {
 				const model = getModel("anthropic", "claude-haiku-4-5");
 				let capturedPayload: any = null;
@@ -75,12 +75,12 @@ describe("Cache Retention (VOLT_CACHE_RETENTION)", () => {
 			},
 		);
 
-		it.skipIf(!process.env.ANTHROPIC_API_KEY)("should use 1h cache TTL when VOLT_CACHE_RETENTION=long", async () => {
-			process.env.VOLT_CACHE_RETENTION = "long";
+		it.skipIf(!process.env.ANTHROPIC_API_KEY)("should use 1h cache TTL when cacheRetention is long", async () => {
 			const model = getModel("anthropic", "claude-haiku-4-5");
 			let capturedPayload: any = null;
 
 			const s = stream(model, context, {
+				cacheRetention: "long",
 				onPayload: stopAfterPayload((payload) => {
 					capturedPayload = payload;
 				}),
@@ -97,9 +97,22 @@ describe("Cache Retention (VOLT_CACHE_RETENTION)", () => {
 			expect(capturedPayload.system[0].cache_control).toEqual({ type: "ephemeral", ttl: "1h" });
 		});
 
-		it("should add ttl for non-api.anthropic.com baseUrl by default", async () => {
+		it("does not read VOLT_CACHE_RETENTION from the environment", async () => {
 			process.env.VOLT_CACHE_RETENTION = "long";
+			let capturedPayload: any = null;
+			const s = streamAnthropic(getModel("anthropic", "claude-haiku-4-5"), context, {
+				apiKey: "fake-key",
+				onPayload: stopAfterPayload((payload) => {
+					capturedPayload = payload;
+				}),
+			});
+			for await (const event of s) {
+				if (event.type === "error") break;
+			}
+			expect(capturedPayload.system[0].cache_control).toEqual({ type: "ephemeral" });
+		});
 
+		it("should add ttl for non-api.anthropic.com baseUrl by default", async () => {
 			// Create a model with a different baseUrl (simulating a proxy)
 			const baseModel = getModel("anthropic", "claude-haiku-4-5");
 			const proxyModel = {
@@ -119,6 +132,7 @@ describe("Cache Retention (VOLT_CACHE_RETENTION)", () => {
 			try {
 				const s = streamAnthropic(proxyModel, context, {
 					apiKey: "fake-key",
+					cacheRetention: "long",
 					onPayload: stopAfterPayload((payload) => {
 						capturedPayload = payload;
 					}),

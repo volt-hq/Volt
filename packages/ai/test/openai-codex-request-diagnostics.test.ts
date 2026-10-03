@@ -34,7 +34,7 @@ const options: OpenAICodexResponsesOptions = {
 	sessionId,
 	transport: "auto",
 	cacheRetention: "short",
-	env: { VOLT_CODEX_REQUEST_DIAGNOSTICS: "1" },
+	requestDiagnostics: true,
 };
 
 interface SentBody extends Record<string, unknown> {
@@ -569,7 +569,7 @@ describe("Codex redacted request diagnostics", () => {
 				const item = () => ({ role: "user", content: `private-hook-evaluation-${++evaluations}` });
 				const result = await streamOpenAICodexResponses(model, context(), {
 					...options,
-					env: { VOLT_CODEX_REQUEST_DIAGNOSTICS: enabled ? "1" : "0" },
+					requestDiagnostics: enabled,
 					onPayload: (payload) => {
 						const body = payload as SentBody;
 						if (kind === "getter") {
@@ -727,26 +727,24 @@ describe("Codex redacted request diagnostics", () => {
 
 	it.each([
 		[undefined, undefined, false],
-		["0", undefined, false],
-		["true", undefined, false],
-		["1", "0", false],
-		["1", "", false],
-		["0", "1", true],
-		["1", undefined, true],
+		[undefined, "1", false],
+		[false, "1", false],
+		[true, undefined, true],
+		[true, "0", true],
 	] as const)(
-		"respects process flag %s and provider override %s without changing the body",
-		async (processFlag, providerFlag, enabled) => {
+		"respects requestDiagnostics %s, ignores VOLT_CODEX_REQUEST_DIAGNOSTICS=%s, and keeps the body",
+		async (requested, processFlag, enabled) => {
 			const mock = mockTransports();
 			const baseline = await streamOpenAICodexResponses(model, context(), {
 				...options,
 				transport: "sse",
-				env: { VOLT_CODEX_REQUEST_DIAGNOSTICS: "0" },
+				requestDiagnostics: false,
 			}).result();
 			vi.stubEnv("VOLT_CODEX_REQUEST_DIAGNOSTICS", processFlag);
 			const result = await streamOpenAICodexResponses(model, context(), {
 				...options,
 				transport: "sse",
-				env: providerFlag === undefined ? undefined : { VOLT_CODEX_REQUEST_DIAGNOSTICS: providerFlag },
+				requestDiagnostics: requested,
 			}).result();
 			expect([baseline.stopReason, result.stopReason]).toEqual(["stop", "stop"]);
 			expect(mock.sseBodyJson).toHaveLength(2);
@@ -760,11 +758,11 @@ describe("Codex redacted request diagnostics", () => {
 		"leaves the complete request sequence unchanged with diagnostics enabled over %s",
 		async (transport) => {
 			const sequences: SentBody[][] = [];
-			for (const flag of ["0", "1"]) {
+			for (const enabled of [false, true]) {
 				closeOpenAICodexWebSocketSessions();
 				resetOpenAICodexWebSocketDebugStats();
 				const mock = mockTransports();
-				const settings = { ...options, transport, env: { VOLT_CODEX_REQUEST_DIAGNOSTICS: flag } };
+				const settings = { ...options, transport, requestDiagnostics: enabled };
 				const firstContext = context();
 				const first = await streamOpenAICodexResponses(model, firstContext, settings).result();
 				const second = await streamOpenAICodexResponses(model, appendReply(firstContext, first), settings).result();
@@ -781,7 +779,7 @@ describe("Codex redacted request diagnostics", () => {
 				).result();
 				for (const message of [first, second, compaction]) {
 					expect(message.stopReason).toBe("stop");
-					expect(requestDiagnostics(message)).toHaveLength(flag === "1" ? 1 : 0);
+					expect(requestDiagnostics(message)).toHaveLength(enabled ? 1 : 0);
 				}
 				sequences.push(transport === "sse" ? mock.sseBodies : mock.websocketBodies);
 			}

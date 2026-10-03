@@ -6,7 +6,6 @@
  */
 
 import type { Server } from "node:http";
-import { getProviderEnvValue } from "../provider-env.ts";
 import { fetchAnthropicSubscriptionUsage } from "./anthropic-usage.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { generatePKCE } from "./pkce.ts";
@@ -30,7 +29,7 @@ const decode = (s: string) => atob(s);
 const CLIENT_ID = decode("OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl");
 const AUTHORIZE_URL = "https://claude.ai/oauth/authorize";
 const TOKEN_URL = "https://platform.claude.com/v1/oauth/token";
-const CALLBACK_HOST = getProviderEnvValue("VOLT_OAUTH_CALLBACK_HOST") || "127.0.0.1";
+const DEFAULT_CALLBACK_HOST = "127.0.0.1";
 const CALLBACK_PORT = 53692;
 const CALLBACK_PATH = "/callback";
 const REDIRECT_URI = `http://localhost:${CALLBACK_PORT}${CALLBACK_PATH}`;
@@ -97,7 +96,7 @@ function formatErrorDetails(error: unknown): string {
 	return String(error);
 }
 
-async function startCallbackServer(expectedState: string): Promise<CallbackServerInfo> {
+async function startCallbackServer(expectedState: string, callbackHost: string): Promise<CallbackServerInfo> {
 	const { createServer } = await getNodeApis();
 
 	return new Promise((resolve, reject) => {
@@ -155,7 +154,7 @@ async function startCallbackServer(expectedState: string): Promise<CallbackServe
 			reject(err);
 		});
 
-		server.listen(CALLBACK_PORT, CALLBACK_HOST, () => {
+		server.listen(CALLBACK_PORT, callbackHost, () => {
 			resolve({
 				server,
 				redirectUri: REDIRECT_URI,
@@ -234,9 +233,11 @@ export async function loginAnthropic(options: {
 	onPrompt: (prompt: OAuthPrompt) => Promise<string>;
 	onProgress?: (message: string) => void;
 	onManualCodeInput?: () => Promise<string>;
+	/** Host the callback server listens on. Default: "127.0.0.1". */
+	callbackHost?: string;
 }): Promise<OAuthCredentials> {
 	const { verifier, challenge } = await generatePKCE();
-	const server = await startCallbackServer(verifier);
+	const server = await startCallbackServer(verifier, options.callbackHost ?? DEFAULT_CALLBACK_HOST);
 
 	let code: string | undefined;
 	let state: string | undefined;
@@ -391,6 +392,7 @@ export const anthropicOAuthProvider: OAuthProviderInterface = {
 			onPrompt: callbacks.onPrompt,
 			onProgress: callbacks.onProgress,
 			onManualCodeInput: callbacks.onManualCodeInput,
+			callbackHost: callbacks.callbackHost,
 		});
 	},
 

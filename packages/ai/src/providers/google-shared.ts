@@ -26,7 +26,6 @@ import type {
 } from "../types.ts";
 import type { JsonObject } from "../utils/json-value.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
-import type { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 type GoogleApiType = "google-generative-ai" | "google-vertex";
@@ -110,18 +109,14 @@ function supportsMultimodalFunctionResponse(modelId: string): boolean {
 /**
  * Convert internal messages to Gemini Content[] format.
  */
-export function convertMessages<T extends GoogleApiType>(
-	model: Model<T>,
-	context: Context,
-	toolResultPayload?: ToolResultPayloadTracker,
-): Content[] {
+export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
 	const normalizeToolCallId = (id: string): string => {
 		if (!requiresToolCallId(model.id)) return id;
 		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
 	};
 
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId, toolResultPayload);
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 
 	for (const msg of transformedMessages) {
 		if (msg.role === "user") {
@@ -246,8 +241,6 @@ export function convertMessages<T extends GoogleApiType>(
 					parts: [functionResponsePart],
 				});
 			}
-
-			toolResultPayload?.include(msg);
 
 			// For Gemini < 3, add images in a separate user message
 			if (hasImages && !modelSupportsMultimodalFunctionResponse) {

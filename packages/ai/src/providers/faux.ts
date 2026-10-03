@@ -260,7 +260,7 @@ function withUsageEstimate(
 	let cacheRead = 0;
 	let cacheWrite = 0;
 	const sessionId = options?.sessionId;
-	const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention, options?.env);
+	const cacheRetention = resolvePromptCacheRetention(model, options?.cacheRetention);
 
 	if (sessionId && cacheRetention !== "none") {
 		const previousPrompt = promptCache.get(sessionId);
@@ -298,7 +298,7 @@ function estimateRefreshUsage(
 	const promptText = serializeContext(context);
 	const promptTokens = estimateTokens(promptText);
 	const sessionId = options?.sessionId;
-	const cached = sessionId && resolvePromptCacheRetention(model, options?.cacheRetention, options?.env) !== "none";
+	const cached = sessionId && resolvePromptCacheRetention(model, options?.cacheRetention) !== "none";
 	const previousPrompt = cached ? promptCache.get(sessionId) : undefined;
 	const cacheRead = previousPrompt
 		? estimateTokens(previousPrompt.slice(0, commonPrefixLength(previousPrompt, promptText)))

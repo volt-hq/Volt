@@ -224,6 +224,29 @@ describe("session entry codec", () => {
 		).toThrow("must not be empty");
 	});
 
+	it("stores a client input identity beside the user message, never inside it", () => {
+		const entry = {
+			type: "message",
+			id: "identified",
+			parentId: null,
+			timestamp: ENTRY_TIMESTAMP,
+			message: { role: "user", content: "hello", timestamp: 1 },
+		};
+		expect(parseSessionEntryForAdmission({ ...entry, clientMessageId: "client-1" })).toMatchObject({
+			clientMessageId: "client-1",
+			message: { role: "user", content: "hello", timestamp: 1 },
+		});
+		expect(() =>
+			parseSessionEntryForAdmission({ ...entry, message: { ...entry.message, clientMessageId: "client-1" } }),
+		).toThrow("$.message.clientMessageId: unknown property");
+		expect(() => parseSessionEntryForAdmission({ ...entry, clientMessageId: "-invalid" })).toThrow(
+			"invalid client input identity",
+		);
+		expect(() =>
+			parseSessionEntryForAdmission({ ...entry, message: validAssistantMessage(), clientMessageId: "client-1" }),
+		).toThrow("only user messages have a client input identity");
+	});
+
 	it("rejects noncanonical JSON, timestamps, numbers, and modes", () => {
 		const cyclic: Record<string, unknown> = {};
 		cyclic.self = cyclic;
@@ -348,9 +371,9 @@ describe("session entry codec", () => {
 					message: {
 						role: "user",
 						content: "too early",
-						clientMessageId: "client-1",
 						timestamp: MESSAGE_TIMESTAMP,
 					},
+					clientMessageId: "client-1",
 				},
 			]),
 		).toThrow("requires a started receipt");

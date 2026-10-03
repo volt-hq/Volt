@@ -50,11 +50,7 @@ async function setup(extra: HarnessOptions = {}) {
 	harness.setResponses = (responses) =>
 		setResponses(
 			responses.map((response) => async (context, options, state, model) => {
-				await options?.onPayload?.({ messages: structuredClone(context.messages) }, model, {
-					toolResultMessageIndices: context.messages.flatMap((message, index) =>
-						message.role === "toolResult" ? [index] : [],
-					),
-				});
+				await options?.onPayload?.({ messages: structuredClone(context.messages) }, model);
 				return typeof response === "function" ? response(context, options, state, model) : response;
 			}),
 		);

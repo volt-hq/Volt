@@ -39,6 +39,7 @@ under the MIT License.
   - [Custom Models](#custom-models)
   - [OpenAI Compatibility Settings](#openai-compatibility-settings)
   - [Type Safety](#type-safety)
+- [Replaying Conversation History](#replaying-conversation-history)
 - [Cross-Provider Handoffs](#cross-provider-handoffs)
 - [Context Serialization](#context-serialization)
   - [Message and Model Schemas](#message-and-model-schemas)
@@ -743,9 +744,11 @@ if (response.stopReason === 'aborted') {
 
 ### Continuing After Abort
 
-Aborted messages can be added to the conversation context and continued in subsequent requests:
+Keep aborted messages in your history and continue in subsequent requests. Apply `applyReplayPolicy` to the history before each request: it drops the aborted turn, so the model continues from the last valid state (see [Replaying Conversation History](#replaying-conversation-history)):
 
 ```typescript
+import { applyReplayPolicy } from '@hansjm10/volt-ai';
+
 const context = {
   messages: [
     { role: 'user', content: 'Explain quantum computing in detail' }
@@ -763,7 +766,7 @@ context.messages.push(partial);
 context.messages.push({ role: 'user', content: 'Please continue' });
 
 // Continue the conversation
-const continuation = await client.complete(model, context);
+const continuation = await client.complete(model, { ...context, messages: applyReplayPolicy(context.messages) });
 ```
 
 ### Debugging Provider Payloads
@@ -1079,6 +1082,24 @@ const options: AnthropicOptions = {
 await streamAnthropic(claude, context, options);
 ```
 
+## Replaying Conversation History
+
+Providers send the messages they are given. A stored history can hold turns that no provider accepts back as-is, so apply `applyReplayPolicy(messages)` to the message list before each request:
+
+- Errored and aborted assistant turns are dropped together with the results of their tool calls. A later completed call may reuse an interrupted call's ID.
+- A turn dropped because its tool call arguments were rejected (an `invalid_tool_arguments` diagnostic) is replaced by a user message explaining that none of its tool calls ran.
+- Every tool call of a completed turn gets a result: a missing one is synthesized as an error result (`"No result provided"`) before the next user or assistant message, or at the end.
+
+The function is pure: it does not mutate its input, returns retained messages by reference, and returns an equal result for an equal input. Applying it to its own output changes nothing. Keep the original history as the record; replay it for each request.
+
+```typescript
+import { applyReplayPolicy } from '@hansjm10/volt-ai';
+
+const response = await client.complete(model, { ...context, messages: applyReplayPolicy(context.messages) });
+```
+
+Model-dependent normalization stays inside the providers: images become placeholders for models without image input, tool call IDs are normalized for the target API, and thinking from another model becomes text (see [Cross-Provider Handoffs](#cross-provider-handoffs)).
+
 ## Cross-Provider Handoffs
 
 The library supports seamless handoffs between different LLM providers within the same conversation. This allows you to switch models mid-conversation while preserving context, including thinking blocks, tool calls, and tool results.
@@ -1127,7 +1148,7 @@ All providers can handle messages from other providers, including:
 - Text content
 - Tool calls and tool results (including images in tool results)
 - Thinking/reasoning blocks (transformed to tagged text for cross-provider compatibility)
-- Aborted messages with partial content
+- Histories with aborted turns, once replayed with `applyReplayPolicy`
 
 This enables flexible workflows where you can:
 - Start with a fast model for initial responses
@@ -1226,7 +1247,7 @@ Providers still read their own non-secret configuration from the environment in 
 
 ### Provider-Scoped Environment Overrides
 
-Pass `env` in stream options to scope provider configuration to a request. Values in `env` are used before process environment variables for provider configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings, `VOLT_CACHE_RETENTION`, and `HTTP_PROXY`/`HTTPS_PROXY`.
+Pass `env` in stream options to scope provider configuration to a request. Values in `env` are used before process environment variables for provider configuration such as Cloudflare account IDs, Azure OpenAI settings, Vertex project/location, Bedrock settings, and `HTTP_PROXY`/`HTTPS_PROXY`. The library reads no Volt-specific environment variables; Volt settings such as prompt cache retention are request options (`cacheRetention`).
 
 ```typescript
 const model = getModel('cloudflare-ai-gateway', 'workers-ai/@cf/moonshotai/kimi-k2.6');
@@ -1316,6 +1337,8 @@ import {
 } from '@hansjm10/volt-ai/oauth';
 ```
 
+Logins that use a local callback server (Anthropic, OpenAI Codex browser login) listen on `127.0.0.1` by default. Pass `callbackHost` in the login options or `OAuthLoginCallbacks` to listen elsewhere, for example `0.0.0.0` inside a container.
+
 ### Login Flow Example
 
 ```typescript
@@ -1401,7 +1424,7 @@ The result contains only provider-neutral quota fields. `fetchedAt` and `resetsA
 
 ### Provider Notes
 
-**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity.
+**OpenAI Codex**: Requires a ChatGPT Plus or Pro subscription. Provides access to GPT-5.x Codex models with extended context windows and reasoning capabilities. The library automatically handles session-based prompt caching when `sessionId` is provided in stream options. You can set `transport` in stream options to `"sse"`, `"websocket"`, or `"auto"` for Codex Responses transport selection. When using WebSocket with a `sessionId`, connections are reused per session and expire after 5 minutes of inactivity. Set `requestDiagnostics: true` in stream options to record redacted request fingerprints as `codex_request` diagnostics on the response.
 
 **Azure OpenAI (Responses)**: Uses the Responses API only. Pass the Azure API key as `apiKey` and set either `AZURE_OPENAI_BASE_URL` or `AZURE_OPENAI_RESOURCE_NAME`. `AZURE_OPENAI_BASE_URL` supports both `https://<resource>.openai.azure.com` and `https://<resource>.cognitiveservices.azure.com`; root endpoints are normalized to `.../openai/v1` automatically. Use `AZURE_OPENAI_API_VERSION` (defaults to `v1`) to override the API version if needed. Deployment names are treated as model IDs by default, override with `azureDeploymentName` or `AZURE_OPENAI_DEPLOYMENT_NAME_MAP` using comma-separated `model-id=deployment` pairs (for example `gpt-4o-mini=my-deployment,gpt-4o=prod`). Legacy deployment-based URLs are intentionally unsupported.
 

@@ -459,13 +459,11 @@ const streamMyProvider = createProviderStream<
 
 The runner starts the message on the first fragment, maps any failure under an aborted signal to `stopReason: "aborted"`, and turns every other failure into a typed `error` on the assistant message: `{ kind, retryable, providerCode?, message }`. Failures carrying an HTTP `status` (and an optional provider `code` or `type`) are classified by `classifyProviderError`; supply `mapError` for provider-specific failures, or throw `new ProviderStreamError(kind, message)` where the provider already knows the classification. Only a failed `send` with a retryable error retries, up to `maxRetries`.
 
-### Payload delivery evidence
+### Replayed context and payload delivery
 
-Return the serialized payload from `buildRequest` together with its `metadata`; the runner calls `options.onPayload(payload, model, metadata)` once before the first attempt. `ProviderPayloadMetadata.toolResultMessageIndices` contains the zero-based indices of original `context.messages` tool results represented in that payload. Record these indices when emitting each tool result, after replay filtering. Preserve the source index through tool-call ID normalization and grouped result messages. Do not include omitted messages or synthesized missing-result placeholders.
+The `context` a provider receives is already replayed: Volt applies `applyReplayPolicy` from `@hansjm10/volt-ai` before each request, so errored and aborted turns are gone, rejected tool calls are explained, and every tool call has a result. Apply only model-dependent normalization, such as tool call ID formats, and serialize every message, including every tool result, into the payload.
 
-The metadata is host-only and must not enter the wire payload. It describes the payload before the callback runs, not a replacement returned by the callback. Do not infer it from tool-call IDs or scan output text for matches. Providers that cannot establish this mapping must omit the metadata rather than claim delivery.
-
-Volt uses this evidence to clear background-job notices only after an unchanged payload hook and a successful, non-aborted response. Missing evidence leaves notices visible; it does not fail inference. See [Background jobs](usage.md#background-jobs).
+Return the serialized payload from `buildRequest`; the runner calls `options.onPayload(payload, model)` once before the first attempt. Volt treats the tool results of the replayed context as delivered, and clears background-job notices, only after the payload hook left the payload unchanged and the response completed successfully. A provider without a wire payload gets no `onPayload` call, which leaves notices visible; it does not fail inference. See [Background jobs](usage.md#background-jobs).
 
 ### Fragment Types
 

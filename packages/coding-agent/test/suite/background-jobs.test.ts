@@ -4,7 +4,6 @@ import { setKeybindings, TuiMainScreen } from "@hansjm10/volt-tui";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { convertResponsesMessages } from "../../../ai/src/providers/openai-responses-shared.ts";
-import { ToolResultPayloadTracker } from "../../../ai/src/providers/tool-result-payload.ts";
 import { VirtualTerminal } from "../../../tui/test/virtual-terminal.ts";
 import type { AgentSessionRuntime } from "../../src/core/agent-session-runtime.ts";
 import {
@@ -162,11 +161,7 @@ describe("AgentSession background jobs", () => {
 			setResponses(
 				responses.map((response) => async (context, options, state, model) => {
 					const payload = { messages: structuredClone(context.messages) };
-					const replacement = (await options?.onPayload?.(payload, model, {
-						toolResultMessageIndices: payload.messages.flatMap((message, index) =>
-							message.role === "toolResult" ? [index] : [],
-						),
-					})) as typeof payload | undefined;
+					const replacement = (await options?.onPayload?.(payload, model)) as typeof payload | undefined;
 					const delivered = { ...context, messages: (replacement === undefined ? payload : replacement).messages };
 					return typeof response === "function" ? response(delivered, options, state, model) : response;
 				}),
@@ -351,7 +346,7 @@ describe("AgentSession background jobs", () => {
 	});
 
 	it.each(["error", "aborted"] as const)(
-		"acknowledges only results actually serialized after %s replay filtering",
+		"acknowledges only results in the replayed context after an %s turn is dropped",
 		async (stopReason) => {
 			const backend = controlledBash();
 			let omittedJobId: string | undefined;
@@ -381,11 +376,8 @@ describe("AgentSession background jobs", () => {
 			// Use the real serializer with a different provider, but return a faux response.
 			const response: FauxResponseStep = async (context, options) => {
 				const model = getModel("openai", "gpt-5.4");
-				const toolResultPayload = new ToolResultPayloadTracker();
-				const payload = {
-					input: convertResponsesMessages(model, context, new Set(["openai"]), { toolResultPayload }),
-				};
-				await options?.onPayload?.(payload, model, toolResultPayload.metadata);
+				const payload = { input: convertResponsesMessages(model, context, new Set(["openai"])) };
+				await options?.onPayload?.(payload, model);
 				requests.push(payload.input);
 				return fauxAssistantMessage("Received the serialized results.");
 			};
@@ -411,43 +403,20 @@ describe("AgentSession background jobs", () => {
 		},
 	);
 
-	it.each(["missing", "empty", "other-message", "later-missing", "later-empty"] as const)(
-		"retains a terminal result when payload evidence is %s",
-		async (evidence) => {
-			const backend = controlledBash();
-			const harness = await setup();
-			const job = await startJob(harness);
-			backend.finish.resolve();
-			await harness.session.waitForBackgroundJobs();
-			harness.faux.setResponses([
-				fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
-				async (context, options, _state, model) => {
-					const payload = { messages: context.messages };
-					if (evidence.startsWith("later-")) {
-						await options?.onPayload?.(payload, model, {
-							toolResultMessageIndices: context.messages.flatMap((message, index) =>
-								message.role === "toolResult" ? [index] : [],
-							),
-						});
-					}
-					await options?.onPayload?.(
-						payload,
-						model,
-						evidence === "missing" || evidence === "later-missing"
-							? undefined
-							: {
-									toolResultMessageIndices:
-										evidence === "other-message" ? [0, -1, context.messages.length, 1.5] : [],
-								},
-					);
-					return fauxAssistantMessage("Provider completed without result evidence.");
-				},
-			]);
-			await harness.session.prompt("Read the result");
-			expect(harness.session.getLastAssistantText()).toBe("Provider completed without result evidence.");
-			expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
-		},
-	);
+	it("retains a terminal result when the provider builds no payload", async () => {
+		const backend = controlledBash();
+		const harness = await setup();
+		const job = await startJob(harness);
+		backend.finish.resolve();
+		await harness.session.waitForBackgroundJobs();
+		harness.faux.setResponses([
+			fauxAssistantMessage(fauxToolCall("jobs", { action: "read", id: job.id }), { stopReason: "toolUse" }),
+			fauxAssistantMessage("Provider completed without a payload."),
+		]);
+		await harness.session.prompt("Read the result");
+		expect(harness.session.getLastAssistantText()).toBe("Provider completed without a payload.");
+		expect(harness.session.backgroundJobs.listUncollected()).toMatchObject([{ id: job.id }]);
+	});
 
 	it.each(["redacted", "replacement", "missing-details", "error"] as const)(
 		"respects post-policy inspection results before acknowledging collection: %s",

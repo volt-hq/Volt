@@ -66,7 +66,6 @@ import {
 } from "./anthropic-capabilities.ts";
 import { resolvePromptCacheRetention, supportsPromptCacheMode } from "./prompt-cache.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampReasoning } from "./simple-options.ts";
-import { ToolResultPayloadTracker } from "./tool-result-payload.ts";
 import { transformMessages } from "./transform-messages.ts";
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
@@ -222,15 +221,14 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		const forcePromptCache = getProviderEnvValue("AWS_BEDROCK_FORCE_CACHE", options.env) === "1";
 		const cacheRetention =
 			forcePromptCache || supportsPromptCacheMode(model, "explicit")
-				? resolvePromptCacheRetention(model, options.cacheRetention, options.env, {
+				? resolvePromptCacheRetention(model, options.cacheRetention, {
 						forceShort: forcePromptCache,
 					})
 				: "none";
 		const inferenceMaxTokens = options.maxTokens ?? (isAnthropicClaudeModel(model) ? model.maxTokens : undefined);
-		const toolResultPayload = new ToolResultPayloadTracker();
 		const payload = {
 			modelId: model.id,
-			messages: convertMessages(context, model, cacheRetention, toolResultPayload),
+			messages: convertMessages(context, model, cacheRetention),
 			system: buildSystemPrompt(context.systemPrompt, cacheRetention),
 			inferenceConfig: {
 				...(inferenceMaxTokens !== undefined && { maxTokens: inferenceMaxTokens }),
@@ -245,7 +243,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream", BedrockOpt
 		};
 		return {
 			payload,
-			metadata: toolResultPayload.metadata,
 			async send(commandInput, { signal }) {
 				const response = await client.send(new ConverseStreamCommand(commandInput), { abortSignal: signal });
 				const responseHeaders: Record<string, string> = {};
@@ -732,10 +729,9 @@ function convertMessages(
 	context: Context,
 	model: Model<"bedrock-converse-stream">,
 	cacheRetention: CacheRetention,
-	toolResultPayload?: ToolResultPayloadTracker,
 ): Message[] {
 	const result: Message[] = [];
-	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId, toolResultPayload);
+	const transformedMessages = transformMessages(context.messages, model, normalizeToolCallId);
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const m = transformedMessages[i];
@@ -848,7 +844,6 @@ function convertMessages(
 						status: m.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 					},
 				});
-				toolResultPayload?.include(m);
 
 				// Look ahead for consecutive toolResult messages
 				let j = i + 1;
@@ -861,7 +856,6 @@ function convertMessages(
 							status: nextMsg.isError ? ToolResultStatus.ERROR : ToolResultStatus.SUCCESS,
 						},
 					});
-					toolResultPayload?.include(nextMsg);
 					j++;
 				}
 

@@ -17,7 +17,6 @@ if (typeof process !== "undefined" && (process.versions?.node || process.version
 	});
 }
 
-import { getProviderEnvValue } from "../provider-env.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 import { oauthErrorHtml, oauthSuccessHtml } from "./oauth-page.ts";
 import { fetchOpenAICodexSubscriptionUsage } from "./openai-codex-usage.ts";
@@ -48,9 +47,7 @@ const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 type OAuthToken = { access: string; refresh: string; expires: number };
 type TokenOperation = "exchange" | "refresh";
 
-function getCallbackHost(): string {
-	return getProviderEnvValue("VOLT_OAUTH_CALLBACK_HOST") || "127.0.0.1";
-}
+const DEFAULT_CALLBACK_HOST = "127.0.0.1";
 
 type DeviceAuthInfo = {
 	deviceAuthId: string;
@@ -323,7 +320,7 @@ type OAuthServerInfo = {
 	waitForCode: () => Promise<{ code: string } | null>;
 };
 
-function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
+function startLocalOAuthServer(state: string, callbackHost: string): Promise<OAuthServerInfo> {
 	if (!_http) {
 		throw new Error("OpenAI Codex OAuth is only available in Node.js environments");
 	}
@@ -373,7 +370,7 @@ function startLocalOAuthServer(state: string): Promise<OAuthServerInfo> {
 
 	return new Promise((resolve) => {
 		server
-			.listen(1455, getCallbackHost(), () => {
+			.listen(1455, callbackHost, () => {
 				resolve({
 					close: () => server.close(),
 					cancelWait: () => {
@@ -462,6 +459,7 @@ export async function loginOpenAICodexDeviceCode(options: {
  *                                    Races with browser callback - whichever completes first wins.
  *                                    Useful for showing paste input immediately alongside browser flow.
  * @param options.originator - OAuth originator parameter (defaults to "volt")
+ * @param options.callbackHost - Host the callback server listens on (defaults to "127.0.0.1")
  */
 export async function loginOpenAICodex(options: {
 	onAuth: (info: { url: string; instructions?: string }) => void;
@@ -469,9 +467,10 @@ export async function loginOpenAICodex(options: {
 	onProgress?: (message: string) => void;
 	onManualCodeInput?: () => Promise<string>;
 	originator?: string;
+	callbackHost?: string;
 }): Promise<OAuthCredentials> {
 	const { verifier, state, url } = await createAuthorizationFlow(options.originator);
-	const server = await startLocalOAuthServer(state);
+	const server = await startLocalOAuthServer(state, options.callbackHost ?? DEFAULT_CALLBACK_HOST);
 
 	options.onAuth({ url, instructions: "A browser window should open. Complete login to finish." });
 
@@ -595,6 +594,7 @@ export const openaiCodexOAuthProvider: OAuthProviderInterface = {
 			onPrompt: callbacks.onPrompt,
 			onProgress: callbacks.onProgress,
 			onManualCodeInput: callbacks.onManualCodeInput,
+			callbackHost: callbacks.callbackHost,
 		});
 	},
 

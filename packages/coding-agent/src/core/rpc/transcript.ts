@@ -234,7 +234,7 @@ function projectTranscriptEntry(
 				role: "user",
 				text: text.text,
 				timestamp: normalizeTimestamp(entry.timestamp),
-				...(message.clientMessageId === undefined ? {} : { clientMessageId: message.clientMessageId }),
+				...(entry.clientMessageId === undefined ? {} : { clientMessageId: entry.clientMessageId }),
 				...(imageCount > 0 ? { imageCount } : {}),
 			},
 			truncated: text.truncated,

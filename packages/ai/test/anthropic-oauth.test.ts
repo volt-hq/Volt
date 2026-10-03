@@ -1,3 +1,4 @@
+import { Server } from "node:net";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { loginAnthropic, refreshAnthropicToken } from "../src/utils/oauth/anthropic.ts";
 
@@ -33,6 +34,30 @@ function getJsonBody(init?: RequestInit): Record<string, string> {
 describe("Anthropic OAuth", { concurrent: false }, () => {
 	afterEach(() => {
 		vi.unstubAllGlobals();
+		vi.unstubAllEnvs();
+		vi.restoreAllMocks();
+	});
+
+	it.each([
+		[undefined, "127.0.0.1"],
+		["localhost", "localhost"],
+	] as const)("binds the callback server to callbackHost %s", async (callbackHost, expectedHost) => {
+		vi.stubEnv("VOLT_OAUTH_CALLBACK_HOST", "0.0.0.0");
+		const listen = vi.spyOn(Server.prototype, "listen");
+		vi.stubGlobal(
+			"fetch",
+			vi.fn(async () => jsonResponse({ access_token: "access", refresh_token: "refresh", expires_in: 3600 })),
+		);
+		let authUrl = "";
+		await loginAnthropic({
+			onAuth: (info) => {
+				authUrl = info.url;
+			},
+			onPrompt: async () => "",
+			onManualCodeInput: async () => `manual-code#${new URL(authUrl).searchParams.get("state")}`,
+			...(callbackHost === undefined ? {} : { callbackHost }),
+		});
+		expect(listen.mock.calls[0]?.slice(0, 2)).toEqual([53692, expectedHost]);
 	});
 
 	it("keeps the localhost redirect_uri for manual callback login", async () => {

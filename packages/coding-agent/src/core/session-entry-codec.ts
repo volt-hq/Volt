@@ -171,12 +171,9 @@ function validateAgentMessage(value: unknown, path: string): asserts value is Ag
 	const message = record(value, path);
 	const role = stringValue(message.role, `${path}.role`);
 	if (role === "user") {
-		exactKeys(message, path, ["role", "content", "timestamp"], ["clientMessageId"]);
+		exactKeys(message, path, ["role", "content", "timestamp"]);
 		validateUserContent(message.content, `${path}.content`);
 		messageTimestamp(message.timestamp, `${path}.timestamp`);
-		if (message.clientMessageId !== undefined && !isValidClientMessageId(message.clientMessageId)) {
-			fail(`${path}.clientMessageId`, "invalid client input identity");
-		}
 		return;
 	}
 	if (role === "assistant") {
@@ -350,8 +347,13 @@ function parseSessionEntry(
 
 	switch (type) {
 		case "message":
-			exactKeys(entry, "$", [...base, "message"], optionalOrdinal);
+			exactKeys(entry, "$", [...base, "message"], [...optionalOrdinal, "clientMessageId"]);
 			validateAgentMessage(entry.message, "$.message");
+			if (entry.clientMessageId !== undefined) {
+				assertClientMessageIdValue(entry.clientMessageId, "$.clientMessageId");
+				if (entry.message.role !== "user")
+					fail("$.clientMessageId", "only user messages have a client input identity");
+			}
 			break;
 		case "client_input_receipt": {
 			exactKeys(entry, "$", [...base, "clientMessageId", "command", "semanticDigest", "input"], optionalOrdinal);
@@ -666,14 +668,12 @@ function validateClientInputSequenceEntry(entry: SessionEntry, records: Map<stri
 		record.error = entry.state === "failed" ? entry.error : undefined;
 		return;
 	}
-	if (entry.type !== "message" || entry.message.role !== "user" || entry.message.clientMessageId === undefined) {
+	if (entry.type !== "message" || entry.clientMessageId === undefined) {
 		return;
 	}
-	const record = records.get(entry.message.clientMessageId);
+	const record = records.get(entry.clientMessageId);
 	if (!record || record.state !== "started") {
-		throw new Error(
-			`Canonical client input ${JSON.stringify(entry.message.clientMessageId)} requires a started receipt`,
-		);
+		throw new Error(`Canonical client input ${JSON.stringify(entry.clientMessageId)} requires a started receipt`);
 	}
 	record.state = "completed";
 	record.error = undefined;
@@ -770,10 +770,8 @@ export function validatePersistedSessionEntrySequence(
 		if (options.snapshot && isHostOnlySessionEntryType(entry.type) && entry.type !== "leaf") {
 			throw new Error(`Session snapshot contains unsupported host-only entry: ${entry.type}`);
 		}
-		if (options.snapshot && entry.type === "message" && entry.message.role === "user") {
-			if (entry.message.clientMessageId !== undefined) {
-				throw new Error("Session snapshot contains a transport-owned client message identity");
-			}
+		if (options.snapshot && entry.type === "message" && entry.clientMessageId !== undefined) {
+			throw new Error("Session snapshot contains a transport-owned client message identity");
 		}
 		if (options.snapshot && entry.type === "leaf" && index !== values.length - 1) {
 			throw new Error("Session snapshot leaf must be the final entry");

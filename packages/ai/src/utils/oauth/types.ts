@@ -85,6 +85,8 @@ export interface OAuthLoginCallbacks {
 	/** Show an interactive selector and return the selected option id, or undefined on cancel. */
 	onSelect: (prompt: OAuthSelectPrompt) => Promise<string | undefined>;
 	signal?: AbortSignal;
+	/** Host the local OAuth callback server listens on, for providers that use one. Default: "127.0.0.1". */
+	callbackHost?: string;
 }
 
 export interface OAuthProviderInterface {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { getModel } from "../src/models.ts";
 import { convertResponsesMessages } from "../src/providers/openai-responses-shared.ts";
 import { transformMessages } from "../src/providers/transform-messages.ts";
+import { applyReplayPolicy } from "../src/replay-policy.ts";
 import type { AssistantMessage, Message, ToolCall, ToolResultMessage } from "../src/types.ts";
 import type { JsonObject } from "../src/utils/json-value.ts";
 
@@ -60,19 +61,19 @@ describe("interrupted tool replay (#355)", () => {
 			];
 			const savedHistory = structuredClone(messages);
 
-			const replay = transformMessages(messages, model);
+			const replay = applyReplayPolicy(messages);
 
 			expect(replay).toEqual([completed, completedResult, continuation, continuation]);
-			expect(transformMessages(messages, model)).toEqual(replay);
+			expect(applyReplayPolicy(messages)).toEqual(replay);
 			expect(messages).toEqual(savedHistory);
 		},
 	);
 
 	it.each(["aborted", "error"] as const)("does not synthesize results for a trailing %s call", (stopReason) => {
-		expect(transformMessages([continuation, assistant(stopReason, "partial")], model)).toEqual([continuation]);
+		expect(applyReplayPolicy([continuation, assistant(stopReason, "partial")])).toEqual([continuation]);
 	});
 
-	it("filters results after cross-model normalization and preserves completed calls with tool errors", () => {
+	it("filters results before cross-model normalization and preserves completed calls with tool errors", () => {
 		const completed = assistant("toolUse", "completed|foreign/item");
 		const interrupted = assistant("aborted", "partial|foreign/item");
 		const messages: Message[] = [
@@ -85,7 +86,9 @@ describe("interrupted tool replay (#355)", () => {
 		const savedHistory = structuredClone(messages);
 		const targetModel = getModel("anthropic", "claude-sonnet-4-6");
 
-		const replay = transformMessages(messages, targetModel, (id) => id.replace(/[^a-zA-Z0-9_-]/g, "_"));
+		const replay = transformMessages(applyReplayPolicy(messages), targetModel, (id) =>
+			id.replace(/[^a-zA-Z0-9_-]/g, "_"),
+		);
 
 		expect(replay).toEqual([
 			{
@@ -109,15 +112,17 @@ describe("interrupted tool replay (#355)", () => {
 			completedResult,
 		];
 
-		expect(transformMessages(messages, model)).toEqual([continuation, completed, completedResult]);
+		expect(applyReplayPolicy(messages)).toEqual([continuation, completed, completedResult]);
 	});
 
 	it("continues synthesizing missing results for earlier completed calls", () => {
 		const completed = assistant("toolUse", "completed");
-		const replay = transformMessages(
-			[completed, assistant("aborted", "partial"), toolResult("partial", true), continuation],
-			model,
-		);
+		const replay = applyReplayPolicy([
+			completed,
+			assistant("aborted", "partial"),
+			toolResult("partial", true),
+			continuation,
+		]);
 
 		expect(replay).toEqual([
 			completed,
@@ -127,7 +132,7 @@ describe("interrupted tool replay (#355)", () => {
 				toolName: "edit",
 				content: [{ type: "text", text: "No result provided" }],
 				isError: true,
-				timestamp: expect.any(Number),
+				timestamp: completed.timestamp,
 			},
 			continuation,
 		]);
@@ -136,7 +141,7 @@ describe("interrupted tool replay (#355)", () => {
 	describe("rejected tool arguments (#452)", () => {
 		function rejected(details: JsonObject) {
 			const message = assistant("error", "call_rejected");
-			// An empty thinking block is dropped from replay, shifting later content indices.
+			// Provider normalization drops an empty thinking block; feedback reads indices from the stored message.
 			message.content.unshift({ type: "thinking", thinking: "" });
 			message.content[1] = { type: "toolCall", id: "call_rejected", name: "edit", arguments: { secret: "private" } };
 			message.diagnostics = [{ type: "invalid_tool_arguments", timestamp: 0, details }];
@@ -172,7 +177,7 @@ describe("interrupted tool replay (#355)", () => {
 			const messages: Message[] = [prompt, failure, toolResult("call_rejected", true), continuation];
 			const savedHistory = structuredClone(messages);
 
-			const replay = transformMessages(messages, model);
+			const replay = applyReplayPolicy(messages);
 
 			expect(replay).toEqual([
 				prompt,
@@ -180,13 +185,13 @@ describe("interrupted tool replay (#355)", () => {
 				continuation,
 			]);
 			expect(JSON.stringify(replay)).not.toContain("private");
-			expect(transformMessages(messages, model)).toEqual(replay);
+			expect(applyReplayPolicy(messages)).toEqual(replay);
 			expect(messages).toEqual(savedHistory);
 		});
 
 		it("does not explain aborted responses", () => {
 			const failure = { ...rejected({ code: "invalid_json" }), stopReason: "aborted" as const };
-			expect(transformMessages([failure, continuation], model)).toEqual([continuation]);
+			expect(applyReplayPolicy([failure, continuation])).toEqual([continuation]);
 		});
 	});
 
@@ -209,7 +214,7 @@ describe("interrupted tool replay (#355)", () => {
 			];
 			const savedHistory = structuredClone(messages);
 
-			const input = convertResponsesMessages(model, { messages }, allowedProviders);
+			const input = convertResponsesMessages(model, { messages: applyReplayPolicy(messages) }, allowedProviders);
 			const calls = input.filter((item) => item.type === "function_call");
 			const outputs = input.filter((item) => item.type === "function_call_output");
 

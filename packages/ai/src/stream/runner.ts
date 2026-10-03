@@ -3,7 +3,6 @@ import type {
 	Context,
 	Model,
 	ProviderError,
-	ProviderPayloadMetadata,
 	ProviderResponse,
 	StopReason,
 	StreamFunction,
@@ -77,8 +76,6 @@ export interface ProviderRequest<TPayload, TBody> {
 	 * A provider without a wire payload (such as a test double) leaves it undefined and gets no `onPayload` call.
 	 */
 	payload: TPayload;
-	/** Tool results the payload serializes, passed to `onPayload`. */
-	metadata?: ProviderPayloadMetadata;
 	/**
 	 * Send one attempt, resolving once the provider accepted the request and before any of its
 	 * body is parsed. Throw on rejection; the runner retries retryable failures.
@@ -207,8 +204,7 @@ async function runProviderStream<TApi extends Api, TOptions extends StreamOption
 		const request = await provider.buildRequest(ctx);
 		finish = request.finish?.bind(request);
 		let payload = request.payload;
-		const replacement =
-			payload === undefined ? undefined : await options.onPayload?.(payload, model, request.metadata);
+		const replacement = payload === undefined ? undefined : await options.onPayload?.(payload, model);
 		if (replacement !== undefined) payload = replacement as TPayload;
 		const sent = await sendWithRetry(request, payload, options, describeFailure);
 		if (sent.response) await options.onResponse?.(sent.response, model);

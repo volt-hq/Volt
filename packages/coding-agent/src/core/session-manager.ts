@@ -19,10 +19,14 @@ import {
 import { cloneCanonicalData } from "./canonical-data.ts";
 import {
 	type BashExecutionMessage,
+	type ClientUserMessage,
 	type CustomMessage,
 	createBranchSummaryMessage,
 	createCompactionSummaryMessage,
 	createCustomMessage,
+	getClientMessageId,
+	withClientMessageId,
+	withoutClientMessageId,
 } from "./messages.ts";
 import { clonePlanningState, DEFAULT_PLANNING_STATE, type PlanningState, parsePlanningState } from "./planning.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
@@ -335,7 +339,10 @@ export interface SessionEntryBase {
 
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
+	/** The stored message. A user message never carries its client input identity here. */
 	message: AgentMessage;
+	/** Client input identity of a client-submitted user message, stored beside the message. */
+	clientMessageId?: string;
 }
 
 export type ClientInputCommand = "prompt" | "steer" | "follow_up";
@@ -835,12 +842,11 @@ function generateId(byId: { has(id: string): boolean }): string {
 }
 
 function withoutClientInputIdentity(entry: SessionEntry): SessionEntry {
-	if (entry.type !== "message" || entry.message.role !== "user" || entry.message.clientMessageId === undefined) {
+	if (entry.type !== "message" || entry.clientMessageId === undefined) {
 		return entry;
 	}
-	const message = { ...entry.message };
-	delete message.clientMessageId;
-	return { ...entry, message };
+	const { clientMessageId: _clientMessageId, ...withoutIdentity } = entry;
+	return withoutIdentity;
 }
 
 export function createSessionSnapshotHeader(header: SessionHeader): SessionSnapshotHeader {
@@ -1008,7 +1014,11 @@ export function buildSessionContext(
 
 	const appendMessage = (entry: SessionEntry) => {
 		if (entry.type === "message") {
-			messages.push(entry.message);
+			messages.push(
+				entry.clientMessageId !== undefined && entry.message.role === "user"
+					? withClientMessageId(entry.message, entry.clientMessageId)
+					: entry.message,
+			);
 		} else if (entry.type === "custom_message") {
 			messages.push(
 				createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
@@ -2038,17 +2048,18 @@ export class SessionManager {
 		await this.appendAtomically(
 			() => {
 				for (const message of messages) {
-					if (message.role !== "user" || message.clientMessageId === undefined) continue;
-					const record = this.clientInputsById.get(message.clientMessageId);
+					const clientMessageId = getClientMessageId(message);
+					if (clientMessageId === undefined) continue;
+					const record = this.clientInputsById.get(clientMessageId);
 					if (record?.state === "accepted") {
-						this.transitionClientInput(message.clientMessageId, "started");
+						this.transitionClientInput(clientMessageId, "started");
 						const stateEntry = this.fileEntries.at(-1);
 						if (!stateEntry || stateEntry.type !== "client_input_state") {
 							throw new Error("Client input start transition was not staged");
 						}
 						entryIds.push(stateEntry.id);
 					}
-					clientMessageIds.push(message.clientMessageId);
+					clientMessageIds.push(clientMessageId);
 				}
 				if (planning !== undefined) {
 					entryIds.push(this.appendPlanningState(planning));
@@ -2146,9 +2157,9 @@ export class SessionManager {
 		await this.appendAtomically(
 			() => {
 				for (const message of canonicalMessages) {
-					if (message.role !== "user" || message.clientMessageId === undefined) continue;
-					if (this.getClientInput(message.clientMessageId)?.state === "started") {
-						this.rollbackClientInput(message.clientMessageId);
+					const clientMessageId = getClientMessageId(message);
+					if (clientMessageId !== undefined && this.getClientInput(clientMessageId)?.state === "started") {
+						this.rollbackClientInput(clientMessageId);
 					}
 				}
 				afterProjection = this._captureCanonicalProjection();
@@ -2194,11 +2205,7 @@ export class SessionManager {
 		const canonicalMessages = cloneCanonicalData([...messages], "Terminal delivery messages");
 		await this.appendAtomically(
 			() => {
-				const clientMessageIds = new Set(
-					canonicalMessages.flatMap((message) =>
-						message.role === "user" && message.clientMessageId !== undefined ? [message.clientMessageId] : [],
-					),
-				);
+				const clientMessageIds = new Set(canonicalMessages.flatMap((message) => getClientMessageId(message) ?? []));
 				for (const clientMessageId of clientMessageIds) {
 					const record = this.getClientInput(clientMessageId);
 					if (record?.state === "accepted" || record?.state === "started") {
@@ -2597,9 +2604,9 @@ export class SessionManager {
 	 * so it is easier to find them.
 	 * These need to be appended via appendCompaction() and appendBranchSummary() methods.
 	 */
-	appendMessage(message: Message | CustomMessage | BashExecutionMessage): string {
+	appendMessage(message: Message | ClientUserMessage | CustomMessage | BashExecutionMessage): string {
 		this.assertConversationAuthorityAvailable();
-		if (message.role === "user" && message.clientMessageId !== undefined) {
+		if ("clientMessageId" in message) {
 			requireStartedClientInputReceipt(this.clientInputsById, message.clientMessageId);
 		}
 		const entry: SessionMessageEntry = {
@@ -2607,7 +2614,10 @@ export class SessionManager {
 			id: generateId(this.byId),
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
-			message,
+			// The client input identity moves from the runtime message to the entry envelope.
+			...("clientMessageId" in message
+				? { message: withoutClientMessageId(message), clientMessageId: message.clientMessageId }
+				: { message }),
 		};
 		this._appendEntry(entry);
 		return entry.id;

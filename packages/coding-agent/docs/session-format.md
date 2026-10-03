@@ -253,6 +253,12 @@ A message in the conversation. The `message` field contains an `AgentMessage`.
 {"type":"message","id":"c3d4e5f6","parentId":"b2c3d4e5","timestamp":"2024-12-03T14:00:03.000Z","message":{"role":"toolResult","toolCallId":"call_123","toolName":"bash","content":[{"type":"text","text":"output"}],"isError":false}}
 ```
 
+A user message that a client submitted with a `clientMessageId` keeps that identity beside the message, never inside it. Snapshots omit it.
+
+```json
+{"type":"message","id":"d4e5f6a7","parentId":"c3d4e5f6","timestamp":"2024-12-03T14:00:04.000Z","message":{"role":"user","content":"Continue"},"clientMessageId":"client-1"}
+```
+
 ### ModelChangeEntry
 
 Emitted when the user switches models mid-session.

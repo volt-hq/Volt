@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { transformMessages } from "../src/providers/transform-messages.ts";
+import { applyReplayPolicy } from "../src/replay-policy.ts";
 import type { AssistantMessage, Message, Model, ToolCall } from "../src/types.ts";
 
 // Normalize function matching what anthropic.ts uses
@@ -133,7 +134,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 		expect(toolCall.thoughtSignature).toBeUndefined();
 	});
 
-	it("adds synthetic tool results for trailing orphaned tool calls", () => {
+	it("normalizes the IDs of replayed synthetic results for trailing orphaned tool calls", () => {
 		const model = makeCopilotClaudeModel();
 		const messages: Message[] = [
 			{ role: "user", content: "read the file", timestamp: Date.now() },
@@ -147,7 +148,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 			]),
 		];
 
-		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
+		const result = transformMessages(applyReplayPolicy(messages), model, anthropicNormalizeToolCallId);
 		const lastMessage = result[result.length - 1];
 
 		expect(lastMessage).toMatchObject({
@@ -159,7 +160,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 		});
 	});
 
-	it("adds synthetic results only for trailing tool calls that are still missing results", () => {
+	it("normalizes replayed synthetic results only for trailing tool calls that are still missing results", () => {
 		const model = makeCopilotClaudeModel();
 		const messages: Message[] = [
 			{ role: "user", content: "run commands", timestamp: Date.now() },
@@ -177,7 +178,7 @@ describe("OpenAI to Anthropic session migration for Copilot Claude", () => {
 			},
 		];
 
-		const result = transformMessages(messages, model, anthropicNormalizeToolCallId);
+		const result = transformMessages(applyReplayPolicy(messages), model, anthropicNormalizeToolCallId);
 		const syntheticResults = result.filter((message) => message.role === "toolResult" && message.isError);
 
 		expect(syntheticResults).toHaveLength(1);

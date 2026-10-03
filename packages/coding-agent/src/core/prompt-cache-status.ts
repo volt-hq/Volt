@@ -1,4 +1,4 @@
-import { type CacheRetention, type Model, type ProviderEnv, resolvePromptCacheRetention } from "@hansjm10/volt-ai";
+import { type CacheRetention, type Model, resolvePromptCacheRetention } from "@hansjm10/volt-ai";
 import type { SessionEntry } from "./session-manager.ts";
 
 /**
@@ -26,14 +26,13 @@ export interface PromptCacheStatusInput {
 	/** Active branch, root first. */
 	branch: readonly SessionEntry[];
 	cacheRetention?: CacheRetention;
-	env?: ProviderEnv;
 }
 
 /** Undefined when the model does not cache or the active prefix has no prior request. */
 export function resolvePromptCacheStatus(input: PromptCacheStatusInput): PromptCacheStatus | undefined {
 	const model = input.model;
 	if (!model?.promptCache) return undefined;
-	const retention = resolvePromptCacheRetention(model, input.cacheRetention, input.env);
+	const retention = resolvePromptCacheRetention(model, input.cacheRetention);
 	if (retention === "none") return undefined;
 
 	let sawRequest = false;

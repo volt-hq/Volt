@@ -1,6 +1,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageDiagnostic,
+	applyReplayPolicy,
 	type Context,
 	classifyProviderError,
 	createAssistantMessageDiagnostic,
@@ -934,12 +935,14 @@ export class AgentHarness<TTool extends AgentTool = AgentTool> {
 						!!optionalMessages?.length &&
 						this.requestBatch === optionalBatch &&
 						optionalAuthorization?.isCurrent() === true;
-					if (includeOptionalContext) {
-						admittedContext = {
-							...admittedContext,
-							messages: [...admittedContext.messages, ...optionalMessages!],
-						};
-					}
+					admittedContext = {
+						...admittedContext,
+						messages: applyReplayPolicy(
+							includeOptionalContext
+								? [...admittedContext.messages, ...optionalMessages!]
+								: admittedContext.messages,
+						),
+					};
 					settleOptionalContext(includeOptionalContext);
 					if (isTurnProviderRequestState(requestState) && requestBasis) {
 						const {

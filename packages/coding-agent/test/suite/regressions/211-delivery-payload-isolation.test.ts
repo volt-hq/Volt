@@ -2,6 +2,7 @@ import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it } from "vitest";
+import { getClientMessageId } from "../../../src/core/messages.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 function createNestedUserMessage(
@@ -189,7 +190,7 @@ describe("regression #211: delivery payload isolation", () => {
 								const participantMessages = context.messages as AgentMessage[];
 								mutateRetainedMessages(participantMessages);
 								const user = findUser(participantMessages);
-								if (user) user.clientMessageId = "substituted-runtime-identity";
+								if (user) Object.assign(user, { clientMessageId: "substituted-runtime-identity" });
 								retain = false;
 								return { outcome: "retained", error: new Error("retry retained queue") };
 							}
@@ -219,7 +220,7 @@ describe("regression #211: delivery payload isolation", () => {
 			.buildSessionContext()
 			.messages.find(
 				(message): message is Extract<AgentMessage, { role: "user" }> =>
-					message.role === "user" && message.clientMessageId === clientMessageId,
+					message.role === "user" && getClientMessageId(message) === clientMessageId,
 			);
 		expect(canonicalUser?.content).toEqual([{ type: "text", text: "queued immutable payload" }]);
 		expect(harness.sessionManager.getClientInput(clientMessageId)?.state).toBe("completed");

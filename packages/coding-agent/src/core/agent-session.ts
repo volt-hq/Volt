@@ -145,7 +145,14 @@ import type { LspServerPool } from "./lsp/server-pool.ts";
 import { createMcpDirectToolDefinitions } from "./mcp/direct-tools.ts";
 import type { McpManager } from "./mcp/manager.ts";
 import type { McpManagerEvent } from "./mcp/types.ts";
-import type { BashExecutionMessage, CustomMessage, CustomMessageInput } from "./messages.ts";
+import {
+	type BashExecutionMessage,
+	type CustomMessage,
+	type CustomMessageInput,
+	getClientMessageId,
+	withClientMessageId,
+	withoutClientMessageId,
+} from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import {
 	authorizeToolOperation,
@@ -993,11 +1000,7 @@ export class AgentSession {
 					? 0
 					: promptCacheRefreshBudget(
 							this.model,
-							resolvePromptCacheRetention(
-								this.model,
-								this._streamOptions.cacheRetention,
-								this._streamOptions.env,
-							),
+							resolvePromptCacheRetention(this.model, this._streamOptions.cacheRetention),
 						),
 			canRefresh: () => this._harness.canRefreshPromptCache(),
 			hasInFlightWork: () => this.isBusy || this.hasBackgroundJobs,
@@ -1042,33 +1045,27 @@ export class AgentSession {
 								.map((job) => job.id)
 						: [],
 				);
+				// The context is already replayed, and providers serialize every tool result it holds,
+				// so a job result in it is delivered once the provider built its payload.
 				const resultCandidates =
 					pendingJobIds.size > 0
-						? context.messages.flatMap((message, messageIndex) => {
-								if (message.role !== "toolResult" || message.toolName !== "jobs") return [];
-								const snapshots = getBackgroundJobResultSnapshots(message.details);
-								return snapshots.some(
-									(snapshot) => snapshot.endedAt !== undefined && pendingJobIds.has(snapshot.id),
-								)
-									? [{ message, messageIndex }]
-									: [];
-							})
+						? context.messages.filter(
+								(message): message is ToolResultMessage =>
+									message.role === "toolResult" &&
+									message.toolName === "jobs" &&
+									getBackgroundJobResultSnapshots(message.details).some(
+										(snapshot) => snapshot.endedAt !== undefined && pendingJobIds.has(snapshot.id),
+									),
+							)
 						: [];
-				let eligibleResultCandidates: ToolResultMessage[] = [];
 				let payloadCompleted = false;
 				let payloadUnchanged = true;
 				let requestOptions = this._activeCompaction ? { ...options, maxRetries: 0 } : options;
 				if (resultCandidates.length > 0) {
 					requestOptions = {
 						...requestOptions,
-						onPayload: async (payload, payloadModel, metadata) => {
+						onPayload: async (payload, payloadModel) => {
 							payloadCompleted = false;
-							// Copy provider evidence before hooks await. Each payload owns its
-							// source indices; missing evidence cannot inherit an earlier payload's results.
-							const deliveredIndices = new Set(metadata?.toolResultMessageIndices ?? []);
-							eligibleResultCandidates = resultCandidates
-								.filter(({ messageIndex }) => deliveredIndices.has(messageIndex))
-								.map(({ message }) => message);
 							// ExtensionRunner reports hook failures instead of rejecting. Observe
 							// only this callback window without changing its error behavior.
 							const unsubscribe = this._extensionRunner.onError((error) => {
@@ -1156,7 +1153,7 @@ export class AgentSession {
 									result.stopReason !== "toolUse")
 							)
 								return;
-							for (const message of eligibleResultCandidates) {
+							for (const message of resultCandidates) {
 								acknowledgeBackgroundJobResult(this._backgroundJobs, message);
 							}
 						})
@@ -1516,8 +1513,8 @@ export class AgentSession {
 			} catch (error) {
 				let fatalError = error instanceof Error ? error : new Error(String(error));
 				if (error instanceof ExtensionMessageRoleMismatchError) {
-					if (event.message.role === "user" && event.message.clientMessageId !== undefined) {
-						const clientMessageId = event.message.clientMessageId;
+					const clientMessageId = getClientMessageId(event.message);
+					if (clientMessageId !== undefined) {
 						const operation = this._liveClientInputs.get(clientMessageId);
 						if (operation) {
 							try {
@@ -1532,9 +1529,10 @@ export class AgentSession {
 				}
 				throw fatalError;
 			}
+			const clientMessageId = getClientMessageId(event.message);
 			const identityPreservingReplacement =
-				event.message.role === "user" && replacement?.role === "user" && event.message.clientMessageId !== undefined
-					? { ...replacement, clientMessageId: event.message.clientMessageId }
+				replacement?.role === "user" && clientMessageId !== undefined
+					? withClientMessageId(replacement, clientMessageId)
 					: replacement;
 			return identityPreservingReplacement ? { message: identityPreservingReplacement } : undefined;
 		});
@@ -2354,24 +2352,21 @@ export class AgentSession {
 		queueEntries: PreparedQueueEntry[];
 	} {
 		const queueEntries: PreparedQueueEntry[] = [];
-		const normalizedMessages = messages.map((message) => {
-			if (message.role !== "user" || message.clientMessageId === undefined) return message;
-			const steering = this._steeringMessages.find((entry) => entry.queueEntryId === message.clientMessageId);
+		const normalizedMessages = messages.map((message): AgentMessage => {
+			if (message.role !== "user" || !("clientMessageId" in message)) return message;
+			const queueEntryId = message.clientMessageId;
+			const steering = this._steeringMessages.find((entry) => entry.queueEntryId === queueEntryId);
 			const followUp = steering
 				? undefined
-				: this._followUpMessages.find((entry) => entry.queueEntryId === message.clientMessageId);
+				: this._followUpMessages.find((entry) => entry.queueEntryId === queueEntryId);
 			const entry = steering ?? followUp;
 			if (!entry) return message;
 			if (!queueEntries.some((candidate) => candidate.entry.queueEntryId === entry.queueEntryId)) {
 				queueEntries.push({ kind: steering ? "steer" : "followUp", entry });
 			}
-			const normalizedMessage = { ...message } as AgentMessage & { clientMessageId?: string };
-			if (entry.clientMessageId === undefined) {
-				delete normalizedMessage.clientMessageId;
-			} else {
-				normalizedMessage.clientMessageId = entry.clientMessageId;
-			}
-			return normalizedMessage;
+			return entry.clientMessageId === undefined
+				? withoutClientMessageId(message)
+				: withClientMessageId(message, entry.clientMessageId);
 		});
 		return { messages: normalizedMessages, queueEntries };
 	}
@@ -2390,9 +2385,10 @@ export class AgentSession {
 			for (const message of ownedMessages) {
 				await this._emitExtensionEvent({ type: "message_start", message });
 				const replacement = await this._emitExtensionEvent({ type: "message_end", message });
+				const clientMessageId = getClientMessageId(message);
 				const identityPreservingReplacement =
-					message.role === "user" && replacement?.role === "user" && message.clientMessageId !== undefined
-						? { ...replacement, clientMessageId: message.clientMessageId }
+					replacement?.role === "user" && clientMessageId !== undefined
+						? withClientMessageId(replacement, clientMessageId)
 						: replacement;
 				prepared.push(identityPreservingReplacement ?? message);
 			}
@@ -2425,7 +2421,7 @@ export class AgentSession {
 	private _hasRetainedDirectInput(clientMessageId: string): boolean {
 		if (!this._harness.hasPendingPrompt()) return false;
 		return [...this._preparedDeliveryExtensions.values()].some(({ messages }) =>
-			messages.some((message) => message.role === "user" && message.clientMessageId === clientMessageId),
+			messages.some((message) => getClientMessageId(message) === clientMessageId),
 		);
 	}
 
@@ -2453,9 +2449,7 @@ export class AgentSession {
 				try {
 					await this.sessionManager.terminalizeDelivery(context.preparedMessages, prepared.error);
 					const clientMessageIds = new Set(
-						context.preparedMessages.flatMap((message) =>
-							message.role === "user" && message.clientMessageId !== undefined ? [message.clientMessageId] : [],
-						),
+						context.preparedMessages.flatMap((message) => getClientMessageId(message) ?? []),
 					);
 					for (const clientMessageId of clientMessageIds) {
 						if (this._liveClientInputs.get(clientMessageId)?.acceptanceSettled) {
@@ -2562,9 +2556,8 @@ export class AgentSession {
 				if (prepared.nextPlanningState) this._publishCommittedPlanningState(prepared.nextPlanningState);
 				this._finishCommittedQueueEntries(prepared.queueEntries);
 				for (const message of prepared.messages) {
-					if (message.role === "user" && message.clientMessageId !== undefined) {
-						this._completeLiveClientInput(message.clientMessageId, "admitted");
-					}
+					const clientMessageId = getClientMessageId(message);
+					if (clientMessageId !== undefined) this._completeLiveClientInput(clientMessageId, "admitted");
 				}
 			} else if (context.outcome === "retained" || context.outcome === "terminally_failed") {
 				const error = context.error ?? new Error(`Delivery ${context.deliveryId} did not commit`);
@@ -2576,19 +2569,14 @@ export class AgentSession {
 					),
 				);
 				for (const message of prepared.messages) {
-					if (
-						message.role !== "user" ||
-						message.clientMessageId === undefined ||
-						queuedClientMessageIds.has(message.clientMessageId)
-					) {
-						continue;
-					}
-					const operation = this._liveClientInputs.get(message.clientMessageId);
+					const clientMessageId = getClientMessageId(message);
+					if (clientMessageId === undefined || queuedClientMessageIds.has(clientMessageId)) continue;
+					const operation = this._liveClientInputs.get(clientMessageId);
 					if (!operation) continue;
 					rejectedDirectInput = true;
 					operation.rejectAccepted(error);
 					operation.rejectCompletion(error);
-					this._liveClientInputs.delete(message.clientMessageId);
+					this._liveClientInputs.delete(clientMessageId);
 				}
 				if (context.outcome === "terminally_failed") this._finishCommittedQueueEntries(prepared.queueEntries);
 				if (prepared.error instanceof ExtensionMessageRoleMismatchError) {
@@ -2667,7 +2655,7 @@ export class AgentSession {
 		if (event.type === "message_start" && event.message.role === "user" && event.deliveryId === undefined) {
 			this._overflowRecoveryAttempted = false;
 			this._proactiveCompactionState = "idle";
-			const queueEntryId = event.message.clientMessageId;
+			const queueEntryId = getClientMessageId(event.message);
 			if (queueEntryId !== undefined) {
 				// Check steering queue first. Queue identity, never display text,
 				// owns dequeue so duplicate messages cannot remove each other.
@@ -2737,31 +2725,28 @@ export class AgentSession {
 			(event.type === "message_start" || event.type === "message_end") &&
 			event.deliveryId === undefined &&
 			event.message.role === "user" &&
-			event.message.clientMessageId !== undefined &&
+			"clientMessageId" in event.message &&
 			this._dequeuedQueueClientMessageIds.has(event.message.clientMessageId)
 		) {
 			const runtimeQueueEntryId = event.message.clientMessageId;
 			const externalClientMessageId = this._dequeuedQueueClientMessageIds.get(runtimeQueueEntryId);
-			const normalizedMessage = { ...event.message } as AgentMessage & { clientMessageId?: string };
-			if (externalClientMessageId == null) {
-				delete normalizedMessage.clientMessageId;
-			} else {
-				normalizedMessage.clientMessageId = externalClientMessageId;
-			}
+			const normalizedMessage =
+				externalClientMessageId == null
+					? withoutClientMessageId(event.message)
+					: withClientMessageId(event.message, externalClientMessageId);
 			normalizedEvent = { ...event, message: normalizedMessage } as AgentEvent;
 			if (event.type === "message_end") {
 				this._dequeuedQueueClientMessageIds.delete(runtimeQueueEntryId);
 			}
 		}
-		if (
-			normalizedEvent.type === "message_start" &&
-			normalizedEvent.deliveryId === undefined &&
-			normalizedEvent.message.role === "user" &&
-			normalizedEvent.message.clientMessageId !== undefined
-		) {
+		const startedClientMessageId =
+			normalizedEvent.type === "message_start" && normalizedEvent.deliveryId === undefined
+				? getClientMessageId(normalizedEvent.message)
+				: undefined;
+		if (startedClientMessageId !== undefined) {
 			await this._markClientInputDispatchStarted(
-				normalizedEvent.message.clientMessageId,
-				this._liveClientInputs.get(normalizedEvent.message.clientMessageId),
+				startedClientMessageId,
+				this._liveClientInputs.get(startedClientMessageId),
 			);
 			if (this._disposed) return undefined;
 		}
@@ -2848,9 +2833,10 @@ export class AgentSession {
 				}
 				return handledEvent.message;
 			}
-			if (handledEvent.message.role === "user" && handledEvent.message.clientMessageId !== undefined) {
+			const admittedClientMessageId = getClientMessageId(handledEvent.message);
+			if (admittedClientMessageId !== undefined) {
 				await this.sessionManager.flush();
-				this._completeLiveClientInput(handledEvent.message.clientMessageId, "admitted");
+				this._completeLiveClientInput(admittedClientMessageId, "admitted");
 			}
 			if (handledEvent.message.role === "assistant") {
 				this._lastAssistantMessage = handledEvent.message;
@@ -8914,7 +8900,6 @@ export class AgentSession {
 			model: this.model,
 			branch: this.sessionManager.getBranch(),
 			cacheRetention: this._streamOptions.cacheRetention,
-			env: this._streamOptions.env,
 		});
 	}
 
@@ -8942,7 +8927,7 @@ export class AgentSession {
 
 	private _promptCacheAuditCommon(model: Model<any>) {
 		const keepAlive = this.settingsManager.getPromptCacheKeepAlive();
-		const retention = resolvePromptCacheRetention(model, this._streamOptions.cacheRetention, this._streamOptions.env);
+		const retention = resolvePromptCacheRetention(model, this._streamOptions.cacheRetention);
 		const ttlSeconds = retention === "none" ? undefined : model.promptCache?.retention[retention]?.ttlSeconds;
 		return {
 			provider: model.provider,

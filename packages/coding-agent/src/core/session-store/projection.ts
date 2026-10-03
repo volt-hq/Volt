@@ -448,10 +448,10 @@ function reduceClientInputEntry(state: SessionDerivedState, entry: SessionEntry)
 			...(entry.state === "failed" && entry.error !== undefined ? { error: entry.error } : { error: undefined }),
 		};
 	}
-	if (entry.type !== "message" || entry.message.role !== "user" || entry.message.clientMessageId === undefined) {
+	if (entry.type !== "message" || entry.clientMessageId === undefined) {
 		return undefined;
 	}
-	const existing = requireStartedClientInputReceipt(state.clientInputsById, entry.message.clientMessageId);
+	const existing = requireStartedClientInputReceipt(state.clientInputsById, entry.clientMessageId);
 	return {
 		...cloneClientInputRecord(existing),
 		state: "completed",
