@@ -1009,6 +1009,8 @@ await runtime.importFromJsonl("/path/to/session-snapshot.jsonl");
 
 A persisted session can be open for writing in only one place at a time, across processes and within one process. `SessionManager.create`, `open`, `continueRecent`, `forkFrom` (for the new session), `importFromJsonl`, and `delete` take the session's lock, and closing the manager (`closePersistence()`, or disposing the session or runtime that owns it) releases it. While another host has the session open they throw `ConversationLockedError` (`code: "conversation_locked"`). `SessionManager.openReadOnly` takes no lock and rejects writes. Runtime replacement takes the target's lock before it releases the current session's.
 
+An OS lock gives no loss signal, so a writer that is no longer the session's only writer finds out when a commit cannot be confirmed: a fence conflict, a missing session, or an outcome that cannot be resolved. The session then ends instead of reloading. `SessionManager.lost`, `AgentSession.lost`, and `AgentSessionRuntime.lost` resolve with the error; the session cancels its work and rejects further writes. Dispose the runtime (which releases the lock), report the error, and reopen the session to continue from what was saved.
+
 **SessionManager tree API:**
 
 ```typescript

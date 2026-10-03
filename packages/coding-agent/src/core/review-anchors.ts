@@ -39,7 +39,6 @@ export async function resolveCanonicalReviewSource(
 			manager.getCwd() !== cwd
 		)
 			throw new ReviewSourceUnavailableError("The review conversation changed during lookup.");
-		manager.assertConversationAuthorityAvailable();
 		if (!anchor) return undefined;
 		if (!anchor.sourceAvailable || canonicalizePath(cwd) !== anchor.source.cwd)
 			throw new ReviewSourceUnavailableError();

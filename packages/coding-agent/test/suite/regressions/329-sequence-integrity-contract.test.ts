@@ -71,10 +71,10 @@ describe("PR #329 canonical sequence integrity contract", () => {
 				try {
 					expect(reopened.getEntries()).toEqual(healthy.getEntries());
 				} finally {
-					await reopened.drainPersistence();
+					await reopened.closePersistence();
 				}
 			} finally {
-				await healthy.drainPersistence();
+				await healthy.closePersistence();
 			}
 		} finally {
 			database.close();

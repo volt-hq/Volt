@@ -553,7 +553,6 @@ function reviewConversationGuard(manager: SessionManager): () => void {
 			manager.getCwd() !== cwd
 		)
 			throw new ReviewSourceUnavailableError("The review conversation changed during lookup.");
-		manager.assertConversationAuthorityAvailable();
 	};
 }
 

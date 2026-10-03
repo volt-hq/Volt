@@ -120,6 +120,7 @@ describe("AgentSession background jobs", () => {
 			session: harness.session,
 			setBeforeSessionInvalidate: () => undefined,
 			setRebindSession: () => undefined,
+			lost: new Promise<Error>(() => {}),
 		} as unknown as AgentSessionRuntime);
 		modes.push(mode);
 		const control = mode as unknown as {

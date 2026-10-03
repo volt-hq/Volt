@@ -83,7 +83,12 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 			summary: "Keep storage local and respect ignored files.",
 		});
 	}
-	const runtime = { session: harness.session, setBeforeSessionInvalidate: vi.fn(), setRebindSession: vi.fn() };
+	const runtime = {
+		session: harness.session,
+		setBeforeSessionInvalidate: vi.fn(),
+		setRebindSession: vi.fn(),
+		lost: new Promise<Error>(() => {}),
+	};
 	const mode = new InteractiveMode(runtime as unknown as AgentSessionRuntime, { tuiMode });
 	fixtures.push({ mode, harness });
 	const access = mode as unknown as TestAccess;

@@ -1078,7 +1078,7 @@ Command handlers receive `ExtensionCommandContext`, which extends `ExtensionCont
 
 ### ctx.signal (commands)
 
-In a command handler, `ctx.signal` is always defined. It is aborted when the command's session is disposed, including when `ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, or a reload replaces it. It is also aborted when the session loses conversation authority because a write could not be confirmed as saved. It is not the agent turn's signal, so a command started during a turn is not cancelled when that turn is.
+In a command handler, `ctx.signal` is always defined. It is aborted when the command's session is disposed, including when `ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, or a reload replaces it. It is also aborted when the session ends because a write could not be confirmed as saved; Volt then stops waiting for the handler. It is not the agent turn's signal, so a command started during a turn is not cancelled when that turn is.
 
 After authority is lost, volt stops waiting for the command, cancels the session's other work, and ends the session (`session_shutdown` with reason `"quit"`); the user reopens it with `/resume`. Nothing the command does afterwards can be saved. Pass the signal to long-running work and dialogs so the command ends promptly:
 
@@ -1807,7 +1807,7 @@ Extensions can prepare optional repository context without running another agent
 
 `ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, conversation revision, cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
 
-Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload/replacement, and authority loss. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
+Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload/replacement, and when the session ends because a write could not be confirmed as saved. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
 
 ```typescript
 // Illustrative API use, not a built-in extension or default behavior.
@@ -2422,7 +2422,7 @@ if (confirmed) {
 
 #### Host Dismissal
 
-Volt dismisses pending dialogs when it tears down extension UI: when the session is replaced or reloaded (including `/reload`), and when the session loses conversation authority. Dismissed dialogs return the same values as a cancel: `select()`, `input()`, and `editor()` return `undefined`, and `confirm()` returns `false`.
+Volt dismisses pending dialogs when it tears down extension UI: when the session is replaced or reloaded (including `/reload`), and when the session ends because a write could not be confirmed as saved. Dismissed dialogs return the same values as a cancel: `select()`, `input()`, and `editor()` return `undefined`, and `confirm()` returns `false`.
 
 #### Manual Dismissal with AbortSignal
 

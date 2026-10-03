@@ -714,6 +714,7 @@ describe("new session into a worktree (§5.2.1 cwd/sessionDir overrides)", () =>
 				disposeForSessionReplacement: vi.fn(),
 				dispose: vi.fn(),
 				subscribe: vi.fn(() => () => {}),
+				lost: new Promise<Error>(() => {}),
 				get sessionRef() {
 					return sessionManager.getSessionRef();
 				},

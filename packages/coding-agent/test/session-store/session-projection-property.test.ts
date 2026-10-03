@@ -206,7 +206,7 @@ async function applyStatefulOperation(
 						{ kind: "append", entry: { type: "model_change", provider: "", modelId: "invalid" } },
 					],
 				}),
-			).rejects.toMatchObject({ effect: "rolled_back", authority: "available" });
+			).rejects.toMatchObject({ effect: "rolled_back" });
 			expect(manager.getEntries()).toEqual(before);
 			break;
 		}

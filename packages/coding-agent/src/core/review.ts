@@ -1848,7 +1848,6 @@ export async function executeReviewWorkflow(
 	const assertSource = (): void => {
 		if (source && (source.getSessionId() !== sessionId || source.getSessionRef()?.sessionGeneration !== generation))
 			throw new Error("Review accounting source changed");
-		source?.assertConversationAuthorityAvailable();
 	};
 	const accounting = new ReviewUsageCollector(
 		source

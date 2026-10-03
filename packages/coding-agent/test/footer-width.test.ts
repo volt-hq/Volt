@@ -3,7 +3,6 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../src/core/agent-session.ts";
 import type { ReadonlyFooterDataProvider } from "../src/core/footer-data-provider.ts";
 import type { PromptCacheStatus } from "../src/core/prompt-cache-status.ts";
-import { SessionConversationStateUnavailableError } from "../src/core/session-manager.ts";
 import { initTheme, theme } from "../src/core/theme/runtime.ts";
 import { FooterComponent, formatCwdForFooter } from "../src/modes/interactive/components/footer.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
@@ -57,7 +56,6 @@ function createSession(options: {
 		},
 		thinkingLevel: options.thinkingLevel ?? "off",
 		sessionManager: {
-			getConversationAuthorityStatus: () => ({ status: "available" }),
 			getEntries: () => entries,
 			getSessionName: () => options.sessionName,
 			getCwd: () => "/tmp/project",
@@ -259,40 +257,6 @@ describe("FooterComponent width handling", () => {
 		footer.render(120).lines;
 		expect(entryReads).toBe(2);
 		expect(contextReads).toBe(2);
-	});
-
-	it("renders without conversation readers after conversation authority loss", () => {
-		const loseAuthority = (session: AgentSession) => {
-			const error = new SessionConversationStateUnavailableError({ cause: new Error("commit failed") });
-			const unavailable = () => {
-				throw error;
-			};
-			session.sessionManager.getConversationAuthorityStatus = () => ({
-				status: "reconciliation_required",
-				error,
-			});
-			session.sessionManager.getSessionName = unavailable;
-			session.sessionManager.getEntries = unavailable;
-			session.getContextUsage = unavailable;
-			session.getPromptCacheStatus = unavailable;
-		};
-		const usage = { input: 100, output: 10, cacheRead: 0, cacheWrite: 0, cost: { total: 0.25 } };
-
-		const renderedSession = createSession({ sessionName: "named-session", modelId: "kept-model", usage });
-		const rendered = new FooterComponent(renderedSession, createFooterData(1));
-		expect(stripAnsi(rendered.render(120).lines[1])).toContain("$0.250");
-		loseAuthority(renderedSession);
-		rendered.invalidate();
-		const renderedLines = rendered.render(120).lines.map(stripAnsi);
-		expect(renderedLines[0]).toContain("kept-model");
-		expect(renderedLines[0]).not.toContain("named-session");
-		expect(renderedLines[1]).toContain("$0.250");
-
-		const freshSession = createSession({ sessionName: "named-session", modelId: "fresh-model", usage });
-		loseAuthority(freshSession);
-		const freshLines = new FooterComponent(freshSession, createFooterData(1)).render(120).lines.map(stripAnsi);
-		expect(freshLines[0]).toContain("fresh-model");
-		expect(freshLines[1]).not.toContain("$");
 	});
 
 	it("labels subscription billing without showing a misleading zero cost", () => {

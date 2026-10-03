@@ -107,7 +107,7 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 				.pop()!
 				.cleanupAsync()
 				.catch(() => {});
-		while (managers.length > 0) await managers.pop()!.drainPersistence();
+		while (managers.length > 0) await managers.pop()!.closePersistence();
 		vi.restoreAllMocks();
 		while (storeLeases.length > 0) await storeLeases.pop()!.release();
 		while (tempDirs.length > 0) rmSync(tempDirs.pop()!, { recursive: true, force: true });
@@ -204,32 +204,24 @@ describe("regression #212: planning and canonical delivery atomicity", () => {
 		expect(resumed.getPendingResponseCount()).toBe(0);
 	});
 
-	it("does not overwrite a newer revision committed by another manager", async () => {
+	it("ends the session instead of committing past a lost lock", async () => {
 		const { harness, sessionRef, baseline } = await setup();
 		harness.setResponses([fauxAssistantMessage("must remain unused")]);
 		const clientMessageId = "issue-212-stale-preimage";
 		await harness.session.steer("revise this ready plan", undefined, clientMessageId);
 		await harness.sessionManager.flush();
-		// Simulates a lost lock: another manager commits a newer revision behind the harness.
-		loseConversationLock(harness.sessionManager);
-		const otherManager = await SessionManager.open(sessionRef);
-		managers.push(otherManager);
-		otherManager.appendFastModeChange(true);
-		await otherManager.flush();
+		await loseConversationLock(harness.sessionManager);
 		await expect(harness.control.continue()).resolves.toMatchObject({
 			status: "delivery_failed",
 			failure: { outcome: "terminally_failed", phase: "settlement" },
 		});
 
-		expect(harness.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+		await expect(harness.session.lost).resolves.toMatchObject({ reason: "fence_conflict" });
 		expect(harness.getPendingResponseCount()).toBe(1);
 		const reopened = await SessionManager.openReadOnly(sessionRef);
 		managers.push(reopened);
 		expect(snapshotEntries(reopened.getBranch())).toEqual(baseline);
 		expect(reopened.getClientInput(clientMessageId)).toMatchObject({ state: "accepted" });
-		expect(reopened.getEntries().filter((entry) => entry.type === "fast_mode_change" && entry.enabled)).toHaveLength(
-			1,
-		);
 		harnesses.pop();
 		harness.session.dispose();
 		await harness.session.waitForClosed().catch(() => {});

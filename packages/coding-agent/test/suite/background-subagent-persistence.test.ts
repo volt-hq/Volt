@@ -15,7 +15,6 @@ import { parsePersistedSessionEntry } from "../../src/core/session-entry-codec.t
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/index.ts";
 import { createBuiltInSubagentDefinitions, SubagentManager } from "../../src/core/subagents/index.ts";
-import { loseConversationLock } from "../lost-conversation-lock.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createFauxModelRegistry, createHarness, getMessageText, type Harness } from "./harness.ts";
 
@@ -169,7 +168,7 @@ async function setup(withConfiguredAuth = true) {
 
 type Context = Awaited<ReturnType<typeof setup>>;
 
-function pauseParent(context: Context, outcome: "commit" | "rollback" = "commit", failSpawn = false) {
+function pauseParent(context: Context, outcome: "commit" | "rollback" | "conflict" = "commit", failSpawn = false) {
 	const started = deferred();
 	const release = deferred();
 	const spawnStarted = deferred();
@@ -186,6 +185,8 @@ function pauseParent(context: Context, outcome: "commit" | "rollback" = "commit"
 			started.resolve();
 			await release.promise;
 			if (outcome === "rollback") throw new Error("injected parent rollback");
+			// The parent's lock was lost: another writer appended, so the fence fails.
+			if (outcome === "conflict") return { status: "conflict", actualOrdinal: input.expectedOrdinal + 1 };
 		} else if (types.includes("subagent_spawn")) {
 			spawnStarted.resolve();
 			await releaseSpawn.promise;
@@ -333,7 +334,7 @@ describe("background subagent spawn persistence", () => {
 				expect(() => context.parent.appendSubagentSpawn(spawn)).toThrow(/closed/);
 				barrier.release.resolve();
 				const result = await commit;
-				if (outcome === "rollback") expect(result).toMatchObject({ effect: "rolled_back", authority: "available" });
+				if (outcome === "rollback") expect(result).toMatchObject({ effect: "rolled_back" });
 				else expect(result).toBeUndefined();
 				await barrier.spawnStarted.promise;
 				await setImmediate();
@@ -342,7 +343,6 @@ describe("background subagent spawn persistence", () => {
 				const closeResult = await close;
 				if (outcome === "rollback") expect(closeResult).toMatchObject({ effect: "rolled_back" });
 				else expect(closeResult).toBeUndefined();
-				expect(context.parent.getConversationAuthorityStatus()).toEqual({ status: "available" });
 				const reopened = await SessionManager.open(ref);
 				try {
 					expect(reopened.getSubagentSpawnEntries()).toMatchObject([
@@ -400,37 +400,30 @@ describe("background subagent spawn persistence", () => {
 		},
 	);
 
-	it("rejects queued edges when the parent loses canonical authority", async () => {
+	it("rejects queued edges when the parent loses its log", async () => {
 		const context = await setup();
-		const barrier = pauseParent(context);
+		const barrier = pauseParent(context, "conflict");
 		try {
 			const jobId = await context.start();
 			const ref = context.parent.getSessionRef()!;
 			const commit = commitParent(context.parent, "delivery");
-			const rejectedCommit = expect(commit).rejects.toMatchObject({
-				effect: "not_started",
-				authority: "reconciliation_required",
-			});
+			const rejectedCommit = expect(commit).rejects.toThrow(/ordinal changed/);
 			await barrier.started.promise;
 			context.allowPrompt.resolve();
 			await context.published.promise;
 			context.finishChild.resolve();
 			await context.wait(jobId);
-			// Simulates a lost lock: a second writer appends behind the parent's back.
-			loseConversationLock(context.parent);
-			const other = await SessionManager.open(ref);
-			other.appendSessionInfo("another writer");
-			await other.closePersistence();
 			const flush = expect(context.parent.flush()).rejects.toThrow(/ordinal changed/);
 			barrier.release.resolve();
 			await rejectedCommit;
 			await flush;
-			expect(await context.parent.drainPersistence()).toMatchObject({ status: "reconciliation_required" });
-			expect(() => context.parent.appendSessionInfo("must reject")).toThrow(/reconciliation/);
+			await expect(context.parent.lost).resolves.toMatchObject({ reason: "fence_conflict" });
+			// Closing reports nothing new: `lost` already did.
+			await expect(context.parent.closePersistence()).resolves.toBeUndefined();
+			expect(() => context.parent.appendSessionInfo("must reject")).toThrow(/ordinal changed/);
 			const reopened = await SessionManager.openReadOnly(ref);
 			try {
 				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
-				expect(reopened.getSessionName()).toBe("another writer");
 			} finally {
 				await reopened.closePersistence();
 			}
@@ -438,10 +431,7 @@ describe("background subagent spawn persistence", () => {
 			barrier.release.resolve();
 			barrier.releaseSpawn.resolve();
 			barrier.restore();
-			expect(await context.cleanup(true)).toMatchObject({
-				effect: "not_started",
-				authority: "reconciliation_required",
-			});
+			expect(await context.cleanup(true)).toBeUndefined();
 		}
 	});
 
@@ -509,8 +499,9 @@ describe("background subagent spawn persistence", () => {
 			await commit;
 			barrier.releaseSpawn.resolve();
 			await flush;
-			expect(context.parent.getConversationAuthorityStatus().status).toBe("reconciliation_required");
-			await expect(context.parent.closePersistence()).rejects.toThrow(/rolled back/);
+			// The edge was indexed when it failed, so the parent no longer matches its log.
+			await expect(context.parent.lost).resolves.toMatchObject({ reason: "storage" });
+			await expect(context.parent.closePersistence()).resolves.toBeUndefined();
 			const reopened = await SessionManager.open(ref);
 			try {
 				expect(reopened.getSubagentSpawnEntries()).toEqual([]);
@@ -522,7 +513,7 @@ describe("background subagent spawn persistence", () => {
 			barrier.release.resolve();
 			barrier.releaseSpawn.resolve();
 			barrier.restore();
-			expect(await context.cleanup(true)).toMatchObject({ effect: "rolled_back" });
+			expect(await context.cleanup(true)).toBeUndefined();
 		}
 	});
 });

@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -17,13 +18,10 @@ import {
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { ConversationLock, ConversationLockedError } from "../../../src/core/conversation-log/conversation-lock.ts";
 import type { RpcCloseHandler, RpcLineHandler } from "../../../src/core/rpc/transport.ts";
-import {
-	SessionConversationStateUnavailableError,
-	SessionManager,
-	type SessionReference,
-} from "../../../src/core/session-manager.ts";
+import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../../../src/index.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
+import { loseLog } from "../../lost-conversation-lock.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -351,17 +349,21 @@ describe("regression #585: one writer per conversation log", () => {
 		}
 	});
 
-	it("shuts an RPC host down with an error when its session loses its log", async () => {
+	it.each([
+		["an embedded RPC host rejects its close promise", false],
+		["an RPC process exits non-zero with the error message", true],
+	] as const)("ends when its session loses its log: %s", async (_label, exitProcess) => {
 		const root = temporaryDirectory();
 		const ref = await storedSession(join(root, "sessions"), root);
 		const runtime = await createRuntime(root, await SessionManager.open(ref));
 		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+		const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
 		let ready!: () => void;
 		const started = new Promise<void>((resolve) => {
 			ready = resolve;
 		});
 		const mode = runRpcMode(runtime, {
-			exitProcess: false,
+			exitProcess,
 			onReady: ready,
 			transport: {
 				write: () => {},
@@ -373,14 +375,19 @@ describe("regression #585: one writer per conversation log", () => {
 		void mode.catch(() => {});
 		await started;
 
-		runtime.session.sessionManager.retireConversationAuthority(
-			new Error(`Expected log ordinal 1, but the log head is 2`),
-		);
+		const lost = await loseLog(runtime.session.sessionManager);
 
-		await expect(mode).rejects.toBeInstanceOf(SessionConversationStateUnavailableError);
-		expect(consoleError).toHaveBeenCalledWith(
-			`Volt stopped session ${ref.sessionId} because its saved state could not be confirmed: Expected log ordinal 1, but the log head is 2`,
+		if (exitProcess) {
+			await expect(mode).resolves.toBeUndefined();
+			expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+		} else {
+			await expect(mode).rejects.toBeInstanceOf(ConversationLogLostError);
+			expect(exit).not.toHaveBeenCalled();
+		}
+		expect(consoleError).toHaveBeenCalledExactlyOnceWith(
+			`Volt stopped session ${ref.sessionId} because its saved state could not be confirmed: ${lost.message}`,
 		);
+		expect(lost.message).toMatch(/^Session ordinal changed from \d+ to \d+$/);
 		// The RPC host owned the runtime: disposal released the session's lock.
 		expect(lockState(ref)).toBe("free");
 	});

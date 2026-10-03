@@ -265,8 +265,7 @@ export class HostReviewDiscussionService {
 				currentRef.sessionId !== ref.sessionId ||
 				currentRef.sessionGeneration !== ref.sessionGeneration ||
 				runtime.session !== session ||
-				session.conversationGenerationRevision !== revision ||
-				session.sessionManager.getConversationAuthorityStatus().status !== "available"
+				session.conversationGenerationRevision !== revision
 			)
 				throw new Error("Review source generation changed");
 		};

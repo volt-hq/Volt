@@ -335,8 +335,7 @@ describe("SessionManager projection cache", () => {
 					{ kind: "append", entry: { type: "label", targetId: baselineId, label: "rolled back" } },
 				],
 			}),
-		).rejects.toMatchObject({ effect: "rolled_back", authority: "available" });
-		expect(manager.getConversationAuthorityStatus()).toEqual({ status: "available" });
+		).rejects.toMatchObject({ effect: "rolled_back" });
 
 		manager.appendCustomEntry("post-rollback", { durable: true });
 		await manager.flush();

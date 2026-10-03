@@ -14,14 +14,10 @@ type BindExtensionOptions = {
 	commandContextActions: { waitForIdle(): Promise<void> };
 };
 
-type AuthorityListener = (status: { status: "reconciliation_required"; error: Error }) => void;
-
 type FakeSession = {
 	sessionId: string;
 	sessionManager: {
 		getHeader: () => object | undefined;
-		subscribeConversationAuthorityChanges: (listener: AuthorityListener) => () => void;
-		loseConversation(cause: Error): void;
 	};
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AssistantMessage[] };
@@ -39,6 +35,8 @@ type FakeRuntimeHost = {
 	switchSession: ReturnType<typeof vi.fn>;
 	dispose: ReturnType<typeof vi.fn>;
 	setRebindSession: ReturnType<typeof vi.fn>;
+	lost: Promise<Error>;
+	loseLog(error: Error): void;
 };
 
 function createAssistantMessage(options?: {
@@ -73,20 +71,12 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 	};
 
 	const state = { messages: [assistantMessage] };
-	const authorityListeners = new Set<AuthorityListener>();
+	const lost = Promise.withResolvers<Error>();
 
 	const session: FakeSession = {
 		sessionId: "print-session",
 		sessionManager: {
 			getHeader: () => undefined,
-			subscribeConversationAuthorityChanges: (listener) => {
-				authorityListeners.add(listener);
-				return () => authorityListeners.delete(listener);
-			},
-			loseConversation: (cause) => {
-				const error = Object.assign(new Error("Session conversation authority requires reconciliation"), { cause });
-				for (const listener of authorityListeners) listener({ status: "reconciliation_required", error });
-			},
 		},
 		waitForIdle: vi.fn(async () => undefined),
 		state,
@@ -106,6 +96,8 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 			await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
 		}),
 		setRebindSession: vi.fn(),
+		lost: lost.promise,
+		loseLog: (error) => lost.resolve(error),
 	};
 }
 
@@ -169,11 +161,11 @@ describe("runPrintMode", () => {
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
 	});
 
-	it("ends the run with an error when the session loses its log, skipping later prompts", async () => {
+	it("ends the run with an error when the runtime's session loses its log, skipping later prompts", async () => {
 		const runtimeHost = createRuntimeHost(createAssistantMessage({ text: "done" }));
 		const { session } = runtimeHost;
 		session.prompt.mockImplementationOnce(async () => {
-			session.sessionManager.loseConversation(new Error("Expected log ordinal 4, but the log head is 5"));
+			runtimeHost.loseLog(new Error("Expected log ordinal 4, but the log head is 5"));
 		});
 		const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
 

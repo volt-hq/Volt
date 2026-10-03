@@ -32,7 +32,6 @@ import { execCommand } from "../exec.ts";
 import { RESERVED_PLAN_COMMAND_NAMES, RESERVED_PLAN_TOOL_NAMES } from "../planning.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { type ExtensionHandlerFn, ExtensionHandlerRegistry } from "./policy-registration.ts";
-import { hasShutdownCleanupScope } from "./shutdown-scope.ts";
 import type {
 	Extension,
 	ExtensionAPI,
@@ -316,7 +315,7 @@ function createExtensionAPI(
 		},
 
 		exec(command: string, args: string[], options?: ExecOptions) {
-			if (!hasShutdownCleanupScope(runtime, extension.path)) runtime.assertActive();
+			runtime.assertActive();
 			return execCommand(command, args, options?.cwd ?? cwd, options);
 		},
 

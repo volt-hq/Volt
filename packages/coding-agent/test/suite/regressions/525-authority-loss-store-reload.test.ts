@@ -24,7 +24,7 @@ import type { CustomEditor } from "../../../src/modes/interactive/components/cus
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
 import { createInteractiveTui, InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { stripAnsi } from "../../../src/utils/ansi.ts";
-import { loseConversationLock } from "../../lost-conversation-lock.ts";
+import { loseConversationLock, loseLog } from "../../lost-conversation-lock.ts";
 import { getMessageText } from "../harness.ts";
 
 type View = { regularComponents: readonly Component[]; fullscreenRoot: Component };
@@ -133,7 +133,6 @@ describe("regression #525: ending a session whose saved state could not be confi
 		}
 
 		cleanups.push(async () => {
-			// A runtime whose session lost authority cannot close its persistence cleanly.
 			await runtime.dispose().catch(() => {});
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
@@ -146,21 +145,6 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const sessionRef = runtime.session.sessionRef;
 		if (!sessionRef) throw new Error("expected a persisted session");
 		return sessionRef;
-	}
-
-	/** Write as a second owner after the runtime's lock was lost; its next commit fails the ordinal fence. */
-	async function appendAsOtherOwner(
-		runtime: AgentSessionRuntime,
-		write: (manager: SessionManager) => Promise<void> | void,
-	): Promise<void> {
-		loseConversationLock(runtime.session.sessionManager);
-		const manager = await SessionManager.open(requireSessionRef(runtime));
-		try {
-			await write(manager);
-			await manager.flush();
-		} finally {
-			await manager.closePersistence();
-		}
 	}
 
 	async function readStoredMessageTexts(sessionRef: SessionReference): Promise<string[]> {
@@ -244,35 +228,23 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const renderedFooter = new FooterComponent(staleSession, createFooterData());
 		expect(stripAnsi(renderedFooter.render(120).lines[0])).toContain("faux-1");
 
-		await appendAsOtherOwner(runtime, (manager) => {
-			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
-			manager.appendMessage(fauxAssistantMessage("phone reply"));
+		await loseConversationLock(staleSession.sessionManager);
+		const stalePrompt = Promise.allSettled([staleSession.prompt("stale prompt")]);
+		await expect(withinTimeout(runtime.lost, "runtime.lost")).resolves.toMatchObject({
+			reason: "fence_conflict",
 		});
-
-		// The authority-loss listener runs synchronously inside the failing write.
-		let waitWhileBusy: Promise<void> | undefined;
-		const unsubscribe = staleSession.sessionManager.subscribeConversationAuthorityChanges(() => {
-			if (staleSession.isBusy) waitWhileBusy = staleSession.waitForNotBusy();
-		});
-		cleanups.push(unsubscribe);
-
-		await Promise.allSettled([staleSession.prompt("stale prompt")]);
-		expect(staleSession.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
+		await stalePrompt;
+		await withinTimeout(staleSession.waitForNotBusy(), "waitForNotBusy()");
+		expect(staleSession.isBusy).toBe(false);
 
 		// Every frame renders the footer; it must not throw after the loss.
 		renderedFooter.invalidate();
 		expect(stripAnsi(renderedFooter.render(120).lines[0])).toContain("faux-1");
 		expect(stripAnsi(new FooterComponent(staleSession, createFooterData()).render(120).lines[0])).toContain("faux-1");
 
-		expect(waitWhileBusy).toBeDefined();
-		await withinTimeout(waitWhileBusy!, "waitForNotBusy()");
-		// The store keeps what the other owner committed; the stale prompt never landed.
-		expect(await readStoredMessageTexts(sessionRef)).toEqual([
-			"tui prompt",
-			"tui reply",
-			"phone prompt",
-			"phone reply",
-		]);
+		// The store keeps what was committed; the stale prompt never landed and nothing reloads.
+		expect(await readStoredMessageTexts(sessionRef)).toEqual(["tui prompt", "tui reply"]);
+		expect(runtime.session).toBe(staleSession);
 
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(unhandledRejections).toEqual([]);
@@ -299,13 +271,10 @@ describe("regression #525: ending a session whose saved state could not be confi
 		expect(extensionFooterEntries(terminal)).toBeGreaterThan(0);
 
 		const staleSession = runtime.session;
-		await appendAsOtherOwner(runtime, (manager) => {
-			manager.appendMessage({ role: "user", content: "phone prompt", timestamp: Date.now() });
-		});
+		await loseConversationLock(staleSession.sessionManager);
 		access.editor.setText("unsent draft");
 
 		await Promise.allSettled([staleSession.prompt("stale prompt")]);
-		expect(staleSession.sessionManager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
 		access.ui.requestRender(true);
 		await terminal.waitForRender();
 
@@ -348,7 +317,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		expect(viewport(terminal)).toContain("Pick a target");
 		expect(staleSession.isBusy).toBe(true);
 
-		staleSession.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
+		await loseLog(staleSession.sessionManager);
 
 		await expect(withinTimeout(selection.promise, "ctx.ui.select()")).resolves.toBeUndefined();
 		await expect(withinTimeout(command, "prompt('/pick')")).resolves.toBeUndefined();
@@ -380,7 +349,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		const commandSignal = await commandStarted.promise;
 		expect(staleSession.isBusy).toBe(true);
 
-		staleSession.sessionManager.retireConversationAuthority(new Error("write could not be confirmed"));
+		await loseLog(staleSession.sessionManager);
 
 		await vi.waitFor(() => expect(handleFatalRuntimeError).toHaveBeenCalledTimes(1), { timeout: 5_000 });
 		expect(commandSignal.aborted).toBe(true);

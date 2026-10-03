@@ -29,7 +29,6 @@ export async function getReviewGeneral(manager: SessionManager, runId: string): 
 			canonicalizePath(cwd) !== anchor.source.cwd
 		)
 			throw new ReviewSourceUnavailableError("This conversation is not an exact member of the review run.");
-		manager.assertConversationAuthorityAvailable();
 		return {
 			runId: anchor.runId,
 			sourceSessionId: anchor.source.sessionId,

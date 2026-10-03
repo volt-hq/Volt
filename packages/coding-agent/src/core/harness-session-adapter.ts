@@ -1,5 +1,6 @@
 import {
 	type AgentMessage,
+	ConversationLogLostError,
 	type SessionTreeEntry as HarnessSessionTreeEntry,
 	type PendingSessionWrite,
 	type ProjectionCursor,
@@ -16,7 +17,6 @@ import {
 } from "@hansjm10/volt-agent-core";
 import { withClientMessageId } from "./messages.ts";
 import {
-	SessionAtomicAppendError,
 	type SessionCanonicalAppend,
 	type SessionCanonicalCommitEvidence,
 	SessionCanonicalConflictError,
@@ -148,6 +148,7 @@ function toHarnessEntry(entry: SessionEntry, parentId: string | null): HarnessSe
 export class SessionManagerHarnessStorage implements SessionStorage {
 	readonly sessionManager: SessionManager;
 	private readonly isRetired: () => boolean;
+	private readonly lose: (error: Error) => void;
 	private readonly authorityGeneration = uuidv7();
 	private revision = 0;
 	private currentFingerprint: string | undefined;
@@ -161,32 +162,29 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 	>();
 	private readonly mutationReceipts = new WeakMap<SessionMutationReceipt, SessionMutationReceiptRecord>();
 
-	constructor(sessionManager: SessionManager, isRetired: () => boolean = () => false) {
+	/**
+	 * @param isRetired Whether the producer stopped writing: it closed, or its session lost its log.
+	 * @param lose Ends the producer's session when committed evidence cannot be interpreted.
+	 */
+	constructor(
+		sessionManager: SessionManager,
+		isRetired: () => boolean = () => false,
+		lose: (error: Error) => void = () => {},
+	) {
 		this.sessionManager = sessionManager;
 		this.isRetired = isRetired;
-	}
-
-	private cannotWrite(): boolean {
-		return this.isRetired() || this.sessionManager.getConversationAuthorityStatus().status !== "available";
+		this.lose = lose;
 	}
 
 	private assertAuthorityAvailable(): void {
 		if (this.isRetired()) throw new SessionError("authority_retired", "SessionManager storage is retired");
-		try {
-			this.sessionManager.assertConversationAuthorityAvailable();
-		} catch (error) {
-			throw new SessionError(
-				"authority_retired",
-				error instanceof Error ? error.message : String(error),
-				error instanceof Error ? error : undefined,
-			);
-		}
 	}
 
+	/** A commit landed, but its evidence cannot be interpreted: nothing later can be trusted, so the session ends. */
 	private failStopCanonicalEvidence(error: unknown): never {
 		const cause = error instanceof Error ? error : new Error(String(error));
-		const retired = this.sessionManager.retireConversationAuthority(cause);
-		throw new SessionError("authority_retired", retired.message, retired);
+		this.lose(cause);
+		throw new SessionError("authority_retired", cause.message, cause);
 	}
 
 	private getVisibleParentId(parentId: string | null): string | null {
@@ -394,12 +392,7 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 				mutations,
 			});
 		} catch (error) {
-			if (
-				error instanceof SessionAtomicAppendError &&
-				(error.effect === "uncertain" ||
-					error.effect === "committed" ||
-					error.authority === "reconciliation_required")
-			) {
+			if (error instanceof ConversationLogLostError) {
 				return {
 					outcome: "uncertain",
 					error: new SessionError("authority_retired", error.message, error),
@@ -540,7 +533,7 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 	}
 
 	async getLeafId(): Promise<string | null> {
-		if (this.cannotWrite()) return null;
+		if (this.isRetired()) return null;
 		return this.mapPath(this.sessionManager.getBranch()).at(-1)?.id ?? null;
 	}
 

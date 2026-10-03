@@ -68,8 +68,6 @@ export interface ConversationProjectionSource {
 	subscribe(listener: (event: object) => void): () => void;
 	/** Retain expensive source observation only while at least one remote subscriber is active. */
 	retainObservation?(): () => void;
-	/** Synchronously fence projections when persisted conversation authority is lost. */
-	subscribeAuthorityLoss?(listener: (error: Error) => void): () => void;
 	/** Optional atomic source-generation hook for navigation and other rebases. */
 	subscribeGenerationChanges?(listener: () => void): () => void;
 	/**
@@ -833,7 +831,6 @@ function activeAssistantFromFrame(frame: object): RpcConversationActiveAssistant
 export class ConversationProjectionFeed {
 	private source: ConversationProjectionSource;
 	private detachSourceEvents: () => void = () => {};
-	private detachSourceAuthorityLoss: () => void = () => {};
 	private detachGenerationChanges: () => void = () => {};
 	private releaseSourceObservation: (() => void) | undefined;
 	private activeAssistantSourceEvent?: ActiveAssistantSourceEvent;
@@ -853,7 +850,6 @@ export class ConversationProjectionFeed {
 	private readonly now: () => number;
 	private disposed = false;
 	private poisonedError?: Error;
-	private sourceAuthorityError?: Error;
 	private sourceRebindPending = false;
 	private _branchEpoch: string;
 
@@ -1181,13 +1177,9 @@ export class ConversationProjectionFeed {
 		// Retire request/reply capabilities while the old authority tuple is still
 		// observable. Waiting until commit leaves a window where the source has
 		// already changed but an old correlated reply can still mutate host state.
-		// A suspended source already published this one-way authority cut.
-		if (this.sourceAuthorityError === undefined) {
-			this.notifyAllSubscriberAuthorityChanging();
-		}
+		this.notifyAllSubscriberAuthorityChanging();
 		this.stopSourceObservation();
 		this.detachSourceEvents();
-		this.detachSourceAuthorityLoss();
 		this.detachGenerationChanges();
 		this.source = source;
 		this.activeAssistantSourceEvent = undefined;
@@ -1196,7 +1188,6 @@ export class ConversationProjectionFeed {
 		this.resetTranscriptCursors();
 		this.clearPendingRebindControls();
 		this.poisonedError = undefined;
-		this.sourceAuthorityError = undefined;
 		this._branchEpoch = this.mintId("branchEpoch");
 		this.sourceRebindPending = true;
 		this.bindSourceListeners();
@@ -1262,7 +1253,6 @@ export class ConversationProjectionFeed {
 		this.disposed = true;
 		this.stopSourceObservation();
 		this.detachSourceEvents();
-		this.detachSourceAuthorityLoss();
 		this.detachGenerationChanges();
 		for (const subscriber of [...this.subscribers]) {
 			this.detachSubscriber(subscriber, new Error("Conversation projection feed disposed"));
@@ -1275,13 +1265,6 @@ export class ConversationProjectionFeed {
 
 	private bindSourceListeners(): void {
 		this.detachSourceEvents = this.source.subscribe((event) => this.handleSourceEvent(event));
-		const detachAuthorityLoss = this.source.subscribeAuthorityLoss?.((error) => this.suspendSourceAuthority(error));
-		this.detachSourceAuthorityLoss = detachAuthorityLoss ?? (() => {});
-		if (this.sourceAuthorityError !== undefined) {
-			this.detachSourceAuthorityLoss();
-			this.detachSourceAuthorityLoss = () => {};
-			return;
-		}
 		this.detachGenerationChanges =
 			this.source.subscribeGenerationChanges?.(() => this.rotateForBranchRebase()) ?? (() => {});
 	}
@@ -1297,7 +1280,7 @@ export class ConversationProjectionFeed {
 	}
 
 	private handleSourceEvent(event: object): void {
-		if (this.disposed || this.poisonedError !== undefined || this.sourceAuthorityError !== undefined) return;
+		if (this.disposed || this.poisonedError !== undefined) return;
 		if (!isRecord(event) || typeof event.type !== "string") {
 			this.poisonGeneration(new Error("Conversation projection source emitted a malformed event"));
 			return;
@@ -1368,31 +1351,6 @@ export class ConversationProjectionFeed {
 				}
 				this.failSubscriber(subscriber, projectionError);
 			}
-		}
-	}
-
-	private suspendSourceAuthority(error: Error): void {
-		if (this.disposed || this.sourceAuthorityError !== undefined) return;
-		this.sourceAuthorityError = error;
-		this.notifyAllSubscriberAuthorityChanging();
-		this.stopSourceObservation();
-		this.detachSourceEvents();
-		this.detachSourceAuthorityLoss();
-		this.detachGenerationChanges();
-		this.detachSourceEvents = () => {};
-		this.detachSourceAuthorityLoss = () => {};
-		this.detachGenerationChanges = () => {};
-		this.activeAssistantSourceEvent = undefined;
-		this.workflowSnapshots.clear();
-		this.canonicalWorkflowBytes = 0;
-		this.resetTranscriptCursors();
-		this.clearPendingRebindControls();
-		for (const subscriber of [...this.subscribers]) {
-			if (!subscriber.active || subscriber.fenced) continue;
-			this.dropPendingConversationItems(subscriber, error);
-			subscriber.attaching = false;
-			subscriber.pendingCheckpointRequestId = undefined;
-			subscriber.overflowRotationPending = false;
 		}
 	}
 
@@ -1923,10 +1881,7 @@ export class ConversationProjectionFeed {
 				item.deferred?.reject(error);
 				continue;
 			}
-			if (
-				isStaleConversationProjectionControl(item.value, this._branchEpoch) ||
-				(this.sourceAuthorityError !== undefined && isConversationProjectionControl(item.value))
-			) {
+			if (isStaleConversationProjectionControl(item.value, this._branchEpoch)) {
 				item.deferred?.resolve(undefined);
 				continue;
 			}
@@ -2182,9 +2137,6 @@ export class ConversationProjectionFeed {
 
 	private assertActive(): void {
 		this.assertNotDisposed();
-		if (this.sourceAuthorityError !== undefined) {
-			throw this.sourceAuthorityError;
-		}
 		if (this.poisonedError !== undefined) {
 			throw new Error(`Conversation projection generation is poisoned: ${this.poisonedError.message}`);
 		}

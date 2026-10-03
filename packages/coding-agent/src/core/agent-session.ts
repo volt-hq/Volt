@@ -47,7 +47,7 @@ import type {
 	ToolCallEvent,
 	ToolCallResult,
 } from "@hansjm10/volt-agent-core";
-import { AgentHarness, AgentHarnessAdmissionGate } from "@hansjm10/volt-agent-core";
+import { AgentHarness, AgentHarnessAdmissionGate, ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import type {
 	Api,
 	AssistantMessage,
@@ -876,12 +876,21 @@ export class AgentSession {
 	private _extensionWorkKey: string | undefined;
 	private _extensionWorkSignal: AbortSignal | undefined;
 	private _extensionWorkAbort: (() => void) | undefined;
-	private _unsubscribeWorkAuthority?: () => void;
-	/** Aborted on conversation-authority loss or disposal; command handlers see it as `ctx.signal`. */
+	/** Aborted when the session loses its log or is disposed; command handlers see it as `ctx.signal`. */
 	private readonly _lifetimeAbort = new AbortController();
-	/** Resolves when authority-loss cancellation starts; in-flight command handlers are no longer awaited. */
-	private readonly _conversationAuthorityLoss = Promise.withResolvers<void>();
-	private _conversationAuthorityLossObserved = false;
+	/** The first loss of this session's log; nothing the session does afterwards can be saved. */
+	private _lostError: Error | undefined;
+	private readonly _lostDeferred = Promise.withResolvers<Error>();
+	/** Aborted with the loss as its reason; in-flight tool executions are abandoned on it. */
+	private readonly _lostAbort = new AbortController();
+	/**
+	 * Resolves once, when this session loses its log: its manager could not
+	 * confirm a commit, or a delivery left durable input state it could not
+	 * resolve. The session has cancelled its work by then and accepts no more;
+	 * its runtime ends. In-flight command handlers and extension tools are no
+	 * longer awaited. Never rejects.
+	 */
+	readonly lost: Promise<Error> = this._lostDeferred.promise;
 	private readonly _workToolPolicies = new Set<{ policy: Readonly<AgentSessionTurnPolicy> }>();
 	private _workPolicyRevision = 0n;
 	private readonly _workImplementations = new WeakMap<
@@ -1009,15 +1018,17 @@ export class AgentSession {
 			changed: () => this._publishPromptCacheStatus(),
 		});
 		this._convertToLlm = config.convertToLlm;
+		const isCanonicalProducerRetired = () => this._canonicalProducerRetired || this._lostError !== undefined;
 		this._harnessSessionStorage = new SessionManagerHarnessStorage(
 			config.sessionManager,
-			() => this._canonicalProducerRetired,
+			isCanonicalProducerRetired,
+			(error) => this._lose(error),
 		);
 		this._harness = new AgentHarness({
 			admissionGate: this._admissionGate,
 			session: createSessionManagerHarnessSession(
 				config.sessionManager,
-				() => this._canonicalProducerRetired,
+				isCanonicalProducerRetired,
 				this._harnessSessionStorage,
 			),
 			...(config.model === undefined ? {} : { model: config.model }),
@@ -1207,10 +1218,7 @@ export class AgentSession {
 			this._mcpManagerFactory = config.mcpManagerFactory;
 			this._attachMcpManagerEvents();
 			this._extensionWork = this._createExtensionWorkManager();
-			this._unsubscribeWorkAuthority = this.sessionManager.subscribeConversationAuthorityChanges((status) => {
-				this._invalidateExtensionWork();
-				this._cancelWorkAfterAuthorityLoss(status.error);
-			});
+			void this.sessionManager.lost.then((error) => this._lose(error));
 
 			// Always subscribe to finalized Harness events for internal handling.
 			this._unsubscribeAgent = this._harness.subscribe(async (event) => {
@@ -1271,7 +1279,6 @@ export class AgentSession {
 		} catch (error) {
 			this._disposed = true;
 			this._canonicalProducerRetired = true;
-			this._unsubscribeWorkAuthority?.();
 			void this._extensionWork?.close();
 			void this._backgroundJobs.close();
 			void this._backgroundDiagnostics.close();
@@ -1327,19 +1334,22 @@ export class AgentSession {
 	}
 
 	/**
-	 * Nothing this session does after losing conversation authority can be saved, so it cancels
-	 * its own work: the run (with retry, compaction, and background jobs), branch summary, bash,
-	 * and the lifetime signal command handlers observe. In-flight command handlers stop being
-	 * awaited, so `isBusy` clears once cooperative work settles and a store reload can proceed.
-	 * Deferred to a microtask: the loss is reported synchronously inside the failing write, and
-	 * abort listeners must not reenter it.
+	 * The session lost its log. Nothing it does afterwards can be saved, so it cancels its own
+	 * work: the run (with retry, compaction, and background jobs), branch summary, bash, and the
+	 * lifetime signal command handlers observe. In-flight command handlers and extension tools
+	 * stop being awaited, so `isBusy` clears once cooperative work settles and the runtime can
+	 * end. Cancellation is deferred to a microtask so abort listeners never reenter a failing
+	 * write.
 	 */
-	private _cancelWorkAfterAuthorityLoss(error: Error): void {
-		if (this._conversationAuthorityLossObserved) return;
-		this._conversationAuthorityLossObserved = true;
+	private _lose(error: Error): void {
+		if (this._lostError) return;
+		this._lostError = error;
+		// First, so in-flight commands and tools are abandoned before reactions to the aborts below run.
+		this._lostDeferred.resolve(error);
+		this._lostAbort.abort(error);
+		if (this._disposed) return;
+		this._invalidateExtensionWork();
 		queueMicrotask(() => {
-			// First, so in-flight commands are abandoned before reactions to the abort below run.
-			this._conversationAuthorityLoss.resolve();
 			if (this._disposed) return;
 			this._lifetimeAbort.abort(error);
 			void this.abort("session_replacement").catch(() => undefined);
@@ -1349,17 +1359,19 @@ export class AgentSession {
 		});
 	}
 
-	private _assertConversationAuthorityAvailable(): void {
+	/** Actions and writes: rejected once the session is disposed or has lost its log. */
+	private _assertActive(): void {
+		this._assertNotDisposed();
+		this._assertNotLost();
+	}
+
+	/** Reads keep working after the session lost its log, until it is disposed. */
+	private _assertNotDisposed(): void {
 		if (this._disposed) throw new Error("AgentSession is disposed");
-		this._assertCanonicalProducerAuthorityAvailable();
 	}
 
-	private _assertCanonicalProducerAuthorityAvailable(): void {
-		this.sessionManager.assertConversationAuthorityAvailable();
-	}
-
-	private _isConversationAuthorityAvailable(): boolean {
-		return this.sessionManager.getConversationAuthorityStatus().status === "available";
+	private _assertNotLost(): void {
+		if (this._lostError) throw this._lostError;
 	}
 
 	/** Model registry for API key resolution and model discovery */
@@ -1368,7 +1380,7 @@ export class AgentSession {
 	}
 
 	setHostInteraction(hostInteraction: HostInteraction | undefined): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._hostInteraction = hostInteraction;
 		this._lspManager?.setHostInteraction(hostInteraction);
 	}
@@ -1385,7 +1397,7 @@ export class AgentSession {
 
 	/** Enable or disable LSP protocol tracing at runtime. */
 	setLspTraceFile(filePath: string | undefined): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		return this._trackAdmittedAncillaryWork(this._lspManager?.setTraceFile(filePath) ?? Promise.resolve());
 	}
 
@@ -1399,7 +1411,7 @@ export class AgentSession {
 	 * other sessions from the same pool; they respawn lazily on next use. Returns the number stopped.
 	 */
 	restartLspServers(): number {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		return this._lspManager?.restart() ?? 0;
 	}
 
@@ -1422,7 +1434,7 @@ export class AgentSession {
 	private async _prepareOwnedDelivery(
 		context: AgentDeliveryPreparationContext,
 	): Promise<AgentDeliveryPreparationOutcome> {
-		this._assertCanonicalProducerAuthorityAvailable();
+		this._assertNotLost();
 		const upstream: AgentDeliveryPreparationOutcome = {
 			outcome: "prepared",
 			messages: context.sourceMessages,
@@ -1506,7 +1518,7 @@ export class AgentSession {
 		});
 		this._harness.on("message_end", async (event) => {
 			if (event.deliveryId !== undefined) return undefined;
-			if (this._disposed || !this._isConversationAuthorityAvailable()) return undefined;
+			if (this._disposed || this._lostError) return undefined;
 			let replacement: AgentMessage | undefined;
 			try {
 				replacement = await this._emitExtensionEvent(event);
@@ -1537,7 +1549,7 @@ export class AgentSession {
 			return identityPreservingReplacement ? { message: identityPreservingReplacement } : undefined;
 		});
 		this._harness.on("next_action", (event) => {
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			this._backgroundNotificationDecisionRevision = this._backgroundContinuationRevision;
 			if (this._shouldStopForProactiveCompaction(event)) return { type: "pause" };
 			return this._backgroundNotificationAction(event);
@@ -1618,7 +1630,7 @@ export class AgentSession {
 					this._backgroundContinuationDeferredRevision === this._backgroundContinuationRevision ||
 					this._disposed ||
 					!this._admissionGate.isOpen ||
-					!this._isConversationAuthorityAvailable() ||
+					this._lostError !== undefined ||
 					this.isBusy ||
 					this.isStreaming ||
 					this._admittedPromptWork.size > 0 ||
@@ -1715,7 +1727,7 @@ export class AgentSession {
 
 	private _assertBackgroundToolContextCurrent(signal: AbortSignal): void {
 		const context = this._backgroundToolContext.getStore();
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (
 			signal.aborted ||
 			context?.generation !== this._conversationGenerationRevision ||
@@ -1731,7 +1743,7 @@ export class AgentSession {
 			!this._canonicalProducerRetired &&
 			!this._reloadInProgress &&
 			this._admissionGate.isOpen &&
-			this._isConversationAuthorityAvailable()
+			this._lostError === undefined
 		);
 	}
 
@@ -2040,7 +2052,7 @@ export class AgentSession {
 		toolCallId: string;
 		input: JsonObject;
 	}): Promise<{ block?: boolean; reason?: string } | undefined> {
-		this._assertCanonicalProducerAuthorityAvailable();
+		this._assertNotLost();
 		if (!this.getActiveToolNames().includes(event.toolName)) {
 			return {
 				block: true,
@@ -2106,7 +2118,7 @@ export class AgentSession {
 		},
 		backgroundCompletion = false,
 	): Promise<{ content: Array<TextContent | ImageContent>; details?: JsonValue; isError: boolean } | undefined> {
-		this._assertCanonicalProducerAuthorityAvailable();
+		this._assertNotLost();
 		if (
 			!backgroundCompletion &&
 			this._backgroundStartAcknowledgements.delete(`${event.toolName}:${event.toolCallId}`)
@@ -2182,7 +2194,7 @@ export class AgentSession {
 
 	/** Publish an isolated passive projection to every public session observer. */
 	private _emit(event: AgentSessionEvent): void {
-		if (this.sessionManager.getConversationAuthorityStatus().status !== "available") {
+		if (this._lostError) {
 			// Dropped events still end `isBusy` inputs (agent_settled); waiters re-check it, so wake them.
 			this._releaseActivityWaiters();
 			return;
@@ -2375,7 +2387,7 @@ export class AgentSession {
 		messages: AgentMessage[];
 		error?: Error;
 	}> {
-		this._assertCanonicalProducerAuthorityAvailable();
+		this._assertNotLost();
 		const ownedMessages = messages.map((message, index) => cloneCanonicalData(message, `Delivery message ${index}`));
 		if (!this._extensionRunner.hasHandlers("message_start") && !this._extensionRunner.hasHandlers("message_end")) {
 			return { messages: ownedMessages };
@@ -2461,7 +2473,7 @@ export class AgentSession {
 						error instanceof Error
 							? error
 							: new Error(`Failed to terminalize invalid delivery: ${String(error)}`);
-					this.sessionManager.retireConversationAuthority(terminalError);
+					this._lose(terminalError);
 					return { outcome: "terminally_failed", error: terminalError, authority: "retired" };
 				}
 				return { outcome: "terminally_failed", error: prepared.error };
@@ -2500,12 +2512,8 @@ export class AgentSession {
 			return { outcome: "committed", receipt };
 		} catch (error) {
 			let terminalError = error instanceof Error ? error : new Error(String(error));
-			const safeRollback =
-				error instanceof SessionAtomicAppendError &&
-				(error.effect === "not_started" || error.effect === "rolled_back") &&
-				error.authority === "available" &&
-				this.sessionManager.getConversationAuthorityStatus().status === "available";
-			if (safeRollback) {
+			// Definitely not committed, and the log is still writable.
+			if (error instanceof SessionAtomicAppendError) {
 				try {
 					return {
 						outcome: "retained",
@@ -2522,9 +2530,8 @@ export class AgentSession {
 					);
 				}
 			}
-			let authorityRetired =
-				this.sessionManager.getConversationAuthorityStatus().status === "reconciliation_required";
-			if (!authorityRetired) {
+			let lost = error instanceof ConversationLogLostError || this._lostError !== undefined;
+			if (!lost) {
 				try {
 					await this.sessionManager.terminalizeDelivery(context.preparedMessages, terminalError);
 				} catch (terminalizationError) {
@@ -2532,18 +2539,15 @@ export class AgentSession {
 						[terminalError, terminalizationError],
 						"Delivery failed and its durable client-input ownership could not be terminalized",
 					);
-					this.sessionManager.retireConversationAuthority(terminalError);
-					authorityRetired = true;
+					this._lose(terminalError);
+					lost = true;
 				}
 			}
 			this._runtimeErrorMessage = terminalError.message;
 			return {
 				outcome: "terminally_failed",
 				error: terminalError,
-				...(authorityRetired ||
-				(error instanceof SessionAtomicAppendError && error.authority === "reconciliation_required")
-					? { authority: "retired" as const }
-					: {}),
+				...(lost ? { authority: "retired" as const } : {}),
 			};
 		}
 	}
@@ -2640,7 +2644,7 @@ export class AgentSession {
 			this._backgroundNotificationDeliveries.clear();
 			this._backgroundStartAcknowledgements.clear();
 		}
-		if (!this._isConversationAuthorityAvailable()) {
+		if (this._lostError !== undefined) {
 			// Agent may emit a synthetic transaction-failure message after the
 			// persistence proof failed. It is runtime diagnostics, not a canonical
 			// transcript commit, so do not expose it through message lifecycle events.
@@ -2758,7 +2762,7 @@ export class AgentSession {
 		}
 		const handledEvent = normalizedEvent;
 
-		if (!this._isConversationAuthorityAvailable()) {
+		if (this._lostError !== undefined) {
 			return handledEvent.type === "message_end" ? handledEvent.message : undefined;
 		}
 
@@ -2938,7 +2942,7 @@ export class AgentSession {
 
 	/** Emit extension events based on agent events */
 	private async _emitExtensionEvent(event: AgentEvent): Promise<AgentMessage | undefined> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (event.type === "agent_start") {
 			this._turnIndex = 0;
 			await this._extensionRunner.emit({ type: "agent_start" });
@@ -3087,7 +3091,7 @@ export class AgentSession {
 	private _captureConversationGenerationAssertion(assertExternalAuthorityCurrent?: () => void): () => void {
 		const expectedRevision = this._conversationGenerationRevision;
 		return () => {
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			// Keep the transport's stable stale-authority error when one is available.
 			assertExternalAuthorityCurrent?.();
 			if (this._conversationGenerationRevision !== expectedRevision) {
@@ -3154,7 +3158,7 @@ export class AgentSession {
 		if (
 			this._disposed ||
 			!this._admissionGate.isOpen ||
-			!this._isConversationAuthorityAvailable() ||
+			this._lostError !== undefined ||
 			this._hasSessionOperationBarrier ||
 			this._harness.isReservedOrRunning() ||
 			this._harness.hasPendingPrompt() ||
@@ -3213,20 +3217,18 @@ export class AgentSession {
 		return this._disposePromise ?? Promise.resolve();
 	}
 
-	/** Retire a generation whose recorded reconciliation failure is already authoritative. */
+	/** Dispose an outgoing generation without joining admitted prompt work, which may be what replaces it. */
 	disposeForSessionReplacement(): Promise<void> {
 		return this._dispose("session_replacement", true);
 	}
 
-	private _dispose(source: AgentAbortSource, acceptReconciliationRequired: boolean): Promise<void> {
+	private _dispose(source: AgentAbortSource, replacement: boolean): Promise<void> {
 		if (!this._disposePromise) {
 			// Fence observable runtime state before any asynchronous close barrier.
 			// Late Harness events are ignored by the disposed guard and cannot
 			// repopulate these projections.
 			this._disposed = true;
 			this._invalidateExtensionWork();
-			this._unsubscribeWorkAuthority?.();
-			this._unsubscribeWorkAuthority = undefined;
 			this._activeAgentOperation = undefined;
 			this._agentConversationMutationInFlight = false;
 			this._unsubscribeBackgroundJobs?.();
@@ -3259,17 +3261,14 @@ export class AgentSession {
 			this._disposePromise = disposal;
 			// Publish the join before cancellation invokes reentrant abort listeners.
 			const backgroundDrain = this._backgroundJobs.close();
-			void this._performDispose(source, acceptReconciliationRequired, backgroundDrain).then(
-				resolveDisposal,
-				rejectDisposal,
-			);
+			void this._performDispose(source, replacement, backgroundDrain).then(resolveDisposal, rejectDisposal);
 		}
 		return this._disposePromise;
 	}
 
 	private async _performDispose(
 		source: AgentAbortSource,
-		acceptReconciliationRequired: boolean,
+		replacement: boolean,
 		backgroundDrain: Promise<void>,
 	): Promise<void> {
 		this._harness.requestClose(source);
@@ -3296,7 +3295,7 @@ export class AgentSession {
 		} catch {
 			// Dispose must continue even if an abort hook throws.
 		}
-		await this._drainAdmittedWork(!acceptReconciliationRequired);
+		await this._drainAdmittedWork(!replacement);
 
 		let subagentDrain: Promise<void>;
 		let mcpDrain: Promise<void>;
@@ -3339,9 +3338,7 @@ export class AgentSession {
 			}
 			let closeError: unknown;
 			try {
-				await (acceptReconciliationRequired
-					? this.sessionManager.drainPersistence().then(() => undefined)
-					: this.sessionManager.closePersistence());
+				await this.sessionManager.closePersistence();
 			} catch (error) {
 				closeError = error;
 			}
@@ -3621,7 +3618,7 @@ export class AgentSession {
 
 	/** Read-only runtime state snapshot. */
 	get state(): AgentSessionState {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return {
 			systemPrompt: this.systemPrompt,
 			model: this.model,
@@ -3682,12 +3679,12 @@ export class AgentSession {
 	}
 
 	get agentMode(): AgentMode {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return this._planningState.mode;
 	}
 
 	get planningState(): PlanningState {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return clonePlanningState(this.sessionManager.buildSessionContext().planning);
 	}
 
@@ -3788,7 +3785,7 @@ export class AgentSession {
 	 * Used by subagent runtimes to apply a selected definition before any turns run.
 	 */
 	appendSystemPromptContext(context: string): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const trimmed = context.trim();
 		if (!trimmed) {
 			return;
@@ -3818,7 +3815,7 @@ export class AgentSession {
 
 	/** Own callback snapshots; explicit updates/invalidation revoke earlier managed authorization. */
 	registerTurnPolicy(policy: AgentSessionTurnPolicy): PolicyRegistration<AgentSessionTurnPolicy> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const workPolicy = { policy: ownTurnPolicy(policy) };
 		const changed = (previous: Readonly<AgentSessionTurnPolicy>, next: Readonly<AgentSessionTurnPolicy>) => {
 			if (previous.beforeToolCall || next.beforeToolCall) this._workPolicyRevision++;
@@ -3841,7 +3838,7 @@ export class AgentSession {
 		changed({}, workPolicy.policy);
 		let registered = true;
 		const assertRegistered = () => {
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			if (!registered) throw new Error("Policy registration has been removed");
 		};
 		const remove = () => {
@@ -3874,12 +3871,12 @@ export class AgentSession {
 	}
 
 	setTransport(transport: NonNullable<AgentHarnessStreamOptions["transport"]>): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._applyHarnessMutation(this._setHarnessStreamOptions({ ...this._streamOptions, transport }));
 	}
 
 	getSubagentToolManager(): SubagentToolManager | undefined {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return this._subagentToolManager;
 	}
 
@@ -3890,7 +3887,7 @@ export class AgentSession {
 	}
 
 	getMcpManager(): McpManager | undefined {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return this._mcpManager;
 	}
 
@@ -3954,7 +3951,7 @@ export class AgentSession {
 	 * Changes take effect on the next agent turn.
 	 */
 	setActiveToolsByName(toolNames: string[]): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._planningRuntimeInitialized) {
 			this._requestedBuildToolNames = [...new Set(toolNames.filter((name) => !NATIVE_PLAN_TOOL_NAMES.has(name)))];
 			this._syncPlanningRuntime();
@@ -4014,12 +4011,12 @@ export class AgentSession {
 	}
 
 	private async _prepareUnrestrictedMcpForBuild(): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (!this._mcpManager) {
 			return;
 		}
 		await this._mcpManager.startEagerServers();
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const previousDirectToolNames = this._directMcpToolNames;
 		const directDefinitions = createMcpDirectToolDefinitions(this._mcpManager);
 		for (const name of previousDirectToolNames) {
@@ -4094,7 +4091,7 @@ export class AgentSession {
 	}
 
 	private _commitPlanningState(next: PlanningState): PlanningState {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const parsed = parsePlanningState(next);
 		if (parsed.mode === "plan" && this._backgroundJobs.hasActive) {
 			throw new Error("Cannot enter Plan mode while background jobs are active; abort or wait for them to finish");
@@ -4126,9 +4123,9 @@ export class AgentSession {
 	 * commit while a queued transition is suspended mid-flight.
 	 */
 	private _enqueuePlanningTransition<T>(transition: () => Promise<T>): Promise<T> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const result = this._planningTransitionQueue.then(async () => {
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			this._planningTransitionInFlight = true;
 			try {
 				return await transition();
@@ -4145,7 +4142,7 @@ export class AgentSession {
 	}
 
 	private _assertNoPlanningTransitionInFlight(action: string): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._planningTransitionInFlight) {
 			throw new Error(`${action} is unavailable while a planning transition is in progress; retry once it settles`);
 		}
@@ -4491,7 +4488,7 @@ export class AgentSession {
 
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return cloneAgentMessages(this.sessionManager.buildSessionContext().messages);
 	}
 
@@ -4527,7 +4524,7 @@ export class AgentSession {
 
 	/** Update scoped models for cycling */
 	setScopedModels(scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._scopedModels = scopedModels;
 	}
 
@@ -4723,13 +4720,13 @@ export class AgentSession {
 
 	/**
 	 * True while this live operation still owns an identified input that has not
-	 * reached a canonical commit, retained delivery, or terminal record. Without
-	 * conversation authority the durable state cannot be read; the terminal write
-	 * then reports the fail-stop instead of leaving the admission pending.
+	 * reached a canonical commit, retained delivery, or terminal record. After the
+	 * session lost its log, the terminal write reports the loss instead of leaving
+	 * the admission pending.
 	 */
 	private _ownsUncommittedClientInput(clientMessageId: string, operation: LiveClientInputOperation): boolean {
 		if (this._disposed || this._liveClientInputs.get(clientMessageId) !== operation) return false;
-		if (!this._isConversationAuthorityAvailable()) return true;
+		if (this._lostError !== undefined) return true;
 		const state = this.sessionManager.getClientInput(clientMessageId)?.state;
 		return state === "accepted" || state === "started";
 	}
@@ -4825,7 +4822,7 @@ export class AgentSession {
 	 * and drain behind that run. Interrupted provider/tool work is never resumed.
 	 */
 	resumeRecoveredClientInputs(): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._resumeRecoveredClientInputsPromise) {
 			return this._resumeRecoveredClientInputsPromise;
 		}
@@ -4843,7 +4840,7 @@ export class AgentSession {
 			}
 			if (this.isReviewDiscussion) {
 				const interrupted = await this.sessionManager.terminalizeInterruptedReviewInputs();
-				this._assertConversationAuthorityAvailable();
+				this._assertActive();
 				if (this._disposed || abortGeneration !== this._abortGeneration)
 					throw new Error("Review recovery was aborted");
 				await this._clearAgentQueues();
@@ -4877,7 +4874,7 @@ export class AgentSession {
 			// Rebuild it here with the promoted first input removed, without using
 			// clearQueue (which correctly marks user-cleared receipts failed).
 			await this._clearAgentQueues();
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			this._steeringMessages = [];
 			this._followUpMessages = [];
 			this._queueDeliveryIds.clear();
@@ -4927,7 +4924,7 @@ export class AgentSession {
 				// below must still run.
 				if (
 					firstOperation !== undefined &&
-					this._isConversationAuthorityAvailable() &&
+					this._lostError === undefined &&
 					this._liveClientInputs.get(first.clientMessageId) === firstOperation &&
 					this.sessionManager.getClientInput(first.clientMessageId)?.state === "started"
 				) {
@@ -4938,7 +4935,7 @@ export class AgentSession {
 					).catch(() => undefined);
 				}
 				await this._clearAgentQueues();
-				this._assertConversationAuthorityAvailable();
+				this._assertActive();
 				this._steeringMessages = [];
 				this._followUpMessages = [];
 				this._queueDeliveryIds.clear();
@@ -5004,7 +5001,7 @@ export class AgentSession {
 		reservedRun?: AgentHarnessRunReservation,
 		auxiliaryInput = false,
 	): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._hasSessionOperationBarrier) {
 			throw new Error("Cannot start an agent run while a session mutation is active");
 		}
@@ -5072,7 +5069,7 @@ export class AgentSession {
 	}
 
 	private async _runAgentOperation<T>(operation: () => Promise<T>): Promise<T> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._agentEventFatalError) {
 			const staleError = this._agentEventFatalError;
 			this._agentEventFatalError = undefined;
@@ -5095,7 +5092,7 @@ export class AgentSession {
 	}
 
 	private async _continueAgent(reservedRun?: AgentHarnessRunReservation): Promise<AgentRunResult> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._backgroundContinuationRevision++;
 		const drainFollowUps = this._drainFollowUpsOnNextContinuation;
 		this._drainFollowUpsOnNextContinuation = false;
@@ -5414,7 +5411,7 @@ export class AgentSession {
 			// A handled command or input hook already ran its side effects. If its
 			// terminal write fails, `started` remains the truthful ambiguous outcome.
 			if (operation && clientMessageId && outcome === "handled") {
-				this._assertConversationAuthorityAvailable();
+				this._assertActive();
 				this.sessionManager.transitionClientInput(clientMessageId, "completed");
 				await this.sessionManager.flush();
 				this._completeLiveClientInput(clientMessageId, "completed");
@@ -5753,12 +5750,10 @@ export class AgentSession {
 			this._activeExtensionCommandHandlers++;
 			this._activityChanged();
 			const handler = Promise.resolve(command.handler(args, ctx));
-			// After authority loss nothing the handler does can be saved. Stop awaiting it (its
-			// ctx.signal is aborted) so a handler that never settles cannot block a store reload.
-			const abandoned = await Promise.race([
-				handler.then(() => false),
-				this._conversationAuthorityLoss.promise.then(() => true),
-			]);
+			// After the session lost its log nothing the handler does can be saved. Stop awaiting
+			// it (its ctx.signal is aborted) so a handler that never settles cannot keep the
+			// ending runtime alive.
+			const abandoned = await Promise.race([handler.then(() => false), this.lost.then(() => true)]);
 			if (abandoned) {
 				void handler.catch(() => undefined);
 				return true;
@@ -5766,7 +5761,7 @@ export class AgentSession {
 			await this._waitForHarnessMutations();
 			return true;
 		} catch (err) {
-			// Volt tore the handler's custom UI down (session replacement, reload, authority loss).
+			// Volt tore the handler's custom UI down (session replacement, reload, or the session ending).
 			if (err instanceof ExtensionUIDismissedError) return true;
 			// Emit error via extension runner
 			this._extensionRunner.emitError({
@@ -5821,7 +5816,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async steer(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._disposed) {
 			throw new Error("Cannot queue input on a disposed session");
 		}
@@ -5868,7 +5863,7 @@ export class AgentSession {
 	 * @throws Error if text is an extension command
 	 */
 	async followUp(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._disposed) {
 			throw new Error("Cannot queue input on a disposed session");
 		}
@@ -5952,7 +5947,7 @@ export class AgentSession {
 		operation?: LiveClientInputOperation,
 		auxiliaryInput = false,
 	): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this.pendingMessageCount >= AGENT_SESSION_MAX_QUEUED_MESSAGES) {
 			throw new Error(`Agent queue is limited to ${AGENT_SESSION_MAX_QUEUED_MESSAGES} messages`);
 		}
@@ -5993,7 +5988,7 @@ export class AgentSession {
 		operation?: LiveClientInputOperation,
 		auxiliaryInput = false,
 	): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this.pendingMessageCount >= AGENT_SESSION_MAX_QUEUED_MESSAGES) {
 			throw new Error(`Agent queue is limited to ${AGENT_SESSION_MAX_QUEUED_MESSAGES} messages`);
 		}
@@ -6063,7 +6058,7 @@ export class AgentSession {
 		allowDuringPromptTransaction: boolean,
 		appendDuringReservedTurn = false,
 	): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._hasSessionOperationBarrier) {
 			throw new Error("Cannot append a custom message while a session mutation is active");
 		}
@@ -6119,7 +6114,7 @@ export class AgentSession {
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
@@ -6161,7 +6156,7 @@ export class AgentSession {
 	 * @throws QueueClearPersistenceError when the cleared state could not be persisted
 	 */
 	async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
-		if (this._disposed || !this._isConversationAuthorityAvailable()) {
+		if (this._disposed || this._lostError !== undefined) {
 			const handback = this._disposedQueueHandback ?? {
 				steering: this._steeringMessages.map((entry) => entry.text),
 				followUp: this._followUpMessages.map((entry) => entry.text),
@@ -6223,8 +6218,8 @@ export class AgentSession {
 		// Runtime-only queue entries carry a local-queue identity and never reach the
 		// WAL, so clearing them appends nothing. Awaiting the durable watermark in
 		// that case records no cancellation and only inherits an unrelated earlier
-		// failure, which would fail the one action a fail-stopped session still owes
-		// the user: handing their unsent text back.
+		// failure, which would fail the one action a session that lost its log still
+		// owes the user: handing their unsent text back.
 		if (queuedOperations.length > 0 && persistenceError === undefined) {
 			try {
 				await this.sessionManager.flush();
@@ -6253,19 +6248,19 @@ export class AgentSession {
 
 	/** Number of pending messages (includes both steering and follow-up) */
 	get pendingMessageCount(): number {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return this._steeringMessages.length + this._followUpMessages.length;
 	}
 
 	/** Get pending steering messages (read-only) */
 	getSteeringMessages(): readonly AgentSessionQueuedMessage[] {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return this._steeringMessages;
 	}
 
 	/** Get pending follow-up messages (read-only) */
 	getFollowUpMessages(): readonly AgentSessionQueuedMessage[] {
-		this._assertConversationAuthorityAvailable();
+		this._assertNotDisposed();
 		return this._followUpMessages;
 	}
 
@@ -6354,7 +6349,7 @@ export class AgentSession {
 		previousModel: Model<any> | undefined,
 		source: "set" | "cycle" | "restore",
 	): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (modelsAreEqual(previousModel, nextModel)) return;
 		this._publishPromptCacheStatus();
 		await this._extensionRunner.emit({
@@ -6375,7 +6370,7 @@ export class AgentSession {
 	}
 
 	private async _setModel(model: Model<any>, options?: DefaultPersistenceOptions): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (!this._modelRegistry.hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
@@ -6385,7 +6380,7 @@ export class AgentSession {
 		const persistDefault = options?.persistDefault !== false;
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
 		await this._harness.setModelAndThinkingLevel(model, thinkingLevel);
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._syncPlanningRuntime();
 		if (persistDefault) {
 			this.settingsManager.setDefaultModelAndProvider(model.provider, model.id);
@@ -6395,7 +6390,7 @@ export class AgentSession {
 		}
 		this._publishThinkingLevelChange(thinkingLevel, previousThinkingLevel);
 		await this.settingsManager.flush();
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 
 		await this._emitModelSelect(model, previousModel, "set");
 	}
@@ -6411,7 +6406,7 @@ export class AgentSession {
 	}
 
 	private async _cycleModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._scopedModels.length > 0) {
 			return this._cycleScopedModel(direction);
 		}
@@ -6433,7 +6428,7 @@ export class AgentSession {
 		const previousThinkingLevel = this.thinkingLevel;
 
 		await this._harness.setModelAndThinkingLevel(next.model, thinkingLevel);
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._syncPlanningRuntime();
 		this.settingsManager.setDefaultModelAndProvider(next.model.provider, next.model.id);
 		if (this.supportsThinking() || thinkingLevel !== "off") {
@@ -6441,7 +6436,7 @@ export class AgentSession {
 		}
 		this._publishThinkingLevelChange(thinkingLevel, previousThinkingLevel);
 		await this.settingsManager.flush();
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 
 		await this._emitModelSelect(next.model, currentModel, "cycle");
 
@@ -6463,7 +6458,7 @@ export class AgentSession {
 		const thinkingLevel = this._getThinkingLevelForModelSwitch(nextModel);
 		const previousThinkingLevel = this.thinkingLevel;
 		await this._harness.setModelAndThinkingLevel(nextModel, thinkingLevel);
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._syncPlanningRuntime();
 		this.settingsManager.setDefaultModelAndProvider(nextModel.provider, nextModel.id);
 		if (this.supportsThinking() || thinkingLevel !== "off") {
@@ -6471,7 +6466,7 @@ export class AgentSession {
 		}
 		this._publishThinkingLevelChange(thinkingLevel, previousThinkingLevel);
 		await this.settingsManager.flush();
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 
 		await this._emitModelSelect(nextModel, currentModel, "cycle");
 
@@ -6492,7 +6487,7 @@ export class AgentSession {
 	}
 
 	private async _setThinkingLevel(level: ThinkingLevel, options?: DefaultPersistenceOptions): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const availableLevels = this.getAvailableThinkingLevels();
 		const effectiveLevel = availableLevels.includes(level) ? level : this._clampThinkingLevel(level, availableLevels);
 		const previousLevel = this.thinkingLevel;
@@ -6504,7 +6499,7 @@ export class AgentSession {
 		}
 
 		await this._harness.setThinkingLevel(effectiveLevel);
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 
 		if (persistDefault && (this.supportsThinking() || effectiveLevel !== "off")) {
 			this.settingsManager.setDefaultThinkingLevel(effectiveLevel);
@@ -6558,7 +6553,7 @@ export class AgentSession {
 
 	/** Commit a branch-local Fast mode transition before publishing its settled state. */
 	setFastModeEnabled(enabled: boolean): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (enabled === this._fastModeEnabled) {
 			return;
 		}
@@ -6631,7 +6626,7 @@ export class AgentSession {
 
 	/** Set the built-in prompt personality and apply it to future turns. */
 	setPersonality(personality: Personality): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this.settingsManager.setPersonality(personality);
 		this._baseSystemPrompt = this._rebuildSystemPrompt(this.getActiveToolNames());
 		this._applyTrustedPlanningInstructionsToSystemPrompt();
@@ -6642,7 +6637,7 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setSteeringMode(mode: "all" | "one-at-a-time"): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._applyHarnessMutation(this._harness.setSteeringMode(mode));
 		this.settingsManager.setSteeringMode(mode);
 	}
@@ -6652,7 +6647,7 @@ export class AgentSession {
 	 * Saves to settings.
 	 */
 	setFollowUpMode(mode: "all" | "one-at-a-time"): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this._applyHarnessMutation(this._harness.setFollowUpMode(mode));
 		this.settingsManager.setFollowUpMode(mode);
 	}
@@ -7179,7 +7174,7 @@ export class AgentSession {
 		continueAfterCompaction = false,
 		assertConversationGenerationCurrent?: () => void,
 	): Promise<boolean> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const settings = this.settingsManager.getCompactionSettings();
 		const abortGeneration = this._abortGeneration;
 		const canContinue = (): boolean => !this._disposed && abortGeneration === this._abortGeneration;
@@ -7384,7 +7379,7 @@ export class AgentSession {
 	 * Toggle auto-compaction setting.
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this.settingsManager.setCompactionEnabled(enabled);
 	}
 
@@ -7398,7 +7393,7 @@ export class AgentSession {
 	}
 
 	private async _bindExtensions(bindings: ExtensionBindings): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (bindings.uiContext !== undefined) {
 			this._extensionUIContext = bindings.uiContext;
 		}
@@ -7422,11 +7417,11 @@ export class AgentSession {
 		// Interactive-only native tools follow the currently bound host surface.
 		this._syncPlanningRuntime();
 		await this._extensionRunner.emit(this._sessionStartEvent);
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		await this.extendResourcesFromExtensions(this._sessionStartEvent.reason === "reload" ? "reload" : "startup");
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		await this._waitForHarnessMutations();
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -7438,7 +7433,7 @@ export class AgentSession {
 			this._cwd,
 			reason,
 		);
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 
 		if (skillPaths.length === 0 && promptPaths.length === 0 && themePaths.length === 0) {
 			return;
@@ -7702,7 +7697,7 @@ export class AgentSession {
 				.filter((entry): entry is readonly [string, string[]] => entry !== undefined),
 		);
 		const runner = this._extensionRunner;
-		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner);
+		const wrappedExtensionTools = wrapRegisteredTools(allCustomTools, runner, this._lostAbort.signal);
 		const wrappedBuiltInTools = wrapRegisteredTools(
 			Array.from(this._baseToolDefinitions.values())
 				.filter((definition) => isAllowedListedTool(definition.name))
@@ -7711,6 +7706,7 @@ export class AgentSession {
 					sourceInfo: createSyntheticSourceInfo(`<builtin:${definition.name}>`, { source: "builtin" }),
 				})),
 			runner,
+			this._lostAbort.signal,
 		);
 
 		const toolRegistry = new Map<string, AgentTool>();
@@ -7998,7 +7994,7 @@ export class AgentSession {
 				baseToolDefinitions[name] = {
 					...wrapped,
 					execute: async (...args: Parameters<typeof wrapped.execute>) => {
-						this._assertConversationAuthorityAvailable();
+						this._assertActive();
 						this._admissionGate.assertOpen();
 						if (this._hasSessionOperationBarrier) {
 							throw new Error(
@@ -8083,7 +8079,7 @@ export class AgentSession {
 	}
 
 	private async _reload(): Promise<void> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this.isStreaming || this.isBashRunning || this.hasActiveSessionMutation || this._backgroundJobs.hasActive) {
 			throw new Error(
 				"Cannot reload while active session work still owns this runtime; abort or wait for it to finish",
@@ -8097,17 +8093,17 @@ export class AgentSession {
 			this._extensionWork = this._createExtensionWorkManager();
 			const previousFlagValues = this._extensionRunner.getFlagValues();
 			await emitSessionShutdownEvent(this._extensionRunner, { type: "session_shutdown", reason: "reload" });
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			await this.sessionManager.flush();
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			await this.settingsManager.reload();
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			await this.syncAgentRuntimeSettingsFromSettings();
 			this._modelRegistry.clearRegisteredProviders();
 			await this._resourceLoader.reload();
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			await this._reloadMcpManager();
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 			const activeToolNames = this._planningRuntimeInitialized
 				? [...this._requestedBuildToolNames]
 				: this.getActiveToolNames();
@@ -8138,12 +8134,12 @@ export class AgentSession {
 				this._extensionErrorListener;
 			if (hasBindings) {
 				await this._extensionRunner.emit({ type: "session_start", reason: "reload" });
-				this._assertConversationAuthorityAvailable();
+				this._assertActive();
 				await this.extendResourcesFromExtensions("reload");
-				this._assertConversationAuthorityAvailable();
+				this._assertActive();
 			}
 			await this.sessionManager.flush();
-			this._assertConversationAuthorityAvailable();
+			this._assertActive();
 		} finally {
 			this._reloadInProgress = false;
 			this._activityChanged();
@@ -8292,7 +8288,7 @@ export class AgentSession {
 	 * Toggle auto-retry setting.
 	 */
 	setAutoRetryEnabled(enabled: boolean): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this.settingsManager.setRetryEnabled(enabled);
 	}
 
@@ -8321,7 +8317,7 @@ export class AgentSession {
 		onChunk?: (chunk: string) => void,
 		options?: { excludeFromContext?: boolean; operations?: BashOperations },
 	): Promise<BashResult> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._disposed) {
 			throw new Error("Cannot execute bash on a disposed session");
 		}
@@ -8361,7 +8357,7 @@ export class AgentSession {
 	 * Used by executeBash and by extensions that handle bash execution themselves.
 	 */
 	recordBashResult(command: string, result: BashResult, options?: { excludeFromContext?: boolean }): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		if (this._disposed) return;
 		const bashMessage: BashExecutionMessage = {
 			role: "bashExecution",
@@ -8408,7 +8404,7 @@ export class AgentSession {
 	 */
 	private _flushPendingBashMessages(): void {
 		if (this._pendingBashMessages.length === 0) return;
-		this._assertCanonicalProducerAuthorityAvailable();
+		this._assertNotLost();
 
 		for (const bashMessage of this._pendingBashMessages) {
 			this.sessionManager.appendMessage(bashMessage);
@@ -8425,7 +8421,7 @@ export class AgentSession {
 	 * Set a display name for the current session.
 	 */
 	setSessionName(name: string): void {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		this.sessionManager.appendSessionInfo(name);
 		const resolvedName = this.sessionManager.getSessionName();
 		this._emit({
@@ -9140,7 +9136,7 @@ export class AgentSession {
 	 * @returns Path to exported file
 	 */
 	async exportToHtml(outputPath?: string): Promise<string> {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		await this.sessionManager.flush();
 		const configuredThemeName = this.settingsManager.getTheme();
 		const themeName = configuredThemeName && getThemeByName(configuredThemeName) ? configuredThemeName : undefined;
@@ -9166,7 +9162,7 @@ export class AgentSession {
 	 * @returns The resolved output file path.
 	 */
 	exportToJsonl(outputPath?: string): string {
-		this._assertConversationAuthorityAvailable();
+		this._assertActive();
 		const filePath = resolvePath(
 			outputPath ?? `session-${new Date().toISOString().replace(/[:.]/g, "-")}.jsonl`,
 			process.cwd(),

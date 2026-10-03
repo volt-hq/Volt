@@ -1,8 +1,9 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { SessionConversationStateUnavailableError, SessionManager } from "../../src/core/session-manager.ts";
+import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/index.ts";
 import { loseConversationLock } from "../lost-conversation-lock.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
@@ -170,22 +171,14 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 		]);
 	});
 
-	it("fail-stops ordinary persistence when matched commit evidence trails a descendant", async () => {
+	it("loses its log when matched commit evidence trails a descendant", async () => {
 		const root = createTempDir();
 		const manager = await SessionManager.create(root, root, { id: "reconciled-descendant" });
 		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
 		const lease = await acquireSharedSQLiteSessionStore(root);
 		const applyTransaction = lease.client.applyTransaction.bind(lease.client);
-		const reconcileCommit = lease.client.reconcileCommit.bind(lease.client);
-		let markReconciliationStarted!: () => void;
-		const reconciliationStarted = new Promise<void>((resolve) => {
-			markReconciliationStarted = resolve;
-		});
-		let releaseReconciliation!: () => void;
-		const reconciliationGate = new Promise<void>((resolve) => {
-			releaseReconciliation = resolve;
-		});
+		const findSessionSummary = lease.client.findSessionSummary.bind(lease.client);
 		let intercepted = false;
 		const applySpy = vi.spyOn(lease.client, "applyTransaction").mockImplementation(async (input) => {
 			if (intercepted) return applyTransaction(input);
@@ -193,78 +186,54 @@ describe("SessionManager asynchronous SQLite persistence", () => {
 			await applyTransaction(input);
 			throw new Error("injected lost transaction response");
 		});
-		const reconcileSpy = vi.spyOn(lease.client, "reconcileCommit").mockImplementation(async (input) => {
-			markReconciliationStarted();
-			await reconciliationGate;
-			return reconcileCommit(input);
-		});
-		let watermark: Promise<void> | undefined;
+		// The commit is found, but the log has moved past it: another writer appended.
+		const summarySpy = vi
+			.spyOn(lease.client, "findSessionSummary")
+			.mockImplementation(async (sessionId, sessionGeneration) => {
+				const summary = await findSessionSummary(sessionId, sessionGeneration);
+				return summary && { ...summary, lastOrdinal: summary.lastOrdinal + 1 };
+			});
 
 		try {
 			const committedId = manager.appendCustomEntry("test", { writer: "reconciling-manager" });
-			watermark = manager.flush();
-			await reconciliationStarted;
-
-			// Simulates a lost lock: a second writer opens while the reconciling manager still writes.
-			loseConversationLock(manager);
-			const descendant = await SessionManager.open(ref);
-			expect(descendant.getEntry(committedId)).toMatchObject({
-				type: "custom",
-				data: { writer: "reconciling-manager" },
+			const watermark = manager.flush();
+			await expect(watermark).rejects.toBeInstanceOf(ConversationLogLostError);
+			await expect(manager.lost).resolves.toMatchObject({
+				reason: "fence_conflict",
+				message: "SQLite session transaction committed but authoritative session state has changed",
 			});
-			const descendantId = descendant.appendCustomEntry("test", { writer: "descendant-manager" });
-			await descendant.flush();
+			expect(() => manager.appendCustomEntry("test", { writer: "stale-manager" })).toThrow(ConversationLogLostError);
+			// Reads keep working; the runtime ends instead of reloading.
+			expect(manager.getEntry(committedId)).toMatchObject({ type: "custom" });
 
-			releaseReconciliation();
-			await expect(watermark).rejects.toMatchObject({
-				effect: "committed",
-				authority: "reconciliation_required",
-			});
-			expect(manager.getConversationAuthorityStatus().status).toBe("reconciliation_required");
-			expect(() => manager.appendCustomEntry("test", { writer: "stale-manager" })).toThrow(
-				SessionConversationStateUnavailableError,
-			);
-
+			summarySpy.mockRestore();
 			const reopened = await SessionManager.openReadOnly(ref);
-			expect(reopened.getEntries().map((entry) => entry.id)).toEqual([committedId, descendantId]);
-			expect(reopened.getEntries().map((entry) => (entry.type === "custom" ? entry.data : undefined))).toEqual([
-				{ writer: "reconciling-manager" },
-				{ writer: "descendant-manager" },
-			]);
+			expect(reopened.getEntries().map((entry) => entry.id)).toEqual([committedId]);
 		} finally {
-			releaseReconciliation();
-			if (watermark) await Promise.allSettled([watermark]);
-			reconcileSpy.mockRestore();
+			summarySpy.mockRestore();
 			applySpy.mockRestore();
 			await lease.release();
 		}
 	});
 
-	it("fails stale concurrent managers closed instead of losing a committed update", async () => {
+	it("loses its log when a lost lock fails the ordinal fence", async () => {
 		const root = createTempDir();
-		const seed = await SessionManager.create(root, root, { id: "shared" });
-		seed.appendCustomMessageEntry("test", "seed", true);
-		await seed.flush();
-		const ref = seed.getSessionRef();
+		const manager = await SessionManager.create(root, root, { id: "fenced" });
+		const committedId = manager.appendCustomEntry("test", { writer: "first" });
+		await manager.flush();
+		const ref = manager.getSessionRef();
 		if (!ref) throw new Error("Expected a persisted session reference");
-		await seed.closePersistence();
-		const first = await SessionManager.open(ref);
-		// Simulates a lost lock: a stale second writer opens the same log concurrently.
-		loseConversationLock(first);
-		const stale = await SessionManager.open(ref);
 
-		const firstId = first.appendCustomEntry("test", { writer: "first" });
-		await first.flush();
-		stale.appendCustomEntry("test", { writer: "stale" });
-		await expect(stale.flush()).rejects.toThrow("Session ordinal changed");
-		expect(stale.getConversationAuthorityStatus().status).toBe("reconciliation_required");
-		expect(() => stale.getEntries()).toThrow("requires reconciliation");
+		await loseConversationLock(manager);
+		manager.appendCustomEntry("test", { writer: "stale" });
+		await expect(manager.flush()).rejects.toThrow("Session ordinal changed");
+		await expect(manager.lost).resolves.toMatchObject({ reason: "fence_conflict" });
+		expect(() => manager.appendCustomEntry("test", { writer: "later" })).toThrow("Session ordinal changed");
+		// Closing a lost manager reports nothing new: `lost` already did.
+		await expect(manager.closePersistence()).resolves.toBeUndefined();
 
 		const reopened = await SessionManager.openReadOnly(ref);
-		expect(reopened.getEntry(firstId)).toMatchObject({ type: "custom", data: { writer: "first" } });
-		expect(reopened.getEntries()).not.toContainEqual(
-			expect.objectContaining({ type: "custom", data: { writer: "stale" } }),
-		);
+		expect(reopened.getEntries().map((entry) => entry.id)).toEqual([committedId]);
 	});
 
 	it("imports a current JSONL snapshot once and continues only in SQLite", async () => {

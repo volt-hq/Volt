@@ -273,7 +273,7 @@ describe("SubagentManager", () => {
 			}
 		});
 		const parentSessionManager = await SessionManager.create(parentRoot, join(parentRoot, "sessions"));
-		cleanups.push(() => parentSessionManager.drainPersistence().then(() => undefined));
+		cleanups.push(() => parentSessionManager.closePersistence());
 		parentSessionManager.appendMessage({
 			role: "user",
 			content: [{ type: "text", text: "parent prompt" }],
@@ -294,7 +294,7 @@ describe("SubagentManager", () => {
 		}
 		expect(stats.sessionRef.sessionDirectory).toBe(parentSessionManager.getSessionDir());
 		const reopened = await SessionManager.openReadOnly(stats.sessionRef);
-		cleanups.push(() => reopened.drainPersistence().then(() => undefined));
+		cleanups.push(() => reopened.closePersistence());
 		expect(reopened.getHeader()).toMatchObject({
 			type: "session",
 			id: handle.sessionId,

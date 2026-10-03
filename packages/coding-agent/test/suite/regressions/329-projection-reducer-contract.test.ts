@@ -646,7 +646,7 @@ async function runProjectionPropertyPartition(
 		applyTransaction.mockRestore();
 	}
 	expect(injectedRollback).toBe(true);
-	expect(rollbackError).toMatchObject({ effect: "rolled_back", authority: "available" });
+	expect(rollbackError).toMatchObject({ effect: "rolled_back" });
 	expect(replayComparableState(manager, rootEntryId, clientMessageId)).toEqual(beforeRollback);
 	await expectReplayMatches(manager, rootEntryId, clientMessageId);
 	expect(
