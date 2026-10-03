@@ -6,16 +6,16 @@ import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-	ClientInputConflictError,
-	ClientInputOutcomeAmbiguousError,
-	QueueClearPersistenceError,
-} from "../src/core/agent-session.ts";
 import { getClientMessageId } from "../src/core/messages.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
+import {
+	ClientInputConflictError,
+	ClientInputOutcomeAmbiguousError,
+	QueueClearPersistenceError,
+} from "../src/core/session/client-inputs.ts";
 import {
 	CLIENT_INPUT_MAX_OUTSTANDING_ENTRIES,
 	type ClientInputCommand,
