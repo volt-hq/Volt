@@ -332,6 +332,13 @@ export class DeliveryInbox<TKind extends string, TMessage> {
 		return [...revoked, ...leased].sort((left, right) => left.sequence - right.sequence);
 	}
 
+	/** Remove one pending delivery that no lease holds. */
+	withdraw(deliveryId: string): InboxDelivery<TKind, TMessage> | undefined {
+		const delivery = this.pending.find((candidate) => candidate.deliveryId === deliveryId);
+		if (delivery) this.pending = this.pending.filter((candidate) => candidate !== delivery);
+		return delivery;
+	}
+
 	hasPending(kind?: TKind): boolean {
 		return this.list(kind).length > 0;
 	}
