@@ -1,5 +1,7 @@
 # Extension services foundation
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) replaced the Harness request boundary and canonical cursor this design builds on (`packages/agent/src/harness/`) with the `Conversation` kernel's `requestBoundary` policy hook, keyed to the log ordinal the request builds on. The rest of this document is a historical record.
+
 - Status: Design intent. Text/search, tasks, and ready-only context shipped in #432; [completion scope](extension-services-completion-design.md) adds bounded waiting, semantic discovery, and skill resources. See [extensions](extensions.md#managed-context-preparation) for the actual public API.
 - Date: 2026-09-18
 - Audience: Volt maintainers and extension API implementers.

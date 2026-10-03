@@ -21,7 +21,6 @@ import { isDeepStrictEqual } from "node:util";
 import type {
 	AgentAbortSource,
 	AgentEvent,
-	AgentHarnessNextActionPolicy,
 	AgentLoopNextAction,
 	AgentLoopNextActionContext,
 	AgentMessage,
@@ -49,11 +48,9 @@ import type {
 	PendingToolExecution,
 	StreamFn,
 	ThinkingLevel,
-	ToolCallEvent,
-	ToolCallResult,
 } from "@hansjm10/volt-agent-core";
 import {
-	AgentHarnessAdmissionGate,
+	AdmissionGate,
 	Conversation,
 	ConversationError,
 	type ConversationLog,
@@ -216,7 +213,14 @@ import {
 	shouldCompactBeforeContinuing,
 } from "./session/compaction-policy.ts";
 import { retryDelayMs } from "./session/retry-policy.ts";
-import { type NextActionPolicy, reduceNextAction, reduceToolCall, type ToolCallPolicy } from "./session/turn-policy.ts";
+import {
+	type NextActionPolicy,
+	reduceNextAction,
+	reduceToolCall,
+	type ToolCallDecision,
+	type ToolCallPolicy,
+	type TurnToolCall,
+} from "./session/turn-policy.ts";
 import { boundClientInputError, normalizeClientInputPayload } from "./session-entry-codec.ts";
 import { PRODUCT_SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import type { BranchSummaryEntry, ClientInputCommand, SessionEntry, SessionManager } from "./session-manager.ts";
@@ -594,10 +598,10 @@ interface DefaultPersistenceOptions {
 
 export interface AgentSessionTurnPolicy {
 	beforeToolCall?: (
-		event: ToolCallEvent,
+		event: TurnToolCall,
 		signal: AbortSignal,
-	) => ToolCallResult | undefined | Promise<ToolCallResult | undefined>;
-	nextAction?: AgentHarnessNextActionPolicy;
+	) => ToolCallDecision | undefined | Promise<ToolCallDecision | undefined>;
+	nextAction?: NextActionPolicy;
 }
 
 function ownTurnPolicy(policy: AgentSessionTurnPolicy): Readonly<AgentSessionTurnPolicy> {
@@ -841,7 +845,7 @@ export class AgentSession {
 	private _activeCompaction: ActiveCompaction | undefined = undefined;
 
 	/** One admission authority for foreground operations, native tools, and background jobs. */
-	private readonly _admissionGate = new AgentHarnessAdmissionGate();
+	private readonly _admissionGate = new AdmissionGate();
 	/** Preflight continuations retain the same revision that fences low-level reservations. */
 	private get _abortGeneration(): number {
 		return this._admissionGate.revision;
@@ -1568,7 +1572,7 @@ export class AgentSession {
 				});
 			},
 			beforeToolCall: async ({ toolCall, args }, signal) =>
-				await reduceToolCall<ToolCallEvent>(
+				await reduceToolCall<TurnToolCall>(
 					{ type: "tool_call", toolCallId: toolCall.id, toolName: toolCall.name, input: args },
 					this._toolCallPolicies(signal),
 				),
@@ -1676,7 +1680,7 @@ export class AgentSession {
 	}
 
 	/** The session's tool-call policy (activity, extensions, capability profile), then registered turn policies. */
-	private *_toolCallPolicies(signal: AbortSignal | undefined): Generator<ToolCallPolicy<ToolCallEvent>> {
+	private *_toolCallPolicies(signal: AbortSignal | undefined): Generator<ToolCallPolicy<TurnToolCall>> {
 		yield (event) => this._handleToolCallPolicy(event, signal);
 		for (const registration of this._workToolPolicies) {
 			yield async (event) => {

@@ -8,14 +8,14 @@ import {
 	Type,
 } from "@hansjm10/volt-ai";
 import {
-	AgentHarness,
+	AdmissionGate,
 	bashExecutionToText,
+	Conversation,
 	convertToLlm,
 	createCustomMessage,
 	createSessionId,
-	Session,
+	InMemoryConversationLog,
 	streamProxy,
-	toError,
 } from "@hansjm10/volt-agent-core";
 import { CONTRACT_SCHEMA_REGISTRY, CORE_LOG_ENTRY_TYPES, UiNodeSchema } from "@hansjm10/volt-protocol";
 
@@ -35,8 +35,9 @@ console.log(
 	typeof client.complete,
 	schema.type,
 	typeof stream.push,
-	typeof AgentHarness,
-	typeof Session,
+	typeof Conversation,
+	new InMemoryConversationLog(createSessionId()).conversationId.length,
+	new AdmissionGate().isOpen,
 	createSessionId().length,
 	llmMessages.length,
 	bashExecutionToText({
@@ -48,7 +49,6 @@ console.log(
 		truncated: false,
 		timestamp: 0,
 	}),
-	toError("boom").message,
 	typeof streamProxy,
 	CONTRACT_SCHEMA_REGISTRY.size,
 	Object.keys(CORE_LOG_ENTRY_TYPES).length,

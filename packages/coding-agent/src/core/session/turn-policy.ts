@@ -6,6 +6,7 @@
  */
 
 import type { AgentLoopNextAction, AgentLoopNextActionContext, AgentMessage } from "@hansjm10/volt-agent-core";
+import type { JsonObject } from "@hansjm10/volt-ai";
 
 export type NextActionPolicy = (
 	context: AgentLoopNextActionContext,
@@ -93,6 +94,14 @@ export async function reduceNextAction(
 export interface ToolCallDecision {
 	block?: boolean;
 	reason?: string;
+}
+
+/** A tool call as the turn policies see it, carrying the decision so far. */
+export interface TurnToolCall extends ToolCallDecision {
+	type: "tool_call";
+	toolCallId: string;
+	toolName: string;
+	input: JsonObject;
 }
 
 export type ToolCallPolicy<TCall extends object> = (

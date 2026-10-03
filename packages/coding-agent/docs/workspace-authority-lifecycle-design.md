@@ -1,5 +1,7 @@
 # RFC Amendment: Workspace Authority Generations and Retirement
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) replaced the agent-core in-memory queue this proposal extends (queue-entry identities, selective removal) with the durable client-input queue folded from the conversation log, where a queued input taken back is settled `withdrawn`.
+
 - Status: Proposed
 - Date: 2026-07-31
 - Workspaces: `Volt/packages/coding-agent` (authority and runtime integration), `Volt/packages/agent` (origin-aware queues)

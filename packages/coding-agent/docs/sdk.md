@@ -72,18 +72,23 @@ const { session } = await createAgentSession({
 
 Passing `sessionManager` transfers its ownership to `createAgentSession()` immediately. On success, dispose the returned session and await `session.waitForClosed()`. If setup fails, the factory closes the consumed manager but retains any committed session row; do not reuse the manager object. Open its `SessionReference` again when another live manager is needed.
 
+`createAgentSession()` opens the session with `await AgentSession.create(config)`; the `AgentSession` constructor is private. The session runs on the conversation kernel from `@hansjm10/volt-agent-core`, which serves the session's log for the session's whole life and is its only writer until the session is disposed.
+
 ### AgentSession
 
-The session manages agent lifecycle, message history, model state, compaction, and event streaming.
+The session manages agent lifecycle, message history, model state, compaction, and event streaming. Its state is the fold of its session log: the model, thinking level, Fast mode, plan, and queued input are read from committed entries, and every change commits an entry before the session reports it.
 
 ```typescript
 interface AgentSession {
   // Send a prompt and wait for completion
   prompt(text: string, options?: PromptOptions): Promise<void>;
 
-  // Queue messages during streaming
-  steer(text: string): Promise<void>;
-  followUp(text: string): Promise<void>;
+  // Queue input; resolves once the input is saved to the queue
+  steer(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void>;
+  followUp(text: string, images?: ImageContent[], clientMessageId?: string): Promise<void>;
+  getSteeringMessages(): readonly AgentSessionQueuedMessage[]; // { clientMessageId, text }
+  getFollowUpMessages(): readonly AgentSessionQueuedMessage[];
+  clearQueue(): Promise<{ steering: string[]; followUp: string[] }>;
 
   // Send lossless JSON custom data
   sendCustomMessage<T>(message: CustomMessageInput<T>, options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void>;
@@ -91,32 +96,40 @@ interface AgentSession {
   // Subscribe to events (returns unsubscribe function)
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
 
-  // Session identity
+  // Session identity and log
   sessionRef: SessionReference | undefined; // undefined for in-memory sessions
   sessionId: string;
+  sessionManager: SessionManager; // read view of the session's log
+  sessionWriter: SessionWriter;   // writes to the log while the session is open
+  lost: Promise<Error>;           // resolves if the session loses its log
 
-  // Model control
+  // Model control; each change commits an entry to the log
   setModel(model: Model): Promise<void>;
   setThinkingLevel(level: ThinkingLevel): Promise<void>;
+  setFastModeEnabled(enabled: boolean): Promise<void>;
   cycleModel(): Promise<ModelCycleResult | undefined>;
   cycleThinkingLevel(): ThinkingLevel | undefined;
 
   // Planning
   planningState: PlanningState;
   setAgentMode(mode: "build" | "plan"): Promise<PlanningState>;
-  changePlan(planId: string, expectedRevision: number): PlanningState;
-  discardPlan(planId: string, expectedRevision: number): PlanningState;
+  changePlan(planId: string, expectedRevision: number): Promise<PlanningState>;
+  discardPlan(planId: string, expectedRevision: number): Promise<PlanningState>;
 
   // State access
   state: AgentSessionState;
   model: Model | undefined;
   thinkingLevel: ThinkingLevel;
+  fastModeEnabled: boolean;
   messages: AgentMessage[];
   isStreaming: boolean; // provider run or session continuation
   isBusy: boolean;      // also includes prompt preflight and standalone session operations
 
+  // Turn policies
+  registerTurnPolicy(policy: AgentSessionTurnPolicy): PolicyRegistration<AgentSessionTurnPolicy>;
+
   // In-place tree navigation within the current session
-  navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean }>;
+  navigateTree(targetId: string, options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string }): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }>;
 
   // Compaction
   compact(customInstructions?: string): Promise<CompactionResult>;
@@ -198,7 +211,7 @@ Important behavior:
 - creation returns diagnostics on `runtime.diagnostics`
 - if runtime creation or replacement fails, the method throws and the caller decides how to handle it
 
-`AgentSession` owns its manager: `session.dispose()` installs the shutdown fence, and `await session.waitForClosed()` drains persistence and releases the SQLite store. `AgentSessionRuntime` does the same for its active session during `await runtime.dispose()`.
+`AgentSession` owns its manager: `session.dispose()` installs the shutdown fence, and `await session.waitForClosed()` waits for pending writes, closes the session's log, and releases its lock and the SQLite store. `AgentSessionRuntime` does the same for its active session during `await runtime.dispose()`.
 
 ```typescript
 let session = runtime.session;
@@ -408,11 +421,13 @@ For explicit queueing during streaming:
 // Queue a steering message for delivery after the current assistant turn finishes its tool calls
 await session.steer("New instruction");
 
-// Wait for agent to finish (delivered only when agent stops)
+// Queue a follow-up, delivered only when the agent has no more tool calls or steering messages
 await session.followUp("After you're done, also do this");
 ```
 
-Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued).
+Both `steer()` and `followUp()` expand file-based prompt templates but error on extension commands (extension commands cannot be queued). They resolve once the input is saved to the queue, not when it is delivered. A steer or follow-up sent while the session is idle starts a turn.
+
+Every prompt, steer, follow-up, and queued extension message is a durable client input in the session log. Pass a `clientMessageId` to make a resubmission idempotent; input sent without one gets a `local-` identity. The queue is read from the log, so `getSteeringMessages()`, `getFollowUpMessages()`, and `queue_update` events list `{ clientMessageId, text }`, and input still queued when the process exits is recovered when the session is reopened. `clearQueue()` withdraws every queued input durably and returns the text of the user input it withdrew; RPC clients receive `client_input_outcome` with reason `queue_cleared` for their identified input. The queue holds at most 128 inputs, extension messages included. To inspect recoverable input without opening a session, use `clientInputRecovery(sessionManager.getConversationState())` from `@hansjm10/volt-agent-core`; its `records` are the queued inputs.
 
 ### Host inference accounting
 
@@ -424,7 +439,7 @@ The admission callback finishes before provider dispatch. Observer promises are 
 
 ### Session state
 
-`AgentSession` exposes an owned, read-only runtime snapshot through `session.state`. Mutate the session through its explicit methods so persistence and the provider context remain synchronized.
+`AgentSession` exposes an owned, read-only runtime snapshot through `session.state`. The model, thinking level, Fast mode, and plan come from the session log: `setModel()`, `setThinkingLevel()`, and `setFastModeEnabled()` commit an entry and resolve after it commits. Read the current values from the session instead of keeping your own copy. Mutate the session only through its explicit methods.
 
 ```typescript
 // Access current state
@@ -438,9 +453,10 @@ const state = session.state;
 // state.streamingMessage?: AgentMessage - current partial assistant message
 // state.errorMessage?: string - latest assistant error
 
-// Change persisted runtime policy
+// Change the model and thinking level; each commits an entry to the session log
 await session.setModel(model);
 await session.setThinkingLevel("high");
+await session.setFastModeEnabled(true);
 
 // Change the active tool projection
 session.setActiveToolsByName(["read", "bash"]);
@@ -511,6 +527,7 @@ session.subscribe((event) => {
     
     // Session events (queue, compaction, retry)
     case "queue_update":
+      // { clientMessageId, text } entries, read from the session log
       console.log(event.steering, event.followUp);
       break;
     case "compaction_start":
@@ -598,6 +615,8 @@ If no model is provided:
 1. Tries to restore from session (if continuing)
 2. Uses default from settings
 3. Falls back to first available model
+
+The session's model and thinking level come from its log. A configured or selected model or thinking level that the branch does not name is committed as a `model_change` or `thinking_level_change` entry when the session opens. A resumed session whose model has no credentials commits its fallback model and reports it in `modelFallbackMessage`.
 
 > See [examples/sdk/02-custom-model.ts](../examples/sdk/02-custom-model.ts)
 
@@ -794,7 +813,7 @@ eventBus.on("my-extension:status", (data) => console.log(data));
 
 Extensions can use `request_boundary`, `ctx.work`, and `volt.getWorkStatus()` to prepare bounded read-only context. No extension or auxiliary model is enabled by the SDK. See [Managed context preparation](extensions.md#managed-context-preparation) for task ownership, services, and context admission semantics.
 
-`session.registerTurnPolicy(policy)` snapshots and freezes the `beforeToolCall` and `nextAction` callbacks. Mutating the original object no longer changes registered behavior. The returned callable `PolicyRegistration` removes the policy; `registration.update(nextPolicy)` replaces its complete callback snapshot in place, and `registration.invalidate()` revokes previous authorization after a closure-state change. Make closure changes and invalidation synchronously, without an intervening await. Updates and removals preserve other registrations and their order. Removed handles cannot update or invalidate.
+`session.registerTurnPolicy(policy)` adds a turn policy to the session's conversation. Policies run after the session's own policy, in registration order: each `beforeToolCall` sees the decision so far on its event (a block is final, and the latest reason wins), and each `nextAction` sees the action so far as `context.defaultAction`. Registration snapshots and freezes the `beforeToolCall` and `nextAction` callbacks. Mutating the original object no longer changes registered behavior. The returned callable `PolicyRegistration` removes the policy; `registration.update(nextPolicy)` replaces its complete callback snapshot in place, and `registration.invalidate()` revokes previous authorization after a closure-state change. Make closure changes and invalidation synchronously, without an intervening await. Updates and removals preserve other registrations and their order. Removed handles cannot update or invalidate.
 
 Tool-policy revisions cover every managed operation, the complete source-validation collection, and final provider admission. Changes during collection or later admission awaits omit optional context with `authority_changed` rather than retrying validation or extending deadlines. Mandatory context continues normally. These controls do not sandbox trusted extensions or later provider payload hooks. Extension call/result policies use the same [registration-handle contract](extensions.md#updating-tool-policies).
 
@@ -1011,7 +1030,9 @@ A persisted session can be open for writing in only one place at a time, across 
 
 An OS lock gives no loss signal, so a writer that is no longer the session's only writer finds out when a commit cannot be confirmed: a fence conflict, a missing session, or an outcome that cannot be resolved. The session then ends instead of reloading. `SessionManager.lost`, `AgentSession.lost`, and `AgentSessionRuntime.lost` resolve with the error; the session cancels its work and rejects further writes. Dispose the runtime (which releases the lock), report the error, and reopen the session to continue from what was saved.
 
-**SessionManager tree API:**
+**SessionManager: catalog and read view**
+
+`SessionManager` is the session catalog (the static `create`, `open`, `openReadOnly`, `inMemory`, `continueRecent`, `createBranched`, `forkFrom`, `importFromJsonl`, `list`, `search`, `exportJsonlSnapshot`, and `delete`) and a read view of one session's log. A manager holds one session for its whole life; open another manager for another session.
 
 ```typescript
 if (!selectedRef) throw new Error("No saved session");
@@ -1023,19 +1044,41 @@ try {
   const leaf = sm.getLeafEntry();
   const entry = sm.getEntry(id);
   const children = sm.getChildren(id);
-
   const label = sm.getLabel(id);
-  await sm.appendLabelChange(id, "checkpoint");
 
-  await sm.branch(entryId);
-  await sm.branchWithSummary(id, "Summary...");
-  await sm.createBranchedSession(leafId);
+  // The fold of the session's log: leaf, branch context, plan, labels, name, and client inputs
+  const state = sm.getConversationState();
+  console.log(state.context.messages.length, state.context.model, state.context.thinkingLevel, state.context.fastMode);
 } finally {
   await sm.closePersistence();
 }
 ```
 
-`SessionManager` writes (`appendMessage`, `appendLabelChange`, `branch`, `newSession`, and the other `append*` and client-input methods) run one at a time and resolve after their entries commit; reads return committed state only, and entry listeners see an entry only after it commits. Await each write. Callers that directly own a persisted `SessionManager` must await `closePersistence()` before deleting its session directory or exiting; it waits for writes already called. Static list, search, context lookup, export, and delete operations release their scoped store ownership before resolving.
+`getConversationState()` returns the fold of the session's log from `@hansjm10/volt-agent-core`, an immutable value that a later commit replaces. Its `context` holds the branch's `messages` (with compaction and branch summaries applied), `model`, `thinkingLevel`, and `fastMode`, and its `planning` is `null` until the branch commits a plan state. For log entries outside a session, use `fold` and `buildContext` from `@hansjm10/volt-agent-core`.
+
+**Writing a session: `SessionWriter`**
+
+Sessions are written through a `SessionWriter`, never through `SessionManager` itself:
+
+- Before a session opens, write through `sessionManager.logWriter`: `appendMessage`, `appendCustomEntry`, `appendCustomMessageEntry`, `appendModelChange`, `appendThinkingLevelChange`, `appendFastModeChange`, `appendPlanningState`, `appendSessionInfo`, `appendLabelChange`, `appendSubagentSpawn`, `recordStartingGitContext`, `recordPrReviewBinding`, and the structural `appendCompaction`, `branch`, `resetLeaf`, and `branchWithSummary`.
+- While an `AgentSession` is open, its conversation is the log's only writer: write through `session.sessionWriter`. The log writer refuses writes meanwhile. Compaction and tree navigation are the session's own operations (`session.compact()`, `session.navigateTree()`).
+
+Code that runs in either phase takes the `SessionWriter` interface; its `sessionManager` is the view it writes. Every write resolves after its entries commit, and the view already holds them; read the entry a model, thinking level, Fast mode, plan, name, or label write appended from `getLeafId()`. Writes run one at a time, reads return committed state only, and entry listeners see an entry only after it commits. A write whose commit rolls back rejects with `SessionAtomicAppendError` and leaves the session unchanged and writable.
+
+```typescript
+const sm = await SessionManager.create(process.cwd());
+await sm.logWriter.appendSessionInfo("Seeded session");
+await sm.logWriter.appendMessage({ role: "user", content: [{ type: "text", text: "Context" }], timestamp: Date.now() });
+
+// Copy the branch ending at an entry into a new session beside the source
+const branched = await SessionManager.createBranched(sm, sm.getLeafId()!);
+await branched.closePersistence();
+
+const { session } = await createAgentSession({ sessionManager: sm });
+await session.sessionWriter.appendLabelChange(session.sessionManager.getLeafId()!, "checkpoint");
+```
+
+Callers that directly own a persisted `SessionManager` must await `closePersistence()` before deleting its session directory or exiting; it waits for writes already called and closes the session's log, which releases its lock. Static list, search, context lookup, export, and delete operations release their scoped store ownership before resolving.
 
 > See [examples/sdk/11-sessions.ts](../examples/sdk/11-sessions.ts) and [Session Format](session-format.md)
 
@@ -1426,6 +1469,7 @@ getExamplesPath
 // Session management
 SessionManager
 type SessionReference
+type SessionWriter
 SettingsManager
 
 // Tool factories

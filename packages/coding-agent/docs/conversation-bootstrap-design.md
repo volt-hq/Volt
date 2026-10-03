@@ -1,5 +1,7 @@
 # RFC: Atomic Conversation Bootstrap and Ordered Subscription Ingress
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) replaced the host source revisions this design cuts snapshots at with conversation log ordinals, and replaces its per-subscription cursors and re-bootstrap on gaps with subscription by log ordinal in Phase 3 (§6.1).
+
 - Status: Accepted; Phases 1–6, relay ownership consolidation, and the presentation/reconciliation invariants are implemented, regression-clean, and live re-accepted from current branch source; the proposed `PreparedConversationActivation` API in §5.7 remains an optional API-consolidation follow-up
 - Date: 2026-07-17
 - Workspaces: `Volt/packages/coding-agent` (host contract and feed), `volt-app` (client ingress and UI projection)

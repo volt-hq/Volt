@@ -1,6 +1,6 @@
 # @hansjm10/volt-agent-core
 
-Stateful LLM orchestration, transactional message delivery, tool execution, session persistence, and a low-level agent loop. Built on `@hansjm10/volt-ai`.
+A product-agnostic conversation kernel over an append-only conversation log, and the stateless agent loop it runs. Built on `@hansjm10/volt-ai` and `@hansjm10/volt-protocol`.
 
 Maintained and distributed as part of Volt by [Jordan Hans](https://github.com/hansjm10).
 Volt is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi-mono) under the MIT License.
@@ -11,193 +11,157 @@ Volt is derived from [Mario Zechner's Pi project](https://github.com/badlogic/pi
 npm install @hansjm10/volt-agent-core
 ```
 
+## Overview
+
+- `Conversation` is the kernel. It is bound to one `ConversationLog` for its whole life and owns the agent loop, the delivery queue, the single busy state, and the fold over the log. Hosts add product behavior through a `ConversationPolicy` and an injected summarizer.
+- `ConversationLog` is the storage contract: one ordered, append-only log per conversation. The ordinal of an entry is the only position and fence. `InMemoryConversationLog` is the reference implementation.
+- `fold` turns log entries into `ConversationState`; `buildContext` turns a state into provider messages. There is one fold and one context builder.
+- `agentLoop` and `runAgentLoop` are the stateless loop the kernel runs. Use them directly only when the host owns persistence, queueing, and lifecycle itself.
+
+The design is described in the [architecture rewrite RFC](https://github.com/volt-hq/Volt/blob/main/packages/coding-agent/docs/architecture-rewrite-design.md). Hook contracts are in [Policy](docs/policy.md) and events in [Events](docs/events.md).
+
 ## Quick start
 
-`AgentHarness` is the public stateful orchestrator. The host supplies a `Session` backed by its own `SessionStorage` (see [Session storage](#session-storage)).
-
 ```typescript
-import { AgentHarness, Session } from "@hansjm10/volt-agent-core";
-import { getModel } from "@hansjm10/volt-ai";
+import { Conversation, InMemoryConversationLog } from "@hansjm10/volt-agent-core";
+import { builtInModels, builtInProviders, createAiClient } from "@hansjm10/volt-ai";
 
-const session = new Session(hostSessionStorage);
-const harness = new AgentHarness({
-  session,
-  model: getModel("anthropic", "claude-sonnet-4-5"),
-  systemPrompt: "You are a helpful assistant.",
+const client = createAiClient({
+  providers: builtInProviders(),
+  models: builtInModels(),
+  credentials: { resolve: async () => ({ apiKey: process.env.ANTHROPIC_API_KEY }) },
 });
 
-harness.subscribe((event) => {
+const conversation = await Conversation.open({
+  log: new InMemoryConversationLog("conversation-1"),
+  stream: client.streamSimple,
+  resolveModel: client.getModel,
+  promptCacheRefresh: client,
+  systemPrompt: "You are a helpful assistant.",
+  tools: [readFileTool],
+});
+
+const model = client.getModel("anthropic", "claude-sonnet-4-5");
+if (!model) throw new Error("Unknown model");
+await conversation.setModel(model);
+
+conversation.subscribe((event) => {
   if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
     process.stdout.write(event.assistantMessageEvent.delta);
   }
 });
 
-const result = await harness.runReserved(harness.reserveRun(), {
-  role: "user",
-  content: "Hello!",
-  timestamp: Date.now(),
-});
-console.log(result.status);
+const admission = await conversation.prompt({ message: "Hello!" });
+const outcome = await admission.completion; // { state: "completed", entryId, ordinal }
+
+await conversation.close();
 ```
 
-`reserveRun()` synchronously claims the harness before host preflight awaits; `runReserved()` admits the input and returns the bounded `AgentRunResult`, including delivery outcomes. `cancelReservedRun()` releases a reservation that was never run.
+`Conversation.open` reads and folds the whole log before it returns. The model is part of the log: `setModel` commits a `model_change` entry, and `conversation.model` resolves the model the active branch names through `resolveModel`. A turn needs a resolvable model.
 
-`systemPrompt` is a string or a function that receives the active operation's `AbortSignal` and returns the prompt for each request snapshot.
+`systemPrompt` is a string, or a function of the operation's `AbortSignal` resolved before every request.
 
-## Ownership model
+## The log
 
-The package has two execution layers:
+```typescript
+interface ConversationLog {
+  readonly conversationId: string;
+  head(): number;
+  append(batch: ConversationLogAppend): Promise<ConversationLogAppendResult>;
+  read(afterOrdinal: number, limit: number): Promise<ConversationLogPage>;
+  readonly lost: Promise<ConversationLogLostError>;
+  close(): Promise<void>;
+}
+```
 
-- `AgentHarness` is the reusable stateful orchestrator. It owns runtime configuration, queues, transactional delivery, persistence coordination, lifecycle state, hooks, and turn execution.
-- `agent-loop.ts` is the stateless execution kernel. Use it only when the host needs to own all state, persistence, event settlement, and request policy itself.
+- Entries use the envelope from `@hansjm10/volt-protocol/entries`: ordinal, id, parent id, type, timestamp, visibility (`public` or `host`), and payload. The log assigns ordinals, contiguous from 1.
+- `append({ expectedOrdinal, commitId, entries })` commits one batch atomically. `expectedOrdinal` must equal the head; a mismatch loses the log with reason `fence_conflict`. `commitId` makes a retried commit idempotent.
+- `committed` means durable. `rolled_back` means the batch definitely did not commit and the log is still writable. A rejection with `ConversationLogLostError` means the outcome is unknown and the log accepts no more work; `lost` resolves with the reason (`fence_conflict`, `uncertain_commit`, `storage`, or `closed`).
+- Commit, then publish: the kernel folds and publishes a batch only after `append` resolves `committed`.
 
-The supplied `Session` is the persisted conversation authority. Store-issued projection cursors identify one branch revision, and guarded declarative batches are the only canonical mutation seam. Harness queues, operation leases, and overlays are runtime state; committed messages are written to the session.
+`InMemoryConversationLog` implements the contract in memory, including the fence, `commitId` idempotency, and reads of at most `CONVERSATION_LOG_READ_LIMIT_MAX` entries. A durable host supplies its own implementation.
 
-## Messages and context
+Hosts register product entry types with `entryTypes` (definitions from `defineLogEntryType` in `@hansjm10/volt-protocol/entries`). The fold indexes product entries in the tree and carries them through without reading their payloads.
 
-`AgentMessage` includes standard LLM messages (`user`, `assistant`, and `toolResult`) plus application messages added through declaration merging.
+## State
+
+`conversation.state` is the fold of every committed entry:
+
+- `ordinal`, `tree`, `leafId`, and `branch` (entry ids from the root to the leaf);
+- `context`: the branch messages with the latest compaction and branch summaries applied, plus `model`, `thinkingLevel`, and `fastMode`;
+- `planning`, `labels`, `name`;
+- `clientInputs`: every durable input with its state, and the queued and started sets used for recovery;
+- `branchOrdinal`, `branchSwitchOrdinal`, and `contextOrdinal` for staleness checks.
+
+The same functions are available without a kernel:
+
+```typescript
+import { buildContext, clientInputRecovery, convertToLlm, fold } from "@hansjm10/volt-agent-core";
+
+const state = fold(entries);
+const messages = await buildContext(state, { convertToLlm });
+const recovery = clientInputRecovery(state); // idle | replay | blocked
+```
+
+`fold(entries, initial)` folds onto an earlier state, and `apply(state, entry)` folds one entry. States are frozen values. `snapshot(state)` and `restore(snapshot)` serialize a state. The fold throws `ConversationFoldError` for a log that breaks its structural invariants.
+
+## Input
+
+Every prompt, steer, and follow-up is a durable client input: the input (and, for queued input, its queue intent) commits to the log before the call resolves.
+
+```typescript
+const admission = await conversation.prompt({ clientMessageId, message, images });
+admission.completion; // completed | failed | withdrawn
+```
+
+- `prompt(input)` starts a turn when no operation runs. While one runs, a prompt needs `streamingBehavior: "steer" | "followUp"` and is queued with it; without one it is rejected with `ConversationError("busy")`.
+- `steer(input)` and `followUp(input)` queue input and start a turn when nothing will deliver it.
+- Resubmitting a `clientMessageId` with the same input writes nothing; its `completion` settles with the input's recorded or pending outcome. The same id with different input is rejected with `client_input_conflict`.
+- `input.prepared` is delivered instead of `message` (templates, input hooks). `input.attachments` are delivered right after the user message, in the same batch.
+- `reserve()` claims the idle conversation for one turn while the host prepares input. Pass it as `prompt(input, { reservation })`, or call `reservation.cancel()`.
+- `admitInput(command, input, { deliver: false })` records input the host runs itself. Call `markInputStarted(id)` before running it, then `settleClientInput(id, outcome)`. A started input without an outcome is never run again.
+- `queueMessages(kind, messages)` queues host messages as one durable input with a host origin.
+- `clearQueue()` withdraws every queued steer and follow-up and returns them.
+- `continue()` runs a turn over pending input, a paused continuation, or a context that ends with input.
+
+Queued input a previous runtime left behind is queued again on open; `continue()` delivers it. A started input without an outcome blocks that replay (`clientInputRecovery(state).kind === "blocked"`) until the host settles it.
+
+Steering and follow-up queues drain `"one-at-a-time"` by default; change them with `setQueueModes({ steer, followUp })`.
+
+## Settings and host entries
+
+Durable settings are log entries:
+
+- `setModel(model)`, `setThinkingLevel(level)`, `setFastMode(enabled)`, `setPlanning(snapshot)`, `setName(name)`, `setLabel(targetId, label?)`;
+- `append(entries)` commits host entries in one batch: registered product types, or core `custom`, `custom_message`, `message`, and `subagent_spawn`;
+- `runHostOperation(operation)` runs exclusive host work that may append entries;
+- `beginActivity(kind)` counts non-exclusive host work (`bash`, `extension_command`, `background`) toward `busy` until the returned release runs.
+
+Runtime configuration is not logged: `setTools(tools)`, `setStreamOptions(options)`, and `setQueueModes(modes)` apply to later requests.
+
+`compact({ instructions })` and `navigate(targetId, options)` are the structural intents; see [Policy](docs/policy.md#compaction-and-navigation).
+
+## Messages
+
+`AgentMessage` is a provider `Message` (`user`, `assistant`, `toolResult`) or an application message added through declaration merging:
 
 ```typescript
 declare module "@hansjm10/volt-agent-core" {
   interface CustomAgentMessages {
-    notification: {
-      role: "notification";
-      text: string;
-      timestamp: number;
-    };
+    notification: { role: "notification"; text: string; timestamp: number };
   }
 }
 ```
 
-Before each provider request, Harness applies context hooks and converts `AgentMessage[]` to provider-compatible `Message[]`. Supply `convertToLlm` when custom messages require application-specific filtering or conversion.
+The package registers four application roles: `bashExecution`, `custom`, `branchSummary`, and `compactionSummary`, with the constructors `createCustomMessage`, `createBranchSummaryMessage`, and `createCompactionSummaryMessage`. `convertToLlm` converts them to user messages and drops roles it does not know.
 
-```typescript
-const harness = new AgentHarness({
-  session,
-  model,
-  convertToLlm: (messages) =>
-    messages.flatMap((message) =>
-      message.role === "user" || message.role === "assistant" || message.role === "toolResult"
-        ? [message]
-        : [],
-    ),
-});
-```
-
-A turn snapshot fixes the model, thinking level, active tools, system prompt, stream options, and session context used by one provider request. Runtime setters affect future snapshots, not an in-flight request.
-
-## Transactional delivery
-
-Harness admits prompt, steering, and follow-up messages into one stable inbox. A host that owns canonical persistence installs an `AgentDeliveryOwner` before the delivery becomes visible:
-
-```typescript
-const deliveryOwner = {
-  prepareLogical: ({ sourceMessages }) => ({
-    outcome: "prepared",
-    messages: sourceMessages,
-  }),
-  async commitAttempt({ deliveryId, epoch, attemptId, preparedMessages }) {
-    const basis = await session.getBranchSnapshot();
-    const result = await session.commitBatch({
-      guard: { kind: "exact", cursor: basis.cursor },
-      deliveryAttribution: { deliveryId, epoch, attemptId },
-      mutations: preparedMessages.map((message) => ({
-        kind: "append",
-        entry: { type: "message", message },
-      })),
-    });
-    if (result.outcome === "committed") {
-      return { outcome: "committed", receipt: result.receipt };
-    }
-    if (result.outcome === "rolled_back") {
-      const current = await session.getBranchSnapshot();
-      const noEffect = await session.commitBatch({
-        guard: { kind: "exact", cursor: current.cursor },
-        deliveryAttribution: { deliveryId, epoch, attemptId },
-        mutations: [],
-      });
-      if (noEffect.outcome === "committed") {
-        return { outcome: "retained", error: result.error, noEffectReceipt: noEffect.receipt };
-      }
-      return { outcome: "terminally_failed", error: noEffect.error };
-    }
-    return { outcome: "terminally_failed", error: result.error, authority: "retired" };
-  },
-  finish: ({ outcome }) => updateHostProjection(outcome),
-} satisfies AgentDeliveryOwner;
-
-const harness = new AgentHarness({ session, model, deliveryOwner });
-```
-
-`prepareLogical()` is side-effect-free. One successful immutable preparation is cached for the logical delivery; a retained retry receives a fresh attempt ID without rerunning it. Preparation failure is retained only when the owner explicitly returns `retained`; thrown failures and unsafe effects are terminal.
-
-`commitAttempt()` receives the frozen prepared messages and must return a store-verifiable committed or no-effect receipt bound to the delivery ID, inbox epoch, and attempt ID. Harness rejects forged, stale, cross-session, or same-delta receipts. An uncertain write retires the session authority and suppresses provider work. `finish()` is passive projection cleanup and cannot perform canonical writes.
-
-Delivery outcomes are:
-
-- `committed`: publish the delivery and permit provider work.
-- `retained`: restore the same logical delivery and stable ID for explicit retry.
-- `terminally_failed`: consume unsafe-to-replay work and stop the run.
-- `revoked`: reported by Harness when explicit revocation wins before settlement begins.
-
-A supplied owner owns canonical persistence for that delivery. Harness does not append the prepared delivery messages again. Without a custom owner, Harness uses its built-in owner and the supplied session's guarded batch API.
-
-```typescript
-const result = await harness.runReserved(harness.reserveRun(), userMessage);
-if (result.status === "delivery_failed") {
-  console.error(result.failure.phase, result.failure.error.message);
-}
-```
-
-## Lifecycle and abort
-
-`abort(source?)` records synchronous cancellation intent and returns an immutable `AgentAbortAcceptance`. The first accepted source is preserved. Abort does not implicitly clear queued work.
-
-```typescript
-const acceptance = harness.abort("remote_request");
-if (acceptance.accepted) {
-  await harness.waitForIdle();
-}
-```
-
-Useful lifecycle projections include:
-
-- `getPhase()`
-- `signal`
-- `activeRunSnapshot`
-- `waitForIdle()`
-
-Queue revocation is explicit. `revokeAllQueues()` synchronously revokes queued steering and follow-up deliveries that have not started commitment and returns their IDs:
-
-```typescript
-const revokedIds = harness.revokeAllQueues();
-```
-
-`requestClose()` is the terminal synchronous fence. It rejects new admission and mutations, aborts an open operation, revokes work that has not crossed its commit boundary, and makes late callbacks inert. `dispose()` is its fence-only conventional alias and returns `void`; use `waitForClosed()` from external lifecycle code to join the active operation, delivery settlement, notifications, and persistence drain. Owner callbacks may request close but must not join closure from inside themselves.
-
-## Runs and queues
-
-```typescript
-const reservation = harness.reserveRun();
-await harness.runReserved(reservation, { role: "user", content: "Structured input", timestamp: Date.now() });
-
-// During a run, admit structured queue messages synchronously:
-const steerId = harness.queueSteer(userMessage);
-const followUpId = harness.queueFollowUp(otherUserMessage);
-
-// Resume retained work or a provider/tool continuation:
-await harness.continue();
-```
-
-Harness owns deep snapshots of `runReserved()` messages, explicit context, and options before any asynchronous preflight. `continue()` similarly owns explicit context and dispatch options. Later caller mutation cannot change admission, retries, or provider context.
-
-`queueSteer()` and `queueFollowUp()` synchronously return the delivery ID after admission and publish `queue_update` passively. Steering and follow-up modes are `"one-at-a-time"` or `"all"` and can be changed with their corresponding getters and setters.
+The kernel converts messages with `convertToLlm` unless `ConversationOptions.convertToLlm` is supplied. A replacement must drop each user message's `clientMessageId`.
 
 ## Tools
 
-Tools implement `AgentTool`:
-
 ```typescript
+import { readFile } from "node:fs/promises";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { Type } from "typebox";
 
 const readFileTool = {
@@ -206,99 +170,55 @@ const readFileTool = {
   description: "Read a UTF-8 file",
   parameters: Type.Object({ path: Type.String() }),
   executionMode: "sequential",
-  async execute(toolCallId, params, signal, onUpdate) {
+  async execute(_toolCallId, params, signal, onUpdate) {
     onUpdate?.({ content: [{ type: "text", text: "Reading..." }], details: {} });
-    const text = await fs.readFile(params.path, "utf8");
-    return {
-      content: [{ type: "text", text }],
-      details: { path: params.path },
-    };
+    const text = await readFile(params.path, { encoding: "utf8", signal });
+    return { content: [{ type: "text", text }], details: { path: params.path } };
   },
 } satisfies AgentTool;
 ```
 
-Configure all tools and the active subset together:
+`setTools(tools)` replaces the tool list; names must be unique. Thrown tool errors become failed tool results. Return `isError: true` to keep structured failure details. A result may request `disposition: "stop"` or one tool-free `disposition: "final_response"`.
 
-```typescript
-await harness.setTools([readFileTool], ["read_file"]);
-```
+## Lifecycle
 
-Thrown tool errors become failed tool results. Return `isError: true` to preserve structured failure details. A successful result may request `disposition: "stop"` or one bounded tool-free `disposition: "final_response"`.
+- `abort(source?)` aborts the active operation and revokes a held reservation. It returns an `AgentAbortAcceptance`; the first accepted source is kept and recorded as a `runtime_abort` diagnostic on the aborted assistant message. Queued input stays queued.
+- `close()` aborts work, waits for it to settle, and closes the log. It is idempotent.
+- `ended` resolves once, when the conversation is closed or its log is lost. After that every intent throws `ConversationError("ended")` and pending input completions reject with it.
 
-## Hooks and events
+`ConversationError.code` is one of `busy`, `ended`, `invalid_state`, `invalid_argument`, `client_input_conflict`, or `commit_rolled_back`.
 
-Use `on()` for ordered mutation policy and `subscribe()` for finalized observation.
+## Admission gate
 
-```typescript
-const removeToolPolicy = harness.on("tool_call", (event) => {
-  if (event.toolName === "bash") return { block: true, reason: "bash is disabled" };
-});
+`AdmissionGate` is a host-owned admission fence that a conversation (`ConversationOptions.admissionGate`) and the host's detached work can share. `suspend()` closes it until the returned release runs and revokes reservations made before it; started work is never interrupted. `assertOpen()` throws `ConversationError("busy")` while it is suspended.
 
-const removeContextPolicy = harness.on("context", (event) => ({
-  messages: pruneContext(event.messages),
-}));
+## Prompt-cache refresh
 
-const unsubscribe = harness.subscribe(async (event) => {
-  if (event.type === "agent_end") await flushUiProjection(event.messages);
-});
-```
-
-Mutation hooks run in registration order before persistence or provider use, as appropriate for the event. Every `next_action` hook and scoped policy receives a fresh deep projection of messages, completed-turn results, and delivery payloads; tool arrays are copied while tool objects retain their callable identity. Only an explicitly returned action advances reducer state. Finalized subscribers receive cloned, passive projections. Subscriber mutation or failure cannot change committed delivery or terminal outcomes.
-
-Important loop events include:
-
-- `agent_start`, `agent_end`, and Harness `settled`
-- `turn_start`, `turn_end`
-- `delivery_start`
-- `message_start`, `message_update`, `message_end`
-- `tool_execution_start`, `tool_execution_update`, `tool_execution_end`
-- `queue_update`
-
-Provider hooks are `before_provider_payload` and `after_provider_response`. Stream options include transport, retry limits, timeouts, WebSocket connect timeout, inference speed, thinking budgets, environment, headers, metadata, and cache retention.
-
-Scoped next-action policy is available for bounded host policy such as subagent budgets:
-
-```typescript
-const unregister = harness.registerNextActionPolicy((context, _signal) => {
-  return budgetExceeded(context) ? { type: "stop" } : undefined;
-});
-```
-
-Return `undefined` to leave the suggested action unchanged. Returning `{ type: "stop" }` explicitly enforces a policy stop even when the suggestion was already `stop`; use `pause` for resumable interruptions such as compaction.
-
-Harness emits `next_action_resolved` after all hooks and scoped policies, with the authority-normalized `action` and `requestAuthority`. Stop actions include `stopReason`: `completion`, `policy`, or `tool`. An awaited `on("next_action_resolved", ...)` handler can fence host-owned background continuations before the run settles, without changing the decision. Ordinary completion does not revoke independently authorized work. `subscribe()` receives the same finalized decision as a passive cloned projection.
-
-## Session storage
-
-The package does not ship session storage. Harness receives one `Session` that wraps a host `SessionStorage`.
-
-A `SessionStorage` must provide atomic branch snapshots and guarded declarative `commitBatch()` operations. Runtime storage exposes no imperative append or leaf setter; append, move, summary, and label effects all cross the guarded batch seam. The store issues opaque `ProjectionCursor` and `SessionMutationReceipt` capabilities, verifies receipt ownership, preserves parent/leaf ordering, and classifies every batch as `committed`, `rolled_back`, or `uncertain`. Exact guards are compare-and-swap; descendant guards may tail-append only while the cursor branch remains an ancestor. An uncertain authority must reject later canonical work until reopened or reconciled.
+With `promptCacheRefresh` (an `AiClient` implements it), `refreshPromptCache(signal?)` replays the latest turn request without generating output, so the provider renews its cached prefix. It reports `unavailable` when the branch or configuration changed since that request. `canRefreshPromptCache()` checks without sending.
 
 ## Low-level loop
 
-Use the low-level loop when the host intentionally owns orchestration:
-
 ```typescript
-import { agentLoop } from "@hansjm10/volt-agent-core";
+import { agentLoop, convertToLlm } from "@hansjm10/volt-agent-core";
 
-const context = {
-  systemPrompt: "You are helpful.",
-  messages: [],
-  tools: [readFileTool],
-};
-
-const config = {
-  model,
-  convertToLlm,
-  nextAction: async (context) => context.defaultAction,
-};
-
-for await (const event of agentLoop([userMessage], context, config)) {
-  console.log(event.type);
-}
+const stream = agentLoop(
+  [{ role: "user", content: "Hello!", timestamp: Date.now() }],
+  { systemPrompt: "You are helpful.", messages: [], tools: [readFileTool] },
+  { model, convertToLlm },
+  undefined,
+  client.streamSimple,
+);
+for await (const event of stream) console.log(event.type);
+const newMessages = await stream.result();
 ```
 
-`agentLoop()` and `agentLoopContinue()` preserve event order but do not provide Harness persistence, transactional inboxes, lifecycle snapshots, or hook settlement. Prefer `AgentHarness` unless the host needs to implement those responsibilities itself.
+`agentLoop(prompts, context, config, signal, streamFn)` and `agentLoopContinue(context, config, signal, streamFn)` return an event stream; `runAgentLoop` and `runAgentLoopContinue` take an event sink instead. The loop keeps nothing: it does not persist messages, queue input, retry, or compact. `config.nextAction` decides at each dispatch boundary, and `beginDelivery` settles each attached delivery before it enters the context.
+
+## Other exports
+
+- `streamProxy(model, context, { proxyUrl, authToken })` streams through a server that holds the provider credentials.
+- `uuidv7()` returns a time-ordered UUIDv7; `createSessionId()` returns one for a new conversation.
+- `OperationCoordinator` is the coordinator the kernel uses for its operations and busy state.
 
 ## License
 

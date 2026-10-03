@@ -25,13 +25,29 @@ For storage, snapshots, and the `SessionManager` API, see [Session Format](sessi
 
 ### One Volt Process per Session
 
-A session can be open for writing in only one Volt process at a time: the interactive TUI, `volt -p`, `--mode json`, `--mode rpc`, an SDK embedding, a subagent, or a daemon conversation a phone is using. Each takes an exclusive lock on `<session dir>/locks/<sha256(session id)>.lock` before it opens the session and holds it until it closes the session; the operating system releases it if the process exits. Opening a session that is already open elsewhere fails with an error naming the session (`conversation_locked`). Quit the session in the other process, or switch that process to another session, then retry.
+A session can be open for writing in only one Volt process at a time: the interactive TUI, `volt -p`, `--mode json`, `--mode rpc`, an SDK embedding, a subagent, or a daemon conversation a phone is using. Each takes an exclusive lock on `<session dir>/locks/<sha256(session id)>.lock` before it opens the session and holds it until it closes the session; the operating system releases it if the process exits. Taking the lock never waits.
 
-Listing, searching, exporting, and forking from a session read it without the lock and keep working while it is open elsewhere. Renaming or deleting another session from the picker takes its lock briefly and fails while that session is open in another process.
+Opening a session that is already open elsewhere fails with a `conversation_locked` error that names the session:
+
+```text
+Session <id> is open in another Volt process. Quit that session there (or switch it to another session), then retry. Listing, searching, and exporting it still work.
+```
+
+Quit the session in the other process, or switch that process to another session, then retry. RPC clients receive `errorCode: "conversation_locked"`, and phones receive the `conversation_locked` handshake outcome.
+
+Listing and searching read store summaries, and exporting and forking from a session open it read-only: none of them take the lock, so they keep working while the session is open elsewhere. SDK code reads a session the same way with `SessionManager.openReadOnly(ref)`; every write through a read-only manager throws. Renaming or deleting another session from the picker takes its lock briefly and fails while that session is open in another process.
 
 When the interactive TUI opens a session that the daemon is hosting for a phone, it first takes the daemon's conversation lease. If the phone's turn is still running, the TUI prints a waiting line until the turn finishes and the daemon closes its copy: the interrupt key (Escape by default) stops that turn, and Ctrl+C cancels opening the session. If another TUI has the session open, it refuses with a message.
 
-If a session's saved state cannot be confirmed (for example, a commit finds that another writer changed the session), Volt stops that session instead of continuing: the TUI exits with an error that suggests `/resume`, print and RPC runs exit with an error, and the daemon closes the conversation. Reopen the session to continue from what was saved.
+### When a Session Stops
+
+Every write to a session names the log position it expects (see [Session Format](session-format.md#the-conversation-log)). If a write finds that another writer appended, that the session was deleted, or that its own outcome cannot be resolved, the session's log is lost: Volt cannot confirm what was saved, so it stops that session instead of continuing.
+
+- The TUI exits with `Volt stopped this session because its saved state could not be confirmed`, suggests `/resume`, and prints any unsent editor text so you can copy it.
+- `volt -p`, `--mode json`, and `--mode rpc` print `Volt stopped session <id> because its saved state could not be confirmed: <reason>` and exit with code 1.
+- The daemon closes the conversation.
+
+Extensions observe the stop through the aborted `ctx.signal` of their commands and then receive `session_shutdown`; session writes after the stop throw. Reopen the session with `/resume` or `--session` to continue from what was saved.
 
 ## Session Commands
 
@@ -155,6 +171,6 @@ See [Compaction](compaction.md) for branch summarization internals and extension
 
 ## Session Format
 
-The SQLite store contains message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries. Explicit JSONL snapshots serialize the same public session tree for interchange; they are not reopened as live storage.
+Each session in the SQLite store is a log of entries: messages, model, thinking-level, and Fast mode changes, plan state, labels, compactions, branch summaries, extension entries, and host-only records such as branch moves and queued input. Explicit JSONL snapshots serialize the public session tree for interchange; they are not reopened as live storage.
 
-For snapshot parsers, extensions, SDK usage, and the full `SessionManager` API, see [Session Format](session-format.md).
+For the log format, snapshot parsers, and the full `SessionManager` API, see [Session Format](session-format.md).

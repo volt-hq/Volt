@@ -1,5 +1,7 @@
 # Coding-agent delivery transaction contract
 
+> **Superseded.** The [architecture rewrite](architecture-rewrite-design.md) replaced the Harness delivery owners, delivery receipts, store revisions, and conversation-authority reconciliation this contract describes with the `Conversation` kernel, which commits each delivery as one log batch fenced on its ordinal, and the per-log lock. This document is a historical record.
+
 Issue: [#206](https://github.com/volt-hq/Volt/issues/206)
 
 This document specifies the observable delivery behavior for coding-agent and its Harness integration. #206 established the behavioral contract, #207 established explicit delivery outcomes, #205 moved coding-agent persistence behind canonical settlement, #211 isolated delivery projections, #214 fenced reentrant shutdown, and #217 defined reconciliation when an atomic replacement reports failure after its candidate may already be visible.

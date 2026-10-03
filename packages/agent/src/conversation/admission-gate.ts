@@ -1,7 +1,7 @@
-import { AgentHarnessError } from "./types.ts";
+import { ConversationError } from "./api.ts";
 
-/** Host-owned admission shared by exclusive Harness operations and detached work. */
-export class AgentHarnessAdmissionGate {
+/** Host-owned admission shared by a conversation's exclusive operations and the host's detached work. */
+export class AdmissionGate {
 	private holds = 0;
 	private currentRevision = 0;
 
@@ -14,7 +14,7 @@ export class AgentHarnessAdmissionGate {
 	}
 
 	assertOpen(): void {
-		if (!this.isOpen) throw new AgentHarnessError("busy", "Operation admission is suspended");
+		if (!this.isOpen) throw new ConversationError("busy", "Operation admission is suspended");
 	}
 
 	/** A released suspension never restores authority to an older reservation. */

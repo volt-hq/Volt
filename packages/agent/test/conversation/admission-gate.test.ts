@@ -1,12 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { HarnessOperationCoordinator } from "../../src/harness/operation-coordinator.ts";
-import { AgentHarnessAdmissionGate, AgentHarnessError } from "../../src/index.ts";
+import { AdmissionGate } from "../../src/conversation/admission-gate.ts";
+import { ConversationError } from "../../src/conversation/api.ts";
+import { OperationCoordinator } from "../../src/conversation/coordinator.ts";
 
-const suspendedError = new AgentHarnessError("busy", "Operation admission is suspended");
+type Kind = "turn" | "compaction" | "navigation";
 
-describe("AgentHarnessAdmissionGate", () => {
+const suspendedError = new ConversationError("busy", "Operation admission is suspended");
+
+function gatedCoordinator(admissionGate?: AdmissionGate): OperationCoordinator<Kind> {
+	return new OperationCoordinator<Kind>({
+		...(admissionGate === undefined ? {} : { admissionGate }),
+		busyError: (message) => new ConversationError("busy", message),
+	});
+}
+
+describe("AdmissionGate", () => {
 	it("starts open and only accepts its current revision", () => {
-		const gate = new AgentHarnessAdmissionGate();
+		const gate = new AdmissionGate();
 		expect(gate.isOpen).toBe(true);
 		expect(gate.assertOpen()).toBeUndefined();
 		expect(gate.isCurrent(gate.revision)).toBe(true);
@@ -14,8 +24,22 @@ describe("AgentHarnessAdmissionGate", () => {
 		expect(gate.isCurrent(gate.revision + 1)).toBe(false);
 	});
 
+	it("rejects suspended admission with a busy ConversationError", () => {
+		const gate = new AdmissionGate();
+		const release = gate.suspend();
+		let thrown: unknown;
+		try {
+			gate.assertOpen();
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(ConversationError);
+		expect(thrown).toMatchObject({ code: "busy", message: "Operation admission is suspended" });
+		release();
+	});
+
 	it.each(["outer-first", "inner-first"] as const)("keeps nested holds closed with %s release", (order) => {
-		const gate = new AgentHarnessAdmissionGate();
+		const gate = new AdmissionGate();
 		const originalRevision = gate.revision;
 		const outer = gate.suspend();
 		expect(gate.isOpen).toBe(false);
@@ -42,7 +66,7 @@ describe("AgentHarnessAdmissionGate", () => {
 	});
 
 	it("does not let an old idempotent release remove a later hold", () => {
-		const gate = new AgentHarnessAdmissionGate();
+		const gate = new AdmissionGate();
 		const originalRevision = gate.revision;
 		const first = gate.suspend();
 		first();
@@ -60,8 +84,8 @@ describe("AgentHarnessAdmissionGate", () => {
 	});
 
 	it("keeps independent gates independent", () => {
-		const first = new AgentHarnessAdmissionGate();
-		const second = new AgentHarnessAdmissionGate();
+		const first = new AdmissionGate();
+		const second = new AdmissionGate();
 		const secondRevision = second.revision;
 		const releaseFirst = first.suspend();
 		expect(second.isOpen).toBe(true);
@@ -75,10 +99,10 @@ describe("AgentHarnessAdmissionGate", () => {
 	});
 });
 
-describe("HarnessOperationCoordinator admission", () => {
+describe("OperationCoordinator admission", () => {
 	it("supports default coordinators without sharing exclusive operation ownership", async () => {
-		const first = new HarnessOperationCoordinator();
-		const second = new HarnessOperationCoordinator();
+		const first = gatedCoordinator();
+		const second = gatedCoordinator();
 		const firstLease = first.reserve("turn")!;
 		const secondLease = second.reserve("compaction")!;
 		first.start(firstLease);
@@ -90,11 +114,11 @@ describe("HarnessOperationCoordinator admission", () => {
 		await Promise.all([first.waitForIdle(), second.waitForIdle()]);
 	});
 
-	it.each(["turn", "compaction", "branch_summary"] as const)(
+	it.each(["turn", "compaction", "navigation"] as const)(
 		"rejects idle %s admission synchronously and recovers after release",
 		async (kind) => {
-			const gate = new AgentHarnessAdmissionGate();
-			const coordinator = new HarnessOperationCoordinator(gate);
+			const gate = new AdmissionGate();
+			const coordinator = gatedCoordinator(gate);
 			const release = gate.suspend();
 			expect(() => coordinator.reserve(kind)).toThrow(suspendedError);
 			expect(coordinator.current).toBeUndefined();
@@ -110,8 +134,8 @@ describe("HarnessOperationCoordinator admission", () => {
 	);
 
 	it.each([false, true])("invalidates reserved starts even when reopened=%s", async (reopen) => {
-		const gate = new AgentHarnessAdmissionGate();
-		const coordinator = new HarnessOperationCoordinator(gate);
+		const gate = new AdmissionGate();
+		const coordinator = gatedCoordinator(gate);
 		const lease = coordinator.reserve("turn")!;
 		const idle = coordinator.waitForIdle();
 		const release = gate.suspend();
@@ -128,8 +152,8 @@ describe("HarnessOperationCoordinator admission", () => {
 	});
 
 	it.each([false, true])("rejects stale reclassification even when reopened=%s", async (reopen) => {
-		const gate = new AgentHarnessAdmissionGate();
-		const coordinator = new HarnessOperationCoordinator(gate);
+		const gate = new AdmissionGate();
+		const coordinator = gatedCoordinator(gate);
 		const lease = coordinator.reserve("turn")!;
 		const release = gate.suspend();
 		if (reopen) release();
@@ -141,8 +165,8 @@ describe("HarnessOperationCoordinator admission", () => {
 	});
 
 	it("rejects successor admission without aborting or replacing the active operation", async () => {
-		const gate = new AgentHarnessAdmissionGate();
-		const coordinator = new HarnessOperationCoordinator(gate);
+		const gate = new AdmissionGate();
+		const coordinator = gatedCoordinator(gate);
 		const lease = coordinator.reserve("turn")!;
 		coordinator.start(lease);
 		const release = gate.suspend();
@@ -159,11 +183,11 @@ describe("HarnessOperationCoordinator admission", () => {
 		["turn", true],
 		["compaction", false],
 		["compaction", true],
-		["branch_summary", false],
-		["branch_summary", true],
+		["navigation", false],
+		["navigation", true],
 	] as const)("settles stale %s successors without promotion, reopened=%s", async (kind, reopen) => {
-		const gate = new AgentHarnessAdmissionGate();
-		const coordinator = new HarnessOperationCoordinator(gate);
+		const gate = new AdmissionGate();
+		const coordinator = gatedCoordinator(gate);
 		const active = coordinator.reserve("compaction")!;
 		coordinator.start(active);
 		const successor = coordinator.reserveSuccessor(kind)!;
@@ -190,13 +214,13 @@ describe("HarnessOperationCoordinator admission", () => {
 	});
 
 	it.each([false, true])("settles every inherited waiter when a replacement is stale, reopened=%s", async (reopen) => {
-		const gate = new AgentHarnessAdmissionGate();
-		const coordinator = new HarnessOperationCoordinator(gate);
+		const gate = new AdmissionGate();
+		const coordinator = gatedCoordinator(gate);
 		const active = coordinator.reserve("compaction")!;
 		coordinator.start(active);
 		const original = coordinator.reserveSuccessor("turn")!;
-		const replaced = coordinator.reserveSuccessorReplacing("turn", "branch_summary")!;
-		const final = coordinator.reserveSuccessorReplacing("branch_summary", "compaction")!;
+		const replaced = coordinator.reserveSuccessorReplacing("turn", "navigation")!;
+		const final = coordinator.reserveSuccessorReplacing("navigation", "compaction")!;
 		const settled: string[] = [];
 		void original.ready.then(() => settled.push("original"));
 		void replaced.ready.then(() => settled.push("replaced"));
@@ -215,12 +239,12 @@ describe("HarnessOperationCoordinator admission", () => {
 	it.each([false, true])(
 		"keeps original and inherited waiters reachable after rejected replacement, inherited=%s",
 		async (inherited) => {
-			const gate = new AgentHarnessAdmissionGate();
-			const coordinator = new HarnessOperationCoordinator(gate);
+			const gate = new AdmissionGate();
+			const coordinator = gatedCoordinator(gate);
 			const active = coordinator.reserve("compaction")!;
 			coordinator.start(active);
 			const original = coordinator.reserveSuccessor("turn")!;
-			const pending = inherited ? coordinator.reserveSuccessorReplacing("turn", "branch_summary")! : original;
+			const pending = inherited ? coordinator.reserveSuccessorReplacing("turn", "navigation")! : original;
 			const release = gate.suspend();
 			expect(() => coordinator.reserveSuccessorReplacing(pending.lease.kind, "compaction")).toThrow(suspendedError);
 			expect(coordinator.current).toBe(active);
@@ -232,13 +256,13 @@ describe("HarnessOperationCoordinator admission", () => {
 	);
 
 	it("still promotes a fresh successor after reopening and preserves settlement ordering", async () => {
-		const gate = new AgentHarnessAdmissionGate();
-		const coordinator = new HarnessOperationCoordinator(gate);
+		const gate = new AdmissionGate();
+		const coordinator = gatedCoordinator(gate);
 		const active = coordinator.reserve("compaction")!;
 		coordinator.start(active);
 		gate.suspend()();
 		const original = coordinator.reserveSuccessor("turn")!;
-		const replacement = coordinator.reserveSuccessorReplacing("turn", "branch_summary")!;
+		const replacement = coordinator.reserveSuccessorReplacing("turn", "navigation")!;
 		let originalSettled = false;
 		let idle = false;
 		void original.ready.then(() => {
@@ -260,8 +284,8 @@ describe("HarnessOperationCoordinator admission", () => {
 	});
 
 	it("allows abort, successor cancellation, and terminal close while suspended", async () => {
-		const gate = new AgentHarnessAdmissionGate();
-		const coordinator = new HarnessOperationCoordinator(gate);
+		const gate = new AdmissionGate();
+		const coordinator = gatedCoordinator(gate);
 		const active = coordinator.reserve("turn")!;
 		coordinator.start(active);
 		const successor = coordinator.reserveSuccessor("compaction")!;

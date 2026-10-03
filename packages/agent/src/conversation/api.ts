@@ -25,7 +25,6 @@ import type {
 	UserMessage,
 } from "@hansjm10/volt-ai";
 import type { LogEntryType } from "@hansjm10/volt-protocol/entries";
-import type { AgentHarnessAdmissionGate } from "../harness/admission-gate.ts";
 import type {
 	AgentAbortSource,
 	AgentDeliveryKind,
@@ -40,6 +39,7 @@ import type {
 	StreamFn,
 	ThinkingLevel,
 } from "../types.ts";
+import type { AdmissionGate } from "./admission-gate.ts";
 import type { CoordinatorPhase, OperationStage } from "./coordinator.ts";
 import type { ConversationState } from "./fold.ts";
 import type {
@@ -354,7 +354,7 @@ export interface ConversationOptions<TTool extends AgentTool = AgentTool> {
 	readonly queueModes?: Partial<ConversationQueueModes>;
 	readonly policy?: ConversationPolicy;
 	/** Shared host admission fence. Defaults to an independent gate. */
-	readonly admissionGate?: AgentHarnessAdmissionGate;
+	readonly admissionGate?: AdmissionGate;
 	/** Entry, commit, and delivery identifiers. Defaults to random UUIDs. */
 	readonly createId?: () => string;
 }

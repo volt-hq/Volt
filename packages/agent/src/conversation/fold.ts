@@ -30,13 +30,9 @@ import type {
 	LogEntry,
 	PlanningStateChangeEntryPayload,
 } from "@hansjm10/volt-protocol/entries";
-import {
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "../harness/messages.ts";
 import type { AgentMessage, ThinkingLevel } from "../types.ts";
 import { type ConversationLogEntry, isCoreLogEntry } from "./log.ts";
+import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages.ts";
 
 /** A complete branch-local Plan mode snapshot; the kernel stores it without interpreting it. */
 export type PlanningSnapshot = PlanningStateChangeEntryPayload["planning"];

@@ -48,7 +48,7 @@ describe("SessionManager.saveCustomEntry", () => {
 		expect(path[1].id).toBe(customId);
 		expect(path[2].id).toBe(msg2Id);
 
-		// buildSessionContext should work (custom entries skipped in messages)
+		// The folded context skips custom entries
 		const ctx = session.getConversationState().context;
 		expect(ctx.messages).toHaveLength(2); // only message entries
 	});

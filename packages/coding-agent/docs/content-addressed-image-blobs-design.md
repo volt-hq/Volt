@@ -1309,7 +1309,7 @@ Expected work areas include:
 - `packages/ai/src/providers/*`
 - `packages/agent/src/types.ts`
 - `packages/agent/src/agent-loop.ts`
-- `packages/agent/src/harness/messages.ts`
+- `packages/agent/src/conversation/messages.ts`
 - `packages/coding-agent/src/core/session-manager.ts`
 - `packages/coding-agent/src/core/agent-session.ts`
 - `packages/coding-agent/src/core/sdk.ts`

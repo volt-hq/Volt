@@ -40,8 +40,6 @@ import {
 import { Check } from "typebox/value";
 import { AgentDeliverySettlementError, runAgentLoop } from "../agent-loop.ts";
 import { DeliveryInbox, type DeliveryLease, type InboxDelivery } from "../delivery-inbox.ts";
-import { convertToLlm as convertRuntimeMessages } from "../harness/messages.ts";
-import { toError } from "../harness/types.ts";
 import type {
 	AgentAbortAcceptance,
 	AgentAbortSource,
@@ -113,6 +111,7 @@ import {
 	ConversationLogLostError,
 	isCoreLogEntry,
 } from "./log.ts";
+import { convertToLlm as convertRuntimeMessages } from "./messages.ts";
 import {
 	cloneAgentMessages,
 	cloneNextAction,
@@ -121,6 +120,7 @@ import {
 	createAbortedAssistantStream,
 	createFailureMessage,
 	deepFreeze,
+	toError,
 	withRuntimeAbortDiagnostic,
 } from "./runtime-support.ts";
 

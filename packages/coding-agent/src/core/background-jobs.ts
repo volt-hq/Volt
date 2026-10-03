@@ -1,9 +1,5 @@
 import { randomUUID } from "node:crypto";
-import {
-	AgentHarnessAdmissionGate,
-	type AgentToolResult,
-	type AgentToolUpdateCallback,
-} from "@hansjm10/volt-agent-core";
+import { AdmissionGate, type AgentToolResult, type AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
 import type { BackgroundJobDiagnosticEvent } from "./background-job-diagnostics.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { truncateTail } from "./tools/truncate.ts";
@@ -58,7 +54,7 @@ export interface BackgroundJobWaitOptions {
 
 export interface BackgroundJobManagerOptions {
 	/** Shared execution admission; job inspection and cleanup remain available while suspended. */
-	admissionGate?: AgentHarnessAdmissionGate;
+	admissionGate?: AdmissionGate;
 	/** Host-owned capability check, including the jobs control tool. */
 	isToolAllowed: (name: BackgroundToolName | "jobs") => boolean;
 	/** Changes on branch navigation, but not on ordinary turns or compaction. */
@@ -94,7 +90,7 @@ interface JobRecord {
 /** Session-owned work. Completion never starts an inference request or writes a transcript. */
 export class BackgroundJobManager {
 	private readonly options: BackgroundJobManagerOptions;
-	private readonly admissionGate: AgentHarnessAdmissionGate;
+	private readonly admissionGate: AdmissionGate;
 	private readonly records = new Map<string, JobRecord>();
 	private closed = false;
 	private readonly listeners = new Set<() => void>();
@@ -120,7 +116,7 @@ export class BackgroundJobManager {
 
 	constructor(options: BackgroundJobManagerOptions) {
 		this.options = options;
-		this.admissionGate = options.admissionGate ?? new AgentHarnessAdmissionGate();
+		this.admissionGate = options.admissionGate ?? new AdmissionGate();
 	}
 
 	/** UI observers receive no output payload and cannot affect worker settlement. */

@@ -1,5 +1,7 @@
 # RFC: SQLite Session Storage Merge Contract
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) replaced the session revisions, revision-keyed commit evidence, sticky authority reconciliation, and atomic staging this contract describes with the conversation log: writes are fenced on entry ordinals, one writer holds the per-log lock, and a commit that cannot be confirmed ends the runtime. The rest of this document is a historical record.
+
 - Status: Accepted; implemented
 - Date: 2026-09-03
 - Pull request: [#329](https://github.com/volt-hq/Volt/pull/329)

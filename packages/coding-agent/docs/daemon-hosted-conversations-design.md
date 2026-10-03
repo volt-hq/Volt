@@ -1,5 +1,7 @@
 # RFC: Daemon-Hosted Conversations: One Runtime Owner, TUI as Client
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) absorbs this design as its host model (Phase 7). Its Phase 1 replaced the store revision and conversation-authority fencing described here with ordinal-fenced log writes and an exclusive per-log lock that every host takes, in-process modes included, so opening a session another process holds fails with `conversation_locked` (Q4).
+
 - Status: Draft (proposed). Phase 1 stands on its own; Phases 2-4 are subject to the architecture rewrite RFC now being drafted.
 - Date: 2026-10-01
 - Workspaces: `Volt/packages/coding-agent` (primary). `volt-app` needs no protocol change; it can delete dead handling afterwards (§10.3).
