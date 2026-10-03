@@ -27,9 +27,16 @@ export type LogOp =
 	| { kind: "planning"; mode: "build" | "plan" }
 	| { kind: "compaction"; pick: number; summary: string }
 	| { kind: "navigate"; pick: number; summary: string | null }
+	| { kind: "fork"; pick: number; text: string }
 	| { kind: "product"; visibility: "public" | "host" }
-	| { kind: "receipt"; command: ClientInputCommand; behavior: "steer" | "followUp" | null; text: string }
-	| { kind: "queue"; pick: number }
+	| {
+			kind: "receipt";
+			command: ClientInputCommand;
+			behavior: "steer" | "followUp" | null;
+			text: string;
+			origin: "host" | null;
+	  }
+	| { kind: "queue"; pick: number; messages: boolean }
 	| { kind: "transition"; pick: number; choice: number; error: string | null }
 	| { kind: "complete"; pick: number }
 	| { kind: "spawn" };
@@ -78,6 +85,7 @@ export const logOpArbitrary: fc.Arbitrary<LogOp> = fc.oneof(
 			summary: fc.option(fc.constantFrom("", "summary of the branch"), { nil: null }),
 		}),
 	},
+	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("fork" as const), pick, text }) },
 	fc.record({
 		kind: fc.constant("product" as const),
 		visibility: fc.constantFrom("public" as const, "host" as const),
@@ -89,9 +97,13 @@ export const logOpArbitrary: fc.Arbitrary<LogOp> = fc.oneof(
 			command: fc.constantFrom<ClientInputCommand>("prompt", "steer", "follow_up"),
 			behavior: fc.constantFrom("steer" as const, "followUp" as const, null),
 			text,
+			origin: fc.constantFrom<"host" | null>("host", null),
 		}),
 	},
-	{ weight: 2, arbitrary: fc.record({ kind: fc.constant("queue" as const), pick }) },
+	{
+		weight: 2,
+		arbitrary: fc.record({ kind: fc.constant("queue" as const), pick, messages: fc.boolean() }),
+	},
 	{
 		weight: 4,
 		arbitrary: fc.record({
@@ -128,6 +140,7 @@ interface ModelInput {
 	readonly command: ClientInputCommand;
 	readonly behavior: "steer" | "followUp" | null;
 	readonly text: string;
+	readonly origin: "host" | null;
 	state: ClientInputState;
 	queued: boolean;
 }
@@ -365,6 +378,17 @@ export function buildLog(ops: readonly LogOp[]): ConversationLogEntry[] {
 				}
 				break;
 			}
+			case "fork": {
+				const parentId = choose([null, ...publicIds], op.pick) ?? null;
+				append({
+					...base(),
+					parentId,
+					type: "message",
+					visibility: "public",
+					payload: { message: { role: "user", content: op.text, timestamp: ordinal } },
+				});
+				break;
+			}
 			case "product":
 				append({ ...base(), type: "test_product", visibility: op.visibility, payload: { ordinal } });
 				break;
@@ -384,6 +408,7 @@ export function buildLog(ops: readonly LogOp[]): ConversationLogEntry[] {
 							images: [],
 							...(behavior === null ? {} : { streamingBehavior: behavior }),
 						},
+						...(op.origin === null ? {} : { origin: op.origin }),
 					},
 				});
 				inputs.push({
@@ -392,6 +417,7 @@ export function buildLog(ops: readonly LogOp[]): ConversationLogEntry[] {
 					command: op.command,
 					behavior,
 					text: op.text,
+					origin: op.origin,
 					state: "accepted",
 					queued: false,
 				});
@@ -409,6 +435,13 @@ export function buildLog(ops: readonly LogOp[]): ConversationLogEntry[] {
 				);
 				const delivery = input && queuedDelivery(input);
 				if (!input || !delivery) break;
+				const notice = {
+					role: "custom" as const,
+					customType: "notice",
+					content: input.text,
+					display: true,
+					timestamp: ordinal,
+				};
 				append({
 					...base(),
 					type: "client_input_queued",
@@ -416,7 +449,10 @@ export function buildLog(ops: readonly LogOp[]): ConversationLogEntry[] {
 					payload: {
 						receiptId: input.receiptId,
 						clientMessageId: input.clientMessageId,
-						queuedInput: { delivery, message: input.text, images: [] },
+						queuedInput:
+							op.messages && input.origin === "host"
+								? { delivery, message: "", images: [], messages: [notice] }
+								: { delivery, message: input.text, images: [] },
 					},
 				});
 				input.queued = true;

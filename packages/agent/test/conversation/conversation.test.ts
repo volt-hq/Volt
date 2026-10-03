@@ -506,16 +506,22 @@ describe("Conversation client input", () => {
 		faux.setResponses([fauxAssistantMessage("first"), fauxAssistantMessage("noticed")]);
 		await promptAndSettle(conversation, "first");
 
-		conversation.queueMessages("followUp", [
+		const admission = await conversation.queueMessages("followUp", [
 			{ role: "custom", customType: "notice", content: "job finished", display: true, timestamp: 1 },
 			{ role: "user", content: "host note", timestamp: 2 },
 		]);
+		await expect(admission.completion).resolves.toMatchObject({ state: "completed" });
 		await conversation.waitForIdle();
 
 		const batches = events.flatMap((event) =>
 			event.type === "committed" ? [event.entries.map((entry) => entry.type)] : [],
 		);
-		expect(batches).toContainEqual(["custom_message", "message"]);
+		expect(batches).toContainEqual(["client_input_receipt", "client_input_queued"]);
+		expect(batches).toContainEqual(["custom_message", "message", "client_input_state"]);
+		expect(conversation.state.clientInputs.inputs.get(admission.clientMessageId)).toMatchObject({
+			origin: "host",
+			state: "completed",
+		});
 		expect(conversation.state.context.messages.map((message) => message.role)).toEqual([
 			"user",
 			"assistant",

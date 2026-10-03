@@ -237,6 +237,13 @@ export class OperationCoordinator<TKind extends string> {
 		lease.stage = "executing";
 	}
 
+	/** Whether an admitted lease can still start: it is active and admission was not suspended since it was reserved. */
+	canStart(lease: OperationLease<TKind>): boolean {
+		return (
+			this.active === lease && lease.stage === "admitted" && this.admissionGate.isCurrent(lease.admissionRevision)
+		);
+	}
+
 	reclassify(lease: OperationLease<TKind>, kind: TKind): boolean {
 		if (this.active !== lease || lease.stage !== "admitted") return false;
 		if (!this.admissionGate.isCurrent(lease.admissionRevision)) {
