@@ -3,7 +3,7 @@ import * as fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { buildContext } from "../../src/conversation/context.ts";
 import { fold, restore, snapshot } from "../../src/conversation/fold.ts";
-import { convertToLlm } from "../../src/harness/messages.ts";
+import { convertToLlm } from "../../src/conversation/messages.ts";
 import type { AgentMessage } from "../../src/types.ts";
 import { buildLog, logArbitrary } from "./log-generators.ts";
 

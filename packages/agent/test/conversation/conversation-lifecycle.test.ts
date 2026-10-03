@@ -1,9 +1,9 @@
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
+import { AdmissionGate } from "../../src/conversation/admission-gate.ts";
 import type { ConversationEvent, ConversationSummarizer } from "../../src/conversation/api.ts";
 import { fold } from "../../src/conversation/fold.ts";
-import { AgentHarnessAdmissionGate } from "../../src/harness/admission-gate.ts";
 import type { AgentTool } from "../../src/types.ts";
 import {
 	deferred,
@@ -38,7 +38,7 @@ const summarizer: ConversationSummarizer = {
 
 describe("Conversation admission", () => {
 	it("rejects suspended operations before any write or hook and recovers after release", async () => {
-		const admissionGate = new AgentHarnessAdmissionGate();
+		const admissionGate = new AdmissionGate();
 		const systemPrompt = vi.fn(() => "prompt");
 		const strategy = vi.fn(() => "host result");
 		const { conversation, log, faux } = await openConversation({ admissionGate, systemPrompt, summarizer });
@@ -64,7 +64,7 @@ describe("Conversation admission", () => {
 	});
 
 	it("keeps queue and settings intents usable while suspended without starting a turn", async () => {
-		const admissionGate = new AgentHarnessAdmissionGate();
+		const admissionGate = new AdmissionGate();
 		const { conversation, faux } = await openConversation({ admissionGate });
 		faux.setResponses([fauxAssistantMessage("first answer")]);
 		await promptAndSettle(conversation, "first");
@@ -101,7 +101,7 @@ describe("Conversation admission", () => {
 	});
 
 	it("lets a running request finish while admission is suspended", async () => {
-		const admissionGate = new AgentHarnessAdmissionGate();
+		const admissionGate = new AdmissionGate();
 		const { conversation, faux } = await openConversation({ admissionGate });
 		const entered = deferred();
 		const release = deferred();

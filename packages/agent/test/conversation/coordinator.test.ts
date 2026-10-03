@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
+import { AdmissionGate } from "../../src/conversation/admission-gate.ts";
 import { type CoordinatorPhase, OperationCoordinator } from "../../src/conversation/coordinator.ts";
-import { AgentHarnessAdmissionGate } from "../../src/harness/admission-gate.ts";
 
 type Kind = "turn" | "compaction" | "navigation" | "host";
 
-function recordingCoordinator(admissionGate = new AgentHarnessAdmissionGate()) {
+function recordingCoordinator(admissionGate = new AdmissionGate()) {
 	const phases: CoordinatorPhase<Kind>[] = [];
 	const coordinator = new OperationCoordinator<Kind>({
 		admissionGate,

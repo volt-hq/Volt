@@ -6,8 +6,8 @@
  * reservations that have not started, but never interrupts started work.
  */
 
-import { AgentHarnessAdmissionGate } from "../harness/admission-gate.ts";
 import type { AgentAbortAcceptance, AgentAbortSource } from "../types.ts";
+import { AdmissionGate } from "./admission-gate.ts";
 
 /** Lifecycle stage of one exclusive operation. */
 export type OperationStage = "admitted" | "executing" | "terminalizing" | "notifying" | "settled";
@@ -72,7 +72,7 @@ export interface CoordinatorPhase<TKind extends string> {
 
 export interface OperationCoordinatorOptions<TKind extends string> {
 	/** Shared host admission fence. Defaults to an independent gate. */
-	readonly admissionGate?: AgentHarnessAdmissionGate;
+	readonly admissionGate?: AdmissionGate;
 	/** Creates the error thrown when admission is suspended or revoked. */
 	readonly busyError?: (message: string) => Error;
 	/** Prefix of operation lease ids. */
@@ -90,7 +90,7 @@ interface PendingSuccessor<TKind extends string> {
 
 /** Owns admission and abort authority for every exclusive operation, plus counted activities. */
 export class OperationCoordinator<TKind extends string> {
-	private readonly admissionGate: AgentHarnessAdmissionGate;
+	private readonly admissionGate: AdmissionGate;
 	private readonly busyError: (message: string) => Error;
 	private readonly leaseIdPrefix: string;
 	private readonly onPhaseChange: ((phase: CoordinatorPhase<TKind>) => void) | undefined;
@@ -113,7 +113,7 @@ export class OperationCoordinator<TKind extends string> {
 	});
 
 	constructor(options: OperationCoordinatorOptions<TKind> = {}) {
-		this.admissionGate = options.admissionGate ?? new AgentHarnessAdmissionGate();
+		this.admissionGate = options.admissionGate ?? new AdmissionGate();
 		this.busyError = options.busyError ?? ((message) => new Error(message));
 		this.leaseIdPrefix = options.leaseIdPrefix ?? "operation";
 		this.onPhaseChange = options.onPhaseChange;

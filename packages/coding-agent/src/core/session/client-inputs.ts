@@ -10,7 +10,7 @@
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
-	AgentHarnessAdmissionGate,
+	AdmissionGate,
 	AgentMessage,
 	AgentTool,
 	Conversation,
@@ -107,7 +107,7 @@ export class QueueClearPersistenceError extends Error {
 }
 
 export interface SessionClientInputsHost {
-	readonly admissionGate: AgentHarnessAdmissionGate;
+	readonly admissionGate: AdmissionGate;
 	conversation(): Conversation<AgentTool>;
 	events(): SessionEvents;
 	isDisposed(): boolean;

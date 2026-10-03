@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { type Context, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { clientInputDigestMaterial } from "@hansjm10/volt-protocol/entries";
 import { describe, expect, it } from "vitest";
+import { AdmissionGate } from "../../src/conversation/admission-gate.ts";
 import type {
 	ConversationDelivery,
 	ConversationEvent,
@@ -13,7 +14,6 @@ import { clientInputDigest } from "../../src/conversation/conversation.ts";
 import { clientInputRecovery, fold } from "../../src/conversation/fold.ts";
 import { InMemoryConversationLog } from "../../src/conversation/in-memory-log.ts";
 import type { ConversationLog, ConversationLogEntry } from "../../src/conversation/log.ts";
-import { AgentHarnessAdmissionGate } from "../../src/harness/admission-gate.ts";
 import type { AgentMessage } from "../../src/types.ts";
 import {
 	deferred,
@@ -146,7 +146,7 @@ describe("Conversation turn reservations", () => {
 	});
 
 	it("rejects a reservation whose admission was suspended without writing", async () => {
-		const admissionGate = new AgentHarnessAdmissionGate();
+		const admissionGate = new AdmissionGate();
 		const { conversation, log } = await openConversation({ admissionGate });
 		const reservation = conversation.reserve();
 		const before = await readLog(log);

@@ -1,7 +1,7 @@
 /**
- * Helpers shared by the `Conversation` kernel, its logs, and `AgentHarness`:
- * frozen and owned copies of loop values, synthesized failure messages, and
- * runtime diagnostics.
+ * Helpers shared by the `Conversation` kernel and its logs: frozen and owned
+ * copies of loop values, synthesized failure messages, error normalization,
+ * and runtime diagnostics.
  */
 
 import {
@@ -16,6 +16,17 @@ import {
 	type ToolArgumentLimits,
 } from "@hansjm10/volt-ai";
 import type { AgentAbortSource, AgentLoopNextAction, AgentLoopNextActionContext, AgentMessage } from "../types.ts";
+
+/** Normalize unknown thrown values into Error instances before using them as typed error causes. */
+export function toError(error: unknown): Error {
+	if (error instanceof Error) return error;
+	if (typeof error === "string") return new Error(error);
+	try {
+		return new Error(JSON.stringify(error));
+	} catch {
+		return new Error(String(error));
+	}
+}
 
 /** Freeze `value` and everything reachable from it. */
 export function deepFreeze<T>(value: T): T {

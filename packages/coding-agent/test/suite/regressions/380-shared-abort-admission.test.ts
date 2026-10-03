@@ -1,5 +1,5 @@
 import { setImmediate } from "node:timers/promises";
-import { AgentHarnessAdmissionGate, type AgentTool } from "@hansjm10/volt-agent-core";
+import { AdmissionGate, type AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -368,7 +368,7 @@ describe("shared admission at background manager dispatch", () => {
 	it.each(["bash", "subagent"] as const)(
 		"rejects new %s jobs and invalidates pre-dispatch work across reopening",
 		async (toolName) => {
-			const gate = new AgentHarnessAdmissionGate();
+			const gate = new AdmissionGate();
 			const manager = new BackgroundJobManager({
 				admissionGate: gate,
 				isToolAllowed: () => true,

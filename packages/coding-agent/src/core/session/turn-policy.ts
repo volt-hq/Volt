@@ -21,7 +21,6 @@ import type {
 	ConversationMessageOrigin,
 	ConversationPolicy,
 	ConversationPreparedDelivery,
-	ToolCallEvent,
 } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonObject, JsonValue, TextContent } from "@hansjm10/volt-ai";
 import type { AgentSessionTurnPolicy } from "../agent-session.ts";
@@ -132,6 +131,14 @@ export async function reduceNextAction(
 export interface ToolCallDecision {
 	block?: boolean;
 	reason?: string;
+}
+
+/** A tool call as the turn policies see it, carrying the decision so far. */
+export interface TurnToolCall extends ToolCallDecision {
+	type: "tool_call";
+	toolCallId: string;
+	toolName: string;
+	input: JsonObject;
 }
 
 export type ToolCallPolicy<TCall extends object> = (
@@ -248,7 +255,7 @@ export class SessionTurnPolicy {
 				});
 			},
 			beforeToolCall: async ({ toolCall, args }, signal) =>
-				await reduceToolCall<ToolCallEvent>(
+				await reduceToolCall<TurnToolCall>(
 					{ type: "tool_call", toolCallId: toolCall.id, toolName: toolCall.name, input: args },
 					this.toolCallPolicies(signal),
 				),
@@ -365,7 +372,7 @@ export class SessionTurnPolicy {
 	}
 
 	/** The session's tool-call policy (activity, extensions, capability profile), then registered turn policies. */
-	*toolCallPolicies(signal: AbortSignal | undefined): Generator<ToolCallPolicy<ToolCallEvent>> {
+	*toolCallPolicies(signal: AbortSignal | undefined): Generator<ToolCallPolicy<TurnToolCall>> {
 		yield (event) => this.toolCall(event, signal);
 		for (const registration of this.workToolPolicies) {
 			yield async (event) => {

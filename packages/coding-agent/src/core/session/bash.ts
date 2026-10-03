@@ -5,7 +5,7 @@
  * splits a tool call from its result.
  */
 
-import type { AgentHarnessAdmissionGate, AgentTool, Conversation } from "@hansjm10/volt-agent-core";
+import type { AdmissionGate, AgentTool, Conversation } from "@hansjm10/volt-agent-core";
 import { type BashResult, executeBashWithOperations } from "../bash-executor.ts";
 import type { GitContextProvider } from "../git-context-provider.ts";
 import type { BashExecutionMessage } from "../messages.ts";
@@ -18,7 +18,7 @@ export interface SessionBashHost {
 	readonly sessionManager: SessionManager;
 	readonly settingsManager: SettingsManager;
 	readonly gitContextProvider: GitContextProvider;
-	readonly admissionGate: AgentHarnessAdmissionGate;
+	readonly admissionGate: AdmissionGate;
 	conversation(): Conversation<AgentTool>;
 	sessionWriter(): SessionWriter;
 	/** Rejects once the session is disposed or has lost its log. */

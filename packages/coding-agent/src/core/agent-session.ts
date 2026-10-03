@@ -16,17 +16,14 @@
 import type {
 	AgentAbortSource,
 	AgentEvent,
-	AgentHarnessNextActionPolicy,
 	AgentMessage,
 	AgentTool,
 	ConversationStreamOptions,
 	PendingToolExecution,
 	StreamFn,
 	ThinkingLevel,
-	ToolCallEvent,
-	ToolCallResult,
 } from "@hansjm10/volt-agent-core";
-import { AgentHarnessAdmissionGate, Conversation, type ConversationLog } from "@hansjm10/volt-agent-core";
+import { AdmissionGate, Conversation, type ConversationLog } from "@hansjm10/volt-agent-core";
 import type { ImageContent, Message, Model, PromptCacheRefresher, TextContent } from "@hansjm10/volt-ai";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -81,7 +78,12 @@ import { SessionPrompting } from "./session/prompting.ts";
 import { SessionRetry } from "./session/retry-policy.ts";
 import { exportSessionToJsonl, SessionInfo } from "./session/session-info.ts";
 import { SessionToolRuntime } from "./session/tool-runtime.ts";
-import { SessionTurnPolicy } from "./session/turn-policy.ts";
+import {
+	type NextActionPolicy,
+	SessionTurnPolicy,
+	type ToolCallDecision,
+	type TurnToolCall,
+} from "./session/turn-policy.ts";
 import { PRODUCT_SESSION_ENTRY_TYPES } from "./session-entry-types.ts";
 import type { SessionManager, SessionReference } from "./session-manager.ts";
 import { ConversationSessionWriter, type SessionWriter } from "./session-writer.ts";
@@ -369,10 +371,10 @@ export interface SessionStats {
 
 export interface AgentSessionTurnPolicy {
 	beforeToolCall?: (
-		event: ToolCallEvent,
+		event: TurnToolCall,
 		signal: AbortSignal,
-	) => ToolCallResult | undefined | Promise<ToolCallResult | undefined>;
-	nextAction?: AgentHarnessNextActionPolicy;
+	) => ToolCallDecision | undefined | Promise<ToolCallDecision | undefined>;
+	nextAction?: NextActionPolicy;
 }
 
 /** @internal Preserves the primary constructor failure and every synchronous rollback failure. */
@@ -426,7 +428,7 @@ export class AgentSession {
 	private readonly _admittedPromptWork = new Set<Promise<unknown>>();
 	private _activityRevision = 0;
 	/** One admission authority for foreground operations, native tools, and background jobs. */
-	private readonly _admissionGate = new AgentHarnessAdmissionGate();
+	private readonly _admissionGate = new AdmissionGate();
 	/** Preflight continuations retain the same revision that fences low-level reservations. */
 	private get _abortGeneration(): number {
 		return this._admissionGate.revision;

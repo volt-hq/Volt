@@ -288,7 +288,7 @@ Values must be positive safe integers; `maxIdleMs` and `maxDurationMs` must also
 }
 ```
 
-Add `"maxDurationMs": 1800000` to opt into a 30-minute total preparation cap per call, in addition to the idle timeout. SDK callers can pass `toolArgumentLimits` to `createAgentSession`; supplied fields override matching settings fields. Direct `stream`/`streamSimple` callers and `AgentHarness` stream options accept the same object.
+Add `"maxDurationMs": 1800000` to opt into a 30-minute total preparation cap per call, in addition to the idle timeout. SDK callers can pass `toolArgumentLimits` to `createAgentSession`; supplied fields override matching settings fields. Direct `stream`/`streamSimple` callers and the `Conversation` kernel's stream options (`ConversationStreamOptions` in `@hansjm10/volt-agent-core`) accept the same object as `toolArgumentLimits`.
 
 ### Message Delivery
 

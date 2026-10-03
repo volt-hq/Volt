@@ -8,7 +8,7 @@
 
 import { readFileSync } from "node:fs";
 import type {
-	AgentHarnessAdmissionGate,
+	AdmissionGate,
 	AgentMessage,
 	AgentTool,
 	Conversation,
@@ -40,7 +40,7 @@ type PromptDispatchOutcome = "handled" | "queued" | "run";
 export interface SessionPromptingHost {
 	readonly resourceLoader: ResourceLoader;
 	readonly modelRegistry: ModelRegistry;
-	readonly admissionGate: AgentHarnessAdmissionGate;
+	readonly admissionGate: AdmissionGate;
 	/** Aborted when the session loses its log or is disposed; command handlers see it as `ctx.signal`. */
 	readonly lifetimeSignal: AbortSignal;
 	/** Resolves once, when the session loses its log. */

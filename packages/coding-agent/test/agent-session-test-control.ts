@@ -1,5 +1,4 @@
 import type {
-	AgentHarnessNextActionPolicy,
 	AgentMessage,
 	AgentTool,
 	AgentToolDisposition,
@@ -7,13 +6,27 @@ import type {
 	ConversationPolicy,
 	StreamFn,
 	ThinkingLevel,
-	ToolCallEvent,
-	ToolCallResult,
-	ToolResultEvent,
 } from "@hansjm10/volt-agent-core";
 import type { ImageContent, JsonObject, JsonValue, Model, TextContent } from "@hansjm10/volt-ai";
 import type { AgentSession } from "../src/core/agent-session.ts";
-import { reduceToolCall, type ToolCallPolicy } from "../src/core/session/turn-policy.ts";
+import {
+	type NextActionPolicy,
+	reduceToolCall,
+	type ToolCallDecision,
+	type ToolCallPolicy,
+	type TurnToolCall,
+} from "../src/core/session/turn-policy.ts";
+
+/** A finished tool call's result, as a tool-result hook sees it. */
+export interface ToolResultEvent {
+	type: "tool_result";
+	toolCallId: string;
+	toolName: string;
+	input: JsonObject;
+	content: Array<TextContent | ImageContent>;
+	details?: JsonValue;
+	isError: boolean;
+}
 
 /** A tool-result hook's patch, as the conversation's `afterToolCall` merges it. */
 export interface ToolResultPatch {
@@ -27,7 +40,7 @@ type SessionTestInternals = {
 	_conversation: Conversation<AgentTool>;
 	_streamFn: StreamFn;
 	_turnPolicy: {
-		toolCallPolicies(signal: AbortSignal | undefined): Iterable<ToolCallPolicy<ToolCallEvent>>;
+		toolCallPolicies(signal: AbortSignal | undefined): Iterable<ToolCallPolicy<TurnToolCall>>;
 		toolResult(event: Omit<ToolResultEvent, "type">): Promise<ToolResultPatch | undefined>;
 	};
 };
@@ -141,17 +154,16 @@ export function createAgentSessionTestControl(session: AgentSession) {
 			};
 		},
 		/** Register a next-action policy after the session's own; returns its removal. */
-		registerNextActionPolicy: (policy: AgentHarnessNextActionPolicy) =>
-			session.registerTurnPolicy({ nextAction: policy }),
+		registerNextActionPolicy: (policy: NextActionPolicy) => session.registerTurnPolicy({ nextAction: policy }),
 		transformContext: async (messages: AgentMessage[]) =>
 			(await policyOf(session).transformContext?.(messages)) ?? messages,
 		/** The session's tool-call decision for `event`; undefined when nothing blocks or explains it. */
-		evaluateToolCall: async (event: ToolCallEvent): Promise<ToolCallResult | undefined> => {
+		evaluateToolCall: async (event: TurnToolCall): Promise<ToolCallDecision | undefined> => {
 			const result = await reduceToolCall(event, internals(session)._turnPolicy.toolCallPolicies(policySignal()));
 			return result.block === undefined && result.reason === undefined ? undefined : result;
 		},
 		evaluateToolCallRequest: async (input: { toolCall: { id: string; name: string }; args: JsonObject }) => {
-			const result = await reduceToolCall<ToolCallEvent>(
+			const result = await reduceToolCall<TurnToolCall>(
 				{ type: "tool_call", toolCallId: input.toolCall.id, toolName: input.toolCall.name, input: input.args },
 				internals(session)._turnPolicy.toolCallPolicies(policySignal()),
 			);

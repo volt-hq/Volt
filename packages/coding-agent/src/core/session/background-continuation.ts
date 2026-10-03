@@ -12,7 +12,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type {
-	AgentHarnessAdmissionGate,
+	AdmissionGate,
 	AgentLoopNextAction,
 	AgentLoopNextActionContext,
 	AgentMessage,
@@ -36,7 +36,7 @@ import type { SessionTurnPolicy } from "./turn-policy.ts";
 
 export interface SessionBackgroundContinuationHost {
 	readonly jobs: BackgroundJobManager;
-	readonly admissionGate: AgentHarnessAdmissionGate;
+	readonly admissionGate: AdmissionGate;
 	readonly diagnostics: BackgroundJobDiagnostics;
 	readonly toolProgressDiagnostics: ToolProgressDiagnostics;
 	/** The provider stream the session sends requests through. */

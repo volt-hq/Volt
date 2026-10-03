@@ -12,8 +12,6 @@ import {
 	snapshot,
 } from "../../src/conversation/fold.ts";
 import { type ConversationLogEntry, isCoreLogEntry } from "../../src/conversation/log.ts";
-import { buildSessionContext } from "../../src/harness/session/session.ts";
-import type { SessionTreeEntry } from "../../src/harness/types.ts";
 import { buildLog, deepFreeze, type LogOp, logArbitrary } from "./log-generators.ts";
 
 const PROPERTY_SEED = 5_850_102;
@@ -21,17 +19,6 @@ const RUNS = { seed: PROPERTY_SEED, numRuns: 200 };
 
 function roundTrip(state: ConversationState): ConversationState {
 	return restore(JSON.parse(JSON.stringify(snapshot(state))));
-}
-
-/** The harness builder's entry shape: payload fields beside the envelope, client identity on the message. */
-function toHarnessEntry(entry: ConversationLogEntry): SessionTreeEntry {
-	const { ordinal: _ordinal, visibility: _visibility, payload, ...envelope } = entry;
-	const flattened = { ...envelope, ...(payload as object) } as SessionTreeEntry & { clientMessageId?: string };
-	if (flattened.type === "message" && flattened.clientMessageId !== undefined && flattened.message.role === "user") {
-		const { clientMessageId, ...rest } = flattened;
-		return { ...rest, message: { ...flattened.message, clientMessageId } } as SessionTreeEntry;
-	}
-	return flattened;
 }
 
 function assertStateFrozen(state: ConversationState): void {
@@ -130,23 +117,6 @@ describe("conversation fold properties", () => {
 				}
 			}),
 			RUNS,
-		);
-	});
-
-	it("the context matches the harness builder over the branch path", () => {
-		fc.assert(
-			fc.property(logArbitrary, (entries) => {
-				for (let length = 0; length <= entries.length; length++) {
-					const state = fold(entries.slice(0, length));
-					const path = state.branch.map((id) => state.tree.byId.get(id)).filter((entry) => entry !== undefined);
-					const harness = buildSessionContext(path.map(toHarnessEntry));
-					expect(state.context.messages).toEqual(harness.messages);
-					expect(state.context.model).toEqual(harness.model);
-					expect(state.context.thinkingLevel).toBe(harness.thinkingLevel);
-					expect(state.leafId).toBe(harness.anchorLeafId);
-				}
-			}),
-			{ seed: PROPERTY_SEED, numRuns: 100 },
 		);
 	});
 });

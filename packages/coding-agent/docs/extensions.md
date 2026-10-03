@@ -509,13 +509,13 @@ volt.on("session_tree", async (event, ctx) => {
 
 Fired before a started session runtime is torn down. Use this to clean up resources opened from `session_start` or other session-scoped hooks.
 
-Session writes from this handler (`volt.appendEntry()`, `volt.setLabel()`, `volt.setSessionName()`) are best-effort. If another owner, such as the background daemon during a handoff, added to the session after this instance last saw it, the instance's state is outdated and its writes are discarded so they cannot overwrite the newer owner's state. Save durable state when it changes rather than only at shutdown, and rebuild in-memory state in `session_start`.
+Session writes from this handler (`volt.appendEntry()`, `volt.setLabel()`, `volt.setSessionName()`) commit like any other: the session is disposed only after the handlers finish. They throw once the session has lost its log because a write could not be confirmed as saved; nothing can be saved after that. Save durable state when it changes rather than only at shutdown, and rebuild in-memory state in `session_start`.
 
 ```typescript
 volt.on("session_shutdown", async (event, ctx) => {
   // event.reason - "quit" | "reload" | "new" | "resume" | "fork"
   // event.targetSessionRef - destination reference for session replacement flows
-  // Clean up resources; session writes here are best-effort (see above)
+  // Clean up resources; session writes here throw if the session lost its log (see above)
 });
 ```
 
@@ -733,7 +733,7 @@ Use this to update extension UI when `volt.setThinkingLevel()`, model changes, o
 
 Fired after `tool_execution_start`, before the tool executes. **Can block.** Use `isToolCallEventType` to narrow and get typed inputs.
 
-Before `tool_call` runs, volt waits for previously emitted Agent events to finish draining through `AgentSession`. This means `ctx.sessionManager` is up to date through the current assistant tool-calling message.
+Every message commits to the session log before its `message_end` is published, so when `tool_call` runs, `ctx.sessionManager` includes the assistant message that requested the tool.
 
 In the default parallel tool execution mode, sibling tool calls from the same assistant message are preflighted sequentially, then executed concurrently. `tool_call` is not guaranteed to see sibling tool results from that same assistant message in `ctx.sessionManager`.
 
@@ -960,15 +960,22 @@ Use this before reading project-local extension configuration that should only b
 
 ### ctx.sessionManager
 
-Read-only access to session state. See [Session Format](session-format.md) for the full SessionManager API and entry types.
+A read-only view of the session's log. It holds committed entries only: an entry appears after its write commits. It has no write methods; write through `volt.appendEntry()`, `volt.setLabel()`, and `volt.setSessionName()`, which resolve after their entries commit. See [Session Format](session-format.md) for entry types.
 
-For `tool_call`, this state is synchronized through the current assistant message before handlers run. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
+For `tool_call`, the view includes the assistant message that requested the tool. In parallel tool execution mode it is still not guaranteed to include sibling tool results from the same assistant message.
 
 ```typescript
 ctx.sessionManager.getEntries()       // All entries
 ctx.sessionManager.getBranch()        // Current branch
 ctx.sessionManager.getLeafId()        // Current leaf entry ID
+ctx.sessionManager.getEntry(id)       // One entry
+ctx.sessionManager.getLabel(id)       // An entry's label
+ctx.sessionManager.getTree()          // The session tree
+ctx.sessionManager.getSessionName()   // The session's display name
+ctx.sessionManager.getSessionRef()    // Persisted reference, or undefined in memory
 ```
+
+The view also has `getCwd()`, `getSessionDir()`, `getSessionId()`, `getLeafEntry()`, `getBranchWindow()`, and `getHeader()`.
 
 ### ctx.modelRegistry / ctx.model
 
@@ -1080,7 +1087,7 @@ Command handlers receive `ExtensionCommandContext`, which extends `ExtensionCont
 
 In a command handler, `ctx.signal` is always defined. It is aborted when the command's session is disposed, including when `ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, or a reload replaces it. It is also aborted when the session ends because a write could not be confirmed as saved; Volt then stops waiting for the handler. It is not the agent turn's signal, so a command started during a turn is not cancelled when that turn is.
 
-After authority is lost, volt stops waiting for the command, cancels the session's other work, and ends the session (`session_shutdown` with reason `"quit"`); the user reopens it with `/resume`. Nothing the command does afterwards can be saved. Pass the signal to long-running work and dialogs so the command ends promptly:
+After the session loses its log, volt stops waiting for the command, cancels the session's other work, and ends the session (`session_shutdown` with reason `"quit"`); the user reopens it with `/resume`. Nothing the command does afterwards can be saved. Pass the signal to long-running work and dialogs so the command ends promptly:
 
 ```typescript
 volt.registerCommand("deploy", {
@@ -1431,6 +1438,8 @@ volt.sendMessage({
   - `"followUp"` - Waits for agent to finish. Delivered only when agent has no more tool calls.
   - `"nextTurn"` - Queued for next user prompt. Does not interrupt or trigger anything.
 - `triggerTurn: true` - If agent is idle, trigger an LLM response immediately. Only applies to `"steer"` and `"followUp"` modes (ignored for `"nextTurn"`).
+
+A message queued with `"steer"` or `"followUp"` while the agent streams, or sent with `triggerTurn` while it is idle, is saved to the session log before it is delivered and is recovered when the session is reopened. It counts toward the session's queue limit. A `"nextTurn"` message is held in memory until the next prompt. An idle message without `triggerTurn` is appended to the session immediately.
 
 ### volt.sendUserMessage(content, options?)
 
@@ -1805,7 +1814,7 @@ Extensions can prepare optional repository context without running another agent
 
 `request_boundary` is a notification-only event before conversational model requests, after committed user delivery and normal context processing. It provides `attemptId`, `cause` (`input`, `tools`, `continuation`, or `retry`), `first` for the request scope, and `waitAvailableMs` for the host's first-boundary allowance. Returned promises do not delay the model; exceptions are contained.
 
-`ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, conversation revision, cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
+`ctx.work` captures the current request scope and a detached snapshot: runtime/branch/scope identity, `revision` (the log ordinal the request builds on), cwd, mode, model identity, committed input text and delivery class, available read services, and a bounded loaded skill catalog (`skills`, `skillsTruncated`). It is available to request-boundary and eligible foreground `tool_execution_end` handlers, not idle commands, raw input, compaction, or policy/diagnostic handlers. Keeping a facade does not let it follow a later request.
 
 Queued messages start no preparation until delivered. Accepted steering cancels current preparation; queued follow-ups do not cancel it until delivery. Tasks are revoked on abort, foreground settlement, tree navigation, reload/replacement, and when the session ends because a write could not be confirmed as saved. Retries/tool turns share a scope. Compaction and tree-summary inference do not collect preparation context. Completion never wakes the model or queues a message.
 

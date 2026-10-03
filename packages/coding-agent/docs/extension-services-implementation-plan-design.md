@@ -1,5 +1,7 @@
 # Extension services: first implementation PR
 
+> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) deleted the Harness request boundary, delivery transaction, and harness tests this plan changes (`packages/agent/src/harness/`, `vitest.harness.config.ts`); the boundary is now the `Conversation` kernel's `requestBoundary` policy hook. The rest of this document is a historical record.
+
 - Status: Implemented and validated first-PR slice.
 - Tracking: [#431](https://github.com/volt-hq/Volt/issues/431), branch `feat/extension-services-foundation`.
 - Date: 2026-09-18
