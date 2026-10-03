@@ -63,6 +63,10 @@ const ANY_BATCH: ConversationLogBatchMatcher = () => true;
  * outcomes: a rollback, a loss before or after the batch commits, or a pause.
  * Each fault applies once, to the next append its matcher accepts. Batches
  * that received a fault are recorded in `faulted`.
+ *
+ * Any writer can run over it: pass it to `Conversation.open`,
+ * `SessionManager.openInMemory`, or `createHarness({ log })`, or wrap a
+ * manager's open log with {@link injectFaultyLog}.
  */
 export class FaultyConversationLog implements ConversationLog {
 	readonly conversationId: string;

@@ -1,4 +1,4 @@
-import type { AgentMessage, AgentTool } from "@hansjm10/volt-agent-core";
+import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxThinking, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -588,21 +588,14 @@ describe("AgentSession retry and event characterization", () => {
 	it("settles after resumed overflow recovery when new prompt construction fails", async () => {
 		const harness = await createHarness({
 			settings: { compaction: { enabled: true, keepRecentTokens: 1 } },
+			seed: (log) =>
+				log.user("previous prompt").assistant("", {
+					stopReason: "error",
+					error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
+				}),
 		});
 		harnesses.push(harness);
 		await harness.session.setSessionName("resumed recovery test");
-
-		const previousUser = {
-			role: "user",
-			content: [{ type: "text", text: "previous prompt" }],
-			timestamp: Date.now() - 1,
-		} satisfies AgentMessage;
-		const overflow = fauxAssistantMessage("", {
-			stopReason: "error",
-			error: { kind: "context_overflow", retryable: false, message: "prompt is too long" },
-		});
-		await harness.sessionManager.appendMessage(previousUser);
-		await harness.sessionManager.appendMessage(overflow);
 		harness.faux.setSimpleResponses([fauxAssistantMessage("compacted context")]);
 		harness.setResponses([fauxAssistantMessage("recovered previous turn")]);
 

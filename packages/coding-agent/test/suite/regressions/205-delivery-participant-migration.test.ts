@@ -2,7 +2,7 @@ import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { PromptPreflightResult } from "../../../src/core/agent-session.ts";
-import { appendsEntryType, injectFaultyLog } from "../../utilities/faulty-log.ts";
+import { appendsEntryType } from "../../utilities/faulty-log.ts";
 import { createHarness, getMessageText, getUserTexts, type Harness } from "../harness.ts";
 
 function deferred(): { promise: Promise<void>; resolve(): void } {
@@ -179,10 +179,10 @@ describe("regression #205: coding-agent delivery participant migration", () => {
 	});
 
 	it("rolls back a direct RPC attempt when its canonical commit rolls back", async () => {
-		harness = await createHarness();
+		harness = await createHarness({ log: "memory" });
 		harness.setResponses([fauxAssistantMessage("committed after append retry")]);
 		const clientMessageId = "participant-sync-append-failure";
-		injectFaultyLog(harness.sessionManager).failNext("rolled_back", appendsEntryType("message"));
+		harness.log?.failNext("rolled_back", appendsEntryType("message"));
 		const firstPreflight: PromptPreflightResult[] = [];
 
 		await expect(

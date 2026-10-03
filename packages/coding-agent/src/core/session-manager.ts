@@ -1,5 +1,6 @@
 import {
 	type AgentMessage,
+	CONVERSATION_LOG_READ_LIMIT_MAX,
 	type ConversationLog,
 	type ConversationLogAppendResult,
 	type ConversationLogEntryDraft,
@@ -51,7 +52,7 @@ import {
 } from "../utils/private-files.ts";
 import { cloneCanonicalData } from "./canonical-data.ts";
 import { ConversationLock } from "./conversation-log/conversation-lock.ts";
-import { toLogEntryDraft } from "./conversation-log/entry-codec.ts";
+import { toLogEntryDraft, toSessionEntry } from "./conversation-log/entry-codec.ts";
 import { SqliteConversationLog } from "./conversation-log/sqlite-conversation-log.ts";
 import {
 	type BashExecutionMessage,
@@ -73,6 +74,7 @@ import {
 	decodeStoredSessionEntry,
 	digestClientInputPayload,
 	isHostOnlySessionEntryType,
+	isTerminalClientInputState,
 	isValidClientMessageId,
 	isValidSessionId,
 	normalizeClientInputPayload,
@@ -334,8 +336,7 @@ export interface SessionMessageEntry extends SessionEntryBase {
 }
 
 export type ClientInputCommand = ProtocolClientInputCommand;
-/** The protocol's client input states this store writes; `withdrawn` arrives with the kernel's delivery queue. */
-export type ClientInputState = Exclude<ProtocolClientInputState, "withdrawn">;
+export type ClientInputState = ProtocolClientInputState;
 export type ClientInputStreamingBehavior = NonNullable<ProtocolClientInputPayload["streamingBehavior"]>;
 export type ClientInputQueuedDelivery = ProtocolClientInputQueuedDelivery;
 export type ClientInputPayload = ProtocolClientInputPayload;
@@ -375,15 +376,16 @@ export interface ClientInputQueuedEntry extends SessionEntryBase, ClientInputQue
 }
 
 /** Append-only state transition for a client input receipt. */
-export interface ClientInputStateEntry extends SessionEntryBase, Omit<ClientInputStateEntryPayload, "state"> {
+export interface ClientInputStateEntry extends SessionEntryBase, ClientInputStateEntryPayload {
 	type: "client_input_state";
-	state: ClientInputState;
 }
 
 export interface ClientInputRecord {
 	receiptId: string;
 	clientMessageId: string;
 	command: ClientInputCommand;
+	/** `host` on input the host submitted itself; client input has no origin. */
+	origin?: "host";
 	semanticDigest: string;
 	input: ClientInputPayload;
 	queuedEntryId?: string;
@@ -1566,7 +1568,7 @@ class SessionWrite implements SessionEntryLookup {
 		error?: string,
 	): ClientInputRecord {
 		const record = this.clientInput(clientMessageId);
-		if (record.state === "completed" || record.state === "failed") return cloneClientInputRecord(record);
+		if (isTerminalClientInputState(record.state)) return cloneClientInputRecord(record);
 		if (state === "started" && record.state !== "accepted") return cloneClientInputRecord(record);
 		this.append({
 			type: "client_input_state",
@@ -2985,6 +2987,38 @@ export class SessionManager {
 	static inMemory(cwd: string = process.cwd()): SessionManager {
 		const manager = new SessionManager(cwd, "", false);
 		manager._startInMemorySession({});
+		return manager;
+	}
+
+	/**
+	 * Open an in-memory session (no persistence) over an existing log, such as
+	 * an `InMemoryConversationLog` with entries already in it. The session id is
+	 * the log's conversation id; the manager loads every entry, then writes
+	 * through `log`. Only an empty log is a new session that captures its first
+	 * Git observation.
+	 */
+	static async openInMemory(log: ConversationLog, cwd: string = process.cwd()): Promise<SessionManager> {
+		const entries: CommittedSessionEntry[] = [];
+		for (;;) {
+			const page = await log.read(entries.length, CONVERSATION_LOG_READ_LIMIT_MAX);
+			entries.push(...page.entries.map((entry) => toSessionEntry(entry, entry.ordinal)));
+			if (page.entries.length === 0 || entries.length >= page.lastOrdinal) break;
+		}
+		assertValidSessionId(log.conversationId);
+		const manager = new SessionManager(cwd, "", false);
+		const header: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: log.conversationId,
+			timestamp: new Date().toISOString(),
+			cwd: manager.cwd,
+		};
+		manager.sessionId = log.conversationId;
+		manager.sessionGeneration = randomUUID();
+		manager.fileEntries = [header, ...entries];
+		manager._buildIndex();
+		manager.acceptsStartingGitContext = entries.length === 0;
+		manager._attachLog(log);
 		return manager;
 	}
 

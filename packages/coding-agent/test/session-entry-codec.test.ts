@@ -106,7 +106,38 @@ function validEntries(): Array<Record<string, unknown>> {
 			},
 			requestKey: "request-1",
 		},
+		{
+			...base("client_input_receipt", "host-receipt", 18),
+			clientMessageId: "host-1",
+			command: "follow_up",
+			semanticDigest: digestClientInputPayload("follow_up", { message: "", images: [] }),
+			input: { message: "", images: [] },
+			origin: "host",
+		},
+		{
+			...base("client_input_queued", "host-queued", 19),
+			receiptId: "host-receipt",
+			clientMessageId: "host-1",
+			queuedInput: { delivery: "follow_up", message: "", images: [], messages: [hostMessage()] },
+		},
+		{
+			...base("client_input_state", "withdrawn", 20),
+			receiptId: "receipt",
+			clientMessageId: "client-1",
+			state: "withdrawn",
+		},
 	];
+}
+
+/** A message the host queues for delivery, as an extension's follow-up. */
+function hostMessage() {
+	return { role: "custom", customType: "extension", content: "notice", display: true, timestamp: MESSAGE_TIMESTAMP };
+}
+
+function entryOf(id: string, ordinal: number, changes: Record<string, unknown> = {}): Record<string, unknown> {
+	const entry = validEntries().find((candidate) => candidate.id === id);
+	if (!entry) throw new Error(`No valid entry ${id}`);
+	return { ...entry, ordinal, ...changes };
 }
 
 const REQUIRED_TYPE_FIELD: Record<string, string> = {
@@ -182,16 +213,30 @@ describe("session entry codec", () => {
 		);
 	});
 
-	it("rejects protocol entry types and states this store does not write yet", () => {
+	it("rejects protocol entry types this store does not write yet", () => {
 		expect(() =>
 			parsePersistedSessionEntry({ ...base("forked_from", "fork", 1), sessionId: "source", entryId: "entry" }),
 		).toThrow('unsupported entry type "forked_from"');
+	});
+
+	it("validates host input origins and the messages a host input queues", () => {
+		expect(() => parsePersistedSessionEntry(entryOf("host-receipt", 1, { origin: "client" }))).toThrow(
+			"invalid client input origin",
+		);
+		const queued = entryOf("host-queued", 1);
+		const queuedInput = queued.queuedInput as Record<string, unknown>;
+		const withMessages = (messages: unknown) => ({ ...queued, queuedInput: { ...queuedInput, messages } });
+		expect(() => parsePersistedSessionEntry(withMessages([]))).toThrow("must be a non-empty array");
+		expect(() => parsePersistedSessionEntry(withMessages(hostMessage()))).toThrow("must be a non-empty array");
 		expect(() =>
-			parsePersistedSessionEntry({
-				...validEntries().find((entry) => entry.type === "client_input_state"),
-				state: "withdrawn",
-			}),
-		).toThrow("invalid client input state");
+			parsePersistedSessionEntry(withMessages([{ ...hostMessage(), clientMessageId: "client-1" }])),
+		).toThrow("queuedInput.messages[0].clientMessageId: unknown property");
+		expect(() =>
+			parsePersistedSessionEntry(withMessages([{ role: "compactionSummary", summary: "s", timestamp: 1 }])),
+		).toThrow("unsupported canonical message role");
+		expect(() => parsePersistedSessionEntry({ ...queued, queuedInput: { ...queuedInput, extra: true } })).toThrow(
+			"unknown property",
+		);
 	});
 
 	it("rejects unknown and missing fields for every entry type", () => {
@@ -410,6 +455,16 @@ describe("session entry codec", () => {
 		expect(() =>
 			validatePersistedSessionEntrySequence([
 				receipt,
+				entryOf("host-queued", 2, {
+					receiptId: "receipt",
+					clientMessageId: "client-1",
+					queuedInput: { delivery: "steer", message: "", images: [], messages: [hostMessage()] },
+				}),
+			]),
+		).toThrow("only a host input may");
+		expect(() =>
+			validatePersistedSessionEntrySequence([
+				receipt,
 				{
 					...base("message", "identified-message", 2),
 					message: {
@@ -421,6 +476,38 @@ describe("session entry codec", () => {
 				},
 			]),
 		).toThrow("requires a started receipt");
+	});
+
+	it("withdraws only an accepted input and never moves a withdrawn one", () => {
+		const receipt = entryOf("receipt", 1);
+		const state = (id: string, ordinal: number, value: string) => entryOf("state", ordinal, { id, state: value });
+		expect(validatePersistedSessionEntrySequence([receipt, state("withdrawn", 2, "withdrawn")])).toHaveLength(2);
+		expect(
+			validatePersistedSessionEntrySequence([
+				entryOf("host-receipt", 1),
+				entryOf("host-queued", 2),
+				entryOf("withdrawn", 3, { receiptId: "host-receipt", clientMessageId: "host-1" }),
+			]),
+		).toHaveLength(3);
+		expect(() =>
+			validatePersistedSessionEntrySequence([
+				receipt,
+				state("started", 2, "started"),
+				state("withdrawn", 3, "withdrawn"),
+			]),
+		).toThrow("withdraws an input whose dispatch started");
+		for (const next of ["accepted", "started", "completed", "failed", "withdrawn"]) {
+			expect(() =>
+				validatePersistedSessionEntrySequence([
+					receipt,
+					state("withdrawn", 2, "withdrawn"),
+					state("after", 3, next),
+				]),
+			).toThrow("follows a terminal state");
+		}
+		expect(() =>
+			validatePersistedSessionEntrySequence([receipt, state("withdrawn", 2, "withdrawn"), entryOf("queued", 3)]),
+		).toThrow("was persisted after dispatch started");
 	});
 
 	it("rejects invalid compaction, branch, Git-context, and child-session relationships", () => {

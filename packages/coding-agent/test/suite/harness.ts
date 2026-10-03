@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { AgentTool } from "@hansjm10/volt-agent-core";
+import { type AgentTool, type ConversationLog, InMemoryConversationLog, uuidv7 } from "@hansjm10/volt-agent-core";
 import {
 	createFauxProvider,
 	type FauxModelDefinition,
@@ -18,6 +18,7 @@ import {
 } from "@hansjm10/volt-ai";
 import { AgentSession, type AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { AuthStorage } from "../../src/core/auth-storage.ts";
+import { SqliteConversationLog } from "../../src/core/conversation-log/sqlite-conversation-log.ts";
 import type { ExtensionRunner } from "../../src/core/extensions/index.ts";
 import type { LspServerPool } from "../../src/core/lsp/server-pool.ts";
 import { convertToLlm } from "../../src/core/messages.ts";
@@ -28,6 +29,8 @@ import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { SubagentToolManager } from "../../src/core/tools/subagent.ts";
 import type { ExtensionFactory, ExtensionWorkLimits, ResourceLoader } from "../../src/index.ts";
 import { createAgentSessionTestControl, type LegacyPrepareDelivery } from "../agent-session-test-control.ts";
+import { FaultyConversationLog, injectFaultyLog } from "../utilities/faulty-log.ts";
+import { type SeedLogBuild, type SeedModel, seedLog } from "../utilities/seed-log.ts";
 import {
 	type CreateTestExtensionsResultInput,
 	createTestExtensionsResult,
@@ -84,6 +87,16 @@ export interface HarnessOptions {
 	withConfiguredAuth?: boolean;
 	/** Inject a persisted manager when a test needs to exercise session reload behavior. */
 	sessionManager?: SessionManager;
+	/**
+	 * Build the session from a conversation log instead: `"memory"` (the default
+	 * with `seed`) for an in-memory log, `"sqlite"` for a persisted session in
+	 * the harness temp directory, or a log to use as given, such as an
+	 * `InMemoryConversationLog`. The session writes through a
+	 * `FaultyConversationLog`, exposed as `harness.log`.
+	 */
+	log?: "memory" | "sqlite" | ConversationLog;
+	/** Entries committed to the log before the session opens; assistant messages name the faux model. */
+	seed?: SeedLogBuild;
 	/** Project root for project-scoped services such as LSP. Defaults to the harness temp dir. */
 	projectCwd?: string;
 	/** Share language servers with other sessions using the same pool. */
@@ -98,6 +111,8 @@ export interface Harness {
 	session: AgentSession;
 	control: ReturnType<typeof createAgentSessionTestControl>;
 	sessionManager: SessionManager;
+	/** The log the session writes, for fault injection, when it was built from a log (`log` or `seed`). */
+	log: FaultyConversationLog | undefined;
 	settingsManager: SettingsManager;
 	authStorage: AuthStorage;
 	faux: FauxProvider;
@@ -124,6 +139,31 @@ export function createFauxModelRegistry(harness: Harness, agentDir = harness.tem
 	return registry;
 }
 
+/** A session manager over a (seeded) conversation log, writing through a fault-injecting wrapper. */
+async function openLogSession(
+	options: HarnessOptions,
+	tempDir: string,
+	model: SeedModel,
+): Promise<{ sessionManager: SessionManager; log: FaultyConversationLog }> {
+	if (options.sessionManager) throw new Error("A harness takes either a session manager or a log");
+	const seed = options.seed;
+	if (options.log === "sqlite") {
+		const created = await SqliteConversationLog.create({ sessionDirectory: join(tempDir, "sessions"), cwd: tempDir });
+		try {
+			if (seed) await seedLog(created, seed, { model });
+		} finally {
+			await created.close();
+		}
+		const sessionManager = await SessionManager.open(created.ref);
+		return { sessionManager, log: injectFaultyLog(sessionManager) };
+	}
+	const log =
+		options.log === undefined || options.log === "memory" ? new InMemoryConversationLog(uuidv7()) : options.log;
+	if (seed) await seedLog(log, seed, { model });
+	const faulty = log instanceof FaultyConversationLog ? log : new FaultyConversationLog(log);
+	return { sessionManager: await SessionManager.openInMemory(faulty), log: faulty };
+}
+
 export async function createHarness(options: HarnessOptions = {}): Promise<Harness> {
 	// Leave room for nested worktree/quarantine paths within Git for Windows' path limit.
 	const tempDir = mkdtempSync(join(tmpdir(), "volt-"));
@@ -139,7 +179,11 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 	const withConfiguredAuth = options.withConfiguredAuth ?? true;
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
 
-	const sessionManager = options.sessionManager ?? SessionManager.inMemory();
+	const fromLog =
+		options.log !== undefined || options.seed !== undefined
+			? await openLogSession(options, tempDir, model)
+			: undefined;
+	const sessionManager = fromLog?.sessionManager ?? options.sessionManager ?? SessionManager.inMemory();
 	const settingsManager = SettingsManager.inMemory(options.settings);
 
 	const authStorage = AuthStorage.inMemory();
@@ -211,6 +255,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		session,
 		control,
 		sessionManager,
+		log: fromLog?.log,
 		settingsManager,
 		authStorage,
 		faux: fauxProvider,

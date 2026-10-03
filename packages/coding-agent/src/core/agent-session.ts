@@ -51,7 +51,6 @@ import { AgentHarness, AgentHarnessAdmissionGate, ConversationLogLostError } fro
 import type {
 	Api,
 	AssistantMessage,
-	AssistantMessageDiagnostic,
 	Context,
 	ImageContent,
 	JsonObject,
@@ -66,10 +65,8 @@ import type {
 import {
 	clampThinkingLevel,
 	cleanupSessionResources,
-	createRejectedToolCallFeedback,
 	estimateToolDefinitionTokens,
 	getSupportedThinkingLevels,
-	isContextOverflow,
 	modelsAreEqual,
 	resolvePromptCacheRetention,
 	validateToolArguments,
@@ -96,7 +93,6 @@ import {
 	generateBranchSummary,
 	prepareCompaction,
 	type SummarizationRetryOptions,
-	shouldCompact,
 } from "./compaction/index.ts";
 import { exportSessionToHtml, type ToolHtmlRenderer } from "./export-html/index.ts";
 import { createToolHtmlRenderer } from "./export-html/tool-renderer.ts";
@@ -203,6 +199,9 @@ import {
 import { expandPromptTemplate, type PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import type { RpcGitContext, UiActionStateDescriptor } from "./rpc/types.ts";
+import { checkResponseCompaction, shouldCompactBeforeContinuing } from "./session/compaction-policy.ts";
+import { isRetryableError, retryContextMessages, retryDelayMs, willRetryAfterRun } from "./session/retry-policy.ts";
+import { type NextActionPolicy, reduceNextAction, reduceToolCall, type ToolCallPolicy } from "./session/turn-policy.ts";
 import type {
 	BranchSummaryEntry,
 	ClientInputCommand,
@@ -283,29 +282,6 @@ export interface ParsedSkillBlock {
 	location: string;
 	content: string;
 	userMessage: string | undefined;
-}
-
-/** Local stream limits and processing failures: a new attempt would repeat them unchanged. */
-const NON_RETRYABLE_STREAM_DIAGNOSTICS: ReadonlySet<string> = new Set([
-	"tool_argument_generation_limit",
-	"assistant_stream_queue_limit",
-	"assistant_stream_processing_error",
-]);
-
-function hasLocalStreamFailure(diagnostics?: readonly AssistantMessageDiagnostic[]): boolean {
-	return diagnostics?.some((diagnostic) => NON_RETRYABLE_STREAM_DIAGNOSTICS.has(diagnostic.type)) === true;
-}
-
-/**
- * Whether a response failed only because its tool calls were rejected before execution. Unlike a
- * transient failure, repeating the request would not help; a new attempt must carry the rejection
- * feedback so the model can correct its arguments.
- */
-function isRejectedToolCallResponse(diagnostics?: readonly AssistantMessageDiagnostic[]): boolean {
-	return (
-		diagnostics?.some((diagnostic) => diagnostic.type === "invalid_tool_arguments") === true &&
-		!hasLocalStreamFailure(diagnostics)
-	);
 }
 
 export type CompactionReason = "manual" | "threshold" | "overflow";
@@ -1550,8 +1526,8 @@ export class AgentSession {
 		this._harness.on("next_action", (event) => {
 			this._assertActive();
 			this._backgroundNotificationDecisionRevision = this._backgroundContinuationRevision;
-			if (this._shouldStopForProactiveCompaction(event)) return { type: "pause" };
-			return this._backgroundNotificationAction(event);
+			const { type: _type, signal, ...context } = event;
+			return reduceNextAction(context, this._nextActionPolicies(), signal);
 		});
 		this._harness.on("next_action_resolved", (event) => {
 			if (event.stopReason === "policy" || event.stopReason === "tool") this._invalidateExtensionWork();
@@ -1601,8 +1577,35 @@ export class AgentSession {
 			}
 			return undefined;
 		});
-		this._harness.on("tool_call", async (event) => await this._handleToolCallPolicy(event));
+		this._harness.on("tool_call", async (event) => await reduceToolCall(event, this._toolCallPolicies()));
 		this._harness.on("tool_result", async (event) => await this._handleToolResultPolicy(event));
+	}
+
+	/** The session's next-action policy (proactive compaction, then background notices), then registered turn policies. */
+	private *_nextActionPolicies(): Generator<NextActionPolicy> {
+		yield (context) =>
+			this._shouldStopForProactiveCompaction(context)
+				? { type: "pause" }
+				: this._backgroundNotificationAction(context);
+		for (const registration of this._workToolPolicies) {
+			yield (context, signal) => {
+				const snapshot = registration.policy;
+				return withoutExtensionWork(() => snapshot.nextAction?.(context, signal));
+			};
+		}
+	}
+
+	/** The session's tool-call policy (activity, extensions, capability profile), then registered turn policies. */
+	private *_toolCallPolicies(): Generator<ToolCallPolicy<ToolCallEvent>> {
+		yield (event) => this._handleToolCallPolicy(event);
+		for (const registration of this._workToolPolicies) {
+			yield async (event) => {
+				const signal = this._harness.signal;
+				const snapshot = registration.policy;
+				if (!signal) return undefined;
+				return await withoutExtensionWork(() => snapshot.beforeToolCall?.(event, signal));
+			};
+		}
 	}
 
 	/** One event-driven wake at idle, shared by Bash and subagents. No worker output enters the prompt. */
@@ -2803,7 +2806,14 @@ export class AgentSession {
 				startedAt: this._activeAgentOperation!.startedAt,
 			});
 		} else if (handledEvent.type === "agent_end") {
-			this._emit({ ...handledEvent, willRetry: this._willRetryAfterAgentEnd(handledEvent) });
+			this._emit({
+				...handledEvent,
+				willRetry: willRetryAfterRun(
+					handledEvent.messages,
+					this._retryAttempt,
+					this.settingsManager.getRetrySettings(),
+				),
+			});
 			this._activeAgentRun = undefined;
 		} else {
 			this._emit(handledEvent);
@@ -2891,24 +2901,6 @@ export class AgentSession {
 		// user append. Only clearQueue's still-owned entries may become failed.
 		const operation = this._liveClientInputs.get(clientMessageId);
 		if (operation) operation.queued = false;
-	}
-
-	private _willRetryAfterAgentEnd(event: Extract<AgentEvent, { type: "agent_end" }>): boolean {
-		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled || this._retryAttempt >= settings.maxRetries) {
-			return false;
-		}
-
-		for (let i = event.messages.length - 1; i >= 0; i--) {
-			const message = event.messages[i];
-			if (message.role === "assistant") {
-				if (message.diagnostics?.some((diagnostic) => diagnostic.type === "delivery_transaction_failure")) {
-					return false;
-				}
-				return this._isRetryableError(message as AssistantMessage);
-			}
-		}
-		return false;
 	}
 
 	private _settleRetry(success: boolean, finalError?: string): void {
@@ -3818,16 +3810,6 @@ export class AgentSession {
 			}
 		};
 		this._workToolPolicies.add(workPolicy);
-		const unregisterToolCall = this._harness.on("tool_call", async (event) => {
-			const signal = this._harness.signal;
-			const snapshot = workPolicy.policy;
-			if (!signal) return undefined;
-			return await withoutExtensionWork(() => snapshot.beforeToolCall?.(event, signal));
-		});
-		const unregisterNextAction = this._harness.registerNextActionPolicy((context, signal) => {
-			const snapshot = workPolicy.policy;
-			return withoutExtensionWork(() => snapshot.nextAction?.(context, signal));
-		});
 		changed({}, workPolicy.policy);
 		let registered = true;
 		const assertRegistered = () => {
@@ -3838,8 +3820,6 @@ export class AgentSession {
 			if (!registered) return;
 			registered = false;
 			this._workToolPolicies.delete(workPolicy);
-			unregisterToolCall();
-			unregisterNextAction();
 			changed(workPolicy.policy, {});
 		};
 		return Object.freeze(
@@ -5271,7 +5251,7 @@ export class AgentSession {
 			return !this._disposed && abortGeneration === this._abortGeneration;
 		}
 
-		if (this._isRetryableError(msg)) {
+		if (isRetryableError(msg)) {
 			const willRetry = await this._prepareRetry(msg, abortGeneration);
 			if (conversationGenerationChanged()) {
 				return abandonStaleConversationRun();
@@ -7054,24 +7034,20 @@ export class AgentSession {
 			if (context.completedTurn?.disposition === "stop" && hasQueuedMessages) {
 				this._drainFollowUpsOnNextContinuation = true;
 			}
-			if (this._proactiveCompactionState !== "idle" || !context.completedTurn) return false;
-			// Only interrupt turns that would otherwise continue with another LLM
-			// call. Queued steering/follow-up messages also force a continuation,
-			// including after a plain response or a terminating tool batch.
-			const willContinueForTools =
-				context.completedTurn.toolResults.length > 0 && context.completedTurn.disposition === "continue";
-			if (!willContinueForTools && !hasQueuedMessages) return false;
-			const message = context.completedTurn.message;
-			if (message.stopReason === "aborted" || message.stopReason === "error") return false;
+			const turn = context.completedTurn;
+			if (this._proactiveCompactionState !== "idle" || !turn) return false;
 			const model = this.model;
-			if (!model || message.provider !== model.provider || message.model !== model.id) return false;
-			const settings = this.settingsManager.getCompactionSettings(model);
-			if (!settings.enabled) return false;
-			// Provider usage predates this turn's tool execution. Estimate from the
-			// live context so newly appended tool results are included before the
-			// loop starts another provider request.
-			const contextTokens = estimateContextTokens(context.context.messages, context.context.tools).tokens;
-			if (!shouldCompact(contextTokens, model.contextWindow ?? 0, settings)) return false;
+			// Queued steering/follow-up messages also force a continuation,
+			// including after a plain response or a terminating tool batch.
+			const compact = shouldCompactBeforeContinuing({
+				message: turn.message,
+				continuing: (turn.toolResults.length > 0 && turn.disposition === "continue") || hasQueuedMessages,
+				messages: context.context.messages,
+				...(context.context.tools === undefined ? {} : { tools: context.context.tools }),
+				model,
+				settings: this.settingsManager.getCompactionSettings(model),
+			});
+			if (!compact) return false;
 			this._proactiveCompactionState = "scheduled";
 			return true;
 		} catch {
@@ -7101,34 +7077,23 @@ export class AgentSession {
 			assertConversationGenerationCurrent?: () => void,
 		) => Promise<boolean> = (...args) => this._runAutoCompaction(...args),
 	): Promise<boolean> {
-		const settings = this.settingsManager.getCompactionSettings(this.model);
-		if (!settings.enabled) return false;
-
-		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
-		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
-
-		const contextWindow = this.model?.contextWindow ?? 0;
-
-		// Skip overflow check if the message came from a different model.
-		// This handles the case where user switched from a smaller-context model (e.g. opus)
-		// to a larger-context model (e.g. codex) - the overflow error from the old model
-		// shouldn't trigger compaction for the new model.
-		const sameModel =
-			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
-
-		// Skip compaction checks if this assistant message is older than the latest
-		// compaction boundary. This prevents a stale pre-compaction usage/error
-		// from retriggering compaction on the first prompt after compaction.
-		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
-		const assistantIsFromBeforeCompaction =
-			compactionEntry !== null && assistantMessage.timestamp <= new Date(compactionEntry.timestamp).getTime();
-		if (assistantIsFromBeforeCompaction) {
-			return false;
-		}
-
-		// Case 1: Overflow - LLM returned context overflow error
-		if (sameModel && isContextOverflow(assistantMessage, contextWindow)) {
-			if (this._overflowRecoveryAttempted) {
+		const model = this.model;
+		const compaction = checkResponseCompaction({
+			message: assistantMessage,
+			includeAborted: !skipAbortedCheck,
+			model,
+			settings: this.settingsManager.getCompactionSettings(model),
+			overflowRecoveryAttempted: this._overflowRecoveryAttempted,
+			compactedAt: () => {
+				const entry = getLatestCompactionEntry(this.sessionManager.getBranch());
+				return entry === null ? undefined : new Date(entry.timestamp).getTime();
+			},
+			context: () => ({ messages: this.messages, tools: this._harness.getActiveTools() }),
+		});
+		switch (compaction.kind) {
+			case "none":
+				return false;
+			case "overflow_exhausted":
 				this._emit({
 					type: "compaction_end",
 					reason: "overflow",
@@ -7138,51 +7103,17 @@ export class AgentSession {
 						"Context overflow recovery failed after one compact-and-retry attempt. Try reducing context or switching to a larger-context model.",
 				});
 				return false;
-			}
-
-			this._overflowRecoveryAttempted = true;
-			return await runAutoCompaction("overflow", true, false, assertConversationGenerationCurrent);
-		}
-
-		// Case 2: Threshold - context is getting large. Estimate from the live
-		// context so tool results and other messages appended after provider usage
-		// are included. For error messages, require a prior successful usage source.
-		const messages = this.messages;
-		const estimate = estimateContextTokens(messages, this._harness.getActiveTools());
-		let contextTokens: number;
-		if (assistantMessage.stopReason === "error") {
-			if (estimate.lastUsageIndex === null) return false; // No usage data at all
-			// Verify the usage source is post-compaction. Kept pre-compaction messages
-			// have stale usage reflecting the old (larger) context and would falsely
-			// trigger compaction right after one just finished.
-			const usageMsg = messages[estimate.lastUsageIndex];
-			if (
-				compactionEntry &&
-				usageMsg.role === "assistant" &&
-				(usageMsg as AssistantMessage).timestamp <= new Date(compactionEntry.timestamp).getTime()
-			) {
-				return false;
-			}
-			contextTokens = estimate.tokens;
-		} else {
-			// A lone aborted response may not be considered a trustworthy estimate
-			// source, but its provider usage is still better than a character-only
-			// fallback for the pre-prompt recovery check.
-			contextTokens =
-				estimate.lastUsageIndex === null ? calculateContextTokens(assistantMessage.usage) : estimate.tokens;
-		}
-		if (shouldCompact(contextTokens, contextWindow, settings)) {
-			const continueAfterCompaction =
-				assistantMessage.stopReason === "length" &&
-				!assistantMessage.content.some(
-					(content) => (content.type === "text" && content.text.trim().length > 0) || content.type === "toolCall",
+			case "overflow":
+				this._overflowRecoveryAttempted = true;
+				return await runAutoCompaction("overflow", true, false, assertConversationGenerationCurrent);
+			case "threshold":
+				return await runAutoCompaction(
+					"threshold",
+					false,
+					compaction.continueAfterCompaction,
+					assertConversationGenerationCurrent,
 				);
-			if (continueAfterCompaction) {
-				return await runAutoCompaction("threshold", false, true, assertConversationGenerationCurrent);
-			}
-			return await runAutoCompaction("threshold", false, false, assertConversationGenerationCurrent);
 		}
-		return false;
 	}
 
 	/**
@@ -8211,38 +8142,18 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Check if an error is retryable: provider failures classified as retryable (rate limits, overload,
-	 * server, network, and timeout errors) or tool calls rejected before execution, which retry with
-	 * feedback explaining the rejection. Context overflow is never retryable; compaction handles it, and
-	 * a local stream limit or processing failure would repeat unchanged.
-	 */
-	private _isRetryableError(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error" || !message.error || hasLocalStreamFailure(message.diagnostics)) return false;
-		return message.error.retryable || isRejectedToolCallResponse(message.diagnostics);
-	}
-
-	/**
 	 * Prepare a retryable error for continuation with exponential backoff.
 	 * @returns true if the caller should continue the agent, false otherwise
 	 */
 	private async _prepareRetry(message: AssistantMessage, abortGeneration: number): Promise<boolean> {
 		const settings = this.settingsManager.getRetrySettings();
-		if (!settings.enabled || this._disposed || abortGeneration !== this._abortGeneration) {
+		if (this._disposed || abortGeneration !== this._abortGeneration) {
 			return false;
 		}
-
+		// Past the last retry, the completed attempt count stays so post-run handling can emit the final failure.
+		const delayMs = retryDelayMs(message, this._retryAttempt + 1, settings);
+		if (delayMs === undefined) return false;
 		this._retryAttempt++;
-
-		if (this._retryAttempt > settings.maxRetries) {
-			// Preserve the completed attempt count so post-run handling can emit the final failure.
-			this._retryAttempt--;
-			return false;
-		}
-
-		// Feedback, not waiting, corrects a rejected tool call.
-		const delayMs = isRejectedToolCallResponse(message.diagnostics)
-			? 0
-			: settings.baseDelayMs * 2 ** (this._retryAttempt - 1);
 
 		const retryAbortController = new AbortController();
 		this._retryAbortController = retryAbortController;
@@ -8261,23 +8172,9 @@ export class AgentSession {
 				return false;
 			}
 
-			// Keep the persisted errors in history while excluding them from the retry request. A rejected
-			// tool call is replaced by the same feedback provider replay shows, so the model can correct it.
 			retryProjectionToken = await this._harness.rebaseContinuationContext({
 				source: "retry",
-				project: (messages) => {
-					let retryContextEnd = messages.length;
-					while (retryContextEnd > 0) {
-						const candidate = messages[retryContextEnd - 1];
-						if (candidate?.role !== "assistant" || candidate.stopReason !== "error") break;
-						retryContextEnd--;
-					}
-					const feedback = messages.slice(retryContextEnd).flatMap((failed) => {
-						const note = failed.role === "assistant" ? createRejectedToolCallFeedback(failed) : undefined;
-						return note ? [note] : [];
-					});
-					return [...messages.slice(0, retryContextEnd), ...feedback];
-				},
+				project: retryContextMessages,
 			});
 
 			await sleep(delayMs, retryAbortController.signal);

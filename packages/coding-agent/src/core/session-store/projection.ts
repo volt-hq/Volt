@@ -9,6 +9,7 @@ import {
 	CLIENT_INPUT_ERROR_MAX_SCALARS,
 	digestClientInputPayload,
 	isHostOnlySessionEntryType,
+	isTerminalClientInputState,
 	normalizeClientInputPayload,
 	normalizeClientInputQueuedPayload,
 } from "../session-entry-codec.ts";
@@ -120,6 +121,7 @@ function clientInputRecordFromWrite(write: SessionStoreClientInputWrite): Client
 		receiptId: write.receiptEntryId,
 		clientMessageId: write.clientMessageId,
 		command: write.command,
+		...(write.origin === null ? {} : { origin: write.origin }),
 		semanticDigest: write.semanticDigest,
 		input,
 		state: write.state,
@@ -133,6 +135,11 @@ function clientInputRecordFromWrite(write: SessionStoreClientInputWrite): Client
 	}
 	if (record.queuedInput && record.queuedInput.delivery !== expectedClientInputQueuedDelivery(record)) {
 		throw new Error(`Client input ${JSON.stringify(record.clientMessageId)} has conflicting queued state`);
+	}
+	if (record.queuedInput?.messages !== undefined && record.origin !== "host") {
+		throw new Error(
+			`Client input ${JSON.stringify(record.clientMessageId)} queues messages, which only a host input may`,
+		);
 	}
 	if (
 		(record.state !== "failed" && record.error !== undefined) ||
@@ -177,6 +184,9 @@ export function cloneClientInputRecord(record: ClientInputRecord): ClientInputRe
 					queuedInput: {
 						...record.queuedInput,
 						images: record.queuedInput.images.map((image) => ({ ...image })),
+						...(record.queuedInput.messages === undefined
+							? {}
+							: { messages: structuredClone(record.queuedInput.messages) }),
 					},
 				}),
 	};
@@ -287,10 +297,11 @@ function measureClientInputPayloadBytes(value: ClientInputRecord["input"] | Clie
 	return Buffer.byteLength(JSON.stringify(value), "utf8");
 }
 
+/** Accepted and started inputs are outstanding; completed, failed, and withdrawn ones are terminal. */
 function outstandingClientInputBytes(records: Iterable<ClientInputRecord>): number {
 	let total = 0;
 	for (const record of records) {
-		if (record.state === "completed" || record.state === "failed") continue;
+		if (isTerminalClientInputState(record.state)) continue;
 		total += measureClientInputPayloadBytes(record.input);
 		if (record.queuedInput) total += measureClientInputPayloadBytes(record.queuedInput);
 	}
@@ -300,7 +311,7 @@ function outstandingClientInputBytes(records: Iterable<ClientInputRecord>): numb
 function outstandingClientInputCount(records: Iterable<ClientInputRecord>): number {
 	let total = 0;
 	for (const record of records) {
-		if (record.state !== "completed" && record.state !== "failed") total++;
+		if (!isTerminalClientInputState(record.state)) total++;
 	}
 	return total;
 }
@@ -393,6 +404,7 @@ function reduceClientInputEntry(state: SessionDerivedState, entry: SessionEntry)
 			receiptId: entry.id,
 			clientMessageId: entry.clientMessageId,
 			command: entry.command,
+			...(entry.origin === undefined ? {} : { origin: entry.origin }),
 			semanticDigest: entry.semanticDigest,
 			input,
 			state: "accepted",
@@ -413,6 +425,9 @@ function reduceClientInputEntry(state: SessionDerivedState, entry: SessionEntry)
 		if (queuedInput.delivery !== expectedClientInputQueuedDelivery(existing)) {
 			throw new Error(`Queued client input ${entry.id} conflicts with its requested delivery`);
 		}
+		if (queuedInput.messages !== undefined && existing.origin !== "host") {
+			throw new Error(`Queued client input ${entry.id} queues messages, which only a host input may`);
+		}
 		assertRecoverableClientInputQueueCapacity(state.clientInputsById.values());
 		assertClientInputOutstandingBudget(state.clientInputsById.values(), measureClientInputPayloadBytes(queuedInput));
 		return {
@@ -428,7 +443,7 @@ function reduceClientInputEntry(state: SessionDerivedState, entry: SessionEntry)
 		if (!existing || existing.receiptId !== entry.receiptId) {
 			throw new Error(`Client input state ${entry.id} has no matching receipt`);
 		}
-		if (existing.state === "completed" || existing.state === "failed") {
+		if (isTerminalClientInputState(existing.state)) {
 			throw new Error(`Client input state ${entry.id} follows a terminal state`);
 		}
 		if (entry.state === "started" && existing.state !== "accepted") {
@@ -436,6 +451,9 @@ function reduceClientInputEntry(state: SessionDerivedState, entry: SessionEntry)
 		}
 		if (entry.state === "accepted" && existing.state !== "started") {
 			throw new Error(`Client input state ${entry.id} cannot roll back from ${existing.state}`);
+		}
+		if (entry.state === "withdrawn" && existing.state !== "accepted") {
+			throw new Error(`Client input state ${entry.id} withdraws an input whose dispatch started`);
 		}
 		if (
 			(entry.error !== undefined && entry.state !== "failed") ||
@@ -576,6 +594,7 @@ function clientInputWrite(record: ClientInputRecord): SessionStoreClientInputWri
 		clientMessageId: record.clientMessageId,
 		receiptEntryId: record.receiptId,
 		command: record.command,
+		origin: record.origin ?? null,
 		semanticDigest: record.semanticDigest,
 		input: record.input as unknown as SessionStoreJsonValue,
 		queuedEntryId: record.queuedEntryId ?? null,
