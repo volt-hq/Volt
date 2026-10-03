@@ -211,7 +211,11 @@ export class SQLiteSessionStoreClient {
 		this.expectedExit = true;
 		this.failAll(error);
 		evictSharedClient(this);
-		void this.worker.terminate().catch(() => undefined);
+		// close() waits for the worker to exit: until then, the request it was running can still commit.
+		this.closePromise = this.worker.terminate().then(
+			() => undefined,
+			() => undefined,
+		);
 	}
 
 	private call(operation: SessionStoreWorkerOperation): Promise<unknown> {
