@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import { QueueClearPersistenceError } from "../src/core/agent-session.ts";
+import { QueueClearPersistenceError } from "../src/core/session/client-inputs.ts";
 import { InteractiveMode } from "../src/modes/interactive/interactive-mode.ts";
 
 type CompactionQueuedMessage = { text: string; mode: "steer" | "followUp" };

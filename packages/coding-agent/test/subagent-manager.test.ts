@@ -771,13 +771,17 @@ describe("SubagentManager", () => {
 			responseText: "extension command result",
 			onRuntimeCreated: (event) => {
 				const runner = event.runtime.session.extensionRunner;
-				const session = event.runtime.session as unknown as {
-					_sendCustomMessage(
-						message: { customType: string; content: string; display: boolean },
-						options: { triggerTurn: true },
-						allowDuringPromptTransaction: true,
-					): Promise<void>;
-				};
+				const session = (
+					event.runtime.session as unknown as {
+						_prompting: {
+							sendCustomMessage(
+								message: { customType: string; content: string; display: boolean },
+								options: { triggerTurn: true },
+								allowDuringPromptTransaction: true,
+							): Promise<void>;
+						};
+					}
+				)._prompting;
 				runner.getCommand = (name) =>
 					name === "custom-turn"
 						? {
@@ -786,7 +790,7 @@ describe("SubagentManager", () => {
 								description: "Trigger a custom child turn",
 								sourceInfo: createSyntheticSourceInfo("<test-command>", { source: "sdk" }),
 								handler: async (_args, ctx) => {
-									void session._sendCustomMessage(
+									void session.sendCustomMessage(
 										{ customType: "command", content: "custom child turn", display: true },
 										{ triggerTurn: true },
 										true,
