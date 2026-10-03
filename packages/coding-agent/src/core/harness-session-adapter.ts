@@ -154,7 +154,11 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 	private currentSnapshot: SessionStorageBranchSnapshot | undefined;
 	private readonly snapshots = new WeakMap<ProjectionCursor, SessionStorageBranchSnapshot>();
 	private readonly canonicalTokens = new WeakMap<ProjectionCursor, SessionCanonicalProjectionToken>();
-	private readonly canonicalRevisions = new WeakMap<ProjectionCursor, number>();
+	/** Session-level branch each cursor projected; it changes exactly when a public or `leaf` entry is appended. */
+	private readonly canonicalBranches = new WeakMap<
+		ProjectionCursor,
+		Pick<SessionCanonicalProjection, "leafId" | "leafEntryOrdinal">
+	>();
 	private readonly mutationReceipts = new WeakMap<SessionMutationReceipt, SessionMutationReceiptRecord>();
 
 	constructor(sessionManager: SessionManager, isRetired: () => boolean = () => false) {
@@ -304,6 +308,15 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 		}
 	}
 
+	private projectsCanonicalBranch(cursor: ProjectionCursor, projection: SessionCanonicalProjection): boolean {
+		const branch = this.canonicalBranches.get(cursor);
+		return (
+			branch !== undefined &&
+			branch.leafId === projection.leafId &&
+			branch.leafEntryOrdinal === projection.leafEntryOrdinal
+		);
+	}
+
 	private projectCanonicalProjection(
 		projection: SessionCanonicalProjection,
 		preferred?: SessionStorageBranchSnapshot,
@@ -313,7 +326,7 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 		const fingerprint = `${entries.map((entry) => entry.id).join(":")}:${leafId ?? "root"}`;
 		if (
 			preferred &&
-			this.canonicalRevisions.get(preferred.cursor) === projection.revision &&
+			this.projectsCanonicalBranch(preferred.cursor, projection) &&
 			preferred.cursor.branchIdentity === leafId &&
 			preferred.entries.length === entries.length &&
 			preferred.entries.every((entry, index) => entry.id === entries[index]?.id)
@@ -326,7 +339,7 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 		if (
 			this.currentSnapshot &&
 			this.currentFingerprint === fingerprint &&
-			this.canonicalRevisions.get(this.currentSnapshot.cursor) === projection.revision
+			this.projectsCanonicalBranch(this.currentSnapshot.cursor, projection)
 		) {
 			this.canonicalTokens.set(this.currentSnapshot.cursor, projection.token);
 			return cloneSnapshot(this.currentSnapshot);
@@ -342,7 +355,10 @@ export class SessionManagerHarnessStorage implements SessionStorage {
 		this.currentSnapshot = snapshot;
 		this.snapshots.set(nextCursor, snapshot);
 		this.canonicalTokens.set(nextCursor, projection.token);
-		this.canonicalRevisions.set(nextCursor, projection.revision);
+		this.canonicalBranches.set(nextCursor, {
+			leafId: projection.leafId,
+			leafEntryOrdinal: projection.leafEntryOrdinal,
+		});
 		return cloneSnapshot(snapshot);
 	}
 

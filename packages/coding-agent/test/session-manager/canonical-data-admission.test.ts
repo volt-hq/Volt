@@ -78,7 +78,7 @@ describe("SessionManager canonical data admission", () => {
 		).toThrow("Session message timestamp must be representable as a Date");
 
 		const after = manager.issueCanonicalProjection();
-		expect(after.revision).toBe(before.revision);
+		expect(after.leafEntryOrdinal).toBe(before.leafEntryOrdinal);
 		expect(after.entries).toEqual([]);
 		expect(manager.getEntries()).toEqual([]);
 		expect(manager.getLeafId()).toBeNull();

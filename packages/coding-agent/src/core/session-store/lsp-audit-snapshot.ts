@@ -85,7 +85,7 @@ export function runLspAuditSnapshot(loadBuiltin: (name: string) => unknown): voi
 		location.search = hasWal ? "?mode=ro" : "?mode=ro&immutable=1";
 		db = new DatabaseSync(location, { readOnly: true, timeout: 50, allowExtension: false });
 		db.exec("PRAGMA query_only = ON; PRAGMA trusted_schema = OFF; BEGIN DEFERRED TRANSACTION");
-		if (db.prepare("PRAGMA user_version").get()?.user_version !== 2) {
+		if (db.prepare("PRAGMA user_version").get()?.user_version !== 3) {
 			result.status = "unsupported";
 			return;
 		}
@@ -119,8 +119,8 @@ export function runLspAuditSnapshot(loadBuiltin: (name: string) => unknown): voi
 		const createdAt = metadata.get("created_at");
 		if (
 			metadata.size !== 5 ||
-			metadata.get("schema_id") !== "volt-session-store-v2" ||
-			metadata.get("schema_version") !== 2 ||
+			metadata.get("schema_id") !== "volt-session-store-v3" ||
+			metadata.get("schema_version") !== 3 ||
 			metadata.get("schema_digest") !== digest ||
 			typeof storeId !== "string" ||
 			storeId.length === 0 ||

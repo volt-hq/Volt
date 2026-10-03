@@ -1,6 +1,6 @@
 import { REVIEW_DISCUSSION_SCHEMA_SQL } from "./discussion-schema.ts";
 
-export const SESSION_STORE_SCHEMA_ID = "volt-session-store-v2";
+export const SESSION_STORE_SCHEMA_ID = "volt-session-store-v3";
 
 export const SESSION_STORE_TABLE_NAMES = [
 	"store_metadata",
@@ -21,10 +21,31 @@ export const SESSION_STORE_INDEX_NAMES = [
 	"entries_type_idx",
 	"client_inputs_state_idx",
 	"search_chunks_entry_idx",
-	"transaction_commits_session_revision_idx",
+	"transaction_commits_session_ordinal_idx",
 	"review_anchors_source_idx",
 	"review_discussions_run_idx",
 ] as const;
+
+/** Commit evidence fenced on the session's last entry ordinal. Every commit appends at least one entry. */
+export const SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL = `
+CREATE TABLE transaction_commits (
+	commit_id TEXT PRIMARY KEY NOT NULL CHECK (length(commit_id) BETWEEN 1 AND 512),
+	session_id TEXT NOT NULL,
+	session_generation TEXT NOT NULL CHECK (length(session_generation) BETWEEN 1 AND 512),
+	digest TEXT NOT NULL CHECK (
+		length(digest) = 71 AND
+		substr(digest, 1, 7) = 'sha256:' AND
+		substr(digest, 8) NOT GLOB '*[^0-9a-f]*'
+	),
+	before_ordinal INTEGER NOT NULL CHECK (before_ordinal >= 0),
+	after_ordinal INTEGER NOT NULL CHECK (after_ordinal > before_ordinal),
+	committed_at TEXT NOT NULL,
+	FOREIGN KEY (session_id, session_generation) REFERENCES sessions(id, session_generation) ON DELETE CASCADE
+) STRICT, WITHOUT ROWID;
+
+CREATE UNIQUE INDEX transaction_commits_session_ordinal_idx
+	ON transaction_commits (session_id, session_generation, after_ordinal DESC);
+`;
 
 export const SESSION_STORE_SCHEMA_SQL = `
 CREATE TABLE store_metadata (
@@ -52,7 +73,6 @@ CREATE TABLE sessions (
 	),
 	name TEXT,
 	visible INTEGER NOT NULL DEFAULT 0 CHECK (visible IN (0, 1)),
-	revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
 	leaf_entry_id TEXT,
 	message_count INTEGER NOT NULL DEFAULT 0 CHECK (message_count >= 0),
 	first_message TEXT NOT NULL DEFAULT '',
@@ -131,22 +151,5 @@ CREATE TABLE search_chunks (
 
 CREATE INDEX search_chunks_entry_idx ON search_chunks (session_id, entry_id);
 
-CREATE TABLE transaction_commits (
-	commit_id TEXT PRIMARY KEY NOT NULL CHECK (length(commit_id) BETWEEN 1 AND 512),
-	session_id TEXT NOT NULL,
-	session_generation TEXT NOT NULL CHECK (length(session_generation) BETWEEN 1 AND 512),
-	digest TEXT NOT NULL CHECK (
-		length(digest) = 71 AND
-		substr(digest, 1, 7) = 'sha256:' AND
-		substr(digest, 8) NOT GLOB '*[^0-9a-f]*'
-	),
-	before_revision INTEGER NOT NULL CHECK (before_revision >= 0),
-	after_revision INTEGER NOT NULL CHECK (after_revision = before_revision + 1),
-	committed_at TEXT NOT NULL,
-	FOREIGN KEY (session_id, session_generation) REFERENCES sessions(id, session_generation) ON DELETE CASCADE
-) STRICT, WITHOUT ROWID;
-
-CREATE UNIQUE INDEX transaction_commits_session_revision_idx
-	ON transaction_commits (session_id, session_generation, after_revision DESC);
-${REVIEW_DISCUSSION_SCHEMA_SQL}
+${SESSION_STORE_TRANSACTION_COMMITS_SCHEMA_SQL}${REVIEW_DISCUSSION_SCHEMA_SQL}
 `;

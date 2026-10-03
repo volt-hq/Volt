@@ -259,7 +259,7 @@ describe("background subagent spawn persistence", () => {
 				expect(context.parent.getLeafId()).toBe(finalLeaf);
 				expect(context.parent.getEntries()).toEqual(entries);
 				expect(context.parent.getBranch()).toEqual(branch);
-				expect(context.parent.issueCanonicalProjection().revision).toBe(projection.revision);
+				expect(context.parent.issueCanonicalProjection().leafEntryOrdinal).toBe(projection.leafEntryOrdinal);
 				expect(observed).toEqual(["message"]);
 				expect(branches).toEqual([{ previousLeafId: leaf, nextLeafId: finalLeaf }]);
 				expect(barrier.writes).toEqual([
@@ -418,7 +418,7 @@ describe("background subagent spawn persistence", () => {
 			const other = await SessionManager.open(ref);
 			other.appendSessionInfo("another writer");
 			await other.closePersistence();
-			const flush = expect(context.parent.flush()).rejects.toThrow(/revision changed/);
+			const flush = expect(context.parent.flush()).rejects.toThrow(/ordinal changed/);
 			barrier.release.resolve();
 			await rejectedCommit;
 			await flush;

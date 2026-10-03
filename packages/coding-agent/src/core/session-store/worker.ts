@@ -265,7 +265,7 @@ const SUMMARY_COLUMNS = `
 	starting_git_context_json AS startingGitContextJson,
 	name,
 	visible,
-	revision,
+	(SELECT COALESCE(MAX(ordinal), 0) FROM entries WHERE entries.session_id = sessions.id) AS lastOrdinal,
 	leaf_entry_id AS leafId,
 	message_count AS messageCount,
 	first_message AS firstMessage
@@ -287,7 +287,7 @@ const SUMMARY_RESULT_COLUMNS = `
 	startingGitContextJson,
 	name,
 	visible,
-	revision,
+	lastOrdinal,
 	leafId,
 	messageCount,
 	firstMessage
@@ -325,7 +325,7 @@ function summaryFromRow(row: Record<string, unknown>): SessionStoreSessionSummar
 				: parseCanonicalSessionStoreJson(startingGitContextJson, "Stored starting Git context"),
 		name: sqlNullableString(row, "name"),
 		visible: sqlBoolean(row, "visible"),
-		revision: sqlInteger(row, "revision"),
+		lastOrdinal: sqlInteger(row, "lastOrdinal"),
 		leafId: sqlNullableString(row, "leafId"),
 		messageCount: sqlInteger(row, "messageCount"),
 		firstMessage: sqlString(row, "firstMessage"),
@@ -1053,7 +1053,8 @@ function loadSession(sessionId: string, sessionGeneration: string): SessionStore
 function readEntries(input: SessionStoreReadEntriesInput): SessionStoreReadEntriesResult | null {
 	const db = requireDatabase();
 	return withDeferredReadTransaction(db, () => {
-		if (!findSummaryRow(db, input.sessionId, input.sessionGeneration)) return null;
+		const summaryRow = findSummaryRow(db, input.sessionId, input.sessionGeneration);
+		if (!summaryRow) return null;
 		const entries = storedEntriesFromRows(
 			db
 				.prepare(
@@ -1061,7 +1062,7 @@ function readEntries(input: SessionStoreReadEntriesInput): SessionStoreReadEntri
 				)
 				.all(input.sessionId, input.afterOrdinal, input.limit),
 		);
-		return { entries, lastOrdinal: nextEntryOrdinal(db, input.sessionId) - 1 };
+		return { entries, lastOrdinal: sqlInteger(summaryRow, "lastOrdinal") };
 	});
 }
 
@@ -1071,8 +1072,8 @@ function evidenceFromRow(row: Record<string, unknown>): SessionStoreCommitEviden
 		sessionGeneration: sqlString(row, "sessionGeneration"),
 		commitId: sqlString(row, "commitId"),
 		digest: sqlString(row, "digest"),
-		beforeRevision: sqlInteger(row, "beforeRevision"),
-		afterRevision: sqlInteger(row, "afterRevision"),
+		beforeOrdinal: sqlInteger(row, "beforeOrdinal"),
+		afterOrdinal: sqlInteger(row, "afterOrdinal"),
 		committedAt: sqlString(row, "committedAt"),
 	};
 }
@@ -1081,7 +1082,7 @@ function findCommit(db: DatabaseSync, commitId: string): SessionStoreCommitEvide
 	const row = db
 		.prepare(
 			`SELECT commit_id AS commitId, session_id AS sessionId, session_generation AS sessionGeneration,
-				digest, before_revision AS beforeRevision, after_revision AS afterRevision, committed_at AS committedAt
+				digest, before_ordinal AS beforeOrdinal, after_ordinal AS afterOrdinal, committed_at AS committedAt
 			FROM transaction_commits WHERE commit_id = ?`,
 		)
 		.get(commitId);
@@ -1256,14 +1257,6 @@ function loadTransactionClientInputs(
 	return [...selected.values()];
 }
 
-function nextEntryOrdinal(db: DatabaseSync, sessionId: string): number {
-	const row = db
-		.prepare("SELECT COALESCE(MAX(ordinal), 0) AS maxOrdinal FROM entries WHERE session_id = ?")
-		.get(sessionId);
-	if (!row) throw new Error("Could not determine the current session entry ordinal");
-	return sqlInteger(row, "maxOrdinal") + 1;
-}
-
 function nextSearchChunkIndex(db: DatabaseSync, sessionId: string): number {
 	const row = db
 		.prepare(
@@ -1302,11 +1295,12 @@ function applyTransactionInCurrentTransaction(
 		throw new SessionStoreError("session_not_found", `Session ${JSON.stringify(input.sessionId)} does not exist`);
 	}
 	const summary = summaryFromRow(summaryRow);
-	if (summary.revision !== input.expectedRevision) {
-		return { status: "conflict", actualRevision: summary.revision };
+	// The fence: the writer's committed head must still be the log's last ordinal.
+	if (summary.lastOrdinal !== input.expectedOrdinal) {
+		return { status: "conflict", actualOrdinal: summary.lastOrdinal };
 	}
 	const canonicalEntries = validateTransactionEntryReferences(db, input.sessionId, input.payload.entries);
-	const firstNewOrdinal = nextEntryOrdinal(db, input.sessionId);
+	const firstNewOrdinal = summary.lastOrdinal + 1;
 	const transitionState = createSessionStoreTransactionValidationState(
 		summary.createdAt,
 		loadTransactionClientInputs(db, input.sessionId, canonicalEntries),
@@ -1396,13 +1390,12 @@ function applyTransactionInCurrentTransaction(
 		throw new SessionStoreError("constraint_failed", "Session leaf must identify a stored entry");
 	}
 
-	const afterRevision = summary.revision + 1;
 	const update = db
 		.prepare(
 			`UPDATE sessions SET
 				updated_at = ?, starting_git_context_recorded = ?, starting_git_context_json = ?,
-				name = ?, visible = ?, leaf_entry_id = ?, message_count = ?, first_message = ?, revision = ?
-			WHERE id = ? AND session_generation = ? AND revision = ?`,
+				name = ?, visible = ?, leaf_entry_id = ?, message_count = ?, first_message = ?
+			WHERE id = ? AND session_generation = ?`,
 		)
 		.run(
 			input.payload.session.updatedAt,
@@ -1415,34 +1408,31 @@ function applyTransactionInCurrentTransaction(
 			input.payload.session.leafId,
 			input.payload.session.messageCount,
 			input.payload.session.firstMessage,
-			afterRevision,
 			input.sessionId,
 			input.sessionGeneration,
-			summary.revision,
 		);
-	if (update.changes !== 1)
-		throw new SessionStoreError("constraint_failed", "Session revision changed during transaction");
+	if (update.changes !== 1) throw new SessionStoreError("constraint_failed", "Session changed during transaction");
 
 	const evidence: SessionStoreCommitEvidence = {
 		sessionId: input.sessionId,
 		sessionGeneration: input.sessionGeneration,
 		commitId: input.commitId,
 		digest: input.digest,
-		beforeRevision: summary.revision,
-		afterRevision,
+		beforeOrdinal: summary.lastOrdinal,
+		afterOrdinal: insertionOrdinal - 1,
 		committedAt: new Date().toISOString(),
 	};
 	db.prepare(
 		`INSERT INTO transaction_commits (
-			commit_id, session_id, session_generation, digest, before_revision, after_revision, committed_at
+			commit_id, session_id, session_generation, digest, before_ordinal, after_ordinal, committed_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 	).run(
 		evidence.commitId,
 		evidence.sessionId,
 		evidence.sessionGeneration,
 		evidence.digest,
-		evidence.beforeRevision,
-		evidence.afterRevision,
+		evidence.beforeOrdinal,
+		evidence.afterOrdinal,
 		evidence.committedAt,
 	);
 	return { status: "committed", evidence };
@@ -1466,12 +1456,12 @@ function deleteSession(input: SessionStoreDeleteSessionInput): SessionStoreDelet
 	return withTransaction(db, () => {
 		const summary = findSummary(db, input.sessionId, input.sessionGeneration);
 		if (!summary) return { status: "not_found" };
-		if (summary.revision !== input.expectedRevision) {
-			return { status: "conflict", actualRevision: summary.revision };
+		if (summary.lastOrdinal !== input.expectedOrdinal) {
+			return { status: "conflict", actualOrdinal: summary.lastOrdinal };
 		}
 		const result = db
-			.prepare("DELETE FROM sessions WHERE id = ? AND session_generation = ? AND revision = ?")
-			.run(input.sessionId, input.sessionGeneration, input.expectedRevision);
+			.prepare("DELETE FROM sessions WHERE id = ? AND session_generation = ?")
+			.run(input.sessionId, input.sessionGeneration);
 		if (result.changes !== 1) {
 			throw new SessionStoreError("constraint_failed", "Session changed during conditional deletion");
 		}

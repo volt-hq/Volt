@@ -190,7 +190,7 @@ describe("Regression #341: persisted review discussion policy", () => {
 			await store.deleteSession({
 				sessionId: sourceRef.sessionId,
 				sessionGeneration: sourceRef.sessionGeneration,
-				expectedRevision: 0,
+				expectedOrdinal: 0,
 			});
 			for (const ref of [childRef, { ...childRef, ...reset.child.child }]) {
 				const item = await harness({ sessionManager: await open(ref) });
