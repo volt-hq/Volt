@@ -521,6 +521,7 @@
 			"license": "MIT",
 			"dependencies": {
 				"@hansjm10/volt-ai": "^0.2.3",
+				"@hansjm10/volt-protocol": "^0.2.3",
 				"typebox": "1.1.38"
 			},
 			"engines": {
