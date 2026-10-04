@@ -490,10 +490,12 @@ export async function probeControlSocket(
 					return;
 				}
 				if (ControlValidators.helloAck.Check(message) && !message.ok) {
+					const error = message.error;
 					settle({
 						kind: "live-rejected",
-						reason: message.error ?? "other",
-						...(message.error === undefined ? {} : { error: message.error }),
+						reason:
+							error !== undefined && KNOWN_HELLO_REJECTIONS.has(error) ? (error as HelloRejection) : "other",
+						...(error === undefined ? {} : { error }),
 						...(message.version === undefined ? {} : { version: message.version }),
 						...(message.protocolVersion === undefined ? {} : { protocolVersion: message.protocolVersion }),
 					});
@@ -507,6 +509,16 @@ export async function probeControlSocket(
 		});
 	});
 }
+
+type HelloRejection = Extract<ControlSocketProbe, { kind: "live-rejected" }>["reason"];
+
+/** Ack error codes this version knows; a code from another protocol version reads as "other". */
+const KNOWN_HELLO_REJECTIONS: ReadonlySet<string> = new Set<HelloRejection>([
+	"shutting_down",
+	"protocol_mismatch",
+	"bad_relay_token",
+	"auth_failed",
+]);
 
 function isControlStatusProbe(value: unknown): value is ControlStatusProbe {
 	return typeof value === "object" && value !== null && (value as { type?: unknown }).type === "status_result";

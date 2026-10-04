@@ -17,11 +17,7 @@ import { type Static, type TSchema, type TString, Type } from "typebox";
 import { SessionReferenceSchema } from "./entries.ts";
 import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
-import {
-	IrohRemoteAccessPresetNameSchema,
-	IrohRemoteRpcCapabilitiesSchema,
-	IrohRemoteRpcGrantSchema,
-} from "./remote-access.ts";
+import { RemoteAccessPresetNameSchema, RemoteCapabilitiesSchema, RemoteGrantSchema } from "./remote-access.ts";
 import {
 	IrohRemoteHandshakeSuccessSchema,
 	IrohRemoteHelloSchema,
@@ -152,7 +148,7 @@ export const ControlClientStatusSchema = Type.Object(
 		allowedTools: Type.Optional(Type.Array(Type.String())),
 		/** True when the device has no customized grant and tracks the daemon's current default. */
 		usesDefaultTools: Type.Optional(Type.Boolean()),
-		rpcGrant: Type.Optional(IrohRemoteRpcGrantSchema),
+		rpcGrant: Type.Optional(RemoteGrantSchema),
 	},
 	closed,
 );
@@ -167,7 +163,7 @@ export const ControlRevokedClientStatusSchema = Type.Object(
 		revokedAtMs: Type.Number(),
 		/** Present after the desktop explicitly allows this identity to use a fresh pairing ticket. */
 		rePairApprovedAtMs: Type.Optional(Type.Number()),
-		rpcGrant: Type.Optional(IrohRemoteRpcGrantSchema),
+		rpcGrant: Type.Optional(RemoteGrantSchema),
 	},
 	closed,
 );
@@ -240,14 +236,14 @@ export type DaemonEnvironmentStatus = Static<typeof DaemonEnvironmentStatusSchem
  * capabilities. `pair_request` may omit both for the default preset.
  */
 const presetAccess = {
-	access: IrohRemoteAccessPresetNameSchema,
+	access: RemoteAccessPresetNameSchema,
 	allowedTools: Type.Optional(Type.Never()),
 	rpcCapabilities: Type.Optional(Type.Never()),
 };
 const explicitAccess = {
 	access: Type.Optional(Type.Never()),
 	allowedTools: Type.Array(Type.String()),
-	rpcCapabilities: IrohRemoteRpcCapabilitiesSchema,
+	rpcCapabilities: RemoteCapabilitiesSchema,
 };
 
 /**
@@ -256,7 +252,10 @@ const explicitAccess = {
  * command type and answers unsupported types with an error.
  */
 export const ControlRelayRpcCommandSchema = Type.Unsafe<Record<string, unknown> & { type: string }>(
-	Type.Object({ type: Type.String() }, open),
+	Type.Object(
+		{ type: Type.String() },
+		{ ...open, description: "A phone RPC command, validated by the daemon per command type." },
+	),
 );
 
 /**
@@ -264,7 +263,9 @@ export const ControlRelayRpcCommandSchema = Type.Unsafe<Record<string, unknown> 
  * include remote-only commands the RPC contract does not declare yet, so the
  * control plane carries the response as an opaque object.
  */
-export const ControlRelayRpcResponseSchema = Type.Record(Type.String(), Type.Unknown());
+export const ControlRelayRpcResponseSchema = Type.Record(Type.String(), Type.Unknown(), {
+	"x-volt-opaque": "the RPC response to a relayed phone command, forwarded verbatim",
+});
 export type ControlRelayRpcResponse = Static<typeof ControlRelayRpcResponseSchema>;
 
 // ============================================================================
@@ -305,7 +306,8 @@ export const ControlHelloAckSchema = Type.Object(
 	{
 		type: Type.Literal("hello_ack"),
 		ok: Type.Boolean(),
-		error: Type.Optional(stringEnum(["protocol_mismatch", "shutting_down", "bad_relay_token", "auth_failed"])),
+		/** Unknown codes from other protocol versions still read as a rejection. */
+		error: Type.Optional(openStringEnum(["protocol_mismatch", "shutting_down", "bad_relay_token", "auth_failed"])),
 		/** Daemon-assigned; present when ok on a control connection. */
 		connectionId: Type.Optional(Type.String()),
 		/** Daemon package version. */
@@ -345,7 +347,7 @@ export const ControlRelayPreambleSchema = Type.Object(
 				workspacePath: Type.String(),
 				/** Headless agent tool grant, for visibility; TUI-owned sessions keep their full local tools. */
 				allowedTools: Type.String(),
-				rpcGrant: IrohRemoteRpcGrantSchema,
+				rpcGrant: RemoteGrantSchema,
 				/** Present when the conversation is bound to a daemon-managed worktree. */
 				worktreeId: Type.Optional(Type.String()),
 				/** Worktree checkout path: the TUI sanitizes with it as the root. */
@@ -422,7 +424,7 @@ export const CONTROL_REQUEST_SCHEMAS = {
 		withId("pair_request", {
 			workspaceName: Type.Optional(Type.String()),
 			...presetAccess,
-			access: Type.Optional(IrohRemoteAccessPresetNameSchema),
+			access: Type.Optional(RemoteAccessPresetNameSchema),
 		}),
 		withId("pair_request", { workspaceName: Type.Optional(Type.String()), ...explicitAccess }),
 	]),

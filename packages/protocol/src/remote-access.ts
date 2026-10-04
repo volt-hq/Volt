@@ -1,16 +1,19 @@
 /**
- * Remote access: the capability vocabulary granted to a paired device, the
- * grant record the host stores and reports, and the named access presets.
- * The daemon control plane and the relay preamble carry these shapes.
+ * Remote access: the capabilities a paired device can hold, the grant that
+ * stores them, and the named access presets (RFC §6.2: capability grants
+ * collapse into profile definitions).
+ *
+ * A remote client's grant is re-read for every frame; an intent or query whose
+ * descriptor `requires` a capability the grant lacks is rejected with
+ * `not_allowed{requiredCapability}`. Stored grants keep this exact shape.
  */
 
 import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
 import { RPC_WIRE_MAX_SAFE_INTEGER } from "./wire-limits.ts";
 
-export const IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION = 1 as const;
-
-export const IROH_REMOTE_RPC_CAPABILITIES = [
+/** Every capability a remote grant can hold. */
+export const REMOTE_CAPABILITIES = [
 	"conversation.observe.v1",
 	"conversation.control.v1",
 	"model.select.v1",
@@ -21,29 +24,49 @@ export const IROH_REMOTE_RPC_CAPABILITIES = [
 	"diagnostics.upload.v1",
 ] as const;
 
-export const IROH_REMOTE_ACCESS_PRESET_NAMES = ["coding", "review", "chat", "full"] as const;
+export const RemoteCapabilitySchema = stringEnum(REMOTE_CAPABILITIES);
+export type RemoteCapability = Static<typeof RemoteCapabilitySchema>;
 
-export const IrohRemoteRpcCapabilitySchema = stringEnum(IROH_REMOTE_RPC_CAPABILITIES, {
-	"x-volt-expected": "be a known remote capability",
-});
-export type IrohRemoteRpcCapability = Static<typeof IrohRemoteRpcCapabilitySchema>;
-
-/** A capability set: every entry known, none repeated. */
-export const IrohRemoteRpcCapabilitiesSchema = Type.Array(IrohRemoteRpcCapabilitySchema, {
-	maxItems: IROH_REMOTE_RPC_CAPABILITIES.length,
+/** A set of capabilities: no duplicates, so never more entries than there are capabilities. */
+export const RemoteCapabilitiesSchema = Type.Array(RemoteCapabilitySchema, {
+	maxItems: REMOTE_CAPABILITIES.length,
 	uniqueItems: true,
 });
 
-/** A device's RPC grant. `revision` increases on every access change and fences concurrent edits. */
-export const IrohRemoteRpcGrantSchema = Type.Object(
+export const REMOTE_GRANT_SCHEMA_VERSION = 1;
+
+/** A device's stored capability grant. `revision` increases on every change, so a stale grant is detectable. */
+export const RemoteGrantSchema = Type.Object(
 	{
-		schemaVersion: Type.Literal(IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION),
+		schemaVersion: Type.Literal(REMOTE_GRANT_SCHEMA_VERSION),
 		revision: Type.Integer({ minimum: 1, maximum: RPC_WIRE_MAX_SAFE_INTEGER }),
-		capabilities: IrohRemoteRpcCapabilitiesSchema,
+		capabilities: RemoteCapabilitiesSchema,
 	},
 	{ additionalProperties: false },
 );
-export type IrohRemoteRpcGrant = Static<typeof IrohRemoteRpcGrantSchema>;
+export type RemoteGrant = Static<typeof RemoteGrantSchema>;
 
-export const IrohRemoteAccessPresetNameSchema = stringEnum(IROH_REMOTE_ACCESS_PRESET_NAMES);
-export type IrohRemoteAccessPresetName = Static<typeof IrohRemoteAccessPresetNameSchema>;
+export const REMOTE_ACCESS_PRESET_NAMES = ["coding", "review", "chat", "full"] as const;
+
+export const RemoteAccessPresetNameSchema = stringEnum(REMOTE_ACCESS_PRESET_NAMES);
+export type RemoteAccessPresetName = Static<typeof RemoteAccessPresetNameSchema>;
+
+/**
+ * The capabilities a paired device holds out of the box: it is the user's own,
+ * so host-request approvals and keep-awake work without a custom grant.
+ */
+const STANDARD_CAPABILITIES: readonly RemoteCapability[] = Object.freeze([
+	"conversation.observe.v1",
+	"conversation.control.v1",
+	"model.select.v1",
+	"host.manage.v1",
+]);
+
+/** The capabilities each preset grants. Presets differ otherwise only in the tools they allow, which the host owns. */
+export const REMOTE_ACCESS_PRESET_CAPABILITIES: Readonly<Record<RemoteAccessPresetName, readonly RemoteCapability[]>> =
+	Object.freeze({
+		coding: STANDARD_CAPABILITIES,
+		review: STANDARD_CAPABILITIES,
+		chat: STANDARD_CAPABILITIES,
+		full: Object.freeze([...REMOTE_CAPABILITIES]),
+	});

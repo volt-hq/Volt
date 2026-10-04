@@ -102,6 +102,34 @@
 			"terminalMaxLines": 2000,
 			"lineMaxChars": 4096,
 			"imageDataMaxChars": 1048576
+		},
+		"protocol": {
+			"version": 1,
+			"reservedFrameTypes": [
+				"hello",
+				"subscribe",
+				"unsubscribe",
+				"host_response",
+				"query",
+				"welcome",
+				"snapshot",
+				"entry",
+				"head",
+				"live",
+				"ended",
+				"accepted",
+				"rejected",
+				"result",
+				"query_error",
+				"changed",
+				"fatal"
+			],
+			"dynamicIntentPattern": "^(extension\\.command|prompt\\.template|skill)\\.",
+			"intentNameMaxChars": 160,
+			"intentOutcomeWindow": 256,
+			"historyPageMaxEntries": 200,
+			"contentTextMaxScalars": 12000,
+			"liveKeyIdMaxChars": 256
 		}
 	},
 	"$defs": {
@@ -146,6 +174,102 @@
 				}
 			},
 			"additionalProperties": false
+		},
+		"BuiltinIntentName": {
+			"type": "string",
+			"enum": [
+				"prompt",
+				"steer",
+				"follow_up",
+				"abort",
+				"abort_retry",
+				"bash",
+				"abort_bash",
+				"compact",
+				"set_model",
+				"set_thinking_level",
+				"set_fast_mode",
+				"set_session_name",
+				"set_agent_mode",
+				"plan_execute",
+				"plan_change",
+				"plan_discard",
+				"new_session",
+				"switch_session",
+				"fork",
+				"clone",
+				"export_html",
+				"cancel_job",
+				"subagent_start",
+				"subagent_abort",
+				"subagent_dispose",
+				"review_uncommitted",
+				"review_branch",
+				"review_pr",
+				"review_commit",
+				"review_rerun",
+				"review_cancel_workflow",
+				"review_open_session",
+				"review_acknowledge",
+				"review_record_finding_outcome",
+				"review_publish",
+				"review_export_feedback",
+				"review_start_discussions",
+				"review_reset_discussion",
+				"set_default_model",
+				"set_default_thinking_level",
+				"set_steering_mode",
+				"set_follow_up_mode",
+				"set_auto_retry",
+				"set_auto_compaction",
+				"set_compaction_threshold",
+				"set_keep_awake",
+				"set_web_search_key",
+				"upload_device_logs",
+				"mcp.connect",
+				"mcp.disconnect",
+				"mcp.refresh",
+				"mcp.set_enabled",
+				"mcp.auth_start_device",
+				"mcp.auth_start_browser",
+				"mcp.auth_complete",
+				"mcp.auth_poll",
+				"mcp.auth_cancel",
+				"mcp.logout"
+			]
+		},
+		"CatalogName": {
+			"type": "string",
+			"enum": [
+				"models",
+				"intents",
+				"sessions",
+				"mcp",
+				"extensions",
+				"settings"
+			]
+		},
+		"ClientFrame": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Frame.hello"
+				},
+				{
+					"$ref": "#/$defs/Frame.subscribe"
+				},
+				{
+					"$ref": "#/$defs/Frame.unsubscribe"
+				},
+				{
+					"$ref": "#/$defs/Frame.host_response"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent"
+				},
+				{
+					"$ref": "#/$defs/Frame.query"
+				}
+			]
 		},
 		"ClientInputCommand": {
 			"type": "string",
@@ -218,6 +342,184 @@
 				"withdrawn"
 			]
 		},
+		"ClientLabel": {
+			"type": "object",
+			"required": [
+				"targetId",
+				"label",
+				"timestamp"
+			],
+			"properties": {
+				"targetId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"label": {
+					"type": "string"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ClientModelRef": {
+			"type": "object",
+			"required": [
+				"provider",
+				"modelId"
+			],
+			"properties": {
+				"provider": {
+					"type": "string"
+				},
+				"modelId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false,
+			"description": "A model, by provider and model id."
+		},
+		"ClientQueuedInput": {
+			"type": "object",
+			"required": [
+				"clientMessageId",
+				"state",
+				"ordinal",
+				"message",
+				"imageCount"
+			],
+			"properties": {
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"state": {
+					"type": "string",
+					"enum": [
+						"accepted",
+						"started"
+					]
+				},
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"command": {
+					"$ref": "#/$defs/ClientInputCommand"
+				},
+				"delivery": {
+					"$ref": "#/$defs/ClientInputQueuedDelivery"
+				},
+				"origin": {
+					"type": "string",
+					"const": "host"
+				},
+				"message": {
+					"type": "string"
+				},
+				"imageCount": {
+					"type": "integer",
+					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"ClientSnapshot": {
+			"type": "object",
+			"required": [
+				"leafId",
+				"entries",
+				"earlier",
+				"model",
+				"thinkingLevel",
+				"fastMode",
+				"planning",
+				"name",
+				"labels",
+				"queue"
+			],
+			"properties": {
+				"leafId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"entries": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ProjectedEntry"
+					}
+				},
+				"earlier": {
+					"type": "boolean"
+				},
+				"model": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/ClientModelRef"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"thinkingLevel": {
+					"$ref": "#/$defs/RpcThinkingLevel"
+				},
+				"fastMode": {
+					"type": "boolean"
+				},
+				"planning": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcPlanningState"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"name": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"labels": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ClientLabel"
+					}
+				},
+				"queue": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ClientQueuedInput"
+					}
+				},
+				"forkedFrom": {
+					"$ref": "#/$defs/LogEntryPayload.forked_from"
+				}
+			},
+			"additionalProperties": false
+		},
 		"Control.ClientKind": {
 			"type": "string",
 			"enum": [
@@ -254,7 +556,7 @@
 					"type": "boolean"
 				},
 				"rpcGrant": {
-					"$ref": "#/$defs/IrohRemoteRpcGrant"
+					"$ref": "#/$defs/RemoteGrant"
 				}
 			},
 			"additionalProperties": false
@@ -648,7 +950,7 @@
 				},
 				"error": {
 					"type": "string",
-					"enum": [
+					"x-volt-known-values": [
 						"protocol_mismatch",
 						"shutting_down",
 						"bad_relay_token",
@@ -869,7 +1171,7 @@
 							"type": "string"
 						},
 						"rpcGrant": {
-							"$ref": "#/$defs/IrohRemoteRpcGrant"
+							"$ref": "#/$defs/RemoteGrant"
 						},
 						"worktreeId": {
 							"type": "string"
@@ -952,13 +1254,15 @@
 					"type": "string"
 				}
 			},
-			"additionalProperties": true
+			"additionalProperties": true,
+			"description": "A phone RPC command, validated by the daemon per command type."
 		},
 		"Control.RelayRpcResponse": {
 			"type": "object",
 			"patternProperties": {
 				"^.*$": {}
-			}
+			},
+			"x-volt-opaque": "the RPC response to a relayed phone command, forwarded verbatim"
 		},
 		"Control.RemotePolicyStatus": {
 			"type": "object",
@@ -1141,7 +1445,7 @@
 							"maximum": 9007199254740991
 						},
 						"access": {
-							"$ref": "#/$defs/IrohRemoteAccessPresetName"
+							"$ref": "#/$defs/RemoteAccessPresetName"
 						},
 						"allowedTools": {
 							"not": {}
@@ -1188,7 +1492,7 @@
 							}
 						},
 						"rpcCapabilities": {
-							"$ref": "#/$defs/IrohRemoteRpcCapabilities"
+							"$ref": "#/$defs/RemoteCapabilities"
 						}
 					},
 					"additionalProperties": false
@@ -1373,7 +1677,7 @@
 							"type": "string"
 						},
 						"access": {
-							"$ref": "#/$defs/IrohRemoteAccessPresetName"
+							"$ref": "#/$defs/RemoteAccessPresetName"
 						},
 						"allowedTools": {
 							"not": {}
@@ -1413,7 +1717,7 @@
 							}
 						},
 						"rpcCapabilities": {
-							"$ref": "#/$defs/IrohRemoteRpcCapabilities"
+							"$ref": "#/$defs/RemoteCapabilities"
 						}
 					},
 					"additionalProperties": false
@@ -2520,7 +2824,7 @@
 					"type": "number"
 				},
 				"rpcGrant": {
-					"$ref": "#/$defs/IrohRemoteRpcGrant"
+					"$ref": "#/$defs/RemoteGrant"
 				}
 			},
 			"additionalProperties": false
@@ -2680,13 +2984,5023 @@
 			},
 			"additionalProperties": false
 		},
-		"IrohRemoteAccessPresetName": {
+		"DynamicIntentInput": {
+			"type": "object",
+			"properties": {
+				"arguments": {
+					"type": "string"
+				},
+				"streamingBehavior": {
+					"$ref": "#/$defs/RpcStreamingBehavior"
+				}
+			},
+			"additionalProperties": false
+		},
+		"DynamicIntentName": {
+			"type": "string",
+			"maxLength": 160,
+			"pattern": "^(?:extension\\.command|prompt\\.template|skill)\\.[A-Za-z0-9_.:-]+$",
+			"x-volt-expected": "be a dynamic intent name"
+		},
+		"EmptyInput": {
+			"type": "object",
+			"properties": {},
+			"additionalProperties": false
+		},
+		"FatalCode": {
 			"type": "string",
 			"enum": [
-				"coding",
+				"invalid_frame",
+				"frame_too_large",
+				"protocol_mismatch",
+				"revoked",
+				"workspace_unregistered",
+				"host_shutdown"
+			]
+		},
+		"Frame.accepted": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"ordinals"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "accepted"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"ordinals": {
+					"type": "array",
+					"items": {
+						"type": "integer",
+						"minimum": 1,
+						"maximum": 9007199254740991
+					}
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"result": {
+					"x-volt-opaque": "the accepted intent's IntentOutput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.changed": {
+			"type": "object",
+			"required": [
+				"type",
+				"catalog"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "changed"
+				},
+				"catalog": {
+					"$ref": "#/$defs/CatalogName"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.ended": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"subscriptionId",
+						"reason",
+						"target"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "ended"
+						},
+						"subscriptionId": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"reason": {
+							"type": "string",
+							"const": "moved"
+						},
+						"target": {
+							"type": "string",
+							"maxLength": 512,
+							"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"subscriptionId",
+						"reason"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "ended"
+						},
+						"subscriptionId": {
+							"$ref": "#/$defs/RpcConversationIdentifier"
+						},
+						"reason": {
+							"type": "string",
+							"enum": [
+								"unsubscribed",
+								"closed",
+								"lost",
+								"shutdown"
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"Frame.entry": {
+			"type": "object",
+			"required": [
+				"type",
+				"subscriptionId",
+				"entry"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "entry"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"entry": {
+					"$ref": "#/$defs/ProjectedEntry"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.fatal": {
+			"type": "object",
+			"required": [
+				"type",
+				"code"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "fatal"
+				},
+				"code": {
+					"$ref": "#/$defs/FatalCode"
+				},
+				"message": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.head": {
+			"type": "object",
+			"required": [
+				"type",
+				"subscriptionId",
+				"ordinal"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "head"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.hello": {
+			"type": "object",
+			"required": [
+				"type",
+				"protocol",
+				"client",
+				"accepts"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "hello"
+				},
+				"protocol": {
+					"type": "number",
+					"const": 1
+				},
+				"client": {
+					"type": "object",
+					"required": [
+						"name",
+						"version"
+					],
+					"properties": {
+						"name": {
+							"type": "string",
+							"minLength": 1
+						},
+						"version": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				"accepts": {
+					"type": "object",
+					"required": [
+						"hostRequests"
+					],
+					"properties": {
+						"hostRequests": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/HostRequestKind"
+							},
+							"uniqueItems": true
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.host_response": {
+			"type": "object",
+			"required": [
+				"type",
+				"requestId",
+				"response"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "host_response"
+				},
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"response": {
+					"$ref": "#/$defs/HostResponse"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Frame.intent.prompt"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.steer"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.follow_up"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.abort"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.abort_retry"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.bash"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.abort_bash"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.compact"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_model"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_fast_mode"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_session_name"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_agent_mode"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.plan_execute"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.plan_change"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.plan_discard"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.new_session"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.switch_session"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.fork"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.clone"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.export_html"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.cancel_job"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.subagent_start"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.subagent_abort"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.subagent_dispose"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_uncommitted"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_branch"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_pr"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_commit"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_rerun"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_cancel_workflow"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_open_session"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_acknowledge"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_record_finding_outcome"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_publish"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_export_feedback"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_start_discussions"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.review_reset_discussion"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_default_model"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_default_thinking_level"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_steering_mode"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_follow_up_mode"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_auto_retry"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_auto_compaction"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_compaction_threshold"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_web_search_key"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.upload_device_logs"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.connect"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.disconnect"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.refresh"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.set_enabled"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.auth_start_device"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.auth_start_browser"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.auth_complete"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.auth_poll"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.auth_cancel"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.mcp.logout"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.dynamic"
+				}
+			]
+		},
+		"Frame.intent.abort": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "abort"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.abort_bash": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "abort_bash"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.abort_retry": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "abort_retry"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.bash": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "bash"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.bash"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.cancel_job": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "cancel_job"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.cancel_job"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.clone": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "clone"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.compact": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "compact"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.compact"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.dynamic": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"$ref": "#/$defs/DynamicIntentName"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/DynamicIntentInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.export_html": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "export_html"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.export_html"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.follow_up": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "follow_up"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.follow_up"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.fork": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "fork"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.fork"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.auth_cancel": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.auth_cancel"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.auth_cancel"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.auth_complete": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.auth_complete"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.auth_complete"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.auth_poll": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.auth_poll"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.auth_poll"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.auth_start_browser": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.auth_start_browser"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.auth_start_browser"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.auth_start_device": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.auth_start_device"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.auth_start_device"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.connect": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.connect"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.connect"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.disconnect": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.disconnect"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.disconnect"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.logout": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.logout"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.logout"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.refresh": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.refresh"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.refresh"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.mcp.set_enabled": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "mcp.set_enabled"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.mcp.set_enabled"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.new_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "new_session"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.new_session"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.plan_change": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "plan_change"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.plan_change"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.plan_discard": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "plan_discard"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.plan_discard"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.plan_execute": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "plan_execute"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.plan_execute"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.prompt": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "prompt"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.prompt"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_acknowledge": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_acknowledge"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_acknowledge"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_branch": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_branch"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_branch"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_cancel_workflow": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_cancel_workflow"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_cancel_workflow"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_commit": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_commit"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_commit"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_export_feedback": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_export_feedback"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_export_feedback"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_open_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_open_session"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_open_session"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_pr": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_pr"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_pr"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_publish": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_publish"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_publish"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_record_finding_outcome": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_record_finding_outcome"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_record_finding_outcome"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_rerun": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_rerun"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_rerun"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_reset_discussion": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_reset_discussion"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_reset_discussion"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_start_discussions": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_start_discussions"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_start_discussions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.review_uncommitted": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "review_uncommitted"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.review_uncommitted"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_agent_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_agent_mode"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_agent_mode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_auto_compaction": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_auto_compaction"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_auto_compaction"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_auto_retry": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_auto_retry"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_auto_retry"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_compaction_threshold": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_compaction_threshold"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_compaction_threshold"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_default_model": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_default_model"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_default_model"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_default_thinking_level": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_default_thinking_level"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_default_thinking_level"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_fast_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_fast_mode"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_fast_mode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_follow_up_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_follow_up_mode"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_follow_up_mode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_keep_awake": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_keep_awake"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_keep_awake"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_model": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_model"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_model"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_session_name": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_session_name"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_session_name"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_steering_mode": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_steering_mode"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_steering_mode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_thinking_level": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_thinking_level"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_thinking_level"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.set_web_search_key": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set_web_search_key"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.set_web_search_key"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.steer": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "steer"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.steer"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.subagent_abort": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "subagent_abort"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.subagent_abort"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.subagent_dispose": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "subagent_dispose"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.subagent_dispose"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.subagent_start": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "subagent_start"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.subagent_start"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.switch_session": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "switch_session"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.switch_session"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.intent.upload_device_logs": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"input"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "upload_device_logs"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"expectedOrdinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"input": {
+					"$ref": "#/$defs/IntentInput.upload_device_logs"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.live": {
+			"type": "object",
+			"required": [
+				"type",
+				"subscriptionId",
+				"basedOn",
+				"seq",
+				"items"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "live"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"basedOn": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"seq": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"reset": {
+					"type": "boolean"
+				},
+				"items": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/LiveItem"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Frame.query.intents"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.intent_completions"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.history"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.content"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.models"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.sessions"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.settings"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.subscription_usage"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.host_status"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.subagent_definitions"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.job_output"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.capabilities"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.servers"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.server"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.tools"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.tool"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.resources"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.resource"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.prompts"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.prompt"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.mcp.recent_calls"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.review.discussions"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.review.discussion_source"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.review.general"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.review.result"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.review.workflows"
+				}
+			]
+		},
+		"Frame.query.content": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "content"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.content"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.history": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "history"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.history"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.host_status": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "host_status"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.intent_completions": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "intent_completions"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.intent_completions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.intents": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "intents"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.job_output": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "job_output"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.job_output"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.capabilities": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.capabilities"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.prompt": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.prompt"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.prompt"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.prompts": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.prompts"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.prompts"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.recent_calls": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.recent_calls"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.recent_calls"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.resource": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.resource"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.resource"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.resources": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.resources"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.resources"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.server": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.server"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.server"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.servers": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.servers"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.tool": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.tool"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.tool"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.mcp.tools": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "mcp.tools"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.mcp.tools"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.models": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "models"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.review.discussion_source": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "review.discussion_source"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.review.discussions": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "review.discussions"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.review.discussions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.review.general": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "review.general"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.review.general"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.review.result": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query",
+				"params"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "review.result"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.review.result"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.review.workflows": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "review.workflows"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.review.workflows"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.sessions": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "sessions"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/QueryParams.sessions"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.settings": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "settings"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.subagent_definitions": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "subagent_definitions"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query.subscription_usage": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"query"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"query": {
+					"type": "string",
+					"const": "subscription_usage"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"params": {
+					"$ref": "#/$defs/EmptyInput"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.query_error": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "query_error"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"reason": {
+					"$ref": "#/$defs/QueryErrorReason"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.rejected": {
+			"type": "object",
+			"required": [
+				"type",
+				"intentId",
+				"reason"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "rejected"
+				},
+				"intentId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"reason": {
+					"$ref": "#/$defs/RejectionReason"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.result": {
+			"type": "object",
+			"required": [
+				"type",
+				"queryId",
+				"data"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "result"
+				},
+				"queryId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"data": {
+					"x-volt-opaque": "the answered query's QueryResult"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.snapshot": {
+			"type": "object",
+			"required": [
+				"type",
+				"subscriptionId",
+				"conversation",
+				"ordinal",
+				"state"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "snapshot"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"ordinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"state": {
+					"$ref": "#/$defs/ClientSnapshot"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.subscribe": {
+			"type": "object",
+			"required": [
+				"type",
+				"subscriptionId",
+				"conversation",
+				"after"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "subscribe"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"after": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+						},
+						{
+							"type": "string",
+							"const": "snapshot"
+						}
+					]
+				},
+				"live": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.unsubscribe": {
+			"type": "object",
+			"required": [
+				"type",
+				"subscriptionId"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "unsubscribe"
+				},
+				"subscriptionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"Frame.welcome": {
+			"type": "object",
+			"required": [
+				"type",
+				"protocol",
+				"connectionId",
+				"profile",
+				"server"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "welcome"
+				},
+				"protocol": {
+					"type": "number",
+					"const": 1
+				},
+				"connectionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"profile": {
+					"$ref": "#/$defs/ProfileName"
+				},
+				"server": {
+					"type": "object",
+					"required": [
+						"name",
+						"version"
+					],
+					"properties": {
+						"name": {
+							"type": "string",
+							"minLength": 1
+						},
+						"version": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"HostFrame": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Frame.welcome"
+				},
+				{
+					"$ref": "#/$defs/Frame.snapshot"
+				},
+				{
+					"$ref": "#/$defs/Frame.entry"
+				},
+				{
+					"$ref": "#/$defs/Frame.head"
+				},
+				{
+					"$ref": "#/$defs/Frame.live"
+				},
+				{
+					"$ref": "#/$defs/Frame.ended"
+				},
+				{
+					"$ref": "#/$defs/Frame.accepted"
+				},
+				{
+					"$ref": "#/$defs/Frame.rejected"
+				},
+				{
+					"$ref": "#/$defs/Frame.result"
+				},
+				{
+					"$ref": "#/$defs/Frame.query_error"
+				},
+				{
+					"$ref": "#/$defs/Frame.changed"
+				},
+				{
+					"$ref": "#/$defs/Frame.fatal"
+				}
+			]
+		},
+		"HostRequest": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title",
+						"options"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "select"
+						},
+						"title": {
+							"type": "string"
+						},
+						"options": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							},
+							"minItems": 1
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title",
+						"message"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "confirm"
+						},
+						"title": {
+							"type": "string"
+						},
+						"message": {
+							"type": "string"
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "input"
+						},
+						"title": {
+							"type": "string"
+						},
+						"placeholder": {
+							"type": "string"
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "editor"
+						},
+						"title": {
+							"type": "string"
+						},
+						"prefill": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"title",
+						"fields"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "form"
+						},
+						"title": {
+							"type": "string"
+						},
+						"fields": {
+							"type": "array",
+							"items": {
+								"$ref": "#/$defs/UiNodeFormField"
+							},
+							"minItems": 1
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"action",
+						"title"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "approval"
+						},
+						"action": {
+							"type": "string"
+						},
+						"title": {
+							"type": "string"
+						},
+						"message": {
+							"type": "string"
+						},
+						"confirmLabel": {
+							"type": "string"
+						},
+						"cancelLabel": {
+							"type": "string"
+						},
+						"commandPreview": {
+							"type": "string"
+						},
+						"blocking": {
+							"type": "boolean"
+						},
+						"destructive": {
+							"type": "boolean"
+						},
+						"metadata": {
+							"type": "object",
+							"patternProperties": {
+								"^.*$": {
+									"$ref": "#/$defs/UiActionScalar"
+								}
+							}
+						},
+						"timeoutMs": {
+							"type": "integer",
+							"minimum": 0
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"kind",
+						"server",
+						"flow"
+					],
+					"properties": {
+						"kind": {
+							"type": "string",
+							"const": "mcp_auth"
+						},
+						"server": {
+							"type": "string"
+						},
+						"flow": {
+							"$ref": "#/$defs/RpcMcpAuthFlow"
+						},
+						"authorizationUrl": {
+							"type": "string"
+						},
+						"redirectUrl": {
+							"type": "string"
+						},
+						"verificationUri": {
+							"type": "string"
+						},
+						"verificationUriComplete": {
+							"type": "string"
+						},
+						"userCode": {
+							"type": "string"
+						},
+						"expiresAt": {
+							"type": "string"
+						},
+						"intervalMs": {
+							"type": "integer",
+							"minimum": 0
+						},
+						"message": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"HostRequestKind": {
+			"type": "string",
+			"enum": [
+				"select",
+				"confirm",
+				"input",
+				"editor",
+				"form",
+				"approval",
+				"mcp_auth"
+			]
+		},
+		"HostResponse": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"value"
+					],
+					"properties": {
+						"value": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"confirmed"
+					],
+					"properties": {
+						"confirmed": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"values"
+					],
+					"properties": {
+						"values": {
+							"type": "object",
+							"patternProperties": {
+								"^.*$": {
+									"anyOf": [
+										{
+											"type": "string"
+										},
+										{
+											"type": "boolean"
+										},
+										{
+											"type": "integer"
+										}
+									]
+								}
+							}
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"decision"
+					],
+					"properties": {
+						"decision": {
+							"type": "string",
+							"enum": [
+								"approved",
+								"denied",
+								"dismissed"
+							]
+						},
+						"message": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean",
+							"const": true
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"IntentAvailability": {
+			"type": "object",
+			"required": [
+				"name",
+				"enabled"
+			],
+			"properties": {
+				"name": {
+					"$ref": "#/$defs/IntentName"
+				},
+				"enabled": {
+					"type": "boolean"
+				},
+				"reason": {
+					"type": "string"
+				},
+				"state": {
+					"$ref": "#/$defs/UiActionStateDescriptor"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentCancelled": {
+			"type": "object",
+			"required": [
+				"cancelled"
+			],
+			"properties": {
+				"cancelled": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false,
+			"description": "The intent was cancelled; the client stays where it is."
+		},
+		"IntentCategory": {
+			"type": "string",
+			"enum": [
+				"session",
+				"model",
+				"context",
 				"review",
-				"chat",
-				"full"
+				"mcp",
+				"host",
+				"extension",
+				"prompt",
+				"skill",
+				"advanced"
+			]
+		},
+		"IntentDescriptor": {
+			"type": "object",
+			"required": [
+				"name",
+				"label",
+				"category",
+				"source",
+				"scope",
+				"input",
+				"fence",
+				"remote",
+				"requires",
+				"whileBusy",
+				"enabled"
+			],
+			"properties": {
+				"name": {
+					"$ref": "#/$defs/IntentName"
+				},
+				"label": {
+					"type": "string"
+				},
+				"description": {
+					"type": "string"
+				},
+				"category": {
+					"$ref": "#/$defs/IntentCategory"
+				},
+				"source": {
+					"$ref": "#/$defs/UiActionSource"
+				},
+				"sourceLabel": {
+					"type": "string"
+				},
+				"scope": {
+					"$ref": "#/$defs/IntentScope"
+				},
+				"input": {
+					"x-volt-opaque": "JSON Schema of the intent's input"
+				},
+				"output": {
+					"x-volt-opaque": "JSON Schema of the intent's result"
+				},
+				"fence": {
+					"$ref": "#/$defs/IntentFence"
+				},
+				"remote": {
+					"type": "string",
+					"enum": [
+						"safe",
+						"unsafe"
+					]
+				},
+				"requires": {
+					"$ref": "#/$defs/RemoteCapabilities"
+				},
+				"whileBusy": {
+					"$ref": "#/$defs/IntentWhileBusy"
+				},
+				"confirm": {
+					"type": "object",
+					"properties": {
+						"message": {
+							"type": "string"
+						},
+						"destructive": {
+							"type": "boolean"
+						}
+					},
+					"additionalProperties": false
+				},
+				"presentation": {
+					"$ref": "#/$defs/UiActionPresentationHint"
+				},
+				"slash": {
+					"$ref": "#/$defs/UiActionSlashAlias"
+				},
+				"completions": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"enabled": {
+					"type": "boolean"
+				},
+				"reason": {
+					"type": "string"
+				},
+				"state": {
+					"$ref": "#/$defs/UiActionStateDescriptor"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentFence": {
+			"type": "string",
+			"enum": [
+				"none",
+				"branch"
+			]
+		},
+		"IntentInput.abort": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"IntentInput.abort_bash": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"IntentInput.abort_retry": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"IntentInput.bash": {
+			"type": "object",
+			"required": [
+				"command"
+			],
+			"properties": {
+				"command": {
+					"type": "string"
+				},
+				"excludeFromContext": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.cancel_job": {
+			"type": "object",
+			"required": [
+				"jobId"
+			],
+			"properties": {
+				"jobId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.clone": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"IntentInput.compact": {
+			"type": "object",
+			"properties": {
+				"customInstructions": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.export_html": {
+			"type": "object",
+			"properties": {
+				"outputPath": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.follow_up": {
+			"type": "object",
+			"required": [
+				"message"
+			],
+			"properties": {
+				"message": {
+					"type": "string"
+				},
+				"images": {
+					"$ref": "#/$defs/RpcConversationInputImages"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.fork": {
+			"type": "object",
+			"required": [
+				"entryId"
+			],
+			"properties": {
+				"entryId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.auth_cancel": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.auth_complete": {
+			"type": "object",
+			"required": [
+				"server",
+				"redirectUrl",
+				"code"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"redirectUrl": {
+					"type": "string"
+				},
+				"code": {
+					"type": "string"
+				},
+				"state": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.auth_poll": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.auth_start_browser": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"redirectUrl": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.auth_start_device": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.connect": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.disconnect": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.logout": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.refresh": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.mcp.set_enabled": {
+			"type": "object",
+			"required": [
+				"server",
+				"enabled"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.new_session": {
+			"type": "object",
+			"properties": {
+				"parentSessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"preserveReviewRunId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"replaceReviewGeneral": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false,
+			"anyOf": [
+				{
+					"properties": {
+						"replaceReviewGeneral": {
+							"const": false
+						}
+					}
+				},
+				{
+					"required": [
+						"preserveReviewRunId"
+					]
+				}
+			]
+		},
+		"IntentInput.plan_change": {
+			"type": "object",
+			"required": [
+				"planId",
+				"expectedRevision"
+			],
+			"properties": {
+				"planId": {
+					"type": "string"
+				},
+				"expectedRevision": {
+					"type": "integer",
+					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.plan_discard": {
+			"type": "object",
+			"required": [
+				"planId",
+				"expectedRevision"
+			],
+			"properties": {
+				"planId": {
+					"type": "string"
+				},
+				"expectedRevision": {
+					"type": "integer",
+					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.plan_execute": {
+			"type": "object",
+			"required": [
+				"planId",
+				"expectedRevision",
+				"strategy"
+			],
+			"properties": {
+				"planId": {
+					"type": "string"
+				},
+				"expectedRevision": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"strategy": {
+					"$ref": "#/$defs/RpcPlanExecutionStrategy"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.prompt": {
+			"type": "object",
+			"required": [
+				"message"
+			],
+			"properties": {
+				"message": {
+					"type": "string"
+				},
+				"images": {
+					"$ref": "#/$defs/RpcConversationInputImages"
+				},
+				"streamingBehavior": {
+					"$ref": "#/$defs/RpcStreamingBehavior"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_acknowledge": {
+			"type": "object",
+			"required": [
+				"runId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_branch": {
+			"type": "object",
+			"properties": {
+				"base": {
+					"type": "string"
+				},
+				"focus": {
+					"type": "string"
+				},
+				"scope": {
+					"type": "string"
+				},
+				"effort": {
+					"type": "string",
+					"enum": [
+						"low",
+						"standard",
+						"high"
+					]
+				},
+				"includeOptional": {
+					"type": "boolean"
+				},
+				"scopeMode": {
+					"type": "string",
+					"enum": [
+						"incremental",
+						"full"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_cancel_workflow": {
+			"type": "object",
+			"required": [
+				"workflowId"
+			],
+			"properties": {
+				"workflowId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_commit": {
+			"type": "object",
+			"required": [
+				"ref"
+			],
+			"properties": {
+				"ref": {
+					"type": "string",
+					"minLength": 1
+				},
+				"focus": {
+					"type": "string"
+				},
+				"scope": {
+					"type": "string"
+				},
+				"effort": {
+					"type": "string",
+					"enum": [
+						"low",
+						"standard",
+						"high"
+					]
+				},
+				"includeOptional": {
+					"type": "boolean"
+				},
+				"scopeMode": {
+					"type": "string",
+					"enum": [
+						"incremental",
+						"full"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_export_feedback": {
+			"type": "object",
+			"properties": {
+				"path": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_open_session": {
+			"type": "object",
+			"required": [
+				"runId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"findingIds": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcConversationIdentifier"
+					},
+					"maxItems": 50
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_pr": {
+			"type": "object",
+			"properties": {
+				"number": {
+					"type": "string"
+				},
+				"focus": {
+					"type": "string"
+				},
+				"scope": {
+					"type": "string"
+				},
+				"effort": {
+					"type": "string",
+					"enum": [
+						"low",
+						"standard",
+						"high"
+					]
+				},
+				"includeOptional": {
+					"type": "boolean"
+				},
+				"scopeMode": {
+					"type": "string",
+					"enum": [
+						"incremental",
+						"full"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_publish": {
+			"type": "object",
+			"required": [
+				"runId",
+				"confirmed"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"confirmed": {
+					"type": "boolean",
+					"const": true
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_record_finding_outcome": {
+			"type": "object",
+			"required": [
+				"runId",
+				"findingId",
+				"status"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"findingId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"accepted",
+						"fixed",
+						"dismissed"
+					]
+				},
+				"reason": {
+					"type": "string",
+					"enum": [
+						"false_positive",
+						"intentional",
+						"not_actionable",
+						"other"
+					]
+				},
+				"note": {
+					"type": "string",
+					"maxLength": 2000
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_rerun": {
+			"type": "object",
+			"required": [
+				"runId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"mode": {
+					"type": "string",
+					"enum": [
+						"incremental",
+						"full"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_reset_discussion": {
+			"type": "object",
+			"required": [
+				"discussionId",
+				"expectedSessionId",
+				"requestId"
+			],
+			"properties": {
+				"discussionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"expectedSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_start_discussions": {
+			"type": "object",
+			"required": [
+				"runId",
+				"findingIds",
+				"requestId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"findingIds": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcConversationIdentifier"
+					},
+					"minItems": 1,
+					"maxItems": 50,
+					"uniqueItems": true
+				},
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"discussionConfiguration": {
+					"type": "object",
+					"properties": {
+						"model": {
+							"$ref": "#/$defs/RpcAgentOptionsModelSelection"
+						},
+						"thinkingLevel": {
+							"$ref": "#/$defs/RpcThinkingLevel"
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.review_uncommitted": {
+			"type": "object",
+			"properties": {
+				"focus": {
+					"type": "string"
+				},
+				"scope": {
+					"type": "string"
+				},
+				"effort": {
+					"type": "string",
+					"enum": [
+						"low",
+						"standard",
+						"high"
+					]
+				},
+				"includeOptional": {
+					"type": "boolean"
+				},
+				"scopeMode": {
+					"type": "string",
+					"enum": [
+						"incremental",
+						"full"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_agent_mode": {
+			"type": "object",
+			"required": [
+				"mode"
+			],
+			"properties": {
+				"mode": {
+					"$ref": "#/$defs/RpcAgentMode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_auto_compaction": {
+			"type": "object",
+			"required": [
+				"enabled"
+			],
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				},
+				"provider": {
+					"type": "string"
+				},
+				"modelId": {
+					"type": "string"
+				},
+				"expectedProfile": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_auto_retry": {
+			"type": "object",
+			"required": [
+				"enabled"
+			],
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_compaction_threshold": {
+			"type": "object",
+			"required": [
+				"tokens",
+				"provider",
+				"modelId",
+				"expectedProfile"
+			],
+			"properties": {
+				"tokens": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"provider": {
+					"type": "string"
+				},
+				"modelId": {
+					"type": "string"
+				},
+				"expectedProfile": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_default_model": {
+			"type": "object",
+			"required": [
+				"provider",
+				"modelId"
+			],
+			"properties": {
+				"provider": {
+					"type": "string",
+					"minLength": 1
+				},
+				"modelId": {
+					"type": "string",
+					"minLength": 1
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_default_thinking_level": {
+			"type": "object",
+			"required": [
+				"level"
+			],
+			"properties": {
+				"level": {
+					"$ref": "#/$defs/RpcThinkingLevel"
+				}
+			},
+			"additionalProperties": false,
+			"description": "The default thinking level for new conversations."
+		},
+		"IntentInput.set_fast_mode": {
+			"type": "object",
+			"required": [
+				"enabled"
+			],
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_follow_up_mode": {
+			"type": "object",
+			"required": [
+				"mode"
+			],
+			"properties": {
+				"mode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_keep_awake": {
+			"type": "object",
+			"required": [
+				"enabled"
+			],
+			"properties": {
+				"enabled": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_model": {
+			"type": "object",
+			"required": [
+				"provider",
+				"modelId"
+			],
+			"properties": {
+				"provider": {
+					"type": "string",
+					"minLength": 1
+				},
+				"modelId": {
+					"type": "string",
+					"minLength": 1
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_session_name": {
+			"type": "object",
+			"required": [
+				"name"
+			],
+			"properties": {
+				"name": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_steering_mode": {
+			"type": "object",
+			"required": [
+				"mode"
+			],
+			"properties": {
+				"mode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.set_thinking_level": {
+			"type": "object",
+			"required": [
+				"level"
+			],
+			"properties": {
+				"level": {
+					"$ref": "#/$defs/RpcThinkingLevel"
+				}
+			},
+			"additionalProperties": false,
+			"description": "The thinking level for the conversation's branch."
+		},
+		"IntentInput.set_web_search_key": {
+			"type": "object",
+			"properties": {
+				"apiKey": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.steer": {
+			"type": "object",
+			"required": [
+				"message"
+			],
+			"properties": {
+				"message": {
+					"type": "string"
+				},
+				"images": {
+					"$ref": "#/$defs/RpcConversationInputImages"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.subagent_abort": {
+			"type": "object",
+			"required": [
+				"subagentId"
+			],
+			"properties": {
+				"subagentId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.subagent_dispose": {
+			"type": "object",
+			"required": [
+				"subagentId"
+			],
+			"properties": {
+				"subagentId": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.subagent_start": {
+			"type": "object",
+			"required": [
+				"agent",
+				"prompt"
+			],
+			"properties": {
+				"agent": {
+					"type": "string"
+				},
+				"prompt": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.switch_session": {
+			"type": "object",
+			"required": [
+				"sessionId"
+			],
+			"properties": {
+				"sessionId": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentInput.upload_device_logs": {
+			"type": "object",
+			"required": [
+				"content"
+			],
+			"properties": {
+				"fileName": {
+					"type": "string"
+				},
+				"content": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentName": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/BuiltinIntentName"
+				},
+				{
+					"$ref": "#/$defs/DynamicIntentName"
+				}
+			]
+		},
+		"IntentOutput.bash": {
+			"$ref": "#/$defs/RpcBashResult"
+		},
+		"IntentOutput.cancel_job": {
+			"type": "object",
+			"required": [
+				"job"
+			],
+			"properties": {
+				"job": {
+					"$ref": "#/$defs/RpcBackgroundJobSummary"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.clone": {
+			"$ref": "#/$defs/IntentCancelled"
+		},
+		"IntentOutput.compact": {
+			"$ref": "#/$defs/RpcCompactionResult"
+		},
+		"IntentOutput.export_html": {
+			"type": "object",
+			"required": [
+				"path"
+			],
+			"properties": {
+				"path": {
+					"type": "string",
+					"minLength": 1
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.fork": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/IntentCancelled"
+				},
+				{
+					"type": "object",
+					"required": [
+						"text"
+					],
+					"properties": {
+						"text": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"IntentOutput.mcp.auth_cancel": {
+			"$ref": "#/$defs/RpcMcpAuthResponse"
+		},
+		"IntentOutput.mcp.auth_complete": {
+			"$ref": "#/$defs/RpcMcpAuthResponse"
+		},
+		"IntentOutput.mcp.auth_poll": {
+			"$ref": "#/$defs/RpcMcpAuthResponse"
+		},
+		"IntentOutput.mcp.auth_start_browser": {
+			"$ref": "#/$defs/RpcMcpAuthResponse"
+		},
+		"IntentOutput.mcp.auth_start_device": {
+			"$ref": "#/$defs/RpcMcpAuthResponse"
+		},
+		"IntentOutput.mcp.connect": {
+			"$ref": "#/$defs/RpcMcpServerResponse"
+		},
+		"IntentOutput.mcp.disconnect": {
+			"$ref": "#/$defs/RpcMcpServerResponse"
+		},
+		"IntentOutput.mcp.logout": {
+			"$ref": "#/$defs/RpcMcpAuthResponse"
+		},
+		"IntentOutput.mcp.refresh": {
+			"$ref": "#/$defs/RpcMcpServerResponse"
+		},
+		"IntentOutput.mcp.set_enabled": {
+			"$ref": "#/$defs/RpcMcpServerResponse"
+		},
+		"IntentOutput.new_session": {
+			"$ref": "#/$defs/IntentCancelled"
+		},
+		"IntentOutput.plan_execute": {
+			"type": "object",
+			"required": [
+				"started"
+			],
+			"properties": {
+				"started": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.review_acknowledge": {
+			"$ref": "#/$defs/RpcReviewAcknowledgmentResponse"
+		},
+		"IntentOutput.review_branch": {
+			"$ref": "#/$defs/ReviewWorkflowStarted"
+		},
+		"IntentOutput.review_commit": {
+			"$ref": "#/$defs/ReviewWorkflowStarted"
+		},
+		"IntentOutput.review_export_feedback": {
+			"type": "object",
+			"required": [
+				"schemaVersion",
+				"exportedAt",
+				"outcomes"
+			],
+			"properties": {
+				"schemaVersion": {
+					"type": "number",
+					"const": 1
+				},
+				"exportedAt": {
+					"type": "string"
+				},
+				"outcomes": {
+					"type": "array",
+					"items": {
+						"type": "object",
+						"patternProperties": {
+							"^.*$": {}
+						}
+					}
+				},
+				"path": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.review_open_session": {
+			"$ref": "#/$defs/IntentCancelled"
+		},
+		"IntentOutput.review_pr": {
+			"$ref": "#/$defs/ReviewWorkflowStarted"
+		},
+		"IntentOutput.review_publish": {
+			"type": "object",
+			"required": [
+				"inlineFindingIds",
+				"summaryOnlyFindingIds"
+			],
+			"properties": {
+				"reviewId": {
+					"type": "integer",
+					"minimum": 1
+				},
+				"url": {
+					"type": "string"
+				},
+				"inlineFindingIds": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"summaryOnlyFindingIds": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.review_record_finding_outcome": {
+			"type": "object",
+			"required": [
+				"runId",
+				"findingId",
+				"status",
+				"createdAt"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"findingId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"accepted",
+						"fixed",
+						"dismissed"
+					]
+				},
+				"reason": {
+					"type": "string",
+					"enum": [
+						"false_positive",
+						"intentional",
+						"not_actionable",
+						"other"
+					]
+				},
+				"note": {
+					"type": "string"
+				},
+				"createdAt": {
+					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.review_rerun": {
+			"$ref": "#/$defs/ReviewWorkflowStarted"
+		},
+		"IntentOutput.review_reset_discussion": {
+			"$ref": "#/$defs/RpcResetReviewDiscussion"
+		},
+		"IntentOutput.review_start_discussions": {
+			"$ref": "#/$defs/RpcStartReviewDiscussions"
+		},
+		"IntentOutput.review_uncommitted": {
+			"$ref": "#/$defs/ReviewWorkflowStarted"
+		},
+		"IntentOutput.set_keep_awake": {
+			"$ref": "#/$defs/RpcKeepAwakeStatus"
+		},
+		"IntentOutput.set_web_search_key": {
+			"$ref": "#/$defs/RpcWebSearchStatus"
+		},
+		"IntentOutput.subagent_start": {
+			"type": "object",
+			"required": [
+				"subagentId",
+				"conversation"
+			],
+			"properties": {
+				"subagentId": {
+					"type": "string"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentOutput.switch_session": {
+			"$ref": "#/$defs/IntentCancelled"
+		},
+		"IntentOutput.upload_device_logs": {
+			"type": "object",
+			"required": [
+				"path",
+				"byteCount"
+			],
+			"properties": {
+				"path": {
+					"type": "string"
+				},
+				"byteCount": {
+					"type": "integer",
+					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"IntentScope": {
+			"type": "string",
+			"enum": [
+				"conversation",
+				"host"
+			]
+		},
+		"IntentWhileBusy": {
+			"type": "string",
+			"enum": [
+				"reject",
+				"run",
+				"queue"
 			]
 		},
 		"IrohRemotePushNotification": {
@@ -2874,51 +8188,6 @@
 				"invalid_target"
 			]
 		},
-		"IrohRemoteRpcCapabilities": {
-			"type": "array",
-			"items": {
-				"$ref": "#/$defs/IrohRemoteRpcCapability"
-			},
-			"maxItems": 8,
-			"uniqueItems": true
-		},
-		"IrohRemoteRpcCapability": {
-			"x-volt-expected": "be a known remote capability",
-			"type": "string",
-			"enum": [
-				"conversation.observe.v1",
-				"conversation.control.v1",
-				"model.select.v1",
-				"integrations.manage.v1",
-				"worktrees.manage.v1",
-				"host.manage.v1",
-				"workspace.manage.v1",
-				"diagnostics.upload.v1"
-			]
-		},
-		"IrohRemoteRpcGrant": {
-			"type": "object",
-			"required": [
-				"schemaVersion",
-				"revision",
-				"capabilities"
-			],
-			"properties": {
-				"schemaVersion": {
-					"type": "number",
-					"const": 1
-				},
-				"revision": {
-					"type": "integer",
-					"minimum": 1,
-					"maximum": 9007199254740991
-				},
-				"capabilities": {
-					"$ref": "#/$defs/IrohRemoteRpcCapabilities"
-				}
-			},
-			"additionalProperties": false
-		},
 		"IrohRemoteWorkspaceAvailabilityStatus": {
 			"x-volt-expected": "be a supported workspace status",
 			"type": "string",
@@ -2969,6 +8238,697 @@
 				},
 				"status": {
 					"$ref": "#/$defs/IrohRemoteWorkspaceAvailabilityStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/LiveItem.assistant_start"
+				},
+				{
+					"$ref": "#/$defs/LiveItem.assistant_delta"
+				},
+				{
+					"$ref": "#/$defs/LiveItem.assistant_end"
+				},
+				{
+					"$ref": "#/$defs/LiveItem.tool"
+				},
+				{
+					"$ref": "#/$defs/LiveItem.set"
+				},
+				{
+					"$ref": "#/$defs/LiveItem.clear"
+				},
+				{
+					"$ref": "#/$defs/LiveItem.notice"
+				},
+				{
+					"$ref": "#/$defs/LiveItem.directive"
+				}
+			]
+		},
+		"LiveItem.assistant_delta": {
+			"type": "object",
+			"required": [
+				"type",
+				"event"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "assistant_delta"
+				},
+				"event": {
+					"$ref": "#/$defs/RpcSlimAssistantEvent"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.assistant_end": {
+			"type": "object",
+			"required": [
+				"type"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "assistant_end"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.assistant_start": {
+			"type": "object",
+			"required": [
+				"type",
+				"message"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "assistant_start"
+				},
+				"message": {
+					"$ref": "#/$defs/RpcAssistantMessage"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.clear": {
+			"type": "object",
+			"required": [
+				"type",
+				"key"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "clear"
+				},
+				"key": {
+					"$ref": "#/$defs/LiveKey"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.directive": {
+			"type": "object",
+			"required": [
+				"type",
+				"directive",
+				"text"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "directive"
+				},
+				"directive": {
+					"type": "string",
+					"const": "set_editor_text"
+				},
+				"text": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.notice": {
+			"type": "object",
+			"required": [
+				"type",
+				"level",
+				"message"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "notice"
+				},
+				"level": {
+					"type": "string",
+					"enum": [
+						"info",
+						"warning",
+						"error"
+					]
+				},
+				"message": {
+					"type": "string"
+				},
+				"source": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.set": {
+			"type": "object",
+			"required": [
+				"type",
+				"key",
+				"value"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "set"
+				},
+				"key": {
+					"$ref": "#/$defs/LiveKey"
+				},
+				"value": {
+					"$ref": "#/$defs/LiveValue"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveItem.tool": {
+			"type": "object",
+			"required": [
+				"type",
+				"op",
+				"toolCallId",
+				"toolName"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "tool"
+				},
+				"op": {
+					"type": "string",
+					"enum": [
+						"start",
+						"update",
+						"end"
+					]
+				},
+				"toolCallId": {
+					"type": "string"
+				},
+				"toolName": {
+					"type": "string"
+				},
+				"args": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"partial": {
+					"$ref": "#/$defs/LiveToolPartial"
+				},
+				"isError": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveKey": {
+			"type": "string",
+			"pattern": "^(?:(?:phase|git|prompt_cache|usage|intents|ext_title|jobs)|(?:host_request|ext_status|ext_widget|workflow|subagent|host_action)/[^\\u0000-\\u001f\\u007f]{1,256})$",
+			"x-volt-expected": "be a live key"
+		},
+		"LiveToolPartial": {
+			"type": "object",
+			"required": [
+				"content"
+			],
+			"properties": {
+				"content": {
+					"type": "array",
+					"items": {
+						"anyOf": [
+							{
+								"$ref": "#/$defs/RpcTextContent"
+							},
+							{
+								"type": "object",
+								"required": [
+									"type",
+									"data",
+									"mimeType"
+								],
+								"properties": {
+									"type": {
+										"type": "string",
+										"const": "image"
+									},
+									"data": {
+										"type": "string"
+									},
+									"mimeType": {
+										"type": "string"
+									}
+								},
+								"additionalProperties": false
+							}
+						]
+					}
+				},
+				"details": {
+					"x-volt-opaque": "tool-specific JSON details, until tools present UiNode data (Phase 5)"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/LiveValue.phase"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.git"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.prompt_cache"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.usage"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.intents"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.host_request"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.ext_status"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.ext_widget"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.ext_title"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.jobs"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.workflow"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.subagent"
+				},
+				{
+					"$ref": "#/$defs/LiveValue.host_action"
+				}
+			]
+		},
+		"LiveValue.ext_status": {
+			"type": "object",
+			"required": [
+				"kind",
+				"text"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "ext_status"
+				},
+				"text": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.ext_title": {
+			"type": "object",
+			"required": [
+				"kind",
+				"title"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "ext_title"
+				},
+				"title": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.ext_widget": {
+			"type": "object",
+			"required": [
+				"kind",
+				"lines",
+				"placement"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "ext_widget"
+				},
+				"lines": {
+					"type": "array",
+					"items": {
+						"type": "string"
+					}
+				},
+				"placement": {
+					"type": "string",
+					"enum": [
+						"aboveEditor",
+						"belowEditor"
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.git": {
+			"type": "object",
+			"required": [
+				"kind",
+				"gitContext"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "git"
+				},
+				"gitContext": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcGitContext"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.host_action": {
+			"type": "object",
+			"required": [
+				"kind",
+				"action",
+				"status"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "host_action"
+				},
+				"action": {
+					"type": "string"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"running",
+						"completed",
+						"failed",
+						"cancelled"
+					]
+				},
+				"message": {
+					"type": "string"
+				},
+				"exitCode": {
+					"anyOf": [
+						{
+							"type": "integer"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.host_request": {
+			"type": "object",
+			"required": [
+				"kind",
+				"requestId",
+				"request"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "host_request"
+				},
+				"requestId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"request": {
+					"$ref": "#/$defs/HostRequest"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.intents": {
+			"type": "object",
+			"required": [
+				"kind",
+				"availability"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "intents"
+				},
+				"availability": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/IntentAvailability"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.jobs": {
+			"type": "object",
+			"required": [
+				"kind",
+				"jobs"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "jobs"
+				},
+				"jobs": {
+					"$ref": "#/$defs/RpcBackgroundJobs"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.phase": {
+			"type": "object",
+			"required": [
+				"kind",
+				"busy",
+				"operation"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "phase"
+				},
+				"busy": {
+					"type": "boolean"
+				},
+				"operation": {
+					"anyOf": [
+						{
+							"type": "string",
+							"enum": [
+								"turn",
+								"compaction",
+								"navigation",
+								"host"
+							]
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"run": {
+					"$ref": "#/$defs/RpcActiveAgentRun"
+				},
+				"compaction": {
+					"$ref": "#/$defs/RpcActiveCompaction"
+				},
+				"retry": {
+					"$ref": "#/$defs/RpcActiveRetry"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.prompt_cache": {
+			"type": "object",
+			"required": [
+				"kind",
+				"promptCache"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "prompt_cache"
+				},
+				"promptCache": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcPromptCacheStatus"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.subagent": {
+			"type": "object",
+			"required": [
+				"kind",
+				"subagentId",
+				"conversation",
+				"status"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "subagent"
+				},
+				"subagentId": {
+					"type": "string"
+				},
+				"conversation": {
+					"type": "string",
+					"maxLength": 512,
+					"pattern": "^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
+				},
+				"agent": {
+					"type": "string"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"running",
+						"completed",
+						"failed",
+						"aborted"
+					]
+				},
+				"error": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.usage": {
+			"type": "object",
+			"required": [
+				"kind",
+				"tokens",
+				"cost"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "usage"
+				},
+				"tokens": {
+					"type": "object",
+					"required": [
+						"input",
+						"output",
+						"cacheRead",
+						"cacheWrite",
+						"total"
+					],
+					"properties": {
+						"input": {
+							"type": "number"
+						},
+						"output": {
+							"type": "number"
+						},
+						"cacheRead": {
+							"type": "number"
+						},
+						"cacheWrite": {
+							"type": "number"
+						},
+						"total": {
+							"type": "number"
+						}
+					},
+					"additionalProperties": false
+				},
+				"cost": {
+					"type": "number"
+				},
+				"contextUsage": {
+					"type": "object",
+					"required": [
+						"tokens",
+						"contextWindow",
+						"percent"
+					],
+					"properties": {
+						"tokens": {
+							"anyOf": [
+								{
+									"type": "number"
+								},
+								{
+									"type": "null"
+								}
+							]
+						},
+						"contextWindow": {
+							"type": "number"
+						},
+						"percent": {
+							"anyOf": [
+								{
+									"type": "number"
+								},
+								{
+									"type": "null"
+								}
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			},
+			"additionalProperties": false
+		},
+		"LiveValue.workflow": {
+			"type": "object",
+			"required": [
+				"kind",
+				"event",
+				"activeTools"
+			],
+			"properties": {
+				"kind": {
+					"type": "string",
+					"const": "workflow"
+				},
+				"event": {
+					"$ref": "#/$defs/RpcWorkflowEvent"
+				},
+				"activeTools": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcWorkflowToolEvent"
+					}
 				}
 			},
 			"additionalProperties": false
@@ -4391,6 +10351,1769 @@
 				}
 			]
 		},
+		"ProfileName": {
+			"type": "string",
+			"enum": [
+				"local",
+				"remote"
+			]
+		},
+		"ProjectedEntry": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/ProjectedEntry.message"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.client_input_receipt"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.client_input_queued"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.client_input_state"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.thinking_level_change"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.fast_mode_change"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.model_change"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.planning_state_change"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.compaction"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.branch_summary"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.custom"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.custom_message"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.label"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.session_info"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.leaf"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.subagent_spawn"
+				},
+				{
+					"$ref": "#/$defs/ProjectedEntry.forked_from"
+				}
+			]
+		},
+		"ProjectedEntry.branch_summary": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "branch_summary"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.branch_summary"
+				},
+				"view": {
+					"$ref": "#/$defs/TranscriptItem"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.client_input_queued": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "client_input_queued"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.client_input_queued"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.client_input_receipt": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "client_input_receipt"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.client_input_receipt"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.client_input_state": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "client_input_state"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.client_input_state"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.compaction": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "compaction"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.compaction"
+				},
+				"view": {
+					"$ref": "#/$defs/TranscriptItem"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.custom": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "custom"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.custom"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.custom_message": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "custom_message"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.custom_message"
+				},
+				"view": {
+					"$ref": "#/$defs/TranscriptItem"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.fast_mode_change": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "fast_mode_change"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.fast_mode_change"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.forked_from": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "forked_from"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.forked_from"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.label": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "label"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.label"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.leaf": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "leaf"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.leaf"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.message": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "message"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/ProjectedPayload.message"
+				},
+				"view": {
+					"$ref": "#/$defs/TranscriptItem"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.model_change": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "model_change"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.model_change"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.planning_state_change": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "planning_state_change"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.planning_state_change"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.session_info": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "session_info"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.session_info"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.subagent_spawn": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "subagent_spawn"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.subagent_spawn"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedEntry.thinking_level_change": {
+			"type": "object",
+			"required": [
+				"ordinal",
+				"id",
+				"parentId",
+				"type",
+				"timestamp"
+			],
+			"properties": {
+				"ordinal": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"id": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"parentId": {
+					"anyOf": [
+						{
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 512,
+							"pattern": "^[^\\u0000]+$"
+						},
+						{
+							"type": "null"
+						}
+					]
+				},
+				"type": {
+					"type": "string",
+					"const": "thinking_level_change"
+				},
+				"timestamp": {
+					"type": "string",
+					"pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$",
+					"x-volt-expected": "be a canonical ISO-8601 UTC timestamp"
+				},
+				"payload": {
+					"$ref": "#/$defs/LogEntryPayload.thinking_level_change"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedPayload.branch_summary": {
+			"$ref": "#/$defs/LogEntryPayload.branch_summary"
+		},
+		"ProjectedPayload.client_input_queued": {
+			"$ref": "#/$defs/LogEntryPayload.client_input_queued"
+		},
+		"ProjectedPayload.client_input_receipt": {
+			"$ref": "#/$defs/LogEntryPayload.client_input_receipt"
+		},
+		"ProjectedPayload.client_input_state": {
+			"$ref": "#/$defs/LogEntryPayload.client_input_state"
+		},
+		"ProjectedPayload.compaction": {
+			"$ref": "#/$defs/LogEntryPayload.compaction"
+		},
+		"ProjectedPayload.custom": {
+			"$ref": "#/$defs/LogEntryPayload.custom"
+		},
+		"ProjectedPayload.custom_message": {
+			"$ref": "#/$defs/LogEntryPayload.custom_message"
+		},
+		"ProjectedPayload.fast_mode_change": {
+			"$ref": "#/$defs/LogEntryPayload.fast_mode_change"
+		},
+		"ProjectedPayload.forked_from": {
+			"$ref": "#/$defs/LogEntryPayload.forked_from"
+		},
+		"ProjectedPayload.label": {
+			"$ref": "#/$defs/LogEntryPayload.label"
+		},
+		"ProjectedPayload.leaf": {
+			"$ref": "#/$defs/LogEntryPayload.leaf"
+		},
+		"ProjectedPayload.message": {
+			"type": "object",
+			"required": [
+				"message"
+			],
+			"properties": {
+				"message": {
+					"$ref": "#/$defs/LogMessage"
+				},
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				}
+			},
+			"additionalProperties": false
+		},
+		"ProjectedPayload.model_change": {
+			"$ref": "#/$defs/LogEntryPayload.model_change"
+		},
+		"ProjectedPayload.planning_state_change": {
+			"$ref": "#/$defs/LogEntryPayload.planning_state_change"
+		},
+		"ProjectedPayload.session_info": {
+			"$ref": "#/$defs/LogEntryPayload.session_info"
+		},
+		"ProjectedPayload.subagent_spawn": {
+			"$ref": "#/$defs/LogEntryPayload.subagent_spawn"
+		},
+		"ProjectedPayload.thinking_level_change": {
+			"$ref": "#/$defs/LogEntryPayload.thinking_level_change"
+		},
+		"QueryErrorCode": {
+			"type": "string",
+			"enum": [
+				"invalid_input",
+				"unknown_query",
+				"not_allowed",
+				"unavailable",
+				"failed",
+				"host_shutdown"
+			]
+		},
+		"QueryErrorReason": {
+			"type": "object",
+			"required": [
+				"code",
+				"message"
+			],
+			"properties": {
+				"code": {
+					"$ref": "#/$defs/QueryErrorCode"
+				},
+				"message": {
+					"type": "string"
+				},
+				"requiredCapability": {
+					"$ref": "#/$defs/RemoteCapability"
+				},
+				"retryAfterMs": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 30000
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryName": {
+			"type": "string",
+			"enum": [
+				"intents",
+				"intent_completions",
+				"history",
+				"content",
+				"models",
+				"sessions",
+				"settings",
+				"subscription_usage",
+				"host_status",
+				"subagent_definitions",
+				"job_output",
+				"mcp.capabilities",
+				"mcp.servers",
+				"mcp.server",
+				"mcp.tools",
+				"mcp.tool",
+				"mcp.resources",
+				"mcp.resource",
+				"mcp.prompts",
+				"mcp.prompt",
+				"mcp.recent_calls",
+				"review.discussions",
+				"review.discussion_source",
+				"review.general",
+				"review.result",
+				"review.workflows"
+			]
+		},
+		"QueryParams.content": {
+			"type": "object",
+			"required": [
+				"entryId"
+			],
+			"properties": {
+				"entryId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"part": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"offset": {
+					"type": "integer",
+					"minimum": 0
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.history": {
+			"type": "object",
+			"required": [
+				"before",
+				"limit"
+			],
+			"properties": {
+				"before": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 200
+				},
+				"branch": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.host_status": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.intent_completions": {
+			"type": "object",
+			"required": [
+				"intent",
+				"field"
+			],
+			"properties": {
+				"intent": {
+					"$ref": "#/$defs/IntentName"
+				},
+				"field": {
+					"type": "string"
+				},
+				"prefix": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.intents": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.job_output": {
+			"type": "object",
+			"required": [
+				"jobId"
+			],
+			"properties": {
+				"jobId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.capabilities": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.mcp.prompt": {
+			"type": "object",
+			"required": [
+				"server",
+				"prompt"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"prompt": {
+					"type": "string"
+				},
+				"arguments": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"argumentsJson": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.prompts": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"cursor": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.recent_calls": {
+			"type": "object",
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.resource": {
+			"type": "object",
+			"required": [
+				"server",
+				"resourceUri"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"resourceUri": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.resources": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"cursor": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.server": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.servers": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.mcp.tool": {
+			"type": "object",
+			"required": [
+				"server",
+				"tool"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				},
+				"tool": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.mcp.tools": {
+			"type": "object",
+			"required": [
+				"server"
+			],
+			"properties": {
+				"server": {
+					"type": "string"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.models": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.review.discussion_source": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.review.discussions": {
+			"type": "object",
+			"required": [
+				"runId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"cursor": {
+					"type": "string",
+					"maxLength": 32,
+					"pattern": "^[0-9]+$"
+				},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 50
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.review.general": {
+			"type": "object",
+			"required": [
+				"runId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.review.result": {
+			"type": "object",
+			"required": [
+				"runId"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.review.workflows": {
+			"type": "object",
+			"properties": {
+				"cursor": {
+					"type": "string"
+				},
+				"limit": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 50
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.sessions": {
+			"type": "object",
+			"properties": {
+				"limit": {
+					"type": "integer",
+					"minimum": 1
+				},
+				"cursor": {
+					"type": "string",
+					"minLength": 1
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryParams.settings": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.subagent_definitions": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryParams.subscription_usage": {
+			"$ref": "#/$defs/EmptyInput"
+		},
+		"QueryResult.content": {
+			"type": "object",
+			"required": [
+				"entryId",
+				"part",
+				"parts",
+				"content"
+			],
+			"properties": {
+				"entryId": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 512,
+					"pattern": "^[^\\u0000]+$"
+				},
+				"part": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"parts": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"content": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"type",
+								"text",
+								"offset",
+								"nextOffset",
+								"totalScalars"
+							],
+							"properties": {
+								"type": {
+									"type": "string",
+									"const": "text"
+								},
+								"text": {
+									"type": "string"
+								},
+								"offset": {
+									"type": "integer",
+									"minimum": 0
+								},
+								"nextOffset": {
+									"anyOf": [
+										{
+											"type": "integer",
+											"minimum": 0
+										},
+										{
+											"type": "null"
+										}
+									]
+								},
+								"totalScalars": {
+									"type": "integer",
+									"minimum": 0
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "object",
+							"required": [
+								"type",
+								"mimeType",
+								"data"
+							],
+							"properties": {
+								"type": {
+									"type": "string",
+									"const": "image"
+								},
+								"mimeType": {
+									"type": "string"
+								},
+								"data": {
+									"type": "string"
+								}
+							},
+							"additionalProperties": false
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.history": {
+			"type": "object",
+			"required": [
+				"entries",
+				"earlier"
+			],
+			"properties": {
+				"entries": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ProjectedEntry"
+					}
+				},
+				"earlier": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.host_status": {
+			"type": "object",
+			"required": [
+				"keepAwake",
+				"webSearch"
+			],
+			"properties": {
+				"keepAwake": {
+					"$ref": "#/$defs/RpcKeepAwakeStatus"
+				},
+				"webSearch": {
+					"$ref": "#/$defs/RpcWebSearchStatus"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.intent_completions": {
+			"$ref": "#/$defs/UiActionCompletionListResponse"
+		},
+		"QueryResult.intents": {
+			"type": "object",
+			"required": [
+				"intents"
+			],
+			"properties": {
+				"intents": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/IntentDescriptor"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.job_output": {
+			"type": "object",
+			"required": [
+				"job"
+			],
+			"properties": {
+				"job": {
+					"$ref": "#/$defs/RpcBackgroundJobSnapshot"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.mcp.capabilities": {
+			"$ref": "#/$defs/RpcMcpCapabilitiesResponse"
+		},
+		"QueryResult.mcp.prompt": {
+			"$ref": "#/$defs/RpcMcpPromptContentResponse"
+		},
+		"QueryResult.mcp.prompts": {
+			"$ref": "#/$defs/RpcMcpPromptsResponse"
+		},
+		"QueryResult.mcp.recent_calls": {
+			"$ref": "#/$defs/RpcMcpRecentCallsResponse"
+		},
+		"QueryResult.mcp.resource": {
+			"$ref": "#/$defs/RpcMcpResourceContentResponse"
+		},
+		"QueryResult.mcp.resources": {
+			"$ref": "#/$defs/RpcMcpResourcesResponse"
+		},
+		"QueryResult.mcp.server": {
+			"$ref": "#/$defs/RpcMcpServerResponse"
+		},
+		"QueryResult.mcp.servers": {
+			"$ref": "#/$defs/RpcMcpServersResponse"
+		},
+		"QueryResult.mcp.tool": {
+			"$ref": "#/$defs/RpcMcpToolResponse"
+		},
+		"QueryResult.mcp.tools": {
+			"$ref": "#/$defs/RpcMcpToolsResponse"
+		},
+		"QueryResult.models": {
+			"type": "object",
+			"required": [
+				"models",
+				"cycleScope"
+			],
+			"properties": {
+				"models": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcCatalogModel"
+					}
+				},
+				"cycleScope": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/ClientModelRef"
+					}
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.review.discussion_source": {
+			"type": "object",
+			"required": [
+				"discussion"
+			],
+			"properties": {
+				"discussion": {
+					"anyOf": [
+						{
+							"$ref": "#/$defs/RpcReviewDiscussion"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.review.discussions": {
+			"$ref": "#/$defs/RpcListReviewDiscussions"
+		},
+		"QueryResult.review.general": {
+			"type": "object",
+			"required": [
+				"runId",
+				"sourceSessionId",
+				"generalSessionId",
+				"generalSessionGeneration",
+				"generalRevision",
+				"generalAvailable"
+			],
+			"properties": {
+				"runId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"sourceSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"generalSessionId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"generalSessionGeneration": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				},
+				"generalRevision": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"generalAvailable": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false,
+			"description": "A review run's general discussion session."
+		},
+		"QueryResult.review.result": {
+			"$ref": "#/$defs/RpcReviewWorkflowResultResponse"
+		},
+		"QueryResult.review.workflows": {
+			"$ref": "#/$defs/RpcReviewWorkflowListResponse"
+		},
+		"QueryResult.sessions": {
+			"type": "object",
+			"required": [
+				"sessions",
+				"hasMore",
+				"nextCursor"
+			],
+			"properties": {
+				"sessions": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcSessionListItem"
+					}
+				},
+				"hasMore": {
+					"type": "boolean"
+				},
+				"nextCursor": {
+					"anyOf": [
+						{
+							"type": "string"
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.settings": {
+			"type": "object",
+			"required": [
+				"steeringMode",
+				"followUpMode",
+				"autoCompaction",
+				"autoRetry"
+			],
+			"properties": {
+				"steeringMode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				},
+				"followUpMode": {
+					"$ref": "#/$defs/RpcQueueMode"
+				},
+				"autoCompaction": {
+					"type": "boolean"
+				},
+				"autoRetry": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
+		"QueryResult.subagent_definitions": {
+			"$ref": "#/$defs/RpcListSubagentsResponse"
+		},
+		"QueryResult.subscription_usage": {
+			"$ref": "#/$defs/RpcSubscriptionUsageReport"
+		},
+		"RejectionCode": {
+			"type": "string",
+			"enum": [
+				"invalid_input",
+				"unknown_intent",
+				"not_allowed",
+				"unavailable",
+				"stale",
+				"busy",
+				"conflict",
+				"locked",
+				"ended",
+				"read_only",
+				"failed",
+				"host_shutdown"
+			]
+		},
+		"RejectionReason": {
+			"type": "object",
+			"required": [
+				"code",
+				"message"
+			],
+			"properties": {
+				"code": {
+					"$ref": "#/$defs/RejectionCode"
+				},
+				"message": {
+					"type": "string"
+				},
+				"ordinal": {
+					"$ref": "#/$defs/RpcSafeNonNegativeInteger"
+				},
+				"requiredCapability": {
+					"$ref": "#/$defs/RemoteCapability"
+				},
+				"retryAfterMs": {
+					"type": "integer",
+					"minimum": 0,
+					"maximum": 30000
+				}
+			},
+			"additionalProperties": false
+		},
+		"RemoteAccessPresetName": {
+			"type": "string",
+			"enum": [
+				"coding",
+				"review",
+				"chat",
+				"full"
+			]
+		},
+		"RemoteCapabilities": {
+			"type": "array",
+			"items": {
+				"$ref": "#/$defs/RemoteCapability"
+			},
+			"maxItems": 8,
+			"uniqueItems": true
+		},
+		"RemoteCapability": {
+			"type": "string",
+			"enum": [
+				"conversation.observe.v1",
+				"conversation.control.v1",
+				"model.select.v1",
+				"integrations.manage.v1",
+				"worktrees.manage.v1",
+				"host.manage.v1",
+				"workspace.manage.v1",
+				"diagnostics.upload.v1"
+			]
+		},
+		"RemoteGrant": {
+			"type": "object",
+			"required": [
+				"schemaVersion",
+				"revision",
+				"capabilities"
+			],
+			"properties": {
+				"schemaVersion": {
+					"type": "number",
+					"const": 1
+				},
+				"revision": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"capabilities": {
+					"$ref": "#/$defs/RemoteCapabilities"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RemoteHandshake.ConversationMetadata": {
 			"type": "object",
 			"required": [
@@ -5084,6 +12807,18 @@
 			"pattern": "^[a-z0-9][a-z0-9._-]{0,63}$",
 			"x-volt-expected": "match lowercase worktree id syntax"
 		},
+		"ReviewWorkflowStarted": {
+			"type": "object",
+			"required": [
+				"workflowId"
+			],
+			"properties": {
+				"workflowId": {
+					"$ref": "#/$defs/RpcConversationIdentifier"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcActiveAgentRun": {
 			"type": "object",
 			"required": [
@@ -5168,10 +12903,16 @@
 					"const": "started"
 				},
 				"args": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"details": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"projection": {
 					"$ref": "#/$defs/RpcProjectionTruncation"
@@ -5375,7 +13116,10 @@
 					"$ref": "#/$defs/RpcDiagnosticErrorInfo"
 				},
 				"details": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				}
 			},
 			"additionalProperties": false
@@ -7021,7 +14765,10 @@
 					"type": "string"
 				},
 				"arguments": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"argumentsJson": {
 					"type": "string"
@@ -7512,7 +15259,10 @@
 					"type": "string"
 				},
 				"args": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"streamingBehavior": {
 					"$ref": "#/$defs/RpcStreamingBehavior"
@@ -9340,10 +17090,16 @@
 					"type": "string"
 				},
 				"args": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"details": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"output": {
 					"type": "string"
@@ -11226,7 +18982,10 @@
 					"x-volt-opaque": "MCP SDK JSON schema; passed through verbatim"
 				},
 				"annotations": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"metadataHash": {
 					"type": "string"
@@ -13323,7 +21082,10 @@
 						"outcomes": {
 							"type": "array",
 							"items": {
-								"$ref": "#/$defs/Control.RelayRpcResponse"
+								"type": "object",
+								"patternProperties": {
+									"^.*$": {}
+								}
 							}
 						}
 					},
@@ -19674,7 +27436,10 @@
 					"type": "string"
 				},
 				"arguments": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"thoughtSignature": {
 					"type": "string"
@@ -19905,10 +27670,16 @@
 					"type": "number"
 				},
 				"args": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"details": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				},
 				"diffPreview": {
 					"type": "string"
@@ -20244,7 +28015,10 @@
 							"type": "string"
 						},
 						"args": {
-							"$ref": "#/$defs/Control.RelayRpcResponse"
+							"type": "object",
+							"patternProperties": {
+								"^.*$": {}
+							}
 						},
 						"projection": {
 							"$ref": "#/$defs/RpcProjectionTruncation"
@@ -20386,6 +28160,91 @@
 				},
 				"timestamp": {
 					"type": "number"
+				}
+			},
+			"additionalProperties": false
+		},
+		"TranscriptItem": {
+			"type": "object",
+			"required": [
+				"role",
+				"text",
+				"truncated"
+			],
+			"properties": {
+				"role": {
+					"type": "string",
+					"enum": [
+						"user",
+						"assistant",
+						"system",
+						"tool"
+					]
+				},
+				"text": {
+					"type": "string"
+				},
+				"truncated": {
+					"type": "boolean"
+				},
+				"clientMessageId": {
+					"$ref": "#/$defs/RpcClientMessageId"
+				},
+				"imageCount": {
+					"type": "integer",
+					"minimum": 0
+				},
+				"toolCallId": {
+					"type": "string"
+				},
+				"toolName": {
+					"type": "string"
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"completed",
+						"failed"
+					]
+				},
+				"summary": {
+					"type": "string"
+				},
+				"path": {
+					"type": "string"
+				},
+				"args": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"details": {
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
+				},
+				"output": {
+					"type": "string"
+				},
+				"outputTruncated": {
+					"type": "boolean"
+				},
+				"parts": {
+					"type": "array",
+					"items": {
+						"$ref": "#/$defs/RpcConversationAssistantPart"
+					}
+				},
+				"stopReason": {
+					"$ref": "#/$defs/RpcStopReason"
+				},
+				"diffPreview": {
+					"type": "string"
+				},
+				"patchPreview": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -21479,7 +29338,10 @@
 					"pattern": "^[^\\s\\u0000-\\u001f\\u007f]+$"
 				},
 				"input": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
+					"type": "object",
+					"patternProperties": {
+						"^.*$": {}
+					}
 				}
 			},
 			"additionalProperties": false

@@ -316,6 +316,16 @@ export function createDaemonClient(options: DaemonClientOptions): DaemonClient {
 					}
 					if (ControlValidators.event.Check(message)) {
 						options.onEvent?.(message);
+						continue;
+					}
+					// A response the contract rejects still settles its request instead
+					// of leaving the caller waiting until the connection closes.
+					const id =
+						typeof message === "object" && message !== null ? (message as { id?: unknown }).id : undefined;
+					const entry = typeof id === "string" ? pending.get(id) : undefined;
+					if (typeof id === "string" && entry) {
+						pending.delete(id);
+						entry.reject(new Error(`daemon sent an invalid control response for request ${id}`));
 					}
 				}
 			});

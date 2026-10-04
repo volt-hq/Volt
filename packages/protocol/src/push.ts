@@ -31,8 +31,9 @@ const NOTIFICATION_CHARACTER = String.raw`[^\s/\\\p{Cc}\p{Cf}\p{Cs}]`;
 
 /**
  * Lock-screen text: words separated by single spaces, no leading or trailing
- * whitespace. `maxLength` (the byte budget, which bounds the character count)
- * runs before the pattern, so oversized input never reaches the regex.
+ * whitespace. `maxLength` (the byte budget, never below the character count)
+ * rejects most oversized input before the pattern runs; it counts grapheme
+ * clusters, so the layered byte check is what bounds the size.
  */
 const notificationText = (maxBytes: number) =>
 	Type.String({

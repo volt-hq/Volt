@@ -110,6 +110,33 @@ describe("daemon control client provisional responses", () => {
 	});
 });
 
+describe("daemon control client response validation", () => {
+	it("rejects a request whose response fails the contract instead of waiting for disconnect", async () => {
+		const socketPath = tempSocketPath();
+		const server = createServer((socket: Socket) => {
+			const decoder = new ControlLineDecoder();
+			socket.on("data", (chunk) => {
+				for (const message of decoder.push(chunk)) {
+					const request = message as Record<string, unknown>;
+					if (request.type === "hello") {
+						socket.write(encodeControlLine({ type: "hello_ack", ok: true, connectionId: "c-1" }));
+					} else if (request.type === "status") {
+						socket.write(encodeControlLine({ type: "status_result", id: request.id, pid: "not-a-number" }));
+					} else {
+						socket.write(encodeControlLine({ type: "ok", id: request.id }));
+					}
+				}
+			});
+		});
+		await listenTestServer(server, socketPath);
+		cleanups.push(() => new Promise<void>((resolve) => server.close(() => resolve())));
+		const client = await connectClient(socketPath);
+
+		await expect(client.request({ type: "status" })).rejects.toThrow(/invalid control response/);
+		await expect(client.request({ type: "clients_list" })).resolves.toMatchObject({ type: "ok" });
+	});
+});
+
 describe("daemon control client reconnect", () => {
 	it("keeps retrying after the initial dial fails", async () => {
 		const socketPath = tempSocketPath();

@@ -575,7 +575,9 @@ describe("control version negotiation", () => {
 		).toBe(true);
 		expect(ControlValidators.helloAck.Check({ ...ack, futureField: true })).toBe(true);
 		expect(ControlValidators.helloAck.Check({ type: "hello_ack" })).toBe(false);
-		expect(ControlValidators.helloAck.Check({ type: "hello_ack", ok: false, error: "nope" })).toBe(false);
+		expect(ControlValidators.helloAck.Check({ type: "hello_ack", ok: false, error: "future_reason" })).toBe(true);
+		expect(ControlValidators.helloAck.Check({ type: "hello_ack", ok: false, error: 7 })).toBe(false);
+		expect(ControlValidators.helloAck.Check({ type: "hello_ack", ok: "no" })).toBe(false);
 		expect(ControlValidators.fatal.Check({ type: "fatal", error: "invalid_hello" })).toBe(true);
 		expect(ControlValidators.fatal.Check({ type: "fatal", error: "future_reason", detail: 1 })).toBe(true);
 		expect(ControlValidators.fatal.Check({ type: "fatal" })).toBe(false);
