@@ -1,8 +1,10 @@
 /**
- * The protocol contract: the top-level RPC wire unions, every named schema
- * (wire frames, log entries, and `UiNode`), and the numeric limits block —
- * everything the JSON Schema artifact (contract/protocol-schema.json) is
- * generated from by scripts/generate-protocol-schema.ts.
+ * The protocol contract: the top-level RPC wire unions, the protocol frames
+ * (`ClientFrame`, `HostFrame`, and their intents, queries, live values, and
+ * projected entries), every named schema (wire frames, log entries, and
+ * `UiNode`), and the numeric limits block — everything the JSON Schema
+ * artifact (contract/protocol-schema.json) is generated from by
+ * scripts/generate-protocol-schema.ts.
  */
 
 import {
@@ -36,6 +38,12 @@ import {
 	RpcListJobsResponseSchema,
 	RpcReadJobResponseSchema,
 } from "./background-jobs.ts";
+import {
+	ClientLabelSchema,
+	ClientModelRefSchema,
+	ClientQueuedInputSchema,
+	ClientSnapshotSchema,
+} from "./client-fold.ts";
 import { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema, RpcMcpAuthFlowSchema } from "./commands.ts";
 import {
 	RpcConversationActiveAssistantSchema,
@@ -89,6 +97,20 @@ import {
 	RpcUiActionStateChangedEventSchema,
 } from "./events.ts";
 import {
+	CatalogNameSchema,
+	CLIENT_FRAME_SCHEMAS,
+	ClientFrameSchema,
+	FatalCodeSchema,
+	HOST_FRAME_SCHEMAS,
+	HostFrameSchema,
+	PROTOCOL_LIMITS,
+	ProfileNameSchema,
+	QueryErrorCodeSchema,
+	QueryErrorReasonSchema,
+	RejectionCodeSchema,
+	RejectionReasonSchema,
+} from "./frames.ts";
+import {
 	RpcGitChangeCountsSchema,
 	RpcGitComparisonSchema,
 	RpcGitContextSchema,
@@ -98,6 +120,38 @@ import {
 	RpcGitRefSchema,
 	RpcGitStatusCountsSchema,
 } from "./git-context.ts";
+import {
+	BUILTIN_INTENT_NAMES,
+	BuiltinIntentNameSchema,
+	DynamicIntentFrameSchema,
+	DynamicIntentInputSchema,
+	DynamicIntentNameSchema,
+	EmptyInputSchema,
+	INTENT_FRAME_SCHEMAS,
+	INTENT_SCHEMAS,
+	IntentAvailabilitySchema,
+	IntentCancelledSchema,
+	IntentCategorySchema,
+	IntentDescriptorSchema,
+	IntentFenceSchema,
+	IntentFrameSchema,
+	IntentNameSchema,
+	type IntentSchemas,
+	IntentScopeSchema,
+	IntentWhileBusySchema,
+	ReviewWorkflowStartedSchema,
+} from "./intents.ts";
+import {
+	HostRequestKindSchema,
+	HostRequestSchema,
+	HostResponseSchema,
+	LIVE_ITEM_SCHEMAS,
+	LIVE_VALUE_SCHEMAS,
+	LiveItemSchema,
+	LiveKeySchema,
+	LiveToolPartialSchema,
+	LiveValueSchema,
+} from "./live.ts";
 import {
 	RpcMcpAuthResponseSchema,
 	RpcMcpAuthStateSchema,
@@ -148,6 +202,7 @@ import {
 	RpcThinkingLevelSchema,
 	RpcUiActionListScopeSchema,
 } from "./primitives.ts";
+import { PROJECTED_ENTRY_TYPES, ProjectedEntrySchema, TranscriptItemSchema } from "./projected.ts";
 import {
 	RpcProjectionCollectionTruncationSchema,
 	RpcProjectionTruncationSchema,
@@ -171,6 +226,13 @@ import {
 	RpcWorkflowStatusSchema,
 	RpcWorkflowToolEventSchema,
 } from "./projections.ts";
+import { QUERY_FRAME_SCHEMAS, QUERY_NAMES, QUERY_SCHEMAS, QueryFrameSchema, QueryNameSchema } from "./queries.ts";
+import {
+	RemoteAccessPresetNameSchema,
+	RemoteCapabilitiesSchema,
+	RemoteCapabilitySchema,
+	RemoteGrantSchema,
+} from "./remote-access.ts";
 import {
 	RPC_RESPONSE_SCHEMAS,
 	RpcBashResultSchema,
@@ -668,12 +730,70 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	UiNode: UiNodeSchema,
 };
 
+/** Protocol schemas registered under their own names, before the per-intent, per-query, and per-frame entries. */
+const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
+	// Remote access
+	RemoteCapability: RemoteCapabilitySchema,
+	RemoteCapabilities: RemoteCapabilitiesSchema,
+	RemoteGrant: RemoteGrantSchema,
+	RemoteAccessPresetName: RemoteAccessPresetNameSchema,
+
+	// Projected entries and the client fold
+	TranscriptItem: TranscriptItemSchema,
+	ClientModelRef: ClientModelRefSchema,
+	ClientLabel: ClientLabelSchema,
+	ClientQueuedInput: ClientQueuedInputSchema,
+
+	// Intents
+	EmptyInput: EmptyInputSchema,
+	IntentCancelled: IntentCancelledSchema,
+	ReviewWorkflowStarted: ReviewWorkflowStartedSchema,
+	BuiltinIntentName: BuiltinIntentNameSchema,
+	DynamicIntentName: DynamicIntentNameSchema,
+	IntentName: IntentNameSchema,
+	DynamicIntentInput: DynamicIntentInputSchema,
+	IntentCategory: IntentCategorySchema,
+	IntentScope: IntentScopeSchema,
+	IntentFence: IntentFenceSchema,
+	IntentWhileBusy: IntentWhileBusySchema,
+	IntentAvailability: IntentAvailabilitySchema,
+	IntentDescriptor: IntentDescriptorSchema,
+
+	// Queries
+	QueryName: QueryNameSchema,
+
+	// Live lane and host requests
+	HostRequestKind: HostRequestKindSchema,
+	HostRequest: HostRequestSchema,
+	HostResponse: HostResponseSchema,
+	LiveKey: LiveKeySchema,
+	LiveToolPartial: LiveToolPartialSchema,
+
+	// Outcomes
+	ProfileName: ProfileNameSchema,
+	RejectionCode: RejectionCodeSchema,
+	RejectionReason: RejectionReasonSchema,
+	QueryErrorCode: QueryErrorCodeSchema,
+	QueryErrorReason: QueryErrorReasonSchema,
+	CatalogName: CatalogNameSchema,
+	FatalCode: FatalCodeSchema,
+};
+
 /**
  * Every named definition of the artifact. Per-command and per-response
  * members are keyed `RpcCommand.<type>` / `RpcResponse.<command>`, and the
  * four wire unions follow them. Each core log entry type contributes
  * `LogEntryPayload.<type>` and `LogEntry.<type>`; the `LogEntry` union closes
- * the map.
+ * the legacy map.
+ *
+ * Protocol 1 follows: each projected entry type contributes
+ * `ProjectedPayload.<type>` and `ProjectedEntry.<type>`; each built-in intent
+ * `IntentInput.<name>` (and `IntentOutput.<name>` when it returns data); each
+ * query `QueryParams.<name>` and `QueryResult.<name>`; each live value kind
+ * and item type `LiveValue.<kind>` and `LiveItem.<type>`. Frames are
+ * `Frame.<type>`, intent frames `Frame.intent.<name>` (the frame's type is the
+ * intent name) and `Frame.intent.dynamic`, query frames `Frame.query.<name>`;
+ * the closed `ClientFrame` and `HostFrame` unions close the map.
  */
 export const CONTRACT_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 	const registry = new Map<string, TSchema>(Object.entries(SHARED_SCHEMAS));
@@ -692,6 +812,36 @@ export const CONTRACT_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 		registry.set(`LogEntry.${definition.type}`, definition.schema);
 	}
 	registry.set("LogEntry", LogEntrySchema);
+
+	for (const [name, schema] of Object.entries(PROTOCOL_SCHEMAS)) registry.set(name, schema);
+	for (const [type, definition] of Object.entries(PROJECTED_ENTRY_TYPES)) {
+		registry.set(`ProjectedPayload.${type}`, definition.payload);
+		registry.set(`ProjectedEntry.${type}`, definition.schema);
+	}
+	registry.set("ProjectedEntry", ProjectedEntrySchema);
+	registry.set("ClientSnapshot", ClientSnapshotSchema);
+	for (const name of BUILTIN_INTENT_NAMES) {
+		const schemas: IntentSchemas = INTENT_SCHEMAS[name];
+		registry.set(`IntentInput.${name}`, schemas.input);
+		if (schemas.output !== undefined) registry.set(`IntentOutput.${name}`, schemas.output);
+	}
+	for (const name of QUERY_NAMES) {
+		registry.set(`QueryParams.${name}`, QUERY_SCHEMAS[name].params);
+		registry.set(`QueryResult.${name}`, QUERY_SCHEMAS[name].result);
+	}
+	for (const [kind, schema] of Object.entries(LIVE_VALUE_SCHEMAS)) registry.set(`LiveValue.${kind}`, schema);
+	registry.set("LiveValue", LiveValueSchema);
+	for (const [type, schema] of Object.entries(LIVE_ITEM_SCHEMAS)) registry.set(`LiveItem.${type}`, schema);
+	registry.set("LiveItem", LiveItemSchema);
+	for (const [type, schema] of Object.entries(CLIENT_FRAME_SCHEMAS)) registry.set(`Frame.${type}`, schema);
+	for (const name of BUILTIN_INTENT_NAMES) registry.set(`Frame.intent.${name}`, INTENT_FRAME_SCHEMAS[name]);
+	registry.set("Frame.intent.dynamic", DynamicIntentFrameSchema);
+	registry.set("Frame.intent", IntentFrameSchema);
+	for (const name of QUERY_NAMES) registry.set(`Frame.query.${name}`, QUERY_FRAME_SCHEMAS[name]);
+	registry.set("Frame.query", QueryFrameSchema);
+	for (const [type, schema] of Object.entries(HOST_FRAME_SCHEMAS)) registry.set(`Frame.${type}`, schema);
+	registry.set("ClientFrame", ClientFrameSchema);
+	registry.set("HostFrame", HostFrameSchema);
 	return registry;
 })();
 
@@ -779,5 +929,5 @@ export const RPC_WIRE_LIMITS = {
 	remoteErrorStrings: RPC_REMOTE_ERROR_STRINGS,
 } as const;
 
-/** Everything exported into the artifact as `x-volt-limits`: the RPC wire limits plus the `UiNode` bounds. */
-export const CONTRACT_LIMITS = { ...RPC_WIRE_LIMITS, uiNode: UI_NODE_LIMITS } as const;
+/** Everything exported into the artifact as `x-volt-limits`: the RPC wire limits, the `UiNode` bounds, and the protocol constants. */
+export const CONTRACT_LIMITS = { ...RPC_WIRE_LIMITS, uiNode: UI_NODE_LIMITS, protocol: PROTOCOL_LIMITS } as const;
