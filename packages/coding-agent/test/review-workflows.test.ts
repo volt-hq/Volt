@@ -1,4 +1,5 @@
-import { describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { liveKey } from "../src/core/host/live-state.ts";
 import type { ExecuteReviewWorkflowResult, ParsedReview } from "../src/core/review.ts";
 import {
 	createReviewFileMetadata,
@@ -7,7 +8,12 @@ import {
 	type ReviewWorkflowExecuteHooks,
 	ReviewWorkflowManager,
 } from "../src/core/review-workflows.ts";
-import { ConversationProjectionFeed } from "../src/core/rpc/conversation-projection-feed.ts";
+import { createHostHarness } from "./suite/host-harness.ts";
+
+const cleanups: Array<() => Promise<void>> = [];
+afterEach(async () => {
+	while (cleanups.length > 0) await cleanups.pop()?.();
+});
 
 function parsed(findingsCount = 1, completionStatus: ParsedReview["completionStatus"] = "complete"): ParsedReview {
 	return {
@@ -333,8 +339,12 @@ describe("ReviewWorkflowManager", () => {
 		const preparationGate = new Promise<void>((resolve) => {
 			releasePreparation = resolve;
 		});
-		const projection = new ConversationProjectionFeed({ subscribe: () => () => {} });
-		const manager = new ReviewWorkflowManager({ publishEvent: (event) => projection.publishExternal(event) });
+		// A hosted conversation's workflows publish to its live state, which every subscriber's live lane reads.
+		const harness = await createHostHarness();
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		const manager = conversation.reviewWorkflows;
+		const live = () => conversation.liveState.get(liveKey("workflow", "review:preparing"));
 		const started = manager.start({
 			provisional: true,
 			prepared: prepared("review:preparing", { workflowDescription: "Preparing pull request review" }),
@@ -350,17 +360,15 @@ describe("ReviewWorkflowManager", () => {
 		started.launch();
 		expect(started.signal.aborted).toBe(false);
 		expect(manager.get("review:preparing")?.target.description).toBe("Preparing pull request review");
-		expect(projection.activeWorkflows).toMatchObject([
-			{
+		expect(live()).toMatchObject({
+			kind: "workflow",
+			event: {
+				type: "workflow_start",
 				workflowId: "review:preparing",
-				workflowEvent: {
-					type: "workflow_start",
-					workflowId: "review:preparing",
-					message: "Preparing pull request review.",
-				},
-				activeTools: [],
+				message: "Preparing pull request review.",
 			},
-		]);
+			activeTools: [],
+		});
 
 		started.updatePrepared(
 			prepared("review:preparing", {
@@ -373,18 +381,16 @@ describe("ReviewWorkflowManager", () => {
 			description: "PR #7",
 			pullRequest: { provider: "github", number: 7 },
 		});
-		expect(projection.activeWorkflows).toMatchObject([
-			{
+		expect(live()).toMatchObject({
+			kind: "workflow",
+			event: {
+				type: "workflow_update",
 				workflowId: "review:preparing",
-				workflowEvent: {
-					type: "workflow_update",
-					workflowId: "review:preparing",
-					message: "Reviewing PR #7.",
-					pullRequest: { provider: "github", number: 7 },
-				},
-				activeTools: [],
+				message: "Reviewing PR #7.",
+				pullRequest: { provider: "github", number: 7 },
 			},
-		]);
+			activeTools: [],
+		});
 		manager.cancel("review:preparing");
 		const remainedActiveUntilPreparationSettled = manager.hasActiveWorkflows;
 		releasePreparation();
@@ -394,8 +400,7 @@ describe("ReviewWorkflowManager", () => {
 		expect(started.signal.aborted).toBe(true);
 		expect(dispose).toHaveBeenCalledOnce();
 		expect(manager.get("review:preparing")?.status).toBe("cancelled");
-		expect(projection.activeWorkflows).toEqual([]);
-		projection.dispose();
+		expect(live()).toBeUndefined();
 	});
 
 	test("records thrown failures", async () => {

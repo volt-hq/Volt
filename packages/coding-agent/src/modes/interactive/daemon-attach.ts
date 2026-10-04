@@ -1,5 +1,6 @@
 import { basename, resolve } from "node:path";
 import type { Duplex } from "node:stream";
+import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
 import { isStandaloneBinary, VERSION } from "../../config.ts";
 import { parseIrohRemoteRpcGrant } from "../../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
@@ -7,7 +8,6 @@ import type {
 	IrohRemotePushNotificationDeliveryStatus,
 	IrohRemotePushNotificationIntent,
 } from "../../core/remote/iroh/push.ts";
-import type { IrohRemoteWorkspaceMetadataSnapshot } from "../../core/remote/iroh/workspace.ts";
 import type { RpcGitContext } from "../../core/rpc/types.ts";
 import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
@@ -56,17 +56,13 @@ export interface OpenedRelay {
 	finished(): void;
 }
 
-export interface RelayRpcForwardResult {
-	/** verbatim RPC response object to forward to the phone */
-	response: Record<string, unknown>;
-	/** refreshed workspace metadata after a successful unregister_workspace */
-	workspaceMetadata?: IrohRemoteWorkspaceMetadataSnapshot;
-}
-
+/**
+ * A relayed phone unregistered the workspace of the session this TUI serves:
+ * once the phone is answered, the TUI releases the session's lease.
+ */
 export interface RelayWorkspaceUnregisterRetirement {
-	isIngressOpen(): boolean;
-	observeForwardedResponse(command: Record<string, unknown>, response: Record<string, unknown>): void;
-	onResponseWritten(response: Record<string, unknown>): Promise<void>;
+	/** The daemon accepted the phone's unregister_workspace. */
+	unregistered(): void;
 	finalize(): Promise<void>;
 }
 
@@ -76,31 +72,14 @@ export function createRelayWorkspaceUnregisterRetirement(
 ): RelayWorkspaceUnregisterRetirement {
 	let workspaceUnregistered = false;
 	let releasePromise: Promise<void> | undefined;
-	const release = (): Promise<void> => {
-		releasePromise ??= daemonAttach.release(getSessionId(), "workspace_unregistered");
-		return releasePromise;
-	};
 	return {
-		isIngressOpen: () => !workspaceUnregistered,
-		observeForwardedResponse(command, response) {
-			if (
-				command.type === "unregister_workspace" &&
-				response.type === "response" &&
-				response.command === "unregister_workspace" &&
-				response.success === true
-			) {
-				workspaceUnregistered = true;
-			}
-		},
-		async onResponseWritten(response) {
-			if (workspaceUnregistered && response.command === "unregister_workspace" && response.success === true) {
-				await release();
-			}
+		unregistered() {
+			workspaceUnregistered = true;
 		},
 		async finalize() {
-			if (workspaceUnregistered) {
-				await release();
-			}
+			if (!workspaceUnregistered) return;
+			releasePromise ??= daemonAttach.release(getSessionId(), "workspace_unregistered");
+			await releasePromise;
 		},
 	};
 }
@@ -136,20 +115,19 @@ export interface DaemonAttach {
 	/** Release the lease of `sessionId`, in the workspace it was acquired in. */
 	release(sessionId: string, reason?: LeaseReleaseReason): Promise<void>;
 	/**
-	 * Forward a state-touching RPC command from a relayed phone conversation to
-	 * the daemon (push targets and workspace unregister). Returns
-	 * undefined when the daemon is unreachable or rejected the request.
+	 * Forward a relayed phone's intent or query that the daemon's state backs
+	 * (push targets, workspace registration and worktrees, keep-awake, the web
+	 * search key, the session list). Returns the daemon's outcome frame, or
+	 * undefined when the daemon is unreachable or refused the relay.
 	 */
 	forwardRelayRpc(
 		clientNodeId: string,
 		sessionId: string,
-		command: Record<string, unknown> & { type: string },
-	): Promise<RelayRpcForwardResult | undefined>;
+		frame: ControlRelayFrame,
+	): Promise<ControlRelayOutcome | undefined>;
 	/** Deliver relayed completion pushes through the daemon-owned push backend. */
 	relayNotificationDelivery: RelayNotificationDeliveryForwarder;
-	/** Viewer feed subscription (drain overlay). */
-	viewerSubscribe(viewerFeedId: string): Promise<void>;
-	viewerUnsubscribe(viewerFeedId: string): Promise<void>;
+	/** Stop the daemon's turn in a session this TUI waits to acquire. */
 	viewerAbort(viewerFeedId: string): Promise<void>;
 	onRelayOffer(handler: (offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>) => void): void;
 	onEvent(handler: (event: ControlEvent) => void): () => void;
@@ -377,8 +355,6 @@ export function createDisabledDaemonAttach(): DaemonAttach {
 				return "failed";
 			},
 		},
-		async viewerSubscribe() {},
-		async viewerUnsubscribe() {},
 		async viewerAbort() {},
 		onRelayOffer() {},
 		onEvent() {
@@ -859,11 +835,7 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 				// Daemon-side implicit release on disconnect covers this.
 			}
 		},
-		async forwardRelayRpc(
-			clientNodeId: string,
-			sessionId: string,
-			command: Record<string, unknown> & { type: string },
-		) {
+		async forwardRelayRpc(clientNodeId: string, sessionId: string, frame: ControlRelayFrame) {
 			const activeClient = client;
 			const relay = activeRelayIds.get(relayKey(clientNodeId, sessionId));
 			if (!activeClient || !relay) {
@@ -876,15 +848,9 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					clientNodeId,
 					workspaceName: relay.workspaceName,
 					sessionId,
-					command,
+					frame,
 				});
-				if (response.type !== "relay_rpc_result") {
-					return undefined;
-				}
-				return {
-					response: response.response,
-					...(response.workspaceMetadata === undefined ? {} : { workspaceMetadata: response.workspaceMetadata }),
-				};
+				return response.type === "relay_rpc_result" ? response.frame : undefined;
 			} catch {
 				return undefined;
 			}
@@ -913,20 +879,6 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					return "failed";
 				}
 			},
-		},
-		async viewerSubscribe(viewerFeedId: string) {
-			try {
-				await client?.request({ type: "viewer_subscribe", viewerFeedId });
-			} catch {
-				// Viewer feed is best-effort; the post-grant file load is authoritative.
-			}
-		},
-		async viewerUnsubscribe(viewerFeedId: string) {
-			try {
-				await client?.request({ type: "viewer_unsubscribe", viewerFeedId });
-			} catch {
-				// Best-effort.
-			}
 		},
 		async viewerAbort(viewerFeedId: string) {
 			try {

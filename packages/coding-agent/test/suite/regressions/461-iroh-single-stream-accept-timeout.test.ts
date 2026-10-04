@@ -5,14 +5,14 @@ import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { IROH_REMOTE_ALPN } from "../../../src/core/remote/iroh/protocol.ts";
 import { decodeIrohRemoteTicketPayload } from "../../../src/core/remote/iroh/ticket.ts";
-import type { IrohBiStreamLike } from "../../../src/core/rpc/iroh-transport.ts";
+import { type IrohBiStreamLike, readIrohJsonlLine } from "../../../src/core/rpc/iroh-transport.ts";
 import { createDaemonClient, type DaemonClient } from "../../../src/daemon/control-client.ts";
 import type { ControlEvent } from "../../../src/daemon/control-protocol.ts";
 import { loadIrohModule } from "../../../src/daemon/iroh-native.ts";
 import { createIrohDaemonService } from "../../../src/daemon/iroh-service.ts";
 import { runVoltDaemon } from "../../../src/daemon/main.ts";
 import { probeDaemon } from "../../../src/daemon/spawn.ts";
-import { readLineFromIroh } from "../../../src/daemon/workspace-streams.ts";
+import { connectRemotePhone } from "../../utilities/remote-phone.ts";
 
 const native = loadIrohModule();
 const runNative = native.iroh !== undefined || process.env.VOLT_TEST_REQUIRE_NATIVE_IROH === "1";
@@ -35,7 +35,7 @@ async function writeLine(stream: IrohBiStreamLike, text: string): Promise<void> 
 }
 
 async function readJsonLine(stream: IrohBiStreamLike, rest: Buffer = Buffer.alloc(0)) {
-	const result = await readLineFromIroh(stream.recv, rest, { maxLineBytes: 1024 * 1024 });
+	const result = await readIrohJsonlLine(stream.recv, rest, { maxLineBytes: 1024 * 1024 });
 	if (result.line === undefined) throw new Error("stream ended before a line was received");
 	return { value: JSON.parse(result.line) as Record<string, unknown>, rest: result.rest };
 }
@@ -141,9 +141,10 @@ describe.runIf(runNative)("#461 single-stream connection accept deadline", () =>
 		// The phone opens no second stream while its only request is slow.
 		await new Promise((resolve) => setTimeout(resolve, HANDSHAKE_TIMEOUT_MS * 2));
 
-		await writeLine(stream, `${JSON.stringify({ id: "ls-after-deadline", type: "list_sessions" })}\n`);
-		const response = await withDeadline(readJsonLine(stream, handshake.rest), 5_000, "list_sessions response");
-		expect(response.value).toMatchObject({ id: "ls-after-deadline", command: "list_sessions", success: true });
+		const device = connectRemotePhone(stream, handshake.rest);
+		await withDeadline(device.hello(), 5_000, "welcome");
+		const response = await withDeadline(device.query("sessions"), 5_000, "sessions result");
+		expect(response).toMatchObject({ type: "result", data: { sessions: [] } });
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
 	}, 20_000);
 

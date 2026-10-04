@@ -118,7 +118,7 @@ Streaming items:
 | `assistant_start{message}` | A streaming assistant message begins with this partial message. |
 | `assistant_delta{event}` | One incremental event: `text_start`, `text_delta{delta}`, `text_end{content}`, `thinking_start`, `thinking_delta`, `thinking_end`, `toolcall_start{id, name}`, `toolcall_delta{argsTextDelta}`, `toolcall_end{toolCall}`, each with its `contentIndex`. |
 | `assistant_end` | The message finished; the entry that commits it follows. |
-| `tool{op: start|update|end, toolCallId, toolName, args?, partial?, isError?}` | A tool execution starts (with its arguments), reports a partial result (`{content, details?}`, replacing the previous one), or ends; its result entry follows. |
+| `tool{op: start|update|end, toolCallId, toolName, args?, partial?, isError?}` | A tool execution starts (with its arguments), reports a partial result (`{content, details?}`, replacing the previous one), or ends; its result entry follows. An MCP server call a tool makes is a tool item of its own: `toolCallId` `mcp_call:<id>`, `toolName` `mcp`, `args` `{server, tool}`, progress as `partial` (`{content: [message], details: {progress, total?}}`); no entry commits it, so it leaves the streaming state when it ends. |
 
 Keyed values (`value.kind` is the key's family):
 
@@ -219,15 +219,15 @@ A query frame is `{type: "query", queryId, query, conversation?, params?}`; the 
 | `history` | `{before, limit (≤ 200), branch?}` | `{entries, earlier}`: projected entries before ordinal `before`, newest last; with `branch`, the path from the root to that entry. Entries are projected exactly as the subscription sends them. |
 | `content` | `{entryId, part?, offset?}` | `{entryId, part, parts, content}`: one text, thinking, or image block of an entry in full. Text comes in chunks of up to 12,000 Unicode scalars from `offset`, with `nextOffset` and `totalScalars`. |
 | `models` | | `{models, cycleScope}`. |
-| `sessions` | `{limit?, cursor?}` | The workspace's stored sessions. |
-| `settings` | | `{steeringMode, followUpMode, autoCompaction, autoRetry}`. |
+| `sessions` | `{limit?, cursor?}` | The workspace's stored sessions, newest first; `cursor` is the `nextCursor` of the previous page. |
+| `settings` | | `{steeringMode, followUpMode, autoCompaction, autoRetry, profile}`; `profile` is the active settings profile (`""` without one), which the compaction intents name as `expectedProfile`. |
 | `subscription_usage` | | Subscription quota usage of stored logins. |
 | `subagent_definitions` | | Discovered subagent definitions. |
 | `job_output` | `{jobId}` | A background job's retained output. |
 | `mcp.capabilities`, `mcp.servers`, `mcp.server`, `mcp.tools`, `mcp.tool`, `mcp.resources`, `mcp.resource`, `mcp.prompts`, `mcp.prompt`, `mcp.recent_calls` | see the contract | MCP catalogs and reads. |
 | `review.discussions`, `review.discussion_source`, `review.general`, `review.result`, `review.workflows` | see the contract | Durable review reads. |
 
-`changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, `settings` after a settings intent, `mcp` when MCP servers change.
+`changed{catalog}` tells the client to refetch a catalog: `models` when logins or API keys change on disk, `settings` after a settings intent, `mcp` when MCP servers change, `sessions` when the conversation's name changes or an intent moved the client to another conversation, `intents` and `extensions` after the conversation's extensions, prompt templates, and skills reload, and `host` (remote profile) when the host's keep-awake state, web search key, or shared theme changes.
 
 ## Host requests
 

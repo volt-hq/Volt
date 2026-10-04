@@ -1,12 +1,15 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fauxAssistantMessage } from "@hansjm10/volt-ai";
+import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import type { AgentSessionEvent } from "../src/core/agent-session.ts";
+import type { ProtocolConnection } from "../src/core/protocol/server/connection.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
@@ -18,14 +21,10 @@ import {
 } from "../src/daemon/iroh-service.ts";
 import { LeaseBroker } from "../src/daemon/lease-broker.ts";
 import type { IrohRemoteAgentRuntime } from "../src/modes/rpc/iroh-remote-agent-runtime.ts";
-import {
-	createTestConversation,
-	createTestDaemonRuntime,
-	createTestSession,
-	parseWrittenObjects,
-	startIrohRpcMode,
-	withCurrentConversationAuthority,
-} from "./iroh-stream-doubles.ts";
+import { createTestDaemonRuntime, createTestSession } from "./iroh-stream-doubles.ts";
+import { createHostHarness } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 
 let fixtureRoot: string;
 let workspacePath: string;
@@ -60,27 +59,6 @@ afterAll(async () => {
 	await rm(fixtureRoot, { recursive: true, force: true });
 });
 
-function createFanoutSession(sessionId: string) {
-	const session = createTestSession(sessionId, null);
-	const subscribers = new Set<(event: AgentSessionEvent) => void>();
-	session.subscribe = vi.fn((handler: (event: AgentSessionEvent) => void) => {
-		subscribers.add(handler);
-		return () => {
-			subscribers.delete(handler);
-		};
-	});
-	const abort = vi.fn(async () => {});
-	return {
-		session: Object.assign(session, { abort }),
-		abort,
-		emit(event: AgentSessionEvent) {
-			for (const handler of Array.from(subscribers)) {
-				handler(event);
-			}
-		},
-	};
-}
-
 function createAuthorization(clientNodeId: string, allowTools = "read"): IrohRemoteClientAuthorizationSuccess {
 	return {
 		ok: true,
@@ -109,7 +87,7 @@ function createHello(
 ): IrohRemoteHello {
 	return {
 		type: "volt_iroh_hello",
-		protocol: "volt-rpc/0",
+		protocol: "volt/1",
 		workspace: "ws",
 		mode: "conversation",
 		conversation:
@@ -126,120 +104,172 @@ const HANDSHAKE_RESPONSE = {
 
 describe("daemon co-attach (one runtime per conversation)", () => {
 	it("two phones with distinct clientNodeIds share one runtime, both stream, and abort keeps streams open", async () => {
-		const fanout = createFanoutSession("s-co");
-		const dispose = vi.fn(async () => {});
-		const auditEvents: IrohRemoteAuditEvent[] = [];
-		// Both phones' streams are served from this one conversation.
-		const runtimeHost = createTestConversation(fanout.session, { cwd: workspacePath, close: dispose });
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		const connections: ProtocolConnection[] = [];
+		try {
+			const conversation = await harness.openStartup();
+			const sessionId = conversation.id;
+			// The turn runs until a phone stops it.
+			harness.faux.setResponses([
+				(_context, options) =>
+					new Promise((resolve) => {
+						const stop = () => resolve(fauxAssistantMessage("stopped", { stopReason: "aborted" }));
+						if (options?.signal?.aborted) stop();
+						else options?.signal?.addEventListener("abort", stop, { once: true });
+					}),
+			]);
+			const closeConversation = vi.spyOn(harness.host, "close");
+			const auditEvents: IrohRemoteAuditEvent[] = [];
+			// Both phones' streams are served from this one conversation.
+			const runtimeHost = { host: harness.host, conversation };
 
-		const registry = new IntegratedRuntimeRegistry({
-			agentDir,
-			auditLogger: new IrohRemoteAuditLogger({
-				sink: {
-					write: (event) => {
-						auditEvents.push(event);
+			const registry = new IntegratedRuntimeRegistry({
+				agentDir,
+				auditLogger: new IrohRemoteAuditLogger({
+					sink: {
+						write: (event) => {
+							auditEvents.push(event);
+						},
 					},
-				},
-			}),
-			stateManager: new IrohRemoteHostStateManager(),
-			activeStreams: new IrohRemoteActiveStreamRegistry(),
-			detachedRuntimeTtlMs: () => 60_000,
-			getAllowTools: () => undefined,
-			getProjectTrustedForWorkspace: () => false,
-			setClientLastSessionId: vi.fn(async () => undefined),
-			createRuntime: async () => ({
-				runtime: runtimeHost,
-				sessionSelection: { kind: "created", sessionId: "s-co" },
-			}),
-		});
+				}),
+				stateManager: new IrohRemoteHostStateManager(),
+				activeStreams: new IrohRemoteActiveStreamRegistry(),
+				detachedRuntimeTtlMs: () => 60_000,
+				getAllowTools: () => undefined,
+				getProjectTrustedForWorkspace: () => false,
+				setClientLastSessionId: vi.fn(async () => undefined),
+				createRuntime: async () => ({
+					runtime: runtimeHost,
+					sessionSelection: { kind: "created", sessionId },
+				}),
+			});
 
-		const phoneA = createAuthorization("n-phone-a");
-		const phoneB = createAuthorization("n-phone-b");
+			// The phones' workspace is where the host's conversation runs.
+			const workspace = { name: "ws", path: conversation.cwd };
+			const phoneA = { ...createAuthorization("n-phone-a"), workspace };
+			const phoneB = { ...createAuthorization("n-phone-b"), workspace };
 
-		// Phone A creates the runtime.
-		const first = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
-			phoneA,
-		);
-		expect(first.created).toBe(true);
-		await expect(
-			registry.commitEntry(first.entry, first.sessionSelection, phoneB, first.attachClaim),
-		).rejects.toMatchObject({ outcome: "duplicate_conversation_connection" });
-		expect(first.entry.lifecycle).toBe("prepared");
-		await registry.commitEntry(first.entry, first.sessionSelection, phoneA, first.attachClaim);
+			// Phone A creates the runtime.
+			const first = await registry.getOrCreateEntry(
+				{ hello: createHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
+				phoneA,
+			);
+			expect(first.created).toBe(true);
+			await expect(
+				registry.commitEntry(first.entry, first.sessionSelection, phoneB, first.attachClaim),
+			).rejects.toMatchObject({ outcome: "duplicate_conversation_connection" });
+			expect(first.entry.lifecycle).toBe("prepared");
+			await registry.commitEntry(first.entry, first.sessionSelection, phoneA, first.attachClaim);
 
-		// Phone B (different clientNodeId) attaches to the SAME runtime — no
-		// conversation_in_use rejection.
-		const second = await registry.getOrCreateEntry(
-			{ hello: createHello({ target: "session", sessionId: "s-co" }), response: HANDSHAKE_RESPONSE },
-			phoneB,
-		);
-		expect(second.created).toBe(false);
-		expect(second.entry).toBe(first.entry);
-		expect(second.sessionSelection).toEqual({
-			kind: "resumed",
-			requestedSessionId: "s-co",
-			sessionId: "s-co",
-		});
-		await registry.commitEntry(second.entry, second.sessionSelection, phoneB, second.attachClaim);
+			// Phone B (different clientNodeId) attaches to the SAME runtime — no
+			// conversation_in_use rejection.
+			const second = await registry.getOrCreateEntry(
+				{ hello: createHello({ target: "session", sessionId }), response: HANDSHAKE_RESPONSE },
+				phoneB,
+			);
+			expect(second.created).toBe(false);
+			expect(second.entry).toBe(first.entry);
+			expect(second.sessionSelection).toEqual({
+				kind: "resumed",
+				requestedSessionId: sessionId,
+				sessionId,
+			});
+			await registry.commitEntry(second.entry, second.sessionSelection, phoneB, second.attachClaim);
 
-		const subscriberA = await registry.attachSubscriber(first.entry, first.attachClaim);
-		const subscriberB = await registry.attachSubscriber(first.entry, second.attachClaim);
-		first.attachClaim.release();
-		second.attachClaim.release();
-		expect(first.entry.subscribers.size).toBe(2);
-		expect([subscriberA.clientNodeId, subscriberB.clientNodeId]).toEqual(["n-phone-a", "n-phone-b"]);
-		expect(
-			auditEvents.filter((event) => event.type === "remote_subscriber_attached").map((event) => event.clientNodeId),
-		).toEqual(["n-phone-a", "n-phone-b"]);
+			const subscriberA = await registry.attachSubscriber(first.entry, first.attachClaim);
+			const subscriberB = await registry.attachSubscriber(first.entry, second.attachClaim);
+			first.attachClaim.release();
+			second.attachClaim.release();
+			expect(first.entry.subscribers.size).toBe(2);
+			expect([subscriberA.clientNodeId, subscriberB.clientNodeId]).toEqual(["n-phone-a", "n-phone-b"]);
+			expect(
+				auditEvents
+					.filter((event) => event.type === "remote_subscriber_attached")
+					.map((event) => event.clientNodeId),
+			).toEqual(["n-phone-a", "n-phone-b"]);
 
-		// Serve both phones from the same runtime.
-		const modeA = await startIrohRpcMode(runtimeHost, fanout.session);
-		fanout.session.attachExtensionClient.mockClear();
-		const modeB = await startIrohRpcMode(runtimeHost, fanout.session);
+			// Serve both phones from the same runtime.
+			const serve = (authorization: IrohRemoteClientAuthorizationSuccess): RemotePhone => {
+				const pair = createIrohStreamPair();
+				connections.push(
+					serveIrohRemoteConnection({
+						host: harness.host,
+						conversation,
+						stream: pair.host,
+						grant: authorization.client.rpcGrant,
+						redaction: { workspacePath: conversation.cwd },
+						redirect: {},
+					}),
+				);
+				return connectRemotePhone(pair.phone);
+			};
+			const deviceA = serve(phoneA);
+			const deviceB = serve(phoneB);
+			for (const device of [deviceA, deviceB]) {
+				expect(await device.hello()).toMatchObject({ conversation: sessionId });
+				await device.subscribe(sessionId);
+			}
 
-		// A session event fans out to both streams.
-		fanout.emit({ type: "agent_start" } as AgentSessionEvent);
-		await vi.waitFor(() => {
-			expect(parseWrittenObjects(modeA.send).some((frame) => frame.type === "agent_start")).toBe(true);
-			expect(parseWrittenObjects(modeB.send).some((frame) => frame.type === "agent_start")).toBe(true);
-		});
+			// Phone A's turn streams to both phones.
+			const busy = (device: RemotePhone, from = 0): boolean | undefined =>
+				device.frames
+					.slice(from)
+					.flatMap((frame) => (frame.type === "live" ? frame.items : []))
+					.flatMap((item) => (item.type === "set" && item.value.kind === "phase" ? [item.value.busy] : []))
+					.at(-1);
+			expect(await deviceA.intent("prompt", { message: "go" })).toMatchObject({ type: "accepted" });
+			await vi.waitFor(() => {
+				expect(busy(deviceA)).toBe(true);
+				expect(busy(deviceB)).toBe(true);
+			});
+			await vi.waitFor(() => expect(harness.faux.state.callCount).toBe(1));
 
-		// Abort from phone B stops the turn; BOTH streams stay open and the
-		// runtime stays live (no dispose, no stream invalidation).
-		modeB.recv.pushLine(JSON.stringify(withCurrentConversationAuthority(modeB.send, { id: "a1", type: "abort" })));
-		await vi.waitFor(() => {
-			const responses = parseWrittenObjects(modeB.send).filter((frame) => frame.command === "abort");
-			expect(responses).toHaveLength(1);
-			expect(responses[0]?.success).toBe(true);
-		});
-		expect(fanout.abort).toHaveBeenCalled();
-		expect(modeA.send.finished).toBe(false);
-		expect(modeB.send.finished).toBe(false);
-		expect(dispose).not.toHaveBeenCalled();
+			// Abort from phone B stops the turn; BOTH streams stay open and the
+			// runtime stays live (no dispose, no stream invalidation).
+			const abort = vi.spyOn(conversation.session, "abort");
+			expect(await deviceB.intent("abort")).toMatchObject({ type: "accepted" });
+			expect(abort).toHaveBeenCalled();
+			await vi.waitFor(() => {
+				expect(busy(deviceA)).toBe(false);
+				expect(busy(deviceB)).toBe(false);
+			});
+			expect(conversation.closed).toBe(false);
+			expect(closeConversation).not.toHaveBeenCalled();
 
-		// Both streams still receive events after the abort.
-		fanout.emit({ type: "agent_end" } as unknown as AgentSessionEvent);
-		await vi.waitFor(() => {
-			expect(parseWrittenObjects(modeA.send).some((frame) => frame.type === "agent_end")).toBe(true);
-			expect(parseWrittenObjects(modeB.send).some((frame) => frame.type === "agent_end")).toBe(true);
-		});
+			// Both streams still receive the conversation's changes after the abort.
+			const marks = [deviceA.frames.length, deviceB.frames.length];
+			conversation.liveState.notice("info", "still here");
+			for (const [index, device] of [deviceA, deviceB].entries()) {
+				await device.waitFor(
+					(frame): frame is HostFrame =>
+						frame.type === "live" &&
+						frame.items.some((item) => item.type === "notice" && item.message === "still here"),
+					{ from: marks[index] },
+				);
+				expect(device.frames.some((frame) => frame.type === "fatal" || frame.type === "ended")).toBe(false);
+			}
 
-		modeA.recv.end();
-		modeB.recv.end();
-		await modeA.modePromise;
-		await modeB.modePromise;
-		expect(dispose).not.toHaveBeenCalled();
+			await deviceA.close();
+			await deviceB.close();
+			await Promise.all(connections.map((connection) => connection.closed.catch(() => undefined)));
+			expect(conversation.closed).toBe(false);
+			expect(closeConversation).not.toHaveBeenCalled();
 
-		await registry.detachSubscriber(first.entry, subscriberB, "phone_b_closed");
-		await registry.detachSubscriber(first.entry, subscriberA, "phone_a_closed");
-		expect(
-			auditEvents.filter((event) => event.type === "remote_subscriber_detached").map((event) => event.clientNodeId),
-		).toEqual(["n-phone-b", "n-phone-a"]);
-		expect(
-			auditEvents.filter((event) => event.type === "remote_runtime_detached").map((event) => event.clientNodeId),
-		).toEqual(["n-phone-a"]);
-		await registry.stopAll("test_cleanup");
+			await registry.detachSubscriber(first.entry, subscriberB, "phone_b_closed");
+			await registry.detachSubscriber(first.entry, subscriberA, "phone_a_closed");
+			expect(
+				auditEvents
+					.filter((event) => event.type === "remote_subscriber_detached")
+					.map((event) => event.clientNodeId),
+			).toEqual(["n-phone-b", "n-phone-a"]);
+			expect(
+				auditEvents.filter((event) => event.type === "remote_runtime_detached").map((event) => event.clientNodeId),
+			).toEqual(["n-phone-a"]);
+			await registry.stopAll("test_cleanup");
+		} finally {
+			await Promise.all(connections.map((connection) => connection.close().catch(() => undefined)));
+			await harness.cleanup();
+		}
 	});
 
 	it("attributes a co-attaching client's pre-subscriber detach to that client", async () => {

@@ -100,15 +100,21 @@ export async function runRpcMode(
 		}
 	}
 	let stopWatcher = (): void => {};
+	let readyFailure: { error: unknown } | undefined;
 	void connection.ready.then(
 		() => {
-			// Logins and API keys saved by other volt processes change the selectable models.
-			stopWatcher = startModelCatalogWatcher({
-				agentDir: conversation.services.agentDir,
-				getModelRegistry: () => connection.conversation.session.modelRegistry,
-				onCatalogChanged: () => connection.changed("models"),
-			});
-			options.onReady?.();
+			try {
+				// Logins and API keys saved by other volt processes change the selectable models.
+				stopWatcher = startModelCatalogWatcher({
+					agentDir: conversation.services.agentDir,
+					getModelRegistry: () => (connection.conversation ?? conversation).session.modelRegistry,
+					onCatalogChanged: () => connection.changed("models"),
+				});
+				options.onReady?.();
+			} catch (error) {
+				readyFailure = { error };
+				void shutdown(1);
+			}
 		},
 		() => undefined,
 	);
@@ -116,6 +122,7 @@ export async function runRpcMode(
 	let failure: unknown;
 	try {
 		await connection.closed;
+		if (readyFailure) throw readyFailure.error;
 	} catch (error) {
 		failure = error;
 		exitCode = Math.max(exitCode, 1);

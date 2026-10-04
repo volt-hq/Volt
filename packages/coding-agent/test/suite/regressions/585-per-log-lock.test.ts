@@ -4,9 +4,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient, ProtocolClient } from "../../../src/client/protocol-client.ts";
 import {
 	createAgentSessionFromServices,
 	createAgentSessionServices,
@@ -14,10 +14,10 @@ import {
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { ConversationLock, ConversationLockedError } from "../../../src/core/conversation-log/conversation-lock.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
-import type { RpcCloseHandler, RpcLineHandler } from "../../../src/core/rpc/transport.ts";
+import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../../../src/index.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
+import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { loseLog } from "../../lost-conversation-lock.ts";
 import { connectTestClient, openTestHost, type TestClient, type TestHost } from "../../utilities/host-client.ts";
 
@@ -287,7 +287,7 @@ describe("regression #585: one writer per conversation log", () => {
 		expect(lockState(sourceRef)).toBe("free");
 	});
 
-	it("fails an RPC switch to a session open elsewhere with the stable conversation_locked code", async () => {
+	it("rejects a protocol switch to a session open elsewhere with the stable locked code", async () => {
 		const root = temporaryDirectory();
 		const sessionDir = join(root, "sessions");
 		const sourceRef = await storedSession(sessionDir, root, "source");
@@ -295,55 +295,19 @@ describe("regression #585: one writer per conversation log", () => {
 		const { host, conversation } = await openConversation(root, await SessionManager.open(sourceRef));
 		const elsewhere = ConversationLock.acquire(sessionDir, targetRef.sessionId);
 		cleanups.push(() => elsewhere.close());
-		let line!: RpcLineHandler;
-		let close: RpcCloseHandler | undefined;
-		let ready!: () => void;
-		const started = new Promise<void>((resolve) => {
-			ready = resolve;
+		const client = await createLoopbackClient(host, conversation, { anchor: false });
+		cleanups.push(() => client.stop());
+
+		await expect(client.intent("switch_session", { sessionId: targetRef.sessionId })).rejects.toMatchObject({
+			reason: { code: "locked" },
 		});
-		const writes: object[] = [];
-		const mode = runLegacyRemoteRpcMode(host, conversation, {
-			exitProcess: false,
-			anchor: false,
-			onReady: ready,
-			transport: {
-				write: (value) => {
-					writes.push(value);
-				},
-				onLine: (handler) => {
-					line = handler;
-					return () => {};
-				},
-				onClose: (handler) => {
-					close = handler;
-					return () => {};
-				},
-				close: () => {},
-			},
-		});
-		await started;
-		try {
-			await line(JSON.stringify({ id: "switch", type: "switch_session", sessionId: targetRef.sessionId }));
-			await vi.waitFor(() =>
-				expect(writes).toContainEqual(
-					expect.objectContaining({
-						id: "switch",
-						type: "response",
-						success: false,
-						errorCode: "conversation_locked",
-					}),
-				),
-			);
-			expect(host.list()).toEqual([conversation]);
-			expect(conversation.closed).toBe(false);
-		} finally {
-			close?.();
-			await mode;
-		}
+		expect(host.list()).toEqual([conversation]);
+		expect(conversation.closed).toBe(false);
+		expect(client.conversation).toBe(conversation.id);
 	});
 
 	it.each([
-		["an embedded RPC host rejects its close promise", false],
+		["an embedded RPC host settles its close promise", false],
 		["an RPC process exits non-zero with the error message", true],
 	] as const)("ends when its session loses its log: %s", async (_label, exitProcess) => {
 		const root = temporaryDirectory();
@@ -351,36 +315,26 @@ describe("regression #585: one writer per conversation log", () => {
 		const { host, conversation } = await openConversation(root, await SessionManager.open(ref));
 		const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
 		const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
-		let ready!: () => void;
-		const started = new Promise<void>((resolve) => {
-			ready = resolve;
-		});
-		const mode = runLegacyRemoteRpcMode(host, conversation, {
-			exitProcess,
-			onReady: ready,
-			transport: {
-				write: () => {},
-				onLine: () => () => {},
-				onClose: () => () => {},
-				close: () => {},
-			},
-		});
+		const pair = createLoopbackRpcTransportPair();
+		const ready = Promise.withResolvers<void>();
+		const mode = runRpcMode(host, conversation, { transport: pair.server, exitProcess, onReady: ready.resolve });
 		void mode.catch(() => {});
-		await started;
+		const client = new ProtocolClient();
+		cleanups.push(() => client.stop());
+		await client.connect(pair.client);
+		await ready.promise;
 
 		const lost = await loseLog(conversation.session.sessionWriter);
 
-		if (exitProcess) {
-			await expect(mode).resolves.toBeUndefined();
-			expect(exit).toHaveBeenCalledExactlyOnceWith(1);
-		} else {
-			await expect(mode).rejects.toBeInstanceOf(ConversationLogLostError);
-			expect(exit).not.toHaveBeenCalled();
-		}
+		await expect(mode).resolves.toBeUndefined();
+		if (exitProcess) expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+		else expect(exit).not.toHaveBeenCalled();
 		expect(consoleError).toHaveBeenCalledExactlyOnceWith(
 			`Volt stopped session ${ref.sessionId} because its saved state could not be confirmed: ${lost.message}`,
 		);
 		expect(lost.message).toMatch(/^Expected log ordinal \d+, but the log head is \d+$/);
+		// The client was told the host shut down.
+		await expect(client.caughtUp()).rejects.toThrow(/shutdown/);
 		// The RPC client anchored the conversation: closing it released the session's lock.
 		expect(lockState(ref)).toBe("free");
 	});

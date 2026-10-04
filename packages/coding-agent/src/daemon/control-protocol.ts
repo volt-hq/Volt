@@ -57,7 +57,7 @@ export type {
 	RemoteTransportReasonCode,
 } from "@hansjm10/volt-protocol/daemon-control";
 
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
@@ -72,19 +72,6 @@ export const CONTROL_WORKTREES_CAPABILITY = "worktrees";
 export const CONTROL_PAIR_CANCEL_CAPABILITY = "pair_cancel";
 /** TUI/CLI understands per-device tool + RPC grant control messages and relay preambles. */
 export const CONTROL_RPC_GRANTS_CAPABILITY = "rpc_grants";
-
-/** RPC command types the daemon executes on behalf of a TUI relay. */
-export const RELAY_RPC_COMMAND_TYPES: ReadonlySet<string> = new Set([
-	"register_push_target",
-	"unregister_workspace",
-	// worktrees.v1: create/list only — remove_worktree is management-stream-only.
-	"create_worktree",
-	"list_worktrees",
-	"set_keep_awake",
-	"get_keep_awake",
-	"set_web_search_key",
-	"get_web_search_status",
-]);
 
 /** Single mapping from a persisted client record to its control-socket status. */
 export function createControlClientStatus(client: IrohRemoteClient): ControlClientStatus {

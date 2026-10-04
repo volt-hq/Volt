@@ -7,7 +7,7 @@ import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SubagentManager } from "../../../src/core/subagents/index.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
+import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import { adoptTestSession, connectTestClient } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -156,10 +156,18 @@ describe("PR #329 finalizer error contract", () => {
 		const pair = createLoopbackRpcTransportPair();
 
 		try {
-			const thrown = await runLegacyRemoteRpcMode(host, conversation, {
+			const running = runRpcMode(host, conversation, {
 				transport: pair.server,
 				exitProcess: false,
 			}).catch((error: unknown) => error);
+			// The client attaches, and its extensions bind, once it says hello.
+			await pair.client.write({
+				type: "hello",
+				protocol: 1,
+				client: { name: "test", version: "1" },
+				accepts: { hostRequests: [] },
+			});
+			const thrown = await running;
 
 			expect(thrown).toBeInstanceOf(AggregateError);
 			if (!(thrown instanceof AggregateError)) throw new Error("expected aggregate RPC startup cleanup failure");

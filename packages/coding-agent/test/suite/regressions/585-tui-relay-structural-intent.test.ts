@@ -8,17 +8,13 @@ import { executePlan } from "../../../src/core/host/plan-handoff.ts";
 import { openFork, openNewSession, openStoredSession } from "../../../src/core/host/session-intents.ts";
 import type { HostClient } from "../../../src/core/host/targets.ts";
 import { PLAN_EXECUTION_CUSTOM_TYPE } from "../../../src/core/planning.ts";
+import type { ProtocolConnection } from "../../../src/core/protocol/server/connection.ts";
 import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
+import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import { findSessionInfoById, SessionManager } from "../../../src/core/session-manager.ts";
-import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import {
-	createTestIrohConversationOptions,
-	ManualIrohRecvStream,
-	ManualIrohSendStream,
-	parseWrittenObjects,
-	withCurrentConversationAuthority,
-} from "../../iroh-stream-doubles.ts";
 import { connectTestClient, type TestClient } from "../../utilities/host-client.ts";
+import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
 import { createExtensionRuntime } from "../extension-runtime.ts";
 
 interface LifecycleEvent {
@@ -27,28 +23,26 @@ interface LifecycleEvent {
 }
 
 /** A phone relayed through the TUI: a client of the TUI's conversation that its moves redirect alone. */
-function servePhone(host: ConversationHost, conversation: HostedConversation, tempDir: string) {
-	const recv = new ManualIrohRecvStream();
-	const send = new ManualIrohSendStream();
-	const ready = Promise.withResolvers<void>();
-	const sessionId = conversation.id;
-	const closed = runIrohRemoteRpcMode(host, conversation, {
-		...createTestIrohConversationOptions(conversation),
-		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-		stream: { recv, send },
+async function servePhone(
+	host: ConversationHost,
+	conversation: HostedConversation,
+	tempDir: string,
+): Promise<{ phone: RemotePhone; connection: ProtocolConnection }> {
+	const pair = createIrohStreamPair();
+	const connection = serveIrohRemoteConnection({
+		host,
+		conversation,
+		stream: pair.host,
+		grant: createIrohRemotePresetAccess("full").rpcGrant,
+		redaction: { workspacePath: tempDir },
+		// As the TUI serves a relay offer: the phone stays here, and a session change redirects it alone.
 		redirect: {},
-		suppressExtensionUiRequests: true,
-		detachedTerminal: (detachment) => ({
-			type: "remote_terminal",
-			reason: detachment.kind === "redirected" ? "conversation_moved" : "lease_transferred",
-			workspace: "test",
-			sessionId,
-			...(detachment.kind === "redirected" ? { targetSessionId: detachment.sessionId } : {}),
-		}),
-		workspacePath: tempDir,
-		onReady: ready.resolve,
 	});
-	return { recv, send, closed, ready: Promise.race([ready.promise, closed]) };
+	const phone = connectRemotePhone(pair.phone);
+	await phone.hello();
+	await connection.ready;
+	await phone.subscribe(conversation.id);
+	return { phone, connection };
 }
 
 /** The new log is stored and unlocked, for the daemon to open when the phone reconnects. */
@@ -110,33 +104,23 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 		const { runtime, tempDir } = await createTuiRuntime();
 		const sourceId = runtime.session.sessionId;
 		const sessionDir = runtime.session.sessionManager.getSessionDir();
-		const phone = servePhone(runtime.host, runtime.conversation, tempDir);
-		cleanups.push(async () => {
-			phone.recv.end();
-			await phone.closed.catch(() => undefined);
-		});
-		await phone.ready;
+		const { phone, connection } = await servePhone(runtime.host, runtime.conversation, tempDir);
+		cleanups.push(() => connection.close());
 		events = [];
 
-		phone.recv.pushLine(
-			JSON.stringify(withCurrentConversationAuthority(phone.send, { id: "n1", type: "new_session" })),
-		);
-		await phone.closed;
-
-		const frames = parseWrittenObjects(phone.send);
-		const response = frames.find((frame) => frame.type === "response" && frame.command === "new_session");
-		expect(response).toMatchObject({ id: "n1", success: true, data: { cancelled: false } });
-		const targetId = (response?.data as { sessionId: string }).sessionId;
+		const outcome = await phone.intent("new_session", {});
+		expect(outcome).toMatchObject({ type: "accepted", conversation: expect.any(String) });
+		const targetId = outcome.type === "accepted" ? outcome.conversation : undefined;
+		if (targetId === undefined) throw new Error("new_session named no target");
 		expect(targetId).not.toBe(sourceId);
-		// The response comes first; the redirect ends the stream.
-		expect(frames.at(-1)).toEqual({
-			type: "remote_terminal",
-			reason: "conversation_moved",
-			workspace: "test",
-			sessionId: sourceId,
-			targetSessionId: targetId,
-		});
-		expect(phone.send.finished).toBe(true);
+		// The answer comes first; the subscription ends moved, then the stream.
+		await phone.ended;
+		const tail = phone.frames.slice(phone.frames.indexOf(outcome) + 1);
+		expect(tail.filter((frame) => frame.type === "ended")).toEqual([
+			{ type: "ended", subscriptionId: "s1", reason: "moved", target: targetId },
+		]);
+		expect(phone.frames.at(-1)).toEqual({ type: "ended", subscriptionId: "s1", reason: "moved", target: targetId });
+		await connection.closed;
 
 		// The TUI stays on its session; the new conversation never opened here.
 		expect(runtime.session.sessionId).toBe(sourceId);
@@ -198,24 +182,24 @@ describe("regression #585: a phone relayed through a TUI changes sessions alone"
 
 	it("keeps the phone on the session when the TUI's extensions cancel the switch", async () => {
 		const { runtime, tempDir } = await createTuiRuntime();
-		const phone = servePhone(runtime.host, runtime.conversation, tempDir);
-		cleanups.push(async () => {
-			phone.recv.end();
-			await phone.closed.catch(() => undefined);
-		});
-		await phone.ready;
+		const { phone, connection } = await servePhone(runtime.host, runtime.conversation, tempDir);
+		cleanups.push(() => connection.close());
 		cancelSwitch = true;
 
-		phone.recv.pushLine(
-			JSON.stringify(withCurrentConversationAuthority(phone.send, { id: "n1", type: "new_session" })),
-		);
+		const outcome = await phone.intent("new_session", {});
+		expect(outcome).toMatchObject({ type: "accepted", result: { cancelled: true } });
+		expect(outcome).not.toHaveProperty("conversation");
+		// The phone stays subscribed: the conversation goes on serving it.
+		expect(phone.frames.some((frame) => frame.type === "ended" || frame.type === "fatal")).toBe(false);
+		await runtime.session.prompt("still here");
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(phone.send)).toContainEqual(
-				expect.objectContaining({ id: "n1", command: "new_session", success: true, data: { cancelled: true } }),
-			),
+			expect(
+				phone.frames.some(
+					(frame) =>
+						frame.type === "entry" && frame.entry.type === "message" && frame.entry.view?.text === "still here",
+				),
+			).toBe(true),
 		);
-		expect(parseWrittenObjects(phone.send).some((frame) => frame.type === "remote_terminal")).toBe(false);
-		expect(phone.send.finished).toBe(false);
 	});
 
 	it("executes a plan in a new session from a relayed phone: the new log queues the execution turn", async () => {

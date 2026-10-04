@@ -2,19 +2,18 @@ import { chmod, mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/pr
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { describe, expect, test, vi } from "vitest";
+import { describe, expect, test } from "vitest";
 import {
 	assertIrohRemoteHandshakeHostIdentity,
 	assertIrohRemoteTicketNotExpired,
 	assertIrohRemoteTicketPayloadHostIdentity,
 	authorizeIrohRemoteClient,
 	createEmptyIrohRemoteHostState,
-	createIrohRemoteFilteredRpcTransport,
 	createIrohRemoteHandshakeFailure,
 	createIrohRemoteHandshakeSuccess,
 	createIrohRemoteHostMetadata,
-	createIrohRemoteOutboundFilteredRpcTransport,
 	createIrohRemotePresetAccess,
+	createIrohRemoteProjectionSanitizer,
 	createIrohRemoteSanitizedReconnectTicket,
 	createIrohRemoteSanitizedReconnectTicketPayload,
 	createIrohRemoteTicketQrCode,
@@ -26,10 +25,9 @@ import {
 	formatIrohRemoteTicketQrCode,
 	formatIrohRemoteTicketQrCodeTerminal,
 	getIrohRemoteControlPath,
-	getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult,
 	getIrohRemoteUnsafeAllowedTools,
 	getIrohRemoteWorkspaceAvailabilityStatus,
-	handleIrohRemoteWorkspaceUnregisterRpcCommand,
+	getIrohRemoteWorkspaceStatuses,
 	hashIrohRemotePairingSecret,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
@@ -39,7 +37,6 @@ import {
 	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
 	IROH_REMOTE_REDACTED_EXPORT_PATH,
 	IROH_REMOTE_REDACTED_SESSION_FILE,
-	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
 	IROH_REMOTE_WORKSPACE_UNAVAILABLE_RETRY_AFTER_MS,
 	type IrohRemoteAuditEvent,
 	IrohRemoteAuditLogger,
@@ -49,6 +46,7 @@ import {
 	IrohRemoteHostEngine,
 	type IrohRemoteHostState,
 	IrohRemoteHostStateManager,
+	type IrohRemoteSanitizerOptions,
 	type IrohRemoteTicketPayload,
 	type IrohRemoteWorkspace,
 	listenIrohRemoteControlServer,
@@ -59,102 +57,20 @@ import {
 	parseIrohRemoteHostState,
 	parseIrohRemoteTicketPayload,
 	parseIrohRemoteWorkspaceSpec,
-	pipeIrohRemoteOutboundJsonlReadable,
 	readIrohRemoteHandshakeLine,
 	readIrohRemoteHostState,
 	resolveIrohRemoteRuntimeToolPolicy,
 	resolveIrohRemoteWorkspaceProjectTrusted,
-	sanitizeIrohRemoteOutbound,
-	sanitizeIrohRemoteOutboundJsonLine,
 	selectIrohRemoteWorkspace,
-	serializeIrohRemoteRpcFilterRejection,
 	shouldReplaceIrohRemoteIntegratedRuntimeForAuthorization,
 	writeIrohRemoteHandshakeResponse,
 	writeIrohRemoteHello,
 	writeIrohRemoteHostState,
 } from "../src/core/remote/iroh/index.ts";
 import { IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE } from "../src/core/remote/iroh/protocol.ts";
-import type {
-	IrohBytes,
-	IrohRecvStreamLike,
-	IrohSendStreamLike,
-	RpcCloseHandler,
-	RpcLineHandler,
-	RpcTransport,
-} from "../src/core/rpc/index.ts";
-import {
-	createIrohRemoteCloseDeferringRpcTransport,
-	createIrohRemoteHostCommandRpcTransport,
-} from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-
-const CONTEXT_COMPACT_ACTION_ID = "context.compact";
-const REVIEW_BRANCH_ACTION_ID = "review.branch";
-const REVIEW_COMMIT_ACTION_ID = "review.commit";
-const REVIEW_PR_ACTION_ID = "review.pr";
-const REVIEW_UNCOMMITTED_ACTION_ID = "review.uncommitted";
-const RUN_CANCEL_ACTION_ID = "run.cancel";
-const SESSION_NEW_ACTION_ID = "session.new";
-const SESSION_RENAME_ACTION_ID = "session.rename";
-const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
+import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 
 const CODING_RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
-
-class ManualRpcTransport implements RpcTransport {
-	readonly writes: object[] = [];
-	readonly writeResults: Array<void | Promise<void>> = [];
-	readonly lineHandlers = new Set<RpcLineHandler>();
-	readonly closeHandlers = new Set<RpcCloseHandler>();
-	closeCalls = 0;
-	flushCalls = 0;
-	waitForBackpressureCalls = 0;
-	writeError: Error | undefined;
-
-	write(value: object): void | Promise<void> {
-		this.writes.push(value);
-		if (this.writeError) {
-			throw this.writeError;
-		}
-		return this.writeResults.shift();
-	}
-
-	onLine(handler: RpcLineHandler): () => void {
-		this.lineHandlers.add(handler);
-		return () => {
-			this.lineHandlers.delete(handler);
-		};
-	}
-
-	onClose(handler: RpcCloseHandler): () => void {
-		this.closeHandlers.add(handler);
-		return () => {
-			this.closeHandlers.delete(handler);
-		};
-	}
-
-	async waitForBackpressure(): Promise<void> {
-		this.waitForBackpressureCalls++;
-	}
-
-	async flush(): Promise<void> {
-		this.flushCalls++;
-	}
-
-	close(): void {
-		this.closeCalls++;
-	}
-
-	emitLine(line: string): void {
-		for (const handler of this.lineHandlers) {
-			handler(line);
-		}
-	}
-
-	emitClose(error?: Error): void {
-		for (const handler of this.closeHandlers) {
-			handler(error);
-		}
-	}
-}
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
 
@@ -228,26 +144,6 @@ class FailingAuditSink {
 	}
 }
 
-interface DeferredVoid {
-	promise: Promise<void>;
-	resolve(): void;
-	reject(error: Error): void;
-}
-
-function createDeferredVoid(): DeferredVoid {
-	let resolve: () => void = () => {};
-	let reject: (error: Error) => void = () => {};
-	const promise = new Promise<void>((resolvePromise, rejectPromise) => {
-		resolve = resolvePromise;
-		reject = rejectPromise;
-	});
-	return { promise, resolve, reject };
-}
-
-function nextTick(): Promise<void> {
-	return new Promise((resolve) => setImmediate(resolve));
-}
-
 async function closeListeningServer(server: Server): Promise<void> {
 	if (!server.listening) return;
 	await new Promise<void>((resolveClose, rejectClose) => {
@@ -259,6 +155,11 @@ async function closeListeningServer(server: Server): Promise<void> {
 			resolveClose();
 		});
 	});
+}
+
+/** A value as a paired device sees it: the remote profile's field-aware path redaction. */
+function sanitizeRemoteValue(value: object, options: IrohRemoteSanitizerOptions): unknown {
+	return createIrohRemoteProjectionSanitizer(options).sanitizeValue(value);
 }
 
 function makeHello(workspace: string, secret?: string, clientLabel = "phone"): IrohRemoteHello {
@@ -803,6 +704,7 @@ describe("Iroh remote core helpers", () => {
 	});
 
 	test("pins protocol v1 ticket and handshake compatibility vectors", () => {
+		expect(IROH_REMOTE_ALPN).toBe("volt/1");
 		const payload: IrohRemoteTicketPayload = {
 			alpn: IROH_REMOTE_ALPN,
 			expiresAt: 1790000000000,
@@ -813,14 +715,14 @@ describe("Iroh remote core helpers", () => {
 			workspace: "volt",
 		};
 		const ticket =
-			"volt+iroh://v1/eyJhbHBuIjoidm9sdC1ycGMvMCIsImV4cGlyZXNBdCI6MTc5MDAwMDAwMDAwMCwiaXJvaFRpY2tldCI6Imlyb2gtZW5kcG9pbnQtdGlja2V0Iiwibm9kZUlkIjoiaG9zdC1ub2RlLWlkIiwicmVsYXlNb2RlIjoiZGlzYWJsZWQiLCJzZWNyZXQiOiJvbmUtdGltZS1zZWNyZXQiLCJ3b3Jrc3BhY2UiOiJ2b2x0In0";
+			"volt+iroh://v1/eyJhbHBuIjoidm9sdC8xIiwiZXhwaXJlc0F0IjoxNzkwMDAwMDAwMDAwLCJpcm9oVGlja2V0IjoiaXJvaC1lbmRwb2ludC10aWNrZXQiLCJub2RlSWQiOiJob3N0LW5vZGUtaWQiLCJyZWxheU1vZGUiOiJkaXNhYmxlZCIsInNlY3JldCI6Im9uZS10aW1lLXNlY3JldCIsIndvcmtzcGFjZSI6InZvbHQifQ";
 
 		expect(encodeIrohRemoteTicketPayload(payload)).toBe(ticket);
 		expect(decodeIrohRemoteTicketPayload(ticket)).toEqual(payload);
 		expect(parseIrohRemoteTicketPayload({ ...payload, unknownFutureField: "ignored" })).toEqual(payload);
 
 		const helloLine =
-			'{"type":"volt_iroh_hello","protocol":"volt-rpc/0","workspace":"volt","secret":"one-time-secret","clientLabel":"Jordan iPhone","clientNodeId":"client-claimed-node-id","conversation":{"target":"last"}}';
+			'{"type":"volt_iroh_hello","protocol":"volt/1","workspace":"volt","secret":"one-time-secret","clientLabel":"Jordan iPhone","clientNodeId":"client-claimed-node-id","conversation":{"target":"last"}}';
 		expect(parseIrohRemoteHelloLine(helloLine)).toEqual({
 			type: "volt_iroh_hello",
 			protocol: IROH_REMOTE_ALPN,
@@ -886,7 +788,7 @@ describe("Iroh remote core helpers", () => {
 		});
 	});
 
-	test("pins protocol v1 remote command and redaction compatibility vectors", () => {
+	test("pins protocol v1 outcome and redaction compatibility vectors", () => {
 		expect(Array.from(IROH_REMOTE_OUTCOMES)).toEqual([
 			"host_unreachable",
 			"host_storage_full",
@@ -928,242 +830,9 @@ describe("Iroh remote core helpers", () => {
 			"conversation_in_use",
 			"conversation_locked",
 		]);
-		expect(Array.from(IROH_REMOTE_RPC_PASSTHROUGH_TYPES)).toEqual([
-			"prompt",
-			"steer",
-			"follow_up",
-			"abort",
-			"cancel_job",
-			"new_session",
-			"set_agent_mode",
-			"plan_execute",
-			"plan_change",
-			"plan_discard",
-			"set_client_capabilities",
-			"report_stream_discontinuity",
-			"get_pending_host_actions",
-			"host_action_response",
-			"get_state",
-			"list_jobs",
-			"read_job",
-			"get_transcript",
-			"get_subscription_usage",
-			"get_message_images",
-			"get_transcript_entry_text",
-			"get_mcp_capabilities",
-			"list_mcp_servers",
-			"get_mcp_server",
-			"connect_mcp_server",
-			"refresh_mcp_server",
-			"set_mcp_server_enabled",
-			"list_mcp_recent_calls",
-			"list_mcp_tools",
-			"get_mcp_tool",
-			"list_mcp_resources",
-			"read_mcp_resource",
-			"list_mcp_prompts",
-			"get_mcp_prompt",
-			"disconnect_mcp_server",
-			"poll_mcp_server_auth",
-			"cancel_mcp_server_auth",
-			"logout_mcp_server",
-			"get_ui_capabilities",
-			"get_ui_actions",
-			"cancel_workflow",
-			"get_review_result",
-			"get_review_general",
-			"list_review_workflows",
-			"open_review_session",
-			"start_review_discussions",
-			"list_review_discussions",
-			"reset_review_discussion",
-			"get_review_discussion_source",
-			"acknowledge_review",
-			"record_review_finding_outcome",
-			"rerun_review",
-			"publish_review",
-			"list_sessions",
-			"get_session_contexts",
-			"switch_session_by_id",
-			"register_push_target",
-			"unregister_workspace",
-			"create_worktree",
-			"list_worktrees",
-			"set_keep_awake",
-			"get_keep_awake",
-			"set_web_search_key",
-			"get_web_search_status",
-			"upload_device_logs",
-			"extension_ui_response",
-			"get_available_models",
-			"set_model",
-			"set_thinking_level",
-		]);
-		for (const type of IROH_REMOTE_RPC_PASSTHROUGH_TYPES) {
-			const result = getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-1`, type }));
-			expect(result).toEqual({ allowed: true, command: { id: `${type}-1`, type } });
-		}
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "mcp-auth-1", type: "start_mcp_server_auth", server: "github", flow: "device" }),
-			),
-		).toEqual({
-			allowed: true,
-			command: { id: "mcp-auth-1", type: "start_mcp_server_auth", server: "github", flow: "device" },
-		});
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({
-					id: "mcp-auth-browser-1",
-					type: "start_mcp_server_auth",
-					server: "github",
-					flow: "browser",
-				}),
-			),
-		).toEqual({
-			allowed: false,
-			response: {
-				id: "mcp-auth-browser-1",
-				type: "response",
-				command: "start_mcp_server_auth",
-				success: false,
-				error: "Only MCP device-code auth can be started over remote host",
-			},
-		});
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "bash-1", type: "bash" }))).toEqual({
-			allowed: false,
-			response: {
-				id: "bash-1",
-				type: "response",
-				command: "bash",
-				success: false,
-				error: "RPC command not allowed over remote host: bash",
-			},
-		});
-		const dynamicInvocation = {
-			id: "invoke-1",
-			type: "invoke_ui_action",
-			action: "skill.sk_a1b2c3d4e5f6_1",
-		};
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify(dynamicInvocation))).toEqual({
-			allowed: true,
-			command: dynamicInvocation,
-		});
-		const dynamicCompletion = {
-			id: "completion-1",
-			type: "get_ui_action_completions",
-			action: "skill.sk_a1b2c3d4e5f6_1",
-			argument: "arguments",
-			prefix: "crash",
-		};
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify(dynamicCompletion))).toEqual({
-			allowed: true,
-			command: dynamicCompletion,
-		});
-		for (const action of [
-			SESSION_NEW_ACTION_ID,
-			RUN_CANCEL_ACTION_ID,
-			THINKING_FAST_MODE_ACTION_ID,
-			REVIEW_UNCOMMITTED_ACTION_ID,
-			REVIEW_BRANCH_ACTION_ID,
-			REVIEW_PR_ACTION_ID,
-			REVIEW_COMMIT_ACTION_ID,
-		]) {
-			const builtInInvocation = {
-				id: `${action}-1`,
-				type: "invoke_ui_action",
-				action,
-			};
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify(builtInInvocation))).toEqual({
-				allowed: true,
-				command: builtInInvocation,
-			});
-		}
-		for (const action of [CONTEXT_COMPACT_ACTION_ID, SESSION_RENAME_ACTION_ID]) {
-			expect(
-				getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${action}-1`, type: "invoke_ui_action", action })),
-			).toEqual({
-				allowed: false,
-				response: {
-					id: `${action}-1`,
-					type: "response",
-					command: "invoke_ui_action",
-					success: false,
-					error: `UI action not available over remote host: ${action}`,
-				},
-			});
-			expect(
-				getIrohRemoteRpcFilterResult(
-					JSON.stringify({
-						id: `${action}-completion-1`,
-						type: "get_ui_action_completions",
-						action,
-						argument: "arguments",
-					}),
-				),
-			).toEqual({
-				allowed: false,
-				response: {
-					id: `${action}-completion-1`,
-					type: "response",
-					command: "get_ui_action_completions",
-					success: false,
-					error: `UI action not available over remote host: ${action}`,
-				},
-			});
-		}
-		for (const action of ["review.pr.extra", "review.commitment"]) {
-			expect(
-				getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${action}-1`, type: "invoke_ui_action", action })),
-			).toEqual({
-				allowed: false,
-				response: {
-					id: `${action}-1`,
-					type: "response",
-					command: "invoke_ui_action",
-					success: false,
-					error: `UI action not available over remote host: ${action}`,
-				},
-			});
-		}
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "get_messages-1", type: "get_messages" }))).toEqual({
-			allowed: false,
-			response: {
-				id: "get_messages-1",
-				type: "response",
-				command: "get_messages",
-				success: false,
-				error: "unsupported_remote_command",
-			},
-		});
-		for (const command of ["get_available_models", "set_model", "set_thinking_level"] as const) {
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${command}-1`, type: command }))).toEqual({
-				allowed: true,
-				command: { id: `${command}-1`, type: command },
-			});
-		}
-		for (const command of [
-			"switch_session",
-			"get_commands",
-			"get_last_assistant_text",
-			"cycle_model",
-			"cycle_thinking_level",
-		] as const) {
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${command}-1`, type: command }))).toEqual({
-				allowed: false,
-				response: {
-					id: `${command}-1`,
-					type: "response",
-					command,
-					success: false,
-					error: `RPC command not allowed over remote host: ${command}`,
-				},
-			});
-		}
-
 		const workspacePath = "/Users/jordan/project";
 		expect(
-			sanitizeIrohRemoteOutbound(
+			sanitizeRemoteValue(
 				{
 					type: "response",
 					command: "get_state",
@@ -3143,7 +2812,7 @@ describe("Iroh remote core helpers", () => {
 		expect((await stateManager.getState()).workspaces.map((workspace) => workspace.name)).toEqual(["Volt", "café"]);
 	});
 
-	test("remote RPC unregister command removes workspace registration and returns fresh metadata only", async () => {
+	test("host state manager unregisters a workspace and keeps unrelated clients, revocations, and registrations", async () => {
 		const tempDir = await mkdtemp(join(tmpdir(), "volt-iroh-unregister-rpc-"));
 		try {
 			const alphaPath = join(tempDir, "alpha");
@@ -3204,34 +2873,20 @@ describe("Iroh remote core helpers", () => {
 				},
 			});
 
-			const result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(
-				{ id: "remove-beta", type: "unregister_workspace", workspaceName: "beta" },
-				{
-					classifyWorkspaceAvailability: getIrohRemoteWorkspaceAvailabilityStatus,
-					client: { allowedWorkspaces: ["alpha", "beta"] },
-					stateManager,
-				},
-			);
-
-			expect(result).toEqual({
-				handled: true,
-				metadata: {
-					workspaceNames: ["alpha"],
-					workspaces: [{ name: "alpha", status: "available" }],
-				},
-				response: {
-					id: "remove-beta",
-					type: "response",
-					command: "unregister_workspace",
-					success: true,
-					data: {
-						removedWorkspace: "beta",
-						workspaceNames: ["alpha"],
-						workspaces: [{ name: "alpha", status: "available" }],
-					},
-				},
+			await expect(stateManager.unregisterWorkspace("beta")).resolves.toEqual({
+				name: "beta",
+				path: betaPath,
+				allowedTools: "read,grep",
 			});
-			expect(JSON.stringify(result)).not.toContain(betaPath);
+			expect(
+				await getIrohRemoteWorkspaceStatuses(
+					await stateManager.getState(),
+					getIrohRemoteWorkspaceAvailabilityStatus,
+				),
+			).toEqual([
+				{ name: "alpha", status: "available" },
+				{ name: "missing", status: "missing" },
+			]);
 			const state = await stateManager.getState();
 			expect(state.workspaces.map((workspace) => workspace.name)).toEqual(["alpha", "missing"]);
 			expect(state.clients).toEqual([expect.objectContaining({ nodeId: "client-node" })]);
@@ -3242,7 +2897,7 @@ describe("Iroh remote core helpers", () => {
 		}
 	});
 
-	test("remote RPC unregister command rejects unknown workspace without mutating state", async () => {
+	test("host state manager unregister of an unknown workspace does not mutate state", async () => {
 		const stateManager = new IrohRemoteHostStateManager({
 			initialState: {
 				hostSecretKey: undefined,
@@ -3252,37 +2907,7 @@ describe("Iroh remote core helpers", () => {
 		});
 		const before = await stateManager.getState();
 
-		await expect(
-			handleIrohRemoteWorkspaceUnregisterRpcCommand(
-				{ id: "remove-missing", type: "unregister_workspace", workspaceName: "missing" },
-				{ client: { allowedWorkspaces: [] }, stateManager },
-			),
-		).resolves.toEqual({
-			handled: true,
-			response: {
-				id: "remove-missing",
-				type: "response",
-				command: "unregister_workspace",
-				success: false,
-				error: "No registered Iroh remote workspace named missing",
-			},
-		});
-		expect(await stateManager.getState()).toEqual(before);
-		await expect(
-			handleIrohRemoteWorkspaceUnregisterRpcCommand(
-				{ id: "remove-path", type: "unregister_workspace", workspaceName: "alpha", path: "/alpha" },
-				{ client: { allowedWorkspaces: [] }, stateManager },
-			),
-		).resolves.toEqual({
-			handled: true,
-			response: {
-				id: "remove-path",
-				type: "response",
-				command: "unregister_workspace",
-				success: false,
-				error: "Workspace unregister accepts a workspace name only, not a path",
-			},
-		});
+		await expect(stateManager.unregisterWorkspace("missing")).resolves.toBeUndefined();
 		expect(await stateManager.getState()).toEqual(before);
 	});
 
@@ -4019,320 +3644,6 @@ describe("Iroh remote core helpers", () => {
 		});
 	});
 
-	test("wraps RPC transports with the remote command filter", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteFilteredRpcTransport({
-			transport: inner,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-		});
-		const forwardedLines: string[] = [];
-		transport.onLine((line) => {
-			forwardedLines.push(line);
-		});
-
-		const promptLine = JSON.stringify({
-			id: "prompt-1",
-			type: "prompt",
-			clientMessageId: "client-prompt-1",
-			message: "hi",
-		});
-		inner.emitLine(promptLine);
-		inner.emitLine(JSON.stringify({ id: "bash-1", type: "bash", command: "pwd" }));
-		inner.emitLine("{");
-		await transport.waitForBackpressure?.();
-		await transport.flush?.();
-		await transport.close();
-
-		expect(forwardedLines).toEqual([promptLine]);
-		expect(inner.writes).toEqual([
-			{
-				id: "bash-1",
-				type: "response",
-				command: "bash",
-				success: false,
-				error: "RPC command not allowed over remote host: bash",
-			},
-			expect.objectContaining({ type: "response", command: "parse", success: false }),
-		]);
-		expect(inner.waitForBackpressureCalls).toBe(1);
-		expect(inner.flushCalls).toBe(1);
-		expect(inner.closeCalls).toBe(1);
-	});
-
-	test("retags malformed remote invoke_ui_action correlations as uncorrelated validation failures", () => {
-		for (const id of [undefined, 7, "", "   ", "é".repeat(129)]) {
-			const result = getIrohRemoteRpcFilterResult(
-				JSON.stringify({
-					...(id === undefined ? {} : { id }),
-					type: "invoke_ui_action",
-					action: SESSION_NEW_ACTION_ID,
-				}),
-			);
-			expect(result).toEqual({
-				allowed: false,
-				response: {
-					type: "response",
-					command: "invalid",
-					success: false,
-					error: "invoke_ui_action requires a trimmed, non-empty correlation id of at most 256 UTF-8 bytes",
-				},
-			});
-		}
-	});
-
-	test("routes policy rejections through the installed ordered response sink", async () => {
-		const inner = new ManualRpcTransport();
-		const orderedWrites: object[] = [];
-		const transport = createIrohRemoteFilteredRpcTransport({
-			transport: inner,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			writeRejectedResponse: async (value) => {
-				orderedWrites.push(value);
-			},
-		});
-		transport.onLine(() => {
-			throw new Error("denied commands must not reach RPC mode");
-		});
-
-		inner.emitLine(JSON.stringify({ id: "denied", type: "bash", command: "pwd" }));
-		await vi.waitFor(() => expect(orderedWrites).toHaveLength(1));
-
-		expect(inner.writes).toEqual([]);
-		expect(orderedWrites).toEqual([expect.objectContaining({ id: "denied", command: "bash", success: false })]);
-	});
-
-	test("checks current authority before capability filtering and closes after the ordered rejection", async () => {
-		const inner = new ManualRpcTransport();
-		const events: string[] = [];
-		const transport = createIrohRemoteFilteredRpcTransport({
-			transport: inner,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			isRpcGrantCurrent: () => false,
-			writeRejectedResponse: async () => {
-				events.push("ordinary-rejection-sink");
-			},
-			writeStaleGrantResponse: async (value) => {
-				events.push(`write:${String((value as { error?: unknown }).error)}`);
-			},
-			onRpcGrantStale: async () => {
-				events.push("close");
-			},
-		});
-		transport.onLine(() => {
-			throw new Error("stale grants must not dispatch any command");
-		});
-
-		// This is also statically denied: persisted authority must still win and
-		// force reconnect before the snapshot grant is consulted.
-		inner.emitLine(JSON.stringify({ id: "stale", type: "bash", command: "pwd" }));
-		await vi.waitFor(() => expect(events).toHaveLength(2));
-
-		expect(inner.writes).toEqual([]);
-		expect(events).toEqual(["write:RPC grant is stale; reconnect", "close"]);
-	});
-
-	test("preserves only usable invocation ids on stale-grant responses", async () => {
-		const cases = [
-			{
-				command: { id: "invoke-stale-exact", type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID },
-				expected: {
-					id: "invoke-stale-exact",
-					type: "response",
-					command: "invoke_ui_action",
-					success: false,
-					error: "RPC grant is stale; reconnect",
-				},
-			},
-			{
-				command: { id: " ".repeat(257), type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID },
-				expected: {
-					type: "response",
-					command: "invalid",
-					success: false,
-					error: "RPC grant is stale; reconnect",
-				},
-			},
-		];
-
-		for (const { command, expected } of cases) {
-			const inner = new ManualRpcTransport();
-			const staleWrites: object[] = [];
-			const transport = createIrohRemoteFilteredRpcTransport({
-				transport: inner,
-				rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-				isRpcGrantCurrent: () => false,
-				writeStaleGrantResponse: (value) => {
-					staleWrites.push(value);
-				},
-			});
-			transport.onLine(() => {
-				throw new Error("stale grants must not dispatch");
-			});
-
-			inner.emitLine(JSON.stringify(command));
-			await vi.waitFor(() => expect(staleWrites).toHaveLength(1));
-			expect(staleWrites[0]).toEqual(expected);
-		}
-	});
-
-	test("retires stale authority even when the courtesy rejection cannot be admitted", async () => {
-		const inner = new ManualRpcTransport();
-		const admissionError = new Error("ordered feed already fenced");
-		let retired = false;
-		const transport = createIrohRemoteFilteredRpcTransport({
-			transport: inner,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			isRpcGrantCurrent: () => false,
-			writeStaleGrantResponse: () => {
-				throw admissionError;
-			},
-			onRpcGrantStale: () => {
-				retired = true;
-			},
-		});
-		transport.onLine(() => {
-			throw new Error("stale grants must not dispatch any command");
-		});
-
-		inner.emitLine(JSON.stringify({ id: "stale-fenced", type: "get_state" }));
-		await vi.waitFor(() => expect(retired).toBe(true));
-
-		await expect(transport.waitForBackpressure?.()).rejects.toBe(admissionError);
-	});
-
-	test("intercepts allowed remote host commands before subsequent active-connection state requests", async () => {
-		const inner = new ManualRpcTransport();
-		const forwardedLines: string[] = [];
-		let activeWorkspaceNames = ["alpha", "beta"];
-		const filteredTransport = createIrohRemoteFilteredRpcTransport({
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			transport: createIrohRemoteCloseDeferringRpcTransport({
-				transport: inner,
-				waitForPromptCompletion: () => Promise.resolve(),
-			}),
-		});
-		const transport = createIrohRemoteHostCommandRpcTransport({
-			transport: filteredTransport,
-			handleCommand: async (command) => {
-				if (command.type !== "unregister_workspace") {
-					return undefined;
-				}
-				await Promise.resolve();
-				activeWorkspaceNames = ["alpha"];
-				return {
-					id: typeof command.id === "string" ? command.id : undefined,
-					type: "response",
-					command: "unregister_workspace",
-					success: true,
-					data: {
-						removedWorkspace: "beta",
-						workspaceNames: activeWorkspaceNames,
-						workspaces: [{ name: "alpha", status: "available" }],
-					},
-				};
-			},
-		});
-		transport.onLine((line) => {
-			if (JSON.parse(line).type === "get_state") {
-				expect(activeWorkspaceNames).toEqual(["alpha"]);
-			}
-			forwardedLines.push(line);
-		});
-
-		inner.emitLine(JSON.stringify({ id: "remove-beta", type: "unregister_workspace", workspaceName: "beta" }));
-		const getStateLine = JSON.stringify({ id: "state-after-remove", type: "get_state" });
-		inner.emitLine(getStateLine);
-		inner.emitLine(JSON.stringify({ id: "unsafe", type: "bash", command: "pwd" }));
-		await transport.flush?.();
-
-		expect(forwardedLines).toEqual([getStateLine]);
-		expect(inner.writes).toContainEqual({
-			id: "remove-beta",
-			type: "response",
-			command: "unregister_workspace",
-			success: true,
-			data: {
-				removedWorkspace: "beta",
-				workspaceNames: ["alpha"],
-				workspaces: [{ name: "alpha", status: "available" }],
-			},
-		});
-		expect(inner.writes).toContainEqual({
-			id: "unsafe",
-			type: "response",
-			command: "bash",
-			success: false,
-			error: "RPC command not allowed over remote host: bash",
-		});
-	});
-
-	test("normalizes remote host handler failures with the invocation correlation contract", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteHostCommandRpcTransport({
-			transport: inner,
-			handleCommand: () => {
-				throw new Error("host handler failed");
-			},
-		});
-		transport.onLine(() => {
-			throw new Error("handled commands must not be forwarded");
-		});
-
-		inner.emitLine(
-			JSON.stringify({ id: "invoke-host-exact", type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID }),
-		);
-		inner.emitLine(JSON.stringify({ type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID }));
-		await transport.flush?.();
-
-		expect(inner.writes).toEqual([
-			{
-				id: "invoke-host-exact",
-				type: "response",
-				command: "invoke_ui_action",
-				success: false,
-				error: "host handler failed",
-			},
-			{
-				type: "response",
-				command: "invalid",
-				success: false,
-				error: "host handler failed",
-			},
-		]);
-	});
-
-	test("routes remote command filter rejections through outbound and close-deferring layers", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteFilteredRpcTransport({
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			transport: createIrohRemoteCloseDeferringRpcTransport({
-				transport: createIrohRemoteOutboundFilteredRpcTransport({
-					transport: inner,
-					workspacePath: "/Users/jordan/project",
-				}),
-				waitForPromptCompletion: () => Promise.resolve(),
-			}),
-		});
-		const forwardedLines: string[] = [];
-		transport.onLine((line) => {
-			forwardedLines.push(line);
-		});
-
-		inner.emitLine(JSON.stringify({ id: "private-command", type: "/Users/jordan/private" }));
-		await transport.waitForBackpressure?.();
-
-		expect(forwardedLines).toEqual([]);
-		expect(inner.writes).toEqual([
-			expect.objectContaining({
-				id: "private-command",
-				type: "response",
-				command: "/Users/jordan/private",
-				success: false,
-				error: "RPC command not allowed over remote host: /Users/jordan/private",
-			}),
-		]);
-	});
-
 	test("sanitizes representative remote-safe RPC event views", () => {
 		const workspacePath = "/Users/jordan/project";
 		const sessionFile = "/Users/jordan/.volt/agent/sessions/project/session.jsonl";
@@ -4340,7 +3651,7 @@ describe("Iroh remote core helpers", () => {
 		const bashOutputPath = join(tmpdir(), "volt-bash-deadbeef.log");
 
 		expect(
-			sanitizeIrohRemoteOutbound(
+			sanitizeRemoteValue(
 				{
 					type: "response",
 					command: "get_state",
@@ -4365,7 +3676,7 @@ describe("Iroh remote core helpers", () => {
 			},
 		});
 		expect(
-			sanitizeIrohRemoteOutbound(
+			sanitizeRemoteValue(
 				{
 					type: "response",
 					command: "export_html",
@@ -4381,7 +3692,7 @@ describe("Iroh remote core helpers", () => {
 			data: { path: IROH_REMOTE_REDACTED_EXPORT_PATH, message: `Exported ${IROH_REMOTE_REDACTED_EXPORT_PATH}` },
 		});
 		expect(
-			sanitizeIrohRemoteOutbound(
+			sanitizeRemoteValue(
 				{
 					type: "response",
 					command: "bash",
@@ -4406,7 +3717,7 @@ describe("Iroh remote core helpers", () => {
 			},
 		});
 		expect(
-			sanitizeIrohRemoteOutbound(
+			sanitizeRemoteValue(
 				{
 					type: "response",
 					command: "get_transcript",
@@ -4452,7 +3763,7 @@ describe("Iroh remote core helpers", () => {
 			},
 		});
 		expect(
-			sanitizeIrohRemoteOutbound(
+			sanitizeRemoteValue(
 				{
 					type: "extension_ui_request",
 					id: "extension-confirm-1",
@@ -4470,7 +3781,7 @@ describe("Iroh remote core helpers", () => {
 			message: "Approve /Users/jordan/.volt/auth.json?",
 		});
 		expect(
-			sanitizeIrohRemoteOutbound(
+			sanitizeRemoteValue(
 				{
 					type: "event",
 					message: {
@@ -4547,7 +3858,7 @@ describe("Iroh remote core helpers", () => {
 			[workspacePathNfc, workspacePathNfd],
 			[workspacePathNfd, workspacePathNfc],
 		]) {
-			const sanitized = sanitizeIrohRemoteOutbound(
+			const sanitized = sanitizeRemoteValue(
 				{
 					type: "response",
 					command: "get_state",
@@ -4587,7 +3898,7 @@ describe("Iroh remote core helpers", () => {
 			},
 		};
 
-		expect(sanitizeIrohRemoteOutbound(value, { workspacePath: alphaPath })).toEqual({
+		expect(sanitizeRemoteValue(value, { workspacePath: alphaPath })).toEqual({
 			type: "response",
 			command: "get_state",
 			success: true,
@@ -4597,7 +3908,7 @@ describe("Iroh remote core helpers", () => {
 				message: `alpha /workspace/src beta ${betaPath}/src`,
 			},
 		});
-		expect(sanitizeIrohRemoteOutbound(value, { workspacePath: betaPath })).toEqual({
+		expect(sanitizeRemoteValue(value, { workspacePath: betaPath })).toEqual({
 			type: "response",
 			command: "get_state",
 			success: true,
@@ -4634,7 +3945,7 @@ describe("Iroh remote core helpers", () => {
 		];
 
 		for (const [index, value] of values.entries()) {
-			const sanitized = sanitizeIrohRemoteOutbound(value, options);
+			const sanitized = sanitizeRemoteValue(value, options);
 			if (index > 0) expect(sanitized).toMatchObject(publicPayload);
 			const wire = JSON.stringify(sanitized);
 			for (const forbidden of [
@@ -4661,7 +3972,7 @@ describe("Iroh remote core helpers", () => {
 		const sessionFile = "/Users/jordan/.volt/agent/sessions/project/session.jsonl";
 		const bashOutputPath = join(tmpdir(), "volt-bash-deadbeef.log");
 
-		const sanitized = sanitizeIrohRemoteOutbound(
+		const sanitized = sanitizeRemoteValue(
 			{
 				id: "/Users/jordan/private/request-id",
 				type: "response",
@@ -4745,7 +4056,7 @@ describe("Iroh remote core helpers", () => {
 		expect(sanitized.data.ordinaryKeys).toEqual({ constructor: 1, toString: 2 });
 
 		const spacedWorkspacePath = "/Users/Jordan Hans/project";
-		const freeTextSanitized = sanitizeIrohRemoteOutbound(
+		const freeTextSanitized = sanitizeRemoteValue(
 			{
 				message: `Opened ${spacedWorkspacePath}/src/index.ts and outside /Users/Jordan Hans/.volt/auth.json`,
 			},
@@ -4755,13 +4066,14 @@ describe("Iroh remote core helpers", () => {
 			"Opened /workspace/src/index.ts and outside /Users/Jordan Hans/.volt/auth.json",
 		);
 
-		const urlTextSanitized = sanitizeIrohRemoteOutbound(
+		const urlTextSanitized = sanitizeRemoteValue(
 			{ message: "See https://example.com/Users/jordan/project/src/index.ts" },
 			{ workspacePath },
 		) as { message: string };
-		expect(urlTextSanitized.message).toBe("See https://example.com/Users/jordan/project/src/index.ts");
+		// A URL whose path spells the workspace root still names it: the root is replaced wherever it appears.
+		expect(urlTextSanitized.message).toBe("See https://example.com/workspace/src/index.ts");
 
-		const keyEdgeSanitized = sanitizeIrohRemoteOutbound(
+		const keyEdgeSanitized = sanitizeRemoteValue(
 			{
 				"/Users/jordan/private key": "key",
 				__proto__: { leaked: true },
@@ -4774,25 +4086,25 @@ describe("Iroh remote core helpers", () => {
 		});
 		expect(Object.getPrototypeOf(keyEdgeSanitized)).toBeNull();
 
-		const ordinaryDataSanitized = sanitizeIrohRemoteOutbound(
+		const ordinaryDataSanitized = sanitizeRemoteValue(
 			{ type: "response", data: "/Users/jordan/.volt/auth.json" },
 			{ workspacePath },
 		) as { data: string };
 		expect(ordinaryDataSanitized.data).toBe("/Users/jordan/.volt/auth.json");
 
-		const spacedRelativeSeparatorSanitized = sanitizeIrohRemoteOutbound(
+		const spacedRelativeSeparatorSanitized = sanitizeRemoteValue(
 			{ message: "Updated Sources / Example.swift, Sources /Example.swift, and Sources/Example.swift" },
 			{ workspacePath },
 		) as { message: string };
 		expect(spacedRelativeSeparatorSanitized.message).toBe(
 			"Updated Sources / Example.swift, Sources /Example.swift, and Sources/Example.swift",
 		);
-		const strictRootPathSanitized = sanitizeIrohRemoteOutbound({ path: "/" }, { workspacePath }) as {
+		const strictRootPathSanitized = sanitizeRemoteValue({ path: "/" }, { workspacePath }) as {
 			path: string;
 		};
 		expect(strictRootPathSanitized.path).toBe("/");
 
-		const opaqueContentSanitized = sanitizeIrohRemoteOutbound(
+		const opaqueContentSanitized = sanitizeRemoteValue(
 			{
 				content: [
 					{
@@ -4842,429 +4154,24 @@ describe("Iroh remote core helpers", () => {
 			},
 		]);
 
-		const remoteWorkspaceSanitized = sanitizeIrohRemoteOutbound({ cwd: "/workspace/src" }, { workspacePath }) as {
+		const remoteWorkspaceSanitized = sanitizeRemoteValue({ cwd: "/workspace/src" }, { workspacePath }) as {
 			cwd: string;
 		};
 		expect(remoteWorkspaceSanitized.cwd).toBe("/workspace/src");
 	});
 
-	test("sanitizes remote outbound JSONL lines for remote streams", () => {
-		const line = `${JSON.stringify({
-			id: "/Users/jordan/private/request-id",
-			type: "response",
-			command: "get_messages",
-			success: true,
-			data: {
-				messages: [
-					{
-						role: "assistant",
-						content: [
-							{
-								type: "text",
-								text: "Read /Users/jordan/project/src/index.ts and /Users/jordan/.volt/auth.json",
-							},
-							{
-								type: "image",
-								data: "/9j/4AAQSkZJRgABAQAAAQABAAD=",
-								mimeType: "image/jpeg",
-							},
-						],
-					},
-				],
-			},
-		})}\n`;
-
-		expect(sanitizeIrohRemoteOutboundJsonLine(line, { workspacePath: "/Users/jordan/project" })).toBe(
-			`${JSON.stringify({
-				id: "/Users/jordan/private/request-id",
-				type: "response",
-				command: "get_messages",
-				success: true,
-				data: {
-					messages: [
-						{
-							role: "assistant",
-							content: [
-								{ type: "text", text: "Read /workspace/src/index.ts and /Users/jordan/.volt/auth.json" },
-								{
-									type: "image",
-									data: "/9j/4AAQSkZJRgABAQAAAQABAAD=",
-									mimeType: "image/jpeg",
-								},
-							],
-						},
-					],
-				},
-			})}\n`,
-		);
-		expect(sanitizeIrohRemoteOutboundJsonLine("not json\n", { workspacePath: "/Users/jordan/project" })).toBe(
-			"not json\n",
-		);
-		expect(
-			sanitizeIrohRemoteOutboundJsonLine(
-				"not json path:/Users/jordan/.volt/agent/auth.json pipe |/Users/jordan/.volt/agent/auth.json| file:file://localhost/Users/jordan/.volt/agent/auth.json url:https://example.com/Users/jordan/file\n",
-				{
-					workspacePath: "/Users/jordan/project",
-				},
-			),
-		).toBe(
-			"not json path:/Users/jordan/.volt/agent/auth.json pipe |/Users/jordan/.volt/agent/auth.json| file:file://localhost/Users/jordan/.volt/agent/auth.json url:https://example.com/Users/jordan/file\n",
-		);
-		expect(
-			sanitizeIrohRemoteOutboundJsonLine("not json 1:/Users/jordan/.volt/agent/auth.json\n", {
-				workspacePath: "/Users/jordan/project",
-			}),
-		).toBe("not json 1:/Users/jordan/.volt/agent/auth.json\n");
-		expect(
-			sanitizeIrohRemoteOutboundJsonLine('not json {\\"message\\":\\"\\\\\\\\server\\\\share\\\\auth.json\\"}\n', {
-				workspacePath: "/Users/jordan/project",
-			}),
-		).toBe('not json {\\"message\\":\\"\\\\\\\\server\\\\share\\\\auth.json\\"}\n');
-	});
-
-	test("pipes remote outbound JSONL chunks through the shared sanitizer", async () => {
-		const workspacePath = "/Users/jordan/project";
-		const eventLine = `${JSON.stringify({
-			type: "response",
-			command: "get_state",
-			success: true,
-			data: {
-				cwd: `${workspacePath}/src`,
-				message: `using /Users/jordan/.volt/agent/sessions/project/session.jsonl`,
-			},
-		})}\n`;
-		const partialLine = "child failed at /Users/jordan/.volt/agent/auth.json";
-		const writes: string[] = [];
-		const observedLines: string[] = [];
-
-		async function* readable(): AsyncIterable<string | Uint8Array> {
-			yield Buffer.from(eventLine.slice(0, 19), "utf8");
-			yield Buffer.from(eventLine.slice(19), "utf8");
-			yield partialLine;
+	test("leaves free text outside the workspace untouched", () => {
+		const sanitizer = createIrohRemoteProjectionSanitizer({ workspacePath: "/Users/jordan/project" });
+		for (const text of [
+			"not json",
+			"not json path:/Users/jordan/.volt/agent/auth.json pipe |/Users/jordan/.volt/agent/auth.json| file:file://localhost/Users/jordan/.volt/agent/auth.json url:https://example.com/Users/jordan/file",
+			"not json 1:/Users/jordan/.volt/agent/auth.json",
+			'not json {\\"message\\":\\"\\\\\\\\server\\\\share\\\\auth.json\\"}',
+		]) {
+			expect(sanitizer.sanitizeText(text)).toBe(text);
 		}
-
-		await pipeIrohRemoteOutboundJsonlReadable(readable(), {
-			workspacePath,
-			writeLine(line) {
-				writes.push(line);
-			},
-			onLine(line) {
-				observedLines.push(line);
-			},
-		});
-
-		expect(writes).toEqual([
-			`${JSON.stringify({
-				type: "response",
-				command: "get_state",
-				success: true,
-				data: {
-					cwd: "/workspace/src",
-					message: `using ${IROH_REMOTE_REDACTED_SESSION_FILE}`,
-				},
-			})}\n`,
-			"child failed at /Users/jordan/.volt/agent/auth.json",
-		]);
-		expect(observedLines).toEqual(writes);
-	});
-
-	test("wraps RPC transports with the remote outbound filter", () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteOutboundFilteredRpcTransport({
-			transport: inner,
-			workspacePath: "/Users/jordan/project",
-		});
-
-		transport.write({
-			type: "response",
-			command: "get_session_stats",
-			success: true,
-			data: {
-				sessionFile: "/Users/jordan/.volt/agent/sessions/project/session.jsonl",
-				cwd: "/Users/jordan/project",
-			},
-		});
-
-		expect(inner.writes).toEqual([
-			{
-				type: "response",
-				command: "get_session_stats",
-				success: true,
-				data: { cwd: "/workspace" },
-			},
-		]);
-	});
-
-	test("surfaces asynchronous filter rejection write failures from close", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteFilteredRpcTransport({
-			transport: inner,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-		});
-		const write = createDeferredVoid();
-		const writeError = new Error("rejection write failed");
-		inner.writeResults.push(write.promise);
-		transport.onLine(() => {
-			throw new Error("rejected commands must not be forwarded");
-		});
-
-		inner.emitLine(JSON.stringify({ id: "bash-1", type: "bash", command: "pwd" }));
-		write.reject(writeError);
-		await nextTick();
-
-		await expect(transport.close()).rejects.toBe(writeError);
-		expect(inner.closeCalls).toBe(1);
-	});
-
-	test("defers clean remote close until one-shot command responses are written", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => Promise.resolve(),
-		});
-		let closed = false;
-		transport.onLine(() => {});
-		transport.onClose?.(() => {
-			closed = true;
-		});
-
-		inner.emitLine(JSON.stringify({ id: "state-1", type: "get_state" }));
-		inner.emitClose();
-		await nextTick();
-		expect(closed).toBe(false);
-
-		transport.write({ id: "state-1", type: "response", command: "get_state", success: true });
-		await nextTick();
-
-		expect(closed).toBe(true);
-	});
-
-	test("defers clean remote close until unknown command error responses are written", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => Promise.resolve(),
-		});
-		let closed = false;
-		transport.onLine(() => {});
-		transport.onClose?.(() => {
-			closed = true;
-		});
-
-		inner.emitLine(JSON.stringify({ id: "unknown-1", type: "unknown_rpc" }));
-		inner.emitClose();
-		await nextTick();
-		expect(closed).toBe(false);
-
-		transport.write({ id: "unknown-1", type: "response", command: "unknown_rpc", success: false });
-		await nextTick();
-
-		expect(closed).toBe(true);
-	});
-
-	test("pairs malformed invocation close deferral with the uncorrelated invalid response", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => Promise.resolve(),
-		});
-		let closed = false;
-		transport.onLine(() => {});
-		transport.onClose?.(() => {
-			closed = true;
-		});
-
-		inner.emitLine(JSON.stringify({ type: "invoke_ui_action", action: SESSION_NEW_ACTION_ID }));
-		inner.emitClose();
-		await nextTick();
-		expect(closed).toBe(false);
-
-		transport.write({ type: "response", command: "invalid", success: false, error: "invalid invocation" });
-		await nextTick();
-
-		expect(closed).toBe(true);
-	});
-
-	test("does not hang clean remote close after synchronous response write failures", async () => {
-		const inner = new ManualRpcTransport();
-		const writeError = new Error("send closed");
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => Promise.resolve(),
-		});
-		let closed = false;
-		transport.onLine(() => {});
-		transport.onClose?.(() => {
-			closed = true;
-		});
-
-		inner.emitLine(JSON.stringify({ id: "state-1", type: "get_state" }));
-		inner.emitClose();
-		await nextTick();
-		expect(closed).toBe(false);
-
-		inner.writeError = writeError;
-		expect(() => transport.write({ id: "state-1", type: "response", command: "get_state", success: true })).toThrow(
-			writeError,
+		expect(sanitizer.sanitizeText("Read /Users/jordan/project/src/index.ts and /Users/jordan/.volt/auth.json")).toBe(
+			"Read /workspace/src/index.ts and /Users/jordan/.volt/auth.json",
 		);
-		await nextTick();
-
-		expect(closed).toBe(true);
-	});
-
-	test("does not retain clean close for detached prompt completion after response admission", async () => {
-		const inner = new ManualRpcTransport();
-		const promptCompletion = createDeferredVoid();
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => promptCompletion.promise,
-		});
-		let closed = false;
-		transport.onLine(() => {});
-		transport.onClose?.(() => {
-			closed = true;
-		});
-
-		inner.emitLine(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hi" }),
-		);
-		inner.emitClose();
-		await nextTick();
-		expect(closed).toBe(false);
-
-		transport.write({ id: "prompt-1", type: "response", command: "prompt", success: true });
-		await nextTick();
-		expect(closed).toBe(true);
-
-		promptCompletion.resolve();
-		await nextTick();
-	});
-
-	test.each(["steer", "follow_up"] as const)(
-		"does not retain clean remote close for detached %s completion after response admission",
-		async (command) => {
-			const inner = new ManualRpcTransport();
-			const promptCompletion = createDeferredVoid();
-			const transport = createIrohRemoteCloseDeferringRpcTransport({
-				transport: inner,
-				waitForPromptCompletion: () => promptCompletion.promise,
-			});
-			let closed = false;
-			transport.onLine(() => {});
-			transport.onClose?.(() => {
-				closed = true;
-			});
-
-			inner.emitLine(JSON.stringify({ id: `${command}-1`, type: command, message: "hi" }));
-			inner.emitClose();
-			await nextTick();
-			expect(closed).toBe(false);
-
-			transport.write({ id: `${command}-1`, type: "response", command, success: true });
-			await nextTick();
-			expect(closed).toBe(true);
-
-			promptCompletion.resolve();
-			await nextTick();
-		},
-	);
-
-	test("releases duplicate id-less prompt commands at admission while completions continue detached", async () => {
-		const inner = new ManualRpcTransport();
-		const firstCompletion = createDeferredVoid();
-		const secondCompletion = createDeferredVoid();
-		const completions = [firstCompletion, secondCompletion];
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => {
-				const completion = completions.shift();
-				if (!completion) {
-					throw new Error("unexpected prompt completion wait");
-				}
-				return completion.promise;
-			},
-		});
-		let closed = false;
-		transport.onLine(() => {});
-		transport.onClose?.(() => {
-			closed = true;
-		});
-
-		inner.emitLine(JSON.stringify({ type: "steer", clientMessageId: "client-steer-1", message: "first" }));
-		inner.emitLine(JSON.stringify({ type: "steer", clientMessageId: "client-steer-2", message: "second" }));
-		inner.emitClose();
-		await nextTick();
-		expect(closed).toBe(false);
-
-		transport.write({ type: "response", command: "steer", success: true });
-		transport.write({ type: "response", command: "steer", success: true });
-		await nextTick();
-		expect(closed).toBe(true);
-
-		firstCompletion.resolve();
-		await nextTick();
-		expect(closed).toBe(true);
-
-		secondCompletion.resolve();
-		await nextTick();
-	});
-
-	test("filters remote RPC commands before forwarding to Volt RPC", () => {
-		const prompt = getIrohRemoteRpcFilterResult(
-			JSON.stringify({ id: "prompt-1", type: "prompt", clientMessageId: "client-prompt-1", message: "hi" }),
-		);
-		if (!prompt.allowed) {
-			throw new Error(prompt.response.error);
-		}
-		expect(prompt.command).toMatchObject({
-			id: "prompt-1",
-			type: "prompt",
-			clientMessageId: "client-prompt-1",
-			message: "hi",
-		});
-
-		const rejected = getIrohRemoteRpcFilterResult(JSON.stringify({ id: "bash-1", type: "bash", command: "pwd" }));
-		if (rejected.allowed) {
-			throw new Error("bash should have been rejected");
-		}
-		expect(rejected.response).toEqual({
-			id: "bash-1",
-			type: "response",
-			command: "bash",
-			success: false,
-			error: "RPC command not allowed over remote host: bash",
-		});
-		expect(serializeIrohRemoteRpcFilterRejection(rejected.response)).toBe(`${JSON.stringify(rejected.response)}\n`);
-
-		const parseFailure = getIrohRemoteRpcFilterResult("{");
-		if (parseFailure.allowed) {
-			throw new Error("invalid JSON should have been rejected");
-		}
-		expect(parseFailure.response.command).toBe("parse");
-		expect(parseFailure.response.error).toContain("Failed to parse command");
-
-		const missingType = getIrohRemoteRpcFilterResult(JSON.stringify({ id: "missing-type" }));
-		if (missingType.allowed) {
-			throw new Error("missing type should have been rejected");
-		}
-		expect(missingType.response).toEqual({
-			id: "missing-type",
-			type: "response",
-			command: "unknown",
-			success: false,
-			error: "RPC command must be a JSON object with a string type",
-		});
-
-		const numericType = getIrohRemoteRpcFilterResult(JSON.stringify({ id: "numeric-type", type: 1 }));
-		if (numericType.allowed) {
-			throw new Error("numeric type should have been rejected");
-		}
-		expect(numericType.response).toEqual({
-			id: "numeric-type",
-			type: "response",
-			command: "unknown",
-			success: false,
-			error: "RPC command must be a JSON object with a string type",
-		});
 	});
 });

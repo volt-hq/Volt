@@ -1,250 +1,215 @@
-import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
-import type { Api, Model, SubscriptionUsageResult } from "@hansjm10/volt-ai";
-import { describe, expect, test, vi } from "vitest";
-import { AuthStorage } from "../src/core/auth-storage.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
-import {
-	createTestConversation,
-	createTestModel,
-	createTestSession,
-	parseWrittenObjects,
-	startIrohRpcMode,
-	withCurrentConversationAuthority,
-} from "./iroh-stream-doubles.ts";
+/**
+ * Model selection for paired devices on the remote profile: the `models`
+ * query, the `set_model` and `set_thinking_level` intents, and the
+ * `subscription_usage` query, served by a real conversation host.
+ */
+
+import type { SubscriptionUsageResult } from "@hansjm10/volt-ai";
+import { createFauxProvider } from "@hansjm10/volt-ai";
+import { type HostFrame, REMOTE_CAPABILITIES, type RemoteGrant } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
+import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
+
+const ALL: RemoteGrant = { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] };
+
+type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
 
 describe("Iroh remote model RPC", () => {
-	test("starts recovered dispatch only after extension session_start and resource discovery binding", async () => {
-		const bindingOrder: string[] = [];
-		let sessionStartInitialized = false;
-		let resourcesInitialized = false;
-		const session = {
-			...createTestSession("session-recovery-order", null),
-			attachExtensionClient: vi.fn(() => ({
-				ready: (async () => {
-					sessionStartInitialized = true;
-					bindingOrder.push("session_start");
-					await Promise.resolve();
-					resourcesInitialized = true;
-					bindingOrder.push("resources");
-				})(),
-				detach: () => {},
-			})),
-		};
-		const target = createTestConversation(session);
-		const recoveredDispatch = vi.fn(() => {
-			expect(sessionStartInitialized).toBe(true);
-			expect(resourcesInitialized).toBe(true);
-			bindingOrder.push("recovered_dispatch");
-		});
-
-		const { modePromise, recv } = await startIrohRpcMode(target, session, {
-			onReady: recoveredDispatch,
-		});
-		await vi.waitFor(() => expect(recoveredDispatch).toHaveBeenCalledOnce());
-		expect(bindingOrder).toEqual(["session_start", "resources", "recovered_dispatch"]);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	test("forwards model catalog, set_model, and set_thinking_level while rejecting cycle commands", async () => {
-		const modelOne = createTestModel("model-one");
-		const modelTwo = createTestModel("model-two", { input: ["text", "image"] });
-		const fastModel = createTestModel("gpt-5.6-sol", {
-			api: "openai-codex-responses",
-			provider: "openai-codex",
-			baseUrl: "https://chatgpt.com/backend-api",
+	async function setup(
+		options: HostHarnessOptions = {},
+	): Promise<{ harness: HostHarness; conversation: HostedConversation }> {
+		const harness = await createHostHarness({ whenUnattached: "keep", ...options });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		return { harness, conversation };
+	}
+
+	function phone(harness: HostHarness, conversation: HostedConversation): RemotePhone {
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: ALL,
+			redaction: { workspacePath: conversation.cwd },
+			redirect: {},
 		});
-		let currentModel = modelOne;
-		let thinkingLevel: ThinkingLevel = "medium";
-		const setModel = vi.fn(async (model: Model<Api>) => {
-			currentModel = model;
+		const device = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await device.close();
 		});
-		const setThinkingLevel = vi.fn((level: ThinkingLevel) => {
-			thinkingLevel = level;
-		});
-		const session = {
-			...createTestSession("session-one", null),
-			get model() {
-				return currentModel;
+		return device;
+	}
+
+	test("runs a device's frames only after the conversation's extension session_start bound", async () => {
+		const order: string[] = [];
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<void>();
+		let holdSessionStart = false;
+		const { harness, conversation } = await setup({
+			extension: (volt) => {
+				volt.on("session_start", async () => {
+					if (!holdSessionStart) return;
+					started.resolve();
+					await gate.promise;
+					order.push("session_start");
+				});
 			},
-			get thinkingLevel() {
-				return thinkingLevel;
-			},
-			modelRegistry: {
-				authStorage: {},
-				getAvailable: vi.fn(() => [modelOne, modelTwo, fastModel]),
-				refreshFromDisk: vi.fn(),
-			},
-			getAvailableThinkingLevels: vi.fn(() => ["off", "minimal", "low", "medium", "high"]),
-			setModel,
-			setThinkingLevel,
-			activeToolExecutions: new Map(),
-			subscribeRuntimeEvents: vi.fn(() => () => {}),
-		};
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
-
-		recv.pushLine(JSON.stringify({ id: "models-1", type: "get_available_models" }));
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "set-1",
-					type: "set_model",
-					provider: "anthropic",
-					modelId: "model-two",
-				}),
-			),
-		);
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "set-2",
-					type: "set_model",
-					provider: "anthropic",
-					modelId: "missing",
-				}),
-			),
-		);
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "think-1",
-					type: "set_thinking_level",
-					level: "low",
-				}),
-			),
-		);
-		recv.pushLine(JSON.stringify({ id: "state-1", type: "get_state" }));
-		// Sent after state-1 so the persistDefault-forwarding checks don't disturb the state assertions above.
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "set-3",
-					type: "set_model",
-					provider: "anthropic",
-					modelId: "model-one",
-					persistDefault: false,
-				}),
-			),
-		);
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "think-2",
-					type: "set_thinking_level",
-					level: "high",
-					persistDefault: false,
-				}),
-			),
-		);
-		recv.pushLine(JSON.stringify({ id: "cycle-1", type: "cycle_model" }));
-		recv.pushLine(JSON.stringify({ id: "cycle-2", type: "cycle_thinking_level" }));
-
-		await vi.waitFor(() => {
-			const responses = parseWrittenObjects(send).filter((record) => record.type === "response");
-			expect(responses.map((record) => record.id)).toEqual(
-				expect.arrayContaining([
-					"models-1",
-					"set-1",
-					"set-2",
-					"set-3",
-					"think-1",
-					"think-2",
-					"state-1",
-					"cycle-1",
-					"cycle-2",
-				]),
-			);
 		});
+		holdSessionStart = true;
+		const device = phone(harness, conversation);
+		await device.hello();
+		const queryId = "models-1";
+		device.send({ type: "query", queryId, query: "models" });
+		await started.promise;
+		// The connection's lane waits for its client's extension binding: nothing is answered yet.
+		expect(device.frames.some((frame) => frame.type === "result" || frame.type === "query_error")).toBe(false);
+		gate.resolve();
+		await device.waitFor((frame): frame is Frame<"result"> => frame.type === "result" && frame.queryId === queryId);
+		order.push("models");
+		expect(order).toEqual(["session_start", "models"]);
+	});
 
-		const responses = parseWrittenObjects(send).filter((record) => record.type === "response");
-		const byId = new Map(responses.map((record) => [record.id, record]));
+	test("serves the model catalog, set_model, and set_thinking_level; cycle commands are not intents", async () => {
+		const acme = createFauxProvider({
+			provider: "acme",
+			models: [
+				{ id: "model-one", reasoning: true, input: ["text"] },
+				{ id: "model-two", reasoning: true, input: ["text", "image"] },
+			],
+		});
+		const { harness, conversation } = await setup({
+			extension: (volt) => {
+				volt.registerProvider("acme", {
+					baseUrl: acme.getModel().baseUrl,
+					apiKey: "acme-key",
+					api: acme.api,
+					streamSimple: acme.streamSimple,
+					models: acme.models.map((model) => ({
+						id: model.id,
+						name: model.name,
+						api: model.api,
+						reasoning: model.reasoning,
+						input: model.input,
+						cost: model.cost,
+						contextWindow: model.contextWindow,
+						maxTokens: model.maxTokens,
+					})),
+				});
+				volt.registerProvider("openai-codex", {
+					baseUrl: "https://chatgpt.com/backend-api",
+					apiKey: "codex-key",
+					api: "openai-codex-responses",
+					models: [
+						{
+							id: "gpt-5.6-sol",
+							name: "GPT-5.6 Sol",
+							reasoning: true,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 16_384,
+						},
+					],
+				});
+			},
+		});
+		const session = conversation.session;
+		const refreshFromDisk = vi.spyOn(session.modelRegistry, "refreshFromDisk");
+		const setModel = vi.spyOn(session, "setModel");
+		const setThinkingLevel = vi.spyOn(session, "setThinkingLevel");
+		const device = phone(harness, conversation);
+		await device.hello();
+		await device.subscribe(conversation.id);
 
+		const models = await device.query("models");
 		const catalogLevels = ["off", "minimal", "low", "medium", "high"];
-		expect(byId.get("models-1")).toMatchObject({
-			command: "get_available_models",
-			success: true,
+		expect(models).toMatchObject({
+			type: "result",
 			data: {
-				models: [
+				models: expect.arrayContaining([
 					expect.objectContaining({
+						provider: "acme",
 						id: "model-one",
 						availableThinkingLevels: catalogLevels,
 						supportsFastMode: false,
 						input: ["text"],
 					}),
 					expect.objectContaining({
+						provider: "acme",
 						id: "model-two",
 						availableThinkingLevels: catalogLevels,
 						supportsFastMode: false,
 						input: ["text", "image"],
 					}),
-					expect.objectContaining({
-						id: "gpt-5.6-sol",
-						supportsFastMode: true,
-					}),
-				],
+					expect.objectContaining({ provider: "openai-codex", id: "gpt-5.6-sol", supportsFastMode: true }),
+				]),
 			},
 		});
-		expect(session.modelRegistry.refreshFromDisk).toHaveBeenCalled();
-		expect(byId.get("set-1")).toMatchObject({
-			command: "set_model",
-			success: true,
-			data: expect.objectContaining({
-				provider: "anthropic",
-				id: "model-two",
-				availableThinkingLevels: catalogLevels,
-				supportsFastMode: false,
-				input: ["text", "image"],
-			}),
+		expect(refreshFromDisk).toHaveBeenCalled();
+
+		expect(await device.intent("set_model", { provider: "acme", modelId: "model-two" })).toMatchObject({
+			type: "accepted",
 		});
-		// The conversation's model changes alone; set_default_model persists the default.
-		expect(setModel).toHaveBeenCalledWith(expect.objectContaining({ id: "model-two" }), {
+		// The conversation's model changes alone; the remote intent never persists a default.
+		expect(setModel).toHaveBeenCalledWith(expect.objectContaining({ provider: "acme", id: "model-two" }), {
 			persistDefault: false,
 		});
-		expect(session.settingsManager.getDefaultModel()).toBe("model-two");
-		expect(session.settingsManager.getDefaultProvider()).toBe("anthropic");
-		expect(byId.get("set-3")).toMatchObject({ command: "set_model", success: true });
-		expect(setModel).toHaveBeenCalledWith(expect.objectContaining({ id: "model-one" }), {
-			persistDefault: false,
-		});
-		expect(byId.get("set-2")).toMatchObject({
-			command: "set_model",
-			success: false,
-			error: "Model not found: anthropic/missing",
-		});
-		expect(byId.get("think-1")).toMatchObject({
-			command: "set_thinking_level",
-			success: true,
-			data: { level: "low" },
-		});
-		expect(setThinkingLevel).toHaveBeenCalledWith("low", { persistDefault: false });
-		expect(session.settingsManager.getDefaultThinkingLevel()).toBe("low");
-		expect(byId.get("think-2")).toMatchObject({ command: "set_thinking_level", success: true });
-		expect(setThinkingLevel).toHaveBeenCalledWith("high", { persistDefault: false });
-		expect(byId.get("state-1")).toMatchObject({
-			command: "get_state",
-			success: true,
-			data: expect.objectContaining({
-				model: expect.objectContaining({ id: "model-two", input: ["text", "image"] }),
-				thinkingLevel: "low",
-				availableThinkingLevels: ["off", "minimal", "low", "medium", "high"],
-			}),
-		});
-		expect(byId.get("cycle-1")).toMatchObject({
-			success: false,
-			error: "RPC command not allowed over remote host: cycle_model",
-		});
-		expect(byId.get("cycle-2")).toMatchObject({
-			success: false,
-			error: "RPC command not allowed over remote host: cycle_thinking_level",
+		await device.waitFor(
+			(frame): frame is Frame<"entry"> =>
+				frame.type === "entry" &&
+				frame.entry.type === "model_change" &&
+				JSON.stringify(frame.entry.payload) === JSON.stringify({ provider: "acme", modelId: "model-two" }),
+		);
+		expect(session.model).toMatchObject({ provider: "acme", id: "model-two" });
+
+		expect(await device.intent("set_model", { provider: "acme", modelId: "missing" })).toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: "Model not found: acme/missing" },
 		});
 
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		expect(await device.intent("set_thinking_level", { level: "low" })).toMatchObject({ type: "accepted" });
+		expect(setThinkingLevel).toHaveBeenCalledWith("low", { persistDefault: false });
+		await device.waitFor(
+			(frame): frame is Frame<"entry"> =>
+				frame.type === "entry" &&
+				frame.entry.type === "thinking_level_change" &&
+				JSON.stringify(frame.entry.payload) === JSON.stringify({ thinkingLevel: "low" }),
+		);
+		expect(session.thinkingLevel).toBe("low");
+
+		// A fresh subscription's snapshot folds the branch's model and thinking level.
+		const from = device.frames.length;
+		await device.subscribe(conversation.id, "s2");
+		const snapshot = await device.waitFor(
+			(frame): frame is Frame<"snapshot"> => frame.type === "snapshot" && frame.subscriptionId === "s2",
+			{ from },
+		);
+		expect(snapshot.state).toMatchObject({
+			model: { provider: "acme", modelId: "model-two" },
+			thinkingLevel: "low",
+		});
+
+		for (const type of ["cycle_model", "cycle_thinking_level"]) {
+			expect(await device.intent(type)).toMatchObject({
+				type: "rejected",
+				reason: { code: "unknown_intent", message: `Unknown intent: ${type}` },
+			});
+		}
 	});
 
 	test("returns normalized subscription quota usage to authorized remote clients", async () => {
+		const { harness, conversation } = await setup();
 		const providerId = `remote-usage-${Date.now()}`;
 		const fetchedAt = 1_800_000_000_000;
 		const providerResult: SubscriptionUsageResult = {
@@ -267,15 +232,13 @@ describe("Iroh remote model RPC", () => {
 		Object.assign(providerResult.snapshot, { accountEmail: "private@example.com" });
 		Object.assign(providerResult.snapshot.limits[0], { rawProviderWindow: { secret: true } });
 		const fetchSubscriptionUsage = vi.fn(async () => providerResult);
-		const authStorage = AuthStorage.inMemory({
-			[providerId]: {
-				type: "oauth",
-				access: "access-token",
-				refresh: "refresh-token",
-				expires: 1_900_000_000_000,
-			},
+		const modelRegistry = conversation.session.modelRegistry;
+		modelRegistry.authStorage.set(providerId, {
+			type: "oauth",
+			access: "access-token",
+			refresh: "refresh-token",
+			expires: 1_900_000_000_000,
 		});
-		const modelRegistry = ModelRegistry.inMemory(authStorage);
 		modelRegistry.client.registerOAuthProvider({
 			id: providerId,
 			name: "Remote Usage",
@@ -290,32 +253,14 @@ describe("Iroh remote model RPC", () => {
 			},
 			fetchSubscriptionUsage,
 		});
-		const session = {
-			...createTestSession("session-usage", null),
-			model: createTestModel("usage-model", { provider: providerId }),
-			modelRegistry,
-		};
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
+		const device = phone(harness, conversation);
+		await device.hello();
 
-		try {
-			recv.pushLine(JSON.stringify({ id: "usage-1", type: "get_subscription_usage" }));
-			recv.pushLine(JSON.stringify({ id: "usage-2", type: "get_subscription_usage" }));
-			await vi.waitFor(() => {
-				const responses = parseWrittenObjects(send).filter(
-					(record) => record.type === "response" && record.command === "get_subscription_usage",
-				);
-				expect(responses).toHaveLength(2);
-			});
-
-			const responses = parseWrittenObjects(send).filter(
-				(record) => record.type === "response" && record.command === "get_subscription_usage",
-			);
-			expect(responses[0]).toEqual({
-				id: "usage-1",
-				type: "response",
-				command: "get_subscription_usage",
-				success: true,
+		const results = [await device.query("subscription_usage"), await device.query("subscription_usage")];
+		for (const result of results) {
+			expect(result).toEqual({
+				type: "result",
+				queryId: result.queryId,
 				data: {
 					status: "providers",
 					providers: [
@@ -341,13 +286,11 @@ describe("Iroh remote model RPC", () => {
 					],
 				},
 			});
-			expect(JSON.stringify(responses)).not.toContain("private@example.com");
-			expect(JSON.stringify(responses)).not.toContain("private-account");
-			expect(JSON.stringify(responses)).not.toContain("rawProviderWindow");
-			expect(fetchSubscriptionUsage).toHaveBeenCalledOnce();
-		} finally {
-			recv.end();
-			await modePromise;
 		}
+		const wire = JSON.stringify(device.frames);
+		expect(wire).not.toContain("private@example.com");
+		expect(wire).not.toContain("private-account");
+		expect(wire).not.toContain("rawProviderWindow");
+		expect(fetchSubscriptionUsage).toHaveBeenCalledOnce();
 	});
 });

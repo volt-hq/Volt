@@ -912,6 +912,22 @@ export class SubagentManager {
 		return this.subagentContext !== undefined;
 	}
 
+	/** An open child conversation this manager started, or one its children started, by conversation id. */
+	childConversation(id: string, depth = 8): HostedConversation | undefined {
+		for (const host of this.childHosts.values()) {
+			const child = host.get(id);
+			if (child && !child.closed) return child;
+		}
+		if (depth <= 0) return undefined;
+		for (const host of this.childHosts.values()) {
+			for (const child of host.list()) {
+				const nested = child.session.getSubagentToolManager()?.childConversation?.(id, depth - 1);
+				if (nested) return nested;
+			}
+		}
+		return undefined;
+	}
+
 	createDelegationScope(options: SubagentDelegationScopeOptions = {}): SubagentDelegationScopeLease {
 		this.assertNotDisposed();
 		const inherited = this.subagentContext?.delegationScope;

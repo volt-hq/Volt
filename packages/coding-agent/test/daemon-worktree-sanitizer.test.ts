@@ -1,20 +1,28 @@
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
 import { describe, expect, it } from "vitest";
-import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
-import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
-import { getRemoteSanitizerOptions } from "../src/daemon/workspace-streams.ts";
+import { remoteProfile } from "../src/core/protocol/profiles.ts";
+import {
+	createIrohRemoteProjectionSanitizer,
+	type IrohRemoteSanitizerOptions,
+} from "../src/core/remote/iroh/sanitizer.ts";
 
 const FIXTURE_ROOT = join(tmpdir(), "volt-worktree-sanitizer");
 const PARENT_PATH = join(FIXTURE_ROOT, "projects", "repo");
 const WORKTREES_ROOT = join(FIXTURE_ROOT, ".volt", "agent", "worktrees");
 const WORKTREE_PATH = join(WORKTREES_ROOT, "--repo--", "fix-login");
 
-const OPTIONS = {
+const OPTIONS: IrohRemoteSanitizerOptions = {
 	remoteWorkspacePath: "/workspace",
 	workspacePath: WORKTREE_PATH,
 	additionalRedactedPaths: [PARENT_PATH, WORKTREES_ROOT],
 };
+
+/** `value` as the remote profile's path sanitizer redacts it with `options`. */
+function sanitize(value: Record<string, unknown>, options: IrohRemoteSanitizerOptions): Record<string, unknown> {
+	return createIrohRemoteProjectionSanitizer(options).sanitizeValue(value) as Record<string, unknown>;
+}
 
 function withMixedPathSeparators(value: string): string {
 	let useSlash = false;
@@ -26,14 +34,14 @@ function withMixedPathSeparators(value: string): string {
 
 describe("worktree sanitizer additionalRedactedPaths", () => {
 	it("maps the worktree root in strict path fields and redacts the parent path in text", () => {
-		const sanitized = sanitizeIrohRemoteOutbound(
+		const sanitized = sanitize(
 			{
 				cwd: WORKTREE_PATH,
 				path: join(WORKTREE_PATH, "src", "index.ts"),
 				text: `worktree of ${PARENT_PATH} under ${WORKTREES_ROOT} is ready`,
 			},
 			OPTIONS,
-		) as Record<string, unknown>;
+		);
 		expect(sanitized.cwd).toBe("/workspace");
 		expect(sanitized.path).toBe("/workspace/src/index.ts");
 		expect(sanitized.text).not.toContain(PARENT_PATH);
@@ -42,26 +50,49 @@ describe("worktree sanitizer additionalRedactedPaths", () => {
 	});
 
 	it("maps subpaths of additional roots in strict path fields", () => {
-		const sanitized = sanitizeIrohRemoteOutbound(
+		const sanitized = sanitize(
 			{
 				cwd: join(PARENT_PATH, "src"),
 				path: join(WORKTREES_ROOT, "pending-worktree"),
 			},
 			OPTIONS,
-		) as Record<string, unknown>;
+		);
 		expect(sanitized.cwd).toBe("/workspace/src");
 		expect(sanitized.path).toBe("/workspace/pending-worktree");
 	});
 
 	it("redacts git worktree list style output mentioning every root", () => {
-		const sanitized = sanitizeIrohRemoteOutbound(
+		const sanitized = sanitize(
 			{
 				text: `${PARENT_PATH}  0f0f0f [main]\n` + `${WORKTREE_PATH}  1a1a1a [volt/fix-login]\n`,
 			},
 			OPTIONS,
-		) as Record<string, unknown>;
+		);
 		expect(sanitized.text).not.toContain(PARENT_PATH);
 		expect(sanitized.text).not.toContain(WORKTREES_ROOT);
+	});
+
+	it("redacts every root from the frames a worktree-bound stream sends", () => {
+		// The roots the daemon and a relaying TUI serve a worktree-bound conversation with.
+		const redactor = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: OPTIONS,
+		}).redactor();
+		const listing = `${PARENT_PATH}  0f0f0f [main]\n${WORKTREE_PATH}  1a1a1a [volt/fix-login]\n`;
+		expect(redactor.redact({ type: "result", queryId: "q-1", data: { output: listing } })).toEqual({
+			type: "result",
+			queryId: "q-1",
+			data: { output: "/workspace  0f0f0f [main]\n/workspace  1a1a1a [volt/fix-login]\n" },
+		});
+		const notice = redactor.redact({
+			type: "live",
+			subscriptionId: "s1",
+			basedOn: 3,
+			seq: 1,
+			items: [{ type: "notice", level: "info", message: `created ${join(WORKTREES_ROOT, "pending")}` }],
+		});
+		expect(notice).toMatchObject({ items: [{ type: "notice", message: "created /workspace/pending" }] });
+		expect(JSON.stringify(notice)).not.toContain(FIXTURE_ROOT);
 	});
 
 	it("redacts an additional root exactly like a primary sanitizer root", () => {
@@ -71,8 +102,8 @@ describe("worktree sanitizer additionalRedactedPaths", () => {
 		const payload = {
 			text: `Workspace ${join(PARENT_PATH, "src", "index.ts")} and gitdir ${join(PARENT_PATH, ".git", "worktrees", "fix-login")}`,
 		};
-		const asPrimary = sanitizeIrohRemoteOutbound(payload, { workspacePath: PARENT_PATH }) as Record<string, unknown>;
-		const asAdditional = sanitizeIrohRemoteOutbound(payload, OPTIONS) as Record<string, unknown>;
+		const asPrimary = sanitize(payload, { workspacePath: PARENT_PATH });
+		const asAdditional = sanitize(payload, OPTIONS);
 		expect(asAdditional.text).toBe(asPrimary.text);
 		expect(asAdditional.text).not.toContain(PARENT_PATH);
 	});
@@ -82,10 +113,7 @@ describe("worktree sanitizer additionalRedactedPaths", () => {
 			context.skip("mixed separators are only equivalent on Windows");
 		}
 		const mixedParentPath = withMixedPathSeparators(PARENT_PATH);
-		const sanitized = sanitizeIrohRemoteOutbound(
-			{ text: `see ${mixedParentPath}/src/index.ts for details` },
-			OPTIONS,
-		) as Record<string, unknown>;
+		const sanitized = sanitize({ text: `see ${mixedParentPath}/src/index.ts for details` }, OPTIONS);
 		expect(sanitized.text).toBe("see /workspace/src/index.ts for details");
 	});
 
@@ -93,10 +121,7 @@ describe("worktree sanitizer additionalRedactedPaths", () => {
 		if (process.platform !== "win32") {
 			context.skip("path comparison is case-sensitive outside Windows");
 		}
-		const sanitized = sanitizeIrohRemoteOutbound(
-			{ text: `see ${PARENT_PATH.toUpperCase()}\\src\\index.ts for details` },
-			OPTIONS,
-		) as Record<string, unknown>;
+		const sanitized = sanitize({ text: `see ${PARENT_PATH.toUpperCase()}\\src\\index.ts for details` }, OPTIONS);
 		expect(sanitized.text).toBe("see /workspace/src/index.ts for details");
 	});
 
@@ -104,18 +129,12 @@ describe("worktree sanitizer additionalRedactedPaths", () => {
 		if (process.platform === "win32") {
 			context.skip("backslashes are path separators on Windows");
 		}
-		const sanitizedSuffix = sanitizeIrohRemoteOutbound(
-			{ text: `see ${PARENT_PATH}/file\\name for details` },
-			OPTIONS,
-		) as Record<string, unknown>;
+		const sanitizedSuffix = sanitize({ text: `see ${PARENT_PATH}/file\\name for details` }, OPTIONS);
 		expect(sanitizedSuffix.text).toBe("see /workspace/file\\name for details");
 
 		const separatorIndex = PARENT_PATH.lastIndexOf("/");
 		const literalBackslashPath = `${PARENT_PATH.slice(0, separatorIndex)}\\${PARENT_PATH.slice(separatorIndex + 1)}`;
-		const sanitizedRoot = sanitizeIrohRemoteOutbound({ text: literalBackslashPath }, OPTIONS) as Record<
-			string,
-			unknown
-		>;
+		const sanitizedRoot = sanitize({ text: literalBackslashPath }, OPTIONS);
 		expect(sanitizedRoot.text).toBe(literalBackslashPath);
 	});
 
@@ -128,45 +147,15 @@ describe("worktree sanitizer additionalRedactedPaths", () => {
 			additionalRedactedPaths: [nfcParent],
 		};
 		for (const embedded of [nfcParent, nfdParent]) {
-			const sanitized = sanitizeIrohRemoteOutbound(
-				{ text: `parent lives at ${embedded} on disk` },
-				options,
-			) as Record<string, unknown>;
+			const sanitized = sanitize({ text: `parent lives at ${embedded} on disk` }, options);
 			expect(sanitized.text).not.toContain(nfcParent);
 			expect(sanitized.text).not.toContain(nfdParent);
 			expect(sanitized.text).toContain("/workspace");
 		}
 	});
 
-	it("getRemoteSanitizerOptions folds the worktree overrides into the sanitizer options", () => {
-		const authorization = {
-			workspace: { name: "ws", path: PARENT_PATH },
-		} as IrohRemoteClientAuthorizationSuccess;
-
-		// Non-worktree streams: unchanged shape, no extra roots.
-		expect(getRemoteSanitizerOptions(authorization)).toEqual({
-			remoteWorkspacePath: "/workspace",
-			workspacePath: PARENT_PATH,
-		});
-
-		// Worktree-bound streams: worktree root + parent/worktrees-root redaction.
-		expect(
-			getRemoteSanitizerOptions(authorization, {
-				workspacePath: WORKTREE_PATH,
-				additionalRedactedPaths: [PARENT_PATH, WORKTREES_ROOT],
-			}),
-		).toEqual({
-			remoteWorkspacePath: "/workspace",
-			workspacePath: WORKTREE_PATH,
-			additionalRedactedPaths: [PARENT_PATH, WORKTREES_ROOT],
-		});
-	});
-
 	it("keeps paths under an additional root pointing at /workspace subpaths", () => {
-		const sanitized = sanitizeIrohRemoteOutbound(
-			{ text: `see ${join(PARENT_PATH, "README.md")} for details` },
-			OPTIONS,
-		) as Record<string, unknown>;
+		const sanitized = sanitize({ text: `see ${join(PARENT_PATH, "README.md")} for details` }, OPTIONS);
 		expect(sanitized.text).toBe("see /workspace/README.md for details");
 	});
 });

@@ -4,17 +4,24 @@ import { existsSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import type { Socket } from "node:net";
 import { relative, resolve, sep } from "node:path";
+import type { ControlRelayOutcome, RejectionReason } from "@hansjm10/volt-protocol";
 import { createAgentSessionServices } from "../core/agent-session-services.ts";
 import { type GitContextObservation, GitContextObservationBinding } from "../core/git-context-provider.ts";
 import { discoverGitWorktree } from "../core/git-repository.ts";
-import type { HostedConversation } from "../core/host/hosted-conversation.ts";
 import { intentRegistry } from "../core/protocol/intents/index.ts";
+import { type IntentContext, WorkspaceIntentError } from "../core/protocol/intents/types.ts";
+import { queryRegistry } from "../core/protocol/queries/index.ts";
+import type { RemoteRedactionOptions } from "../core/protocol/remote-redaction.ts";
+import {
+	type AuthorityLoss,
+	type ProtocolConnection,
+	queryErrorReason,
+	rejectionReason,
+} from "../core/protocol/server/connection.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
-	getIrohRemoteRpcCommandCapabilities,
 	getIrohRemoteStreamCapability,
-	getMissingIrohRemoteRpcCapability,
 	hasIrohRemoteRpcCapability,
 	parseIrohRemoteRpcCapabilities,
 	parseIrohRemoteRpcGrant,
@@ -31,6 +38,7 @@ import {
 	hashIrohRemotePairingSecret,
 	isIrohRemoteClientAllowedForWorkspace,
 } from "../core/remote/iroh/authorization.ts";
+import { serveIrohRemoteConnection } from "../core/remote/iroh/connection.ts";
 import {
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
 	IrohRemoteHostEngine,
@@ -63,31 +71,23 @@ import {
 	revokeIrohRemoteClientPushTargets,
 } from "../core/remote/iroh/push.ts";
 import {
-	createIrohRemoteRpcCapabilityDeniedResponse,
-	createIrohRemoteRpcErrorResponse,
-} from "../core/remote/iroh/rpc-command-filter.ts";
-import {
 	createIrohRemoteSessionContextsRpcBackend,
 	type IrohRemoteSessionContextsRpcBackend,
 } from "../core/remote/iroh/session-contexts.ts";
 import type { IrohRemoteClient, IrohRemoteWorkspace, IrohRemoteWorkspaceWorktree } from "../core/remote/iroh/state.ts";
 import {
+	getIrohRemoteAuthorizationLoss,
 	IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
 	type IrohRemoteHostStateManager,
 	isIrohRemoteWorkspaceHasWorktreesError,
 } from "../core/remote/iroh/state-manager.ts";
-import {
-	getIrohRemoteWorkspaceAvailabilityStatus,
-	type IrohRemoteWorkspaceMetadataSnapshot,
-} from "../core/remote/iroh/workspace.ts";
+import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
-import type { RpcRegisterPushTargetArgs, RpcRemoteTerminalEvent } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
 import { ProjectTrustStore } from "../core/trust-manager.ts";
-import { runIrohRemoteRpcMode } from "../modes/rpc/iroh-remote-rpc-mode.ts";
 import { observeCompactionFailures } from "./compaction-failure-log.ts";
 import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
@@ -97,33 +97,15 @@ import {
 	type ControlRequest,
 	createControlClientStatus,
 	isRemoteTransportPairingAvailable,
-	RELAY_RPC_COMMAND_TYPES,
 	REMOTE_TRANSPORT_REASON_MESSAGES,
 	type RelayCloseReason,
 	type RemoteTransportHealth,
 } from "./control-protocol.ts";
 import type { ControlConnection } from "./control-server.ts";
-import {
-	type ConversationCommandContext,
-	createKeepAwakeRpcResponse,
-	createRpcSuccessResponse,
-	createWebSearchKeyRpcResponse,
-	getRpcResponseId,
-	handleIntegratedConversationRpcCommand,
-	handleRemoteHostRpcCommand,
-	REMOTE_SESSION_LIST_CURSOR_TTL_MS,
-	type RemoteSessionListCursorEntry,
-	toRpcKeepAwakeStatus,
-} from "./conversation-commands.ts";
 import { type ConversationCoordinator, ConversationCoordinatorRegistry } from "./conversation-coordinator.ts";
 import { observeConversationLoss } from "./conversation-loss.ts";
 import {
-	createRemoteConversationExternalProjector,
-	createRemoteConversationSnapshotBuilder,
-} from "./conversation-projection.ts";
-import {
 	createIntegratedConversationHandshakeResponse,
-	decorateRemoteHostState,
 	type RemoteHostResponseContext,
 } from "./handshake-responses.ts";
 import {
@@ -182,7 +164,15 @@ import {
 	revokeIrohManagedRelayCredential,
 } from "./relay-credential.ts";
 import { RelayRegistry } from "./relay-stream.ts";
-import { remoteIntentProfile } from "./remote-host-intents.ts";
+import {
+	admitRemoteIntent,
+	type RemoteIntentHost,
+	type RemoteStreamKeep,
+	type RemoteStreamScope,
+	remoteIntentServices,
+	remoteStreamAllows,
+	toRemoteKeepAwakeStatus,
+} from "./remote-intents.ts";
 import { beginReviewSiblingAdmission, withReviewSourceWriteLease } from "./review-sibling-admission.ts";
 import {
 	createSessionManagerTargetStore,
@@ -191,17 +181,9 @@ import {
 	resolveIrohRemoteSessionTarget,
 } from "./session-target.ts";
 import { resolveWorktreeCleanupPolicy } from "./state.ts";
-import { createHostThemeTokensFrame, HOST_THEME_TOKENS_FEATURE } from "./theme-push.ts";
+import { sanitizeHostThemeTokens } from "./theme-push.ts";
 import { ViewerFeedRegistry } from "./viewer-feed.ts";
 import { isPathInside, type WorkspaceDirectoryResolution } from "./workspace-directory.ts";
-import {
-	type RemoteSanitizerOverrides,
-	runWorkspaceDiscoveryStream,
-	runWorkspaceManagementStream,
-	runWorktreeManagementStream,
-	WORKSPACE_UNREGISTERED_CLOSE_REASON,
-	writeIrohRemoteJsonLine,
-} from "./workspace-streams.ts";
 import {
 	evaluateWorktreeRelayGate,
 	getRegisteredWorkingDirectoryForWorktree,
@@ -215,6 +197,8 @@ import {
 } from "./worktree-manager.ts";
 
 const ACTIVE_REVOKE_CLOSE_REASON = "revoked";
+/** Streams of a workspace that was unregistered close with this reason. */
+export const WORKSPACE_UNREGISTERED_CLOSE_REASON = "workspace_unregistered";
 const ACTIVE_REPLACE_CLOSE_REASON = "replaced";
 const DUPLICATE_CONVERSATION_RETRY_AFTER_MS = 500;
 const RELAY_OFFER_RETRY_AFTER_MS = 1000;
@@ -774,28 +758,60 @@ function closeIrohRemoteStream(stream: IrohBiStreamLike, reason?: string): void 
 	void Promise.resolve(stream.recv.stop?.(0n)).catch(() => {});
 }
 
-function getRemoteTerminalReason(reason: string): string | undefined {
-	if (reason === ACTIVE_REVOKE_CLOSE_REASON) {
-		return "client_revoked";
-	}
-	if (
-		reason === WORKSPACE_UNREGISTERED_CLOSE_REASON ||
-		reason === "workspace_authorization_removed" ||
-		reason === "lease_transferred"
-	) {
-		return reason;
-	}
-	return undefined;
-}
+/** How long a stream the host closes may take to deliver its final frame before it is reset. */
+const STREAM_FINAL_FRAME_TIMEOUT_MS = 2_000;
 
 function isAuthorityTighteningCloseReason(reason: string): boolean {
 	return (
 		reason === ACTIVE_REVOKE_CLOSE_REASON ||
-		reason === WORKSPACE_UNREGISTERED_CLOSE_REASON ||
 		reason === "workspace_authorization_removed" ||
 		reason === "access_updated" ||
 		reason === "access_updated_during_attach"
 	);
+}
+
+/**
+ * End a device stream the host closes on purpose. Its connection tells the
+ * device why, as its last frame: a revoked or changed grant
+ * `fatal{revoked}`, an unregistered workspace `fatal{workspace_unregistered}`,
+ * a host shutdown `fatal{host_shutdown}`, and a conversation another host
+ * process serves now `ended{closed}` (the device reconnects to it). Other
+ * closes end the stream without a frame. A stream that cannot deliver its
+ * final frame in time is reset.
+ *
+ * The stream's owner fences `stream` as this close begins, so the connection
+ * can no longer finish it: the final frames are already on their way, and
+ * `physical` (the stream under the fence) is finished after them, or reset.
+ */
+async function closeStreamConnection(
+	stream: IrohBiStreamLike,
+	physical: IrohBiStreamLike,
+	reason: string,
+	connection: ProtocolConnection | undefined,
+	lifecycleSettled: Promise<void> | undefined,
+): Promise<void> {
+	if (connection) {
+		const ending = isAuthorityTighteningCloseReason(reason)
+			? connection.close({ code: "revoked", message: "The device's access changed; reconnect" })
+			: reason === WORKSPACE_UNREGISTERED_CLOSE_REASON
+				? connection.close({ code: "workspace_unregistered" })
+				: reason === "host_shutdown"
+					? connection.shutdown()
+					: reason === "lease_transferred"
+						? connection.end()
+						: connection.close();
+		const delivered = await Promise.race([
+			ending.then(
+				() => true,
+				() => true,
+			),
+			new Promise<boolean>((resolve) => setTimeout(() => resolve(false), STREAM_FINAL_FRAME_TIMEOUT_MS).unref()),
+		]);
+		closeIrohRemoteStream(physical, delivered ? "stream_task_settled" : reason);
+	} else {
+		closeIrohRemoteStream(stream, reason);
+	}
+	await lifecycleSettled?.catch(() => {});
 }
 
 /**
@@ -930,7 +946,7 @@ class IrohDaemonService {
 	private acceptLoopTask: Promise<void> | undefined;
 	private readonly resourceGuard = new IrohRemoteResourceGuard();
 	private readonly pendingPairRequests = new Map<string, PendingPairRequest>();
-	private readonly sessionListCursors = new Map<string, RemoteSessionListCursorEntry>();
+	private remoteIntentHostValue: RemoteIntentHost | undefined;
 	private readonly pushRelayClient: IrohRemotePushRelayHttpClient;
 	private readonly pushNotificationDeduper = new IrohRemoteInMemoryPushNotificationDeduper();
 	private readonly trustStore: ProjectTrustStore;
@@ -1635,31 +1651,66 @@ class IrohDaemonService {
 		return this.stateManager.isAuthorizationCurrent(authorization);
 	}
 
-	private getCommandContext(conversation?: {
-		workspaceName: string;
-		workspacePath?: string;
-		entry: IntegratedRuntimeEntry;
-		/** The entry's conversation, whose projection feed serves the stream. */
-		conversation: HostedConversation;
-		streamEntry?: IrohRemoteActiveStreamEntry;
-		onWorkspaceUnregistered?: () => void;
-	}): ConversationCommandContext {
-		return {
+	/**
+	 * A stream's per-frame authority: the daemon's in-memory host state, read
+	 * again whenever it changes. A revoked or changed grant, or an unregistered
+	 * workspace, ends the stream with its fatal code before the next frame.
+	 */
+	private frameAuthority(authorization: IrohRemoteClientAuthorizationSuccess): () => AuthorityLoss | undefined {
+		let checked: unknown;
+		let loss: AuthorityLoss | undefined;
+		return () => {
+			const current = this.services.state.state;
+			if (current !== checked) {
+				checked = current;
+				loss = this.admission.isOpen
+					? getIrohRemoteAuthorizationLoss(this.services.state.getHostState(), authorization)
+					: undefined;
+			}
+			return loss;
+		};
+	}
+
+	/** The daemon's own admission of a device's intent on a conversation it hosts. */
+	private admitRemoteIntent(intent: string, entry: IntegratedRuntimeEntry): RejectionReason | undefined {
+		return admitRemoteIntent(intent, {
+			shuttingDown: !this.admission.isOpen,
+			draining: this.leaseBroker.isDraining(entry.workspaceName, entry.sessionId),
+			subagent: entry.subagentId !== undefined || entry.parentSessionId !== undefined,
+		});
+	}
+
+	/** The daemon backends the remote intents and queries of every device stream call. */
+	private get remoteIntentHost(): RemoteIntentHost {
+		this.remoteIntentHostValue ??= {
 			agentDir: this.services.agentDir,
 			auditLogger: this.services.auditLogger,
-			hostEngine: this.engine,
 			stateManager: this.stateManager,
-			sessionListCursors: this.sessionListCursors,
-			sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
-			...(conversation === undefined
-				? {}
-				: {
-						getConversationBranchEpoch: () => conversation.conversation.projectionFeed.branchEpoch,
-						isConversationTranscriptCursorValid: (cursor: string) =>
-							conversation.conversation.projectionFeed.isTranscriptCursorValid(cursor),
-						registerConversationTranscriptCursor: (cursor: string | null) =>
-							conversation.conversation.projectionFeed.registerTranscriptCursor(cursor),
-					}),
+			keepAwake: {
+				status: () => toRemoteKeepAwakeStatus(this.services.keepAwake.status),
+				setEnabled: (enabled) => {
+					const status = this.services.keepAwake.setEnabled(enabled);
+					this.services.state.updateSettings({ keepAwakeEnabled: enabled });
+					return toRemoteKeepAwakeStatus(status);
+				},
+			},
+			webSearchKey: this.services.webSearchKey,
+			hostTheme: () =>
+				this.isThemeTokenPushEnabled()
+					? {
+							themeName: getCurrentThemeName() ?? "dark",
+							tokens: sanitizeHostThemeTokens(getResolvedThemeColors()),
+						}
+					: undefined,
+			pushTargets: (authorization) => {
+				const dispatcher = this.createPushNotificationDispatcher(authorization);
+				return { register: (args) => dispatcher.registerPushTarget(args) };
+			},
+			worktrees: (authorization) => this.createWorktreeRpcBackend(authorization.workspace),
+			agentOptions: (authorization) => this.createAgentOptionsRpcBackend(authorization.workspace),
+			sessionContexts: (authorization) => this.createSessionContextsRpcBackend(authorization),
+			prReviews: (authorization, signal) =>
+				this.createPrReviewRpcBackend(authorization, signal ?? new AbortController().signal),
 			listRuntimeStates: (workspaceName) => {
 				const states = new Map<string, Exclude<LeaseState, "unowned">>();
 				for (const record of this.leaseBroker.list()) {
@@ -1671,36 +1722,40 @@ class IrohDaemonService {
 			},
 			getWorkContext: (workspaceName, workspaceGeneration, sessionId) =>
 				this.services.work.getWorkContext(workspaceName, workspaceGeneration, sessionId),
-			keepAwake: this.services.keepAwake,
-			onKeepAwakeSetting: (enabled) => this.services.state.updateSettings({ keepAwakeEnabled: enabled }),
-			webSearchKey: this.services.webSearchKey,
-			createWorktreeBackend: (workspace) => this.createWorktreeRpcBackend(workspace),
-			onWorkspaceUnregistered: async (workspaceName) => {
-				// Unregistering the conversation's own workspace keeps the requesting
-				// stream and runtime alive so the response can still be delivered
-				// (mirrors the workspace-management stream path).
-				const excludeOwn = conversation !== undefined && workspaceName === conversation.workspaceName;
-				const workspacePath = excludeOwn ? conversation.workspacePath : undefined;
-				await this.cleanupUnregisteredWorkspace(
-					workspaceName,
-					excludeOwn
-						? { streamEntry: conversation.streamEntry, runtimeEntry: conversation.entry, workspacePath }
-						: {},
-				);
-				if (excludeOwn) {
-					conversation.onWorkspaceUnregistered?.();
-				}
-			},
-			...(conversation === undefined
-				? {}
-				: {
-						isTurnAdmissionClosed: () => !this.admission.isOpen,
-						isDraining: () =>
-							this.leaseBroker.isDraining(conversation.workspaceName, conversation.entry.sessionId),
-						isSubagentSession: () =>
-							conversation.entry.subagentId !== undefined || conversation.entry.parentSessionId !== undefined,
-					}),
+			unregisterWorkspace: (workspaceName, keep) => this.unregisterWorkspaceForRemote(workspaceName, keep),
 		};
+		return this.remoteIntentHostValue;
+	}
+
+	/** Unregister a workspace for a device, keeping the requesting stream, runtime, or relays until it is answered. */
+	private async unregisterWorkspaceForRemote(
+		workspaceName: string,
+		keep: RemoteStreamKeep,
+	): Promise<{ closedStreamCount: number; stoppedRuntimeCount: number }> {
+		let removed: Awaited<ReturnType<IrohRemoteHostStateManager["unregisterWorkspace"]>>;
+		try {
+			removed = await this.stateManager.unregisterWorkspace(workspaceName);
+		} catch (error) {
+			if (!isIrohRemoteWorkspaceHasWorktreesError(error)) throw error;
+			throw new WorkspaceIntentError(IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR, {
+				worktreeCount: error.worktreeIds.length,
+				worktreeIds: error.worktreeIds,
+			});
+		}
+		if (!removed) throw new WorkspaceIntentError("workspace_unregistered");
+		this.engine?.clearPairingSecretForWorkspace(workspaceName);
+		const streamEntry =
+			keep.streamId === undefined
+				? undefined
+				: this.activeStreams.allEntries().find((entry) => entry.streamId === keep.streamId);
+		const runtimeEntry =
+			keep.sessionId === undefined ? undefined : this.runtimes.findOwner(workspaceName, keep.sessionId);
+		return await this.cleanupUnregisteredWorkspace(workspaceName, {
+			...(streamEntry === undefined ? {} : { streamEntry }),
+			...(runtimeEntry === undefined ? {} : { runtimeEntry }),
+			...(keep.relayIds === undefined ? {} : { relayIds: keep.relayIds }),
+			workspacePath: removed.path,
+		});
 	}
 
 	start(): void {
@@ -3248,22 +3303,17 @@ class IrohDaemonService {
 		}
 
 		if (handshake.hello.mode === "workspaceDiscovery") {
-			await this.runWorkspaceDiscovery(stream, handshake, connectionId, streamId, owner);
+			await this.runWorkspaceStream(stream, handshake, connectionId, streamId, owner, {
+				kind: "discovery",
+				purpose: handshake.hello.workspaceDiscovery.purpose,
+			});
 			return;
 		}
 		if (handshake.hello.mode === "workspaceManagement") {
-			if (handshake.hello.workspaceManagement.purpose === "manage_worktrees") {
-				await this.runWorktreeManagement(stream, handshake, connectionId, streamId, owner);
-				return;
-			}
-			await this.runWorkspaceManagement(
-				stream,
-				handshake,
-				connectionId,
-				streamId,
-				owner,
-				handshake.hello.workspaceManagement.purpose,
-			);
+			await this.runWorkspaceStream(stream, handshake, connectionId, streamId, owner, {
+				kind: "management",
+				purpose: handshake.hello.workspaceManagement.purpose,
+			});
 			return;
 		}
 		await this.runIntegratedConversation(stream, handshake, connectionId, streamId, owner);
@@ -3283,8 +3333,6 @@ class IrohDaemonService {
 		details: {
 			/** Adopt this physical stream into the stable conversation authority. */
 			coordinator?: ConversationCoordinator;
-			terminalSessionId?: string | undefined;
-			sanitizerOverrides?: RemoteSanitizerOverrides;
 			/** Settles after the owning stream task has detached its runtime subscriber. */
 			lifecycleSettled?: Promise<void>;
 		} = {},
@@ -3296,17 +3344,15 @@ class IrohDaemonService {
 			streamId,
 			workspaceName: authorization.workspace.name,
 			close: (reason: string) => owner.close(reason),
-			write: (value: object) =>
-				writeIrohRemoteJsonLine(stream.send, value, authorization, details.sanitizerOverrides ?? {}),
 		};
 		const installed = owner.installCloseAction((reason) =>
-			this.closeStreamWithTerminal(stream, reason, {
-				authorization,
-				sessionId: Object.hasOwn(details, "terminalSessionId") ? details.terminalSessionId : entry.sessionId,
-				write: (value) => entry.write?.(value),
-				terminate: () => entry.terminate?.(),
-				lifecycleSettled: details.lifecycleSettled,
-			}),
+			closeStreamConnection(
+				stream,
+				owner.physicalStream ?? stream,
+				reason,
+				entry.connection,
+				details.lifecycleSettled,
+			),
 		);
 		if (!installed) {
 			throw new Error("physical stream closed before active ownership was installed");
@@ -3340,143 +3386,103 @@ class IrohDaemonService {
 	}
 
 	// ==========================================================================
-	// iOS theme token push (§9.5) — flag off by default, capability gated
+	// Host status: keep-awake and the shared theme reach devices as `changed{host}`
 	// ==========================================================================
 
+	/** Whether the daemon shares its resolved theme colors with devices (`host_status.theme`); off by default. */
 	private isThemeTokenPushEnabled(): boolean {
 		return this.services.state.state.settings.themeTokenPush === true || process.env.VOLT_HOST_THEME_TOKENS === "1";
 	}
 
-	/** Send the current sanitized theme tokens to one capable stream. */
-	private pushThemeTokensToStream(entry: IrohRemoteActiveStreamEntry): void {
-		if (!this.isThemeTokenPushEnabled() || !entry.capabilities?.has(HOST_THEME_TOKENS_FEATURE)) {
-			return;
-		}
-		const frame = createHostThemeTokensFrame(getCurrentThemeName() ?? "dark", getResolvedThemeColors());
-		void Promise.resolve(entry.write?.(frame)).catch(() => {});
+	/** Tell every device stream to refetch the host's status. */
+	private hostStatusChanged(): void {
+		for (const entry of this.activeStreams.allEntries()) entry.connection?.changed("host");
 	}
 
-	/** Theme changed: fan the new tokens out to every capable phone stream. */
+	/** Theme changed: devices refetch the shared theme. */
 	onThemeChanged(): void {
 		if (!this.isThemeTokenPushEnabled()) {
 			return;
 		}
-		for (const entry of this.activeStreams.allEntries()) {
-			this.pushThemeTokensToStream(entry);
-		}
+		this.hostStatusChanged();
+	}
+
+	/** Keep-awake status changed (control toggle, phone toggle, or degradation). */
+	onKeepAwakeChanged(): void {
+		this.hostStatusChanged();
 	}
 
 	/**
-	 * Keep-awake status changed (control toggle, phone toggle, or degradation):
-	 * fan the new state to every phone stream. Clients that ignore the frame are
-	 * fully supported, so no capability gating.
+	 * Serve a workspace stream: host intents and queries of one purpose on the
+	 * device's remote profile, without a conversation.
 	 */
-	onKeepAwakeChanged(): void {
-		const frame = {
-			type: "keep_awake_changed",
-			data: { keepAwake: toRpcKeepAwakeStatus(this.services.keepAwake.status) },
-		};
-		for (const entry of this.activeStreams.allEntries()) {
-			void Promise.resolve(entry.write?.(frame)).catch(() => {});
-		}
-	}
-
-	private async closeStreamWithTerminal(
-		stream: IrohBiStreamLike,
-		reason: string,
-		terminal: {
-			authorization: IrohRemoteClientAuthorizationSuccess;
-			sessionId: string | undefined;
-			write(value: object): Promise<void> | void | undefined;
-			terminate(): Promise<void> | undefined;
-			lifecycleSettled?: Promise<void>;
-		},
-	): Promise<void> {
-		// Revocation/access tightening invalidates the old projection policy. Do
-		// not drain its already-authorized queue merely to deliver a courtesy frame;
-		// close the physical stream immediately and force a fresh handshake.
-		if (isAuthorityTighteningCloseReason(reason)) {
-			const termination = terminal.terminate();
-			if (termination) await termination.catch(() => {});
-			else closeIrohRemoteStream(stream, reason);
-			await terminal.lifecycleSettled?.catch(() => {});
-			return;
-		}
-		const terminalReason = getRemoteTerminalReason(reason);
-		if (terminalReason) {
-			try {
-				const delivery = terminal.write({
-					type: "remote_terminal",
-					reason: terminalReason,
-					workspace: terminal.authorization.workspace.name,
-					...(terminal.sessionId === undefined ? {} : { sessionId: terminal.sessionId }),
-					hostNodeId: this.hostNodeId,
-				});
-				if (delivery) void Promise.resolve(delivery).catch(() => {});
-			} catch {}
-		}
-		const termination = terminal.terminate();
-		if (termination) await termination.catch(() => {});
-		else closeIrohRemoteStream(stream, reason);
-		await terminal.lifecycleSettled?.catch(() => {});
-	}
-
-	private async runWorkspaceDiscovery(
+	private async runWorkspaceStream(
 		stream: IrohBiStreamLike,
 		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
 		connectionId: string,
 		streamId: string,
 		owner: IrohPhysicalStreamOwner,
+		scope: Extract<RemoteStreamScope, { kind: "discovery" | "management" }>,
 	): Promise<void> {
+		const authorization = handshake.authorization;
 		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
-		await this.dependencies.beforeAuthorizedStreamPublication?.("workspace_discovery", handshake.authorization);
-		if (!this.admission.isOpen || !(await this.isAuthorizationCurrent(handshake.authorization))) {
+		await this.dependencies.beforeAuthorizedStreamPublication?.(
+			scope.kind === "discovery"
+				? "workspace_discovery"
+				: scope.purpose === "manage_worktrees"
+					? "worktree_management"
+					: "workspace_management",
+			authorization,
+		);
+		if (!this.admission.isOpen || !(await this.isAuthorizationCurrent(authorization))) {
 			await owner.close("access_updated_during_attach").catch(() => {});
 			return;
 		}
 		const activeStream = this.registerActiveStream(
-			handshake.authorization,
-			WORKSPACE_DISCOVERY_STREAM_SESSION_ID,
+			authorization,
+			scope.kind === "discovery" ? WORKSPACE_DISCOVERY_STREAM_SESSION_ID : WORKSPACE_MANAGEMENT_STREAM_SESSION_ID,
 			stream,
 			owner,
 			connectionId,
 			streamId,
-			{ terminalSessionId: undefined },
 		);
+		/** The device unregisters this stream's workspace: the stream stays until the answer is written. */
+		let unregistering = false;
+		const frameAuthority = this.frameAuthority(authorization);
+		const allows = remoteStreamAllows(scope);
 		try {
-			const purpose =
-				handshake.hello.mode === "workspaceDiscovery"
-					? handshake.hello.workspaceDiscovery.purpose
-					: "list_sessions";
-			const discoveryHooks =
-				purpose === "agent_options"
-					? {
-							purpose: "agent_options" as const,
-							agentOptions: this.createAgentOptionsRpcBackend(handshake.authorization.workspace),
-						}
-					: purpose === "session_contexts"
-						? {
-								purpose: "session_contexts" as const,
-								sessionContexts: this.createSessionContextsRpcBackend(handshake.authorization),
-							}
-						: purpose === "review"
-							? {
-									purpose: "review" as const,
-									prReviews: this.createPrReviewRpcBackend(handshake.authorization, owner.signal),
-								}
-							: { purpose: "list_sessions" as const, commandContext: this.getCommandContext() };
-			await runWorkspaceDiscoveryStream(
-				{
-					stream,
-					initialInput: handshake.initialInput,
-					authorization: handshake.authorization,
-					isRpcGrantCurrent: () => this.isAuthorizationCurrent(handshake.authorization),
-					closeStream: (reason) => {
-						void owner.close(reason ?? "stream_closed").catch(() => {});
-					},
+			const connection = serveIrohRemoteConnection({
+				stream,
+				initialInput: handshake.initialInput,
+				grant: parseIrohRemoteRpcGrant(authorization.client.rpcGrant, "client rpcGrant"),
+				clientKey: authorization.client.nodeId,
+				redaction: {
+					workspacePath: authorization.workspace.path,
+					remoteWorkspacePath: "/workspace",
+					...(scope.purpose === "manage_worktrees"
+						? { additionalRedactedPaths: [getWorktreesRoot(this.services.agentDir)] }
+						: {}),
 				},
-				discoveryHooks,
-			);
+				services: () =>
+					remoteIntentServices(this.remoteIntentHost, authorization, scope, {
+						keep: { streamId },
+						signal: owner.signal,
+						workspaceUnregister: {
+							begin: () => {
+								unregistering = true;
+							},
+							// An accepted unregister ends the connection after its answer.
+							end: (succeeded) => {
+								if (!succeeded) unregistering = false;
+							},
+						},
+					}),
+				authority: () => (unregistering ? undefined : frameAuthority()),
+				revalidate: () => (unregistering ? Promise.resolve(true) : this.isAuthorizationCurrent(authorization)),
+				...(allows === undefined ? {} : { allows }),
+			});
+			activeStream.entry.connection = connection;
+			await connection.closed.catch(() => undefined);
 		} finally {
 			activeStream.remove();
 		}
@@ -3547,128 +3553,6 @@ class IrohDaemonService {
 			workspaceName: workspace.name,
 		});
 		return createIrohRemoteAgentOptions(workspace.name, services, signal);
-	}
-
-	private async runWorkspaceManagement(
-		stream: IrohBiStreamLike,
-		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connectionId: string,
-		streamId: string,
-		owner: IrohPhysicalStreamOwner,
-		purpose: "unregister_workspace" | "list_workspace_directories",
-	): Promise<void> {
-		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
-		await this.dependencies.beforeAuthorizedStreamPublication?.("workspace_management", handshake.authorization);
-		if (!this.admission.isOpen || !(await this.isAuthorizationCurrent(handshake.authorization))) {
-			await owner.close("access_updated_during_attach").catch(() => {});
-			return;
-		}
-		const activeStream = this.registerActiveStream(
-			handshake.authorization,
-			WORKSPACE_MANAGEMENT_STREAM_SESSION_ID,
-			stream,
-			owner,
-			connectionId,
-			streamId,
-			{ terminalSessionId: undefined },
-		);
-		try {
-			await runWorkspaceManagementStream(
-				{
-					stream,
-					initialInput: handshake.initialInput,
-					authorization: handshake.authorization,
-					isRpcGrantCurrent: () => this.isAuthorizationCurrent(handshake.authorization),
-					closeStream: (reason) => {
-						activeStream.remove();
-						void owner.close(reason ?? "stream_closed").catch(() => {});
-					},
-				},
-				{
-					auditLogger: this.services.auditLogger,
-					commandContext: this.getCommandContext(),
-					unregisterWorkspace: async (workspaceName) => {
-						let removedWorkspace: Awaited<ReturnType<IrohRemoteHostStateManager["unregisterWorkspace"]>>;
-						try {
-							removedWorkspace = await this.stateManager.unregisterWorkspace(workspaceName);
-						} catch (error) {
-							if (!isIrohRemoteWorkspaceHasWorktreesError(error)) {
-								throw error;
-							}
-							return {
-								ok: false,
-								error: IROH_REMOTE_WORKSPACE_HAS_WORKTREES_ERROR,
-								details: {
-									worktreeCount: error.worktreeIds.length,
-									worktreeIds: error.worktreeIds,
-								},
-							};
-						}
-						if (!removedWorkspace) {
-							return { ok: false, error: "workspace_unregistered" };
-						}
-						this.engine?.clearPairingSecretForWorkspace(workspaceName);
-						const { closedStreamCount, stoppedRuntimeCount } = await this.cleanupUnregisteredWorkspace(
-							workspaceName,
-							{ streamEntry: activeStream.entry, workspacePath: removedWorkspace.path },
-						);
-						return { ok: true, closedStreamCount, stoppedRuntimeCount };
-					},
-				},
-				purpose,
-			);
-		} finally {
-			activeStream.remove();
-		}
-	}
-
-	/** Serve a manage_worktrees workspaceManagement stream (worktrees.v1). */
-	private async runWorktreeManagement(
-		stream: IrohBiStreamLike,
-		handshake: Extract<IrohRemoteHostHandshakeResult, { ok: true }>,
-		connectionId: string,
-		streamId: string,
-		owner: IrohPhysicalStreamOwner,
-	): Promise<void> {
-		await writeIrohRemoteHandshakeResponse(stream.send, handshake.response);
-		await this.dependencies.beforeAuthorizedStreamPublication?.("worktree_management", handshake.authorization);
-		if (!this.admission.isOpen || !(await this.isAuthorizationCurrent(handshake.authorization))) {
-			await owner.close("access_updated_during_attach").catch(() => {});
-			return;
-		}
-		const sanitizerOverrides: RemoteSanitizerOverrides = {
-			additionalRedactedPaths: [getWorktreesRoot(this.services.agentDir)],
-		};
-		const activeStream = this.registerActiveStream(
-			handshake.authorization,
-			WORKSPACE_MANAGEMENT_STREAM_SESSION_ID,
-			stream,
-			owner,
-			connectionId,
-			streamId,
-			{ terminalSessionId: undefined, sanitizerOverrides },
-		);
-		try {
-			await runWorktreeManagementStream(
-				{
-					stream,
-					initialInput: handshake.initialInput,
-					authorization: handshake.authorization,
-					isRpcGrantCurrent: () => this.isAuthorizationCurrent(handshake.authorization),
-					closeStream: (reason) => {
-						void owner.close(reason ?? "stream_closed").catch(() => {});
-					},
-				},
-				{
-					auditLogger: this.services.auditLogger,
-					additionalRedactedPaths: sanitizerOverrides.additionalRedactedPaths,
-					worktrees: this.createWorktreeRpcBackend(handshake.authorization.workspace),
-					prReviews: this.createPrReviewRpcBackend(handshake.authorization, owner.signal),
-				},
-			);
-		} finally {
-			activeStream.remove();
-		}
 	}
 
 	private prReviewAuthority(
@@ -4526,7 +4410,6 @@ class IrohDaemonService {
 		let attachDetached = false;
 		let retireRuntimeAfterStreamLifecycle = false;
 		let workspaceUnregistered = false;
-		let workspaceUnregisterClosureScheduled = false;
 		let handshakeResponseWritten = false;
 		let resolveStreamLifecycleSettled = () => {};
 		const streamLifecycleSettled = new Promise<void>((resolve) => {
@@ -4674,12 +4557,15 @@ class IrohDaemonService {
 				await this.rejectDuplicateActiveConnection(stream, authorization, entry.sessionId);
 				return;
 			}
-			// Worktree-bound conversations sanitize with the worktree checkout as the
+			// Worktree-bound conversations redact with the worktree checkout as the
 			// root; the parent checkout and the worktrees root must ALSO redact (bash
 			// output like `git worktree list` prints both).
-			const worktreeSanitizerOverrides: RemoteSanitizerOverrides | undefined =
+			const redaction: Pick<
+				RemoteRedactionOptions,
+				"workspacePath" | "remoteWorkspacePath" | "additionalRedactedPaths"
+			> =
 				entry.worktreePath === undefined
-					? undefined
+					? { workspacePath: authorization.workspace.path, remoteWorkspacePath: "/workspace" }
 					: {
 							remoteWorkspacePath:
 								entry.worktreeSourceRootRelativePath === undefined
@@ -4715,7 +4601,6 @@ class IrohDaemonService {
 				streamId,
 				{
 					coordinator: entry.coordinator,
-					...(worktreeSanitizerOverrides === undefined ? {} : { sanitizerOverrides: worktreeSanitizerOverrides }),
 					lifecycleSettled: streamLifecycleSettled,
 				},
 			);
@@ -4725,9 +4610,6 @@ class IrohDaemonService {
 				entry.sessionId,
 				connectionId,
 			);
-			// The ordered feed installs the sole post-handshake writer. Until then,
-			// global theme/keep-awake fanout must not overtake cursor-zero bootstrap.
-			activeStream.entry.write = undefined;
 			// Runtime, lease, and physical stream ownership are now synchronously
 			// published. Later subscriber admission rechecks the service gate, while
 			// this long-lived stream no longer belongs to the attach-operation drain.
@@ -4774,126 +4656,77 @@ class IrohDaemonService {
 			if (!this.admission.isOpen) {
 				return;
 			}
-			const pushDispatcher = this.createPushNotificationDispatcher(authorization);
-			const responseContext = this.getResponseContext();
-			const hostNodeId = responseContext.hostNodeId;
+			const hostNodeId = this.getResponseContext().hostNodeId;
 			if (hostNodeId === undefined) {
 				throw new Error("Iroh service host node ID is unavailable");
 			}
 			const { host, conversation } = entry.runtime;
-			// The phone's structural intents redirect it alone; it stays on this conversation.
-			await runIrohRemoteRpcMode(host, conversation, {
-				redirect: this.runtimes.streamRedirect(entry, authorization),
-				...(entry.reviewDiscussions === undefined ? {} : { reviewDiscussions: entry.reviewDiscussions }),
-				onClientDetached: (detachment) => {
-					if (detachment.kind === "redirected") movedToSessionId = detachment.sessionId;
-				},
-				rpcGrant: authorization.client.rpcGrant,
-				hostNodeId,
-				clientNodeId: authorization.client.nodeId,
-				isRpcIngressOpen: () => !workspaceUnregistered,
-				isRpcGrantCurrent: () => this.isAuthorizationCurrent(authorization),
-				decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
-				notificationDelivery: pushDispatcher,
-				onClientCapabilitiesChanged: (features) => {
-					const streamEntry = activeStream?.entry;
-					if (streamEntry) {
-						streamEntry.capabilities = new Set(features);
-						this.pushThemeTokensToStream(streamEntry);
-					}
-				},
-				onResponseWritten: (response) => {
-					if (
-						!workspaceUnregistered ||
-						workspaceUnregisterClosureScheduled ||
-						response.command !== "unregister_workspace" ||
-						response.success !== true
-					) {
-						return;
-					}
-					workspaceUnregisterClosureScheduled = true;
-					// The response write has physically completed. Admit the explicit
-					// terminal frame on the next microtask so the ordered feed can finish
-					// the current response before retiring its requesting stream.
-					queueMicrotask(() => {
-						void (async () => {
-							try {
-								await activeStream?.entry.writeTerminal?.({
-									type: "remote_terminal",
-									reason: WORKSPACE_UNREGISTERED_CLOSE_REASON,
-									workspace: authorization.workspace.name,
-									sessionId: entry.sessionId,
-									hostNodeId: this.hostNodeId,
-								});
-							} catch {
-								// The response is already delivered; terminal delivery is best-effort.
-							} finally {
-								await owner.close(WORKSPACE_UNREGISTERED_CLOSE_REASON).catch(() => {});
-							}
-						})();
-					});
-				},
-				// After the response of the phone's own session change, the stream ends
-				// and the phone reconnects to the conversation it moved to.
-				detachedTerminal: (detachment): RpcRemoteTerminalEvent | undefined =>
-					detachment.kind === "redirected"
-						? {
-								type: "remote_terminal",
-								reason: "conversation_moved",
-								workspace: authorization.workspace.name,
-								sessionId: entry.sessionId,
-								targetSessionId: detachment.sessionId,
-								hostNodeId,
-							}
-						: undefined,
-				buildConversationSnapshot: createRemoteConversationSnapshotBuilder({ authorization, conversation }),
-				projectConversationExternal: createRemoteConversationExternalProjector({ authorization, conversation }),
-				onConversationLifecycleReady: (lifecycle) => {
-					if (activeStream?.entry) {
-						activeStream.entry.write = lifecycle.write;
-						activeStream.entry.writeTerminal = lifecycle.writeTerminal;
-						activeStream.entry.terminate = lifecycle.terminate;
-					}
-				},
-				onReady: () => {
-					if (!subscriber) {
-						throw new Error("Recovered input cannot start before subscriber admission");
-					}
-					// Arm recovery only after RPC has rebound the active session and extension
-					// session_start/resource discovery has completed. Fresh sessions complete as
-					// a no-op; later replacements inherit the same post-rebind capability.
-					void this.runtimes.startRecoveredClientInputs(entry, attachClaim, subscriber);
-					attachClaim.release();
-				},
-				registerPushTarget: (args) => pushDispatcher.registerPushTarget(args),
-				remoteCommandHandler: (command) =>
-					handleIntegratedConversationRpcCommand(
-						command as { type: string } & Record<string, unknown>,
-						authorization,
-						this.getCommandContext({
-							workspaceName: authorization.workspace.name,
-							workspacePath: authorization.workspace.path,
-							entry,
-							conversation,
-							streamEntry: activeStream?.entry,
-							onWorkspaceUnregistered: () => {
-								workspaceUnregistered = true;
-								activeStream?.remove();
-							},
-						}),
-						conversation,
-					),
+			const redirect = this.runtimes.streamRedirect(entry, authorization);
+			const attached = subscriber;
+			/** The device unregisters its own workspace: its stream stays until the answer is written. */
+			let unregistering = false;
+			const frameAuthority = this.frameAuthority(authorization);
+			const connection = serveIrohRemoteConnection({
+				host,
+				conversation,
 				stream,
 				initialInput: handshake.initialInput,
-				workspaceName: authorization.workspace.name,
-				workspacePath: entry.worktreePath ?? authorization.workspace.path,
-				...(worktreeSanitizerOverrides?.remoteWorkspacePath === undefined
-					? {}
-					: { remoteWorkspacePath: worktreeSanitizerOverrides.remoteWorkspacePath }),
-				...(worktreeSanitizerOverrides?.additionalRedactedPaths === undefined
-					? {}
-					: { additionalRedactedPaths: worktreeSanitizerOverrides.additionalRedactedPaths }),
+				grant: parseIrohRemoteRpcGrant(authorization.client.rpcGrant, "client rpcGrant"),
+				clientKey: authorization.client.nodeId,
+				redaction,
+				// The phone's structural intents redirect it alone; it stays on this conversation.
+				redirect: {
+					...(redirect.hostTarget === undefined ? {} : { hostTarget: redirect.hostTarget }),
+					onRedirected: (sessionId) => {
+						movedToSessionId = sessionId;
+					},
+				},
+				services: () =>
+					remoteIntentServices(
+						this.remoteIntentHost,
+						authorization,
+						{
+							kind: "conversation",
+							conversation,
+							...(entry.reviewDiscussions === undefined ? {} : { reviewDiscussions: entry.reviewDiscussions }),
+						},
+						{
+							keep: { streamId, sessionId: entry.sessionId },
+							workspaceUnregister: {
+								begin: () => {
+									unregistering = true;
+								},
+								// An accepted unregister ends the connection after its answer.
+								end: (succeeded) => {
+									if (!succeeded) {
+										unregistering = false;
+										return;
+									}
+									workspaceUnregistered = true;
+								},
+							},
+						},
+					),
+				authority: () => (unregistering ? undefined : frameAuthority()),
+				revalidate: () => (unregistering ? Promise.resolve(true) : this.isAuthorizationCurrent(authorization)),
+				admit: (intent) => this.admitRemoteIntent(intent, entry),
+				notifications: {
+					hostNodeId,
+					clientNodeId: authorization.client.nodeId,
+					workspaceName: authorization.workspace.name,
+					delivery: this.createPushNotificationDispatcher(authorization),
+				},
 			});
+			activeStream.entry.connection = connection;
+			void connection.ready.then(
+				() => {
+					// Recovery of queued input starts once the conversation's extensions are bound.
+					void this.runtimes.startRecoveredClientInputs(entry, attachClaim, attached);
+					attachClaim.release();
+				},
+				() => undefined,
+			);
+			await connection.closed;
 		} catch (error) {
 			subscriberError = error;
 			if (!runtimeOwnershipPublished) {
@@ -4986,6 +4819,16 @@ class IrohDaemonService {
 				this.connectionSupervisors.delete(connectionId);
 			}
 		});
+	}
+
+	/** Make every TUI relay of `nodeId`, active or offered, unusable now. */
+	private closeClientRelays(nodeId: string): void {
+		for (const relay of [...this.relays.all("active"), ...this.relays.all("offered")]) {
+			if (relay.clientNodeId !== nodeId) continue;
+			void this.conversationCoordinators
+				.get(relay.workspaceName, relay.sessionId)
+				?.closeTransport(relay.relayId, "error");
+		}
 	}
 
 	private closeClientConnectionsForClient(nodeId: string, reason: string): number {
@@ -5555,22 +5398,6 @@ class IrohDaemonService {
 				connection.send({ type: "ok", id: request.id });
 				return true;
 			}
-			case "viewer_subscribe": {
-				if (!this.viewerFeeds.subscribe(request.viewerFeedId, connection.connectionId)) {
-					connection.send({ type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" });
-					return true;
-				}
-				connection.send({ type: "ok", id: request.id });
-				return true;
-			}
-			case "viewer_unsubscribe": {
-				if (!this.viewerFeeds.unsubscribe(request.viewerFeedId, connection.connectionId)) {
-					connection.send({ type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" });
-					return true;
-				}
-				connection.send({ type: "ok", id: request.id });
-				return true;
-			}
 			case "viewer_abort": {
 				if (!(await this.viewerFeeds.abort(request.viewerFeedId, connection.connectionId))) {
 					connection.send({ type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" });
@@ -5612,12 +5439,7 @@ class IrohDaemonService {
 					connection.send({ type: "error", id: request.id, code: result.code, message: result.message });
 					return true;
 				}
-				connection.send({
-					type: "relay_rpc_result",
-					id: request.id,
-					response: result.response,
-					...(result.workspaceMetadata === undefined ? {} : { workspaceMetadata: result.workspaceMetadata }),
-				});
+				connection.send({ type: "relay_rpc_result", id: request.id, frame: result.frame });
 				return true;
 			}
 			case "relay_notification_delivery": {
@@ -5664,6 +5486,8 @@ class IrohDaemonService {
 				return true;
 			}
 			case "client_access_update": {
+				// A TUI serves a relayed device on the grant it was relayed with: end those relays before the change.
+				this.closeClientRelays(request.clientNodeId);
 				const access =
 					request.access !== undefined
 						? createIrohRemotePresetAccess(request.access)
@@ -5726,6 +5550,8 @@ class IrohDaemonService {
 					connection.send({ type: "error", id: request.id, code: "not_found", message: "client not found" });
 					return true;
 				}
+				// A TUI serves a relayed device on the grant it was relayed with: end those relays before the change.
+				this.closeClientRelays(request.clientNodeId);
 				const relayAppEndpoint = await this.stageManagedRelayAppEndpointRevocation(request.clientNodeId);
 				const revocation = await result.engine.revokeClient(request.clientNodeId);
 				if (!revocation.revoked) {
@@ -5905,49 +5731,26 @@ class IrohDaemonService {
 	}
 
 	/**
-	 * Execute a state-touching RPC command forwarded from a TUI-owned relay
-	 * against the daemon's real state (§5.6): push targets and workspace
-	 * unregistration must land here, not in the TUI's in-memory state copy.
+	 * Run a relayed phone's intent or query that the daemon's state backs
+	 * (§5.6): push targets, workspace registration and worktrees, keep-awake,
+	 * the web search key, and the session list. The TUI serving the phone
+	 * forwards the frame; the daemon admits it on the phone's remote profile
+	 * with the grant it holds now and answers with the outcome frame.
 	 */
 	private async handleRelayRpc(
 		connection: ControlConnection,
 		request: Extract<ControlRequest, { type: "relay_rpc" }>,
-	): Promise<
-		| {
-				ok: true;
-				response: Record<string, unknown>;
-				workspaceMetadata?: IrohRemoteWorkspaceMetadataSnapshot;
-		  }
-		| { ok: false; code: string; message: string }
-	> {
+	): Promise<{ ok: true; frame: ControlRelayOutcome } | { ok: false; code: string; message: string }> {
 		const relayAuthorization = this.relays.authorizeRpc(request.relayId, connection.connectionId, request);
 		if (!relayAuthorization.ok) {
 			return relayAuthorization;
-		}
-		const command = request.command;
-		if (!RELAY_RPC_COMMAND_TYPES.has(command.type)) {
-			return { ok: false, code: "unsupported", message: `unsupported relay rpc command: ${command.type}` };
 		}
 		const client = await this.stateManager.getClient(request.clientNodeId);
 		if (!client) {
 			return { ok: false, code: "not_found", message: "paired client not found" };
 		}
-		const requiredCapabilities = getIrohRemoteRpcCommandCapabilities(command);
-		if (requiredCapabilities === undefined) {
-			return { ok: false, code: "unsupported", message: `unsupported relay rpc command: ${command.type}` };
-		}
-		const missingCapability = getMissingIrohRemoteRpcCapability(client.rpcGrant, requiredCapabilities);
-		if (missingCapability !== undefined) {
-			return {
-				ok: true,
-				response: {
-					...createIrohRemoteRpcCapabilityDeniedResponse(
-						getRpcResponseId(command),
-						command.type,
-						missingCapability,
-					),
-				},
-			};
+		if (!isIrohRemoteClientAllowedForWorkspace(client, request.workspaceName)) {
+			return { ok: false, code: "not_allowed", message: "client is not authorized for the relay workspace" };
 		}
 		const workspace = (await this.stateManager.getState()).workspaces.find(
 			(candidate) => candidate.name === request.workspaceName,
@@ -5966,69 +5769,47 @@ class IrohDaemonService {
 			workspaceNames: [...relayWorkspaceMetadata.workspaceNames],
 			workspaces: relayWorkspaceMetadata.workspaces.map((entry) => ({ ...entry })),
 		};
-		const responseId = getRpcResponseId(command);
-		if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
-			const response = await createKeepAwakeRpcResponse(command, authorization, this.getCommandContext());
-			return { ok: true, response: response as Record<string, unknown> };
-		}
-		if (command.type === "set_web_search_key" || command.type === "get_web_search_status") {
-			const response = await createWebSearchKeyRpcResponse(command, authorization, this.getCommandContext());
-			return { ok: true, response: response as Record<string, unknown> };
-		}
-		if (command.type === "register_push_target") {
-			try {
-				const dispatcher = this.createPushNotificationDispatcher(authorization);
-				const { outcome } = await intentRegistry.invoke(
-					{
-						services: { pushTargets: { register: (args) => dispatcher.registerPushTarget(args) } },
-						profile: remoteIntentProfile(authorization),
-					},
-					"register_push_target",
-					command.args as RpcRegisterPushTargetArgs,
-				);
-				return { ok: true, response: createRpcSuccessResponse(responseId, command.type, { ...outcome }) };
-			} catch (error) {
-				return {
-					ok: true,
-					response: {
-						...createIrohRemoteRpcErrorResponse(
-							responseId,
-							command.type,
-							error instanceof Error ? error.message : String(error),
-						),
-					},
-				};
-			}
-		}
-		// unregister_workspace: run against the daemon state with the shared host
-		// cleanup, keeping the requesting conversation's own relays open so the
-		// response can still be delivered over them.
-		const excludeRelayIds = new Set(
+		// An unregister keeps the requesting conversation's relays, so the TUI can still answer the phone.
+		const relayIds = new Set(
 			this.relays
 				.forConversation(request.clientNodeId, request.workspaceName, request.sessionId, "active")
 				.map((relay) => relay.relayId),
 		);
-		const context: ConversationCommandContext = {
-			...this.getCommandContext(),
-			onWorkspaceUnregistered: async (workspaceName) => {
-				await this.cleanupUnregisteredWorkspace(workspaceName, {
-					relayIds: excludeRelayIds,
-					workspacePath: workspace.path,
-				});
-			},
+		const ctx: IntentContext = {
+			services: remoteIntentServices(
+				this.remoteIntentHost,
+				authorization,
+				{ kind: "relay", sessionId: request.sessionId },
+				{ keep: { relayIds } },
+			),
+			profile: { name: "remote", grant: parseIrohRemoteRpcGrant(client.rpcGrant, "client rpcGrant") },
 		};
-		const response = await handleRemoteHostRpcCommand(command, authorization, context);
-		if (!response) {
-			return { ok: false, code: "unsupported", message: `unsupported relay rpc command: ${command.type}` };
+		const frame = request.frame;
+		if (frame.type === "query") {
+			try {
+				const data = await queryRegistry.runFrame(ctx, frame.query, frame.params);
+				return { ok: true, frame: { type: "result", queryId: frame.queryId, data } };
+			} catch (error) {
+				return {
+					ok: true,
+					frame: { type: "query_error", queryId: frame.queryId, reason: queryErrorReason(error) },
+				};
+			}
 		}
-		return {
-			ok: true,
-			response: response as Record<string, unknown>,
-			workspaceMetadata: {
-				workspaceNames: [...authorization.workspaceNames],
-				workspaces: authorization.workspaces.map((entry) => ({ name: entry.name, status: entry.status })),
-			},
-		};
+		try {
+			const invocation = await intentRegistry.invokeFrame(ctx, frame.type, frame.input);
+			return {
+				ok: true,
+				frame: {
+					type: "accepted",
+					intentId: frame.intentId,
+					ordinals: invocation.ordinals,
+					...(invocation.result === undefined ? {} : { result: invocation.result }),
+				},
+			};
+		} catch (error) {
+			return { ok: true, frame: { type: "rejected", intentId: frame.intentId, reason: rejectionReason(error) } };
+		}
 	}
 
 	private async requireEngineSafe(): Promise<

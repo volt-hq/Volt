@@ -1,7 +1,13 @@
 import { Buffer } from "node:buffer";
 import { DEFAULT_IROH_RPC_MAX_LINE_BYTES } from "@hansjm10/volt-protocol";
 import { serializeJsonLine } from "./jsonl.ts";
-import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "./transport.ts";
+import {
+	type RpcCloseHandler,
+	RpcFrameTooLargeError,
+	type RpcLineHandler,
+	RpcSendQueueFullError,
+	type RpcTransport,
+} from "./transport.ts";
 
 export const DEFAULT_IROH_READ_LIMIT = 64 * 1024;
 export { DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES, DEFAULT_IROH_RPC_MAX_LINE_BYTES } from "@hansjm10/volt-protocol";
@@ -38,6 +44,12 @@ export interface IrohRpcTransportOptions {
 	stopRecvOnClose?: boolean;
 	/** Error code used for the recv stop helper. Defaults to 0. */
 	closeErrorCode?: bigint;
+	/**
+	 * Most bytes the transport queues for a peer that reads slower than it is
+	 * written to. A write past it resets the stream and fails with
+	 * `RpcSendQueueFullError` instead of growing the queue. Unbounded by default.
+	 */
+	maxQueuedBytes?: number;
 }
 
 /**
@@ -53,6 +65,7 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 	const closeHandlers = new Set<RpcCloseHandler>();
 	const pendingWrites = new Set<Promise<void>>();
 	let writeQueue: Promise<void> | undefined;
+	let queuedBytes = 0;
 	let pendingWriteError: Error | undefined;
 	let readLoopStarted = false;
 	let localCloseRequested = false;
@@ -133,6 +146,18 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 			const serialized = serializeJsonLine(value);
 			const serializedBytes = Buffer.from(serialized, "utf8");
 			assertIrohRpcLineWithinLimit(serializedBytes.length - 1, maxLineBytes);
+			if (options.maxQueuedBytes !== undefined && queuedBytes + serializedBytes.length > options.maxQueuedBytes) {
+				// The peer stopped keeping up: reset the stream rather than hold more for it.
+				const overflow = recordWriteError(new RpcSendQueueFullError(options.maxQueuedBytes));
+				localCloseRequested = true;
+				sendClosed = true;
+				void Promise.resolve(options.stream.send.reset?.(closeErrorCode)).catch(() => {});
+				void Promise.resolve(options.stream.recv.stop?.(closeErrorCode)).catch(() => {});
+				emitClose(overflow);
+				throw overflow;
+			}
+			queuedBytes += serializedBytes.length;
+			const queued = serializedBytes.length;
 			const bytes = Array.from(serializedBytes);
 			const runWrite = (): Promise<void> => {
 				try {
@@ -148,6 +173,7 @@ export function createIrohRpcTransport(options: IrohRpcTransportOptions): RpcTra
 					throw recordWriteError(error);
 				})
 				.finally(() => {
+					queuedBytes -= queued;
 					pendingWrites.delete(writePromise);
 					if (writeQueue === writePromise) {
 						writeQueue = undefined;
@@ -333,7 +359,7 @@ function normalizeJsonlLine(line: Buffer): Buffer {
 
 function assertIrohRpcLineWithinLimit(length: number, maxLineBytes: number): void {
 	if (length > maxLineBytes) {
-		throw new Error(`Iroh RPC line exceeds maximum size of ${maxLineBytes} bytes`);
+		throw new RpcFrameTooLargeError(maxLineBytes);
 	}
 }
 

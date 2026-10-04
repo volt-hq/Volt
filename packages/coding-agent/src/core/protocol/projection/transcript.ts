@@ -151,7 +151,8 @@ function toolResultItem(
 	profile: Profile,
 ): TranscriptItem {
 	const toolName = message.toolName;
-	const args = findToolCall(entry, message.toolCallId, source)?.arguments;
+	const call = findToolCall(entry, message.toolCallId, source);
+	const args = call === undefined ? undefined : profile.source(call).arguments;
 	const status = message.isError ? "failed" : "completed";
 	const path = getToolPath(toolName, args);
 	const details = isRecord(message.details) ? message.details : undefined;
@@ -219,12 +220,20 @@ function bashItem(
 	};
 }
 
-/** The transcript view of a message-like entry, or none for an entry no transcript shows. */
+/**
+ * The transcript view of a message-like entry, or none for an entry no
+ * transcript shows. The view is projected from the profile's source of the
+ * entry, so the remote profile's paths are redacted before any text is cut.
+ */
 export function projectTranscriptItem(
 	entry: CommittedSessionEntry,
 	source: ProjectionSource,
 	profile: Profile,
 ): TranscriptItem | undefined {
+	return viewOf(profile.source(entry), source, profile);
+}
+
+function viewOf(entry: CommittedSessionEntry, source: ProjectionSource, profile: Profile): TranscriptItem | undefined {
 	switch (entry.type) {
 		case "compaction": {
 			const summary = boundScalars(entry.summary, profile.limits.textScalars);

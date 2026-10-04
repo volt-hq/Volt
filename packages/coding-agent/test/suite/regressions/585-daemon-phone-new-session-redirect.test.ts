@@ -13,20 +13,16 @@ import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/acce
 import { IrohRemoteActiveStreamRegistry } from "../../../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../../src/core/remote/iroh/authorization.ts";
+import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../../../src/core/remote/iroh/handshake.ts";
+import { IROH_REMOTE_ALPN } from "../../../src/core/remote/iroh/protocol.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import { IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
+import { type IntegratedRuntimeEntry, IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
 import type { ExtensionAPI } from "../../../src/index.ts";
-import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import {
-	createTestIrohConversationOptions,
-	ManualIrohRecvStream,
-	ManualIrohSendStream,
-	parseWrittenObjects,
-	withCurrentConversationAuthority,
-} from "../../iroh-stream-doubles.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
+import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type IntentOutcome, type RemotePhone } from "../../utilities/remote-phone.ts";
 
 interface LifecycleEvent {
 	type: string;
@@ -42,7 +38,7 @@ const HANDSHAKE_RESPONSE = {
 function conversationHello(conversation: Record<string, unknown>): IrohRemoteHello {
 	return {
 		type: "volt_iroh_hello",
-		protocol: "volt-rpc/0",
+		protocol: IROH_REMOTE_ALPN,
 		workspace: "ws",
 		mode: "conversation",
 		conversation,
@@ -176,7 +172,10 @@ function createDaemon() {
 	}
 
 	/** Attach a phone stream the way the daemon serves one: a client of the conversation that its moves redirect alone. */
-	async function connectPhone(nodeId: string, hello: IrohRemoteHello) {
+	async function connectPhone(
+		nodeId: string,
+		hello: IrohRemoteHello,
+	): Promise<{ entry: IntegratedRuntimeEntry; phone: RemotePhone; closed: Promise<void> }> {
 		const authorization = authorize(nodeId);
 		const attach = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
 		await registry.commitEntry(attach.entry, attach.sessionSelection, authorization, attach.attachClaim);
@@ -184,43 +183,38 @@ function createDaemon() {
 		attach.attachClaim.release();
 		const entry = attach.entry;
 		const { host, conversation } = entry.runtime;
+		const redirect = registry.streamRedirect(entry, authorization);
 		let movedTo: string | undefined;
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		const ready = Promise.withResolvers<void>();
-		const closed = runIrohRemoteRpcMode(host, conversation, {
-			...createTestIrohConversationOptions(conversation),
-			rpcGrant: authorization.client.rpcGrant,
-			stream: { recv, send },
-			redirect: registry.streamRedirect(entry, authorization),
-			...(entry.reviewDiscussions === undefined ? {} : { reviewDiscussions: entry.reviewDiscussions }),
-			onClientDetached: (detachment) => {
-				if (detachment.kind === "redirected") movedTo = detachment.sessionId;
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host,
+			conversation,
+			stream: pair.host,
+			grant: authorization.client.rpcGrant,
+			redaction: { workspacePath },
+			redirect: {
+				hostTarget: redirect.hostTarget,
+				onRedirected: (sessionId) => {
+					movedTo = sessionId;
+				},
 			},
-			workspaceName: "ws",
-			workspacePath,
-			detachedTerminal: (detachment) =>
-				detachment.kind === "redirected"
-					? {
-							type: "remote_terminal",
-							reason: "conversation_moved",
-							workspace: "ws",
-							sessionId: entry.sessionId,
-							targetSessionId: detachment.sessionId,
-						}
-					: undefined,
-			onReady: ready.resolve,
-		}).finally(async () => {
-			await registry.detachSubscriber(
-				entry,
-				subscriber,
-				movedTo === undefined ? "transport_closed" : "conversation_moved",
-				undefined,
-				movedTo === undefined ? {} : { retainMs: 0 },
-			);
 		});
-		await Promise.race([ready.promise, closed]);
-		return { entry, recv, send, closed };
+		const closed = connection.closed
+			.catch(() => undefined)
+			.finally(async () => {
+				await registry.detachSubscriber(
+					entry,
+					subscriber,
+					movedTo === undefined ? "transport_closed" : "conversation_moved",
+					undefined,
+					movedTo === undefined ? {} : { retainMs: 0 },
+				);
+			});
+		const phone = connectRemotePhone(pair.phone);
+		await phone.hello();
+		await connection.ready;
+		await phone.subscribe(conversation.id);
+		return { entry, phone, closed };
 	}
 
 	return {
@@ -237,8 +231,12 @@ function createDaemon() {
 	};
 }
 
-function newSessionRequest(send: ManualIrohSendStream): string {
-	return JSON.stringify(withCurrentConversationAuthority(send, { id: "n1", type: "new_session" }));
+/** The conversation a structural intent's acceptance names. */
+function targetOf(outcome: IntentOutcome): string {
+	if (outcome.type !== "accepted" || outcome.conversation === undefined) {
+		throw new Error(`Expected the intent to name its target: ${JSON.stringify(outcome)}`);
+	}
+	return outcome.conversation;
 }
 
 describe("regression #585: a phone on a daemon-hosted conversation changes sessions alone", () => {
@@ -264,23 +262,19 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 		expect(source.reviewDiscussions).toBeDefined();
 		daemon.events.length = 0;
 
-		phoneA.recv.pushLine(newSessionRequest(phoneA.send));
-		await phoneA.closed;
-
-		const frames = parseWrittenObjects(phoneA.send);
-		const response = frames.find((frame) => frame.type === "response" && frame.command === "new_session");
-		expect(response).toMatchObject({ id: "n1", success: true, data: { cancelled: false } });
-		const targetId = (response?.data as { sessionId: string }).sessionId;
+		const outcome = await phoneA.phone.intent("new_session", {});
+		const targetId = targetOf(outcome);
 		expect(targetId).not.toBe("s-source");
-		// The response comes first; the redirect ends the stream.
-		expect(frames.at(-1)).toEqual({
-			type: "remote_terminal",
-			reason: "conversation_moved",
-			workspace: "ws",
-			sessionId: "s-source",
-			targetSessionId: targetId,
+		// The answer comes first; the subscription ends moved, then the stream.
+		await phoneA.phone.ended;
+		await phoneA.closed;
+		expect(phoneA.phone.frames.indexOf(outcome)).toBeGreaterThan(0);
+		expect(phoneA.phone.frames.at(-1)).toEqual({
+			type: "ended",
+			subscriptionId: "s1",
+			reason: "moved",
+			target: targetId,
 		});
-		expect(phoneA.send.finished).toBe(true);
 
 		// The daemon hosts the new conversation, detached, with the source's tool policy.
 		const target = daemon.registry.findOwner("ws", targetId);
@@ -290,26 +284,16 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 		expect(daemon.events).toEqual([{ type: "session_before_switch", sessionId: "s-source", reason: "new" }]);
 
 		// Phone B stays on the source, which stays open for it.
-		expect(phoneB.send.finished).toBe(false);
+		expect(phoneB.phone.frames.some((frame) => frame.type === "ended" || frame.type === "fatal")).toBe(false);
 		expect(daemon.registry.findOwner("ws", "s-source")).toBe(source);
-		phoneB.recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(phoneB.send, {
-					id: "p1",
-					type: "prompt",
-					message: "still on the source",
-					clientMessageId: "phone-b-prompt",
-				}),
-			),
-		);
+		expect(
+			await phoneB.phone.intent("prompt", { message: "still on the source" }, { intentId: "phone-b-prompt" }),
+		).toMatchObject({ type: "accepted" });
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(phoneB.send)).toContainEqual(
-				expect.objectContaining({ id: "p1", command: "prompt", success: true }),
-			),
+			expect(source.runtime.conversation.session.messages.some((message) => message.role === "user")).toBe(true),
 		);
 		await source.runtime.conversation.session.waitForIdle();
 		expect(source.runtime.conversation.session.sessionId).toBe("s-source");
-		expect(source.runtime.conversation.session.messages.some((message) => message.role === "user")).toBe(true);
 
 		// Only phone A's last session moved: `target:"last"` lands it on the new conversation.
 		expect(daemon.lastSessionIds.get("n-phone-a")).toBe(targetId);
@@ -336,8 +320,7 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 		expect(daemon.events).toContainEqual({ type: "session_start", sessionId: targetId, reason: "new" });
 		expect(daemon.events.some((event) => event.type === "session_shutdown")).toBe(false);
 
-		moved.recv.end();
-		phoneB.recv.end();
+		await Promise.all([moved.phone.close(), phoneB.phone.close()]);
 		await Promise.all([moved.closed, phoneB.closed]);
 	});
 
@@ -346,11 +329,9 @@ describe("regression #585: a phone on a daemon-hosted conversation changes sessi
 		cleanups.push(() => daemon.cleanup());
 		const phone = await daemon.connectPhone("n-phone-a", conversationHello({ target: "new", sessionId: "s-alone" }));
 
-		phone.recv.pushLine(newSessionRequest(phone.send));
+		const targetId = targetOf(await phone.phone.intent("new_session", {}));
 		await phone.closed;
 
-		const response = parseWrittenObjects(phone.send).find((frame) => frame.command === "new_session");
-		const targetId = (response?.data as { sessionId: string }).sessionId;
 		// Not after the configured detached TTL: the moved-away source closes at once.
 		await vi.waitFor(() => expect(daemon.registry.findOwner("ws", "s-alone")).toBeUndefined());
 		expect(daemon.events).toContainEqual({ type: "session_shutdown", sessionId: "s-alone", reason: "quit" });

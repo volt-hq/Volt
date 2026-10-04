@@ -14,6 +14,7 @@ import {
 import { type Static, Type } from "typebox";
 import type { SessionStats } from "../agent-session.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { HostedConversation } from "../host/hosted-conversation.ts";
 import type { SessionWriter } from "../session-writer.ts";
 import type {
 	SubagentActivity,
@@ -318,6 +319,8 @@ export interface SubagentToolManager {
 	getDefinition(agentName: string): SubagentDefinition;
 	/** Whether this manager belongs to a child subagent runtime. */
 	isSubagentRuntime?(): boolean;
+	/** An open child conversation of this runtime's tree, by conversation id. */
+	childConversation?(id: string, depth?: number): HostedConversation | undefined;
 	/** Definitions this runtime is currently allowed to invoke. Omit for unrestricted legacy managers. */
 	listAvailableDefinitions?(): readonly SubagentDefinition[];
 	/**

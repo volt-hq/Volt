@@ -3,13 +3,20 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { RPC_RESPONSE_SCHEMAS, RPC_STABLE_ERROR_CODES, RpcErrorResponseSchema } from "@hansjm10/volt-protocol";
+import {
+	REMOTE_CAPABILITIES,
+	type RemoteGrant,
+	RPC_RESPONSE_SCHEMAS,
+	RPC_STABLE_ERROR_CODES,
+	RpcErrorResponseSchema,
+} from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { CodeHostProvider, ReviewCodeHostPublishRequest } from "../../../src/core/code-host/index.ts";
 import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-anchors.ts";
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../../src/core/review-discussions.ts";
 import { publishReviewRun } from "../../../src/core/review-publish.ts";
@@ -27,10 +34,8 @@ import {
 	type ReviewRunRecord,
 	recordReviewFindingOutcome,
 } from "../../../src/core/review-state.ts";
-import type { RpcCloseHandler, RpcLineHandler } from "../../../src/core/rpc/transport.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import {
 	createRpcErrorResponse,
 	handleRpcCommand,
@@ -38,6 +43,8 @@ import {
 } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import type { RpcCommand, RpcResponse } from "../../../src/modes/rpc/rpc-types.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
+import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
+import { connectRemotePhone } from "../../utilities/remote-phone.ts";
 import { createHarness } from "../harness.ts";
 
 /** A conversation this test hosts, with the review discussion service a daemon would give it. */
@@ -528,56 +535,39 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		).toBe("fixed");
 	});
 
-	it("routes the existing RPC review.feedback host action through canonical state", async () => {
+	it("routes a paired device's review feedback intent through canonical state", async () => {
 		const { aliases, source } = await fixture();
-		let line!: RpcLineHandler;
-		let close: RpcCloseHandler | undefined;
-		let ready!: () => void;
-		const started = new Promise<void>((resolve) => {
-			ready = resolve;
-		});
-		const writes: object[] = [];
 		const alias = aliases[0]!;
-		const mode = runLegacyRemoteRpcMode(alias.host, alias.conversation, {
-			exitProcess: false,
-			anchor: false,
-			...(alias.reviewDiscussions === undefined ? {} : { reviewDiscussions: alias.reviewDiscussions }),
-			onReady: ready,
-			transport: {
-				write: (value) => {
-					writes.push(value);
-				},
-				onLine: (handler) => {
-					line = handler;
-					return () => {};
-				},
-				onClose: (handler) => {
-					close = handler;
-					return () => {};
-				},
-				close: () => {},
-			},
+		const grant: RemoteGrant = { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] };
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: alias.host,
+			conversation: alias.conversation,
+			stream: pair.host,
+			grant,
+			redaction: { workspacePath: alias.conversation.cwd },
+			redirect: {},
+			services: () => (alias.reviewDiscussions === undefined ? {} : { reviewDiscussions: alias.reviewDiscussions }),
 		});
-		await started;
+		const phone = connectRemotePhone(pair.phone);
 		try {
-			await line(
-				JSON.stringify({
-					id: "feedback",
-					type: "invoke_ui_action",
-					action: "review.feedback",
-					args: { runId: "review:341", findingId: "f2", status: "dismissed", reason: "intentional" },
+			await phone.hello();
+			await phone.subscribe(alias.conversation.id);
+			expect(
+				await phone.intent("review_record_finding_outcome", {
+					runId: "review:341",
+					findingId: "f2",
+					status: "dismissed",
+					reason: "intentional",
 				}),
-			);
-			await vi.waitFor(() =>
-				expect(writes).toContainEqual(expect.objectContaining({ id: "feedback", success: true })),
-			);
+			).toMatchObject({ type: "accepted", result: { findingId: "f2", status: "dismissed" } });
 			expect(
 				(await getCanonicalReviewRun(source.session.sessionManager, "review:341"))!.result!.findings[1]!.status,
 			).toBe("dismissed");
 			expect(exportReviewFeedback(aliases[0]!.session.sessionManager).outcomes).toEqual([]);
 		} finally {
-			close?.();
-			await mode;
+			await phone.close();
+			await connection.close().catch(() => undefined);
 		}
 	});
 

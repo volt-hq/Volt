@@ -13,7 +13,8 @@ import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
 import { IrohRemoteWorkspaceNameSchema, IrohRemoteWorkspaceStatusSchema } from "./workspace.ts";
 
-export const IROH_REMOTE_ALPN = "volt-rpc/0";
+/** The ALPN of protocol 1 streams: after the handshake line, a stream carries protocol 1 frames. */
+export const IROH_REMOTE_ALPN = "volt/1";
 export const IROH_REMOTE_HELLO_TYPE = "volt_iroh_hello";
 export const IROH_REMOTE_HANDSHAKE_TYPE = "volt_iroh_handshake";
 
@@ -335,38 +336,3 @@ export const IrohRemoteHandshakeResponseSchema = Type.Union([
 	IrohRemoteHandshakeFailureSchema,
 ]);
 export type IrohRemoteHandshakeResponse = Static<typeof IrohRemoteHandshakeResponseSchema>;
-
-// ============================================================================
-// Terminal frame
-// ============================================================================
-
-/**
- * The final frame of a phone conversation stream the host ends on purpose;
- * the stream closes after it. `lease_transferred`: another host process
- * serves the session now; reconnect to the same session. `conversation_moved`:
- * a session command moved this client to `targetSessionId` after its response;
- * reconnect with `target: "session"` and that id.
- */
-export const RpcRemoteTerminalEventSchema = Type.Union([
-	Type.Object(
-		{
-			type: Type.Literal("remote_terminal"),
-			reason: Type.Literal("lease_transferred"),
-			workspace: Type.String(),
-			sessionId: Type.Optional(Type.String()),
-			hostNodeId: Type.Optional(Type.String()),
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			type: Type.Literal("remote_terminal"),
-			reason: Type.Literal("conversation_moved"),
-			workspace: Type.String(),
-			sessionId: Type.String(),
-			targetSessionId: Type.String(),
-			hostNodeId: Type.Optional(Type.String()),
-		},
-		{ additionalProperties: false },
-	),
-]);

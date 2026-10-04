@@ -1,7 +1,5 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, test } from "vitest";
-import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import { createIrohRemoteFilteredRpcTransport } from "../src/core/remote/iroh/rpc-transport.ts";
 import {
 	createIrohRpcTransport,
 	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
@@ -12,7 +10,7 @@ import {
 	readIrohJsonlLine,
 } from "../src/core/rpc/iroh-transport.ts";
 import { serializeJsonLine } from "../src/core/rpc/jsonl.ts";
-import type { RpcTransport } from "../src/core/rpc/transport.ts";
+import { RpcFrameTooLargeError, type RpcTransport } from "../src/core/rpc/transport.ts";
 
 type QueuedRead = { type: "data"; bytes: IrohBytes } | { type: "end" } | { type: "error"; error: Error };
 
@@ -234,7 +232,7 @@ describe("Iroh RPC transport", () => {
 		const recv = new FragmentedIrohRecvStream(Buffer.from("a".repeat(4097)), 1);
 
 		await expect(readIrohJsonlLine(recv, undefined, { maxLineBytes: 4096 })).rejects.toThrow(
-			"Iroh RPC line exceeds maximum size of 4096 bytes",
+			new RpcFrameTooLargeError(4096),
 		);
 		expect(recv.requestedReadLimits.at(-1)).toBe(1);
 	});
@@ -289,30 +287,6 @@ describe("Iroh RPC transport", () => {
 		expect(receivedLines).toHaveLength(4096);
 	});
 
-	test("waits for each filtered parse-error write before dispatching the next line", async () => {
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		const rawTransport = createIrohRpcTransport({ stream: { recv, send } });
-		const transport = createIrohRemoteFilteredRpcTransport({
-			transport: rawTransport,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-		});
-		transport.onLine(() => {
-			throw new Error("empty lines must be rejected before RPC dispatch");
-		});
-		const closed = waitForTransportClose(transport);
-		send.deferNextWrite();
-		recv.push(Buffer.from("\n".repeat(4096)));
-		recv.end();
-
-		await nextTick();
-		expect(send.writes).toHaveLength(1);
-
-		send.completeWrite();
-		await expect(closed).resolves.toBeUndefined();
-		expect(send.writes).toHaveLength(4096);
-	});
-
 	test("serializes outbound values and reads strict JSONL from an Iroh stream", async () => {
 		const recv = new ManualIrohRecvStream();
 		const send = new ManualIrohSendStream();
@@ -353,9 +327,9 @@ describe("Iroh RPC transport", () => {
 		recv.push(Buffer.from("abcde"));
 		recv.end();
 
-		await expect(closed).resolves.toMatchObject({
-			message: "Iroh RPC line exceeds maximum size of 4 bytes",
-		});
+		const error = await closed;
+		expect(error).toBeInstanceOf(RpcFrameTooLargeError);
+		expect(error).toMatchObject({ message: "A frame exceeds the maximum size of 4 bytes", maxLineBytes: 4 });
 	});
 
 	test("rejects outbound JSONL lines that exceed the configured maximum", () => {
@@ -363,7 +337,8 @@ describe("Iroh RPC transport", () => {
 		const send = new ManualIrohSendStream();
 		const transport = createIrohRpcTransport({ stream: { recv, send }, maxLineBytes: 4 });
 
-		expect(() => transport.write({ ok: true })).toThrow("Iroh RPC line exceeds maximum size of 4 bytes");
+		expect(() => transport.write({ ok: true })).toThrow(RpcFrameTooLargeError);
+		expect(() => transport.write({ ok: true })).toThrow("A frame exceeds the maximum size of 4 bytes");
 		expect(send.writes).toEqual([]);
 	});
 

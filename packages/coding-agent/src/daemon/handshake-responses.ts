@@ -8,7 +8,6 @@ import {
 } from "../core/remote/iroh/handshake.ts";
 import { createIrohRemoteHostMetadata, type IrohRemoteHostMetadata } from "../core/remote/iroh/metadata.ts";
 import type { IrohRemoteRelayMode } from "../core/remote/iroh/protocol.ts";
-import type { RpcSessionState } from "../core/rpc/types.ts";
 
 /** Session selection outcomes as tracked by the conversation owner. */
 export type IntegratedConversationSessionSelection =
@@ -16,7 +15,7 @@ export type IntegratedConversationSessionSelection =
 	| { kind: "created_after_missing"; requestedSessionId: string; sessionId: string }
 	| { kind: "resumed"; requestedSessionId: string; sessionId: string };
 
-/** Host identity/context needed to build handshake responses and host-state decoration. */
+/** Host identity and relay configuration a handshake response carries. */
 export interface RemoteHostResponseContext {
 	hostNodeId?: string;
 	relayMode?: IrohRemoteRelayMode;
@@ -44,18 +43,6 @@ export function createRemoteHostMetadata(
 		userName: getCurrentUserName(),
 		cwd: "/workspace",
 	});
-}
-
-export function decorateRemoteConversationSessionState(
-	state: RpcSessionState,
-	authorization: IrohRemoteClientAuthorizationSuccess,
-	context: RemoteHostResponseContext,
-): RpcSessionState & { workspaceName: string; remoteHost: IrohRemoteHostMetadata } {
-	return {
-		...state,
-		workspaceName: authorization.workspace.name,
-		remoteHost: createRemoteHostMetadata(authorization, context),
-	};
 }
 
 export function getHandshakeConversationSelection(
@@ -99,68 +86,4 @@ export function createIntegratedConversationHandshakeResponse(
 			...(workingDirectory === undefined ? {} : { workingDirectory }),
 		},
 	});
-}
-
-function isResponseRecord(value: object): value is Record<string, unknown> {
-	return !Array.isArray(value);
-}
-
-function decorateRemoteUiActionResponse(value: object): object {
-	if (!isResponseRecord(value)) {
-		return value;
-	}
-	const data = value.data;
-	if (
-		value.type !== "response" ||
-		value.command !== "get_ui_actions" ||
-		value.success !== true ||
-		typeof data !== "object" ||
-		data === null ||
-		Array.isArray(data) ||
-		!Array.isArray((data as Record<string, unknown>).actions)
-	) {
-		return value;
-	}
-	const actions = (data as Record<string, unknown>).actions as unknown[];
-	return {
-		...value,
-		data: {
-			...data,
-			actions: actions.filter(
-				(action) =>
-					typeof action === "object" && action !== null && (action as Record<string, unknown>).remoteSafe === true,
-			),
-		},
-	};
-}
-
-/**
- * Decorates outbound RPC frames with host-side metadata: filters get_ui_actions
- * to remote-safe actions, and stamps get_state responses with the workspace
- * name and remote host metadata.
- */
-export function decorateRemoteHostState(
-	value: object,
-	authorization: IrohRemoteClientAuthorizationSuccess,
-	context: RemoteHostResponseContext,
-): object {
-	const decoratedValue = decorateRemoteUiActionResponse(value);
-	if (!isResponseRecord(decoratedValue)) {
-		return decoratedValue;
-	}
-	const data = decoratedValue.data;
-	if (
-		decoratedValue.type !== "response" ||
-		decoratedValue.command !== "get_state" ||
-		decoratedValue.success !== true ||
-		typeof data !== "object" ||
-		data === null ||
-		Array.isArray(data)
-	) {
-		return decoratedValue;
-	}
-	return {
-		...decoratedValue,
-		data: decorateRemoteConversationSessionState(data as unknown as RpcSessionState, authorization, context),
-	};
 }

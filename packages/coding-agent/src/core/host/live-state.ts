@@ -202,6 +202,102 @@ function gateOf(key: string, value: LiveValue): HostRequestKind | undefined {
 	return undefined;
 }
 
+/** Longest form field pattern, in characters. */
+const FORM_PATTERN_MAX_CHARS = 512;
+/** Longest value a form field pattern is tested against, in characters. */
+export const FORM_PATTERN_VALUE_MAX_CHARS = 256;
+/** Most repeating quantifiers (`*`, `+`, `{n,}`, `{n,m}`) a form field pattern holds. */
+const FORM_PATTERN_MAX_REPEATS = 3;
+/** Most choice points (quantifiers, `?`, and `|` alternatives) a form field pattern holds. */
+const FORM_PATTERN_MAX_CHOICES = 4;
+
+/**
+ * Whether a form field pattern is cheap to test against any value a client
+ * may send: it compiles, has no backreferences or lookarounds, repeats no
+ * group that itself repeats or alternates (no `(a+)+`, `(a|ab)*`), and holds
+ * at most four choice points (quantifiers, optionals, and alternatives), at
+ * most three of them repeating, so its backtracking stays polynomial (at most
+ * cubic, times a small constant) in a value of at most 256 characters. A
+ * client answers forms with values of its choosing, so another pattern is
+ * refused when the form is asked.
+ */
+export function isSafeFormPattern(pattern: string): boolean {
+	if (pattern.length > FORM_PATTERN_MAX_CHARS) return false;
+	try {
+		new RegExp(`^(?:${pattern})$`, "u");
+	} catch {
+		return false;
+	}
+	/** Per open group: whether it holds a quantifier or an alternation. */
+	const groups: boolean[] = [];
+	const markOpenGroup = (): void => {
+		if (groups.length > 0) groups[groups.length - 1] = true;
+	};
+	let inClass = false;
+	let repeats = 0;
+	let choices = 0;
+	const choose = (): boolean => {
+		choices++;
+		markOpenGroup();
+		return choices <= FORM_PATTERN_MAX_CHOICES;
+	};
+	for (let index = 0; index < pattern.length; index++) {
+		const char = pattern[index]!;
+		if (char === "\\") {
+			if (/[1-9k]/.test(pattern[index + 1] ?? "")) return false;
+			index++;
+			continue;
+		}
+		if (inClass) {
+			if (char === "]") inClass = false;
+			continue;
+		}
+		switch (char) {
+			case "[":
+				inClass = true;
+				break;
+			case "(": {
+				if (pattern[index + 1] === "?") {
+					const modifier = pattern.slice(index + 2);
+					if (modifier.startsWith(":")) index += 2;
+					else if (modifier.startsWith("<") && !/^<[=!]/.test(modifier)) {
+						const close = pattern.indexOf(">", index);
+						if (close === -1) return false;
+						index = close;
+					} else return false;
+				}
+				groups.push(false);
+				break;
+			}
+			case ")": {
+				const holds = groups.pop() ?? false;
+				const next = pattern[index + 1];
+				const repeated = next === "*" || next === "+" || next === "{";
+				if (holds && repeated) return false;
+				if (holds || repeated || next === "?") markOpenGroup();
+				break;
+			}
+			case "*":
+			case "+":
+			case "{": {
+				const repeating = char !== "{" || /^\{\d*,\d*\}/.test(pattern.slice(index));
+				if (!repeating) {
+					markOpenGroup();
+					break;
+				}
+				repeats++;
+				if (repeats > FORM_PATTERN_MAX_REPEATS || !choose()) return false;
+				break;
+			}
+			case "?":
+			case "|":
+				if (!choose()) return false;
+				break;
+		}
+	}
+	return true;
+}
+
 function isFormValue(field: UiNodeFormField, value: string | boolean | number): boolean {
 	switch (field.kind) {
 		case "string": {
@@ -210,6 +306,7 @@ function isFormValue(field: UiNodeFormField, value: string | boolean | number): 
 			if (field.minLength !== undefined && length < field.minLength) return false;
 			if (field.maxLength !== undefined && length > field.maxLength) return false;
 			if (field.pattern === undefined) return true;
+			if (length > FORM_PATTERN_VALUE_MAX_CHARS || !isSafeFormPattern(field.pattern)) return false;
 			try {
 				return new RegExp(`^(?:${field.pattern})$`, "u").test(value);
 			} catch {
@@ -428,6 +525,16 @@ export class LiveState {
 		}
 		const value: LiveValue = { kind: "host_request", requestId, request };
 		if (!isLiveValue(value)) return Promise.reject(new TypeError(`Invalid ${request.kind} host request`));
+		if (
+			request.kind === "form" &&
+			request.fields.some(
+				(field) => field.kind === "string" && field.pattern !== undefined && !isSafeFormPattern(field.pattern),
+			)
+		) {
+			return Promise.reject(
+				new TypeError("A form field pattern must not repeat a repeating group or use backreferences"),
+			);
+		}
 		if (this.closed) return Promise.resolve({ status: "cancelled", reason: "closed" });
 		const signal = options.signal;
 		if (signal?.aborted) return Promise.resolve({ status: "cancelled", reason: "aborted" });

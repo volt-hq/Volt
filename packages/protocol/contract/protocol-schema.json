@@ -251,7 +251,8 @@
 				"sessions",
 				"mcp",
 				"extensions",
-				"settings"
+				"settings",
+				"host"
 			]
 		},
 		"ClientFrame": {
@@ -608,9 +609,6 @@
 					"$ref": "#/$defs/Control.Event.relay_closed"
 				},
 				{
-					"$ref": "#/$defs/Control.Event.viewer_event"
-				},
-				{
 					"$ref": "#/$defs/Control.Event.viewer_end"
 				},
 				{
@@ -810,33 +808,6 @@
 						"cancelled",
 						"error"
 					]
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Event.viewer_event": {
-			"type": "object",
-			"required": [
-				"type",
-				"viewerFeedId",
-				"seq",
-				"event"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "viewer_event"
-				},
-				"viewerFeedId": {
-					"type": "string"
-				},
-				"seq": {
-					"type": "integer",
-					"minimum": 0,
-					"maximum": 9007199254740991
-				},
-				"event": {
-					"x-volt-opaque": "a draining daemon runtime's session event as JSON, or {kind: 'truncated'} after a buffer overflow; deleted with the viewer feed"
 				}
 			},
 			"additionalProperties": false
@@ -1095,6 +1066,53 @@
 			},
 			"additionalProperties": false
 		},
+		"Control.RelayFrame": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Frame.intent.register_push_target"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.unregister_workspace"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.create_worktree"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_keep_awake"
+				},
+				{
+					"$ref": "#/$defs/Frame.intent.set_web_search_key"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.sessions"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.worktrees"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.host_status"
+				},
+				{
+					"$ref": "#/$defs/Frame.query.web_search_status"
+				}
+			]
+		},
+		"Control.RelayOutcome": {
+			"anyOf": [
+				{
+					"$ref": "#/$defs/Frame.accepted"
+				},
+				{
+					"$ref": "#/$defs/Frame.rejected"
+				},
+				{
+					"$ref": "#/$defs/Frame.result"
+				},
+				{
+					"$ref": "#/$defs/Frame.query_error"
+				}
+			]
+		},
 		"Control.RelayPreamble": {
 			"type": "object",
 			"required": [
@@ -1249,26 +1267,6 @@
 			},
 			"additionalProperties": false
 		},
-		"Control.RelayRpcCommand": {
-			"type": "object",
-			"required": [
-				"type"
-			],
-			"properties": {
-				"type": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": true,
-			"description": "A phone RPC command, validated by the daemon per command type."
-		},
-		"Control.RelayRpcResponse": {
-			"type": "object",
-			"patternProperties": {
-				"^.*$": {}
-			},
-			"x-volt-opaque": "the RPC response to a relayed phone command, forwarded verbatim"
-		},
 		"Control.RemotePolicyStatus": {
 			"type": "object",
 			"required": [
@@ -1404,12 +1402,6 @@
 				},
 				{
 					"$ref": "#/$defs/Control.Request.keep_awake_set"
-				},
-				{
-					"$ref": "#/$defs/Control.Request.viewer_subscribe"
-				},
-				{
-					"$ref": "#/$defs/Control.Request.viewer_unsubscribe"
 				},
 				{
 					"$ref": "#/$defs/Control.Request.viewer_abort"
@@ -1805,7 +1797,7 @@
 				"clientNodeId",
 				"workspaceName",
 				"sessionId",
-				"command"
+				"frame"
 			],
 			"properties": {
 				"type": {
@@ -1827,8 +1819,8 @@
 				"sessionId": {
 					"type": "string"
 				},
-				"command": {
-					"$ref": "#/$defs/Control.RelayRpcCommand"
+				"frame": {
+					"$ref": "#/$defs/Control.RelayFrame"
 				}
 			},
 			"additionalProperties": false
@@ -1899,48 +1891,6 @@
 				"type": {
 					"type": "string",
 					"const": "viewer_abort"
-				},
-				"id": {
-					"type": "string"
-				},
-				"viewerFeedId": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Request.viewer_subscribe": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"viewerFeedId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "viewer_subscribe"
-				},
-				"id": {
-					"type": "string"
-				},
-				"viewerFeedId": {
-					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Request.viewer_unsubscribe": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"viewerFeedId"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "viewer_unsubscribe"
 				},
 				"id": {
 					"type": "string"
@@ -2562,7 +2512,7 @@
 			"required": [
 				"type",
 				"id",
-				"response"
+				"frame"
 			],
 			"properties": {
 				"type": {
@@ -2572,11 +2522,8 @@
 				"id": {
 					"type": "string"
 				},
-				"response": {
-					"$ref": "#/$defs/Control.RelayRpcResponse"
-				},
-				"workspaceMetadata": {
-					"$ref": "#/$defs/IrohRemoteWorkspaceMetadataSnapshot"
+				"frame": {
+					"$ref": "#/$defs/Control.RelayOutcome"
 				}
 			},
 			"additionalProperties": false
@@ -12558,6 +12505,28 @@
 			"properties": {
 				"keepAwake": {
 					"$ref": "#/$defs/RpcKeepAwakeStatus"
+				},
+				"theme": {
+					"type": "object",
+					"required": [
+						"themeName",
+						"tokens"
+					],
+					"properties": {
+						"themeName": {
+							"type": "string"
+						},
+						"tokens": {
+							"type": "object",
+							"patternProperties": {
+								"^.*$": {
+									"type": "string",
+									"pattern": "^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$"
+								}
+							}
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -12853,7 +12822,8 @@
 				"steeringMode",
 				"followUpMode",
 				"autoCompaction",
-				"autoRetry"
+				"autoRetry",
+				"profile"
 			],
 			"properties": {
 				"steeringMode": {
@@ -12867,6 +12837,9 @@
 				},
 				"autoRetry": {
 					"type": "boolean"
+				},
+				"profile": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false
@@ -13262,7 +13235,7 @@
 						},
 						"protocol": {
 							"type": "string",
-							"const": "volt-rpc/0"
+							"const": "volt/1"
 						},
 						"workspace": {
 							"$ref": "#/$defs/IrohRemoteWorkspaceName"
@@ -13311,7 +13284,7 @@
 						},
 						"protocol": {
 							"type": "string",
-							"const": "volt-rpc/0"
+							"const": "volt/1"
 						},
 						"workspace": {
 							"$ref": "#/$defs/IrohRemoteWorkspaceName"
@@ -13360,7 +13333,7 @@
 						},
 						"protocol": {
 							"type": "string",
-							"const": "volt-rpc/0"
+							"const": "volt/1"
 						},
 						"workspace": {
 							"$ref": "#/$defs/IrohRemoteWorkspaceName"
@@ -13504,7 +13477,7 @@
 						},
 						"protocol": {
 							"type": "string",
-							"const": "volt-rpc/0"
+							"const": "volt/1"
 						},
 						"workspace": {
 							"$ref": "#/$defs/IrohRemoteWorkspaceName"
@@ -13550,7 +13523,7 @@
 						},
 						"protocol": {
 							"type": "string",
-							"const": "volt-rpc/0"
+							"const": "volt/1"
 						},
 						"workspace": {
 							"$ref": "#/$defs/IrohRemoteWorkspaceName"
@@ -13596,7 +13569,7 @@
 						},
 						"protocol": {
 							"type": "string",
-							"const": "volt-rpc/0"
+							"const": "volt/1"
 						},
 						"workspace": {
 							"$ref": "#/$defs/IrohRemoteWorkspaceName"
@@ -21099,71 +21072,6 @@
 			},
 			"additionalProperties": false
 		},
-		"RpcRemoteTerminalEvent": {
-			"anyOf": [
-				{
-					"type": "object",
-					"required": [
-						"type",
-						"reason",
-						"workspace"
-					],
-					"properties": {
-						"type": {
-							"type": "string",
-							"const": "remote_terminal"
-						},
-						"reason": {
-							"type": "string",
-							"const": "lease_transferred"
-						},
-						"workspace": {
-							"type": "string"
-						},
-						"sessionId": {
-							"type": "string"
-						},
-						"hostNodeId": {
-							"type": "string"
-						}
-					},
-					"additionalProperties": false
-				},
-				{
-					"type": "object",
-					"required": [
-						"type",
-						"reason",
-						"workspace",
-						"sessionId",
-						"targetSessionId"
-					],
-					"properties": {
-						"type": {
-							"type": "string",
-							"const": "remote_terminal"
-						},
-						"reason": {
-							"type": "string",
-							"const": "conversation_moved"
-						},
-						"workspace": {
-							"type": "string"
-						},
-						"sessionId": {
-							"type": "string"
-						},
-						"targetSessionId": {
-							"type": "string"
-						},
-						"hostNodeId": {
-							"type": "string"
-						}
-					},
-					"additionalProperties": false
-				}
-			]
-		},
 		"RpcResetReviewDiscussion": {
 			"type": "object",
 			"required": [
@@ -22313,7 +22221,16 @@
 					"const": true
 				},
 				"data": {
-					"$ref": "#/$defs/QueryResult.host_status"
+					"type": "object",
+					"required": [
+						"keepAwake"
+					],
+					"properties": {
+						"keepAwake": {
+							"$ref": "#/$defs/RpcKeepAwakeStatus"
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -24245,7 +24162,16 @@
 					"const": true
 				},
 				"data": {
-					"$ref": "#/$defs/QueryResult.host_status"
+					"type": "object",
+					"required": [
+						"keepAwake"
+					],
+					"properties": {
+						"keepAwake": {
+							"$ref": "#/$defs/RpcKeepAwakeStatus"
+						}
+					},
+					"additionalProperties": false
 				}
 			},
 			"additionalProperties": false
@@ -26876,9 +26802,6 @@
 				},
 				{
 					"$ref": "#/$defs/RpcPlanningStateChangedEvent"
-				},
-				{
-					"$ref": "#/$defs/RpcRemoteTerminalEvent"
 				}
 			]
 		},
@@ -26967,6 +26890,21 @@
 				},
 				"workContext": {
 					"$ref": "#/$defs/RpcSessionWorkContext"
+				},
+				"runtimeState": {
+					"type": "string",
+					"enum": [
+						"tui-owned",
+						"daemon-active",
+						"daemon-detached",
+						"daemon-draining"
+					]
+				},
+				"worktreeId": {
+					"type": "string"
+				},
+				"workingDirectory": {
+					"type": "string"
 				}
 			},
 			"additionalProperties": false

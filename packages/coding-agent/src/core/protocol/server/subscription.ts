@@ -78,6 +78,31 @@ export function projectLog(
 	return projected;
 }
 
+/** Whether a subscription from `after` starts with a snapshot: from `snapshot`, past the log, or further back than the profile replays. */
+export function subscriptionSnapshots(
+	conversation: HostedConversation,
+	profile: Profile,
+	after: number | "snapshot",
+): boolean {
+	const head = conversation.session.sessionManager.getOrdinal();
+	return after === "snapshot" || after > head || head - after > profile.limits.maxReplay;
+}
+
+/**
+ * What a subscription from `after` costs of its connection's read budget: one
+ * read for a snapshot or a live start, and one per snapshot tail of entries a
+ * resume replays.
+ */
+export function subscriptionReads(
+	conversation: HostedConversation,
+	profile: Profile,
+	after: number | "snapshot",
+): number {
+	if (subscriptionSnapshots(conversation, profile, after) || after === "snapshot") return 1;
+	const replayed = conversation.session.sessionManager.getOrdinal() - after;
+	return Math.max(1, Math.ceil(replayed / profile.limits.snapshotTail));
+}
+
 export class Subscription {
 	readonly id: string;
 	readonly conversation: HostedConversation;
@@ -116,11 +141,10 @@ export class Subscription {
 	 */
 	start(after: number | "snapshot"): void {
 		const sessionManager = this.conversation.session.sessionManager;
-		const head = sessionManager.getOrdinal();
-		if (after === "snapshot" || after > head || head - after > this.options.profile.limits.maxReplay) {
-			this.writeSnapshot(head);
+		if (subscriptionSnapshots(this.conversation, this.options.profile, after)) {
+			this.writeSnapshot(sessionManager.getOrdinal());
 		} else {
-			this.cursor = after;
+			this.cursor = after as number;
 		}
 		this.unsubscribeLog = sessionManager.subscribeOrdinal(() => this.pump());
 		if (this.options.live) {

@@ -1,12 +1,8 @@
 /**
- * iOS theme token push (§9.5, M11): the daemon can push its resolved theme
- * tokens to phones as a `host_theme_tokens` frame on conversation streams.
- * Ships OFF by default (voltd settings.themeTokenPush or VOLT_HOST_THEME_TOKENS=1)
- * and is additionally gated on the phone advertising the capability string;
- * clients that ignore the frame are fully supported.
+ * The daemon's shared theme (§9.5, M11): its resolved theme tokens reach
+ * devices in the `host_status` query's `theme`, refetched on `changed{host}`.
+ * Off by default (voltd settings.themeTokenPush or VOLT_HOST_THEME_TOKENS=1).
  */
-
-export const HOST_THEME_TOKENS_FEATURE = "host_theme_tokens.v1";
 
 const HEX_COLOR_PATTERN = /^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
@@ -23,19 +19,4 @@ export function sanitizeHostThemeTokens(tokens: Record<string, string>): Record<
 		}
 	}
 	return sanitized;
-}
-
-export interface HostThemeTokensFrame {
-	type: "host_theme_tokens";
-	data: {
-		themeName: string;
-		tokens: Record<string, string>;
-	};
-}
-
-export function createHostThemeTokensFrame(themeName: string, tokens: Record<string, string>): HostThemeTokensFrame {
-	return {
-		type: "host_theme_tokens",
-		data: { themeName, tokens: sanitizeHostThemeTokens(tokens) },
-	};
 }

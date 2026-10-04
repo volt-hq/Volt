@@ -4,13 +4,21 @@ import { join } from "node:path";
 import type { AgentTool, ConversationLogEntryDraft, ConversationTurnReservation } from "@hansjm10/volt-agent-core";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import {
+	type ClientSnapshot,
+	clientFold,
+	clientSnapshot,
+	type ProjectedEntry,
+	REMOTE_CAPABILITIES,
+} from "@hansjm10/volt-protocol";
 import { Type } from "typebox";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getClientMessageId } from "../src/core/messages.ts";
+import { localProfile, type Profile, remoteProfile } from "../src/core/protocol/profiles.ts";
+import { projectEntry, sessionProjectionSource } from "../src/core/protocol/projection/entries.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
-import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
 import {
 	ClientInputConflictError,
 	ClientInputOutcomeAmbiguousError,
@@ -29,12 +37,7 @@ import {
 	SessionManager,
 } from "../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreLease } from "../src/core/session-store/index.ts";
-import {
-	type ConversationCommandContext,
-	type ConversationCommandRuntime,
-	createRemoteConversationTranscriptPage,
-	listRemoteWorkspaceSessionSummaries,
-} from "../src/daemon/conversation-commands.ts";
+import { listRemoteWorkspaceSessions } from "../src/daemon/remote-intents.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { createHarness, getUserTexts, type Harness } from "./suite/harness.ts";
 import { appendsEntryType, type ConversationLogBatchMatcher, lose } from "./utilities/faulty-log.ts";
@@ -66,6 +69,16 @@ function createAuthorization(workspacePath: string): IrohRemoteClientAuthorizati
 		workspaceNames: ["ws"],
 		workspaces: [{ name: "ws", status: "available" }],
 	};
+}
+
+/** The snapshot a subscriber on `profile` is sent of `manager`'s log, projected and folded as a subscription does. */
+function subscriberSnapshot(manager: SessionManager, profile: Profile): ClientSnapshot {
+	const source = sessionProjectionSource(manager);
+	const projected = manager.committedEntriesAfter(0).flatMap((entry): ProjectedEntry[] => {
+		const projectedEntry = projectEntry(entry, source, profile);
+		return projectedEntry === undefined ? [] : [projectedEntry];
+	});
+	return clientSnapshot(clientFold(projected));
 }
 
 /** Claim the idle conversation as a running turn does, so queued input stays pending until it is released. */
@@ -1542,7 +1555,7 @@ describe("durable client input idempotency", () => {
 		expect(getUserTexts(failedHarness)).toEqual([]);
 	});
 
-	it("keeps host WAL out of every public conversation and bootstrap projection", async () => {
+	it("keeps host WAL out of every public conversation and subscriber transcript projection", async () => {
 		const tempDir = createTempDir();
 		tempDirs.push(tempDir);
 		const manager = await SessionManager.create(tempDir, tempDir);
@@ -1567,7 +1580,6 @@ describe("durable client input idempotency", () => {
 		expect(manager.getLeafId()).toBeNull();
 		expect(manager.getLabel(receiptId)).toBeUndefined();
 		expect(manager.getConversationState().context.messages).toEqual([]);
-		expect(projectSessionTranscript(manager).items).toEqual([]);
 		await expect(manager.logWriter.branch(receiptId)).rejects.toThrow(`Entry ${receiptId} not found`);
 		await expect(manager.logWriter.branchWithSummary(receiptId, "hidden")).rejects.toThrow(
 			`Entry ${receiptId} not found`,
@@ -1576,12 +1588,17 @@ describe("durable client input idempotency", () => {
 			`Entry ${receiptId} not found`,
 		);
 
-		const runtime = {
-			session: { sessionId: manager.getSessionId(), sessionManager: manager },
-			listSessions: async () => [],
-		} satisfies ConversationCommandRuntime;
-		const bootstrapBefore = createRemoteConversationTranscriptPage(createAuthorization(tempDir), runtime);
-		expect(bootstrapBefore).toMatchObject({ items: [], head: null });
+		const remote = remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: tempDir },
+		});
+		const messageEntries = (snapshot: ClientSnapshot) => snapshot.entries.filter((entry) => entry.type === "message");
+		// Subscribers fold the admission WAL as pending client input only: it is never a transcript entry or the leaf.
+		for (const profile of [localProfile, remote]) {
+			const before = subscriberSnapshot(manager, profile);
+			expect(before.leafId).toBeNull();
+			expect(messageEntries(before)).toEqual([]);
+		}
 
 		const userEntryCommit = manager.logWriter.appendMessage({
 			role: "user",
@@ -1595,11 +1612,16 @@ describe("durable client input idempotency", () => {
 		expect(manager.getEntries()).toHaveLength(1);
 		expect(manager.getBranch()).toHaveLength(1);
 		expect(manager.getTree()).toHaveLength(1);
-		const bootstrapAfter = createRemoteConversationTranscriptPage(createAuthorization(tempDir), runtime);
-		expect(bootstrapAfter).toMatchObject({
-			items: [{ entryId: userEntryId, role: "user", clientMessageId: "private-wal" }],
-			head: { entryId: userEntryId },
-		});
+		const localAfter = subscriberSnapshot(manager, localProfile);
+		expect(localAfter.leafId).toBe(userEntryId);
+		expect(messageEntries(localAfter)).toMatchObject([
+			{ id: userEntryId, payload: { clientMessageId: "private-wal" } },
+		]);
+		const remoteAfter = subscriberSnapshot(manager, remote);
+		expect(remoteAfter.leafId).toBe(userEntryId);
+		expect(messageEntries(remoteAfter)).toMatchObject([
+			{ id: userEntryId, view: { role: "user", text: "visible later", clientMessageId: "private-wal" } },
+		]);
 	});
 
 	it("keeps WAL-only files out of local and remote session enumeration until canonical content commits", async () => {
@@ -1622,13 +1644,8 @@ describe("durable client input idempotency", () => {
 
 		expect(await SessionManager.list(workspaceDir, sessionDir)).toEqual([]);
 		expect(await SessionManager.listAll(sessionDir)).toEqual([]);
-		const context: ConversationCommandContext = {
-			stateManager: new IrohRemoteHostStateManager(),
-			sessionListCursors: new Map(),
-			sessionListCursorTtlMs: 60_000,
-			agentDir,
-		};
-		expect(await listRemoteWorkspaceSessionSummaries(createAuthorization(workspaceDir), context)).toEqual([]);
+		const remoteHost = { agentDir, stateManager: new IrohRemoteHostStateManager() };
+		expect(await listRemoteWorkspaceSessions(remoteHost, createAuthorization(workspaceDir))).toEqual([]);
 
 		// Enumeration purity does not weaken recovery: an explicit reopen still
 		// sees the terminal receipt and can deterministically replay its outcome.
@@ -1648,8 +1665,8 @@ describe("durable client input idempotency", () => {
 			{ id: manager.getSessionId(), messageCount: 1, firstMessage: "visible later" },
 		]);
 		expect(await SessionManager.listAll(sessionDir)).toHaveLength(1);
-		expect(await listRemoteWorkspaceSessionSummaries(createAuthorization(workspaceDir), context)).toMatchObject([
-			{ session: { sessionId: manager.getSessionId(), messageCount: 1, title: "visible later" } },
+		expect(await listRemoteWorkspaceSessions(remoteHost, createAuthorization(workspaceDir))).toMatchObject([
+			{ sessionId: manager.getSessionId(), messageCount: 1, firstMessage: "visible later" },
 		]);
 	});
 

@@ -4,9 +4,7 @@ export {
 	createIrohRemotePresetAccess,
 	createIrohRemoteRpcGrant,
 	getIrohRemoteAccessPreset,
-	getIrohRemoteRpcCommandCapabilities,
 	getIrohRemoteStreamCapability,
-	getMissingIrohRemoteRpcCapability,
 	hasIrohRemoteRpcCapability,
 	IROH_REMOTE_ACCESS_PRESET_NAMES,
 	IROH_REMOTE_ACCESS_PRESETS,
@@ -45,6 +43,14 @@ export {
 	isIrohRemoteClientAllowedForWorkspace,
 } from "./authorization.ts";
 export {
+	attachCompletionNotifications,
+	type CompletionNotifications,
+	type CompletionNotificationsOptions,
+	type IrohRemoteCompletionState,
+	type IrohRemoteNotificationKind,
+} from "./completion-notifications.ts";
+export { type IrohRemoteConnectionOptions, serveIrohRemoteConnection } from "./connection.ts";
+export {
 	DEFAULT_IROH_REMOTE_CONTROL_TIMEOUT_MS,
 	ensureIrohRemoteControlDirectory,
 	getIrohRemoteControlPath,
@@ -73,12 +79,10 @@ export {
 } from "./control.ts";
 export {
 	DEFAULT_IROH_REMOTE_DEVICE_LOG_MAX_CONTENT_BYTES,
-	type HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
-	handleIrohRemoteDeviceLogUploadRpcCommand,
 	IROH_REMOTE_DEVICE_LOGS_DIR_SEGMENTS,
-	IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE,
-	type IrohRemoteDeviceLogUploadRpcData,
-	type IrohRemoteDeviceLogUploadRpcResponse,
+	type IrohRemoteDeviceLogUpload,
+	type IrohRemoteDeviceLogUploadOptions,
+	uploadIrohRemoteDeviceLog,
 } from "./device-log-rpc.ts";
 export {
 	DEFAULT_IROH_REMOTE_PAIRING_TICKET_TTL_MS,
@@ -139,22 +143,6 @@ export {
 	type IrohRemoteHostMetadata,
 } from "./metadata.ts";
 export {
-	createIrohRemoteOutboundFilteredRpcTransport,
-	createIrohRemoteProjectionSanitizer,
-	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
-	IROH_REMOTE_REDACTED_EXPORT_PATH,
-	IROH_REMOTE_REDACTED_SESSION_FILE,
-	type IrohRemoteOutboundFilterOptions,
-	type IrohRemoteOutboundJsonlReadablePipeOptions,
-	type IrohRemoteOutboundSanitizerOptions,
-	type IrohRemoteOutboundValueDecorator,
-	type IrohRemoteProjectionSanitizer,
-	type IrohRemoteSanitizerOptions,
-	pipeIrohRemoteOutboundJsonlReadable,
-	sanitizeIrohRemoteOutbound,
-	sanitizeIrohRemoteOutboundJsonLine,
-} from "./outbound-filter.ts";
-export {
 	DEFAULT_IROH_REMOTE_ALLOW_TOOLS,
 	getIrohRemoteUnsafeAllowedTools,
 	IROH_REMOTE_ALPN,
@@ -165,7 +153,6 @@ export {
 	IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES,
 	IROH_REMOTE_MULTI_STREAMS_FEATURE,
 	IROH_REMOTE_OUTCOMES,
-	IROH_REMOTE_PLANNING_STATE_FEATURE,
 	IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE,
 	IROH_REMOTE_TICKET_PREFIX,
 	IROH_REMOTE_UNSAFE_TOOL_NAMES,
@@ -219,24 +206,13 @@ export {
 	type IrohRemoteTicketQrCodeFormatOptions,
 } from "./qr.ts";
 export {
-	createIrohRemoteRpcCapabilityDeniedResponse,
-	createIrohRemoteRpcErrorResponse,
-	getIrohRemoteRpcFilterResult,
-	getStaticIrohRemoteRpcFilterResult,
-	IROH_REMOTE_RPC_CANCELLATION_TYPES,
-	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
-	type IrohRemoteRpcCapabilityDeniedError,
-	type IrohRemoteRpcCapabilityDeniedResponse,
-	type IrohRemoteRpcCommand,
-	type IrohRemoteRpcErrorResponse,
-	type IrohRemoteRpcFilterResult,
-	serializeIrohRemoteRpcFilterRejection,
-} from "./rpc-command-filter.ts";
-export {
-	createIrohRemoteFilteredRpcTransport,
-	createIrohRemoteRpcTransport,
-	type IrohRemoteFilteredRpcTransportOptions,
-} from "./rpc-transport.ts";
+	createIrohRemoteProjectionSanitizer,
+	IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH,
+	IROH_REMOTE_REDACTED_EXPORT_PATH,
+	IROH_REMOTE_REDACTED_SESSION_FILE,
+	type IrohRemoteProjectionSanitizer,
+	type IrohRemoteSanitizerOptions,
+} from "./sanitizer.ts";
 export {
 	createEmptyIrohRemoteHostState,
 	type IrohRemoteClient,
@@ -289,11 +265,6 @@ export {
 	parseIrohRemoteTicketPayload,
 } from "./ticket.ts";
 export {
-	type IrohRemoteSanitizedTranscriptText,
-	type IrohRemoteTranscriptTextLayout,
-	sanitizeIrohRemoteTranscriptText,
-} from "./transcript-text.ts";
-export {
 	getAvailableIrohRemoteWorkspaceNames,
 	getIrohRemoteWorkspaceAvailabilityStatus,
 	getIrohRemoteWorkspaceStatuses,
@@ -305,23 +276,4 @@ export {
 	selectIrohRemoteWorkspace,
 	upsertIrohRemoteWorkspace,
 } from "./workspace.ts";
-export {
-	type HandleIrohRemoteWorkspaceUnregisterRpcCommandOptions,
-	handleIrohRemoteWorkspaceUnregisterRpcCommand,
-	IROH_REMOTE_UNREGISTER_WORKSPACE_RPC_TYPE,
-	type IrohRemoteWorkspaceUnregisterRpcData,
-	type IrohRemoteWorkspaceUnregisterRpcResponse,
-	type IrohRemoteWorkspaceUnregisterRpcResult,
-} from "./workspace-rpc.ts";
-export {
-	type HandleIrohRemoteWorktreeRpcCommandOptions,
-	handleIrohRemoteWorktreeRpcCommand,
-	IROH_REMOTE_CREATE_WORKTREE_RPC_TYPE,
-	IROH_REMOTE_LIST_WORKTREES_RPC_TYPE,
-	IROH_REMOTE_REMOVE_WORKTREE_RPC_TYPE,
-	IROH_REMOTE_WORKTREE_RPC_TYPES,
-	type IrohRemoteWorktreeRpcBackend,
-	type IrohRemoteWorktreeRpcResponse,
-	type IrohRemoteWorktreeRpcResult,
-	type IrohRemoteWorktreeSummary,
-} from "./worktree-rpc.ts";
+export type { IrohRemoteWorktreeRpcBackend, IrohRemoteWorktreeSummary } from "./worktree-rpc.ts";

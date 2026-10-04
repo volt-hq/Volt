@@ -43,7 +43,6 @@ function publishDaemonRuntime(broker: LeaseBroker, workspaceName: string, sessio
 }
 
 function createDrainableSession() {
-	const handlers = new Set<(event: unknown) => void>();
 	let idle = deferred();
 	const abort = vi.fn(async () => {
 		idle.resolve();
@@ -51,17 +50,6 @@ function createDrainableSession() {
 	return {
 		isStreaming: false,
 		abort,
-		subscribe(handler: (event: unknown) => void) {
-			handlers.add(handler);
-			return () => {
-				handlers.delete(handler);
-			};
-		},
-		emit(event: unknown) {
-			for (const handler of Array.from(handlers)) {
-				handler(event);
-			}
-		},
 		waitForIdle(): Promise<void> {
 			return this.isStreaming ? idle.promise : Promise.resolve();
 		},
@@ -219,13 +207,6 @@ async function startDaemonHalf(
 				);
 				return;
 			}
-			case "viewer_subscribe":
-				connection.send(
-					feeds.subscribe(request.viewerFeedId, connection.connectionId)
-						? { type: "ok", id: request.id }
-						: { type: "error", id: request.id, code: "not_found", message: "unknown viewer feed" },
-				);
-				return;
 			case "viewer_abort":
 				connection.send(
 					(await feeds.abort(request.viewerFeedId, connection.connectionId))
@@ -541,7 +522,7 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		);
 	}, 20_000);
 
-	it("drains a mid-turn daemon runtime to the TUI: pending, viewer feed, abort, warm grant, phone streams transferred", async () => {
+	it("drains a mid-turn daemon runtime to the TUI: pending, abort, warm grant, phone streams transferred", async () => {
 		const agentDir = mkdtempSync(join(tmpdir(), "volt-handoff-"));
 		const cwd = mkdtempSync(join(tmpdir(), "volt-handoff-ws-"));
 		cleanups.push(() => {
@@ -567,20 +548,10 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		expect(outcome.kind).toBe("pending");
 		const pending = outcome as Extract<AcquireOutcome, { kind: "pending" }>;
 
-		// Events emitted before viewer_subscribe are buffered...
-		daemon.session.emit({ type: "message_delta", n: 1 });
-		await attach.viewerSubscribe(pending.viewerFeedId);
-		// ...and events after it stream live.
-		daemon.session.emit({ type: "message_delta", n: 2 });
-		await vi.waitFor(() => {
-			const feedEvents = events.filter((event) => event.type === "viewer_event");
-			expect(feedEvents.map((event) => (event.event as { n: number }).n)).toEqual([1, 2]);
-			expect(feedEvents.map((event) => event.seq)).toEqual([0, 1]);
-		});
-
 		// Abort from the TUI stops the remote turn (non-destructive).
 		await attach.viewerAbort(pending.viewerFeedId);
 		expect(daemon.session.abort).toHaveBeenCalledTimes(1);
+		expect(daemon.session.abort).toHaveBeenCalledWith("remote_request");
 
 		// Turn ends -> drain completes: warm grant, runtime disposed via the
 		// normal quit path, phone streams closed lease_transferred, viewer ends.
@@ -590,7 +561,9 @@ describe("turn-boundary handoff (§12.3.2)", () => {
 		expect(daemon.disposed).toEqual([{ reason: "lease_transferred_to_tui" }]);
 		expect(daemon.closedStreams).toEqual([{ reason: "lease_transferred" }]);
 		await vi.waitFor(() => {
-			expect(events.some((event) => event.type === "viewer_end" && event.reason === "granted")).toBe(true);
+			expect(events.filter((event) => event.type === "viewer_end")).toEqual([
+				{ type: "viewer_end", viewerFeedId: pending.viewerFeedId, reason: "granted" },
+			]);
 		});
 		expect(daemon.broker.lookup(workspaceName as string, "s-1")?.state).toBe("tui-owned");
 

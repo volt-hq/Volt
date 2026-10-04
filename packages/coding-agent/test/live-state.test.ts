@@ -1,7 +1,13 @@
 import type { HostRequest, HostRequestKind, LiveItem, LiveValue } from "@hansjm10/volt-protocol";
 import fc from "fast-check";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { type LiveClient, LiveState, type LiveUpdate } from "../src/core/host/live-state.ts";
+import {
+	FORM_PATTERN_VALUE_MAX_CHARS,
+	isSafeFormPattern,
+	type LiveClient,
+	LiveState,
+	type LiveUpdate,
+} from "../src/core/host/live-state.ts";
 import { createLiveRecorder } from "./utilities/live-recorder.ts";
 
 const DIALOGS: HostRequestKind[] = ["select", "confirm", "input", "editor"];
@@ -439,6 +445,52 @@ describe("LiveState properties", () => {
 				live.close();
 				await Promise.all(asked.map((request) => request.outcome));
 			}),
+		);
+	});
+});
+
+describe("form field patterns", () => {
+	it("accepts patterns with few choice points and refuses ones that could backtrack without bound", () => {
+		for (const pattern of ["[a-z]+", "\\d{3}-\\d{4}", "(?:jpg|png|gif)", "[a-z]+@[a-z]+\\.[a-z]{2,}", "x?y"]) {
+			expect(isSafeFormPattern(pattern), pattern).toBe(true);
+		}
+		for (const pattern of [
+			"(a+)+",
+			"(a|ab)*",
+			"(a)\\1",
+			"(?=a)a",
+			"(?:a|a)".repeat(25),
+			`${"a?".repeat(25)}${"a".repeat(25)}`,
+			"(?:\\w|\\d)".repeat(10),
+			"a|b|c|d|e|f",
+			"a*b*c*d*",
+			"x".repeat(513),
+		]) {
+			expect(isSafeFormPattern(pattern), pattern).toBe(false);
+		}
+	});
+
+	it("tests every pattern it accepts against an adversarial value quickly", () => {
+		const atom = fc.constantFrom("a", "[ab]", "\\w", ".", "(?:a|a)", "(?:a|ab)", "(?:ab)");
+		const quantifier = fc.constantFrom("", "", "?", "*", "+", "{0,256}", "{2}");
+		const pattern = fc
+			.array(fc.tuple(atom, quantifier), { minLength: 1, maxLength: 30 })
+			.map((parts) => parts.map(([part, count]) => `${part}${count}`).join(""));
+		const values = [
+			`${"a".repeat(FORM_PATTERN_VALUE_MAX_CHARS - 1)}!`,
+			"ab".repeat(FORM_PATTERN_VALUE_MAX_CHARS / 2),
+		];
+		fc.assert(
+			fc.property(pattern, (source) => {
+				if (!isSafeFormPattern(source)) return;
+				const regex = new RegExp(`^(?:${source})$`, "u");
+				for (const value of values) {
+					const started = performance.now();
+					regex.test(value);
+					expect(performance.now() - started, source).toBeLessThan(250);
+				}
+			}),
+			{ numRuns: 300 },
 		);
 	});
 });

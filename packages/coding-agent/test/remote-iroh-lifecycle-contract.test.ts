@@ -1,528 +1,177 @@
-import { describe, expect, test, vi } from "vitest";
-import type { PromptPreflightResult } from "../src/core/agent-session.ts";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import { LiveState } from "../src/core/host/live-state.ts";
-import {
-	createIrohRemoteFilteredRpcTransport,
-	createIrohRemotePresetAccess,
-	getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult,
-	IROH_REMOTE_RPC_CANCELLATION_TYPES,
-	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
-} from "../src/core/remote/iroh/index.ts";
-import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/index.ts";
-import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
-import {
-	createIrohRemoteCloseDeferringRpcTransport,
-	createIrohRemoteHostCommandRpcTransport,
-} from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { createTestConversation } from "./iroh-stream-doubles.ts";
+/**
+ * The run lifecycle a paired device sees on its stream: it may stop runs and
+ * background jobs, and nothing else ends a run. A phone that disconnects, or
+ * whose stream fails, leaves its accepted prompt running in the conversation
+ * the host keeps; an explicit `abort` is accepted once the run settled.
+ */
 
-class ManualRpcTransport implements RpcTransport {
-	readonly writes: object[] = [];
-	readonly lineHandlers = new Set<RpcLineHandler>();
-	readonly closeHandlers = new Set<RpcCloseHandler>();
-	writeFailure: Error | undefined;
+import { type FauxResponseFactory, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import type { HostFrame } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import type { ProtocolConnection } from "../src/core/protocol/server/connection.ts";
+import { createIrohRemotePresetAccess, serveIrohRemoteConnection } from "../src/core/remote/iroh/index.ts";
+import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 
-	write(value: object): void {
-		if (this.writeFailure) {
-			throw this.writeFailure;
-		}
-		this.writes.push(value);
-	}
+type EntryFrame = Extract<HostFrame, { type: "entry" }>;
 
-	onLine(handler: RpcLineHandler): () => void {
-		this.lineHandlers.add(handler);
-		return () => {
-			this.lineHandlers.delete(handler);
-		};
-	}
-
-	onClose(handler: RpcCloseHandler): () => void {
-		this.closeHandlers.add(handler);
-		return () => {
-			this.closeHandlers.delete(handler);
-		};
-	}
-
-	close(): void {}
-
-	emitLine(line: string): void {
-		for (const handler of this.lineHandlers) {
-			handler(line);
-		}
-	}
-
-	async emitLineAndWait(line: string): Promise<void> {
-		await Promise.all([...this.lineHandlers].map((handler) => handler(line)));
-	}
-
-	emitClose(error?: Error): void {
-		for (const handler of this.closeHandlers) {
-			handler(error);
-		}
-	}
-}
-
-function createDeferred(): { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void } {
-	let resolve = () => {};
-	let reject = (_error: unknown) => {};
-	const promise = new Promise<void>((innerResolve, innerReject) => {
-		resolve = innerResolve;
-		reject = innerReject;
-	});
-	return { promise, resolve, reject };
-}
-
-interface PromptRuntimeAbortControls {
-	completePrompt(): void;
-	promptCompleted: Promise<void>;
-}
-
-interface PromptRuntimeOptions {
-	abort?: (controls: PromptRuntimeAbortControls) => Promise<void>;
-	stopReason?: "stop" | "aborted";
-}
-
-function createPromptRuntime(
-	sessionManager: SessionManager,
-	completionText: string,
-	options: PromptRuntimeOptions = {},
-) {
-	const promptRelease = createDeferred();
-	const promptCompleted = createDeferred();
-	const abort = vi.fn(async () => {
-		await options.abort?.({
-			completePrompt: promptRelease.resolve,
-			promptCompleted: promptCompleted.promise,
+/** A faux turn that answers `text` once released, or stops when the run is aborted. */
+function gatedTurn(text: string): { step: FauxResponseFactory; release(): void; started: Promise<void> } {
+	const release = Promise.withResolvers<void>();
+	const started = Promise.withResolvers<void>();
+	const step: FauxResponseFactory = async (_context, options) => {
+		started.resolve();
+		await new Promise<void>((resolve) => {
+			void release.promise.then(resolve);
+			options?.signal?.addEventListener("abort", () => resolve(), { once: true });
 		});
-	});
-	const dispose = vi.fn(async () => {
-		await abort();
-	});
-	let sessionEventHandler: ((event: object) => void) | undefined;
-	const detachSession = vi.fn();
-	const detachBackpressure = vi.fn();
-	const session = {
-		liveState: new LiveState(),
-		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
-		subscribe: vi.fn((handler: (event: object) => void) => {
-			sessionEventHandler = handler;
-			return detachSession;
-		}),
-		subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
-		sessionId: sessionManager.getSessionId(),
-		sessionManager,
-		prompt: vi.fn(
-			async (
-				_message: string,
-				promptOptions?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				promptOptions?.preflightResult?.({ success: true, outcome: "admitted" });
-				await promptRelease.promise;
-				await sessionManager.logWriter.appendMessage({
-					role: "assistant",
-					content: [{ type: "text", text: completionText }],
-					api: "anthropic-messages",
-					provider: "anthropic",
-					model: "claude-test",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					stopReason: options.stopReason ?? "stop",
-					timestamp: Date.now(),
-				});
-				promptCompleted.resolve();
-			},
-		),
-		abort,
-		lost: new Promise<Error>(() => {}),
+		return fauxAssistantMessage(text);
 	};
-	// Closing the conversation would abort the prompt, as disposing its session does.
-	const target = createTestConversation(session, { close: dispose });
-
-	return {
-		abort,
-		dispose,
-		emitSessionEvent(event: object): void {
-			if (!sessionEventHandler) {
-				throw new Error("RPC mode did not subscribe to session events");
-			}
-			sessionEventHandler(event);
-		},
-		promptCompleted: promptCompleted.promise,
-		promptRelease,
-		target,
-	};
+	return { step, release: release.resolve, started: started.promise };
 }
 
-describe("Iroh remote lifecycle command contract", () => {
-	test("allows run and background-job cancellation commands", () => {
-		expect(Array.from(IROH_REMOTE_RPC_CANCELLATION_TYPES)).toEqual(["abort", "cancel_job"]);
-		expect(IROH_REMOTE_RPC_PASSTHROUGH_TYPES.has("abort")).toBe(true);
+/** The assistant entries a conversation committed, by text and stop reason. */
+function assistantEntries(conversation: HostedConversation): Array<{ text: string; stopReason: string }> {
+	return conversation.session.sessionManager.getEntries().flatMap((entry) => {
+		if (entry.type !== "message" || entry.message.role !== "assistant") return [];
+		const text = entry.message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("");
+		return [{ text, stopReason: entry.message.stopReason }];
+	});
+}
 
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "abort-1", type: "abort" }))).toEqual({
-			allowed: true,
-			command: { id: "abort-1", type: "abort" },
+describe("Iroh remote run lifecycle", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
+	});
+
+	async function setup(): Promise<{ harness: HostHarness; conversation: HostedConversation }> {
+		// The daemon keeps a conversation its phones leave.
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		return { harness, conversation: await harness.openStartup() };
+	}
+
+	async function phone(
+		harness: HostHarness,
+		conversation: HostedConversation,
+		stream?: (pair: { host: IrohBiStreamLike; phone: IrohBiStreamLike }) => IrohBiStreamLike,
+	): Promise<{ device: RemotePhone; connection: ProtocolConnection }> {
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: stream ? stream(pair) : pair.host,
+			grant: createIrohRemotePresetAccess("coding").rpcGrant,
+			redaction: { workspacePath: conversation.cwd },
+			redirect: {},
 		});
+		void connection.closed.catch(() => undefined);
+		const device = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await device.close();
+		});
+		await device.hello();
+		await device.subscribe(conversation.id);
+		return { device, connection };
+	}
 
-		for (const command of ["cancel", "cancel_run", "detach", "disconnect", "stop"] as const) {
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${command}-1`, type: command }))).toEqual({
-				allowed: false,
-				response: {
-					id: `${command}-1`,
-					type: "response",
-					command,
-					success: false,
-					error: `RPC command not allowed over remote host: ${command}`,
-				},
+	test("allows stopping runs and background jobs; other stop-like commands are unknown", async () => {
+		const { harness, conversation } = await setup();
+		const { device } = await phone(harness, conversation);
+
+		expect(await device.intent("abort")).toMatchObject({ type: "accepted" });
+		const cancelJob = await device.intent("cancel_job", { jobId: "missing-job" });
+		expect(cancelJob.type === "rejected" ? cancelJob.reason.code : "accepted").not.toMatch(
+			/^(not_allowed|unknown_intent)$/,
+		);
+
+		for (const name of ["cancel", "cancel_run", "detach", "disconnect", "stop", "get_messages"]) {
+			expect(await device.intent(name), name).toMatchObject({
+				type: "rejected",
+				reason: { code: "unknown_intent" },
 			});
 		}
-
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "messages-1", type: "get_messages" }))).toEqual({
-			allowed: false,
-			response: {
-				id: "messages-1",
-				type: "response",
-				command: "get_messages",
-				success: false,
-				error: "unsupported_remote_command",
-			},
-		});
 	});
 
-	test("clean transport close is not translated into an abort command", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => Promise.resolve(),
-		});
-		const forwardedLines: string[] = [];
-		const closeErrors: Array<Error | undefined> = [];
-		transport.onLine((line) => {
-			forwardedLines.push(line);
-		});
-		const onClose = transport.onClose;
-		if (!onClose) {
-			throw new Error("Expected Iroh remote close-deferring transport to expose onClose");
-		}
-		const closeReceived = new Promise<void>((resolve) => {
-			onClose((error) => {
-				closeErrors.push(error);
-				resolve();
-			});
-		});
+	test("an accepted prompt keeps running after the phone disconnects, and the conversation stays open", async () => {
+		const { harness, conversation } = await setup();
+		const turn = gatedTurn("detached completion");
+		harness.faux.setResponses([turn.step]);
+		const abort = vi.spyOn(conversation.session, "abort");
+		const { device, connection } = await phone(harness, conversation);
 
-		inner.emitClose();
-		await closeReceived;
+		expect(await device.intent("prompt", { message: "keep running" })).toMatchObject({ type: "accepted" });
+		await turn.started;
 
-		expect(forwardedLines).toEqual([]);
-		expect(inner.writes).toEqual([]);
-		expect(closeErrors).toEqual([undefined]);
+		// A clean close is the phone leaving, not a request to stop.
+		await device.close();
+		await connection.closed;
+		expect(conversation.closed).toBe(false);
+		expect(conversation.session.isBusy).toBe(true);
+
+		turn.release();
+		await vi.waitFor(() => expect(conversation.session.isBusy).toBe(false));
+		expect(abort).not.toHaveBeenCalled();
+		expect(conversation.closed).toBe(false);
+		expect(assistantEntries(conversation)).toEqual([{ text: "detached completion", stopReason: "stop" }]);
 	});
 
-	test("ordered response admission settles command ownership before physical delivery", async () => {
-		const inner = new ManualRpcTransport();
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => Promise.resolve(),
-		});
-		let closed = false;
-		transport.onLine(() => {});
-		transport.onClose?.(() => {
-			closed = true;
-		});
-
-		inner.emitLine(JSON.stringify({ id: "state-queued", type: "get_state" }));
-		inner.emitClose();
-		await Promise.resolve();
-		expect(closed).toBe(false);
-
-		transport.admitPrepared({
-			id: "state-queued",
-			type: "response",
-			command: "get_state",
-			success: true,
-		});
-		await vi.waitFor(() => expect(closed).toBe(true));
-
-		expect(inner.writes).toEqual([]);
-	});
-
-	test("denied input settles after ordered response admission without waiting for delivery", async () => {
-		const inner = new ManualRpcTransport();
-		const delivery = createDeferred();
-		const admitted: object[] = [];
-		const forwarded = vi.fn();
-		const transport = createIrohRemoteFilteredRpcTransport({
-			transport: inner,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			writeRejectedResponse: (value) => {
-				admitted.push(value);
-				return delivery.promise;
-			},
-		});
-		transport.onLine(forwarded);
-
-		let inputSettled = false;
-		const input = inner
-			.emitLineAndWait(JSON.stringify({ id: "denied-gated", type: "bash", command: "pwd" }))
-			.then(() => {
-				inputSettled = true;
-			});
-		try {
-			expect(admitted).toEqual([expect.objectContaining({ id: "denied-gated", command: "bash", success: false })]);
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(inputSettled).toBe(true);
-			expect(forwarded).not.toHaveBeenCalled();
-		} finally {
-			delivery.resolve();
-			await input;
-		}
-		await transport.flush?.();
-	});
-
-	test("host command input settles after final FIFO admission without waiting for delivery", async () => {
-		const inner = new ManualRpcTransport();
-		const delivery = createDeferred();
-		const admitted: object[] = [];
-		const forwarded = vi.fn();
-		const transport = createIrohRemoteHostCommandRpcTransport({
-			transport: inner,
-			handleCommand: async (command) => ({
-				id: command.id,
-				type: "response",
-				command: command.type,
-				success: true,
-			}),
-			writeResponse: (value) => {
-				admitted.push(value);
-				return delivery.promise;
-			},
-		});
-		transport.onLine(forwarded);
-
-		let inputSettled = false;
-		const input = inner
-			.emitLineAndWait(JSON.stringify({ id: "host-gated", type: "unregister_workspace" }))
-			.then(() => {
-				inputSettled = true;
-			});
-		try {
-			await vi.waitFor(() =>
-				expect(admitted).toEqual([
-					expect.objectContaining({ id: "host-gated", command: "unregister_workspace", success: true }),
-				]),
-			);
-			await new Promise<void>((resolve) => setImmediate(resolve));
-			expect(inputSettled).toBe(true);
-			expect(forwarded).not.toHaveBeenCalled();
-		} finally {
-			delivery.resolve();
-			await input;
-		}
-		await transport.flush?.();
-	});
-
-	test("accepted prompts continue after clean transport close without disposing the runtime", async () => {
-		const inner = new ManualRpcTransport();
-		const sessionManager = SessionManager.inMemory("/workspace");
-		const runtime = createPromptRuntime(sessionManager, "detached completion");
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => runtime.promptCompleted,
-		});
-		let resolveReady = () => {};
-		const ready = new Promise<void>((resolve) => {
-			resolveReady = resolve;
-		});
-		const modePromise = runLegacyRemoteRpcMode(runtime.target.host, runtime.target.conversation, {
-			anchor: false,
-			onReady: resolveReady,
-			transport,
-		});
-		let modeSettled = false;
-		void modePromise.then(
-			() => {
-				modeSettled = true;
-			},
-			() => {
-				modeSettled = true;
-			},
-		);
-		await ready;
-
-		inner.emitLine(
-			JSON.stringify({
-				id: "prompt-1",
-				type: "prompt",
-				clientMessageId: "client-prompt-1",
-				message: "keep running",
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(inner.writes).toContainEqual(
-				expect.objectContaining({
-					id: "prompt-1",
-					type: "response",
-					command: "prompt",
-					success: true,
-					data: { clientMessageId: "client-prompt-1", outcome: "admitted" },
-				}),
-			),
-		);
-
-		inner.emitClose();
-		await Promise.resolve();
-		await Promise.resolve();
-		expect(modeSettled).toBe(false);
-
-		runtime.promptRelease.resolve();
-		await expect(modePromise).resolves.toBeUndefined();
-
-		expect(runtime.dispose).not.toHaveBeenCalled();
-		expect(runtime.abort).not.toHaveBeenCalled();
-		expect(projectSessionTranscript(sessionManager, { limit: 10 }).items).toContainEqual(
-			expect.objectContaining({ role: "assistant", text: "detached completion" }),
-		);
-	});
-
-	test("write failure while an accepted prompt is active detaches without disposing the runtime", async () => {
-		const inner = new ManualRpcTransport();
-		const sessionManager = SessionManager.inMemory("/workspace");
-		const runtime = createPromptRuntime(sessionManager, "write failure detached completion");
-		const transport = createIrohRemoteCloseDeferringRpcTransport({
-			transport: inner,
-			waitForPromptCompletion: () => runtime.promptCompleted,
-		});
-		let resolveReady = () => {};
-		const ready = new Promise<void>((resolve) => {
-			resolveReady = resolve;
-		});
-		const modePromise = runLegacyRemoteRpcMode(runtime.target.host, runtime.target.conversation, {
-			anchor: false,
-			onReady: resolveReady,
-			transport,
-		});
-		await ready;
-
-		inner.emitLine(
-			JSON.stringify({
-				id: "prompt-1",
-				type: "prompt",
-				clientMessageId: "client-prompt-1",
-				message: "keep running",
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(inner.writes).toContainEqual(
-				expect.objectContaining({
-					id: "prompt-1",
-					type: "response",
-					command: "prompt",
-					success: true,
-					data: { clientMessageId: "client-prompt-1", outcome: "admitted" },
-				}),
-			),
-		);
-
+	test("a failed write to the phone ends its connection without stopping the run", async () => {
+		const { harness, conversation } = await setup();
+		const turn = gatedTurn("write failure detached completion");
+		harness.faux.setResponses([turn.step]);
+		const abort = vi.spyOn(conversation.session, "abort");
 		const writeError = new Error("remote write side closed");
-		inner.writeFailure = writeError;
-		runtime.emitSessionEvent({ type: "agent_event" });
+		let failWrites = false;
+		const { device, connection } = await phone(harness, conversation, (pair) => ({
+			recv: pair.host.recv,
+			send: {
+				...pair.host.send,
+				writeAll: (bytes) => (failWrites ? Promise.reject(writeError) : pair.host.send.writeAll(bytes)),
+			},
+		}));
 
-		await expect(modePromise).rejects.toBe(writeError);
-		expect(runtime.dispose).not.toHaveBeenCalled();
-		expect(runtime.abort).not.toHaveBeenCalled();
+		expect(await device.intent("prompt", { message: "keep running" })).toMatchObject({ type: "accepted" });
+		await turn.started;
 
-		runtime.promptRelease.resolve();
-		await runtime.promptCompleted;
-		expect(projectSessionTranscript(sessionManager, { limit: 10 }).items).toContainEqual(
-			expect.objectContaining({ role: "assistant", text: "write failure detached completion" }),
-		);
+		failWrites = true;
+		conversation.liveState.notice("info", "the next frame fails to send");
+		await expect(connection.closed).rejects.toBe(writeError);
+		expect(conversation.closed).toBe(false);
+
+		turn.release();
+		await vi.waitFor(() => expect(conversation.session.isBusy).toBe(false));
+		expect(abort).not.toHaveBeenCalled();
+		expect(assistantEntries(conversation)).toEqual([
+			{ text: "write failure detached completion", stopReason: "stop" },
+		]);
 	});
 
-	test("explicit remote abort cancels an active prompt and waits for abort settlement", async () => {
-		const inner = new ManualRpcTransport();
-		const sessionManager = SessionManager.inMemory("/workspace");
-		const abortCanFinish = createDeferred();
-		const runtime = createPromptRuntime(sessionManager, "explicit abort completed", {
-			stopReason: "aborted",
-			async abort({ completePrompt, promptCompleted }) {
-				completePrompt();
-				await promptCompleted;
-				await abortCanFinish.promise;
-			},
-		});
-		const transport = createIrohRemoteFilteredRpcTransport({
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			transport: createIrohRemoteCloseDeferringRpcTransport({
-				transport: inner,
-				waitForPromptCompletion: () => runtime.promptCompleted,
-			}),
-		});
-		let resolveReady = () => {};
-		const ready = new Promise<void>((resolve) => {
-			resolveReady = resolve;
-		});
-		const modePromise = runLegacyRemoteRpcMode(runtime.target.host, runtime.target.conversation, {
-			anchor: false,
-			onReady: resolveReady,
-			transport,
-		});
-		await ready;
+	test("an explicit abort stops the active prompt and is accepted once the run settled", async () => {
+		const { harness, conversation } = await setup();
+		const turn = gatedTurn("never released");
+		harness.faux.setResponses([turn.step]);
+		const { device } = await phone(harness, conversation);
 
-		inner.emitLine(
-			JSON.stringify({
-				id: "prompt-1",
-				type: "prompt",
-				clientMessageId: "client-prompt-1",
-				message: "keep running",
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(inner.writes).toContainEqual(
-				expect.objectContaining({
-					id: "prompt-1",
-					type: "response",
-					command: "prompt",
-					success: true,
-					data: { clientMessageId: "client-prompt-1", outcome: "admitted" },
-				}),
-			),
-		);
+		expect(await device.intent("prompt", { message: "keep running" })).toMatchObject({ type: "accepted" });
+		await turn.started;
+		const aborted = await device.intent("abort");
+		expect(aborted).toMatchObject({ type: "accepted" });
+		expect(conversation.session.isBusy).toBe(false);
+		expect(assistantEntries(conversation)).toEqual([expect.objectContaining({ stopReason: "aborted" })]);
 
-		inner.emitLine(JSON.stringify({ id: "abort-1", type: "abort" }));
-		await vi.waitFor(() => expect(runtime.abort).toHaveBeenCalledOnce());
-		await Promise.resolve();
-		expect(inner.writes).not.toContainEqual({
-			id: "abort-1",
-			type: "response",
-			command: "abort",
-			success: true,
-		});
-
-		abortCanFinish.resolve();
-		await vi.waitFor(() =>
-			expect(inner.writes).toContainEqual({
-				id: "abort-1",
-				type: "response",
-				command: "abort",
-				success: true,
-			}),
+		// The aborted turn committed before the abort was answered.
+		const committed = device.frames.find(
+			(frame): frame is EntryFrame =>
+				frame.type === "entry" && frame.entry.type === "message" && frame.entry.view?.stopReason === "aborted",
 		);
-		expect(projectSessionTranscript(sessionManager, { limit: 10 }).items).toContainEqual(
-			expect.objectContaining({ role: "assistant", text: "explicit abort completed" }),
-		);
-
-		inner.emitClose();
-		await expect(modePromise).resolves.toBeUndefined();
-		expect(runtime.dispose).not.toHaveBeenCalled();
+		expect(committed).toBeDefined();
+		expect(device.frames.indexOf(committed!)).toBeLessThan(device.frames.indexOf(aborted));
+		expect(conversation.closed).toBe(false);
 	});
 });

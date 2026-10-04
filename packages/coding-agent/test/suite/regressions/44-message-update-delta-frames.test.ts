@@ -1,412 +1,140 @@
-import { fauxAssistantMessage } from "@hansjm10/volt-ai";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
+import type { HostFrame, LiveItem } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
+import { createLoopbackClient, type LoopbackClient } from "../../../src/client/protocol-client.ts";
 import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
-import { openNewSession } from "../../../src/core/host/session-intents.ts";
-import type { RpcCloseHandler, RpcTransport } from "../../../src/core/rpc/transport.ts";
-import type { RpcSessionState, RpcTranscriptResponse } from "../../../src/core/rpc/types.ts";
-import type { SubagentEvent, SubagentHandle, SubagentResult } from "../../../src/core/subagents/index.ts";
-import type { SubagentToolManager } from "../../../src/core/tools/index.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import type { RpcClientEvent } from "../../../src/modes/rpc/rpc-client-base.ts";
-import { createFakeConversation, createFakeHost } from "../../utilities/fake-conversation-host.ts";
-import { createLegacyRpcClient } from "../../utilities/legacy-rpc-client.ts";
-import { createHarness, type Harness } from "../harness.ts";
+import { createHostHarness, type HostHarness } from "../host-harness.ts";
 
-// Structural intents answer cancelled unless a test moves the client itself.
-vi.mock("../../../src/core/host/session-intents.ts", () => ({
-	openFork: vi.fn(async () => ({ cancelled: true })),
-	openImport: vi.fn(async () => ({ cancelled: true })),
-	openNewSession: vi.fn(async () => ({ cancelled: true })),
-	openStoredSession: vi.fn(async () => ({ cancelled: true })),
-	openStoredSessionById: vi.fn(async () => ({ cancelled: true })),
-}));
-
-interface RpcHarness {
-	close(): void;
-	modePromise: Promise<void>;
-	send(message: object): void;
-	writes: Record<string, unknown>[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function getMessageText(message: unknown): string {
-	if (!isRecord(message) || !Array.isArray(message.content)) {
-		return "";
-	}
-	return message.content
-		.filter(
-			(part): part is { type: "text"; text: string } =>
-				isRecord(part) && part.type === "text" && typeof part.text === "string",
-		)
-		.map((part) => part.text)
-		.join("");
-}
-
-function getAssistantMessageEvent(frame: Record<string, unknown>): Record<string, unknown> {
-	const event = frame.assistantMessageEvent;
-	if (!isRecord(event)) {
-		throw new Error("Expected assistantMessageEvent to be a record");
-	}
-	return event;
-}
-
-/** A fake host over the harness session's conversation. */
-function createFakeRuntimeHost(harness: Harness) {
-	const fake = createFakeHost();
-	const { conversation } = createFakeConversation(harness.session, {
-		startRecoveredClientInputs: vi.fn(async () => {}),
-	});
-	return { ...fake, conversation };
-}
-
-type FakeRuntimeHost = ReturnType<typeof createFakeRuntimeHost>;
-
-function createFakeSubagentScaffold(): {
-	emit: (event: SubagentEvent) => void;
-	handle: SubagentHandle;
-	manager: SubagentToolManager;
-} {
-	const listeners = new Set<(event: SubagentEvent) => void>();
-	const handle: SubagentHandle = {
-		id: "sa_child",
-		sessionId: "child-session",
-		conversation: {} as HostedConversation,
-		prompt: vi.fn(async () => undefined),
-		abort: vi.fn(async () => undefined),
-		getState: async () => ({}) as RpcSessionState,
-		getTranscript: async () => ({}) as RpcTranscriptResponse,
-		getSessionStats: async () => {
-			throw new Error("not used");
-		},
-		waitForEnd: () => new Promise<SubagentResult>(() => {}),
-		dispose: vi.fn(async () => undefined),
-		onEvent: (listener) => {
-			listeners.add(listener);
-			return () => {
-				listeners.delete(listener);
-			};
-		},
-	};
-	const manager = {
-		getDefinition: () => {
-			throw new Error("not used");
-		},
-		startByName: vi.fn(async () => handle),
-	} as unknown as SubagentToolManager;
-	return {
-		emit(event) {
-			for (const listener of listeners) {
-				listener(event);
-			}
-		},
-		handle,
-		manager,
-	};
-}
-
-async function startRpcModeForHarness(
-	harness: Harness,
-	runtimeHost: FakeRuntimeHost = createFakeRuntimeHost(harness),
-): Promise<RpcHarness> {
-	let lineHandler: ((line: string) => void) | undefined;
-	let closeHandler: RpcCloseHandler | undefined;
-	const writes: Record<string, unknown>[] = [];
-	const transport: RpcTransport = {
-		write: vi.fn((value) => {
-			if (!isRecord(value)) {
-				throw new Error("Expected RPC write to be an object");
-			}
-			writes.push(value);
-		}),
-		onLine: vi.fn((handler) => {
-			lineHandler = handler;
-			return vi.fn();
-		}),
-		onClose: vi.fn((handler) => {
-			closeHandler = handler;
-			return vi.fn();
-		}),
-		waitForBackpressure: vi.fn(async () => {}),
-		flush: vi.fn(async () => {}),
-		close: vi.fn(async () => {}),
-	};
-	let resolveReady: () => void = () => {};
-	const ready = new Promise<void>((resolve) => {
-		resolveReady = resolve;
-	});
-	const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
-		anchor: false,
-		onReady: resolveReady,
-		transport,
-	});
-	await ready;
-	await vi.waitFor(() => expect(lineHandler).toBeDefined());
-
-	return {
-		close() {
-			closeHandler?.();
-		},
-		modePromise,
-		send(message: object) {
-			if (!lineHandler) {
-				throw new Error("RPC line handler was not registered");
-			}
-			lineHandler(JSON.stringify(message));
-		},
-		writes,
-	};
-}
-
-async function promptAndWaitForMessageEnd(rpc: RpcHarness, text: string): Promise<void> {
-	rpc.send({
-		id: "prompt-1",
-		type: "prompt",
-		clientMessageId: "client-prompt-1",
-		message: "stream please",
-	});
-	await vi.waitFor(() =>
-		expect(
-			rpc.writes.some((record) => record.type === "message_end" && getMessageText(record.message) === text),
-		).toBe(true),
-	);
-}
-
-function getMessageUpdateFrames(writes: Record<string, unknown>[]): Record<string, unknown>[] {
-	return writes.filter((record) => record.type === "message_update");
-}
-
-const activeHarnesses: Harness[] = [];
-
-afterEach(() => {
-	for (const harness of activeHarnesses.splice(0)) {
-		harness.cleanup();
-	}
-});
+type AssistantDelta = Extract<LiveItem, { type: "assistant_delta" }>;
 
 const STREAMED_TEXT = ["Delta frames flatten the quadratic streaming cost.", "Each token ships once, not O(n) times."]
 	.join("\n")
 	.repeat(3);
 
-describe("issue #44: delta-based message_update RPC frames", () => {
-	test("message_update frames are delta-only: no accumulated message, snapshot, or tool state", async () => {
-		const harness = await createHarness();
-		activeHarnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage(STREAMED_TEXT)]);
-		const rpc = await startRpcModeForHarness(harness);
+function messageText(message: AssistantMessage | undefined): string {
+	return (message?.content ?? []).flatMap((part) => (part.type === "text" ? [part.text] : [])).join("");
+}
 
-		await promptAndWaitForMessageEnd(rpc, STREAMED_TEXT);
+function liveItems(frames: HostFrame[]): LiveItem[] {
+	return frames.flatMap((frame) => (frame.type === "live" ? frame.items : []));
+}
 
-		const updates = getMessageUpdateFrames(rpc.writes);
-		expect(updates.length).toBeGreaterThan(1);
-		for (const update of updates) {
-			// message_start already delivered the accumulator base on this stream.
-			expect("message" in update).toBe(false);
-			expect(isRecord(update.stream)).toBe(true);
-			const event = getAssistantMessageEvent(update);
-			expect("seq" in event).toBe(false);
-			expect("snapshot" in event).toBe(false);
-			expect("toolState" in event).toBe(false);
+function partialAssistant(text: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [{ type: "text", text }],
+		api: "faux",
+		provider: "faux",
+		model: "faux-1",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+}
+
+describe("issue #44: streaming assistant messages ship as deltas", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
+	});
+
+	async function setup(): Promise<{ harness: HostHarness; conversation: HostedConversation }> {
+		const harness = await createHostHarness({ responses: [STREAMED_TEXT], whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		return { harness, conversation: await harness.openStartup() };
+	}
+
+	async function connect(
+		harness: HostHarness,
+		conversation: HostedConversation,
+	): Promise<{ client: LoopbackClient; frames: HostFrame[] }> {
+		const frames: HostFrame[] = [];
+		const client = await createLoopbackClient(harness.host, conversation, {
+			anchor: false,
+			onFrame: (frame) => frames.push(frame),
+		});
+		cleanups.push(() => client.stop());
+		return { client, frames };
+	}
+
+	test("assistant deltas are slim: the message starts once and each token ships once", async () => {
+		const { harness, conversation } = await setup();
+		const { client, frames } = await connect(harness, conversation);
+
+		await client.promptAndWait("stream please", { timeoutMs: 10_000 });
+
+		const items = liveItems(frames);
+		const starts = items.filter((item) => item.type === "assistant_start");
+		expect(starts).toHaveLength(1);
+
+		const deltas = items.filter((item): item is AssistantDelta => item.type === "assistant_delta");
+		expect(deltas.length).toBeGreaterThan(1);
+		for (const { event } of deltas) {
+			// Only the start carries a message; deltas carry no accumulation, snapshot, or tool state.
+			for (const field of ["message", "partial", "snapshot", "toolState", "seq"]) {
+				expect(field in event).toBe(false);
+			}
 		}
 
 		// The deltas alone reconstruct the full text.
-		const concatenated = updates
-			.map((update) => getAssistantMessageEvent(update))
-			.filter((event) => event.type === "text_delta")
-			.map((event) => event.delta)
-			.join("");
+		const concatenated = deltas.flatMap(({ event }) => (event.type === "text_delta" ? [event.delta] : [])).join("");
 		expect(concatenated).toBe(STREAMED_TEXT);
+		// text_end carries the authoritative block text once.
+		const textEnd = deltas.find(({ event }) => event.type === "text_end");
+		expect(textEnd?.event.type === "text_end" ? textEnd.event.content : undefined).toBe(STREAMED_TEXT);
 
-		// text_end carries the authoritative block text without a duplicate visible-text shim.
-		const textEnd = updates
-			.map((update) => getAssistantMessageEvent(update))
-			.find((event) => event.type === "text_end");
-		expect(textEnd?.content).toBe(STREAMED_TEXT);
-		expect("message" in (textEnd ?? {})).toBe(false);
-
-		// Boundary frames keep full messages.
-		const assistantStarts = rpc.writes.filter(
-			(record) => record.type === "message_start" && isRecord(record.message) && record.message.role === "assistant",
+		// The committed entry carries the full message.
+		const assistant = client.state.entries.find(
+			(entry) => entry.type === "message" && entry.view?.role === "assistant",
 		);
-		expect(assistantStarts.length).toBe(1);
-		expect(isRecord(assistantStarts[0]?.stream)).toBe(true);
-		const assistantEnds = rpc.writes.filter(
-			(record) => record.type === "message_end" && isRecord(record.message) && record.message.role === "assistant",
-		);
-		expect(assistantEnds.some((record) => getMessageText(record.message) === STREAMED_TEXT)).toBe(true);
-		expect(assistantEnds.every((record) => isRecord(record.stream))).toBe(true);
-
-		rpc.close();
-		await expect(rpc.modePromise).resolves.toBeUndefined();
+		expect(assistant?.type === "message" ? assistant.view?.text : undefined).toBe(STREAMED_TEXT);
 	});
 
-	test("first message_update without a prior message_start carries a full snapshot", async () => {
-		// Drive the subagent_event fan-out with a controlled handle: the child
-		// emits message_update without any message_start on this stream, so the
-		// first frame must include the accumulator base and later frames must be
-		// delta-only.
-		const { emit, manager } = createFakeSubagentScaffold();
-		const harness = await createHarness();
-		activeHarnesses.push(harness);
-		const session = harness.session as unknown as { getSubagentToolManager?: () => SubagentToolManager };
-		session.getSubagentToolManager = () => manager;
-		const rpc = await startRpcModeForHarness(harness);
+	test("a client that joins mid-stream gets the message so far in its live reset, then deltas", async () => {
+		const { harness, conversation } = await setup();
+		const live = conversation.liveState;
+		live.stream([{ type: "assistant_start", message: partialAssistant("") }]);
+		live.stream([{ type: "assistant_delta", event: { type: "text_start", contentIndex: 0 } }]);
+		live.stream([{ type: "assistant_delta", event: { type: "text_delta", contentIndex: 0, delta: "He" } }]);
 
-		rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "inspect" });
-		await vi.waitFor(() =>
-			expect(rpc.writes.some((record) => record.type === "response" && record.command === "subagent_start")).toBe(
-				true,
-			),
-		);
+		const { client, frames } = await connect(harness, conversation);
+		const reset = frames.find((frame) => frame.type === "live" && frame.reset === true);
+		if (reset?.type !== "live") throw new Error("Expected a live reset");
+		const joined = reset.items.find((item) => item.type === "assistant_start");
+		expect(joined?.type === "assistant_start" ? messageText(joined.message) : undefined).toBe("He");
+		expect(messageText(client.live.assistant?.message)).toBe("He");
 
-		const firstPartial = fauxAssistantMessage("He");
-		const secondPartial = fauxAssistantMessage("Hello");
-		emit({
-			type: "message_update",
-			message: firstPartial,
-			assistantMessageEvent: {
-				type: "text_delta",
-				seq: 1,
-				contentIndex: 0,
-				delta: "He",
-				snapshot: firstPartial,
-				toolState: [],
-			},
-		});
-		emit({
-			type: "message_update",
-			message: secondPartial,
-			assistantMessageEvent: {
-				type: "text_delta",
-				seq: 2,
-				contentIndex: 0,
-				delta: "llo",
-				snapshot: secondPartial,
-				toolState: [],
-			},
-		});
-
-		await vi.waitFor(() => expect(rpc.writes.filter((record) => record.type === "subagent_event").length).toBe(2));
-		const [first, second] = rpc.writes.filter((record) => record.type === "subagent_event");
-		const firstEvent = first.event;
-		const secondEvent = second.event;
-		if (!isRecord(firstEvent) || !isRecord(secondEvent)) {
-			throw new Error("Expected subagent_event frames to carry event records");
-		}
-		// Snapshot frame: no message_start was seen on this stream.
-		expect(isRecord(firstEvent.message)).toBe(true);
-		expect(getMessageText(firstEvent.message)).toBe("He");
-		expect("snapshot" in getAssistantMessageEvent(firstEvent)).toBe(false);
-		expect("toolState" in getAssistantMessageEvent(firstEvent)).toBe(false);
-		// Delta-only afterwards.
-		expect("message" in secondEvent).toBe(false);
-		expect("snapshot" in getAssistantMessageEvent(secondEvent)).toBe(false);
-		expect("toolState" in getAssistantMessageEvent(secondEvent)).toBe(false);
-
-		rpc.close();
-		await rpc.modePromise.catch(() => undefined);
+		const from = frames.length;
+		live.stream([{ type: "assistant_delta", event: { type: "text_delta", contentIndex: 0, delta: "llo" } }]);
+		await vi.waitFor(() => expect(messageText(client.live.assistant?.message)).toBe("Hello"));
+		const after = liveItems(frames.slice(from));
+		expect(after).toEqual([
+			{ type: "assistant_delta", event: { type: "text_delta", contentIndex: 0, delta: "llo" } },
+		]);
 	});
 
-	test("host-side subagent disposal emits a terminal subagent_disposed frame", async () => {
-		const { emit, handle, manager } = createFakeSubagentScaffold();
-		const harness = await createHarness();
-		activeHarnesses.push(harness);
-		const session = harness.session as unknown as { getSubagentToolManager?: () => SubagentToolManager };
-		session.getSubagentToolManager = () => manager;
-		const runtimeHost = createFakeRuntimeHost(harness);
-		const next = await createHarness();
-		activeHarnesses.push(next);
-		const nextConversation = createFakeConversation(next.session).conversation;
-		vi.mocked(openNewSession).mockImplementationOnce(async (_host, client) => {
-			await runtimeHost.move(client, nextConversation);
-			return { cancelled: false, sessionId: nextConversation.id, seeded: false };
-		});
-		const rpc = await startRpcModeForHarness(harness, runtimeHost);
-
-		rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "inspect" });
-		await vi.waitFor(() =>
-			expect(rpc.writes.some((record) => record.type === "response" && record.command === "subagent_start")).toBe(
-				true,
-			),
-		);
-
-		// Leave the child mid-message so a connected client holds a delta
-		// accumulator for this subagent stream.
-		const snapshot = fauxAssistantMessage("He");
-		emit({
-			type: "message_update",
-			message: snapshot,
-			assistantMessageEvent: {
-				type: "text_delta",
-				seq: 1,
-				contentIndex: 0,
-				delta: "He",
-				snapshot,
-				toolState: [],
-			},
+	test("protocol clients reconstruct the full message from deltas", async () => {
+		const { harness, conversation } = await setup();
+		const { client } = await connect(harness, conversation);
+		const observed: string[] = [];
+		client.onChange(() => {
+			const assistant = client.live.assistant;
+			if (assistant) observed.push(messageText(assistant.message));
 		});
 
-		// new_session moves the RPC client to another session, which disposes all
-		// active subagents host-side. No subagent_end fires on this path; the dedicated terminal
-		// frame is the only signal that lets clients drop the accumulator.
-		rpc.send({ id: "new-1", type: "new_session" });
-		await vi.waitFor(() =>
-			expect(rpc.writes.some((record) => record.type === "response" && record.command === "new_session")).toBe(true),
-		);
+		await client.promptAndWait("stream please", { timeoutMs: 10_000 });
 
-		const disposedIndex = rpc.writes.findIndex((record) => record.type === "subagent_disposed");
-		const responseIndex = rpc.writes.findIndex(
-			(record) => record.type === "response" && record.command === "new_session",
-		);
-		expect(disposedIndex).toBeGreaterThan(-1);
-		expect(rpc.writes[disposedIndex].subagentId).toBe("sa_child");
-		// The terminal frame precedes the command response on the same ordered
-		// transport, so clients clear state before the command resolves.
-		expect(disposedIndex).toBeLessThan(responseIndex);
-		expect(rpc.writes.some((record) => record.type === "subagent_end")).toBe(false);
-		expect(handle.dispose).toHaveBeenCalled();
-
-		rpc.close();
-		await rpc.modePromise.catch(() => undefined);
-	});
-
-	test("RPC clients reconstruct full messages from delta frames", async () => {
-		const harness = await createHarness();
-		activeHarnesses.push(harness);
-		harness.setResponses([fauxAssistantMessage(STREAMED_TEXT)]);
-
-		const events: RpcClientEvent[] = [];
-		const runtimeHost = createFakeRuntimeHost(harness);
-		const client = await createLegacyRpcClient(runtimeHost.host, runtimeHost.conversation, {
-			anchor: false,
-			onEvent: (event) => {
-				events.push(event);
-			},
-		});
-		try {
-			await client.promptAndWait("stream please");
-
-			const updates = events.filter(
-				(event): event is Extract<RpcClientEvent, { type: "message_update" }> => event.type === "message_update",
-			);
-			expect(updates.length).toBeGreaterThan(1);
-			for (const update of updates) {
-				// Every decoded update exposes the full accumulated message plus the
-				// immutable normalizer snapshot and resumable tool state.
-				expect(isRecord(update.message)).toBe(true);
-				expect(update.message.role).toBe("assistant");
-				expect(STREAMED_TEXT.startsWith(getMessageText(update.message))).toBe(true);
-				const assistantMessageEvent = update.assistantMessageEvent as unknown as Record<string, unknown>;
-				expect(assistantMessageEvent.snapshot).toBe(update.message);
-				expect(Array.isArray(assistantMessageEvent.toolState)).toBe(true);
-				expect("partial" in assistantMessageEvent).toBe(false);
-			}
-			const textEndUpdate = updates.find((update) => update.assistantMessageEvent.type === "text_end");
-			expect(getMessageText(textEndUpdate?.message)).toBe(STREAMED_TEXT);
-		} finally {
-			await client.stop();
-		}
+		expect(observed.length).toBeGreaterThan(1);
+		for (const text of observed) expect(STREAMED_TEXT.startsWith(text)).toBe(true);
+		expect(observed.at(-1)).toBe(STREAMED_TEXT);
+		// The committed entry ended the stream.
+		expect(client.live.assistant).toBeUndefined();
 	});
 });

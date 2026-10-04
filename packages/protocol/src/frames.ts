@@ -112,8 +112,11 @@ export const QueryErrorReasonSchema = Type.Object(
 	closed,
 );
 
-/** The catalogs a `changed` frame invalidates. */
-export const CatalogNameSchema = stringEnum(["models", "intents", "sessions", "mcp", "extensions", "settings"]);
+/**
+ * The catalogs a `changed` frame invalidates. `host` is the host's own status:
+ * the `host_status` and `web_search_status` queries.
+ */
+export const CatalogNameSchema = stringEnum(["models", "intents", "sessions", "mcp", "extensions", "settings", "host"]);
 
 /**
  * Why the host ended a connection.

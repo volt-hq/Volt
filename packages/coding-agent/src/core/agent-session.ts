@@ -389,6 +389,7 @@ export class AgentSession {
 	 */
 	readonly liveState: LiveState = new LiveState({ head: () => this.sessionManager.getOrdinal() });
 	private readonly _activityListeners = new Set<() => void>();
+	private readonly _reloadListeners = new Set<() => void>();
 	private readonly _releaseGitContextProvider: () => void;
 
 	/** The conversation kernel this session runs on, over its session manager's log. */
@@ -2093,7 +2094,28 @@ export class AgentSession {
 
 	reload(): Promise<void> {
 		// The reloaded extensions' session_start belongs to no client, whoever asked for the reload.
-		return ClientScope.exit(() => this._trackAdmittedAncillaryWork(this._extensions.reload()));
+		const reloaded = ClientScope.exit(() => this._trackAdmittedAncillaryWork(this._extensions.reload()));
+		void reloaded.then(
+			() => {
+				for (const listener of [...this._reloadListeners]) {
+					try {
+						listener();
+					} catch {
+						// A reload observer's failure never fails the reload.
+					}
+				}
+			},
+			() => undefined,
+		);
+		return reloaded;
+	}
+
+	/** Observe completed reloads: the conversation's extensions, commands, prompt templates, and skills may have changed. */
+	subscribeReloads(listener: () => void): () => void {
+		this._reloadListeners.add(listener);
+		return () => {
+			this._reloadListeners.delete(listener);
+		};
 	}
 
 	// =========================================================================

@@ -2,6 +2,7 @@ import { Check } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import { RPC_COMMAND_SCHEMAS } from "../src/commands.ts";
 import { RpcClientMessageSchema, RpcCommandSchema, RpcResponseSchema, RpcServerEventSchema } from "../src/contract.ts";
+import { CatalogNameSchema, HostFrameSchema } from "../src/frames.ts";
 import { RPC_RESPONSE_SCHEMAS } from "../src/responses.ts";
 
 const ASSISTANT = {
@@ -23,41 +24,29 @@ const ASSISTANT = {
 };
 
 describe("wire frames", () => {
-	it("accepts the remote_terminal frames that end a phone stream on purpose", () => {
+	it("ends a phone stream with protocol frames: ended{moved, target} or fatal, never remote_terminal", () => {
 		expect(
-			Check(RpcServerEventSchema, {
-				type: "remote_terminal",
-				reason: "lease_transferred",
-				workspace: "volt",
-				sessionId: "s-1",
-				hostNodeId: "a".repeat(64),
+			Check(HostFrameSchema, {
+				type: "ended",
+				subscriptionId: "s",
+				reason: "moved",
+				target: "01a1056a-0cdd-7381-b91a-6ef0dfbfdd1f",
 			}),
 		).toBe(true);
-		expect(
-			Check(RpcServerEventSchema, {
-				type: "remote_terminal",
-				reason: "conversation_moved",
-				workspace: "volt",
-				sessionId: "s-1",
-				targetSessionId: "s-2",
-			}),
-		).toBe(true);
-		// A redirect names where to reconnect; the removed rekey reason is gone.
-		expect(
-			Check(RpcServerEventSchema, {
-				type: "remote_terminal",
-				reason: "conversation_moved",
-				workspace: "volt",
-				sessionId: "s-1",
-			}),
-		).toBe(false);
-		expect(
-			Check(RpcServerEventSchema, {
-				type: "remote_terminal",
-				reason: "session_rekeyed_reconnect",
-				workspace: "volt",
-			}),
-		).toBe(false);
+		expect(Check(HostFrameSchema, { type: "ended", subscriptionId: "s", reason: "closed" })).toBe(true);
+		for (const code of ["revoked", "workspace_unregistered", "frame_too_large", "host_shutdown"]) {
+			expect(Check(HostFrameSchema, { type: "fatal", code }), code).toBe(true);
+		}
+		expect(Check(CatalogNameSchema, "host")).toBe(true);
+		const terminal = {
+			type: "remote_terminal",
+			reason: "conversation_moved",
+			workspace: "volt",
+			sessionId: "s-1",
+			targetSessionId: "s-2",
+		};
+		expect(Check(HostFrameSchema, terminal)).toBe(false);
+		expect(Check(RpcServerEventSchema, terminal)).toBe(false);
 	});
 
 	it("accepts representative client commands and control messages", () => {

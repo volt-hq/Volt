@@ -3,14 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { type FauxModelDefinition, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { RpcReviewDiscussionLinkSchema } from "@hansjm10/volt-protocol";
+import { REMOTE_CAPABILITIES, type RemoteGrant, RpcReviewDiscussionLinkSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { intentRegistry, intentStateOf, LOCAL_INTENT_PROFILE } from "../../../src/core/protocol/intents/index.ts";
-import { getStaticIrohRemoteRpcFilterResult } from "../../../src/core/remote/iroh/rpc-command-filter.ts";
+import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
 import { assertReviewDiscussionRpcAllowed } from "../../../src/core/review-discussion-policy.ts";
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../../src/core/review-discussions.ts";
@@ -32,6 +32,8 @@ import {
 } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "../../../src/modes/rpc/rpc-command-validation.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
+import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -60,6 +62,30 @@ afterEach(async () => {
 	for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 	vi.restoreAllMocks();
 });
+
+const FULL_GRANT: RemoteGrant = { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] };
+
+/** A paired device on `owned`'s conversation, over the remote profile, with the discussion service a daemon gives it. */
+async function connectPhone(owned: Owned): Promise<RemotePhone> {
+	const pair = createIrohStreamPair();
+	const connection = serveIrohRemoteConnection({
+		host: owned.host,
+		conversation: owned.conversation,
+		stream: pair.host,
+		grant: FULL_GRANT,
+		redaction: { workspacePath: owned.conversation.cwd },
+		redirect: {},
+		services: () => (owned.reviewDiscussions === undefined ? {} : { reviewDiscussions: owned.reviewDiscussions }),
+	});
+	const phone = connectRemotePhone(pair.phone);
+	cleanups.push(async () => {
+		await phone.close();
+		await connection.close().catch(() => undefined);
+	});
+	await phone.hello();
+	await phone.subscribe(owned.conversation.id);
+	return phone;
+}
 
 function record(): ReviewRunRecord {
 	return {
@@ -265,10 +291,13 @@ describe("Regression #341 host sibling lifecycle", () => {
 				discussionConfiguration,
 			} as const;
 			expect(validateRpcCommandPayload(command)).toBeUndefined();
-			const remote = getStaticIrohRemoteRpcFilterResult(JSON.stringify(command));
-			expect(remote).toMatchObject({ allowed: true, command: JSON.parse(JSON.stringify(command)) });
-			const response = await handleRpcCommand(JSON.parse(JSON.stringify(command)), rpcContext(source));
-			expect(response).toMatchObject({ success: true, data: { results: [{ outcome: "created" }] } });
+			// A paired device's intent carries the nested configuration across the remote profile unchanged.
+			const phone = await connectPhone(source);
+			const { type: _type, ...input } = command;
+			expect(await phone.intent("review_start_discussions", JSON.parse(JSON.stringify(input)))).toMatchObject({
+				type: "accepted",
+				result: { results: [{ outcome: "created" }] },
+			});
 			await runtimes[1]!.session.waitForIdle();
 			expect(observed).toEqual({ model: expectedModel, thinking: expectedThinking });
 			const first = (await api.list("review-341")).discussions[0]!;

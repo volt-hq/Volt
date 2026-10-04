@@ -24,6 +24,7 @@ import type {
 	RemoteGrant,
 	RpcAgentOptionsSchema,
 	RpcSessionContextSchema,
+	RpcSessionListItemSchema,
 } from "@hansjm10/volt-protocol";
 import type { Static } from "typebox";
 import type { AgentSession } from "../../agent-session.ts";
@@ -144,6 +145,14 @@ export interface IntentWorkspaceServices {
 	resolvePrReview?(request: PrReviewSourceRequest): Promise<PrReviewResolveResponse>;
 	preparePrReview?(request: PrReviewPrepareRequest): Promise<PrReviewPrepareResponse>;
 	uploadDeviceLogs?(request: { fileName?: string; content: string }): Promise<{ path: string; byteCount: number }>;
+	/** The workspace's sessions, newest first, as the host lists them to its remote clients. */
+	listSessions?(): Promise<Static<typeof RpcSessionListItemSchema>[]>;
+}
+
+/** The theme a host shares with its remote clients: resolved hex colors by token name. */
+export interface IntentHostTheme {
+	readonly themeName: string;
+	readonly tokens: Readonly<Record<string, string>>;
 }
 
 /**
@@ -165,6 +174,8 @@ export interface IntentServices {
 	readonly webSearchKey?: IntentWebSearchKeyService;
 	readonly pushTargets?: IntentPushTargetService;
 	readonly workspace?: IntentWorkspaceServices;
+	/** The theme the host shares, when it shares one. */
+	readonly hostTheme?: () => IntentHostTheme | undefined;
 }
 
 /** One invocation's context: the target conversation (conversation scope), the host's services, and the profile. */

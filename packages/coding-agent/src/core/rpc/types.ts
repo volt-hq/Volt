@@ -90,7 +90,6 @@ import type {
 	RpcReadJobResponseSchema,
 	RpcRegisterPushTargetArgsSchema,
 	RpcRegisterPushTargetResponseSchema,
-	RpcRemoteTerminalEventSchema,
 	RpcReviewAcknowledgmentResponseSchema,
 	RpcReviewCompletionStatusSchema,
 	RpcReviewCorrectnessSchema,
@@ -425,7 +424,6 @@ export type RpcSubagentDisposedEvent = Static<typeof RpcSubagentDisposedEventSch
 /** Model catalog changed; clients re-fetch get_available_models. */
 export type RpcModelsChangedEvent = Static<typeof RpcModelsChangedEventSchema>;
 /** The final frame of a phone conversation stream the host ends on purpose. */
-export type RpcRemoteTerminalEvent = Static<typeof RpcRemoteTerminalEventSchema>;
 /** Full replacement of the active session's path-free Git context. */
 export type RpcGitContextChangedEvent = Static<typeof RpcGitContextChangedEventSchema>;
 /** Full replacement of the current model's prompt-cache status. */

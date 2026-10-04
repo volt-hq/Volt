@@ -4,11 +4,12 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider } from "@hansjm10/volt-ai";
+import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { parseIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
 import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
-import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
+import { type IrohBiStreamLike, readIrohJsonlLine } from "../src/core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import {
@@ -45,7 +46,7 @@ import { runVoltDaemon } from "../src/daemon/main.ts";
 import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
-import { readLineFromIroh } from "../src/daemon/workspace-streams.ts";
+import { connectRemotePhone } from "./utilities/remote-phone.ts";
 
 const native = loadIrohModule();
 const nativeAvailable = native.iroh !== undefined;
@@ -605,7 +606,7 @@ function withGatedUnregisterResponse(
 		send: {
 			async writeAll(bytes) {
 				const line = Buffer.from(bytes).toString("utf8");
-				if (!gated && line.includes('"command":"unregister_workspace"') && line.includes('"success":true')) {
+				if (!gated && line.includes('"type":"accepted"') && line.includes('"unregistered":true')) {
 					gated = true;
 					onWriteStarted();
 					await writeGate;
@@ -626,26 +627,11 @@ async function readJsonLine(
 	stream: IrohBiStreamLike,
 	rest: Buffer = Buffer.alloc(0),
 ): Promise<{ value: Record<string, unknown>; rest: Buffer }> {
-	const result = await readLineFromIroh(stream.recv, rest, { maxLineBytes: 1024 * 1024 });
+	const result = await readIrohJsonlLine(stream.recv, rest, { maxLineBytes: 1024 * 1024 });
 	if (result.line === undefined) {
 		throw new Error("stream ended before a line was received");
 	}
 	return { value: JSON.parse(result.line) as Record<string, unknown>, rest: result.rest };
-}
-
-async function readJsonLineMatching(
-	stream: IrohBiStreamLike,
-	rest: Buffer,
-	predicate: (value: Record<string, unknown>) => boolean,
-): Promise<{ value: Record<string, unknown>; rest: Buffer }> {
-	let buffered = rest;
-	while (true) {
-		const result = await readJsonLine(stream, buffered);
-		if (predicate(result.value)) {
-			return result;
-		}
-		buffered = result.rest;
-	}
 }
 
 describe("relay config resolution", () => {
@@ -1575,12 +1561,20 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 			})
 			.toBe(true);
 
-		// list_sessions works over the discovery stream.
-		await writeJsonLine(stream, { id: "ls-1", type: "list_sessions" });
-		const listResponse = await readJsonLine(stream, handshake.rest);
-		expect(listResponse.value.command).toBe("list_sessions");
-		expect(listResponse.value.success).toBe(true);
-		expect((listResponse.value.data as Record<string, unknown>).sessions).toEqual([]);
+		// The discovery stream is a protocol connection without a conversation: it serves its sessions query.
+		const discovery = connectRemotePhone(stream, handshake.rest);
+		const welcome = await discovery.hello();
+		expect(welcome).toMatchObject({ type: "welcome", protocol: 1, profile: "remote" });
+		expect(welcome).not.toHaveProperty("conversation");
+		expect(await discovery.query("sessions")).toMatchObject({
+			type: "result",
+			data: { sessions: [], hasMore: false, nextCursor: null },
+		});
+		// Only its purpose: another workspace query is unavailable here.
+		expect(await discovery.query("worktrees")).toMatchObject({
+			type: "query_error",
+			reason: { code: "unavailable" },
+		});
 		connection.close(0n, Array.from(Buffer.from("done", "utf8")));
 		await connection.closed();
 
@@ -1600,7 +1594,17 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 			clientNodeId: pairedClientNodeId,
 			workspaceName: "ws",
 			sessionId: "s-relay",
-			command: { type: "register_push_target", id: "rp-1", args: {} },
+			frame: {
+				type: "register_push_target",
+				intentId: "rp-1",
+				input: {
+					provider: "fcm",
+					platform: "ios",
+					pushTargetId: "target-1",
+					pushTargetAuthToken: "token-1",
+					enabled: true,
+				},
+			},
 		});
 		expect(missingRelay).toMatchObject({ type: "error", code: "not_found", message: "active relay not found" });
 
@@ -1614,15 +1618,16 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		});
 		const reconnectHandshake = await readJsonLine(reconnectStream);
 		expect(reconnectHandshake.value.success).toBe(true);
-		await writeJsonLine(reconnectStream, { id: "ls-reconnect-1", type: "list_sessions" });
-		const reconnectListResponse = await readJsonLine(reconnectStream, reconnectHandshake.rest);
-		expect(reconnectListResponse.value.command).toBe("list_sessions");
-		expect(reconnectListResponse.value.success).toBe(true);
+		const reconnectDiscovery = connectRemotePhone(reconnectStream, reconnectHandshake.rest);
+		await reconnectDiscovery.hello();
+		expect(await reconnectDiscovery.query("sessions")).toMatchObject({ type: "result", data: { sessions: [] } });
 
-		// Completing one stream must leave the multi-stream connection reusable.
+		// Completing one stream must leave the multi-stream connection reusable: the
+		// phone finishes its side, and the host ends the connection with its FIN.
 		await reconnectStream.send.finish();
 		expect(await reconnectStream.send.stopped()).toBeNull();
-		await reconnectStream.recv.stop?.(0n);
+		await reconnectDiscovery.ended;
+		expect(reconnectDiscovery.frames.some((frame) => frame.type === "fatal")).toBe(false);
 		const reusedStream = await reconnection.openBi();
 		await writeJsonLine(reusedStream, {
 			type: "volt_iroh_hello",
@@ -1632,16 +1637,10 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		});
 		const reusedHandshake = await readJsonLine(reusedStream);
 		expect(reusedHandshake.value.success).toBe(true);
-		await writeJsonLine(reusedStream, {
-			id: "contexts-reconnect-2",
-			type: "get_session_contexts",
-			workspaceName: "ws",
-			sessionIds: ["session-missing"],
-		});
-		const reusedContextResponse = await readJsonLine(reusedStream, reusedHandshake.rest);
-		expect(reusedContextResponse.value).toMatchObject({
-			command: "get_session_contexts",
-			success: true,
+		const reusedDiscovery = connectRemotePhone(reusedStream, reusedHandshake.rest);
+		await reusedDiscovery.hello();
+		expect(await reusedDiscovery.query("session_contexts", { sessionIds: ["session-missing"] })).toMatchObject({
+			type: "result",
 			data: {
 				contexts: [{ sessionId: "session-missing", startingGitContext: null, workContext: null }],
 			},
@@ -1665,7 +1664,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		const revokedHandshake = await readJsonLine(revokedStream);
 		expect(revokedHandshake.value.success).toBe(false);
 		expect(revokedHandshake.value.outcome).toBe("client_revoked");
-		const revokedStreamEnd = await readLineFromIroh(revokedStream.recv, revokedHandshake.rest, {
+		const revokedStreamEnd = await readIrohJsonlLine(revokedStream.recv, revokedHandshake.rest, {
 			maxLineBytes: 1024 * 1024,
 		});
 		expect(revokedStreamEnd.line).toBeUndefined();
@@ -1684,7 +1683,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		const retriedRevokedHandshake = await readJsonLine(retriedRevokedStream);
 		expect(retriedRevokedHandshake.value.success).toBe(false);
 		expect(retriedRevokedHandshake.value.outcome).toBe("client_revoked");
-		const retriedRevokedStreamEnd = await readLineFromIroh(retriedRevokedStream.recv, retriedRevokedHandshake.rest, {
+		const retriedRevokedStreamEnd = await readIrohJsonlLine(retriedRevokedStream.recv, retriedRevokedHandshake.rest, {
 			maxLineBytes: 1024 * 1024,
 		});
 		expect(retriedRevokedStreamEnd.line).toBeUndefined();
@@ -1828,11 +1827,10 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 			});
 			const handshake = await readJsonLine(stream);
 			expect(handshake.value).toMatchObject({ type: "volt_iroh_handshake", success: true, workspace: "ws" });
-			const bootstrap = await readJsonLine(stream, handshake.rest);
-			expect(bootstrap.value.type).toBe("conversation_bootstrap");
-			const conversation = bootstrap.value.conversation as { sessionId: string };
-			const delivery = bootstrap.value.delivery as { subscriptionId: string };
-			const transcript = bootstrap.value.transcript as { branchEpoch: string };
+			const device = connectRemotePhone(stream, handshake.rest);
+			const welcome = await device.hello();
+			expect(welcome).toMatchObject({ type: "welcome", profile: "remote", conversation: "live-unregister-session" });
+			await device.subscribe("live-unregister-session");
 
 			pauseRacingPublications = true;
 			const racingConversation = await connection.openBi();
@@ -1853,7 +1851,14 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 				clientLabel: "vitest-racing-utility",
 				workspaceDiscovery: { purpose: "list_sessions" },
 			});
-			await writeJsonLine(racingUtility, { id: "stale-list", type: "list_sessions" });
+			// Frames queued behind the handshake before the stream is published.
+			await writeJsonLine(racingUtility, {
+				type: "hello",
+				protocol: 1,
+				client: { name: "phone", version: "1" },
+				accepts: { hostRequests: [] },
+			});
+			await writeJsonLine(racingUtility, { type: "query", queryId: "stale-list", query: "sessions" });
 			await expect.poll(() => utilityPublicationStarted).toBe(true);
 			const racingUtilityHandshake = await readJsonLine(racingUtility);
 			expect(racingUtilityHandshake.value).toMatchObject({
@@ -1862,46 +1867,31 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 				workspace: "ws",
 			});
 
-			await writeJsonLine(stream, {
-				id: "remove-live",
-				type: "unregister_workspace",
-				workspaceName: "ws",
-				conversationAuthority: {
-					sessionId: conversation.sessionId,
-					subscriptionId: delivery.subscriptionId,
-					branchEpoch: transcript.branchEpoch,
-				},
-			});
+			device.send({ type: "unregister_workspace", intentId: "remove-live", input: { workspaceName: "ws" } });
 			await expect.poll(() => unregisterResponseWriteStarted).toBe(true);
-			await writeJsonLine(stream, { id: "pipelined", type: "get_state" });
+			device.send({ type: "query", queryId: "pipelined", query: "sessions" });
 			unregisterResponseWriteGate.resolve();
-			const unregisterResponse = await readJsonLineMatching(
-				stream,
-				bootstrap.rest,
-				(value) => value.type === "response" && value.command === "unregister_workspace",
+			const accepted = await device.waitFor(
+				(frame): frame is Extract<HostFrame, { type: "accepted" }> =>
+					frame.type === "accepted" && frame.intentId === "remove-live",
 			);
-			expect(unregisterResponse.value).toMatchObject({
-				id: "remove-live",
-				type: "response",
-				command: "unregister_workspace",
-				success: true,
-				data: { removedWorkspace: "ws", workspaceNames: [], workspaces: [] },
+			expect(accepted).toEqual({
+				type: "accepted",
+				intentId: "remove-live",
+				ordinals: [],
+				result: { workspaceName: "ws", unregistered: true },
 			});
-			let terminal: Awaited<ReturnType<typeof readJsonLine>> | undefined;
-			try {
-				terminal = await readJsonLine(stream, unregisterResponse.rest);
-			} catch {
-				// The explicit terminal is best-effort once the response is delivered;
-				// native Iroh may expose the ensuing transport retirement as Reset(0).
-			}
-			if (terminal) {
-				expect(terminal.value).toMatchObject({
-					type: "remote_terminal",
-					reason: "workspace_unregistered",
-					workspace: "ws",
-					sessionId: conversation.sessionId,
-				});
-			}
+			// The stream ends after the answer: fatal{workspace_unregistered} is its last frame, unless
+			// native Iroh exposes the ensuing transport retirement as a reset first.
+			await device.ended;
+			const tail = device.frames.slice(device.frames.indexOf(accepted) + 1);
+			expect(tail.length === 0 || (tail.length === 1 && tail[0]?.type === "fatal")).toBe(true);
+			if (tail[0]) expect(tail[0]).toEqual({ type: "fatal", code: "workspace_unregistered" });
+			expect(
+				device.frames.some(
+					(frame) => (frame.type === "result" || frame.type === "query_error") && frame.queryId === "pipelined",
+				),
+			).toBe(false);
 
 			await expect(
 				control.request({ type: "workspace_register", name: "ws", path: workspaceDir }),
@@ -1921,14 +1911,9 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 				success: true,
 				workspace: "ws",
 			});
-			await writeJsonLine(freshUtility, { id: "fresh-list", type: "list_sessions" });
-			const freshListResponse = await readJsonLine(freshUtility, freshUtilityHandshake.rest);
-			expect(freshListResponse.value).toMatchObject({
-				id: "fresh-list",
-				type: "response",
-				command: "list_sessions",
-				success: true,
-			});
+			const freshDiscovery = connectRemotePhone(freshUtility, freshUtilityHandshake.rest);
+			await freshDiscovery.hello();
+			expect(await freshDiscovery.query("sessions")).toMatchObject({ type: "result" });
 
 			conversationPublicationGate.resolve();
 			utilityPublicationGate.resolve();
@@ -1942,10 +1927,10 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 			let racingUtilityTail: string | undefined;
 			try {
 				racingUtilityTail = (
-					await readLineFromIroh(racingUtility.recv, racingUtilityHandshake.rest, { maxLineBytes: 1024 * 1024 })
+					await readIrohJsonlLine(racingUtility.recv, racingUtilityHandshake.rest, { maxLineBytes: 1024 * 1024 })
 				).line;
 			} catch {
-				// A native reset also proves the queued utility command was not served.
+				// A native reset also proves the queued utility frames were not served.
 			}
 			expect(racingUtilityTail).toBeUndefined();
 
@@ -1961,17 +1946,10 @@ describe.skipIf(!nativeAvailable)("voltd iroh live workspace unregister", () => 
 			await expect
 				.poll(() => readFileSync(getDaemonPaths(agentDir).auditPath, "utf8"))
 				.toContain('"reason":"workspace_unregistered"');
-			let postUnregisterLine: string | undefined;
-			try {
-				postUnregisterLine = (
-					await readLineFromIroh(stream.recv, terminal?.rest ?? unregisterResponse.rest, {
-						maxLineBytes: 1024 * 1024,
-					})
-				).line;
-			} catch {
-				// A native reset is also a valid terminal observation.
-			}
-			expect(postUnregisterLine).toBeUndefined();
+			// The control-plane unregister retires the fresh discovery stream: its last frame says why.
+			await freshDiscovery.ended;
+			const freshLast = freshDiscovery.frames.at(-1);
+			if (freshLast?.type === "fatal") expect(freshLast.code).toBe("workspace_unregistered");
 		} finally {
 			conversationPublicationGate.resolve();
 			utilityPublicationGate.resolve();

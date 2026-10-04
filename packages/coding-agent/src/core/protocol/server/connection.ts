@@ -12,13 +12,27 @@
  * conversation by `intentId`; input intents carry their durable
  * `clientMessageId` as theirs. A structural intent that moves the client
  * answers `accepted{conversation}`, then ends the subscriptions on the
- * conversation it left with `ended{moved, target}`.
+ * conversation it left with `ended{moved, target}`. A client that follows its
+ * structural intents by redirect (a phone) stays where it is: after
+ * `ended{moved, target}` the connection closes, and the client connects to
+ * the target.
  *
- * A malformed frame ends the connection with `fatal`.
+ * Every frame the host writes passes through the profile's redactor at one
+ * send; the remote profile also bounds frames to its frame limit. The
+ * connection's authority is checked before every frame in either direction,
+ * and re-read from its store before every intent, query, subscription, and
+ * answer: a client whose grant was revoked gets `fatal{revoked}` as its last
+ * frame. A malformed frame ends the connection with `fatal`, an oversized one
+ * with `fatal{frame_too_large}`.
+ *
+ * A connection without a conversation serves host intents and queries only
+ * (a workspace stream).
  */
 
 import { randomUUID } from "node:crypto";
 import {
+	type ControlRelayFrame,
+	type ControlRelayOutcome,
 	DYNAMIC_INTENT_PATTERN,
 	DynamicIntentFrameSchema,
 	type FatalCode,
@@ -32,7 +46,10 @@ import {
 	INTENT_OUTCOME_WINDOW,
 	LogSessionIdSchema,
 	PROTOCOL_VERSION,
+	QUERY_FRAME_SCHEMAS,
 	type QueryErrorCode,
+	RELAY_INTENT_NAMES,
+	RELAY_QUERY_NAMES,
 	RESERVED_FRAME_TYPES,
 	type RejectionReason,
 	RpcConversationIdentifierSchema,
@@ -48,16 +65,16 @@ import { ClientScope } from "../../host/client-scope.ts";
 import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
-import type { HostClient } from "../../host/targets.ts";
-import type { RpcTransport } from "../../rpc/transport.ts";
+import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
+import { RpcFrameTooLargeError, type RpcTransport } from "../../rpc/transport.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
 import { intentRegistry, isBuiltinIntentName } from "../intents/index.ts";
-import { type IntentContext, IntentRejectedError } from "../intents/types.ts";
+import { type IntentContext, IntentRejectedError, type IntentServices } from "../intents/types.ts";
 import type { Profile } from "../profiles.ts";
 import { queryRegistry } from "../queries/index.ts";
 import { QueryRejectedError } from "../queries/types.ts";
 import { ConnectionSubagents, createLocalIntentServices, PendingReviewWorkflows } from "./local-services.ts";
-import { Subscription, type SubscriptionEnd } from "./subscription.ts";
+import { Subscription, type SubscriptionEnd, subscriptionReads } from "./subscription.ts";
 
 /** Frames a connection holds for its intent and query lane, at most. */
 const MAX_PENDING_FRAMES = 256;
@@ -80,23 +97,38 @@ const SETTINGS_INTENTS: ReadonlySet<string> = new Set([
 	"set_compaction_threshold",
 ]);
 
+/** Intents whose acceptance changes the `host` catalog. */
+const HOST_INTENTS: ReadonlySet<string> = new Set(["set_keep_awake", "set_web_search_key"]);
+
+/** Intents whose acceptance ends the connection: its `accepted` is the last frame before this fatal. */
+const ENDING_INTENTS: ReadonlyMap<string, FatalCode> = new Map([["unregister_workspace", "workspace_unregistered"]]);
+
 const INPUT_INTENTS: ReadonlySet<string> = new Set(INPUT_INTENT_NAMES);
 const DYNAMIC_INTENT = new RegExp(DYNAMIC_INTENT_PATTERN);
 const RESERVED: ReadonlySet<string> = new Set(RESERVED_FRAME_TYPES);
+const RELAY_INTENTS: ReadonlySet<string> = new Set(RELAY_INTENT_NAMES);
+const RELAY_QUERIES: ReadonlySet<string> = new Set(RELAY_QUERY_NAMES);
 
 export interface ProtocolPeer {
 	readonly name: string;
 	readonly version: string;
 }
 
+/** Why a connection's authority no longer holds: the fatal code it ends with. */
+export type AuthorityLoss = Extract<FatalCode, "revoked" | "workspace_unregistered">;
+
 export interface ServeConnectionOptions {
-	readonly host: ConversationHost;
-	/** The conversation the connection's client attaches to once it says hello. */
-	readonly conversation: HostedConversation;
+	/** The host of the conversation; a connection without a conversation needs none. */
+	readonly host?: ConversationHost;
+	/**
+	 * The conversation the connection's client attaches to once it says hello.
+	 * Without one, the connection serves host intents and queries only.
+	 */
+	readonly conversation?: HostedConversation;
 	/**
 	 * Defaults to true. The client anchors its conversation: the conversation
 	 * closes when the connection ends. A host that shares the conversation
-	 * keeps it open after the connection ends.
+	 * keeps it open after the connection ends. A redirect client never anchors.
 	 */
 	readonly anchor?: boolean;
 	/** What the host calls itself in `welcome`. */
@@ -105,6 +137,37 @@ export interface ServeConnectionOptions {
 	readonly onShutdownRequested?: () => void;
 	/** The conversation the client is on lost its log: a commit it could not confirm. */
 	readonly onLost?: (conversation: HostedConversation, error: Error) => void;
+	/**
+	 * The client follows its structural intents by redirect (a phone): it
+	 * stays on its conversation, its subscriptions there end `moved`, and the
+	 * connection closes. `hostTarget` hosts the conversations its intents
+	 * lead it to (see `HostClientMove`).
+	 */
+	readonly redirect?: {
+		readonly hostTarget?: (target: RedirectTarget) => Promise<HostedRedirect>;
+		/** The client's intent redirected it to `sessionId`. */
+		readonly onRedirected?: (sessionId: string) => void;
+	};
+	/** What intents get beyond the local services: the host's workspace, push, and settings services. */
+	readonly services?: (conversation: HostedConversation | undefined) => IntentServices;
+	/** The connection's authority, checked before every frame in either direction. */
+	readonly authority?: () => AuthorityLoss | undefined;
+	/** Re-read the connection's authority from its store before a client frame acts; false is a revocation. */
+	readonly revalidate?: () => Promise<boolean>;
+	/** The host's own admission of an intent on `conversation`: a reason refuses it. */
+	readonly admit?: (intent: string, conversation: HostedConversation) => RejectionReason | undefined;
+	/** Which intents and queries the connection serves at all; every one by default. */
+	readonly allows?: (kind: "intent" | "query", name: string) => boolean;
+	/** Run relay intents and queries where their state lives (a TUI serving a relayed phone forwards them to the daemon). */
+	readonly relay?: (frame: ControlRelayFrame) => Promise<ControlRelayOutcome>;
+	/**
+	 * Who the client is across its connections (a paired device's node id):
+	 * its retried intents answer from its own outcome window. Clients without
+	 * one share a window.
+	 */
+	readonly clientKey?: string;
+	/** An intent of this client that starts a run (a prompt, a dynamic intent) was accepted on `conversation`. */
+	readonly onInputAccepted?: (conversation: HostedConversation) => void;
 }
 
 export interface ProtocolConnection {
@@ -113,13 +176,15 @@ export interface ProtocolConnection {
 	readonly ready: Promise<void>;
 	/** Settles once the connection ended; rejects with the failure that ended it. */
 	readonly closed: Promise<void>;
-	/** The conversation the client is on. */
-	readonly conversation: HostedConversation;
+	/** The conversation the client is on, if any. */
+	readonly conversation: HostedConversation | undefined;
 	/** Tell the client to refetch a catalog. */
 	changed(catalog: CatalogName): void;
 	/** End every subscription with `ended{shutdown}`, then the connection with `fatal{host_shutdown}`. */
 	shutdown(message?: string): Promise<void>;
-	/** End the connection; with a code, the client is told why first. */
+	/** End every subscription with `ended{closed}`, then the connection: the host stopped serving the conversation here. */
+	end(): Promise<void>;
+	/** End the connection; with a code, the client is told why first, and nothing follows. */
 	close(fatal?: { readonly code: FatalCode; readonly message?: string }): Promise<void>;
 }
 
@@ -160,13 +225,23 @@ class IntentOutcomeWindow {
 	}
 }
 
-const outcomeWindows = new WeakMap<HostedConversation, IntentOutcomeWindow>();
+const outcomeWindows = new WeakMap<object, Map<string, IntentOutcomeWindow>>();
 
-function outcomeWindow(conversation: HostedConversation): IntentOutcomeWindow {
-	let window = outcomeWindows.get(conversation);
+/**
+ * The outcome window of one client of a conversation (or of a host, for
+ * host-only connections): a client's retries answer from its own window, and
+ * no client's intents evict another's.
+ */
+function outcomeWindow(scope: object, clientKey: string): IntentOutcomeWindow {
+	let windows = outcomeWindows.get(scope);
+	if (!windows) {
+		windows = new Map();
+		outcomeWindows.set(scope, windows);
+	}
+	let window = windows.get(clientKey);
 	if (!window) {
 		window = new IntentOutcomeWindow();
-		outcomeWindows.set(conversation, window);
+		windows.set(clientKey, window);
 	}
 	return window;
 }
@@ -185,7 +260,8 @@ const CODED_REJECTIONS: Readonly<Record<string, RejectionReason["code"]>> = {
 	conversation_locked: "locked",
 };
 
-function rejection(error: unknown): RejectionReason {
+/** The rejection a failed admission or run answers with. */
+export function rejectionReason(error: unknown): RejectionReason {
 	if (error instanceof IntentRejectedError) {
 		return {
 			code: error.code,
@@ -198,7 +274,8 @@ function rejection(error: unknown): RejectionReason {
 	return { code: code ?? "failed", message: errorMessage(error) };
 }
 
-function queryError(
+/** The query error a failed admission or run answers with. */
+export function queryErrorReason(
 	error: unknown,
 ): { code: QueryErrorCode; message: string } & Pick<QueryRejectedError, "requiredCapability"> {
 	if (error instanceof QueryRejectedError) {
@@ -268,6 +345,59 @@ function intentEnvelopeValidator(type: string): Validator {
 	return validator("intent:unknown", () => UnknownIntentEnvelopeSchema);
 }
 
+/** Whether intent `type` is fenced to the client's branch position. Dynamic intents send prompts: fenced. */
+function isBranchFenced(type: string): boolean {
+	return isBuiltinIntentName(type) ? intentRegistry.get(type).fence === "branch" : true;
+}
+
+/**
+ * Queries whose answers cost the host a log, store, or Git read the client
+ * chooses the size or number of: each takes one read of the connection's budget.
+ */
+const COSTLY_QUERIES: ReadonlySet<string> = new Set([
+	"history",
+	"content",
+	"sessions",
+	"session_contexts",
+	"worktrees",
+	"workspace_directories",
+	"pr_review",
+]);
+
+/** Snapshots, replays, and costly reads a connection may still request: a refilling bucket. */
+class ReadBudget {
+	private readonly burst: number;
+	private readonly refillMs: number;
+	private tokens: number;
+	private refilledAt = Date.now();
+
+	constructor(burst: number, refillMs: number) {
+		this.burst = burst;
+		this.refillMs = refillMs;
+		this.tokens = burst;
+	}
+
+	/** Take `count` reads; false (taking none) when the budget holds fewer. */
+	take(count = 1): boolean {
+		if (this.refillMs > 0) {
+			const now = Date.now();
+			const refilled = Math.floor((now - this.refilledAt) / this.refillMs);
+			if (refilled > 0) {
+				this.tokens = Math.min(this.burst, this.tokens + refilled);
+				this.refilledAt += refilled * this.refillMs;
+			}
+		}
+		if (this.tokens < count) return false;
+		this.tokens -= count;
+		return true;
+	}
+
+	/** Milliseconds until the next read is available. */
+	get retryAfterMs(): number {
+		return Math.max(0, this.refillMs - (Date.now() - this.refilledAt));
+	}
+}
+
 /** Serve one client on `transport` with `profile`, until the transport closes or the connection is closed. */
 export function serveConnection(
 	transport: RpcTransport,
@@ -275,22 +405,35 @@ export function serveConnection(
 	options: ServeConnectionOptions,
 ): ProtocolConnection {
 	const host = options.host;
+	if (options.conversation && !host) throw new Error("A connection to a conversation needs its host");
 	const connectionId = randomUUID();
-	const anchor = options.anchor ?? true;
+	const redirectClient = options.redirect !== undefined;
+	const anchor = !redirectClient && (options.anchor ?? true);
 	const server = options.server ?? { name: "volt", version: VERSION };
+	const redactor = profile.redactor();
+	/** The outcome window scope of a connection without a host. */
+	const outcomeScope = {};
+	const reads = new ReadBudget(profile.limits.readBurst, profile.limits.readRefillMs);
 	const subscriptions = new Map<string, Subscription>();
 	const subscriptionUsage = new SubscriptionUsageService();
 	const reviews = new PendingReviewWorkflows();
 	let home = options.conversation;
-	const subagents = new ConnectionSubagents(() => home);
+	const subagents = new ConnectionSubagents(() => {
+		if (!home) throw new Error("The connection has no conversation");
+		return home;
+	});
 	let accepts: ReadonlySet<HostRequestKind> = new Set();
 	let helloReceived = false;
 	let closing: Promise<void> | undefined;
+	/** A fatal frame was written: nothing follows it. */
+	let fatalWritten = false;
 	let lane: Promise<void> = Promise.resolve();
+	/** Subscribe, unsubscribe, and answers, in order, each after the authority check. */
+	let controlLane: Promise<void> = Promise.resolve();
 	let pendingFrames = 0;
 	/** Lane frames running; moves a structural intent makes end the old subscriptions once its outcome is written. */
 	let laneBusy = false;
-	const moves: Array<{ from: HostedConversation; to: HostedConversation }> = [];
+	const moves: Array<{ from: HostedConversation; to: string }> = [];
 	const ready = Promise.withResolvers<void>();
 	const closed = Promise.withResolvers<void>();
 	void ready.promise.catch(() => undefined);
@@ -303,9 +446,26 @@ export function serveConnection(
 	const pendingWrites = new Set<Promise<void>>();
 
 	const write = (frame: HostFrame): void => {
+		if (fatalWritten) return;
 		if (closing && frame.type !== "fatal" && frame.type !== "ended") return;
+		if (frame.type !== "fatal") {
+			const loss = options.authority?.();
+			if (loss !== undefined) {
+				void close({ code: loss });
+				return;
+			}
+		}
+		let redacted: HostFrame | undefined;
 		try {
-			const result = transport.write(profile.redact(frame));
+			redacted = redactor.redact(frame);
+		} catch (error) {
+			void fail(error);
+			return;
+		}
+		if (!redacted) return;
+		if (redacted.type === "fatal") fatalWritten = true;
+		try {
+			const result = transport.write(redacted);
 			if (result) {
 				const tracked = Promise.resolve(result).then(
 					() => undefined,
@@ -351,19 +511,31 @@ export function serveConnection(
 					event.type === "mcp_auth_update"
 				) {
 					write({ type: "changed", catalog: "mcp" });
+				} else if (event.type === "session_info_changed") {
+					write({ type: "changed", catalog: "sessions" });
 				}
 			},
 			{ monitorGitContext: false },
 		);
-		const unsubscribeBackpressure = session.subscribeRuntimeEvents(async () => {
-			try {
-				await drain();
-			} catch (error) {
-				void fail(error);
-			}
+		const unsubscribeReloads = session.subscribeReloads(() => {
+			write({ type: "changed", catalog: "intents" });
+			write({ type: "changed", catalog: "extensions" });
 		});
+		// A client in the host's trust domain slows the agent loop to its pace. A
+		// remote client never does: its transport bounds what it queues instead.
+		const unsubscribeBackpressure =
+			profile.limits.sendQueueBytes === undefined
+				? session.subscribeRuntimeEvents(async () => {
+						try {
+							await drain();
+						} catch (error) {
+							void fail(error);
+						}
+					})
+				: () => {};
 		unsubscribeHome = () => {
 			unsubscribeEvents();
+			unsubscribeReloads();
 			unsubscribeBackpressure();
 		};
 	};
@@ -377,7 +549,46 @@ export function serveConnection(
 	};
 
 	const flushMoves = (): void => {
-		for (const { from, to } of moves.splice(0)) endSubscriptionsOn(from, { reason: "moved", target: to.id });
+		for (const { from, to } of moves.splice(0)) {
+			endSubscriptionsOn(from, { reason: "moved", target: to });
+			// A redirect client reconnects to the target: its connection here is done.
+			if (redirectClient) void close();
+		}
+	};
+
+	const move: HostClientMove = redirectClient
+		? {
+				kind: "redirect",
+				redirect: (sessionId) => {
+					if (!home) return;
+					options.redirect?.onRedirected?.(sessionId);
+					moves.push({ from: home, to: sessionId });
+					if (!laneBusy) flushMoves();
+				},
+				...(options.redirect?.hostTarget === undefined ? {} : { hostTarget: options.redirect.hostTarget }),
+			}
+		: {
+				kind: "in_place",
+				prepare: (to) => {
+					home = to;
+				},
+				onMoved: async (to, from) => {
+					observeLoss(to);
+					observeHome(to);
+					await subagents.disposeAll();
+					if (from) moves.push({ from, to: to.id });
+					if (!laneBusy) flushMoves();
+				},
+			};
+
+	const currentHost = (): ConversationHost => {
+		if (!host) throw new Error("The connection has no conversation host");
+		return host;
+	};
+
+	const currentHome = (): HostedConversation => {
+		if (!home) throw new Error("The connection has no conversation");
+		return home;
 	};
 
 	const client: HostClient = {
@@ -388,16 +599,16 @@ export function serveConnection(
 		live: { acceptsHostRequest: (kind) => accepts.has(kind), apply: () => {} },
 		surface: {
 			commandContextActions: {
-				waitForIdle: () => home.session.waitForIdle(),
-				newSession: (newSessionOptions) => openNewSession(host, client, newSessionOptions),
+				waitForIdle: () => currentHome().session.waitForIdle(),
+				newSession: (newSessionOptions) => openNewSession(currentHost(), client, newSessionOptions),
 				fork: async (entryId, forkOptions) => {
-					const result = await openFork(host, client, entryId, forkOptions);
+					const result = await openFork(currentHost(), client, entryId, forkOptions);
 					return result.cancelled
 						? result
 						: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
 				},
 				navigateTree: async (targetId, navigateOptions) => {
-					const result = await home.session.navigateTree(targetId, {
+					const result = await currentHome().session.navigateTree(targetId, {
 						summarize: navigateOptions?.summarize,
 						customInstructions: navigateOptions?.customInstructions,
 						replaceInstructions: navigateOptions?.replaceInstructions,
@@ -405,65 +616,157 @@ export function serveConnection(
 					});
 					return { cancelled: result.cancelled };
 				},
-				switchSession: (sessionRef, switchOptions) => openStoredSession(host, client, sessionRef, switchOptions),
-				reload: () => home.session.reload(),
+				switchSession: (sessionRef, switchOptions) =>
+					openStoredSession(currentHost(), client, sessionRef, switchOptions),
+				reload: () => currentHome().session.reload(),
 			},
 			shutdownHandler: () => options.onShutdownRequested?.(),
 			onError: onExtensionError,
 		},
-		move: {
-			kind: "in_place",
-			prepare: (to) => {
-				home = to;
-			},
-			onMoved: async (to, from) => {
-				observeLoss(to);
-				observeHome(to);
-				await subagents.disposeAll();
-				if (from) moves.push({ from, to });
-				if (!laneBusy) flushMoves();
-			},
-		},
+		move,
 	};
 
-	/** The conversation a frame names: the client's own, or another open one of the host. */
+	/** The conversation an intent or subscription names: the client's own, or another the profile may target. */
 	const resolveTarget = (id: string | undefined): HostedConversation | undefined => {
+		if (!home) return undefined;
 		if (id === undefined || id === home.id) return home;
-		const conversation = host.get(id);
+		const conversation = host?.get(id);
 		return conversation && profile.conversations(id) ? conversation : undefined;
 	};
 
-	/** A conversation a client may subscribe to or read: a target, or a subagent child this connection started. */
+	/**
+	 * A subagent child a client may read but not act on: one this connection
+	 * started, or, on a profile bound to a conversation, any subagent child of
+	 * that conversation.
+	 */
+	const resolveChild = (id: string): HostedConversation | undefined => {
+		const started = subagents.conversation(id);
+		if (started && profile.conversations(id)) return started;
+		if (profile.bound === undefined || !home || home.id !== profile.bound) return started;
+		const child = home.session.getSubagentToolManager()?.childConversation?.(id);
+		return child && !child.closed ? child : undefined;
+	};
+
+	/** A conversation a client may subscribe to or read: a target, or a subagent child. */
 	const resolveReadable = (id: string | undefined): HostedConversation | undefined => {
 		const target = resolveTarget(id);
 		if (target || id === undefined) return target;
-		const child = subagents.conversation(id);
-		return child && profile.conversations(id) ? child : undefined;
+		return resolveChild(id);
 	};
 
-	const intentContext = (conversation: HostedConversation, intentId?: string): IntentContext => ({
-		target: { session: conversation.session, conversation, host, client },
-		services: createLocalIntentServices(conversation, { subagents, reviews, subscriptionUsage }),
+	const intentServices = (conversation: HostedConversation | undefined): IntentServices => ({
+		...(conversation === undefined
+			? {}
+			: createLocalIntentServices(conversation, { subagents, reviews, subscriptionUsage })),
+		...options.services?.(conversation),
+	});
+
+	const intentContext = (conversation: HostedConversation | undefined, intentId?: string): IntentContext => ({
+		...(conversation === undefined || host === undefined
+			? {}
+			: { target: { session: conversation.session, conversation, host, client } }),
+		services: intentServices(conversation),
 		profile: profile.intents,
 		subscriber: profile,
 		...(intentId === undefined ? {} : { intentId }),
 	});
 
+	/** Re-read the connection's authority; a lost one ends the connection. */
+	const stillAuthorized = async (): Promise<boolean> => {
+		const loss = options.authority?.();
+		if (loss !== undefined) {
+			await close({ code: loss });
+			return false;
+		}
+		if (!options.revalidate) return true;
+		let current = false;
+		try {
+			current = await options.revalidate();
+		} catch {
+			current = false;
+		}
+		if (!current) await close({ code: "revoked", message: "The device's access changed; reconnect" });
+		return current && !closing;
+	};
+
+	const relayed = async (frame: ControlRelayFrame): Promise<void> => {
+		const relay = options.relay;
+		if (!relay) return;
+		let outcome: ControlRelayOutcome;
+		try {
+			outcome = await relay(frame);
+		} catch (error) {
+			outcome =
+				frame.type === "query"
+					? {
+							type: "query_error",
+							queryId: frame.queryId,
+							reason: { code: "unavailable", message: errorMessage(error) },
+						}
+					: {
+							type: "rejected",
+							intentId: frame.intentId,
+							reason: { code: "unavailable", message: errorMessage(error) },
+						};
+		}
+		write(outcome);
+		if (outcome.type !== "accepted") return;
+		if (HOST_INTENTS.has(frame.type)) write({ type: "changed", catalog: "host" });
+		const ending = ENDING_INTENTS.get(frame.type);
+		// Nothing the client pipelined after the intent is served.
+		if (ending !== undefined) void close({ code: ending });
+	};
+
 	const runIntent = async (frame: IntentEnvelope): Promise<void> => {
 		const reject = (reason: RejectionReason): void => {
 			write({ type: "rejected", intentId: frame.intentId, reason });
 		};
-		const conversation = resolveTarget(frame.conversation);
-		if (!conversation || conversation.closed) {
-			reject({ code: "ended", message: `Conversation ${frame.conversation ?? home.id} is not open` });
+		if (!(await stillAuthorized())) return;
+		if (options.allows && !options.allows("intent", frame.type)) {
+			reject({ code: "unavailable", message: `${frame.type} is not available on this stream` });
 			return;
 		}
-		if (conversation !== home && STRUCTURAL_INTENTS.has(frame.type)) {
+		const type = frame.type;
+		if (options.relay && RELAY_INTENTS.has(type) && isBuiltinIntentName(type)) {
+			const schema: TSchema = INTENT_FRAME_SCHEMAS[type];
+			const relayFrame: unknown = frame;
+			if (!validator(`relay:${type}`, () => schema).Check(relayFrame)) {
+				reject({ code: "invalid_input", message: `Invalid ${type} input` });
+				return;
+			}
+			await relayed(frame as unknown as ControlRelayFrame);
+			return;
+		}
+		const conversation = home === undefined ? undefined : resolveTarget(frame.conversation);
+		if (frame.conversation !== undefined && !conversation) {
+			if (resolveChild(frame.conversation)) {
+				reject({ code: "read_only", message: "Subagent conversations are observe-only" });
+				return;
+			}
+			reject({ code: "ended", message: `Conversation ${frame.conversation} is not open` });
+			return;
+		}
+		if (conversation?.closed) {
+			reject({ code: "ended", message: `Conversation ${conversation.id} is not open` });
+			return;
+		}
+		if (conversation && conversation !== home && STRUCTURAL_INTENTS.has(frame.type)) {
 			reject({ code: "unavailable", message: `${frame.type} acts on the conversation the client is on` });
 			return;
 		}
+		if (profile.name === "remote" && frame.expectedOrdinal === undefined && isBranchFenced(frame.type)) {
+			reject({ code: "invalid_input", message: `${frame.type} needs the client's expectedOrdinal` });
+			return;
+		}
+		if (conversation) {
+			const refused = options.admit?.(frame.type, conversation);
+			if (refused) {
+				reject(refused);
+				return;
+			}
+		}
 		const input = INPUT_INTENTS.has(frame.type);
-		const window = input ? undefined : outcomeWindow(conversation);
+		const window = input ? undefined : outcomeWindow(conversation ?? host ?? outcomeScope, options.clientKey ?? "");
 		const fingerprint = JSON.stringify([frame.type, frame.input ?? null, frame.expectedOrdinal ?? null]);
 		const remembered = window?.get(frame.intentId);
 		if (remembered) {
@@ -475,20 +778,30 @@ export function serveConnection(
 			return;
 		}
 		const outcome = Promise.withResolvers<IntentOutcomeFrame>();
-		window?.set(frame.intentId, fingerprint, outcome.promise);
 		/** Prompt-like intents settle off the lane, where a lane intent's pending reviews are not theirs. */
 		const settle = (result: IntentOutcomeFrame, onLane: boolean): void => {
+			// The outcome is written before a review it registered launches, so `accepted` precedes its progress.
+			write(result);
 			if (onLane && result.type === "accepted") reviews.launchAll();
 			else if (onLane) reviews.cancelAll();
-			write(result);
 			outcome.resolve(result);
-			if (result.type === "accepted" && SETTINGS_INTENTS.has(frame.type))
-				write({ type: "changed", catalog: "settings" });
+			if (result.type !== "accepted") return;
+			const ending = ENDING_INTENTS.get(frame.type);
+			if (ending !== undefined) {
+				// Nothing the client pipelined after the intent is served.
+				void close({ code: ending });
+				return;
+			}
+			if (SETTINGS_INTENTS.has(frame.type)) write({ type: "changed", catalog: "settings" });
+			if (HOST_INTENTS.has(frame.type)) write({ type: "changed", catalog: "host" });
+			if (result.conversation !== undefined) write({ type: "changed", catalog: "sessions" });
+			// Prompts and dynamic intents (prompt templates, skills, extension commands) start runs.
+			if ((input || !isBuiltinIntentName(frame.type)) && conversation) options.onInputAccepted?.(conversation);
 		};
 		const rejected = (error: unknown): IntentOutcomeFrame => ({
 			type: "rejected",
 			intentId: frame.intentId,
-			reason: rejection(error),
+			reason: rejectionReason(error),
 		});
 		let prepared: ReturnType<typeof intentRegistry.prepareFrame>;
 		try {
@@ -498,9 +811,11 @@ export function serveConnection(
 				}),
 			);
 		} catch (error) {
+			// A refusal is not remembered: a retry is admitted afresh.
 			settle(rejected(error), true);
 			return;
 		}
+		window?.set(frame.intentId, fingerprint, outcome.promise);
 		const run = ClientScope.run(client.id, () => prepared.run()).then(
 			(invocation): IntentOutcomeFrame => ({
 				type: "accepted",
@@ -523,13 +838,34 @@ export function serveConnection(
 	};
 
 	const runQuery = async (frame: QueryEnvelope): Promise<void> => {
-		const conversation = resolveReadable(frame.conversation);
-		if (!conversation || conversation.closed) {
+		const refuse = (code: QueryErrorCode, message: string, retryAfterMs?: number): void => {
 			write({
 				type: "query_error",
 				queryId: frame.queryId,
-				reason: { code: "unavailable", message: `Conversation ${frame.conversation ?? home.id} is not open` },
+				reason: { code, message, ...(retryAfterMs === undefined ? {} : { retryAfterMs }) },
 			});
+		};
+		if (!(await stillAuthorized())) return;
+		if (options.allows && !options.allows("query", frame.query)) {
+			refuse("unavailable", `${frame.query} is not available on this stream`);
+			return;
+		}
+		if (COSTLY_QUERIES.has(frame.query) && !reads.take()) {
+			refuse("unavailable", `Too many ${frame.query} reads; retry later`, Math.min(30_000, reads.retryAfterMs));
+			return;
+		}
+		if (options.relay && RELAY_QUERIES.has(frame.query)) {
+			const schema = (QUERY_FRAME_SCHEMAS as Record<string, TSchema>)[frame.query];
+			if (!schema || !validator(`query:${frame.query}`, () => schema).Check(frame)) {
+				refuse("invalid_input", `Invalid ${frame.query} parameters`);
+				return;
+			}
+			await relayed(frame as unknown as ControlRelayFrame);
+			return;
+		}
+		const conversation = home === undefined ? undefined : resolveReadable(frame.conversation);
+		if ((frame.conversation !== undefined && !conversation) || conversation?.closed) {
+			refuse("unavailable", `Conversation ${frame.conversation ?? home?.id} is not open`);
 			return;
 		}
 		try {
@@ -538,7 +874,7 @@ export function serveConnection(
 			);
 			write({ type: "result", queryId: frame.queryId, data });
 		} catch (error) {
-			write({ type: "query_error", queryId: frame.queryId, reason: queryError(error) });
+			write({ type: "query_error", queryId: frame.queryId, reason: queryErrorReason(error) });
 		}
 	};
 
@@ -565,9 +901,29 @@ export function serveConnection(
 		});
 	};
 
-	const answer = (requestId: string, response: HostResponse): void => {
+	/** Run a subscription change or an answer in order, once the connection's authority is re-read. */
+	const enqueueControl = (task: () => void): void => {
+		if (pendingFrames >= MAX_PENDING_FRAMES) {
+			void close({ code: "invalid_frame", message: `More than ${MAX_PENDING_FRAMES} frames are pending` });
+			return;
+		}
+		pendingFrames++;
+		controlLane = controlLane.then(async () => {
+			try {
+				if (closing || !(await stillAuthorized())) return;
+				task();
+			} catch {
+				// Each frame answers its own failure.
+			} finally {
+				pendingFrames--;
+			}
+		});
+	};
+
+	const answer = (requestId: string, sent: HostResponse): void => {
+		const response = redactor.response(requestId, sent);
 		const candidates = new Map<HostedConversation, string>();
-		if (host.conversationOf(client) === home) candidates.set(home, client.id);
+		if (home && host?.conversationOf(client) === home) candidates.set(home, client.id);
 		for (const subscription of subscriptions.values()) {
 			if (!candidates.has(subscription.conversation)) {
 				candidates.set(subscription.conversation, `${connectionId}:${subscription.id}`);
@@ -585,9 +941,17 @@ export function serveConnection(
 			void close({ code: "invalid_frame", message: `Subscription ${frame.subscriptionId} is already active` });
 			return;
 		}
+		if (subscriptions.size >= profile.limits.subscriptions) {
+			void close({ code: "invalid_frame", message: `More than ${profile.limits.subscriptions} subscriptions` });
+			return;
+		}
 		const conversation = resolveReadable(frame.conversation);
 		if (!conversation || conversation.closed) {
 			write({ type: "ended", subscriptionId: frame.subscriptionId, reason: "closed" });
+			return;
+		}
+		if (!reads.take(subscriptionReads(conversation, profile, frame.after))) {
+			void close({ code: "invalid_frame", message: "Too many subscriptions requested" });
 			return;
 		}
 		const subscription = new Subscription({
@@ -625,9 +989,13 @@ export function serveConnection(
 		const frame = value as Static<typeof HelloFrameSchema>;
 		helloReceived = true;
 		accepts = profile.hostRequests(frame.accepts.hostRequests);
-		observeHome(home);
-		// The live view attaches synchronously, so a dialog an extension asks from session_start waits for the client.
-		attached = host.attach(client, home);
+		if (home && host) {
+			observeHome(home);
+			// The live view attaches synchronously, so a dialog an extension asks from session_start waits for the client.
+			attached = host.attach(client, home);
+		} else {
+			attached = Promise.resolve();
+		}
 		attached.then(
 			() => ready.resolve(),
 			(error: unknown) => {
@@ -641,12 +1009,17 @@ export function serveConnection(
 			connectionId,
 			profile: profile.name,
 			server: { name: server.name, version: server.version },
-			conversation: home.id,
+			...(home === undefined ? {} : { conversation: home.id }),
 		});
 	};
 
 	const receive = (value: unknown): void => {
 		if (closing) return;
+		const loss = options.authority?.();
+		if (loss !== undefined) {
+			void close({ code: loss });
+			return;
+		}
 		if (!isRecord(value) || typeof value.type !== "string") {
 			void close({ code: "invalid_frame", message: "A frame is a JSON object with a string type" });
 			return;
@@ -658,23 +1031,27 @@ export function serveConnection(
 			return;
 		}
 		switch (type) {
-			case "subscribe":
+			case "subscribe": {
 				if (!validator("subscribe", () => SubscribeFrameSchema).Check(value)) break;
-				subscribe(value as Static<typeof SubscribeFrameSchema>);
+				const frame = value as Static<typeof SubscribeFrameSchema>;
+				enqueueControl(() => subscribe(frame));
 				return;
+			}
 			case "unsubscribe": {
 				if (!validator("unsubscribe", () => UnsubscribeFrameSchema).Check(value)) break;
 				const subscriptionId = (value as Static<typeof UnsubscribeFrameSchema>).subscriptionId;
-				const subscription = subscriptions.get(subscriptionId);
-				subscriptions.delete(subscriptionId);
-				if (subscription) subscription.end({ reason: "unsubscribed" });
-				else write({ type: "ended", subscriptionId, reason: "unsubscribed" });
+				enqueueControl(() => {
+					const subscription = subscriptions.get(subscriptionId);
+					subscriptions.delete(subscriptionId);
+					if (subscription) subscription.end({ reason: "unsubscribed" });
+					else write({ type: "ended", subscriptionId, reason: "unsubscribed" });
+				});
 				return;
 			}
 			case "host_response": {
 				if (!validator("host_response", () => HostResponseFrameSchema).Check(value)) break;
 				const frame = value as Static<typeof HostResponseFrameSchema>;
-				answer(frame.requestId, frame.response);
+				enqueueControl(() => answer(frame.requestId, frame.response));
 				return;
 			}
 			case "query":
@@ -696,8 +1073,9 @@ export function serveConnection(
 			stopObservingClose();
 			unsubscribeHome();
 			await subagents.disposeAll();
+			if (!host) return;
 			if (host.conversationOf(client) !== undefined) await host.detach(client);
-			else if (anchor && !home.closed) await host.close(home);
+			else if (anchor && home && !home.closed) await host.close(home);
 		})();
 		return left;
 	};
@@ -745,12 +1123,15 @@ export function serveConnection(
 		return closing;
 	}
 
-	observeLoss(home);
-	stopObservingClose = host.onClosed((conversation) => {
-		// A conversation the client moved away from ends its subscriptions as moved.
-		if (moves.some((move) => move.from === conversation)) return;
-		endSubscriptionsOn(conversation, { reason: "closed" });
-	});
+	if (home) observeLoss(home);
+	stopObservingClose =
+		host?.onClosed((conversation) => {
+			// A conversation the client moved away from ends its subscriptions as moved.
+			if (moves.some((pending) => pending.from === conversation)) return;
+			endSubscriptionsOn(conversation, { reason: "closed" });
+			// A redirect client leaves when its conversation closes: it reconnects to wherever the conversation opens.
+			if (redirectClient && conversation === home) void close();
+		}) ?? (() => {});
 
 	detachInput = transport.onValue
 		? transport.onValue(receive)
@@ -764,7 +1145,14 @@ export function serveConnection(
 				}
 				receive(value);
 			});
-	detachClose = transport.onClose?.((error) => void (error ? fail(error) : close())) ?? (() => {});
+	detachClose =
+		transport.onClose?.((error) => {
+			if (error instanceof RpcFrameTooLargeError) {
+				void close({ code: "frame_too_large", message: error.message });
+				return;
+			}
+			void (error ? fail(error) : close());
+		}) ?? (() => {});
 
 	return {
 		id: connectionId,
@@ -783,6 +1171,14 @@ export function serveConnection(
 				subscription.end({ reason: "shutdown" });
 			}
 			return close({ code: "host_shutdown", ...(message === undefined ? {} : { message }) });
+		},
+		async end() {
+			if (closing) return closing;
+			for (const [id, subscription] of [...subscriptions]) {
+				subscriptions.delete(id);
+				subscription.end({ reason: "closed" });
+			}
+			return close();
 		},
 		close,
 	};

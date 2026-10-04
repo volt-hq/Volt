@@ -10,10 +10,8 @@ import {
 } from "../src/core/remote/iroh/handshake.ts";
 import {
 	IROH_REMOTE_AGENT_OPTIONS_FEATURE,
-	IROH_REMOTE_AGENT_SETTLED_FEATURE,
 	IROH_REMOTE_ALPN,
 	IROH_REMOTE_HOST_FEATURES,
-	IROH_REMOTE_PLANNING_STATE_FEATURE,
 	IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE,
 	IROH_REMOTE_WORKING_DIRECTORIES_FEATURE,
 	IROH_REMOTE_WORKTREE_ID_PATTERN,
@@ -51,12 +49,11 @@ describe("worktrees.v1 capability flag", () => {
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("worktrees.v1");
 		expect(IROH_REMOTE_WORKING_DIRECTORIES_FEATURE).toBe("working_directories.v1");
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("working_directories.v1");
-		expect(IROH_REMOTE_AGENT_SETTLED_FEATURE).toBe("agent_settled.v1");
-		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("agent_settled.v1");
 		expect(IROH_REMOTE_SESSION_RUNTIME_STATE_FEATURE).toBe("session_runtime_state.v1");
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("session_runtime_state.v1");
-		expect(IROH_REMOTE_PLANNING_STATE_FEATURE).toBe("planning_state.v1");
-		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("planning_state.v1");
+		// Protocol 1 carries agent settlement and planning state in its frames: no feature flags.
+		expect([...IROH_REMOTE_HOST_FEATURES]).not.toContain("agent_settled.v1");
+		expect([...IROH_REMOTE_HOST_FEATURES]).not.toContain("planning_state.v1");
 		expect(IROH_REMOTE_AGENT_OPTIONS_FEATURE).toBe("agent_options.v1");
 		expect([...IROH_REMOTE_HOST_FEATURES]).toContain("agent_options.v1");
 	});

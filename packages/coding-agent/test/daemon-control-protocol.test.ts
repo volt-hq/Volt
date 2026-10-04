@@ -60,6 +60,14 @@ function roundTrip(message: object): unknown {
 
 type ByType<T extends { type: string }> = { [K in T["type"]]: Extract<T, { type: K }> };
 
+const PUSH_TARGET = {
+	provider: "fcm" as const,
+	platform: "ios" as const,
+	pushTargetId: "target-1",
+	pushTargetAuthToken: "token-1",
+	enabled: true,
+};
+
 // One valid sample per message type. The mapped types make a missing type a compile error.
 const REQUESTS: ByType<ControlRequest> = {
 	status: { type: "status", id: "1" },
@@ -124,21 +132,19 @@ const REQUESTS: ByType<ControlRequest> = {
 	},
 	theme_set: { type: "theme_set", id: "24", theme: "dark" },
 	keep_awake_set: { type: "keep_awake_set", id: "25", enabled: false },
-	viewer_subscribe: { type: "viewer_subscribe", id: "26", viewerFeedId: "vf-1" },
-	viewer_unsubscribe: { type: "viewer_unsubscribe", id: "27", viewerFeedId: "vf-1" },
-	viewer_abort: { type: "viewer_abort", id: "28", viewerFeedId: "vf-1" },
+	viewer_abort: { type: "viewer_abort", id: "26", viewerFeedId: "vf-1" },
 	relay_rpc: {
 		type: "relay_rpc",
-		id: "29",
+		id: "27",
 		relayId: "rl-1",
 		clientNodeId: "n-1",
 		workspaceName: "volt",
 		sessionId: "s-1",
-		command: { type: "register_push_target", id: "rpc-1", args: { token: "t" } },
+		frame: { type: "register_push_target", intentId: "i-1", input: PUSH_TARGET },
 	},
 	relay_notification_delivery: {
 		type: "relay_notification_delivery",
-		id: "30",
+		id: "28",
 		clientNodeId: "n-1",
 		workspaceName: "volt",
 		sessionId: "s-1",
@@ -213,10 +219,18 @@ const INVALID_REQUESTS: { [K in ControlRequest["type"]]?: Array<Record<string, u
 	worktree_bind: [{ sessionId: undefined }, { acquireLease: "yes" }],
 	theme_set: [{ theme: undefined }],
 	keep_awake_set: [{ enabled: "yes" }, { enabled: undefined }],
-	viewer_subscribe: [{ viewerFeedId: undefined }],
-	viewer_unsubscribe: [{ viewerFeedId: 42 }],
-	viewer_abort: [{ viewerFeedId: undefined }],
-	relay_rpc: [{ command: undefined }, { command: { id: "rpc-1" } }, { command: "register_push_target" }],
+	viewer_abort: [{ viewerFeedId: undefined }, { viewerFeedId: 42 }],
+	relay_rpc: [
+		{ frame: undefined },
+		{ frame: { intentId: "i-1", input: PUSH_TARGET } },
+		{ frame: "register_push_target" },
+		// The legacy RPC command envelope.
+		{ frame: undefined, command: { type: "register_push_target", id: "rpc-1", args: PUSH_TARGET } },
+		{ frame: { type: "register_push_target", intentId: "i-1" } },
+		{ frame: { type: "register_push_target", intentId: "", input: PUSH_TARGET } },
+		{ frame: { type: "register_push_target", intentId: "i-1", input: { ...PUSH_TARGET, provider: "apns" } } },
+		{ frame: { type: "register_push_target", intentId: "i-1", input: PUSH_TARGET, unexpected: true } },
+	],
 	relay_notification_delivery: [
 		{ notification: { eventId: "e-1", kind: "conversation_completed", title: "Volt finished" } },
 		{ notification: { ...REVIEW_NOTIFICATION, planId: "plan-1" } },
@@ -318,8 +332,7 @@ const RESPONSES: ByType<ControlResponse> = {
 	relay_rpc_result: {
 		type: "relay_rpc_result",
 		id: "15",
-		response: { type: "response", command: "register_push_target", success: true },
-		workspaceMetadata: { workspaceNames: ["volt"], workspaces: [{ name: "volt", status: "available" }] },
+		frame: { type: "accepted", intentId: "i-1", ordinals: [], result: { registered: true } },
 	},
 	relay_push_delivery_result: { type: "relay_push_delivery_result", id: "16", status: "sent" },
 };
@@ -353,8 +366,16 @@ const INVALID_RESPONSES: { [K in ControlResponse["type"]]?: Array<Record<string,
 	worktree_prune_result: [{ results: {} }],
 	pair_started: [{ requestId: undefined }],
 	relay_rpc_result: [
-		{ response: "ok" },
-		{ workspaceMetadata: { workspaceNames: ["volt"], workspaces: [{ name: "volt", status: "unknown" }] } },
+		{ frame: undefined },
+		{ frame: "accepted" },
+		// The legacy RPC response envelope.
+		{ frame: undefined, response: { type: "response", command: "register_push_target", success: true } },
+		{ frame: { type: "accepted", intentId: "i-1" } },
+		{ frame: { type: "rejected", intentId: "i-1", reason: { code: "nope", message: "x" } } },
+		{ frame: { type: "query_error", queryId: "q-1", reason: { code: "stale", message: "x" } } },
+		// Only an outcome frame answers a relayed frame.
+		{ frame: { type: "changed", catalog: "host" } },
+		{ frame: { type: "fatal", code: "revoked" } },
 	],
 	relay_push_delivery_result: [{ status: "maybe" }],
 };
@@ -371,7 +392,6 @@ const EVENTS: ByType<ControlEvent> = {
 		streamId: "st-1",
 	},
 	relay_closed: { type: "relay_closed", relayId: "rl-1", reason: "phone_disconnected" },
-	viewer_event: { type: "viewer_event", viewerFeedId: "vf-1", seq: 0, event: { type: "agent_end" } },
 	viewer_end: { type: "viewer_end", viewerFeedId: "vf-1", reason: "granted" },
 	theme_snapshot: { type: "theme_snapshot", themeName: "dark", tokens: { accent: "#ff0000" } },
 	keep_awake_changed: {
@@ -385,7 +405,6 @@ const EVENTS: ByType<ControlEvent> = {
 const INVALID_EVENTS: { [K in ControlEvent["type"]]?: Array<Record<string, unknown>> } = {
 	relay_offer: [{ relayToken: undefined }],
 	relay_closed: [{ reason: "other" }],
-	viewer_event: [{ seq: -1 }, { seq: 1.5 }],
 	viewer_end: [{ reason: "drained" }],
 	theme_snapshot: [{ tokens: { accent: 1 } }],
 	keep_awake_changed: [{ keepAwake: undefined }],
@@ -514,6 +533,86 @@ describe("daemon control contract", () => {
 		expect(ControlValidators.response.Check({ type: "lease_rekey_prepared", id: "5a", transactionId: "tx-1" })).toBe(
 			false,
 		);
+	});
+
+	it("rejects the removed viewer feed subscription messages", () => {
+		for (const type of ["viewer_subscribe", "viewer_unsubscribe"]) {
+			expect(admitControlRequest({ type, id: "5", viewerFeedId: "vf-1" }), type).toBe(false);
+		}
+		expect(
+			ControlValidators.event.Check({
+				type: "viewer_event",
+				viewerFeedId: "vf-1",
+				seq: 0,
+				event: { type: "agent_end" },
+			}),
+		).toBe(false);
+	});
+
+	it("relays exactly the daemon-executed intents and queries, as the phone sent them", () => {
+		const relay = (frame: object) => ({ ...REQUESTS.relay_rpc, frame });
+		const relayed: object[] = [
+			{ type: "register_push_target", intentId: "i-1", input: PUSH_TARGET },
+			{ type: "unregister_workspace", intentId: "i-2", input: { workspaceName: "volt" } },
+			{ type: "create_worktree", intentId: "i-3", input: { worktreeName: "fix-login", baseRef: "main" } },
+			{ type: "create_worktree", intentId: "i-4", expectedOrdinal: 3 },
+			{ type: "set_keep_awake", intentId: "i-5", input: { enabled: true } },
+			{ type: "set_web_search_key", intentId: "i-6", input: { apiKey: null } },
+			{ type: "query", queryId: "q-1", query: "sessions", params: { limit: 5, cursor: "10" } },
+			{ type: "query", queryId: "q-2", query: "worktrees" },
+			{ type: "query", queryId: "q-3", query: "host_status", params: {} },
+			{ type: "query", queryId: "q-4", query: "web_search_status" },
+		];
+		for (const frame of relayed) {
+			expect(admitControlRequest(roundTrip(relay(frame))), JSON.stringify(frame)).toBe(true);
+		}
+		const local: object[] = [
+			// Conversation intents and management-stream intents stay with the TUI or the daemon's stream.
+			{ type: "prompt", intentId: "i-1", expectedOrdinal: 0, input: { message: "hi" } },
+			{ type: "remove_worktree", intentId: "i-2", input: { worktreeId: "x" } },
+			{
+				type: "prepare_pr_review",
+				intentId: "i-3",
+				input: {
+					number: "7",
+					sessionId: "review-7",
+					expectedPullRequest: { url: "https://github.com/o/r/pull/7", headRefOid: HEAD_OID },
+				},
+			},
+			{ type: "extension.command.deploy", intentId: "i-4" },
+			{ type: "query", queryId: "q-1", query: "models" },
+			{ type: "query", queryId: "q-2", query: "job_output", params: { jobId: "j-1" } },
+			{ type: "query", queryId: "q-3", query: "agent_options" },
+			// Malformed relayed frames.
+			{ type: "set_keep_awake", intentId: "i-5", input: { enabled: "yes" } },
+			{ type: "unregister_workspace", intentId: "i-6" },
+			{ type: "query", queryId: "q-4", query: "sessions", params: { limit: 0 } },
+			{ type: "query", queryId: "q-5", query: "worktrees", params: { workspaceName: "volt" } },
+			{ type: "query", query: "host_status" },
+		];
+		for (const frame of local) {
+			expect(admitControlRequest(roundTrip(relay(frame))), JSON.stringify(frame)).toBe(false);
+		}
+	});
+
+	it("answers a relayed frame with each outcome frame", () => {
+		const outcomes: object[] = [
+			{ type: "accepted", intentId: "i-1", ordinals: [4, 5], conversation: "s-2" },
+			{
+				type: "rejected",
+				intentId: "i-1",
+				reason: { code: "not_allowed", message: "denied", requiredCapability: "host.manage.v1" },
+			},
+			{ type: "rejected", intentId: "i-1", reason: { code: "busy", message: "draining", retryAfterMs: 1_000 } },
+			{ type: "result", queryId: "q-1", data: { worktrees: [] } },
+			{ type: "query_error", queryId: "q-1", reason: { code: "unavailable", message: "no" } },
+		];
+		for (const frame of outcomes) {
+			expect(
+				ControlValidators.response.Check(roundTrip({ type: "relay_rpc_result", id: "1", frame })),
+				JSON.stringify(frame),
+			).toBe(true);
+		}
 	});
 });
 
@@ -679,7 +778,7 @@ describe("Iroh remote hello admission", () => {
 		null,
 		[],
 		{ ...base, type: "wrong", conversation: { target: "last" } },
-		{ ...base, protocol: "volt/1", conversation: { target: "last" } },
+		{ ...base, protocol: "volt-rpc/0", conversation: { target: "last" } },
 		{ ...base, workspace: "", conversation: { target: "last" } },
 		{ ...base, workspace: "bad\nworkspace", conversation: { target: "last" } },
 		{ ...base, workspace: "w".repeat(256), conversation: { target: "last" } },
@@ -729,7 +828,7 @@ describe("Iroh remote hello admission", () => {
 			return result.error instanceof IrohRemoteHandshakeError ? result.error.outcome : undefined;
 		};
 		expect(outcomeOf({ ...base, type: "wrong", conversation: { target: "last" } })).toBeUndefined();
-		expect(outcomeOf({ ...base, protocol: "volt/1", conversation: { target: "last" } })).toBeUndefined();
+		expect(outcomeOf({ ...base, protocol: "volt-rpc/0", conversation: { target: "last" } })).toBeUndefined();
 		expect(outcomeOf({ ...base, workspace: "bad\nworkspace", conversation: { target: "last" } })).toBe(
 			"invalid_workspace",
 		);

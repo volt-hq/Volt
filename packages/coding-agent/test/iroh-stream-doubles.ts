@@ -1,5 +1,5 @@
 /**
- * Shared manual Iroh stream doubles and session/boot helpers for Iroh remote RPC tests.
+ * Shared manual Iroh stream doubles and lightweight session and daemon runtime doubles for Iroh remote tests.
  *
  * These implement the simple blocking-read semantics used by the notification and
  * model RPC suites. Other Iroh suites (transport, core, handshake) keep their own
@@ -11,19 +11,16 @@
 import { Buffer } from "node:buffer";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Api, Model } from "@hansjm10/volt-ai";
-import { expect, vi } from "vitest";
+import { vi } from "vitest";
 import type { AgentSession, AgentSessionEvent, PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { LiveState } from "../src/core/host/live-state.ts";
-import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
-import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
-import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
 
@@ -96,38 +93,6 @@ export function parseWrittenObjects(send: ManualIrohSendStream): Array<Record<st
 			}
 			return parsed;
 		});
-}
-
-export function getCurrentConversationAuthority(send: ManualIrohSendStream): RpcConversationAuthority {
-	const bootstrap = parseWrittenObjects(send)
-		.slice()
-		.reverse()
-		.find((record) => record.type === "conversation_bootstrap");
-	const conversation = bootstrap?.conversation;
-	const delivery = bootstrap?.delivery;
-	const transcript = bootstrap?.transcript;
-	if (!isRecord(conversation) || !isRecord(delivery) || !isRecord(transcript)) {
-		throw new Error("Conversation bootstrap authority is unavailable");
-	}
-	if (
-		typeof conversation.sessionId !== "string" ||
-		typeof delivery.subscriptionId !== "string" ||
-		typeof transcript.branchEpoch !== "string"
-	) {
-		throw new Error("Conversation bootstrap authority is malformed");
-	}
-	return {
-		sessionId: conversation.sessionId,
-		subscriptionId: delivery.subscriptionId,
-		branchEpoch: transcript.branchEpoch,
-	};
-}
-
-export function withCurrentConversationAuthority<T extends object>(
-	send: ManualIrohSendStream,
-	command: T,
-): T & { conversationAuthority: RpcConversationAuthority } {
-	return { ...command, conversationAuthority: getCurrentConversationAuthority(send) };
 }
 
 export function createTestSession(sessionId: string, leafId: string | null) {
@@ -216,8 +181,7 @@ export interface TestConversation {
 /**
  * Host a lightweight test session as a conversation of its own host, which
  * opens nothing else and keeps the conversation open when its clients leave,
- * as a daemon host does. The conversation's projection feed observes the
- * session's events.
+ * as a daemon host does.
  */
 export function createTestConversation(
 	session: Pick<ReturnType<typeof createTestSession>, "sessionId" | "lost">,
@@ -306,94 +270,6 @@ function createTestDaemonHost(): ConversationHost {
 	} as unknown as ConversationHost;
 	testDaemonHostClosers.set(host, closers);
 	return host;
-}
-
-type TestIrohConversationOptions = Pick<
-	Parameters<typeof runIrohRemoteRpcMode>[2],
-	"buildConversationSnapshot" | "hostNodeId" | "projectConversationExternal"
->;
-
-/** A checkpoint builder and external projector over a test conversation's session. */
-export function createTestIrohConversationOptions(conversation: HostedConversation): TestIrohConversationOptions {
-	return {
-		hostNodeId: "a".repeat(64),
-		buildConversationSnapshot: ({ activeAssistant, branchEpoch }) => {
-			const session = conversation.session;
-			return {
-				conversation: { workspaceName: "test", sessionId: session.sessionId },
-				state: {
-					thinkingLevel: session.thinkingLevel,
-					availableThinkingLevels: [session.thinkingLevel],
-					fastModeEnabled: session.fastModeEnabled,
-					planning:
-						typeof session.getPlanningState === "function"
-							? session.getPlanningState()
-							: { mode: "build", plan: null },
-					gitContext: session.gitContextProvider.getSnapshot(),
-					isStreaming: session.isStreaming,
-					isCompacting: session.isCompacting,
-					steeringMode: session.steeringMode,
-					followUpMode: session.followUpMode,
-					sessionId: session.sessionId,
-					autoCompactionEnabled: session.autoCompactionEnabled,
-					messageCount: session.messages.length,
-					pendingMessageCount: session.pendingMessageCount,
-					steeringQueue: [],
-					followUpQueue: [],
-					backgroundJobs: [],
-				},
-				transcript: {
-					sessionId: session.sessionId,
-					items: [],
-					hasMore: false,
-					nextBeforeEntryId: null,
-					projectionVersion: 1,
-					branchEpoch,
-					head: null,
-				},
-				activeAssistant,
-				activeWorkflows: [],
-			};
-		},
-		projectConversationExternal: (event) => event,
-	};
-}
-
-/**
- * Serve `target`'s conversation over a manual Iroh stream as a client that
- * shares it with others, as a daemon phone stream does: the conversation stays
- * open when the stream ends.
- */
-export async function startIrohRpcMode(
-	target: TestConversation,
-	startupSession:
-		| Pick<AgentSession, "attachExtensionClient">
-		| Pick<ReturnType<typeof createTestSession>, "attachExtensionClient">,
-	options: Partial<Parameters<typeof runIrohRemoteRpcMode>[2]> = {},
-) {
-	const recv = new ManualIrohRecvStream();
-	const send = new ManualIrohSendStream();
-	const conversationOptions = createTestIrohConversationOptions(target.conversation);
-	const modePromise = runIrohRemoteRpcMode(target.host, target.conversation, {
-		anchor: false,
-		...options,
-		buildConversationSnapshot: options.buildConversationSnapshot ?? conversationOptions.buildConversationSnapshot,
-		hostNodeId: options.hostNodeId ?? conversationOptions.hostNodeId,
-		projectConversationExternal:
-			options.projectConversationExternal ?? conversationOptions.projectConversationExternal,
-		rpcGrant: options.rpcGrant ?? createIrohRemotePresetAccess("full").rpcGrant,
-		stream: { recv, send },
-		workspacePath: "/workspace",
-	});
-	await vi.waitFor(() => expect(startupSession.attachExtensionClient).toHaveBeenCalledOnce());
-	const bootstrap = parseWrittenObjects(send)[0];
-	expect(bootstrap).toMatchObject({
-		type: "conversation_bootstrap",
-		delivery: { cursor: 0 },
-		conversation: { sessionId: target.conversation.session.sessionId },
-		reason: "bootstrap",
-	});
-	return { modePromise, recv, send };
 }
 
 export function createTestModel(id: string, overrides: Partial<Model<Api>> = {}): Model<Api> {

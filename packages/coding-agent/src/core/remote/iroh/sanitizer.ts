@@ -1,5 +1,5 @@
+import { realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ProjectionSanitizer } from "../../rpc/stream-projection.ts";
 
 export const IROH_REMOTE_REDACTED_BASH_OUTPUT_PATH = "[redacted bash output path]";
 export const IROH_REMOTE_REDACTED_EXPORT_PATH = "[redacted export path]";
@@ -48,22 +48,31 @@ export type IrohRemoteSanitizerValuePreserver = (
 	value: unknown,
 ) => boolean;
 
-export interface IrohRemoteProjectionSanitizer extends ProjectionSanitizer {
+/** Path redaction of text and of whole values, field-aware. */
+export interface IrohRemoteProjectionSanitizer {
+	sanitizeText(value: string): string;
 	sanitizeValue(value: unknown, preserveEntry?: IrohRemoteSanitizerValuePreserver): unknown;
+	/** Whether `value` holds a redacted root. */
+	containsRoot(value: string): boolean;
+	/**
+	 * The length of the longest end of `value` that begins a redacted root
+	 * without completing it: text cut there, or still growing, that would
+	 * show part of a root.
+	 */
+	rootPrefixSuffix(value: string): number;
 }
 
 interface IrohRemoteOutboundSanitizerContext {
 	remoteWorkspacePath: string;
 	workspacePath: string;
 	workspacePathPatterns: string[];
+	/** Every redacted root as text may spell it: NFC and NFD, and on Windows with either separator. */
+	rootForms: string[];
 }
 
 type PathContinuationMode = "text" | "delimited";
 
-/**
- * Creates the shared field-aware sanitizer used by Iroh stream projection and
- * whole-frame outbound filtering.
- */
+/** The field-aware path sanitizer the remote profile's redaction runs on every frame. */
 export function createIrohRemoteProjectionSanitizer(
 	options: IrohRemoteSanitizerOptions,
 ): IrohRemoteProjectionSanitizer {
@@ -71,6 +80,8 @@ export function createIrohRemoteProjectionSanitizer(
 	return {
 		sanitizeText: (value) => sanitizeRemoteText(value, context),
 		sanitizeValue: (value, preserveEntry) => sanitizeValue(value, context, undefined, preserveEntry),
+		containsRoot: (value) => containsRoot(value, context),
+		rootPrefixSuffix: (value) => rootPrefixSuffix(value, context),
 	};
 }
 
@@ -85,21 +96,58 @@ function createSanitizerContext(options: IrohRemoteSanitizerOptions): IrohRemote
 	// Additional roots (worktree parent checkout, worktrees root) fold into the
 	// same pattern list: every occurrence maps to remoteWorkspacePath. On Windows,
 	// match either separator so mixed paths cannot bypass redaction.
-	const redactedRoots = [
+	const configuredRoots = [
 		resolvedWorkspacePath,
 		...(options.additionalRedactedPaths ?? []).map((value) => resolve(value)),
 	];
+	// A root reached through a symlink also appears as its real path, in file system errors for one.
+	const redactedRoots = [...new Set(configuredRoots.flatMap((root) => [root, realRoot(root)]))];
 	const workspacePathPatterns = [
 		...new Set(redactedRoots.flatMap((root) => [root.normalize("NFC"), root.normalize("NFD")])),
 	]
 		.filter((value) => value.length > 0)
 		.sort((left, right) => right.length - left.length)
 		.map(createWorkspacePathPattern);
+	const rootForms = [
+		...new Set(
+			redactedRoots.flatMap((root) =>
+				[root.normalize("NFC"), root.normalize("NFD")].flatMap((form) =>
+					sep === "\\" ? [form, form.replaceAll("\\", "/")] : [form],
+				),
+			),
+		),
+	].filter((value) => value.length > 0);
 	return {
 		remoteWorkspacePath: options.remoteWorkspacePath ?? "/workspace",
 		workspacePath,
 		workspacePathPatterns,
+		rootForms,
 	};
+}
+
+function realRoot(root: string): string {
+	try {
+		return realpathSync(root);
+	} catch {
+		return root;
+	}
+}
+
+function containsRoot(value: string, context: IrohRemoteOutboundSanitizerContext): boolean {
+	return normalizeWorkspacePathOccurrences(value, context) !== value;
+}
+
+function rootPrefixSuffix(value: string, context: IrohRemoteOutboundSanitizerContext): number {
+	let longest = 0;
+	for (const root of context.rootForms) {
+		for (let length = Math.min(root.length - 1, value.length); length > longest; length--) {
+			if (value.endsWith(root.slice(0, length))) {
+				longest = length;
+				break;
+			}
+		}
+	}
+	return longest;
 }
 
 function sanitizeValue(
@@ -109,6 +157,11 @@ function sanitizeValue(
 	preserveEntry?: IrohRemoteSanitizerValuePreserver,
 ): unknown {
 	if (typeof value === "string") {
+		if (fieldName === "label" && value.endsWith("…")) {
+			// A label the host cut: where it was cut may have left the start of a root.
+			const kept = value.slice(0, -1);
+			return `${sanitizeRemoteText(kept.slice(0, kept.length - rootPrefixSuffix(kept, context)), context)}…`;
+		}
 		return shouldTreatAsPathField(fieldName) ? sanitizePathField(value, context) : sanitizeRemoteText(value, context);
 	}
 	if (Array.isArray(value)) {
@@ -124,7 +177,7 @@ function sanitizeValue(
 			continue;
 		}
 		const sanitizedEntry =
-			preserveEntry?.(value, key, entry) === true || shouldPreserveOpaqueStringEntry(value, key, entry)
+			preserveEntry?.(value, key, entry) === true || shouldPreserveOpaqueStringEntry(value, key, entry, context)
 				? entry
 				: sanitizeValue(entry, context, key, preserveEntry);
 		if (sanitizedEntry !== undefined) {
@@ -138,12 +191,14 @@ function shouldPreserveOpaqueStringEntry(
 	record: Record<string, unknown>,
 	key: string,
 	value: unknown,
+	context: IrohRemoteOutboundSanitizerContext,
 ): value is string {
 	if (typeof value !== "string") {
 		return false;
 	}
 	return (
-		key === "id" ||
+		// An id is opaque unless it names a root.
+		(key === "id" && !containsRoot(value, context)) ||
 		(key === "data" && isImageContentRecord(record)) ||
 		(key === "textSignature" && isTypedContentRecord(record, "text")) ||
 		(key === "thinkingSignature" && isTypedContentRecord(record, "thinking")) ||
@@ -203,7 +258,8 @@ function sanitizePathField(value: string, context: IrohRemoteOutboundSanitizerCo
 }
 
 function sanitizeRemoteText(value: string, context: IrohRemoteOutboundSanitizerContext): string {
-	return sanitizePathOccurrences(value, context, "text");
+	// A root the path scan does not see as a path of its own (inside another token) is still replaced.
+	return normalizeWorkspacePathOccurrences(sanitizePathOccurrences(value, context, "text"), context);
 }
 
 function sanitizeObjectKey(value: string, context: IrohRemoteOutboundSanitizerContext): string {

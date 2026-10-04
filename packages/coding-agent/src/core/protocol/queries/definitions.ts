@@ -73,11 +73,13 @@ export const modelsQuery = defineQuery({
 
 export const sessionsQuery = defineQuery({
 	name: "sessions",
-	scope: "conversation",
+	// A remote host lists its workspace's sessions without a conversation (a workspace stream).
+	scope: "host",
 	remote: "safe",
 	requires: observe,
 	async run(ctx, params) {
-		const sessions = await targetOf(ctx).conversation.listSessions();
+		const listWorkspace = ctx.services.workspace?.listSessions;
+		const sessions = listWorkspace ? await listWorkspace() : await targetOf(ctx).conversation.listSessions();
 		const start = params.cursor === undefined ? 0 : Number(params.cursor);
 		if (
 			!Number.isSafeInteger(start) ||
@@ -104,6 +106,7 @@ export const settingsQuery = defineQuery({
 			followUpMode: session.followUpMode,
 			autoCompaction: session.autoCompactionEnabled,
 			autoRetry: session.autoRetryEnabled,
+			profile: session.settingsManager.getActiveProfile() ?? "",
 		};
 	},
 });
@@ -173,7 +176,11 @@ export const hostStatusQuery = defineQuery({
 	async run(ctx) {
 		const keepAwake = ctx.services.keepAwake;
 		if (!keepAwake) throw new QueryRejectedError("unavailable", "unsupported_remote_command");
-		return { keepAwake: keepAwake.status() };
+		const theme = ctx.services.hostTheme?.();
+		return {
+			keepAwake: keepAwake.status(),
+			...(theme === undefined ? {} : { theme: { themeName: theme.themeName, tokens: { ...theme.tokens } } }),
+		};
 	},
 });
 

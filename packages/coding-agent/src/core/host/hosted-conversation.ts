@@ -1,9 +1,9 @@
 /**
  * One conversation a `ConversationHost` opened. It serves one log for its
  * whole life: its session, the cwd-bound services the session was created
- * with, its live state, its projection feed, its detached reviews, the
- * one-shot recovery of durable queued input, and its managed-worktree pin are
- * fixed until it closes.
+ * with, its live state, its detached reviews, the one-shot recovery of
+ * durable queued input, and its managed-worktree pin are fixed until it
+ * closes.
  */
 
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
@@ -13,10 +13,8 @@ import type { AgentSessionDiagnostic, AgentSessionServices } from "../agent-sess
 import type { ProjectTrustContext, SessionShutdownEvent, SessionStartEvent } from "../extensions/index.ts";
 import { emitSessionShutdownEvent } from "../extensions/runner.ts";
 import { ReviewWorkflowManager } from "../review-workflows.ts";
-import { subscribeRpcSessionEvents } from "../rpc/background-jobs.ts";
-import { ConversationProjectionFeed, type ConversationProjectionSource } from "../rpc/conversation-projection-feed.ts";
 import type { CreateAgentSessionResult } from "../sdk.ts";
-import { type CommittedSessionEntry, isHostOnlySessionEntry, type SessionManager } from "../session-manager.ts";
+import type { SessionManager } from "../session-manager.ts";
 import type { SubagentDelegationScope } from "../subagents/delegation-scope.ts";
 import type { SubagentRegistry } from "../subagents/registry.ts";
 import { feedLiveState, type LiveFeed } from "./live-feed.ts";
@@ -68,24 +66,6 @@ export type ConversationFactory = (options: {
 	workspaceName?: string;
 	baseRef?: string;
 }) => Promise<ConversationFactoryResult>;
-
-/** Canonical persistence commit, published after its store transaction, positioned by `entry.ordinal`. */
-export interface ConversationTranscriptCommittedEvent {
-	type: "conversation_transcript_committed";
-	entry: CommittedSessionEntry;
-}
-
-export function isConversationTranscriptCommittedEvent(value: object): value is ConversationTranscriptCommittedEvent {
-	return (
-		"type" in value &&
-		value.type === "conversation_transcript_committed" &&
-		"entry" in value &&
-		typeof value.entry === "object" &&
-		value.entry !== null &&
-		"ordinal" in value.entry &&
-		Number.isSafeInteger(value.entry.ordinal)
-	);
-}
 
 /**
  * How long a conversation lives: while it has clients (the default), or as
@@ -152,15 +132,6 @@ export class HostedConversation {
 	readonly lifetime: ConversationLifetime;
 	/** Why the conversation opened. */
 	readonly openedAs: ConversationOpenReason;
-	/** The session's events, Git observation, and branch changes, as a projection feed consumes them. */
-	readonly projectionSource: ConversationProjectionSource;
-	/**
-	 * The ordered projection of the conversation for remote subscribers: its
-	 * session's events, canonical transcript commits, and detached review
-	 * workflow events. Closing the conversation closes the feed: it takes no new
-	 * subscriber and disposes once its subscribers detached.
-	 */
-	readonly projectionFeed: ConversationProjectionFeed;
 	private readonly lostSignal = Promise.withResolvers<Error>();
 	/**
 	 * Resolves once, when the conversation's session loses its log while the
@@ -171,7 +142,6 @@ export class HostedConversation {
 	readonly lost: Promise<Error> = this.lostSignal.promise;
 	/** Feeds the live state from the session until the conversation closes. */
 	private readonly liveFeed: LiveFeed;
-	private detachTranscriptCommits: () => void;
 	private _reviewWorkflows?: ReviewWorkflowManager;
 	private recovery?: RecoveredClientInputsTask;
 	/** Operations the conversation stays open for: closing waits for them. */
@@ -186,10 +156,7 @@ export class HostedConversation {
 		this.subagentContext = options.subagentContext;
 		this.lifetime = options.lifetime;
 		this.openedAs = options.openedAs;
-		this.projectionSource = this.createProjectionSource();
-		this.projectionFeed = new ConversationProjectionFeed(this.projectionSource);
 		this.liveFeed = feedLiveState(this.session);
-		this.detachTranscriptCommits = this.subscribeTranscriptCommits();
 		const session = this.session;
 		void session.lost.then((error) => {
 			if (this.closePromise) return;
@@ -225,56 +192,15 @@ export class HostedConversation {
 	}
 
 	/**
-	 * Detached review workflows of this conversation. Their events reach the
-	 * projection feed, so they survive client detach and reattach; closing the
-	 * conversation aborts every active review.
+	 * Detached review workflows of this conversation. Their progress is the
+	 * live state's `workflow/<id>` value, so it survives client detach and
+	 * reattach; closing the conversation aborts every active review.
 	 */
 	get reviewWorkflows(): ReviewWorkflowManager {
 		this._reviewWorkflows ??= new ReviewWorkflowManager({
-			publishEvent: (event) => {
-				this.liveFeed.workflowEvent(event);
-				this.projectionFeed.publishExternal(event);
-			},
+			publishEvent: (event) => this.liveFeed.workflowEvent(event),
 		});
 		return this._reviewWorkflows;
-	}
-
-	private createProjectionSource(): ConversationProjectionSource {
-		const session = this.session;
-		const sessionLike = session as AgentSession & {
-			subscribe?: AgentSession["subscribe"];
-			subscribeConversationGenerationChanges?: AgentSession["subscribeConversationGenerationChanges"];
-		};
-		return {
-			subscribe: (listener) =>
-				typeof sessionLike.subscribe === "function"
-					? subscribeRpcSessionEvents(sessionLike, listener, { monitorGitContext: false })
-					: () => {},
-			retainObservation: () => session.gitContextProvider.retainObservation(),
-			subscribeGenerationChanges: (listener) =>
-				typeof sessionLike.subscribeConversationGenerationChanges === "function"
-					? sessionLike.subscribeConversationGenerationChanges(() => listener())
-					: () => {},
-		};
-	}
-
-	private subscribeTranscriptCommits(): () => void {
-		const manager = this.session.sessionManager;
-		if (typeof manager?.subscribeEntries !== "function") return () => {};
-		return manager.subscribeEntries((entry) => {
-			// Defense in depth: host-only sidecar records (admission WAL, subagent
-			// spawn edges) are never transcript commits, even if a custom
-			// SessionManager emits them.
-			if (isHostOnlySessionEntry(entry)) return;
-			// Planning snapshots are durable branch-local state, not transcript
-			// rows. Clients receive them through planning_state_changed and every
-			// bootstrap/checkpoint instead.
-			if (entry.type === "planning_state_change") return;
-			this.projectionFeed.publishExternal({
-				type: "conversation_transcript_committed",
-				entry,
-			} satisfies ConversationTranscriptCommittedEvent);
-		});
 	}
 
 	/**
@@ -426,8 +352,6 @@ export class HostedConversation {
 		await this.waitForHolds();
 		await this._reviewWorkflows?.abortAll().catch(() => undefined);
 		await this.abortRecovery(moved ? "session_replacement" : "disposal");
-		this.detachTranscriptCommits();
-		this.detachTranscriptCommits = () => {};
 		this.liveFeed.close();
 		const shutdownErrors: unknown[] = [];
 		try {
@@ -441,7 +365,6 @@ export class HostedConversation {
 			shutdownErrors.push(error);
 		}
 		const session = this.session;
-		this.projectionFeed.close();
 		await finalizeConversationSession(
 			session,
 			async () => {
@@ -457,10 +380,7 @@ export class HostedConversation {
 	discard(): Promise<void> {
 		this.closePromise ??= (async () => {
 			await this.waitForHolds();
-			this.detachTranscriptCommits();
-			this.detachTranscriptCommits = () => {};
 			this.liveFeed.close();
-			this.projectionFeed.close();
 			const session = this.session;
 			await finalizeConversationSession(
 				session,

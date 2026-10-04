@@ -265,7 +265,7 @@ async function fixture(nested = false, workspaceName = "project") {
 		) {
 			const hello: IrohRemoteHello = {
 				type: "volt_iroh_hello",
-				protocol: "volt-rpc/0",
+				protocol: "volt/1",
 				workspace: workspace.name,
 				mode: "conversation",
 				conversation,

@@ -1,174 +1,55 @@
-import { fauxAssistantMessage } from "@hansjm10/volt-ai";
-import { afterEach, describe, expect, test, vi } from "vitest";
-import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
-import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { createHarness, type Harness } from "./suite/harness.ts";
-import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+import type { HostFrame, LiveItem } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, test } from "vitest";
+import { createLoopbackClient } from "../src/client/protocol-client.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 
-interface RpcHarness {
-	close(): void;
-	modePromise: Promise<void>;
-	send(message: object): void;
-	writes: Record<string, unknown>[];
-}
+type AssistantDelta = Extract<LiveItem, { type: "assistant_delta" }>;
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
+const harnesses: HostHarness[] = [];
 
-function getMessageText(message: unknown): string {
-	if (!isRecord(message)) {
-		return "";
-	}
-	const content = message.content;
-	if (typeof content === "string") {
-		return content;
-	}
-	if (!Array.isArray(content)) {
-		return "";
-	}
-	return content
-		.filter(
-			(part): part is { type: "text"; text: string } =>
-				isRecord(part) && part.type === "text" && typeof part.text === "string",
-		)
-		.map((part) => part.text)
-		.join("\n");
-}
-
-function getNestedRecord(record: Record<string, unknown>, key: string): Record<string, unknown> {
-	const value = record[key];
-	if (!isRecord(value)) {
-		throw new Error(`Expected ${key} to be a record`);
-	}
-	return value;
-}
-
-async function startRpcModeForHarness(harness: Harness): Promise<RpcHarness> {
-	let lineHandler: ((line: string) => void) | undefined;
-	let closeHandler: RpcCloseHandler | undefined;
-	const writes: Record<string, unknown>[] = [];
-	const transport: RpcTransport = {
-		write: vi.fn((value) => {
-			if (!isRecord(value)) {
-				throw new Error("Expected RPC write to be an object");
-			}
-			writes.push(value);
-		}),
-		onLine: vi.fn((handler) => {
-			lineHandler = handler;
-			return vi.fn();
-		}),
-		onClose: vi.fn((handler) => {
-			closeHandler = handler;
-			return vi.fn();
-		}),
-		waitForBackpressure: vi.fn(async () => {}),
-		flush: vi.fn(async () => {}),
-		close: vi.fn(async () => {}),
-	};
-	let resolveReady: () => void = () => {};
-	const ready = new Promise<void>((resolve) => {
-		resolveReady = resolve;
-	});
-	const { host } = createFakeHost();
-	const { conversation } = createFakeConversation(harness.session);
-	const modePromise = runLegacyRemoteRpcMode(host, conversation, {
-		anchor: false,
-		onReady: resolveReady,
-		transport,
-	});
-	await ready;
-	await vi.waitFor(() => expect(lineHandler).toBeDefined());
-
-	return {
-		close() {
-			closeHandler?.();
-		},
-		modePromise,
-		send(message: object) {
-			if (!lineHandler) {
-				throw new Error("RPC line handler was not registered");
-			}
-			lineHandler(JSON.stringify(message));
-		},
-		writes,
-	};
-}
-
-const activeHarnesses: Harness[] = [];
-
-afterEach(() => {
-	for (const harness of activeHarnesses.splice(0)) {
-		harness.cleanup();
-	}
+afterEach(async () => {
+	for (const harness of harnesses.splice(0)) await harness.cleanup();
 });
 
-describe("RPC assistant formatting", () => {
-	test("streams and persists raw assistant Markdown text for final surfaces", async () => {
-		const harness = await createHarness();
-		activeHarnesses.push(harness);
+describe("assistant formatting on the protocol wire", () => {
+	test("streams and commits raw assistant Markdown text for final surfaces", async () => {
 		const formattedText = ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join(
 			"\n",
 		);
-		harness.setResponses([fauxAssistantMessage(formattedText)]);
-		const rpc = await startRpcModeForHarness(harness);
+		const harness = await createHostHarness({ responses: [formattedText] });
+		harnesses.push(harness);
+		const conversation = await harness.openStartup();
+		const frames: HostFrame[] = [];
+		const client = await createLoopbackClient(harness.host, conversation, { onFrame: (frame) => frames.push(frame) });
+		try {
+			await client.prompt("formatting");
+			await client.waitForIdle(10_000);
 
-		rpc.send({
-			id: "prompt-1",
-			type: "prompt",
-			clientMessageId: "client-prompt-1",
-			message: "formatting",
-		});
-		await vi.waitFor(() =>
-			expect(
-				rpc.writes.some(
-					(record) => record.type === "message_end" && getMessageText(record.message) === formattedText,
-				),
-			).toBe(true),
-		);
+			const deltas = frames.flatMap((frame) =>
+				frame.type === "live"
+					? frame.items.filter((item): item is AssistantDelta => item.type === "assistant_delta")
+					: [],
+			);
+			const textDeltas = deltas.flatMap((item) => (item.event.type === "text_delta" ? [item.event.delta] : []));
+			expect(textDeltas.join("")).toBe(formattedText);
 
-		const updates = rpc.writes.filter((record) => record.type === "message_update");
-		const textDeltas = updates
-			.map((record) => getNestedRecord(record, "assistantMessageEvent"))
-			.filter((event) => event.type === "text_delta")
-			.map((event) => event.delta);
-		expect(textDeltas.join("")).toBe(formattedText);
+			const textEnd = deltas.find((item) => item.event.type === "text_end");
+			if (textEnd?.event.type !== "text_end") throw new Error("Expected a text_end delta");
+			expect(textEnd.event.content).toBe(formattedText);
+			// Deltas are slim: no accumulated message or partial rides along.
+			expect("message" in textEnd.event).toBe(false);
+			expect("partial" in textEnd.event).toBe(false);
 
-		const textEnd = updates.find((record) => getNestedRecord(record, "assistantMessageEvent").type === "text_end");
-		if (!textEnd) {
-			throw new Error("Expected text_end event");
+			// The committed entry carries the raw Markdown, as does a history page.
+			const assistant = client.state.entries.find(
+				(entry) => entry.type === "message" && entry.view?.role === "assistant",
+			);
+			expect(assistant?.type === "message" ? assistant.view?.text : undefined).toBe(formattedText);
+			const page = await client.query("history", { before: client.state.ordinal + 1, limit: 10 });
+			const paged = page.entries.find((entry) => entry.type === "message" && entry.view?.role === "assistant");
+			expect(paged?.type === "message" ? paged.view?.text : undefined).toBe(formattedText);
+		} finally {
+			await client.stop();
 		}
-		const textEndEvent = getNestedRecord(textEnd, "assistantMessageEvent");
-		expect(textEndEvent.content).toBe(formattedText);
-		// message_update frames are delta-only: no legacy visible-text shim,
-		// duplicated partial, or accumulated message after the base ships.
-		expect("message" in textEndEvent).toBe(false);
-		expect("partial" in textEndEvent).toBe(false);
-		expect("message" in textEnd).toBe(false);
-
-		rpc.send({ id: "transcript-1", type: "get_transcript", limit: 10 });
-		await vi.waitFor(() =>
-			expect(
-				rpc.writes.some(
-					(record) =>
-						record.type === "response" &&
-						record.command === "get_transcript" &&
-						getTranscriptAssistantText(record) === formattedText,
-				),
-			).toBe(true),
-		);
-
-		rpc.close();
-		await expect(rpc.modePromise).resolves.toBeUndefined();
 	});
 });
-
-function getTranscriptAssistantText(response: Record<string, unknown>): string | undefined {
-	const data = response.data;
-	if (!isRecord(data) || !Array.isArray(data.items)) {
-		return undefined;
-	}
-	const item = data.items.find((entry) => isRecord(entry) && entry.role === "assistant");
-	return isRecord(item) && typeof item.text === "string" ? item.text : undefined;
-}

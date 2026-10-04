@@ -1,392 +1,109 @@
-import { describe, expect, test, vi } from "vitest";
-import { createLoopbackRpcTransportPair } from "../src/core/rpc/loopback-transport.ts";
-import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import {
-	createTestConversation,
-	createTestModel,
-	createTestSession,
-	getCurrentConversationAuthority,
-	parseWrittenObjects,
-	startIrohRpcMode,
-	withCurrentConversationAuthority,
-} from "./iroh-stream-doubles.ts";
-import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+import type { HostFrame } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import { ProtocolClient } from "../src/client/protocol-client.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { localProfile } from "../src/core/protocol/profiles.ts";
+import { serveConnection } from "../src/core/protocol/server/connection.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 
-// Structural intents are not under test here: they answer cancelled once a command passes its authority check.
-vi.mock("../src/core/host/session-intents.ts", () => ({
-	openFork: vi.fn(async () => ({ cancelled: true })),
-	openImport: vi.fn(async () => ({ cancelled: true })),
-	openNewSession: vi.fn(async () => ({ cancelled: true })),
-	openStoredSession: vi.fn(async () => ({ cancelled: true })),
-	openStoredSessionById: vi.fn(async () => ({ cancelled: true })),
-}));
+/** The pending host requests the client's live state shows, by request id. */
+function shownRequests(client: ProtocolClient): string[] {
+	return [...client.live.values.values()].flatMap((value) => (value.kind === "host_request" ? [value.requestId] : []));
+}
 
-describe("conversation mutation authority", () => {
-	test("requires the exact current tuple for every remote conversation mutation", async () => {
-		const session = createTestSession("session-one", null);
-		const abort = vi.fn(async () => {});
-		const steer = vi.fn(async () => {});
-		const followUp = vi.fn(async () => {});
-		const setModel = vi.fn(async () => {});
-		const setThinkingLevel = vi.fn();
-		Object.assign(session, {
-			abort,
-			followUp,
-			modelRegistry: {
-				authStorage: {},
-				getAvailable: vi.fn(async () => [createTestModel("model")]),
-			},
-			setModel,
-			setThinkingLevel,
-			steer,
-		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
-		const authority = getCurrentConversationAuthority(send);
-
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "exact-prompt",
-					type: "prompt",
-					clientMessageId: "exact-client-prompt",
-					message: "exact",
-				}),
-			),
-		);
-		await vi.waitFor(() => {
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({ id: "exact-prompt", command: "prompt", success: true }),
-			);
-		});
-		const exactCommands = [
-			{ id: "exact-steer", type: "steer", clientMessageId: "exact-client-steer", message: "steer" },
-			{
-				id: "exact-follow-up",
-				type: "follow_up",
-				clientMessageId: "exact-client-follow-up",
-				message: "follow up",
-			},
-			{ id: "exact-abort", type: "abort" },
-			{ id: "exact-new", type: "new_session" },
-			{ id: "exact-switch", type: "switch_session_by_id", sessionId: "other-session" },
-			{ id: "exact-model", type: "set_model", provider: "anthropic", modelId: "model" },
-			{ id: "exact-thinking", type: "set_thinking_level", level: "low" },
-			{ id: "exact-action", type: "invoke_ui_action", action: "session.new" },
-		];
-		for (const command of exactCommands) {
-			recv.pushLine(JSON.stringify({ ...command, conversationAuthority: authority }));
-		}
-		await vi.waitFor(() => {
-			const responses = parseWrittenObjects(send).filter((record) => record.type === "response");
-			for (const command of exactCommands) {
-				expect(responses).toContainEqual(expect.objectContaining({ id: command.id, success: true }));
-			}
-		});
-
-		const missingAuthorityCommands = [
-			{ id: "missing-prompt", type: "prompt", clientMessageId: "missing-client-prompt", message: "prompt" },
-			{ id: "missing-steer", type: "steer", clientMessageId: "missing-client-steer", message: "steer" },
-			{
-				id: "missing-follow-up",
-				type: "follow_up",
-				clientMessageId: "missing-client-follow-up",
-				message: "follow up",
-			},
-			{ id: "missing-abort", type: "abort" },
-			{ id: "missing-new", type: "new_session" },
-			{ id: "missing-switch", type: "switch_session_by_id", sessionId: "other-session" },
-			{ id: "missing-model", type: "set_model", provider: "anthropic", modelId: "model" },
-			{ id: "missing-thinking", type: "set_thinking_level", level: "low" },
-			{ id: "missing-action", type: "invoke_ui_action", action: "session.new" },
-			{ id: "missing-review-ack", type: "acknowledge_review", runId: "review:test" },
-		];
-		for (const command of missingAuthorityCommands) {
-			recv.pushLine(JSON.stringify(command));
-		}
-
-		for (const [field, value] of [
-			["sessionId", "stale-session"],
-			["subscriptionId", "stale-subscription"],
-			["branchEpoch", "stale-branch"],
-		] as const) {
-			recv.pushLine(
-				JSON.stringify({
-					id: `mismatch-${field}`,
-					type: "prompt",
-					clientMessageId: `mismatch-client-${field}`,
-					message: "stale",
-					conversationAuthority: { ...authority, [field]: value },
-				}),
-			);
-		}
-		recv.pushLine(
-			JSON.stringify({
-				id: "malformed-authority",
-				type: "abort",
-				conversationAuthority: { ...authority, extra: "field" },
-			}),
-		);
-
-		await vi.waitFor(() => {
-			const responses = parseWrittenObjects(send).filter((record) => record.type === "response");
-			for (const command of missingAuthorityCommands) {
-				expect(responses).toContainEqual(
-					expect.objectContaining({
-						id: command.id,
-						success: false,
-						errorCode: "stale_conversation_authority",
-					}),
-				);
-			}
-			for (const field of ["sessionId", "subscriptionId", "branchEpoch"]) {
-				expect(responses).toContainEqual(
-					expect.objectContaining({
-						id: `mismatch-${field}`,
-						success: false,
-						errorCode: "stale_conversation_authority",
-					}),
-				);
-			}
-			expect(responses).toContainEqual(
-				expect.objectContaining({
-					id: "malformed-authority",
-					success: false,
-					error: expect.stringContaining("must contain exactly"),
-				}),
-			);
-		});
-		expect(session.prompt).toHaveBeenCalledTimes(1);
-		expect(steer).toHaveBeenCalledOnce();
-		expect(followUp).toHaveBeenCalledOnce();
-		expect(abort).toHaveBeenCalledOnce();
-		expect(setModel).toHaveBeenCalledOnce();
-		expect(setThinkingLevel).toHaveBeenCalledOnce();
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+describe("host requests across branch cuts and moves", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	test("revalidates authority after asynchronous model lookup before mutating the branch", async () => {
-		const session = createTestSession("model-race", null);
-		let releaseModels = () => {};
-		const modelsRelease = new Promise<void>((resolve) => {
-			releaseModels = resolve;
-		});
-		let notifyModelsStarted = () => {};
-		const modelsStarted = new Promise<void>((resolve) => {
-			notifyModelsStarted = resolve;
-		});
-		const setModel = vi.fn(async () => {});
-		Object.assign(session, {
-			modelRegistry: {
-				authStorage: {},
-				getAvailable: vi.fn(async () => {
-					notifyModelsStarted();
-					await modelsRelease;
-					return [createTestModel("target-model")];
-				}),
-			},
-			setModel,
-		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "model-race",
-					type: "set_model",
-					provider: "anthropic",
-					modelId: "target-model",
-				}),
-			),
-		);
-		await modelsStarted;
-		target.conversation.projectionFeed.rotateForBranchRebase();
-		releaseModels();
-
-		await vi.waitFor(() => {
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({
-					id: "model-race",
-					success: false,
-					errorCode: "stale_conversation_authority",
-				}),
-			);
-		});
-		expect(setModel).not.toHaveBeenCalled();
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("keeps transport-neutral local RPC prompts compatible without authority", async () => {
-		const session = createTestSession("local-session", null);
-		const target = createTestConversation(session);
+	test("keeps dialogs and approvals pending across a branch switch and with their conversation on a move", async () => {
+		const harness: HostHarness = await createHostHarness({ whenUnattached: "keep", responses: ["one", "two"] });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		// Other clients keep the conversation open: this one does not anchor it.
 		const pair = createLoopbackRpcTransportPair();
-		const received: Array<Record<string, unknown>> = [];
-		pair.client.onValue?.((value) => {
-			if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-				received.push(value as Record<string, unknown>);
-			}
-		});
-		const modePromise = runLegacyRemoteRpcMode(target.host, target.conversation, {
+		const connection = serveConnection(pair.server, localProfile, {
+			host: harness.host,
+			conversation,
 			anchor: false,
-			exitProcess: false,
-			transport: pair.server,
 		});
-		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalledOnce());
-		pair.client.write({
-			id: "local-prompt",
-			type: "prompt",
-			clientMessageId: "local-client-prompt",
-			message: "local",
+		const frames: HostFrame[] = [];
+		const client = new ProtocolClient({
+			hostRequests: ["confirm", "approval"],
+			onFrame: (frame) => frames.push(frame),
 		});
-		await vi.waitFor(() => {
-			expect(received).toContainEqual(
-				expect.objectContaining({ id: "local-prompt", command: "prompt", success: true }),
+		cleanups.push(async () => {
+			await client.stop();
+			await connection.closed.catch(() => undefined);
+		});
+		await client.connect(pair.client);
+		await connection.ready;
+		/** Wait until the host handled every answer sent so far: answers and unsubscribes share one ordered lane. */
+		const answersHandled = async (barrier: string) => {
+			pair.client.write({ type: "unsubscribe", subscriptionId: barrier });
+			await vi.waitFor(() =>
+				expect(frames).toContainEqual({ type: "ended", subscriptionId: barrier, reason: "unsubscribed" }),
 			);
-		});
-		expect(session.prompt).toHaveBeenCalledOnce();
-		pair.client.close();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-});
-
-describe("host requests across conversation authority cuts", () => {
-	test("keeps dialogs and approvals pending across branch and authority cuts and with their conversation on a move", async () => {
-		const makeSession = (sessionId: string) => {
-			const generationListeners = new Set<() => void>();
-			const session = Object.assign(createTestSession(sessionId, null), {
-				subscribeConversationGenerationChanges(listener: () => void) {
-					generationListeners.add(listener);
-					return () => generationListeners.delete(listener);
-				},
-			});
-			return { session, generationListeners };
 		};
+		await client.promptAndWait("first", { timeoutMs: 10_000 });
+		await client.promptAndWait("second", { timeoutMs: 10_000 });
 
-		const old = makeSession("control-old");
-		const replacement = makeSession("control-new");
-		const fake = createFakeHost();
-		const oldConversation = createFakeConversation(old.session).conversation;
-		const replacementConversation = createFakeConversation(replacement.session).conversation;
-		const pair = createLoopbackRpcTransportPair();
-		const received: Array<Record<string, unknown>> = [];
-		pair.client.onValue?.((value) => {
-			if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-				received.push(value as Record<string, unknown>);
-			}
-		});
-		const modePromise = runLegacyRemoteRpcMode(fake.host, oldConversation, {
-			anchor: false,
-			exitProcess: false,
-			orderedConversation: {
-				subscriptionId: "control-subscription",
-				branchEpoch: "control-branch",
-				async enqueueControl(value) {
-					received.push(value as Record<string, unknown>);
-				},
-				requestCheckpoint(command) {
-					return {
-						subscriptionId: "control-subscription",
-						requestId: command.id,
-						checkpointCursor: 1,
-					};
-				},
-				publishExternal() {},
-			},
-			transport: pair.server,
-		});
-		await vi.waitFor(() => expect(old.session.attachExtensionClient).toHaveBeenCalledOnce());
-		pair.client.write({
-			id: "capabilities",
-			type: "set_client_capabilities",
-			features: ["host_action_requests.v1"],
-		});
-		await vi.waitFor(() =>
-			expect(received).toContainEqual(expect.objectContaining({ id: "capabilities", success: true })),
-		);
-
-		/** An extension dialog and an approval in the old conversation, as the client sees them. */
-		const startControls = async (suffix: string) => {
-			const liveState = oldConversation.liveState;
-			const extensionResult = liveState.request({
-				kind: "confirm",
-				title: `Confirm ${suffix}`,
-				message: "Proceed?",
-			});
-			const hostResult = liveState.hostInteraction.requestAction({
+		/** An extension dialog and an approval in `asker`, as the client sees them. */
+		const startControls = async (asker: HostedConversation, suffix: string) => {
+			const confirm = asker.liveState.request({ kind: "confirm", title: `Confirm ${suffix}`, message: "Proceed?" });
+			const approval = asker.liveState.hostInteraction.requestAction({
 				id: `host-${suffix}`,
 				action: "test.action",
 				title: `Host ${suffix}`,
 			});
-			await vi.waitFor(() => {
-				expect(received).toContainEqual(
-					expect.objectContaining({ type: "extension_ui_request", method: "confirm", title: `Confirm ${suffix}` }),
-				);
-				expect(received).toContainEqual(
-					expect.objectContaining({ type: "host_action_request", id: `host-${suffix}` }),
-				);
-			});
-			const extensionRequest = received
-				.slice()
-				.reverse()
-				.find((record) => record.type === "extension_ui_request" && record.title === `Confirm ${suffix}`);
-			if (typeof extensionRequest?.id !== "string") throw new Error("Missing extension request id");
-			return { extensionRequestId: extensionRequest.id, extensionResult, hostResult };
+			const confirmId = asker.liveState
+				.pendingRequests()
+				.find(
+					(pending) => pending.request.kind === "confirm" && pending.request.title === `Confirm ${suffix}`,
+				)?.requestId;
+			if (confirmId === undefined) throw new Error("Missing the confirm request");
+			await vi.waitFor(() =>
+				expect(shownRequests(client)).toEqual(expect.arrayContaining([confirmId, `host-${suffix}`])),
+			);
+			return { confirmId, confirm, approval };
 		};
 
-		// A branch change commits entries; it never drops a pending dialog or approval (RFC §6.1).
-		const branchControls = await startControls("branch");
-		for (const listener of old.generationListeners) listener();
-		pair.client.write({
-			type: "extension_ui_response",
-			id: branchControls.extensionRequestId,
-			confirmed: true,
-		});
-		pair.client.write({ type: "host_action_response", id: "host-branch", decision: "approved" });
-		await expect(branchControls.extensionResult).resolves.toMatchObject({
-			status: "answered",
-			response: { confirmed: true },
-		});
-		await expect(branchControls.hostResult).resolves.toEqual({ decision: "approved" });
+		// A branch switch commits entries; it never drops a pending dialog or approval (RFC §6.1).
+		const branch = await startControls(conversation, "branch");
+		const firstAnswer = client.state.entries.find((entry) => entry.type === "message" && entry.view?.text === "one");
+		if (!firstAnswer) throw new Error("Missing the first answer");
+		await conversation.session.navigateTree(firstAnswer.id);
+		const switched = conversation.session.conversationGenerationRevision;
+		await vi.waitFor(() => expect(client.state.ordinal).toBeGreaterThanOrEqual(switched));
+		expect(shownRequests(client)).toEqual(expect.arrayContaining([branch.confirmId, "host-branch"]));
+		client.answer(branch.confirmId, { confirmed: true });
+		client.answer("host-branch", { decision: "approved" });
+		await expect(branch.confirm).resolves.toMatchObject({ status: "answered", response: { confirmed: true } });
+		await expect(branch.approval).resolves.toEqual({ decision: "approved" });
 
-		// The client moves to another conversation, as one of its structural intents does. The
-		// requests stay with the conversation that asked them, which other clients keep open.
-		const rebindControls = await startControls("rebind");
-		const client = fake.clientOf(oldConversation);
-		if (!client) throw new Error("The RPC client is not attached");
-		await fake.move(client, replacementConversation);
-		expect(replacement.session.attachExtensionClient).toHaveBeenCalledOnce();
+		// The client moves to another conversation, as its structural intents do. The requests
+		// stay with the conversation that asked them, which stays open.
+		const moved = await startControls(conversation, "move");
+		const accepted = await client.intent("new_session", {});
+		if (accepted.conversation === undefined) throw new Error("Expected the client to move");
+		await vi.waitFor(() => expect(client.conversation).toBe(accepted.conversation));
+		await client.caughtUp();
+		expect(shownRequests(client)).toEqual([]);
 		// Its answers now go to the conversation it is on, which asked nothing.
-		pair.client.write({
-			type: "extension_ui_response",
-			id: rebindControls.extensionRequestId,
-			confirmed: true,
-		});
-		pair.client.write({ type: "host_action_response", id: "host-rebind", decision: "approved" });
-		pair.client.write({ id: "pending-after-move", type: "get_pending_host_actions" });
-		await vi.waitFor(() => {
-			expect(received).toContainEqual(
-				expect.objectContaining({
-					id: "pending-after-move",
-					success: true,
-					data: { actions: [] },
-				}),
-			);
-		});
-		expect(oldConversation.liveState.pendingRequests().map((pending) => pending.requestId)).toEqual([
-			rebindControls.extensionRequestId,
-			"host-rebind",
+		client.answer(moved.confirmId, { confirmed: true });
+		client.answer("host-move", { decision: "approved" });
+		await answersHandled("after-move");
+		expect(conversation.closed).toBe(false);
+		expect(conversation.liveState.pendingRequests().map((pending) => pending.requestId)).toEqual([
+			moved.confirmId,
+			"host-move",
 		]);
 
 		// They end when their conversation closes.
-		await fake.close(oldConversation);
-		await expect(rebindControls.extensionResult).resolves.toEqual({ status: "cancelled", reason: "closed" });
-		await expect(rebindControls.hostResult).resolves.toMatchObject({ decision: "dismissed" });
-
-		pair.client.close();
-		await expect(modePromise).resolves.toBeUndefined();
+		await harness.host.close(conversation);
+		await expect(moved.confirm).resolves.toEqual({ status: "cancelled", reason: "closed" });
+		await expect(moved.approval).resolves.toMatchObject({ decision: "dismissed" });
 	});
 });

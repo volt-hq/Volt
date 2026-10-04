@@ -100,9 +100,9 @@ import type { PlanningState, PlanPhase, PlanState } from "../../core/planning.ts
 import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../core/protocol/intents/index.ts";
 import { describeFastModeChange } from "../../core/protocol/intents/state.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
+import { serveIrohRemoteConnection } from "../../core/remote/iroh/connection.ts";
+import { uploadIrohRemoteDeviceLog } from "../../core/remote/iroh/device-log-rpc.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
-import { createIrohRemoteRpcErrorResponse } from "../../core/remote/iroh/rpc-command-filter.ts";
-import { IrohRemoteHostStateManager } from "../../core/remote/iroh/state-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
 	listBaseBranches,
@@ -119,7 +119,6 @@ import {
 	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
 import { resolveReviewAccountingMessage } from "../../core/review-state.ts";
-import type { RpcRemoteTerminalEvent } from "../../core/rpc/types.ts";
 import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
 import type { ExtensionTerminalUI } from "../../core/session/extension-binding.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -135,20 +134,8 @@ import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import { isInstallTelemetryEnabled } from "../../core/telemetry.ts";
 import type { TruncationResult } from "../../core/tools/truncate.ts";
 import { hasTrustRequiringProjectResources, ProjectTrustStore } from "../../core/trust-manager.ts";
-import { RELAY_RPC_COMMAND_TYPES } from "../../daemon/control-protocol.ts";
-import {
-	getRpcResponseId,
-	handleIntegratedConversationRpcCommand,
-	REMOTE_SESSION_LIST_CURSOR_TTL_MS,
-	type RemoteSessionListCursorEntry,
-} from "../../daemon/conversation-commands.ts";
-import {
-	createRemoteConversationExternalProjector,
-	createRemoteConversationSnapshotBuilder,
-} from "../../daemon/conversation-projection.ts";
 import {
 	createIntegratedConversationHandshakeResponse,
-	decorateRemoteHostState,
 	type IntegratedConversationSessionSelection,
 } from "../../daemon/handshake-responses.ts";
 import { LocalSessionWorktreeRestoreError } from "../../daemon/session-worktree.ts";
@@ -187,7 +174,6 @@ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
 import { checkForNewVoltVersion, type LatestVoltRelease } from "../../utils/version-check.ts";
 import { getVoltUserAgent } from "../../utils/volt-user-agent.ts";
-import { runIrohRemoteRpcMode } from "../rpc/iroh-remote-rpc-mode.ts";
 import { formatCompactionUsage } from "./compaction-usage.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
@@ -229,7 +215,6 @@ import {
 	isDaemonAttachSupported,
 	type OpenedRelay,
 	openDaemonWorktreeControl,
-	type RelayWorkspaceUnregisterRetirement,
 } from "./daemon-attach.ts";
 import { TuiLiveView } from "./live-view.ts";
 import { collectPromptImageAttachments, MAX_PROMPT_IMAGE_ATTACHMENTS } from "./prompt-image-attachments.ts";
@@ -663,14 +648,6 @@ export class InteractiveMode {
 	private daemonLeaseTail: Promise<void> = Promise.resolve();
 	/** A resume that holds its target's lease while it opens: relay offers for the target wait for it. */
 	private pendingSessionSwitch: { sessionId: string; settled: Promise<void> } | undefined;
-	/** list_sessions cursor state shared across relayed phone conversations. */
-	private readonly relaySessionListCursors = new Map<string, RemoteSessionListCursorEntry>();
-	/**
-	 * Inert state manager for relayed conversation commands: state-touching
-	 * commands (RELAY_RPC_COMMAND_TYPES) are forwarded to the daemon; nothing
-	 * served locally reads or writes host state.
-	 */
-	private readonly relayStateManager = new IrohRemoteHostStateManager();
 	/** The conversation the TUI shows lost its log, and the TUI is exiting. */
 	private endingLostSession = false;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
@@ -2243,13 +2220,14 @@ export class InteractiveMode {
 
 	/**
 	 * Serve a relayed phone conversation from this TUI's in-process runtime
-	 * (§5.6 step 7-9). The daemon has already authenticated the phone and
-	 * resolved the session target; the TUI writes the handshake response itself.
-	 * The phone is a client of the conversation the TUI shows that follows its
-	 * structural intents by redirect: a session change the phone asks for
-	 * redirects the phone alone (`conversation_moved`), and when the TUI leaves
-	 * the conversation the phone is told to reconnect (`lease_transferred`), to
-	 * the daemon then.
+	 * (§5.6 step 7-9) on the remote profile. The daemon has already
+	 * authenticated the phone and resolved the session target; the TUI writes
+	 * the handshake response itself. The phone follows its structural intents
+	 * by redirect: a session change the phone asks for ends its stream with
+	 * `ended{moved}` for the phone alone, and when the TUI leaves the
+	 * conversation the phone hears `ended{closed}` and reconnects to the
+	 * daemon. Intents and queries the daemon's state backs are relayed to the
+	 * daemon.
 	 */
 	private async serveRelayConversation(offer: DaemonRelayOffer, openRelay: () => Promise<OpenedRelay>): Promise<void> {
 		// A resume holding its target's lease serves the target's phones once it switched.
@@ -2281,10 +2259,6 @@ export class InteractiveMode {
 		const handshake = preamble.handshake;
 		const authorizationSubset = preamble.authorization;
 		const authorization = createTuiRelayAuthorization(authorizationSubset);
-		const rpcGrant = authorization.client.rpcGrant;
-		// Worktree-bound conversations sanitize with the worktree checkout as the
-		// root; the parent checkout and the worktrees root must also redact.
-		const sanitizerOptions = getRelayServingSanitizerOptions(authorizationSubset, getAgentDir());
 		const responseContext = {
 			hostNodeId,
 			relayMode: preamble.relayMode,
@@ -2300,7 +2274,10 @@ export class InteractiveMode {
 					};
 
 		const server = (async () => {
-			let workspaceUnregisterRetirement: RelayWorkspaceUnregisterRetirement | undefined;
+			const workspaceUnregisterRetirement = createRelayWorkspaceUnregisterRetirement(
+				this.daemonAttach,
+				() => conversationSessionId,
+			);
 			try {
 				// The TUI writes the handshake success response itself, keeping
 				// construction identical to the daemon-owned path.
@@ -2314,113 +2291,60 @@ export class InteractiveMode {
 					preamble.resolvedTarget.workingDirectory,
 				);
 				await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
-
-				workspaceUnregisterRetirement = createRelayWorkspaceUnregisterRetirement(
-					this.daemonAttach,
-					() => conversationSessionId,
-				);
-				await runIrohRemoteRpcMode(this.host, conversation, {
-					// The phone stays on this conversation; a session change redirects it alone.
-					redirect: {},
-					rpcGrant,
-					hostNodeId,
-					isRpcIngressOpen: workspaceUnregisterRetirement.isIngressOpen,
-					clientNodeId: authorizationSubset.clientNodeId,
+				const connection = serveIrohRemoteConnection({
+					host: this.host,
+					conversation,
 					stream: relayedStream,
-					workspaceName: authorization.workspace.name,
-					workspacePath: sanitizerOptions.workspacePath,
-					...(sanitizerOptions.remoteWorkspacePath === undefined
-						? {}
-						: { remoteWorkspacePath: sanitizerOptions.remoteWorkspacePath }),
-					...(sanitizerOptions.additionalRedactedPaths === undefined
-						? {}
-						: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),
-					suppressExtensionUiRequests: true,
-					// Redirected, the phone reconnects to the new session through the
-					// daemon, which hosts it; when the TUI left the session, it
-					// reconnects to the same session.
-					detachedTerminal: (detachment): RpcRemoteTerminalEvent =>
-						detachment.kind === "redirected"
-							? {
-									type: "remote_terminal",
-									reason: "conversation_moved",
-									workspace: authorization.workspace.name,
-									sessionId: conversationSessionId,
-									targetSessionId: detachment.sessionId,
-									hostNodeId,
-								}
-							: {
-									type: "remote_terminal",
-									reason: "lease_transferred",
-									workspace: authorization.workspace.name,
-									sessionId: conversationSessionId,
-									hostNodeId,
-								},
-					decorateOutbound: (value) => decorateRemoteHostState(value, authorization, responseContext),
-					buildConversationSnapshot: createRemoteConversationSnapshotBuilder({ authorization, conversation }),
-					projectConversationExternal: createRemoteConversationExternalProjector({ authorization, conversation }),
-					onReady: () => {
-						void conversation.startRecoveredClientInputs().catch(() => undefined);
-					},
-					onResponseWritten: (response) => workspaceUnregisterRetirement?.onResponseWritten(response),
 					initialInput: handshake.initialInput,
-					notificationDelivery: {
-						deliverNotification: (notification) =>
-							this.daemonAttach.relayNotificationDelivery.deliverNotification(
-								authorizationSubset.clientNodeId,
-								conversationSessionId,
-								notification,
-							),
-					},
-					remoteCommandHandler: async (command) => {
-						const rpcCommand = command as { type: string } & Record<string, unknown>;
-						if (RELAY_RPC_COMMAND_TYPES.has(rpcCommand.type)) {
-							// State-touching commands (push targets and workspace
-							// unregister) must run against the daemon's state;
-							// the TUI has no host state of its own.
-							const forwarded = await this.daemonAttach.forwardRelayRpc(
-								authorizationSubset.clientNodeId,
-								conversationSessionId,
-								rpcCommand,
-							);
-							if (!forwarded) {
-								return createIrohRemoteRpcErrorResponse(
-									getRpcResponseId(rpcCommand),
-									rpcCommand.type,
-									"daemon_unavailable",
-								);
-							}
-							workspaceUnregisterRetirement?.observeForwardedResponse(rpcCommand, forwarded.response);
-							if (forwarded.workspaceMetadata) {
-								authorization.workspaceNames = [...forwarded.workspaceMetadata.workspaceNames];
-								authorization.workspaces = forwarded.workspaceMetadata.workspaces.map((workspace) => ({
-									...workspace,
-								}));
-							}
-							return forwarded.response;
-						}
-						return handleIntegratedConversationRpcCommand(
-							rpcCommand,
-							authorization,
-							{
-								stateManager: this.relayStateManager,
-								sessionListCursors: this.relaySessionListCursors,
-								sessionListCursorTtlMs: REMOTE_SESSION_LIST_CURSOR_TTL_MS,
-								getConversationBranchEpoch: () => conversation.projectionFeed.branchEpoch,
-								isConversationTranscriptCursorValid: (cursor) =>
-									conversation.projectionFeed.isTranscriptCursorValid(cursor),
-								registerConversationTranscriptCursor: (cursor) =>
-									conversation.projectionFeed.registerTranscriptCursor(cursor),
-								listRuntimeStates: (workspaceName) => this.daemonAttach.listRuntimeStates(workspaceName),
-							},
-							conversation,
+					grant: authorization.client.rpcGrant,
+					clientKey: authorizationSubset.clientNodeId,
+					redaction: getRelayServingSanitizerOptions(authorizationSubset, getAgentDir()),
+					// The phone stays on this conversation; a session change redirects it alone, to the daemon.
+					redirect: {},
+					// The phone's device logs are written under the workspace here; the rest of the host is the daemon's.
+					services: () => ({
+						workspace: {
+							name: authorization.workspace.name,
+							uploadDeviceLogs: (upload) =>
+								uploadIrohRemoteDeviceLog(upload, { workspacePath: authorization.workspace.path }),
+						},
+					}),
+					relay: async (frame) => {
+						const outcome = await this.daemonAttach.forwardRelayRpc(
+							authorizationSubset.clientNodeId,
+							conversationSessionId,
+							frame,
 						);
+						if (!outcome) throw new Error("daemon_unavailable");
+						// An accepted unregister ends the connection after its answer.
+						if (frame.type === "unregister_workspace" && outcome.type === "accepted") {
+							workspaceUnregisterRetirement.unregistered();
+						}
+						return outcome;
+					},
+					notifications: {
+						hostNodeId,
+						clientNodeId: authorizationSubset.clientNodeId,
+						workspaceName: authorization.workspace.name,
+						delivery: {
+							deliverNotification: (notification) =>
+								this.daemonAttach.relayNotificationDelivery.deliverNotification(
+									authorizationSubset.clientNodeId,
+									conversationSessionId,
+									notification,
+								),
+						},
 					},
 				});
+				void connection.ready.then(
+					() => void conversation.startRecoveredClientInputs().catch(() => undefined),
+					() => undefined,
+				);
+				await connection.closed;
 			} catch {
 				// Relay teardown surfaces to the phone via the daemon's close reason.
 			} finally {
-				await workspaceUnregisterRetirement?.finalize();
+				await workspaceUnregisterRetirement.finalize();
 				relayedStream.close();
 				opened.finished();
 			}

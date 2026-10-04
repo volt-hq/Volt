@@ -285,6 +285,42 @@ describe("protocol server on the local profile", () => {
 		).resolves.toMatchObject({ type: "accepted" });
 	});
 
+	it("rejects a branch-fenced intent stale when the branch switches while it awaits", async () => {
+		const { harness, conversation } = await setup({ responses: ["one", "two"] });
+		const { client } = await connect(harness, conversation);
+		await client.prompt("first");
+		await client.waitForIdle(10_000);
+		await client.prompt("second");
+		await client.waitForIdle(10_000);
+		const position = client.state.ordinal;
+		const firstAnswer = client.state.entries.find((entry) => entry.type === "message" && entry.view?.text === "one")!;
+		const session = conversation.session;
+		const model = session.model!;
+		// The model lookup holds until the branch switched under it.
+		const lookup = Promise.withResolvers<void>();
+		const registry = session.modelRegistry;
+		const getAvailable = registry.getAvailable.bind(registry);
+		// The intent awaits the lookup, so a pending one holds it.
+		vi.spyOn(registry, "getAvailable").mockImplementation(
+			() => lookup.promise.then(getAvailable) as unknown as ReturnType<typeof getAvailable>,
+		);
+		const setModel = vi.spyOn(session, "setModel");
+
+		const outcome = client.intent(
+			"set_model",
+			{ provider: model.provider, modelId: model.id },
+			{ expectedOrdinal: position },
+		);
+		await vi.waitFor(() => expect(registry.getAvailable).toHaveBeenCalled());
+		await session.navigateTree(firstAnswer.id);
+		lookup.resolve();
+
+		await expect(outcome).rejects.toMatchObject({
+			reason: { code: "stale", ordinal: session.conversationGenerationRevision },
+		});
+		expect(setModel).not.toHaveBeenCalled();
+	});
+
 	it("tells the client to refetch settings after a settings intent", async () => {
 		const { harness, conversation } = await setup();
 		const { client, frames } = await connect(harness, conversation);

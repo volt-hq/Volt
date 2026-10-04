@@ -183,12 +183,36 @@ export const QUERY_SCHEMAS = {
 				followUpMode: RpcQueueModeSchema,
 				autoCompaction: Type.Boolean(),
 				autoRetry: Type.Boolean(),
+				/** The active settings profile, `""` without one: compaction intents name it as `expectedProfile`. */
+				profile: Type.String(),
 			},
 			closed,
 		),
 	},
 	subscription_usage: { params: EmptyInputSchema, result: RpcSubscriptionUsageReportSchema },
-	host_status: { params: EmptyInputSchema, result: Type.Object({ keepAwake: RpcKeepAwakeStatusSchema }, closed) },
+	/** The host's keep-awake state and, when the host shares it, its theme colors; refetched on `changed{host}`. */
+	host_status: {
+		params: EmptyInputSchema,
+		result: Type.Object(
+			{
+				keepAwake: RpcKeepAwakeStatusSchema,
+				theme: Type.Optional(
+					Type.Object(
+						{
+							themeName: Type.String(),
+							/** Resolved colors by token name, hex values only. */
+							tokens: Type.Record(
+								Type.String(),
+								Type.String({ pattern: "^#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$" }),
+							),
+						},
+						closed,
+					),
+				),
+			},
+			closed,
+		),
+	},
 	/** Whether the host stores a web search key; never the key. */
 	web_search_status: {
 		params: EmptyInputSchema,

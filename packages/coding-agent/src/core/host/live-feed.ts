@@ -2,9 +2,10 @@
  * What feeds a conversation's live state from its session (RFC §6.1): the
  * run phase, Git and prompt-cache status, token use, the intents whose
  * availability follows the conversation, background jobs, review workflows,
- * the streaming assistant message, and running tools. Each value is set when
- * it changes; streaming items are published as the session emits them and
- * leave the live state when the entry that commits them is applied.
+ * the streaming assistant message, running tools, and the MCP server calls
+ * they make. Each value is set when it changes; streaming items are published
+ * as the session emits them and leave the live state when the entry that
+ * commits them is applied (an MCP call, which no entry commits, when it ends).
  */
 
 import type { AssistantMessageEvent } from "@hansjm10/volt-ai";
@@ -84,6 +85,14 @@ export function slimAssistantEvent(event: AssistantMessageEvent): SlimAssistantE
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * The live tool call id of an MCP server call: MCP calls run inside a tool
+ * call, and their progress is a tool item of its own.
+ */
+function mcpCallId(callId: string): string {
+	return `mcp_call:${callId}`;
 }
 
 /** A tool's partial result as the live lane carries it: its content blocks and details. */
@@ -217,6 +226,50 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				updateIntents();
 				updateUsage();
 				return;
+			case "mcp_call_start":
+				stream([
+					{
+						type: "tool",
+						op: "start",
+						toolCallId: mcpCallId(event.call.id),
+						toolName: "mcp",
+						args: { server: event.call.server, tool: event.call.tool },
+					},
+				]);
+				return;
+			case "mcp_call_update": {
+				if (!live.snapshot().tools.has(mcpCallId(event.call.id))) return;
+				const { progress, total, message } = event.progress;
+				stream([
+					{
+						type: "tool",
+						op: "update",
+						toolCallId: mcpCallId(event.call.id),
+						toolName: "mcp",
+						partial: {
+							content: message === undefined ? [] : [{ type: "text", text: message }],
+							details: { progress, ...(total === undefined ? {} : { total }) },
+						},
+					},
+				]);
+				return;
+			}
+			case "mcp_call_end": {
+				const toolCallId = mcpCallId(event.call.id);
+				if (!live.snapshot().tools.has(toolCallId)) return;
+				stream([
+					{
+						type: "tool",
+						op: "end",
+						toolCallId,
+						toolName: "mcp",
+						isError: event.call.status !== "completed",
+					},
+				]);
+				// No result entry commits a nested MCP call: it leaves the streaming state once it ended.
+				live.commit({ role: "tool", toolCallId });
+				return;
+			}
 			case "git_context_changed":
 				update("git", () => ({ kind: "git", gitContext: event.gitContext }));
 				return;
