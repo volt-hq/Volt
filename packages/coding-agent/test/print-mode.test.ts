@@ -10,7 +10,7 @@ type FakeExtensionRunner = {
 	emit: ReturnType<typeof vi.fn<(event: EmitEvent) => Promise<void>>>;
 };
 
-type BindExtensionOptions = {
+type AttachExtensionOptions = {
 	commandContextActions: { waitForIdle(): Promise<void> };
 };
 
@@ -22,7 +22,9 @@ type FakeSession = {
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
-	bindExtensions: ReturnType<typeof vi.fn<(options: BindExtensionOptions) => Promise<void>>>;
+	attachExtensionClient: ReturnType<
+		typeof vi.fn<(options: AttachExtensionOptions) => { ready: Promise<void>; detach(): void }>
+	>;
 	subscribe: ReturnType<typeof vi.fn>;
 	prompt: ReturnType<typeof vi.fn>;
 	reload: ReturnType<typeof vi.fn>;
@@ -81,7 +83,10 @@ function createRuntimeHost(assistantMessage: AssistantMessage): FakeRuntimeHost 
 		waitForIdle: vi.fn(async () => undefined),
 		state,
 		extensionRunner,
-		bindExtensions: vi.fn(async (_options: BindExtensionOptions) => undefined),
+		attachExtensionClient: vi.fn((_options: AttachExtensionOptions) => ({
+			ready: Promise.resolve(),
+			detach: () => {},
+		})),
 		subscribe: vi.fn(() => () => {}),
 		prompt: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
@@ -119,7 +124,7 @@ describe("runPrintMode", () => {
 
 		expect(exitCode).toBe(0);
 		expect(session.prompt).toHaveBeenCalledWith("Say done", { images });
-		const bindOptions = session.bindExtensions.mock.calls[0]?.[0];
+		const bindOptions = session.attachExtensionClient.mock.calls[0]?.[0];
 		await bindOptions.commandContextActions.waitForIdle();
 		expect(session.waitForIdle).toHaveBeenCalledOnce();
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);

@@ -79,7 +79,7 @@ describe("AgentSession conversation generation commits", () => {
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 		});
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		let subscription: ConversationProjectionSubscription | undefined;
 		cleanups.push(async () => {
 			subscription?.detach();
@@ -250,7 +250,7 @@ describe("AgentSession conversation generation commits", () => {
 				rmSync(tempDir, { recursive: true, force: true });
 			}
 		});
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "first user", timestamp: 1 });
 		const firstAssistantId = await runtime.session.sessionWriter.appendMessage(
@@ -511,7 +511,7 @@ describe("AgentSession conversation generation commits", () => {
 				};
 			}
 
-			vi.spyOn(runtime.session, "bindExtensions");
+			vi.spyOn(runtime.session, "attachExtensionClient");
 			const mode = await startIrohRpcMode(runtime, runtime.session);
 			modePromise = mode.modePromise;
 			endMode = () => mode.recv.end();
@@ -660,7 +660,7 @@ describe("AgentSession conversation generation commits", () => {
 			return originalEmit(event);
 		});
 
-		vi.spyOn(runtime.session, "bindExtensions");
+		vi.spyOn(runtime.session, "attachExtensionClient");
 		const mode = await startIrohRpcMode(runtime, runtime.session);
 		modePromise = mode.modePromise;
 		endMode = () => mode.recv.end();
@@ -818,7 +818,7 @@ describe("AgentSession conversation generation commits", () => {
 				return originalEmit(event);
 			});
 
-			vi.spyOn(runtime.session, "bindExtensions");
+			vi.spyOn(runtime.session, "attachExtensionClient");
 			const mode = await startIrohRpcMode(runtime, runtime.session);
 			modePromise = mode.modePromise;
 			endMode = () => mode.recv.end();

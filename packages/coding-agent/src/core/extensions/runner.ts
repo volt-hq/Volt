@@ -301,6 +301,7 @@ export class ExtensionRunner {
 	private uiContext: ExtensionUIContext;
 	private guardedContextObjects = new WeakMap<object, object>();
 	private mode: ExtensionMode = "print";
+	private hasUIFn: () => boolean = () => this.uiContext !== noOpUIContext;
 	private cwd: string;
 	private sessionManager: SessionManager;
 	private modelRegistry: ModelRegistry;
@@ -474,9 +475,11 @@ export class ExtensionRunner {
 		this.reloadHandler = async () => {};
 	}
 
-	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print"): void {
+	/** @param hasUI Whether the UI can reach a user right now; defaults to whether a UI context is set. */
+	setUIContext(uiContext?: ExtensionUIContext, mode: ExtensionMode = "print", hasUI?: () => boolean): void {
 		this.uiContext = uiContext ?? noOpUIContext;
 		this.mode = mode;
+		this.hasUIFn = hasUI ?? (() => this.uiContext !== noOpUIContext);
 	}
 
 	getUIContext(): ExtensionUIContext {
@@ -484,7 +487,7 @@ export class ExtensionRunner {
 	}
 
 	hasUI(): boolean {
-		return this.uiContext !== noOpUIContext;
+		return this.hasUIFn();
 	}
 
 	getExtensionPaths(): string[] {
@@ -725,7 +728,7 @@ export class ExtensionRunner {
 
 	/**
 	 * Request a graceful shutdown. Called by extension tools and event handlers.
-	 * The actual shutdown behavior is provided by the mode via bindExtensions().
+	 * The actual shutdown behavior is provided by the attached client the call runs for.
 	 */
 	shutdown(): void {
 		if (this.isInert) {

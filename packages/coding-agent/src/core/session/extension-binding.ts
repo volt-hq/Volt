@@ -1,16 +1,24 @@
 /**
  * The session's extension binding: the extension runner over the loaded
- * extensions, the host surface a mode binds to it (UI context, mode, command
- * context actions, abort and shutdown handlers, error listener), the core
- * actions and resources extensions reach the session through, and the
- * in-place runtime reload that rebuilds the runner and the tools.
+ * extensions, the clients attached to them, the core actions and resources
+ * extensions reach the session through, and the in-place runtime reload that
+ * rebuilds the runner and the tools.
+ *
+ * The extensions are bound once: the first client to attach fixes the mode and
+ * `session_start` fires. Later clients only add their surface. UI calls go to
+ * the last attached client with a UI, which receives the latest status, widget,
+ * and title values when it starts showing UI. Errors go to every client.
+ * Command context actions, abort, and shutdown go to the client the call runs
+ * for (its client scope); calls outside any client scope go to the anchor, the
+ * oldest attached client, and calls for a client that has left go nowhere.
  */
 
 import { basename, dirname } from "node:path";
 import type { AgentTool, Conversation } from "@hansjm10/volt-agent-core";
-import type { AgentSession, ExtensionBindings } from "../agent-session.ts";
+import type { AgentSession } from "../agent-session.ts";
 import {
 	type ExtensionCommandContextActions,
+	type ExtensionError,
 	type ExtensionErrorListener,
 	type ExtensionMode,
 	ExtensionRunner,
@@ -20,6 +28,7 @@ import {
 	type ShutdownHandler,
 } from "../extensions/index.ts";
 import { emitSessionShutdownEvent } from "../extensions/runner.ts";
+import { ClientScope } from "../host/client-scope.ts";
 import type { CustomMessageInput } from "../messages.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "../resource-loader.ts";
@@ -27,6 +36,7 @@ import type { SessionManager } from "../session-manager.ts";
 import type { SessionWriter } from "../session-writer.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SlashCommandInfo } from "../slash-commands.ts";
+import { theme } from "../theme/runtime.ts";
 import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import type { SessionExtensionWork } from "./extension-work.ts";
 import type { ModelSettings } from "./model-settings.ts";
@@ -113,6 +123,35 @@ export interface SessionExtensionBindingHost {
 	trackAncillaryWork<T>(work: Promise<T>): Promise<T>;
 }
 
+/**
+ * A client's surface on the session's extensions. A client keeps its id across
+ * the sessions it attaches to.
+ */
+export interface ExtensionClient {
+	/** Matches the client scope the client's requests run in. */
+	readonly id: string;
+	/** The client's run mode. The first client to attach fixes the session's `ctx.mode`. */
+	readonly mode: ExtensionMode;
+	/** Where dialogs, notifications, status, and widgets show. A client without one receives no UI calls. */
+	readonly ui?: ExtensionUIContext;
+	/** Session control for the commands the client invoked. */
+	readonly commandContextActions?: ExtensionCommandContextActions;
+	/** Replaces the session abort for the `ctx.abort()` calls the client invoked. */
+	readonly abortHandler?: () => void;
+	/** Handles the `ctx.shutdown()` calls the client invoked. */
+	readonly shutdownHandler?: ShutdownHandler;
+	/** Receives every extension error. */
+	readonly onError?: ExtensionErrorListener;
+}
+
+/** A client's attachment to a session's extensions. */
+export interface ExtensionClientAttachment {
+	/** Settles once the extensions are bound; rejects, with the client detached, when binding fails. */
+	readonly ready: Promise<void>;
+	/** Detach the client; later calls do nothing. */
+	detach(): void;
+}
+
 export interface SessionExtensionBindingOptions {
 	/** Mutable ref used by Agent to access the current ExtensionRunner */
 	extensionRunnerRef?: { current?: ExtensionRunner };
@@ -125,12 +164,17 @@ export class SessionExtensionBinding {
 	private extensionRunner!: ExtensionRunner;
 	private readonly extensionRunnerRef?: { current?: ExtensionRunner };
 	private readonly sessionStartEvent: SessionStartEvent;
-	private extensionUIContext?: ExtensionUIContext;
 	private extensionMode: ExtensionMode = "print";
-	private extensionCommandContextActions?: ExtensionCommandContextActions;
-	private extensionAbortHandler?: () => void;
-	private extensionShutdownHandler?: ShutdownHandler;
-	private extensionErrorListener?: ExtensionErrorListener;
+	/** The attached clients, oldest first. */
+	private readonly clients: ExtensionClient[] = [];
+	/** Set by the first attachment; settles once `session_start` and resource discovery ran. */
+	private bound: Promise<void> | undefined;
+	/** The latest status and widget per key and the latest title, replayed to a client that starts showing UI. */
+	private readonly statuses = new Map<string, (ui: ExtensionUIContext) => void>();
+	private readonly widgets = new Map<string, (ui: ExtensionUIContext) => void>();
+	private title: string | undefined;
+	private readonly uiRouter: ExtensionUIContext = this.createUIRouter();
+	private readonly commandActions: ExtensionCommandContextActions = this.createCommandActions();
 	private extensionErrorUnsubscriber?: () => void;
 	/** Fences session replacement and fresh mutations across asynchronous runtime reload. */
 	private reloadInProgress = false;
@@ -151,12 +195,19 @@ export class SessionExtensionBinding {
 		return this.extensionRunnerRef;
 	}
 
+	/** The UI extensions see, while an attached client shows UI. */
 	get uiContext(): ExtensionUIContext | undefined {
-		return this.extensionUIContext;
+		return this.uiClient() ? this.uiRouter : undefined;
 	}
 
+	/** The mode the first attached client fixed. */
 	get mode(): ExtensionMode {
 		return this.extensionMode;
+	}
+
+	/** The mode of the client the current call runs for, else the session's mode. */
+	get invokingMode(): ExtensionMode {
+		return this.scopedClient()?.mode ?? this.extensionMode;
 	}
 
 	/** Whether a runtime reload is in progress. */
@@ -164,34 +215,202 @@ export class SessionExtensionBinding {
 		return this.reloadInProgress;
 	}
 
-	async bind(bindings: ExtensionBindings): Promise<void> {
+	/**
+	 * Attach a client. The first attachment binds the extensions with the
+	 * client's mode and emits `session_start`; a client attaching again under the
+	 * same id replaces its surface. The client can detach before binding settles.
+	 */
+	attach(client: ExtensionClient): ExtensionClientAttachment {
 		this.host.assertActive();
-		if (bindings.uiContext !== undefined) {
-			this.extensionUIContext = bindings.uiContext;
-		}
-		if (bindings.mode !== undefined) {
-			this.extensionMode = bindings.mode;
-		}
-		if (bindings.commandContextActions !== undefined) {
-			this.extensionCommandContextActions = bindings.commandContextActions;
-		}
-		if (bindings.abortHandler !== undefined) {
-			this.extensionAbortHandler = bindings.abortHandler;
-		}
-		if (bindings.shutdownHandler !== undefined) {
-			this.extensionShutdownHandler = bindings.shutdownHandler;
-		}
-		if (bindings.onError !== undefined) {
-			this.extensionErrorListener = bindings.onError;
-		}
+		const previousUIClient = this.uiClient();
+		const index = this.clients.findIndex((attached) => attached.id === client.id);
+		if (index === -1) this.clients.push(client);
+		else this.clients[index] = client;
+		this.uiClientChanged(previousUIClient);
+		const detach = (): void => this.detach(client);
+		const bound = this.bound ?? this.bind(client.mode);
+		this.bound = bound;
+		const ready = bound.catch((error: unknown) => {
+			detach();
+			// A later attachment binds again.
+			if (this.bound === bound) this.bound = undefined;
+			throw error;
+		});
+		return { ready, detach };
+	}
 
+	private detach(client: ExtensionClient): void {
+		// A later attachment under the same id replaced this one and owns the slot.
+		const index = this.clients.indexOf(client);
+		if (index === -1) return;
+		const previousUIClient = this.uiClient();
+		this.clients.splice(index, 1);
+		this.uiClientChanged(previousUIClient);
+	}
+
+	private async bind(mode: ExtensionMode): Promise<void> {
+		this.extensionMode = mode;
 		this.applyExtensionBindings(this.extensionRunner);
-		// Interactive-only native tools follow the currently bound host surface.
+		// Interactive-only native tools follow the bound mode and UI.
 		this.host.tools().syncPlanningRuntime();
 		await this.extensionRunner.emit(this.sessionStartEvent);
 		this.host.assertActive();
 		await this.extendResourcesFromExtensions(this.sessionStartEvent.reason === "reload" ? "reload" : "startup");
 		this.host.assertActive();
+	}
+
+	/** The client UI calls go to: the last attached client with a UI. */
+	private uiClient(): ExtensionClient | undefined {
+		for (let index = this.clients.length - 1; index >= 0; index--) {
+			const client = this.clients[index];
+			if (client?.ui) return client;
+		}
+		return undefined;
+	}
+
+	/** The attached client the current call runs for, if any. */
+	private scopedClient(): ExtensionClient | undefined {
+		const clientId = ClientScope.current();
+		return clientId === undefined ? undefined : this.clients.find((client) => client.id === clientId);
+	}
+
+	/**
+	 * The client session actions go to: the invoking client, or the anchor (the
+	 * oldest attached client) for calls outside any client scope. An invoking
+	 * client that has detached gets none, and nothing falls through to the anchor.
+	 */
+	private actionClient(): ExtensionClient | undefined {
+		return ClientScope.current() === undefined ? this.clients[0] : this.scopedClient();
+	}
+
+	private uiClientChanged(previous: ExtensionClient | undefined): void {
+		const current = this.uiClient();
+		if (current && current.id !== previous?.id) this.replayUI(current);
+		// request_user_input is offered only while an interactive client shows UI.
+		if (this.bound && this.extensionMode === "tui" && (current === undefined) !== (previous === undefined)) {
+			this.host.tools().syncPlanningRuntime();
+		}
+	}
+
+	/** Show the latest status, widget, and title values on a client that starts showing UI. */
+	private replayUI(client: ExtensionClient): void {
+		const ui = client.ui;
+		if (!ui) return;
+		const replays = [...this.statuses.values(), ...this.widgets.values()];
+		const title = this.title;
+		if (title !== undefined) replays.push((target) => target.setTitle(title));
+		for (const replay of replays) {
+			try {
+				replay(ui);
+			} catch (error) {
+				this.extensionRunner.emitError({
+					extensionPath: "<runtime>",
+					event: "ui_replay",
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+
+	private clearRecordedUI(): void {
+		this.statuses.clear();
+		this.widgets.clear();
+		this.title = undefined;
+	}
+
+	/** Every attached client hears every extension error; one failing listener cannot silence the others. */
+	private reportError(error: ExtensionError): void {
+		for (const client of [...this.clients]) {
+			const listener = client.onError;
+			if (!listener) continue;
+			try {
+				void Promise.resolve((listener as (reported: ExtensionError) => unknown)(error)).catch(() => {});
+			} catch {
+				// Error reporting is observational.
+			}
+		}
+	}
+
+	/**
+	 * Session control for extension commands. Without a client that handles it
+	 * the action does nothing; for an invoking client that has left it reports
+	 * cancelled, so the extension does not act as if it ran.
+	 */
+	private createCommandActions(): ExtensionCommandContextActions {
+		const actions = () => this.actionClient()?.commandContextActions;
+		const outcome = () => ({ cancelled: this.invokerLeft(), seeded: false });
+		return {
+			waitForIdle: () => actions()?.waitForIdle() ?? Promise.resolve(),
+			newSession: (options) => actions()?.newSession(options) ?? Promise.resolve(outcome()),
+			fork: (entryId, options) => actions()?.fork(entryId, options) ?? Promise.resolve(outcome()),
+			navigateTree: (targetId, options) =>
+				actions()?.navigateTree(targetId, options) ?? Promise.resolve({ cancelled: this.invokerLeft() }),
+			switchSession: (sessionRef, options) =>
+				actions()?.switchSession(sessionRef, options) ?? Promise.resolve(outcome()),
+			reload: () => actions()?.reload() ?? Promise.resolve(),
+		};
+	}
+
+	/** Whether the current call runs for a client that has detached. */
+	private invokerLeft(): boolean {
+		return ClientScope.current() !== undefined && this.scopedClient() === undefined;
+	}
+
+	/** The UI extensions see: calls go to the UI client with their arguments as given; with none attached they no-op. */
+	private createUIRouter(): ExtensionUIContext {
+		const ui = () => this.uiClient()?.ui;
+		type UI = ExtensionUIContext;
+		return {
+			select: (...args: Parameters<UI["select"]>) => ui()?.select(...args) ?? Promise.resolve(undefined),
+			confirm: (...args: Parameters<UI["confirm"]>) => ui()?.confirm(...args) ?? Promise.resolve(false),
+			input: (...args: Parameters<UI["input"]>) => ui()?.input(...args) ?? Promise.resolve(undefined),
+			notify: (...args: Parameters<UI["notify"]>) => ui()?.notify(...args),
+			onTerminalInput: (...args: Parameters<UI["onTerminalInput"]>) => ui()?.onTerminalInput(...args) ?? (() => {}),
+			setStatus: (key, text) => {
+				if (text === undefined) this.statuses.delete(key);
+				else this.statuses.set(key, (target) => target.setStatus(key, text));
+				ui()?.setStatus(key, text);
+			},
+			setWorkingMessage: (...args: Parameters<UI["setWorkingMessage"]>) => ui()?.setWorkingMessage(...args),
+			setWorkingVisible: (...args: Parameters<UI["setWorkingVisible"]>) => ui()?.setWorkingVisible(...args),
+			setWorkingIndicator: (...args: Parameters<UI["setWorkingIndicator"]>) => ui()?.setWorkingIndicator(...args),
+			setHiddenThinkingLabel: (...args: Parameters<UI["setHiddenThinkingLabel"]>) =>
+				ui()?.setHiddenThinkingLabel(...args),
+			setWidget: (key, content, options) => {
+				const show = (target: UI): void => {
+					if (content === undefined || Array.isArray(content)) target.setWidget(key, content, options);
+					else target.setWidget(key, content, options);
+				};
+				if (content === undefined) this.widgets.delete(key);
+				else this.widgets.set(key, show);
+				const target = ui();
+				if (target) show(target);
+			},
+			setFooter: (...args: Parameters<UI["setFooter"]>) => ui()?.setFooter(...args),
+			setHeader: (...args: Parameters<UI["setHeader"]>) => ui()?.setHeader(...args),
+			setTitle: (title) => {
+				this.title = title;
+				ui()?.setTitle(title);
+			},
+			custom: (factory, options) => ui()?.custom(factory, options) ?? Promise.resolve(undefined as never),
+			pasteToEditor: (...args: Parameters<UI["pasteToEditor"]>) => ui()?.pasteToEditor(...args),
+			setEditorText: (...args: Parameters<UI["setEditorText"]>) => ui()?.setEditorText(...args),
+			getEditorText: () => ui()?.getEditorText() ?? "",
+			editor: (...args: Parameters<UI["editor"]>) => ui()?.editor(...args) ?? Promise.resolve(undefined),
+			addAutocompleteProvider: (...args: Parameters<UI["addAutocompleteProvider"]>) =>
+				ui()?.addAutocompleteProvider(...args),
+			setEditorComponent: (...args: Parameters<UI["setEditorComponent"]>) => ui()?.setEditorComponent(...args),
+			getEditorComponent: () => ui()?.getEditorComponent(),
+			get theme() {
+				return ui()?.theme ?? theme;
+			},
+			getAllThemes: () => ui()?.getAllThemes() ?? [],
+			getTheme: (...args: Parameters<UI["getTheme"]>) => ui()?.getTheme(...args),
+			setTheme: (...args: Parameters<UI["setTheme"]>) =>
+				ui()?.setTheme(...args) ?? { success: false, error: "UI not available" },
+			getToolsExpanded: () => ui()?.getToolsExpanded() ?? false,
+			setToolsExpanded: (...args: Parameters<UI["setToolsExpanded"]>) => ui()?.setToolsExpanded(...args),
+		};
 	}
 
 	private async extendResourcesFromExtensions(reason: "startup" | "reload"): Promise<void> {
@@ -219,20 +438,25 @@ export class SessionExtensionBinding {
 		this.host.tools().refreshSystemPrompt();
 	}
 
+	/** Route the runner's UI, command context actions, and errors through the attached clients. */
 	private applyExtensionBindings(runner: ExtensionRunner): void {
-		runner.setUIContext(this.extensionUIContext, this.extensionMode);
-		runner.bindCommandContext(this.extensionCommandContextActions);
+		// TUI and RPC sessions keep UI while no client shows it: dialogs then resolve to their defaults.
+		runner.setUIContext(
+			this.uiRouter,
+			this.extensionMode,
+			() => this.uiClient() !== undefined || this.extensionMode === "tui" || this.extensionMode === "rpc",
+		);
+		runner.bindCommandContext(this.commandActions);
 
 		this.extensionErrorUnsubscriber?.();
-		this.extensionErrorUnsubscriber = this.extensionErrorListener
-			? runner.onError(this.extensionErrorListener)
-			: undefined;
+		this.extensionErrorUnsubscriber = runner.onError((error) => this.reportError(error));
 	}
 
-	/** Stop forwarding extension errors to the listener the host bound. */
-	releaseErrorListener(): void {
+	/** Detach every client of a disposed session: nothing reaches them or is replayed to them afterwards. */
+	releaseClients(): void {
 		this.extensionErrorUnsubscriber?.();
 		this.extensionErrorUnsubscriber = undefined;
+		this.clients.length = 0;
 	}
 
 	/**
@@ -294,7 +518,7 @@ export class SessionExtensionBinding {
 		// runtime (project-trust rebuild), so live generations are unaffected.
 		previousRunner?.invalidateStaleGeneration(extensionsResult.runtime);
 		this.bindExtensionCore(this.extensionRunner);
-		this.applyExtensionBindings(this.extensionRunner);
+		if (this.bound) this.applyExtensionBindings(this.extensionRunner);
 	}
 
 	private bindExtensionCore(runner: ExtensionRunner): void {
@@ -374,15 +598,16 @@ export class SessionExtensionBinding {
 				isProjectTrusted: () => this.host.settingsManager.isProjectTrusted(),
 				getSignal: () => this.host.background().hookSignal(),
 				abort: () => {
-					if (this.extensionAbortHandler) {
-						this.extensionAbortHandler();
+					const abortHandler = this.actionClient()?.abortHandler;
+					if (abortHandler) {
+						abortHandler();
 						return;
 					}
 					void session.abort();
 				},
 				hasPendingMessages: () => session.pendingMessageCount > 0,
 				shutdown: () => {
-					this.extensionShutdownHandler?.();
+					this.actionClient()?.shutdownHandler?.();
 				},
 				getContextUsage: () => session.getContextUsage(),
 				compact: (options) => {
@@ -448,12 +673,9 @@ export class SessionExtensionBinding {
 		this.host.tools().rebuild(previousFlagValues);
 		await this.host.modelSettings.refreshFromRegistry();
 
-		const hasBindings =
-			this.extensionUIContext ||
-			this.extensionCommandContextActions ||
-			this.extensionShutdownHandler ||
-			this.extensionErrorListener;
-		if (hasBindings) {
+		if (this.bound) {
+			// The reloaded extensions declare their UI again from session_start.
+			this.clearRecordedUI();
 			await this.extensionRunner.emit({ type: "session_start", reason: "reload" });
 			this.host.assertActive();
 			await this.extendResourcesFromExtensions("reload");

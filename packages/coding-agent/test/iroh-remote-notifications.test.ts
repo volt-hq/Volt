@@ -876,7 +876,7 @@ describe("Iroh remote notification requests", () => {
 			workspacePath: "/workspace",
 		});
 		void modePromise.catch(() => {});
-		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalledOnce());
+		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalledOnce());
 		expect(parseWrittenObjects(send)[0]).toMatchObject({
 			type: "conversation_bootstrap",
 			delivery: { cursor: 0 },
@@ -1763,7 +1763,7 @@ describe("Iroh remote notification requests", () => {
 		await reviewWorkflows.waitForIdle();
 		expect(getNotifications(firstMode.send)).toEqual([]);
 
-		session.bindExtensions.mockClear();
+		session.attachExtensionClient.mockClear();
 		const secondMode = await startIrohRpcMode(runtimeHost, session, { clientNodeId: "paired-client" });
 		await vi.waitFor(() =>
 			expect(getNotifications(secondMode.send)).toEqual([
@@ -1782,7 +1782,7 @@ describe("Iroh remote notification requests", () => {
 		secondMode.recv.end();
 		await expect(secondMode.modePromise).resolves.toBeUndefined();
 
-		session.bindExtensions.mockClear();
+		session.attachExtensionClient.mockClear();
 		const thirdMode = await startIrohRpcMode(runtimeHost, session, { clientNodeId: "paired-client" });
 		await new Promise((resolve) => setImmediate(resolve));
 		expect(getNotifications(thirdMode.send)).toEqual([]);

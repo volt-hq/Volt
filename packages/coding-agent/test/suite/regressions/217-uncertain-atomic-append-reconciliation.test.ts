@@ -239,7 +239,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 			agentDir: tempDir,
 			sessionManager,
 		});
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		runtimeCleanups.push(async () => {
 			await runtime.dispose().catch(() => {});
 		});

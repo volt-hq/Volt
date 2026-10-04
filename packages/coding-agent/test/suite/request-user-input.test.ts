@@ -49,17 +49,20 @@ describe("native structured questions", () => {
 	async function bind(
 		harness: Harness,
 		custom: ExtensionUIContext["custom"] = async <T>() => answered as T,
-	): Promise<void> {
-		await harness.session.bindExtensions({
+	): Promise<() => void> {
+		const attachment = harness.session.attachExtensionClient({
+			id: "tui",
 			mode: "tui",
-			uiContext: { ...harness.session.extensionRunner.getUIContext(), custom },
+			ui: { ...harness.session.extensionRunner.getUIContext(), custom },
 		});
+		await attachment.ready;
+		return attachment.detach;
 	}
 
-	it("advertises questions only with a bound local TUI, preserving policy across mode changes and reload", async () => {
+	it("advertises questions only while a local TUI is attached, preserving policy across mode changes and reload", async () => {
 		const h = await setup();
 		expect(h.session.getActiveToolNames()).not.toContain("request_user_input");
-		await bind(h);
+		const detach = await bind(h);
 		expect(h.session.getActiveToolNames()).toContain("request_user_input");
 		expect(h.session.systemPrompt).toContain("Explore before asking");
 		await h.session.setAgentMode("plan");
@@ -67,11 +70,21 @@ describe("native structured questions", () => {
 		expect(h.session.getActiveToolNames()).not.toContain("write");
 		await h.session.reload();
 		expect(h.session.getActiveToolNames()).toContain("request_user_input");
-		await h.session.bindExtensions({ mode: "rpc" });
+		// A client without UI keeps the TUI's mode and surface.
+		await h.session.attachExtensionClient({ id: "relayed-phone", mode: "rpc" }).ready;
+		expect(h.session.getActiveToolNames()).toContain("request_user_input");
+		detach();
 		expect(h.session.getActiveToolNames()).not.toContain("request_user_input");
 		await h.session.setAgentMode("build");
 		await bind(h);
 		expect(h.session.getActiveToolNames()).toContain("request_user_input");
+	});
+
+	it("does not advertise questions to sessions an RPC client opened", async () => {
+		const h = await setup();
+		await h.session.attachExtensionClient({ id: "rpc-client", mode: "rpc" }).ready;
+		await bind(h);
+		expect(h.session.getActiveToolNames()).not.toContain("request_user_input");
 	});
 
 	it.each([{ allowedToolNames: ["read"] }, { excludedToolNames: ["request_user_input"] }, { allowedToolNames: [] }])(

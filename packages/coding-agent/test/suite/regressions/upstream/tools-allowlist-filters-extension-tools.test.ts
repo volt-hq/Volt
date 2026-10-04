@@ -63,7 +63,7 @@ describe("regression #2835: tool allowlists filter extension tools", () => {
 			resourceLoader,
 			tools: allowedToolNames,
 		});
-		await session.bindExtensions({});
+		await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		return session;
 	}
 

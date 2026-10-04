@@ -23,6 +23,7 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { ClientScope } from "../../core/host/client-scope.ts";
 import {
 	type HostActionInvocationContext,
 	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
@@ -193,6 +194,11 @@ export interface RpcModeOptions {
 	onWorkflowEvent?: (event: ReviewWorkflowEvent | ReviewWorkflowToolEvent) => void | Promise<void>;
 	/** Defaults to true. Remote transports can disable this until their action allowlist is widened. */
 	allowUiActionInvocation?: boolean;
+	/**
+	 * Defaults to true. Whether this client shows extension UI. A stream relayed
+	 * through a desktop TUI attaches without it: dialogs and status stay there.
+	 */
+	extensionUi?: boolean;
 	/** Defaults to false. Remote transports should only expose and invoke actions marked remote-safe. */
 	requireRemoteSafeUiActions?: boolean;
 	/** Remote host callback for registering platform push notification targets. */
@@ -595,6 +601,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	const shouldDisposeRuntimeOnClose = options.disposeRuntimeOnClose ?? true;
 	const allowUiActionInvocation = options.allowUiActionInvocation ?? true;
 	const requireRemoteSafeUiActions = options.requireRemoteSafeUiActions ?? false;
+	const showsExtensionUi = options.extensionUi ?? true;
+	/** This client's identity on the session's extensions; its commands run in its client scope. */
+	const extensionClientId = crypto.randomUUID();
 	const shouldRestoreStdout = !options.transport && !shouldExitProcess;
 	const transport = options.transport ?? createStdioRpcTransport();
 	const startupAwareTransport = transport as RpcModeStartupAwareTransport;
@@ -662,6 +671,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 	let unsubscribeBackpressure: (() => void) | undefined;
 	let sessionProjector: StreamProjector | undefined;
 	let stopModelCatalogWatcher: () => void = () => {};
+	let detachExtensionClient: (() => void) | undefined;
+	const detachExtensions = (): void => {
+		detachExtensionClient?.();
+		detachExtensionClient = undefined;
+	};
+	/** Settles when shutdown starts, so a rebind stops waiting on another client's pending bind. */
+	const shutdownStarted = Promise.withResolvers<void>();
 
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
 		if (shuttingDown || hasPendingWriteError) {
@@ -1032,8 +1048,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		unsubscribe?.();
 		unsubscribe = undefined;
 		// Correlated control replies are capabilities over the conversation state
-		// that minted them. Retire them before a replacement binds extensions, and
-		// bind the same synchronous cut to every in-session branch generation.
+		// that minted them. Retire them before attaching to a replacement's
+		// extensions, and bind the same synchronous cut to every in-session branch
+		// generation.
 		if (hasBoundConversationSession) {
 			retireConversationControlCapabilities();
 		}
@@ -1060,9 +1077,13 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		if (resourceThemes) {
 			setRegisteredThemes(resourceThemes);
 		}
-		await session.bindExtensions({
-			uiContext: createExtensionUIContext(),
+		// The extensions are bound once per session; this client attaches its
+		// surface. Attaching again under the same id replaces it in place.
+		const detachPreviousExtensionClient = detachExtensionClient;
+		const extensionAttachment = session.attachExtensionClient({
+			id: extensionClientId,
 			mode: "rpc",
+			...(showsExtensionUi ? { ui: createExtensionUIContext() } : {}),
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
 				newSession: async (options) => runtimeHost.newSession(options),
@@ -1093,7 +1114,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
 			},
 		});
-		if (shuttingDown) return;
+		// Shutdown can detach the client while the extensions are still binding.
+		detachExtensionClient = extensionAttachment.detach;
+		detachPreviousExtensionClient?.();
+		await Promise.race([extensionAttachment.ready, shutdownStarted.promise]);
+		if (shuttingDown) {
+			detachExtensions();
+			return;
+		}
 		await notifySessionChanged();
 
 		unsubscribeBackpressure?.();
@@ -1562,6 +1590,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		};
 
 		await captureCleanupError(restoreRebindSession);
+		await captureCleanupError(detachExtensions);
 		await captureCleanupError(stopModelCatalogWatcher);
 		await captureCleanupError(cancelPendingExtensionRequests);
 		await captureCleanupError(detachHostActionBridge);
@@ -1612,6 +1641,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 			}
 		}
 		stopModelCatalogWatcher();
+		// Extension UI, errors, and session actions go to the remaining clients from here on.
+		detachExtensions();
+		shutdownStarted.resolve();
 		cancelPendingExtensionRequests();
 		detachHostActionBridge();
 		retireReviewWorkflowSink();
@@ -1740,15 +1772,18 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		const command = parsed as RpcCommand;
 		let response: RpcResponse | undefined;
 		try {
-			response = isRpcSessionInterruptionCommand(command)
-				? await runtimeHost.runSessionInterruption((interruptionSession) => {
-						assertConversationAuthority(command, interruptionSession);
-						return handleRpcCommand(command, createRpcCommandContext(command, interruptionSession));
-					})
-				: await runtimeHost.runWithStableSession((stableSession) => {
-						assertConversationAuthority(command, stableSession);
-						return handleRpcCommand(command, createRpcCommandContext(command, stableSession));
-					});
+			// Extension actions the command reaches go to this client.
+			response = await ClientScope.run(extensionClientId, () =>
+				isRpcSessionInterruptionCommand(command)
+					? runtimeHost.runSessionInterruption((interruptionSession) => {
+							assertConversationAuthority(command, interruptionSession);
+							return handleRpcCommand(command, createRpcCommandContext(command, interruptionSession));
+						})
+					: runtimeHost.runWithStableSession((stableSession) => {
+							assertConversationAuthority(command, stableSession);
+							return handleRpcCommand(command, createRpcCommandContext(command, stableSession));
+						}),
+			);
 		} catch (commandError: unknown) {
 			const target = getRpcErrorResponseTarget(command);
 			output(createRpcErrorResponse(target.id, target.command, toError(commandError).message, commandError));

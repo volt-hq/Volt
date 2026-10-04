@@ -58,7 +58,10 @@ describe("PR #329 finalizer error contract", () => {
 		const startupError = new Error("injected local RPC startup failure");
 		const fixture = createHarnessRuntimeFactory({
 			onHarness: (harness) => {
-				vi.spyOn(harness.session, "bindExtensions").mockRejectedValue(startupError);
+				vi.spyOn(harness.session, "attachExtensionClient").mockImplementation(() => ({
+					ready: Promise.reject(startupError),
+					detach: () => {},
+				}));
 			},
 		});
 		const manager = new SubagentManager({
@@ -128,7 +131,10 @@ describe("PR #329 finalizer error contract", () => {
 		const harness = await createHarness();
 		const startupError = new Error("injected RPC bind failure");
 		const cleanupError = new Error("injected RPC runtime disposal failure");
-		vi.spyOn(harness.session, "bindExtensions").mockRejectedValue(startupError);
+		vi.spyOn(harness.session, "attachExtensionClient").mockImplementation(() => ({
+			ready: Promise.reject(startupError),
+			detach: () => {},
+		}));
 		const createRuntime: CreateAgentSessionRuntimeFactory = async ({ cwd, agentDir }) => {
 			const services = createServices(harness, cwd, agentDir);
 			return {

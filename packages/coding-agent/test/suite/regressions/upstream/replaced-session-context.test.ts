@@ -101,7 +101,9 @@ describe("regression #2860: replaced session callbacks", () => {
 
 		const rebindSession = async (): Promise<void> => {
 			const session = runtime.session;
-			await session.bindExtensions({
+			await session.attachExtensionClient({
+				id: "test",
+				mode: "print",
 				commandContextActions: {
 					waitForIdle: () => session.waitForIdle(),
 					newSession: async (options) => runtime.newSession(options),
@@ -123,7 +125,7 @@ describe("regression #2860: replaced session callbacks", () => {
 						await session.reload();
 					},
 				},
-			});
+			}).ready;
 		};
 
 		runtime.setRebindSession(async () => {

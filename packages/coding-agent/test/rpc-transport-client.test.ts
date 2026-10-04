@@ -5,7 +5,7 @@ import { join } from "node:path";
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, fauxAssistantMessage, type Model, type ThinkingLevelMap } from "@hansjm10/volt-ai";
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSession, AgentSessionEvent, ExtensionBindings, PromptOptions } from "../src/core/agent-session.ts";
+import type { AgentSession, AgentSessionEvent, PromptOptions } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ResolvedCommand } from "../src/core/extensions/types.ts";
@@ -46,6 +46,7 @@ import {
 	type RpcTransport,
 	type RpcUiActionStateChangedEvent,
 } from "../src/core/rpc/index.ts";
+import type { ExtensionClient } from "../src/core/session/extension-binding.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import type { Skill } from "../src/core/skills.ts";
 import type { SourceInfo } from "../src/core/source-info.ts";
@@ -845,8 +846,8 @@ describe("runRpcMode", () => {
 				}
 			});
 		});
-		const runtimeHost = createRuntimeHost(dispose, async (bindings) => {
-			const uiContext = bindings.uiContext;
+		const runtimeHost = createRuntimeHost(dispose, async (client) => {
+			const uiContext = client.ui;
 			if (!uiContext) {
 				throw new Error("UI context was not bound");
 			}
@@ -981,8 +982,8 @@ describe("runRpcMode", () => {
 				}
 			});
 		});
-		const runtimeHost = createRuntimeHost(dispose, async (bindings) => {
-			const uiContext = bindings.uiContext;
+		const runtimeHost = createRuntimeHost(dispose, async (client) => {
+			const uiContext = client.ui;
 			if (!uiContext) {
 				throw new Error("UI context was not bound");
 			}
@@ -2250,11 +2251,11 @@ describe("createInProcessRpcClient", () => {
 	});
 
 	test("sends extension UI responses from in-process clients", async () => {
-		let uiContext: ExtensionBindings["uiContext"];
+		let uiContext: ExtensionClient["ui"];
 		const runtimeHost = createRuntimeHost(
 			vi.fn(async () => {}),
-			async (bindings) => {
-				uiContext = bindings.uiContext;
+			async (client) => {
+				uiContext = client.ui;
 			},
 		);
 		const client = await createInProcessRpcClient(runtimeHost);
@@ -2292,8 +2293,8 @@ describe("createInProcessRpcClient", () => {
 	test("handles extension UI requests emitted while binding startup extensions", async () => {
 		const responsePromises: Promise<void>[] = [];
 		const dispose = vi.fn(async () => {});
-		const runtimeHost = createRuntimeHost(dispose, async (bindings) => {
-			const uiContext = bindings.uiContext;
+		const runtimeHost = createRuntimeHost(dispose, async (client) => {
+			const uiContext = client.ui;
 			if (!uiContext) {
 				throw new Error("UI context was not bound");
 			}
@@ -2433,7 +2434,7 @@ function parseCommandLine(line: string): { id: string; type: string } {
 
 function createRuntimeHost(
 	dispose: () => Promise<void>,
-	bindExtensions: (bindings: ExtensionBindings) => Promise<void> = async () => {},
+	attachExtensions: (client: ExtensionClient) => Promise<void> = async () => {},
 	resources: {
 		abort?: () => Promise<void>;
 		agentDir?: string;
@@ -2502,7 +2503,10 @@ function createRuntimeHost(
 		},
 		session: {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(bindExtensions),
+			attachExtensionClient: vi.fn((client: ExtensionClient) => ({
+				ready: attachExtensions(client),
+				detach: () => {},
+			})),
 			gitContextProvider: {
 				getSnapshot: () => null,
 				retainObservation: () => () => undefined,

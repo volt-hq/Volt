@@ -39,9 +39,10 @@ describe("InteractiveMode extension settlement", () => {
 		const sessionWaitForIdle = vi.fn(async () => undefined);
 		const session = {
 			isBusy: true,
-			bindExtensions: vi.fn(
-				async (_options: { commandContextActions: { waitForIdle(): Promise<void> } }) => undefined,
-			),
+			attachExtensionClient: vi.fn((_options: { commandContextActions: { waitForIdle(): Promise<void> } }) => ({
+				ready: Promise.resolve(),
+				detach: () => {},
+			})),
 			extensionRunner: {},
 			resourceLoader: { getThemes: () => ({ themes: [] }) },
 			waitForIdle: sessionWaitForIdle,
@@ -56,13 +57,13 @@ describe("InteractiveMode extension settlement", () => {
 			shutdownRequested: false,
 			shutdown: vi.fn(async () => undefined),
 		};
-		const bindCurrentSessionExtensions = Reflect.get(InteractiveMode.prototype, "bindCurrentSessionExtensions") as (
+		const attachSessionExtensions = Reflect.get(InteractiveMode.prototype, "attachSessionExtensions") as (
 			this: typeof fakeThis,
 			currentSession: typeof session,
 		) => Promise<void>;
 
-		await bindCurrentSessionExtensions.call(fakeThis, session);
-		const options = session.bindExtensions.mock.calls[0]?.[0] as {
+		await attachSessionExtensions.call(fakeThis, session);
+		const options = session.attachExtensionClient.mock.calls[0]?.[0] as {
 			commandContextActions: { waitForIdle(): Promise<void> };
 			shutdownHandler(): void;
 		};

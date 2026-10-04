@@ -389,7 +389,7 @@ it("invokes compaction actions through RPC with durable replies and shared state
 		...session,
 		backgroundJobs,
 		sessionId: "session",
-		bindExtensions: async () => {},
+		attachExtensionClient: () => ({ ready: Promise.resolve(), detach: () => {} }),
 		subscribe: () => () => {},
 		subscribeRuntimeEvents: () => () => {},
 		extensionRunner: { getRegisteredCommands: () => [] },

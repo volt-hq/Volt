@@ -95,7 +95,7 @@ async function createRuntimeFixture(options: { persisted?: boolean } = {}): Prom
 		sessionManager: initialManager,
 	});
 	runtimes.push(runtime);
-	await runtime.session.bindExtensions({});
+	await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 	return { runtime, cwd, sessionDir, root, modelProvider: model.provider, modelId: model.id };
 }
 

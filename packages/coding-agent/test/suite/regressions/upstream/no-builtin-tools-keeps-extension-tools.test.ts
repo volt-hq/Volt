@@ -68,7 +68,7 @@ describe("regression #3592: no-builtin-tools keeps extension tools enabled", () 
 			noTools: options?.noTools,
 			tools: options?.tools,
 		});
-		await session.bindExtensions({});
+		await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		return session;
 	}
 

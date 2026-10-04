@@ -259,7 +259,7 @@ export default function (volt) {
 				]),
 			);
 
-			await runtime.session.bindExtensions({});
+			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 			expect(runtime.session.getAllTools().map((tool) => tool.name)).toContain("remote_dynamic_tool");
 			expect(runtime.session.getActiveToolNames()).toEqual(expect.arrayContaining(["remote_dynamic_tool"]));
@@ -378,7 +378,7 @@ export default function (volt) {
 		let runtime: Awaited<ReturnType<typeof createIrohRemoteAgentRuntime>> | undefined;
 		try {
 			runtime = await createIrohRemoteAgentRuntime({ agentDir, allowTools: "read", cwd });
-			await runtime.session.bindExtensions({});
+			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 			expect(
 				runtime.session
@@ -407,7 +407,7 @@ export default function (volt) {
 				cwd,
 				toolPolicy: { tools: [], allowUnlistedExtensionTools: false },
 			});
-			await runtime.session.bindExtensions({});
+			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 			expect(runtime.session.getAllTools()).toEqual([]);
 			expect(runtime.session.getActiveToolNames()).toEqual([]);

@@ -15,12 +15,12 @@ import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 function createSession() {
 	return {
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		bindExtensions: vi.fn(
-			async (_options: {
-				uiContext: ExtensionUIContext;
+		attachExtensionClient: vi.fn(
+			(_options: {
+				ui: ExtensionUIContext;
 				mode: string;
 				commandContextActions: { waitForIdle(): Promise<void> };
-			}) => undefined,
+			}) => ({ ready: Promise.resolve(), detach: () => {} }),
 		),
 		subscribe: vi.fn(() => () => undefined),
 		activeToolExecutions: new Map(),
@@ -77,10 +77,10 @@ describe("rpc-mode extension theme facade", () => {
 		});
 		const modePromise = runRpcMode(runtimeHost, { transport: createFakeTransport(), onReady: resolveReady });
 		await ready;
-		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalled());
+		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalled());
 
-		const bindOptions = session.bindExtensions.mock.calls[0]?.[0];
-		const uiContext = bindOptions?.uiContext as ExtensionUIContext;
+		const bindOptions = session.attachExtensionClient.mock.calls[0]?.[0];
+		const uiContext = bindOptions?.ui as ExtensionUIContext;
 		expect(bindOptions?.mode).toBe("rpc");
 		await bindOptions?.commandContextActions.waitForIdle();
 		expect(session.waitForIdle).toHaveBeenCalledOnce();

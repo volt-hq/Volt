@@ -92,8 +92,10 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		cleanups.push(() => runtime.dispose().catch(() => undefined));
 		const shutdown = vi.fn();
 		runtime.setRebindSession(async (session) => {
-			await session.bindExtensions({
-				uiContext: uiOverrides ? { ...session.extensionRunner.getUIContext(), ...uiOverrides } : undefined,
+			await session.attachExtensionClient({
+				id: "test",
+				mode: "print",
+				...(uiOverrides ? { ui: { ...session.extensionRunner.getUIContext(), ...uiOverrides } } : {}),
 				shutdownHandler: shutdown,
 				onError: (error) => errors.push(error),
 				commandContextActions: {
@@ -104,7 +106,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 					navigateTree: (targetId, options) => session.navigateTree(targetId, options),
 					reload: () => session.reload(),
 				},
-			});
+			}).ready;
 		});
 		await runtime.getRebindSession()?.(runtime.session);
 		return { runtime, harness, lifecycle, resources, errors, shutdown, eventBus };

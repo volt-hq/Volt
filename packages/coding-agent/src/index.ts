@@ -666,6 +666,7 @@ export {
 	type SubagentRuntimeContext,
 } from "./core/sdk.ts";
 export { QueueClearPersistenceError } from "./core/session/client-inputs.ts";
+export type { ExtensionClient } from "./core/session/extension-binding.ts";
 export {
 	assertCurrentSessionSnapshot,
 	type BranchSummaryEntry,

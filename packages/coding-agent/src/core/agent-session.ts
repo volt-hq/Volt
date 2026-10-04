@@ -34,21 +34,17 @@ import { cloneCanonicalData } from "./canonical-data.ts";
 import type { CompactionResult } from "./compaction/index.ts";
 import type {
 	ContextUsage,
-	ExtensionCommandContextActions,
-	ExtensionErrorListener,
-	ExtensionMode,
 	ExtensionRunner,
-	ExtensionUIContext,
 	InputSource,
 	ReplacedSessionContext,
 	SessionStartEvent,
-	ShutdownHandler,
 	ToolDefinition,
 	ToolInfo,
 } from "./extensions/index.ts";
 import type { PolicyRegistration } from "./extensions/policy-registration.ts";
 import type { ExtensionWorkLimits } from "./extensions/work-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
+import { ClientScope } from "./host/client-scope.ts";
 import type { HostInteraction } from "./host-interaction.ts";
 import type { LspServerStatus } from "./lsp/manager.ts";
 import type { LspServerPool } from "./lsp/server-pool.ts";
@@ -67,7 +63,11 @@ import { SessionBash } from "./session/bash.ts";
 import { SessionClientInputs } from "./session/client-inputs.ts";
 import { SessionCompaction } from "./session/compaction.ts";
 import { SessionEvents } from "./session/events.ts";
-import { SessionExtensionBinding } from "./session/extension-binding.ts";
+import {
+	type ExtensionClient,
+	type ExtensionClientAttachment,
+	SessionExtensionBinding,
+} from "./session/extension-binding.ts";
 import { SessionExtensionWork } from "./session/extension-work.ts";
 import { SessionLifecycle } from "./session/lifecycle.ts";
 import { type DefaultPersistenceOptions, ModelSettings } from "./session/model-settings.ts";
@@ -302,15 +302,6 @@ export interface AgentSessionState {
 	readonly pendingToolCalls: ReadonlySet<string>;
 	readonly pendingToolExecutions: ReadonlyMap<string, PendingToolExecution>;
 	readonly errorMessage: string | undefined;
-}
-
-export interface ExtensionBindings {
-	uiContext?: ExtensionUIContext;
-	mode?: ExtensionMode;
-	commandContextActions?: ExtensionCommandContextActions;
-	abortHandler?: () => void;
-	shutdownHandler?: ShutdownHandler;
-	onError?: ExtensionErrorListener;
 }
 
 /** Options for AgentSession.prompt() */
@@ -1280,7 +1271,7 @@ export class AgentSession {
 				this._events.clearStreamingState();
 				this._clientInputs.handBackQueue();
 			},
-			releaseExtensionErrorListener: () => this._extensions.releaseErrorListener(),
+			releaseExtensionClients: () => this._extensions.releaseClients(),
 			closeBackgroundJobs: () => this._backgroundJobs.close(),
 			settleLiveClientInputs: () => this._clientInputs.settleOnDisposal(),
 			stopToolServers: () => this._tools.stopServers(),
@@ -2025,12 +2016,26 @@ export class AgentSession {
 		return this.settingsManager.getCompactionEnabled();
 	}
 
-	bindExtensions(bindings: ExtensionBindings): Promise<void> {
-		return this._trackAdmittedAncillaryWork(this._extensions.bind(bindings));
+	/**
+	 * Attach a client to the session's extensions. The first client to attach
+	 * binds them: its mode becomes `ctx.mode` and `session_start` fires once.
+	 * Later clients add their surface: UI calls go to the last attached client
+	 * with a UI, errors go to every client, and session actions go to the client
+	 * the call runs for (see `ClientScope`), or to the oldest attached client
+	 * outside any client scope. `ready` settles once the extensions are bound.
+	 */
+	attachExtensionClient(client: ExtensionClient): ExtensionClientAttachment {
+		// Binding runs session_start handlers and schedules background work; none of it belongs to the attaching client.
+		return ClientScope.exit(() => {
+			const attachment = this._extensions.attach(client);
+			void this._trackAdmittedAncillaryWork(attachment.ready);
+			return attachment;
+		});
 	}
 
 	reload(): Promise<void> {
-		return this._trackAdmittedAncillaryWork(this._extensions.reload());
+		// The reloaded extensions' session_start belongs to no client, whoever asked for the reload.
+		return ClientScope.exit(() => this._trackAdmittedAncillaryWork(this._extensions.reload()));
 	}
 
 	// =========================================================================

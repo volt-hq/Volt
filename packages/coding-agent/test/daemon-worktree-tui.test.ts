@@ -591,7 +591,7 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 				? {}
 				: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),
 		});
-		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalledOnce());
+		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalledOnce());
 		expect(parseWrittenObjects(send)[0]).toMatchObject({
 			type: "conversation_bootstrap",
 			delivery: { cursor: 0 },

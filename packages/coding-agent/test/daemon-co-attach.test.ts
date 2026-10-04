@@ -242,7 +242,7 @@ describe("daemon co-attach (one runtime per conversation)", () => {
 
 		// Serve both phones from the same runtime.
 		const modeA = await startIrohRpcMode(runtimeHost, fanout.session);
-		fanout.session.bindExtensions.mockClear();
+		fanout.session.attachExtensionClient.mockClear();
 		const modeB = await startIrohRpcMode(runtimeHost, fanout.session);
 
 		// A session event fans out to both streams.

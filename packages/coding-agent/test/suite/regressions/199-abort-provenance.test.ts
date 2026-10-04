@@ -340,7 +340,7 @@ describe("regression #199: abort provenance persistence", () => {
 		const finishResponse = deferred();
 		const harness = await createHarness();
 		harnesses.push(harness);
-		await harness.session.bindExtensions({ mode: "rpc" });
+		await harness.session.attachExtensionClient({ id: "rpc-client", mode: "rpc" }).ready;
 		harness.setResponses([
 			async () => {
 				responseStarted.resolve();

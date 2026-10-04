@@ -21,7 +21,7 @@ type TestAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	bindCurrentSessionExtensions(session: AgentSession): Promise<void>;
+	attachSessionExtensions(session: AgentSession): Promise<void>;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	registerSignalHandlers(): void;
@@ -85,7 +85,7 @@ async function fixture() {
 	access.activateView(access.conversationView, access.editor, false);
 	access.isInitialized = true;
 	access.ui.start();
-	await access.bindCurrentSessionExtensions(harness.session);
+	await access.attachSessionExtensions(harness.session);
 	access.subscribeToAgent(harness.session);
 	// Never let the fatal exit reach the real process.exit.
 	const handleFatalRuntimeError = vi.fn(async (_prefix: string, _error: unknown, _options?: FatalOptions) => {});

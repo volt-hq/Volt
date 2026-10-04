@@ -44,7 +44,7 @@ describe("host theme token push (§9.5)", () => {
 	test("rpc mode reports set_client_capabilities feature lists to the host", async () => {
 		const session = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => undefined),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => () => undefined),
 			activeToolExecutions: new Map(),
 			subscribeRuntimeEvents: vi.fn(() => () => undefined),

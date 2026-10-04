@@ -87,8 +87,8 @@ export interface SessionLifecycleHost {
 	 * asynchronous close barrier: from here on it is disposed.
 	 */
 	fence(): void;
-	/** Stop forwarding extension errors to the listener the host bound. */
-	releaseExtensionErrorListener(): void;
+	/** Detach the extension clients: errors, UI, and session actions stop reaching them. */
+	releaseExtensionClients(): void;
 	/** Close the background jobs; resolves once they drained. */
 	closeBackgroundJobs(): Promise<void>;
 	/** Settle the client inputs this runtime admitted once the conversation stopped. */
@@ -242,9 +242,9 @@ export class SessionLifecycle {
 		runner.invalidate(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured volt or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);
-		// The listener may be wired to a live RPC transport. Fence it before any
+		// The clients may be wired to a live RPC transport. Fence them before any
 		// asynchronous disposal barrier can yield to a replacement generation.
-		this.host.releaseExtensionErrorListener();
+		this.host.releaseExtensionClients();
 		const ref = this.host.extensionRunnerRef();
 		if (ref?.current === runner) {
 			ref.current = undefined;

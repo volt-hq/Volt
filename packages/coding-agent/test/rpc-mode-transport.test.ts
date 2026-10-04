@@ -43,7 +43,7 @@ function createRuntimeHost(): { runtimeHost: AgentSessionRuntime; dispose: Retur
 	const runtimeHost = {
 		session: {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			sessionId,
 			sessionManager: {
 				getClientInput: vi.fn(() => undefined),
@@ -77,7 +77,7 @@ function createStateSession(sessionId: string, gitContext: RpcGitContext | null 
 		activeCompaction: undefined,
 		autoCompactionEnabled: true,
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		bindExtensions: vi.fn(async () => {}),
+		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		followUpMode: "one-at-a-time" as const,
 		gitContextProvider: {
 			getSnapshot: vi.fn(() => gitContext),
@@ -105,7 +105,7 @@ function createPayloadValidationSession() {
 	return {
 		subscribeRuntimeEvents: vi.fn(() => () => {}),
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		bindExtensions: vi.fn(async () => {}),
+		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		executeBash: vi.fn(async () => ({ cancelled: false, exitCode: 0, output: "" })),
 		followUp: vi.fn(async () => {}),
 		prompt: vi.fn(async () => {}),
@@ -212,7 +212,7 @@ describe("RPC mode caller-provided transports", () => {
 		};
 		const makeSession = (sessionId: string) => ({
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => detachSession),
 			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			sessionFile: `/sessions/${sessionId}.jsonl`,
@@ -677,7 +677,7 @@ describe("RPC mode caller-provided transports", () => {
 		};
 		const currentSession = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => detachSession),
 			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			sessionId: "session-1",
@@ -812,7 +812,7 @@ describe("RPC mode caller-provided transports", () => {
 		const detachBackpressure = vi.fn();
 		const currentSession = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => detachSession),
 			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			sessionId: "session-1",
@@ -990,7 +990,7 @@ describe("RPC mode caller-provided transports", () => {
 		let hostInteraction: HostInteraction | undefined;
 		const currentSession = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => () => {}),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
 			sessionId: "session-1",
@@ -1120,7 +1120,7 @@ describe("RPC mode caller-provided transports", () => {
 		const runtimeHost = {
 			session: {
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-				bindExtensions: vi.fn(async () => {}),
+				attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 				subscribe: vi.fn(() => () => {}),
 				subscribeRuntimeEvents: vi.fn(() => () => {}),
 				sessionId: "session-1",
@@ -1317,7 +1317,7 @@ describe("RPC mode caller-provided transports", () => {
 		});
 		const currentSession = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => detachSession),
 			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			sessionId: sessionManager.getSessionId(),
@@ -1396,7 +1396,7 @@ describe("RPC mode caller-provided transports", () => {
 		};
 		const makeSession = (sessionId: string) => ({
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => detachSession),
 			subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			sessionId,
@@ -1558,7 +1558,7 @@ describe("RPC mode caller-provided transports", () => {
 		const runtimeHost = {
 			session: {
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-				bindExtensions: vi.fn(async () => {}),
+				attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 				subscribe: vi.fn((handler: (event: object) => void) => {
 					sessionEventHandler = handler;
 					return detachSession;
@@ -1593,7 +1593,7 @@ describe("RPC mode caller-provided transports", () => {
 
 	test("does not subscribe after startup close interrupts extension binding", async () => {
 		let closeHandler: RpcCloseHandler | undefined;
-		let resolveBindExtensions: (() => void) | undefined;
+		let resolveAttach: (() => void) | undefined;
 		const detachInput = vi.fn();
 		const detachClose = vi.fn();
 		const transportClose = vi.fn(async () => {});
@@ -1614,12 +1614,12 @@ describe("RPC mode caller-provided transports", () => {
 		const runtimeHost = {
 			session: {
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-				bindExtensions: vi.fn(
-					() =>
-						new Promise<void>((resolve) => {
-							resolveBindExtensions = resolve;
-						}),
-				),
+				attachExtensionClient: vi.fn(() => ({
+					ready: new Promise<void>((resolve) => {
+						resolveAttach = resolve;
+					}),
+					detach: () => {},
+				})),
 				subscribe,
 				subscribeRuntimeEvents: runtimeEventSubscribe,
 			},
@@ -1631,15 +1631,17 @@ describe("RPC mode caller-provided transports", () => {
 		} as unknown as AgentSessionRuntime;
 
 		const modePromise = runRpcMode(runtimeHost, { transport });
+		// Startup ends as soon as the transport closes, without waiting for the pending bind.
+		void modePromise.catch(() => {});
 		await vi.waitFor(() => {
 			expect(closeHandler).toBeDefined();
-			expect(runtimeHost.session.bindExtensions).toHaveBeenCalledOnce();
+			expect(runtimeHost.session.attachExtensionClient).toHaveBeenCalledOnce();
 		});
 
 		closeHandler?.();
 		await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
-		expect(resolveBindExtensions).toBeDefined();
-		resolveBindExtensions?.();
+		expect(resolveAttach).toBeDefined();
+		resolveAttach?.();
 
 		await expect(modePromise).rejects.toThrow("RPC transport closed during startup");
 		expect(subscribe).not.toHaveBeenCalled();
@@ -1673,9 +1675,9 @@ describe("RPC mode caller-provided transports", () => {
 		const runtimeHost = {
 			session: {
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-				bindExtensions: vi.fn(async (options: { uiContext: ExtensionUIContext }) => {
-					uiContext = options.uiContext;
-					throw startupError;
+				attachExtensionClient: vi.fn((options: { ui: ExtensionUIContext }) => {
+					uiContext = options.ui;
+					return { ready: Promise.reject(startupError), detach: () => {} };
 				}),
 				subscribe: vi.fn(() => () => {}),
 				subscribeRuntimeEvents: vi.fn(() => () => {}),
@@ -1714,7 +1716,7 @@ describe("RPC mode caller-provided transports", () => {
 		const runtimeHost = {
 			session: {
 				backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-				bindExtensions: vi.fn(async () => {}),
+				attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 				subscribe: vi.fn(() => detachSession),
 				subscribeRuntimeEvents: vi.fn(() => detachBackpressure),
 			},
