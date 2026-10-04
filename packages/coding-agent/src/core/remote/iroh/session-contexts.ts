@@ -1,11 +1,11 @@
-import { type RpcGitContext, RpcSessionContextSchema, type RpcSessionWorkContext } from "@hansjm10/volt-protocol";
+import { type RpcGitContext, type RpcSessionChangeContext, RpcSessionContextSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { SessionManager } from "../../session-manager.ts";
 
 export interface IrohRemoteSessionContext {
 	sessionId: string;
 	startingGitContext: RpcGitContext | null;
-	workContext: RpcSessionWorkContext | null;
+	changeContext: RpcSessionChangeContext | null;
 }
 
 export interface IrohRemoteSessionContextsRpcBackend {
@@ -16,7 +16,7 @@ export function createIrohRemoteSessionContextsRpcBackend(options: {
 	workspaceName: string;
 	sessionDirectory: string;
 	getLiveStartingGitContext(sessionId: string): RpcGitContext | null | undefined;
-	getWorkContext(sessionId: string): RpcSessionWorkContext | undefined;
+	getChangeContext(sessionId: string): RpcSessionChangeContext | undefined;
 }): IrohRemoteSessionContextsRpcBackend {
 	return {
 		getSessionContexts: async (workspaceName, sessionIds) => {
@@ -40,7 +40,7 @@ export function createIrohRemoteSessionContextsRpcBackend(options: {
 			return sessionIds.map((sessionId) => ({
 				sessionId,
 				startingGitContext: liveContexts.get(sessionId) ?? persistedContexts.get(sessionId) ?? null,
-				workContext: options.getWorkContext(sessionId) ?? null,
+				changeContext: options.getChangeContext(sessionId) ?? null,
 			}));
 		},
 	};

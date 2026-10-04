@@ -37,7 +37,7 @@ import { type CommittedSessionEntry, type FileEntry, SessionManager } from "../.
 import type { Settings } from "../../src/core/settings-manager.ts";
 import { SettingsManager } from "../../src/core/settings-manager.ts";
 import type { SubagentToolManager } from "../../src/core/tools/subagent.ts";
-import type { ExtensionFactory, ExtensionWorkLimits, ResourceLoader } from "../../src/index.ts";
+import type { ExtensionFactory, ExtensionServicesLimits, ResourceLoader } from "../../src/index.ts";
 import { createAgentSessionTestControl } from "../agent-session-test-control.ts";
 import { FaultyConversationLog, injectFaultyLog } from "../utilities/faulty-log.ts";
 import { type SeedLogBuild, type SeedModel, seedLog } from "../utilities/seed-log.ts";
@@ -84,7 +84,7 @@ export interface HarnessOptions {
 	tokensPerSecond?: number;
 	models?: FauxModelDefinition[];
 	settings?: Partial<Settings>;
-	extensionWorkLimits?: Partial<ExtensionWorkLimits>;
+	extensionServicesLimits?: Partial<ExtensionServicesLimits>;
 	systemPrompt?: string;
 	tools?: AgentTool[];
 	initialActiveToolNames?: string[];
@@ -240,7 +240,7 @@ export async function createHarness(options: HarnessOptions = {}): Promise<Harne
 		...(options.refreshPromptCache === undefined ? {} : { promptCacheRefresh: modelRegistry.client }),
 		convertToLlm,
 		settingsManager,
-		extensionWorkLimits: options.extensionWorkLimits,
+		extensionServicesLimits: options.extensionServicesLimits,
 		cwd: tempDir,
 		...(options.projectCwd === undefined ? {} : { projectCwd: options.projectCwd }),
 		agentDir: options.agentDir ?? tempDir,

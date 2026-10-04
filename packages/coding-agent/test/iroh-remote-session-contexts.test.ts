@@ -5,7 +5,7 @@ import {
 	REMOTE_CAPABILITIES,
 	type RemoteCapability,
 	type RpcGitContext,
-	type RpcSessionWorkContext,
+	type RpcSessionChangeContext,
 } from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
@@ -66,7 +66,7 @@ const gitContext: RpcGitContext = {
 	stale: false,
 };
 
-const workContext: RpcSessionWorkContext = {
+const changeContext: RpcSessionChangeContext = {
 	changeId: "change-a",
 	repository: "Volt",
 	branch: "feature/work",
@@ -79,7 +79,7 @@ function backend(): IrohRemoteSessionContextsRpcBackend {
 			sessionIds.map((sessionId, index) => ({
 				sessionId,
 				startingGitContext: index === 0 ? gitContext : null,
-				workContext: index === 0 ? workContext : null,
+				changeContext: index === 0 ? changeContext : null,
 			})),
 	};
 }
@@ -155,8 +155,8 @@ describe("session_contexts workspace discovery", () => {
 			type: "result",
 			data: {
 				contexts: [
-					{ sessionId: "session-a", startingGitContext: gitContext, workContext },
-					{ sessionId: "session-b", startingGitContext: null, workContext: null },
+					{ sessionId: "session-a", startingGitContext: gitContext, changeContext },
+					{ sessionId: "session-b", startingGitContext: null, changeContext: null },
 				],
 			},
 		});
@@ -190,7 +190,7 @@ describe("session_contexts workspace discovery", () => {
 				{
 					sessionId: "session-a",
 					startingGitContext: { ...gitContext, repository: WORKSPACE_PATH },
-					workContext: { ...workContext, repository: WORKSPACE_PATH },
+					changeContext: { ...changeContext, repository: WORKSPACE_PATH },
 				},
 			],
 		});
@@ -202,7 +202,7 @@ describe("session_contexts workspace discovery", () => {
 					{
 						sessionId: "session-a",
 						startingGitContext: { repository: "/workspace" },
-						workContext: { repository: "/workspace" },
+						changeContext: { repository: "/workspace" },
 					},
 				],
 			},
@@ -213,8 +213,8 @@ describe("session_contexts workspace discovery", () => {
 	test("contains malformed or reordered backend output", async () => {
 		const { device } = await phone({
 			getSessionContexts: async () => [
-				{ sessionId: "session-b", startingGitContext: null, workContext: null },
-				{ sessionId: "session-a", startingGitContext: null, workContext: null },
+				{ sessionId: "session-b", startingGitContext: null, changeContext: null },
+				{ sessionId: "session-a", startingGitContext: null, changeContext: null },
 			],
 		});
 		expect(await device.query("session_contexts", { sessionIds: ["session-a", "session-b"] })).toMatchObject({
@@ -235,18 +235,18 @@ describe("session_contexts workspace discovery", () => {
 			workspaceName: "volt",
 			sessionDirectory: directory,
 			getLiveStartingGitContext: (sessionId) => (sessionId === "session-live" ? gitContext : undefined),
-			getWorkContext: (sessionId) => {
+			getChangeContext: (sessionId) => {
 				workLookups.push(sessionId);
-				return sessionId === persistedId ? workContext : undefined;
+				return sessionId === persistedId ? changeContext : undefined;
 			},
 		});
 
 		await expect(
 			sessionBackend.getSessionContexts("volt", ["session-live", persistedId, "session-missing"]),
 		).resolves.toEqual([
-			{ sessionId: "session-live", startingGitContext: gitContext, workContext: null },
-			{ sessionId: persistedId, startingGitContext: gitContext, workContext },
-			{ sessionId: "session-missing", startingGitContext: null, workContext: null },
+			{ sessionId: "session-live", startingGitContext: gitContext, changeContext: null },
+			{ sessionId: persistedId, startingGitContext: gitContext, changeContext },
+			{ sessionId: "session-missing", startingGitContext: null, changeContext: null },
 		]);
 		expect(workLookups).toEqual(["session-live", persistedId, "session-missing"]);
 		expect(listSpy).not.toHaveBeenCalled();

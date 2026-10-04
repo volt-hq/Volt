@@ -26,7 +26,7 @@ import type { BranchSummaryEntry, SessionEntry, SessionManager } from "../sessio
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import { withInferenceSpeed } from "./compaction.ts";
-import type { SessionExtensionWork } from "./extension-work.ts";
+import type { SessionExtensionServices } from "./extension-services.ts";
 import type { ModelSettings } from "./model-settings.ts";
 import type { SessionPlanning } from "./planning.ts";
 import { extractUserMessageText } from "./session-info.ts";
@@ -52,7 +52,7 @@ export interface SessionNavigationHost {
 	readonly backgroundJobs: BackgroundJobManager;
 	conversation(): Conversation<AgentTool>;
 	extensionRunner(): ExtensionRunner;
-	extensionWork(): SessionExtensionWork;
+	extensionServices(): SessionExtensionServices;
 	background(): SessionBackgroundContinuation;
 	planning(): SessionPlanning;
 	/** A turn holds the conversation, a prompt's reservation included. */
@@ -123,7 +123,7 @@ export class SessionNavigation {
 		if (this.host.hasSessionOperationBarrier()) {
 			return Promise.reject(new Error("Cannot navigate the session tree while another session mutation is active"));
 		}
-		this.host.extensionWork().invalidate();
+		this.host.extensionServices().invalidate();
 		return this.navigate(targetId, options).finally(() => this.host.background().schedule());
 	}
 

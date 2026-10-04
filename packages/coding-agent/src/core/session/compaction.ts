@@ -32,7 +32,7 @@ import {
 	type SummarizationRetryOptions,
 } from "../compaction/index.ts";
 import type { ExtensionRunner, SessionBeforeCompactResult } from "../extensions/index.ts";
-import { withoutExtensionWork } from "../extensions/work-runtime.ts";
+import { withoutExtensionServices } from "../extensions/services-runtime.ts";
 import { PLAN_CHECKPOINT_CUSTOM_TYPE } from "../planning.ts";
 import { getLatestCompactionEntry, type SessionEntry, type SessionManager } from "../session-manager.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -154,7 +154,7 @@ export class SessionCompaction {
 			sourceMessageCount: messages.length,
 			retainedMessageCount: retainedCount,
 			context: async (signal) => {
-				const transformed = await withoutExtensionWork(() =>
+				const transformed = await withoutExtensionServices(() =>
 					this.host.extensionRunner().emitContext(cloneCanonicalData([...messages], "Agent message delivery")),
 				);
 				signal.throwIfAborted();

@@ -273,7 +273,7 @@ describe("listRemoteWorkspaceSessions", () => {
 			["s-gone", "daemon-active"],
 		]);
 		const listRuntimeStates = vi.fn(() => runtimeStates);
-		const getWorkContext = vi.fn((_workspaceName: string, _generation: number, sessionId: string) =>
+		const getChangeContext = vi.fn((_workspaceName: string, _generation: number, sessionId: string) =>
 			sessionId === "s-sub"
 				? {
 						changeId: "change-1",
@@ -293,7 +293,7 @@ describe("listRemoteWorkspaceSessions", () => {
 					}
 				: undefined,
 		);
-		const host = { agentDir, stateManager: new IrohRemoteHostStateManager(), listRuntimeStates, getWorkContext };
+		const host = { agentDir, stateManager: new IrohRemoteHostStateManager(), listRuntimeStates, getChangeContext };
 
 		const sessions = await listRemoteWorkspaceSessions(
 			host,
@@ -309,22 +309,22 @@ describe("listRemoteWorkspaceSessions", () => {
 		expect(sessionsById.get("s-long")).not.toHaveProperty("runtimeState");
 		expect(sessionsById.has("s-gone")).toBe(false);
 
-		expect(getWorkContext).toHaveBeenCalledTimes(sessions.length);
-		for (const session of sessions) expect(getWorkContext).toHaveBeenCalledWith("ws", 7, session.sessionId);
-		expect(sessionsById.get("s-sub")?.workContext).toEqual({
+		expect(getChangeContext).toHaveBeenCalledTimes(sessions.length);
+		for (const session of sessions) expect(getChangeContext).toHaveBeenCalledWith("ws", 7, session.sessionId);
+		expect(sessionsById.get("s-sub")?.changeContext).toEqual({
 			changeId: "change-1",
 			repository: "Volt",
 			branch: "feature/work",
 			resolutionState: "resolved",
 			pullRequest: { provider: "github", number: 42, title: "Work", status: "open", stale: false },
 		});
-		expect(sessionsById.get("s-root")).not.toHaveProperty("workContext");
+		expect(sessionsById.get("s-root")).not.toHaveProperty("changeContext");
 
 		// Without the workspace's registration generation, no work association is looked up.
-		getWorkContext.mockClear();
+		getChangeContext.mockClear();
 		const withoutGeneration = await listRemoteWorkspaceSessions(host, authorizationFor(workspacePath));
-		expect(getWorkContext).not.toHaveBeenCalled();
-		expect(withoutGeneration.some((session) => session.workContext !== undefined)).toBe(false);
+		expect(getChangeContext).not.toHaveBeenCalled();
+		expect(withoutGeneration.some((session) => session.changeContext !== undefined)).toBe(false);
 	});
 
 	it("bounds session titles and first messages to 160 Unicode scalars", async () => {
@@ -1056,14 +1056,14 @@ describe("remote intent services over protocol frames", () => {
 		const context = (sessionId: string): IrohRemoteSessionContext => ({
 			sessionId,
 			startingGitContext: null,
-			workContext: null,
+			changeContext: null,
 		});
 		const answers: IrohRemoteSessionContext[][] = [
 			[context("s-a"), context("s-b")],
 			[context("s-b"), context("s-a")],
 			[context("s-a")],
 			[context("s-a"), context("s-b"), context("s-c")],
-			[context("s-a"), { ...context("s-b"), workContext: { changeId: "c" } as never }],
+			[context("s-a"), { ...context("s-b"), changeContext: { changeId: "c" } as never }],
 		];
 		const getSessionContexts = vi.fn<IrohRemoteSessionContextsRpcBackend["getSessionContexts"]>(async () => {
 			const next = answers.shift();

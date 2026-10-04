@@ -4,15 +4,15 @@ import type { RepositoryObservation } from "../tools/repository-observation.ts";
 import type {
 	ExtensionOperationEvent,
 	ExtensionOperationOrigin,
-	ExtensionWorkCause,
-	ExtensionWorkFailure,
-	ExtensionWorkLimits,
-	ExtensionWorkService,
-	ExtensionWorkSnapshot,
+	ExtensionServiceName,
+	ExtensionServicesCause,
+	ExtensionServicesFailure,
+	ExtensionServicesLimits,
+	ExtensionServicesSnapshot,
 	RequestBoundaryEvent,
-} from "./work-types.ts";
+} from "./services-types.ts";
 
-export interface ExtensionWorkCollection {
+export interface ExtensionServicesCollection {
 	readonly text: string;
 	readonly authorization: {
 		isCurrent(): boolean;
@@ -20,30 +20,30 @@ export interface ExtensionWorkCollection {
 	};
 }
 
-export interface ExtensionWorkExecution {
-	service: ExtensionWorkService;
+export interface ExtensionServicesExecution {
+	service: ExtensionServiceName;
 	input: JsonObject;
 	signal: AbortSignal;
 	origin: Extract<ExtensionOperationOrigin, { kind: "extension" }>;
 }
 
-export type ExtensionWorkExecutionResult =
-	| ExtensionWorkFailure
+export type ExtensionServicesExecutionResult =
+	| ExtensionServicesFailure
 	| { status: "ok"; observation: RepositoryObservation | ManagedLspObservation; implementation: object };
 
-export interface ExtensionWorkBoundary {
+export interface ExtensionServicesBoundary {
 	/** Stable identity of the most recent committed user-delivery batch, retained over retries. */
 	key: string;
 	attemptId: string;
-	cause: ExtensionWorkCause;
+	cause: ExtensionServicesCause;
 	allowNewWork: boolean;
-	snapshot: Omit<ExtensionWorkSnapshot, "scopeId" | "runtimeId">;
+	snapshot: Omit<ExtensionServicesSnapshot, "scopeId" | "runtimeId">;
 }
 
-export interface ExtensionWorkManagerOptions {
-	limits?: Partial<ExtensionWorkLimits>;
+export interface ExtensionServicesManagerOptions {
+	limits?: Partial<ExtensionServicesLimits>;
 	isCurrent(): boolean;
-	execute(request: ExtensionWorkExecution): Promise<ExtensionWorkExecutionResult>;
+	execute(request: ExtensionServicesExecution): Promise<ExtensionServicesExecutionResult>;
 	onBoundary(event: RequestBoundaryEvent): void;
 	onOperation(event: ExtensionOperationEvent): void;
 }

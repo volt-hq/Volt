@@ -566,7 +566,7 @@ function buildStatusQuery(chunk: readonly StatusChunkEntry[]): StatusQuery {
 		);
 	}
 	return {
-		query: `query WorkPullRequestStatuses(${declarations.join(",")}){ ${selections.join(" ")} }`,
+		query: `query ChangePullRequestStatuses(${declarations.join(",")}){ ${selections.join(" ")} }`,
 		variables,
 		aliases,
 	};

@@ -267,8 +267,8 @@ interface PhoneConnection {
 }
 
 const ALPN = Array.from(Buffer.from(IROH_REMOTE_ALPN, "utf8"));
-const WORK_OID_A = "0123456789abcdef0123456789abcdef01234567";
-const WORK_OID_B = "abcdef0123456789abcdef0123456789abcdef01";
+const CHANGE_OID_A = "0123456789abcdef0123456789abcdef01234567";
+const CHANGE_OID_B = "abcdef0123456789abcdef0123456789abcdef01";
 
 function createDeferred(): { promise: Promise<void>; resolve: () => void } {
 	let resolve = () => {};
@@ -1104,9 +1104,9 @@ describe("iroh daemon lifecycle ownership", () => {
 	});
 });
 
-describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () => {
+describe.skipIf(!nativeAvailable)("TUI change observation receipt revisions", () => {
 	it("keeps delayed positive and null receipts from invalidating a newer claim", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-work-revision-"));
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-change-revision-"));
 		const unresolvedWorkspaceDir = join(agentDir, "ws");
 		mkdirSync(join(unresolvedWorkspaceDir, ".git"), { recursive: true });
 		writeFileSync(join(unresolvedWorkspaceDir, ".git", "HEAD"), "ref: refs/heads/main\n");
@@ -1128,9 +1128,9 @@ describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () =
 		let tui: DaemonClient | undefined;
 		const daemon = runVoltDaemon({ agentDir, foreground: false }, [
 			(services) => {
-				getCurrentBranch = () => services.work.getWorkContext("ws", 1, sessionId)?.branch;
-				const retireSession = services.work.retireSession.bind(services.work);
-				services.work.retireSession = (workspaceName, workspaceGeneration, retiredSessionId) => {
+				getCurrentBranch = () => services.changes.getChangeContext("ws", 1, sessionId)?.branch;
+				const retireSession = services.changes.retireSession.bind(services.changes);
+				services.changes.retireSession = (workspaceName, workspaceGeneration, retiredSessionId) => {
 					if (workspaceName === "ws" && retiredSessionId === sessionId) retirementCount++;
 					return retireSession(workspaceName, workspaceGeneration, retiredSessionId);
 				};
@@ -1139,7 +1139,7 @@ describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () =
 			createIrohDaemonService(
 				{ relayMode: "disabled" },
 				{
-					beforeTuiWorkObservationValidation: async (request) => {
+					beforeTuiChangeObservationValidation: async (request) => {
 						if (request.gitContext?.branch === "feature/old") {
 							oldPositiveStarted = true;
 							await oldPositiveGate.promise;
@@ -1176,26 +1176,26 @@ describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () =
 			});
 
 			const oldPositive = tui.request({
-				type: "work_observe",
+				type: "change_observe",
 				workspaceName: "ws",
 				sessionId,
 				gitContext: {
 					repository: "Volt",
 					branch: "feature/old",
-					headOid: WORK_OID_A,
+					headOid: CHANGE_OID_A,
 				},
 			});
 			void oldPositive.catch(() => {});
 			await expect.poll(() => oldPositiveStarted).toBe(true);
 			expect(
 				await tui.request({
-					type: "work_observe",
+					type: "change_observe",
 					workspaceName: "ws",
 					sessionId,
 					gitContext: {
 						repository: "Volt",
 						branch: "feature/new",
-						headOid: WORK_OID_B,
+						headOid: CHANGE_OID_B,
 					},
 				}),
 			).toMatchObject({ type: "ok" });
@@ -1206,7 +1206,7 @@ describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () =
 			await expect.poll(getCurrentBranch).toBe("feature/new");
 
 			const oldNull = tui.request({
-				type: "work_observe",
+				type: "change_observe",
 				workspaceName: "ws",
 				sessionId,
 				gitContext: null,
@@ -1216,13 +1216,13 @@ describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () =
 			expect(retirementCount).toBe(1);
 			expect(
 				await tui.request({
-					type: "work_observe",
+					type: "change_observe",
 					workspaceName: "ws",
 					sessionId,
 					gitContext: {
 						repository: "Volt",
 						branch: "feature/replacement",
-						headOid: WORK_OID_A,
+						headOid: CHANGE_OID_A,
 					},
 				}),
 			).toMatchObject({ type: "ok" });
@@ -1688,7 +1688,7 @@ describe.skipIf(!nativeAvailable)("voltd iroh service (loopback)", () => {
 		expect(await reusedDiscovery.query("session_contexts", { sessionIds: ["session-missing"] })).toMatchObject({
 			type: "result",
 			data: {
-				contexts: [{ sessionId: "session-missing", startingGitContext: null, workContext: null }],
+				contexts: [{ sessionId: "session-missing", startingGitContext: null, changeContext: null }],
 			},
 		});
 		reconnection.close(0n, Array.from(Buffer.from("done", "utf8")));

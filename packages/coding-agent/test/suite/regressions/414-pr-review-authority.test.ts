@@ -10,6 +10,7 @@ import { createIrohRemoteRpcGrant, type IrohRemoteRpcCapability } from "../../..
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
 import { IrohRemoteHostStateManager } from "../../../src/core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDirPath, SessionManager } from "../../../src/core/session-manager.ts";
+import type { ChangeAssociationService } from "../../../src/daemon/change-association.ts";
 import { IntegratedRuntimeRegistry } from "../../../src/daemon/integrated-runtimes.ts";
 import type { IrohIncomingLike, IrohModuleLike, IrohNodeIdLike } from "../../../src/daemon/iroh-native.ts";
 import { createIrohDaemonService } from "../../../src/daemon/iroh-service.ts";
@@ -18,7 +19,6 @@ import { getDaemonPaths } from "../../../src/daemon/paths.ts";
 import { PrReviewCheckoutManager, type PrReviewPreparationAuthority } from "../../../src/daemon/pr-review-checkout.ts";
 import * as reviewGit from "../../../src/daemon/pr-review-git.ts";
 import { VoltdStateStore } from "../../../src/daemon/state.ts";
-import type { WorkAssociationService } from "../../../src/daemon/work-association.ts";
 import { getWorktreesRoot, WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
 import { createHarness } from "../harness.ts";
 
@@ -282,16 +282,16 @@ async function fixture(grant = capabilities) {
 			async close() {},
 			async quiesce() {},
 		},
-		// Streams record client activity for PR status polling; nothing else may touch Work.
-		work: new Proxy(
+		// Streams record client activity for PR status polling; nothing else may touch the change association.
+		changes: new Proxy(
 			{},
 			{
 				get(_target, property) {
 					if (property === "retainClientActivity") return () => () => {};
-					throw new Error("utility must not start work observation");
+					throw new Error("utility must not start change observation");
 				},
 			},
-		) as unknown as WorkAssociationService,
+		) as unknown as ChangeAssociationService,
 		get keepAwake(): never {
 			throw new Error("utility must not start keep-awake");
 		},

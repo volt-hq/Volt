@@ -13,6 +13,12 @@ import type { SessionManager, SessionReference } from "../session-manager.ts";
 import type { SessionWriter } from "../session-writer.ts";
 import type { BuildSystemPromptOptions } from "../system-prompt.ts";
 import { type Theme, theme } from "../theme/runtime.ts";
+import {
+	type ExtensionServicesManager,
+	extensionServicesForbidden,
+	withoutExtensionServices,
+} from "./services-runtime.ts";
+import type { ExtensionOperationEvent, ExtensionOperationOrigin, RequestBoundaryEvent } from "./services-types.ts";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -64,10 +70,8 @@ import type {
 	UserBashEvent,
 	UserBashEventResult,
 } from "./types.ts";
-import { type ExtensionWorkManager, extensionWorkForbidden, withoutExtensionWork } from "./work-runtime.ts";
-import type { ExtensionOperationEvent, ExtensionOperationOrigin, RequestBoundaryEvent } from "./work-types.ts";
 
-interface WorkPolicyOptions {
+interface ServicesPolicyOptions {
 	signal?: AbortSignal;
 	origin?: ExtensionOperationOrigin;
 	strict?: boolean;
@@ -327,7 +331,7 @@ export class ExtensionRunner {
 	private shortcutDiagnostics: ResourceDiagnostic[] = [];
 	private commandDiagnostics: ResourceDiagnostic[] = [];
 	private staleMessage: string | undefined;
-	private workManager: ExtensionWorkManager | undefined;
+	private servicesManager: ExtensionServicesManager | undefined;
 
 	constructor(
 		extensions: Extension[],
@@ -344,36 +348,37 @@ export class ExtensionRunner {
 		this.modelRegistry = modelRegistry;
 	}
 
-	bindWork(manager: ExtensionWorkManager): void {
-		this.workManager = manager;
-		this.runtime.getWorkStatus = (owner) => {
+	bindServices(manager: ExtensionServicesManager): void {
+		this.servicesManager = manager;
+		this.runtime.getServicesStatus = (owner) => {
 			this.assertActive();
 			return manager.getStatus(owner);
 		};
 	}
 
 	emitRequestBoundary(event: RequestBoundaryEvent): void {
-		this.emitWorkObservation(event);
+		this.emitServicesObservation(event);
 	}
 
 	emitExtensionOperation(event: ExtensionOperationEvent): void {
-		withoutExtensionWork(() => this.emitWorkObservation(event));
+		withoutExtensionServices(() => this.emitServicesObservation(event));
 	}
 
-	private emitWorkObservation(event: RequestBoundaryEvent | ExtensionOperationEvent): void {
+	private emitServicesObservation(event: RequestBoundaryEvent | ExtensionOperationEvent): void {
 		if (this.isInert) return;
 		for (const ext of this.extensions) {
-			if (event.type === "extension_operation" && this.workManager?.isOwner(ext.path, event.extensionId)) continue;
+			if (event.type === "extension_operation" && this.servicesManager?.isOwner(ext.path, event.extensionId))
+				continue;
 			for (const handler of ext.handlers.get(event.type) ?? []) {
 				const report = () =>
 					this.emitErrorContained({
-						extensionPath: "<extension-work>",
+						extensionPath: "<extension-services>",
 						event: event.type,
-						error: "Extension work observer failed",
+						error: "Extension services observer failed",
 					});
 				try {
 					const ctx = this.createContext(event.type === "request_boundary" ? ext.path : undefined);
-					void Promise.resolve(handler(cloneCanonicalData(event, "Extension work observation"), ctx)).catch(
+					void Promise.resolve(handler(cloneCanonicalData(event, "Extension services observation"), ctx)).catch(
 						report,
 					);
 				} catch {
@@ -775,11 +780,11 @@ export class ExtensionRunner {
 	createContext(owner?: string): ExtensionContext {
 		const runner = this;
 		const getModel = this.getModel;
-		const work = owner ? this.workManager?.getContext(owner) : undefined;
+		const services = owner ? this.servicesManager?.getContext(owner) : undefined;
 		return {
-			get work() {
+			get services() {
 				runner.assertActive();
-				return extensionWorkForbidden() ? undefined : work;
+				return extensionServicesForbidden() ? undefined : services;
 			},
 			get ui() {
 				runner.assertActive();
@@ -1042,7 +1047,7 @@ export class ExtensionRunner {
 
 	async emitToolResult(
 		event: ToolResultEvent,
-		options?: WorkPolicyOptions,
+		options?: ServicesPolicyOptions,
 	): Promise<ToolResultEventResult | undefined> {
 		if (this.isInert) {
 			if (options?.strict) throw new Error("Extension runtime is stale");
@@ -1063,7 +1068,7 @@ export class ExtensionRunner {
 			for (const handler of handlers) {
 				try {
 					const handlerEvent = cloneCanonicalData(currentEvent, `Extension tool_result input for ${ext.path}`);
-					const rawHandlerResult = (await withoutExtensionWork(() => handler(handlerEvent, ctx))) as
+					const rawHandlerResult = (await withoutExtensionServices(() => handler(handlerEvent, ctx))) as
 						| ToolResultEventResult
 						| undefined;
 					const description = `Extension tool_result output from ${ext.path}`;
@@ -1115,7 +1120,7 @@ export class ExtensionRunner {
 		};
 	}
 
-	async emitToolCall(event: ToolCallEvent, options?: WorkPolicyOptions): Promise<ToolCallEventResult | undefined> {
+	async emitToolCall(event: ToolCallEvent, options?: ServicesPolicyOptions): Promise<ToolCallEventResult | undefined> {
 		if (this.isInert) {
 			if (options?.strict) throw new Error("Extension runtime is stale");
 			return undefined;
@@ -1135,7 +1140,7 @@ export class ExtensionRunner {
 			if (!handlers || handlers.length === 0) continue;
 
 			for (const handler of handlers) {
-				const handlerResult = await withoutExtensionWork(() => handler(attributedEvent, ctx));
+				const handlerResult = await withoutExtensionServices(() => handler(attributedEvent, ctx));
 
 				if (handlerResult) {
 					result = handlerResult as ToolCallEventResult;

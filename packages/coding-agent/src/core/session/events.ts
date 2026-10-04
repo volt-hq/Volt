@@ -40,7 +40,7 @@ import type { SessionBackgroundContinuation } from "./background-continuation.ts
 import type { SessionBash } from "./bash.ts";
 import type { SessionClientInputs } from "./client-inputs.ts";
 import type { SessionCompaction } from "./compaction.ts";
-import type { SessionExtensionWork } from "./extension-work.ts";
+import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionPromptCache } from "./prompt-cache.ts";
 import type { SessionPrompting } from "./prompting.ts";
 import type { SessionRetry } from "./retry-policy.ts";
@@ -71,7 +71,7 @@ export interface SessionEventsHost {
 	readonly retry: SessionRetry;
 	conversation(): Conversation<AgentTool>;
 	extensionRunner(): ExtensionRunner;
-	extensionWork(): SessionExtensionWork;
+	extensionServices(): SessionExtensionServices;
 	background(): SessionBackgroundContinuation;
 	promptCache(): SessionPromptCache;
 	turnPolicy(): SessionTurnPolicy;
@@ -337,7 +337,8 @@ export class SessionEvents {
 				await this.onPhaseChanged(event.phase);
 				return;
 			case "next_action_resolved":
-				if (event.stopReason === "policy" || event.stopReason === "tool") this.host.extensionWork().invalidate();
+				if (event.stopReason === "policy" || event.stopReason === "tool")
+					this.host.extensionServices().invalidate();
 				this.host.background().nextActionResolved(event);
 				return;
 			case "retry_start":
@@ -413,7 +414,7 @@ export class SessionEvents {
 			// Deferred bash output is best-effort once its turn ended.
 		}
 		if (!ran || this.host.isDisposed()) return;
-		this.host.extensionWork().invalidate();
+		this.host.extensionServices().invalidate();
 		this.settlementRevisionValue += 1;
 		this.emit({ type: "agent_settled" });
 		this.host.background().schedule();
@@ -422,7 +423,7 @@ export class SessionEvents {
 	/** A handled command or input hook ran no turn: publish the settlement a turn would have. */
 	emitHandledSettlement(): void {
 		if (this.host.conversation().operation !== undefined) return;
-		this.host.extensionWork().invalidate();
+		this.host.extensionServices().invalidate();
 		this.settlementRevisionValue += 1;
 		this.emit({ type: "agent_settled" });
 		this.host.background().schedule();

@@ -837,9 +837,9 @@ eventBus.on("my-extension:status", (data) => console.log(data));
 
 > See [examples/sdk/06-extensions.ts](../examples/sdk/06-extensions.ts) and [docs/extensions.md](extensions.md)
 
-### Managed extension work
+### Managed extension services
 
-Extensions can use `request_boundary`, `ctx.work`, and `volt.getWorkStatus()` to prepare bounded read-only context. No extension or auxiliary model is enabled by the SDK. See [Managed context preparation](extensions.md#managed-context-preparation) for task ownership, services, and context admission semantics.
+Extensions can use `request_boundary`, `ctx.services`, and `volt.getServicesStatus()` to prepare bounded read-only context. No extension or auxiliary model is enabled by the SDK. See [Managed context preparation](extensions.md#managed-context-preparation) for task ownership, services, and context admission semantics.
 
 `session.registerTurnPolicy(policy)` adds a turn policy to the session's conversation. Policies run after the session's own policy, in registration order: each `beforeToolCall` sees the decision so far on its event (a block is final, and the latest reason wins), and each `nextAction` sees the action so far as `context.defaultAction`. Registration snapshots and freezes the `beforeToolCall` and `nextAction` callbacks. Mutating the original object no longer changes registered behavior. The returned callable `PolicyRegistration` removes the policy; `registration.update(nextPolicy)` replaces its complete callback snapshot in place, and `registration.invalidate()` revokes previous authorization after a closure-state change. Make closure changes and invalidation synchronously, without an intervening await. Updates and removals preserve other registrations and their order. Removed handles cannot update or invalidate.
 
@@ -849,7 +849,7 @@ Hosts may tighten the default resource ceilings and opt into a bounded first-req
 
 ```typescript
 const { session } = await createAgentSession({
-  extensionWorkLimits: {
+  extensionServicesLimits: {
     perRuntimeTasks: 2,
     perExtensionTasks: 1,
     taskTimeoutMs: 3000,

@@ -12,7 +12,7 @@ type SessionReplacementContext = {
 	sessionRenderSuspension: RenderSuspensionLease | undefined;
 	dismissSubagentInspector?: () => void;
 	resetExtensionUI(): void;
-	bindDaemonWorkObservation(session: AgentSession): void;
+	bindDaemonChangeObservation(session: AgentSession): void;
 	observeLoss(conversation: HostedConversation): void;
 	followSession(session: AgentSession): Promise<void>;
 };
@@ -45,7 +45,7 @@ describe("InteractiveMode session replacement rendering", () => {
 			sessionRenderSuspension: undefined,
 			dismissSubagentInspector: vi.fn(() => order.push("dismiss")),
 			resetExtensionUI: vi.fn(() => order.push("reset")),
-			bindDaemonWorkObservation: vi.fn(() => order.push("bind-work")),
+			bindDaemonChangeObservation: vi.fn(() => order.push("bind-change")),
 			observeLoss: vi.fn(),
 			followSession: vi.fn(async () => {
 				order.push("rebind");
@@ -60,15 +60,15 @@ describe("InteractiveMode session replacement rendering", () => {
 
 		const moved = interactiveModePrototype.followMove.call(context, replacement);
 		await Promise.resolve();
-		expect(order).toEqual(["suspend", "dismiss", "reset", "bind-work", "rebind"]);
+		expect(order).toEqual(["suspend", "dismiss", "reset", "bind-change", "rebind"]);
 
 		finishRebind();
 		await moved;
 
 		expect(context.observeLoss).toHaveBeenCalledWith(replacement);
-		expect(context.bindDaemonWorkObservation).toHaveBeenCalledWith(replacementSession);
+		expect(context.bindDaemonChangeObservation).toHaveBeenCalledWith(replacementSession);
 		expect(context.followSession).toHaveBeenCalledWith(replacementSession);
-		expect(order).toEqual(["suspend", "dismiss", "reset", "bind-work", "rebind", "render:true", "release"]);
+		expect(order).toEqual(["suspend", "dismiss", "reset", "bind-change", "rebind", "render:true", "release"]);
 		expect(context.sessionRenderSuspension).toBeUndefined();
 	});
 
@@ -82,7 +82,7 @@ describe("InteractiveMode session replacement rendering", () => {
 			},
 			sessionRenderSuspension: suspension,
 			resetExtensionUI: vi.fn(),
-			bindDaemonWorkObservation: vi.fn(),
+			bindDaemonChangeObservation: vi.fn(),
 			observeLoss: vi.fn(),
 			followSession: vi.fn(async () => {
 				throw rebindError;
@@ -93,7 +93,7 @@ describe("InteractiveMode session replacement rendering", () => {
 			interactiveModePrototype.followMove.call(context, { session: {} as AgentSession } as HostedConversation),
 		).rejects.toBe(rebindError);
 
-		expect(context.bindDaemonWorkObservation).toHaveBeenCalledOnce();
+		expect(context.bindDaemonChangeObservation).toHaveBeenCalledOnce();
 		expect(context.ui.requestRender).not.toHaveBeenCalled();
 		expect(suspension.release).not.toHaveBeenCalled();
 		expect(context.sessionRenderSuspension).toBe(suspension);

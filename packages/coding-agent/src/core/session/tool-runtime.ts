@@ -54,7 +54,7 @@ import {
 import { createToolDefinitionFromAgentTool } from "../tools/tool-definition-wrapper.ts";
 import type { SessionBackgroundContinuation } from "./background-continuation.ts";
 import type { SessionExtensionBinding } from "./extension-binding.ts";
-import type { SessionExtensionWork } from "./extension-work.ts";
+import type { SessionExtensionServices } from "./extension-services.ts";
 import { McpAuthRequests } from "./mcp-auth-requests.ts";
 
 interface ToolDefinitionEntry {
@@ -104,7 +104,7 @@ export interface SessionToolRuntimeHost {
 	readonly liveState: LiveState;
 	conversation(): Conversation<AgentTool>;
 	extensions(): SessionExtensionBinding;
-	extensionWork(): SessionExtensionWork;
+	extensionServices(): SessionExtensionServices;
 	background(): SessionBackgroundContinuation;
 	sessionWriter(): SessionWriter;
 	isDisposed(): boolean;
@@ -398,7 +398,7 @@ export class SessionToolRuntime {
 				validToolNames.push(name);
 			}
 		}
-		this.host.extensionWork().invalidate();
+		this.host.extensionServices().invalidate();
 		this.effectiveActiveToolNames = validToolNames;
 		this.effectiveToolRegistry = this.toolRegistry;
 		this.host.backgroundJobs.cancelInaccessible();
@@ -563,7 +563,7 @@ export class SessionToolRuntime {
 
 	/** Rebuild the registry from the base, SDK, and extension tools, keeping the requested tools active. */
 	refreshRegistry(options?: { activeToolNames?: string[]; includeAllExtensionTools?: boolean }): void {
-		this.host.extensionWork().invalidate();
+		this.host.extensionServices().invalidate();
 		const previousRegistryNames = new Set(this.toolRegistry.keys());
 		const previousActiveToolNames = this.planningRuntimeInitialized
 			? [...this.requestedBuildToolNames]
@@ -640,7 +640,7 @@ export class SessionToolRuntime {
 			toolRegistry.set(tool.name, tool);
 		}
 		this.toolRegistry = toolRegistry;
-		this.host.extensionWork().retainImplementations(toolRegistry, (name) => {
+		this.host.extensionServices().retainImplementations(toolRegistry, (name) => {
 			const entry = definitionRegistry.get(name);
 			return entry?.sourceInfo.source === "builtin" && this.trustedHostToolNames.has(name)
 				? entry.definition
