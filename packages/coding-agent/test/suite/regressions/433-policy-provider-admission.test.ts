@@ -125,10 +125,10 @@ describe("#433 managed task result exposure", () => {
 		let change = () => {};
 		let restricted = false;
 		let result: ExtensionWorkReadResult | undefined;
+		let handle: ExtensionWorkTaskHandle | undefined;
 		let operations = 0;
 		const harness = await createHarness({
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
-			extensionWorkLimits: { firstRequestWaitMs: 100 },
 			extensionFactories: [
 				(volt) => {
 					if (layer === "tool_call") {
@@ -165,10 +165,10 @@ describe("#433 managed task result exposure", () => {
 							);
 					}
 					volt.on("request_boundary", (_event, ctx) => {
-						ctx.work!.context.requestWait(100);
-						ctx.work!.tasks.start({ key: "read", label: "Read" }, async (task) => {
+						const admission = ctx.work!.tasks.start({ key: "read", label: "Read" }, async (task) => {
 							result = await task.repository.readText({ path: "source.txt" });
 						});
+						if (admission.status === "started") handle = admission.task;
 					});
 				},
 				(volt) => {
@@ -204,7 +204,14 @@ describe("#433 managed task result exposure", () => {
 					);
 			}
 			await writeFile(join(harness.tempDir, "source.txt"), "private observation");
-			harness.setResponses([fauxAssistantMessage("done")]);
+			// Settling the turn invalidates its work scope, so the request holds the turn open
+			// until the task settles instead of racing the read against a first-request wait.
+			harness.setResponses([
+				async () => {
+					await handle!.wait();
+					return fauxAssistantMessage("done");
+				},
+			]);
 			const run = harness.session.prompt("inspect");
 			await entered.promise;
 			change();
