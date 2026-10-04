@@ -171,29 +171,6 @@ describe("Iroh remote handshake stream modes", () => {
 		}
 
 		expect(
-			parseIrohRemoteHandshakeResponseLine(
-				responseLine({
-					sessionId: "def456",
-					conversation: {
-						target: "session",
-						sessionId: "def456",
-						selection: "session_rekeyed",
-						requestedSessionId: "abc123",
-					},
-				}),
-			),
-		).toMatchObject({
-			success: true,
-			sessionId: "def456",
-			conversation: {
-				target: "session",
-				sessionId: "def456",
-				selection: "session_rekeyed",
-				requestedSessionId: "abc123",
-			},
-		});
-
-		expect(
 			parseIrohRemoteHandshakeResponseLine(responseLine({ workspaceDiscovery: { purpose: "list_sessions" } })),
 		).toMatchObject({ success: true, workspaceDiscovery: { purpose: "list_sessions" } });
 		expect(
@@ -239,26 +216,14 @@ describe("Iroh remote handshake stream modes", () => {
 				sessionId: "abc123",
 				conversation: { target: "last", sessionId: "abc123", selection: "resumed", extra: true },
 			}),
+			// A session id never aliases another conversation.
 			responseLine({
 				sessionId: "def456",
-				conversation: { target: "session", sessionId: "def456", selection: "session_rekeyed" },
-			}),
-			responseLine({
-				sessionId: "abc123",
 				conversation: {
 					target: "session",
-					sessionId: "abc123",
+					sessionId: "def456",
 					selection: "session_rekeyed",
 					requestedSessionId: "abc123",
-				},
-			}),
-			responseLine({
-				sessionId: "abc123",
-				conversation: {
-					target: "last",
-					sessionId: "abc123",
-					selection: "session_rekeyed",
-					requestedSessionId: "def456",
 				},
 			}),
 			responseLine({
@@ -327,31 +292,6 @@ describe("Iroh remote handshake stream modes", () => {
 				success: true,
 				sessionId: "abc123",
 				conversation: { target: "session", sessionId: "abc123", selection: "resumed" },
-			},
-		});
-
-		const rekeyedConversation = await readHandshakeForHello(
-			hostEngine,
-			{ ...baseHello, conversation: { target: "session", sessionId: "abc123" } },
-			{
-				conversationSession: {
-					sessionId: "def456",
-					selection: "session_rekeyed",
-					requestedSessionId: "abc123",
-				},
-			},
-		);
-		expect(rekeyedConversation).toMatchObject({
-			ok: true,
-			response: {
-				success: true,
-				sessionId: "def456",
-				conversation: {
-					target: "session",
-					sessionId: "def456",
-					selection: "session_rekeyed",
-					requestedSessionId: "abc123",
-				},
 			},
 		});
 

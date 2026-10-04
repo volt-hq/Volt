@@ -3,11 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import type {
-	AgentSessionReplacementTarget,
-	AgentSessionReplacementTransaction,
-	AgentSessionRuntime,
-} from "../src/core/agent-session-runtime.ts";
+import type { AgentSessionRuntime, RedirectViewOptions } from "../src/core/agent-session-runtime.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteActiveStreamRegistry } from "../src/core/remote/iroh/active-stream-registry.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
@@ -103,21 +99,19 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		bindWorktreeSession?: ConstructorParameters<typeof IntegratedRuntimeRegistry>[0]["bindWorktreeSession"];
 	}) {
 		const createRuntimeCalls: CreateRuntimeOptions[] = [];
-		let prepareSessionReplacement:
-			| ((target: AgentSessionReplacementTarget) => Promise<AgentSessionReplacementTransaction | undefined>)
-			| undefined;
+		let hostTarget: RedirectViewOptions["hostTarget"];
 		const runtime = {
 			session: createTestSession(options.sessionId, null),
 			dispose: vi.fn(async () => {}),
 			setRebindSession: vi.fn(),
-			setPrepareSessionReplacement: vi.fn(
-				(prepare: (target: AgentSessionReplacementTarget) => Promise<AgentSessionReplacementTransaction>) => {
-					prepareSessionReplacement = prepare;
-				},
-			),
+			attachRedirectClient: vi.fn((viewOptions: RedirectViewOptions) => {
+				hostTarget = viewOptions.hostTarget;
+				return runtime;
+			}),
 			listSessions: vi.fn(async () => []),
 		} as unknown as AgentSessionRuntime;
 		const selectionKind = options.selectionKind ?? "created";
+		const setClientLastSessionId = vi.fn(async () => undefined);
 		const registry = new IntegratedRuntimeRegistry({
 			agentDir,
 			auditLogger: new IrohRemoteAuditLogger(),
@@ -126,7 +120,7 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 			detachedRuntimeTtlMs: () => 60_000,
 			getAllowTools: () => "read,bash",
 			getProjectTrustedForWorkspace: () => true,
-			setClientLastSessionId: vi.fn(async () => undefined),
+			setClientLastSessionId,
 			createRuntime: async (runtimeOptions) => {
 				createRuntimeCalls.push(runtimeOptions);
 				(runtime as AgentSessionRuntime & { cwd: string }).cwd = runtimeOptions.cwd;
@@ -151,8 +145,30 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		return {
 			registry,
 			createRuntimeCalls,
-			getPrepareSessionReplacement: () => prepareSessionReplacement,
+			setClientLastSessionId,
+			/** The runtime the phone's structural intent opened, as the view hands it to the daemon. */
+			moveTo: (sessionId: string, cwd: string) => {
+				const moved = {
+					session: createTestSession(sessionId, null),
+					cwd,
+					dispose: vi.fn(async () => {}),
+					listSessions: vi.fn(async () => []),
+				} as unknown as AgentSessionRuntime;
+				if (!hostTarget) throw new Error("No stream view was attached");
+				return { moved, hosted: hostTarget({ sessionId, runtime: moved }) };
+			},
 		};
+	}
+
+	async function publishSource(
+		registry: IntegratedRuntimeRegistry,
+		hello: IrohRemoteHello,
+	): Promise<Awaited<ReturnType<IntegratedRuntimeRegistry["getOrCreateEntry"]>>["entry"]> {
+		const created = await registry.getOrCreateEntry({ hello, response: HANDSHAKE_RESPONSE }, authorization);
+		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
+		created.attachClaim.release();
+		registry.attachStreamView(created.entry, authorization);
+		return created.entry;
 	}
 
 	it("worktree-bound new passes the worktree cwd and the parent-keyed session dir; binds once after created", async () => {
@@ -404,121 +420,57 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		await registry.stopAll("test_cleanup");
 	});
 
-	it("rekey via handleSessionChanged appends the worktree binding for the new session id (#83)", async () => {
+	it("publishes a phone's new session on a worktree conversation bound to the worktree, with the source's policy (#83)", async () => {
 		const bindWorktreeSession = vi.fn(async () => {});
-		const { registry } = createRegistry({
+		const { registry, moveTo, setClientLastSessionId } = createRegistry({
 			sessionId: "s-wt",
 			resolveWorktree: async () => worktree,
 			bindWorktreeSession,
 		});
-		const created = await registry.getOrCreateEntry(
-			{
-				hello: createConversationHello({ target: "new", worktreeId: "fix-login" }),
-				response: HANDSHAKE_RESPONSE,
-			},
-			authorization,
-		);
-		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
-		created.attachClaim.release();
+		const source = await publishSource(registry, createConversationHello({ target: "new", worktreeId: "fix-login" }));
 		bindWorktreeSession.mockClear();
+		setClientLastSessionId.mockClear();
 
-		await registry.handleSessionChanged(created.entry, undefined, { sessionId: "s-wt-rekeyed" }, authorization);
-
-		expect(created.entry.sessionId).toBe("s-wt-rekeyed");
-		expect(bindWorktreeSession).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", "s-wt-rekeyed");
-		await registry.stopAll("test_cleanup");
-	});
-
-	it("a failed binding write during rekey stops the runtime (fail closed)", async () => {
-		const bindWorktreeSession = vi.fn(async (_workspace: string, _worktreeId: string, sessionId: string) => {
-			if (sessionId === "s-wt-rekeyed") {
-				throw new Error("bind failed");
-			}
-		});
-		const { registry } = createRegistry({
-			sessionId: "s-wt",
-			resolveWorktree: async () => worktree,
-			bindWorktreeSession,
-		});
-		const created = await registry.getOrCreateEntry(
-			{
-				hello: createConversationHello({ target: "new", worktreeId: "fix-login" }),
-				response: HANDSHAKE_RESPONSE,
-			},
-			authorization,
-		);
-		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
-		created.attachClaim.release();
-
-		await expect(
-			registry.handleSessionChanged(created.entry, undefined, { sessionId: "s-wt-rekeyed" }, authorization),
-		).rejects.toThrow("bind failed");
-		expect(registry.size).toBe(0);
-	});
-
-	it("prepared session replacement binds the worktree for the new session id on commit (#83)", async () => {
-		const stateManager = new IrohRemoteHostStateManager();
-		vi.spyOn(stateManager, "setClientsLastSessionId").mockResolvedValue([]);
-		const bindWorktreeSession = vi.fn(async () => {});
-		const { registry, getPrepareSessionReplacement } = createRegistry({
-			sessionId: "s-wt",
-			stateManager,
-			resolveWorktree: async () => worktree,
-			bindWorktreeSession,
-		});
-		const created = await registry.getOrCreateEntry(
-			{
-				hello: createConversationHello({ target: "new", worktreeId: "fix-login" }),
-				response: HANDSHAKE_RESPONSE,
-			},
-			authorization,
-		);
-		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
-		created.attachClaim.release();
-		bindWorktreeSession.mockClear();
-
-		const transaction = await getPrepareSessionReplacement()?.({ previousSessionId: "s-wt", sessionId: "s-wt-new" });
-		expect(transaction).toBeDefined();
-		await transaction?.commit();
+		const { hosted } = moveTo("s-wt-new", worktreePath);
+		await hosted;
 
 		expect(bindWorktreeSession).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", "s-wt-new");
-		expect(created.entry.sessionId).toBe("s-wt-new");
-		await transaction?.finalize?.();
+		expect(setClientLastSessionId).toHaveBeenCalledExactlyOnceWith("n-phone", "ws", "s-wt-new");
+		const moved = registry.findOwner("ws", "s-wt-new");
+		expect(moved).toMatchObject({
+			lifecycle: "active",
+			clientNodeId: "n-phone",
+			worktreeId: "fix-login",
+			worktreePath,
+			toolPolicy: source.toolPolicy,
+		});
+		expect(moved?.subscribers.size).toBe(0);
+		// The source stays: its other phones keep their conversation.
+		expect(registry.findOwner("ws", "s-wt")).toBe(source);
 		await registry.stopAll("test_cleanup");
 	});
 
-	it("a failed binding write during replacement commit restores the persisted reconnect target", async () => {
-		const stateManager = new IrohRemoteHostStateManager();
-		const setClientsLastSessionId = vi.spyOn(stateManager, "setClientsLastSessionId").mockResolvedValue([]);
+	it("keeps the phone on its conversation and publishes nothing when the worktree binding fails", async () => {
 		const bindWorktreeSession = vi.fn(async (_workspace: string, _worktreeId: string, sessionId: string) => {
 			if (sessionId === "s-wt-new") {
 				throw new Error("bind failed");
 			}
 		});
-		const { registry, getPrepareSessionReplacement } = createRegistry({
+		const { registry, moveTo, setClientLastSessionId } = createRegistry({
 			sessionId: "s-wt",
-			stateManager,
 			resolveWorktree: async () => worktree,
 			bindWorktreeSession,
 		});
-		const created = await registry.getOrCreateEntry(
-			{
-				hello: createConversationHello({ target: "new", worktreeId: "fix-login" }),
-				response: HANDSHAKE_RESPONSE,
-			},
-			authorization,
-		);
-		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
-		created.attachClaim.release();
+		const source = await publishSource(registry, createConversationHello({ target: "new", worktreeId: "fix-login" }));
+		setClientLastSessionId.mockClear();
 
-		const transaction = await getPrepareSessionReplacement()?.({ previousSessionId: "s-wt", sessionId: "s-wt-new" });
-		await expect(transaction?.commit()).rejects.toThrow("bind failed");
+		const { moved, hosted } = moveTo("s-wt-new", worktreePath);
+		await expect(hosted).rejects.toThrow("bind failed");
 
-		// The runtime identity never moved and the persisted reconnect target was compensated.
-		expect(created.entry.sessionId).toBe("s-wt");
-		expect(setClientsLastSessionId).toHaveBeenNthCalledWith(1, ["n-phone"], "ws", "s-wt-new");
-		expect(setClientsLastSessionId).toHaveBeenNthCalledWith(2, ["n-phone"], "ws", "s-wt");
-		await transaction?.rollback();
+		expect(registry.findOwner("ws", "s-wt-new")).toBeUndefined();
+		expect(registry.findOwner("ws", "s-wt")).toBe(source);
+		expect(setClientLastSessionId).not.toHaveBeenCalled();
+		expect(moved.dispose).toHaveBeenCalled();
 		await registry.stopAll("test_cleanup");
 	});
 
@@ -542,23 +494,32 @@ describe("worktree runtime plumbing (createRuntime seam)", () => {
 		await registry.stopAll("test_cleanup");
 	});
 
-	it("rekey of a non-worktree conversation never touches worktree bindings", async () => {
+	it("publishes a phone's new session on a plain conversation without worktree bindings", async () => {
 		const bindWorktreeSession = vi.fn(async () => {});
-		const { registry } = createRegistry({
+		const { registry, moveTo } = createRegistry({
 			sessionId: "s-plain",
 			resolveWorktree: async () => undefined,
 			bindWorktreeSession,
 		});
-		const created = await registry.getOrCreateEntry(
-			{ hello: createConversationHello({ target: "new" }), response: HANDSHAKE_RESPONSE },
-			authorization,
-		);
-		await registry.commitEntry(created.entry, created.sessionSelection, authorization, created.attachClaim);
-		created.attachClaim.release();
+		await publishSource(registry, createConversationHello({ target: "new" }));
 
-		await registry.handleSessionChanged(created.entry, undefined, { sessionId: "s-plain-new" }, authorization);
+		await moveTo("s-plain-new", workspacePath).hosted;
 
 		expect(bindWorktreeSession).not.toHaveBeenCalled();
+		expect(registry.findOwner("ws", "s-plain-new")).toMatchObject({ lifecycle: "active" });
+		expect(registry.findOwner("ws", "s-plain-new")?.worktreeId).toBeUndefined();
+		await registry.stopAll("test_cleanup");
+	});
+
+	it("refuses a new session whose cwd leaves the source's workspace", async () => {
+		const { registry, moveTo } = createRegistry({ sessionId: "s-plain", resolveWorktree: async () => undefined });
+		await publishSource(registry, createConversationHello({ target: "new" }));
+
+		const { moved, hosted } = moveTo("s-escaped", worktreePath);
+		await expect(hosted).rejects.toMatchObject({ outcome: "session_unavailable" });
+
+		expect(registry.findOwner("ws", "s-escaped")).toBeUndefined();
+		expect(moved.dispose).not.toHaveBeenCalled();
 		await registry.stopAll("test_cleanup");
 	});
 

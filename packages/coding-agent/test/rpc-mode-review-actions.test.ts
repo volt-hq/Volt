@@ -895,7 +895,7 @@ describe("RPC durable review actions", () => {
 			}),
 		);
 		expect(runtimeHost.newSession).toHaveBeenCalledWith(
-			expect.objectContaining({ rebindRequestId: "new-discussion" }),
+			expect.objectContaining({ preserveReviewRunId: "review:test" }),
 		);
 		expect(getReviewRun(replacementManagers[0]!, "review:test")).toMatchObject({
 			runId: "review:test",

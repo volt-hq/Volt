@@ -543,7 +543,7 @@ async function serveOwnedRelayFromTui(
 	);
 	await writeIrohRemoteHandshakeResponse(relayedStream.send, handshakeResponse);
 	const conversationOptions = createTestIrohConversationOptions(runtimeHost);
-	let relayedSessionId = offer.sessionId;
+	const relayedSessionId = offer.sessionId;
 	const retirement = createRelayWorkspaceUnregisterRetirement(daemonAttach, () => relayedSessionId);
 	try {
 		await runIrohRemoteRpcMode(runtimeHost, {
@@ -586,9 +586,6 @@ async function serveOwnedRelayFromTui(
 					},
 					runtimeHost,
 				);
-			},
-			onSessionChanged: (session) => {
-				relayedSessionId = session.sessionId;
 			},
 		});
 	} finally {

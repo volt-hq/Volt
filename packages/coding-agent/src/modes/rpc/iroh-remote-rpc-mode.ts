@@ -39,7 +39,7 @@ import {
 	StreamProjector,
 	serializeJsonLine,
 } from "../../core/rpc/index.ts";
-import { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
+import { type RpcModeOptions, runRpcMode } from "./rpc-mode.ts";
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
@@ -57,12 +57,6 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	notificationDelivery?: IrohRemotePushNotificationDelivery;
 	onClientCapabilitiesChanged?: (features: string[]) => void;
 	onResponseWritten?: (response: Record<string, unknown>) => void | Promise<void>;
-	/**
-	 * Ownership barrier for replacement sessions. The runtime does not publish
-	 * the new conversation generation until every attached host has rekeyed it.
-	 */
-	onSessionWillProject?: (session: RpcSessionChange) => void | Promise<void>;
-	onSessionChanged?: (session: RpcSessionChange) => void | Promise<void>;
 	onWorkflowEvent?: RpcModeOptions["onWorkflowEvent"];
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
@@ -85,7 +79,7 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	projectConversationExternal: (event: object) => object | null;
 	/** Installs the idempotent owner for the physical conversation stream. */
 	onConversationLifecycleReady?: (lifecycle: IrohRemoteConversationLifecycle) => void;
-	/** Runs only after RPC has rebound the session and completed extension/resource binding. */
+	/** Runs only after RPC has bound the session and completed extension/resource binding. */
 	onReady?: RpcModeOptions["onReady"];
 }
 
@@ -397,14 +391,6 @@ export function runIrohRemoteRpcMode(
 		},
 	};
 	options.onConversationLifecycleReady?.(lifecycle);
-	const detachSessionWillProject = options.onSessionWillProject
-		? runtimeHost.subscribeSessionWillProject((nextSession) =>
-				options.onSessionWillProject?.({
-					sessionRef: nextSession.sessionRef,
-					sessionId: nextSession.sessionId,
-				}),
-			)
-		: undefined;
 
 	// attach() returns only after the cursor-zero bootstrap owns its immutable
 	// FIFO slot. RPC ingress can start at that admission boundary; waiting for
@@ -421,7 +407,6 @@ export function runIrohRemoteRpcMode(
 		...(options.detachedTerminal === undefined ? {} : { detachedTerminal: options.detachedTerminal }),
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onReady: options.onReady,
-		onSessionChanged: options.onSessionChanged,
 		onClientCapabilitiesChanged: options.onClientCapabilitiesChanged,
 		onWorkflowEvent: options.onWorkflowEvent,
 		requireRemoteSafeUiActions: true,
@@ -450,7 +435,6 @@ export function runIrohRemoteRpcMode(
 		},
 	}).finally(() => {
 		notificationDelivery?.detach();
-		detachSessionWillProject?.();
 		detachRawCloseRetirement();
 		retireConversation();
 		resolveModeSettled();

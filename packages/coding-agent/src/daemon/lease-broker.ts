@@ -17,9 +17,9 @@ export type LeaseDenyReason = "held_by_tui" | "force_unsupported" | "draining_el
 export type DaemonAttachRejectionReason = "tui_owned" | "draining" | "runtime_owner_fenced";
 
 export interface LeaseRecord {
-	key: string;
-	workspaceName: string;
-	sessionId: string;
+	readonly key: string;
+	readonly workspaceName: string;
+	readonly sessionId: string;
 	state: LeaseState;
 	/** control connectionId of owning TUI when tui-owned / target of daemon-draining */
 	tuiConnectionId?: string;
@@ -70,7 +70,6 @@ export interface DaemonRuntimeOwnerCapability {
 
 export type DaemonRuntimeCommitLeaseObservation =
 	| { kind: "exact"; state: LeaseState }
-	| { kind: "rekeyed"; state: LeaseState; workspaceName: string; sessionId: string }
 	| { kind: "replaced"; state: LeaseState }
 	| { kind: "missing" };
 
@@ -128,27 +127,6 @@ export type LeaseAcquireOutcome =
 	| { kind: "pending"; viewerFeedId: string; granted: Promise<{ handoff: "warm" }> }
 	| { kind: "denied"; reason: LeaseDenyReason };
 
-export type LeaseRekeyOutcome = { ok: true } | { ok: false; code: "not_found" | "not_held" | "target_in_use" };
-
-export interface DaemonLeaseRekeyReservation {
-	readonly id: string;
-	readonly owner: DaemonRuntimeOwnerCapability;
-	readonly workspaceName: string;
-	readonly oldSessionId: string;
-	readonly newSessionId: string;
-	readonly sourceKey: string;
-	readonly targetKey: string;
-	readonly record: LeaseRecord;
-}
-
-export type DaemonLeaseRekeyPrepareOutcome =
-	| { ok: true; reservation: DaemonLeaseRekeyReservation }
-	| { ok: false; code: "not_found" | "not_held" | "target_in_use" | "transition_in_progress" };
-
-export type DaemonLeaseRekeyTransactionOutcome =
-	| { ok: true; reservation: DaemonLeaseRekeyReservation }
-	| { ok: false; code: "not_found" | "not_held" | "target_in_use" };
-
 export interface LeaseBrokerEffects {
 	/** True when the daemon runtime for the key is mid-turn. */
 	isRuntimeStreaming(workspaceName: string, sessionId: string): boolean;
@@ -192,10 +170,9 @@ export class LeaseBroker {
 	private readonly effects: LeaseBrokerEffects;
 	private readonly records = new Map<string, LeaseRecord>();
 	/**
-	 * Claims retain the record object they incremented. A session rekey may move
-	 * that record to another map key while an attach is still provisioning; using
-	 * the claim's original session id to decrement would otherwise strand a
-	 * permanent pending-attach count.
+	 * Claims retain the record object they incremented: a record dropped and
+	 * recreated meanwhile is another record, whose pending-attach count the
+	 * claim never incremented.
 	 */
 	private readonly daemonAttachRecords = new Map<string, LeaseRecord>();
 	/** Monotonic CAS generation for provisional daemon-runtime commit cohorts. */
@@ -210,9 +187,6 @@ export class LeaseBroker {
 	private readonly daemonRuntimeOwners = new WeakMap<LeaseRecord, DaemonRuntimeOwnerCapability>();
 	/** Identity and provisional/durable epoch retained behind each opaque owner capability. */
 	private readonly daemonRuntimeOwnerRecords = new WeakMap<DaemonRuntimeOwnerCapability, DaemonRuntimeOwnerRecord>();
-	private readonly daemonRekeyReservations = new Map<string, DaemonLeaseRekeyReservation>();
-	private readonly daemonRekeyReservationsBySource = new Map<string, DaemonLeaseRekeyReservation>();
-	private readonly daemonRekeyReservationsByTarget = new Map<string, DaemonLeaseRekeyReservation>();
 	/** TUI acquires serialized behind a runtime publication, grouped for disconnect cancellation. */
 	private readonly pendingTuiAcquireBarriers = new Map<string, Set<PendingTuiAcquireBarrier>>();
 	private readonly worktreeRemovalReservations = new Set<string>();
@@ -233,7 +207,7 @@ export class LeaseBroker {
 		const keys = sessionIds.map((sessionId) => getLeaseKey(workspaceName, sessionId));
 		if (
 			keys.some((key) => {
-				if (this.worktreeRemovalReservations.has(key) || this.daemonRekeyReservationsByTarget.has(key)) {
+				if (this.worktreeRemovalReservations.has(key)) {
 					return true;
 				}
 				const record = this.records.get(key);
@@ -289,12 +263,7 @@ export class LeaseBroker {
 		if (sessionId === undefined) {
 			return { kind: "proceed", claim };
 		}
-		const attachKey = getLeaseKey(workspaceName, sessionId);
-		if (
-			this.worktreeRemovalReservations.has(attachKey) ||
-			this.daemonRekeyReservationsBySource.has(attachKey) ||
-			this.daemonRekeyReservationsByTarget.has(attachKey)
-		) {
+		if (this.worktreeRemovalReservations.has(getLeaseKey(workspaceName, sessionId))) {
 			return { kind: "retry", retryAfterMs: 1000 };
 		}
 		const record = this.getOrCreateRecord(workspaceName, sessionId);
@@ -332,11 +301,7 @@ export class LeaseBroker {
 	): DaemonAttachCommitOutcome {
 		this.abortDaemonAttach(claim);
 		const key = getLeaseKey(workspaceName, sessionId);
-		if (
-			this.worktreeRemovalReservations.has(key) ||
-			this.daemonRekeyReservationsBySource.has(key) ||
-			this.daemonRekeyReservationsByTarget.has(key)
-		) {
+		if (this.worktreeRemovalReservations.has(key)) {
 			return { ok: false, reason: "draining" };
 		}
 		const record = this.getOrCreateRecord(workspaceName, sessionId);
@@ -535,14 +500,6 @@ export class LeaseBroker {
 			}
 			return { kind: "exact", state: cohort.record.state };
 		}
-		if (this.records.get(cohort.record.key) === cohort.record) {
-			return {
-				kind: "rekeyed",
-				state: cohort.record.state,
-				workspaceName: cohort.record.workspaceName,
-				sessionId: cohort.record.sessionId,
-			};
-		}
 		if (exactRecord) {
 			return { kind: "replaced", state: exactRecord.state };
 		}
@@ -718,19 +675,13 @@ export class LeaseBroker {
 			if (this.worktreeRemovalReservations.has(leaseKey)) {
 				return { kind: "denied", reason: "draining_elsewhere" };
 			}
-			if (this.daemonRekeyReservationsByTarget.has(getLeaseKey(workspaceName, sessionId))) {
-				return { kind: "denied", reason: "draining_elsewhere" };
-			}
-			if (this.daemonRekeyReservationsBySource.has(getLeaseKey(workspaceName, sessionId))) {
-				return { kind: "denied", reason: "draining_elsewhere" };
-			}
 			const record = this.getOrCreateRecord(workspaceName, sessionId);
 			const publication = this.getCurrentDaemonRuntimePublication(record);
 			if (publication) {
 				// A successful commit publishes the runtime into the registry only after
 				// the broker has reserved daemon ownership. Crossing that interval would
 				// make an idle TUI handoff dispose/fence a runtime that is not discoverable
-				// yet. Serialize behind publication, then re-read every lease/rekey state.
+				// yet. Serialize behind publication, then re-read every lease state.
 				if (!(await this.waitForDaemonRuntimePublication(connectionId, publication))) {
 					return { kind: "denied", reason: "draining_elsewhere" };
 				}
@@ -1078,184 +1029,11 @@ export class LeaseBroker {
 		}
 	}
 
-	prepareDaemonRekey(
-		owner: DaemonRuntimeOwnerCapability,
-		workspaceName: string,
-		oldSessionId: string,
-		newSessionId: string,
-	): DaemonLeaseRekeyPrepareOutcome {
-		const sourceKey = getLeaseKey(workspaceName, oldSessionId);
-		const targetKey = getLeaseKey(workspaceName, newSessionId);
-		const record = this.records.get(sourceKey);
-		if (!record) {
-			return { ok: false, code: "not_found" };
-		}
-		if (!this.isDaemonRuntimeOwnerCurrent(owner, workspaceName, oldSessionId)) {
-			return { ok: false, code: "not_held" };
-		}
-		if (record.state !== "daemon-active" && record.state !== "daemon-detached") {
-			return { ok: false, code: "not_held" };
-		}
-		const existing = this.daemonRekeyReservationsBySource.get(sourceKey);
-		if (existing) {
-			return existing.owner === owner && existing.targetKey === targetKey
-				? { ok: true, reservation: existing }
-				: { ok: false, code: "transition_in_progress" };
-		}
-		if (sourceKey !== targetKey) {
-			if (
-				this.worktreeRemovalReservations.has(targetKey) ||
-				this.records.has(targetKey) ||
-				this.daemonRekeyReservationsByTarget.has(targetKey)
-			) {
-				this.effects.audit({
-					type: "lease_denied",
-					workspaceName,
-					sessionId: newSessionId,
-					details: { reason: "rekey_target_in_use", oldSessionId },
-				});
-				return { ok: false, code: "target_in_use" };
-			}
-		}
-		const reservation: DaemonLeaseRekeyReservation = {
-			id: randomUUID(),
-			owner,
-			workspaceName,
-			oldSessionId,
-			newSessionId,
-			sourceKey,
-			targetKey,
-			record,
-		};
-		this.daemonRekeyReservations.set(reservation.id, reservation);
-		this.daemonRekeyReservationsBySource.set(sourceKey, reservation);
-		if (sourceKey !== targetKey) {
-			this.daemonRekeyReservationsByTarget.set(targetKey, reservation);
-		}
-		return { ok: true, reservation };
-	}
-
-	commitDaemonRekey(transactionId: string): DaemonLeaseRekeyTransactionOutcome {
-		const reservation = this.daemonRekeyReservations.get(transactionId);
-		if (!reservation) {
-			return { ok: false, code: "not_found" };
-		}
-		const record = this.records.get(reservation.sourceKey);
-		if (
-			record !== reservation.record ||
-			!this.isDaemonRuntimeOwnerCurrent(reservation.owner, reservation.workspaceName, reservation.oldSessionId) ||
-			(record.state !== "daemon-active" && record.state !== "daemon-detached")
-		) {
-			this.clearDaemonRekeyReservation(reservation);
-			return { ok: false, code: "not_held" };
-		}
-		if (
-			reservation.sourceKey !== reservation.targetKey &&
-			(this.records.has(reservation.targetKey) || this.worktreeRemovalReservations.has(reservation.targetKey))
-		) {
-			return { ok: false, code: "target_in_use" };
-		}
-		this.clearDaemonRekeyReservation(reservation);
-		if (reservation.sourceKey !== reservation.targetKey) {
-			this.fenceCurrentDaemonRuntimeCommitCohort(record);
-			this.records.delete(reservation.sourceKey);
-			record.sessionId = reservation.newSessionId;
-			record.key = reservation.targetKey;
-			this.records.set(reservation.targetKey, record);
-		}
-		return { ok: true, reservation };
-	}
-
-	rollbackDaemonRekey(transactionId: string): DaemonLeaseRekeyTransactionOutcome {
-		const reservation = this.daemonRekeyReservations.get(transactionId);
-		if (!reservation) {
-			return { ok: false, code: "not_found" };
-		}
-		this.clearDaemonRekeyReservation(reservation);
-		return { ok: true, reservation };
-	}
-
-	private clearDaemonRekeyReservationsForRecord(record: LeaseRecord): void {
-		for (const reservation of Array.from(this.daemonRekeyReservations.values())) {
-			if (reservation.record === record) {
-				this.clearDaemonRekeyReservation(reservation);
-			}
-		}
-	}
-
-	private clearDaemonRekeyReservation(reservation: DaemonLeaseRekeyReservation): void {
-		this.daemonRekeyReservations.delete(reservation.id);
-		if (this.daemonRekeyReservationsBySource.get(reservation.sourceKey) === reservation) {
-			this.daemonRekeyReservationsBySource.delete(reservation.sourceKey);
-		}
-		if (this.daemonRekeyReservationsByTarget.get(reservation.targetKey) === reservation) {
-			this.daemonRekeyReservationsByTarget.delete(reservation.targetKey);
-		}
-	}
-
-	rekeyDaemonRuntime(
-		owner: DaemonRuntimeOwnerCapability,
-		workspaceName: string,
-		oldSessionId: string,
-		newSessionId: string,
-	): LeaseRekeyOutcome {
-		if (oldSessionId === newSessionId) {
-			return this.isDaemonRuntimeOwnerCurrent(owner, workspaceName, oldSessionId)
-				? { ok: true }
-				: { ok: false, code: "not_held" };
-		}
-		const record = this.lookup(workspaceName, oldSessionId);
-		if (!record) {
-			const alreadyRekeyed = this.lookup(workspaceName, newSessionId);
-			if (alreadyRekeyed && this.isDaemonRuntimeOwnerCurrent(owner, workspaceName, newSessionId)) {
-				return { ok: true };
-			}
-			return { ok: false, code: "not_found" };
-		}
-		if (!this.isDaemonRuntimeOwnerCurrent(owner, workspaceName, oldSessionId)) {
-			return { ok: false, code: "not_held" };
-		}
-		const newKey = getLeaseKey(workspaceName, newSessionId);
-		if (
-			this.worktreeRemovalReservations.has(newKey) ||
-			this.daemonRekeyReservationsBySource.has(record.key) ||
-			this.daemonRekeyReservationsByTarget.has(newKey)
-		) {
-			return { ok: false, code: "target_in_use" };
-		}
-		const displaced = this.records.get(newKey);
-		if (displaced) {
-			// The target session id already has its own lease record. A destructive
-			// rekey would either orphan `record` (its old key removed but never
-			// re-inserted) or silently drop the live `displaced` record from all
-			// lease accounting, stranding its runtime/streams/relays. Refuse instead
-			// and leave both records on their current keys; the caller re-acquires
-			// under the new id on its next reconnect.
-			this.effects.audit({
-				type: "lease_denied",
-				workspaceName,
-				sessionId: newSessionId,
-				details: { reason: "rekey_target_in_use", oldSessionId, displacedState: displaced.state },
-			});
-			return { ok: false, code: "target_in_use" };
-		}
-		this.fenceCurrentDaemonRuntimeCommitCohort(record);
-		this.records.delete(record.key);
-		record.sessionId = newSessionId;
-		record.key = newKey;
-		this.records.set(newKey, record);
-		return { ok: true };
-	}
-
 	// ==========================================================================
 	// Relay bookkeeping (tui-owned)
 	// ==========================================================================
 
 	registerRelay(workspaceName: string, sessionId: string, relayId: string): boolean {
-		const key = getLeaseKey(workspaceName, sessionId);
-		if (this.daemonRekeyReservationsBySource.has(key) || this.daemonRekeyReservationsByTarget.has(key)) {
-			return false;
-		}
 		const record = this.lookup(workspaceName, sessionId);
 		if (record?.state === "tui-owned") {
 			record.relayIds.add(relayId);
@@ -1327,7 +1105,6 @@ export class LeaseBroker {
 			return false;
 		}
 		this.fenceCurrentDaemonRuntimeCommitCohort(record);
-		this.clearDaemonRekeyReservationsForRecord(record);
 		this.invalidateDaemonRuntimeOwner(record, owner);
 		if (record.state === "daemon-draining") {
 			// Disposal is part of the drain flow (or shutdown subsumed it); the drain

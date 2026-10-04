@@ -26,12 +26,6 @@ function createRuntimeHost(session: ReturnType<typeof createTestSession>): Agent
 	} as unknown as AgentSessionRuntime;
 }
 
-function sourceFor(session: ReturnType<typeof createTestSession>) {
-	return {
-		subscribe: (listener: (event: object) => void) => session.subscribe((event) => listener(event)),
-	};
-}
-
 describe("conversation mutation authority", () => {
 	test("requires the exact current tuple for every remote conversation mutation", async () => {
 		const session = createTestSession("session-one", null);
@@ -176,122 +170,6 @@ describe("conversation mutation authority", () => {
 
 		recv.end();
 		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("rejects a co-attached client's stale mutations after another client rebinds", async () => {
-		const oldSession = createTestSession("old-session", null);
-		const newSession = createTestSession("new-session", null);
-		const newAbort = vi.fn(async () => {});
-		const newSetThinkingLevel = vi.fn();
-		Object.assign(newSession, { abort: newAbort, setThinkingLevel: newSetThinkingLevel });
-
-		let currentSession = oldSession;
-		let releaseReplacement = () => {};
-		const replacementGate = new Promise<void>((resolve) => {
-			releaseReplacement = resolve;
-		});
-		const willProjectListeners = new Set<(session: AgentSession) => Promise<void> | void>();
-		const replacedListeners = new Set<(session: AgentSession) => Promise<void> | void>();
-		const runtime = {
-			get session() {
-				return currentSession;
-			},
-			subscribeSessionWillProject(listener: (session: AgentSession) => Promise<void> | void) {
-				willProjectListeners.add(listener);
-				return () => willProjectListeners.delete(listener);
-			},
-			subscribeSessionReplaced(listener: (session: AgentSession) => Promise<void> | void) {
-				replacedListeners.add(listener);
-				return () => replacedListeners.delete(listener);
-			},
-			newSession: vi.fn(async (options?: { rebindRequestId?: string }) => {
-				await replacementGate;
-				const feed = (runtime as { conversationProjectionFeed?: ConversationProjectionFeed })
-					.conversationProjectionFeed;
-				if (!feed) throw new Error("Missing shared conversation feed");
-				feed.beginSourceRebind(sourceFor(newSession));
-				currentSession = newSession;
-				for (const listener of willProjectListeners) await listener(newSession as unknown as AgentSession);
-				feed.commitSourceRebind(options?.rebindRequestId);
-				for (const listener of replacedListeners) await listener(newSession as unknown as AgentSession);
-				return { cancelled: false };
-			}),
-			switchSessionById: vi.fn(async () => ({ cancelled: true })),
-			dispose: vi.fn(async () => {}),
-			setRebindSession: vi.fn(),
-			listSessions: vi.fn(async () => []),
-		} as unknown as AgentSessionRuntime;
-
-		const modeA = await startIrohRpcMode(runtime, oldSession);
-		const modeB = await startIrohRpcMode(runtime, oldSession);
-		const staleAuthority = getCurrentConversationAuthority(modeA.send);
-		modeB.recv.pushLine(
-			JSON.stringify(withCurrentConversationAuthority(modeB.send, { id: "rebind", type: "new_session" })),
-		);
-		await vi.waitFor(() => expect(runtime.newSession).toHaveBeenCalledOnce());
-		releaseReplacement();
-
-		await vi.waitFor(() => {
-			const initiatingFrames = parseWrittenObjects(modeB.send);
-			const initiatingBootstrapIndex = initiatingFrames.findIndex(
-				(frame) =>
-					frame.type === "conversation_bootstrap" &&
-					frame.reason === "session_rebind" &&
-					frame.requestId === "rebind",
-			);
-			const initiatingResponseIndex = initiatingFrames.findIndex((frame) => frame.id === "rebind");
-			expect(initiatingBootstrapIndex).toBeGreaterThanOrEqual(0);
-			expect(initiatingResponseIndex).toBeGreaterThan(initiatingBootstrapIndex);
-		});
-		modeA.recv.pushLine(
-			JSON.stringify({
-				id: "queued-prompt",
-				type: "prompt",
-				clientMessageId: "queued-client-prompt",
-				message: "must not enter the replacement",
-				conversationAuthority: staleAuthority,
-			}),
-		);
-		modeA.recv.pushLine(
-			JSON.stringify({
-				id: "queued-thinking",
-				type: "set_thinking_level",
-				level: "high",
-				conversationAuthority: staleAuthority,
-			}),
-		);
-
-		await vi.waitFor(() => {
-			const frames = parseWrittenObjects(modeA.send);
-			const replacementBootstrapIndex = frames.findIndex(
-				(frame) => frame.type === "conversation_bootstrap" && frame.reason === "session_rebind",
-			);
-			const promptResponseIndex = frames.findIndex((frame) => frame.id === "queued-prompt");
-			expect(replacementBootstrapIndex).toBeGreaterThanOrEqual(0);
-			expect(promptResponseIndex).toBeGreaterThan(replacementBootstrapIndex);
-			for (const id of ["queued-prompt", "queued-thinking"]) {
-				expect(frames).toContainEqual(
-					expect.objectContaining({ id, success: false, errorCode: "stale_conversation_authority" }),
-				);
-			}
-		});
-		modeA.recv.pushLine(JSON.stringify({ id: "stale-abort", type: "abort", conversationAuthority: staleAuthority }));
-		await vi.waitFor(() => {
-			expect(parseWrittenObjects(modeA.send)).toContainEqual(
-				expect.objectContaining({
-					id: "stale-abort",
-					success: false,
-					errorCode: "stale_conversation_authority",
-				}),
-			);
-		});
-		expect(newSession.prompt).not.toHaveBeenCalled();
-		expect(newSetThinkingLevel).not.toHaveBeenCalled();
-		expect(newAbort).not.toHaveBeenCalled();
-
-		modeA.recv.end();
-		modeB.recv.end();
-		await Promise.all([modeA.modePromise, modeB.modePromise]);
 	});
 
 	test("revalidates authority after asynchronous model lookup before mutating the branch", async () => {

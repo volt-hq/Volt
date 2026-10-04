@@ -7,7 +7,7 @@
 
 import type { ExtensionClient } from "../session/extension-binding.ts";
 import type { SessionManager, SessionReference } from "../session-manager.ts";
-import type { SessionWriter } from "../session-writer.ts";
+import type { LogWriter } from "../session-writer.ts";
 import type { HostedConversation } from "./hosted-conversation.ts";
 
 /** A new log. Without a source it is stored; with one it follows the source's storage. */
@@ -28,7 +28,7 @@ export interface NewConversationTarget {
 	/** Managed-worktree base ref for the Git context. */
 	readonly baseRef?: string;
 	/** Write the log before the conversation opens, through its writer. */
-	readonly seed?: (writer: SessionWriter) => Promise<void>;
+	readonly seed?: (writer: LogWriter) => Promise<void>;
 }
 
 /** A stored log, resumed. */

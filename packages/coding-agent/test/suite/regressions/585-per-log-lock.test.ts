@@ -8,7 +8,6 @@ import { ConversationLogLostError } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-	type AgentSessionReplacementTransaction,
 	type AgentSessionRuntime,
 	type CreateAgentSessionRuntimeFactory,
 	createAgentSessionFromServices,
@@ -253,52 +252,29 @@ describe("regression #585: one writer per conversation log", () => {
 		expect(lockState(sourceRef)).toBe("free");
 	});
 
-	it("prepares the host lease before opening the target, and rolls it back when the open fails", async () => {
+	it("keeps the source when the target is held elsewhere, and switches once its lock is free", async () => {
 		const root = temporaryDirectory();
 		const sessionDir = join(root, "sessions");
 		const sourceRef = await storedSession(sessionDir, root, "source");
 		const targetRef = await storedSession(sessionDir, root, "target");
 		const runtime = await createRuntime(root, await SessionManager.open(sourceRef));
 		// The daemon hosts the target: its runtime holds the target's lock.
-		let daemonRuntimeLock: ConversationLock | undefined = ConversationLock.acquire(sessionDir, targetRef.sessionId);
-		const steps: string[] = [];
-		const transaction = (): AgentSessionReplacementTransaction => ({
-			commit: async () => {
-				steps.push("commit");
-			},
-			rollback: async () => {
-				steps.push("rollback");
-			},
-			dispose: async () => {
-				steps.push("dispose");
-			},
-		});
+		const daemonRuntimeLock = ConversationLock.acquire(sessionDir, targetRef.sessionId);
 
-		// A lease that does not free the lock: the open fails and the lease is rolled back.
-		runtime.setPrepareSessionReplacement(async (target) => {
-			steps.push(`prepare:${target.sessionId}:${target.cwd}`);
-			return transaction();
-		});
 		await expect(runtime.switchSession(targetRef)).rejects.toBeInstanceOf(ConversationLockedError);
-		expect(steps).toEqual([`prepare:${targetRef.sessionId}:${root}`, "rollback"]);
 		expect(runtime.session.sessionId).toBe(sourceRef.sessionId);
+		expect(lockState(sourceRef)).toBe("held");
 
-		// Granting the lease disposes the daemon runtime first, which frees the lock for the open.
-		steps.length = 0;
-		runtime.setPrepareSessionReplacement(async (target) => {
-			steps.push(`prepare:${target.sessionId}:${lockState(targetRef)}`);
-			daemonRuntimeLock?.close();
-			daemonRuntimeLock = undefined;
-			return transaction();
-		});
+		// Once the daemon released the target, the switch opens it.
+		daemonRuntimeLock.close();
 		await expect(runtime.switchSession(targetRef)).resolves.toEqual({
 			cancelled: false,
 			sessionId: targetRef.sessionId,
 			seeded: false,
 		});
-		expect(steps).toEqual([`prepare:${targetRef.sessionId}:held`, "commit"]);
 		expect(runtime.session.sessionId).toBe(targetRef.sessionId);
 		expect(lockState(targetRef)).toBe("held");
+		expect(lockState(sourceRef)).toBe("free");
 	});
 
 	it("fails an RPC switch to a session open elsewhere with the stable conversation_locked code", async () => {

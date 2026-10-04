@@ -109,7 +109,7 @@ RelayAdmit(r) ==
     /\ relayState' = [relayState EXCEPT ![r] = "active"]
     /\ UNCHANGED << relayExpired, feedState, feedOwner, feedBuffered, feedSeq, feedAborted >>
 
-\* invalidatePending(): rekey / duplicate replacement / expiry cleanup marks the
+\* invalidatePending(): duplicate replacement / expiry cleanup marks the
 \* offer used and drops it.  Allowed regardless of expiry.  (relay-stream.ts L87-94)
 RelayInvalidate(r) ==
     /\ relayState[r] = "pending"

@@ -83,36 +83,17 @@ function createCoordinatorWiredLeaseBroker(registry: ConversationCoordinatorRegi
 }
 
 describe("ConversationCoordinator", () => {
-	it("keeps one stable authority across rekey aliases", () => {
-		const registry = new ConversationCoordinatorRegistry();
-		const coordinator = registry.reserveRuntime("workspace", "session-a");
-		coordinator.activateRuntime();
-
-		registry.rekey(coordinator, "session-b");
-
-		expect(registry.get("workspace", "session-a")).toBe(coordinator);
-		expect(registry.get("workspace", "session-b")).toBe(coordinator);
-		expect(coordinator.sessionId).toBe("session-b");
-		expect(coordinator.previousSessionIds).toEqual(new Set(["session-a"]));
-		expect(registry.values()).toEqual([coordinator]);
-	});
-
-	it("reserves a rekey target until the same authority commits or rolls back", () => {
+	it("indexes one authority per conversation and drops it once vacant", () => {
 		const registry = new ConversationCoordinatorRegistry();
 		const coordinator = registry.getOrCreate("workspace", "session-a");
-		coordinator.beginTuiLeaseHandoff("tui");
-		coordinator.commitTuiLeaseHandoff("tui");
-		const rolledBack = registry.prepareRekey(coordinator, "session-b");
+		const other = registry.getOrCreate("workspace", "session-b");
 
-		expect(() => registry.getOrCreate("workspace", "session-b")).toThrow("rekey target is reserved");
-		expect(registry.rollbackRekey(rolledBack)).toBe(true);
-		expect(coordinator.sessionId).toBe("session-a");
-
-		const committed = registry.prepareRekey(coordinator, "session-b");
-		registry.commitRekey(committed);
 		expect(registry.get("workspace", "session-a")).toBe(coordinator);
-		expect(registry.get("workspace", "session-b")).toBe(coordinator);
-		expect(coordinator.sessionId).toBe("session-b");
+		expect(other).not.toBe(coordinator);
+		expect(registry.values()).toEqual([coordinator, other]);
+		expect(registry.releaseIfVacant(coordinator)).toBe(true);
+		expect(registry.get("workspace", "session-a")).toBeUndefined();
+		expect(registry.size).toBe(1);
 	});
 
 	it("fences attach claims synchronously when retirement begins", async () => {
@@ -196,32 +177,6 @@ describe("ConversationCoordinator", () => {
 		closeGate.resolve();
 		await expect(closing).resolves.toBe(true);
 		expect(coordinator.transportCount).toBe(0);
-	});
-
-	it("can finalize concurrently when retirement originates inside its own transport", async () => {
-		const registry = new ConversationCoordinatorRegistry();
-		const coordinator = registry.reserveRuntime("workspace", "session");
-		coordinator.activateRuntime();
-		const closeGate = deferred();
-		const finalize = vi.fn();
-		coordinator.registerTransport(createTransport("stream", () => closeGate.promise));
-
-		const retirement = coordinator.beginRuntimeRetirement("replacement_failed", finalize, {
-			finalizationOrder: "concurrent",
-		});
-
-		await retirement.finalization;
-		expect(finalize).toHaveBeenCalledTimes(1);
-		expect(coordinator.runtimeLifecycle).toBe("retiring");
-		let terminalSettled = false;
-		void retirement.settled.then(() => {
-			terminalSettled = true;
-		});
-		await Promise.resolve();
-		expect(terminalSettled).toBe(false);
-		closeGate.resolve();
-		await retirement.settled;
-		expect(terminalSettled).toBe(true);
 	});
 
 	it("is the exactly-once closer for relay-only conversations", async () => {
@@ -442,7 +397,7 @@ describe("ConversationCoordinator", () => {
 		expect(coordinator.runtimeLifecycle).toBe("retired");
 	});
 
-	it("keeps a TUI lease anchored across relay settlement and rekey", async () => {
+	it("keeps a TUI lease anchored across relay settlement", async () => {
 		const registry = new ConversationCoordinatorRegistry();
 		const coordinator = registry.getOrCreate("workspace", "session-a");
 		coordinator.beginTuiLeaseHandoff("tui");
@@ -450,15 +405,12 @@ describe("ConversationCoordinator", () => {
 		coordinator.registerTransport(createTransport("relay", () => {}, "relay"));
 
 		await coordinator.closeTransport("relay", "lease_transferred");
-		registry.rekey(coordinator, "session-b");
 
 		expect(registry.get("workspace", "session-a")).toBe(coordinator);
-		expect(registry.get("workspace", "session-b")).toBe(coordinator);
 		expect(coordinator.tuiLeaseConnectionId).toBe("tui");
 		expect(coordinator.releaseTuiLease("tui")).toBe(true);
 		expect(registry.size).toBe(0);
 		expect(registry.get("workspace", "session-a")).toBeUndefined();
-		expect(registry.get("workspace", "session-b")).toBeUndefined();
 		const replacement = registry.getOrCreate("workspace", "session-a");
 		expect(replacement).not.toBe(coordinator);
 		expect(replacement.sessionId).toBe("session-a");

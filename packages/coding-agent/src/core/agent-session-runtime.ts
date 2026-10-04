@@ -44,7 +44,7 @@ import {
 	type SessionManager,
 	type SessionReference,
 } from "./session-manager.ts";
-import type { SessionWriter } from "./session-writer.ts";
+import type { LogWriter } from "./session-writer.ts";
 
 export { SessionImportFileNotFoundError } from "./host/conversation-host.ts";
 export {
@@ -64,26 +64,10 @@ export interface AgentSessionSwitchOptions {
 	assertConversationGenerationCurrent?: () => void;
 }
 
-export interface AgentSessionReplacementTransaction {
-	commit(): Promise<void>;
-	/** Finish host ownership before replacement callbacks and any durable publication barrier. */
-	finalize?(): Promise<void>;
-	rollback(): Promise<void>;
-	dispose(): Promise<void>;
-}
-
-export interface AgentSessionReplacementTarget {
-	previousSessionId: string;
-	sessionId: string;
-	cwd?: string;
-}
-
 export interface AgentSessionNewSessionOptions {
 	parentSessionRef?: SessionReference;
 	preserveReviewRunId?: string;
 	replaceReviewGeneral?: boolean;
-	/** RPC request correlated with the new session's bootstrap, when any. */
-	rebindRequestId?: string;
 	/** Override the new session's cwd (e.g. a daemon-managed worktree checkout). */
 	cwd?: string;
 	/** Override the session dir (e.g. the parent workspace's default dir for worktree sessions). */
@@ -93,7 +77,7 @@ export interface AgentSessionNewSessionOptions {
 	/** Trusted managed-worktree base ref for the new session's Git context. */
 	baseRef?: string;
 	/** Write the new session before it opens, through its log writer. */
-	setup?: (writer: SessionWriter) => Promise<void>;
+	setup?: (writer: LogWriter) => Promise<void>;
 	/**
 	 * Runs once the new session opened, before the runtime leaves the current
 	 * one, which is still open and admits no new work: a handoff writes its
@@ -114,9 +98,37 @@ export type RuntimeClientDetachment =
 	| { readonly kind: "redirected"; readonly sessionId: string }
 	| { readonly kind: "closed" };
 
+/**
+ * The conversation a redirect view's structural intent leads its client to:
+ * see `RedirectViewOptions.hostTarget`.
+ */
+export interface RedirectTarget {
+	readonly sessionId: string;
+	/**
+	 * The conversation the intent opened in the view's host, over a runtime of
+	 * its own that the callee takes over; absent for a switch to a stored
+	 * conversation, which opens wherever the client reconnects.
+	 */
+	readonly runtime?: AgentSessionRuntime;
+}
+
+export interface RedirectViewOptions {
+	/**
+	 * Host the conversations the view's structural intents lead its client to,
+	 * before the client is redirected there. A new, forked, or imported
+	 * conversation opens in this runtime's host, which need not fence the
+	 * source, since the view's conversation stays open for its other clients;
+	 * a switch opens nothing. A failure keeps the client where it was and
+	 * discards what opened. Without it, the target's log is written and closed
+	 * for the host the client reconnects through to open.
+	 */
+	readonly hostTarget?: (target: RedirectTarget) => Promise<void>;
+}
+
 /** Marks a runtime as a redirect view: see `AgentSessionRuntime.attachRedirectClient`. */
 interface RedirectView {
 	readonly redirect: true;
+	readonly hostTarget?: RedirectViewOptions["hostTarget"];
 }
 
 function sessionRefsEqual(left: SessionReference, right: SessionReference): boolean {
@@ -126,31 +138,6 @@ function sessionRefsEqual(left: SessionReference, right: SessionReference): bool
 		left.sessionId === right.sessionId &&
 		left.sessionGeneration === right.sessionGeneration
 	);
-}
-
-/** Roll back a host replacement transaction that no move took over; returns the error to report. */
-async function rollbackPreparedReplacement(
-	transaction: AgentSessionReplacementTransaction | undefined,
-	error: unknown,
-): Promise<unknown> {
-	if (!transaction) return error;
-	try {
-		await transaction.rollback();
-		return error;
-	} catch (rollbackError) {
-		return new AggregateError(
-			[error, rollbackError],
-			"Session replacement failed and its host transaction could not be rolled back",
-		);
-	}
-}
-
-/** How a committed move hands the runtime's modes over to the new conversation. */
-interface Handover {
-	readonly transaction: AgentSessionReplacementTransaction | undefined;
-	readonly rebindRequestId: string | undefined;
-	/** The projection publishes the new identity only after the durable publication step. */
-	readonly deferProjection: boolean;
 }
 
 type MoveOutcome =
@@ -173,35 +160,35 @@ type MoveOutcome =
  * session-replacement hooks. Every structural operation opens another
  * conversation before the current one closes, so an open that fails leaves
  * the runtime on its current session. A committed move then fires the hooks
- * modes bind through: the before-invalidate hook, the projection rebind, the
- * will-project listeners, the rebind hook, and the replaced listeners, after
- * which the previous conversation closes with its `session_shutdown`.
+ * modes bind through: the before-invalidate hook, the will-project listeners,
+ * the rebind hook, and the replaced listeners, after which the previous
+ * conversation closes with its `session_shutdown`. The runtime's projection
+ * feed serves one conversation: a move replaces it, ending its subscriptions.
  *
  * Structural operations run one at a time; one admitted for a session that is
  * no longer current fails as stale. A failure after the move committed ends
  * the runtime.
  *
  * A redirect view (`attachRedirectClient`) instead stays on its conversation:
- * its structural operations write the new conversation's log and redirect its
- * client there, for another host to open.
+ * its structural operations redirect its client to the new conversation, which
+ * the view's host opens (`RedirectViewOptions.hostTarget`) or whose log is
+ * written for another host to open.
  */
 export class AgentSessionRuntime {
 	private readonly host: ConversationHost;
 	private current: HostedConversation;
 	private readonly client: HostClient;
 	private readonly redirects: boolean;
+	private readonly hostTarget: RedirectViewOptions["hostTarget"];
 	private readonly clientDetachedListeners = new Set<(detachment: RuntimeClientDetachment) => void>();
 	private clientDetachment: RuntimeClientDetachment | undefined;
 	private stopObservingClose: () => void = () => {};
 	private rebindSession?: (session: AgentSession) => Promise<void>;
-	private prepareSessionReplacement?: (
-		target: AgentSessionReplacementTarget,
-	) => Promise<AgentSessionReplacementTransaction | undefined>;
 	private readonly sessionWillProjectListeners = new Set<(session: AgentSession) => Promise<void> | void>();
 	private readonly sessionReplacementListeners = new Set<(session: AgentSession) => Promise<void> | void>();
 	private beforeSessionInvalidate?: () => void;
+	private projectionFeed: ConversationProjectionFeed;
 	private detachProjectionEvents: () => void;
-	private handover: Handover | undefined;
 	private moveTail: Promise<void> = Promise.resolve();
 	/** Set by disposal and by a failed handover: no further structural operations. */
 	private ended = false;
@@ -221,7 +208,6 @@ export class AgentSessionRuntime {
 	 * has already moved away from does not end it. Never rejects.
 	 */
 	readonly lost: Promise<Error> = this.lostSignal.promise;
-	readonly conversationProjectionFeed: ConversationProjectionFeed;
 	/** Installed only by a daemon with sibling runtime ownership. */
 	reviewDiscussions?: ReviewDiscussionService;
 
@@ -248,6 +234,7 @@ export class AgentSessionRuntime {
 			this.host = first;
 			this.current = second as HostedConversation;
 			this.redirects = typeof third === "object";
+			this.hostTarget = typeof third === "object" ? third.hostTarget : undefined;
 		} else {
 			const services = second as AgentSessionServices;
 			if (typeof third !== "function") throw new Error("A runtime over a session needs a runtime factory");
@@ -257,6 +244,7 @@ export class AgentSessionRuntime {
 				subagentContext === undefined ? {} : { subagentContext },
 			);
 			this.redirects = false;
+			this.hostTarget = undefined;
 		}
 		if (this.current.closed) throw new Error("Cannot create an agent session runtime over a closed conversation");
 		this.client = this.redirects
@@ -280,7 +268,7 @@ export class AgentSessionRuntime {
 				if (closed === conversation) this.detachClient({ kind: "closed" });
 			});
 		}
-		this.conversationProjectionFeed = new ConversationProjectionFeed(this.current.projectionSource);
+		this.projectionFeed = new ConversationProjectionFeed(this.current.projectionSource);
 		this.detachProjectionEvents = this.relayProjectionEvents(this.current);
 		this.observeLoss(this.current);
 	}
@@ -288,12 +276,16 @@ export class AgentSessionRuntime {
 	/**
 	 * Attach one more client to the current conversation, viewed through a
 	 * runtime of its own that stays on it: the client's structural operations
-	 * write the new conversation's log and redirect the client there
-	 * (`onClientDetached`) instead of moving this runtime. A phone relayed
-	 * through the TUI is served this way. Disposing the view detaches its client.
+	 * redirect the client to the new conversation (`onClientDetached`) instead
+	 * of moving this runtime. A phone is served this way, relayed through the
+	 * TUI or on a daemon-hosted conversation. Disposing the view detaches its
+	 * client.
 	 */
-	attachRedirectClient(): AgentSessionRuntime {
-		return new AgentSessionRuntime(this.host, this.current, { redirect: true });
+	attachRedirectClient(options: RedirectViewOptions = {}): AgentSessionRuntime {
+		return new AgentSessionRuntime(this.host, this.current, {
+			redirect: true,
+			...(options.hostTarget === undefined ? {} : { hostTarget: options.hostTarget }),
+		});
 	}
 
 	/**
@@ -330,8 +322,17 @@ export class AgentSessionRuntime {
 
 	private relayProjectionEvents(conversation: HostedConversation): () => void {
 		return conversation.subscribeProjectionEvents((event) => {
-			this.conversationProjectionFeed.publishExternal(event);
+			this.projectionFeed.publishExternal(event);
 		});
+	}
+
+	/**
+	 * The ordered projection of the runtime's conversation for remote
+	 * subscribers. It serves that one conversation: a move replaces it, and the
+	 * subscriptions of the one it replaced end.
+	 */
+	get conversationProjectionFeed(): ConversationProjectionFeed {
+		return this.projectionFeed;
 	}
 
 	/** End the runtime when `conversation` loses its log while it is still the runtime's conversation. */
@@ -415,12 +416,6 @@ export class AgentSessionRuntime {
 		this.rebindSession = rebindSession;
 	}
 
-	setPrepareSessionReplacement(
-		prepare?: (target: AgentSessionReplacementTarget) => Promise<AgentSessionReplacementTransaction | undefined>,
-	): void {
-		this.prepareSessionReplacement = prepare;
-	}
-
 	/** The currently installed rebind handler, so a temporary owner can restore it. */
 	getRebindSession(): ((session: AgentSession) => Promise<void>) | undefined {
 		return this.rebindSession;
@@ -439,9 +434,8 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * Register a host-ownership barrier for moves. The new source is already
-	 * bound and reducing state, but its cursor-zero generation remains
-	 * unpublished until every listener has atomically rekeyed runtime/lease state.
+	 * Observe every session the runtime moves to before its rebind hook and
+	 * replaced listeners run, once the source's extension clients left it.
 	 */
 	subscribeSessionWillProject(listener: (session: AgentSession) => Promise<void> | void): () => void {
 		this.sessionWillProjectListeners.add(listener);
@@ -471,7 +465,7 @@ export class AgentSessionRuntime {
 
 	/** Publish a canonical conversation reducer event to every attached subscriber. */
 	publishConversationProjectionEvent(event: object): void {
-		this.conversationProjectionFeed.publishExternal(event);
+		this.projectionFeed.publishExternal(event);
 	}
 
 	getCurrentSessionSummary(): WorkspaceSessionSummary {
@@ -538,9 +532,7 @@ export class AgentSessionRuntime {
 	/**
 	 * Open `target` from `source` and move this runtime there. Until the move
 	 * commits, any failure closes what was opened and leaves the runtime on
-	 * `source`. The host transaction is prepared before an existing session
-	 * opens (the host may be what frees its lock), else once the new session
-	 * exists; it commits as the move's first step.
+	 * `source`.
 	 */
 	private async replace(
 		source: HostedConversation,
@@ -548,13 +540,9 @@ export class AgentSessionRuntime {
 		options: {
 			assertConversationGenerationCurrent?: () => void;
 			projectTrustContextFactory?: (cwd: string) => ProjectTrustContext;
-			rebindRequestId?: string;
-			/** The stored session being opened, when the target is one. */
-			existingSession?: SessionReference & { cwdOverride?: string };
 			/**
 			 * The last durable step, after the move and `withSession`, with the target's
-			 * log; the projection publishes the new identity after it. Any failure
-			 * before it ends the runtime.
+			 * log. Any failure in it ends the runtime.
 			 */
 			commitPublication?: (target: SessionManager) => Promise<void>;
 			/** Runs inside the move only before a durable publication; otherwise the caller seeds after the move. */
@@ -564,47 +552,29 @@ export class AgentSessionRuntime {
 		} = {},
 	): Promise<MoveOutcome> {
 		if (this.redirects) return this.redirectTo(target, options);
-		const prepare = this.prepareSessionReplacement;
-		let transaction: AgentSessionReplacementTransaction | undefined;
-		let opened: OpenConversationResult;
-		try {
-			opened = await this.host.open(target, {
-				from: source,
-				...(options.projectTrustContextFactory ? { projectTrustContext: options.projectTrustContextFactory } : {}),
-				onOpening: async () => {
-					options.assertConversationGenerationCurrent?.();
-					const existing = options.existingSession;
-					if (!existing || !prepare) return;
-					const cwd =
-						existing.cwdOverride ??
-						(await findSessionInfoById(existing.sessionDirectory, existing.sessionId))?.cwd;
-					transaction = await prepare({ previousSessionId: source.id, sessionId: existing.sessionId, cwd });
-					options.assertConversationGenerationCurrent?.();
-				},
-			});
-		} catch (error) {
-			throw await rollbackPreparedReplacement(transaction, error);
-		}
+		const opened: OpenConversationResult = await this.host.open(target, {
+			from: source,
+			...(options.projectTrustContextFactory ? { projectTrustContext: options.projectTrustContextFactory } : {}),
+			onOpening: async () => {
+				options.assertConversationGenerationCurrent?.();
+			},
+		});
 		if (opened.cancelled) return { cancelled: true };
 		const to = opened.conversation;
 		let releaseSource: (() => void) | undefined;
 		const abandonOpen = async (error: unknown): Promise<never> => {
 			releaseSource?.();
-			const errors = [await rollbackPreparedReplacement(transaction, error)];
-			await this.host.discard(to).catch((closeError: unknown) => errors.push(closeError));
-			if (errors.length > 1) throw new AggregateError(errors, "Session open failed and could not be cleaned up");
-			throw errors[0];
+			try {
+				await this.host.discard(to);
+			} catch (closeError) {
+				throw new AggregateError([error, closeError], "Session open failed and could not be cleaned up");
+			}
+			throw error;
 		};
 		try {
 			options.assertConversationGenerationCurrent?.();
 			// Nothing new starts in the source from here; it closes once the move commits.
 			releaseSource = source.holdForLeave();
-			transaction ??= await prepare?.({
-				previousSessionId: source.id,
-				sessionId: to.id,
-				cwd: to.session.sessionManager.getCwd(),
-			});
-			options.assertConversationGenerationCurrent?.();
 			// The last step before the move: what it writes through the source stays true only if the move happens.
 			await options.beforeMove?.(source);
 			options.assertConversationGenerationCurrent?.();
@@ -612,19 +582,12 @@ export class AgentSessionRuntime {
 			return await abandonOpen(error);
 		}
 
-		this.handover = {
-			transaction,
-			rebindRequestId: options.rebindRequestId,
-			deferProjection: options.commitPublication !== undefined,
-		};
 		try {
 			await this.host.move(this.client, to);
 		} catch (error) {
 			// A move that never left the source is a failed open: the runtime stays where it was.
 			if (this.host.conversationOf(this.client) === source) return await abandonOpen(error);
-			return await this.failHandover(error, to, transaction);
-		} finally {
-			this.handover = undefined;
+			return await this.failHandover(error, to);
 		}
 
 		let seedable = true;
@@ -657,9 +620,8 @@ export class AgentSessionRuntime {
 				assertPublicationCurrent("before");
 				await commitPublication(to.session.sessionManager);
 				assertPublicationCurrent("during");
-				this.conversationProjectionFeed.commitSourceRebind(options.rebindRequestId);
 			} catch (error) {
-				return await this.failHandover(error, to, undefined);
+				return await this.failHandover(error, to);
 			}
 			return {
 				cancelled: false,
@@ -680,10 +642,12 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * A redirect view's structural operation: write `target`'s log and redirect
-	 * the client there; this runtime stays on its conversation. `withSession`
-	 * cannot run, since the new conversation opens in the host the client
-	 * reconnects through.
+	 * A redirect view's structural operation: redirect the client to `target`;
+	 * this runtime stays on its conversation. With `hostTarget`, a new
+	 * conversation opens in this host and is handed over before the redirect;
+	 * otherwise its log is written for the host the client reconnects through.
+	 * `withSession` cannot run, since no client of this host joins the new
+	 * conversation.
 	 */
 	private async redirectTo(
 		target: ConversationTarget,
@@ -696,10 +660,37 @@ export class AgentSessionRuntime {
 		if (target.kind === "adopt") throw new Error("A redirect view cannot adopt a conversation");
 		options.assertConversationGenerationCurrent?.();
 		const { beforeMove, commitPublication } = options;
+		const hostTarget = this.hostTarget;
+		if (hostTarget && target.kind !== "session") {
+			const opened = await this.host.openFor(this.client, target, {
+				beforeMove: async (from, to) => {
+					options.assertConversationGenerationCurrent?.();
+					if (from) await beforeMove?.(from);
+					await commitPublication?.(to.session.sessionManager);
+					const runtime = new AgentSessionRuntime(this.host, to);
+					try {
+						await hostTarget({ sessionId: to.id, runtime });
+					} catch (error) {
+						// The target was never handed over: it closes without its extensions having started.
+						await this.host.discard(to).catch(() => undefined);
+						await runtime.dispose().catch(() => undefined);
+						throw error;
+					}
+				},
+			});
+			if (opened.cancelled) return { cancelled: true };
+			return {
+				cancelled: false,
+				sessionId: opened.sessionId,
+				seedable: false,
+				...(opened.selectedText === undefined ? {} : { selectedText: opened.selectedText }),
+			};
+		}
 		const redirected = await this.host.redirectFor(this.client, target, {
 			beforeMove: async (from) => {
 				options.assertConversationGenerationCurrent?.();
 				await beforeMove?.(from);
+				if (hostTarget && target.kind === "session") await hostTarget({ sessionId: target.ref.sessionId });
 			},
 			...(commitPublication === undefined ? {} : { publish: commitPublication }),
 		});
@@ -713,37 +704,24 @@ export class AgentSessionRuntime {
 	}
 
 	/**
-	 * The committed move: the host transaction commits, the modes leave `from`
-	 * and bind to `to`, then the host closes `from`.
+	 * The committed move: the modes leave `from` and bind to `to`, whose
+	 * projection feed replaces `from`'s, then the host closes `from`.
 	 */
 	private async handOver(to: HostedConversation, from: HostedConversation | undefined): Promise<void> {
-		const handover = this.handover;
-		if (!handover) throw new Error("Agent session runtime moved without a handover");
 		this.current = to;
-		await handover.transaction?.commit();
 		this.beforeSessionInvalidate?.();
 		// The modes' extension clients moved: the source's session_shutdown reaches none of their UI.
 		from?.session.detachExtensionClients();
 		this.detachProjectionEvents();
 		this.detachProjectionEvents = () => {};
-		// Fence the old generation before subscription. A source may synchronously
-		// replay while attaching; it must reduce only inside the unpublished generation.
-		this.conversationProjectionFeed.beginSourceRebind(to.projectionSource);
+		// A stream never follows a move: the feed serves one conversation.
+		this.projectionFeed.dispose();
+		this.projectionFeed = new ConversationProjectionFeed(to.projectionSource);
 		this.detachProjectionEvents = this.relayProjectionEvents(to);
 		this.observeLoss(to);
-		try {
-			for (const listener of [...this.sessionWillProjectListeners]) {
-				await listener(to.session);
-			}
-		} catch (error: unknown) {
-			this.conversationProjectionFeed.failSourceRebind(error instanceof Error ? error : new Error(String(error)));
-			throw error;
+		for (const listener of [...this.sessionWillProjectListeners]) {
+			await listener(to.session);
 		}
-		// An ordinary move publishes before extension callbacks so their input and
-		// UI interactions can stream. A durable destination move instead commits
-		// its routing record before clients can adopt the new identity.
-		if (!handover.deferProjection) this.conversationProjectionFeed.commitSourceRebind(handover.rebindRequestId);
-		await handover.transaction?.finalize?.();
 		if (this.rebindSession) {
 			await this.rebindSession(to.session);
 		}
@@ -753,30 +731,18 @@ export class AgentSessionRuntime {
 	}
 
 	/** A committed move failed: the runtime ends, closing both conversations. */
-	private async failHandover(
-		error: unknown,
-		to: HostedConversation,
-		transaction: AgentSessionReplacementTransaction | undefined,
-	): Promise<never> {
+	private async failHandover(error: unknown, to: HostedConversation): Promise<never> {
 		this.ended = true;
 		this.failed = true;
 		const failure = error instanceof Error ? error : new Error(String(error));
 		const cleanupErrors: unknown[] = [];
-		this.conversationProjectionFeed.failSourceRebind(failure);
-		this.conversationProjectionFeed.dispose();
+		this.projectionFeed.dispose();
 		this.detachProjectionEvents();
 		this.detachProjectionEvents = () => {};
 		for (const conversation of this.host.list()) {
 			if (conversation !== to && conversation !== this.current) continue;
 			try {
 				await this.host.close(conversation);
-			} catch (cleanupError) {
-				cleanupErrors.push(cleanupError);
-			}
-		}
-		if (transaction) {
-			try {
-				await transaction.dispose();
 			} catch (cleanupError) {
 				cleanupErrors.push(cleanupError);
 			}
@@ -846,15 +812,6 @@ export class AgentSessionRuntime {
 				...(options?.projectTrustContextFactory
 					? { projectTrustContextFactory: options.projectTrustContextFactory }
 					: {}),
-				// A reference reusing the current session ID is rejected by the host; it needs no host lease.
-				...(sessionRef.sessionId === source.id
-					? {}
-					: {
-							existingSession: {
-								...sessionRef,
-								...(options?.cwdOverride === undefined ? {} : { cwdOverride: options.cwdOverride }),
-							},
-						}),
 			},
 		);
 	}
@@ -909,7 +866,6 @@ export class AgentSessionRuntime {
 						...(options?.assertConversationGenerationCurrent
 							? { assertConversationGenerationCurrent: options.assertConversationGenerationCurrent }
 							: {}),
-						...(options?.rebindRequestId === undefined ? {} : { rebindRequestId: options.rebindRequestId }),
 						...(options?.beforeMove === undefined ? {} : { beforeMove: options.beforeMove }),
 						...(options?.replaceReviewGeneral
 							? {
@@ -943,12 +899,6 @@ export class AgentSessionRuntime {
 	): Promise<{ planning: PlanningState; selectedSessionId: string; started: boolean }> {
 		if (this.session.isReviewDiscussion && strategy === "new_session") {
 			throw new Error("Finding discussions execute plans in the current context; reset through the source review");
-		}
-		if (this.redirects && strategy === "new_session") {
-			// The execution turn would have to start in a conversation that opens in another host.
-			throw new Error(
-				"Executing a plan in a new session is unavailable while this session is open on the desktop; execute it in the current context or from the desktop",
-			);
 		}
 		const sourceSession = this.session;
 		const sourcePlanning = sourceSession.planningState;
@@ -1003,14 +953,20 @@ export class AgentSessionRuntime {
 		// The new session is written before it opens; the source records the handoff while still open.
 		const handoff = createPlanHandoff(sourceSession, sourcePlan, expectedRevision);
 		const sourceSessionRef = sourceSession.sessionRef;
+		// A redirected client's new conversation opens for it elsewhere or later:
+		// its log queues the execution turn, which starts when it recovers its durable input.
+		const redirected = this.redirects;
 		const replacement = await this.newSession({
 			...(sourceSessionRef ? { parentSessionRef: sourceSessionRef } : {}),
-			setup: (writer) => handoff.setup(writer),
+			setup: async (writer) => {
+				await handoff.setup(writer);
+				if (redirected) await handoff.queueStart(writer);
+			},
 			beforeMove: (source) => handoff.beforeMove(source),
-			withSession: (context) => handoff.start(this.session, context),
+			...(redirected ? {} : { withSession: (context) => handoff.start(this.session, context) }),
 			...(assertConversationGenerationCurrent ? { assertConversationGenerationCurrent } : {}),
 		});
-		if (replacement.cancelled || !replacement.seeded) {
+		if (replacement.cancelled || (!redirected && !replacement.seeded)) {
 			throw new Error("Plan execution session was not created");
 		}
 		return {
@@ -1063,12 +1019,11 @@ export class AgentSessionRuntime {
 		}
 		this.ended = true;
 		this.disposePromise = this.moveTail.then(async () => {
-			this.prepareSessionReplacement = undefined;
 			this.sessionWillProjectListeners.clear();
 			this.sessionReplacementListeners.clear();
 			this.detachProjectionEvents();
 			this.detachProjectionEvents = () => {};
-			this.conversationProjectionFeed.dispose();
+			this.projectionFeed.dispose();
 			this.stopObservingClose();
 			this.clientDetachedListeners.clear();
 			if (this.redirects) {

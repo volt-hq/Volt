@@ -5876,7 +5876,6 @@
 			"enum": [
 				"bootstrap",
 				"branch_rebase",
-				"session_rebind",
 				"resync",
 				"overflow"
 			]

@@ -1,10 +1,7 @@
 import { mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import {
-	type AgentSessionReplacementTransaction,
-	createAgentSessionRuntime,
-} from "../../../src/core/agent-session-runtime.ts";
+import { createAgentSessionRuntime } from "../../../src/core/agent-session-runtime.ts";
 import { ConversationLockedError } from "../../../src/core/conversation-log/conversation-lock.ts";
 import { MissingSessionCwdError } from "../../../src/core/session-cwd.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
@@ -106,7 +103,7 @@ describe("regression #585: a failed open keeps the client on its source", () => 
 		await reopened.closePersistence();
 	});
 
-	it("keeps the runtime on its session and rolls back the host transaction when a switch fails to open", async () => {
+	it("keeps the runtime on its session when a switch fails to open", async () => {
 		const harness = await createHostHarness();
 		harnesses.push(harness);
 		const runtime = await createAgentSessionRuntime(harness.factory, {
@@ -122,15 +119,6 @@ describe("regression #585: a failed open keeps the client on its source", () => 
 		rebind.mockClear();
 		const source = runtime.session;
 		await source.prompt("before the failed switch");
-		const phases: string[] = [];
-		runtime.setPrepareSessionReplacement(async (): Promise<AgentSessionReplacementTransaction> => {
-			phases.push("prepare");
-			return {
-				commit: async () => void phases.push("commit"),
-				rollback: async () => void phases.push("rollback"),
-				dispose: async () => void phases.push("dispose"),
-			};
-		});
 		const invalidated = vi.fn();
 		runtime.setBeforeSessionInvalidate(invalidated);
 		const holder = await storedSession(harness);
@@ -145,7 +133,6 @@ describe("regression #585: a failed open keeps the client on its source", () => 
 		}
 
 		expect(runtime.session).toBe(source);
-		expect(phases).toEqual(["prepare", "rollback"]);
 		expect(invalidated).not.toHaveBeenCalled();
 		expect(rebind).not.toHaveBeenCalled();
 		expect(harness.events.map((event) => event.type)).toEqual(["session_before_switch"]);

@@ -302,7 +302,9 @@ conversation at a time:
 
 - **daemon-active / daemon-detached** — the daemon runs a headless runtime for
   phones. When the last phone disconnects, the runtime is retained for
-  `remote.detachedRuntimeTtlMs` (default 30 minutes) so a reattach is warm.
+  `remote.detachedRuntimeTtlMs` (default 30 minutes) so a reattach is warm. A
+  session the last phone moved away from (see below) closes as soon as it is
+  idle instead.
 - **tui-owned** — a desktop TUI owns the runtime. The daemon still terminates
   the phone's Iroh connection, then relays the raw stream bytes to the TUI,
   which serves it from its in-process session. Prompts from either side appear
@@ -331,12 +333,20 @@ extension), it opens the new session, closes the one it left, releases that
 session's lease, and takes the new session's lease; `/resume` takes the
 target's lease before it opens it. Phones on the session the TUI left stay on
 it: their streams end with `lease_transferred`, and they reconnect to the same
-session, which the daemon hosts again. A phone relayed through the TUI that
-starts a new session, forks, or switches moves alone: the TUI writes the new
-session and stays on its own, and the phone's stream ends with
-`conversation_moved` naming the new session, which the phone reconnects to
-through the daemon. Executing a plan in a new session is not available from a
-relayed phone; execute it in the current context or from the desktop.
+session, which the daemon hosts again.
+
+A phone that starts a new session, forks, or switches moves alone, and other
+clients of its session stay on it. The phone gets its command's response, then
+its stream ends with `conversation_moved` naming the new session, and the
+phone reconnects to that session, which is also recorded as its last session.
+On a session the daemon hosts, the daemon opens the new session itself, with
+the tool set and worktree of the session the phone left, and keeps it until
+the phone reconnects; the session left behind keeps running a turn in
+progress. A phone relayed through the TUI moves the same way: the TUI writes
+the new session and stays on its own, and the daemon hosts the new session
+when the phone reconnects. Executing a plan in a new session from a phone
+queues the plan's execution in the new session, where it starts once the
+phone reconnects.
 
 When the TUI owns the lease, phone prompts run with the TUI session's full
 local tool set. `remote.allowTools` applies only to daemon-owned headless

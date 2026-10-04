@@ -348,7 +348,7 @@ export type RpcTranscriptResponse = Static<typeof RpcTranscriptResponseSchema>;
 export type RpcConversationDeliveryPosition = Static<typeof RpcConversationDeliveryPositionSchema>;
 export type RpcAssistantStreamPosition = Static<typeof RpcAssistantStreamPositionSchema>;
 export type RpcConversationDiscontinuityReason = Static<typeof RpcConversationDiscontinuityReasonSchema>;
-/** `branch_rebase` retains conversation identity; `session_rebind` replaces it. */
+/** `branch_rebase` retains conversation identity: a stream never changes conversations. */
 export type RpcConversationBootstrapReason = Static<typeof RpcConversationBootstrapReasonSchema>;
 /** Subscriber-sanitized active assistant state used to seed the decoder before tail delivery. */
 export type RpcConversationActiveAssistant = Static<typeof RpcConversationActiveAssistantSchema>;

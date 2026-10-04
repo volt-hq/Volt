@@ -93,12 +93,15 @@ composition with `LeaseBroker` is future work.
 
 ### 3.3 `SessionTarget` — written + verified green
 
-Implemented in `SessionTarget.tla` (28 states). Models the daemon producer
-(`session-target.ts` + rekey overlay) and the phone validator as a
+Implemented in `SessionTarget.tla`. Models the daemon producer
+(`session-target.ts`) and the phone validator as a
 resolve → validate → commit/reject pipeline, checking `NoGhostSession`,
 `CanonicalPinOnly`, `ProducerSubsetOfValidator` (the compatibility proof),
-`RekeyWellFormed`, `SessionResumedMatches`, `RequestedOnlyForRekey`, and
-`HandshakeTerminates`. The prose below is the original design intent.
+`SessionResumedMatches`, and `HandshakeTerminates`. The rekey overlay
+(`session_rekeyed` with `requestedSessionId`) is gone: a session id never
+aliases another conversation, and a phone that changes sessions reconnects to
+the new id after `conversation_moved`. The prose below is the original design
+intent.
 
 **Safety**
 

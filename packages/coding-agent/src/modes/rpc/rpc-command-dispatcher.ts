@@ -412,7 +412,6 @@ export async function handleRpcCommand(
 				}
 			}
 			const newSessionOptions = {
-				rebindRequestId: id,
 				...(command.preserveReviewRunId ? { preserveReviewRunId: command.preserveReviewRunId } : {}),
 				...(command.replaceReviewGeneral ? { replaceReviewGeneral: true } : {}),
 				...(parentSessionRef ? { parentSessionRef } : {}),

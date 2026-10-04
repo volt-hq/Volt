@@ -25,7 +25,7 @@ import type { DaemonEnvironmentStatus } from "./login-environment.ts";
  * the CLI. Zero runtime deps beyond node:buffer.
  */
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
@@ -496,7 +496,7 @@ export interface RelayPreamble {
 	streamId: string;
 	resolvedTarget: {
 		sessionId: string;
-		selection: "created" | "created_after_missing" | "resumed" | "session_rekeyed";
+		selection: "created" | "created_after_missing" | "resumed";
 		requestedSessionId?: string;
 		workspaceName: string;
 		workspacePath: string;
@@ -953,6 +953,12 @@ export function isHelloAck(value: unknown): value is HelloAck {
 	return isRecord(value) && value.type === "hello_ack" && typeof value.ok === "boolean";
 }
 
+const RELAY_TARGET_SELECTIONS: ReadonlySet<unknown> = new Set<RelayPreamble["resolvedTarget"]["selection"]>([
+	"created",
+	"created_after_missing",
+	"resumed",
+]);
+
 export function isRelayPreamble(value: unknown): value is RelayPreamble {
 	if (
 		!isRecord(value) ||
@@ -969,7 +975,9 @@ export function isRelayPreamble(value: unknown): value is RelayPreamble {
 			typeof value.authorization.workspaceName !== "string" ||
 			typeof value.authorization.workspacePath !== "string" ||
 			typeof value.authorization.allowedTools !== "string" ||
-			!isWorkspaceMetadataSnapshot(value.authorization)
+			!isWorkspaceMetadataSnapshot(value.authorization) ||
+			typeof value.resolvedTarget.sessionId !== "string" ||
+			!RELAY_TARGET_SELECTIONS.has(value.resolvedTarget.selection)
 		) {
 			return false;
 		}

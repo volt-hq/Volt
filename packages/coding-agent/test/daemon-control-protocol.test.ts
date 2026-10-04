@@ -434,16 +434,13 @@ describe("control protocol framing", () => {
 			},
 		};
 		expect(isRelayPreamble(roundTrip(preamble))).toBe(true);
-		const rekeyedPreamble: RelayPreamble = {
-			...preamble,
-			resolvedTarget: {
-				...preamble.resolvedTarget,
-				sessionId: "s-def",
-				selection: "session_rekeyed",
-				requestedSessionId: "s-abc",
-			},
-		};
-		expect(isRelayPreamble(roundTrip(rekeyedPreamble))).toBe(true);
+		// A session id never aliases another conversation.
+		expect(
+			isRelayPreamble({
+				...preamble,
+				resolvedTarget: { ...preamble.resolvedTarget, sessionId: "s-def", selection: "session_rekeyed" },
+			}),
+		).toBe(false);
 		expect(
 			isRelayPreamble({
 				...preamble,
