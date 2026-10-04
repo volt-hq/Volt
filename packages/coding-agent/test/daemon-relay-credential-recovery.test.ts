@@ -9,7 +9,7 @@ import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts
 import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
-import { type ControlEvent, type ControlResponse, isControlResponse } from "../src/daemon/control-protocol.ts";
+import { type ControlEvent, type ControlResponse, ControlValidators } from "../src/daemon/control-protocol.ts";
 import type {
 	IrohHomeRelayWatchCallback,
 	IrohIncomingLike,
@@ -352,10 +352,24 @@ afterEach(() => {
 
 describe("managed relay credential recovery", () => {
 	it("validates credential status without requiring it for non-managed relays", () => {
-		const base = { type: "status_result", id: "status", remoteTransport: { state: "ready" } };
-		expect(isControlResponse(base)).toBe(true);
+		const base = {
+			type: "status_result",
+			id: "status",
+			version: "1.0.0",
+			protocolVersion: 2,
+			pid: 1,
+			startedAtMs: 1,
+			environment: { source: "inherited" },
+			leases: [],
+			phoneConnections: 0,
+			workspaces: [],
+			clients: [],
+			remoteTransport: { state: "ready" },
+			keepAwake: { enabled: false, state: "disabled" },
+		};
+		expect(ControlValidators.response.Check(base)).toBe(true);
 		for (const state of ["unpaired", "pairing", "active", "expired", "subscription_inactive", "revocation_pending"]) {
-			expect(isControlResponse({ ...base, relayCredential: { state, expiresAt: 123 } })).toBe(true);
+			expect(ControlValidators.response.Check({ ...base, relayCredential: { state, expiresAt: 123 } })).toBe(true);
 		}
 		for (const relayCredential of [
 			{ state: "unknown" },
@@ -363,7 +377,7 @@ describe("managed relay credential recovery", () => {
 			{ state: "active", expiresAt: "123" },
 			{ state: "expired", expiresAt: -1 },
 		]) {
-			expect(isControlResponse({ ...base, relayCredential })).toBe(false);
+			expect(ControlValidators.response.Check({ ...base, relayCredential })).toBe(false);
 		}
 	});
 

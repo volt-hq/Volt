@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { Buffer } from "node:buffer";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import { MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES } from "@hansjm10/volt-protocol/push";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
@@ -20,7 +21,6 @@ import {
 	sanitizeIrohRemoteTranscriptText,
 } from "../../core/remote/iroh/index.ts";
 import {
-	MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES,
 	sanitizeIrohRemoteNotificationMetadata,
 	sanitizeIrohRemoteNotificationTarget,
 	sanitizeIrohRemoteNotificationText,

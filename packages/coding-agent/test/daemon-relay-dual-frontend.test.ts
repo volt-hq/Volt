@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionEvent } from "../src/core/agent-session.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import type { IrohRemoteHandshakeSuccess, IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
+import { createIrohRemoteHandshakeSuccess, type IrohRemoteHello } from "../src/core/remote/iroh/handshake.ts";
 import { writeIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake-reader.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import type { RpcConversationAuthority } from "../src/core/rpc/types.ts";
@@ -120,13 +120,15 @@ function createPhoneHello(sessionId: string): IrohRemoteHello {
 		workspace: WORKSPACE.name,
 		mode: "conversation",
 		conversation: { target: "session", sessionId },
-	} as IrohRemoteHello;
+	};
 }
 
-const HANDSHAKE_RESPONSE = {
+const HANDSHAKE_RESPONSE = createIrohRemoteHandshakeSuccess({
+	workspace: WORKSPACE.name,
+	clientNodeId: "n-phone",
 	child: "volt",
 	features: ["multi_streams.v1", "conversation_streams.v1"],
-} as unknown as IrohRemoteHandshakeSuccess;
+});
 
 const cleanups: Array<() => Promise<void> | void> = [];
 
@@ -359,7 +361,7 @@ function mintPhoneRelay(registry: RelayRegistry, clientNodeId: string, streamId:
 		streamId,
 		stream: phone,
 		preamble: {
-			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE },
+			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE, initialInput: [] },
 			authorization: {
 				clientNodeId,
 				workspaceName: WORKSPACE.name,
@@ -412,7 +414,7 @@ function mintOwnedPhoneRelay(harness: OwnedRelayDaemonHarness, clientNodeId: str
 		streamId,
 		stream: phone,
 		preamble: {
-			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE },
+			handshake: { hello: createPhoneHello(SESSION_ID), response: HANDSHAKE_RESPONSE, initialInput: [] },
 			authorization: {
 				clientNodeId,
 				workspaceName: WORKSPACE.name,
@@ -465,7 +467,7 @@ async function serveRelayFromTui(
 ) {
 	const opened = await client.openRelay({ relayId: relay.relayId, relayToken: relay.relayToken });
 	const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
-	const handshake = opened.preamble.handshake as { hello: IrohRemoteHello; response: IrohRemoteHandshakeSuccess };
+	const handshake = opened.preamble.handshake;
 	const authorizationSubset = opened.preamble.authorization;
 	const authorization = createTuiRelayAuthorization(authorizationSubset);
 	// The phone verifies the saved host node id in the relayed handshake
@@ -526,7 +528,7 @@ async function serveOwnedRelayFromTui(
 ): Promise<void> {
 	const opened = await openRelay();
 	const relayedStream = adaptRelaySocketToIrohStream(opened.stream);
-	const handshake = opened.preamble.handshake as { hello: IrohRemoteHello; response: IrohRemoteHandshakeSuccess };
+	const handshake = opened.preamble.handshake;
 	const authorizationSubset = opened.preamble.authorization;
 	const authorization = createTuiRelayAuthorization(authorizationSubset);
 	const responseContext = { hostNodeId: opened.preamble.hostNodeId, relayMode: opened.preamble.relayMode };

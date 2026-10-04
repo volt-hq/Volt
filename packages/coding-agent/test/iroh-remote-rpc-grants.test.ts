@@ -21,7 +21,7 @@ import {
 	writeIrohRemoteHostState,
 } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
-import { isControlRequest } from "../src/daemon/control-protocol.ts";
+import { admitControlRequest } from "../src/daemon/control-protocol.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -480,9 +480,9 @@ describe("Iroh remote RPC grants", () => {
 	});
 
 	it("parses preset and explicit control requests and rejects mixed access", () => {
-		expect(isControlRequest({ type: "pair_request", id: "1", access: "coding" })).toBe(true);
+		expect(admitControlRequest({ type: "pair_request", id: "1", access: "coding" })).toBe(true);
 		expect(
-			isControlRequest({
+			admitControlRequest({
 				type: "pair_request",
 				id: "2",
 				allowedTools: [],
@@ -490,7 +490,7 @@ describe("Iroh remote RPC grants", () => {
 			}),
 		).toBe(true);
 		expect(
-			isControlRequest({
+			admitControlRequest({
 				type: "client_access_update",
 				id: "3",
 				clientNodeId: "n",
@@ -499,7 +499,7 @@ describe("Iroh remote RPC grants", () => {
 			}),
 		).toBe(true);
 		expect(
-			isControlRequest({
+			admitControlRequest({
 				type: "pair_request",
 				id: "4",
 				access: "coding",
@@ -508,7 +508,7 @@ describe("Iroh remote RPC grants", () => {
 			}),
 		).toBe(false);
 		expect(
-			isControlRequest({
+			admitControlRequest({
 				type: "client_access_update",
 				id: "unsafe",
 				clientNodeId: "n",

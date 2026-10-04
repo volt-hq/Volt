@@ -1,11 +1,29 @@
 import { Buffer } from "node:buffer";
+import {
+	IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES,
+	IROH_REMOTE_OUTCOMES,
+	IROH_REMOTE_WORKING_DIRECTORY_MAX_CHARS,
+	IROH_REMOTE_WORKING_DIRECTORY_MAX_UTF8_BYTES,
+	IROH_REMOTE_WORKTREE_ID_PATTERN_SOURCE,
+	type IrohRemoteHostHandshakeFailureOutcome,
+	type IrohRemoteOutcome,
+	type IrohRemoteRelayMode,
+} from "@hansjm10/volt-protocol/remote-handshake";
 
-export const IROH_REMOTE_ALPN = "volt-rpc/0";
+export {
+	IROH_REMOTE_ALPN,
+	IROH_REMOTE_HANDSHAKE_TYPE,
+	IROH_REMOTE_HELLO_TYPE,
+	IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES,
+	IROH_REMOTE_OUTCOMES,
+	type IrohRemoteHostHandshakeFailureOutcome,
+	type IrohRemoteOutcome,
+	type IrohRemoteRelayMode,
+} from "@hansjm10/volt-protocol/remote-handshake";
+
 export const IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE =
 	"Computer storage is full. Free space on the computer, then retry.";
 export const IROH_REMOTE_TICKET_PREFIX = "volt+iroh://v1/";
-export const IROH_REMOTE_HELLO_TYPE = "volt_iroh_hello";
-export const IROH_REMOTE_HANDSHAKE_TYPE = "volt_iroh_handshake";
 export const IROH_REMOTE_MULTI_STREAMS_FEATURE = "multi_streams.v1";
 export const IROH_REMOTE_CONVERSATION_STREAMS_FEATURE = "conversation_streams.v1";
 export const IROH_REMOTE_WORKTREES_FEATURE = "worktrees.v1";
@@ -26,7 +44,7 @@ export const IROH_REMOTE_HOST_FEATURES = [
 ] as const;
 
 /** Daemon-managed worktree ids: lowercase slug, unique per workspace. */
-export const IROH_REMOTE_WORKTREE_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+export const IROH_REMOTE_WORKTREE_ID_PATTERN = new RegExp(IROH_REMOTE_WORKTREE_ID_PATTERN_SOURCE);
 
 export function isIrohRemoteWorktreeId(value: unknown): value is string {
 	return typeof value === "string" && IROH_REMOTE_WORKTREE_ID_PATTERN.test(value);
@@ -40,7 +58,10 @@ export function getIrohRemoteWorkingDirectoryValidationError(value: string): str
 	if (value.length === 0) {
 		return "workingDirectory must be omitted for the workspace root";
 	}
-	if (value.length > 4096 || Buffer.byteLength(value, "utf8") > 8192) {
+	if (
+		value.length > IROH_REMOTE_WORKING_DIRECTORY_MAX_CHARS ||
+		Buffer.byteLength(value, "utf8") > IROH_REMOTE_WORKING_DIRECTORY_MAX_UTF8_BYTES
+	) {
 		return "workingDirectory exceeds maximum length";
 	}
 	if (value.includes("\0") || hasAsciiControlCharacter(value)) {
@@ -68,56 +89,11 @@ export const IROH_REMOTE_UNSAFE_TOOL_NAMES = [
 	"web_fetch",
 	"lsp",
 ] as const;
-export const IROH_REMOTE_OUTCOMES = [
-	"host_unreachable",
-	"host_storage_full",
-	"invalid_workspace",
-	"invalid_conversation_target",
-	"conversation_streams_unsupported",
-	"pairing_secret_expired",
-	"pairing_secret_consumed",
-	"client_unknown",
-	"client_revoked",
-	"workspace_unavailable",
-	"workspace_missing",
-	"workspace_forbidden",
-	"workspace_authorization_removed",
-	"workspace_unregistered",
-	"session_unavailable",
-	"duplicate_conversation_connection",
-	"conversation_in_use",
-	"conversation_locked",
-	"host_identity_mismatch",
-	"saved_host_invalid",
-] as const;
-export const IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES = [
-	"host_storage_full",
-	"invalid_workspace",
-	"invalid_conversation_target",
-	"conversation_streams_unsupported",
-	"pairing_secret_expired",
-	"pairing_secret_consumed",
-	"client_unknown",
-	"client_revoked",
-	"workspace_unavailable",
-	"workspace_missing",
-	"workspace_forbidden",
-	"workspace_authorization_removed",
-	"workspace_unregistered",
-	"session_unavailable",
-	"duplicate_conversation_connection",
-	"conversation_in_use",
-	"conversation_locked",
-] as const;
-
 const IROH_REMOTE_UNSAFE_TOOL_NAME_SET = new Set<string>(IROH_REMOTE_UNSAFE_TOOL_NAMES);
 const IROH_REMOTE_OUTCOME_SET = new Set<string>(IROH_REMOTE_OUTCOMES);
 const IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOME_SET = new Set<string>(IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES);
 
-export type IrohRemoteRelayMode = "disabled" | "development" | "production";
 export type IrohRemoteHostFeature = (typeof IROH_REMOTE_HOST_FEATURES)[number];
-export type IrohRemoteOutcome = (typeof IROH_REMOTE_OUTCOMES)[number];
-export type IrohRemoteHostHandshakeFailureOutcome = (typeof IROH_REMOTE_HOST_HANDSHAKE_FAILURE_OUTCOMES)[number];
 
 export function isIrohRemoteRelayMode(value: unknown): value is IrohRemoteRelayMode {
 	return value === "disabled" || value === "development" || value === "production";

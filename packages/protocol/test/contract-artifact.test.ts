@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, test } from "vitest";
 import { RPC_COMMAND_SCHEMAS } from "../src/commands.ts";
 import { CONTRACT_LIMITS, CONTRACT_SCHEMA_REGISTRY } from "../src/contract.ts";
+import { CONTROL_EVENT_SCHEMAS, CONTROL_REQUEST_SCHEMAS, CONTROL_RESPONSE_SCHEMAS } from "../src/daemon-control.ts";
 import { CORE_LOG_ENTRY_TYPES } from "../src/entries.ts";
 import { RPC_RESPONSE_SCHEMAS } from "../src/responses.ts";
 import { UI_NODE_TERMINAL_MAX_LINES } from "../src/ui-node.ts";
@@ -74,6 +75,20 @@ describe("committed protocol contract artifact", () => {
 			...Object.keys(RPC_RESPONSE_SCHEMAS).map((command) => `#/$defs/RpcResponse.${command}`),
 			"#/$defs/RpcErrorResponse",
 		]);
+	});
+
+	test("control unions cover every daemon request, response, and event", () => {
+		const artifact = loadArtifact();
+		for (const [union, schemas] of [
+			["Control.Request", CONTROL_REQUEST_SCHEMAS],
+			["Control.Response", CONTROL_RESPONSE_SCHEMAS],
+			["Control.Event", CONTROL_EVENT_SCHEMAS],
+		] as const) {
+			const definition = artifact.$defs[union] as { anyOf: Array<{ $ref: string }> };
+			expect(definition.anyOf.map((member) => member.$ref)).toEqual(
+				Object.keys(schemas).map((type) => `#/$defs/${union}.${type}`),
+			);
+		}
 	});
 
 	test("x-volt-limits carries the live host constants", () => {

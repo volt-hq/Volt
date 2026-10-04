@@ -15,6 +15,7 @@ import {
 	CONTROL_RPC_GRANTS_CAPABILITY,
 	CONTROL_WORKTREES_CAPABILITY,
 	type ControlEvent,
+	ControlValidators,
 	type ControlWorktreeStatus,
 	type LeaseReleaseReason,
 	type LeaseState,
@@ -895,7 +896,8 @@ export function createDaemonAttach(options: CreateDaemonAttachOptions): DaemonAt
 					leases.get(sessionId)?.workspaceName ??
 					resolvedWorkspaceName;
 				const activeClient = client;
-				if (!activeClient || !workspaceName) {
+				// The daemon admits only canonical intents; anything else fails without a round trip.
+				if (!activeClient || !workspaceName || !ControlValidators.notification.Check(notification)) {
 					return "failed";
 				}
 				try {

@@ -1,19 +1,18 @@
 import { chmodSync, lstatSync, rmSync, type Stats } from "node:fs";
 import { createConnection, createServer, type Server, type Socket } from "node:net";
 import {
+	admitControlRequest,
 	CONTROL_MAX_LINE_BYTES,
 	type ControlClientKind,
 	type ControlEvent,
 	ControlLineDecoder,
 	type ControlRequest,
 	type ControlResponse,
+	ControlValidators,
 	encodeControlLine,
 	type HelloAck,
 	type HelloMessage,
-	isControlRequest,
-	isHelloAck,
 	PROTOCOL_VERSION,
-	parseHelloMessage,
 } from "./control-protocol.ts";
 
 export interface ControlConnection {
@@ -165,8 +164,8 @@ export async function startControlServer(options: ControlServerOptions): Promise
 			socket.destroy();
 		};
 
-		const handleHello = (hello: HelloMessage | undefined): boolean => {
-			if (!hello) {
+		const handleHello = (hello: unknown): boolean => {
+			if (!ControlValidators.hello.Check(hello)) {
 				fatal("invalid_hello");
 				return false;
 			}
@@ -252,12 +251,10 @@ export async function startControlServer(options: ControlServerOptions): Promise
 		const handleMessage = (message: unknown): void => {
 			const connection = established;
 			if (!connection) {
-				if (!handleHello(parseHelloMessage(message))) {
-					return;
-				}
+				handleHello(message);
 				return;
 			}
-			if (!isControlRequest(message)) {
+			if (!admitControlRequest(message)) {
 				const id =
 					typeof message === "object" && message !== null && typeof (message as { id?: unknown }).id === "string"
 						? ((message as { id: string }).id ?? "")
@@ -492,7 +489,7 @@ export async function probeControlSocket(
 					settle({ kind: "healthy", status: message });
 					return;
 				}
-				if (isHelloAck(message) && !message.ok) {
+				if (ControlValidators.helloAck.Check(message) && !message.ok) {
 					settle({
 						kind: "live-rejected",
 						reason: message.error ?? "other",
@@ -502,9 +499,8 @@ export async function probeControlSocket(
 					});
 					return;
 				}
-				if (typeof message === "object" && message !== null && (message as { type?: unknown }).type === "fatal") {
-					const error = (message as { error?: unknown }).error;
-					settle({ kind: "live-rejected", reason: "fatal", ...(typeof error === "string" ? { error } : {}) });
+				if (ControlValidators.fatal.Check(message)) {
+					settle({ kind: "live-rejected", reason: "fatal", error: message.error });
 					return;
 				}
 			}

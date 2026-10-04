@@ -1,5 +1,14 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import {
+	IROH_REMOTE_NOTIFICATION_KINDS,
+	type IrohRemotePushNotificationDeliveryStatus,
+	MAX_IROH_REMOTE_NOTIFICATION_BODY_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_EVENT_ID_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_WORKSPACE_UTF8_BYTES,
+} from "@hansjm10/volt-protocol/push";
 import type { RpcRegisterPushTargetArgs, RpcRegisterPushTargetResponse } from "../../rpc/types.ts";
 import type { IrohRemoteAuditEventInput, IrohRemoteAuditLogger } from "./audit.ts";
 import type {
@@ -14,25 +23,16 @@ export const DEFAULT_IROH_REMOTE_PUSH_RELAY_RETRY_ATTEMPTS = 3;
 export const DEFAULT_IROH_REMOTE_PUSH_RELAY_RETRY_DELAY_MS = 250;
 export const DEFAULT_IROH_REMOTE_PUSH_RELAY_TIMEOUT_MS = 10_000;
 export const DEFAULT_IROH_REMOTE_PUSH_RELAY_URL = "https://us-central1-volt-3fae7.cloudfunctions.net/pushRelay";
-export const MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES = 128;
-export const MAX_IROH_REMOTE_NOTIFICATION_BODY_UTF8_BYTES = 512;
 export const MAX_IROH_REMOTE_NOTIFICATION_TARGET_UTF8_BYTES = 256;
-export const MAX_IROH_REMOTE_NOTIFICATION_WORKSPACE_UTF8_BYTES = 128;
-export const MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES = 128;
-export const MAX_IROH_REMOTE_NOTIFICATION_EVENT_ID_UTF8_BYTES = 512;
 export const MAX_IROH_REMOTE_NOTIFICATION_KIND_UTF8_BYTES = 64;
 
 const NOTIFICATION_UNSAFE_CHARACTERS = /[\p{Cc}\p{Cf}\p{Cs}]/gu;
 const NOTIFICATION_UNSAFE_CHARACTER = /[\p{Cc}\p{Cf}\p{Cs}]/u;
 const NOTIFICATION_PATH_SEPARATOR = /[/\\]/u;
 const IROH_REMOTE_NOTIFICATION_HOST_NODE_ID = /^[0-9a-f]{64}$/u;
-const IROH_REMOTE_NOTIFICATION_KINDS = new Set([
-	"conversation_completed",
-	"plan_ready",
-	"review_completed",
-	"action_completed",
-	"host_notice",
-]);
+const IROH_REMOTE_NOTIFICATION_KIND_SET = new Set<string>(IROH_REMOTE_NOTIFICATION_KINDS);
+
+export type { IrohRemotePushNotificationDeliveryStatus } from "@hansjm10/volt-protocol/push";
 
 export type IrohRemotePushTargetRegistrationRequest = RpcRegisterPushTargetArgs;
 export type IrohRemotePushTargetRegistrationResult = RpcRegisterPushTargetResponse;
@@ -138,7 +138,7 @@ export function sanitizeIrohRemotePushNotificationIntent(
 		!eventId ||
 		!hostNodeId ||
 		!kind ||
-		!IROH_REMOTE_NOTIFICATION_KINDS.has(kind) ||
+		!IROH_REMOTE_NOTIFICATION_KIND_SET.has(kind) ||
 		!title ||
 		!body ||
 		(value.sessionId !== undefined && sessionId === undefined) ||
@@ -162,51 +162,6 @@ export function sanitizeIrohRemotePushNotificationIntent(
 		...(planId === undefined ? {} : { planId }),
 		...(workflowId === undefined ? {} : { workflowId }),
 	};
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** Strict control-plane parser: unsafe or non-canonical text is rejected, not silently rewritten. */
-export function parseIrohRemotePushNotificationIntent(value: unknown): IrohRemotePushNotificationIntent | undefined {
-	if (
-		!isRecord(value) ||
-		!Object.keys(value).every((key) =>
-			[
-				"eventId",
-				"hostNodeId",
-				"kind",
-				"title",
-				"body",
-				"sessionId",
-				"workspaceName",
-				"planId",
-				"workflowId",
-			].includes(key),
-		) ||
-		typeof value.eventId !== "string" ||
-		typeof value.hostNodeId !== "string" ||
-		typeof value.kind !== "string" ||
-		typeof value.title !== "string" ||
-		typeof value.body !== "string" ||
-		(value.sessionId !== undefined && typeof value.sessionId !== "string") ||
-		(value.workspaceName !== undefined && typeof value.workspaceName !== "string") ||
-		(value.planId !== undefined && typeof value.planId !== "string") ||
-		(value.workflowId !== undefined && typeof value.workflowId !== "string")
-	) {
-		return undefined;
-	}
-	const sanitized = sanitizeIrohRemotePushNotificationIntent(value as unknown as IrohRemotePushNotificationIntent);
-	if (!sanitized) {
-		return undefined;
-	}
-	for (const [key, entry] of Object.entries(sanitized)) {
-		if (value[key] !== entry) {
-			return undefined;
-		}
-	}
-	return Object.keys(value).length === Object.keys(sanitized).length ? sanitized : undefined;
 }
 
 export interface IrohRemotePushRelayNotificationRequest {
@@ -251,13 +206,6 @@ export interface IrohRemotePushTargetRevocationSummary {
 	failed: number;
 	skipped: number;
 }
-
-export type IrohRemotePushNotificationDeliveryStatus =
-	| "sent"
-	| "no_push_target"
-	| "duplicate"
-	| "failed"
-	| "invalid_target";
 
 export interface IrohRemotePushNotificationDelivery {
 	deliverNotification(

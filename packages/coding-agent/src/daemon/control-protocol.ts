@@ -1,46 +1,66 @@
 import { Buffer } from "node:buffer";
 import {
-	type IrohRemoteAccessPresetName,
-	type IrohRemoteRpcCapability,
-	type IrohRemoteRpcGrant,
-	isIrohRemoteAccessPresetName,
-	parseIrohRemoteRpcCapabilities,
-	parseIrohRemoteRpcGrant,
-} from "../core/remote/iroh/access-grant.ts";
-import { IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE, parseIrohRemoteAllowTools } from "../core/remote/iroh/protocol.ts";
+	type ControlClientStatus,
+	ControlEventSchema,
+	ControlFatalSchema,
+	ControlHelloAckSchema,
+	ControlHelloSchema,
+	ControlRelayPreambleSchema,
+	type ControlRequest,
+	ControlRequestSchema,
+	ControlResponseSchema,
+	type RemoteTransportHealth,
+	type RemoteTransportReasonCode,
+} from "@hansjm10/volt-protocol/daemon-control";
 import {
-	type IrohRemotePushNotificationDeliveryStatus,
-	type IrohRemotePushNotificationIntent,
-	parseIrohRemotePushNotificationIntent,
-} from "../core/remote/iroh/push.ts";
+	type IrohRemotePushNotification,
+	IrohRemotePushNotificationSchema,
+	MAX_IROH_REMOTE_NOTIFICATION_BODY_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_EVENT_ID_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES,
+	MAX_IROH_REMOTE_NOTIFICATION_WORKSPACE_UTF8_BYTES,
+} from "@hansjm10/volt-protocol/push";
+import { Compile } from "typebox/compile";
+import { parseIrohRemoteRpcGrant } from "../core/remote/iroh/access-grant.ts";
+import { IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE, parseIrohRemoteAllowTools } from "../core/remote/iroh/protocol.ts";
 import type { IrohRemoteClient } from "../core/remote/iroh/state.ts";
-import type { IrohRemoteWorkspaceMetadataSnapshot } from "../core/remote/iroh/workspace.ts";
-import { parseSessionReference } from "../core/session-entry-codec.ts";
-import type { SessionReference } from "../core/session-manager.ts";
-import type { DaemonEnvironmentStatus } from "./login-environment.ts";
 
 /**
- * Wire types and framing for the voltd control plane: JSONL over the unix
- * socket ~/.volt/agent/daemon/voltd.sock. Shared by the daemon, the TUI, and
- * the CLI. Zero runtime deps beyond node:buffer.
+ * Framing and admission for the voltd control plane: JSONL over the unix
+ * socket ~/.volt/agent/daemon/voltd.sock, shared by the daemon, the TUI, and
+ * the CLI. The message schemas live in @hansjm10/volt-protocol/daemon-control;
+ * every check here is a validator compiled from them.
  */
+
+export type {
+	ControlClientKind,
+	ControlClientStatus,
+	ControlEvent,
+	ControlFatal,
+	ControlKeepAwakeStatus,
+	ControlLeaseStatus,
+	ControlRelayCredentialStatus,
+	ControlRequest,
+	ControlResponse,
+	ControlRevokedClientStatus,
+	ControlWorkspaceStatus,
+	ControlWorktreeStatus,
+	DaemonRemotePolicyStatus,
+	HelloAck,
+	HelloMessage,
+	LeaseReleaseReason,
+	LeaseState,
+	RelayCloseReason,
+	RelayPreamble,
+	RemoteTransportHealth,
+	RemoteTransportReasonCode,
+} from "@hansjm10/volt-protocol/daemon-control";
 
 export const PROTOCOL_VERSION = 2;
 
 /** Hard cap per JSONL line; longer lines close the connection with a fatal frame. */
 export const CONTROL_MAX_LINE_BYTES = 8 * 1024 * 1024;
-
-export type LeaseState = "unowned" | "daemon-active" | "daemon-detached" | "daemon-draining" | "tui-owned";
-
-export type LeaseReleaseReason =
-	| "quit"
-	| "switch"
-	| "connection_lost"
-	| "shutdown"
-	| "retention_expired"
-	| "workspace_unregistered";
-
-export type ControlClientKind = "tui" | "cli";
 
 /**
  * Control-hello capability advertised by TUIs that can serve worktree-bound
@@ -52,159 +72,6 @@ export const CONTROL_WORKTREES_CAPABILITY = "worktrees";
 export const CONTROL_PAIR_CANCEL_CAPABILITY = "pair_cancel";
 /** TUI/CLI understands per-device tool + RPC grant control messages and relay preambles. */
 export const CONTROL_RPC_GRANTS_CAPABILITY = "rpc_grants";
-
-export type HelloMessage =
-	| {
-			type: "hello";
-			role: "control";
-			protocolVersion: number;
-			pid: number;
-			version: string;
-			client: ControlClientKind;
-			/** Per-daemon instance token read from the local pidfile. */
-			controlToken?: string;
-			/** Optional client capabilities (e.g. "worktrees"); absent for old clients. */
-			capabilities?: string[];
-	  }
-	| {
-			type: "hello";
-			role: "relay";
-			protocolVersion: number;
-			relayId: string;
-			relayToken: string;
-	  };
-
-export interface HelloAck {
-	type: "hello_ack";
-	ok: boolean;
-	error?: "protocol_mismatch" | "shutting_down" | "bad_relay_token" | "auth_failed";
-	/** daemon-assigned, present when ok (control role) */
-	connectionId?: string;
-	/** daemon package version */
-	version?: string;
-	protocolVersion?: number;
-}
-
-// ============================================================================
-// Requests and responses (control role)
-// ============================================================================
-
-export type ControlAccessSelection =
-	| { access?: IrohRemoteAccessPresetName; allowedTools?: never; rpcCapabilities?: never }
-	| { access?: never; allowedTools: string[]; rpcCapabilities: IrohRemoteRpcCapability[] };
-
-export type ControlRequest =
-	| { type: "status"; id: string }
-	| { type: "shutdown"; id: string }
-	| {
-			type: "lease_acquire";
-			id: string;
-			workspaceName: string;
-			sessionId: string;
-			/** reserved; true => lease_denied{force_unsupported} */
-			force?: boolean;
-	  }
-	| {
-			type: "lease_release";
-			id: string;
-			workspaceName: string;
-			sessionId: string;
-			reason: LeaseReleaseReason;
-	  }
-	| {
-			type: "work_observe";
-			id: string;
-			workspaceName: string;
-			sessionId: string;
-			/** Path-free authoritative Git state from the exact TUI lease holder. */
-			gitContext: {
-				repository: string;
-				branch: string;
-				headOid: string;
-				baseRef?: string;
-			} | null;
-	  }
-	| ({ type: "pair_request"; id: string; workspaceName?: string } & ControlAccessSelection) // progress arrives as pairing_progress events
-	| { type: "pair_cancel"; id: string; requestId: string }
-	| { type: "clients_list"; id: string }
-	| { type: "relay_credential_revoke"; id: string }
-	/** Refresh expired or suspended managed relay access now, instead of waiting for the next scheduled check. */
-	| { type: "relay_credential_check"; id: string }
-	| ({
-			type: "client_access_update";
-			id: string;
-			clientNodeId: string;
-			expectedRevision: number;
-	  } & ControlAccessSelection)
-	| { type: "client_revoke"; id: string; clientNodeId: string }
-	| { type: "client_approve_repair"; id: string; clientNodeId: string }
-	| { type: "workspace_register"; id: string; name: string; path: string }
-	| { type: "workspace_unregister"; id: string; name: string }
-	| {
-			type: "worktree_create";
-			id: string;
-			workspaceName: string;
-			worktreeName?: string;
-			branch?: string;
-			baseRef?: string;
-	  }
-	| {
-			type: "worktree_adopt";
-			id: string;
-			workspaceName: string;
-			path: string;
-			worktreeName?: string;
-			baseRef?: string;
-	  }
-	| { type: "worktree_list"; id: string; workspaceName?: string }
-	| { type: "worktree_remove"; id: string; workspaceName: string; worktreeId: string; force?: boolean }
-	| { type: "worktree_prune"; id: string; workspaceName?: string; purgeRecovery?: boolean }
-	/** Resolve a filesystem path to the daemon-managed worktree containing it. */
-	| { type: "worktree_resolve"; id: string; path: string }
-	/** Restore and pin an exact local session's managed checkout without changing its stored cwd. */
-	| { type: "worktree_restore"; id: string; path: string; sessionRef: SessionReference }
-	/** Bind a session id to a worktree (TUI-created worktree sessions). */
-	| {
-			type: "worktree_bind";
-			id: string;
-			workspaceName: string;
-			worktreeId: string;
-			sessionId: string;
-			/** Direct managed-checkout startup: acquire the lease on this same connection while binding. */
-			acquireLease?: boolean;
-	  }
-	| { type: "theme_set"; id: string; theme: string } // name; daemon resolves + broadcasts
-	| { type: "keep_awake_set"; id: string; enabled: boolean } // hold/release the host sleep-prevention assertion
-	| { type: "viewer_subscribe"; id: string; viewerFeedId: string }
-	| { type: "viewer_unsubscribe"; id: string; viewerFeedId: string }
-	| { type: "viewer_abort"; id: string; viewerFeedId: string }
-	| {
-			type: "relay_rpc";
-			id: string;
-			/** Active relay whose phone command is being forwarded. */
-			relayId: string;
-			/** paired phone client the relayed conversation belongs to */
-			clientNodeId: string;
-			workspaceName: string;
-			/** the TUI's current session id for the relayed conversation */
-			sessionId: string;
-			/**
-			 * Verbatim phone RPC command forwarded from a TUI-owned conversation.
-			 * The daemon executes it against its real state (push targets and
-			 * workspace registry) and returns the RPC response in relay_rpc_result.
-			 */
-			command: Record<string, unknown> & { type: string };
-	  }
-	| {
-			type: "relay_notification_delivery";
-			id: string;
-			/** paired phone client the relayed conversation belongs to */
-			clientNodeId: string;
-			workspaceName: string;
-			/** the TUI's current session id for the relayed conversation */
-			sessionId: string;
-			notification: IrohRemotePushNotificationIntent;
-	  };
 
 /** RPC command types the daemon executes on behalf of a TUI relay. */
 export const RELAY_RPC_COMMAND_TYPES: ReadonlySet<string> = new Set([
@@ -219,63 +86,6 @@ export const RELAY_RPC_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"get_web_search_status",
 ]);
 
-/** Host keep-awake assertion state as reported over the control plane. */
-export interface ControlKeepAwakeStatus {
-	/** Desired (persisted) state. */
-	enabled: boolean;
-	/** Actual state; `degraded` means enabled but the assertion is not held. */
-	state: "disabled" | "active" | "degraded";
-	method?: string;
-	reason?: string;
-}
-
-export interface ControlLeaseStatus {
-	workspaceName: string;
-	sessionId: string;
-	state: LeaseState;
-	relayCount: number;
-	streamCount: number;
-}
-
-export interface ControlWorkspaceStatus {
-	name: string;
-	path: string;
-	/** Workspace-specific headless tool grant, when configured. */
-	allowedTools?: string[];
-}
-
-/**
- * Worktree status over the LOCAL control socket. Unlike the iroh wire, the
- * control plane is trusted (same user), so checkout paths are included for
- * display.
- */
-export interface ControlWorktreeStatus {
-	id: string;
-	workspaceName: string;
-	path: string;
-	branch: string;
-	baseRef?: string;
-	createdAt: number;
-	sessionIds: string[];
-	available?: boolean;
-	dirty?: boolean;
-	/** Branch commits vs the base ref (merge-back guidance). */
-	aheadBehind?: { ahead: number; behind: number };
-}
-
-export interface ControlClientStatus {
-	clientNodeId: string;
-	label?: string;
-	pairedAtMs: number;
-	/** Added to protocol v1 after launch; absent on older running daemons. */
-	lastSeenAtMs?: number;
-	/** Resolved device grant, before workspace/daemon ceilings are applied. */
-	allowedTools?: string[];
-	/** True when the device has no customized grant and tracks the daemon's current default. */
-	usesDefaultTools?: boolean;
-	rpcGrant?: IrohRemoteRpcGrant;
-}
-
 /** Single mapping from a persisted client record to its control-socket status. */
 export function createControlClientStatus(client: IrohRemoteClient): ControlClientStatus {
 	return {
@@ -289,221 +99,95 @@ export function createControlClientStatus(client: IrohRemoteClient): ControlClie
 	};
 }
 
-export interface ControlRevokedClientStatus {
-	clientNodeId: string;
-	label?: string;
-	pairedAtMs: number;
-	lastSeenAtMs?: number;
-	revokedAtMs: number;
-	/** Present after the desktop explicitly allows this identity to use a fresh pairing ticket. */
-	rePairApprovedAtMs?: number;
-	rpcGrant?: IrohRemoteRpcGrant;
-}
-
-export interface DaemonRemotePolicyStatus {
-	/** Daemon-wide override; null delegates to workspace and device grants. */
-	allowTools: string[] | null;
-	/** Retention window for idle, detached daemon-owned runtimes. */
-	detachedRuntimeTtlMs: number;
-}
-
-/** Managed relay access, independent of local endpoint readiness. Contains no credentials. */
-export interface ControlRelayCredentialStatus {
-	state: "unpaired" | "pairing" | "active" | "expired" | "subscription_inactive" | "revocation_pending";
-	/** Current access-token expiry as epoch milliseconds, when a token exists. */
-	expiresAt?: number;
-	/** Next scheduled broker refresh as epoch milliseconds; absent while a refresh runs or none is scheduled. */
-	nextRefreshAt?: number;
-}
-
-export type RemoteTransportState = "starting" | "ready" | "degraded" | "unavailable";
-
-export const REMOTE_TRANSPORT_REASON_MESSAGES = {
+/** Safe operator-facing guidance for each remote transport reason code. */
+export const REMOTE_TRANSPORT_REASON_MESSAGES: Readonly<Record<RemoteTransportReasonCode, string>> = {
 	extension_missing: "Phone transport is not enabled in this daemon.",
 	native_binding_missing:
 		"Phone transport is unavailable on this platform. Reinstall Volt without `--omit=optional` on a supported platform.",
 	endpoint_start_failed: "Phone transport failed to start. Check `volt daemon logs`.",
 	host_storage_full: IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE,
-} as const;
-
-export type RemoteTransportReasonCode = keyof typeof REMOTE_TRANSPORT_REASON_MESSAGES;
-
-export interface RemoteTransportHealth {
-	state: RemoteTransportState;
-	/** Exact @hansjm10/volt-iroh wrapper version, when its manifest is readable. */
-	wrapperVersion?: string;
-	/** Stable machine-readable reason; present whenever state is degraded or unavailable. */
-	reasonCode?: RemoteTransportReasonCode;
-	/** Safe operator-facing guidance corresponding to reasonCode. */
-	message?: string;
-}
+};
 
 export function isRemoteTransportPairingAvailable(health: RemoteTransportHealth | undefined): boolean {
 	return health?.state === "ready" || (health?.state === "degraded" && health.reasonCode === "host_storage_full");
 }
 
-export type ControlResponse =
-	| { type: "ok"; id: string }
-	| { type: "error"; id: string; code: string; message: string }
-	| { type: "lease_granted"; id: string; workspaceName: string; sessionId: string; handoff: "cold" | "warm" | "none" }
-	| { type: "lease_pending"; id: string; viewerFeedId: string }
-	// lease_pending is provisional; the terminal response for the same id arrives
-	// when the drain completes (lease_granted) or fails (error{drain_failed})
-	| { type: "lease_denied"; id: string; reason: "held_by_tui" | "force_unsupported" | "draining_elsewhere" }
-	| {
-			type: "status_result";
-			id: string;
-			version: string;
-			protocolVersion: number;
-			pid: number;
-			startedAtMs: number;
-			/** How the daemon resolved the environment its runtimes and tools use. */
-			environment: DaemonEnvironmentStatus;
-			/** Optional feature flags for protocol-v1 additions. */
-			capabilities?: string[];
-			leases: ControlLeaseStatus[];
-			phoneConnections: number;
-			workspaces: ControlWorkspaceStatus[];
-			clients: ControlClientStatus[];
-			/** Revoked identities retained for explicit repair approval; absent on older running daemons. */
-			revokedClients?: ControlRevokedClientStatus[];
-			/** Required phone-transport readiness; local daemon functions remain available when not ready. */
-			remoteTransport: RemoteTransportHealth;
-			/** Omitted for non-managed relay setups. */
-			relayCredential?: ControlRelayCredentialStatus;
-			/** Added to protocol v1 after launch; absent on older running daemons. */
-			remotePolicy?: DaemonRemotePolicyStatus;
-			keepAwake: ControlKeepAwakeStatus;
-	  }
-	| { type: "keep_awake_result"; id: string; keepAwake: ControlKeepAwakeStatus }
-	| { type: "clients_result"; id: string; clients: ControlClientStatus[] }
-	| { type: "client_access_updated"; id: string; client: ControlClientStatus }
-	| { type: "worktree_result"; id: string; worktree: ControlWorktreeStatus }
-	| { type: "worktrees_result"; id: string; worktrees: ControlWorktreeStatus[] }
-	| {
-			type: "worktree_resolve_result";
-			id: string;
-			/** Parent workspace the worktree belongs to. */
-			workspaceName: string;
-			/** Parent workspace checkout path (control plane is local/trusted). */
-			workspacePath: string;
-			worktreeId: string;
-			worktreePath: string;
-	  }
-	| {
-			type: "worktree_prune_result";
-			id: string;
-			results: Array<{
-				workspaceName: string;
-				removedRecords: string[];
-				orphanCheckouts: string[];
-				purgedRecoveryCheckouts?: string[];
-			}>;
-	  }
-	| { type: "pair_started"; id: string; requestId: string }
-	| {
-			type: "relay_rpc_result";
-			id: string;
-			/** verbatim RPC response object for the TUI to forward to the phone */
-			response: Record<string, unknown>;
-			/** refreshed workspace metadata after a successful unregister_workspace */
-			workspaceMetadata?: IrohRemoteWorkspaceMetadataSnapshot;
-	  }
-	| { type: "relay_push_delivery_result"; id: string; status: IrohRemotePushNotificationDeliveryStatus };
-
 // ============================================================================
-// Unsolicited events (daemon -> control clients)
+// Admission
 // ============================================================================
 
-export type RelayCloseReason =
-	| "phone_disconnected"
-	| "tui_disconnected"
-	| "lease_transferred"
-	| "workspace_unregistered"
-	| "host_shutdown"
-	| "error";
-
-export type ControlEvent =
-	| {
-			type: "relay_offer";
-			relayId: string;
-			/** single-use, 10s expiry */
-			relayToken: string;
-			workspaceName: string;
-			sessionId: string;
-			clientNodeId: string;
-			connectionId: string;
-			streamId: string;
-	  }
-	| { type: "relay_closed"; relayId: string; reason: RelayCloseReason }
-	| {
-			type: "viewer_event";
-			viewerFeedId: string;
-			seq: number;
-			/** AgentSessionEvent JSON, or {kind:"truncated"} when the buffer overflowed */
-			event: unknown;
-	  }
-	| { type: "viewer_end"; viewerFeedId: string; reason: "granted" | "cancelled" | "error" }
-	| { type: "theme_snapshot"; themeName: string; tokens: Record<string, string> }
-	| { type: "keep_awake_changed"; keepAwake: ControlKeepAwakeStatus }
-	| {
-			type: "pairing_progress";
-			requestId: string;
-			phase: "ticket" | "qr" | "waiting" | "completed" | "failed";
-			ticket?: string;
-			qrLines?: string[];
-			clientNodeId?: string;
-			error?: string;
-	  }
-	| { type: "daemon_shutdown" };
-
-export interface ControlFatal {
-	type: "fatal";
-	error: string;
+function compileOnFirstUse<T>(compile: () => T): () => T {
+	let validator: T | undefined;
+	return () => {
+		validator ??= compile();
+		return validator;
+	};
 }
 
-export type ControlMessage = HelloMessage | HelloAck | ControlRequest | ControlResponse | ControlEvent | ControlFatal;
+const helloValidator = compileOnFirstUse(() => Compile(ControlHelloSchema));
+const helloAckValidator = compileOnFirstUse(() => Compile(ControlHelloAckSchema));
+const fatalValidator = compileOnFirstUse(() => Compile(ControlFatalSchema));
+const requestValidator = compileOnFirstUse(() => Compile(ControlRequestSchema));
+const responseValidator = compileOnFirstUse(() => Compile(ControlResponseSchema));
+const eventValidator = compileOnFirstUse(() => Compile(ControlEventSchema));
+const relayPreambleValidator = compileOnFirstUse(() => Compile(ControlRelayPreambleSchema));
+const notificationValidator = compileOnFirstUse(() => Compile(IrohRemotePushNotificationSchema));
 
-/** One JSONL relay preamble line follows a successful relay hello_ack. */
-export interface RelayPreamble {
-	type: "relay_preamble";
-	relayId: string;
-	/** verbatim phone handshake JSON as received (parsed object, re-serialized) */
-	handshake: unknown;
-	/** authorization subset — everything the TUI needs to serve the stream */
-	authorization: IrohRemoteWorkspaceMetadataSnapshot & {
-		clientNodeId: string;
-		workspaceName: string;
-		workspacePath: string;
-		/** Headless agent tool grant, carried for visibility; TUI-owned sessions retain their full local tools. */
-		allowedTools: string;
-		rpcGrant: IrohRemoteRpcGrant;
-		/** Present when the conversation is bound to a daemon-managed worktree. */
-		worktreeId?: string;
-		/** Worktree checkout path — the TUI sanitizes with this as the root. */
-		worktreePath?: string;
-		/** Registered-workspace-relative git source root for nested repo worktrees. */
-		worktreeSourceRootRelativePath?: string;
-	};
-	/**
-	 * The daemon's Iroh node id: the TUI writes it into the handshake response
-	 * so the phone's saved-host identity verification passes over the relay.
-	 */
-	hostNodeId?: string;
-	relayMode?: "disabled" | "development" | "production";
-	relayUrls?: string[];
-	connectionId: string;
-	streamId: string;
-	resolvedTarget: {
-		sessionId: string;
-		selection: "created" | "created_after_missing" | "resumed";
-		requestedSessionId?: string;
-		workspaceName: string;
-		workspacePath: string;
-		worktreeId?: string;
-		/** POSIX-style path relative to the registered workspace root. */
-		workingDirectory?: string;
-	};
+/**
+ * Validators compiled from the daemon-control contract schemas on first use,
+ * so processes that never touch the control plane do not pay for them.
+ * Requests are admitted only through `admitControlRequest`.
+ */
+export const ControlValidators = {
+	get hello() {
+		return helloValidator();
+	},
+	get helloAck() {
+		return helloAckValidator();
+	},
+	get fatal() {
+		return fatalValidator();
+	},
+	get response() {
+		return responseValidator();
+	},
+	get event() {
+		return eventValidator();
+	},
+	get relayPreamble() {
+		return relayPreambleValidator();
+	},
+	/** A relayed push notification intent, without its UTF-8 budgets. */
+	get notification() {
+		return notificationValidator();
+	},
+};
+
+/** The notification fields' `x-volt-max-utf8-bytes` budgets, which JSON Schema cannot check. */
+const NOTIFICATION_UTF8_BUDGETS: Readonly<Record<string, number>> = {
+	eventId: MAX_IROH_REMOTE_NOTIFICATION_EVENT_ID_UTF8_BYTES,
+	title: MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES,
+	body: MAX_IROH_REMOTE_NOTIFICATION_BODY_UTF8_BYTES,
+	sessionId: MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES,
+	workspaceName: MAX_IROH_REMOTE_NOTIFICATION_WORKSPACE_UTF8_BYTES,
+	planId: MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES,
+	workflowId: MAX_IROH_REMOTE_NOTIFICATION_METADATA_UTF8_BYTES,
+};
+
+function isWithinNotificationBudgets(notification: IrohRemotePushNotification): boolean {
+	const fields: Record<string, unknown> = notification;
+	return Object.entries(NOTIFICATION_UTF8_BUDGETS).every(([field, budget]) => {
+		const value = fields[field];
+		return typeof value !== "string" || Buffer.byteLength(value, "utf8") <= budget;
+	});
+}
+
+/** A request the contract schema accepts, with a relayed notification inside its UTF-8 budgets. */
+export function admitControlRequest(value: unknown): value is ControlRequest {
+	return (
+		requestValidator().Check(value) &&
+		(value.type !== "relay_notification_delivery" || isWithinNotificationBudgets(value.notification))
+	);
 }
 
 // ============================================================================
@@ -588,402 +272,5 @@ export class ControlLineDecoder {
 		const remainder = this.buffered;
 		this.buffered = Buffer.alloc(0);
 		return remainder;
-	}
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isOptionalEpochMs(value: unknown): boolean {
-	return value === undefined || (typeof value === "number" && Number.isSafeInteger(value) && value > 0);
-}
-
-function isControlAccessSelection(value: Record<string, unknown>, allowDefault: boolean): boolean {
-	if (value.access !== undefined) {
-		return (
-			isIrohRemoteAccessPresetName(value.access) &&
-			value.allowedTools === undefined &&
-			value.rpcCapabilities === undefined
-		);
-	}
-	if (value.allowedTools === undefined && value.rpcCapabilities === undefined) {
-		return allowDefault;
-	}
-	if (!Array.isArray(value.allowedTools) || !value.allowedTools.every((entry) => typeof entry === "string")) {
-		return false;
-	}
-	try {
-		parseIrohRemoteRpcCapabilities(value.rpcCapabilities);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
-function isLeaseReleaseReason(value: unknown): value is LeaseReleaseReason {
-	return (
-		value === "quit" ||
-		value === "switch" ||
-		value === "connection_lost" ||
-		value === "shutdown" ||
-		value === "retention_expired" ||
-		value === "workspace_unregistered"
-	);
-}
-
-function isRemoteTransportHealth(value: unknown): value is RemoteTransportHealth {
-	if (!isRecord(value)) return false;
-	if (
-		value.state !== "starting" &&
-		value.state !== "ready" &&
-		value.state !== "degraded" &&
-		value.state !== "unavailable"
-	) {
-		return false;
-	}
-	if (value.wrapperVersion !== undefined && typeof value.wrapperVersion !== "string") return false;
-	if (
-		value.reasonCode !== undefined &&
-		(typeof value.reasonCode !== "string" || !(value.reasonCode in REMOTE_TRANSPORT_REASON_MESSAGES))
-	) {
-		return false;
-	}
-	if (value.message !== undefined && typeof value.message !== "string") return false;
-	return true;
-}
-
-function isPushDeliveryStatus(value: unknown): value is IrohRemotePushNotificationDeliveryStatus {
-	return (
-		value === "sent" ||
-		value === "no_push_target" ||
-		value === "duplicate" ||
-		value === "failed" ||
-		value === "invalid_target"
-	);
-}
-
-function isPushNotificationIntent(value: unknown): value is IrohRemotePushNotificationIntent {
-	return parseIrohRemotePushNotificationIntent(value) !== undefined;
-}
-
-function isWorkspaceMetadataSnapshot(value: Record<string, unknown>): boolean {
-	return (
-		Array.isArray(value.workspaceNames) &&
-		value.workspaceNames.every((workspaceName) => typeof workspaceName === "string") &&
-		Array.isArray(value.workspaces) &&
-		value.workspaces.every(
-			(workspace) =>
-				isRecord(workspace) &&
-				typeof workspace.name === "string" &&
-				(workspace.status === "available" || workspace.status === "missing" || workspace.status === "unavailable"),
-		)
-	);
-}
-
-export function parseHelloMessage(value: unknown): HelloMessage | undefined {
-	if (!isRecord(value) || value.type !== "hello") {
-		return undefined;
-	}
-	if (typeof value.protocolVersion !== "number") {
-		return undefined;
-	}
-	if (value.role === "control") {
-		if (
-			typeof value.pid !== "number" ||
-			typeof value.version !== "string" ||
-			(value.client !== "tui" && value.client !== "cli")
-		) {
-			return undefined;
-		}
-		if (
-			value.capabilities !== undefined &&
-			(!Array.isArray(value.capabilities) || !value.capabilities.every((entry) => typeof entry === "string"))
-		) {
-			return undefined;
-		}
-		if (value.controlToken !== undefined && typeof value.controlToken !== "string") {
-			return undefined;
-		}
-		return {
-			type: "hello",
-			role: "control",
-			protocolVersion: value.protocolVersion,
-			pid: value.pid,
-			version: value.version,
-			client: value.client,
-			...(value.controlToken === undefined ? {} : { controlToken: value.controlToken }),
-			...(value.capabilities === undefined ? {} : { capabilities: value.capabilities as string[] }),
-		};
-	}
-	if (value.role === "relay") {
-		if (typeof value.relayId !== "string" || typeof value.relayToken !== "string") {
-			return undefined;
-		}
-		return {
-			type: "hello",
-			role: "relay",
-			protocolVersion: value.protocolVersion,
-			relayId: value.relayId,
-			relayToken: value.relayToken,
-		};
-	}
-	return undefined;
-}
-
-export function isControlRequest(value: unknown): value is ControlRequest {
-	if (!isRecord(value) || typeof value.type !== "string" || typeof value.id !== "string") {
-		return false;
-	}
-	switch (value.type) {
-		case "status":
-		case "shutdown":
-		case "clients_list":
-		case "relay_credential_revoke":
-		case "relay_credential_check":
-			return true;
-		case "pair_request":
-			return (
-				(value.workspaceName === undefined || typeof value.workspaceName === "string") &&
-				isControlAccessSelection(value, true)
-			);
-		case "lease_acquire":
-			return typeof value.workspaceName === "string" && typeof value.sessionId === "string";
-		case "lease_release":
-			return (
-				typeof value.workspaceName === "string" &&
-				typeof value.sessionId === "string" &&
-				isLeaseReleaseReason(value.reason)
-			);
-		case "work_observe": {
-			if (
-				typeof value.workspaceName !== "string" ||
-				typeof value.sessionId !== "string" ||
-				value.workspaceName.length === 0 ||
-				value.workspaceName.length > 256 ||
-				value.sessionId.length === 0 ||
-				value.sessionId.length > 128
-			) {
-				return false;
-			}
-			if (value.gitContext === null) return true;
-			if (!isRecord(value.gitContext)) return false;
-			return (
-				typeof value.gitContext.repository === "string" &&
-				value.gitContext.repository.length > 0 &&
-				value.gitContext.repository.length <= 256 &&
-				!/[\0\r\n]/.test(value.gitContext.repository) &&
-				typeof value.gitContext.branch === "string" &&
-				value.gitContext.branch.length > 0 &&
-				value.gitContext.branch.length <= 1024 &&
-				!/[\0\r\n]/.test(value.gitContext.branch) &&
-				typeof value.gitContext.headOid === "string" &&
-				/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value.gitContext.headOid) &&
-				(value.gitContext.baseRef === undefined ||
-					(typeof value.gitContext.baseRef === "string" &&
-						value.gitContext.baseRef.length <= 1024 &&
-						!/[\0\r\n]/.test(value.gitContext.baseRef)))
-			);
-		}
-		case "pair_cancel":
-			return typeof value.requestId === "string";
-		case "client_access_update":
-			return (
-				typeof value.clientNodeId === "string" &&
-				typeof value.expectedRevision === "number" &&
-				Number.isSafeInteger(value.expectedRevision) &&
-				value.expectedRevision >= 1 &&
-				isControlAccessSelection(value, false)
-			);
-		case "client_revoke":
-		case "client_approve_repair":
-			return typeof value.clientNodeId === "string";
-		case "workspace_register":
-			return typeof value.name === "string" && typeof value.path === "string";
-		case "workspace_unregister":
-			return typeof value.name === "string";
-		case "worktree_create":
-			return (
-				typeof value.workspaceName === "string" &&
-				(value.worktreeName === undefined || typeof value.worktreeName === "string") &&
-				(value.branch === undefined || typeof value.branch === "string") &&
-				(value.baseRef === undefined || typeof value.baseRef === "string")
-			);
-		case "worktree_adopt":
-			return (
-				typeof value.workspaceName === "string" &&
-				typeof value.path === "string" &&
-				(value.worktreeName === undefined || typeof value.worktreeName === "string") &&
-				(value.baseRef === undefined || typeof value.baseRef === "string")
-			);
-		case "worktree_list":
-			return value.workspaceName === undefined || typeof value.workspaceName === "string";
-		case "worktree_prune":
-			return (
-				(value.workspaceName === undefined || typeof value.workspaceName === "string") &&
-				(value.purgeRecovery === undefined || typeof value.purgeRecovery === "boolean")
-			);
-		case "worktree_remove":
-			return (
-				typeof value.workspaceName === "string" &&
-				typeof value.worktreeId === "string" &&
-				(value.force === undefined || typeof value.force === "boolean")
-			);
-		case "worktree_resolve":
-			return typeof value.path === "string";
-		case "worktree_restore":
-			if (typeof value.path !== "string") return false;
-			try {
-				parseSessionReference(value.sessionRef);
-				return true;
-			} catch {
-				return false;
-			}
-		case "worktree_bind":
-			return (
-				typeof value.workspaceName === "string" &&
-				typeof value.worktreeId === "string" &&
-				typeof value.sessionId === "string" &&
-				(value.acquireLease === undefined || typeof value.acquireLease === "boolean")
-			);
-		case "theme_set":
-			return typeof value.theme === "string";
-		case "keep_awake_set":
-			return typeof value.enabled === "boolean";
-		case "viewer_subscribe":
-		case "viewer_unsubscribe":
-		case "viewer_abort":
-			return typeof value.viewerFeedId === "string";
-		case "relay_rpc":
-			return (
-				typeof value.relayId === "string" &&
-				typeof value.clientNodeId === "string" &&
-				typeof value.workspaceName === "string" &&
-				typeof value.sessionId === "string" &&
-				isRecord(value.command) &&
-				typeof value.command.type === "string"
-			);
-		case "relay_notification_delivery":
-			return (
-				typeof value.clientNodeId === "string" &&
-				typeof value.workspaceName === "string" &&
-				typeof value.sessionId === "string" &&
-				isPushNotificationIntent(value.notification)
-			);
-		default:
-			return false;
-	}
-}
-
-export function isControlResponse(value: unknown): value is ControlResponse {
-	if (!isRecord(value) || typeof value.type !== "string" || typeof value.id !== "string") {
-		return false;
-	}
-	switch (value.type) {
-		case "ok":
-		case "error":
-		case "lease_granted":
-		case "lease_pending":
-		case "lease_denied":
-		case "clients_result":
-		case "client_access_updated":
-		case "pair_started":
-			return true;
-		case "status_result":
-			return (
-				isRemoteTransportHealth(value.remoteTransport) &&
-				(value.relayCredential === undefined ||
-					(isRecord(value.relayCredential) &&
-						typeof value.relayCredential.state === "string" &&
-						["unpaired", "pairing", "active", "expired", "subscription_inactive", "revocation_pending"].includes(
-							value.relayCredential.state,
-						) &&
-						isOptionalEpochMs(value.relayCredential.expiresAt) &&
-						isOptionalEpochMs(value.relayCredential.nextRefreshAt)))
-			);
-		case "worktree_result":
-			return isRecord(value.worktree);
-		case "worktrees_result":
-			return Array.isArray(value.worktrees);
-		case "worktree_prune_result":
-			return Array.isArray(value.results);
-		case "worktree_resolve_result":
-			return (
-				typeof value.workspaceName === "string" &&
-				typeof value.workspacePath === "string" &&
-				typeof value.worktreeId === "string" &&
-				typeof value.worktreePath === "string"
-			);
-		case "keep_awake_result":
-			return isRecord(value.keepAwake);
-		case "relay_rpc_result":
-			return (
-				isRecord(value.response) &&
-				(value.workspaceMetadata === undefined ||
-					(isRecord(value.workspaceMetadata) && isWorkspaceMetadataSnapshot(value.workspaceMetadata)))
-			);
-		case "relay_push_delivery_result":
-			return isPushDeliveryStatus(value.status);
-		default:
-			return false;
-	}
-}
-
-export function isControlEvent(value: unknown): value is ControlEvent {
-	if (!isRecord(value) || typeof value.type !== "string") {
-		return false;
-	}
-	switch (value.type) {
-		case "relay_offer":
-		case "relay_closed":
-		case "viewer_event":
-		case "viewer_end":
-		case "theme_snapshot":
-		case "pairing_progress":
-		case "daemon_shutdown":
-			return true;
-		case "keep_awake_changed":
-			return isRecord(value.keepAwake);
-		default:
-			return false;
-	}
-}
-
-export function isHelloAck(value: unknown): value is HelloAck {
-	return isRecord(value) && value.type === "hello_ack" && typeof value.ok === "boolean";
-}
-
-const RELAY_TARGET_SELECTIONS: ReadonlySet<unknown> = new Set<RelayPreamble["resolvedTarget"]["selection"]>([
-	"created",
-	"created_after_missing",
-	"resumed",
-]);
-
-export function isRelayPreamble(value: unknown): value is RelayPreamble {
-	if (
-		!isRecord(value) ||
-		value.type !== "relay_preamble" ||
-		typeof value.relayId !== "string" ||
-		!isRecord(value.authorization) ||
-		!isRecord(value.resolvedTarget)
-	) {
-		return false;
-	}
-	try {
-		if (
-			typeof value.authorization.clientNodeId !== "string" ||
-			typeof value.authorization.workspaceName !== "string" ||
-			typeof value.authorization.workspacePath !== "string" ||
-			typeof value.authorization.allowedTools !== "string" ||
-			!isWorkspaceMetadataSnapshot(value.authorization) ||
-			typeof value.resolvedTarget.sessionId !== "string" ||
-			!RELAY_TARGET_SELECTIONS.has(value.resolvedTarget.selection)
-		) {
-			return false;
-		}
-		parseIrohRemoteRpcGrant(value.authorization.rpcGrant, "relay rpcGrant");
-		return true;
-	} catch {
-		return false;
 	}
 }

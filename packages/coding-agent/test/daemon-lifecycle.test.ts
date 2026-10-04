@@ -6,6 +6,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
+import { createIrohRemoteHandshakeSuccess } from "../src/core/remote/iroh/handshake.ts";
+import { IROH_REMOTE_ALPN, IROH_REMOTE_HELLO_TYPE } from "../src/core/remote/iroh/protocol.ts";
 import { createDaemonClient } from "../src/daemon/control-client.ts";
 import type { ControlEvent } from "../src/daemon/control-protocol.ts";
 import { createDaemonLogger } from "../src/daemon/log.ts";
@@ -598,7 +600,17 @@ describe("voltd lifecycle", () => {
 					streamId: "stream-test",
 					stream: phone,
 					preamble: {
-						handshake: { hello: {}, response: {} },
+						handshake: {
+							hello: {
+								type: IROH_REMOTE_HELLO_TYPE,
+								protocol: IROH_REMOTE_ALPN,
+								workspace: "ws",
+								mode: "conversation",
+								conversation: { target: "session", sessionId: "s-relay-tail" },
+							},
+							response: createIrohRemoteHandshakeSuccess({ workspace: "ws", clientNodeId: "n-phone" }),
+							initialInput: [],
+						},
 						authorization: {
 							clientNodeId: "n-phone",
 							workspaceName: "ws",

@@ -1,28 +1,21 @@
+import {
+	IROH_REMOTE_ACCESS_PRESET_NAMES,
+	IROH_REMOTE_RPC_CAPABILITIES,
+	IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION,
+	type IrohRemoteAccessPresetName,
+	type IrohRemoteRpcCapability,
+	type IrohRemoteRpcGrant,
+} from "@hansjm10/volt-protocol/remote-access";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS, normalizeIrohRemoteAllowTools } from "./protocol.ts";
 
-export const IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION = 1 as const;
-
-export const IROH_REMOTE_RPC_CAPABILITIES = [
-	"conversation.observe.v1",
-	"conversation.control.v1",
-	"model.select.v1",
-	"integrations.manage.v1",
-	"worktrees.manage.v1",
-	"host.manage.v1",
-	"workspace.manage.v1",
-	"diagnostics.upload.v1",
-] as const;
-
-export type IrohRemoteRpcCapability = (typeof IROH_REMOTE_RPC_CAPABILITIES)[number];
-
-export interface IrohRemoteRpcGrant {
-	schemaVersion: typeof IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION;
-	revision: number;
-	capabilities: IrohRemoteRpcCapability[];
-}
-
-export const IROH_REMOTE_ACCESS_PRESET_NAMES = ["coding", "review", "chat", "full"] as const;
-export type IrohRemoteAccessPresetName = (typeof IROH_REMOTE_ACCESS_PRESET_NAMES)[number];
+export {
+	IROH_REMOTE_ACCESS_PRESET_NAMES,
+	IROH_REMOTE_RPC_CAPABILITIES,
+	IROH_REMOTE_RPC_GRANT_SCHEMA_VERSION,
+	type IrohRemoteAccessPresetName,
+	type IrohRemoteRpcCapability,
+	type IrohRemoteRpcGrant,
+} from "@hansjm10/volt-protocol/remote-access";
 
 export interface IrohRemoteAccessPreset {
 	readonly name: IrohRemoteAccessPresetName;

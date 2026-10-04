@@ -2,7 +2,10 @@ import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { homedir, userInfo } from "node:os";
 import { basename } from "node:path";
+import type { DaemonEnvironmentStatus } from "@hansjm10/volt-protocol/daemon-control";
 import { killProcessTree } from "../utils/shell.ts";
+
+export type { DaemonEnvironmentStatus } from "@hansjm10/volt-protocol/daemon-control";
 
 /**
  * Daemon-hosted runtimes run inside voltd, so bash, LSP servers, MCP servers,
@@ -70,19 +73,7 @@ const SYSTEMD_ENVIRONMENT_ARGS = [
 ];
 
 /** Environment the login shell started from; see the module comment. */
-export type DaemonEnvironmentBase = "service" | "systemd" | "minimal";
-
-/** How voltd resolved the environment its runtimes and tools use. Reported by `volt daemon status`. */
-export interface DaemonEnvironmentStatus {
-	source: "login-shell" | "inherited";
-	/** Set when source is login-shell. */
-	base?: DaemonEnvironmentBase;
-	/** Login shell that was run, or would have been run. */
-	shell?: string;
-	durationMs?: number;
-	/** Why the inherited environment is in use. */
-	reason?: string;
-}
+export type DaemonEnvironmentBase = NonNullable<DaemonEnvironmentStatus["base"]>;
 
 export interface DaemonEnvironmentResolution {
 	status: DaemonEnvironmentStatus;

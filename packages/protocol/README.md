@@ -4,6 +4,7 @@ The schemas Volt hosts and clients share:
 
 - **Conversation log entries.** The entry envelope (`ordinal`, `id`, `parentId`, `type`, `timestamp`, `visibility`, `payload`) and the core entry types a conversation folds: messages, model, thinking, fast mode, and plan changes, compaction and branch summaries, labels, session info, the active-branch leaf, client input receipts and state, subagent spawn edges, and fork lineage.
 - **Wire frames.** RPC commands, responses, events, conversation projections, and the payloads they carry.
+- **Daemon control and the Iroh handshake.** Every voltd control-socket message (hellos, requests, responses, events, and the relay preamble), the phone's Iroh hello and the host's handshake response, and the remote access grants, push notification intents, and workspace catalog they carry.
 - **`UiNode`.** Declarative UI as data: text, markdown, lists, tables, key-value lists, progress, forms, actions, cards, diffs, terminal output, code, images, and trees. Styling uses semantic tokens only; text never carries terminal escape sequences.
 - **The contract artifact.** `contract/protocol-schema.json` is a JSON Schema (draft 2020-12) document with every named definition under `$defs` and the numeric limits clients mirror under `x-volt-limits`. Clients in other languages generate or validate against it.
 
@@ -40,7 +41,7 @@ Check(UiNodeSchema, { type: "text", text: [{ text: "done", token: "success", bol
 
 The contract artifact resolves as `@hansjm10/volt-protocol/contract/protocol-schema.json`.
 
-Light subpaths load only what they name: `@hansjm10/volt-protocol/entries` (log entries), `@hansjm10/volt-protocol/git-context`, and `@hansjm10/volt-protocol/wire-limits`.
+Light subpaths load only what they name: `@hansjm10/volt-protocol/entries` (log entries), `/git-context`, `/wire-limits`, `/daemon-control` (the voltd control socket), `/remote-handshake` (the Iroh hello and handshake response), `/remote-access` (capabilities and grants), `/push` (notification intents), and `/workspace` (workspace names and catalog).
 
 ## License
 
