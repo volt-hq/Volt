@@ -226,7 +226,11 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		await expect(outgoing.lost).resolves.toBeInstanceOf(Error);
 		release.resolve();
 
-		await expect(replacement).resolves.toEqual({ cancelled: false, seeded: false });
+		await expect(replacement).resolves.toEqual({
+			cancelled: false,
+			sessionId: runtime.session.sessionId,
+			seeded: false,
+		});
 		expect(runtime.session).not.toBe(outgoing);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(ended).toBe(false);

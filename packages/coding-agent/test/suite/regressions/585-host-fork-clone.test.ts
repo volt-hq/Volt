@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import type { SessionReference } from "../../../src/core/session-manager.ts";
-import { createHostHarness, type HostHarness } from "../host-harness.ts";
+import { createHostHarness, type HostHarness, moved } from "../host-harness.ts";
 
 function userTexts(messages: readonly { role: string; content?: unknown }[]): string[] {
 	return messages
@@ -40,15 +40,17 @@ describe("regression #585: fork and clone open a new conversation from an open o
 		if (!second) throw new Error("Expected the second user message");
 		const parentId = source.session.sessionManager.getEntry(second.entryId)?.parentId;
 
-		const result = await harness.host.openFor(client, {
-			kind: "fork",
-			source,
-			entryId: second.entryId,
-			position: "before",
-		});
+		const result = moved(
+			await harness.host.openFor(client, {
+				kind: "fork",
+				source,
+				entryId: second.entryId,
+				position: "before",
+			}),
+		);
 		const fork = result.conversation;
-		if (!fork) throw new Error("Expected the fork");
 
+		expect(result.sessionId).toBe(fork.id);
 		expect(result.selectedText).toBe("second prompt");
 		expect(userTexts(fork.session.messages)).toEqual(["first prompt"]);
 		expect(fork.session.sessionManager.getForkedFrom()).toEqual({ sessionId: source.id, entryId: parentId });
@@ -71,9 +73,10 @@ describe("regression #585: fork and clone open a new conversation from an open o
 		if (!leafId) throw new Error("Expected a leaf");
 		const sourceMessages = source.session.messages;
 
-		const result = await harness.host.openFor(client, { kind: "fork", source, entryId: leafId, position: "at" });
+		const result = moved(
+			await harness.host.openFor(client, { kind: "fork", source, entryId: leafId, position: "at" }),
+		);
 		const clone = result.conversation;
-		if (!clone) throw new Error("Expected the clone");
 
 		expect(result.selectedText).toBeUndefined();
 		expect(clone.id).not.toBe(source.id);

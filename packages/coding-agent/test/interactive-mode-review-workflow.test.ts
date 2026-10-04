@@ -157,7 +157,7 @@ describe("InteractiveMode review workflow", () => {
 			context.runtimeHost.newSession.mockImplementationOnce(async () => {
 				context.chatContainer.clear();
 				context.chatContainer.addChild(new Text("Replacement session before render"));
-				return { cancelled: false, seeded: true };
+				return { cancelled: false, sessionId: "review-session", seeded: true };
 			});
 			reviewMocks.runReviewWorkflow.mockImplementationOnce(async (options) => {
 				const hooks = await options.createHooks?.();

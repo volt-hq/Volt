@@ -15,7 +15,8 @@ import {
 	githubCliCodeHostProvider,
 } from "./code-host/index.ts";
 import { createExtensionRuntime } from "./extensions/loader.ts";
-import type { ReplacedSessionContext, ToolDefinition } from "./extensions/types.ts";
+import type { ToolDefinition } from "./extensions/types.ts";
+import { createReviewPromotion } from "./host/review-handoff.ts";
 import type { CustomMessageInput } from "./messages.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { findExactModelReferenceMatch } from "./model-resolver.ts";
@@ -26,7 +27,7 @@ import {
 	readPrReviewBinding,
 } from "./pr-review-binding.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import { createReviewSeedMessage, STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
+import { STATIC_REVIEW_LIMITATION } from "./review-presentation.ts";
 import { createReviewPrivateDiagnostics } from "./review-private-diagnostics.ts";
 import {
 	buildParsedReview,
@@ -57,7 +58,6 @@ import {
 	resolveReviewSnapshot,
 } from "./review-snapshot.ts";
 import {
-	appendReviewRun,
 	appendReviewRunDurably,
 	appendReviewUsageCheckpoint,
 	assertReviewControlsPersistLosslessly,
@@ -2005,20 +2005,11 @@ async function promoteCompletedReview(
 ): Promise<Extract<ReviewWorkflowResult, { status: "completed" }>> {
 	const runRecord = result.record;
 	if (!runRecord) throw new Error("Review completed without a durable run record.");
-	const reviewMessage = createReviewSeedMessage(runRecord, undefined, result.parsed);
-	const fastModeEnabled = options.session.fastModeEnabled === true;
-	const newSessionResult = await options.newSession({
-		setup: async (writer) => {
-			if (fastModeEnabled) await writer.appendFastModeChange(true);
-			await appendReviewRun(writer, runRecord);
-		},
-		withSession: async (context: ReplacedSessionContext) => {
-			await context.sendMessage(reviewMessage);
-		},
+	const promotion = createReviewPromotion(runRecord, result.parsed, {
+		fastMode: options.session.fastModeEnabled === true,
 	});
-	if (newSessionResult.cancelled) await options.session.sendCustomMessage(reviewMessage);
-	else if (!newSessionResult.seeded)
-		throw new Error("Review completed, but seeding verified findings was skipped in the replacement session.");
+	const newSessionResult = await options.newSession({ setup: (writer) => promotion.setup(writer) });
+	if (newSessionResult.cancelled) await options.session.sendCustomMessage(promotion.message);
 	return {
 		status: "completed",
 		resolution,

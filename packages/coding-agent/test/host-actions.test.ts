@@ -54,7 +54,7 @@ describe("HostActionRegistry", () => {
 			session: { isStreaming: false, isCompacting: false },
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 		};
 
@@ -83,7 +83,7 @@ describe("HostActionRegistry", () => {
 
 	test("registers the built-in new session action", async () => {
 		const afterSessionSwitch = vi.fn(async () => {});
-		const newSession = vi.fn(async () => ({ cancelled: false, seeded: false }));
+		const newSession = vi.fn(async () => ({ cancelled: false as const, sessionId: "new-session", seeded: false }));
 		const registry = registerBuiltinHostActions(new HostActionRegistry());
 		const context = {
 			session: { isStreaming: false, isCompacting: false },
@@ -152,7 +152,7 @@ describe("HostActionRegistry", () => {
 			session: { isStreaming: false, isCompacting: false },
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 		};
 
@@ -194,7 +194,7 @@ describe("HostActionRegistry", () => {
 			session: { isStreaming: true, isCompacting: false },
 			abortRun,
 			compactContext,
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession,
 		};
 
@@ -293,7 +293,7 @@ describe("HostActionRegistry", () => {
 			session,
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 			setFastModeEnabled,
 		};
@@ -348,7 +348,7 @@ describe("HostActionRegistry", () => {
 			session: { isStreaming: false, isCompacting: false },
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 			runReviewAction,
 		};
@@ -460,7 +460,7 @@ describe("HostActionRegistry", () => {
 			session: { isStreaming: false, isCompacting: false },
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 			runReviewLifecycleAction,
 		};
@@ -493,7 +493,7 @@ describe("HostActionRegistry", () => {
 			session: { isStreaming: false, isCompacting: false },
 			abortRun: vi.fn(async () => {}),
 			compactContext: vi.fn(async () => createCompactionResult()),
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			renameSession: vi.fn(async () => {}),
 		};
 

@@ -81,11 +81,13 @@ import type {
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
 	ProjectTrustContext,
+	SessionIntentResult,
 	ToolInfo,
 } from "../../core/extensions/index.ts";
 import { ExtensionUIDismissedError } from "../../core/extensions/index.ts";
 import { FooterDataProvider, type ReadonlyFooterDataProvider } from "../../core/footer-data-provider.ts";
 import { GitContextObservationBinding } from "../../core/git-context-provider.ts";
+import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
 import {
 	BUILTIN_HOST_ACTION_REGISTRY,
 	CONTEXT_COMPACT_SLASH_ALIAS,
@@ -113,7 +115,6 @@ import { createIrohRemoteRpcErrorResponse } from "../../core/remote/iroh/rpc-com
 import { IrohRemoteHostStateManager } from "../../core/remote/iroh/state-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
-	createReviewSeedMessage,
 	formatReviewWorkflowSummary,
 	listBaseBranches,
 	listRecentCommits,
@@ -130,9 +131,7 @@ import {
 } from "../../core/review.ts";
 import { publishReviewRun } from "../../core/review-publish.ts";
 import {
-	acknowledgeReviewRun,
 	appendReviewPublication,
-	appendReviewRun,
 	exportCanonicalReviewFeedback,
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
@@ -1955,22 +1954,21 @@ export class InteractiveMode {
 						return result;
 					} catch (error: unknown) {
 						await this.reportSessionChangeFailure("Failed to create session", error, source);
-						return { cancelled: true, seeded: false };
+						return { cancelled: true };
 					}
 				},
 				fork: async (entryId, options) => {
 					const source = this.session;
 					try {
 						const result = await this.runtimeHost.fork(entryId, options);
-						if (!result.cancelled) {
-							this.renderCurrentSessionState();
-							this.editor.setText(result.selectedText ?? "");
-							this.showStatus("Forked to new session");
-						}
-						return { cancelled: result.cancelled, seeded: result.seeded };
+						if (result.cancelled) return result;
+						this.renderCurrentSessionState();
+						this.editor.setText(result.selectedText ?? "");
+						this.showStatus("Forked to new session");
+						return { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
 					} catch (error: unknown) {
 						await this.reportSessionChangeFailure("Failed to fork session", error, source);
-						return { cancelled: true, seeded: false };
+						return { cancelled: true };
 					}
 				},
 				navigateTree: async (targetId, options) => {
@@ -7765,7 +7763,7 @@ export class InteractiveMode {
 	private async handleResumeSession(
 		sessionRef: SessionReference,
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
-	): Promise<{ cancelled: boolean; seeded: boolean }> {
+	): Promise<SessionIntentResult> {
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -7790,13 +7788,13 @@ export class InteractiveMode {
 				(error instanceof ConversationLockedError && error.sessionId !== this.session.sessionId)
 			) {
 				this.showError(error.message);
-				return { cancelled: true, seeded: false };
+				return { cancelled: true };
 			}
 			if (error instanceof MissingSessionCwdError) {
 				const selectedCwd = await this.promptForMissingSessionCwd(error);
 				if (!selectedCwd) {
 					this.showStatus("Resume cancelled");
-					return { cancelled: true, seeded: false };
+					return { cancelled: true };
 				}
 				const result = await this.runtimeHost.switchSession(sessionRef, {
 					cwdOverride: selectedCwd,
@@ -7811,7 +7809,7 @@ export class InteractiveMode {
 				return result;
 			}
 			await this.reportSessionChangeFailure("Failed to resume session", error, source);
-			return { cancelled: true, seeded: false };
+			return { cancelled: true };
 		}
 	}
 
@@ -9615,51 +9613,11 @@ export class InteractiveMode {
 				(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
 			);
 			if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
-			const sourceSessionManager = this.session.sessionManager;
-			const seedMessage = createReviewSeedMessage(record, requestedFindingIds);
-			let targetSessionManager: SessionManager | undefined;
-			let acknowledgedAt: number | undefined;
+			const handoff = createReviewFixHandoff(record, requestedFindingIds);
 			const opened = await this.runtimeHost.newSession({
-				setup: async (writer) => {
-					targetSessionManager = writer.sessionManager;
-					await appendReviewRun(writer, record);
-				},
-				withSession: async (context) => {
-					await context.sendMessage(seedMessage);
-					const target = this.session;
-					if (!targetSessionManager || target.sessionManager !== targetSessionManager) {
-						throw new Error("Review session was not initialized");
-					}
-					acknowledgedAt = (
-						await acknowledgeReviewRun(target.sessionWriter, record.runId, record.acknowledgedAt ?? Date.now())
-					).acknowledgedAt;
-				},
+				setup: (writer) => handoff.setup(writer),
+				beforeMove: (source) => handoff.beforeMove(source),
 			});
-			if (!opened.cancelled && !opened.seeded)
-				throw new Error("The review session opened without the selected findings.");
-			if (opened.seeded && requestedFindingIds === undefined) {
-				if (acknowledgedAt === undefined) throw new Error("Review session was seeded without acknowledgment");
-				const sourceSessionRef = sourceSessionManager.getSessionRef();
-				const acknowledgmentManager = sourceSessionRef
-					? await SessionManager.open(sourceSessionRef)
-					: sourceSessionManager;
-				try {
-					await acknowledgeReviewRun(acknowledgmentManager.logWriter, record.runId, acknowledgedAt);
-				} catch (error) {
-					if (sourceSessionRef) {
-						try {
-							await acknowledgmentManager.closePersistence();
-						} catch (closeError) {
-							throw new AggregateError(
-								[error, closeError],
-								"Review acknowledgment failed and its source manager could not be closed",
-							);
-						}
-					}
-					throw error;
-				}
-				if (sourceSessionRef) await acknowledgmentManager.closePersistence();
-			}
 			if (!opened.cancelled) this.renderCurrentSessionState();
 			return {
 				action,

@@ -175,6 +175,7 @@ import {
 	RpcBashResultSchema,
 	RpcCompactionResultSchema,
 	RpcErrorResponseSchema,
+	RpcForkResponseSchema,
 	RpcMcpPromptContentResponseSchema,
 	RpcMcpPromptsResponseSchema,
 	RpcMcpRecentCallsResponseSchema,
@@ -186,6 +187,7 @@ import {
 	RpcMcpToolsResponseSchema,
 	RpcMessageImageSchema,
 	RpcMessageImagesResponseSchema,
+	RpcSessionIntentResponseSchema,
 	RpcSessionStatsSchema,
 	RpcTranscriptEntryTextResponseSchema,
 } from "./responses.ts";
@@ -620,6 +622,8 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcMcpPromptsResponse: RpcMcpPromptsResponseSchema,
 	RpcMcpPromptContentResponse: RpcMcpPromptContentResponseSchema,
 	RpcMcpRecentCallsResponse: RpcMcpRecentCallsResponseSchema,
+	RpcSessionIntentResponse: RpcSessionIntentResponseSchema,
+	RpcForkResponse: RpcForkResponseSchema,
 	RpcErrorResponse: RpcErrorResponseSchema,
 
 	// Conversation log: envelope vocabulary, stored messages, client input

@@ -15,6 +15,7 @@ import type {
 	RpcConversationAuthority,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
+	RpcForkResponse,
 	RpcHostActionRequest,
 	RpcHostActionResponse,
 	RpcHostActionUpdate,
@@ -25,6 +26,7 @@ import type {
 	RpcReviewAcknowledgmentResponse,
 	RpcReviewWorkflowListResponse,
 	RpcReviewWorkflowResultResponse,
+	RpcSessionIntentResponse,
 	RpcSessionListItem,
 	RpcSessionState,
 	RpcSlashCommand,
@@ -163,8 +165,8 @@ export abstract class RpcClientBase {
 		await this.send({ type: "abort" });
 	}
 
-	/** Start a new session, optionally with parent tracking. */
-	async newSession(parentSessionId?: string): Promise<{ cancelled: boolean }> {
+	/** Start a new session, optionally with parent tracking. Resolves with the new session's id unless cancelled. */
+	async newSession(parentSessionId?: string): Promise<RpcSessionIntentResponse> {
 		const response = await this.send({ type: "new_session", parentSessionId });
 		return this.getData(response);
 	}
@@ -259,7 +261,7 @@ export abstract class RpcClientBase {
 	}
 
 	/** Open a fresh session seeded with all or selected findings from a durable review run. */
-	async openReviewSession(runId: string, findingIds?: string[]): Promise<{ cancelled: boolean }> {
+	async openReviewSession(runId: string, findingIds?: string[]): Promise<RpcSessionIntentResponse> {
 		const response = await this.send({ type: "open_review_session", runId, findingIds });
 		return this.getData(response);
 	}
@@ -425,25 +427,25 @@ export abstract class RpcClientBase {
 	}
 
 	/** Switch to a workspace session by stable session id. */
-	async switchSession(sessionId: string): Promise<{ cancelled: boolean }> {
+	async switchSession(sessionId: string): Promise<RpcSessionIntentResponse> {
 		const response = await this.send({ type: "switch_session", sessionId });
 		return this.getData(response);
 	}
 
 	/** Switch to a workspace session by stable session id. */
-	async switchSessionById(sessionId: string): Promise<{ cancelled: boolean }> {
+	async switchSessionById(sessionId: string): Promise<RpcSessionIntentResponse> {
 		const response = await this.send({ type: "switch_session_by_id", sessionId });
 		return this.getData(response);
 	}
 
-	/** Fork from a specific message. */
-	async fork(entryId: string): Promise<{ text: string; cancelled: boolean }> {
+	/** Fork from a specific message into a new session; resolves with its id and the message's text unless cancelled. */
+	async fork(entryId: string): Promise<RpcForkResponse> {
 		const response = await this.send({ type: "fork", entryId });
 		return this.getData(response);
 	}
 
 	/** Clone the current active branch into a new session. */
-	async clone(): Promise<{ cancelled: boolean }> {
+	async clone(): Promise<RpcSessionIntentResponse> {
 		const response = await this.send({ type: "clone" });
 		return this.getData(response);
 	}

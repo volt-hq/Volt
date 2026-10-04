@@ -14,7 +14,7 @@ describe("RpcClient clone", () => {
 			type: "response",
 			command: "clone",
 			success: true,
-			data: { cancelled: false },
+			data: { cancelled: false, sessionId: "clone-session" },
 		}));
 		privateClient.send = send;
 		privateClient.getData = <T>(response: unknown): T => {
@@ -24,6 +24,6 @@ describe("RpcClient clone", () => {
 		const result = await client.clone();
 
 		expect(send).toHaveBeenCalledWith({ type: "clone" });
-		expect(result).toEqual({ cancelled: false });
+		expect(result).toEqual({ cancelled: false, sessionId: "clone-session" });
 	});
 });

@@ -24,6 +24,7 @@ import type {
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
 import { ClientScope } from "../../core/host/client-scope.ts";
+import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
 import {
 	type HostActionInvocationContext,
 	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
@@ -47,7 +48,6 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import {
-	createReviewSeedMessage,
 	executeReviewWorkflow,
 	prepareReviewWorkflow,
 	REMOTE_REVIEW_FAILURE_MESSAGE,
@@ -58,7 +58,6 @@ import {
 } from "../../core/review.ts";
 import { publishReviewRun } from "../../core/review-publish.ts";
 import {
-	acknowledgeReviewRun,
 	appendReviewPublication,
 	appendReviewRun,
 	createReviewRunRecord,
@@ -70,7 +69,7 @@ import { createEmptyReviewUsage } from "../../core/review-usage.ts";
 import { subscribeRpcSessionEvents } from "../../core/rpc/background-jobs.ts";
 import { type ProjectionDiagnostic, StreamProjector } from "../../core/rpc/stream-projection.ts";
 import type { RpcTransport } from "../../core/rpc/transport.ts";
-import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
+import type { SessionReference } from "../../core/session-manager.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../core/subagents/index.ts";
 import { SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import {
@@ -1078,7 +1077,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 				newSession: async (options) => runtimeHost.newSession(options),
 				fork: async (entryId, forkOptions) => {
 					const result = await runtimeHost.fork(entryId, forkOptions);
-					return { cancelled: result.cancelled, seeded: result.seeded };
+					return result.cancelled
+						? result
+						: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
 				},
 				navigateTree: async (targetId, options) => {
 					const result = await session.navigateTree(targetId, {
@@ -1320,52 +1321,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 					(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
 				);
 				if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
-				const sourceSessionManager = commandSession.sessionManager;
-				const seedMessage = createReviewSeedMessage(record, requestedFindingIds);
-				let targetSessionManager: SessionManager | undefined;
-				let acknowledgedAt: number | undefined;
+				const handoff = createReviewFixHandoff(record, requestedFindingIds);
 				const opened = await runtimeHost.newSession({
 					assertConversationGenerationCurrent,
-					setup: async (writer) => {
-						targetSessionManager = writer.sessionManager;
-						await appendReviewRun(writer, record);
-					},
-					withSession: async (sessionContext) => {
-						await sessionContext.sendMessage(seedMessage);
-						const target = runtimeHost.session;
-						if (!targetSessionManager || target.sessionManager !== targetSessionManager) {
-							throw new Error("Review session was not initialized");
-						}
-						acknowledgedAt = (
-							await acknowledgeReviewRun(target.sessionWriter, record.runId, record.acknowledgedAt ?? Date.now())
-						).acknowledgedAt;
-					},
+					setup: (writer) => handoff.setup(writer),
+					beforeMove: (source) => handoff.beforeMove(source),
 				});
-				if (!opened.cancelled && !opened.seeded)
-					throw new Error("The review session opened without the selected findings.");
-				if (opened.seeded && requestedFindingIds === undefined) {
-					if (acknowledgedAt === undefined) throw new Error("Review session was seeded without acknowledgment");
-					const sourceSessionRef = sourceSessionManager.getSessionRef();
-					const acknowledgmentManager = sourceSessionRef
-						? await SessionManager.open(sourceSessionRef)
-						: sourceSessionManager;
-					try {
-						await acknowledgeReviewRun(acknowledgmentManager.logWriter, record.runId, acknowledgedAt);
-					} catch (error) {
-						if (sourceSessionRef) {
-							try {
-								await acknowledgmentManager.closePersistence();
-							} catch (closeError) {
-								throw new AggregateError(
-									[error, closeError],
-									"Review acknowledgment failed and its source manager could not be closed",
-								);
-							}
-						}
-						throw error;
-					}
-					if (sourceSessionRef) await acknowledgmentManager.closePersistence();
-				}
 				return {
 					action,
 					status: opened.cancelled ? "cancelled" : "completed",

@@ -6617,6 +6617,44 @@
 				}
 			]
 		},
+		"RpcForkResponse": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean",
+							"const": true
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"cancelled",
+						"sessionId",
+						"text"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean",
+							"const": false
+						},
+						"sessionId": {
+							"type": "string"
+						},
+						"text": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
 		"RpcGitChangeCounts": {
 			"type": "object",
 			"required": [
@@ -9560,16 +9598,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"cancelled"
-					],
-					"properties": {
-						"cancelled": {
-							"type": "boolean"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/RpcSessionIntentResponse"
 				}
 			},
 			"additionalProperties": false
@@ -9938,20 +9967,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"text",
-						"cancelled"
-					],
-					"properties": {
-						"text": {
-							"type": "string"
-						},
-						"cancelled": {
-							"type": "boolean"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/RpcForkResponse"
 				}
 			},
 			"additionalProperties": false
@@ -11342,16 +11358,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"cancelled"
-					],
-					"properties": {
-						"cancelled": {
-							"type": "boolean"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/RpcSessionIntentResponse"
 				}
 			},
 			"additionalProperties": false
@@ -11381,16 +11388,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"cancelled"
-					],
-					"properties": {
-						"cancelled": {
-							"type": "boolean"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/RpcSessionIntentResponse"
 				}
 			},
 			"additionalProperties": false
@@ -12723,16 +12721,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"cancelled"
-					],
-					"properties": {
-						"cancelled": {
-							"type": "boolean"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/RpcSessionIntentResponse"
 				}
 			},
 			"additionalProperties": false
@@ -12762,16 +12751,7 @@
 					"const": true
 				},
 				"data": {
-					"type": "object",
-					"required": [
-						"cancelled"
-					],
-					"properties": {
-						"cancelled": {
-							"type": "boolean"
-						}
-					},
-					"additionalProperties": false
+					"$ref": "#/$defs/RpcSessionIntentResponse"
 				}
 			},
 			"additionalProperties": false
@@ -14933,6 +14913,40 @@
 				},
 				{
 					"$ref": "#/$defs/RpcPlanningStateChangedEvent"
+				}
+			]
+		},
+		"RpcSessionIntentResponse": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"cancelled"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean",
+							"const": true
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"cancelled",
+						"sessionId"
+					],
+					"properties": {
+						"cancelled": {
+							"type": "boolean",
+							"const": false
+						},
+						"sessionId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
 				}
 			]
 		},

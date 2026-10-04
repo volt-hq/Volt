@@ -163,16 +163,16 @@ With optional stable parent identity:
 {"type": "new_session", "parentSessionId": "parent-session-id"}
 ```
 
-`parentSessionId` must identify a session in the active store. The new session receives its own stable ID; refresh with `get_state` after a successful replacement.
+`parentSessionId` must identify a session in the active store. The new session receives its own stable ID, which the response carries as `sessionId`.
 
 `preserveReviewRunId` copies the selected canonical review into the new session. Optional `replaceReviewGeneral: true` additionally replaces that run's current General destination, and is legal only with `preserveReviewRunId`. The initiating exact session generation must still be the current General. Successful publication atomically advances its durable revision and registers the replacement alias; cancelled, failed or stale competing replacements do not advance it. Ordinary new sessions and history opens never promote General.
 
-Response:
+Response, with the new session's ID:
 ```json
-{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false}}
+{"type": "response", "command": "new_session", "success": true, "data": {"cancelled": false, "sessionId": "new-session-id"}}
 ```
 
-If an extension cancelled:
+If an extension cancelled (no `sessionId`; the current session stays active):
 ```json
 {"type": "response", "command": "new_session", "success": true, "data": {"cancelled": true}}
 ```
@@ -830,7 +830,7 @@ Review invocations return `accepted` with a `workflowId` and run detached from t
 - `list_review_workflows` returns paginated durable `runs` plus all `activeWorkflows`. Targets carry `description` and `diffCommand`. Prepared PR targets additionally carry bounded provider/number/title/URL, author/avatar, head/base refs, reviewed head OID, and optional captured review state, mergeability, check counts, and observation time. `target.files` always reports total changed files and line additions/deletions; its bounded `items`, `projectedCount`, `omittedCount`, and `isComplete` make projection or persistence limits explicit. Active descriptors include the bounded inventory, while durable list rows omit items and retain truthful totals. Durable PR targets may also include context capture counts, limitations, and fingerprint. PR bodies, linked-issue text, and discussion text are excluded from list responses. Clients reconnecting after missing `workflow_end` should list to discover finished reviews.
 - `get_review_result` returns the same descriptor plus the bounded changed-file inventory and structured findings for completed reviews: `findings` (title, body, priority, confidence, file, line), optional `coverage`, `overallCorrectness`, and `overallExplanation`. PR results may include the bounded PR body in `target.identity.pullRequest.body` and context capture status/counts/limitation codes/fingerprint; linked issues and discussion text remain excluded. Finding prose remains code-derived by the context-blind presentation pass. A report or presentation that cannot be validated fails the workflow with a bounded host-generated error. Unknown run ids fail with a normal RPC error.
 - `cancel_workflow` aborts a running review; the workflow ends with `workflow_end` status `cancelled`. Cancelling an unknown or finished workflow fails with a normal RPC error.
-- `open_review_session` starts a fresh session seeded with a completed review's findings (the client-driven replacement for the old forced session switch) and responds with `{ "cancelled": boolean }`. It fails for unknown or non-completed workflows. It also fails when the replacement session was created but the seed was skipped because recovered durable client input failed to replay; in that case the review stays retained (still listed and fetchable) so the open can be retried.
+- `open_review_session` starts a fresh session seeded with a completed review's findings (the client-driven replacement for the old forced session switch) and responds like `new_session`: `{ "cancelled": false, "sessionId": "..." }` with the new session's ID, or `{ "cancelled": true }`. The new session holds the run, the review message, and the run's acknowledgement before it opens. Opening every finding (no `findingIds`) also acknowledges the run in the current session before the client leaves it; if that fails, the command fails and the client stays on the current session. It fails for unknown or non-completed workflows.
 
 #### Initial-review accounting
 
@@ -1386,9 +1386,9 @@ Load another session from the active workspace store by stable ID. Can be cancel
 {"type": "switch_session", "sessionId": "abc123"}
 ```
 
-Response:
+Response, with the ID of the session now active:
 ```json
-{"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": false}}
+{"type": "response", "command": "switch_session", "success": true, "data": {"cancelled": false, "sessionId": "abc123"}}
 ```
 
 If an extension cancelled the switch:
@@ -1411,9 +1411,9 @@ Load another session from the current workspace by stable ID. It has the same pa
 {"type": "switch_session_by_id", "sessionId": "abc123"}
 ```
 
-Response:
+Response, with the ID of the session now active:
 ```json
-{"type": "response", "command": "switch_session_by_id", "success": true, "data": {"cancelled": false}}
+{"type": "response", "command": "switch_session_by_id", "success": true, "data": {"cancelled": false, "sessionId": "abc123"}}
 ```
 
 If an extension cancelled the switch:
@@ -1423,7 +1423,7 @@ If an extension cancelled the switch:
 
 #### fork
 
-Create a new fork from a previous user message on the active branch. Can be cancelled by a `session_before_fork` extension event handler. Returns the text of the message being forked from.
+Create a new fork from a previous user message on the active branch. Can be cancelled by a `session_before_fork` extension event handler. Returns the forked session's ID and the text of the message being forked from.
 
 ```json
 {"type": "fork", "entryId": "abc123"}
@@ -1435,7 +1435,7 @@ Response:
   "type": "response",
   "command": "fork",
   "success": true,
-  "data": {"text": "The original prompt text...", "cancelled": false}
+  "data": {"cancelled": false, "sessionId": "forked-session-id", "text": "The original prompt text..."}
 }
 ```
 
@@ -1445,7 +1445,7 @@ If an extension cancelled the fork:
   "type": "response",
   "command": "fork",
   "success": true,
-  "data": {"text": "The original prompt text...", "cancelled": true}
+  "data": {"cancelled": true}
 }
 ```
 
@@ -1463,7 +1463,7 @@ Response:
   "type": "response",
   "command": "clone",
   "success": true,
-  "data": {"cancelled": false}
+  "data": {"cancelled": false, "sessionId": "cloned-session-id"}
 }
 ```
 

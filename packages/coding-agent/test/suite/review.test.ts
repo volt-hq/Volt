@@ -976,7 +976,7 @@ describe("review pipeline", () => {
 			const workflowManager = new ReviewWorkflowManager({ publishEvent: (event) => events.push(event) });
 			const stderrWarning = vi.spyOn(console, "warn").mockImplementation(() => {});
 			const onDiagnosticRetentionWarning = vi.fn((_message: string) => {});
-			const newSession = vi.fn(async () => ({ cancelled: true, seeded: false }));
+			const newSession = vi.fn(async () => ({ cancelled: true as const }));
 			const cleanup = vi.fn();
 			try {
 				const result = await runReviewWorkflow({
@@ -1048,7 +1048,7 @@ describe("review pipeline", () => {
 			cwd: harness.tempDir,
 			agentDir: harness.tempDir,
 			session: harness.session,
-			newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+			newSession: vi.fn(async () => ({ cancelled: true as const })),
 			authStorage: harness.authStorage,
 			settingsManager: harness.settingsManager,
 		});

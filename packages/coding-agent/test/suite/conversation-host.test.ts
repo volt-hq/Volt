@@ -3,7 +3,7 @@ import type { ExtensionUIContext } from "../../src/core/extensions/index.ts";
 import { PinnedConversationError } from "../../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
-import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./host-harness.ts";
+import { createHostHarness, type HostHarness, type HostHarnessOptions, moved } from "./host-harness.ts";
 
 /** A UI surface that records the statuses it shows. */
 function statusUi(statuses: Map<string, string>): ExtensionUIContext {
@@ -106,11 +106,10 @@ describe("ConversationHost", () => {
 		expect(statuses.get("ext")).toBe(`ready:${source.id}`);
 		harness.events.length = 0;
 
-		const result = await harness.host.openFor(client, { kind: "new" });
+		const result = moved(await harness.host.openFor(client, { kind: "new" }));
 		const target = result.conversation;
-		if (!target) throw new Error("Expected the new conversation");
 
-		expect(result).toMatchObject({ cancelled: false, seeded: false });
+		expect(result).toMatchObject({ cancelled: false, sessionId: target.id, seeded: false });
 		expect(client.moves).toEqual([target.id]);
 		expect(harness.host.conversationOf(client)).toBe(target);
 		expect(source.closed).toBe(true);
@@ -134,19 +133,66 @@ describe("ConversationHost", () => {
 		const client = harness.client("tui");
 		await harness.host.attach(client, source);
 
-		const result = await harness.host.openFor(
-			client,
-			{ kind: "new" },
-			{
-				withSession: async (ctx) => {
-					expect(source.closed).toBe(true);
-					await ctx.sendUserMessage("seed");
+		const result = moved(
+			await harness.host.openFor(
+				client,
+				{ kind: "new" },
+				{
+					withSession: async (ctx) => {
+						expect(source.closed).toBe(true);
+						await ctx.sendUserMessage("seed");
+					},
 				},
-			},
+			),
 		);
 
 		expect(result.seeded).toBe(true);
-		expect(result.conversation?.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+		expect(result.conversation.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
+	});
+
+	it("runs beforeMove while the source is open and fenced, and keeps the client there when it fails", async () => {
+		const harness = await setup();
+		const source = await harness.openStartup();
+		const client = harness.client("tui");
+		await harness.host.attach(client, source);
+
+		await expect(
+			harness.host.openFor(
+				client,
+				{ kind: "new" },
+				{
+					beforeMove: async (from, to) => {
+						expect(from).toBe(source);
+						expect(from?.closed).toBe(false);
+						await expect(from!.session.prompt("blocked")).rejects.toThrow();
+						await from!.session.sessionWriter.appendCustomEntry("handoff-ack", { to: to.id });
+						throw new Error("handoff failed");
+					},
+				},
+			),
+		).rejects.toThrow("handoff failed");
+		expect(harness.host.conversationOf(client)).toBe(source);
+		expect(harness.host.list()).toEqual([source]);
+		expect(harness.events.filter((event) => event.type === "session_shutdown")).toEqual([]);
+		// The fence is lifted: the source admits work again.
+		await source.session.prompt("after");
+
+		let acknowledgedIn: string | undefined;
+		const result = moved(
+			await harness.host.openFor(
+				client,
+				{ kind: "new" },
+				{
+					beforeMove: async (from) => {
+						await from!.session.sessionWriter.appendCustomEntry("handoff-ack", {});
+						acknowledgedIn = from!.id;
+					},
+				},
+			),
+		);
+		expect(acknowledgedIn).toBe(source.id);
+		expect(result.sessionId).not.toBe(source.id);
+		expect(source.closed).toBe(true);
 	});
 
 	it("redirects a redirect client to the new conversation without attaching it there", async () => {
@@ -160,12 +206,12 @@ describe("ConversationHost", () => {
 		};
 		await harness.host.attach(phone, source);
 
-		const result = await harness.host.openFor(phone, { kind: "new" });
+		const result = moved(await harness.host.openFor(phone, { kind: "new" }));
 
-		expect(redirects).toEqual([result.conversation?.id]);
+		expect(redirects).toEqual([result.sessionId]);
 		expect(harness.host.conversationOf(phone)).toBeUndefined();
 		expect(source.closed).toBe(true);
-		expect(result.conversation?.closed).toBe(false);
+		expect(result.conversation.closed).toBe(false);
 	});
 
 	it("runs one client's structural intents one at a time", async () => {
@@ -174,15 +220,17 @@ describe("ConversationHost", () => {
 		const client = harness.client("tui");
 		await harness.host.attach(client, source);
 
-		const [first, second] = await Promise.all([
-			harness.host.openFor(client, { kind: "new" }),
-			harness.host.openFor(client, { kind: "new" }),
-		]);
+		const [first, second] = (
+			await Promise.all([
+				harness.host.openFor(client, { kind: "new" }),
+				harness.host.openFor(client, { kind: "new" }),
+			])
+		).map(moved);
 
-		expect(client.moves).toEqual([first.conversation?.id, second.conversation?.id]);
-		expect(first.conversation?.closed).toBe(true);
-		expect(second.conversation?.session.sessionManager.getHeader()?.parentSession).toBeUndefined();
-		expect(harness.host.list()).toEqual([second.conversation]);
+		expect(client.moves).toEqual([first!.sessionId, second!.sessionId]);
+		expect(first!.conversation.closed).toBe(true);
+		expect(second!.conversation.session.sessionManager.getHeader()?.parentSession).toBeUndefined();
+		expect(harness.host.list()).toEqual([second!.conversation]);
 	});
 
 	it("pins owner-lifetime conversations", async () => {

@@ -305,6 +305,7 @@ describe("regression #217: commits whose outcome is unknown", () => {
 
 		await expect(runtime.switchSessionById(previousSession.sessionId)).resolves.toEqual({
 			cancelled: false,
+			sessionId: previousSession.sessionId,
 			seeded: false,
 		});
 

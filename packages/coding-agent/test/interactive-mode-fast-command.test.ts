@@ -61,7 +61,7 @@ function createHarness(options: { busy?: boolean; fastModeEnabled?: boolean; mod
 		session,
 		abortRun: vi.fn(async () => {}),
 		compactContext: vi.fn(async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 })),
-		newSession: vi.fn(async () => ({ cancelled: true, seeded: false })),
+		newSession: vi.fn(async () => ({ cancelled: true as const })),
 		renameSession: vi.fn(async () => {}),
 		setFastModeEnabled,
 	} as HostActionInvocationContext;

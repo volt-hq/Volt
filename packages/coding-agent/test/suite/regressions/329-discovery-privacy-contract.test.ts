@@ -528,6 +528,7 @@ describe("PR #329 exact-ID discovery isolation", () => {
 
 		await expect(runtime.switchSessionById(target.getSessionId())).resolves.toEqual({
 			cancelled: false,
+			sessionId: target.getSessionId(),
 			seeded: false,
 		});
 		expect(runtime.session.sessionId).toBe(target.getSessionId());
