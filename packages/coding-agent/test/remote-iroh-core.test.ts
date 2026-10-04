@@ -4,17 +4,6 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { describe, expect, test, vi } from "vitest";
 import {
-	CONTEXT_COMPACT_ACTION_ID,
-	REVIEW_BRANCH_ACTION_ID,
-	REVIEW_COMMIT_ACTION_ID,
-	REVIEW_PR_ACTION_ID,
-	REVIEW_UNCOMMITTED_ACTION_ID,
-	RUN_CANCEL_ACTION_ID,
-	SESSION_NEW_ACTION_ID,
-	SESSION_RENAME_ACTION_ID,
-	THINKING_FAST_MODE_ACTION_ID,
-} from "../src/core/host-actions.ts";
-import {
 	assertIrohRemoteHandshakeHostIdentity,
 	assertIrohRemoteTicketNotExpired,
 	assertIrohRemoteTicketPayloadHostIdentity,
@@ -97,6 +86,16 @@ import {
 	createIrohRemoteCloseDeferringRpcTransport,
 	createIrohRemoteHostCommandRpcTransport,
 } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
+
+const CONTEXT_COMPACT_ACTION_ID = "context.compact";
+const REVIEW_BRANCH_ACTION_ID = "review.branch";
+const REVIEW_COMMIT_ACTION_ID = "review.commit";
+const REVIEW_PR_ACTION_ID = "review.pr";
+const REVIEW_UNCOMMITTED_ACTION_ID = "review.uncommitted";
+const RUN_CANCEL_ACTION_ID = "run.cancel";
+const SESSION_NEW_ACTION_ID = "session.new";
+const SESSION_RENAME_ACTION_ID = "session.rename";
+const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
 
 const CODING_RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
 

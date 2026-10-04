@@ -89,22 +89,8 @@ import { GitContextObservationBinding } from "../../core/git-context-provider.ts
 import { type ConversationHost, SessionImportFileNotFoundError } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
 import { executePlan } from "../../core/host/plan-handoff.ts";
-import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
 import { openFork, openImport, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
 import type { HostClient } from "../../core/host/targets.ts";
-import {
-	BUILTIN_HOST_ACTION_REGISTRY,
-	CONTEXT_COMPACT_SLASH_ALIAS,
-	type HostActionInvocationContext,
-	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
-	REVIEW_FEEDBACK_ACTION_ID,
-	REVIEW_FIX_ACTION_ID,
-	REVIEW_PUBLISH_ACTION_ID,
-	REVIEW_RERUN_ACTION_ID,
-	SESSION_NEW_SLASH_ALIAS,
-	SESSION_RENAME_SLASH_ALIAS,
-	THINKING_FAST_MODE_SLASH_ALIAS,
-} from "../../core/host-actions.ts";
 import type { HostActionRequest, HostActionUpdate, HostInteraction } from "../../core/host-interaction.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
@@ -112,13 +98,14 @@ import { createCompactionSummaryMessage } from "../../core/messages.ts";
 import { defaultModelPerProvider, findExactModelReferenceMatch, resolveModelScope } from "../../core/model-resolver.ts";
 import { type ConfiguredPackage, DefaultPackageManager } from "../../core/package-manager.ts";
 import type { PlanningState, PlanPhase, PlanState } from "../../core/planning.ts";
+import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../core/protocol/intents/index.ts";
+import { describeFastModeChange } from "../../core/protocol/intents/state.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
 import { writeIrohRemoteHandshakeResponse } from "../../core/remote/iroh/handshake-reader.ts";
 import { createIrohRemoteRpcErrorResponse } from "../../core/remote/iroh/rpc-command-filter.ts";
 import { IrohRemoteHostStateManager } from "../../core/remote/iroh/state-manager.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import {
-	formatReviewWorkflowSummary,
 	listBaseBranches,
 	listRecentCommits,
 	parseReviewCommandArgs,
@@ -128,18 +115,11 @@ import {
 	type ReviewRunControls,
 	type ReviewTarget,
 	type ReviewWorkflowHooks,
-	reviewTargetForRerun,
+	type ReviewWorkflowResult,
 	runReviewWorkflow,
 	stripReviewEnvelopeForDisplay,
 } from "../../core/review.ts";
-import { publishReviewRun } from "../../core/review-publish.ts";
-import {
-	appendReviewPublication,
-	exportCanonicalReviewFeedback,
-	getCanonicalReviewRun,
-	recordReviewFindingOutcome,
-	resolveReviewAccountingMessage,
-} from "../../core/review-state.ts";
+import { resolveReviewAccountingMessage } from "../../core/review-state.ts";
 import type { RpcRemoteTerminalEvent } from "../../core/rpc/types.ts";
 import { QueueClearPersistenceError } from "../../core/session/client-inputs.ts";
 import { formatMissingSessionCwdPrompt, MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -3829,28 +3809,22 @@ export class InteractiveMode {
 		});
 	}
 
-	private createHostActionContext(): HostActionInvocationContext {
+	/** This client's intent context: its conversation, and how the TUI aborts and reviews. */
+	private intentContext(): IntentContext {
 		return {
-			session: this.session,
-			abortRun: () => this.session.abort("host_action"),
-			compactContext: (customInstructions) => this.session.compact(customInstructions),
-			newSession: (newSessionOptions) => openNewSession(this.host, this.client, newSessionOptions),
-			renameSession: (name) => this.session.setSessionName(name),
-			setFastModeEnabled: (enabled) => this.session.setFastModeEnabled(enabled),
-			setAgentMode: (mode) => this.session.setAgentMode(mode),
-			executePlan: (planId, expectedRevision, strategy) =>
-				executePlan(this.host, this.client, planId, expectedRevision, strategy),
-			changePlan: (planId, expectedRevision) => this.session.changePlan(planId, expectedRevision),
-			discardPlan: (planId, expectedRevision) => this.session.discardPlan(planId, expectedRevision),
-			runReviewAction: (target, reviewOptions) =>
-				this.runInteractiveReviewWorkflow(target, {
-					tools: reviewOptions.remote ? REMOTE_REVIEW_TOOL_NAMES : this.getReviewToolsForRun(),
-					requireConfirmation: reviewOptions.requireConfirmation,
-					requireProjectTrust: reviewOptions.remote,
-					controls: reviewOptions.controls,
-					...(reviewOptions.parentRunId ? { parentRunId: reviewOptions.parentRunId } : {}),
-				}),
-			runReviewLifecycleAction: (action, args) => this.runInteractiveReviewLifecycleAction(action, args),
+			target: { session: this.session, conversation: this.conversation, host: this.host, client: this.client },
+			services: {
+				abortRun: (session) => session.abort("host_action"),
+				runReview: (target, reviewOptions) =>
+					this.runInteractiveReviewWorkflow(target, {
+						tools: reviewOptions.remote ? REMOTE_REVIEW_TOOL_NAMES : this.getReviewToolsForRun(),
+						requireConfirmation: reviewOptions.requireConfirmation,
+						requireProjectTrust: reviewOptions.remote,
+						controls: reviewOptions.controls,
+						...(reviewOptions.parentRunId ? { parentRunId: reviewOptions.parentRunId } : {}),
+					}),
+			},
+			profile: LOCAL_INTENT_PROFILE,
 		};
 	}
 
@@ -3951,7 +3925,9 @@ export class InteractiveMode {
 				this.editor.setText("");
 				const mode = text === "/plan" ? "plan" : "build";
 				try {
-					this.refreshPlanningUi(await this.session.setAgentMode(mode));
+					this.refreshPlanningUi(
+						(await intentRegistry.invoke(this.intentContext(), "set_agent_mode", { mode })).outcome,
+					);
 					this.showStatus(mode === "plan" ? "Plan mode: agent tools are read-only" : "Build mode");
 				} catch (error: unknown) {
 					this.showError(error instanceof Error ? error.message : String(error));
@@ -8704,20 +8680,14 @@ export class InteractiveMode {
 			return;
 		}
 
-		const response = await BUILTIN_HOST_ACTION_REGISTRY.invokeBySlashAlias(
-			SESSION_RENAME_SLASH_ALIAS,
-			this.createHostActionContext(),
-			{
-				name,
-			},
-		);
+		const { outcome } = await intentRegistry.invoke(this.intentContext(), "set_session_name", { name });
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("dim", response.message ?? `Session name set: ${name}`), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${outcome}`), 1, 0));
 		this.ui.requestRender();
 	}
 
 	private async handleFastCommand(text: string): Promise<void> {
-		const argument = text.slice(`/${THINKING_FAST_MODE_SLASH_ALIAS}`.length).trim();
+		const argument = text.slice("/fast".length).trim();
 		let enabled: boolean;
 		if (argument === "") {
 			enabled = !this.session.fastModeEnabled;
@@ -8731,15 +8701,11 @@ export class InteractiveMode {
 		}
 
 		try {
-			const response = await BUILTIN_HOST_ACTION_REGISTRY.invokeBySlashAlias(
-				THINKING_FAST_MODE_SLASH_ALIAS,
-				this.createHostActionContext(),
-				{ enabled },
-			);
+			const { outcome } = await intentRegistry.invoke(this.intentContext(), "set_fast_mode", { enabled });
 			if (enabled) {
-				this.showWarning(response.message ?? "Fast mode enabled. Priority processing may cost more.");
+				this.showWarning(describeFastModeChange(outcome));
 			} else {
-				this.showStatus(response.message ?? "Fast mode disabled");
+				this.showStatus(describeFastModeChange(outcome));
 			}
 		} catch (error: unknown) {
 			this.showWarning(error instanceof Error ? error.message : String(error));
@@ -9203,11 +9169,8 @@ export class InteractiveMode {
 		this.statusContainer.clear();
 		const source = this.session;
 		try {
-			const response = await BUILTIN_HOST_ACTION_REGISTRY.invokeBySlashAlias(
-				SESSION_NEW_SLASH_ALIAS,
-				this.createHostActionContext(),
-			);
-			if (response.status === "cancelled") {
+			const { outcome } = await intentRegistry.invoke(this.intentContext(), "new_session", {});
+			if (outcome.cancelled) {
 				return;
 			}
 			this.renderCurrentSessionState();
@@ -9753,151 +9716,6 @@ export class InteractiveMode {
 		};
 	}
 
-	private async runInteractiveReviewLifecycleAction(
-		action: string,
-		args: Record<string, unknown>,
-	): Promise<Awaited<ReturnType<NonNullable<HostActionInvocationContext["runReviewLifecycleAction"]>>>> {
-		const session = this.session;
-		const generation = session.conversationGenerationRevision;
-		const assertCurrent = () => {
-			if (this.session !== session || session.conversationGenerationRevision !== generation)
-				throw new Error("The review conversation changed; retry from the current session.");
-		};
-		const runId = typeof args.runId === "string" ? args.runId : undefined;
-		const record = runId ? await getCanonicalReviewRun(session.sessionManager, runId) : undefined;
-		assertCurrent();
-		if (action !== REVIEW_EXPORT_FEEDBACK_ACTION_ID && !record)
-			throw new Error(`Unknown durable review run: ${runId ?? "missing"}`);
-		if (action === REVIEW_FIX_ACTION_ID) {
-			if (!record?.result) throw new Error(`Review run has no findings result: ${runId}`);
-			const requestedFindingIds =
-				typeof args.findingIds === "string" && args.findingIds.trim().length > 0
-					? args.findingIds
-							.split(",")
-							.map((value) => value.trim())
-							.filter(Boolean)
-					: undefined;
-			const requestedIds = requestedFindingIds ?? record.result.findings.map((finding) => finding.id);
-			const selectedIds = new Set(requestedIds);
-			const unknown = requestedIds.filter(
-				(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
-			);
-			if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
-			const handoff = createReviewFixHandoff(record, requestedFindingIds);
-			const opened = await openNewSession(this.host, this.client, {
-				setup: (writer) => handoff.setup(writer),
-				beforeMove: (source) => handoff.beforeMove(source),
-			});
-			if (!opened.cancelled) this.renderCurrentSessionState();
-			return {
-				action,
-				status: opened.cancelled ? "cancelled" : "completed",
-				stateChanged: !opened.cancelled,
-				actionsChanged: !opened.cancelled,
-				message: opened.cancelled
-					? "Review fix session cancelled"
-					: `Opened ${selectedIds.size} selected review finding${selectedIds.size === 1 ? "" : "s"}`,
-			};
-		}
-		if (action === REVIEW_FEEDBACK_ACTION_ID) {
-			if (!record?.result) throw new Error(`Review run has no findings result: ${runId}`);
-			const findingId = typeof args.findingId === "string" ? args.findingId : "";
-			if (!record.result.findings.some((finding) => finding.id === findingId))
-				throw new Error(`Unknown finding: ${findingId}`);
-			const status = args.status;
-			if (status !== "accepted" && status !== "fixed" && status !== "dismissed")
-				throw new Error("Review outcome must be accepted, fixed, or dismissed.");
-			const reason = args.reason;
-			if (
-				status === "dismissed" &&
-				reason !== "false_positive" &&
-				reason !== "intentional" &&
-				reason !== "not_actionable" &&
-				reason !== "other"
-			)
-				throw new Error("Dismissed findings require an explicit reason.");
-			await recordReviewFindingOutcome(
-				session.sessionWriter,
-				{
-					runId: record.runId,
-					findingId,
-					status,
-					...(reason === "false_positive" ||
-					reason === "intentional" ||
-					reason === "not_actionable" ||
-					reason === "other"
-						? { reason }
-						: {}),
-					...(typeof args.note === "string" ? { note: args.note } : {}),
-				},
-				{
-					assertCurrent,
-				},
-			);
-			return {
-				action,
-				status: "completed",
-				stateChanged: true,
-				actionsChanged: true,
-				message: `Finding ${findingId} marked ${status}`,
-			};
-		}
-		if (action === REVIEW_RERUN_ACTION_ID) {
-			if (!record) throw new Error(`Unknown durable review run: ${runId}`);
-			const target = reviewTargetForRerun(record);
-			const rerun = await this.runInteractiveReviewWorkflow(target, {
-				tools: this.getReviewToolsForRun(),
-				requireConfirmation: true,
-				requireProjectTrust: false,
-				controls: { ...record.options, scopeMode: args.scopeMode === "full" ? "full" : "incremental" },
-				parentRunId: record.runId,
-			});
-			return {
-				action,
-				status: rerun.status === "completed" ? "completed" : "cancelled",
-				stateChanged: rerun.status === "completed",
-				actionsChanged: true,
-				message: rerun.status === "completed" ? formatReviewWorkflowSummary(rerun) : "Review rerun cancelled",
-			};
-		}
-		if (action === REVIEW_PUBLISH_ACTION_ID) {
-			if (!record) throw new Error(`Unknown durable review run: ${runId}`);
-			const confirmed = await this.showExtensionConfirm(
-				"Publish pull request review",
-				`Publish complete review ${record.runId} to its code host? The PR head will be rechecked first.`,
-			);
-			if (!confirmed) return { action, status: "cancelled", message: "Review publishing cancelled" };
-			assertCurrent();
-			const current = await getCanonicalReviewRun(session.sessionManager, record.runId);
-			assertCurrent();
-			if (!current) throw new Error(`Unknown durable review run: ${record.runId}`);
-			const published = await publishReviewRun(session.sessionManager.getCwd(), current);
-			assertCurrent();
-			await appendReviewPublication(session.sessionWriter, { runId: record.runId, ...published });
-			return {
-				action,
-				status: "completed",
-				message: published.url ? `Review published: ${published.url}` : "Review published",
-			};
-		}
-		if (action === REVIEW_EXPORT_FEEDBACK_ACTION_ID) {
-			const requestedPath =
-				typeof args.path === "string"
-					? args.path
-					: await this.showExtensionInput("Export review feedback", "review-feedback.json");
-			if (!requestedPath?.trim())
-				return { action, status: "cancelled", message: "Review feedback export cancelled" };
-			assertCurrent();
-			const feedback = await exportCanonicalReviewFeedback(session.sessionManager);
-			assertCurrent();
-			const outputPath = path.resolve(session.sessionManager.getCwd(), requestedPath.trim());
-			fs.mkdirSync(path.dirname(outputPath), { recursive: true });
-			fs.writeFileSync(outputPath, `${JSON.stringify(feedback, null, 2)}\n`, { mode: 0o600 });
-			return { action, status: "completed", message: `Review feedback exported to ${outputPath}` };
-		}
-		throw new Error(`Unsupported review lifecycle action: ${action}`);
-	}
-
 	private async runInteractiveReviewWorkflow(
 		target: ReviewTarget,
 		options: {
@@ -9907,7 +9725,7 @@ export class InteractiveMode {
 			controls?: Partial<ReviewRunControls>;
 			parentRunId?: string;
 		},
-	): Promise<Awaited<ReturnType<NonNullable<HostActionInvocationContext["runReviewAction"]>>>> {
+	): Promise<ReviewWorkflowResult> {
 		if (this.activeInteractiveReview) {
 			this.showWarning("A review is already running. Cancel it before starting another.");
 			return { status: "cancelled" };
@@ -9994,13 +9812,13 @@ export class InteractiveMode {
 		}
 		this.statusContainer.clear();
 
+		// A compaction already running takes this one's place.
+		if (this.session.isCompacting) return;
 		try {
-			await BUILTIN_HOST_ACTION_REGISTRY.invokeBySlashAlias(
-				CONTEXT_COMPACT_SLASH_ALIAS,
-				this.createHostActionContext(),
-				{
-					customInstructions,
-				},
+			await intentRegistry.invoke(
+				this.intentContext(),
+				"compact",
+				customInstructions === undefined ? {} : { customInstructions },
 			);
 		} catch {
 			// Ignore, will be emitted as an event

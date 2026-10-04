@@ -423,7 +423,7 @@ export function runIrohRemoteRpcMode(
 		onReady: options.onReady,
 		onClientCapabilitiesChanged: options.onClientCapabilitiesChanged,
 		onWorkflowEvent: options.onWorkflowEvent,
-		requireRemoteSafeUiActions: true,
+		remoteGrant: options.rpcGrant,
 		requireConversationAuthority: true,
 		transport: remoteHostCommandTransport,
 		exitProcess: false,

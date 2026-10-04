@@ -9,15 +9,18 @@
  */
 
 import { type Static, type TObject, type TSchema, Type } from "typebox";
+import { RpcAgentOptionsSchema } from "./agent-options.ts";
 import { RpcBackgroundJobSnapshotSchema } from "./background-jobs.ts";
 import { ClientModelRefSchema } from "./client-fold.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
 import { stringEnum } from "./helpers.ts";
 import { EmptyInputSchema, IntentDescriptorSchema, IntentNameSchema } from "./intents.ts";
 import { RpcMcpCapabilitiesResponseSchema } from "./mcp.ts";
+import { RpcPrReviewSourceRequestSchema, RpcResolvePrReviewResponseSchema } from "./pr-review.ts";
 import { RpcConversationIdentifierSchema, RpcQueueModeSchema } from "./primitives.ts";
 import { ProjectedEntrySchema } from "./projected.ts";
 import { RpcReviewWorkflowListResponseSchema, RpcReviewWorkflowResultResponseSchema } from "./projections.ts";
+import { IrohRemoteSessionIdSchema, IrohRemoteWorkingDirectorySchema } from "./remote-handshake.ts";
 import {
 	RpcMcpPromptContentResponseSchema,
 	RpcMcpPromptsResponseSchema,
@@ -38,12 +41,14 @@ import {
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
 	RpcListSubagentsResponseSchema,
+	RpcSessionContextSchema,
 	RpcSessionListItemSchema,
 	RpcWebSearchStatusSchema,
 } from "./session.ts";
 import { RpcSubscriptionUsageReportSchema } from "./subscription-usage.ts";
 import { UiActionCompletionListResponseSchema } from "./ui-actions.ts";
 import { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "./wire-limits.ts";
+import { IrohRemoteWorkspaceDirectorySchema, IrohRemoteWorktreeSummarySchema } from "./workspace.ts";
 
 const closed = { additionalProperties: false } as const;
 
@@ -183,15 +188,43 @@ export const QUERY_SCHEMAS = {
 		),
 	},
 	subscription_usage: { params: EmptyInputSchema, result: RpcSubscriptionUsageReportSchema },
-	host_status: {
+	host_status: { params: EmptyInputSchema, result: Type.Object({ keepAwake: RpcKeepAwakeStatusSchema }, closed) },
+	/** Whether the host stores a web search key; never the key. */
+	web_search_status: {
 		params: EmptyInputSchema,
-		result: Type.Object({ keepAwake: RpcKeepAwakeStatusSchema, webSearch: RpcWebSearchStatusSchema }, closed),
+		result: Type.Object({ webSearch: RpcWebSearchStatusSchema }, closed),
 	},
 	subagent_definitions: { params: EmptyInputSchema, result: RpcListSubagentsResponseSchema },
 	job_output: {
 		params: Type.Object({ jobId: RpcConversationIdentifierSchema }, closed),
 		result: Type.Object({ job: RpcBackgroundJobSnapshotSchema }, closed),
 	},
+
+	// The connection's workspace
+	/** The models and default configuration for a new conversation in the workspace. */
+	agent_options: { params: EmptyInputSchema, result: RpcAgentOptionsSchema },
+	/** Each session's starting git context and work context, in request order. */
+	session_contexts: {
+		params: Type.Object(
+			{ sessionIds: Type.Array(IrohRemoteSessionIdSchema, { minItems: 1, maxItems: 64, uniqueItems: true }) },
+			closed,
+		),
+		result: Type.Object({ contexts: Type.Array(RpcSessionContextSchema) }, closed),
+	},
+	worktrees: {
+		params: EmptyInputSchema,
+		result: Type.Object({ worktrees: Type.Array(IrohRemoteWorktreeSummarySchema) }, closed),
+	},
+	/** The folders under `path` (the workspace root when absent), by workspace-relative path. */
+	workspace_directories: {
+		params: Type.Object({ path: Type.Optional(IrohRemoteWorkingDirectorySchema) }, closed),
+		result: Type.Object(
+			{ path: Type.Optional(Type.String()), directories: Type.Array(IrohRemoteWorkspaceDirectorySchema) },
+			closed,
+		),
+	},
+	/** The pull request a review would target: by number, or the one for a checkout's branch. */
+	pr_review: { params: RpcPrReviewSourceRequestSchema, result: RpcResolvePrReviewResponseSchema },
 
 	// MCP
 	"mcp.capabilities": { params: EmptyInputSchema, result: RpcMcpCapabilitiesResponseSchema },

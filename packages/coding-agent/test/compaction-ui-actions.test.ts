@@ -3,20 +3,21 @@ import { RpcUiActionStateChangedEventSchema, UiActionDescriptorSchema } from "@h
 import { Compile } from "typebox/compile";
 import { describe, expect, it, vi } from "vitest";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import {
-	CONTEXT_AUTO_COMPACTION_ACTION_ID as autoAction,
-	type HostActionInvocationContext,
-	isRemoteSafeBuiltinHostActionId,
-	BUILTIN_HOST_ACTION_REGISTRY as registry,
-	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID as thresholdAction,
-} from "../src/core/host-actions.ts";
-import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
+import { type IntentContext, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
+import { createIrohRemotePresetAccess, createIrohRemoteRpcGrant } from "../src/core/remote/iroh/access-grant.ts";
 import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
 import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
 import { subscribeRpcSessionEvents } from "../src/core/rpc/background-jobs.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { UiActionDescriptor } from "../src/core/rpc/types.ts";
-import { getUiActionDescriptors } from "../src/core/rpc/ui-actions.ts";
+import {
+	CONTEXT_AUTO_COMPACTION_ACTION_ID as autoAction,
+	getUiActionDescriptors,
+	isRemoteSafeBuiltinUiAction,
+	prepareUiActionInvocation,
+	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID as thresholdAction,
+	type UiActionDiscoverySession,
+} from "../src/core/rpc/ui-actions.ts";
 import { InMemorySettingsStorage, type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
@@ -46,25 +47,32 @@ function setup(global: Settings = {}, project: Settings = {}, profile?: string, 
 		isStreaming: false,
 		isBusy: false,
 		isCompacting: false,
+		extensionRunner: { getRegisteredCommands: () => [] },
+		promptTemplates: [],
+		resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
+		sessionManager: { getCwd: () => "/repo", getOrdinal: () => 0 },
 	};
-	const context: HostActionInvocationContext = {
-		session,
+	const target = { session, conversation: {}, host: {}, client: {} } as unknown as IntentContext["target"];
+	// A paired device invokes the actions; tests swap its authority check to simulate a stale lease.
+	const context: Mutable<IntentContext> = {
+		target,
+		services: {},
+		profile: { name: "remote", grant: createIrohRemoteRpcGrant(["conversation.control.v1"]) },
 		assertCurrent: vi.fn(),
-		abortRun: async () => {},
-		compactContext: async () => ({ summary: "", firstKeptEntryId: "entry", tokensBefore: 0 }),
-		newSession: async () => ({ cancelled: true as const }),
-		renameSession: async () => {},
 	};
-	const descriptor = (action: string) => registry.getDescriptor(action, context)!;
+	const local: IntentContext = { target, services: {}, profile: LOCAL_INTENT_PROFILE };
+	const descriptor = (action: string) =>
+		getUiActionDescriptors(session as unknown as UiActionDiscoverySession, "all").find(
+			(candidate) => candidate.id === action,
+		)!;
+	const invokeAction = async (ctx: IntentContext, action: string, args: unknown) =>
+		prepareUiActionInvocation(ctx, { action, args }).run();
 	const invoke = (action: string, value: boolean | number, target = capturedTarget(descriptor(action))) =>
-		registry.invoke(
-			action,
-			context,
-			{ ...target, [action === autoAction ? "enabled" : "tokens"]: value },
-			{ requireRemoteSafe: true },
-		);
-	return { storage, settingsManager, session, context, descriptor, invoke };
+		invokeAction(context, action, { ...target, [action === autoAction ? "enabled" : "tokens"]: value });
+	return { storage, settingsManager, session, context, local, descriptor, invoke, invokeAction };
 }
+
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
 function capturedTarget(descriptor: UiActionDescriptor) {
 	return Object.fromEntries(
@@ -93,7 +101,7 @@ describe("compaction host actions", () => {
 				expect(item.args).toContainEqual(expect.objectContaining({ name, type: "string", required: true }));
 			expect(item.description).toContain("globally on the connected host");
 			expect(item.description).toContain("overrides take precedence");
-			expect(isRemoteSafeBuiltinHostActionId(action)).toBe(true);
+			expect(isRemoteSafeBuiltinUiAction(action)).toBe(true);
 		}
 		expect(descriptor(autoAction).state).toMatchObject({ type: "boolean", value: true });
 		expect(descriptor(thresholdAction).state).toMatchObject({ type: "integer", value: 123456 });
@@ -109,7 +117,7 @@ describe("compaction host actions", () => {
 			"500000",
 			"750000",
 		]);
-		expect(isRemoteSafeBuiltinHostActionId("context.compact")).toBe(false);
+		expect(isRemoteSafeBuiltinUiAction("context.compact")).toBe(false);
 		const discovery = {
 			...session,
 			extensionRunner: { getRegisteredCommands: () => [] },
@@ -216,9 +224,9 @@ describe("compaction host actions", () => {
 	it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, "350000", null])(
 		"rejects invalid/unsafe token count %s without saving",
 		async (tokens) => {
-			const { descriptor, context, settingsManager } = setup();
+			const { descriptor, local, invokeAction, settingsManager } = setup();
 			await expect(
-				registry.invoke(thresholdAction, context, { ...capturedTarget(descriptor(thresholdAction)), tokens }),
+				invokeAction(local, thresholdAction, { ...capturedTarget(descriptor(thresholdAction)), tokens }),
 			).rejects.toThrow();
 			expect(settingsManager.getGlobalSettings()).toEqual({});
 		},
@@ -227,7 +235,7 @@ describe("compaction host actions", () => {
 	it.each([autoAction, thresholdAction])(
 		"requires exact target args and rejects model/profile/session races for %s",
 		async (action) => {
-			const { context, descriptor, invoke, session, settingsManager } = setup(
+			const { context, local, descriptor, invoke, invokeAction, session, settingsManager } = setup(
 				{ profiles: { work: {}, personal: {} } },
 				{},
 				"work",
@@ -235,7 +243,7 @@ describe("compaction host actions", () => {
 			const target = capturedTarget(descriptor(action));
 			const value = action === autoAction ? false : 350000;
 			await expect(
-				registry.invoke(action, context, { [action === autoAction ? "enabled" : "tokens"]: value }),
+				invokeAction(local, action, { [action === autoAction ? "enabled" : "tokens"]: value }),
 			).rejects.toThrow("Missing required");
 			session.model = { ...model, id: "new-model" };
 			await expect(invoke(action, value, target)).rejects.toThrow("target changed");
@@ -276,9 +284,9 @@ describe("compaction host actions", () => {
 		});
 		await expect(invoke(thresholdAction, 350000)).rejects.toThrow("disk full");
 		const settingsManager = SettingsManager.fromStorage(storage);
-		const context = setup().context;
-		context.session.settingsManager = settingsManager;
-		expect(registry.getDescriptor(autoAction, context)).toMatchObject({
+		const { session, descriptor } = setup();
+		session.settingsManager = settingsManager;
+		expect(descriptor(autoAction)).toMatchObject({
 			enabled: false,
 			disabledReason: expect.stringContaining("could not be loaded"),
 		});
@@ -394,7 +402,7 @@ it("invokes compaction actions through RPC with durable replies and shared state
 		extensionRunner: { getRegisteredCommands: () => [] },
 		promptTemplates: [],
 		resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
-		sessionManager: { flush: async () => {}, getCwd: () => "/repo" },
+		sessionManager: { flush: async () => {}, getCwd: () => "/repo", getOrdinal: () => 0 },
 	};
 	const { host } = createFakeHost();
 	const { conversation } = createFakeConversation(rpcSession);
@@ -423,7 +431,7 @@ it("invokes compaction actions through RPC with durable replies and shared state
 		transport,
 		onReady: ready,
 		anchor: false,
-		requireRemoteSafeUiActions: true,
+		remoteGrant: createIrohRemotePresetAccess("coding").rpcGrant,
 	});
 	try {
 		await started;

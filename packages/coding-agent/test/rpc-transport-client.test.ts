@@ -9,29 +9,6 @@ import type { AgentSessionEvent, PromptOptions } from "../src/core/agent-session
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ResolvedCommand, SessionIntentResult } from "../src/core/extensions/types.ts";
 import { openNewSession } from "../src/core/host/session-intents.ts";
-import {
-	AGENT_MODE_ACTION_ID,
-	CONTEXT_AUTO_COMPACTION_ACTION_ID,
-	CONTEXT_COMPACT_ACTION_ID,
-	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
-	PLAN_CHANGE_ACTION_ID,
-	PLAN_DISCARD_ACTION_ID,
-	PLAN_EXECUTE_ACTION_ID,
-	REVIEW_BRANCH_ACTION_ID,
-	REVIEW_COMMIT_ACTION_ID,
-	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
-	REVIEW_FEEDBACK_ACTION_ID,
-	REVIEW_FIX_ACTION_ID,
-	REVIEW_PR_ACTION_ID,
-	REVIEW_PUBLISH_ACTION_ID,
-	REVIEW_RERUN_ACTION_ID,
-	REVIEW_UNCOMMITTED_ACTION_ID,
-	RUN_CANCEL_ACTION_ID,
-	SESSION_NEW_ACTION_ID,
-	SESSION_NEW_SLASH_ALIAS,
-	SESSION_RENAME_ACTION_ID,
-	THINKING_FAST_MODE_ACTION_ID,
-} from "../src/core/host-actions.ts";
 import type { PromptTemplate } from "../src/core/prompt-templates.ts";
 import {
 	createIrohRemoteFilteredRpcTransport,
@@ -57,6 +34,28 @@ import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { RpcTransportClient } from "../src/modes/rpc/rpc-transport-client.ts";
 import { createTestModel } from "./iroh-stream-doubles.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+
+const AGENT_MODE_ACTION_ID = "agent.mode";
+const CONTEXT_AUTO_COMPACTION_ACTION_ID = "context.auto_compaction";
+const CONTEXT_COMPACT_ACTION_ID = "context.compact";
+const CONTEXT_COMPACTION_THRESHOLD_ACTION_ID = "context.compaction_threshold";
+const PLAN_CHANGE_ACTION_ID = "plan.change";
+const PLAN_DISCARD_ACTION_ID = "plan.discard";
+const PLAN_EXECUTE_ACTION_ID = "plan.execute";
+const REVIEW_BRANCH_ACTION_ID = "review.branch";
+const REVIEW_COMMIT_ACTION_ID = "review.commit";
+const REVIEW_EXPORT_FEEDBACK_ACTION_ID = "review.export_feedback";
+const REVIEW_FEEDBACK_ACTION_ID = "review.feedback";
+const REVIEW_FIX_ACTION_ID = "review.fix";
+const REVIEW_PR_ACTION_ID = "review.pr";
+const REVIEW_PUBLISH_ACTION_ID = "review.publish";
+const REVIEW_RERUN_ACTION_ID = "review.rerun";
+const REVIEW_UNCOMMITTED_ACTION_ID = "review.uncommitted";
+const RUN_CANCEL_ACTION_ID = "run.cancel";
+const SESSION_NEW_ACTION_ID = "session.new";
+const SESSION_NEW_SLASH_ALIAS = "clear";
+const SESSION_RENAME_ACTION_ID = "session.rename";
+const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
 
 // The modes' structural intents run through the host's session intents; these
 // tests stand in for them with the fake runtime's `newSession`.
@@ -1186,7 +1185,7 @@ describe("runRpcMode", () => {
 		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
 			allowUiActionInvocation: true,
 			exitProcess: false,
-			requireRemoteSafeUiActions: true,
+			remoteGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			transport,
 		});
 		const client = new RpcTransportClient({ transport: pair.client });
@@ -2549,6 +2548,8 @@ function createRuntimeHost(
 			return thinkingLevel;
 		},
 		getAvailableThinkingLevels: vi.fn(() => resources.availableThinkingLevels ?? ["off"]),
+		supportsThinking: vi.fn(() => currentModel?.reasoning === true),
+		scopedModels: [],
 		setModel: vi.fn(async (model: Model<Api>, options?: { persistDefault?: boolean }) => {
 			currentModel = model;
 			await resources.setModel?.(model, options);
@@ -2581,6 +2582,7 @@ function createRuntimeHost(
 		sessionManager: {
 			flush: vi.fn(async () => {}),
 			getCwd: vi.fn(() => resources.cwd ?? tmpdir()),
+			getOrdinal: vi.fn(() => 0),
 			getPrReviewBinding: vi.fn(() => undefined),
 			getSessionRef: vi.fn(() => undefined),
 			getStartingGitContext: vi.fn(() => undefined),

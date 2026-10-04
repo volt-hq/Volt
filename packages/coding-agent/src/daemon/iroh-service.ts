@@ -8,6 +8,7 @@ import { createAgentSessionServices } from "../core/agent-session-services.ts";
 import { type GitContextObservation, GitContextObservationBinding } from "../core/git-context-provider.ts";
 import { discoverGitWorktree } from "../core/git-repository.ts";
 import type { HostedConversation } from "../core/host/hosted-conversation.ts";
+import { intentRegistry } from "../core/protocol/intents/index.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
@@ -81,7 +82,7 @@ import {
 } from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
-import type { RpcRemoteTerminalEvent } from "../core/rpc/types.ts";
+import type { RpcRegisterPushTargetArgs, RpcRemoteTerminalEvent } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";
@@ -181,6 +182,7 @@ import {
 	revokeIrohManagedRelayCredential,
 } from "./relay-credential.ts";
 import { RelayRegistry } from "./relay-stream.ts";
+import { remoteIntentProfile } from "./remote-host-intents.ts";
 import { beginReviewSiblingAdmission, withReviewSourceWriteLease } from "./review-sibling-admission.ts";
 import {
 	createSessionManagerTargetStore,
@@ -5966,17 +5968,25 @@ class IrohDaemonService {
 		};
 		const responseId = getRpcResponseId(command);
 		if (command.type === "set_keep_awake" || command.type === "get_keep_awake") {
-			const response = createKeepAwakeRpcResponse(command, this.getCommandContext());
+			const response = await createKeepAwakeRpcResponse(command, authorization, this.getCommandContext());
 			return { ok: true, response: response as Record<string, unknown> };
 		}
 		if (command.type === "set_web_search_key" || command.type === "get_web_search_status") {
-			const response = createWebSearchKeyRpcResponse(command, this.getCommandContext());
+			const response = await createWebSearchKeyRpcResponse(command, authorization, this.getCommandContext());
 			return { ok: true, response: response as Record<string, unknown> };
 		}
 		if (command.type === "register_push_target") {
 			try {
-				const data = await this.createPushNotificationDispatcher(authorization).registerPushTarget(command.args);
-				return { ok: true, response: createRpcSuccessResponse(responseId, command.type, { ...data }) };
+				const dispatcher = this.createPushNotificationDispatcher(authorization);
+				const { outcome } = await intentRegistry.invoke(
+					{
+						services: { pushTargets: { register: (args) => dispatcher.registerPushTarget(args) } },
+						profile: remoteIntentProfile(authorization),
+					},
+					"register_push_target",
+					command.args as RpcRegisterPushTargetArgs,
+				);
+				return { ok: true, response: createRpcSuccessResponse(responseId, command.type, { ...outcome }) };
 			} catch (error) {
 				return {
 					ok: true,

@@ -1,42 +1,28 @@
-import { stripVTControlCharacters } from "node:util";
-import { RPC_STABLE_ERROR_CODES } from "@hansjm10/volt-protocol";
+/**
+ * The legacy RPC command wire over the intent and query registries. Every
+ * command that is an intent or a query runs through the registry, which owns
+ * admission and the behavior; this module keeps only each command's wire
+ * shape. Commands the protocol derives from the subscription (state,
+ * transcript, tree, messages) or the connection (capabilities, recovery) stay
+ * here until the protocol server replaces the wire.
+ */
+
+import { type IntentInput, type RemoteGrant, RPC_STABLE_ERROR_CODES } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { SessionIntentResult } from "../../core/extensions/index.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { executePlan } from "../../core/host/plan-handoff.ts";
-import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
-import { openFork, openStoredSessionById } from "../../core/host/session-intents.ts";
 import type { HostClient } from "../../core/host/targets.ts";
 import {
-	BUILTIN_HOST_ACTION_REGISTRY,
-	type HostActionInvocationContext,
-	REVIEW_RERUN_ACTION_ID,
-	runCancelHostAction,
-	runContextCompactHostAction,
-	runSessionNewHostAction,
-	runSessionRenameHostAction,
-} from "../../core/host-actions.ts";
-import { getMcpRpcCapabilities, listMcpRpcServers } from "../../core/mcp/rpc.ts";
-import type { McpGatewayExecutionContext } from "../../core/mcp/types.ts";
+	type IntentContext,
+	type IntentServices,
+	intentRegistry,
+	LOCAL_INTENT_PROFILE,
+} from "../../core/protocol/intents/index.ts";
+import { queryRegistry } from "../../core/protocol/queries/index.ts";
 import { toIrohRemoteAgentOptionsCatalogModel } from "../../core/remote/iroh/agent-options.ts";
 import { assertReviewDiscussionRpcAllowed } from "../../core/review-discussion-policy.ts";
-import { ReviewDiscussionConfigurationError, type ReviewDiscussionService } from "../../core/review-discussions.ts";
-import { getReviewGeneral } from "../../core/review-general.ts";
-import { publishReviewRun } from "../../core/review-publish.ts";
-import {
-	acknowledgeReviewRun,
-	appendReviewPublication,
-	appendReviewRun,
-	exportCanonicalReviewFeedback,
-	getCanonicalReviewRun,
-	type HydratedReviewRunRecord,
-	listCanonicalReviewRuns,
-	recordReviewFindingOutcome,
-} from "../../core/review-state.ts";
-import { UNAVAILABLE_REVIEW_USAGE } from "../../core/review-usage.ts";
-import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../core/review-workflows.ts";
-import { listRpcBackgroundJobs, projectRpcBackgroundJob } from "../../core/rpc/background-jobs.ts";
+import { listRpcBackgroundJobs } from "../../core/rpc/background-jobs.ts";
 import { getRpcErrorResponseTarget, isUsableRpcConversationIdentifier } from "../../core/rpc/correlation.ts";
 import { buildRpcSessionState } from "../../core/rpc/session-state.ts";
 import { projectSessionTreePage } from "../../core/rpc/session-tree.ts";
@@ -47,31 +33,22 @@ import {
 	projectSessionTranscript,
 } from "../../core/rpc/transcript.ts";
 import {
-	createUiActionInvocationPlan,
 	getUiActionCompletions,
 	getUiActionDescriptors,
+	prepareUiActionInvocation,
 } from "../../core/rpc/ui-actions.ts";
-import { SessionManager } from "../../core/session-manager.ts";
-import type { SessionWriter } from "../../core/session-writer.ts";
-import type { SubscriptionUsageReport, SubscriptionUsageService } from "../../core/subscription-usage.ts";
 import type {
-	RpcCatalogModel,
 	RpcClientCapabilityFeature,
 	RpcCommand,
 	RpcHostActionRequest,
 	RpcListSubagentsResponse,
-	RpcModel,
 	RpcPendingHostActionsResponse,
-	RpcPromptResponse,
-	RpcRegisterPushTargetResponse,
 	RpcResponse,
 	RpcSessionIntentResponse,
-	RpcSessionListItem,
 	RpcSessionState,
 	RpcSessionTreePage,
 	RpcSlashCommand,
 	RpcSubagentStartResponse,
-	RpcSubscriptionUsageReport,
 	RpcTranscriptResponse,
 	UiActionCapabilities,
 } from "./rpc-types.ts";
@@ -80,8 +57,8 @@ export const HOST_ACTION_REQUESTS_CAPABILITY: RpcClientCapabilityFeature = "host
 
 export interface RpcCommandDispatcherOptions {
 	allowUiActionInvocation: boolean;
-	requireRemoteSafeUiActions: boolean;
-	registerPushTarget: ((args: unknown) => Promise<RpcRegisterPushTargetResponse>) | undefined;
+	/** A paired device's grant: commands run on the remote profile, limited to remote-safe intents within it. */
+	remoteGrant?: RemoteGrant;
 }
 
 export interface RpcSubagentLifecycleController {
@@ -105,11 +82,10 @@ export interface RpcCommandDispatcherContext {
 	/** The client's host and the client itself, whose structural intents move it. */
 	host: ConversationHost;
 	client: HostClient;
-	/** Installed only by a daemon with sibling runtime ownership. */
-	reviewDiscussions?: ReviewDiscussionService;
 	options: RpcCommandDispatcherOptions;
+	/** What this host gives intents beyond the conversation. */
+	services: IntentServices;
 	output(response: RpcResponse): void;
-	createHostActionContext(): HostActionInvocationContext;
 	setClientCapabilities(features: RpcClientCapabilityFeature[]): void;
 	reportStreamDiscontinuity(
 		command: Extract<RpcCommand, { type: "report_stream_discontinuity" }>,
@@ -120,7 +96,6 @@ export interface RpcCommandDispatcherContext {
 	conversationBranchEpoch?: string;
 	/** Revalidate the mutation lease after an awaited dispatcher/session preflight boundary. */
 	assertConversationGenerationCurrent(): void;
-	subscriptionUsageService: SubscriptionUsageService;
 	/**
 	 * Claim the deferred launch of a review workflow registered by this
 	 * invocation. The dispatcher launches it only after the accepted response is
@@ -128,13 +103,6 @@ export interface RpcCommandDispatcherContext {
 	 */
 	takePendingReviewWorkflow?(workflowId: string): { launch: () => void; cancel: () => void } | undefined;
 	subagents: RpcSubagentLifecycleController;
-}
-
-function createRpcMcpExecutionContext(): McpGatewayExecutionContext {
-	return {
-		mode: "rpc",
-		caller: "user",
-	};
 }
 
 function getUiActionCapabilities(invocationEnabled: boolean): UiActionCapabilities {
@@ -146,62 +114,6 @@ function getUiActionCapabilities(invocationEnabled: boolean): UiActionCapabiliti
 		maxActions: 200,
 		maxDescriptorBytes: 65_536,
 	};
-}
-
-function toCatalogModel(model: RpcModel): RpcCatalogModel {
-	return toIrohRemoteAgentOptionsCatalogModel(model);
-}
-
-function projectSubscriptionUsageReport(report: SubscriptionUsageReport): RpcSubscriptionUsageReport {
-	if (report.status !== "providers") {
-		return { status: report.status };
-	}
-	return {
-		status: "providers",
-		providers: report.providers.map((provider) => {
-			if (provider.result.status === "error") {
-				return {
-					providerId: provider.providerId,
-					result: {
-						status: "error",
-						error: {
-							code: provider.result.error.code,
-							message: provider.result.error.message,
-						},
-					},
-				};
-			}
-			const snapshot = provider.result.snapshot;
-			return {
-				providerId: provider.providerId,
-				result: {
-					status: "success",
-					snapshot: {
-						providerId: provider.providerId,
-						fetchedAt: snapshot.fetchedAt,
-						...(snapshot.plan === undefined ? {} : { plan: snapshot.plan }),
-						limits: snapshot.limits.map((limit) => ({
-							id: limit.id,
-							label: limit.label,
-							usedPercent: limit.usedPercent,
-							...(limit.resetsAt === undefined ? {} : { resetsAt: limit.resetsAt }),
-							...(limit.windowDurationMs === undefined ? {} : { windowDurationMs: limit.windowDurationMs }),
-							...(limit.limitReached === undefined ? {} : { limitReached: limit.limitReached }),
-						})),
-					},
-				},
-			};
-		}),
-	};
-}
-
-function getPromptExtensionCommandName(message: string): string | undefined {
-	if (!message.startsWith("/")) {
-		return undefined;
-	}
-	const spaceIndex = message.indexOf(" ");
-	const name = spaceIndex === -1 ? message.slice(1) : message.slice(1, spaceIndex);
-	return name.length > 0 ? name : undefined;
 }
 
 export function createRpcSuccessResponse<T extends RpcCommand["type"]>(
@@ -252,88 +164,94 @@ function projectSessionIntent(result: SessionIntentResult): RpcSessionIntentResp
 	return result.cancelled ? { cancelled: true } : { cancelled: false, sessionId: result.sessionId };
 }
 
-function projectReviewTargetIdentity(
-	identity: HydratedReviewRunRecord["target"]["identity"],
-	includePullRequestBody: boolean,
-): Record<string, unknown> {
-	const pullRequest = identity.pullRequest;
+/** The intent context a command runs in: its conversation, this host's services, and the client's profile. */
+export function createRpcIntentContext(context: RpcCommandDispatcherContext): IntentContext {
+	const { remoteGrant } = context.options;
 	return {
-		kind: identity.kind,
-		baseTree: identity.baseTree,
-		headTree: identity.headTree,
-		...(identity.baseCommit ? { baseCommit: identity.baseCommit } : {}),
-		...(identity.mergeBaseCommit ? { mergeBaseCommit: identity.mergeBaseCommit } : {}),
-		...(identity.headCommit ? { headCommit: identity.headCommit } : {}),
-		...(pullRequest
-			? {
-					pullRequest: {
-						number: pullRequest.number,
-						title: pullRequest.title,
-						...(includePullRequestBody ? { body: pullRequest.body } : {}),
-						url: pullRequest.url,
-						baseRefName: pullRequest.baseRefName,
-						headRefName: pullRequest.headRefName,
-						baseRefOid: pullRequest.baseRefOid,
-						headRefOid: pullRequest.headRefOid,
-					},
-				}
-			: {}),
+		target: {
+			session: context.session,
+			conversation: context.conversation,
+			host: context.host,
+			client: context.client,
+		},
+		services: context.services,
+		profile: remoteGrant === undefined ? LOCAL_INTENT_PROFILE : { name: "remote", grant: remoteGrant },
+		assertCurrent: () => context.assertConversationGenerationCurrent(),
 	};
 }
 
-function projectReviewRun(record: HydratedReviewRunRecord, includeResult: boolean): Record<string, unknown> {
-	const result = record.result;
-	const pullRequest = createReviewPullRequestMetadata(record.target.identity);
-	const files = createReviewFileMetadata(record.target.files, record.target.fileSummary, includeResult);
-	return {
-		runId: record.runId,
-		workflowAction: record.workflowAction,
-		status: record.status,
-		startedAt: record.startedAt,
-		...(record.endedAt === undefined ? {} : { endedAt: record.endedAt }),
-		usage: record.usage?.summary ?? UNAVAILABLE_REVIEW_USAGE,
-		...(record.usage
-			? {
-					usageUpdatedAt: record.usage.updatedAt,
-					...(includeResult ? { usageBreakdown: record.usage.attempts } : {}),
-				}
-			: {}),
-		...(record.acknowledgedAt === undefined ? {} : { acknowledgedAt: record.acknowledgedAt }),
-		target: {
-			description: record.target.description,
-			diffCommand: record.target.diffCommand,
-			identity: projectReviewTargetIdentity(record.target.identity, includeResult),
-			...(pullRequest ? { pullRequest } : {}),
-			files,
-			...(record.target.context ? { context: record.target.context } : {}),
-		},
-		options: record.options,
-		...(record.parentRunId ? { parentRunId: record.parentRunId } : {}),
-		...(record.incrementalFallbackReason ? { incrementalFallbackReason: record.incrementalFallbackReason } : {}),
-		...(record.errorMessage ? { errorMessage: record.errorMessage } : {}),
-		...(result
-			? includeResult
-				? {
-						completionStatus: result.completionStatus,
-						summary: result.summary,
-						findings: result.findings,
-						coverage: result.coverage,
-						...(result.overallCorrectness ? { overallCorrectness: result.overallCorrectness } : {}),
-						overallExplanation: result.overallExplanation,
-						...(result.verificationChallenge ? { verificationChallenge: result.verificationChallenge } : {}),
-					}
-				: { completionStatus: result.completionStatus, findingsCount: result.findings.length }
-			: {}),
-	};
+/** Answer a command once its admitted run settles, without holding the command lane until then. */
+function respondWhenSettled(
+	context: RpcCommandDispatcherContext,
+	id: string | undefined,
+	command: RpcCommand["type"],
+	run: () => Promise<object | undefined>,
+): undefined {
+	void run().then(
+		(data) => context.output(createRpcSuccessResponse(id, command, data)),
+		(error: unknown) =>
+			context.output(
+				createRpcErrorResponse(id, command, error instanceof Error ? error.message : String(error), error),
+			),
+	);
+	return undefined;
 }
+
+/** Commands that answer a failure as an error response rather than throwing it to the caller. */
+const ANSWERED_FAILURE_COMMANDS: ReadonlySet<RpcCommand["type"]> = new Set([
+	"prompt",
+	"new_session",
+	"start_review_discussions",
+	"list_review_discussions",
+	"reset_review_discussion",
+	"get_review_discussion_source",
+	"get_review_result",
+	"open_review_session",
+	"record_review_finding_outcome",
+	"rerun_review",
+	"publish_review",
+	"register_push_target",
+	"get_mcp_server",
+	"connect_mcp_server",
+	"refresh_mcp_server",
+	"disconnect_mcp_server",
+	"start_mcp_server_auth",
+	"complete_mcp_server_auth",
+	"poll_mcp_server_auth",
+	"cancel_mcp_server_auth",
+	"logout_mcp_server",
+	"set_mcp_server_enabled",
+	"list_mcp_tools",
+	"get_mcp_tool",
+	"list_mcp_resources",
+	"read_mcp_resource",
+	"list_mcp_prompts",
+	"get_mcp_prompt",
+	"set_model",
+	"clone",
+]);
 
 export async function handleRpcCommand(
 	command: RpcCommand,
 	context: RpcCommandDispatcherContext,
 ): Promise<RpcResponse | undefined> {
-	const { options, host, client, conversation, session } = context;
+	assertReviewDiscussionRpcAllowed(context.session, command);
+	try {
+		return await dispatchRpcCommand(command, context);
+	} catch (error) {
+		if (!ANSWERED_FAILURE_COMMANDS.has(command.type)) throw error;
+		const id = typeof command.id === "string" ? command.id : undefined;
+		return createRpcErrorResponse(id, command.type, error instanceof Error ? error.message : String(error), error);
+	}
+}
+
+async function dispatchRpcCommand(
+	command: RpcCommand,
+	context: RpcCommandDispatcherContext,
+): Promise<RpcResponse | undefined> {
+	const { options, session } = context;
 	const id = typeof command.id === "string" ? command.id : undefined;
-	assertReviewDiscussionRpcAllowed(session, command);
+	const intents = createRpcIntentContext(context);
 
 	switch (command.type) {
 		// =================================================================
@@ -341,136 +259,65 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "prompt": {
-			if (options.requireRemoteSafeUiActions) {
-				const commandName = getPromptExtensionCommandName(command.message);
-				const extensionCommand = commandName ? session.extensionRunner.getCommand(commandName) : undefined;
-				if (extensionCommand && extensionCommand.remoteSafe !== true) {
-					return createRpcErrorResponse(
-						id,
-						"prompt",
-						`Extension command is not available over remote host: /${commandName}`,
-					);
-				}
-			}
-			// Start prompt handling immediately, but emit the authoritative response only after
-			// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
-			let preflightSucceeded = false;
-			void session
-				.prompt(command.message, {
-					images: command.images,
-					streamingBehavior: command.streamingBehavior,
-					clientMessageId: command.clientMessageId,
-					source: "rpc",
-					assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
-					preflightResult: (result) => {
-						if (result.success) {
-							preflightSucceeded = true;
-							const record = session.sessionManager.getClientInput(command.clientMessageId);
-							const data: RpcPromptResponse = {
-								clientMessageId: command.clientMessageId,
-								outcome: result.outcome,
-								...(record?.canonicalEntryId === undefined
-									? {}
-									: { canonicalEntryId: record.canonicalEntryId }),
-							};
-							context.output(createRpcSuccessResponse(id, "prompt", data));
-						}
-					},
-				})
-				.catch((e) => {
-					if (!preflightSucceeded) {
-						context.output(createRpcErrorResponse(id, "prompt", e.message, e));
-					}
-				});
-			return undefined;
+			// Admit now; answer once the prompt passes preflight, without blocking later commands.
+			const prepared = intentRegistry.prepare({ ...intents, intentId: command.clientMessageId }, "prompt", {
+				message: command.message,
+				...(command.images === undefined ? {} : { images: command.images }),
+				...(command.streamingBehavior === undefined ? {} : { streamingBehavior: command.streamingBehavior }),
+			});
+			return respondWhenSettled(context, id, "prompt", async () => (await prepared.run()).outcome);
 		}
 
-		case "steer": {
-			await session.steer(command.message, command.images, command.clientMessageId);
-			return createRpcSuccessResponse(id, "steer");
-		}
-
+		case "steer":
 		case "follow_up": {
-			await session.followUp(command.message, command.images, command.clientMessageId);
-			return createRpcSuccessResponse(id, "follow_up");
+			await intentRegistry.invoke({ ...intents, intentId: command.clientMessageId }, command.type, {
+				message: command.message,
+				...(command.images === undefined ? {} : { images: command.images }),
+			});
+			return createRpcSuccessResponse(id, command.type);
 		}
 
 		case "abort": {
-			await runCancelHostAction(context.createHostActionContext());
+			await intentRegistry.invoke(intents, "abort", {});
 			return createRpcSuccessResponse(id, "abort");
 		}
 
 		case "new_session": {
-			if (command.replaceReviewGeneral && !command.preserveReviewRunId)
-				return createRpcErrorResponse(id, "new_session", "replaceReviewGeneral requires preserveReviewRunId");
-			const preservedReviewRun = command.preserveReviewRunId
-				? await getCanonicalReviewRun(session.sessionManager, command.preserveReviewRunId)
-				: undefined;
-			if (command.preserveReviewRunId && !preservedReviewRun) {
-				return createRpcErrorResponse(id, "new_session", `Unknown review run: ${command.preserveReviewRunId}`);
-			}
-			let parentSessionRef =
-				command.parentSessionId === session.sessionId ? session.sessionManager.getSessionRef() : undefined;
-			if (command.parentSessionId && !parentSessionRef) {
-				const candidates = await SessionManager.listAll(session.sessionManager.getSessionDir(), undefined, {
-					includeMessageFreeDurable: true,
-				});
-				parentSessionRef = candidates.find((candidate) => candidate.id === command.parentSessionId)?.ref;
-				if (!parentSessionRef) {
-					return createRpcErrorResponse(id, "new_session", `Unknown parent session: ${command.parentSessionId}`);
-				}
-			}
-			const newSessionOptions = {
-				...(command.preserveReviewRunId ? { preserveReviewRunId: command.preserveReviewRunId } : {}),
-				...(command.replaceReviewGeneral ? { replaceReviewGeneral: true } : {}),
-				...(parentSessionRef ? { parentSessionRef } : {}),
-				...(preservedReviewRun
-					? {
-							setup: async (writer: SessionWriter) => {
-								await appendReviewRun(writer, preservedReviewRun);
-								if (preservedReviewRun.acknowledgedAt !== undefined) {
-									await acknowledgeReviewRun(
-										writer,
-										preservedReviewRun.runId,
-										preservedReviewRun.acknowledgedAt,
-									);
-								}
-							},
-						}
-					: {}),
-			};
-			const result = await runSessionNewHostAction(context.createHostActionContext(), newSessionOptions);
-			return createRpcSuccessResponse(id, "new_session", projectSessionIntent(result));
+			const { outcome } = await intentRegistry.invoke(intents, "new_session", {
+				...(command.parentSessionId === undefined ? {} : { parentSessionId: command.parentSessionId }),
+				...(command.preserveReviewRunId === undefined ? {} : { preserveReviewRunId: command.preserveReviewRunId }),
+				...(command.replaceReviewGeneral === undefined
+					? {}
+					: { replaceReviewGeneral: command.replaceReviewGeneral }),
+			});
+			return createRpcSuccessResponse(id, "new_session", projectSessionIntent(outcome));
 		}
 
 		case "set_agent_mode": {
-			context.assertConversationGenerationCurrent();
-			const planning = await session.setAgentMode(command.mode);
-			return createRpcSuccessResponse(id, "set_agent_mode", planning);
+			const { outcome } = await intentRegistry.invoke(intents, "set_agent_mode", { mode: command.mode });
+			return createRpcSuccessResponse(id, "set_agent_mode", outcome);
 		}
 
 		case "plan_execute": {
-			const result = await executePlan(
-				host,
-				client,
-				command.planId,
-				command.expectedRevision,
-				command.strategy,
-				context.assertConversationGenerationCurrent,
-			);
-			return createRpcSuccessResponse(id, "plan_execute", result);
+			const { outcome } = await intentRegistry.invoke(intents, "plan_execute", {
+				planId: command.planId,
+				expectedRevision: command.expectedRevision,
+				strategy: command.strategy,
+			});
+			return createRpcSuccessResponse(id, "plan_execute", {
+				planning: outcome.planning,
+				selectedSessionId: outcome.selectedSessionId,
+				started: outcome.started,
+			});
 		}
 
-		case "plan_change": {
-			context.assertConversationGenerationCurrent();
-			const planning = await session.changePlan(command.planId, command.expectedRevision);
-			return createRpcSuccessResponse(id, "plan_change", planning);
-		}
-
+		case "plan_change":
 		case "plan_discard": {
-			context.assertConversationGenerationCurrent();
-			const planning = await session.discardPlan(command.planId, command.expectedRevision);
-			return createRpcSuccessResponse(id, "plan_discard", planning);
+			const { outcome } = await intentRegistry.invoke(intents, command.type, {
+				planId: command.planId,
+				expectedRevision: command.expectedRevision,
+			});
+			return createRpcSuccessResponse(id, command.type, outcome);
 		}
 
 		// =================================================================
@@ -512,7 +359,7 @@ export async function handleRpcCommand(
 		case "get_ui_actions": {
 			return createRpcSuccessResponse(id, "get_ui_actions", {
 				actions: getUiActionDescriptors(session, command.scope, {
-					remoteSafeOnly: options.requireRemoteSafeUiActions,
+					remoteSafeOnly: intents.profile.name === "remote",
 					detachedReviews: true,
 				}),
 			});
@@ -520,11 +367,10 @@ export async function handleRpcCommand(
 
 		case "get_ui_action_completions": {
 			return createRpcSuccessResponse(id, "get_ui_action_completions", {
-				completions: await getUiActionCompletions(session, {
+				completions: await getUiActionCompletions(intents, {
 					action: command.action,
 					argument: command.argument,
 					prefix: command.prefix,
-					requireRemoteSafe: options.requireRemoteSafeUiActions,
 				}),
 			});
 		}
@@ -537,208 +383,141 @@ export async function handleRpcCommand(
 					"UI action invocation is not available over this RPC transport",
 				);
 			}
-			if (BUILTIN_HOST_ACTION_REGISTRY.get(command.action)) {
-				const response = await BUILTIN_HOST_ACTION_REGISTRY.invoke(
-					command.action,
-					context.createHostActionContext(),
-					command.args,
-					{ requireRemoteSafe: options.requireRemoteSafeUiActions },
-				);
-				const pendingReviewWorkflow =
-					response.status === "accepted" && response.workflowId !== undefined
-						? context.takePendingReviewWorkflow?.(response.workflowId)
-						: undefined;
-				if (pendingReviewWorkflow) {
-					try {
-						context.output(createRpcSuccessResponse(id, "invoke_ui_action", response));
-					} finally {
-						// The workflow must always launch once registered; an unlaunched
-						// entry would pin the active set (and daemon retention) forever.
-						pendingReviewWorkflow.launch();
-					}
-					return undefined;
-				}
-				return createRpcSuccessResponse(id, "invoke_ui_action", response);
-			}
-			const invocation = createUiActionInvocationPlan(session, {
+			const invocation = prepareUiActionInvocation(intents, {
 				action: command.action,
-				args: command.args,
-				requireRemoteSafe: options.requireRemoteSafeUiActions,
-				streamingBehavior: command.streamingBehavior,
+				...(command.args === undefined ? {} : { args: command.args }),
+				...(command.streamingBehavior === undefined ? {} : { streamingBehavior: command.streamingBehavior }),
 			});
-			let preflightSucceeded = false;
-			void session
-				.prompt(invocation.promptText, {
-					streamingBehavior: invocation.promptStreamingBehavior,
-					source: "rpc",
-					assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
-					preflightResult: (result) => {
-						if (result.success) {
-							preflightSucceeded = true;
-							context.output(createRpcSuccessResponse(id, "invoke_ui_action", invocation.response));
-						}
-					},
-				})
-				.catch((e) => {
-					if (!preflightSucceeded) {
-						context.output(createRpcErrorResponse(id, "invoke_ui_action", e.message, e));
-					}
-				});
-			return undefined;
+			if (invocation.prompt) {
+				return respondWhenSettled(context, id, "invoke_ui_action", () => invocation.run());
+			}
+			const response = await invocation.run();
+			const pendingReviewWorkflow =
+				response.status === "accepted" && response.workflowId !== undefined
+					? context.takePendingReviewWorkflow?.(response.workflowId)
+					: undefined;
+			if (pendingReviewWorkflow) {
+				try {
+					context.output(createRpcSuccessResponse(id, "invoke_ui_action", response));
+				} finally {
+					// The workflow must always launch once registered; an unlaunched
+					// entry would pin the active set (and daemon retention) forever.
+					pendingReviewWorkflow.launch();
+				}
+				return undefined;
+			}
+			return createRpcSuccessResponse(id, "invoke_ui_action", response);
 		}
 
 		// =================================================================
 		// Detached review workflows
 		// =================================================================
 
-		case "start_review_discussions":
-		case "list_review_discussions":
-		case "reset_review_discussion":
+		case "start_review_discussions": {
+			const { outcome } = await intentRegistry.invoke(intents, "review_start_discussions", {
+				runId: command.runId,
+				findingIds: command.findingIds,
+				requestId: command.requestId,
+				...(command.discussionConfiguration === undefined
+					? {}
+					: {
+							discussionConfiguration:
+								command.discussionConfiguration as IntentInput<"review_start_discussions">["discussionConfiguration"],
+						}),
+			});
+			return createRpcSuccessResponse(id, command.type, outcome);
+		}
+
+		case "reset_review_discussion": {
+			const { outcome } = await intentRegistry.invoke(intents, "review_reset_discussion", {
+				discussionId: command.discussionId,
+				expectedSessionId: command.expectedSessionId,
+				requestId: command.requestId,
+			});
+			return createRpcSuccessResponse(id, command.type, outcome);
+		}
+
+		case "list_review_discussions": {
+			const data = await queryRegistry.run(intents, "review.discussions", {
+				runId: command.runId,
+				...(command.cursor === undefined ? {} : { cursor: command.cursor }),
+				...(command.limit === undefined ? {} : { limit: command.limit }),
+			});
+			return createRpcSuccessResponse(id, command.type, data);
+		}
+
 		case "get_review_discussion_source": {
-			const service = context.reviewDiscussions;
-			if (!service)
-				return createRpcErrorResponse(id, command.type, "This backend has no daemon sibling service", {
-					code: "review_discussions_unavailable",
-				});
-			try {
-				context.assertConversationGenerationCurrent();
-				const data =
-					command.type === "start_review_discussions"
-						? await service.start(
-								command.runId,
-								command.findingIds,
-								command.requestId,
-								command.discussionConfiguration,
-							)
-						: command.type === "list_review_discussions"
-							? await service.list(command.runId, command.cursor, command.limit)
-							: command.type === "reset_review_discussion"
-								? await service.reset(command.discussionId, command.expectedSessionId, command.requestId)
-								: await service.source();
-				return createRpcSuccessResponse(id, command.type, data);
-			} catch (error) {
-				if (error instanceof ReviewDiscussionConfigurationError)
-					return createRpcErrorResponse(id, command.type, error.message);
-				return createRpcErrorResponse(
-					id,
-					command.type,
-					"Review source identity, placement, or runtime admission changed",
-					{ code: "review_source_unavailable" },
-				);
-			}
+			const { discussion } = await queryRegistry.run(intents, "review.discussion_source", {});
+			return createRpcSuccessResponse(id, command.type, discussion);
 		}
 
 		case "cancel_workflow": {
-			conversation.reviewWorkflows.cancel(command.workflowId);
+			await intentRegistry.invoke(intents, "review_cancel_workflow", { workflowId: command.workflowId });
 			return createRpcSuccessResponse(id, "cancel_workflow");
 		}
 
 		case "list_review_workflows": {
-			const page = await listCanonicalReviewRuns(session.sessionManager, {
-				cursor: command.cursor,
-				limit: command.limit,
+			const data = await queryRegistry.run(intents, "review.workflows", {
+				...(command.cursor === undefined ? {} : { cursor: command.cursor }),
+				...(command.limit === undefined ? {} : { limit: command.limit }),
 			});
-			return createRpcSuccessResponse(id, "list_review_workflows", {
-				runs: page.runs.map((run) => projectReviewRun(run, false)),
-				activeWorkflows: conversation.reviewWorkflows.list().filter((workflow) => workflow.status === "running"),
-				...(page.nextCursor ? { nextCursor: page.nextCursor } : {}),
-			});
+			return createRpcSuccessResponse(id, "list_review_workflows", data);
 		}
 
 		case "get_review_general": {
 			return createRpcSuccessResponse(
 				id,
 				"get_review_general",
-				await getReviewGeneral(session.sessionManager, command.runId),
+				await queryRegistry.run(intents, "review.general", { runId: command.runId }),
 			);
 		}
 
 		case "get_review_result": {
-			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
-			if (!record)
-				return createRpcErrorResponse(id, "get_review_result", `Unknown durable review run: ${command.runId}`);
-			return createRpcSuccessResponse(id, "get_review_result", projectReviewRun(record, true));
+			return createRpcSuccessResponse(
+				id,
+				"get_review_result",
+				await queryRegistry.run(intents, "review.result", { runId: command.runId }),
+			);
 		}
 
 		case "open_review_session": {
-			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
-			if (!record?.result)
-				return createRpcErrorResponse(
-					id,
-					"open_review_session",
-					`Review run has no findings result: ${command.runId}`,
-				);
-			const selectedIds = new Set(command.findingIds ?? record.result.findings.map((finding) => finding.id));
-			const unknownIds = [...selectedIds].filter(
-				(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
-			);
-			if (unknownIds.length > 0)
-				return createRpcErrorResponse(id, "open_review_session", `Unknown finding ids: ${unknownIds.join(", ")}`);
-			const handoff = createReviewFixHandoff(record, command.findingIds);
-			const result = await runSessionNewHostAction(context.createHostActionContext(), {
-				setup: (writer) => handoff.setup(writer),
-				beforeMove: (source) => handoff.beforeMove(source),
+			const { outcome } = await intentRegistry.invoke(intents, "review_open_session", {
+				runId: command.runId,
+				...(command.findingIds === undefined ? {} : { findingIds: command.findingIds }),
 			});
-			return createRpcSuccessResponse(id, "open_review_session", projectSessionIntent(result));
+			return createRpcSuccessResponse(id, "open_review_session", projectSessionIntent(outcome.opened));
 		}
 
 		case "acknowledge_review": {
-			const acknowledgment = await acknowledgeReviewRun(session.sessionWriter, command.runId);
-			return createRpcSuccessResponse(id, "acknowledge_review", {
-				runId: acknowledgment.runId,
-				acknowledgedAt: acknowledgment.acknowledgedAt,
-			});
+			const { outcome } = await intentRegistry.invoke(intents, "review_acknowledge", { runId: command.runId });
+			return createRpcSuccessResponse(id, "acknowledge_review", outcome);
 		}
 
 		case "record_review_finding_outcome": {
-			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
-			if (!record?.result?.findings.some((finding) => finding.id === command.findingId)) {
-				return createRpcErrorResponse(
-					id,
-					"record_review_finding_outcome",
-					`Unknown finding ${command.findingId} in review run ${command.runId}`,
-				);
-			}
-			if (command.status === "dismissed" && !command.reason) {
-				return createRpcErrorResponse(
-					id,
-					"record_review_finding_outcome",
-					"Dismissed findings require an explicit reason.",
-				);
-			}
-			const outcome = {
+			const { outcome } = await intentRegistry.invoke(intents, "review_record_finding_outcome", {
 				runId: command.runId,
 				findingId: command.findingId,
 				status: command.status,
-				...(command.reason ? { reason: command.reason } : {}),
-				...(command.note ? { note: command.note } : {}),
-			};
-			const transition = await recordReviewFindingOutcome(session.sessionWriter, outcome, {
-				recordCanonicalOutcome: context.reviewDiscussions?.recordOutcome,
-				assertCurrent: context.assertConversationGenerationCurrent,
+				...(command.reason === undefined ? {} : { reason: command.reason }),
+				...(command.note === undefined ? {} : { note: command.note }),
 			});
-			const { schemaVersion: _schemaVersion, ...data } = transition;
-			return createRpcSuccessResponse(id, "record_review_finding_outcome", data);
+			return createRpcSuccessResponse(id, "record_review_finding_outcome", outcome);
 		}
 
 		case "rerun_review": {
-			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
-			if (!record) return createRpcErrorResponse(id, "rerun_review", `Unknown review run: ${command.runId}`);
-			const response = await BUILTIN_HOST_ACTION_REGISTRY.invoke(
-				REVIEW_RERUN_ACTION_ID,
-				context.createHostActionContext(),
-				{ runId: record.runId, scopeMode: command.mode ?? "incremental" },
-				{ requireRemoteSafe: options.requireRemoteSafeUiActions },
-			);
-			if (response.status !== "accepted" || !response.workflowId) {
-				return createRpcErrorResponse(id, "rerun_review", response.message ?? "The review rerun was not accepted.");
+			const { outcome } = await intentRegistry.invoke(intents, "review_rerun", {
+				runId: command.runId,
+				mode: command.mode ?? "incremental",
+			});
+			if (outcome.status !== "accepted") {
+				return createRpcErrorResponse(id, "rerun_review", "Review rerun was not accepted");
 			}
-			const pending = context.takePendingReviewWorkflow?.(response.workflowId);
+			const pending = context.takePendingReviewWorkflow?.(outcome.workflowId);
 			if (!pending)
 				return createRpcErrorResponse(id, "rerun_review", "The accepted review rerun was not registered.");
 			try {
 				context.output(
-					createRpcSuccessResponse(id, "rerun_review", { status: "accepted", workflowId: response.workflowId }),
+					createRpcSuccessResponse(id, "rerun_review", { status: "accepted", workflowId: outcome.workflowId }),
 				);
 			} finally {
 				pending.launch();
@@ -747,33 +526,25 @@ export async function handleRpcCommand(
 		}
 
 		case "publish_review": {
-			const record = await getCanonicalReviewRun(session.sessionManager, command.runId);
-			if (!record) return createRpcErrorResponse(id, "publish_review", `Unknown review run: ${command.runId}`);
-			const published = await publishReviewRun(session.sessionManager.getCwd(), record);
-			await appendReviewPublication(session.sessionWriter, { runId: record.runId, ...published });
-			return createRpcSuccessResponse(id, "publish_review", published);
+			const { outcome } = await intentRegistry.invoke(intents, "review_publish", {
+				runId: command.runId,
+				confirmed: true,
+			});
+			return createRpcSuccessResponse(id, "publish_review", outcome);
 		}
 
-		case "export_review_feedback":
-			return createRpcSuccessResponse(
-				id,
-				"export_review_feedback",
-				await exportCanonicalReviewFeedback(session.sessionManager),
-			);
+		case "export_review_feedback": {
+			const { outcome } = await intentRegistry.invoke(intents, "review_export_feedback", {});
+			return createRpcSuccessResponse(id, "export_review_feedback", outcome);
+		}
 
 		// =================================================================
 		// Push notifications
 		// =================================================================
 
 		case "register_push_target": {
-			if (!options.registerPushTarget) {
-				return createRpcErrorResponse(
-					id,
-					"register_push_target",
-					"Push target registration is not available over this RPC transport",
-				);
-			}
-			return createRpcSuccessResponse(id, "register_push_target", await options.registerPushTarget(command.args));
+			const { outcome } = await intentRegistry.invoke(intents, "register_push_target", command.args);
+			return createRpcSuccessResponse(id, "register_push_target", outcome);
 		}
 
 		// =================================================================
@@ -781,182 +552,153 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "get_mcp_capabilities": {
-			return createRpcSuccessResponse(id, "get_mcp_capabilities", getMcpRpcCapabilities());
-		}
-
-		case "list_mcp_servers": {
-			return createRpcSuccessResponse(id, "list_mcp_servers", listMcpRpcServers(session.getMcpManager()));
-		}
-
-		case "get_mcp_server": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "get_mcp_server", "MCP is not configured");
-			}
-			return createRpcSuccessResponse(id, "get_mcp_server", { server: manager.getServer(command.server) });
-		}
-
-		case "connect_mcp_server":
-		case "refresh_mcp_server": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, command.type, "MCP is not configured");
-			}
-			const result = await manager.connectServer(command.server);
-			return createRpcSuccessResponse(id, command.type, { server: result.server });
-		}
-
-		case "disconnect_mcp_server": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "disconnect_mcp_server", "MCP is not configured");
-			}
-			const result = await manager.disconnectServer(command.server);
-			return createRpcSuccessResponse(id, "disconnect_mcp_server", { server: result.server });
-		}
-
-		case "start_mcp_server_auth": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "start_mcp_server_auth", "MCP is not configured");
-			}
-			const result = await manager.startServerAuth(command.server, {
-				flow: command.flow,
-				redirectUrl: command.redirectUrl,
-			});
-			return createRpcSuccessResponse(id, "start_mcp_server_auth", result as object);
-		}
-
-		case "complete_mcp_server_auth": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "complete_mcp_server_auth", "MCP is not configured");
-			}
-			const result = await manager.completeServerBrowserAuth(command.server, {
-				redirectUrl: command.redirectUrl,
-				code: command.code,
-				state: command.state,
-			});
-			return createRpcSuccessResponse(id, "complete_mcp_server_auth", result as object);
-		}
-
-		case "poll_mcp_server_auth": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "poll_mcp_server_auth", "MCP is not configured");
-			}
 			return createRpcSuccessResponse(
 				id,
-				"poll_mcp_server_auth",
-				(await manager.pollServerAuth(command.server)) as object,
+				"get_mcp_capabilities",
+				await queryRegistry.run(intents, "mcp.capabilities", {}),
 			);
 		}
 
+		case "list_mcp_servers": {
+			return createRpcSuccessResponse(id, "list_mcp_servers", await queryRegistry.run(intents, "mcp.servers", {}));
+		}
+
+		case "get_mcp_server": {
+			return createRpcSuccessResponse(
+				id,
+				"get_mcp_server",
+				await queryRegistry.run(intents, "mcp.server", { server: command.server }),
+			);
+		}
+
+		case "connect_mcp_server":
+		case "refresh_mcp_server":
+		case "disconnect_mcp_server": {
+			const intent =
+				command.type === "connect_mcp_server"
+					? "mcp.connect"
+					: command.type === "refresh_mcp_server"
+						? "mcp.refresh"
+						: "mcp.disconnect";
+			const { outcome } = await intentRegistry.invoke(intents, intent, { server: command.server });
+			return createRpcSuccessResponse(id, command.type, outcome);
+		}
+
+		case "start_mcp_server_auth": {
+			// Device-code sign-in is its own intent; every other flow is the local browser sign-in.
+			const { outcome } =
+				command.flow === "device"
+					? await intentRegistry.invoke(intents, "mcp.auth_start_device", { server: command.server })
+					: await intentRegistry.invoke(intents, "mcp.auth_start_browser", {
+							server: command.server,
+							...(command.redirectUrl === undefined ? {} : { redirectUrl: command.redirectUrl }),
+						});
+			return createRpcSuccessResponse(id, "start_mcp_server_auth", outcome as object);
+		}
+
+		case "complete_mcp_server_auth": {
+			const { outcome } = await intentRegistry.invoke(intents, "mcp.auth_complete", {
+				server: command.server,
+				redirectUrl: command.redirectUrl,
+				code: command.code,
+				...(command.state === undefined ? {} : { state: command.state }),
+			});
+			return createRpcSuccessResponse(id, "complete_mcp_server_auth", outcome as object);
+		}
+
+		case "poll_mcp_server_auth": {
+			const { outcome } = await intentRegistry.invoke(intents, "mcp.auth_poll", { server: command.server });
+			return createRpcSuccessResponse(id, "poll_mcp_server_auth", outcome as object);
+		}
+
 		case "cancel_mcp_server_auth": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "cancel_mcp_server_auth", "MCP is not configured");
-			}
-			return createRpcSuccessResponse(id, "cancel_mcp_server_auth", manager.cancelServerAuth(command.server));
+			const { outcome } = await intentRegistry.invoke(intents, "mcp.auth_cancel", { server: command.server });
+			return createRpcSuccessResponse(id, "cancel_mcp_server_auth", outcome);
 		}
 
 		case "logout_mcp_server": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "logout_mcp_server", "MCP is not configured");
-			}
-			return createRpcSuccessResponse(id, "logout_mcp_server", await manager.logoutServer(command.server));
+			const { outcome } = await intentRegistry.invoke(intents, "mcp.logout", { server: command.server });
+			return createRpcSuccessResponse(id, "logout_mcp_server", outcome);
 		}
 
 		case "set_mcp_server_enabled": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "set_mcp_server_enabled", "MCP is not configured");
-			}
-			const result = await manager.setServerEnabled(command.server, command.enabled);
-			return createRpcSuccessResponse(id, "set_mcp_server_enabled", {
-				server: result.server,
-				...(result.persisted ? { persisted: result.persisted } : {}),
+			const { outcome } = await intentRegistry.invoke(intents, "mcp.set_enabled", {
+				server: command.server,
+				enabled: command.enabled,
 			});
+			return createRpcSuccessResponse(id, "set_mcp_server_enabled", outcome);
 		}
 
 		case "list_mcp_tools": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "list_mcp_tools", "MCP is not configured");
-			}
-			return createRpcSuccessResponse(id, "list_mcp_tools", await manager.listTools(command.server));
+			return createRpcSuccessResponse(
+				id,
+				"list_mcp_tools",
+				await queryRegistry.run(intents, "mcp.tools", { server: command.server }),
+			);
 		}
 
 		case "get_mcp_tool": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "get_mcp_tool", "MCP is not configured");
-			}
-			const tools = await manager.listTools(command.server);
-			const tool = tools.tools.find((entry) => entry.name === command.tool);
-			if (!tool) {
-				return createRpcErrorResponse(id, "get_mcp_tool", `MCP tool not found: ${command.server}.${command.tool}`);
-			}
-			return createRpcSuccessResponse(id, "get_mcp_tool", { tool });
+			return createRpcSuccessResponse(
+				id,
+				"get_mcp_tool",
+				await queryRegistry.run(intents, "mcp.tool", { server: command.server, tool: command.tool }),
+			);
 		}
 
 		case "list_mcp_resources": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "list_mcp_resources", "MCP is not configured");
-			}
 			return createRpcSuccessResponse(
 				id,
 				"list_mcp_resources",
-				await manager.listResources(command.server, command.cursor),
+				await queryRegistry.run(intents, "mcp.resources", {
+					server: command.server,
+					...(command.cursor === undefined ? {} : { cursor: command.cursor }),
+				}),
 			);
 		}
 
 		case "read_mcp_resource": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "read_mcp_resource", "MCP is not configured");
-			}
-			const result = await manager.readResource(command.server, command.resourceUri, createRpcMcpExecutionContext());
-			return createRpcSuccessResponse(id, "read_mcp_resource", { result });
+			return createRpcSuccessResponse(
+				id,
+				"read_mcp_resource",
+				await queryRegistry.run(intents, "mcp.resource", {
+					server: command.server,
+					resourceUri: command.resourceUri,
+				}),
+			);
 		}
 
 		case "list_mcp_prompts": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "list_mcp_prompts", "MCP is not configured");
-			}
 			return createRpcSuccessResponse(
 				id,
 				"list_mcp_prompts",
-				await manager.listPrompts(command.server, command.cursor),
+				await queryRegistry.run(intents, "mcp.prompts", {
+					server: command.server,
+					...(command.cursor === undefined ? {} : { cursor: command.cursor }),
+				}),
 			);
 		}
 
 		case "get_mcp_prompt": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcErrorResponse(id, "get_mcp_prompt", "MCP is not configured");
-			}
-			const result = await manager.getPrompt(
-				command.server,
-				command.prompt,
-				{ action: "get_prompt", arguments: command.arguments, argumentsJson: command.argumentsJson },
-				createRpcMcpExecutionContext(),
+			return createRpcSuccessResponse(
+				id,
+				"get_mcp_prompt",
+				await queryRegistry.run(intents, "mcp.prompt", {
+					server: command.server,
+					prompt: command.prompt,
+					...(command.arguments === undefined ? {} : { arguments: command.arguments }),
+					...(command.argumentsJson === undefined ? {} : { argumentsJson: command.argumentsJson }),
+				}),
 			);
-			return createRpcSuccessResponse(id, "get_mcp_prompt", { result });
 		}
 
 		case "list_mcp_recent_calls": {
-			const manager = session.getMcpManager();
-			if (!manager) {
-				return createRpcSuccessResponse(id, "list_mcp_recent_calls", { calls: [] });
-			}
-			const calls = command.server
-				? manager.getServer(command.server).recentCalls
-				: manager.listServers().flatMap((server) => server.recentCalls);
-			return createRpcSuccessResponse(id, "list_mcp_recent_calls", { calls });
+			return createRpcSuccessResponse(
+				id,
+				"list_mcp_recent_calls",
+				await queryRegistry.run(intents, "mcp.recent_calls", {
+					...(command.server === undefined ? {} : { server: command.server }),
+				}),
+			);
 		}
 
 		// =================================================================
@@ -1023,24 +765,11 @@ export async function handleRpcCommand(
 					jobs: listRpcBackgroundJobs(session.backgroundJobs),
 				});
 			}
-			context.assertConversationGenerationCurrent();
-			const job =
+			const { job } =
 				command.type === "cancel_job"
-					? session.backgroundJobs.cancel(command.jobId)
-					: session.backgroundJobs.get(command.jobId);
-			const metadata = projectRpcBackgroundJob(job);
-			return createRpcSuccessResponse(id, command.type, {
-				...scope,
-				job:
-					command.type === "read_job"
-						? {
-								...metadata,
-								output: stripVTControlCharacters(job.output)
-									.replace(/\r\n?/g, "\n")
-									.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, ""),
-							}
-						: metadata,
-			});
+					? (await intentRegistry.invoke(intents, "cancel_job", { jobId: command.jobId })).outcome
+					: await queryRegistry.run(intents, "job_output", { jobId: command.jobId });
+			return createRpcSuccessResponse(id, command.type, { ...scope, job });
 		}
 
 		// =================================================================
@@ -1048,20 +777,25 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "list_subagents": {
-			return createRpcSuccessResponse(id, "list_subagents", context.subagents.list());
-		}
-
-		case "subagent_start": {
 			return createRpcSuccessResponse(
 				id,
-				"subagent_start",
-				await context.subagents.start(command.agent, command.prompt),
+				"list_subagents",
+				await queryRegistry.run(intents, "subagent_definitions", {}),
 			);
 		}
 
-		case "subagent_abort": {
-			await context.subagents.abort(command.subagentId);
-			return createRpcSuccessResponse(id, "subagent_abort");
+		case "subagent_start": {
+			const { outcome } = await intentRegistry.invoke(intents, "subagent_start", {
+				agent: command.agent,
+				prompt: command.prompt,
+			});
+			return createRpcSuccessResponse(id, "subagent_start", outcome);
+		}
+
+		case "subagent_abort":
+		case "subagent_dispose": {
+			await intentRegistry.invoke(intents, command.type, { subagentId: command.subagentId });
+			return createRpcSuccessResponse(id, command.type);
 		}
 
 		case "subagent_get_state": {
@@ -1084,24 +818,26 @@ export async function handleRpcCommand(
 			);
 		}
 
-		case "subagent_dispose": {
-			await context.subagents.dispose(command.subagentId);
-			return createRpcSuccessResponse(id, "subagent_dispose");
-		}
-
 		// =================================================================
 		// Model
 		// =================================================================
 
 		case "set_model": {
-			const models = await session.modelRegistry.getAvailable();
-			context.assertConversationGenerationCurrent();
-			const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
-			if (!model) {
-				return createRpcErrorResponse(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
+			// Persisting the default is the separate host intent; admit both before either runs.
+			const selection = { provider: command.provider, modelId: command.modelId };
+			const select = intentRegistry.prepare(intents, "set_model", selection);
+			const persist =
+				command.persistDefault === false
+					? undefined
+					: intentRegistry.prepare(intents, "set_default_model", selection);
+			const { outcome: model } = await select.run();
+			if (persist) {
+				await persist.run();
+				if (session.supportsThinking() || session.thinkingLevel !== "off") {
+					await intentRegistry.invoke(intents, "set_default_thinking_level", { level: session.thinkingLevel });
+				}
 			}
-			await session.setModel(model, { persistDefault: command.persistDefault });
-			return createRpcSuccessResponse(id, "set_model", toCatalogModel(model));
+			return createRpcSuccessResponse(id, "set_model", toIrohRemoteAgentOptionsCatalogModel(model));
 		}
 
 		case "cycle_model": {
@@ -1113,11 +849,8 @@ export async function handleRpcCommand(
 		}
 
 		case "get_available_models": {
-			// Reload credentials and models from disk so logins, logouts, and API keys
-			// saved by other volt processes become selectable without a host restart.
-			session.modelRegistry.refreshFromDisk();
-			const models = await session.modelRegistry.getAvailable();
-			return createRpcSuccessResponse(id, "get_available_models", { models: models.map(toCatalogModel) });
+			const { models } = await queryRegistry.run(intents, "models", {});
+			return createRpcSuccessResponse(id, "get_available_models", { models });
 		}
 
 		// =================================================================
@@ -1125,8 +858,17 @@ export async function handleRpcCommand(
 		// =================================================================
 
 		case "set_thinking_level": {
-			await session.setThinkingLevel(command.level, { persistDefault: command.persistDefault });
-			await session.settingsManager.flush();
+			const select = intentRegistry.prepare(intents, "set_thinking_level", { level: command.level });
+			const persist =
+				command.persistDefault === false
+					? undefined
+					: intentRegistry.prepare(intents, "set_default_thinking_level", { level: command.level });
+			const previous = session.thinkingLevel;
+			const { outcome: level } = await select.run();
+			// The default follows only an actual change, to the level the model supports.
+			if (persist && level !== previous && (session.supportsThinking() || level !== "off")) {
+				await intentRegistry.invoke(intents, "set_default_thinking_level", { level });
+			}
 			return createRpcSuccessResponse(id, "set_thinking_level", { level: session.thinkingLevel });
 		}
 
@@ -1140,64 +882,42 @@ export async function handleRpcCommand(
 		}
 
 		// =================================================================
-		// Queue Modes
+		// Queue Modes, compaction, retry, bash
 		// =================================================================
 
-		case "set_steering_mode": {
-			session.setSteeringMode(command.mode);
-			return createRpcSuccessResponse(id, "set_steering_mode");
-		}
-
+		case "set_steering_mode":
 		case "set_follow_up_mode": {
-			session.setFollowUpMode(command.mode);
-			return createRpcSuccessResponse(id, "set_follow_up_mode");
+			await intentRegistry.invoke(intents, command.type, { mode: command.mode });
+			return createRpcSuccessResponse(id, command.type);
 		}
-
-		// =================================================================
-		// Compaction
-		// =================================================================
 
 		case "compact": {
-			const result = await runContextCompactHostAction(
-				context.createHostActionContext(),
-				command.customInstructions,
+			const { outcome } = await intentRegistry.invoke(
+				intents,
+				"compact",
+				command.customInstructions === undefined ? {} : { customInstructions: command.customInstructions },
 			);
-			return createRpcSuccessResponse(id, "compact", result);
+			return createRpcSuccessResponse(id, "compact", outcome);
 		}
 
-		case "set_auto_compaction": {
-			session.setAutoCompactionEnabled(command.enabled);
-			return createRpcSuccessResponse(id, "set_auto_compaction");
-		}
-
-		// =================================================================
-		// Retry
-		// =================================================================
-
+		case "set_auto_compaction":
 		case "set_auto_retry": {
-			session.setAutoRetryEnabled(command.enabled);
-			return createRpcSuccessResponse(id, "set_auto_retry");
+			await intentRegistry.invoke(intents, command.type, { enabled: command.enabled });
+			return createRpcSuccessResponse(id, command.type);
 		}
 
-		case "abort_retry": {
-			session.abortRetry();
-			return createRpcSuccessResponse(id, "abort_retry");
+		case "abort_retry":
+		case "abort_bash": {
+			await intentRegistry.invoke(intents, command.type, {});
+			return createRpcSuccessResponse(id, command.type);
 		}
-
-		// =================================================================
-		// Bash
-		// =================================================================
 
 		case "bash": {
-			const result = await session.executeBash(command.command, undefined, {
-				excludeFromContext: command.excludeFromContext,
+			const { outcome } = await intentRegistry.invoke(intents, "bash", {
+				command: command.command,
+				...(command.excludeFromContext === undefined ? {} : { excludeFromContext: command.excludeFromContext }),
 			});
-			return createRpcSuccessResponse(id, "bash", result);
-		}
-
-		case "abort_bash": {
-			session.abortBash();
-			return createRpcSuccessResponse(id, "abort_bash");
+			return createRpcSuccessResponse(id, "bash", outcome);
 		}
 
 		// =================================================================
@@ -1210,51 +930,46 @@ export async function handleRpcCommand(
 		}
 
 		case "get_subscription_usage": {
-			const report = await context.subscriptionUsageService.fetch(session.modelRegistry, session.model?.provider);
-			return createRpcSuccessResponse(id, "get_subscription_usage", projectSubscriptionUsageReport(report));
+			return createRpcSuccessResponse(
+				id,
+				"get_subscription_usage",
+				await queryRegistry.run(intents, "subscription_usage", {}),
+			);
 		}
 
 		case "list_sessions": {
-			const sessions: RpcSessionListItem[] = await conversation.listSessions();
+			const { sessions } = await queryRegistry.run(intents, "sessions", {});
 			return createRpcSuccessResponse(id, "list_sessions", { sessions });
 		}
 
 		case "export_html": {
-			const path = await session.exportToHtml(command.outputPath);
-			return createRpcSuccessResponse(id, "export_html", { path });
+			const { outcome } = await intentRegistry.invoke(
+				intents,
+				"export_html",
+				command.outputPath === undefined ? {} : { outputPath: command.outputPath },
+			);
+			return createRpcSuccessResponse(id, "export_html", outcome);
 		}
 
-		case "switch_session": {
-			const result = await openStoredSessionById(host, client, command.sessionId, {
-				assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
-			});
-			return createRpcSuccessResponse(id, "switch_session", projectSessionIntent(result));
-		}
-
+		case "switch_session":
 		case "switch_session_by_id": {
-			const result = await openStoredSessionById(host, client, command.sessionId, {
-				assertConversationGenerationCurrent: context.assertConversationGenerationCurrent,
-			});
-			return createRpcSuccessResponse(id, "switch_session_by_id", projectSessionIntent(result));
+			const { outcome } = await intentRegistry.invoke(intents, "switch_session", { sessionId: command.sessionId });
+			return createRpcSuccessResponse(id, command.type, projectSessionIntent(outcome));
 		}
 
 		case "fork": {
-			const result = await openFork(host, client, command.entryId);
-			if (result.cancelled) return createRpcSuccessResponse(id, "fork", { cancelled: true });
+			const { outcome } = await intentRegistry.invoke(intents, "fork", { entryId: command.entryId });
+			if (outcome.cancelled) return createRpcSuccessResponse(id, "fork", { cancelled: true });
 			return createRpcSuccessResponse(id, "fork", {
 				cancelled: false,
-				sessionId: result.sessionId,
-				text: result.selectedText ?? "",
+				sessionId: outcome.sessionId,
+				text: outcome.selectedText ?? "",
 			});
 		}
 
 		case "clone": {
-			const leafId = session.sessionManager.getLeafId();
-			if (!leafId) {
-				return createRpcErrorResponse(id, "clone", "Cannot clone session: no current entry selected");
-			}
-			const result = await openFork(host, client, leafId, { position: "at" });
-			return createRpcSuccessResponse(id, "clone", projectSessionIntent(result));
+			const { outcome } = await intentRegistry.invoke(intents, "clone", {});
+			return createRpcSuccessResponse(id, "clone", projectSessionIntent(outcome));
 		}
 
 		case "get_fork_messages": {
@@ -1268,7 +983,7 @@ export async function handleRpcCommand(
 		}
 
 		case "set_session_name": {
-			await runSessionRenameHostAction(context.createHostActionContext(), command.name);
+			await intentRegistry.invoke(intents, "set_session_name", { name: command.name });
 			return createRpcSuccessResponse(id, "set_session_name");
 		}
 

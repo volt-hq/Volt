@@ -3,6 +3,7 @@ import type { Stats } from "node:fs";
 import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { writeDurableAtomicFile } from "../../../utils/durable-atomic-write.ts";
+import { WorkspaceIntentError } from "../../protocol/intents/types.ts";
 import { createIrohRemoteRpcErrorResponse, type IrohRemoteRpcErrorResponse } from "./rpc-command-filter.ts";
 
 export const IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE = "upload_device_logs";
@@ -36,40 +37,55 @@ export interface HandleIrohRemoteDeviceLogUploadRpcCommandOptions {
 	now?: () => Date;
 }
 
+/**
+ * Write one device log under the workspace's `.volt/device-logs`. Failures
+ * throw {@link WorkspaceIntentError} with the error the remote wire reports.
+ */
+export async function uploadIrohRemoteDeviceLog(
+	request: Record<string, unknown>,
+	options: HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
+): Promise<IrohRemoteDeviceLogUploadRpcData> {
+	const parsed = parseIrohRemoteDeviceLogUploadCommand(request, options);
+	if (!parsed.ok) throw new WorkspaceIntentError(parsed.error);
+	try {
+		const directory = await resolveSafeDeviceLogDirectory(options.workspacePath);
+		const targetPath = join(directory, parsed.fileName);
+		await writeDurableAtomicFile(targetPath, parsed.content, {
+			directoryMode: DEVICE_LOG_DIRECTORY_MODE,
+			fileMode: DEVICE_LOG_FILE_MODE,
+		});
+	} catch (error: unknown) {
+		throw new WorkspaceIntentError(
+			`Failed to write device log: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return {
+		path: [...IROH_REMOTE_DEVICE_LOGS_DIR_SEGMENTS, parsed.fileName].join("/"),
+		byteCount: parsed.byteCount,
+	};
+}
+
 export async function handleIrohRemoteDeviceLogUploadRpcCommand(
 	command: Record<string, unknown>,
 	options: HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
 ): Promise<IrohRemoteDeviceLogUploadRpcResponse> {
 	const id = typeof command.id === "string" ? command.id : undefined;
-	const request = parseIrohRemoteDeviceLogUploadCommand(command, options);
-	if (!request.ok) {
-		return createIrohRemoteRpcErrorResponse(id, IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE, request.error);
-	}
-
+	let data: IrohRemoteDeviceLogUploadRpcData;
 	try {
-		const directory = await resolveSafeDeviceLogDirectory(options.workspacePath);
-		const targetPath = join(directory, request.fileName);
-		await writeDurableAtomicFile(targetPath, request.content, {
-			directoryMode: DEVICE_LOG_DIRECTORY_MODE,
-			fileMode: DEVICE_LOG_FILE_MODE,
-		});
+		data = await uploadIrohRemoteDeviceLog(command, options);
 	} catch (error: unknown) {
 		return createIrohRemoteRpcErrorResponse(
 			id,
 			IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE,
-			`Failed to write device log: ${error instanceof Error ? error.message : String(error)}`,
+			error instanceof Error ? error.message : String(error),
 		);
 	}
-
 	return {
 		id,
 		type: "response",
 		command: IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE,
 		success: true,
-		data: {
-			path: [...IROH_REMOTE_DEVICE_LOGS_DIR_SEGMENTS, request.fileName].join("/"),
-			byteCount: request.byteCount,
-		},
+		data,
 	};
 }
 
@@ -173,7 +189,8 @@ function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoEx
 	return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
-function parseIrohRemoteDeviceLogUploadCommand(
+/** The upload a device log command asks for, with the default file name filled in, or the error it reports. */
+export function parseIrohRemoteDeviceLogUploadCommand(
 	command: Record<string, unknown>,
 	options: HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
 ): { ok: true; fileName: string; content: string; byteCount: number } | { ok: false; error: string } {

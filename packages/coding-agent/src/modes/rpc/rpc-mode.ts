@@ -13,8 +13,7 @@
 
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as crypto from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { dirname, resolve } from "node:path";
+import type { RemoteGrant } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type {
 	ExtensionUIContext,
@@ -25,18 +24,8 @@ import type {
 import { ClientScope } from "../../core/host/client-scope.ts";
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
 import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { executePlan } from "../../core/host/plan-handoff.ts";
-import { createReviewFixHandoff } from "../../core/host/review-handoff.ts";
 import { openFork, openNewSession, openStoredSession } from "../../core/host/session-intents.ts";
 import type { HostClient, HostedRedirect, RedirectTarget } from "../../core/host/targets.ts";
-import {
-	type HostActionInvocationContext,
-	REVIEW_EXPORT_FEEDBACK_ACTION_ID,
-	REVIEW_FEEDBACK_ACTION_ID,
-	REVIEW_FIX_ACTION_ID,
-	REVIEW_PUBLISH_ACTION_ID,
-	REVIEW_RERUN_ACTION_ID,
-} from "../../core/host-actions.ts";
 import type {
 	HostActionDecision,
 	HostActionRequest,
@@ -51,6 +40,7 @@ import {
 	waitForRawStdoutBackpressure,
 	writeRawStdout,
 } from "../../core/output-guard.ts";
+import type { IntentServices } from "../../core/protocol/intents/index.ts";
 import {
 	executeReviewWorkflow,
 	prepareReviewWorkflow,
@@ -58,18 +48,9 @@ import {
 	REMOTE_REVIEW_TOOL_NAMES,
 	type ReviewWorkflowEvent,
 	type ReviewWorkflowToolEvent,
-	reviewTargetForRerun,
 } from "../../core/review.ts";
 import type { ReviewDiscussionService } from "../../core/review-discussions.ts";
-import { publishReviewRun } from "../../core/review-publish.ts";
-import {
-	appendReviewPublication,
-	appendReviewRun,
-	createReviewRunRecord,
-	exportCanonicalReviewFeedback,
-	getCanonicalReviewRun,
-	recordReviewFindingOutcome,
-} from "../../core/review-state.ts";
+import { appendReviewRun, createReviewRunRecord } from "../../core/review-state.ts";
 import { createEmptyReviewUsage } from "../../core/review-usage.ts";
 import { subscribeRpcSessionEvents } from "../../core/rpc/background-jobs.ts";
 import { type ProjectionDiagnostic, StreamProjector } from "../../core/rpc/stream-projection.ts";
@@ -105,6 +86,7 @@ import type {
 	RpcHostActionResponse,
 	RpcHostActionUpdate,
 	RpcListSubagentsResponse,
+	RpcRegisterPushTargetArgs,
 	RpcRegisterPushTargetResponse,
 	RpcResponse,
 	RpcSessionState,
@@ -245,10 +227,13 @@ export interface RpcModeOptions {
 	detachedTerminal?: (detachment: RpcClientDetachment) => object | undefined;
 	/** Observes a redirect client leaving its conversation, before its stream ends. */
 	onClientDetached?: (detachment: RpcClientDetachment) => void;
-	/** Defaults to false. Remote transports should only expose and invoke actions marked remote-safe. */
-	requireRemoteSafeUiActions?: boolean;
+	/**
+	 * A paired device's grant. Commands then run on the remote profile: only
+	 * remote-safe intents and queries, each within the grant.
+	 */
+	remoteGrant?: RemoteGrant;
 	/** Remote host callback for registering platform push notification targets. */
-	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
+	registerPushTarget?: (args: RpcRegisterPushTargetArgs) => Promise<RpcRegisterPushTargetResponse>;
 	/** Observes set_client_capabilities feature lists (remote hosts gate optional pushes on these). */
 	onClientCapabilitiesChanged?: (features: string[]) => void;
 	/** Outbound projector factory; Iroh remote mode supplies its field-aware sanitizer. */
@@ -642,7 +627,6 @@ export async function runRpcMode(
 	/** Whether this client anchors its conversation; a client that follows moves by redirect never does. */
 	const anchorsConversation = redirect === undefined && (options.anchor ?? true);
 	const allowUiActionInvocation = options.allowUiActionInvocation ?? true;
-	const requireRemoteSafeUiActions = options.requireRemoteSafeUiActions ?? false;
 	const showsExtensionUi = options.extensionUi ?? true;
 	const takesHostActions = options.hostActions ?? true;
 	/** Set once a redirect client left its conversation: the stream only writes its final frame. */
@@ -1281,260 +1265,117 @@ export async function runRpcMode(
 	// response deterministically precedes workflow_start on the shared lane.
 	const pendingReviewWorkflows = new Map<string, { launch: () => void; cancel: () => void }>();
 
-	const createHostActionContext = (
-		commandConversation: HostedConversation,
-		assertConversationGenerationCurrent?: () => void,
-		commandSession: AgentSession = commandConversation.session,
-	): HostActionInvocationContext => ({
-		session: commandSession,
-		assertCurrent: assertConversationGenerationCurrent,
-		detachedReviews: true,
-		// A remote stop sends what the user queued instead of stranding it behind an idle run.
-		abortRun: () => commandSession.abort("remote_request", { deliverQueuedMessages: true }),
-		compactContext: (customInstructions) =>
-			commandSession.compact(customInstructions, assertConversationGenerationCurrent),
-		newSession: (newSessionOptions) =>
-			openNewSession(host, client, { ...newSessionOptions, assertConversationGenerationCurrent }),
-		renameSession: (name) => commandSession.setSessionName(name),
-		setFastModeEnabled: (enabled) => commandSession.setFastModeEnabled(enabled),
-		setAgentMode: (mode) => {
-			assertConversationGenerationCurrent?.();
-			return commandSession.setAgentMode(mode);
-		},
-		executePlan: (planId, expectedRevision, strategy) =>
-			executePlan(host, client, planId, expectedRevision, strategy, assertConversationGenerationCurrent),
-		changePlan: (planId, expectedRevision) => {
-			assertConversationGenerationCurrent?.();
-			return commandSession.changePlan(planId, expectedRevision);
-		},
-		discardPlan: (planId, expectedRevision) => {
-			assertConversationGenerationCurrent?.();
-			return commandSession.discardPlan(planId, expectedRevision);
-		},
-		runReviewAction: async (target, reviewOptions) => {
-			// Detached review: run the fast preflight inline so target errors fail
-			// the invocation synchronously, then register the execution with the
-			// runtime-scoped manager and return an accepted response immediately.
-			// Confirmation is client-side (the descriptors advertise
-			// requiresConfirmation); there is no server confirm round-trip.
-			const prepared = await prepareReviewWorkflow({
-				target,
-				controls: reviewOptions.controls,
-				...(reviewOptions.parentRunId ? { parentRunId: reviewOptions.parentRunId } : {}),
-				cwd: commandConversation.cwd,
-				settingsManager: commandSession.settingsManager,
-				modelRegistry: commandSession.modelRegistry,
-				currentModel: commandSession.model,
-				sessionManager: commandSession.sessionManager,
-				requireProjectTrust: reviewOptions.remote,
-				sanitizeRemoteErrors: reviewOptions.remote,
-			});
-			const thinkingLevel = commandSession.thinkingLevel;
-			const fastModeEnabled = commandSession.fastModeEnabled;
-			const authStorage = commandSession.modelRegistry.authStorage;
-			const modelRegistry = commandSession.modelRegistry;
-			const settingsManager = commandSession.settingsManager;
-			let started: ReturnType<typeof commandConversation.reviewWorkflows.start>;
-			try {
-				started = commandConversation.reviewWorkflows.start({
-					prepared,
-					fastModeEnabled,
-					execute: async (hooks) => {
-						try {
-							const result = await executeReviewWorkflow({
-								prepared,
-								cwd: commandConversation.cwd,
-								agentDir: commandConversation.services.agentDir,
-								authStorage,
-								modelRegistry,
-								settingsManager,
-								sessionWriter: commandSession.sessionWriter,
-								sanitizeRemoteErrors: reviewOptions.remote,
-								thinkingLevel,
-								fastModeEnabled,
-								// Immutable snapshot tools are always installed by the review host;
-								// remote reviews receive no workspace or command-capable tools.
-								tools: REMOTE_REVIEW_TOOL_NAMES,
-								signal: hooks.signal,
-								onEvent: hooks.onEvent,
-							});
-							if (reviewOptions.remote && result.status === "failed") {
-								return { ...result, errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
+	// What this host gives intents: aborts deliver queued input, and reviews run as detached workflows.
+	const createIntentServices = (commandConversation: HostedConversation): IntentServices => {
+		const commandSession = commandConversation.session;
+		return {
+			// A remote stop sends what the user queued instead of stranding it behind an idle run.
+			abortRun: (target) => target.abort("remote_request", { deliverQueuedMessages: true }),
+			detachedReviews: true,
+			runReview: async (target, reviewOptions) => {
+				// Detached review: run the fast preflight inline so target errors fail
+				// the invocation synchronously, then register the execution with the
+				// runtime-scoped manager and return an accepted response immediately.
+				// Confirmation is client-side (the descriptors advertise
+				// requiresConfirmation); there is no server confirm round-trip.
+				const prepared = await prepareReviewWorkflow({
+					target,
+					controls: reviewOptions.controls,
+					...(reviewOptions.parentRunId ? { parentRunId: reviewOptions.parentRunId } : {}),
+					cwd: commandConversation.cwd,
+					settingsManager: commandSession.settingsManager,
+					modelRegistry: commandSession.modelRegistry,
+					currentModel: commandSession.model,
+					sessionManager: commandSession.sessionManager,
+					requireProjectTrust: reviewOptions.remote,
+					sanitizeRemoteErrors: reviewOptions.remote,
+				});
+				const thinkingLevel = commandSession.thinkingLevel;
+				const fastModeEnabled = commandSession.fastModeEnabled;
+				const authStorage = commandSession.modelRegistry.authStorage;
+				const modelRegistry = commandSession.modelRegistry;
+				const settingsManager = commandSession.settingsManager;
+				let started: ReturnType<typeof commandConversation.reviewWorkflows.start>;
+				try {
+					started = commandConversation.reviewWorkflows.start({
+						prepared,
+						fastModeEnabled,
+						execute: async (hooks) => {
+							try {
+								const result = await executeReviewWorkflow({
+									prepared,
+									cwd: commandConversation.cwd,
+									agentDir: commandConversation.services.agentDir,
+									authStorage,
+									modelRegistry,
+									settingsManager,
+									sessionWriter: commandSession.sessionWriter,
+									sanitizeRemoteErrors: reviewOptions.remote,
+									thinkingLevel,
+									fastModeEnabled,
+									// Immutable snapshot tools are always installed by the review host;
+									// remote reviews receive no workspace or command-capable tools.
+									tools: REMOTE_REVIEW_TOOL_NAMES,
+									signal: hooks.signal,
+									onEvent: hooks.onEvent,
+								});
+								if (reviewOptions.remote && result.status === "failed") {
+									return { ...result, errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
+								}
+								return result;
+							} catch (error) {
+								if (reviewOptions.remote) {
+									return { status: "failed", errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
+								}
+								throw error;
 							}
-							return result;
-						} catch (error) {
-							if (reviewOptions.remote) {
-								return { status: "failed", errorMessage: REMOTE_REVIEW_FAILURE_MESSAGE };
-							}
-							throw error;
+						},
+					});
+				} catch (error) {
+					await prepared.resolution.dispose();
+					throw error;
+				}
+				const { descriptor, launch } = started;
+				let launched = false;
+				pendingReviewWorkflows.set(descriptor.workflowId, {
+					launch: () => {
+						launched = true;
+						launch();
+					},
+					cancel: () => {
+						if (!launched) {
+							// The cancelled run record is best-effort; a lost log ends the runtime.
+							void appendReviewRun(
+								commandSession.sessionWriter,
+								createReviewRunRecord({
+									workflowId: prepared.workflowId,
+									workflowAction: prepared.action,
+									startedAt: prepared.startedAt,
+									snapshot: prepared.resolution,
+									controls: prepared.controls,
+									status: "cancelled",
+									usage: createEmptyReviewUsage(),
+									incrementalPlan: prepared.incrementalPlan,
+								}),
+							).catch(() => {});
 						}
+						commandConversation.reviewWorkflows.cancel(descriptor.workflowId);
 					},
 				});
-			} catch (error) {
-				await prepared.resolution.dispose();
-				throw error;
-			}
-			const { descriptor, launch } = started;
-			let launched = false;
-			pendingReviewWorkflows.set(descriptor.workflowId, {
-				launch: () => {
-					launched = true;
-					launch();
-				},
-				cancel: () => {
-					if (!launched) {
-						// The cancelled run record is best-effort; a lost log ends the runtime.
-						void appendReviewRun(
-							commandSession.sessionWriter,
-							createReviewRunRecord({
-								workflowId: prepared.workflowId,
-								workflowAction: prepared.action,
-								startedAt: prepared.startedAt,
-								snapshot: prepared.resolution,
-								controls: prepared.controls,
-								status: "cancelled",
-								usage: createEmptyReviewUsage(),
-								incrementalPlan: prepared.incrementalPlan,
-							}),
-						).catch(() => {});
-					}
-					commandConversation.reviewWorkflows.cancel(descriptor.workflowId);
-				},
-			});
-			return {
-				status: "accepted",
-				workflowId: descriptor.workflowId,
-				...(prepared.modelWarning === undefined || reviewOptions.remote ? {} : { message: prepared.modelWarning }),
-			};
-		},
-		runReviewLifecycleAction: async (action, args) => {
-			const runId = typeof args.runId === "string" ? args.runId : undefined;
-			const record = runId ? await getCanonicalReviewRun(commandSession.sessionManager, runId) : undefined;
-			assertConversationGenerationCurrent?.();
-			if (action !== REVIEW_EXPORT_FEEDBACK_ACTION_ID && !record)
-				throw new Error(`Unknown durable review run: ${runId ?? "missing"}`);
-			if (action === REVIEW_FIX_ACTION_ID) {
-				if (!record?.result) throw new Error(`Review run has no findings result: ${runId}`);
-				const requestedFindingIds =
-					typeof args.findingIds === "string" && args.findingIds.trim().length > 0
-						? args.findingIds
-								.split(",")
-								.map((value) => value.trim())
-								.filter(Boolean)
-						: undefined;
-				const requestedIds = requestedFindingIds ?? record.result.findings.map((finding) => finding.id);
-				const selectedIds = new Set(requestedIds);
-				const unknown = requestedIds.filter(
-					(findingId) => !record.result?.findings.some((finding) => finding.id === findingId),
-				);
-				if (unknown.length > 0) throw new Error(`Unknown finding ids: ${unknown.join(", ")}`);
-				const handoff = createReviewFixHandoff(record, requestedFindingIds);
-				const opened = await openNewSession(host, client, {
-					assertConversationGenerationCurrent,
-					setup: (writer) => handoff.setup(writer),
-					beforeMove: (source) => handoff.beforeMove(source),
-				});
 				return {
-					action,
-					status: opened.cancelled ? "cancelled" : "completed",
-					stateChanged: !opened.cancelled,
-					actionsChanged: !opened.cancelled,
-					message: opened.cancelled
-						? "Review fix session cancelled"
-						: `Opened ${selectedIds.size} selected review findings`,
-				};
-			}
-			if (action === REVIEW_FEEDBACK_ACTION_ID) {
-				if (!record?.result) throw new Error(`Review run has no findings result: ${runId}`);
-				const findingId = typeof args.findingId === "string" ? args.findingId : "";
-				if (!record.result.findings.some((finding) => finding.id === findingId))
-					throw new Error(`Unknown finding: ${findingId}`);
-				const status = args.status;
-				if (status !== "accepted" && status !== "fixed" && status !== "dismissed")
-					throw new Error("Review outcome must be accepted, fixed, or dismissed.");
-				const reason = args.reason;
-				if (
-					status === "dismissed" &&
-					reason !== "false_positive" &&
-					reason !== "intentional" &&
-					reason !== "not_actionable" &&
-					reason !== "other"
-				)
-					throw new Error("Dismissed findings require an explicit reason.");
-				await recordReviewFindingOutcome(
-					commandSession.sessionWriter,
-					{
-						runId: record.runId,
-						findingId,
-						status,
-						...(reason === "false_positive" ||
-						reason === "intentional" ||
-						reason === "not_actionable" ||
-						reason === "other"
-							? { reason }
-							: {}),
-						...(typeof args.note === "string" ? { note: args.note } : {}),
-					},
-					{
-						recordCanonicalOutcome: options.reviewDiscussions?.recordOutcome,
-						assertCurrent: assertConversationGenerationCurrent,
-					},
-				);
-				return {
-					action,
-					status: "completed",
-					stateChanged: true,
-					actionsChanged: true,
-					message: `Finding ${findingId} marked ${status}`,
-				};
-			}
-			if (action === REVIEW_RERUN_ACTION_ID) {
-				if (!record) throw new Error(`Unknown durable review run: ${runId}`);
-				const target = reviewTargetForRerun(record);
-				const rerun = await createHostActionContext(
-					commandConversation,
-					assertConversationGenerationCurrent,
-				).runReviewAction?.(target, {
-					remote: true,
-					requireConfirmation: true,
-					controls: { ...record.options, scopeMode: args.scopeMode === "full" ? "full" : "incremental" },
-					parentRunId: record.runId,
-				});
-				if (rerun?.status !== "accepted")
-					return { action, status: "cancelled", message: "Review rerun was not accepted" };
-				return {
-					action,
 					status: "accepted",
-					workflowId: rerun.workflowId,
-					actionsChanged: true,
-					message: "Review rerun accepted",
+					workflowId: descriptor.workflowId,
+					...(prepared.modelWarning === undefined || reviewOptions.remote
+						? {}
+						: { message: prepared.modelWarning }),
 				};
-			}
-			if (action === REVIEW_PUBLISH_ACTION_ID) {
-				if (!record) throw new Error(`Unknown durable review run: ${runId}`);
-				const published = await publishReviewRun(commandSession.sessionManager.getCwd(), record);
-				await appendReviewPublication(commandSession.sessionWriter, { runId: record.runId, ...published });
-				return {
-					action,
-					status: "completed",
-					message: published.url ? `Review published: ${published.url}` : "Review published",
-				};
-			}
-			if (action === REVIEW_EXPORT_FEEDBACK_ACTION_ID) {
-				if (typeof args.path !== "string" || !args.path.trim())
-					throw new Error("RPC review feedback export requires an explicit local path.");
-				const outputPath = resolve(commandSession.sessionManager.getCwd(), args.path.trim());
-				await mkdir(dirname(outputPath), { recursive: true });
-				await writeFile(
-					outputPath,
-					`${JSON.stringify(await exportCanonicalReviewFeedback(commandSession.sessionManager), null, 2)}\n`,
-					{ mode: 0o600 },
-				);
-				return { action, status: "completed", message: `Review feedback exported to ${outputPath}` };
-			}
-			throw new Error(`Unsupported review lifecycle action: ${action}`);
-		},
-	});
+			},
+			...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
+			subagents: rpcSubagents,
+			subscriptionUsage: subscriptionUsageService,
+			...(options.registerPushTarget === undefined ? {} : { pushTargets: { register: options.registerPushTarget } }),
+		};
+	};
 
 	const createRpcCommandContext = (command: RpcCommand, commandConversation: HostedConversation) => {
 		const commandSession = commandConversation.session;
@@ -1544,15 +1385,12 @@ export async function runRpcMode(
 			conversation: commandConversation,
 			host,
 			client,
-			...(options.reviewDiscussions === undefined ? {} : { reviewDiscussions: options.reviewDiscussions }),
 			options: {
 				allowUiActionInvocation,
-				requireRemoteSafeUiActions,
-				registerPushTarget: options.registerPushTarget,
+				...(options.remoteGrant === undefined ? {} : { remoteGrant: options.remoteGrant }),
 			},
+			services: createIntentServices(commandConversation),
 			output,
-			createHostActionContext: () =>
-				createHostActionContext(commandConversation, assertConversationGenerationCurrent),
 			setClientCapabilities(features: RpcClientCapabilityFeature[]): void {
 				clientCapabilities = new Set(
 					features.filter((feature): feature is RpcClientCapabilityFeature => typeof feature === "string"),
@@ -1575,7 +1413,6 @@ export async function runRpcMode(
 			getPendingHostActionRequests: () => hostActionBridge.getPendingRequests(),
 			cancelPendingHostActionRequests,
 			assertConversationGenerationCurrent,
-			subscriptionUsageService,
 			conversationBranchEpoch: options.orderedConversation?.branchEpoch,
 			takePendingReviewWorkflow: (workflowId: string) => {
 				const pending = pendingReviewWorkflows.get(workflowId);

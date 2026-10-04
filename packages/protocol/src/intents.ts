@@ -27,26 +27,30 @@ import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { RpcMcpAuthResponseSchema } from "./mcp.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
+import { RpcPreparePrReviewResponseSchema, RpcPrReviewPrepareRequestSchema } from "./pr-review.ts";
 import {
 	RpcClientMessageIdSchema,
 	RpcConversationIdentifierSchema,
 	RpcConversationInputImagesSchema,
 	RpcQueueModeSchema,
+	RpcRegisterPushTargetArgsSchema,
 	RpcSafeNonNegativeIntegerSchema,
 	RpcStreamingBehaviorSchema,
 	RpcThinkingLevelSchema,
 } from "./primitives.ts";
 import { RpcReviewAcknowledgmentResponseSchema } from "./projections.ts";
 import { RemoteCapabilitiesSchema } from "./remote-access.ts";
+import { IrohRemoteWorkingDirectorySchema, IrohRemoteWorktreeIdSchema } from "./remote-handshake.ts";
 import { RpcBashResultSchema, RpcCompactionResultSchema, RpcMcpServerResponseSchema } from "./responses.ts";
 import { RpcResetReviewDiscussionSchema, RpcStartReviewDiscussionsSchema } from "./review-discussions.ts";
-import { RpcKeepAwakeStatusSchema, RpcWebSearchStatusSchema } from "./session.ts";
+import { RpcKeepAwakeStatusSchema, RpcRegisterPushTargetResponseSchema, RpcWebSearchStatusSchema } from "./session.ts";
 import {
 	UiActionPresentationHintSchema,
 	UiActionSlashAliasSchema,
 	UiActionSourceSchema,
 	UiActionStateDescriptorSchema,
 } from "./ui-actions.ts";
+import { IrohRemoteWorkspaceNameSchema, IrohRemoteWorktreeSummarySchema } from "./workspace.ts";
 
 const closed = { additionalProperties: false } as const;
 
@@ -381,6 +385,42 @@ export const INTENT_SCHEMAS = {
 	"mcp.auth_poll": { input: Type.Object({ server }, closed), output: RpcMcpAuthResponseSchema },
 	"mcp.auth_cancel": { input: Type.Object({ server }, closed), output: RpcMcpAuthResponseSchema },
 	"mcp.logout": { input: Type.Object({ server }, closed), output: RpcMcpAuthResponseSchema },
+
+	// Push targets and the connection's workspace. Workspace-scoped intents act
+	// on the workspace the connection is bound to; none carries a host path.
+	register_push_target: { input: RpcRegisterPushTargetArgsSchema, output: RpcRegisterPushTargetResponseSchema },
+	/** `workspaceName` confirms the workspace to unregister: the connection's own. */
+	unregister_workspace: {
+		input: Type.Object({ workspaceName: IrohRemoteWorkspaceNameSchema }, closed),
+		output: Type.Object({ workspaceName: IrohRemoteWorkspaceNameSchema, unregistered: Type.Literal(true) }, closed),
+	},
+	create_worktree: {
+		input: Type.Object(
+			{
+				worktreeName: Type.Optional(IrohRemoteWorktreeIdSchema),
+				branch: Type.Optional(Type.String()),
+				baseRef: Type.Optional(Type.String()),
+				workingDirectory: Type.Optional(IrohRemoteWorkingDirectorySchema),
+			},
+			closed,
+		),
+		output: Type.Object({ worktree: IrohRemoteWorktreeSummarySchema }, closed),
+	},
+	/** `force` removes a worktree with uncommitted or unmerged work: the user's explicit destructive choice. */
+	remove_worktree: {
+		input: Type.Object({ worktreeId: IrohRemoteWorktreeIdSchema, force: Type.Optional(Type.Boolean()) }, closed),
+		output: Type.Object(
+			{
+				worktreeId: IrohRemoteWorktreeIdSchema,
+				removed: Type.Literal(true),
+				stoppedRuntimeCount: Type.Integer({ minimum: 0 }),
+				closedStreamCount: Type.Integer({ minimum: 0 }),
+			},
+			closed,
+		),
+	},
+	/** Prepare an isolated worktree session for reviewing a pull request. */
+	prepare_pr_review: { input: RpcPrReviewPrepareRequestSchema, output: RpcPreparePrReviewResponseSchema },
 } as const satisfies Record<string, IntentSchemas>;
 
 export type BuiltinIntentName = keyof typeof INTENT_SCHEMAS;

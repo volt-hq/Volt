@@ -39,3 +39,32 @@ export const IrohRemoteWorkspaceMetadataSnapshotSchema = Type.Object(
 	{ additionalProperties: false },
 );
 export type IrohRemoteWorkspaceMetadataSnapshot = Static<typeof IrohRemoteWorkspaceMetadataSnapshotSchema>;
+
+/** A daemon-managed worktree as a paired client sees it: never a checkout path or another workspace. */
+export const IrohRemoteWorktreeSummarySchema = Type.Object(
+	{
+		id: Type.String(),
+		branch: Type.String(),
+		baseRef: Type.Optional(Type.String()),
+		createdAt: Type.Number(),
+		sessionIds: Type.Array(Type.String()),
+		available: Type.Optional(Type.Boolean()),
+		/** Uncommitted work in the checkout. */
+		dirty: Type.Optional(Type.Boolean()),
+		/** Branch commits vs the base ref (merge-back guidance). */
+		aheadBehind: Type.Optional(
+			Type.Object(
+				{ ahead: Type.Integer({ minimum: 0 }), behind: Type.Integer({ minimum: 0 }) },
+				{ additionalProperties: false },
+			),
+		),
+	},
+	{ additionalProperties: false },
+);
+export type IrohRemoteWorktreeSummary = Static<typeof IrohRemoteWorktreeSummarySchema>;
+
+/** A folder under a registered workspace, by workspace-relative POSIX path. */
+export const IrohRemoteWorkspaceDirectorySchema = Type.Object(
+	{ name: Type.String(), path: Type.String() },
+	{ additionalProperties: false },
+);

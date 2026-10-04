@@ -3,13 +3,11 @@ import { RpcBackgroundJobSnapshotSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import type { BackgroundJobSource } from "../background-jobs.ts";
-import {
-	BUILTIN_HOST_ACTION_REGISTRY,
-	CONTEXT_AUTO_COMPACTION_ACTION_ID,
-	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
-} from "../host-actions.ts";
+import { autoCompactionState, compactionThresholdState } from "../protocol/intents/state.ts";
+import { LOCAL_INTENT_PROFILE } from "../protocol/intents/types.ts";
 import { isUsableRpcConversationIdentifier } from "./correlation.ts";
 import type { RpcBackgroundJobSnapshot, RpcBackgroundJobSummary, RpcBackgroundJobsChangedEvent } from "./types.ts";
+import { CONTEXT_AUTO_COMPACTION_ACTION_ID, CONTEXT_COMPACTION_THRESHOLD_ACTION_ID } from "./ui-action-ids.ts";
 
 /** Whitelist metadata; never copy retained output into state or change events. */
 export function projectRpcBackgroundJob(job: RpcBackgroundJobSnapshot): RpcBackgroundJobSummary {
@@ -59,18 +57,27 @@ export function subscribeRpcSessionEvents(
 	// headless and TUI-owned runtimes. Convert committed edits/profile reloads
 	// into the existing ordered action-state event, never a second wire schema.
 	const unsubscribeSettings = session.settingsManager?.subscribeCompactionSettings(() => {
-		for (const action of [CONTEXT_AUTO_COMPACTION_ACTION_ID, CONTEXT_COMPACTION_THRESHOLD_ACTION_ID]) {
-			const state = BUILTIN_HOST_ACTION_REGISTRY.getDescriptor(action, {
-				session: {
-					isBusy: session.isBusy,
-					isStreaming: session.isStreaming ?? false,
-					isCompacting: session.isCompacting ?? false,
-					model: session.model,
-					settingsManager: session.settingsManager,
-				},
-			})?.state;
-			if (state) listener({ type: "ui_action_state_changed", action, state });
-		}
+		const view = {
+			state: {
+				isBusy: session.isBusy,
+				isStreaming: session.isStreaming ?? false,
+				isCompacting: session.isCompacting ?? false,
+				model: session.model,
+				settingsManager: session.settingsManager,
+			},
+			services: {},
+			profile: LOCAL_INTENT_PROFILE,
+		};
+		listener({
+			type: "ui_action_state_changed",
+			action: CONTEXT_AUTO_COMPACTION_ACTION_ID,
+			state: autoCompactionState(view),
+		});
+		listener({
+			type: "ui_action_state_changed",
+			action: CONTEXT_COMPACTION_THRESHOLD_ACTION_ID,
+			state: compactionThresholdState(view),
+		});
 	});
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const unsubscribeJobs = session.backgroundJobs.subscribe(() => {

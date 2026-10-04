@@ -198,9 +198,12 @@ describe("Iroh remote model RPC", () => {
 				input: ["text", "image"],
 			}),
 		});
+		// The conversation's model changes alone; set_default_model persists the default.
 		expect(setModel).toHaveBeenCalledWith(expect.objectContaining({ id: "model-two" }), {
-			persistDefault: undefined,
+			persistDefault: false,
 		});
+		expect(session.settingsManager.getDefaultModel()).toBe("model-two");
+		expect(session.settingsManager.getDefaultProvider()).toBe("anthropic");
 		expect(byId.get("set-3")).toMatchObject({ command: "set_model", success: true });
 		expect(setModel).toHaveBeenCalledWith(expect.objectContaining({ id: "model-one" }), {
 			persistDefault: false,
@@ -215,7 +218,8 @@ describe("Iroh remote model RPC", () => {
 			success: true,
 			data: { level: "low" },
 		});
-		expect(setThinkingLevel).toHaveBeenCalledWith("low", { persistDefault: undefined });
+		expect(setThinkingLevel).toHaveBeenCalledWith("low", { persistDefault: false });
+		expect(session.settingsManager.getDefaultThinkingLevel()).toBe("low");
 		expect(byId.get("think-2")).toMatchObject({ command: "set_thinking_level", success: true });
 		expect(setThinkingLevel).toHaveBeenCalledWith("high", { persistDefault: false });
 		expect(byId.get("state-1")).toMatchObject({
