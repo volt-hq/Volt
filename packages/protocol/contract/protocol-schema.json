@@ -9017,6 +9017,71 @@
 			},
 			"additionalProperties": false
 		},
+		"RpcRemoteTerminalEvent": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"reason",
+						"workspace"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "remote_terminal"
+						},
+						"reason": {
+							"type": "string",
+							"const": "lease_transferred"
+						},
+						"workspace": {
+							"type": "string"
+						},
+						"sessionId": {
+							"type": "string"
+						},
+						"hostNodeId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"type",
+						"reason",
+						"workspace",
+						"sessionId",
+						"targetSessionId"
+					],
+					"properties": {
+						"type": {
+							"type": "string",
+							"const": "remote_terminal"
+						},
+						"reason": {
+							"type": "string",
+							"const": "conversation_moved"
+						},
+						"workspace": {
+							"type": "string"
+						},
+						"sessionId": {
+							"type": "string"
+						},
+						"targetSessionId": {
+							"type": "string"
+						},
+						"hostNodeId": {
+							"type": "string"
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
 		"RpcResetReviewDiscussion": {
 			"type": "object",
 			"required": [
@@ -14913,6 +14978,9 @@
 				},
 				{
 					"$ref": "#/$defs/RpcPlanningStateChangedEvent"
+				},
+				{
+					"$ref": "#/$defs/RpcRemoteTerminalEvent"
 				}
 			]
 		},

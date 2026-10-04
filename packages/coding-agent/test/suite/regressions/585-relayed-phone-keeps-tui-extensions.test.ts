@@ -16,7 +16,10 @@ import {
 } from "../../iroh-stream-doubles.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
 
-/** A phone stream on a runtime another client already holds, as the TUI relay and the daemon serve it. */
+/**
+ * A phone stream on a runtime another client already holds, as the daemon
+ * serves it, or relayed through a TUI on a view of the session that stays on it.
+ */
 function servePhone(
 	runtime: AgentSessionRuntime,
 	tempDir: string,
@@ -25,12 +28,19 @@ function servePhone(
 	const recv = new ManualIrohRecvStream();
 	const send = new ManualIrohSendStream();
 	const ready = Promise.withResolvers<void>();
+	const sessionId = runtime.session.sessionId;
 	const closed = runIrohRemoteRpcMode(runtime, {
 		...createTestIrohConversationOptions(runtime),
 		rpcGrant: options.rpcGrant,
 		stream: { recv, send },
 		disposeRuntimeOnClose: false,
 		suppressExtensionUiRequests: options.relayed,
+		detachedTerminal: (detachment) => ({
+			type: "remote_terminal",
+			reason: detachment.kind === "redirected" ? "conversation_moved" : "lease_transferred",
+			workspace: "test",
+			sessionId,
+		}),
 		workspacePath: tempDir,
 		onReady: ready.resolve,
 	});
@@ -43,7 +53,7 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	it("keeps session_start, ctx.mode, and extension UI with the TUI while the phone attaches, follows a replacement, and leaves", async () => {
+	it("keeps session_start, ctx.mode, extension UI, and host actions with the TUI; the phone stays when the TUI moves", async () => {
 		const starts: SessionStartEvent[] = [];
 		const seen: Array<{ event: string; mode: ExtensionMode; hasUI: boolean }> = [];
 		const fixture: ExtensionRuntime = await createExtensionRuntime((volt) => {
@@ -83,13 +93,16 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		await runtime.session.attachExtensionClient(tui).ready;
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
 
-		// Serve a phone stream the way the TUI serves a relay offer.
+		// Serve a phone stream the way the TUI serves a relay offer: on a view of the session.
+		const setHostInteraction = vi.spyOn(runtime.session, "setHostInteraction");
+		const phoneView = runtime.attachRedirectClient();
+		cleanups.push(() => phoneView.dispose());
 		const {
 			recv,
 			send,
 			closed: phone,
 			ready,
-		} = servePhone(runtime, fixture.tempDir, {
+		} = servePhone(phoneView, fixture.tempDir, {
 			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
 			relayed: true,
 		});
@@ -100,6 +113,8 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		await ready;
 
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
+		// Approvals stay with the TUI.
+		expect(setHostInteraction).not.toHaveBeenCalled();
 		await runtime.session.prompt("/ask");
 		await runtime.session.prompt("/fail");
 		expect(notify).toHaveBeenCalledOnce();
@@ -115,8 +130,17 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			),
 		);
 
-		// A replacement binds the new session once, through the TUI.
+		// The TUI moves: the phone stays with the session it was on, which closed,
+		// and is told to reconnect to it; the new session binds once, through the TUI.
+		const sourceId = runtime.session.sessionId;
 		await runtime.newSession();
+		await phone;
+		expect(parseWrittenObjects(send).at(-1)).toEqual({
+			type: "remote_terminal",
+			reason: "lease_transferred",
+			workspace: "test",
+			sessionId: sourceId,
+		});
 		await runtime.session.prompt("/ask");
 		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
 		expect(seen.slice(2)).toEqual([
@@ -128,14 +152,7 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			["ext", "ready:startup"],
 			["ext", "ready:new"],
 		]);
-
-		// The phone leaves; the TUI keeps the extensions.
-		recv.end();
-		await phone;
-		await runtime.session.prompt("/ask");
 		expect(starts).toHaveLength(2);
-		expect(seen.at(-1)).toEqual({ event: "ask", mode: "tui", hasUI: true });
-		expect(notify).toHaveBeenCalledTimes(3);
 		expect(parseWrittenObjects(send).filter((frame) => frame.type === "extension_ui_request")).toEqual([]);
 	});
 

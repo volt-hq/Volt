@@ -15,10 +15,9 @@ interface Harness {
 		closedStreams: Array<{ key: string; reason: string }>;
 		closedRelays: Array<{ key: string; reason: string }>;
 		handoffs: Array<{
-			phase: "begin" | "commit" | "cancel" | "release" | "prepare_rekey" | "commit_rekey" | "rollback_rekey";
+			phase: "begin" | "commit" | "cancel" | "release";
 			key: string;
 			connectionId: string;
-			newKey?: string;
 		}>;
 		audits: Array<{ type: string; details: Record<string, unknown> }>;
 		drainStarted: string[];
@@ -35,9 +34,6 @@ const NOOP_CONVERSATION_AUTHORITY_EFFECTS = {
 	commitTuiLeaseHandoff: () => {},
 	cancelTuiLeaseHandoff: () => {},
 	releaseTuiLease: () => {},
-	prepareTuiLeaseRekey: () => {},
-	commitTuiLeaseRekey: () => {},
-	rollbackTuiLeaseRekey: () => {},
 };
 
 function key(workspaceName: string, sessionId: string): string {
@@ -129,7 +125,6 @@ function createHarness(): Harness {
 	const audits: Array<{ type: string; details: Record<string, unknown> }> = [];
 	const drainStarted: string[] = [];
 	const drainEnded: Array<{ key: string; reason: string }> = [];
-	const preparedRekeys = new Map<string, { key: string; newKey: string }>();
 	let viewerFeedSequence = 0;
 	let pendingDisposeError: Error | undefined;
 
@@ -170,27 +165,6 @@ function createHarness(): Harness {
 		},
 		releaseTuiLease: (ws, sid, connectionId) => {
 			handoffs.push({ phase: "release", key: key(ws, sid), connectionId });
-		},
-		prepareTuiLeaseRekey: (transactionId, ws, oldSid, newSid, connectionId) => {
-			preparedRekeys.set(transactionId, { key: key(ws, oldSid), newKey: key(ws, newSid) });
-			handoffs.push({
-				phase: "prepare_rekey",
-				key: key(ws, oldSid),
-				connectionId,
-				newKey: key(ws, newSid),
-			});
-		},
-		commitTuiLeaseRekey: (transactionId, connectionId) => {
-			const prepared = preparedRekeys.get(transactionId);
-			if (!prepared) throw new Error("missing prepared test rekey");
-			handoffs.push({ phase: "commit_rekey", ...prepared, connectionId });
-			preparedRekeys.delete(transactionId);
-		},
-		rollbackTuiLeaseRekey: (transactionId, connectionId) => {
-			const prepared = preparedRekeys.get(transactionId);
-			if (!prepared) return;
-			handoffs.push({ phase: "rollback_rekey", ...prepared, connectionId });
-			preparedRekeys.delete(transactionId);
 		},
 		onDrainStarted: (_record, viewerFeedId) => {
 			drainStarted.push(viewerFeedId);
@@ -1047,130 +1021,67 @@ describe("LeaseBroker", () => {
 		expect(reasons).toEqual(["connection_lost", "connection_lost"]);
 	});
 
-	it("reserves then atomically rekeys a TUI lease and closes its relays", async () => {
+	it("moves a TUI to a new session by releasing the lease it leaves and acquiring the next", async () => {
 		const { broker, effects } = createHarness();
 		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" });
 		broker.registerRelay("ws", "old", "rl-1");
-		const prepared = broker.prepareTuiRekey("ws", "old", "new", "c-1");
-		expect(prepared.ok).toBe(true);
-		if (!prepared.ok) return;
-		expect(broker.lookup("ws", "old")?.state).toBe("tui-owned");
-		expect(broker.lookup("ws", "new")).toBeUndefined();
-		expect(broker.beginDaemonAttach("ws", "old")).toMatchObject({ kind: "retry" });
-		expect(broker.beginDaemonAttach("ws", "new")).toMatchObject({ kind: "retry" });
-		expect(() => attachDaemonRuntime(broker, "ws", "new")).toThrow(/lease rekey reserves/);
-		expect(await broker.acquireForTui({ connectionId: "c-2", workspaceName: "ws", sessionId: "new" })).toMatchObject({
-			kind: "denied",
-		});
 
-		expect(broker.commitTuiRekey(prepared.reservation.id, "c-1")).toMatchObject({ ok: true });
+		// The new session opens before the old one closes; both leases are briefly held.
+		expect(await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "new" })).toEqual({
+			kind: "granted",
+			handoff: "none",
+		});
+		expect(broker.lookup("ws", "old")?.state).toBe("tui-owned");
+		expect(broker.lookup("ws", "new")?.state).toBe("tui-owned");
+
+		expect(broker.releaseFromTui("c-1", "ws", "old", "switch")).toEqual({ ok: true });
+		// Phones relayed into the session the TUI left reconnect to it; the daemon hosts it now.
+		expect(effects.closedRelays).toEqual([{ key: "ws/old", reason: "lease_transferred" }]);
+		expect(effects.audits.at(-1)).toEqual({
+			type: "lease_released",
+			details: { owner: "tui", reason: "switch", connectionId: "c-1" },
+		});
 		expect(broker.lookup("ws", "old")).toBeUndefined();
 		expect(broker.lookup("ws", "new")?.state).toBe("tui-owned");
-		expect(effects.handoffs.slice(-2)).toEqual([
-			{
-				phase: "prepare_rekey",
-				key: "ws/old",
-				newKey: "ws/new",
-				connectionId: "c-1",
-			},
-			{
-				phase: "commit_rekey",
-				key: "ws/old",
-				newKey: "ws/new",
-				connectionId: "c-1",
-			},
-		]);
-		expect(effects.closedRelays).toEqual([{ key: "ws/old", reason: "session_rekeyed_reconnect" }]);
-		expect(broker.commitTuiRekey(prepared.reservation.id, "c-1")).toEqual({ ok: false, code: "not_found" });
+		expect(broker.beginDaemonAttach("ws", "old")).toMatchObject({ kind: "proceed" });
+		expect(broker.beginDaemonAttach("ws", "new")).toEqual({ kind: "relay", tuiConnectionId: "c-1" });
 	});
 
-	it("rolls back both rekey reservations when coordinator commit fails", async () => {
-		const authorityEvents: string[] = [];
-		const broker = new LeaseBroker({
-			...NOOP_CONVERSATION_AUTHORITY_EFFECTS,
-			isRuntimeStreaming: () => false,
-			waitForRuntimeIdle: async () => {},
-			disposeRuntime: async () => {},
-			closePhoneStreams: () => {},
-			closeRelays: () => {},
-			prepareTuiLeaseRekey: (transactionId) => {
-				authorityEvents.push(`prepare:${transactionId}`);
-			},
-			commitTuiLeaseRekey: (transactionId) => {
-				authorityEvents.push(`commit:${transactionId}`);
-				throw new Error("coordinator target changed");
-			},
-			rollbackTuiLeaseRekey: (transactionId) => {
-				authorityEvents.push(`rollback:${transactionId}`);
-			},
-			audit: () => {},
-		});
+	it("acquires a resumed session the daemon hosts mid-turn before releasing the session the TUI leaves", async () => {
+		const { broker, effects, finishTurn } = createHarness();
 		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" });
-		const prepared = broker.prepareTuiRekey("ws", "old", "new", "c-1");
-		expect(prepared.ok).toBe(true);
-		if (!prepared.ok) return;
+		attachDaemonRuntime(broker, "ws", "resumed");
+		updateDaemonRuntimeStreamCount(broker, "ws", "resumed", 1);
+		effects.streaming.add("ws/resumed");
 
-		expect(broker.commitTuiRekey(prepared.reservation.id, "c-1")).toEqual({
-			ok: false,
-			code: "authority_commit_failed",
-		});
-		expect(authorityEvents).toEqual([
-			`prepare:${prepared.reservation.id}`,
-			`commit:${prepared.reservation.id}`,
-			`rollback:${prepared.reservation.id}`,
-		]);
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "resumed" });
+		expect(outcome.kind).toBe("pending");
+		if (outcome.kind !== "pending") return;
+		// The session the TUI shows keeps its lease while it waits.
 		expect(broker.lookup("ws", "old")?.state).toBe("tui-owned");
-		expect(broker.lookup("ws", "new")).toBeUndefined();
-		expect(broker.commitTuiRekey(prepared.reservation.id, "c-1")).toEqual({ ok: false, code: "not_found" });
+		await finishTurn("ws", "resumed");
+		await expect(outcome.granted).resolves.toEqual({ handoff: "warm" });
+		expect(effects.disposed).toEqual([{ key: "ws/resumed", reason: "lease_transferred_to_tui" }]);
+
+		expect(broker.releaseFromTui("c-1", "ws", "old", "switch")).toEqual({ ok: true });
+		expect(broker.lookup("ws", "old")).toBeUndefined();
+		expect(broker.lookup("ws", "resumed")?.state).toBe("tui-owned");
 	});
 
-	it("rejects unauthorized or colliding TUI rekey preflights without moving either lease", async () => {
-		const { broker } = createHarness();
+	it("keeps the session the TUI shows when it cancels a pending switch", async () => {
+		const { broker, effects } = createHarness();
 		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" });
-		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "occupied" });
+		attachDaemonRuntime(broker, "ws", "resumed");
+		effects.streaming.add("ws/resumed");
+		const outcome = await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "resumed" });
+		expect(outcome.kind).toBe("pending");
+		if (outcome.kind !== "pending") return;
 
-		expect(broker.prepareTuiRekey("ws", "old", "new", "c-2")).toEqual({ ok: false, code: "not_held" });
-		expect(broker.prepareTuiRekey("ws", "old", "occupied", "c-1")).toEqual({
-			ok: false,
-			code: "target_in_use",
-		});
-		expect(broker.lookup("ws", "old")?.tuiConnectionId).toBe("c-1");
-		expect(broker.lookup("ws", "occupied")?.tuiConnectionId).toBe("c-1");
-		expect(broker.lookup("ws", "new")).toBeUndefined();
-	});
-
-	it("rolls back a prepared rekey or disposes its source without leaking the target reservation", async () => {
-		const { broker } = createHarness();
-		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" });
-
-		const rolledBack = broker.prepareTuiRekey("ws", "old", "new", "c-1");
-		expect(rolledBack.ok).toBe(true);
-		if (!rolledBack.ok) return;
-		expect(broker.rollbackTuiRekey(rolledBack.reservation.id, "c-1")).toMatchObject({ ok: true });
+		expect(broker.releaseFromTui("c-1", "ws", "resumed", "switch")).toEqual({ ok: true });
+		await expect(outcome.granted).rejects.toThrow("drain cancelled");
+		expect(broker.lookup("ws", "resumed")?.state).toBe("daemon-detached");
 		expect(broker.lookup("ws", "old")?.state).toBe("tui-owned");
-		expect(await broker.acquireForTui({ connectionId: "c-2", workspaceName: "ws", sessionId: "new" })).toMatchObject({
-			kind: "granted",
-		});
-		broker.releaseFromTui("c-2", "ws", "new");
-
-		const disposed = broker.prepareTuiRekey("ws", "old", "new", "c-1");
-		expect(disposed.ok).toBe(true);
-		if (!disposed.ok) return;
-		expect(broker.disposeTuiRekey(disposed.reservation.id, "c-1")).toMatchObject({ ok: true });
-		expect(broker.lookup("ws", "old")).toBeUndefined();
-		expect(broker.lookup("ws", "new")).toBeUndefined();
-	});
-
-	it("clears a prepared target and its source lease when the owning connection dies", async () => {
-		const { broker } = createHarness();
-		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" });
-		expect(broker.prepareTuiRekey("ws", "old", "new", "c-1").ok).toBe(true);
-
-		broker.releaseAllForConnection("c-1");
-		expect(broker.lookup("ws", "old")).toBeUndefined();
-		expect(await broker.acquireForTui({ connectionId: "c-2", workspaceName: "ws", sessionId: "new" })).toMatchObject({
-			kind: "granted",
-		});
+		expect(effects.disposed).toEqual([]);
 	});
 
 	it("rekeys daemon leases keeping state", () => {
@@ -1222,16 +1133,13 @@ describe("LeaseBroker", () => {
 		expect(broker.rollbackDaemonRekey(prepared.reservation.id)).toMatchObject({ ok: true });
 	});
 
-	it("rejects a relay that reaches registration after its source rekey reservation", async () => {
+	it("rejects a relay that reaches registration after its TUI lease was released", async () => {
 		const { broker } = createHarness();
 		await broker.acquireForTui({ connectionId: "c-1", workspaceName: "ws", sessionId: "old" });
-		const prepared = broker.prepareTuiRekey("ws", "old", "new", "c-1");
-		expect(prepared.ok).toBe(true);
-		if (!prepared.ok) return;
+		broker.releaseFromTui("c-1", "ws", "old", "switch");
 
 		expect(broker.registerRelay("ws", "old", "late-relay")).toBe(false);
-		expect(broker.lookup("ws", "old")?.relayIds.size).toBe(0);
-		expect(broker.rollbackTuiRekey(prepared.reservation.id, "c-1")).toMatchObject({ ok: true });
+		expect(broker.lookup("ws", "old")).toBeUndefined();
 	});
 
 	it("rolls back daemon target reservations without disturbing either owner", () => {

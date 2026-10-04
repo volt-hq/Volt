@@ -40,9 +40,6 @@ function createLeaseBroker(): LeaseBroker {
 		commitTuiLeaseHandoff: () => {},
 		cancelTuiLeaseHandoff: () => {},
 		releaseTuiLease: () => {},
-		prepareTuiLeaseRekey: () => {},
-		commitTuiLeaseRekey: () => {},
-		rollbackTuiLeaseRekey: () => {},
 		audit: () => {},
 	});
 }
@@ -79,9 +76,6 @@ function createCoordinatorWiredLeaseBroker(registry: ConversationCoordinatorRegi
 		releaseTuiLease: (workspaceName, sessionId, connectionId) => {
 			registry.get(workspaceName, sessionId)?.releaseTuiLease(connectionId);
 		},
-		prepareTuiLeaseRekey: () => {},
-		commitTuiLeaseRekey: () => {},
-		rollbackTuiLeaseRekey: () => {},
 		audit: () => {},
 	});
 	registry.bindLeaseBroker(broker);
@@ -455,7 +449,7 @@ describe("ConversationCoordinator", () => {
 		coordinator.commitTuiLeaseHandoff("tui");
 		coordinator.registerTransport(createTransport("relay", () => {}, "relay"));
 
-		await coordinator.closeTransport("relay", "session_rekeyed_reconnect");
+		await coordinator.closeTransport("relay", "lease_transferred");
 		registry.rekey(coordinator, "session-b");
 
 		expect(registry.get("workspace", "session-a")).toBe(coordinator);

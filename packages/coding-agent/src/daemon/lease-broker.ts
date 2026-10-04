@@ -130,28 +130,6 @@ export type LeaseAcquireOutcome =
 
 export type LeaseRekeyOutcome = { ok: true } | { ok: false; code: "not_found" | "not_held" | "target_in_use" };
 
-export interface TuiLeaseRekeyReservation {
-	readonly id: string;
-	readonly connectionId: string;
-	readonly workspaceName: string;
-	readonly oldSessionId: string;
-	readonly newSessionId: string;
-	readonly sourceKey: string;
-	readonly targetKey: string;
-	readonly record: LeaseRecord;
-}
-
-export type TuiLeaseRekeyPrepareOutcome =
-	| { ok: true; reservation: TuiLeaseRekeyReservation }
-	| {
-			ok: false;
-			code: "not_found" | "not_held" | "target_in_use" | "transition_in_progress" | "coordinator_unavailable";
-	  };
-
-export type TuiLeaseRekeyTransactionOutcome =
-	| { ok: true; reservation: TuiLeaseRekeyReservation }
-	| { ok: false; code: "not_found" | "not_held" | "target_in_use" | "authority_commit_failed" };
-
 export interface DaemonLeaseRekeyReservation {
 	readonly id: string;
 	readonly owner: DaemonRuntimeOwnerCapability;
@@ -183,7 +161,7 @@ export interface LeaseBrokerEffects {
 	/** Close open relays for a tui-owned lease. */
 	closeRelays(
 		record: LeaseRecord,
-		reason: "lease_transferred" | "session_rekeyed_reconnect" | "workspace_unregistered" | "host_shutdown" | "error",
+		reason: "lease_transferred" | "workspace_unregistered" | "host_shutdown" | "error",
 	): void;
 	/** Reserve the stable conversation authority before daemon-runtime retirement begins. */
 	beginTuiLeaseHandoff(workspaceName: string, sessionId: string, connectionId: string): void;
@@ -193,18 +171,6 @@ export interface LeaseBrokerEffects {
 	cancelTuiLeaseHandoff(workspaceName: string, sessionId: string, connectionId: string): void;
 	/** Release committed or pending TUI authority for a connection. */
 	releaseTuiLease(workspaceName: string, sessionId: string, connectionId: string): void;
-	/** Reserve the stable authority's target key during broker rekey preflight. */
-	prepareTuiLeaseRekey(
-		transactionId: string,
-		workspaceName: string,
-		oldSessionId: string,
-		newSessionId: string,
-		connectionId: string,
-	): void;
-	/** Commit the prepared stable-authority rekey before the broker record moves. */
-	commitTuiLeaseRekey(transactionId: string, connectionId: string): void;
-	/** Release a prepared stable-authority rekey after rollback, disposal, or failure. */
-	rollbackTuiLeaseRekey(transactionId: string, connectionId: string): void;
 	onDrainStarted?(record: LeaseRecord, viewerFeedId: string): void;
 	onDrainEnded?(record: LeaseRecord, viewerFeedId: string, reason: "granted" | "cancelled" | "error"): void;
 	audit(event: {
@@ -244,10 +210,6 @@ export class LeaseBroker {
 	private readonly daemonRuntimeOwners = new WeakMap<LeaseRecord, DaemonRuntimeOwnerCapability>();
 	/** Identity and provisional/durable epoch retained behind each opaque owner capability. */
 	private readonly daemonRuntimeOwnerRecords = new WeakMap<DaemonRuntimeOwnerCapability, DaemonRuntimeOwnerRecord>();
-	/** Prepared TUI rekeys lock both names until commit, rollback, or disposal. */
-	private readonly tuiRekeyReservations = new Map<string, TuiLeaseRekeyReservation>();
-	private readonly tuiRekeyReservationsBySource = new Map<string, TuiLeaseRekeyReservation>();
-	private readonly tuiRekeyReservationsByTarget = new Map<string, TuiLeaseRekeyReservation>();
 	private readonly daemonRekeyReservations = new Map<string, DaemonLeaseRekeyReservation>();
 	private readonly daemonRekeyReservationsBySource = new Map<string, DaemonLeaseRekeyReservation>();
 	private readonly daemonRekeyReservationsByTarget = new Map<string, DaemonLeaseRekeyReservation>();
@@ -271,11 +233,7 @@ export class LeaseBroker {
 		const keys = sessionIds.map((sessionId) => getLeaseKey(workspaceName, sessionId));
 		if (
 			keys.some((key) => {
-				if (
-					this.worktreeRemovalReservations.has(key) ||
-					this.tuiRekeyReservationsByTarget.has(key) ||
-					this.daemonRekeyReservationsByTarget.has(key)
-				) {
+				if (this.worktreeRemovalReservations.has(key) || this.daemonRekeyReservationsByTarget.has(key)) {
 					return true;
 				}
 				const record = this.records.get(key);
@@ -334,8 +292,6 @@ export class LeaseBroker {
 		const attachKey = getLeaseKey(workspaceName, sessionId);
 		if (
 			this.worktreeRemovalReservations.has(attachKey) ||
-			this.tuiRekeyReservationsBySource.has(attachKey) ||
-			this.tuiRekeyReservationsByTarget.has(attachKey) ||
 			this.daemonRekeyReservationsBySource.has(attachKey) ||
 			this.daemonRekeyReservationsByTarget.has(attachKey)
 		) {
@@ -378,8 +334,6 @@ export class LeaseBroker {
 		const key = getLeaseKey(workspaceName, sessionId);
 		if (
 			this.worktreeRemovalReservations.has(key) ||
-			this.tuiRekeyReservationsBySource.has(key) ||
-			this.tuiRekeyReservationsByTarget.has(key) ||
 			this.daemonRekeyReservationsBySource.has(key) ||
 			this.daemonRekeyReservationsByTarget.has(key)
 		) {
@@ -691,7 +645,7 @@ export class LeaseBroker {
 	}
 
 	// ==========================================================================
-	// TUI acquire / release / rekey
+	// TUI acquire / release
 	// ==========================================================================
 
 	private getCurrentDaemonRuntimePublication(record: LeaseRecord): DaemonRuntimeCommitCohort | undefined {
@@ -763,20 +717,6 @@ export class LeaseBroker {
 			const leaseKey = getLeaseKey(workspaceName, sessionId);
 			if (this.worktreeRemovalReservations.has(leaseKey)) {
 				return { kind: "denied", reason: "draining_elsewhere" };
-			}
-			const targetReservation = this.tuiRekeyReservationsByTarget.get(leaseKey);
-			if (targetReservation) {
-				this.effects.audit({
-					type: "lease_denied",
-					workspaceName,
-					sessionId,
-					details: {
-						requester: connectionId,
-						reason: "rekey_target_reserved",
-						reservationOwner: targetReservation.connectionId,
-					},
-				});
-				return { kind: "denied", reason: "held_by_tui" };
 			}
 			if (this.daemonRekeyReservationsByTarget.has(getLeaseKey(workspaceName, sessionId))) {
 				return { kind: "denied", reason: "draining_elsewhere" };
@@ -1106,7 +1046,6 @@ export class LeaseBroker {
 		if (!record || record.state !== "tui-owned" || record.tuiConnectionId !== connectionId) {
 			return { ok: false, code: "not_held" };
 		}
-		this.clearTuiRekeyReservationsForRecord(record);
 		this.effects.closeRelays(
 			record,
 			reason === "workspace_unregistered" ? "workspace_unregistered" : "lease_transferred",
@@ -1137,179 +1076,6 @@ export class LeaseBroker {
 				this.cancelDrain(record);
 			}
 		}
-		for (const reservation of Array.from(this.tuiRekeyReservations.values())) {
-			if (reservation.connectionId === connectionId) {
-				this.clearTuiRekeyReservation(reservation);
-			}
-		}
-	}
-
-	prepareTuiRekey(
-		workspaceName: string,
-		oldSessionId: string,
-		newSessionId: string,
-		connectionId: string,
-	): TuiLeaseRekeyPrepareOutcome {
-		const sourceKey = getLeaseKey(workspaceName, oldSessionId);
-		const targetKey = getLeaseKey(workspaceName, newSessionId);
-		const record = this.records.get(sourceKey);
-		if (!record) {
-			return { ok: false, code: "not_found" };
-		}
-		if (record.state !== "tui-owned" || record.tuiConnectionId !== connectionId) {
-			return { ok: false, code: "not_held" };
-		}
-
-		const existingSourceReservation = this.tuiRekeyReservationsBySource.get(sourceKey);
-		if (existingSourceReservation) {
-			if (
-				existingSourceReservation.connectionId === connectionId &&
-				existingSourceReservation.targetKey === targetKey
-			) {
-				return { ok: true, reservation: existingSourceReservation };
-			}
-			return { ok: false, code: "transition_in_progress" };
-		}
-		if (this.daemonRekeyReservationsBySource.has(sourceKey)) {
-			return { ok: false, code: "transition_in_progress" };
-		}
-
-		if (sourceKey !== targetKey) {
-			if (this.worktreeRemovalReservations.has(targetKey)) {
-				return { ok: false, code: "transition_in_progress" };
-			}
-			const displaced = this.records.get(targetKey);
-			const targetReservation = this.tuiRekeyReservationsByTarget.get(targetKey);
-			const daemonTargetReservation = this.daemonRekeyReservationsByTarget.get(targetKey);
-			if (displaced || targetReservation || daemonTargetReservation) {
-				this.effects.audit({
-					type: "lease_denied",
-					workspaceName,
-					sessionId: newSessionId,
-					details: {
-						reason:
-							targetReservation || daemonTargetReservation ? "rekey_target_reserved" : "rekey_target_in_use",
-						oldSessionId,
-						...(displaced ? { displacedState: displaced.state } : {}),
-					},
-				});
-				return { ok: false, code: "target_in_use" };
-			}
-		}
-
-		const reservation: TuiLeaseRekeyReservation = {
-			id: randomUUID(),
-			connectionId,
-			workspaceName,
-			oldSessionId,
-			newSessionId,
-			sourceKey,
-			targetKey,
-			record,
-		};
-		try {
-			this.effects.prepareTuiLeaseRekey(reservation.id, workspaceName, oldSessionId, newSessionId, connectionId);
-		} catch (error) {
-			this.effects.audit({
-				type: "lease_denied",
-				workspaceName,
-				sessionId: newSessionId,
-				details: {
-					reason: "coordinator_rekey_unavailable",
-					oldSessionId,
-					error: error instanceof Error ? error.message : String(error),
-				},
-			});
-			return { ok: false, code: "coordinator_unavailable" };
-		}
-		this.tuiRekeyReservations.set(reservation.id, reservation);
-		this.tuiRekeyReservationsBySource.set(sourceKey, reservation);
-		if (sourceKey !== targetKey) {
-			this.tuiRekeyReservationsByTarget.set(targetKey, reservation);
-		}
-		return { ok: true, reservation };
-	}
-
-	getTuiRekeyReservation(transactionId: string, connectionId: string): TuiLeaseRekeyReservation | undefined {
-		const reservation = this.tuiRekeyReservations.get(transactionId);
-		return reservation?.connectionId === connectionId ? reservation : undefined;
-	}
-
-	commitTuiRekey(transactionId: string, connectionId: string): TuiLeaseRekeyTransactionOutcome {
-		const reservation = this.getTuiRekeyReservation(transactionId, connectionId);
-		if (!reservation) {
-			return { ok: false, code: "not_found" };
-		}
-		const record = this.records.get(reservation.sourceKey);
-		if (record !== reservation.record || record.state !== "tui-owned" || record.tuiConnectionId !== connectionId) {
-			this.clearTuiRekeyReservation(reservation);
-			return { ok: false, code: "not_held" };
-		}
-		if (
-			reservation.sourceKey !== reservation.targetKey &&
-			(this.records.has(reservation.targetKey) || this.worktreeRemovalReservations.has(reservation.targetKey))
-		) {
-			return { ok: false, code: "target_in_use" };
-		}
-
-		try {
-			if (record.relayIds.size > 0) {
-				this.effects.closeRelays(record, "session_rekeyed_reconnect");
-			}
-			this.effects.commitTuiLeaseRekey(reservation.id, connectionId);
-		} catch {
-			this.clearTuiRekeyReservation(reservation);
-			return { ok: false, code: "authority_commit_failed" };
-		}
-		record.relayIds.clear();
-		this.clearTuiRekeyReservation(reservation, false);
-		if (reservation.sourceKey !== reservation.targetKey) {
-			this.records.delete(reservation.sourceKey);
-			record.sessionId = reservation.newSessionId;
-			record.key = reservation.targetKey;
-			this.records.set(reservation.targetKey, record);
-		}
-		return { ok: true, reservation };
-	}
-
-	rollbackTuiRekey(transactionId: string, connectionId: string): TuiLeaseRekeyTransactionOutcome {
-		const reservation = this.getTuiRekeyReservation(transactionId, connectionId);
-		if (!reservation) {
-			return { ok: false, code: "not_found" };
-		}
-		this.clearTuiRekeyReservation(reservation);
-		return { ok: true, reservation };
-	}
-
-	disposeTuiRekey(transactionId: string, connectionId: string): TuiLeaseRekeyTransactionOutcome {
-		const reservation = this.getTuiRekeyReservation(transactionId, connectionId);
-		if (!reservation) {
-			return { ok: false, code: "not_found" };
-		}
-		this.clearTuiRekeyReservation(reservation);
-		const released = this.releaseFromTui(connectionId, reservation.workspaceName, reservation.oldSessionId, "rekey");
-		return released.ok ? { ok: true, reservation } : released;
-	}
-
-	private clearTuiRekeyReservationsForRecord(record: LeaseRecord): void {
-		for (const reservation of Array.from(this.tuiRekeyReservations.values())) {
-			if (reservation.record === record) {
-				this.clearTuiRekeyReservation(reservation);
-			}
-		}
-	}
-
-	private clearTuiRekeyReservation(reservation: TuiLeaseRekeyReservation, rollbackAuthority = true): void {
-		if (rollbackAuthority) {
-			this.effects.rollbackTuiLeaseRekey(reservation.id, reservation.connectionId);
-		}
-		this.tuiRekeyReservations.delete(reservation.id);
-		if (this.tuiRekeyReservationsBySource.get(reservation.sourceKey) === reservation) {
-			this.tuiRekeyReservationsBySource.delete(reservation.sourceKey);
-		}
-		if (this.tuiRekeyReservationsByTarget.get(reservation.targetKey) === reservation) {
-			this.tuiRekeyReservationsByTarget.delete(reservation.targetKey);
-		}
 	}
 
 	prepareDaemonRekey(
@@ -1336,14 +1102,10 @@ export class LeaseBroker {
 				? { ok: true, reservation: existing }
 				: { ok: false, code: "transition_in_progress" };
 		}
-		if (this.tuiRekeyReservationsBySource.has(sourceKey)) {
-			return { ok: false, code: "transition_in_progress" };
-		}
 		if (sourceKey !== targetKey) {
 			if (
 				this.worktreeRemovalReservations.has(targetKey) ||
 				this.records.has(targetKey) ||
-				this.tuiRekeyReservationsByTarget.has(targetKey) ||
 				this.daemonRekeyReservationsByTarget.has(targetKey)
 			) {
 				this.effects.audit({
@@ -1456,8 +1218,6 @@ export class LeaseBroker {
 		const newKey = getLeaseKey(workspaceName, newSessionId);
 		if (
 			this.worktreeRemovalReservations.has(newKey) ||
-			this.tuiRekeyReservationsBySource.has(record.key) ||
-			this.tuiRekeyReservationsByTarget.has(newKey) ||
 			this.daemonRekeyReservationsBySource.has(record.key) ||
 			this.daemonRekeyReservationsByTarget.has(newKey)
 		) {
@@ -1493,12 +1253,7 @@ export class LeaseBroker {
 
 	registerRelay(workspaceName: string, sessionId: string, relayId: string): boolean {
 		const key = getLeaseKey(workspaceName, sessionId);
-		if (
-			this.tuiRekeyReservationsBySource.has(key) ||
-			this.tuiRekeyReservationsByTarget.has(key) ||
-			this.daemonRekeyReservationsBySource.has(key) ||
-			this.daemonRekeyReservationsByTarget.has(key)
-		) {
+		if (this.daemonRekeyReservationsBySource.has(key) || this.daemonRekeyReservationsByTarget.has(key)) {
 			return false;
 		}
 		const record = this.lookup(workspaceName, sessionId);

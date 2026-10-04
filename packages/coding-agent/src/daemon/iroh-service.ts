@@ -112,11 +112,7 @@ import {
 	type RemoteSessionListCursorEntry,
 	toRpcKeepAwakeStatus,
 } from "./conversation-commands.ts";
-import {
-	type ConversationCoordinator,
-	ConversationCoordinatorRegistry,
-	type ConversationCoordinatorRekeyReservation,
-} from "./conversation-coordinator.ts";
+import { type ConversationCoordinator, ConversationCoordinatorRegistry } from "./conversation-coordinator.ts";
 import { observeConversationLoss } from "./conversation-loss.ts";
 import {
 	createRemoteConversationExternalProjector,
@@ -250,7 +246,6 @@ function normalizeRelayCloseReason(reason: string): RelayCloseReason {
 		case "phone_disconnected":
 		case "tui_disconnected":
 		case "lease_transferred":
-		case "session_rekeyed_reconnect":
 		case "workspace_unregistered":
 		case "host_shutdown":
 		case "error":
@@ -782,8 +777,7 @@ function getRemoteTerminalReason(reason: string): string | undefined {
 	if (
 		reason === WORKSPACE_UNREGISTERED_CLOSE_REASON ||
 		reason === "workspace_authorization_removed" ||
-		reason === "lease_transferred" ||
-		reason === "session_rekeyed_reconnect"
+		reason === "lease_transferred"
 	) {
 		return reason;
 	}
@@ -922,7 +916,6 @@ class IrohDaemonService {
 	private readonly activeStreams = new IrohRemoteActiveStreamRegistry();
 	private readonly admission = new IrohDaemonAdmissionGate();
 	private readonly physicalStreamOwners = new Map<string, IrohPhysicalStreamOwner>();
-	private readonly tuiCoordinatorRekeyReservations = new Map<string, ConversationCoordinatorRekeyReservation>();
 	private readonly clientConnections = new Map<string, Set<ClientConnectionRecord>>();
 	private readonly connectionSupervisors = new Map<string, IrohConnectionSupervisor>();
 	private readonly connectionTasks = new Set<Promise<void>>();
@@ -1246,28 +1239,6 @@ class IrohDaemonService {
 			},
 			releaseTuiLease: (workspaceName, sessionId, connectionId) => {
 				this.conversationCoordinators.get(workspaceName, sessionId)?.releaseTuiLease(connectionId);
-			},
-			prepareTuiLeaseRekey: (transactionId, workspaceName, oldSessionId, newSessionId, connectionId) => {
-				const coordinator = this.conversationCoordinators.get(workspaceName, oldSessionId);
-				if (!coordinator || coordinator.tuiLeaseConnectionId !== connectionId) {
-					throw new Error("TUI lease rekey cannot reserve its conversation coordinator authority");
-				}
-				const reservation = this.conversationCoordinators.prepareRekey(coordinator, newSessionId);
-				this.tuiCoordinatorRekeyReservations.set(transactionId, reservation);
-			},
-			commitTuiLeaseRekey: (transactionId, connectionId) => {
-				const reservation = this.tuiCoordinatorRekeyReservations.get(transactionId);
-				if (!reservation || reservation.coordinator.tuiLeaseConnectionId !== connectionId) {
-					throw new Error("TUI lease rekey lost its conversation coordinator reservation");
-				}
-				this.conversationCoordinators.commitRekey(reservation);
-				this.tuiCoordinatorRekeyReservations.delete(transactionId);
-			},
-			rollbackTuiLeaseRekey: (transactionId, connectionId) => {
-				const reservation = this.tuiCoordinatorRekeyReservations.get(transactionId);
-				if (!reservation || reservation.coordinator.tuiLeaseConnectionId !== connectionId) return;
-				this.conversationCoordinators.rollbackRekey(reservation);
-				this.tuiCoordinatorRekeyReservations.delete(transactionId);
 			},
 			onDrainStarted: (record, viewerFeedId) => {
 				const owner = this.runtimes.findOwner(record.workspaceName, record.sessionId);
@@ -5560,144 +5531,6 @@ class IrohDaemonService {
 					return true;
 				}
 				await this.retireTuiWorkAuthority(request.workspaceName, request.sessionId, connection.connectionId);
-				connection.send({ type: "ok", id: request.id });
-				return true;
-			}
-			case "lease_rekey_prepare": {
-				const result = this.leaseBroker.prepareTuiRekey(
-					request.workspaceName,
-					request.oldSessionId,
-					request.newSessionId,
-					connection.connectionId,
-				);
-				if (!result.ok) {
-					connection.send({
-						type: "error",
-						id: request.id,
-						code: result.code,
-						message: `conversation lease rekey preflight failed: ${result.code}`,
-					});
-					return true;
-				}
-				connection.send({ type: "lease_rekey_prepared", id: request.id, transactionId: result.reservation.id });
-				return true;
-			}
-			case "lease_rekey_commit": {
-				const reservation = this.leaseBroker.getTuiRekeyReservation(request.transactionId, connection.connectionId);
-				if (!reservation) {
-					connection.send({
-						type: "error",
-						id: request.id,
-						code: "not_found",
-						message: "conversation lease rekey transaction not found",
-					});
-					return true;
-				}
-				const relayedClientNodeIds = new Set(
-					this.relays
-						.all()
-						.filter(
-							(relay) =>
-								relay.ownerControlConnectionId === connection.connectionId &&
-								relay.workspaceName === reservation.workspaceName &&
-								relay.sessionId === reservation.oldSessionId,
-						)
-						.map((relay) => relay.clientNodeId),
-				);
-				try {
-					// A TUI rekey of a worktree-bound conversation must keep the durable
-					// binding covering the new id, or a post-restart daemon resume of the
-					// persisted reconnect target cannot resolve its checkout (#83). The
-					// healing lookup also repairs a stranded old id at rekey time, and the
-					// bind runs before the reconnect-target persist so a failure here
-					// leaves the old target intact; the append is additive and idempotent,
-					// so a stale extra id after a failed broker commit below is inert.
-					const boundWorktree = await this.worktrees.resolveSessionWorktree(
-						reservation.workspaceName,
-						reservation.oldSessionId,
-					);
-					if (boundWorktree) {
-						await this.worktrees.bindSession(
-							reservation.workspaceName,
-							boundWorktree.id,
-							reservation.newSessionId,
-						);
-					}
-					const workspaceGeneration = (await this.stateManager.getState()).workspaceGenerations?.find(
-						(candidate) => candidate.workspaceName === reservation.workspaceName,
-					)?.generation;
-					if (workspaceGeneration !== undefined) {
-						await this.services.work
-							.inheritSession(
-								reservation.workspaceName,
-								workspaceGeneration,
-								reservation.oldSessionId,
-								reservation.newSessionId,
-							)
-							.catch(() => false);
-					}
-					await this.stateManager.setClientsLastSessionId(
-						Array.from(relayedClientNodeIds),
-						reservation.workspaceName,
-						reservation.newSessionId,
-					);
-				} catch (error: unknown) {
-					connection.send({
-						type: "error",
-						id: request.id,
-						code: "state_write_failed",
-						message: error instanceof Error ? error.message : String(error),
-					});
-					return true;
-				}
-				const result = this.leaseBroker.commitTuiRekey(request.transactionId, connection.connectionId);
-				if (!result.ok) {
-					try {
-						await this.stateManager.setClientsLastSessionId(
-							Array.from(relayedClientNodeIds),
-							reservation.workspaceName,
-							reservation.oldSessionId,
-						);
-					} catch (error: unknown) {
-						connection.send({
-							type: "error",
-							id: request.id,
-							code: "state_write_failed",
-							message: error instanceof Error ? error.message : String(error),
-						});
-						return true;
-					}
-					connection.send({
-						type: "error",
-						id: request.id,
-						code: result.code,
-						message: `conversation lease rekey failed: ${result.code}`,
-					});
-					return true;
-				}
-				await this.retireTuiWorkAuthority(
-					reservation.workspaceName,
-					reservation.oldSessionId,
-					connection.connectionId,
-				);
-				connection.send({ type: "ok", id: request.id });
-				return true;
-			}
-			case "lease_rekey_rollback": {
-				const result = this.leaseBroker.rollbackTuiRekey(request.transactionId, connection.connectionId);
-				if (!result.ok) {
-					connection.send({ type: "error", id: request.id, code: result.code, message: "rekey not prepared" });
-					return true;
-				}
-				connection.send({ type: "ok", id: request.id });
-				return true;
-			}
-			case "lease_rekey_dispose": {
-				const result = this.leaseBroker.disposeTuiRekey(request.transactionId, connection.connectionId);
-				if (!result.ok) {
-					connection.send({ type: "error", id: request.id, code: result.code, message: "rekey not prepared" });
-					return true;
-				}
 				connection.send({ type: "ok", id: request.id });
 				return true;
 			}

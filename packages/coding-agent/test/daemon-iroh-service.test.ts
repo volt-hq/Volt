@@ -5,11 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createFauxProvider } from "@hansjm10/volt-ai";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import {
-	type IrohRemoteHandshakeSuccess,
-	type IrohRemoteHello,
-	parseIrohRemoteHandshakeResponse,
-} from "../src/core/remote/iroh/handshake.ts";
+import { parseIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
 import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
 import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
@@ -20,7 +16,6 @@ import {
 	type ControlEvent,
 	type RemoteTransportHealth,
 } from "../src/daemon/control-protocol.ts";
-import { createIntegratedConversationHandshakeResponse } from "../src/daemon/handshake-responses.ts";
 import {
 	formatIrohLoadError,
 	type IrohConnectionLike,
@@ -51,7 +46,6 @@ import { getDaemonPaths } from "../src/daemon/paths.ts";
 import type { IrohManagedRelayCredential } from "../src/daemon/relay-credential.ts";
 import { type DaemonProbeResult, probeDaemon } from "../src/daemon/spawn.ts";
 import { readLineFromIroh } from "../src/daemon/workspace-streams.ts";
-import { createTuiRelayAuthorization } from "../src/modes/interactive/daemon-attach.ts";
 
 const native = loadIrohModule();
 const nativeAvailable = native.iroh !== undefined;
@@ -1233,9 +1227,9 @@ describe.skipIf(!nativeAvailable)("TUI Work observation receipt revisions", () =
 	}, 30_000);
 });
 
-describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () => {
-	it("reconnects an explicit old session alias through the canonical TUI lease", async () => {
-		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-rekey-alias-"));
+describe.skipIf(!nativeAvailable)("TUI release/reacquire relay admission (#585)", () => {
+	it("hands the session a TUI left back to the daemon and relays the session it moved to", async () => {
+		const agentDir = mkdtempSync(join(tmpdir(), "voltd-iroh-release-reacquire-"));
 		const unresolvedWorkspaceDir = join(agentDir, "ws");
 		mkdirSync(unresolvedWorkspaceDir, { recursive: true });
 		const workspaceDir = realpathSync.native(unresolvedWorkspaceDir);
@@ -1330,7 +1324,7 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 				protocol: IROH_REMOTE_ALPN,
 				workspace: "ws",
 				secret: payload.secret,
-				clientLabel: "vitest-rekey-phone",
+				clientLabel: "vitest-release-phone",
 				workspaceDiscovery: { purpose: "list_sessions" },
 			});
 			expect((await readJsonLine(pairingStream)).value.success).toBe(true);
@@ -1384,83 +1378,44 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 				selection: "resumed",
 			});
 
-			const prepared = await tui.request({
-				type: "lease_rekey_prepare",
-				workspaceName: "ws",
-				oldSessionId: sourceSessionId,
-				newSessionId: replacementSessionId,
-			});
-			expect(prepared.type).toBe("lease_rekey_prepared");
-			if (prepared.type !== "lease_rekey_prepared") throw new Error("TUI rekey was not prepared");
-			expect(await tui.request({ type: "lease_rekey_commit", transactionId: prepared.transactionId })).toMatchObject(
-				{
-					type: "ok",
-				},
-			);
+			// The TUI moves to the replacement: it acquires the new session's lease
+			// and releases the one it left, whose relays close.
+			expect(
+				await tui.request({ type: "lease_acquire", workspaceName: "ws", sessionId: replacementSessionId }),
+			).toMatchObject({ type: "lease_granted" });
+			expect(
+				await tui.request({
+					type: "lease_release",
+					workspaceName: "ws",
+					sessionId: sourceSessionId,
+					reason: "switch",
+				}),
+			).toMatchObject({ type: "ok" });
 			await expect
 				.poll(() =>
-					tuiEvents.some((event) => event.type === "relay_closed" && event.reason === "session_rekeyed_reconnect"),
+					tuiEvents.some((event) => event.type === "relay_closed" && event.reason === "lease_transferred"),
 				)
 				.toBe(true);
 
-			const aliasConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
-			phoneConnections.push(aliasConnection);
-			const aliasStream = await aliasConnection.openBi();
-			await writeJsonLine(aliasStream, {
+			// The phone reconnects to the session it was on: the daemon hosts it now.
+			const sourceConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
+			phoneConnections.push(sourceConnection);
+			const sourceStream = await sourceConnection.openBi();
+			await writeJsonLine(sourceStream, {
 				type: "volt_iroh_hello",
 				protocol: IROH_REMOTE_ALPN,
 				workspace: "ws",
 				conversation: { target: "session", sessionId: sourceSessionId },
 			});
-			await expect
-				.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, {
-					timeout: relayOfferTimeout,
-				})
-				.toBe(2);
-			const aliasOffer = tuiEvents.filter((event) => event.type === "relay_offer")[1];
-			if (aliasOffer?.type !== "relay_offer") throw new Error("alias relay offer missing");
-			expect(aliasOffer.sessionId).toBe(replacementSessionId);
-			const aliasRelay = await tui.openRelay(aliasOffer);
-			relaySockets.push(aliasRelay.stream);
-			expect(aliasRelay.preamble.resolvedTarget).toMatchObject({
-				sessionId: replacementSessionId,
-				selection: "session_rekeyed",
-				requestedSessionId: sourceSessionId,
-			});
-			expect(aliasRelay.preamble.handshake).toMatchObject({
-				hello: { conversation: { target: "session", sessionId: sourceSessionId } },
-			});
-
-			const relayHandshake = aliasRelay.preamble.handshake as {
-				hello: IrohRemoteHello;
-				response: IrohRemoteHandshakeSuccess;
-			};
-			const authorizationSubset = aliasRelay.preamble.authorization;
-			const authorization = createTuiRelayAuthorization(authorizationSubset);
-			const handshakeResponse = createIntegratedConversationHandshakeResponse(
-				relayHandshake,
-				authorization,
-				replacementSessionId,
-				{ kind: "session_rekeyed", requestedSessionId: sourceSessionId, sessionId: replacementSessionId },
-				{
-					hostNodeId: aliasRelay.preamble.hostNodeId,
-					relayMode: aliasRelay.preamble.relayMode,
-					relayUrls: aliasRelay.preamble.relayUrls,
-				},
-			);
-			aliasRelay.stream.write(`${JSON.stringify(handshakeResponse)}\n`);
-			const phoneHandshake = parseIrohRemoteHandshakeResponse((await readJsonLine(aliasStream)).value);
-			expect(phoneHandshake).toMatchObject({
+			const sourceHandshake = parseIrohRemoteHandshakeResponse((await readJsonLine(sourceStream)).value);
+			expect(sourceHandshake).toMatchObject({
 				success: true,
-				sessionId: replacementSessionId,
-				conversation: {
-					target: "session",
-					sessionId: replacementSessionId,
-					selection: "session_rekeyed",
-					requestedSessionId: sourceSessionId,
-				},
+				sessionId: sourceSessionId,
+				conversation: { target: "session", sessionId: sourceSessionId, selection: "resumed" },
 			});
+			expect(tuiEvents.filter((event) => event.type === "relay_offer")).toHaveLength(1);
 
+			// A phone opening the session the TUI moved to is relayed to the TUI.
 			const directConnection = await phone.connect(endpointTicket.endpointAddr(), ALPN);
 			phoneConnections.push(directConnection);
 			const directStream = await directConnection.openBi();
@@ -1471,18 +1426,18 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 				conversation: { target: "session", sessionId: replacementSessionId },
 			});
 			const directResponse = readJsonLine(directStream).then((response) => {
-				throw new Error(`canonical relay failed before offer: ${JSON.stringify(response.value)}`);
+				throw new Error(`replacement relay failed before offer: ${JSON.stringify(response.value)}`);
 			});
 			await Promise.race([
 				expect
 					.poll(() => tuiEvents.filter((event) => event.type === "relay_offer").length, {
 						timeout: relayOfferTimeout,
 					})
-					.toBe(3),
+					.toBe(2),
 				directResponse,
 			]);
-			const directOffer = tuiEvents.filter((event) => event.type === "relay_offer")[2];
-			if (directOffer?.type !== "relay_offer") throw new Error("canonical relay offer missing");
+			const directOffer = tuiEvents.filter((event) => event.type === "relay_offer")[1];
+			if (directOffer?.type !== "relay_offer") throw new Error("replacement relay offer missing");
 			expect(directOffer.sessionId).toBe(replacementSessionId);
 			const directRelay = await tui.openRelay(directOffer);
 			relaySockets.push(directRelay.stream);
@@ -1493,16 +1448,13 @@ describe.skipIf(!nativeAvailable)("TUI rekey alias relay admission (#259)", () =
 			});
 
 			const currentStatus = await control.request({ type: "status" });
-			expect(currentStatus).toMatchObject({
-				type: "status_result",
-				leases: [
-					{
-						workspaceName: "ws",
-						sessionId: replacementSessionId,
-						state: "tui-owned",
-					},
-				],
-			});
+			if (currentStatus.type !== "status_result") throw new Error("status missing");
+			expect(currentStatus.leases).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ workspaceName: "ws", sessionId: sourceSessionId, state: "daemon-active" }),
+					expect.objectContaining({ workspaceName: "ws", sessionId: replacementSessionId, state: "tui-owned" }),
+				]),
+			);
 			expect(readFileSync(getDaemonPaths(agentDir).auditPath, "utf8")).not.toContain('"type":"runtime_failure"');
 		} finally {
 			for (const socket of relaySockets) socket.destroy();

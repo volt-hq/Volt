@@ -11,6 +11,8 @@
  * closes when its anchor leaves, or when its last client leaves and the host
  * closes unattached conversations. A client may not leave a busy source, and
  * no client may leave an owner-lifetime conversation such as a subagent's.
+ * A client served for another host can instead be redirected: the target's
+ * log is written here and the client reconnects to it through that host.
  */
 
 import { existsSync } from "node:fs";
@@ -108,6 +110,17 @@ export type OpenForResult =
 			readonly selectedText?: string;
 	  };
 
+/** The outcome of a redirect: cancelled, or the conversation the client was redirected to. */
+export type RedirectForResult =
+	| { readonly cancelled: true }
+	| {
+			readonly cancelled: false;
+			/** The id of the conversation the client was redirected to. */
+			readonly sessionId: string;
+			/** Forks before a user message: that message's text. */
+			readonly selectedText?: string;
+	  };
+
 /** Thrown for a structural intent inside an owner-lifetime conversation. */
 export class PinnedConversationError extends Error {
 	constructor() {
@@ -183,6 +196,8 @@ export class ConversationHost {
 	private readonly attachments = new Map<string, Attachment>();
 	private readonly retention = new Map<HostedConversation, ReturnType<typeof setTimeout>>();
 	private readonly clientTails = new Map<string, Promise<unknown>>();
+	/** Sources an anchor is moving away from: they close with the anchor's move, not when another client leaves. */
+	private readonly anchorsLeaving = new Set<HostedConversation>();
 	private readonly openedListeners = new Set<(conversation: HostedConversation) => void>();
 	private readonly closedListeners = new Set<(conversation: HostedConversation) => void>();
 
@@ -532,11 +547,14 @@ export class ConversationHost {
 		if (to.closed) throw new Error("Cannot move to a closed conversation");
 		if (from?.lifetime === "owner") throw new PinnedConversationError();
 		const releaseSource = from?.holdForLeave();
+		const anchorLeaving = client.anchor === true && from !== undefined && !this.anchorsLeaving.has(from);
+		if (anchorLeaving) this.anchorsLeaving.add(from);
 		if (attachment) this.leave(attachment);
 		if (client.move.kind === "in_place") {
 			try {
 				await this.join(client, to);
 			} catch (error) {
+				if (anchorLeaving) this.anchorsLeaving.delete(from);
 				if (from && !from.closed) await this.join(client, from).catch(() => undefined);
 				releaseSource?.();
 				throw error;
@@ -549,6 +567,7 @@ export class ConversationHost {
 		} catch (error) {
 			errors.push(error);
 		}
+		if (anchorLeaving) this.anchorsLeaving.delete(from);
 		if (from) {
 			try {
 				const closed = await this.afterLeave(from, client, {
@@ -620,6 +639,98 @@ export class ConversationHost {
 			conversation: to,
 			...(moved.selectedText === undefined ? {} : { selectedText: moved.selectedText }),
 		};
+	}
+
+	/**
+	 * Write `target`'s log for `client`, which follows moves by redirect, then
+	 * redirect the client there and detach it from its conversation, which
+	 * stays open for its other clients (a phone relayed through a TUI). The log
+	 * is written through the catalog writer and closed again, so whichever host
+	 * the client reconnects through opens it: no conversation opens here and no
+	 * `session_start` fires. A `session` target writes nothing. The source's
+	 * extensions see `session_before_switch` or `session_before_fork` first and
+	 * may cancel; the source may be busy, since it stays open. `beforeMove` runs
+	 * once the log is written and `publish` with the written log before it
+	 * closes; a failure there, or before, keeps the client where it was.
+	 */
+	async redirectFor(
+		client: HostClient,
+		target: Exclude<ConversationTarget, { kind: "adopt" }>,
+		options: {
+			beforeMove?: (from: HostedConversation) => Promise<void>;
+			publish?: (written: SessionManager) => Promise<void>;
+		} = {},
+	): Promise<RedirectForResult> {
+		const move = client.move;
+		if (move.kind !== "redirect") throw new Error(`Client ${client.id} does not follow moves by redirect`);
+		return this.serialize(client.id, async (): Promise<RedirectForResult> => {
+			const from = this.conversationOf(client);
+			if (!from) throw new Error(`Client ${client.id} is not attached`);
+			if (from.closed) throw new Error("The source conversation is closed");
+			if (from.lifetime === "owner") throw new PinnedConversationError();
+			if (target.kind === "import" && !existsSync(resolvePath(target.path))) {
+				throw new SessionImportFileNotFoundError(resolvePath(target.path));
+			}
+			if (await this.emitBeforeLeave(from, target)) return { cancelled: true };
+			if (from.closed) throw new Error("The source conversation is closed");
+			let written: SessionManager | undefined;
+			let selectedText: string | undefined;
+			switch (target.kind) {
+				case "new":
+					written = await this.createNewSessionManager({ ...target, persist: true }, from);
+					break;
+				case "session":
+					if (target.ref.sessionId === from.id) {
+						throw new Error("Cannot redirect a client to the conversation it is on");
+					}
+					break;
+				case "fork": {
+					const branched = await this.createBranchedSessionManager(target.source, target.entryId, target.position);
+					written = branched.sessionManager;
+					selectedText = branched.selectedText;
+					break;
+				}
+				case "import":
+					written = await this.createImportedSessionManager(resolvePath(target.path), target, from);
+					break;
+			}
+			const sessionId = written?.getSessionId() ?? (target.kind === "session" ? target.ref.sessionId : undefined);
+			const targetSessionRef = written?.getSessionRef() ?? (target.kind === "session" ? target.ref : undefined);
+			if (sessionId === undefined || targetSessionRef === undefined) {
+				const error = new Error("A redirected client needs a stored conversation");
+				if (written)
+					await closeOwnedSessionManager(written, error, "Redirect failed and its log could not be closed");
+				throw error;
+			}
+			try {
+				await options.beforeMove?.(from);
+				if (written) await options.publish?.(written);
+			} catch (error) {
+				if (written)
+					await closeOwnedSessionManager(written, error, "Redirect failed and its log could not be closed");
+				throw error;
+			}
+			if (written) await closeLocalSessionManager(written);
+			const attachment = this.attachments.get(client.id);
+			if (attachment) this.leave(attachment);
+			const errors: unknown[] = [];
+			try {
+				await move.redirect(sessionId);
+			} catch (error) {
+				errors.push(error);
+			}
+			try {
+				await this.afterLeave(from, client, {
+					reason: target.kind === "fork" ? "fork" : target.kind === "new" ? "new" : "resume",
+					targetSessionRef,
+				});
+			} catch (error) {
+				errors.push(error);
+			}
+			if (errors.length === 1) throw errors[0];
+			if (errors.length > 1) throw new AggregateError(errors, "Conversation redirect did not complete");
+			return { cancelled: false, sessionId, ...(selectedText === undefined ? {} : { selectedText }) };
+		});
 	}
 
 	/** Close `conversation`, detaching its clients. Every caller joins one close. */
@@ -698,7 +809,7 @@ export class ConversationHost {
 			await this.close(conversation, event);
 			return true;
 		}
-		if (this.clientsOf(conversation).length > 0) return false;
+		if (this.anchorsLeaving.has(conversation) || this.clientsOf(conversation).length > 0) return false;
 		const rule = this.whenUnattached;
 		if (rule === "close") {
 			await this.close(conversation, event);

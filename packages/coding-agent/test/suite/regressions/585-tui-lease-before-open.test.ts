@@ -6,6 +6,7 @@ import { ConversationLock, ConversationLockedError } from "../../../src/core/con
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import {
 	type AcquireOutcome,
+	acquireDaemonLease,
 	createDisabledDaemonAttach,
 	type DaemonAttach,
 	DaemonLeaseUnavailableError,
@@ -38,7 +39,7 @@ function fakeAttach(acquire: () => Promise<AcquireOutcome>) {
 		start: vi.fn(async () => {
 			steps.push("start");
 		}),
-		acquire: vi.fn(async (sessionId: string) => {
+		acquire: vi.fn(async (sessionId: string, _cwd?: string) => {
 			steps.push(`acquire:${sessionId}`);
 			return acquire();
 		}),
@@ -176,5 +177,20 @@ describe("regression #585: the TUI takes its daemon lease before opening a sessi
 			openSessionWithDaemonLease(ref, { createAttach: () => granted.attach, onWaiting: () => () => {} }),
 		).rejects.toBeInstanceOf(ConversationLockedError);
 		expect(granted.steps.at(-1)).toBe("dispose");
+	});
+
+	it("leases a session the running TUI switches to in that session's directory, keeping its integration", async () => {
+		const granted = fakeAttach(async () => ({ kind: "granted", handoff: "none" }));
+		await expect(
+			acquireDaemonLease(granted.attach, "s-2", { cwd: "/elsewhere", onWaiting: () => () => {} }),
+		).resolves.toBe(true);
+		expect(granted.attach.acquire).toHaveBeenCalledWith("s-2", "/elsewhere");
+
+		const denied = fakeAttach(async () => ({ kind: "denied", reason: "held_by_tui" }));
+		await expect(
+			acquireDaemonLease(denied.attach, "s-3", { cwd: "/elsewhere", onWaiting: () => () => {} }),
+		).rejects.toBeInstanceOf(DaemonLeaseUnavailableError);
+		// Only startup disposes an integration it created; the running TUI keeps its own.
+		expect(denied.steps).toEqual(["acquire:s-3"]);
 	});
 });

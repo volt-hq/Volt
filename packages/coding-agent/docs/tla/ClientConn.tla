@@ -142,7 +142,7 @@ MarkTerminal ==
     /\ UNCHANGED << status, dials, loopActive, userDisc, background, netOK, turnAborted,
                     wIllegalReconnect, wTerminalEscape, wAbortDropped >>
 
-\* Expected hand-off closure (lease_transferred / session_rekeyed_reconnect):
+\* Expected hand-off closure (lease_transferred / conversation_moved):
 \* consume the marker and reconnect cleanly -- no surprise disconnect.
 LoseStreamHandoff ==
     /\ status = "live"

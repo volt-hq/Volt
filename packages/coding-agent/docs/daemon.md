@@ -308,10 +308,10 @@ conversation at a time:
   which serves it from its in-process session. Prompts from either side appear
   on both; the TUI footer shows `📱 n` while phones are attached.
 - **daemon-draining** — a TUI asked to take over while a remote turn is
-  streaming. The TUI prints a waiting line (the interrupt key stops the remote
-  turn, Ctrl+C cancels the open), phones get transient
-  `lease_draining` errors on new prompts, and ownership transfers at the turn
-  boundary.
+  streaming. At startup the TUI prints a waiting line, and `/resume` shows the
+  wait in the TUI (the interrupt key stops the remote turn, Ctrl+C cancels the
+  open); phones get transient `lease_draining` errors on new prompts, and
+  ownership transfers at the turn boundary.
 
 Every process that writes a session holds that session's lock (see
 [Sessions](sessions.md#one-volt-process-per-session)), so the TUI takes the
@@ -321,9 +321,22 @@ another Volt process (for example `volt -p` or an SDK embedding) has open is
 rejected with `conversation_locked`.
 
 Handoffs are invisible on the phone: when a TUI takes over or quits, the
-daemon closes phone streams with reason `lease_transferred` and the app
-reconnects immediately to the new owner. Abort is non-destructive everywhere:
-stopping a turn never closes streams or disposes runtimes.
+phone stream ends with reason `lease_transferred` and the app reconnects
+immediately to the new owner. Abort is non-destructive everywhere: stopping a
+turn never closes streams or disposes runtimes.
+
+Each session keeps its own lease. When the TUI starts or switches to another
+session (`/new`, `/resume`, `/fork`, `/clone`, `/import`, `/worktree`, or an
+extension), it opens the new session, closes the one it left, releases that
+session's lease, and takes the new session's lease; `/resume` takes the
+target's lease before it opens it. Phones on the session the TUI left stay on
+it: their streams end with `lease_transferred`, and they reconnect to the same
+session, which the daemon hosts again. A phone relayed through the TUI that
+starts a new session, forks, or switches moves alone: the TUI writes the new
+session and stays on its own, and the phone's stream ends with
+`conversation_moved` naming the new session, which the phone reconnects to
+through the daemon. Executing a plan in a new session is not available from a
+relayed phone; execute it in the current context or from the desktop.
 
 When the TUI owns the lease, phone prompts run with the TUI session's full
 local tool set. `remote.allowTools` applies only to daemon-owned headless

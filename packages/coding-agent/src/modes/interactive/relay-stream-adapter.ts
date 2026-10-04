@@ -11,10 +11,9 @@ export interface RelayedIrohStreamLike extends IrohBiStreamLike {
 
 /**
  * Wrap a relay unix-socket Duplex in the Iroh stream shape consumed by
- * runIrohRemoteRpcMode. The adapter writes no close-reason trailer: the daemon
- * owns close-reason signaling to the phone, so a TUI-initiated destroy
- * surfaces as a generic closure (lease release/rekey closures are executed by
- * the daemon with proper reasons).
+ * runIrohRemoteRpcMode. The adapter writes no close-reason trailer: a
+ * TUI-initiated destroy surfaces as a generic closure. A stream that ends on
+ * purpose writes its `remote_terminal` frame first and finishes gracefully.
  */
 export function adaptRelaySocketToIrohStream(socket: Duplex): RelayedIrohStreamLike {
 	const chunks: Buffer[] = [];

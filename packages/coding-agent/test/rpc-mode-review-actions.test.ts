@@ -363,7 +363,7 @@ function makeRuntimeHost(
 		newSession: vi.fn(
 			async (newSessionOptions?: {
 				setup?: (writer: SessionWriter) => Promise<void>;
-				beforeMove?: (source: HostedConversation, target: HostedConversation) => Promise<void>;
+				beforeMove?: (source: HostedConversation) => Promise<void>;
 				withSession?: (ctx: { sendMessage(message: object): Promise<void> }) => Promise<void>;
 			}) => {
 				const sessionManager = SessionManager.inMemory("/workspace");
@@ -375,10 +375,7 @@ function makeRuntimeHost(
 					options.seedMessages?.push({ customType, content, display, details });
 				}
 				const target = makeSession("review-session", sessionManager);
-				await newSessionOptions?.beforeMove?.(
-					{ session: currentSession } as unknown as HostedConversation,
-					{ session: target } as unknown as HostedConversation,
-				);
+				await newSessionOptions?.beforeMove?.({ session: currentSession } as unknown as HostedConversation);
 				options.replacementManagers?.push(sessionManager);
 				currentSession = target;
 				await newSessionOptions?.withSession?.({

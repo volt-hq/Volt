@@ -32,6 +32,7 @@ import {
 	WorktreeRetentionSweeper,
 } from "../../../src/daemon/worktree-manager.ts";
 import { main } from "../../../src/main.ts";
+import { createDisabledDaemonAttach } from "../../../src/modes/interactive/daemon-attach.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
 import { registerOnCreatedModelRegistries } from "../../utilities.ts";
 import { createHarness } from "../harness.ts";
@@ -670,6 +671,7 @@ describe("#442 local archived-worktree resume", () => {
 		const showError = vi.fn();
 		const context = Object.assign(Object.create(InteractiveMode.prototype), {
 			runtimeHost: runtime,
+			daemonAttach: createDisabledDaemonAttach(),
 			statusContainer: { clear: vi.fn() },
 			showError,
 		}) as InteractiveMode;

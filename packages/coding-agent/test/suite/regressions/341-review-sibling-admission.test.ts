@@ -64,9 +64,6 @@ async function fixture() {
 		commitTuiLeaseHandoff: (ws, id, connection) => coordinators.getOrCreate(ws, id).commitTuiLeaseHandoff(connection),
 		cancelTuiLeaseHandoff: (ws, id, connection) => coordinators.get(ws, id)?.cancelTuiLeaseHandoff(connection),
 		releaseTuiLease: (ws, id, connection) => coordinators.get(ws, id)?.releaseTuiLease(connection),
-		prepareTuiLeaseRekey: () => {},
-		commitTuiLeaseRekey: () => {},
-		rollbackTuiLeaseRekey: () => {},
 	});
 	coordinators.bindLeaseBroker(broker);
 	const factory: CreateAgentSessionRuntimeFactory = async ({ sessionManager, cwd, agentDir }) => {

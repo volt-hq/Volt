@@ -3,6 +3,7 @@ import type { ExtensionUIContext } from "../../src/core/extensions/index.ts";
 import { PinnedConversationError } from "../../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import type { HostClient } from "../../src/core/host/targets.ts";
+import { findSessionInfoById, SessionManager } from "../../src/core/session-manager.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions, moved } from "./host-harness.ts";
 
 /** A UI surface that records the statuses it shows. */
@@ -212,6 +213,66 @@ describe("ConversationHost", () => {
 		expect(harness.host.conversationOf(phone)).toBeUndefined();
 		expect(source.closed).toBe(true);
 		expect(result.conversation.closed).toBe(false);
+	});
+
+	it("writes a redirected client's new log and leaves its source open for the other clients", async () => {
+		const harness = await setup();
+		const source = await harness.openStartup();
+		const anchor = harness.client("tui", { anchor: true });
+		await harness.host.attach(anchor, source);
+		const redirects: string[] = [];
+		const phone: HostClient = {
+			id: "phone",
+			move: { kind: "redirect", redirect: (sessionId) => void redirects.push(sessionId) },
+		};
+		await harness.host.attach(phone, source);
+		const sourceWrites: string[] = [];
+
+		const result = await harness.host.redirectFor(
+			phone,
+			{ kind: "new", seed: (writer) => writer.appendSessionInfo("for the phone") },
+			{ beforeMove: async (from) => void sourceWrites.push(from.id) },
+		);
+		if (result.cancelled) throw new Error("the redirect was cancelled");
+
+		expect(redirects).toEqual([result.sessionId]);
+		expect(sourceWrites).toEqual([source.id]);
+		expect(harness.host.conversationOf(phone)).toBeUndefined();
+		// The source stays open for the anchor; the new log never opened here.
+		expect(source.closed).toBe(false);
+		expect(harness.host.list()).toEqual([source]);
+		expect(harness.events.map((event) => event.type)).toEqual(["session_start", "session_before_switch"]);
+		const info = await findSessionInfoById(source.session.sessionManager.getSessionDir(), result.sessionId);
+		if (!info) throw new Error("the new log is not stored");
+		const written = await SessionManager.openReadOnly(info.ref);
+		expect(written.getSessionName()).toBe("for the phone");
+		await written.closePersistence();
+	});
+
+	it("closes a source its anchor is leaving with the anchor's move, even when another client leaves meanwhile", async () => {
+		const harness = await setup();
+		const source = await harness.openStartup();
+		const phone: HostClient = { id: "phone", move: { kind: "redirect", redirect: () => {} } };
+		const anchor: HostClient = {
+			id: "tui",
+			anchor: true,
+			surface: { mode: "print" },
+			move: {
+				kind: "in_place",
+				// The phone disconnects while the anchor's move is under way.
+				onMoved: () => harness.host.detach(phone),
+			},
+		};
+		await harness.host.attach(anchor, source);
+		await harness.host.attach(phone, source);
+
+		const result = moved(await harness.host.openFor(anchor, { kind: "new" }));
+
+		expect(source.closed).toBe(true);
+		expect(harness.events.filter((event) => event.type === "session_shutdown")).toEqual([
+			expect.objectContaining({ type: "session_shutdown", reason: "new", sessionId: source.id }),
+		]);
+		expect(harness.host.list()).toEqual([result.conversation]);
 	});
 
 	it("runs one client's structural intents one at a time", async () => {
