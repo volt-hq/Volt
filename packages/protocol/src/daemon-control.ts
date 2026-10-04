@@ -15,8 +15,11 @@
 
 import { type Static, type TSchema, type TString, Type } from "typebox";
 import { SessionReferenceSchema } from "./entries.ts";
-import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
+import { AcceptedFrameSchema, QueryErrorFrameSchema, RejectedFrameSchema, ResultFrameSchema } from "./frames.ts";
+import { openStringEnum, stringEnum } from "./helpers.ts";
+import { type BuiltinIntentName, INTENT_FRAME_SCHEMAS, type IntentFrameEnvelope, type IntentInput } from "./intents.ts";
 import { IrohRemotePushNotificationDeliveryStatusSchema, IrohRemotePushNotificationSchema } from "./push.ts";
+import { QUERY_FRAME_SCHEMAS, type QueryFrame, type QueryName } from "./queries.ts";
 import { RemoteAccessPresetNameSchema, RemoteCapabilitiesSchema, RemoteGrantSchema } from "./remote-access.ts";
 import {
 	IrohRemoteHandshakeSuccessSchema,
@@ -247,26 +250,48 @@ const explicitAccess = {
 };
 
 /**
- * A phone RPC command forwarded verbatim from a TUI-served conversation for
- * the daemon to execute against its state. The daemon validates it per
- * command type and answers unsupported types with an error.
+ * The intents a TUI serving a relayed phone forwards to the daemon, which
+ * executes them against its own state: push targets, workspace registration
+ * and worktrees, keep-awake, and the web search key.
  */
-export const ControlRelayRpcCommandSchema = Type.Unsafe<Record<string, unknown> & { type: string }>(
-	Type.Object(
-		{ type: Type.String() },
-		{ ...open, description: "A phone RPC command, validated by the daemon per command type." },
-	),
+export const RELAY_INTENT_NAMES = [
+	"register_push_target",
+	"unregister_workspace",
+	"create_worktree",
+	"set_keep_awake",
+	"set_web_search_key",
+] as const satisfies readonly BuiltinIntentName[];
+
+/** The queries a TUI serving a relayed phone forwards to the daemon. */
+export const RELAY_QUERY_NAMES = [
+	"sessions",
+	"worktrees",
+	"host_status",
+	"web_search_status",
+] as const satisfies readonly QueryName[];
+
+export type RelayIntentName = (typeof RELAY_INTENT_NAMES)[number];
+export type RelayQueryName = (typeof RELAY_QUERY_NAMES)[number];
+export type ControlRelayFrame =
+	| { [K in RelayIntentName]: IntentFrameEnvelope & { type: K; input?: IntentInput<K> } }[RelayIntentName]
+	| Extract<QueryFrame, { query: RelayQueryName }>;
+
+/** A relayed phone's intent or query frame, forwarded as the phone sent it. */
+export const ControlRelayFrameSchema = Type.Unsafe<ControlRelayFrame>(
+	Type.Union([
+		...RELAY_INTENT_NAMES.map((name): TSchema => INTENT_FRAME_SCHEMAS[name]),
+		...RELAY_QUERY_NAMES.map((name): TSchema => QUERY_FRAME_SCHEMAS[name]),
+	]),
 );
 
-/**
- * The RPC response the TUI forwards to the phone verbatim. Relayed commands
- * include remote-only commands the RPC contract does not declare yet, so the
- * control plane carries the response as an opaque object.
- */
-export const ControlRelayRpcResponseSchema = Type.Record(Type.String(), Type.Unknown(), {
-	"x-volt-opaque": "the RPC response to a relayed phone command, forwarded verbatim",
-});
-export type ControlRelayRpcResponse = Static<typeof ControlRelayRpcResponseSchema>;
+/** The daemon's outcome for a relayed frame: what the TUI writes to the phone. */
+export const ControlRelayOutcomeSchema = Type.Union([
+	AcceptedFrameSchema,
+	RejectedFrameSchema,
+	ResultFrameSchema,
+	QueryErrorFrameSchema,
+]);
+export type ControlRelayOutcome = Static<typeof ControlRelayOutcomeSchema>;
 
 // ============================================================================
 // Hello, ack, fatal, relay preamble
@@ -487,17 +512,16 @@ export const CONTROL_REQUEST_SCHEMAS = {
 	theme_set: withId("theme_set", { theme: Type.String() }),
 	/** Hold or release the host sleep-prevention assertion. */
 	keep_awake_set: withId("keep_awake_set", { enabled: Type.Boolean() }),
-	viewer_subscribe: withId("viewer_subscribe", { viewerFeedId: Type.String() }),
-	viewer_unsubscribe: withId("viewer_unsubscribe", { viewerFeedId: Type.String() }),
+	/** Stop the draining runtime's turn (the lease drain's interrupt). */
 	viewer_abort: withId("viewer_abort", { viewerFeedId: Type.String() }),
 	relay_rpc: withId("relay_rpc", {
-		/** The active relay whose phone command is forwarded. */
+		/** The active relay whose phone frame is forwarded. */
 		relayId: Type.String(),
 		clientNodeId: Type.String(),
 		workspaceName: Type.String(),
 		/** The TUI's current session id for the relayed conversation. */
 		sessionId: Type.String(),
-		command: ControlRelayRpcCommandSchema,
+		frame: ControlRelayFrameSchema,
 	}),
 	relay_notification_delivery: withId("relay_notification_delivery", {
 		clientNodeId: Type.String(),
@@ -533,8 +557,6 @@ export const ControlRequestSchema = Type.Union([
 	CONTROL_REQUEST_SCHEMAS.worktree_bind,
 	CONTROL_REQUEST_SCHEMAS.theme_set,
 	CONTROL_REQUEST_SCHEMAS.keep_awake_set,
-	CONTROL_REQUEST_SCHEMAS.viewer_subscribe,
-	CONTROL_REQUEST_SCHEMAS.viewer_unsubscribe,
 	CONTROL_REQUEST_SCHEMAS.viewer_abort,
 	CONTROL_REQUEST_SCHEMAS.relay_rpc,
 	CONTROL_REQUEST_SCHEMAS.relay_notification_delivery,
@@ -606,11 +628,7 @@ export const CONTROL_RESPONSE_SCHEMAS = {
 		),
 	}),
 	pair_started: withId("pair_started", { requestId: Type.String() }),
-	relay_rpc_result: withId("relay_rpc_result", {
-		response: ControlRelayRpcResponseSchema,
-		/** Refreshed workspace catalog after a successful unregister_workspace. */
-		workspaceMetadata: Type.Optional(IrohRemoteWorkspaceMetadataSnapshotSchema),
-	}),
+	relay_rpc_result: withId("relay_rpc_result", { frame: ControlRelayOutcomeSchema }),
 	relay_push_delivery_result: withId("relay_push_delivery_result", {
 		status: IrohRemotePushNotificationDeliveryStatusSchema,
 	}),
@@ -655,13 +673,6 @@ export const CONTROL_EVENT_SCHEMAS = {
 		streamId: Type.String(),
 	}),
 	relay_closed: event("relay_closed", { relayId: Type.String(), reason: ControlRelayCloseReasonSchema }),
-	viewer_event: event("viewer_event", {
-		viewerFeedId: Type.String(),
-		seq: NonNegativeIntegerSchema,
-		event: opaque<unknown>(
-			"a draining daemon runtime's session event as JSON, or {kind: 'truncated'} after a buffer overflow; deleted with the viewer feed",
-		),
-	}),
 	viewer_end: event("viewer_end", {
 		viewerFeedId: Type.String(),
 		reason: stringEnum(["granted", "cancelled", "error"]),
@@ -685,7 +696,6 @@ export const CONTROL_EVENT_SCHEMAS = {
 export const ControlEventSchema = Type.Union([
 	CONTROL_EVENT_SCHEMAS.relay_offer,
 	CONTROL_EVENT_SCHEMAS.relay_closed,
-	CONTROL_EVENT_SCHEMAS.viewer_event,
 	CONTROL_EVENT_SCHEMAS.viewer_end,
 	CONTROL_EVENT_SCHEMAS.theme_snapshot,
 	CONTROL_EVENT_SCHEMAS.keep_awake_changed,

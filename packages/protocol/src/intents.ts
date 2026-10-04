@@ -500,7 +500,7 @@ export const IntentFrameSchema: TUnion<TSchema[]> = Type.Union([
 	DynamicIntentFrameSchema,
 ]);
 
-interface IntentFrameEnvelope {
+export interface IntentFrameEnvelope {
 	intentId: string;
 	conversation?: string;
 	expectedOrdinal?: number;

@@ -6,10 +6,8 @@
  * is remote-safe and its `requires` is within the grant.
  *
  * The oracle is a frozen copy of the legacy rules (access-grant.ts,
- * rpc-command-filter.ts, and host-actions.ts at 31ad0fe83). The test also
- * checks that the live legacy filters still equal the copy, so the registry,
- * the copy, and the production filters agree until the protocol cut-over
- * deletes the filters.
+ * rpc-command-filter.ts, and host-actions.ts at 31ad0fe83); the remote
+ * cut-over deleted the filters themselves.
  */
 
 import {
@@ -31,15 +29,7 @@ import {
 	intentRegistry,
 } from "../../src/core/protocol/intents/index.ts";
 import { QueryRejectedError, queryRegistry } from "../../src/core/protocol/queries/index.ts";
-import {
-	createIrohRemoteRpcGrant,
-	getIrohRemoteRpcCommandCapabilities,
-} from "../../src/core/remote/iroh/access-grant.ts";
-import {
-	getIrohRemoteRpcFilterResult,
-	getStaticIrohRemoteRpcFilterResult,
-	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
-} from "../../src/core/remote/iroh/rpc-command-filter.ts";
+import { createIrohRemoteRpcGrant } from "../../src/core/remote/iroh/access-grant.ts";
 import {
 	isReviewDiscussionHostActionAllowed,
 	REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE,
@@ -522,19 +512,33 @@ async function registryDecision(
 	return "allowed";
 }
 
+/** The legacy conversation-stream filter's allowlist decision, before the grant. */
+function legacyStaticAllowed(command: Record<string, unknown> & { type: string }): boolean {
+	if (command.type === "invoke_ui_action" || command.type === "get_ui_action_completions") {
+		const action = command.action;
+		return (
+			typeof action === "string" &&
+			action.length > 0 &&
+			(LEGACY_REMOTE_SAFE_UI_ACTIONS.has(action) ||
+				["extension.command.", "prompt.template.", "skill."].some((prefix) => action.startsWith(prefix)))
+		);
+	}
+	if (command.type === "start_mcp_server_auth") {
+		return command.flow === "device" && typeof command.redirectUrl !== "string";
+	}
+	if (command.type === "get_messages") return false;
+	return command.type === "get_session_tree" || LEGACY_PASSTHROUGH.includes(command.type);
+}
+
 /** The legacy decision: the conversation-stream filter, or the capability gate of workspace streams. */
 function legacyDecision(
 	command: Record<string, unknown> & { type: string },
 	grant: RemoteGrant,
 ): "allowed" | RemoteCapability | "unsafe" {
-	if (LEGACY_WORKSPACE_STREAM_COMMANDS.includes(command.type)) {
-		const required = legacyRequires(command) ?? [];
-		return required.find((capability) => !grant.capabilities.includes(capability)) ?? "allowed";
-	}
-	const result = getIrohRemoteRpcFilterResult(JSON.stringify({ id: "parity", ...command }), grant);
-	if (result.allowed) return "allowed";
-	const error = result.response.error;
-	return typeof error === "object" ? error.requiredCapability : "unsafe";
+	if (!LEGACY_WORKSPACE_STREAM_COMMANDS.includes(command.type) && !legacyStaticAllowed(command)) return "unsafe";
+	const required = legacyRequires(command);
+	if (required === undefined) return "unsafe";
+	return required.find((capability) => !grant.capabilities.includes(capability)) ?? "allowed";
 }
 
 /** Every grant: each subset of the remote capabilities. */
@@ -580,32 +584,6 @@ describe("intent and query registries cover the protocol", () => {
 	});
 });
 
-describe("the live legacy filters still equal the frozen oracle", () => {
-	it("keeps the passthrough allowlist", () => {
-		expect([...IROH_REMOTE_RPC_PASSTHROUGH_TYPES]).toEqual(LEGACY_PASSTHROUGH);
-	});
-
-	it("keeps every command's capability classification", () => {
-		const commands = [
-			...Object.keys(LEGACY_COMMANDS).map((type) => ({ type })),
-			...VARIANTS.map((variant) => variant.command),
-			{ type: "set_client_capabilities", features: ["host_action_requests.v1"] },
-		];
-		for (const command of commands) {
-			expect(getIrohRemoteRpcCommandCapabilities(command), command.type).toEqual(legacyRequires(command));
-		}
-	});
-
-	it("keeps the remote-safe built-in UI actions", () => {
-		for (const action of [...LEGACY_REMOTE_SAFE_UI_ACTIONS, ...LEGACY_LOCAL_UI_ACTIONS]) {
-			const result = getStaticIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: `${action}-1`, type: "invoke_ui_action", action }),
-			);
-			expect(result.allowed, action).toBe(LEGACY_REMOTE_SAFE_UI_ACTIONS.has(action));
-		}
-	});
-});
-
 describe("commands keep their capability requirements", () => {
 	it("requires exactly the legacy capabilities for every command an intent or query serves", () => {
 		for (const [type, mapping] of Object.entries(LEGACY_COMMANDS)) {
@@ -645,7 +623,7 @@ describe("commands keep their remote safety", () => {
 			expect(safe, type).toBe(remoteCommands.includes(type) || type === "get_ui_action_completions");
 		}
 		for (const { command, mapping } of VARIANTS) {
-			const legacyAllowed = getStaticIrohRemoteRpcFilterResult(JSON.stringify({ id: "v", ...command })).allowed;
+			const legacyAllowed = legacyStaticAllowed(command);
 			expect(mappedRemoteSafe(mapping), JSON.stringify(command)).toBe(legacyAllowed);
 		}
 	});

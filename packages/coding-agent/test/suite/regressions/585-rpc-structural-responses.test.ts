@@ -1,27 +1,15 @@
-import { RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
+import { AcceptedFrameSchema, type HostFrame } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
-import { afterEach, describe, expect, it } from "vitest";
-import { createLoopbackRpcTransportPair, type RpcTransport } from "../../../src/core/rpc/index.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient, type LoopbackClient } from "../../../src/client/protocol-client.ts";
 import { createHostHarness, type HostHarness } from "../host-harness.ts";
 
-type StructuralCommand = "new_session" | "switch_session" | "switch_session_by_id" | "fork" | "clone";
+type StructuralIntent = "new_session" | "switch_session" | "fork" | "clone";
+type AcceptedFrame = Extract<HostFrame, { type: "accepted" }>;
 
-/** The server side of a loopback pair that keeps a copy of every frame it writes. */
-function recording(transport: RpcTransport, frames: Array<Record<string, unknown>>): RpcTransport {
-	return {
-		write: (value) => {
-			frames.push(structuredClone(value) as Record<string, unknown>);
-			return transport.write(value);
-		},
-		onLine: (handler) => transport.onLine(handler),
-		onClose: (handler) => transport.onClose?.(handler) ?? (() => {}),
-		close: () => transport.close(),
-	};
-}
+const checkAccepted = Compile(AcceptedFrameSchema);
 
-describe("regression #585: stdio RPC structural commands respond with the session id", () => {
+describe("regression #585: structural intents answer with the conversation the client moved to", () => {
 	const cleanups: Array<() => Promise<void>> = [];
 	afterEach(async () => {
 		while (cleanups.length > 0) await cleanups.pop()?.();
@@ -37,106 +25,125 @@ describe("regression #585: stdio RPC structural commands respond with the sessio
 		});
 		const source = await harness.openStartup();
 		await source.session.prompt("first prompt");
-		const frames: Array<Record<string, unknown>> = [];
-		const pair = createLoopbackRpcTransportPair();
-		const client = new RpcTransportClient({ transport: pair.client });
-		await client.start();
-		const ready = Promise.withResolvers<void>();
-		const closed = runLegacyRemoteRpcMode(harness.host, source, {
-			transport: recording(pair.server, frames),
-			onReady: ready.resolve,
+		const frames: HostFrame[] = [];
+		const client: LoopbackClient = await createLoopbackClient(harness.host, source, {
+			onFrame: (frame) => frames.push(frame),
 		});
-		await Promise.race([ready.promise, closed]);
 		cleanups.push(async () => {
 			await client.stop();
-			await closed.catch(() => undefined);
 			await harness.cleanup();
 		});
-		/** Every structural response frame so far, checked against its contract schema. */
-		const responses = (command: StructuralCommand) => {
-			const matching = frames.filter((frame) => frame.type === "response" && frame.command === command);
-			for (const frame of matching) expect(Compile(RPC_RESPONSE_SCHEMAS[command]).Errors(frame)).toEqual([]);
-			return matching.map((frame) => frame.data);
+		const intentNames = new Map<string, StructuralIntent>();
+		/** Send a structural intent; once it moved the client, wait until the client follows. */
+		const run = async (name: StructuralIntent, input: Record<string, unknown> = {}): Promise<AcceptedFrame> => {
+			const accepted = await client.intent(name, input);
+			intentNames.set(accepted.intentId, name);
+			if (accepted.conversation !== undefined) {
+				await vi.waitFor(() => expect(client.conversation).toBe(accepted.conversation));
+				await client.caughtUp();
+			}
+			return accepted;
 		};
-		/** The session of the one conversation the RPC client is on: the host closes each it leaves. */
+		/** Every acceptance of `name` so far, checked against the frame schema: its conversation and result. */
+		const outcomes = (name: StructuralIntent) => {
+			const matching = frames.filter(
+				(frame): frame is AcceptedFrame => frame.type === "accepted" && intentNames.get(frame.intentId) === name,
+			);
+			for (const frame of matching) expect([...checkAccepted.Errors(frame)]).toEqual([]);
+			return matching.map((frame) => ({
+				...(frame.conversation === undefined ? {} : { conversation: frame.conversation }),
+				...(frame.result === undefined ? {} : { result: frame.result }),
+			}));
+		};
+		/** The session of the one conversation the client is on: the host closes each it leaves. */
 		const currentSessionId = () => {
 			const [conversation, ...others] = harness.host.list();
 			if (!conversation || others.length > 0) throw new Error("Expected one open conversation");
 			return conversation.id;
 		};
+		/** The id of the first user message the client's fold holds. */
+		const firstUserEntry = () => {
+			const entry = client.state.entries.find(
+				(candidate) => candidate.type === "message" && candidate.view?.role === "user",
+			);
+			if (!entry) throw new Error("Expected a user message");
+			return entry.id;
+		};
 		return {
 			currentSessionId,
 			client,
-			responses,
+			run,
+			outcomes,
+			firstUserEntry,
 			cancelNext: (value: boolean) => {
 				cancel = value;
 			},
 		};
 	}
 
-	it("responds to each structural command with the session the client is on now", async () => {
-		const { currentSessionId, client, responses } = await setup();
+	it("answers each structural intent with the conversation the client is on now", async () => {
+		const { currentSessionId, client, run, outcomes, firstUserEntry } = await setup();
 		const first = currentSessionId();
 
-		const created = await client.newSession();
+		const created = await run("new_session");
 		const second = currentSessionId();
 		expect(second).not.toBe(first);
-		expect(created).toEqual({ cancelled: false, sessionId: second });
-		await expect(client.getState()).resolves.toMatchObject({ sessionId: second });
+		expect(created).toMatchObject({ conversation: second });
+		expect(client.conversation).toBe(second);
 
-		await expect(client.switchSession(first)).resolves.toEqual({ cancelled: false, sessionId: first });
-		await expect(client.switchSessionById(second)).resolves.toEqual({ cancelled: false, sessionId: second });
-		// A switch to the session the client is on moves nothing and names it.
-		await expect(client.switchSessionById(second)).resolves.toEqual({ cancelled: false, sessionId: second });
+		await expect(run("switch_session", { sessionId: first })).resolves.toMatchObject({ conversation: first });
+		await expect(run("switch_session", { sessionId: second })).resolves.toMatchObject({ conversation: second });
+		// A switch to the conversation the client is on moves nothing and names it.
+		await expect(run("switch_session", { sessionId: second })).resolves.toMatchObject({ conversation: second });
 		expect(currentSessionId()).toBe(second);
+		expect(client.conversation).toBe(second);
 
-		await client.switchSessionById(first);
-		const [forkFrom] = await client.getForkMessages();
-		const forked = await client.fork(forkFrom!.entryId);
+		await run("switch_session", { sessionId: first });
+		const forked = await run("fork", { entryId: firstUserEntry() });
 		const third = currentSessionId();
-		expect(forked).toEqual({ cancelled: false, sessionId: third, text: "first prompt" });
+		expect(forked).toMatchObject({ conversation: third, result: { text: "first prompt" } });
 		expect(new Set([first, second, third]).size).toBe(3);
 
 		await client.prompt("fork prompt");
-		await client.waitForIdle();
-		const cloned = await client.clone();
+		await client.waitForIdle(10_000);
+		const cloned = await run("clone");
 		const fourth = currentSessionId();
-		expect(cloned).toEqual({ cancelled: false, sessionId: fourth });
+		expect(cloned).toMatchObject({ conversation: fourth });
 		expect(fourth).not.toBe(third);
-		await expect(client.getState()).resolves.toMatchObject({ sessionId: fourth });
+		expect(client.conversation).toBe(fourth);
 
-		expect(responses("new_session")).toEqual([{ cancelled: false, sessionId: second }]);
-		expect(responses("switch_session")).toEqual([{ cancelled: false, sessionId: first }]);
-		expect(responses("switch_session_by_id")).toEqual([
-			{ cancelled: false, sessionId: second },
-			{ cancelled: false, sessionId: second },
-			{ cancelled: false, sessionId: first },
+		expect(outcomes("new_session")).toEqual([{ conversation: second }]);
+		expect(outcomes("switch_session")).toEqual([
+			{ conversation: first },
+			{ conversation: second },
+			{ conversation: second },
+			{ conversation: first },
 		]);
-		expect(responses("fork")).toEqual([{ cancelled: false, sessionId: third, text: "first prompt" }]);
-		expect(responses("clone")).toEqual([{ cancelled: false, sessionId: fourth }]);
+		expect(outcomes("fork")).toEqual([{ conversation: third, result: { text: "first prompt" } }]);
+		expect(outcomes("clone")).toEqual([{ conversation: fourth }]);
 	});
 
-	it("responds with only cancelled: true when an extension cancels, and keeps the client on its session", async () => {
-		const { currentSessionId, client, responses, cancelNext } = await setup();
+	it("answers only cancelled: true when an extension cancels, and keeps the client on its conversation", async () => {
+		const { currentSessionId, client, run, outcomes, firstUserEntry, cancelNext } = await setup();
 		const first = currentSessionId();
-		const created = await client.newSession();
-		if (created.cancelled) throw new Error("Expected the new session");
-		await client.switchSessionById(first);
-		const [forkFrom] = await client.getForkMessages();
+		const created = await run("new_session");
+		if (created.conversation === undefined) throw new Error("Expected the new session");
+		await run("switch_session", { sessionId: first });
+		const forkFrom = firstUserEntry();
 		cancelNext(true);
 
-		await expect(client.newSession()).resolves.toEqual({ cancelled: true });
-		await expect(client.switchSession(created.sessionId)).resolves.toEqual({ cancelled: true });
-		await expect(client.switchSessionById(created.sessionId)).resolves.toEqual({ cancelled: true });
-		await expect(client.fork(forkFrom!.entryId)).resolves.toEqual({ cancelled: true });
-		await expect(client.clone()).resolves.toEqual({ cancelled: true });
+		await expect(run("new_session")).resolves.not.toHaveProperty("conversation");
+		await expect(run("switch_session", { sessionId: created.conversation })).resolves.not.toHaveProperty(
+			"conversation",
+		);
+		await expect(run("fork", { entryId: forkFrom })).resolves.not.toHaveProperty("conversation");
+		await expect(run("clone")).resolves.not.toHaveProperty("conversation");
 
 		expect(currentSessionId()).toBe(first);
-		await expect(client.getState()).resolves.toMatchObject({ sessionId: first });
-		expect(responses("new_session").at(-1)).toEqual({ cancelled: true });
-		expect(responses("switch_session")).toEqual([{ cancelled: true }]);
-		expect(responses("switch_session_by_id").at(-1)).toEqual({ cancelled: true });
-		expect(responses("fork")).toEqual([{ cancelled: true }]);
-		expect(responses("clone")).toEqual([{ cancelled: true }]);
+		expect(client.conversation).toBe(first);
+		expect(outcomes("new_session").at(-1)).toEqual({ result: { cancelled: true } });
+		expect(outcomes("switch_session").at(-1)).toEqual({ result: { cancelled: true } });
+		expect(outcomes("fork")).toEqual([{ result: { cancelled: true } }]);
+		expect(outcomes("clone")).toEqual([{ result: { cancelled: true } }]);
 	});
 });

@@ -77,7 +77,7 @@ describe("daemon background job retention", () => {
 				{
 					hello: {
 						type: "volt_iroh_hello",
-						protocol: "volt-rpc/0",
+						protocol: "volt/1",
 						workspace: "workspace",
 						mode: "conversation",
 						conversation: { target: "session", sessionId: session.sessionId },

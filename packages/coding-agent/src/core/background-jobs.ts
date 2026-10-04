@@ -88,6 +88,20 @@ interface JobRecord {
 }
 
 /** Session-owned work. Completion never starts an inference request or writes a transcript. */
+/** Longest job label, in UTF-16 units. */
+const JOB_LABEL_MAX_CHARS = 200;
+
+/**
+ * A job label within its bound: cut at a space, so a path in it is shown
+ * whole or not at all, and ending in `…` when cut.
+ */
+function boundJobLabel(label: string): string {
+	if (label.length <= JOB_LABEL_MAX_CHARS) return label;
+	const cut = label.slice(0, JOB_LABEL_MAX_CHARS - 1);
+	const space = cut.search(/\s\S*$/u);
+	return `${space > 0 ? cut.slice(0, space) : cut}…`;
+}
+
 export class BackgroundJobManager {
 	private readonly options: BackgroundJobManagerOptions;
 	private readonly admissionGate: AdmissionGate;
@@ -165,7 +179,7 @@ export class BackgroundJobManager {
 				id: `job_${randomUUID()}`,
 				toolName: work.toolName,
 				toolCallId: work.toolCallId,
-				label: work.label.slice(0, 200),
+				label: boundJobLabel(work.label),
 				status: "running",
 				startedAt: Date.now(),
 				output: "",

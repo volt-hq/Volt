@@ -1,51 +1,73 @@
+import type { HostFrame, HostRequestKind, LiveItem, LiveValue } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { ProtocolClient } from "../../../src/client/protocol-client.ts";
 import type { ExtensionMode, SessionStartEvent } from "../../../src/core/extensions/types.ts";
 import { ClientScope } from "../../../src/core/host/client-scope.ts";
+import { localProfile } from "../../../src/core/protocol/profiles.ts";
+import { type ProtocolConnection, serveConnection } from "../../../src/core/protocol/server/connection.ts";
 import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import type { RpcClientEvent } from "../../../src/modes/rpc/rpc-client-base.ts";
-import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
 import { createHarness } from "../harness.ts";
 
 interface ConnectedClient {
-	client: RpcTransportClient;
-	events: RpcClientEvent[];
+	client: ProtocolClient;
+	frames: HostFrame[];
+	connection: ProtocolConnection;
+	/** Resolves once the client caught up and the conversation's extensions are bound for it. */
 	ready: Promise<void>;
 	closed: Promise<void>;
 }
 
-/** An RPC client sharing the conversation with others; the fixture's host keeps it open. */
-async function open(fixture: ExtensionRuntime): Promise<ConnectedClient> {
+/**
+ * A protocol client sharing the conversation with others, as stdio RPC serves
+ * one: an extension's shutdown request ends its connection. The fixture's host
+ * keeps the conversation open.
+ */
+function open(fixture: ExtensionRuntime, hostRequests: readonly HostRequestKind[] = []): ConnectedClient {
 	const pair = createLoopbackRpcTransportPair();
-	const client = new RpcTransportClient({ transport: pair.client });
-	const events: RpcClientEvent[] = [];
-	client.onEvent((event) => events.push(event));
-	await client.start();
-	const ready = Promise.withResolvers<void>();
-	const closed = runLegacyRemoteRpcMode(fixture.host, fixture.conversation, {
-		transport: pair.server,
+	const frames: HostFrame[] = [];
+	const client = new ProtocolClient({ hostRequests, onFrame: (frame) => frames.push(frame) });
+	const connection: ProtocolConnection = serveConnection(pair.server, localProfile, {
+		host: fixture.host,
+		conversation: fixture.conversation,
 		anchor: false,
-		onReady: ready.resolve,
+		onShutdownRequested: () => void connection.shutdown(),
 	});
-	const readyOrClosed = Promise.race([ready.promise, closed]);
-	// A client that closes during startup rejects both; tests await the one they assert on.
-	readyOrClosed.catch(() => undefined);
-	return { client, events, ready: readyOrClosed, closed };
+	const ready = Promise.all([client.connect(pair.client), connection.ready]).then(() => undefined);
+	// A client that closes during startup rejects; tests await what they assert on.
+	ready.catch(() => undefined);
+	return { client, frames, connection, ready, closed: connection.closed };
 }
 
-async function connect(fixture: ExtensionRuntime): Promise<ConnectedClient> {
-	const connected = await open(fixture);
+async function connect(fixture: ExtensionRuntime, hostRequests: readonly HostRequestKind[] = []) {
+	const connected = open(fixture, hostRequests);
 	await connected.ready;
 	return connected;
 }
 
-function uiRequests(events: RpcClientEvent[], method: string): RpcClientEvent[] {
-	return events.filter((event) => event.type === "extension_ui_request" && event.method === method);
+function liveItems(frames: HostFrame[]): LiveItem[] {
+	return frames.flatMap((frame) => (frame.type === "live" ? frame.items : []));
 }
 
-function extensionErrors(events: RpcClientEvent[]): RpcClientEvent[] {
-	return events.filter((event) => event.type === "extension_error");
+/** Every time the client was told the extension status `key`. */
+function statusSets(frames: HostFrame[], key: string): LiveValue[] {
+	return liveItems(frames).flatMap((item) =>
+		item.type === "set" && item.key === `ext_status/${key}` ? [item.value] : [],
+	);
+}
+
+function notices(frames: HostFrame[], level: "info" | "error"): Array<Extract<LiveItem, { type: "notice" }>> {
+	return liveItems(frames).filter(
+		(item): item is Extract<LiveItem, { type: "notice" }> => item.type === "notice" && item.level === level,
+	);
+}
+
+/** The pending confirm dialog in the client's live state. */
+function pendingConfirm(client: ProtocolClient): Extract<LiveValue, { kind: "host_request" }> | undefined {
+	for (const value of client.live.values.values()) {
+		if (value.kind === "host_request" && value.request.kind === "confirm") return value;
+	}
+	return undefined;
 }
 
 describe("regression #585: a session's extensions are bound once", () => {
@@ -89,7 +111,7 @@ describe("regression #585: a session's extensions are bound once", () => {
 		return { fixture, starts, modes, leaves };
 	}
 
-	it("emits session_start once for two RPC clients and once for the session a client opens", async () => {
+	it("emits session_start once for two protocol clients and once for the session a client opens", async () => {
 		const { fixture, starts, modes } = await setup();
 		const first = await connect(fixture);
 		const second = await connect(fixture);
@@ -101,13 +123,15 @@ describe("regression #585: a session's extensions are bound once", () => {
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
 		expect(modes).toEqual(["rpc"]);
 
-		const opened = await first.client.newSession();
-		if (opened.cancelled) throw new Error("Expected the first client to move");
-		await expect(first.client.getState()).resolves.toMatchObject({ sessionId: opened.sessionId });
+		const opened = await first.client.intent("new_session", {});
+		if (opened.conversation === undefined) throw new Error("Expected the first client to move");
+		await vi.waitFor(() => expect(first.client.conversation).toBe(opened.conversation));
+		await first.client.caughtUp();
 		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
 		expect(modes).toEqual(["rpc", "rpc"]);
 		// The first client moved alone; the second stays, and neither conversation binds twice.
-		await expect(second.client.getState()).resolves.toMatchObject({ sessionId: fixture.conversation.id });
+		expect(second.client.conversation).toBe(fixture.conversation.id);
+		expect(fixture.conversation.closed).toBe(false);
 		expect(starts).toHaveLength(2);
 	});
 
@@ -121,40 +145,39 @@ describe("regression #585: a session's extensions are bound once", () => {
 		});
 
 		// session_start ran while only the first client was attached; the second one received the status on attach.
-		expect(uiRequests(first.events, "setStatus")).toEqual([
-			expect.objectContaining({ statusKey: "ext", statusText: "ready:startup" }),
-		]);
-		expect(uiRequests(second.events, "setStatus")).toEqual([
-			expect.objectContaining({ statusKey: "ext", statusText: "ready:startup" }),
-		]);
+		for (const client of [first, second]) {
+			expect(statusSets(client.frames, "ext")).toEqual([{ kind: "ext_status", text: "ready:startup" }]);
+			expect(client.client.live.values.get("ext_status/ext")).toEqual({ kind: "ext_status", text: "ready:startup" });
+		}
 
 		await first.client.prompt("/ping");
-		for (const events of [first.events, second.events]) {
+		for (const client of [first, second]) {
 			await vi.waitFor(() =>
-				expect(uiRequests(events, "notify")).toEqual([expect.objectContaining({ message: "pong" })]),
+				expect(notices(client.frames, "info")).toEqual([expect.objectContaining({ message: "pong" })]),
 			);
 		}
 
-		await first.client.prompt("/fail");
-		for (const events of [first.events, second.events]) {
+		await first.client.prompt("/fail").catch(() => undefined);
+		for (const client of [first, second]) {
 			await vi.waitFor(() =>
-				expect(extensionErrors(events)).toEqual([
-					expect.objectContaining({ extensionPath: "command:fail", error: "command failed" }),
+				expect(notices(client.frames, "error")).toEqual([
+					expect.objectContaining({ source: "command:fail", message: expect.stringContaining("command failed") }),
 				]),
 			);
 		}
 
-		// The client whose command asked for shutdown leaves at its next command boundary; the other stays.
-		await second.client.prompt("/leave");
+		// The client whose command asked for shutdown leaves; the other stays.
+		await second.client.prompt("/leave").catch(() => undefined);
 		await vi.waitFor(() => expect(leaves).toEqual(["leave"]));
-		await second.client.getState().catch(() => undefined);
 		await second.closed;
-		await expect(first.client.getState()).resolves.toMatchObject({ sessionId: fixture.conversation.id });
+		expect(second.frames.at(-1)).toMatchObject({ type: "ended", reason: "shutdown" });
+		expect(fixture.conversation.closed).toBe(false);
+		expect(first.client.conversation).toBe(fixture.conversation.id);
 
 		// The remaining client kept showing UI all along.
-		expect(uiRequests(first.events, "setStatus")).toHaveLength(1);
+		expect(statusSets(first.frames, "ext")).toHaveLength(1);
 		await first.client.prompt("/ping");
-		await vi.waitFor(() => expect(uiRequests(first.events, "notify")).toHaveLength(2));
+		await vi.waitFor(() => expect(notices(first.frames, "info")).toHaveLength(2));
 	});
 
 	it("asks every client that shows UI, takes the first answer, and shows a pending dialog to a client that attaches", async () => {
@@ -170,33 +193,35 @@ describe("regression #585: a session's extensions are bound once", () => {
 			{ extensionMode: "rpc" },
 		);
 		cleanups.push(() => fixture.dispose());
-		const first = await connect(fixture);
-		const second = await connect(fixture);
+		const first = await connect(fixture, ["confirm"]);
+		const second = await connect(fixture, ["confirm"]);
 		cleanups.push(async () => {
 			await first.client.stop();
 			await second.client.stop();
 		});
 
+		// The command's prompt is admitted once the command ran: it waits for the answer.
 		const asking = first.client.prompt("/ask");
-		const confirmOf = (events: RpcClientEvent[]) =>
-			events.find((event) => event.type === "extension_ui_request" && event.method === "confirm");
 		await vi.waitFor(() => {
-			expect(confirmOf(first.events)).toMatchObject({ title: "Proceed?", message: "Continue with the change?" });
-			expect(confirmOf(second.events)).toEqual(confirmOf(first.events));
+			expect(pendingConfirm(first.client)).toMatchObject({
+				request: { kind: "confirm", title: "Proceed?", message: "Continue with the change?" },
+			});
+			expect(pendingConfirm(second.client)).toEqual(pendingConfirm(first.client));
 		});
-		const requestId = (confirmOf(first.events) as { id: string }).id;
+		const requestId = pendingConfirm(first.client)!.requestId;
 
 		// A client that attaches while the dialog is pending is shown it too.
-		const third = await connect(fixture);
+		const third = await connect(fixture, ["confirm"]);
 		cleanups.push(async () => third.client.stop());
-		expect(confirmOf(third.events)).toEqual(confirmOf(first.events));
+		expect(pendingConfirm(third.client)).toEqual(pendingConfirm(first.client));
 
 		// The first answer wins; a later one finds the dialog gone.
-		await second.client.sendExtensionUIResponse({ type: "extension_ui_response", id: requestId, confirmed: true });
+		second.client.answer(requestId, { confirmed: true });
 		await vi.waitFor(() => expect(answers).toEqual([true]));
-		await first.client.sendExtensionUIResponse({ type: "extension_ui_response", id: requestId, confirmed: false });
+		first.client.answer(requestId, { confirmed: false });
 		await asking;
-		await expect(first.client.getState()).resolves.toMatchObject({ sessionId: fixture.conversation.id });
+		await vi.waitFor(() => expect(pendingConfirm(first.client)).toBeUndefined());
+		expect(first.client.conversation).toBe(fixture.conversation.id);
 		expect(answers).toEqual([true]);
 		expect(fixture.conversation.liveState.pendingRequests()).toEqual([]);
 	});
@@ -250,8 +275,8 @@ describe("regression #585: a session's extensions are bound once", () => {
 			});
 		});
 		cleanups.push(() => fixture.dispose());
-		const first = await open(fixture);
-		const second = await open(fixture);
+		const first = open(fixture);
+		const second = open(fixture);
 		cleanups.push(async () => {
 			gate.resolve();
 			await first.client.stop();
@@ -260,10 +285,12 @@ describe("regression #585: a session's extensions are bound once", () => {
 
 		// The second client gives up during startup without waiting for the first client's session_start.
 		await second.client.stop();
-		await expect(second.closed).rejects.toThrow("RPC transport closed during startup");
+		await second.closed;
+		await expect(second.ready).rejects.toThrow();
 
 		gate.resolve();
 		await first.ready;
-		await expect(first.client.getState()).resolves.toMatchObject({ sessionId: fixture.conversation.id });
+		expect(first.client.conversation).toBe(fixture.conversation.id);
+		expect(fixture.conversation.closed).toBe(false);
 	});
 });

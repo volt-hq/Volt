@@ -298,7 +298,9 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		await loseRuntimeLog(runtime, log);
 		await runtime.lost;
 		const previousSession = runtime.session;
-		const previousBranchEpoch = runtime.conversation.projectionFeed.branchEpoch;
+		const previousConversation = runtime.conversation;
+		const previousOrdinal = previousSession.sessionManager.getOrdinal();
+		const previousLeaf = previousSession.sessionManager.getLeafId();
 
 		await expect(runtime.switchSessionById(previousSession.sessionId)).resolves.toEqual({
 			cancelled: false,
@@ -307,7 +309,10 @@ describe("regression #217: commits whose outcome is unknown", () => {
 		});
 
 		expect(runtime.session).toBe(previousSession);
-		expect(runtime.conversation.projectionFeed.branchEpoch).toBe(previousBranchEpoch);
+		// The log was not reloaded: the same conversation at the same position.
+		expect(runtime.conversation).toBe(previousConversation);
+		expect(runtime.session.sessionManager.getOrdinal()).toBe(previousOrdinal);
+		expect(runtime.session.sessionManager.getLeafId()).toBe(previousLeaf);
 	});
 
 	it("rejects a stale manager at the ordinal fence without changing the committed winner", async () => {

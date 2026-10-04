@@ -10,7 +10,12 @@
  * message-like entries as their transcript view only.
  */
 
-import type { ProjectedEntry, TranscriptItem } from "@hansjm10/volt-protocol";
+import type {
+	ClientInputQueuedEntryPayload,
+	ClientInputReceiptEntryPayload,
+	ProjectedEntry,
+	TranscriptItem,
+} from "@hansjm10/volt-protocol";
 import { toLogEntry } from "../../conversation-log/entry-codec.ts";
 import type { CommittedSessionEntry, SessionManager } from "../../session-manager.ts";
 import type { Profile } from "../profiles.ts";
@@ -24,12 +29,24 @@ const VIEW_ENTRY_TYPES: ReadonlySet<string> = new Set(["message", "compaction", 
 /** Ancestors walked past hidden entries, at most; a deeper hidden chain keeps the parent as is. */
 const HIDDEN_ANCESTOR_DEPTH = 4_096;
 
+/**
+ * Queued input images without their data: a transcript client counts them,
+ * and fetches the delivered message's images with the `content` query.
+ */
+function withoutImageData<T extends { readonly data: string }>(images: readonly T[]): T[] {
+	return images.map((image) => ({ ...image, data: "" }));
+}
+
 /** The projection source over a session manager's committed log. */
 export function sessionProjectionSource(sessionManager: SessionManager): ProjectionSource {
 	return { entry: (id) => sessionManager.getCommittedEntry(id) };
 }
 
-/** `id`, or its nearest ancestor `profile` projects; an id the log does not hold stays as is. */
+/**
+ * `id`, or its nearest ancestor `profile` projects; an id the log does not
+ * hold stays as is. Past the search depth, the root: a hidden entry's id is
+ * never named.
+ */
 export function visibleAncestor(id: string | null, source: ProjectionSource, profile: Profile): string | null {
 	let current = id;
 	for (let depth = 0; current !== null && depth < HIDDEN_ANCESTOR_DEPTH; depth++) {
@@ -37,7 +54,7 @@ export function visibleAncestor(id: string | null, source: ProjectionSource, pro
 		if (!entry || profile.includes(entry)) return current;
 		current = entry.parentId;
 	}
-	return current;
+	return null;
 }
 
 /** The projected form of `entry` for `profile`, or none when the profile hides it. */
@@ -61,6 +78,17 @@ export function projectEntry(
 			};
 		} else if (entry.type === "leaf") {
 			payload = { targetId: visibleAncestor(entry.targetId, source, profile) };
+		} else if (profile.fidelity === "transcript" && entry.type === "client_input_receipt") {
+			const receipt = log.payload as ClientInputReceiptEntryPayload;
+			payload = { ...receipt, input: { ...receipt.input, images: withoutImageData(receipt.input.images) } };
+		} else if (profile.fidelity === "transcript" && entry.type === "client_input_queued") {
+			// The host messages a queued input delivers become entries the profile shows or hides; the queue
+			// a client folds needs only the input's text and image count.
+			const { messages: _messages, ...queuedInput } = (log.payload as ClientInputQueuedEntryPayload).queuedInput;
+			payload = {
+				...(log.payload as ClientInputQueuedEntryPayload),
+				queuedInput: { ...queuedInput, images: withoutImageData(queuedInput.images) },
+			};
 		} else {
 			payload = log.payload;
 		}

@@ -1,48 +1,107 @@
+/**
+ * Subagents a local protocol client starts (docs/rpc.md): the
+ * `subagent_definitions` query, `subagent_start`, `subagent_abort`, and
+ * `subagent_dispose` intents, each child's status as the parent's live
+ * `subagent/<id>` value, and each child's log by subscribing to its
+ * conversation. A connection's children are disposed when it ends or moves.
+ */
+
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, test, vi } from "vitest";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import type { ConversationHost } from "../src/core/host/conversation-host.ts";
+import type { HostFrame } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
-import type { HostClient } from "../src/core/host/targets.ts";
-import { getStaticIrohRemoteRpcFilterResult as getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/index.ts";
-import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
-import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
+import { localProfile } from "../src/core/protocol/profiles.ts";
+import { type ProtocolConnection, serveConnection } from "../src/core/protocol/server/connection.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
-import type { SubagentDefinition, SubagentEvent, SubagentHandle, SubagentResult } from "../src/core/subagents/index.ts";
+import type { SubagentDefinition, SubagentHandle, SubagentResult } from "../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../src/core/tools/index.ts";
-import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 
-interface Deferred<T> {
-	promise: Promise<T>;
-	resolve(value: T): void;
-	reject(error: Error): void;
-}
-
-interface RpcHarness {
-	close(): void;
-	modePromise: Promise<void>;
-	send(message: object): void;
-	writes: object[];
-}
+type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
+type IntentOutcome = Frame<"accepted"> | Frame<"rejected">;
+type QueryOutcome = Frame<"result"> | Frame<"query_error">;
 
 interface ControlledSubagent {
 	handle: SubagentHandle;
-	abort: ReturnType<typeof vi.fn>;
-	dispose: ReturnType<typeof vi.fn>;
-	prompt: ReturnType<typeof vi.fn>;
-	emit(event: SubagentEvent): void;
+	abort: ReturnType<typeof vi.fn<(source?: string) => Promise<void>>>;
+	dispose: ReturnType<typeof vi.fn<() => Promise<void>>>;
+	prompt: ReturnType<typeof vi.fn<(message: string) => Promise<void>>>;
 	complete(result?: SubagentResult): void;
 }
 
-function createDeferred<T>(): Deferred<T> {
-	let resolve: (value: T) => void = () => undefined;
-	let reject: (error: Error) => void = () => undefined;
-	const promise = new Promise<T>((promiseResolve, promiseReject) => {
-		resolve = promiseResolve;
-		reject = promiseReject;
+/** A local protocol client that records every frame and may hold several subscriptions. */
+interface LocalClient {
+	readonly frames: HostFrame[];
+	readonly connection: ProtocolConnection;
+	intent(type: string, input?: object, options?: { conversation?: string }): Promise<IntentOutcome>;
+	query(query: string, params?: object): Promise<QueryOutcome>;
+	/** Subscribe from a snapshot; resolves with the snapshot, or the `ended` frame when refused. */
+	subscribe(conversation: string, subscriptionId: string): Promise<Frame<"snapshot"> | Frame<"ended">>;
+	close(): Promise<void>;
+}
+
+async function connectLocal(harness: HostHarness, conversation: HostedConversation): Promise<LocalClient> {
+	const pair = createLoopbackRpcTransportPair();
+	const connection = serveConnection(pair.server, localProfile, { host: harness.host, conversation });
+	const frames: HostFrame[] = [];
+	pair.client.onValue?.((value) => {
+		frames.push(value as HostFrame);
 	});
-	return { promise, resolve, reject };
+	const send = (frame: object): void => void pair.client.write(frame);
+	const waitFor = async <T extends HostFrame>(predicate: (frame: HostFrame) => frame is T): Promise<T> => {
+		let found: T | undefined;
+		await vi.waitFor(() => {
+			found = frames.find(predicate);
+			expect(found).toBeDefined();
+		});
+		return found!;
+	};
+	let ids = 0;
+	send({ type: "hello", protocol: 1, client: { name: "test", version: "1" }, accepts: { hostRequests: [] } });
+	await connection.ready;
+	return {
+		frames,
+		connection,
+		intent(type, input, options = {}) {
+			const intentId = `i-${++ids}`;
+			send({
+				type,
+				intentId,
+				...(options.conversation === undefined ? {} : { conversation: options.conversation }),
+				...(input === undefined ? {} : { input }),
+			});
+			return waitFor(
+				(frame): frame is IntentOutcome =>
+					(frame.type === "accepted" || frame.type === "rejected") && frame.intentId === intentId,
+			);
+		},
+		query(query, params) {
+			const queryId = `q-${++ids}`;
+			send({ type: "query", queryId, query, ...(params === undefined ? {} : { params }) });
+			return waitFor(
+				(frame): frame is QueryOutcome =>
+					(frame.type === "result" || frame.type === "query_error") && frame.queryId === queryId,
+			);
+		},
+		async subscribe(subscribed, subscriptionId) {
+			send({ type: "subscribe", subscriptionId, conversation: subscribed, after: "snapshot" });
+			await waitFor(
+				(frame): frame is HostFrame =>
+					(frame.type === "live" && frame.subscriptionId === subscriptionId && frame.reset === true) ||
+					(frame.type === "ended" && frame.subscriptionId === subscriptionId),
+			);
+			return waitFor(
+				(frame): frame is Frame<"snapshot"> | Frame<"ended"> =>
+					(frame.type === "snapshot" || frame.type === "ended") && frame.subscriptionId === subscriptionId,
+			);
+		},
+		async close() {
+			await pair.client.close();
+			await connection.closed.catch(() => undefined);
+		},
+	};
 }
 
 function createDefinition(
@@ -68,43 +127,6 @@ function createDefinition(
 	};
 }
 
-function createState(sessionId: string): RpcSessionState {
-	return {
-		thinkingLevel: "off",
-		availableThinkingLevels: ["off"],
-		fastModeEnabled: false,
-		planning: { mode: "build", plan: null },
-		gitContext: null,
-		isStreaming: false,
-		isCompacting: false,
-		steeringMode: "one-at-a-time",
-		followUpMode: "one-at-a-time",
-		sessionId,
-		autoCompactionEnabled: true,
-		messageCount: 0,
-		pendingMessageCount: 0,
-		steeringQueue: [],
-		followUpQueue: [],
-		backgroundJobs: [],
-	};
-}
-
-function createTranscript(sessionId: string): RpcTranscriptResponse {
-	return {
-		sessionId,
-		items: [
-			{
-				id: `${sessionId}-user`,
-				role: "user",
-				text: `prompt for ${sessionId}`,
-				timestamp: new Date(0).toISOString(),
-			},
-		],
-		hasMore: false,
-		nextBeforeEntryId: null,
-	};
-}
-
 function createResult(subagentId: string, sessionId: string): SubagentResult {
 	return {
 		id: subagentId,
@@ -114,170 +136,73 @@ function createResult(subagentId: string, sessionId: string): SubagentResult {
 	};
 }
 
-function createControlledSubagent(subagentId: string, sessionId: string): ControlledSubagent {
-	const listeners = new Set<(event: SubagentEvent) => void>();
-	const completion = createDeferred<SubagentResult>();
-	const prompt = vi.fn(async () => undefined);
-	const abort = vi.fn(async () => undefined);
+/** A child whose run the test ends; its conversation is a real one in the children's host. */
+function createControlledSubagent(
+	subagentId: string,
+	conversation: HostedConversation,
+	run: (message: string) => Promise<void> = async () => undefined,
+): ControlledSubagent {
+	const completion = Promise.withResolvers<SubagentResult>();
+	const prompt = vi.fn(run);
+	const abort = vi.fn(async (_source?: string) => undefined);
 	const dispose = vi.fn(async () => undefined);
+	const unused = async (): Promise<never> => {
+		throw new Error("not used");
+	};
 	return {
 		handle: {
 			id: subagentId,
-			sessionId,
-			conversation: {} as HostedConversation,
+			sessionId: conversation.id,
+			conversation,
 			prompt,
 			abort,
-			getState: async () => createState(sessionId),
-			getTranscript: async () => createTranscript(sessionId),
-			getSessionStats: async () => {
-				throw new Error("not used");
-			},
-			waitForEnd: async () => completion.promise,
+			getState: unused,
+			getTranscript: unused,
+			getSessionStats: unused,
+			waitForEnd: () => completion.promise,
 			dispose,
-			onEvent: (listener) => {
-				listeners.add(listener);
-				return () => {
-					listeners.delete(listener);
-				};
-			},
+			onEvent: () => () => undefined,
 		},
 		abort,
 		dispose,
 		prompt,
-		emit(event) {
-			for (const listener of listeners) {
-				listener(event);
-			}
-		},
-		complete(result = createResult(subagentId, sessionId)) {
+		complete(result = createResult(subagentId, conversation.id)) {
 			completion.resolve(result);
 		},
 	};
 }
 
-function createSession(options: {
-	definitions: SubagentDefinition[];
-	manager: SubagentToolManager;
-	sessionId?: string;
-}) {
-	return {
-		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
-		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		subscribe: vi.fn(() => () => undefined),
-		activeToolExecutions: new Map(),
-		subscribeRuntimeEvents: vi.fn(() => () => undefined),
-		resourceLoader: {
-			getSubagents: () => ({ definitions: options.definitions, diagnostics: [] }),
-		},
-		getSubagentToolManager: () => options.manager,
-		getActiveToolNames: () => ["read"],
-		sessionId: options.sessionId ?? "parent-session",
-		sessionFile: undefined,
-	};
+function subagentValue(conversation: HostedConversation, subagentId: string) {
+	return conversation.liveState.get(`subagent/${subagentId}`);
 }
 
-interface FakeHost {
-	host: ConversationHost;
-	conversation: HostedConversation;
-}
-
-/**
- * A host over fake conversations. A new session opens and the client moves
- * there, as `ConversationHost.openFor` moves an in-place client.
- */
-function createHost(options: { definitions: SubagentDefinition[]; manager: SubagentToolManager }): FakeHost {
-	const conversationFor = (sessionId?: string): HostedConversation => {
-		const session = createSession({
-			definitions: options.definitions,
-			manager: options.manager,
-			...(sessionId === undefined ? {} : { sessionId }),
-		});
-		return {
-			id: session.sessionId,
-			session,
-			cwd: tmpdir(),
-			lifetime: "clients",
-			closed: false,
-			assertNotBusy: () => {},
-			lost: new Promise<Error>(() => {}),
-			services: { agentDir: undefined },
-		} as unknown as HostedConversation;
-	};
-	const conversation = conversationFor();
-	let current = conversation;
-	let attached: HostClient | undefined;
-	const host = {
-		attach: vi.fn(async (client: HostClient) => {
-			attached = client;
-		}),
-		conversationOf: (client: HostClient) => (attached?.id === client.id ? current : undefined),
-		onClosed: () => () => {},
-		detach: vi.fn(async () => {
-			attached = undefined;
-		}),
-		close: vi.fn(async () => undefined),
-		openFor: vi.fn(async (client: HostClient) => {
-			const move = client.move;
-			if (move.kind !== "in_place") throw new Error("Expected an in-place client");
-			const from = current;
-			const to = conversationFor("new-parent-session");
-			move.prepare?.(to, from);
-			current = to;
-			await move.onMoved(to, from);
-			return { cancelled: false, sessionId: to.id, seeded: false, conversation: to };
-		}),
-	} as unknown as ConversationHost;
-	return { host, conversation };
-}
-
-async function startHarness({ host, conversation }: FakeHost): Promise<RpcHarness> {
-	let lineHandler: ((line: string) => void) | undefined;
-	let closeHandler: RpcCloseHandler | undefined;
-	const writes: object[] = [];
-	const transport: RpcTransport = {
-		write: vi.fn((value) => {
-			writes.push(value);
-		}),
-		onLine: vi.fn((handler) => {
-			lineHandler = handler;
-			return vi.fn();
-		}),
-		onClose: vi.fn((handler) => {
-			closeHandler = handler;
-			return vi.fn();
-		}),
-		waitForBackpressure: vi.fn(async () => undefined),
-		flush: vi.fn(async () => undefined),
-		close: vi.fn(async () => undefined),
-	};
-	let resolveReady: () => void = () => undefined;
-	const ready = new Promise<void>((resolve) => {
-		resolveReady = resolve;
+describe("local protocol subagent lifecycle intents", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
-	const modePromise = runLegacyRemoteRpcMode(host, conversation, { transport, onReady: resolveReady });
-	await ready;
-	await vi.waitFor(() => expect(lineHandler).toBeDefined());
-	return {
-		close() {
-			closeHandler?.();
-		},
-		modePromise,
-		send(message: object) {
-			if (!lineHandler) {
-				throw new Error("RPC line handler was not registered");
-			}
-			lineHandler(JSON.stringify(message));
-		},
-		writes,
-	};
-}
 
-describe("local RPC subagent lifecycle commands", () => {
-	test("list_subagents returns safe discovered definition summaries", async () => {
+	/** A parent conversation whose subagent manager is `manager`, and a local client of it. */
+	async function setup(manager: SubagentToolManager, definitions: SubagentDefinition[] = []) {
+		const harness = await createHostHarness();
+		cleanups.push(() => harness.cleanup());
+		const parent = await harness.openStartup();
+		vi.spyOn(parent.session, "getSubagentToolManager").mockReturnValue(manager);
+		vi.spyOn(parent.session, "getActiveToolNames").mockReturnValue(["read"]);
+		vi.spyOn(parent.session.resourceLoader, "getSubagents").mockReturnValue({ definitions, diagnostics: [] });
+		const client = await connectLocal(harness, parent);
+		cleanups.push(() => client.close());
+		return { harness, parent, client };
+	}
+
+	test("subagent_definitions returns safe discovered definition summaries", async () => {
 		const filePath = join(tmpdir(), "unsafe-project", ".volt", "agents", "scout.md");
 		const manager = {
 			getDefinition: () => createDefinition("scout", filePath),
-			startByName: async () => createControlledSubagent("sa_unused", "child-unused").handle,
+			startByName: async () => {
+				throw new Error("not used");
+			},
 		} satisfies SubagentToolManager;
 		const definition = createDefinition("scout", filePath, {
 			excludedTools: ["subagent"],
@@ -285,270 +210,202 @@ describe("local RPC subagent lifecycle commands", () => {
 			maxSubagentDepth: 2,
 			maxChildAgents: 3,
 		});
-		const rpc = await startHarness(createHost({ definitions: [definition], manager }));
-		try {
-			rpc.send({ id: "list-1", type: "list_subagents" });
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "list-1",
-					type: "response",
-					command: "list_subagents",
-					success: true,
-					data: {
-						subagents: [
-							{
-								name: "scout",
-								description: "scout description",
-								source: "project",
-								sourceInfo: { source: "local", scope: "project", origin: "top-level" },
-								tools: ["read", "grep"],
-								excludedTools: ["subagent"],
-								allowedSubagents: ["researcher"],
-								maxSubagentDepth: 2,
-								maxChildAgents: 3,
-								model: "faux/model",
-								thinking: "off",
-							},
-						],
+		const { client } = await setup(manager, [definition]);
+
+		const outcome = await client.query("subagent_definitions");
+		expect(outcome).toMatchObject({
+			type: "result",
+			data: {
+				subagents: [
+					{
+						name: "scout",
+						description: "scout description",
+						source: "project",
+						sourceInfo: { source: "local", scope: "project", origin: "top-level" },
+						tools: ["read", "grep"],
+						excludedTools: ["subagent"],
+						allowedSubagents: ["researcher"],
+						maxSubagentDepth: 2,
+						maxChildAgents: 3,
+						model: "faux/model",
+						thinking: "off",
 					},
-				}),
-			);
-			const serialized = JSON.stringify(rpc.writes.find((write) => (write as { id?: string }).id === "list-1"));
-			expect(serialized).not.toContain(filePath);
-			expect(serialized).not.toContain("secret system prompt");
-			expect(serialized).not.toContain("baseDir");
-		} finally {
-			rpc.close();
-			await rpc.modePromise.catch(() => undefined);
-		}
+				],
+			},
+		});
+		const serialized = JSON.stringify(outcome);
+		expect(serialized).not.toContain(filePath);
+		expect(serialized).not.toContain("secret system prompt");
+		expect(serialized).not.toContain("baseDir");
 	});
 
-	test("subagent_start returns ids and streams wrapped child events and terminal completion", async () => {
-		const child = createControlledSubagent("sa_child", "child-session");
+	test("subagent_start answers the child's id and conversation and shows its status until it ends", async () => {
+		const childHarness = await createHostHarness();
+		cleanups.push(() => childHarness.cleanup());
+		const childConversation = await childHarness.openStartup();
+		const child = createControlledSubagent("sa_child", childConversation);
 		const manager = {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => child.handle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createHost({ definitions: [], manager }));
-		try {
-			rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "inspect auth" });
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "start-1",
-					type: "response",
-					command: "subagent_start",
-					success: true,
-					data: { subagentId: "sa_child", sessionId: "child-session" },
-				}),
-			);
-			expect(manager.startByName).toHaveBeenCalledWith("scout", { allowedTools: ["read"] });
-			expect(child.prompt).toHaveBeenCalledWith("inspect auth");
+		const { parent, client } = await setup(manager);
 
-			child.emit({ type: "agent_start", startedAt: 1_782_470_400_000 });
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					type: "subagent_event",
-					subagentId: "sa_child",
-					event: { type: "agent_start", startedAt: 1_782_470_400_000 },
-				}),
-			);
+		await expect(client.intent("subagent_start", { agent: "scout", prompt: "inspect auth" })).resolves.toMatchObject({
+			type: "accepted",
+			result: { subagentId: "sa_child", conversation: childConversation.id },
+		});
+		expect(manager.startByName).toHaveBeenCalledWith("scout", { allowedTools: ["read"] });
+		expect(child.prompt).toHaveBeenCalledWith("inspect auth");
+		expect(subagentValue(parent, "sa_child")).toEqual({
+			kind: "subagent",
+			subagentId: "sa_child",
+			conversation: childConversation.id,
+			agent: "scout",
+			status: "running",
+		});
 
-			const result = createResult("sa_child", "child-session");
-			child.complete(result);
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					type: "subagent_end",
-					subagentId: "sa_child",
-					result,
-				}),
-			);
-		} finally {
-			rpc.close();
-			await rpc.modePromise.catch(() => undefined);
-		}
+		child.complete();
+		await vi.waitFor(() => expect(subagentValue(parent, "sa_child")).toMatchObject({ status: "completed" }));
+		// The client saw the status change on its live lane.
+		await client.subscribe(parent.id, "parent");
+		const live = client.frames.find((frame) => frame.type === "live" && frame.subscriptionId === "parent");
+		expect(live?.type === "live" ? live.items : []).toContainEqual(
+			expect.objectContaining({
+				type: "set",
+				key: "subagent/sa_child",
+				value: expect.objectContaining({ status: "completed" }),
+			}),
+		);
 	});
 
 	test("subagent_abort calls through, disposes, and removes the child", async () => {
-		const child = createControlledSubagent("sa_abort", "child-abort-session");
+		const childHarness = await createHostHarness();
+		cleanups.push(() => childHarness.cleanup());
+		const childConversation = await childHarness.openStartup();
+		const child = createControlledSubagent("sa_abort", childConversation);
 		const manager = {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => child.handle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createHost({ definitions: [], manager }));
-		try {
-			rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "slow" });
-			await vi.waitFor(() => expect(child.prompt).toHaveBeenCalledWith("slow"));
-			rpc.send({ id: "abort-1", type: "subagent_abort", subagentId: "sa_abort" });
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "abort-1",
-					type: "response",
-					command: "subagent_abort",
-					success: true,
-				}),
-			);
-			expect(child.abort).toHaveBeenCalledWith("remote_request");
-			expect(child.dispose).toHaveBeenCalledOnce();
+		const { parent, client } = await setup(manager);
 
-			rpc.send({ id: "state-after-abort", type: "subagent_get_state", subagentId: "sa_abort" });
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "state-after-abort",
-					type: "response",
-					command: "subagent_get_state",
-					success: false,
-					error: "Subagent sa_abort is not active",
-				}),
-			);
-		} finally {
-			rpc.close();
-			await rpc.modePromise.catch(() => undefined);
-		}
+		await expect(client.intent("subagent_start", { agent: "scout", prompt: "slow" })).resolves.toMatchObject({
+			type: "accepted",
+		});
+		await expect(client.intent("subagent_abort", { subagentId: "sa_abort" })).resolves.toMatchObject({
+			type: "accepted",
+		});
+		expect(child.abort).toHaveBeenCalledWith("remote_request");
+		expect(child.dispose).toHaveBeenCalledOnce();
+		expect(subagentValue(parent, "sa_abort")).toBeUndefined();
+
+		await expect(client.intent("subagent_abort", { subagentId: "sa_abort" })).resolves.toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: "Subagent sa_abort is not active" },
+		});
+		// Its conversation is no longer readable through this connection.
+		await expect(client.subscribe(childConversation.id, "child")).resolves.toEqual({
+			type: "ended",
+			subscriptionId: "child",
+			reason: "closed",
+		});
 	});
 
-	test("subagent state and transcript commands route to the selected child", async () => {
-		const first = createControlledSubagent("sa_first", "first-session");
-		const second = createControlledSubagent("sa_second", "second-session");
+	test("a client reads each child's log by subscribing to the child's conversation", async () => {
+		const childHarness = await createHostHarness({ responses: ["first answer", "second answer"] });
+		cleanups.push(() => childHarness.cleanup());
+		const firstConversation = await childHarness.openStartup();
+		const secondConversation = await childHarness.openStartup();
+		const run = (conversation: HostedConversation) => async (message: string) => {
+			await conversation.session.prompt(message);
+			await conversation.session.waitForIdle();
+		};
+		const first = createControlledSubagent("sa_first", firstConversation, run(firstConversation));
+		const second = createControlledSubagent("sa_second", secondConversation, run(secondConversation));
 		const manager = {
 			getDefinition: (agent: string) => createDefinition(agent, `/tmp/${agent}.md`),
 			startByName: vi.fn(async (agent: string) => (agent === "first" ? first.handle : second.handle)),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createHost({ definitions: [], manager }));
-		try {
-			rpc.send({ id: "start-first", type: "subagent_start", agent: "first", prompt: "one" });
-			rpc.send({ id: "start-second", type: "subagent_start", agent: "second", prompt: "two" });
-			await vi.waitFor(() => expect(second.prompt).toHaveBeenCalledWith("two"));
+		const { client } = await setup(manager);
 
-			rpc.send({ id: "state-second", type: "subagent_get_state", subagentId: "sa_second" });
-			rpc.send({
-				id: "transcript-second",
-				type: "subagent_get_transcript",
-				subagentId: "sa_second",
-				limit: 5,
-				beforeEntryId: "before-entry",
-			});
+		await expect(client.intent("subagent_start", { agent: "first", prompt: "one" })).resolves.toMatchObject({
+			type: "accepted",
+			result: { conversation: firstConversation.id },
+		});
+		await expect(client.intent("subagent_start", { agent: "second", prompt: "two" })).resolves.toMatchObject({
+			type: "accepted",
+			result: { conversation: secondConversation.id },
+		});
 
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "state-second",
-					type: "response",
-					command: "subagent_get_state",
-					success: true,
-					data: createState("second-session"),
-				}),
-			);
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "transcript-second",
-					type: "response",
-					command: "subagent_get_transcript",
-					success: true,
-					data: createTranscript("second-session"),
-				}),
-			);
-		} finally {
-			rpc.close();
-			await rpc.modePromise.catch(() => undefined);
-		}
+		const snapshot = await client.subscribe(secondConversation.id, "second");
+		if (snapshot.type !== "snapshot") throw new Error("Expected the child's snapshot");
+		expect(snapshot.conversation).toBe(secondConversation.id);
+		expect(
+			snapshot.state.entries.flatMap((entry) =>
+				entry.type === "message" ? [[entry.view?.role, entry.view?.text]] : [],
+			),
+		).toEqual([
+			["user", "two"],
+			["assistant", "second answer"],
+		]);
+		// A child is observe-only: an intent on its conversation is refused.
+		await expect(
+			client.intent("set_session_name", { name: "renamed" }, { conversation: firstConversation.id }),
+		).resolves.toMatchObject({ type: "rejected", reason: { code: "read_only" } });
+		expect(firstConversation.session.sessionManager.getSessionName()).toBeUndefined();
 	});
 
-	test("subagent_dispose removes the child and later commands fail clearly", async () => {
-		const child = createControlledSubagent("sa_dispose", "child-dispose-session");
+	test("subagent_dispose removes the child and later intents fail clearly", async () => {
+		const childHarness = await createHostHarness();
+		cleanups.push(() => childHarness.cleanup());
+		const childConversation = await childHarness.openStartup();
+		const child = createControlledSubagent("sa_dispose", childConversation);
 		const manager = {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => child.handle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createHost({ definitions: [], manager }));
-		try {
-			rpc.send({ id: "start-1", type: "subagent_start", agent: "scout", prompt: "work" });
-			await vi.waitFor(() => expect(child.prompt).toHaveBeenCalledWith("work"));
-			rpc.send({ id: "dispose-1", type: "subagent_dispose", subagentId: "sa_dispose" });
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "dispose-1",
-					type: "response",
-					command: "subagent_dispose",
-					success: true,
-				}),
-			);
-			expect(child.dispose).toHaveBeenCalledOnce();
+		const { parent, client } = await setup(manager);
 
-			rpc.send({ id: "state-after-dispose", type: "subagent_get_state", subagentId: "sa_dispose" });
-			await vi.waitFor(() =>
-				expect(rpc.writes).toContainEqual({
-					id: "state-after-dispose",
-					type: "response",
-					command: "subagent_get_state",
-					success: false,
-					error: "Subagent sa_dispose is not active",
-				}),
-			);
-		} finally {
-			rpc.close();
-			await rpc.modePromise.catch(() => undefined);
-		}
+		await client.intent("subagent_start", { agent: "scout", prompt: "work" });
+		await expect(client.intent("subagent_dispose", { subagentId: "sa_dispose" })).resolves.toMatchObject({
+			type: "accepted",
+		});
+		expect(child.dispose).toHaveBeenCalledOnce();
+		expect(subagentValue(parent, "sa_dispose")).toBeUndefined();
+
+		await expect(client.intent("subagent_dispose", { subagentId: "sa_dispose" })).resolves.toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: "Subagent sa_dispose is not active" },
+		});
 	});
 
-	test("RPC shutdown and session replacement dispose active RPC-started children", async () => {
-		const first = createControlledSubagent("sa_shutdown", "child-shutdown-session");
-		const second = createControlledSubagent("sa_replaced", "child-replaced-session");
+	test("ending the connection and moving it to a new session dispose the children it started", async () => {
+		const childHarness = await createHostHarness();
+		cleanups.push(() => childHarness.cleanup());
+		const first = createControlledSubagent("sa_shutdown", await childHarness.openStartup());
+		const second = createControlledSubagent("sa_replaced", await childHarness.openStartup());
 		let nextHandle = first.handle;
 		const manager = {
 			getDefinition: () => createDefinition("scout", "/tmp/scout.md"),
 			startByName: vi.fn(async () => nextHandle),
 		} satisfies SubagentToolManager;
-		const rpc = await startHarness(createHost({ definitions: [], manager }));
-		try {
-			rpc.send({ id: "start-shutdown", type: "subagent_start", agent: "scout", prompt: "keep alive" });
-			await vi.waitFor(() => expect(first.prompt).toHaveBeenCalledWith("keep alive"));
-			rpc.close();
-			await expect(rpc.modePromise).resolves.toBeUndefined();
-			expect(first.dispose).toHaveBeenCalledOnce();
-		} finally {
-			await rpc.modePromise.catch(() => undefined);
-		}
+		const { harness, parent, client } = await setup(manager);
+
+		await client.intent("subagent_start", { agent: "scout", prompt: "keep alive" });
+		await client.close();
+		expect(first.dispose).toHaveBeenCalledOnce();
 
 		nextHandle = second.handle;
-		const replacementRpc = await startHarness(createHost({ definitions: [], manager }));
-		try {
-			replacementRpc.send({ id: "start-replace", type: "subagent_start", agent: "scout", prompt: "replace me" });
-			await vi.waitFor(() => expect(second.prompt).toHaveBeenCalledWith("replace me"));
-			replacementRpc.send({ id: "new-session", type: "new_session" });
-			await vi.waitFor(() =>
-				expect(replacementRpc.writes).toContainEqual({
-					id: "new-session",
-					type: "response",
-					command: "new_session",
-					success: true,
-					data: { cancelled: false, sessionId: "new-parent-session" },
-				}),
-			);
-			expect(second.dispose).toHaveBeenCalledOnce();
-		} finally {
-			replacementRpc.close();
-			await replacementRpc.modePromise.catch(() => undefined);
-		}
-	});
-
-	test("Iroh remote filtering rejects subagent lifecycle commands", () => {
-		for (const command of [
-			"list_subagents",
-			"subagent_start",
-			"subagent_abort",
-			"subagent_get_state",
-			"subagent_get_transcript",
-			"subagent_dispose",
-		] as const) {
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${command}-1`, type: command }))).toEqual({
-				allowed: false,
-				response: {
-					id: `${command}-1`,
-					type: "response",
-					command,
-					success: false,
-					error: `RPC command not allowed over remote host: ${command}`,
-				},
-			});
-		}
+		const reopened = await harness.openStartup();
+		vi.spyOn(reopened.session, "getSubagentToolManager").mockReturnValue(manager);
+		const mover = await connectLocal(harness, reopened);
+		cleanups.push(() => mover.close());
+		await mover.intent("subagent_start", { agent: "scout", prompt: "replace me" });
+		const moved = await mover.intent("new_session", {});
+		expect(moved).toMatchObject({ type: "accepted", conversation: expect.any(String) });
+		expect(moved.type === "accepted" ? moved.conversation : undefined).not.toBe(reopened.id);
+		await vi.waitFor(() => expect(second.dispose).toHaveBeenCalledOnce());
+		expect(subagentValue(reopened, "sa_replaced")).toBeUndefined();
+		expect(parent.closed).toBe(true);
 	});
 });

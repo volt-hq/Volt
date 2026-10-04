@@ -122,7 +122,7 @@ export const contentQuery = defineQuery({
 		if (!entry || !profile.includes(entry)) {
 			throw new QueryRejectedError("invalid_input", `Unknown entry: ${params.entryId}`);
 		}
-		const parts = contentParts(entry);
+		const parts = contentParts(profile.source(entry));
 		const index = params.part ?? 0;
 		const part = parts[index];
 		if (!part) throw new QueryRejectedError("invalid_input", `Entry ${params.entryId} has no content part ${index}`);

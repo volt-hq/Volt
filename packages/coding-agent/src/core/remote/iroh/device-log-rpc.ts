@@ -4,9 +4,6 @@ import { chmod, lstat, mkdir, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, sep } from "node:path";
 import { writeDurableAtomicFile } from "../../../utils/durable-atomic-write.ts";
 import { WorkspaceIntentError } from "../../protocol/intents/types.ts";
-import { createIrohRemoteRpcErrorResponse, type IrohRemoteRpcErrorResponse } from "./rpc-command-filter.ts";
-
-export const IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE = "upload_device_logs";
 
 export const IROH_REMOTE_DEVICE_LOGS_DIR_SEGMENTS = [".volt", "device-logs"] as const;
 
@@ -16,22 +13,12 @@ const DEVICE_LOG_FILE_NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const DEVICE_LOG_DIRECTORY_MODE = 0o700;
 const DEVICE_LOG_FILE_MODE = 0o600;
 
-export interface IrohRemoteDeviceLogUploadRpcData {
+export interface IrohRemoteDeviceLogUpload {
 	path: string;
 	byteCount: number;
 }
 
-export type IrohRemoteDeviceLogUploadRpcResponse =
-	| {
-			id?: string;
-			type: "response";
-			command: typeof IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE;
-			success: true;
-			data: IrohRemoteDeviceLogUploadRpcData;
-	  }
-	| IrohRemoteRpcErrorResponse;
-
-export interface HandleIrohRemoteDeviceLogUploadRpcCommandOptions {
+export interface IrohRemoteDeviceLogUploadOptions {
 	workspacePath: string;
 	maxContentBytes?: number;
 	now?: () => Date;
@@ -43,8 +30,8 @@ export interface HandleIrohRemoteDeviceLogUploadRpcCommandOptions {
  */
 export async function uploadIrohRemoteDeviceLog(
 	request: Record<string, unknown>,
-	options: HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
-): Promise<IrohRemoteDeviceLogUploadRpcData> {
+	options: IrohRemoteDeviceLogUploadOptions,
+): Promise<IrohRemoteDeviceLogUpload> {
 	const parsed = parseIrohRemoteDeviceLogUploadCommand(request, options);
 	if (!parsed.ok) throw new WorkspaceIntentError(parsed.error);
 	try {
@@ -55,37 +42,16 @@ export async function uploadIrohRemoteDeviceLog(
 			fileMode: DEVICE_LOG_FILE_MODE,
 		});
 	} catch (error: unknown) {
-		throw new WorkspaceIntentError(
-			`Failed to write device log: ${error instanceof Error ? error.message : String(error)}`,
-		);
+		const message = error instanceof Error ? error.message : String(error);
+		// A file system error names host paths: the device gets a stable code, the host's audit the cause.
+		if (typeof error === "object" && error !== null && "code" in error) {
+			throw new WorkspaceIntentError("device_log_write_failed", { cause: message });
+		}
+		throw new WorkspaceIntentError(`Failed to write device log: ${message}`);
 	}
 	return {
 		path: [...IROH_REMOTE_DEVICE_LOGS_DIR_SEGMENTS, parsed.fileName].join("/"),
 		byteCount: parsed.byteCount,
-	};
-}
-
-export async function handleIrohRemoteDeviceLogUploadRpcCommand(
-	command: Record<string, unknown>,
-	options: HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
-): Promise<IrohRemoteDeviceLogUploadRpcResponse> {
-	const id = typeof command.id === "string" ? command.id : undefined;
-	let data: IrohRemoteDeviceLogUploadRpcData;
-	try {
-		data = await uploadIrohRemoteDeviceLog(command, options);
-	} catch (error: unknown) {
-		return createIrohRemoteRpcErrorResponse(
-			id,
-			IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE,
-			error instanceof Error ? error.message : String(error),
-		);
-	}
-	return {
-		id,
-		type: "response",
-		command: IROH_REMOTE_UPLOAD_DEVICE_LOGS_RPC_TYPE,
-		success: true,
-		data,
 	};
 }
 
@@ -189,13 +155,13 @@ function isErrnoException(error: unknown, code: string): error is NodeJS.ErrnoEx
 	return error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === code;
 }
 
-/** The upload a device log command asks for, with the default file name filled in, or the error it reports. */
+/** The upload a device asks for, with the default file name filled in, or the error it reports. */
 export function parseIrohRemoteDeviceLogUploadCommand(
 	command: Record<string, unknown>,
-	options: HandleIrohRemoteDeviceLogUploadRpcCommandOptions,
+	options: IrohRemoteDeviceLogUploadOptions,
 ): { ok: true; fileName: string; content: string; byteCount: number } | { ok: false; error: string } {
 	if (typeof command.content !== "string" || command.content.length === 0) {
-		return { ok: false, error: 'Invalid RPC command payload: "content" must be a non-empty string' };
+		return { ok: false, error: '"content" must be a non-empty string' };
 	}
 	const byteCount = Buffer.byteLength(command.content, "utf8");
 	const maxContentBytes = options.maxContentBytes ?? DEFAULT_IROH_REMOTE_DEVICE_LOG_MAX_CONTENT_BYTES;
@@ -212,7 +178,7 @@ export function parseIrohRemoteDeviceLogUploadCommand(
 	if (typeof command.fileName !== "string" || !DEVICE_LOG_FILE_NAME_PATTERN.test(command.fileName)) {
 		return {
 			ok: false,
-			error: 'Invalid RPC command payload: "fileName" must contain only letters, digits, ".", "_", or "-" and must not start with "."',
+			error: '"fileName" must contain only letters, digits, ".", "_", or "-" and must not start with "."',
 		};
 	}
 	return { ok: true, fileName: command.fileName, content: command.content, byteCount };

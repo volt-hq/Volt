@@ -1,34 +1,27 @@
 import type { AgentToolUpdateCallback } from "@hansjm10/volt-agent-core";
-import {
-	RPC_COMMAND_SCHEMAS,
-	RPC_RESPONSE_SCHEMAS,
-	RpcBackgroundJobsChangedEventSchema,
-} from "@hansjm10/volt-protocol";
+import type { AssistantMessage } from "@hansjm10/volt-ai";
+import { type HostFrame, LiveJobsValueSchema, type LiveValue, QUERY_SCHEMAS } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient } from "../src/client/protocol-client.ts";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
+import { feedLiveState, type LiveFeed } from "../src/core/host/live-feed.ts";
+import { LiveState } from "../src/core/host/live-state.ts";
+import { remoteProfile } from "../src/core/protocol/profiles.ts";
+import { projectEntry, sessionProjectionSource } from "../src/core/protocol/projection/entries.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
-import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
-import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
-import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
-import {
-	listRpcBackgroundJobs,
-	projectRpcBackgroundJobDetails,
-	subscribeRpcSessionEvents,
-} from "../src/core/rpc/background-jobs.ts";
-import {
-	ConversationProjectionFeed,
-	type ConversationProjectionSnapshotBuilder,
-} from "../src/core/rpc/conversation-projection-feed.ts";
-import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
-import type { RpcSessionState } from "../src/core/rpc/types.ts";
-import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
-import { projectRemoteTranscriptEntry } from "../src/daemon/conversation-commands.ts";
-import { validateRpcCommandPayload } from "../src/modes/rpc/rpc-command-validation.ts";
+import { projectRpcBackgroundJobDetails } from "../src/core/rpc/background-jobs.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
+import { createLiveRecorder } from "./utilities/live-recorder.ts";
+
+type JobsValue = Extract<LiveValue, { kind: "jobs" }>;
 
 const managers: BackgroundJobManager[] = [];
-const feeds: ConversationProjectionFeed[] = [];
-const cleanup: Array<() => void> = [];
+const feeds: LiveFeed[] = [];
+const harnesses: HostHarness[] = [];
+const cleanup: Array<() => Promise<void> | void> = [];
 
 function deferred() {
 	let resolve!: () => void;
@@ -38,48 +31,29 @@ function deferred() {
 	return { promise, resolve };
 }
 
+/**
+ * A job manager feeding a live state through the conversation live feed. The
+ * session around it reads nothing else: the feed skips the values it cannot read.
+ */
 function setup() {
 	let generation = 0;
 	const manager = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => generation });
 	managers.push(manager);
-	const source = { backgroundJobs: manager, subscribe: () => () => {} };
-	const state: RpcSessionState = {
-		thinkingLevel: "off",
-		availableThinkingLevels: ["off"],
-		fastModeEnabled: false,
-		planning: { mode: "build", plan: null },
-		gitContext: null,
-		isStreaming: false,
-		isCompacting: false,
-		steeringMode: "all",
-		followUpMode: "all",
-		sessionId: "session",
-		autoCompactionEnabled: false,
-		messageCount: 0,
-		pendingMessageCount: 0,
-		steeringQueue: [],
-		followUpQueue: [],
-		backgroundJobs: [],
+	const live = new LiveState();
+	const session = {
+		backgroundJobs: manager,
+		liveState: live,
+		settingsManager: {},
+		sessionManager: { subscribeEntries: () => () => {} },
+		subscribe: () => () => {},
+		subscribeActivity: () => () => {},
 	};
-	const buildSnapshot: ConversationProjectionSnapshotBuilder = ({ activeAssistant, branchEpoch }) => ({
-		conversation: { workspaceName: "workspace", sessionId: "session" },
-		state: { ...state, backgroundJobs: listRpcBackgroundJobs(manager) },
-		transcript: {
-			sessionId: "session",
-			items: [],
-			hasMore: false,
-			nextBeforeEntryId: null,
-			projectionVersion: 3,
-			branchEpoch,
-			head: null,
-		},
-		activeAssistant,
-		activeWorkflows: [],
-	});
+	const feed = feedLiveState(session as unknown as AgentSession);
+	feeds.push(feed);
 	return {
 		manager,
-		source,
-		buildSnapshot,
+		live,
+		feed,
 		rebase: () => {
 			generation++;
 			manager.cancelInaccessible();
@@ -104,198 +78,145 @@ function startJob(manager: BackgroundJobManager, toolName: "bash" | "subagent" =
 	return { job, finish: finish.resolve, output: (text: string) => update({ content: [{ type: "text", text }] }) };
 }
 
+/** The jobs values a recorder was delivered, in order. */
+function jobsSets(recorder: ReturnType<typeof createLiveRecorder>): JobsValue[] {
+	return recorder.items().flatMap((item) => (item.type === "set" && item.value.kind === "jobs" ? [item.value] : []));
+}
+
 afterEach(async () => {
-	for (const fn of cleanup.splice(0)) fn();
-	for (const feed of feeds.splice(0)) feed.dispose();
+	for (const fn of cleanup.splice(0)) await fn();
+	for (const feed of feeds.splice(0)) feed.close();
 	vi.useRealTimers();
 	for (const manager of managers.splice(0)) await manager.close();
+	for (const harness of harnesses.splice(0)) await harness.cleanup();
 });
 
-describe("Jobs RPC contract and projection", () => {
-	it("validates strict commands and preserves correlated errors for invalid job IDs", () => {
-		for (const type of ["read_job", "cancel_job"] as const) {
-			expect(Compile(RPC_COMMAND_SCHEMAS[type]).Check({ type, jobId: "job_123" })).toBe(true);
-			for (const jobId of [undefined, "", " padded ", "界".repeat(100), 42]) {
-				expect(validateRpcCommandPayload({ id: "request", type, jobId })).toBeDefined();
-			}
-			expect(validateRpcCommandPayload({ type, jobId: "job_123", path: "/tmp/log" })).toBeDefined();
+describe("background jobs on the protocol", () => {
+	it("rejects malformed job ids and unknown fields as invalid input, answering the intent or query that sent them", async () => {
+		const harness = await createHostHarness();
+		harnesses.push(harness);
+		const client = await createLoopbackClient(harness.host, await harness.openStartup());
+		cleanup.push(() => client.stop());
+		const invalid: Array<Record<string, unknown>> = [
+			{},
+			{ jobId: "" },
+			{ jobId: " padded " },
+			{ jobId: 42 },
+			{ jobId: "job_123", path: "/tmp/log" },
+		];
+		for (const input of invalid) {
+			await expect(client.intent("cancel_job" as string, input)).rejects.toMatchObject({
+				reason: { code: "invalid_input" },
+			});
+			await expect(client.query("job_output", input as { jobId: string })).rejects.toMatchObject({
+				code: "invalid_input",
+			});
 		}
-		expect(validateRpcCommandPayload({ type: "list_jobs" })).toBeUndefined();
-		expect(validateRpcCommandPayload({ type: "list_jobs", jobId: "job_123" })).toBeDefined();
+		// A well-formed id of no job of the conversation is a failure, not invalid input.
+		await expect(client.intent("cancel_job", { jobId: "job_123" })).rejects.toMatchObject({
+			reason: { code: "failed", message: expect.stringContaining("inaccessible") },
+		});
+		await expect(client.query("job_output", { jobId: "job_123" })).rejects.toMatchObject({
+			code: "failed",
+			message: expect.stringContaining("inaccessible"),
+		});
 	});
 
 	it.each(["bash", "subagent"] as const)(
-		"coalesces %s progress without copying output or consuming model results",
+		"coalesces %s progress into metadata-only jobs values without consuming model results",
 		async (toolName) => {
 			vi.useFakeTimers();
-			const { manager, source } = setup();
-			const listener = vi.fn();
-			const unsubscribe = subscribeRpcSessionEvents(source, listener);
-			cleanup.push(unsubscribe);
+			const { manager, live, feed } = setup();
+			const recorder = createLiveRecorder();
+			live.attach("observer", recorder);
+			const delivered = jobsSets(recorder).length;
 			const worker = startJob(manager, toolName);
 			await Promise.resolve();
 			for (let index = 0; index < 100; index++) worker.output(`progress ${index}`);
-			expect(listener).not.toHaveBeenCalled();
+			expect(jobsSets(recorder)).toHaveLength(delivered);
 			await vi.advanceTimersByTimeAsync(100);
-			expect(listener).toHaveBeenCalledTimes(1);
-			const event = listener.mock.calls[0][0];
-			expect(Compile(RpcBackgroundJobsChangedEventSchema).Errors(event)).toEqual([]);
-			expect(event.jobs).toHaveLength(1);
-			expect(event.jobs[0]).not.toHaveProperty("output");
+			expect(jobsSets(recorder)).toHaveLength(delivered + 1);
+			const value = jobsSets(recorder).at(-1)!;
+			expect(Compile(LiveJobsValueSchema).Errors(value)).toEqual([]);
+			expect(value.jobs).toHaveLength(1);
+			expect(value.jobs[0]).not.toHaveProperty("output");
 			worker.finish();
 			await manager.waitForIdle();
 			await vi.advanceTimersByTimeAsync(100);
-			expect(listener.mock.calls[1][0].jobs[0].status).toBe("completed");
+			expect(jobsSets(recorder).at(-1)?.jobs[0]?.status).toBe("completed");
 			expect(manager.listUncollected()).toHaveLength(1);
-			unsubscribe();
-			manager.setSteeringPending(true);
+			// A closed feed publishes nothing more.
+			feed.close();
+			const after = jobsSets(recorder).length;
+			startJob(manager, toolName);
 			await vi.advanceTimersByTimeAsync(100);
-			expect(listener).toHaveBeenCalledTimes(2);
+			expect(jobsSets(recorder)).toHaveLength(after);
 		},
 	);
 
-	it("captures the current branch when a pending progress notification is delivered", async () => {
+	it("publishes the current branch's jobs when a pending change is delivered", async () => {
 		vi.useFakeTimers();
-		const { manager, source, rebase } = setup();
-		const listener = vi.fn();
-		cleanup.push(subscribeRpcSessionEvents(source, listener));
+		const { manager, live, rebase } = setup();
+		const recorder = createLiveRecorder();
+		live.attach("observer", recorder);
 		startJob(manager);
 		rebase();
 		await vi.advanceTimersByTimeAsync(100);
-		expect(listener).toHaveBeenCalledWith({ type: "background_jobs_changed", jobs: [] });
+		expect(live.get("jobs")).toEqual({ kind: "jobs", jobs: [] });
+		expect(jobsSets(recorder).every((value) => value.jobs.length === 0)).toBe(true);
 	});
 
-	it.each(["list_jobs", "read_job", "cancel_job"])(
-		"drops buffered %s results when the branch changes",
-		async (command) => {
-			const { source, buildSnapshot } = setup();
-			const feed = new ConversationProjectionFeed({
-				subscribe: (listener) => subscribeRpcSessionEvents(source, listener),
-			});
-			feeds.push(feed);
-			const gate = deferred();
-			cleanup.push(gate.resolve);
-			const writes: object[] = [];
-			const subscription = feed.attach({
-				buildSnapshot,
-				write: (value) => {
-					writes.push(value);
-					return writes.length === 1 ? gate.promise : undefined;
-				},
-			});
-			const buffered = subscription.enqueueControl({
-				id: "stale",
-				type: "response",
-				command,
-				success: true,
-				data: { branchEpoch: subscription.branchEpoch, output: "old branch output" },
-			});
-			feed.rotateForBranchRebase();
-			gate.resolve();
-			await buffered;
-			await subscription.flush();
-			expect(writes).not.toContainEqual(expect.objectContaining({ id: "stale" }));
-			expect(writes.at(-1)).toMatchObject({
-				type: "conversation_bootstrap",
-				reason: "branch_rebase",
-				state: { backgroundJobs: [] },
-			});
-		},
-	);
-
-	it("restores terminal jobs in checkpoints and rejects output-bearing change events", async () => {
-		const { manager, source, buildSnapshot } = setup();
-		const feed = new ConversationProjectionFeed({
-			subscribe: (listener) => subscribeRpcSessionEvents(source, listener),
-		});
-		feeds.push(feed);
-		const writes: object[] = [];
-		const subscription = feed.attach({
-			buildSnapshot,
-			write: (value) => {
-				writes.push(value);
-			},
-		});
-		await subscription.ready;
+	it("shows terminal jobs to a client that attaches later and keeps output out of the live value", async () => {
+		vi.useFakeTimers();
+		const { manager, live } = setup();
 		const worker = startJob(manager);
 		worker.finish();
 		await manager.waitForIdle();
-		subscription.requestCheckpoint({ requestId: "recover", lastAppliedCursor: 0, reason: "cursor_gap" });
-		await subscription.flush();
-		expect(writes.at(-1)).toMatchObject({
-			reason: "resync",
-			state: { backgroundJobs: [{ id: worker.job.id, status: "completed" }] },
-		});
-		const jobs = listRpcBackgroundJobs(manager);
-		expect(
-			Compile(RpcBackgroundJobsChangedEventSchema).Check({
-				type: "background_jobs_changed",
-				jobs: [{ ...jobs[0], output: "must stay private" }],
-			}),
-		).toBe(false);
-		expect(
-			Compile(RPC_RESPONSE_SCHEMAS.list_jobs).Check({
-				type: "response",
-				command: "list_jobs",
-				success: true,
-				data: { sessionId: "session", jobs },
-			}),
-		).toBe(true);
-	});
-
-	it("uses observation for reads and control for cancellation", () => {
-		const observe = {
-			...createIrohRemotePresetAccess("coding").rpcGrant,
-			capabilities: ["conversation.observe.v1" as const],
-		};
-		for (const type of ["list_jobs", "read_job"])
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ type, jobId: "job" }), observe).allowed).toBe(true);
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ type: "cancel_job", jobId: "job" }), observe)).toMatchObject(
-			{ allowed: false, response: { error: { requiredCapability: "conversation.control.v1" } } },
+		await vi.advanceTimersByTimeAsync(100);
+		const recorder = createLiveRecorder();
+		live.attach("late", recorder);
+		expect(recorder.updates[0]?.reset).toBe(true);
+		expect(jobsSets(recorder)).toEqual([
+			{ kind: "jobs", jobs: [expect.objectContaining({ id: worker.job.id, status: "completed" })] },
+		]);
+		const jobs = jobsSets(recorder)[0]!.jobs;
+		expect(Compile(LiveJobsValueSchema).Check({ kind: "jobs", jobs: [{ ...jobs[0], output: "private" }] })).toBe(
+			false,
 		);
+		expect(Compile(QUERY_SCHEMAS.job_output.result).Check({ job: { ...jobs[0], output: "private" } })).toBe(true);
 	});
 
-	it("keeps metadata within its schema bounds after remote path expansion", () => {
+	it("keeps live job labels within their schema bound after remote path expansion", () => {
 		const job = {
 			id: "job_123",
-			toolName: "bash",
+			toolName: "bash" as const,
 			label: "/r ".repeat(66).trim(),
-			status: "running",
+			status: "running" as const,
 			startedAt: 1,
 			outputTruncated: false,
 		};
-		const event = { type: "background_jobs_changed", jobs: [job] };
-		const sanitized = sanitizeIrohRemoteOutbound(event, { workspacePath: "/r" });
-		expect(Compile(RpcBackgroundJobsChangedEventSchema).Errors(sanitized)).toEqual([]);
-		expect(sanitized).toMatchObject({ jobs: [{ label: "/workspace ".repeat(66).trim().slice(0, 200) }] });
+		const redactor = remoteProfile({
+			grant: createIrohRemotePresetAccess("coding").rpcGrant,
+			redaction: { workspacePath: "/r" },
+		}).redactor();
+		const frame: HostFrame = {
+			type: "live",
+			subscriptionId: "s1",
+			basedOn: 0,
+			seq: 1,
+			reset: true,
+			items: [{ type: "set", key: "jobs", value: { kind: "jobs", jobs: [job] } }],
+		};
+		const redacted = redactor.redact(frame);
+		if (redacted?.type !== "live") throw new Error("Expected a live frame");
+		const item = redacted.items[0];
+		if (item?.type !== "set") throw new Error("Expected a set item");
+		expect(Compile(LiveJobsValueSchema).Errors(item.value)).toEqual([]);
+		expect(item.value).toMatchObject({ jobs: [{ label: "/workspace ".repeat(66).trim().slice(0, 200) }] });
 		expect(job.label).toBe("/r ".repeat(66).trim());
-		const response = sanitizeIrohRemoteOutbound(
-			{ type: "response", command: "list_jobs", success: true, data: { sessionId: "session", jobs: [job] } },
-			{ workspacePath: "/r" },
-		);
-		expect(Compile(RPC_RESPONSE_SCHEMAS.list_jobs).Errors(response)).toEqual([]);
 	});
 
-	it("projects historical job identity and notices without exposing output in metadata", async () => {
-		const access = createIrohRemotePresetAccess("coding");
-		const authorization: IrohRemoteClientAuthorizationSuccess = {
-			ok: true,
-			allowTools: access.allowedTools,
-			paired: false,
-			pairingSecretConsumed: false,
-			client: {
-				nodeId: "phone",
-				label: "Phone",
-				allowedWorkspaces: [],
-				allowedTools: access.allowedTools,
-				rpcGrant: access.rpcGrant,
-				pairedAt: 1,
-				lastSeenAt: 1,
-			},
-			workspace: { name: "workspace", path: "/repo" },
-			workspaceNames: ["workspace"],
-			workspaces: [{ name: "workspace", status: "available" }],
-		};
+	it("projects historical job identity and notices for a remote client without exposing output", async () => {
 		const backgroundJob = {
 			id: "job_123",
 			toolName: "bash" as const,
@@ -306,57 +227,76 @@ describe("Jobs RPC contract and projection", () => {
 			output: "private result",
 			outputTruncated: false,
 		};
-		const details = { backgroundJob };
-		const entry: SessionEntry = {
-			type: "message",
-			id: "entry",
-			parentId: null,
-			ordinal: 1,
-			timestamp: "2026-09-10T00:00:00.000Z",
-			message: {
-				role: "toolResult",
-				toolCallId: "call",
-				toolName: "bash",
-				content: [{ type: "text", text: "Started job" }],
-				details,
-				isError: false,
-				timestamp: 1,
+		const manager = SessionManager.inMemory("/repo");
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call", name: "bash", arguments: { command: "do work", background: true } }],
+			api: "faux",
+			provider: "faux",
+			model: "faux-1",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
+			stopReason: "toolUse",
+			timestamp: 1,
 		};
-		const toolCall = {
-			assistantEntryId: "assistant",
-			contentIndex: 0,
-			providerCallId: "call",
-			name: "bash",
-			arguments: { command: "do work", background: true },
+		await manager.logWriter.appendMessage(assistant);
+		const resultId = await manager.logWriter.appendMessage({
+			role: "toolResult",
+			toolCallId: "call",
+			toolName: "bash",
+			content: [{ type: "text", text: "Started job" }],
+			details: { backgroundJob },
+			isError: false,
+			timestamp: 1,
+		});
+		const noticeId = await manager.logWriter.appendCustomMessageEntry(
+			"background_job_notification",
+			"Job job_123 completed",
+			true,
+		);
+		const profile = remoteProfile({
+			grant: createIrohRemotePresetAccess("coding").rpcGrant,
+			redaction: { workspacePath: "/repo" },
+		});
+		const redactor = profile.redactor();
+		const project = (id: string) => {
+			const entry = manager.getCommittedEntry(id);
+			if (!entry) throw new Error(`No entry ${id}`);
+			const projected = projectEntry(entry, sessionProjectionSource(manager), profile);
+			if (!projected) throw new Error(`The remote profile hides ${id}`);
+			const redacted = redactor.redact({ type: "entry", subscriptionId: "s1", entry: projected });
+			if (redacted?.type !== "entry") throw new Error("Expected an entry frame");
+			const projectedEntry = redacted.entry;
+			// Message-like entries reach a transcript client as their view only.
+			expect(projectedEntry).not.toHaveProperty("payload");
+			return { entry: projectedEntry, view: "view" in projectedEntry ? projectedEntry.view : undefined };
 		};
-		const projected = projectRemoteTranscriptEntry(entry, authorization, toolCall);
-		expect(projected).toMatchObject({
+
+		const result = project(resultId);
+		expect(result.view).toMatchObject({
 			args: { background: true },
 			details: { backgroundJob: { id: "job_123", label: "/workspace/test" } },
 			summary: "Background job job_123: running (snapshot)",
 		});
-		expect(projected?.details?.backgroundJob).not.toHaveProperty("output");
+		expect(JSON.stringify(result.entry)).not.toContain("private result");
 		expect(
 			projectRpcBackgroundJobDetails({ backgroundJob: { ...backgroundJob, output: undefined } }),
 		).toBeUndefined();
-		const manager = SessionManager.inMemory();
-		await manager.logWriter.appendCustomMessageEntry("background_job_notification", "Job job_123 completed", true);
-		expect(projectSessionTranscript(manager).items).toEqual([
-			expect.objectContaining({ role: "system", text: "Job job_123 completed" }),
-		]);
-		expect(projectRemoteTranscriptEntry(manager.getBranch()[0], authorization, undefined)).toMatchObject({
-			role: "system",
-			text: "Job job_123 completed",
+		expect(project(noticeId).view).toMatchObject({ role: "system", text: "Job job_123 completed" });
+
+		const read = redactor.redact({
+			type: "result",
+			queryId: "q-1",
+			data: { job: { ...backgroundJob, output: '/repo/test\n"escaped"\n界' } },
 		});
-		const read = {
-			type: "response",
-			command: "read_job",
-			success: true,
-			data: { sessionId: "session", job: { ...backgroundJob, output: '/repo/test\n"escaped"\n界' } },
-		};
-		expect(sanitizeIrohRemoteOutbound(read, { workspacePath: "/repo" })).toMatchObject({
-			data: { job: { output: '/workspace/test\n"escaped"\n界' } },
+		expect(read).toMatchObject({
+			data: { job: { label: "/workspace/test", output: '/workspace/test\n"escaped"\n界' } },
 		});
 	});
 });

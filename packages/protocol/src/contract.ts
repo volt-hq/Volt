@@ -79,9 +79,9 @@ import {
 	ControlLeaseStatusSchema,
 	ControlRelayCloseReasonSchema,
 	ControlRelayCredentialStatusSchema,
+	ControlRelayFrameSchema,
+	ControlRelayOutcomeSchema,
 	ControlRelayPreambleSchema,
-	ControlRelayRpcCommandSchema,
-	ControlRelayRpcResponseSchema,
 	ControlRequestSchema,
 	ControlResponseSchema,
 	ControlRevokedClientStatusSchema,
@@ -280,7 +280,6 @@ import {
 	IrohRemoteWorkspaceDiscoveryTargetSchema,
 	IrohRemoteWorkspaceManagementTargetSchema,
 	IrohRemoteWorktreeIdSchema,
-	RpcRemoteTerminalEventSchema,
 } from "./remote-handshake.ts";
 import {
 	RPC_RESPONSE_SCHEMAS,
@@ -504,7 +503,6 @@ export const RpcServerEventSchema = Type.Union([
 	RpcPromptCacheChangedEventSchema,
 	RpcUiActionStateChangedEventSchema,
 	RpcPlanningStateChangedEventSchema,
-	RpcRemoteTerminalEventSchema,
 ]);
 
 // ============================================================================
@@ -724,7 +722,6 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcSubagentEndEvent: RpcSubagentEndEventSchema,
 	RpcSubagentDisposedEvent: RpcSubagentDisposedEventSchema,
 	RpcModelsChangedEvent: RpcModelsChangedEventSchema,
-	RpcRemoteTerminalEvent: RpcRemoteTerminalEventSchema,
 
 	// Response bodies without another home
 	RpcSessionStats: RpcSessionStatsSchema,
@@ -826,8 +823,8 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	"Control.RelayCredentialStatus": ControlRelayCredentialStatusSchema,
 	"Control.RemoteTransportHealth": RemoteTransportHealthSchema,
 	"Control.EnvironmentStatus": DaemonEnvironmentStatusSchema,
-	"Control.RelayRpcCommand": ControlRelayRpcCommandSchema,
-	"Control.RelayRpcResponse": ControlRelayRpcResponseSchema,
+	"Control.RelayFrame": ControlRelayFrameSchema,
+	"Control.RelayOutcome": ControlRelayOutcomeSchema,
 	"Control.Hello": ControlHelloSchema,
 	"Control.HelloAck": ControlHelloAckSchema,
 	"Control.Fatal": ControlFatalSchema,

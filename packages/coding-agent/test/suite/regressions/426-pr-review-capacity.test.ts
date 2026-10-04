@@ -1,12 +1,14 @@
 import { existsSync, realpathSync } from "node:fs";
 import { join } from "node:path";
-import { RpcErrorResponseSchema } from "@hansjm10/volt-protocol";
+import { RejectedFrameSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { githubCliCodeHostProvider, type ResolvedPullRequestCheckout } from "../../../src/core/code-host/index.ts";
+import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../../../src/core/remote/iroh/audit.ts";
+import type { IrohRemoteClientAuthorizationSuccess } from "../../../src/core/remote/iroh/authorization.ts";
+import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import {
-	handleIrohRemotePrReviewRpcCommand,
 	type IrohRemotePrReviewRpcBackend,
 	PrReviewPreparationError,
 } from "../../../src/core/remote/iroh/pr-review-rpc.ts";
@@ -18,7 +20,15 @@ import {
 	PrReviewCheckoutManager,
 	type PrReviewPreparationRequest,
 } from "../../../src/daemon/pr-review-checkout.ts";
+import {
+	type RemoteIntentHost,
+	type RemoteStreamScope,
+	remoteIntentServices,
+	remoteStreamAllows,
+} from "../../../src/daemon/remote-intents.ts";
 import { WorktreeManager } from "../../../src/daemon/worktree-manager.ts";
+import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
 import { createHarness } from "../harness.ts";
 import { createPrReviewGitSeed } from "../pr-review-git-fixture.ts";
 
@@ -95,6 +105,64 @@ async function fixture() {
 	return { root, source, agentDir, workspace, state, worktrees, manager, request, authority };
 }
 
+/** A device's worktree management stream, as the daemon serves it, with `prReviews` as the daemon's PR review backend. */
+async function managementStream(
+	f: Awaited<ReturnType<typeof fixture>>,
+	prReviews: IrohRemotePrReviewRpcBackend,
+): Promise<RemotePhone> {
+	const access = createIrohRemotePresetAccess("full");
+	const authorization: IrohRemoteClientAuthorizationSuccess = {
+		ok: true,
+		allowTools: "read",
+		client: {
+			nodeId: "phone",
+			label: "phone",
+			allowedWorkspaces: [f.workspace.name],
+			rpcGrant: access.rpcGrant,
+			pairedAt: 1,
+			lastSeenAt: 1,
+		},
+		paired: false,
+		pairingSecretConsumed: false,
+		workspace: f.workspace,
+		workspaceNames: [f.workspace.name],
+		workspaces: [{ name: f.workspace.name, status: "available" }],
+	};
+	const unexpected = (): never => {
+		throw new Error("unexpected backend");
+	};
+	const auditLogger = new IrohRemoteAuditLogger();
+	cleanups.push(() => auditLogger.flush());
+	const host: RemoteIntentHost = {
+		agentDir: f.agentDir,
+		auditLogger,
+		stateManager: f.state,
+		pushTargets: unexpected,
+		worktrees: unexpected,
+		agentOptions: unexpected,
+		sessionContexts: unexpected,
+		prReviews: () => prReviews,
+		unregisterWorkspace: unexpected,
+	};
+	const scope: RemoteStreamScope = { kind: "management", purpose: "manage_worktrees" };
+	const allows = remoteStreamAllows(scope);
+	const pair = createIrohStreamPair();
+	const connection = serveIrohRemoteConnection({
+		stream: pair.host,
+		grant: access.rpcGrant,
+		redaction: { workspacePath: f.workspace.path, remoteWorkspacePath: "/workspace" },
+		services: () => remoteIntentServices(host, authorization, scope, { keep: {} }),
+		...(allows === undefined ? {} : { allows }),
+	});
+	const device = connectRemotePhone(pair.phone);
+	cleanups.push(async () => {
+		await connection.close().catch(() => undefined);
+		await device.close();
+	});
+	await device.hello();
+	return device;
+}
+
 describe("#426 PR review capacity errors", () => {
 	it("preserves the real worktree capacity rejection without creating a checkout or session", async () => {
 		const f = await fixture();
@@ -131,36 +199,32 @@ describe("#426 PR review capacity errors", () => {
 		"review_preparation_failed",
 		"review_preparation_stale",
 		"review_preparation_conflict",
-	] as const)("serializes typed %s without diagnostic text", async (code) => {
-		const command = {
-			id: "prepare-426",
-			type: "prepare_pr_review",
-			workspaceName: "project",
-			sessionId: "review-426",
-			expectedPullRequest: { url: "https://github.com/owner/project/pull/414", headRefOid: "a".repeat(40) },
-		};
+	] as const)("answers typed %s without diagnostic text", async (code) => {
+		const f = await fixture();
 		const backend: IrohRemotePrReviewRpcBackend = {
 			resolvePrReview: vi.fn<IrohRemotePrReviewRpcBackend["resolvePrReview"]>(),
 			preparePrReview: vi
 				.fn<IrohRemotePrReviewRpcBackend["preparePrReview"]>()
-				.mockRejectedValue(new PrReviewPreparationError(code, "/secret/checkout git stderr")),
+				.mockRejectedValue(new PrReviewPreparationError(code, `${f.root}/secret/checkout git stderr`)),
 		};
-		const result = await handleIrohRemotePrReviewRpcCommand(command, {
-			authorizedWorkspaceName: "project",
-			backend,
-		});
-		expect(result).toEqual({
-			handled: true,
-			response: {
-				id: command.id,
-				type: "response",
-				command: command.type,
-				success: false,
-				error: code,
-				errorCode: code,
+		const device = await managementStream(f, backend);
+		const outcome = await device.intent(
+			"prepare_pr_review",
+			{
+				sessionId: "review-426",
+				expectedPullRequest: { url: "https://github.com/owner/project/pull/414", headRefOid: "a".repeat(40) },
 			},
+			{ expectedOrdinal: null },
+		);
+		expect(outcome).toEqual({
+			type: "rejected",
+			intentId: outcome.intentId,
+			reason: { code: "failed", message: code },
 		});
-		if (!result.handled) throw new Error("PR review command was not handled");
-		expect(Compile(RpcErrorResponseSchema).Check(result.response)).toBe(true);
+		expect(Compile(RejectedFrameSchema).Check(outcome)).toBe(true);
+		expect(backend.preparePrReview).toHaveBeenCalledOnce();
+		const wire = JSON.stringify(device.frames);
+		expect(wire).not.toContain("secret");
+		expect(wire).not.toContain("stderr");
 	});
 });

@@ -7,7 +7,7 @@ import type { EndpointTicket } from "@hansjm10/volt-iroh";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { IROH_REMOTE_ALPN } from "../../../src/core/remote/iroh/protocol.ts";
 import { decodeIrohRemoteTicketPayload, type IrohRemoteTicketPayload } from "../../../src/core/remote/iroh/ticket.ts";
-import type { IrohBiStreamLike } from "../../../src/core/rpc/iroh-transport.ts";
+import { type IrohBiStreamLike, readIrohJsonlLine } from "../../../src/core/rpc/iroh-transport.ts";
 import { createDaemonClient, type DaemonClient } from "../../../src/daemon/control-client.ts";
 import type { ControlEvent } from "../../../src/daemon/control-protocol.ts";
 import { loadIrohModule } from "../../../src/daemon/iroh-native.ts";
@@ -16,7 +16,6 @@ import { runVoltDaemon } from "../../../src/daemon/main.ts";
 import { getDaemonPaths } from "../../../src/daemon/paths.ts";
 import { probeDaemon, spawnDetachedDaemon, waitForDaemonExit } from "../../../src/daemon/spawn.ts";
 import { createEmptyVoltdState } from "../../../src/daemon/state.ts";
-import { readLineFromIroh } from "../../../src/daemon/workspace-streams.ts";
 
 const native = loadIrohModule();
 const runNative = native.iroh !== undefined || process.env.VOLT_TEST_REQUIRE_NATIVE_IROH === "1";
@@ -194,7 +193,7 @@ async function discoveryHandshake(
 		workspaceDiscovery: { purpose: "list_sessions" },
 	};
 	await stream.send.writeAll(Array.from(Buffer.from(`${JSON.stringify(hello)}\n`, "utf8")));
-	const result = await readLineFromIroh(stream.recv, Buffer.alloc(0), { maxLineBytes: 1024 * 1024 });
+	const result = await readIrohJsonlLine(stream.recv, Buffer.alloc(0), { maxLineBytes: 1024 * 1024 });
 	if (result.line === undefined) throw new Error("stream ended before the handshake response");
 	return JSON.parse(result.line) as Record<string, unknown>;
 }

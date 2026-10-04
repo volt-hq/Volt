@@ -14,7 +14,6 @@ import {
 	writeIrohRemoteHostState,
 } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
-import { handleIrohRemoteWorkspaceUnregisterRpcCommand } from "../src/core/remote/iroh/workspace-rpc.ts";
 import {
 	createEmptyVoltdState,
 	hostStateToVoltdState,
@@ -393,29 +392,5 @@ describe("stream authorization freshness", () => {
 			"Workspace generation counter is exhausted",
 		);
 		expect((await manager.getState()).workspaces).toEqual([workspace]);
-	});
-});
-
-describe("workspace unregister RPC safety", () => {
-	it("returns a stable workspace_has_worktrees conflict without changing state", async () => {
-		const manager = new IrohRemoteHostStateManager({ initialState: createHostStateWithWorktrees() });
-
-		const result = await handleIrohRemoteWorkspaceUnregisterRpcCommand(
-			{ id: "remove-ws", type: "unregister_workspace", workspaceName: "ws" },
-			{ client: { allowedWorkspaces: [] }, stateManager: manager },
-		);
-
-		expect(result).toEqual({
-			handled: true,
-			response: {
-				id: "remove-ws",
-				type: "response",
-				command: "unregister_workspace",
-				success: false,
-				error: "workspace_has_worktrees",
-			},
-		});
-		expect((await manager.getState()).workspaces).toEqual([{ name: "ws", path: "/tmp/ws" }]);
-		expect(await manager.listWorktrees("ws")).toEqual([createWorktree()]);
 	});
 });

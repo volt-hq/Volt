@@ -6,6 +6,28 @@ export type RpcLineHandler = (line: string) => void | Promise<void>;
 export type RpcValueHandler = (value: unknown) => void | Promise<void>;
 export type RpcCloseHandler = (error?: Error) => void;
 
+/** A frame exceeded the transport's line limit; inbound, it was not read or parsed. */
+export class RpcFrameTooLargeError extends Error {
+	readonly maxLineBytes: number;
+
+	constructor(maxLineBytes: number) {
+		super(`A frame exceeds the maximum size of ${maxLineBytes} bytes`);
+		this.name = "RpcFrameTooLargeError";
+		this.maxLineBytes = maxLineBytes;
+	}
+}
+
+/** The client read slower than the host wrote, and the transport's send queue filled; the stream was reset. */
+export class RpcSendQueueFullError extends Error {
+	readonly maxQueuedBytes: number;
+
+	constructor(maxQueuedBytes: number) {
+		super(`The client fell more than ${maxQueuedBytes} bytes behind`);
+		this.name = "RpcSendQueueFullError";
+		this.maxQueuedBytes = maxQueuedBytes;
+	}
+}
+
 /** Transport used by Volt RPC protocol handlers. */
 export interface RpcTransport {
 	/** Write one outbound RPC object. Implementations own JSONL framing. */

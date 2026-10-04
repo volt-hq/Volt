@@ -11,12 +11,13 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { AgentSession, AgentSessionEvent } from "../src/core/agent-session.ts";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionServices } from "../src/core/agent-session-services.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ConversationFactoryResult } from "../src/core/host/hosted-conversation.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
 import { IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { getDefaultSessionDir, SessionManager, type SessionReference } from "../src/core/session-manager.ts";
@@ -47,17 +48,11 @@ import {
 	openDaemonWorktreeControl,
 	resolveDaemonWorkspaceForCwd,
 } from "../src/modes/interactive/daemon-attach.ts";
-import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import {
-	createTestConversation,
-	createTestIrohConversationOptions,
-	createTestSession,
-	ManualIrohRecvStream,
-	ManualIrohSendStream,
-	parseWrittenObjects,
-} from "./iroh-stream-doubles.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
+import { createHostHarness } from "./suite/host-harness.ts";
 import { adoptTestSession, connectTestClient } from "./utilities/host-client.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone } from "./utilities/remote-phone.ts";
 
 const cleanups: Array<() => Promise<void> | void> = [];
 const tempDirs: string[] = [];
@@ -559,59 +554,39 @@ describe("relay sanitization root switching (§5.2.3)", () => {
 		const parentPath = HOST_PARENT_PATH;
 		const agentDir = HOST_AGENT_DIR;
 		const worktreePath = HOST_WORKTREE_PATH;
-		const session = createTestSession("s-relay-wt", null);
-		const subscribers = new Set<(event: AgentSessionEvent) => void>();
-		session.subscribe = vi.fn((handler: (event: AgentSessionEvent) => void) => {
-			subscribers.add(handler);
-			return () => {
-				subscribers.delete(handler);
-			};
-		});
-		const target = createTestConversation(session);
-
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		const sanitizerOptions = getRelayServingSanitizerOptions(
-			{ ...authorizationBase, worktreeId: "fix-login", worktreePath },
-			agentDir,
-		);
-		const modePromise = runIrohRemoteRpcMode(target.host, target.conversation, {
-			...createTestIrohConversationOptions(target.conversation),
-			stream: { recv, send },
+		const text = `wt=${worktreePath}/file.ts parent=${parentPath}/file.ts root=${agentDir}/worktrees`;
+		const harness = await createHostHarness({ whenUnattached: "keep", responses: [text] });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: authorizationBase.rpcGrant,
+			redaction: getRelayServingSanitizerOptions(
+				{ ...authorizationBase, worktreeId: "fix-login", worktreePath },
+				agentDir,
+			),
 			// A relayed phone stays on the TUI's conversation.
 			redirect: {},
-			rpcGrant: authorizationBase.rpcGrant,
-			workspaceName: "repo",
-			workspacePath: sanitizerOptions.workspacePath,
-			...(sanitizerOptions.additionalRedactedPaths === undefined
-				? {}
-				: { additionalRedactedPaths: sanitizerOptions.additionalRedactedPaths }),
 		});
-		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalledOnce());
-		expect(parseWrittenObjects(send)[0]).toMatchObject({
-			type: "conversation_bootstrap",
-			delivery: { cursor: 0 },
-			conversation: { sessionId: "s-relay-wt" },
-		});
+		cleanups.push(() => connection.close());
+		const phone = connectRemotePhone(pair.phone);
+		await phone.hello();
+		await phone.subscribe(conversation.id);
 
-		const text = `wt=${worktreePath}/file.ts parent=${parentPath}/file.ts root=${agentDir}/worktrees`;
-		for (const handler of Array.from(subscribers)) {
-			handler({
-				type: "message_start",
-				message: { role: "user", content: [{ type: "text", text }] },
-			} as unknown as AgentSessionEvent);
-		}
-		await vi.waitFor(() => {
-			const frame = parseWrittenObjects(send).find((entry) => entry.type === "message_start");
-			expect(frame).toBeDefined();
-			const serialized = JSON.stringify(frame);
-			expect(serialized).not.toContain(parentPath);
-			expect(serialized).not.toContain(worktreePath);
-			expect(serialized).not.toContain(`${agentDir}/worktrees`);
-			expect(serialized).toContain("/workspace/file.ts");
-		});
-		recv.end();
-		await modePromise;
+		expect(await phone.intent("prompt", { message: text })).toMatchObject({ type: "accepted" });
+		await vi.waitFor(() =>
+			expect(phone.frames.filter((frame) => frame.type === "entry" && frame.entry.type === "message")).toHaveLength(
+				2,
+			),
+		);
+		const serialized = JSON.stringify(phone.frames);
+		expect(serialized).not.toContain(parentPath);
+		expect(serialized).not.toContain(worktreePath);
+		expect(serialized).not.toContain(`${agentDir}/worktrees`);
+		expect(serialized).toContain("/workspace/file.ts");
 	});
 });
 

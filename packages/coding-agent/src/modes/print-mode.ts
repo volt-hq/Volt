@@ -62,7 +62,7 @@ export async function runPrintMode(
 			liveClientId: `${client.id}:json-${subscriptions}`,
 			conversation: current,
 			profile: localProfile,
-			sink: { send: (frame) => writeRawStdout(`${JSON.stringify(localProfile.redact(frame))}\n`) },
+			sink: { send: (frame) => writeRawStdout(`${JSON.stringify(frame)}\n`) },
 			live: true,
 			accepts: () => false,
 		});

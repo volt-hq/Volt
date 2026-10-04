@@ -237,7 +237,7 @@ async function fixture() {
 	const handshake = (id: string) => ({
 		hello: {
 			type: "volt_iroh_hello",
-			protocol: "volt-rpc/0",
+			protocol: "volt/1",
 			workspace: "ws",
 			mode: "conversation",
 			conversation: { target: "session", sessionId: id },

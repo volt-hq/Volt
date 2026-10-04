@@ -77,7 +77,7 @@ const RELAY_AUTHORIZATION = {
 const HANDSHAKE_VERBATIM: RelayPreamble["handshake"] = {
 	hello: {
 		type: "volt_iroh_hello",
-		protocol: "volt-rpc/0",
+		protocol: "volt/1",
 		workspace: "ws",
 		clientLabel: "phône 📱",
 		mode: "conversation",
@@ -465,7 +465,7 @@ describe("relay framing (§12.2.3)", () => {
 		const phone = new FakePhoneIrohStream();
 		const relay = mintTestRelay(registry, phone, vi.fn());
 		const bufferedPrompt = Buffer.from(
-			`${JSON.stringify({ id: "p1", type: "prompt", clientMessageId: "client-p1", message: "do not run" })}\n`,
+			`${JSON.stringify({ type: "prompt", intentId: "client-p1", expectedOrdinal: 0, input: { message: "do not run" } })}\n`,
 		);
 		(relay.preamble.handshake as { initialInput: number[] }).initialInput = Array.from(bufferedPrompt);
 

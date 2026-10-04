@@ -1,14 +1,18 @@
-import type { RemoteGrant } from "@hansjm10/volt-protocol";
+/**
+ * Durable review intents and queries over protocol frames: a review starts as
+ * a detached workflow whose `accepted` precedes its live progress, and the
+ * durable run's lifecycle (outcomes, feedback export, fix sessions,
+ * acknowledgement, discussion sessions, reruns, cancellation) runs through
+ * `review_*` intents and `review.*` queries.
+ */
+
+import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import type { SessionIntentResult } from "../src/core/extensions/index.ts";
-import type { ConversationHost } from "../src/core/host/conversation-host.ts";
+import { createLoopbackClient, type LoopbackClient, ProtocolRejectedError } from "../src/client/protocol-client.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
-import type * as SessionIntents from "../src/core/host/session-intents.ts";
-import type { HostClient } from "../src/core/host/targets.ts";
 import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
-import { restoreStdout } from "../src/core/output-guard.ts";
 import { createIrohRemotePresetAccess } from "../src/core/remote/iroh/access-grant.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import type { createReviewSeedMessage } from "../src/core/review-presentation.ts";
 import type { ParsedReview } from "../src/core/review-report.ts";
 import {
@@ -18,14 +22,14 @@ import {
 	REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE,
 	type ReviewRunRecord,
 } from "../src/core/review-state.ts";
-import { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
-import type { RpcCloseHandler, RpcLineHandler, RpcTransport } from "../src/core/rpc/transport.ts";
-import { SessionManager } from "../src/core/session-manager.ts";
+import type { SessionManager } from "../src/core/session-manager.ts";
 import type { SessionWriter } from "../src/core/session-writer.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
 import { initTheme } from "../src/core/theme/runtime.ts";
 import { CustomMessageComponent } from "../src/modes/interactive/components/custom-message.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone } from "./utilities/remote-phone.ts";
 
 function parsedReview(): ParsedReview {
 	return {
@@ -277,212 +281,108 @@ vi.mock("../src/core/review.ts", async (importOriginal) => {
 	};
 });
 
-/** The session intents RPC mode runs; a test's fake host moves the client itself. */
-const intentMocks = vi.hoisted(() => ({ openNewSession: vi.fn() }));
+type SeedMessage = ReturnType<typeof createReviewSeedMessage>;
 
-vi.mock("../src/core/host/session-intents.ts", async (importOriginal) => {
-	const actual = await importOriginal<typeof SessionIntents>();
-	return { ...actual, openNewSession: intentMocks.openNewSession };
-});
-
-import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
-
-interface CollectingTransport {
-	transport: RpcTransport;
-	writes: object[];
-	getLineHandler(): RpcLineHandler;
-	getCloseHandler(): RpcCloseHandler | undefined;
-}
-
-function createCollectingTransport(): CollectingTransport {
-	let lineHandler: RpcLineHandler | undefined;
-	let closeHandler: RpcCloseHandler | undefined;
-	const writes: object[] = [];
-	return {
-		transport: {
-			write: vi.fn((value) => {
-				writes.push(value);
-			}),
-			onLine: vi.fn((handler) => {
-				lineHandler = handler;
-				return vi.fn();
-			}),
-			onClose: vi.fn((handler) => {
-				closeHandler = handler;
-				return vi.fn();
-			}),
-			waitForBackpressure: vi.fn(async () => {}),
-			flush: vi.fn(async () => {}),
-			close: vi.fn(async () => {}),
-		},
-		writes,
-		getLineHandler: () => {
-			if (!lineHandler) throw new Error("RPC line handler was not installed");
-			return lineHandler;
-		},
-		getCloseHandler: () => closeHandler,
-	};
-}
-
-function makeSession(sessionId: string, sessionManager = SessionManager.inMemory("/workspace")) {
-	let fastModeEnabled = false;
-	return {
-		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
-		subscribe: vi.fn(() => vi.fn()),
-		activeToolExecutions: new Map(),
-		subscribeRuntimeEvents: vi.fn(() => vi.fn()),
-		isStreaming: false,
-		isCompacting: false,
-		thinkingLevel: "off",
-		get fastModeEnabled() {
-			return fastModeEnabled;
-		},
-		setFastModeEnabled: vi.fn((enabled: boolean) => {
-			fastModeEnabled = enabled;
-		}),
-		getAvailableThinkingLevels: vi.fn(() => ["off"]),
-		gitContextProvider: { getSnapshot: () => null, retainObservation: () => () => undefined },
-		steeringMode: "all",
-		followUpMode: "all",
-		autoCompactionEnabled: false,
-		messages: [],
-		pendingMessageCount: 0,
-		modelRegistry: { authStorage: {} },
-		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-		resourceLoader: {},
-		sessionFile: `/sessions/${sessionId}.jsonl`,
-		sessionId,
-		sessionManager,
-		sessionWriter: sessionManager.logWriter,
-	};
-}
-
-interface FakeNewSessionOptions {
-	setup?: (writer: SessionWriter) => Promise<void>;
-	beforeMove?: (source: HostedConversation) => Promise<void>;
-	withSession?: (ctx: { sendMessage(message: object): Promise<void> }) => Promise<void>;
-}
-
-function makeConversation(session: ReturnType<typeof makeSession>): HostedConversation {
-	return {
-		id: session.sessionId,
-		session,
-		cwd: "/workspace",
-		services: { agentDir: "/workspace/.volt" },
-		reviewWorkflows: new ReviewWorkflowManager(),
-		lost: new Promise<Error>(() => {}),
-	} as unknown as HostedConversation;
-}
-
-/**
- * A host over fake conversations. Its `newSession` stands in for the session
- * intent: it writes the new log, lets the handoff write through the source,
- * and moves the attached client in place to the new conversation.
- */
-function makeFakeHost(
-	options: { manager?: SessionManager; seedMessages?: object[]; replacementManagers?: SessionManager[] } = {},
-) {
-	const conversation = makeConversation(makeSession("initial-session", options.manager));
-	let current = conversation;
-	let attached: HostClient | undefined;
-	const host = {
-		attach: vi.fn(async (client: HostClient) => {
-			attached = client;
-		}),
-		detach: vi.fn(async () => {
-			attached = undefined;
-		}),
-		conversationOf: (client: HostClient) => (attached?.id === client.id ? current : undefined),
-		close: vi.fn(async () => {}),
-		onClosed: () => () => {},
-	} as unknown as ConversationHost;
-	const fake = {
-		host,
-		/** The conversation the client started on. */
-		conversation,
-		get reviewWorkflows() {
-			return conversation.reviewWorkflows;
-		},
-		newSession: vi.fn<(newSessionOptions?: FakeNewSessionOptions) => Promise<SessionIntentResult>>(
-			async (newSessionOptions) => {
-				const sessionManager = SessionManager.inMemory("/workspace");
-				await newSessionOptions?.setup?.(sessionManager.logWriter);
-				// The review message is written into the new session before it opens.
-				for (const entry of sessionManager.getBranch()) {
-					if (entry.type !== "custom_message") continue;
-					const { customType, content, display, details } = entry;
-					options.seedMessages?.push({ customType, content, display, details });
-				}
-				const target = makeConversation(makeSession("review-session", sessionManager));
-				await newSessionOptions?.beforeMove?.(current);
-				options.replacementManagers?.push(sessionManager);
-				const from = current;
-				const move = attached?.move;
-				if (move?.kind === "in_place") move.prepare?.(target, from);
-				current = target;
-				if (move?.kind === "in_place") await move.onMoved(target, from);
-				await newSessionOptions?.withSession?.({
-					sendMessage: async (message) => {
-						options.seedMessages?.push(message);
+/** The review fix messages a conversation's log was seeded with. */
+function seedsOf(conversation: HostedConversation): SeedMessage[] {
+	return conversation.session.sessionManager.getBranch().flatMap((entry) =>
+		entry.type === "custom_message" && entry.customType === "review"
+			? [
+					{
+						customType: "review",
+						content: entry.content as string,
+						display: true,
+						details: entry.details as unknown as SeedMessage["details"],
 					},
-				});
-				return {
-					cancelled: false,
-					sessionId: sessionManager.getSessionId(),
-					seeded: newSessionOptions?.withSession !== undefined,
-				};
-			},
-		),
-	};
-	intentMocks.openNewSession.mockImplementation(
-		(_host: ConversationHost, _client: HostClient, newSessionOptions?: FakeNewSessionOptions) =>
-			fake.newSession(newSessionOptions),
+				]
+			: [],
 	);
-	return fake;
 }
 
-async function startMode(
-	fake: ReturnType<typeof makeFakeHost>,
-	transport: RpcTransport,
-	options: { remoteGrant?: RemoteGrant } = {},
-): Promise<{ modePromise: Promise<void> }> {
-	let readyResolve: () => void = () => {};
-	const ready = new Promise<void>((resolve) => {
-		readyResolve = resolve;
-	});
-	const modePromise = runLegacyRemoteRpcMode(fake.host, fake.conversation, {
-		transport,
-		exitProcess: false,
-		onReady: readyResolve,
-		...options,
-	});
-	await ready;
-	return { modePromise };
+function runOf(conversation: HostedConversation, runId = "review:test"): ReturnType<typeof getReviewRun> {
+	return getReviewRun(conversation.session.sessionManager, runId);
 }
 
-async function closeMode(collecting: CollectingTransport, started: { modePromise: Promise<void> }): Promise<void> {
-	collecting.getCloseHandler()?.();
-	await expect(started.modePromise).resolves.toBeUndefined();
+function acknowledgments(manager: SessionManager): number {
+	return manager
+		.getBranch()
+		.filter((entry) => entry.type === "custom" && entry.customType === REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE)
+		.length;
 }
 
-function response(writes: object[], id: string): Record<string, unknown> | undefined {
-	return writes.find((write) => (write as Record<string, unknown>).id === id) as Record<string, unknown> | undefined;
+interface ReviewFixture {
+	harness: HostHarness;
+	/** The conversation the client started on; it stays open after the client leaves it. */
+	source: HostedConversation;
+	client: LoopbackClient;
+	/** An open conversation by id. */
+	conversation(id: string | undefined): HostedConversation;
+	/** An extension cancels the next session the client's intents open. */
+	cancelNextOpen(): void;
+	/** The next session the client's intents open fails to open. */
+	failNextOpen(error: Error): void;
 }
 
 afterEach(() => {
 	reviewMocks.prepareReviewWorkflow.mockClear();
 	reviewMocks.executeReviewWorkflow.mockClear();
 	reviewMocks.dispose.mockClear();
-	restoreStdout();
 });
 
-describe("RPC durable review actions", () => {
-	test("returns acceptance before detached events, sanitizes failures, and projects only snapshot tool metadata", async () => {
-		let release: () => void = () => {};
-		const gate = new Promise<void>((resolve) => {
-			release = resolve;
+describe("durable review intents over protocol frames", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
+	});
+
+	/** A conversation holding `records`, and a local client on it. */
+	async function setup(records: ReviewRunRecord[] = []): Promise<ReviewFixture> {
+		let cancelOpen = false;
+		let failOpen: Error | undefined;
+		const harness = await createHostHarness({
+			whenUnattached: "keep",
+			extension: (volt) => {
+				volt.on("session_before_switch", () => {
+					if (!cancelOpen) return undefined;
+					cancelOpen = false;
+					return { cancel: true };
+				});
+			},
+			beforeCreate: () => {
+				const error = failOpen;
+				failOpen = undefined;
+				if (error) throw error;
+			},
 		});
+		cleanups.push(() => harness.cleanup());
+		const source = await harness.openStartup();
+		for (const record of records) await appendReviewRun(source.session.sessionWriter, record);
+		const client = await createLoopbackClient(harness.host, source, { anchor: false });
+		cleanups.push(() => client.stop());
+		return {
+			harness,
+			source,
+			client,
+			conversation(id) {
+				const conversation = id === undefined ? undefined : harness.host.get(id);
+				if (!conversation) throw new Error(`Conversation ${id} is not open`);
+				return conversation;
+			},
+			cancelNextOpen: () => {
+				cancelOpen = true;
+			},
+			failNextOpen: (error) => {
+				failOpen = error;
+			},
+		};
+	}
+
+	/**
+	 * A paired device on the remote profile starts a review of uncommitted
+	 * changes; the detached run emits its own start, then waits for `release`.
+	 */
+	async function startRemoteReview() {
+		const gate = Promise.withResolvers<void>();
 		reviewMocks.executeReviewWorkflow.mockImplementationOnce(async (options: ExecuteOptions) => {
 			options.onEvent?.({
 				type: "workflow_start",
@@ -493,7 +393,7 @@ describe("RPC durable review actions", () => {
 				message: "Reviewing.",
 				status: "running",
 			});
-			await gate;
+			await gate.promise;
 			const record = durableRecord();
 			if (options.sessionWriter) await appendReviewRun(options.sessionWriter, record);
 			return {
@@ -505,39 +405,49 @@ describe("RPC durable review actions", () => {
 				record,
 			};
 		});
-		const fake = makeFakeHost();
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport, {
-			remoteGrant: createIrohRemotePresetAccess("coding").rpcGrant,
+		const { harness, source } = await setup();
+		cleanups.push(async () => gate.resolve());
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation: source,
+			stream: pair.host,
+			grant: createIrohRemotePresetAccess("coding").rpcGrant,
+			redaction: { workspacePath: source.cwd },
+			redirect: {},
 		});
-		collecting.getLineHandler()(
-			JSON.stringify({ id: "invoke", type: "invoke_ui_action", action: "review.uncommitted" }),
-		);
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "invoke")).toMatchObject({
-				success: true,
-				data: { status: "accepted", workflowId: "review:test" },
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(collecting.writes).toContainEqual(expect.objectContaining({ type: "workflow_start" })),
-		);
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await phone.close();
+			await connection.close().catch(() => undefined);
+		});
+		await phone.hello();
+		await phone.subscribe(source.id);
+		const accepted = await phone.intent("review_uncommitted", {});
+		const isProgress = (frame: HostFrame): frame is HostFrame =>
+			frame.type === "live" &&
+			frame.items.some((item) => item.type === "set" && item.key === "workflow/review:test");
+		await phone.waitFor(isProgress);
+		return { source, phone, accepted, isProgress, release: () => gate.resolve() };
+	}
+
+	test("starts a remote review as a detached workflow with remote failures sanitized", async () => {
+		const { source, accepted, release } = await startRemoteReview();
+		expect(accepted).toMatchObject({ type: "accepted", result: { workflowId: "review:test" } });
 		expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalledWith(
 			expect.objectContaining({ sanitizeRemoteErrors: true }),
 		);
-		const acceptedIndex = collecting.writes.findIndex((write) => (write as Record<string, unknown>).id === "invoke");
-		const eventIndex = collecting.writes.findIndex(
-			(write) => (write as Record<string, unknown>).type === "workflow_start",
-		);
-		expect(acceptedIndex).toBeLessThan(eventIndex);
 		release();
-		await vi.waitFor(() => expect(fake.reviewWorkflows.get("review:test")?.status).toBe("completed"));
-		await closeMode(collecting, modePromise);
+		await vi.waitFor(() => expect(source.reviewWorkflows.get("review:test")?.status).toBe("completed"));
+	});
+
+	test("writes accepted before the detached workflow's first live progress", async () => {
+		const { phone, accepted, isProgress, release } = await startRemoteReview();
+		expect(phone.frames.indexOf(accepted)).toBeLessThan(phone.frames.findIndex(isProgress));
+		release();
 	});
 
 	test("hydrates durable paginated results and exposes structured context coverage without raw GitHub text", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager.logWriter, durableRecord("review:older"));
 		const newer = { ...durablePullRequestRecord("review:newer"), endedAt: 3 };
 		newer.target.context = {
 			captureStatus: "complete",
@@ -558,26 +468,11 @@ describe("RPC durable review actions", () => {
 			discoveryInspectionComplete: true,
 			verificationInspectionComplete: true,
 		};
-		await appendReviewRun(manager.logWriter, newer);
-		const fake = makeFakeHost({ manager });
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		const line = collecting.getLineHandler();
-		line(JSON.stringify({ id: "list", type: "list_review_workflows", limit: 1 }));
-		line(JSON.stringify({ id: "get", type: "get_review_result", runId: "review:newer" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "get")).toBeDefined());
-		const listData = response(collecting.writes, "list")?.data as {
-			runs: Array<{
-				runId: string;
-				target: {
-					pullRequest?: { provider: string; number: number; title: string };
-					files: { totalCount: number; projectedCount: number; isComplete: boolean };
-				};
-			}>;
-			nextCursor?: string;
-		};
-		expect(listData.runs).toHaveLength(1);
-		expect(listData.runs[0]?.target).toMatchObject({
+		const { client } = await setup([durableRecord("review:older"), newer]);
+
+		const list = await client.query("review.workflows", { limit: 1 });
+		expect(list.runs).toHaveLength(1);
+		expect(list.runs[0]?.target).toMatchObject({
 			pullRequest: {
 				provider: "github",
 				number: 243,
@@ -597,21 +492,18 @@ describe("RPC durable review actions", () => {
 				items: [],
 			},
 		});
-		expect(JSON.stringify(listData)).not.toContain("PRIVATE_PULL_REQUEST_BODY");
-		expect(listData.nextCursor).toBeTruthy();
-		line(JSON.stringify({ id: "next", type: "list_review_workflows", cursor: listData.nextCursor, limit: 1 }));
-		line(JSON.stringify({ id: "oversized", type: "list_review_workflows", limit: 101 }));
-		await vi.waitFor(() => {
-			expect(response(collecting.writes, "next")).toBeDefined();
-			expect(response(collecting.writes, "oversized")).toBeDefined();
+		expect(JSON.stringify(list)).not.toContain("PRIVATE_PULL_REQUEST_BODY");
+		if (!list.nextCursor) throw new Error("Expected a next page");
+		await expect(client.query("review.workflows", { cursor: list.nextCursor, limit: 1 })).resolves.toMatchObject({
+			runs: [{ runId: "review:older" }],
 		});
-		expect(response(collecting.writes, "next")?.data).toMatchObject({ runs: [{ runId: "review:older" }] });
-		expect(response(collecting.writes, "oversized")).toMatchObject({
-			success: false,
-			error: expect.stringContaining("limit"),
+		await expect(client.query("review.workflows", { limit: 51 })).rejects.toMatchObject({
+			code: "invalid_input",
+			message: expect.stringContaining("limit"),
 		});
-		const getData = response(collecting.writes, "get")?.data as Record<string, unknown>;
-		expect(getData).toMatchObject({
+
+		const result = await client.query("review.result", { runId: "review:newer" });
+		expect(result).toMatchObject({
 			runId: "review:newer",
 			completionStatus: "complete",
 			overallCorrectness: "incorrect",
@@ -632,363 +524,207 @@ describe("RPC durable review actions", () => {
 				},
 			},
 		});
-		expect(JSON.stringify(getData)).toContain("changeLocation");
-		expect(JSON.stringify(getData)).toContain("PRIVATE_PULL_REQUEST_BODY");
-		expect(JSON.stringify(getData)).not.toContain('"file"');
-		expect(JSON.stringify(getData)).not.toContain("filesReviewed");
-		expect(JSON.stringify(getData)).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
-		await closeMode(collecting, modePromise);
+		const serialized = JSON.stringify(result);
+		expect(serialized).toContain("changeLocation");
+		expect(serialized).toContain("PRIVATE_PULL_REQUEST_BODY");
+		expect(serialized).not.toContain('"file"');
+		expect(serialized).not.toContain("filesReviewed");
+		expect(serialized).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
 	});
 
-	test("records local outcomes, seeds explicit selections, and treats blank fix selections as all findings", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		const second = {
-			...parsedReview().findings[0],
+	test("records local outcomes, seeds explicit selections, and opens every finding without a selection", async () => {
+		const record = durableRecord();
+		record.result!.findings.push({
+			...parsedReview().findings[0]!,
 			id: "finding-2",
 			fingerprint: "b".repeat(64),
 			title: "Second issue",
-		};
-		const record = durableRecord();
-		record.result!.findings.push(second);
-		await appendReviewRun(manager.logWriter, record);
-		const seedMessages: object[] = [];
-		const replacementManagers: SessionManager[] = [];
-		const fake = makeFakeHost({ manager, seedMessages, replacementManagers });
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		const line = collecting.getLineHandler();
-		line(
-			JSON.stringify({
-				id: "label",
-				type: "record_review_finding_outcome",
+		});
+		const { client, source, conversation } = await setup([record]);
+
+		await expect(
+			client.intent("review_record_finding_outcome", {
 				runId: "review:test",
 				findingId: "finding-1",
 				status: "dismissed",
 				reason: "false_positive",
 				note: "Reproduced expected behavior",
 			}),
-		);
-		line(JSON.stringify({ id: "export", type: "export_review_feedback" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "export")).toBeDefined());
-		expect(response(collecting.writes, "export")?.data).toMatchObject({
+		).resolves.toMatchObject({ result: { findingId: "finding-1", status: "dismissed" } });
+		const exported = await client.intent("review_export_feedback", {});
+		expect(exported.result).toMatchObject({
 			schemaVersion: 1,
 			outcomes: [{ findingId: "finding-1", status: "dismissed" }],
 		});
-		line(
-			JSON.stringify({ id: "open", type: "open_review_session", runId: "review:test", findingIds: ["finding-2"] }),
-		);
-		await vi.waitFor(() => expect(response(collecting.writes, "open")).toBeDefined());
-		console.log("DBG", JSON.stringify(response(collecting.writes, "open")));
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "open")).toMatchObject({ success: true, data: { cancelled: false } }),
-		);
-		expect(JSON.stringify(seedMessages)).toContain("finding-2");
-		expect(JSON.stringify(seedMessages)).not.toContain("finding-1");
-		expect(JSON.stringify(seedMessages)).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
+
+		const opened = await client.intent("review_open_session", { runId: "review:test", findingIds: ["finding-2"] });
+		const target = conversation(opened.conversation);
+		expect(target).not.toBe(source);
+		const seeds = JSON.stringify(seedsOf(target));
+		expect(seeds).toContain("finding-2");
+		expect(seeds).not.toContain("finding-1");
+		expect(seeds).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
 		expect(
-			replacementManagers[0]
-				?.getBranch()
+			target.session.sessionManager
+				.getBranch()
 				.some((entry) => entry.type === "custom" && entry.customType === "volt.review.run"),
 		).toBe(true);
-		expect(getReviewRun(manager, "review:test")?.acknowledgedAt).toBeUndefined();
-		const openedAcknowledgedAt = getReviewRun(replacementManagers[0]!, "review:test")?.acknowledgedAt;
+		expect(runOf(source)?.acknowledgedAt).toBeUndefined();
+		const openedAcknowledgedAt = runOf(target)?.acknowledgedAt;
 		expect(openedAcknowledgedAt).toEqual(expect.any(Number));
-		line(JSON.stringify({ id: "get-opened", type: "get_review_result", runId: "review:test" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "get-opened")).toBeDefined());
-		expect(response(collecting.writes, "get-opened")?.data).toMatchObject({
+		// The client is on the fix session now: reads and intents act on it.
+		await expect(client.query("review.result", { runId: "review:test" })).resolves.toMatchObject({
 			runId: "review:test",
-			acknowledgedAt: expect.any(Number),
+			acknowledgedAt: openedAcknowledgedAt,
 			findings: expect.any(Array),
 		});
 
-		seedMessages.length = 0;
-		line(
-			JSON.stringify({
-				id: "fix-blank",
-				type: "invoke_ui_action",
-				action: "review.fix",
-				args: { runId: "review:test", findingIds: "" },
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "fix-blank")).toMatchObject({
-				success: true,
-				data: { status: "completed" },
-			}),
-		);
-		expect(JSON.stringify(seedMessages)).toContain("finding-1");
-		expect(JSON.stringify(seedMessages)).toContain("finding-2");
-		expect(getReviewRun(replacementManagers[1]!, "review:test")?.acknowledgedAt).toBe(openedAcknowledgedAt);
-		await closeMode(collecting, modePromise);
+		const all = await client.intent("review_open_session", { runId: "review:test" });
+		const fixAll = JSON.stringify(seedsOf(conversation(all.conversation)));
+		expect(fixAll).toContain("finding-1");
+		expect(fixAll).toContain("finding-2");
+		expect(runOf(conversation(all.conversation))?.acknowledgedAt).toBe(openedAcknowledgedAt);
 	});
 
 	test("opens an explicit empty selection without claiming the full run is clean", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager.logWriter, durableRecord());
-		const seedMessages: object[] = [];
-		const replacementManagers: SessionManager[] = [];
-		const fake = makeFakeHost({ manager, seedMessages, replacementManagers });
-		const collecting = createCollectingTransport();
-		const started = await startMode(fake, collecting.transport);
-		try {
-			collecting.getLineHandler()(
-				JSON.stringify({ id: "empty", type: "open_review_session", runId: "review:test", findingIds: [] }),
-			);
-			await vi.waitFor(() =>
-				expect(response(collecting.writes, "empty")).toMatchObject({ success: true, data: { cancelled: false } }),
-			);
-			const seed = seedMessages[0] as ReturnType<typeof createReviewSeedMessage>;
-			expect(seed.details.findings).toEqual([]);
-			expect(seed.details.summary).toContain("Selected findings: 0 of 1 retained entries");
-			expect(seed.details.summary).toContain("1 active P0-P2 finding is outside this selection");
-			expect(seed.content).toContain("No findings were selected for this session");
-			expect(seed.content).not.toContain("no verified issues worth flagging");
-			expect(getReviewRun(replacementManagers[0]!, "review:test")?.result?.findings).toHaveLength(1);
-		} finally {
-			await closeMode(collecting, started);
-		}
+		const { client, conversation } = await setup([durableRecord()]);
+
+		const opened = await client.intent("review_open_session", { runId: "review:test", findingIds: [] });
+		const target = conversation(opened.conversation);
+		const [seed] = seedsOf(target);
+		expect(seed?.details.findings).toEqual([]);
+		expect(seed?.details.summary).toContain("Selected findings: 0 of 1 retained entries");
+		expect(seed?.details.summary).toContain("1 active P0-P2 finding is outside this selection");
+		expect(seed?.content).toContain("No findings were selected for this session");
+		expect(seed?.content).not.toContain("no verified issues worth flagging");
+		expect(runOf(target)?.result?.findings).toHaveLength(1);
 	});
 
 	test.each(["fixed", "dismissed"] as const)(
 		"reopens the sole %s finding with historical verdicts and current status",
 		async (status) => {
-			const manager = SessionManager.inMemory("/workspace");
-			await appendReviewRun(manager.logWriter, durableRecord());
-			const seedMessages: object[] = [];
-			const replacementManagers: SessionManager[] = [];
-			const fake = makeFakeHost({ manager, seedMessages, replacementManagers });
-			const collecting = createCollectingTransport();
-			const started = await startMode(fake, collecting.transport);
-			const line = collecting.getLineHandler();
-			try {
-				line(
-					JSON.stringify({
-						id: "outcome",
-						type: "record_review_finding_outcome",
-						runId: "review:test",
-						findingId: "finding-1",
-						status,
-						...(status === "dismissed" ? { reason: "false_positive" } : {}),
-					}),
-				);
-				await vi.waitFor(() => expect(response(collecting.writes, "outcome")).toMatchObject({ success: true }));
-				line(JSON.stringify({ id: "open-current", type: "open_review_session", runId: "review:test" }));
-				await vi.waitFor(() =>
-					expect(response(collecting.writes, "open-current")).toMatchObject({
-						success: true,
-						data: { cancelled: false },
-					}),
-				);
-				const seed = seedMessages[0] as ReturnType<typeof createReviewSeedMessage>;
-				expect(seed.details.summary).toContain("0 active P0-P2 findings; 1 fixed/dismissed");
-				expect(seed.details.summary).not.toContain("No verified P0-P2 findings in the selected change");
-				expect(seed.details.findings[0]?.status).toBe(status);
-				initTheme("dark");
-				const message = createCustomMessage(
-					seed.customType,
-					seed.content,
-					true,
-					{ summary: seed.details.summary },
-					new Date(0).toISOString(),
-				);
-				const view = new CustomMessageComponent(message);
-				expect(view.render(100).lines.map(stripAnsi).join("\n")).toContain("0 active P0-P2 findings");
-				view.setExpanded(true);
-				const expanded = view.render(100).lines.map(stripAnsi).join("\n");
-				expect(expanded).toContain("Original review conclusion");
-				expect(expanded).toContain("Overall: incorrect");
-				expect(expanded).toContain(`Status: ${status}`);
-				expect(JSON.stringify(convertToLlm([message]))).toContain("Original review conclusion");
-				expect(getReviewRun(replacementManagers[0]!, "review:test")?.result).toMatchObject({
-					overallCorrectness: "incorrect",
-					findings: [{ status }],
-				});
-			} finally {
-				await closeMode(collecting, started);
-			}
+			const { client, conversation } = await setup([durableRecord()]);
+			await client.intent("review_record_finding_outcome", {
+				runId: "review:test",
+				findingId: "finding-1",
+				status,
+				...(status === "dismissed" ? { reason: "false_positive" as const } : {}),
+			});
+
+			const opened = await client.intent("review_open_session", { runId: "review:test" });
+			const target = conversation(opened.conversation);
+			const [seed] = seedsOf(target);
+			if (!seed) throw new Error("Expected the review seed message");
+			expect(seed.details.summary).toContain("0 active P0-P2 findings; 1 fixed/dismissed");
+			expect(seed.details.summary).not.toContain("No verified P0-P2 findings in the selected change");
+			expect(seed.details.findings[0]?.status).toBe(status);
+			initTheme("dark");
+			const message = createCustomMessage(
+				seed.customType,
+				seed.content,
+				true,
+				{ summary: seed.details.summary },
+				new Date(0).toISOString(),
+			);
+			const view = new CustomMessageComponent(message);
+			expect(view.render(100).lines.map(stripAnsi).join("\n")).toContain("0 active P0-P2 findings");
+			view.setExpanded(true);
+			const expanded = view.render(100).lines.map(stripAnsi).join("\n");
+			expect(expanded).toContain("Original review conclusion");
+			expect(expanded).toContain("Overall: incorrect");
+			expect(expanded).toContain(`Status: ${status}`);
+			expect(JSON.stringify(convertToLlm([message]))).toContain("Original review conclusion");
+			expect(runOf(target)?.result).toMatchObject({
+				overallCorrectness: "incorrect",
+				findings: [{ status }],
+			});
 		},
 	);
 
 	test("acknowledges full opens in source and target while retaining durable results", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager.logWriter, durableRecord());
-		const replacementManagers: SessionManager[] = [];
-		const fake = makeFakeHost({ manager, replacementManagers });
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		const line = collecting.getLineHandler();
+		const { client, source, conversation } = await setup([durableRecord()]);
 
-		line(JSON.stringify({ id: "open-all", type: "open_review_session", runId: "review:test" }));
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "open-all")).toMatchObject({
-				success: true,
-				data: { cancelled: false },
-			}),
-		);
-		const source = getReviewRun(manager, "review:test");
-		const target = getReviewRun(replacementManagers[0]!, "review:test");
-		expect(source?.acknowledgedAt).toEqual(expect.any(Number));
-		expect(target?.acknowledgedAt).toBe(source?.acknowledgedAt);
-		expect(source?.result?.findings).toHaveLength(1);
-		expect(target?.result?.findings).toHaveLength(1);
+		const opened = await client.intent("review_open_session", { runId: "review:test" });
+		const target = conversation(opened.conversation);
+		const sourceRun = runOf(source);
+		const targetRun = runOf(target);
+		expect(sourceRun?.acknowledgedAt).toEqual(expect.any(Number));
+		expect(targetRun?.acknowledgedAt).toBe(sourceRun?.acknowledgedAt);
+		expect(sourceRun?.result?.findings).toHaveLength(1);
+		expect(targetRun?.result?.findings).toHaveLength(1);
 
-		line(JSON.stringify({ id: "list-opened", type: "list_review_workflows" }));
-		line(JSON.stringify({ id: "get-opened", type: "get_review_result", runId: "review:test" }));
-		await vi.waitFor(() => {
-			expect(response(collecting.writes, "list-opened")).toBeDefined();
-			expect(response(collecting.writes, "get-opened")).toBeDefined();
+		await expect(client.query("review.workflows", {})).resolves.toMatchObject({
+			runs: [{ runId: "review:test", acknowledgedAt: sourceRun?.acknowledgedAt }],
 		});
-		expect(response(collecting.writes, "list-opened")?.data).toMatchObject({
-			runs: [{ runId: "review:test", acknowledgedAt: source?.acknowledgedAt }],
-		});
-		expect(response(collecting.writes, "get-opened")?.data).toMatchObject({
+		await expect(client.query("review.result", { runId: "review:test" })).resolves.toMatchObject({
 			runId: "review:test",
-			acknowledgedAt: source?.acknowledgedAt,
+			acknowledgedAt: sourceRun?.acknowledgedAt,
 			findings: expect.any(Array),
 		});
-		await closeMode(collecting, modePromise);
 	});
 
 	test("explicit acknowledgment is idempotent and unsuccessful opens preserve the source", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager.logWriter, durableRecord());
-		const fake = makeFakeHost({ manager });
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		const line = collecting.getLineHandler();
+		const { harness, client, source, cancelNextOpen, failNextOpen } = await setup([durableRecord()]);
 
-		line(JSON.stringify({ id: "ack-1", type: "acknowledge_review", runId: "review:test" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "ack-1")).toBeDefined());
-		const acknowledgedAt = (response(collecting.writes, "ack-1")?.data as { acknowledgedAt: number }).acknowledgedAt;
-		line(JSON.stringify({ id: "ack-2", type: "acknowledge_review", runId: "review:test" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "ack-2")).toBeDefined());
-		expect(response(collecting.writes, "ack-2")?.data).toEqual({ runId: "review:test", acknowledgedAt });
-		expect(
-			manager
-				.getBranch()
-				.filter((entry) => entry.type === "custom" && entry.customType === REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE),
-		).toHaveLength(1);
+		const first = await client.intent("review_acknowledge", { runId: "review:test" });
+		const acknowledgedAt = first.result?.acknowledgedAt;
+		expect(acknowledgedAt).toEqual(expect.any(Number));
+		await expect(client.intent("review_acknowledge", { runId: "review:test" })).resolves.toMatchObject({
+			result: { runId: "review:test", acknowledgedAt },
+		});
+		expect(acknowledgments(source.session.sessionManager)).toBe(1);
 
 		const unacknowledged = durableRecord("review:unacknowledged");
-		await appendReviewRun(manager.logWriter, unacknowledged);
-		vi.mocked(fake.newSession).mockResolvedValueOnce({ cancelled: true });
-		line(JSON.stringify({ id: "open-cancelled", type: "open_review_session", runId: unacknowledged.runId }));
-		await vi.waitFor(() => expect(response(collecting.writes, "open-cancelled")).toBeDefined());
-		expect(response(collecting.writes, "open-cancelled")).toMatchObject({
-			success: true,
-			data: { cancelled: true },
-		});
-		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
+		await appendReviewRun(source.session.sessionWriter, unacknowledged);
+		cancelNextOpen();
+		const cancelled = await client.intent("review_open_session", { runId: unacknowledged.runId });
+		expect(cancelled.result).toEqual({ cancelled: true });
+		expect(cancelled.conversation).toBeUndefined();
+		expect(runOf(source, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
 
-		vi.mocked(fake.newSession).mockRejectedValueOnce(new Error("seed failed"));
-		line(JSON.stringify({ id: "open-failed", type: "open_review_session", runId: unacknowledged.runId }));
-		await vi.waitFor(() => expect(response(collecting.writes, "open-failed")).toBeDefined());
-		expect(response(collecting.writes, "open-failed")).toMatchObject({ success: false, error: "seed failed" });
-		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
-
-		vi.mocked(fake.newSession).mockResolvedValueOnce({ cancelled: true });
-		line(
-			JSON.stringify({
-				id: "fix-cancelled",
-				type: "invoke_ui_action",
-				action: "review.fix",
-				args: { runId: unacknowledged.runId, findingIds: "" },
-			}),
-		);
-		await vi.waitFor(() => expect(response(collecting.writes, "fix-cancelled")).toBeDefined());
-		expect(response(collecting.writes, "fix-cancelled")).toMatchObject({
-			success: true,
-			data: { status: "cancelled" },
-		});
-		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
-
-		vi.mocked(fake.newSession).mockRejectedValueOnce(new Error("fix seed failed"));
-		line(
-			JSON.stringify({
-				id: "fix-failed",
-				type: "invoke_ui_action",
-				action: "review.fix",
-				args: { runId: unacknowledged.runId, findingIds: "" },
-			}),
-		);
-		await vi.waitFor(() => expect(response(collecting.writes, "fix-failed")).toBeDefined());
-		expect(response(collecting.writes, "fix-failed")).toMatchObject({ success: false, error: "fix seed failed" });
-		expect(getReviewRun(manager, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
-		await closeMode(collecting, modePromise);
+		failNextOpen(new Error("seed failed"));
+		const failed = client.intent("review_open_session", { runId: unacknowledged.runId });
+		await expect(failed).rejects.toBeInstanceOf(ProtocolRejectedError);
+		await expect(failed).rejects.toMatchObject({ reason: { code: "failed", message: "seed failed" } });
+		expect(runOf(source, unacknowledged.runId)?.acknowledgedAt).toBeUndefined();
+		expect(client.conversation).toBe(source.id);
+		expect(harness.host.list()).toEqual([source]);
 	});
 
 	test("preserves a durable review when starting a clear discussion session", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager.logWriter, durableRecord());
-		const acknowledgedAt = (await acknowledgeReviewRun(manager.logWriter, "review:test")).acknowledgedAt;
-		const replacementManagers: SessionManager[] = [];
-		const fake = makeFakeHost({ manager, replacementManagers });
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		const line = collecting.getLineHandler();
+		const { harness, client, source, conversation } = await setup([durableRecord()]);
+		const { acknowledgedAt } = await acknowledgeReviewRun(source.session.sessionWriter, "review:test");
 
-		line(
-			JSON.stringify({
-				id: "new-discussion",
-				type: "new_session",
-				preserveReviewRunId: "review:test",
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "new-discussion")).toMatchObject({
-				success: true,
-				data: { cancelled: false },
-			}),
-		);
-		expect(fake.newSession).toHaveBeenCalledWith(expect.objectContaining({ preserveReviewRunId: "review:test" }));
-		expect(getReviewRun(replacementManagers[0]!, "review:test")).toMatchObject({
+		const moved = await client.intent("new_session", { preserveReviewRunId: "review:test" });
+		const target = conversation(moved.conversation);
+		expect(target).not.toBe(source);
+		expect(runOf(target)).toMatchObject({
 			runId: "review:test",
 			acknowledgedAt,
 			result: { completionStatus: "complete" },
 		});
 
-		line(JSON.stringify({ id: "rerun-preserved", type: "rerun_review", runId: "review:test" }));
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "rerun-preserved")).toMatchObject({
-				success: true,
-				data: { status: "accepted" },
-			}),
-		);
+		// The preserved run reruns from the discussion session.
+		await expect(client.intent("review_rerun", { runId: "review:test" })).resolves.toMatchObject({
+			result: { workflowId: "review:test" },
+		});
+		await vi.waitFor(() => expect(target.reviewWorkflows.get("review:test")?.status).toBe("completed"));
 
-		line(
-			JSON.stringify({
-				id: "new-missing",
-				type: "new_session",
-				preserveReviewRunId: "review:missing",
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "new-missing")).toMatchObject({
-				success: false,
-				error: "Unknown review run: review:missing",
-			}),
-		);
-		expect(replacementManagers).toHaveLength(1);
-		await closeMode(collecting, modePromise);
+		await expect(client.intent("new_session", { preserveReviewRunId: "review:missing" })).rejects.toMatchObject({
+			reason: { code: "failed", message: "Unknown review run: review:missing" },
+		});
+		expect(harness.host.list()).toHaveLength(2);
+		expect(client.conversation).toBe(target.id);
 	});
 
 	test("accepts an incremental durable branch rerun through its host-only locator", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		await appendReviewRun(manager.logWriter, durableBranchRecord());
-		const fake = makeFakeHost({ manager });
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		const line = collecting.getLineHandler();
-		line(JSON.stringify({ id: "list-branch", type: "list_review_workflows" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "list-branch")).toBeDefined());
-		expect(JSON.stringify(response(collecting.writes, "list-branch"))).not.toContain("branchBase");
+		const { client } = await setup([durableBranchRecord()]);
+		const list = await client.query("review.workflows", {});
+		expect(list.runs).toHaveLength(1);
+		expect(JSON.stringify(list)).not.toContain("branchBase");
 
-		line(JSON.stringify({ id: "rerun", type: "rerun_review", runId: "review:test", mode: "incremental" }));
-		await vi.waitFor(() =>
-			expect(response(collecting.writes, "rerun")).toMatchObject({
-				success: true,
-				data: { status: "accepted", workflowId: "review:test" },
-			}),
+		await expect(client.intent("review_rerun", { runId: "review:test", mode: "incremental" })).resolves.toMatchObject(
+			{ result: { workflowId: "review:test" } },
 		);
 		await vi.waitFor(() => expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalled());
 		expect(reviewMocks.prepareReviewWorkflow).toHaveBeenCalledWith(
@@ -1001,25 +737,6 @@ describe("RPC durable review actions", () => {
 				controls: expect.objectContaining({ scopeMode: "incremental" }),
 			}),
 		);
-		await closeMode(collecting, modePromise);
-	});
-
-	test("rejects a durable branch rerun without a stored locator", async () => {
-		const manager = SessionManager.inMemory("/workspace");
-		const record = durableBranchRecord("review:missing-locator");
-		delete record.target.branchBase;
-		await appendReviewRun(manager.logWriter, record);
-		const fake = makeFakeHost({ manager });
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		collecting.getLineHandler()(JSON.stringify({ id: "rerun-missing", type: "rerun_review", runId: record.runId }));
-		await vi.waitFor(() => expect(response(collecting.writes, "rerun-missing")).toBeDefined());
-		expect(response(collecting.writes, "rerun-missing")).toMatchObject({
-			success: false,
-			error: "Durable branch review run does not retain a base locator.",
-		});
-		expect(reviewMocks.prepareReviewWorkflow).not.toHaveBeenCalled();
-		await closeMode(collecting, modePromise);
 	});
 
 	test("cancels a detached run and reaches a terminal state", async () => {
@@ -1029,15 +746,13 @@ describe("RPC durable review actions", () => {
 			);
 			return { status: "cancelled" as const };
 		});
-		const fake = makeFakeHost();
-		const collecting = createCollectingTransport();
-		const modePromise = await startMode(fake, collecting.transport);
-		const line = collecting.getLineHandler();
-		line(JSON.stringify({ id: "invoke", type: "invoke_ui_action", action: "review.uncommitted" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "invoke")).toBeDefined());
-		line(JSON.stringify({ id: "cancel", type: "cancel_workflow", workflowId: "review:test" }));
-		await vi.waitFor(() => expect(response(collecting.writes, "cancel")).toMatchObject({ success: true }));
-		await vi.waitFor(() => expect(fake.reviewWorkflows.get("review:test")?.status).toBe("cancelled"));
-		await closeMode(collecting, modePromise);
+		const { client, source } = await setup();
+
+		await expect(client.intent("review_uncommitted", {})).resolves.toMatchObject({
+			result: { workflowId: "review:test" },
+		});
+		await vi.waitFor(() => expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalled());
+		await client.intent("review_cancel_workflow", { workflowId: "review:test" });
+		await vi.waitFor(() => expect(source.reviewWorkflows.get("review:test")?.status).toBe("cancelled"));
 	});
 });

@@ -3,24 +3,36 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import {
+	clientActiveBranch,
+	clientRestore,
+	type HostFrame,
+	REMOTE_CAPABILITIES,
+	type RemoteGrant,
+} from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ConversationFactory } from "../src/core/host/hosted-conversation.ts";
-import type {
-	ConversationProjectionSnapshotBuilder,
-	ConversationProjectionSubscription,
-} from "../src/core/rpc/conversation-projection-feed.ts";
-import { buildRpcSessionState } from "../src/core/rpc/session-state.ts";
-import type { RpcConversationTranscriptItem } from "../src/core/rpc/types.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import { SessionManager, type SessionMessageEntry } from "../src/core/session-manager.ts";
-import { getCurrentConversationAuthority, parseWrittenObjects, startIrohRpcMode } from "./iroh-stream-doubles.ts";
 import { connectTestClient, type OpenTestHostOptions, openTestHost, type TestClient } from "./utilities/host-client.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
+
+type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
+
+const ALL: RemoteGrant = { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] };
 
 /** Open a conversation in a host of its own and attach an in-place anchor client to it. */
 async function openRuntime(factory: ConversationFactory, options: OpenTestHostOptions): Promise<TestClient> {
 	const { host, conversation } = await openTestHost(factory, options);
 	return connectTestClient(host, conversation);
+}
+
+/** Whether a device was sent a branch switch: the `leaf` entry a tree navigation commits. */
+function isLeafEntry(frame: HostFrame): frame is Frame<"entry"> {
+	return frame.type === "entry" && frame.entry.type === "leaf";
 }
 
 function messageText(message: AgentMessage): string {
@@ -45,7 +57,28 @@ describe("AgentSession conversation generation commits", () => {
 		}
 	});
 
-	it("rotates the projection only after branch transcript and Agent state commit together", async () => {
+	/** A paired device on the client's conversation, subscribed from a snapshot; it disconnects at cleanup. */
+	async function connectPhone(runtime: TestClient): Promise<RemotePhone> {
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: runtime.host,
+			conversation: runtime.conversation,
+			stream: pair.host,
+			grant: ALL,
+			redaction: { workspacePath: runtime.cwd },
+			redirect: {},
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		await phone.subscribe(runtime.conversation.id);
+		return phone;
+	}
+
+	it("switches the branch for devices only after branch transcript and Agent state commit together", async () => {
 		const tempDir = join(
 			tmpdir(),
 			`volt-conversation-generation-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -83,9 +116,7 @@ describe("AgentSession conversation generation commits", () => {
 			sessionManager: SessionManager.inMemory(tempDir),
 		});
 		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
-		let subscription: ConversationProjectionSubscription | undefined;
 		cleanups.push(async () => {
-			subscription?.detach();
 			await runtime.dispose();
 			if (existsSync(tempDir)) {
 				rmSync(tempDir, { recursive: true, force: true });
@@ -100,56 +131,16 @@ describe("AgentSession conversation generation commits", () => {
 		await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 2 });
 		const oldLeafId = await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant"));
 
-		const transcriptItems = (): RpcConversationTranscriptItem[] => {
-			const items: RpcConversationTranscriptItem[] = [];
-			for (const entry of manager.getBranch()) {
-				if (entry.type !== "message" || (entry.message.role !== "user" && entry.message.role !== "assistant")) {
-					continue;
-				}
-				items.push({
-					entryId: entry.id,
-					ordinal: entry.ordinal ?? 0,
-					createdAt: entry.timestamp,
-					role: entry.message.role,
-					text: messageText(entry.message),
-					truncated: false,
-					...(entry.message.role === "assistant" ? { stopReason: entry.message.stopReason } : {}),
-				});
-			}
-			return items;
-		};
+		const transcriptMessages = (): number =>
+			manager
+				.getBranch()
+				.filter(
+					(entry) =>
+						entry.type === "message" && (entry.message.role === "user" || entry.message.role === "assistant"),
+				).length;
 
-		const snapshotCuts: Array<{ stateMessages: number; transcriptMessages: number }> = [];
-		const buildSnapshot: ConversationProjectionSnapshotBuilder = ({ activeAssistant, branchEpoch }) => {
-			const items = transcriptItems();
-			const state = buildRpcSessionState(runtime.session);
-			snapshotCuts.push({ stateMessages: state.messageCount, transcriptMessages: items.length });
-			const head = items.at(-1);
-			return {
-				conversation: { workspaceName: "test", sessionId: runtime.session.sessionId },
-				state,
-				transcript: {
-					sessionId: runtime.session.sessionId,
-					items,
-					hasMore: false,
-					nextBeforeEntryId: null,
-					projectionVersion: 3,
-					branchEpoch,
-					head: head ? { entryId: head.entryId, ordinal: head.ordinal } : null,
-				},
-				activeAssistant,
-				activeWorkflows: [],
-			};
-		};
-
-		const writes: object[] = [];
-		subscription = runtime.conversation.projectionFeed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot,
-		});
-		await subscription.ready;
+		const phone = await connectPhone(runtime);
+		const from = phone.frames.length;
 
 		const rawLeafCuts: Array<{ nextLeafId: string | null; stateMessages: number }> = [];
 		const detachRawLeaf = manager.subscribeBranchChanges((change) => {
@@ -165,12 +156,11 @@ describe("AgentSession conversation generation commits", () => {
 			committedCuts.push({
 				...change,
 				stateMessages: runtime.session.messages.length,
-				transcriptMessages: transcriptItems().length,
+				transcriptMessages: transcriptMessages(),
 			});
 		});
 
 		await runtime.session.navigateTree(firstAssistantId, { summarize: false });
-		await subscription.flush();
 		detachRawLeaf();
 		detachCommitted();
 
@@ -185,27 +175,25 @@ describe("AgentSession conversation generation commits", () => {
 				transcriptMessages: 2,
 			},
 		]);
-		expect(snapshotCuts).toEqual([
-			{ stateMessages: 4, transcriptMessages: 4 },
-			{ stateMessages: 2, transcriptMessages: 2 },
-		]);
-		const bootstraps = writes.filter(
-			(value): value is object & { type: "conversation_bootstrap" } =>
-				"type" in value && value.type === "conversation_bootstrap",
+		// A subscribed device folds the switch as one committed leaf entry.
+		const leaf = await phone.waitFor(isLeafEntry, { from });
+		expect(leaf.entry.payload).toEqual({ targetId: firstAssistantId });
+		expect(phone.frames.slice(from).filter(isLeafEntry)).toHaveLength(1);
+		// A device that subscribes now starts from the switched branch.
+		await phone.subscribe(runtime.conversation.id, "after");
+		const snapshot = phone.frames.find(
+			(frame): frame is Frame<"snapshot"> => frame.type === "snapshot" && frame.subscriptionId === "after",
 		);
-		expect(bootstraps).toHaveLength(2);
-		expect(bootstraps[1]).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "branch_rebase",
-			conversation: { sessionId: runtime.session.sessionId },
-			state: { messageCount: 2 },
-			transcript: {
-				items: [
-					{ entryId: expect.any(String), role: "user", text: "first user" },
-					{ entryId: firstAssistantId, role: "assistant", text: "first assistant" },
-				],
-			},
-		});
+		if (!snapshot) throw new Error("Expected a snapshot");
+		expect(snapshot.state.leafId).toBe(firstAssistantId);
+		expect(
+			clientActiveBranch(clientRestore(snapshot.ordinal, snapshot.state)).flatMap((entry) =>
+				entry.type === "message" ? [{ role: entry.view?.role, text: entry.view?.text }] : [],
+			),
+		).toEqual([
+			{ role: "user", text: "first user" },
+			{ role: "assistant", text: "first assistant" },
+		]);
 	});
 
 	it("rejects tree navigation during a faux-provider message_update and preserves the run parent chain", async () => {
@@ -432,7 +420,7 @@ describe("AgentSession conversation generation commits", () => {
 	});
 
 	it.each(["input", "before_agent_start"] as const)(
-		"refuses a branch rebase while a remote prompt's %s hook awaits",
+		"refuses a branch rebase while a device's prompt %s hook awaits",
 		async (boundary) => {
 			const tempDir = join(
 				tmpdir(),
@@ -471,11 +459,7 @@ describe("AgentSession conversation generation commits", () => {
 				agentDir: tempDir,
 				sessionManager: SessionManager.inMemory(tempDir),
 			});
-			let modePromise: Promise<void> | undefined;
-			let endMode: (() => void) | undefined;
 			cleanups.push(async () => {
-				endMode?.();
-				await modePromise;
 				await runtime.dispose();
 				if (existsSync(tempDir)) {
 					rmSync(tempDir, { recursive: true, force: true });
@@ -489,6 +473,7 @@ describe("AgentSession conversation generation commits", () => {
 			);
 			await runtime.session.sessionWriter.appendMessage({ role: "user", content: "second user", timestamp: 2 });
 			await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant"));
+			const phone = await connectPhone(runtime);
 
 			let releaseBoundary = () => {};
 			const boundaryRelease = new Promise<void>((resolve) => {
@@ -515,22 +500,11 @@ describe("AgentSession conversation generation commits", () => {
 				};
 			}
 
-			vi.spyOn(runtime.session, "attachExtensionClient");
-			const mode = await startIrohRpcMode(
-				{ host: runtime.host, conversation: runtime.conversation },
-				runtime.session,
-			);
-			modePromise = mode.modePromise;
-			endMode = () => mode.recv.end();
-			const authority = getCurrentConversationAuthority(mode.send);
-			mode.recv.pushLine(
-				JSON.stringify({
-					id: `targeted-${boundary}`,
-					type: "prompt",
-					clientMessageId: `targeted-client-${boundary}`,
-					message: "enters the targeted branch",
-					conversationAuthority: authority,
-				}),
+			const from = phone.frames.length;
+			const outcome = phone.intent(
+				"prompt",
+				{ message: "enters the targeted branch" },
+				{ intentId: `targeted-client-${boundary}` },
 			);
 			await boundaryStarted;
 
@@ -542,16 +516,9 @@ describe("AgentSession conversation generation commits", () => {
 				releaseBoundary();
 			}
 
-			await vi.waitFor(() => {
-				expect(parseWrittenObjects(mode.send)).toContainEqual(
-					expect.objectContaining({ id: `targeted-${boundary}`, success: true }),
-				);
-			});
+			expect(await outcome).toMatchObject({ type: "accepted" });
 			await runtime.session.waitForIdle();
-			const frames = parseWrittenObjects(mode.send);
-			expect(
-				frames.some((frame) => frame.type === "conversation_bootstrap" && frame.reason === "branch_rebase"),
-			).toBe(false);
+			expect(phone.frames.slice(from).some(isLeafEntry)).toBe(false);
 			expect(
 				manager
 					.getBranch()
@@ -562,26 +529,11 @@ describe("AgentSession conversation generation commits", () => {
 		},
 	);
 
+	// `invoke_ui_action session.new` is the `new_session` intent on protocol 1.
 	it.each([
-		{
-			name: "new_session",
-			command: (_targetSessionId: string) => ({ type: "new_session" as const }),
-		},
-		{
-			name: "switch_session_by_id",
-			command: (targetSessionId: string) => ({
-				type: "switch_session_by_id" as const,
-				sessionId: targetSessionId,
-			}),
-		},
-		{
-			name: "invoke_ui_action session.new",
-			command: (_targetSessionId: string) => ({
-				type: "invoke_ui_action" as const,
-				action: "session.new",
-			}),
-		},
-	])("rejects remote $name when session_before_switch awaits across a branch rebase", async ({ name, command }) => {
+		{ name: "new_session", input: (_targetSessionId: string) => ({}) },
+		{ name: "switch_session", input: (targetSessionId: string) => ({ sessionId: targetSessionId }) },
+	])("rejects a device's $name when session_before_switch awaits across a branch rebase", async ({ name, input }) => {
 		const tempDir = join(
 			tmpdir(),
 			`volt-structural-authority-race-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -623,11 +575,7 @@ describe("AgentSession conversation generation commits", () => {
 		await targetManager.logWriter.appendMessage({ role: "user", content: "switch target", timestamp: 1 });
 		await targetManager.logWriter.appendMessage(fauxAssistantMessage("switch target assistant"));
 		const targetSessionId = targetManager.getSessionId();
-		let modePromise: Promise<void> | undefined;
-		let endMode: (() => void) | undefined;
 		cleanups.push(async () => {
-			endMode?.();
-			await modePromise;
 			await runtime.dispose();
 			await targetManager.closePersistence();
 			if (existsSync(tempDir)) {
@@ -643,6 +591,7 @@ describe("AgentSession conversation generation commits", () => {
 		await runtime.session.sessionWriter.appendMessage(fauxAssistantMessage("second assistant"));
 		const originalSession = runtime.session;
 		const originalSessionId = originalSession.sessionId;
+		const phone = await connectPhone(runtime);
 
 		let releaseSwitch = () => {};
 		const switchRelease = new Promise<void>((resolve) => {
@@ -667,41 +616,27 @@ describe("AgentSession conversation generation commits", () => {
 			return originalEmit(event);
 		});
 
-		vi.spyOn(runtime.session, "attachExtensionClient");
-		const mode = await startIrohRpcMode({ host: runtime.host, conversation: runtime.conversation }, runtime.session);
-		modePromise = mode.modePromise;
-		endMode = () => mode.recv.end();
-		const id = `stale-structural-${name.replaceAll(" ", "-")}`;
-		mode.recv.pushLine(
-			JSON.stringify({
-				id,
-				...command(targetSessionId),
-				conversationAuthority: getCurrentConversationAuthority(mode.send),
-			}),
-		);
+		const from = phone.frames.length;
+		const outcome = phone.intent(name, input(targetSessionId), { intentId: `stale-structural-${name}` });
 		await switchStarted;
 
 		await runtime.session.navigateTree(firstAssistantId, { summarize: false });
 		releaseSwitch();
 
-		await vi.waitFor(() => {
-			const frames = parseWrittenObjects(mode.send);
-			expect(frames).toContainEqual(
-				expect.objectContaining({
-					id,
-					success: false,
-					errorCode: "stale_conversation_authority",
-				}),
-			);
-			const rebaseIndex = frames.findIndex(
-				(frame) => frame.type === "conversation_bootstrap" && frame.reason === "branch_rebase",
-			);
-			const rejectionIndex = frames.findIndex((frame) => frame.id === id);
-			expect(rebaseIndex).toBeGreaterThanOrEqual(0);
-			expect(rejectionIndex).toBeGreaterThan(rebaseIndex);
+		const rejected = await outcome;
+		expect(rejected).toMatchObject({
+			type: "rejected",
+			reason: { code: "stale", ordinal: runtime.session.conversationGenerationRevision },
 		});
+		// The device saw the branch switch before the intent it made on the old branch was refused.
+		const frames = phone.frames.slice(from);
+		const rebaseIndex = frames.findIndex(isLeafEntry);
+		expect(rebaseIndex).toBeGreaterThanOrEqual(0);
+		expect(frames.indexOf(rejected)).toBeGreaterThan(rebaseIndex);
+		expect(frames.some((frame) => frame.type === "ended")).toBe(false);
 		expect(runtime.session).toBe(originalSession);
 		expect(runtime.session.sessionId).toBe(originalSessionId);
+		expect(runtime.conversation.closed).toBe(false);
 		expect(
 			activeManager
 				.getBranch()
@@ -759,11 +694,7 @@ describe("AgentSession conversation generation commits", () => {
 				agentDir: tempDir,
 				sessionManager: manager,
 			});
-			let modePromise: Promise<void> | undefined;
-			let endMode: (() => void) | undefined;
 			cleanups.push(async () => {
-				endMode?.();
-				await modePromise;
 				await runtime.dispose();
 				if (existsSync(tempDir)) {
 					rmSync(tempDir, { recursive: true, force: true });
@@ -791,6 +722,7 @@ describe("AgentSession conversation generation commits", () => {
 				reserveTokens: faux.getModel().contextWindow ?? 200_000,
 				keepRecentTokens: 1,
 			});
+			const phone = await connectPhone(runtime);
 
 			let releaseBoundary = () => {};
 			const boundaryRelease = new Promise<void>((resolve) => {
@@ -825,21 +757,11 @@ describe("AgentSession conversation generation commits", () => {
 				return originalEmit(event);
 			});
 
-			vi.spyOn(runtime.session, "attachExtensionClient");
-			const mode = await startIrohRpcMode(
-				{ host: runtime.host, conversation: runtime.conversation },
-				runtime.session,
-			);
-			modePromise = mode.modePromise;
-			endMode = () => mode.recv.end();
-			mode.recv.pushLine(
-				JSON.stringify({
-					id: "targeted-compaction",
-					type: "prompt",
-					clientMessageId: "targeted-compaction-client",
-					message: "enters the targeted branch",
-					conversationAuthority: getCurrentConversationAuthority(mode.send),
-				}),
+			const from = phone.frames.length;
+			const outcome = phone.intent(
+				"prompt",
+				{ message: "enters the targeted branch" },
+				{ intentId: "targeted-compaction-client" },
 			);
 			await boundaryStarted;
 
@@ -851,16 +773,13 @@ describe("AgentSession conversation generation commits", () => {
 				releaseBoundary();
 			}
 
-			await vi.waitFor(() => {
-				const frames = parseWrittenObjects(mode.send);
-				expect(frames).toContainEqual(expect.objectContaining({ id: "targeted-compaction", success: true }));
-				expect(frames).toContainEqual(expect.objectContaining({ type: "compaction_end", aborted: false }));
-			});
+			expect(await outcome).toMatchObject({ type: "accepted" });
+			await phone.waitFor(
+				(frame): frame is Frame<"entry"> => frame.type === "entry" && frame.entry.type === "compaction",
+				{ from },
+			);
 			await runtime.session.waitForIdle();
-			const frames = parseWrittenObjects(mode.send);
-			expect(
-				frames.some((frame) => frame.type === "conversation_bootstrap" && frame.reason === "branch_rebase"),
-			).toBe(false);
+			expect(phone.frames.slice(from).some(isLeafEntry)).toBe(false);
 			expect(compactionHookCalls).toBe(1);
 			expect(manager.getBranch().flatMap((entry) => (entry.type === "compaction" ? [entry.summary] : []))).toEqual([
 				"hook compaction summary",

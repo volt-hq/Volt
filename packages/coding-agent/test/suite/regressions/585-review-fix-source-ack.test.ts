@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient, ProtocolRejectedError } from "../../../src/client/protocol-client.ts";
 import type { ParsedReview } from "../../../src/core/review-report.ts";
 import {
 	appendReviewRun,
@@ -6,10 +7,7 @@ import {
 	REVIEW_ACKNOWLEDGMENT_CUSTOM_ENTRY_TYPE,
 	type ReviewRunRecord,
 } from "../../../src/core/review-state.ts";
-import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createHostHarness } from "../host-harness.ts";
 
 const RUN_ID = "review:585";
@@ -99,21 +97,12 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 		});
 		const source = await harness.openStartup();
 		await appendReviewRun(source.session.sessionWriter, reviewRecord());
-		const pair = createLoopbackRpcTransportPair();
-		const client = new RpcTransportClient({ transport: pair.client });
-		await client.start();
-		const ready = Promise.withResolvers<void>();
-		const closed = runLegacyRemoteRpcMode(harness.host, source, {
-			transport: pair.server,
-			onReady: ready.resolve,
-		});
-		await Promise.race([ready.promise, closed]);
+		const client = await createLoopbackClient(harness.host, source);
 		cleanups.push(async () => {
 			await client.stop();
-			await closed.catch(() => undefined);
 			await harness.cleanup();
 		});
-		/** The session of the one conversation open: the RPC client's, as the host closes each it leaves. */
+		/** The session of the one conversation open: the client's, as the host closes each it leaves. */
 		const currentSession = () => {
 			const [conversation, ...others] = harness.host.list();
 			if (!conversation || others.length > 0) throw new Error("Expected one open conversation");
@@ -138,11 +127,13 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 		const sourceRef = source.session.sessionRef!;
 		const reopen = vi.spyOn(SessionManager, "open");
 
-		const result = await client.openReviewSession(RUN_ID);
+		const accepted = await client.intent("review_open_session", { runId: RUN_ID });
 
 		const target = currentSession();
-		expect(result).toEqual({ cancelled: false, sessionId: target.sessionId });
+		expect(accepted.conversation).toBe(target.sessionId);
+		expect(accepted.result).toBeUndefined();
 		expect(target.sessionId).not.toBe(sourceId);
+		await vi.waitFor(() => expect(client.conversation).toBe(target.sessionId));
 		expect(reopen).not.toHaveBeenCalled();
 		// The source closed after the client moved, and its log already held the acknowledgement.
 		expect(shutdowns).toEqual([{ sessionId: sourceId, acknowledged: true }]);
@@ -161,9 +152,9 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 		const { source, currentSession, client, shutdowns } = await setup();
 		const sourceRef = source.session.sessionRef!;
 
-		const result = await client.openReviewSession(RUN_ID, ["finding-2"]);
+		const accepted = await client.intent("review_open_session", { runId: RUN_ID, findingIds: ["finding-2"] });
 
-		expect(result).toEqual({ cancelled: false, sessionId: currentSession().sessionId });
+		expect(accepted.conversation).toBe(currentSession().sessionId);
 		expect(shutdowns).toEqual([{ sessionId: source.id, acknowledged: false }]);
 		expect(getReviewRun(currentSession().sessionManager, RUN_ID)?.acknowledgedAt).toEqual(expect.any(Number));
 		expect((await storedSourceRun(sourceRef))?.acknowledgedAt).toBeUndefined();
@@ -178,10 +169,12 @@ describe("regression #585: a review fix acknowledges the run through the still-o
 			return appendCustomEntry(customType, data);
 		});
 
-		await expect(client.openReviewSession(RUN_ID)).rejects.toThrow("source write failed");
+		const opened = client.intent("review_open_session", { runId: RUN_ID });
+		await expect(opened).rejects.toBeInstanceOf(ProtocolRejectedError);
+		await expect(opened).rejects.toMatchObject({ reason: { code: "failed", message: "source write failed" } });
 
 		expect(currentSession()).toBe(source.session);
-		await expect(client.getState()).resolves.toMatchObject({ sessionId: source.id });
+		expect(client.conversation).toBe(source.id);
 		expect(harness.host.list()).toEqual([source]);
 		expect(shutdowns).toEqual([]);
 		expect(acknowledged(source.session.sessionManager.getEntries())).toBe(false);

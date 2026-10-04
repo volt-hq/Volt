@@ -300,13 +300,27 @@ export class IntentRegistry {
 		if (metadata.scope === "conversation" && !target) {
 			throw new IntentRejectedError("unavailable", `${name} needs a conversation`);
 		}
-		if (metadata.fence === "branch" && target && options.expectedOrdinal !== undefined) {
-			const switched = target.session.conversationGenerationRevision;
-			if (switched > options.expectedOrdinal) {
-				throw new IntentRejectedError("stale", "The branch switched after the client's position", {
-					ordinal: switched,
-				});
-			}
+		const expectedOrdinal = options.expectedOrdinal;
+		if (metadata.fence === "branch" && target && expectedOrdinal !== undefined) {
+			// Checked at admission and again wherever the intent rechecks before it
+			// mutates, after its awaits: the branch may switch meanwhile.
+			const assertBranch = (): void => {
+				const switched = target.session.conversationGenerationRevision;
+				if (switched > expectedOrdinal) {
+					throw new IntentRejectedError("stale", "The branch switched after the client's position", {
+						ordinal: switched,
+					});
+				}
+			};
+			assertBranch();
+			const outer = ctx.assertCurrent;
+			ctx = {
+				...ctx,
+				assertCurrent: () => {
+					outer?.();
+					assertBranch();
+				},
+			};
 		}
 		if (resolved.kind === "dynamic") {
 			const run = admitDynamicIntent(ctx, resolved.intent, admittedInput as Static<typeof DynamicIntentInputSchema>);

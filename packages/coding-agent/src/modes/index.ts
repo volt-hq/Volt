@@ -12,14 +12,6 @@ export {
 	type IrohRemoteAgentRuntimeSessionSelection,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "./rpc/iroh-remote-agent-runtime.ts";
-export {
-	type IrohRemoteCompletedCommand,
-	type IrohRemoteCompletionState,
-	type IrohRemoteNotificationKind,
-	type IrohRemoteNotificationRequest,
-	type IrohRemoteRpcModeOptions,
-	runIrohRemoteRpcMode,
-} from "./rpc/iroh-remote-rpc-mode.ts";
 export { type RpcModeOptions, runRpcMode } from "./rpc/rpc-mode.ts";
 export type {
 	RpcActiveCompaction,

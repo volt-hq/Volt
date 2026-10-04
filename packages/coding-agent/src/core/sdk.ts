@@ -236,9 +236,7 @@ export {
 	type ConversationFactory,
 	type ConversationFactoryResult,
 	type ConversationLifetime,
-	type ConversationTranscriptCommittedEvent,
 	HostedConversation,
-	isConversationTranscriptCommittedEvent,
 	type SubagentRuntimeContext,
 } from "./host/hosted-conversation.ts";
 export { executePlan } from "./host/plan-handoff.ts";

@@ -855,6 +855,29 @@ export class IrohRemoteHostStateManager {
 	}
 }
 
+/**
+ * Why a stream's authorization no longer holds in `state`: its workspace was
+ * unregistered or replaced, or the device's access was revoked or changed.
+ */
+export function getIrohRemoteAuthorizationLoss(
+	state: IrohRemoteHostState,
+	authorization: IrohRemoteClientAuthorizationSuccess,
+): "revoked" | "workspace_unregistered" | undefined {
+	if (isAuthorizationCurrentInState(state, authorization)) return undefined;
+	const workspace = state.workspaces.find((entry) => entry.name === authorization.workspace.name);
+	const workspaceGeneration = (state.workspaceGenerations ?? []).find(
+		(record) => record.workspaceName === authorization.workspace.name,
+	)?.generation;
+	if (
+		workspace === undefined ||
+		workspace.path !== authorization.workspace.path ||
+		workspaceGeneration !== authorization.workspaceGeneration
+	) {
+		return "workspace_unregistered";
+	}
+	return "revoked";
+}
+
 function isAuthorizationCurrentInState(
 	state: IrohRemoteHostState,
 	authorization: IrohRemoteClientAuthorizationSuccess,

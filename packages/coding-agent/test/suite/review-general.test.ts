@@ -1,15 +1,19 @@
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { RPC_COMMAND_SCHEMAS, RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
+import {
+	type HostFrame,
+	type RemoteCapability,
+	RPC_COMMAND_SCHEMAS,
+	RPC_RESPONSE_SCHEMAS,
+} from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
-import {
-	createIrohRemoteRpcGrant,
-	getIrohRemoteRpcCommandCapabilities,
-} from "../../src/core/remote/iroh/access-grant.ts";
-import { getIrohRemoteRpcFilterResult } from "../../src/core/remote/iroh/rpc-command-filter.ts";
+import { localProfile } from "../../src/core/protocol/profiles.ts";
+import { Subscription } from "../../src/core/protocol/server/subscription.ts";
+import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
 import {
 	registerDurableReviewAnchor,
 	registerReviewHandoffAliases,
@@ -17,12 +21,13 @@ import {
 } from "../../src/core/review-anchors.ts";
 import { getReviewGeneral } from "../../src/core/review-general.ts";
 import { appendReviewRunDurably } from "../../src/core/review-state.ts";
-import { buildRpcSessionState } from "../../src/core/rpc/session-state.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";
 import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { validateRpcCommandPayload } from "../../src/modes/rpc/rpc-command-validation.ts";
 import { connectTestClient, openTestHost, type TestClient, type TestClientOptions } from "../utilities/host-client.ts";
+import { createIrohStreamPair } from "../utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type QueryOutcome } from "../utilities/remote-phone.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 /** Failures a test injects into how the main client follows a move. */
@@ -108,33 +113,51 @@ async function fixture() {
 	return { client, hooks, root, directory, source, original, options, own, managers };
 }
 
-/** Subscribe to the projection feed of the conversation `client` is on now. */
-async function observe(client: TestClient) {
-	const writes: object[] = [];
-	const conversation = client.conversation;
-	const subscription = conversation.projectionFeed.attach({
-		write: (value) => {
-			writes.push(value);
-		},
-		buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-			conversation: { workspaceName: "test", sessionId: conversation.session.sessionId },
-			state: buildRpcSessionState(conversation.session),
-			transcript: {
-				sessionId: conversation.session.sessionId,
-				items: [],
-				hasMore: false,
-				nextBeforeEntryId: null,
-				projectionVersion: 3,
-				branchEpoch,
-				head: null,
-			},
-			activeAssistant,
-			activeWorkflows: [],
-		}),
+/**
+ * Subscribe to the conversation `client` is on now from a snapshot, as a
+ * protocol subscriber that is not one of its clients: it stays on that
+ * conversation whatever the client does.
+ */
+function observe(client: TestClient) {
+	const frames: HostFrame[] = [];
+	const subscription = new Subscription({
+		subscriptionId: "observer",
+		liveClientId: `observer:${randomUUID()}`,
+		conversation: client.conversation,
+		profile: localProfile,
+		sink: { send: (frame) => frames.push(frame) },
+		live: true,
+		accepts: () => false,
 	});
-	await subscription.ready;
-	cleanups.push(async () => subscription.detach());
-	return { writes, subscription };
+	subscription.start("snapshot");
+	cleanups.push(async () => subscription.dispose());
+	return { frames, subscription };
+}
+
+/** Run `query` as a paired device holding `capabilities`, on the conversation `client` is on. */
+async function remoteQuery(
+	client: TestClient,
+	capabilities: RemoteCapability[],
+	query: string,
+	params: unknown,
+): Promise<QueryOutcome> {
+	const pair = createIrohStreamPair();
+	const connection = serveIrohRemoteConnection({
+		host: client.host,
+		conversation: client.conversation,
+		stream: pair.host,
+		grant: { schemaVersion: 1, revision: 1, capabilities },
+		redaction: { workspacePath: client.cwd },
+		redirect: {},
+	});
+	const phone = connectRemotePhone(pair.phone);
+	try {
+		await phone.hello();
+		return await phone.query(query, params);
+	} finally {
+		await phone.close();
+		await connection.closed.catch(() => undefined);
+	}
 }
 
 describe("durable review General publication", () => {
@@ -170,7 +193,7 @@ describe("durable review General publication", () => {
 	it.each(["setup", "prepare", "moved", "seed"])("does not publish when %s fails", async (phase) => {
 		const { client, hooks, source, original, options, own } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
-		const { writes, subscription } = await observe(client);
+		const { frames, subscription } = observe(client);
 		const fail = async () => {
 			throw new Error("injected failure");
 		};
@@ -195,16 +218,23 @@ describe("durable review General publication", () => {
 		).rejects.toThrow("injected failure");
 		expect(await getReviewGeneral(source, "run")).toEqual(initial);
 		await expect(getReviewGeneral(candidate!, "run")).rejects.toThrow("exact member");
-		expect(writes.filter((value) => "type" in value && value.type === "conversation_bootstrap")).toHaveLength(1);
+		expect(frames.filter((frame) => frame.type === "snapshot")).toHaveLength(1);
 		if (phase === "setup" || phase === "prepare") {
-			// The client stays on the source, which stays open.
+			// The client stays on the source, which stays open and keeps serving its subscribers.
 			expect(client.session.sessionManager).toBe(source);
-			await expect(subscription.flush()).resolves.toBeUndefined();
+			expect(subscription.isEnded).toBe(false);
 			await expect(client.session.prompt("The original General is still usable")).resolves.toBeUndefined();
+			await vi.waitFor(() =>
+				expect(
+					frames.some(
+						(frame) =>
+							frame.type === "entry" && frame.entry.type === "message" && frame.entry.view?.role === "assistant",
+					),
+				).toBe(true),
+			);
 		} else {
 			// The source's stream never follows the move: it hears nothing of the new conversation.
-			await subscription.flush().catch(() => undefined);
-			expect(JSON.stringify(writes)).not.toContain(client.session.sessionId);
+			expect(JSON.stringify(frames)).not.toContain(client.session.sessionId);
 			const reopened = await own(await SessionManager.open(original));
 			await expect(reopened.session.prompt("The original General can resume")).resolves.toBeUndefined();
 			expect(await getReviewGeneral(reopened.session.sessionManager, "run")).toEqual(initial);
@@ -214,7 +244,7 @@ describe("durable review General publication", () => {
 	it("commits General only after the seed completed, leaving the source's subscriptions behind", async () => {
 		const { client, source, options } = await fixture();
 		const initial = await getReviewGeneral(source, "run");
-		const { writes, subscription } = await observe(client);
+		const { frames } = observe(client);
 		expect(
 			await client.newSession({
 				...options,
@@ -229,20 +259,20 @@ describe("durable review General publication", () => {
 			}),
 		).toEqual({ cancelled: false, sessionId: client.session.sessionId, seeded: true });
 		// The source's stream never follows the move: it hears nothing of the new conversation.
-		await subscription.flush().catch(() => undefined);
-		expect(JSON.stringify(writes)).not.toContain(client.session.sessionId);
-		expect(writes.filter((value) => "type" in value && value.type === "conversation_bootstrap")).toHaveLength(1);
+		expect(JSON.stringify(frames)).not.toContain(client.session.sessionId);
+		expect(frames.filter((frame) => frame.type === "snapshot")).toHaveLength(1);
 		expect(await getReviewGeneral(source, "run")).toMatchObject({
 			generalSessionId: client.session.sessionId,
 			generalRevision: 1,
 		});
-		const reattached = await observe(client);
-		await reattached.subscription.flush();
-		expect(reattached.writes[0]).toMatchObject({
-			reason: "bootstrap",
-			conversation: { sessionId: client.session.sessionId },
-			state: { messageCount: 1 },
-		});
+		const reattached = observe(client);
+		const snapshot = reattached.frames[0];
+		expect(snapshot).toMatchObject({ type: "snapshot", conversation: client.session.sessionId });
+		if (snapshot?.type !== "snapshot") throw new Error("Expected a snapshot");
+		// The seed is the new conversation's one message.
+		expect(
+			snapshot.state.entries.filter((entry) => entry.type === "message" || entry.type === "custom_message"),
+		).toHaveLength(1);
 	});
 
 	it.each([false, true])("keeps General unpublished through the durable commit (reject: %s)", async (rejectCommit) => {
@@ -435,10 +465,15 @@ describe("durable review General publication", () => {
 			delete data[field];
 			expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_general).Check({ ...response, data })).toBe(false);
 		}
-		expect(getIrohRemoteRpcCommandCapabilities(command)).toEqual(["conversation.observe.v1"]);
-		expect(
-			getIrohRemoteRpcFilterResult(JSON.stringify(command), createIrohRemoteRpcGrant(["conversation.observe.v1"])),
-		).toMatchObject({ allowed: true });
+		// A paired device reads General with observe access alone.
+		expect(await remoteQuery(client, ["conversation.observe.v1"], "review.general", { runId: "run" })).toMatchObject({
+			type: "result",
+			data: { sourceSessionId: original.sessionId, generalRevision: 0 },
+		});
+		expect(await remoteQuery(client, [], "review.general", { runId: "run" })).toMatchObject({
+			type: "query_error",
+			reason: { code: "not_allowed", requiredCapability: "conversation.observe.v1" },
+		});
 		expect(validateRpcCommandPayload({ type: "get_review_general", runId: "é".repeat(200) })).toContain("UTF-8");
 		for (const invalid of [
 			{ type: "new_session", replaceReviewGeneral: true },

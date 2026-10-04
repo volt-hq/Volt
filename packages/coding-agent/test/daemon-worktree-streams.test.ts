@@ -1,8 +1,17 @@
+/**
+ * Workspace management streams: protocol connections without a conversation
+ * on the device's remote profile, each serving the intents and queries of its
+ * purpose through the daemon's remote services (src/daemon/remote-intents.ts),
+ * as the daemon's Iroh service serves them.
+ */
+
 import { Buffer } from "node:buffer";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it, vi } from "vitest";
+import type { HostFrame, IrohRemoteWorkspaceManagementTarget } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WorkspaceIntentError } from "../src/core/protocol/intents/types.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
@@ -11,15 +20,18 @@ import {
 } from "../src/core/remote/iroh/access-grant.ts";
 import { type IrohRemoteAuditEvent, IrohRemoteAuditLogger } from "../src/core/remote/iroh/audit.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import type { IrohRemoteWorkspaceWorktree } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
+import type { IrohRemoteWorktreeRpcBackend, IrohRemoteWorktreeSummary } from "../src/core/remote/iroh/worktree-rpc.ts";
 import {
-	handleIrohRemoteWorktreeRpcCommand,
-	type IrohRemoteWorktreeRpcBackend,
-	type IrohRemoteWorktreeSummary,
-} from "../src/core/remote/iroh/worktree-rpc.ts";
-import { runWorkspaceManagementStream, runWorktreeManagementStream } from "../src/daemon/workspace-streams.ts";
-import { ManualIrohRecvStream, ManualIrohSendStream, parseWrittenObjects } from "./iroh-stream-doubles.ts";
+	type RemoteIntentHost,
+	type RemoteStreamScope,
+	remoteIntentServices,
+	remoteStreamAllows,
+} from "../src/daemon/remote-intents.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type IntentOutcome, type RemotePhone } from "./utilities/remote-phone.ts";
 
 const HOST_WORKSPACE_PATH = "/home/user/projects/repo";
 const HOST_WORKTREES_ROOT = "/home/user/.volt/agent/worktrees";
@@ -39,8 +51,8 @@ function createHostRecord(): IrohRemoteWorkspaceWorktree {
 
 function createBackend(): IrohRemoteWorktreeRpcBackend {
 	// Backend results intentionally carry host-record shapes (with `path` and
-	// `workspaceName`) to prove the RPC layer strips them from the wire.
-	const record: IrohRemoteWorktreeSummary = createHostRecord();
+	// `workspaceName`) to prove the remote services strip them from the wire.
+	const record = createHostRecord() as IrohRemoteWorktreeSummary;
 	return {
 		createWorktree: vi.fn(async () => ({ ok: true as const, worktree: record })),
 		listWorktrees: vi.fn(async () => ({
@@ -104,92 +116,147 @@ function assertNoFilesystemPaths(value: unknown): void {
 	}
 }
 
-describe("worktree RPC command helpers", () => {
-	const options = { authorizedWorkspaceName: "ws", backend: createBackend() };
+const cleanups: Array<() => Promise<void>> = [];
 
-	it("ignores non-worktree commands", async () => {
-		expect(await handleIrohRemoteWorktreeRpcCommand({ type: "list_sessions" }, options)).toEqual({
-			handled: false,
+afterEach(async () => {
+	while (cleanups.length > 0) await cleanups.pop()?.();
+});
+
+function unexpected(name: string): never {
+	throw new Error(`${name} is not served on a workspace management stream`);
+}
+
+interface WorkspaceStreamOptions {
+	purpose: IrohRemoteWorkspaceManagementTarget["purpose"];
+	authorization?: IrohRemoteClientAuthorizationSuccess;
+	backend?: IrohRemoteWorktreeRpcBackend;
+	unregisterWorkspace?: RemoteIntentHost["unregisterWorkspace"];
+	revalidate?: () => Promise<boolean>;
+	/** Bytes the device sent after its handshake line. */
+	initialInput?: Buffer;
+}
+
+interface WorkspaceStream {
+	phone: RemotePhone;
+	backend: IrohRemoteWorktreeRpcBackend;
+	auditEvents: IrohRemoteAuditEvent[];
+	/** Settles once the host ended the connection. */
+	closed: Promise<void>;
+	/** Every frame the host wrote after `welcome`. */
+	frames(): HostFrame[];
+	/** A workspace intent: host-scoped, so it carries no branch position. */
+	intent(type: string, input?: unknown): Promise<IntentOutcome>;
+}
+
+/** A workspace management stream as the daemon serves one (IrohDaemonService.runWorkspaceStream). */
+function serveWorkspaceStream(options: WorkspaceStreamOptions): WorkspaceStream {
+	const authorization = options.authorization ?? createAuthorization();
+	const backend = options.backend ?? createBackend();
+	const auditEvents: IrohRemoteAuditEvent[] = [];
+	const host: RemoteIntentHost = {
+		agentDir: "/home/user/.volt/agent",
+		auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
+		stateManager: new IrohRemoteHostStateManager(),
+		pushTargets: () => unexpected("pushTargets"),
+		worktrees: () => backend,
+		agentOptions: () => unexpected("agentOptions"),
+		sessionContexts: () => unexpected("sessionContexts"),
+		prReviews: () => unexpected("prReviews"),
+		unregisterWorkspace: options.unregisterWorkspace ?? (async () => unexpected("unregisterWorkspace")),
+	};
+	const scope: RemoteStreamScope = { kind: "management", purpose: options.purpose };
+	const allows = remoteStreamAllows(scope);
+	const pair = createIrohStreamPair();
+	const connection = serveIrohRemoteConnection({
+		stream: pair.host,
+		...(options.initialInput === undefined ? {} : { initialInput: options.initialInput }),
+		grant: authorization.client.rpcGrant,
+		redaction: {
+			workspacePath: authorization.workspace.path,
+			remoteWorkspacePath: "/workspace",
+			...(options.purpose === "manage_worktrees" ? { additionalRedactedPaths: [HOST_WORKTREES_ROOT] } : {}),
+		},
+		services: () => remoteIntentServices(host, authorization, scope, { keep: { streamId: "st-1" } }),
+		...(options.revalidate === undefined ? {} : { revalidate: options.revalidate }),
+		...(allows === undefined ? {} : { allows }),
+	});
+	const phone = connectRemotePhone(pair.phone);
+	cleanups.push(async () => {
+		await connection.close().catch(() => undefined);
+		await phone.close();
+	});
+	return {
+		phone,
+		backend,
+		auditEvents,
+		closed: connection.closed,
+		frames: () => phone.frames.filter((frame) => frame.type !== "welcome"),
+		intent: (type, input) => phone.intent(type, input, { expectedOrdinal: null }),
+	};
+}
+
+async function worktreeStream(options: Omit<WorkspaceStreamOptions, "purpose"> = {}): Promise<WorkspaceStream> {
+	const stream = serveWorkspaceStream({ ...options, purpose: "manage_worktrees" });
+	expect(await stream.phone.hello()).not.toHaveProperty("conversation");
+	return stream;
+}
+
+describe("worktree intents on a manage_worktrees stream", () => {
+	it("rejects any input field outside the schema (including inbound paths and workspace names) with invalid_input", async () => {
+		const stream = await worktreeStream();
+		for (const [type, input] of [
+			["create_worktree", { path: "/etc" }],
+			["create_worktree", { workspacePath: "/etc" }],
+			["create_worktree", { bogus: true }],
+			["create_worktree", { workspaceName: "other" }],
+			["remove_worktree", { worktreeId: "fix-login", path: "/etc" }],
+			["remove_worktree", { worktreeId: "fix-login", workspaceName: "other" }],
+		] as const) {
+			expect(await stream.intent(type, input)).toMatchObject({
+				type: "rejected",
+				reason: { code: "invalid_input" },
+			});
+		}
+		expect(await stream.phone.query("worktrees", { force: true })).toMatchObject({
+			type: "query_error",
+			reason: { code: "invalid_input" },
 		});
-		expect(await handleIrohRemoteWorktreeRpcCommand({ type: 42 }, options)).toEqual({ handled: false });
-	});
-
-	it("rejects any field outside the allowlist (including inbound paths) with invalid_request", async () => {
-		for (const command of [
-			{ id: "1", type: "create_worktree", workspaceName: "ws", path: "/etc" },
-			{ id: "1", type: "create_worktree", workspaceName: "ws", workspacePath: "/etc" },
-			{ id: "1", type: "create_worktree", workspaceName: "ws", bogus: true },
-			{ id: "2", type: "list_worktrees", workspaceName: "ws", force: true },
-			{ id: "3", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login", path: "/etc" },
-		]) {
-			const result = await handleIrohRemoteWorktreeRpcCommand(command, options);
-			expect(result).toMatchObject({
-				handled: true,
-				response: { success: false, error: "invalid_request" },
-			});
-		}
-	});
-
-	it("rejects cross-workspace requests with session_mismatch and missing names with invalid_request", async () => {
-		for (const type of ["create_worktree", "list_worktrees"]) {
-			expect(
-				await handleIrohRemoteWorktreeRpcCommand({ id: "1", type, workspaceName: "other" }, options),
-			).toMatchObject({ handled: true, response: { success: false, error: "session_mismatch" } });
-			expect(await handleIrohRemoteWorktreeRpcCommand({ id: "1", type }, options)).toMatchObject({
-				handled: true,
-				response: { success: false, error: "invalid_request" },
-			});
-		}
-		expect(
-			await handleIrohRemoteWorktreeRpcCommand(
-				{ id: "1", type: "remove_worktree", workspaceName: "other", worktreeId: "fix-login" },
-				options,
-			),
-		).toMatchObject({ handled: true, response: { success: false, error: "session_mismatch" } });
+		expect(stream.backend.createWorktree).not.toHaveBeenCalled();
+		expect(stream.backend.listWorktrees).not.toHaveBeenCalled();
+		expect(stream.backend.removeWorktree).not.toHaveBeenCalled();
 	});
 
 	it("validates create/remove field types before touching the backend", async () => {
-		const backend = createBackend();
-		const strict = { authorizedWorkspaceName: "ws", backend };
-		for (const command of [
-			{ id: "1", type: "create_worktree", workspaceName: "ws", worktreeName: "UPPER" },
-			{ id: "1", type: "create_worktree", workspaceName: "ws", branch: 42 },
-			{ id: "1", type: "create_worktree", workspaceName: "ws", baseRef: 42 },
-			{ id: "1", type: "create_worktree", workspaceName: "ws", workingDirectory: "../escape" },
-			{ id: "2", type: "remove_worktree", workspaceName: "ws", worktreeId: "../evil" },
-			{ id: "2", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login", force: "yes" },
-		]) {
-			const result = await handleIrohRemoteWorktreeRpcCommand(command, strict);
-			expect(result).toMatchObject({
-				handled: true,
-				response: { success: false, error: "invalid_request" },
+		const stream = await worktreeStream();
+		for (const [type, input] of [
+			["create_worktree", { worktreeName: "UPPER" }],
+			["create_worktree", { branch: 42 }],
+			["create_worktree", { baseRef: 42 }],
+			["create_worktree", { workingDirectory: "../escape" }],
+			["remove_worktree", { worktreeId: "../evil" }],
+			["remove_worktree", { worktreeId: "fix-login", force: "yes" }],
+		] as const) {
+			expect(await stream.intent(type, input)).toMatchObject({
+				type: "rejected",
+				reason: { code: "invalid_input" },
 			});
 		}
-		expect(backend.createWorktree).not.toHaveBeenCalled();
-		expect(backend.removeWorktree).not.toHaveBeenCalled();
+		expect(stream.backend.createWorktree).not.toHaveBeenCalled();
+		expect(stream.backend.removeWorktree).not.toHaveBeenCalled();
 	});
 
-	it("passes relative workingDirectory to create backend", async () => {
-		const backend = createBackend();
-		const result = await handleIrohRemoteWorktreeRpcCommand(
-			{
-				id: "1",
-				type: "create_worktree",
-				workspaceName: "ws",
-				worktreeName: "fix-login",
-				workingDirectory: "packages/app",
-			},
-			{ authorizedWorkspaceName: "ws", backend },
-		);
-
-		expect(result).toMatchObject({ handled: true, response: { success: true } });
-		expect(backend.createWorktree).toHaveBeenCalledExactlyOnceWith("ws", {
+	it("passes relative workingDirectory to the create backend on the stream's workspace", async () => {
+		const stream = await worktreeStream();
+		expect(
+			await stream.intent("create_worktree", { worktreeName: "fix-login", workingDirectory: "packages/app" }),
+		).toMatchObject({ type: "accepted" });
+		expect(stream.backend.createWorktree).toHaveBeenCalledExactlyOnceWith("ws", {
 			id: "fix-login",
 			workingDirectory: "packages/app",
 		});
 	});
 
-	it("maps backend failures to error responses without detail leakage", async () => {
+	it("maps backend failures to stable rejections without detail leakage, and audits them", async () => {
 		const backend: IrohRemoteWorktreeRpcBackend = {
 			...createBackend(),
 			createWorktree: async () => ({
@@ -198,169 +265,116 @@ describe("worktree RPC command helpers", () => {
 				detail: `branch exists in ${HOST_WORKSPACE_PATH}`,
 			}),
 		};
-		const result = await handleIrohRemoteWorktreeRpcCommand(
-			{ id: "1", type: "create_worktree", workspaceName: "ws" },
-			{ authorizedWorkspaceName: "ws", backend },
-		);
-		expect(result).toMatchObject({
-			handled: true,
-			response: { id: "1", success: false, error: "worktree_branch_conflict" },
+		const stream = await worktreeStream({ backend });
+		const outcome = await stream.intent("create_worktree", {});
+		expect(outcome).toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: "worktree_branch_conflict" },
 		});
-		if (result.handled) {
-			assertNoFilesystemPaths(result.response);
-		}
+		assertNoFilesystemPaths(outcome);
+		expect(stream.auditEvents).toMatchObject([
+			{
+				type: "worktree_created",
+				clientNodeId: "n-phone",
+				workspace: "ws",
+				success: false,
+				error: "worktree_branch_conflict",
+			},
+		]);
 	});
 
 	it("returns wire summaries with no filesystem paths on create/list/remove", async () => {
-		const create = await handleIrohRemoteWorktreeRpcCommand(
-			{ id: "1", type: "create_worktree", workspaceName: "ws", worktreeName: "fix-login", baseRef: "main" },
-			options,
-		);
+		const stream = await worktreeStream();
+		const create = await stream.intent("create_worktree", { worktreeName: "fix-login", baseRef: "main" });
 		expect(create).toMatchObject({
-			handled: true,
-			response: {
-				id: "1",
-				type: "response",
-				command: "create_worktree",
-				success: true,
-				data: { worktree: { id: "fix-login", branch: "volt/fix-login", baseRef: "main" } },
-			},
+			type: "accepted",
+			result: { worktree: { id: "fix-login", branch: "volt/fix-login", baseRef: "main" } },
 		});
-		const list = await handleIrohRemoteWorktreeRpcCommand(
-			{ id: "2", type: "list_worktrees", workspaceName: "ws" },
-			options,
-		);
+		const list = await stream.phone.query("worktrees");
 		expect(list).toMatchObject({
-			handled: true,
-			response: {
-				success: true,
-				data: {
-					worktrees: [
-						{
-							id: "fix-login",
-							available: true,
-							dirty: false,
-							sessionIds: ["s-abc"],
-							// Merge-back guidance (§5.3) crosses the wire; paths still don't.
-							aheadBehind: { ahead: 3, behind: 1 },
-						},
-					],
-				},
+			type: "result",
+			data: {
+				worktrees: [
+					{
+						id: "fix-login",
+						available: true,
+						dirty: false,
+						sessionIds: ["s-abc"],
+						// Merge-back guidance (§5.3) crosses the wire; paths still don't.
+						aheadBehind: { ahead: 3, behind: 1 },
+					},
+				],
 			},
 		});
-		const remove = await handleIrohRemoteWorktreeRpcCommand(
-			{ id: "3", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login", force: true },
-			options,
-		);
+		const remove = await stream.intent("remove_worktree", { worktreeId: "fix-login", force: true });
 		expect(remove).toMatchObject({
-			handled: true,
-			response: {
-				success: true,
-				data: { worktreeId: "fix-login", removed: true, stoppedRuntimeCount: 1, closedStreamCount: 1 },
-			},
+			type: "accepted",
+			result: { worktreeId: "fix-login", removed: true, stoppedRuntimeCount: 1, closedStreamCount: 1 },
 		});
-		for (const result of [create, list, remove]) {
-			if (result.handled) {
-				assertNoFilesystemPaths(result.response);
-			}
+		expect(stream.backend.removeWorktree).toHaveBeenCalledExactlyOnceWith("ws", "fix-login", true);
+		for (const frame of [create, list, remove]) {
+			assertNoFilesystemPaths(frame);
 		}
 	});
 });
 
 describe("manage_worktrees management stream", () => {
-	async function runStream(
-		lines: object[],
-		rpcGrant = createIrohRemotePresetAccess("full").rpcGrant,
-		isRpcGrantCurrent: () => boolean | Promise<boolean> = async () => true,
-	) {
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		for (const line of lines) {
-			recv.pushLine(JSON.stringify(line));
-		}
-		recv.end();
-		const auditEvents: IrohRemoteAuditEvent[] = [];
-		const backend = createBackend();
-		const closeStream = vi.fn();
-		await runWorktreeManagementStream(
-			{
-				stream: { recv, send },
-				initialInput: [],
-				authorization: createAuthorization(rpcGrant),
-				isRpcGrantCurrent,
-				closeStream,
-			},
-			{
-				auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
-				worktrees: backend,
-				additionalRedactedPaths: [HOST_WORKTREES_ROOT],
-			},
-		);
-		return { frames: parseWrittenObjects(send), auditEvents, backend, closeStream };
-	}
-
 	it("serves create/list/remove and keeps the stream open", async () => {
-		const { frames, auditEvents, closeStream } = await runStream([
-			{ id: "1", type: "create_worktree", workspaceName: "ws", worktreeName: "fix-login" },
-			{ id: "2", type: "list_worktrees", workspaceName: "ws" },
-			{ id: "3", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login", force: true },
-		]);
-		expect(frames).toHaveLength(3);
-		expect(frames[0]).toMatchObject({ id: "1", command: "create_worktree", success: true });
-		expect(frames[1]).toMatchObject({ id: "2", command: "list_worktrees", success: true });
-		expect(frames[2]).toMatchObject({ id: "3", command: "remove_worktree", success: true });
-		expect(closeStream).not.toHaveBeenCalled();
+		const stream = await worktreeStream();
+		expect(await stream.intent("create_worktree", { worktreeName: "fix-login" })).toMatchObject({
+			type: "accepted",
+		});
+		expect(await stream.phone.query("worktrees")).toMatchObject({ type: "result" });
+		expect(await stream.intent("remove_worktree", { worktreeId: "fix-login", force: true })).toMatchObject({
+			type: "accepted",
+		});
+		expect(stream.frames().map((frame) => frame.type)).toEqual(["accepted", "result", "accepted"]);
 		// Audit: create + remove, never list.
-		expect(auditEvents.map((event) => event.type)).toEqual(["worktree_created", "worktree_removed"]);
-		expect(auditEvents[0]).toMatchObject({
+		expect(stream.auditEvents.map((event) => event.type)).toEqual(["worktree_created", "worktree_removed"]);
+		expect(stream.auditEvents[0]).toMatchObject({
 			clientNodeId: "n-phone",
 			workspace: "ws",
 			success: true,
-			details: { source: "remote_worktree_management_stream", worktreeId: "fix-login" },
+			details: { source: "remote_workspace_management_stream", worktreeId: "fix-login" },
 		});
+		// Still open: a later request is answered.
+		expect(await stream.phone.query("worktrees")).toMatchObject({ type: "result" });
 	});
 
-	it("does not dispatch an unterminated utility command", async () => {
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		const backend = createBackend();
-		recv.end();
-
-		await runWorktreeManagementStream(
-			{
-				stream: { recv, send },
-				initialInput: Buffer.from(JSON.stringify({ id: "partial", type: "create_worktree", workspaceName: "ws" })),
-				authorization: createAuthorization(),
-				isRpcGrantCurrent: () => true,
-				closeStream: vi.fn(),
-			},
-			{
-				auditLogger: new IrohRemoteAuditLogger(),
-				worktrees: backend,
-			},
-		);
-
-		expect(parseWrittenObjects(send)).toEqual([]);
-		expect(backend.createWorktree).not.toHaveBeenCalled();
+	it("does not dispatch an unterminated intent", async () => {
+		const hello = {
+			type: "hello",
+			protocol: 1,
+			client: { name: "phone", version: "1" },
+			accepts: { hostRequests: [] },
+		};
+		const stream = serveWorkspaceStream({
+			purpose: "manage_worktrees",
+			initialInput: Buffer.from(
+				`${JSON.stringify(hello)}\n${JSON.stringify({ type: "create_worktree", intentId: "partial", input: {} })}`,
+			),
+		});
+		await stream.phone.waitFor((frame): frame is HostFrame => frame.type === "welcome");
+		// The device finishes its side with the intent's line unterminated.
+		await stream.phone.close();
+		await stream.closed;
+		expect(stream.frames()).toEqual([]);
+		expect(stream.backend.createWorktree).not.toHaveBeenCalled();
 	});
 
-	it("closes before executing the next command when the persisted grant revision becomes stale", async () => {
+	it("ends with fatal{revoked} before the next intent when the persisted grant becomes stale", async () => {
 		let checks = 0;
-		const { frames, backend, closeStream } = await runStream(
-			[
-				{ id: "1", type: "list_worktrees", workspaceName: "ws" },
-				{ id: "2", type: "create_worktree", workspaceName: "ws" },
-			],
-			createIrohRemotePresetAccess("full").rpcGrant,
-			() => ++checks === 1,
-		);
-		expect(frames).toHaveLength(1);
-		expect(backend.listWorktrees).toHaveBeenCalledOnce();
-		expect(backend.createWorktree).not.toHaveBeenCalled();
-		expect(closeStream).toHaveBeenCalledWith("access_updated");
+		const stream = await worktreeStream({ revalidate: async () => ++checks === 1 });
+		expect(await stream.phone.query("worktrees")).toMatchObject({ type: "result" });
+		stream.phone.send({ type: "create_worktree", intentId: "after-revocation", input: {} });
+		await stream.phone.ended;
+		expect(stream.frames().map((frame) => frame.type)).toEqual(["result", "fatal"]);
+		expect(stream.phone.frames.at(-1)).toMatchObject({ type: "fatal", code: "revoked" });
+		expect(stream.backend.listWorktrees).toHaveBeenCalledOnce();
+		expect(stream.backend.createWorktree).not.toHaveBeenCalled();
 	});
 
-	it("closes before a command when the workspace was removed without changing the client grant", async () => {
+	it("ends with fatal{revoked} before an intent when the workspace was removed without changing the client grant", async () => {
 		const authorization = createAuthorization();
 		const stateManager = new IrohRemoteHostStateManager({
 			initialState: {
@@ -371,126 +385,81 @@ describe("manage_worktrees management stream", () => {
 		});
 		await stateManager.unregisterWorkspace(authorization.workspace.name);
 
-		const { frames, backend, closeStream } = await runStream(
-			[{ id: "1", type: "create_worktree", workspaceName: "ws" }],
-			authorization.client.rpcGrant,
-			() => stateManager.isAuthorizationCurrent(authorization),
-		);
-
-		expect(frames).toEqual([]);
-		expect(backend.createWorktree).not.toHaveBeenCalled();
-		expect(closeStream).toHaveBeenCalledWith("access_updated");
+		const stream = await worktreeStream({
+			authorization,
+			revalidate: () => stateManager.isAuthorizationCurrent(authorization),
+		});
+		stream.phone.send({ type: "create_worktree", intentId: "c-1", input: {} });
+		await stream.phone.ended;
+		expect(stream.frames()).toEqual([
+			{ type: "fatal", code: "revoked", message: "The device's access changed; reconnect" },
+		]);
+		expect(stream.backend.createWorktree).not.toHaveBeenCalled();
 	});
 
-	it("denies utility commands without the required capability", async () => {
-		const { frames, backend } = await runStream(
-			[{ id: "1", type: "create_worktree", workspaceName: "ws" }],
-			createIrohRemotePresetAccess("coding").rpcGrant,
-		);
-		expect(frames[0]).toMatchObject({
-			id: "1",
-			command: "create_worktree",
-			success: false,
-			error: { code: "rpc_capability_denied", requiredCapability: "worktrees.manage.v1" },
+	it("denies worktree intents without the required capability", async () => {
+		const stream = await worktreeStream({
+			authorization: createAuthorization(createIrohRemotePresetAccess("coding").rpcGrant),
 		});
-		expect(backend.createWorktree).not.toHaveBeenCalled();
+		expect(await stream.intent("create_worktree", {})).toMatchObject({
+			type: "rejected",
+			reason: { code: "not_allowed", requiredCapability: "worktrees.manage.v1" },
+		});
+		expect(stream.backend.createWorktree).not.toHaveBeenCalled();
 	});
 
 	it("never puts filesystem paths on the wire", async () => {
-		const { frames } = await runStream([
-			{ id: "1", type: "create_worktree", workspaceName: "ws" },
-			{ id: "2", type: "list_worktrees", workspaceName: "ws" },
-			{ id: "3", type: "remove_worktree", workspaceName: "ws", worktreeId: "fix-login" },
-		]);
-		for (const frame of frames) {
+		const stream = await worktreeStream();
+		await stream.intent("create_worktree", {});
+		await stream.phone.query("worktrees");
+		await stream.intent("remove_worktree", { worktreeId: "fix-login" });
+		expect(stream.frames()).toHaveLength(3);
+		for (const frame of stream.phone.frames) {
 			assertNoFilesystemPaths(frame);
 		}
 	});
 
-	it("rejects non-worktree commands with unsupported_on_workspace_management_stream", async () => {
-		const { frames, backend, auditEvents } = await runStream([
-			{ id: "1", type: "unregister_workspace", workspaceName: "ws" },
-			{ id: "2", type: "list_sessions" },
-		]);
-		expect(frames[0]).toMatchObject({
-			id: "1",
-			command: "unregister_workspace",
-			success: false,
-			error: "unsupported_on_workspace_management_stream",
+	it("answers intents and queries of other purposes unavailable", async () => {
+		const unregisterWorkspace = vi.fn(async () => ({ closedStreamCount: 0, stoppedRuntimeCount: 0 }));
+		const stream = await worktreeStream({ unregisterWorkspace });
+		expect(await stream.intent("unregister_workspace", { workspaceName: "ws" })).toMatchObject({
+			type: "rejected",
+			reason: { code: "unavailable" },
 		});
-		expect(frames[1]).toMatchObject({
-			id: "2",
-			command: "list_sessions",
-			success: false,
-			error: "unsupported_on_workspace_management_stream",
+		expect(await stream.phone.query("sessions")).toMatchObject({
+			type: "query_error",
+			reason: { code: "unavailable" },
 		});
-		expect(backend.createWorktree).not.toHaveBeenCalled();
-		expect(auditEvents).toEqual([]);
+		expect(unregisterWorkspace).not.toHaveBeenCalled();
+		expect(stream.backend.createWorktree).not.toHaveBeenCalled();
+		expect(stream.auditEvents).toEqual([]);
 	});
 
-	it("rejects allowlist violations and cross-workspace names on the stream", async () => {
-		const { frames, auditEvents } = await runStream([
-			{ id: "1", type: "create_worktree", workspaceName: "ws", path: "/etc" },
-			{ id: "2", type: "create_worktree", workspaceName: "other" },
-			{ id: "3", type: "remove_worktree", workspaceName: "other", worktreeId: "fix-login" },
-			"not json" as unknown as object,
-		]);
-		expect(frames[0]).toMatchObject({ id: "1", success: false, error: "invalid_request" });
-		expect(frames[1]).toMatchObject({ id: "2", success: false, error: "session_mismatch" });
-		expect(frames[2]).toMatchObject({ id: "3", success: false, error: "session_mismatch" });
-		expect(frames[3]).toMatchObject({ success: false, error: "invalid_request" });
-		// Failed create/remove attempts are still audited.
-		expect(auditEvents.map((event) => event.success)).toEqual([false, false, false]);
+	it("ends the stream with fatal{invalid_frame} on a frame that is not JSON", async () => {
+		const raw = serveWorkspaceStream({
+			purpose: "manage_worktrees",
+			initialInput: Buffer.from(
+				`${JSON.stringify({ type: "hello", protocol: 1, client: { name: "phone", version: "1" }, accepts: { hostRequests: [] } })}\nnot json\n`,
+			),
+		});
+		await raw.phone.ended;
+		expect(raw.frames()).toEqual([{ type: "fatal", code: "invalid_frame", message: "A frame is one line of JSON" }]);
 	});
 });
 
 describe("workspace unregister management stream", () => {
-	it("returns and audits workspace_has_worktrees without closing the stream", async () => {
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		recv.pushLine(JSON.stringify({ id: "remove", type: "unregister_workspace", workspaceName: "ws" }));
-		recv.end();
-		const auditEvents: IrohRemoteAuditEvent[] = [];
-		const closeStream = vi.fn();
-		const unregisterWorkspace = vi.fn(async () => ({
-			ok: false as const,
-			error: "workspace_has_worktrees",
-			details: { worktreeCount: 1, worktreeIds: ["fix-login"] },
-		}));
-		await runWorkspaceManagementStream(
-			{
-				stream: { recv, send },
-				initialInput: [],
-				authorization: createAuthorization(),
-				isRpcGrantCurrent: () => true,
-				closeStream,
-			},
-			{
-				auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
-				commandContext: {
-					stateManager: new IrohRemoteHostStateManager({
-						initialState: { workspaces: [], worktrees: [], clients: [] },
-					}),
-					sessionListCursors: new Map(),
-					sessionListCursorTtlMs: 60_000,
-				},
-				unregisterWorkspace,
-			},
-			"unregister_workspace",
-		);
-
-		expect(parseWrittenObjects(send)).toEqual([
-			{
-				id: "remove",
-				type: "response",
-				command: "unregister_workspace",
-				success: false,
-				error: "workspace_has_worktrees",
-			},
-		]);
-		expect(unregisterWorkspace).toHaveBeenCalledOnce();
-		expect(closeStream).not.toHaveBeenCalled();
-		expect(auditEvents).toEqual([
+	it("rejects and audits workspace_has_worktrees without closing the stream", async () => {
+		const unregisterWorkspace = vi.fn(async () => {
+			throw new WorkspaceIntentError("workspace_has_worktrees", { worktreeCount: 1, worktreeIds: ["fix-login"] });
+		});
+		const stream = serveWorkspaceStream({ purpose: "unregister_workspace", unregisterWorkspace });
+		await stream.phone.hello();
+		expect(await stream.intent("unregister_workspace", { workspaceName: "ws" })).toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: "workspace_has_worktrees" },
+		});
+		expect(unregisterWorkspace).toHaveBeenCalledExactlyOnceWith("ws", { streamId: "st-1" });
+		expect(stream.auditEvents).toEqual([
 			{
 				timestamp: expect.any(Number),
 				type: "workspace_unregistered",
@@ -505,6 +474,23 @@ describe("workspace unregister management stream", () => {
 				},
 			},
 		]);
+		// Still open: a retry is answered.
+		expect(await stream.intent("unregister_workspace", { workspaceName: "ws" })).toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: "workspace_has_worktrees" },
+		});
+		expect(stream.phone.frames.some((frame) => frame.type === "fatal")).toBe(false);
+	});
+
+	it("refuses another workspace's name without unregistering anything", async () => {
+		const unregisterWorkspace = vi.fn(async () => ({ closedStreamCount: 0, stoppedRuntimeCount: 0 }));
+		const stream = serveWorkspaceStream({ purpose: "unregister_workspace", unregisterWorkspace });
+		await stream.phone.hello();
+		expect(await stream.intent("unregister_workspace", { workspaceName: "other" })).toMatchObject({
+			type: "rejected",
+			reason: { code: "invalid_input", message: "session_mismatch" },
+		});
+		expect(unregisterWorkspace).not.toHaveBeenCalled();
 	});
 });
 
@@ -517,51 +503,31 @@ describe("read-only workspace directory management stream", () => {
 				await mkdir(join(root, "packages", "app"), { recursive: true });
 				const authorization = createAuthorization(createIrohRemotePresetAccess(preset).rpcGrant);
 				authorization.workspace = { name: "ws", path: root };
-				const recv = new ManualIrohRecvStream();
-				const send = new ManualIrohSendStream();
-				for (const command of [
-					{ id: "folders", type: "list_workspace_directories", workspaceName: "ws", path: "packages" },
-					{ id: "foreign", type: "list_workspace_directories", workspaceName: "other" },
-					{ id: "escape", type: "list_workspace_directories", workspaceName: "ws", path: "../" },
-					{ id: "remove", type: "unregister_workspace", workspaceName: "ws" },
-				])
-					recv.pushLine(JSON.stringify(command));
-				recv.end();
-				const unregisterWorkspace = vi.fn(async () => ({
-					ok: true as const,
-					closedStreamCount: 0,
-					stoppedRuntimeCount: 0,
-				}));
-				await runWorkspaceManagementStream(
-					{
-						stream: { recv, send },
-						initialInput: [],
-						authorization,
-						isRpcGrantCurrent: () => true,
-						closeStream: vi.fn(),
-					},
-					{
-						auditLogger: new IrohRemoteAuditLogger(),
-						commandContext: {
-							stateManager: new IrohRemoteHostStateManager(),
-							sessionListCursors: new Map(),
-							sessionListCursorTtlMs: 60_000,
-						},
-						unregisterWorkspace,
-					},
-					"list_workspace_directories",
-				);
-				expect(parseWrittenObjects(send)).toMatchObject([
-					{
-						id: "folders",
-						success: true,
-						data: { workspaceName: "ws", path: "packages", directories: [{ name: "app", path: "packages/app" }] },
-					},
-					{ id: "foreign", success: false, error: "session_mismatch" },
-					{ id: "escape", success: false, error: "invalid_working_directory" },
-					{ id: "remove", success: false, error: "unsupported_on_workspace_management_stream" },
-				]);
+				const unregisterWorkspace = vi.fn(async () => ({ closedStreamCount: 0, stoppedRuntimeCount: 0 }));
+				const stream = serveWorkspaceStream({
+					purpose: "list_workspace_directories",
+					authorization,
+					unregisterWorkspace,
+				});
+				await stream.phone.hello();
+				expect(await stream.phone.query("workspace_directories", { path: "packages" })).toMatchObject({
+					type: "result",
+					data: { path: "packages", directories: [{ name: "app", path: "packages/app" }] },
+				});
+				expect(await stream.phone.query("workspace_directories", { workspaceName: "other" })).toMatchObject({
+					type: "query_error",
+					reason: { code: "invalid_input" },
+				});
+				expect(await stream.phone.query("workspace_directories", { path: "../" })).toMatchObject({
+					type: "query_error",
+					reason: { code: "invalid_input" },
+				});
+				expect(await stream.intent("unregister_workspace", { workspaceName: "ws" })).toMatchObject({
+					type: "rejected",
+					reason: { code: "unavailable" },
+				});
 				expect(unregisterWorkspace).not.toHaveBeenCalled();
+				expect(JSON.stringify(stream.phone.frames)).not.toContain(root);
 				expect(
 					getIrohRemoteStreamCapability({ mode: "workspaceManagement", purpose: "list_workspace_directories" }),
 				).toBe("conversation.observe.v1");
@@ -575,35 +541,14 @@ describe("read-only workspace directory management stream", () => {
 	);
 
 	it("denies folder reads without observation authority", async () => {
-		const recv = new ManualIrohRecvStream();
-		const send = new ManualIrohSendStream();
-		recv.pushLine(JSON.stringify({ id: "folders", type: "list_workspace_directories", workspaceName: "ws" }));
-		recv.end();
-		await runWorkspaceManagementStream(
-			{
-				stream: { recv, send },
-				initialInput: [],
-				authorization: createAuthorization(createIrohRemoteExplicitAccess([], []).rpcGrant),
-				isRpcGrantCurrent: () => true,
-				closeStream: vi.fn(),
-			},
-			{
-				auditLogger: new IrohRemoteAuditLogger(),
-				commandContext: {
-					stateManager: new IrohRemoteHostStateManager(),
-					sessionListCursors: new Map(),
-					sessionListCursorTtlMs: 60_000,
-				},
-				unregisterWorkspace: vi.fn(),
-			},
-			"list_workspace_directories",
-		);
-		expect(parseWrittenObjects(send)).toMatchObject([
-			{
-				id: "folders",
-				success: false,
-				error: { code: "rpc_capability_denied", requiredCapability: "conversation.observe.v1" },
-			},
-		]);
+		const stream = serveWorkspaceStream({
+			purpose: "list_workspace_directories",
+			authorization: createAuthorization(createIrohRemoteExplicitAccess([], []).rpcGrant),
+		});
+		await stream.phone.hello();
+		expect(await stream.phone.query("workspace_directories")).toMatchObject({
+			type: "query_error",
+			reason: { code: "not_allowed", requiredCapability: "conversation.observe.v1" },
+		});
 	});
 });

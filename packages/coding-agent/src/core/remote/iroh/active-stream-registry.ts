@@ -1,17 +1,14 @@
+import type { ProtocolConnection } from "../../protocol/server/connection.ts";
+
 export interface IrohRemoteActiveStreamEntry {
 	readonly clientNodeId: string;
 	readonly workspaceName: string;
 	sessionId: string;
 	readonly connectionId: string;
 	readonly streamId: string;
-	/** Feature strings from the client's last set_client_capabilities. */
-	capabilities?: Set<string>;
 	close(reason: string): Promise<void> | void;
-	/** Retire the stream-local projection/RPC mode and await its logical shutdown. */
-	terminate?(): Promise<void>;
-	write?(value: object): Promise<void> | void;
-	/** Fence pending projection output and write the stream's final frame. */
-	writeTerminal?(value: object): Promise<void> | void;
+	/** The stream's protocol connection, once it serves frames. */
+	connection?: ProtocolConnection;
 }
 
 export class IrohRemoteActiveStreamRegistry {

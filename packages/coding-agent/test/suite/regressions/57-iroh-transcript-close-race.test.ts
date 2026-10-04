@@ -1,16 +1,9 @@
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
+import { type HostFrame, REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
 import { expect, test, vi } from "vitest";
-import type { AgentSessionEventListener } from "../../../src/core/agent-session.ts";
-import { createIrohRemotePresetAccess } from "../../../src/core/remote/iroh/access-grant.ts";
-import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import {
-	createTestConversation,
-	createTestIrohConversationOptions,
-	ManualIrohRecvStream,
-	ManualIrohSendStream,
-	parseWrittenObjects,
-} from "../../iroh-stream-doubles.ts";
-import { createHarness } from "../harness.ts";
+import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
+import { ManualIrohRecvStream, ManualIrohSendStream, parseWrittenObjects } from "../../iroh-stream-doubles.ts";
+import { createHostHarness } from "../host-harness.ts";
 
 class BlockingFinishIrohSendStream extends ManualIrohSendStream {
 	readonly finishStarted: Promise<void>;
@@ -39,71 +32,66 @@ class BlockingFinishIrohSendStream extends ManualIrohSendStream {
 	}
 }
 
+function frames(send: ManualIrohSendStream): HostFrame[] {
+	return parseWrittenObjects(send) as unknown as HostFrame[];
+}
+
 test("closed Iroh stream does not crash on a queued transcript write", async () => {
-	const harness = await createHarness();
-	const sessionListeners: AgentSessionEventListener[] = [];
-	const originalSubscribe = harness.session.subscribe.bind(harness.session);
-	const subscribeSpy = vi.spyOn(harness.session, "subscribe").mockImplementation((listener) => {
-		sessionListeners.push(listener);
-		return originalSubscribe(listener);
-	});
+	const harness = await createHostHarness({ whenUnattached: "keep" });
+	const conversation = await harness.openStartup();
 	const recv = new ManualIrohRecvStream();
 	const send = new BlockingFinishIrohSendStream();
-	// The conversation's projection feed subscribes to the session as it opens, then its live feed.
-	const { host, conversation } = createTestConversation(harness.session, {
-		cwd: harness.tempDir,
-		agentDir: harness.tempDir,
-	});
-	const modePromise = runIrohRemoteRpcMode(host, conversation, {
-		...createTestIrohConversationOptions(conversation),
-		anchor: false,
-		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
+	const connection = serveIrohRemoteConnection({
+		host: harness.host,
+		conversation,
 		stream: { recv, send },
-		workspacePath: harness.tempDir,
+		grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+		redaction: { workspacePath: conversation.cwd },
+		redirect: {},
 	});
 
 	try {
-		await vi.waitFor(() => expect(sessionListeners).toHaveLength(2));
-		expect(parseWrittenObjects(send)[0]).toMatchObject({
-			type: "conversation_bootstrap",
-			delivery: { cursor: 0 },
-			conversation: { sessionId: harness.session.sessionId },
-		});
-		recv.pushLine(JSON.stringify({ id: "startup-ready", type: "get_state" }));
+		recv.pushLine(
+			JSON.stringify({
+				type: "hello",
+				protocol: 1,
+				client: { name: "phone", version: "1" },
+				accepts: { hostRequests: [] },
+			}),
+		);
+		recv.pushLine(
+			JSON.stringify({ type: "subscribe", subscriptionId: "s1", conversation: conversation.id, after: "snapshot" }),
+		);
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({
-					id: "startup-ready",
-					type: "response",
-					command: "get_state",
-					success: true,
-				}),
+			expect(frames(send)).toContainEqual(
+				expect.objectContaining({ type: "live", subscriptionId: "s1", reset: true }),
 			),
 		);
-		const transcriptListener = sessionListeners[0];
-		if (!transcriptListener) {
-			throw new Error("Expected transcript listener");
-		}
+		expect(frames(send)[0]).toMatchObject({ type: "welcome", conversation: conversation.id });
 
+		// The phone hangs up; the host's finish of its send side is still pending.
 		recv.end();
 		await send.finishStarted;
+		const written = frames(send).length;
 
+		// A transcript entry commits while the stream closes: nothing is written to the closed stream.
 		const message: AgentMessage = {
 			role: "user",
 			content: [{ type: "text", text: "queued transcript" }],
 			timestamp: Date.now(),
 		};
-		await harness.session.sessionWriter.appendMessage(message);
-		transcriptListener({ type: "message_end", message });
+		await conversation.session.sessionWriter.appendMessage(message);
+		conversation.liveState.notice("info", "after close");
 		await new Promise((resolve) => setImmediate(resolve));
 
-		expect(parseWrittenObjects(send)).not.toContainEqual(expect.objectContaining({ type: "transcript_entry" }));
+		expect(frames(send)).toHaveLength(written);
+		expect(send.writtenText()).not.toContain("queued transcript");
 		send.releaseFinish();
-		await expect(modePromise).resolves.toBeUndefined();
+		await expect(connection.closed).resolves.toBeUndefined();
+		expect(conversation.closed).toBe(false);
 	} finally {
 		send.releaseFinish();
-		await modePromise.catch(() => {});
-		subscribeSpy.mockRestore();
-		harness.cleanup();
+		await connection.closed.catch(() => {});
+		await harness.cleanup();
 	}
 });

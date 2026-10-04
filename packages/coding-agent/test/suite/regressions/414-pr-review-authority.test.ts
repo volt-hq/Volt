@@ -102,32 +102,50 @@ function fakeIroh() {
 	};
 	return {
 		module,
-		open(command: { type: string } & Record<string, unknown>) {
+		/** A phone stream that sends `frame` after its handshake and hello, then ends once it is answered. */
+		open(frame: ({ type: "query"; query: string } | { type: string; intentId: string }) & Record<string, unknown>) {
 			const frames: Record<string, unknown>[] = [];
 			const settled = deferred<void>();
+			const answered = deferred<void>();
 			const closed = deferred<void>();
 			let delivered = false;
 			let opened = false;
 			const stream: IrohBiStreamLike = {
 				recv: {
 					async read() {
-						if (delivered) return undefined;
+						if (delivered) {
+							await answered.promise;
+							return undefined;
+						}
 						delivered = true;
-						const hello = {
+						const handshake = {
 							type: "volt_iroh_hello",
-							protocol: "volt-rpc/0",
+							protocol: "volt/1",
 							workspace: "project",
-							...(command.type === "resolve_pr_review"
+							...(frame.type === "query"
 								? { workspaceDiscovery: { purpose: "review" } }
 								: { workspaceManagement: { purpose: "manage_worktrees" } }),
 						};
-						return Buffer.from(`${JSON.stringify(hello)}\n${JSON.stringify(command)}\n`);
+						const hello = {
+							type: "hello",
+							protocol: 1,
+							client: { name: "phone", version: "1" },
+							accepts: { hostRequests: [] },
+						};
+						return Buffer.from([handshake, hello, frame].map((line) => `${JSON.stringify(line)}\n`).join(""));
 					},
 					async stop() {},
 				},
 				send: {
 					async writeAll(bytes) {
-						frames.push(JSON.parse(Buffer.from(bytes).toString("utf8")));
+						for (const line of Buffer.from(bytes).toString("utf8").split("\n")) {
+							if (line.length === 0) continue;
+							const written = JSON.parse(line) as Record<string, unknown>;
+							frames.push(written);
+							if (["accepted", "rejected", "result", "query_error", "fatal"].includes(String(written.type))) {
+								answered.resolve();
+							}
+						}
 					},
 					async finish() {
 						settled.resolve();
@@ -308,11 +326,9 @@ async function fixture(grant = capabilities) {
 		status: git(source, "status", "--porcelain"),
 	};
 	const command = {
-		id: "authority-414",
 		type: "prepare_pr_review",
-		workspaceName: "project",
-		sessionId: "review-414",
-		expectedPullRequest: { url: target.pullRequest.url, headRefOid: head },
+		intentId: "authority-414",
+		input: { sessionId: "review-414", expectedPullRequest: { url: target.pullRequest.url, headRefOid: head } },
 	};
 	return {
 		state,
@@ -411,7 +427,8 @@ function expectNoLeak(f: Fixture, frames: Record<string, unknown>[]) {
 	expect(wire).not.toContain(f.root);
 	expect(wire).not.toContain(f.source);
 	expect(wire).not.toContain(SECRET);
-	expect(frames.filter((frame) => frame.type === "response")).toEqual([]);
+	// Nothing but a refusal: the stream ended, or the preparation was rejected without a result.
+	expect(frames.filter((frame) => frame.type === "accepted" || frame.type === "result")).toEqual([]);
 }
 
 describe("#414 daemon PR authority effect boundaries", () => {
@@ -423,11 +440,11 @@ describe("#414 daemon PR authority effect boundaries", () => {
 			await stream.settled;
 			expect(stream.frames).toMatchObject([
 				{ success: true },
+				{ type: "welcome", profile: "remote" },
 				{
-					type: "response",
-					command: "prepare_pr_review",
-					success: false,
-					error: { code: "rpc_capability_denied", requiredCapability: missing },
+					type: "rejected",
+					intentId: "authority-414",
+					reason: { code: "not_allowed", requiredCapability: missing },
 				},
 			]);
 			expect(f.provider).not.toHaveBeenCalled();
@@ -450,7 +467,7 @@ describe("#414 daemon PR authority effect boundaries", () => {
 				return { ok: true, target: structuredClone(f.target) };
 			});
 			const stream = f.native.open(
-				kind === "prepare" ? f.command : { id: "resolve-414", type: "resolve_pr_review", workspaceName: "project" },
+				kind === "prepare" ? f.command : { type: "query", queryId: "resolve-414", query: "pr_review", params: {} },
 			);
 			try {
 				await entered.promise;

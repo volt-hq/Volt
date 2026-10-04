@@ -285,7 +285,7 @@ describe("voltd lifecycle", () => {
 		const [statusResponse, clientsResponse, unsupported] = await Promise.all([
 			client.request({ type: "status" }),
 			client.request({ type: "clients_list" }),
-			client.request({ type: "viewer_subscribe", viewerFeedId: "vf-nope" }),
+			client.request({ type: "viewer_abort", viewerFeedId: "vf-nope" }),
 		]);
 		expect(statusResponse.type).toBe("status_result");
 		if (statusResponse.type === "status_result") {

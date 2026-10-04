@@ -182,7 +182,7 @@ function fakeIroh() {
 						delivered = true;
 						return Array.from(
 							Buffer.from(
-								`${JSON.stringify({ type: "volt_iroh_hello", protocol: "volt-rpc/0", workspace, workspaceDiscovery: { purpose: "list_sessions" }, ...(secret === undefined ? {} : { secret }), clientLabel: "Fresh phone" })}\n`,
+								`${JSON.stringify({ type: "volt_iroh_hello", protocol: "volt/1", workspace, workspaceDiscovery: { purpose: "list_sessions" }, ...(secret === undefined ? {} : { secret }), clientLabel: "Fresh phone" })}\n`,
 							),
 						);
 					},

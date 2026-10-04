@@ -1,15 +1,20 @@
-import { describe, expect, it, test, vi } from "vitest";
-import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
-import {
-	createHostThemeTokensFrame,
-	HOST_THEME_TOKENS_FEATURE,
-	sanitizeHostThemeTokens,
-} from "../src/daemon/theme-push.ts";
-import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type HostFrame, REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, it } from "vitest";
+import type { IntentHostTheme } from "../src/core/protocol/intents/types.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
+import { sanitizeHostThemeTokens } from "../src/daemon/theme-push.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone } from "./utilities/remote-phone.ts";
 
 describe("host theme token push (§9.5)", () => {
+	const cleanups: Array<() => Promise<void> | void> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
+	});
+
 	it("keeps only plain hex colors and drops anything path-like or unresolved", () => {
 		const sanitized = sanitizeHostThemeTokens({
 			accent: "#ff8800",
@@ -18,7 +23,7 @@ describe("host theme token push (§9.5)", () => {
 			shortAlpha: "#abcd",
 			pathLike: "/Users/someone/.volt/agent/themes/custom.json",
 			varRef: "var(accent)",
-			ansi: "[38;5;208m",
+			ansi: "[38;5;208m",
 			empty: "",
 			notHex: "#zzzzzz",
 			fiveDigits: "#12345",
@@ -31,73 +36,51 @@ describe("host theme token push (§9.5)", () => {
 		});
 	});
 
-	it("frames tokens under data with the theme name", () => {
-		const frame = createHostThemeTokensFrame("dark", { accent: "#ff8800", leak: "/tmp/x" });
-		expect(frame).toEqual({
-			type: "host_theme_tokens",
-			data: { themeName: "dark", tokens: { accent: "#ff8800" } },
-		});
-		expect(HOST_THEME_TOKENS_FEATURE).toBe("host_theme_tokens.v1");
-	});
-
-	test("rpc mode reports set_client_capabilities feature lists to the host", async () => {
-		const session = {
-			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
-			subscribe: vi.fn(() => () => undefined),
-			activeToolExecutions: new Map(),
-			subscribeRuntimeEvents: vi.fn(() => () => undefined),
-			resourceLoader: {
-				getSubagents: () => ({ definitions: [], diagnostics: [] }),
-				getThemes: () => ({ themes: [] }),
-			},
-			getSubagentToolManager: () => undefined,
-			getActiveToolNames: () => ["read"],
-			sessionId: "s-caps",
-			sessionFile: undefined,
-			settingsManager: {
-				getTheme: () => undefined,
-				setTheme: vi.fn(),
-				subscribeCompactionSettings: vi.fn(() => () => {}),
-			},
-		};
-		const { host } = createFakeHost();
-		const { conversation } = createFakeConversation(session);
-
-		let lineHandler: ((line: string) => void) | undefined;
-		const transport: RpcTransport = {
-			write: vi.fn(),
-			onLine: vi.fn((handler) => {
-				lineHandler = handler;
-				return vi.fn();
+	it("shares the theme with a device in host_status and tells it to refetch on changed{host}", async () => {
+		const workspace = mkdtempSync(join(tmpdir(), "volt-theme-push-"));
+		cleanups.push(() => rmSync(workspace, { recursive: true, force: true }));
+		let theme: IntentHostTheme | undefined;
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			stream: pair.host,
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: workspace },
+			services: () => ({
+				keepAwake: {
+					status: () => ({ enabled: false, state: "disabled" }),
+					setEnabled: (enabled) => ({ enabled, state: enabled ? "active" : "disabled" }),
+				},
+				hostTheme: () => theme,
 			}),
-			onClose: vi.fn((_handler: RpcCloseHandler) => vi.fn()),
-			waitForBackpressure: vi.fn(async () => undefined),
-			flush: vi.fn(async () => undefined),
-			close: vi.fn(async () => undefined),
-		};
-		const capabilityUpdates: string[][] = [];
-		let resolveReady: () => void = () => undefined;
-		const ready = new Promise<void>((resolve) => {
-			resolveReady = resolve;
 		});
-		void runLegacyRemoteRpcMode(host, conversation, {
-			transport,
-			onReady: resolveReady,
-			onClientCapabilitiesChanged: (features) => capabilityUpdates.push(features),
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await phone.close();
+			await connection.close().catch(() => undefined);
 		});
-		await ready;
-		await vi.waitFor(() => expect(lineHandler).toBeDefined());
+		await phone.hello();
 
-		lineHandler?.(
-			JSON.stringify({
-				id: "c1",
-				type: "set_client_capabilities",
-				features: ["host_action_requests.v1", HOST_THEME_TOKENS_FEATURE],
-			}),
+		// Sharing is off: host_status carries no theme.
+		const unshared = await phone.query("host_status");
+		expect(unshared).toMatchObject({ type: "result", data: { keepAwake: { enabled: false } } });
+		expect(unshared.type === "result" ? unshared.data : undefined).not.toHaveProperty("theme");
+
+		// The theme changed and sharing is on: the device is told to refetch, and reads only hex colors.
+		theme = {
+			themeName: "dark",
+			tokens: sanitizeHostThemeTokens({ accent: "#ff8800", leak: `${workspace}/themes/custom.json` }),
+		};
+		const from = phone.frames.length;
+		connection.changed("host");
+		await phone.waitFor(
+			(frame): frame is Extract<HostFrame, { type: "changed" }> =>
+				frame.type === "changed" && frame.catalog === "host",
+			{ from },
 		);
-		await vi.waitFor(() => expect(capabilityUpdates).toHaveLength(1));
-		expect(capabilityUpdates[0]).toContain(HOST_THEME_TOKENS_FEATURE);
-		expect(capabilityUpdates[0]).toContain("host_action_requests.v1");
+		await expect(phone.query("host_status")).resolves.toMatchObject({
+			type: "result",
+			data: { theme: { themeName: "dark", tokens: { accent: "#ff8800" } } },
+		});
+		expect(JSON.stringify(phone.frames)).not.toContain(workspace);
 	});
 });

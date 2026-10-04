@@ -11,10 +11,7 @@ import {
 } from "@hansjm10/volt-ai";
 import * as fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import {
-	createIrohRemoteProjectionSanitizer,
-	sanitizeIrohRemoteOutbound,
-} from "../src/core/remote/iroh/outbound-filter.ts";
+import { createIrohRemoteProjectionSanitizer } from "../src/core/remote/iroh/sanitizer.ts";
 import {
 	createProjectionState,
 	type ProjectedMessageUpdateFrame,
@@ -1033,7 +1030,7 @@ describe("sanitizer-mode projection", () => {
 		expect(getMessage(finalFrame.message)).toEqual(expected);
 	});
 
-	it("preserves opaque identity/signature/image fields byte-for-byte", () => {
+	it("preserves opaque signature fields byte-for-byte, and ids unless they name a root", () => {
 		const opaque = `opaque:${SECRET_ROOT}:bytes`;
 		const message = assistant([
 			{ type: "text", text: `${SECRET_ROOT}/visible`, textSignature: opaque },
@@ -1053,8 +1050,9 @@ describe("sanitizer-mode projection", () => {
 			thinking: `${SANITIZED_ROOT}/thought`,
 			thinkingSignature: opaque,
 		});
+		// An id naming a root is rewritten as text is.
+		expect(sanitized.content[2]).toMatchObject({ id: testSanitizer.sanitizeText(opaque) });
 		expect(sanitized.content[2]).toMatchObject({
-			id: opaque,
 			name: `${SANITIZED_ROOT}/tool`,
 			thoughtSignature: opaque,
 			arguments: { path: `${SANITIZED_ROOT}/arg` },
@@ -1362,7 +1360,7 @@ describe("stateful projection properties", () => {
 						},
 						{ type: "custom", path, payload: `visible ${path}` },
 					];
-					const filtered = nonAssistantFrames.map((frame) => sanitizeIrohRemoteOutbound(frame, SANITIZER_OPTIONS));
+					const filtered = nonAssistantFrames.map((frame) => testSanitizer.sanitizeValue(frame));
 					expect(JSON.stringify(filtered[0])).not.toContain(SECRET_ROOT);
 					expect(JSON.stringify(filtered[2])).not.toContain(SECRET_ROOT);
 					const filteredImage = getRecord(getRecord(filtered[1]).message).content as unknown[];

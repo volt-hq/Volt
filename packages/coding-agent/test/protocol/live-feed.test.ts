@@ -6,6 +6,7 @@
 import { fauxAssistantMessage, fauxText, fauxToolCall } from "@hansjm10/volt-ai";
 import type { LiveItem } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it } from "vitest";
+import type { AgentSessionEvent } from "../../src/core/agent-session.ts";
 import { feedLiveState } from "../../src/core/host/live-feed.ts";
 import type { LiveUpdate } from "../../src/core/host/live-state.ts";
 import { intentRegistry, intentStateOf, LOCAL_INTENT_PROFILE } from "../../src/core/protocol/intents/index.ts";
@@ -120,6 +121,40 @@ describe("live feed", () => {
 		).toMatchObject({
 			value: { event: { type: "workflow_end", status: "completed" } },
 		});
+		feed.close();
+	});
+
+	it("streams an MCP server call's progress as a tool item that ends with the call", async () => {
+		const { harness, feed, items } = await feedHarness();
+		const emit = (event: AgentSessionEvent): void =>
+			(harness.session as unknown as { _events: { emit(event: AgentSessionEvent): void } })._events.emit(event);
+		const call = {
+			id: "c1",
+			timestamp: new Date(0).toISOString(),
+			server: "docs",
+			tool: "search",
+			risk: "read" as const,
+		};
+		emit({ type: "mcp_call_start", call: { ...call, status: "started" } });
+		emit({
+			type: "mcp_call_update",
+			call: { id: "c1", server: "docs", tool: "search" },
+			progress: { progress: 1, total: 3, message: "page 1" },
+		});
+		expect(harness.session.liveState.snapshot().tools.get("mcp_call:c1")).toMatchObject({
+			toolName: "mcp",
+			args: { server: "docs", tool: "search" },
+			partial: { content: [{ type: "text", text: "page 1" }], details: { progress: 1, total: 3 } },
+		});
+		emit({ type: "mcp_call_end", call: { ...call, status: "failed", durationMs: 5 } });
+		expect(
+			items()
+				.filter((item) => item.type === "tool")
+				.map((item) => item.type === "tool" && item.op),
+		).toEqual(["start", "update", "end"]);
+		expect(items().at(-1)).toMatchObject({ type: "tool", op: "end", isError: true });
+		// Nothing commits a nested call: it leaves the streaming state when it ends.
+		expect(harness.session.liveState.snapshot().tools.has("mcp_call:c1")).toBe(false);
 		feed.close();
 	});
 });

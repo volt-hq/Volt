@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { createLoopbackClient } from "../../../src/client/protocol-client.ts";
 import type { SessionIntentResult } from "../../../src/core/extensions/index.ts";
 import { ClientScope } from "../../../src/core/host/client-scope.ts";
-import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import { runPrintMode } from "../../../src/modes/print-mode.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
 import { createHostHarness } from "../host-harness.ts";
 
 describe("regression #585: extension session control returns the id of the session the client moved to", () => {
@@ -131,18 +129,10 @@ describe("regression #585: extension session control returns the id of the sessi
 		expect(starts.map((start) => start.sessionId)).toEqual([first]);
 	});
 
-	it("lets an extension command that a stdio RPC prompt runs change sessions", async () => {
+	it("lets an extension command that a protocol client's prompt runs change sessions", async () => {
 		const { harness, source, results, seededIn, starts } = await setup();
-		const pair = createLoopbackRpcTransportPair();
-		const client = new RpcTransportClient({ transport: pair.client });
-		await client.start();
-		const ready = Promise.withResolvers<void>();
-		const closed = runLegacyRemoteRpcMode(harness.host, source, { transport: pair.server, onReady: ready.resolve });
-		await Promise.race([ready.promise, closed]);
-		cleanups.push(async () => {
-			await client.stop();
-			await closed.catch(() => undefined);
-		});
+		const client = await createLoopbackClient(harness.host, source);
+		cleanups.push(() => client.stop());
 		const sourceRef = source.session.sessionRef!;
 
 		// The prompt's durable input is the command's: it settles as the command leaves the session.
@@ -154,7 +144,9 @@ describe("regression #585: extension session control returns the id of the sessi
 		expect(result.seeded).toBe(true);
 		expect(seededIn).toEqual([result.sessionId]);
 		expect(starts.map((start) => start.reason)).toEqual(["startup", "new"]);
-		await expect(client.getState()).resolves.toMatchObject({ sessionId: result.sessionId });
+		// The client follows its move: its subscription on the source ends moved, and it subscribes to the target.
+		await vi.waitFor(() => expect(client.conversation).toBe(result.sessionId));
+		await client.caughtUp();
 		await vi.waitFor(() => expect(source.closed).toBe(true));
 		const stored = await SessionManager.openReadOnly(sourceRef);
 		try {

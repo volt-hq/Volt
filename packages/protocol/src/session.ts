@@ -82,6 +82,12 @@ export const RpcSessionListItemSchema = Type.Object(
 		startingGitContext: Type.Optional(Type.Union([RpcGitContextSchema, Type.Null()])),
 		/** Daemon-owned Work association, when one has been observed. */
 		workContext: Type.Optional(RpcSessionWorkContextSchema),
+		/** Which host process serves the session now, when one does (daemon hosts only). */
+		runtimeState: Type.Optional(stringEnum(["tui-owned", "daemon-active", "daemon-detached", "daemon-draining"])),
+		/** The daemon-managed worktree the session is bound to. */
+		worktreeId: Type.Optional(Type.String()),
+		/** The session's working directory relative to its workspace or worktree root; absent at the root. */
+		workingDirectory: Type.Optional(Type.String()),
 	},
 	{ additionalProperties: false },
 );

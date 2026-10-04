@@ -1,200 +1,171 @@
-import { describe, expect, it, vi } from "vitest";
+/**
+ * Fast mode and picker state as a paired device sees them on the remote
+ * profile: the branch-local `fast_mode_change` entry, the live `intents`
+ * value that carries each stateful intent's state, and the state a snapshot
+ * restores with the branch.
+ */
+
+import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import {
-	ConversationProjectionFeed,
-	type ConversationProjectionSnapshotBuilder,
-	type ConversationProjectionSource,
-} from "../src/core/rpc/conversation-projection-feed.ts";
+	type HostFrame,
+	type IntentAvailability,
+	REMOTE_CAPABILITIES,
+	type RemoteGrant,
+} from "@hansjm10/volt-protocol";
+import { afterEach, describe, expect, it } from "vitest";
+import type { ConversationHost } from "../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import type { ProtocolConnection } from "../src/core/protocol/server/connection.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
+import { createHostHarness } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 
-class TestSource implements ConversationProjectionSource {
-	private readonly listeners = new Set<(event: object) => void>();
-	private readonly generationListeners = new Set<() => void>();
-	fastModeEnabled = false;
+type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
 
-	subscribe(listener: (event: object) => void): () => void {
-		this.listeners.add(listener);
-		return () => this.listeners.delete(listener);
-	}
+const ALL: RemoteGrant = { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] };
 
-	subscribeGenerationChanges(listener: () => void): () => void {
-		this.generationListeners.add(listener);
-		return () => this.generationListeners.delete(listener);
-	}
-
-	emit(event: object): void {
-		for (const listener of this.listeners) listener(event);
-	}
-
-	rebase(): void {
-		for (const listener of this.generationListeners) listener();
-	}
-}
-
-const buildSnapshot =
-	(source: TestSource): ConversationProjectionSnapshotBuilder =>
-	({ activeAssistant, branchEpoch }) => ({
-		conversation: { workspaceName: "workspace", sessionId: "session-1" },
-		state: {
-			thinkingLevel: "high",
-			availableThinkingLevels: ["off", "high"],
-			fastModeEnabled: source.fastModeEnabled,
-			planning: { mode: "build", plan: null },
-			gitContext: null,
-			isStreaming: false,
-			isCompacting: false,
-			steeringMode: "all",
-			followUpMode: "all",
-			sessionId: "session-1",
-			autoCompactionEnabled: true,
-			messageCount: 0,
-			pendingMessageCount: 0,
-			steeringQueue: [],
-			followUpQueue: [],
-			backgroundJobs: [],
-		},
-		transcript: {
-			sessionId: "session-1",
-			items: [],
-			hasMore: false,
-			nextBeforeEntryId: null,
-			projectionVersion: 3,
-			branchEpoch,
-			head: null,
-		},
-		activeAssistant,
-		activeWorkflows: [],
+describe("Fast mode and picker state on the remote profile", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-describe("ordered Fast mode action-state events", () => {
-	it("fans one cursor-bearing settled event to every attached client", async () => {
-		const source = new TestSource();
-		let nextId = 0;
-		const feed = new ConversationProjectionFeed(source, { createId: () => `event-${++nextId}` });
-		const firstWrites: object[] = [];
-		const secondWrites: object[] = [];
-		const first = feed.attach({
-			write: (value) => {
-				firstWrites.push(value);
-			},
-			buildSnapshot: buildSnapshot(source),
-		});
-		const second = feed.attach({
-			write: (value) => {
-				secondWrites.push(value);
-			},
-			buildSnapshot: buildSnapshot(source),
-		});
-		await Promise.all([first.ready, second.ready]);
+	async function setup(): Promise<{ host: ConversationHost; conversation: HostedConversation }> {
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		return { host: harness.host, conversation: await harness.openStartup() };
+	}
 
-		source.emit({
-			type: "ui_action_state_changed",
-			action: "thinking.fast_mode",
-			state: { type: "boolean", value: true, label: "Fast mode enabled" },
+	async function connectPhone(host: ConversationHost, conversation: HostedConversation): Promise<RemotePhone> {
+		const pair = createIrohStreamPair();
+		const connection: ProtocolConnection = serveIrohRemoteConnection({
+			host,
+			conversation,
+			stream: pair.host,
+			grant: ALL,
+			redaction: { workspacePath: conversation.cwd },
+			redirect: {},
 		});
-		await Promise.all([first.flush(), second.flush()]);
-
-		expect(firstWrites.slice(1)).toEqual([
-			{
-				type: "ui_action_state_changed",
-				action: "thinking.fast_mode",
-				state: { type: "boolean", value: true, label: "Fast mode enabled" },
-				delivery: { subscriptionId: first.subscriptionId, cursor: 1 },
-			},
-		]);
-		expect(secondWrites.slice(1)).toEqual([
-			expect.objectContaining({
-				type: "ui_action_state_changed",
-				delivery: { subscriptionId: second.subscriptionId, cursor: 1 },
-			}),
-		]);
-		feed.dispose();
-	});
-
-	it("accepts bounded generic picker state on the ordered feed", async () => {
-		const source = new TestSource();
-		const writes: object[] = [];
-		const feed = new ConversationProjectionFeed(source);
-		const subscription = feed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot: buildSnapshot(source),
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
 		});
-		await subscription.ready;
+		await phone.hello();
+		return phone;
+	}
 
-		source.emit({
-			type: "ui_action_state_changed",
-			action: "model.reasoning_effort",
-			state: {
-				type: "enum",
-				value: "high",
-				options: [
-					{ value: "low", label: "Low" },
-					{ value: "high", label: "High" },
-				],
-			},
-		});
-		await subscription.flush();
+	/** The newest live state of intent `name` the device received from frame `from` on. */
+	function intentState(phone: RemotePhone, name: string, from = 0): IntentAvailability["state"] {
+		let state: IntentAvailability["state"];
+		for (const frame of phone.frames.slice(from)) {
+			if (frame.type !== "live") continue;
+			for (const item of frame.items) {
+				if (item.type !== "set" || item.value.kind !== "intents") continue;
+				state = item.value.availability.find((intent) => intent.name === name)?.state;
+			}
+		}
+		return state;
+	}
 
-		expect(writes.at(-1)).toMatchObject({
-			type: "ui_action_state_changed",
-			action: "model.reasoning_effort",
-			state: { type: "enum", value: "high" },
-			delivery: { subscriptionId: subscription.subscriptionId, cursor: 1 },
-		});
-		feed.dispose();
-	});
-
-	it("checkpoints restored Fast state in replacement bootstraps", async () => {
-		const source = new TestSource();
-		const writes: object[] = [];
-		const feed = new ConversationProjectionFeed(source);
-		const subscription = feed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot: buildSnapshot(source),
-		});
-		await subscription.ready;
-		expect(writes[0]).toMatchObject({
-			type: "conversation_bootstrap",
-			state: { fastModeEnabled: false },
-		});
-
-		source.fastModeEnabled = true;
-		source.rebase();
-		await subscription.flush();
-
-		expect(writes.at(-1)).toMatchObject({
-			type: "conversation_bootstrap",
-			reason: "branch_rebase",
-			state: { fastModeEnabled: true },
-		});
-		feed.dispose();
-	});
-
-	it("fails closed on an oversized action-state source event", async () => {
-		const source = new TestSource();
-		const failed = vi.fn();
-		const feed = new ConversationProjectionFeed(source);
-		const subscription = feed.attach({
-			write: () => {},
-			buildSnapshot: buildSnapshot(source),
-			onError: failed,
-		});
-		await subscription.ready;
-
-		source.emit({
-			type: "ui_action_state_changed",
-			action: "thinking.fast_mode",
-			state: { type: "boolean", value: true, label: "x".repeat(100_000) },
-		});
-
-		expect(failed).toHaveBeenCalledWith(
-			expect.objectContaining({ message: expect.stringContaining("action-state") }),
+	function snapshotOf(phone: RemotePhone, subscriptionId: string): Frame<"snapshot"> | undefined {
+		return phone.frames.find(
+			(frame): frame is Frame<"snapshot"> => frame.type === "snapshot" && frame.subscriptionId === subscriptionId,
 		);
-		expect(() => feed.attach({ write: () => {}, buildSnapshot: buildSnapshot(source) })).toThrow(
-			/generation is poisoned/,
+	}
+
+	it("fans one Fast mode change to every subscribed device as its entry and the live intent state", async () => {
+		const { host, conversation } = await setup();
+		const first = await connectPhone(host, conversation);
+		const second = await connectPhone(host, conversation);
+		await first.subscribe(conversation.id);
+		await second.subscribe(conversation.id);
+		expect(intentState(first, "set_fast_mode")).toEqual({
+			type: "boolean",
+			value: false,
+			label: "Fast mode disabled",
+		});
+		const marks = [first.frames.length, second.frames.length];
+
+		await conversation.session.setFastModeEnabled(true);
+
+		const ordinals: number[] = [];
+		for (const [index, phone] of [first, second].entries()) {
+			const from = marks[index];
+			const change = await phone.waitFor(
+				(frame): frame is Frame<"entry"> => frame.type === "entry" && frame.entry.type === "fast_mode_change",
+				{ from },
+			);
+			expect(change.entry.payload).toEqual({ enabled: true });
+			ordinals.push(change.entry.ordinal);
+			await phone.waitFor(
+				(frame): frame is Frame<"live"> =>
+					frame.type === "live" && intentState(phone, "set_fast_mode", from)?.value === true,
+				{ from },
+			);
+			expect(intentState(phone, "set_fast_mode", from)).toEqual({
+				type: "boolean",
+				value: true,
+				label: "Fast mode enabled",
+			});
+		}
+		// One committed change, the same position for every device.
+		expect(ordinals[0]).toBe(ordinals[1]);
+	});
+
+	it("carries a picker intent's enum state with its options, and its change", async () => {
+		const { host, conversation } = await setup();
+		const phone = await connectPhone(host, conversation);
+		await phone.subscribe(conversation.id);
+		expect(intentState(phone, "set_agent_mode")).toEqual({
+			type: "enum",
+			value: "build",
+			label: "Build",
+			options: [
+				{ value: "build", label: "Build" },
+				{ value: "plan", label: "Plan" },
+			],
+		});
+		const from = phone.frames.length;
+
+		await conversation.session.setAgentMode("plan");
+
+		await phone.waitFor(
+			(frame): frame is Frame<"live"> =>
+				frame.type === "live" && intentState(phone, "set_agent_mode", from)?.value === "plan",
+			{ from },
 		);
-		feed.dispose();
+		expect(intentState(phone, "set_agent_mode", from)).toMatchObject({ type: "enum", value: "plan", label: "Plan" });
+	});
+
+	it("restores the branch's Fast mode state when the branch switches", async () => {
+		const { host, conversation } = await setup();
+		const session = conversation.session;
+		await session.sessionWriter.appendMessage({ role: "user", content: "before fast", timestamp: 1 });
+		const beforeFast = await session.sessionWriter.appendMessage(fauxAssistantMessage("answer before fast"));
+		await session.setFastModeEnabled(true);
+		const phone = await connectPhone(host, conversation);
+		await phone.subscribe(conversation.id, "before");
+		expect(snapshotOf(phone, "before")?.state.fastMode).toBe(true);
+		const from = phone.frames.length;
+
+		await session.navigateTree(beforeFast, { summarize: false });
+		expect(session.fastModeEnabled).toBe(false);
+
+		// The subscribed device folds the branch switch and the restored state.
+		const leaf = await phone.waitFor(
+			(frame): frame is Frame<"entry"> => frame.type === "entry" && frame.entry.type === "leaf",
+			{ from },
+		);
+		expect(leaf.entry.payload).toEqual({ targetId: beforeFast });
+		await phone.waitFor(
+			(frame): frame is Frame<"live"> =>
+				frame.type === "live" && intentState(phone, "set_fast_mode", from)?.value === false,
+			{ from },
+		);
+		// A device that subscribes now starts from the restored state.
+		await phone.subscribe(conversation.id, "after");
+		expect(snapshotOf(phone, "after")?.state).toMatchObject({ leafId: beforeFast, fastMode: false });
 	});
 });

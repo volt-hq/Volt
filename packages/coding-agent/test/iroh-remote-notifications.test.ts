@@ -1,13 +1,24 @@
-// biome-ignore-all assist/source/organizeImports: the RPC mode loads before the daemon commands, so its review module is the mock below.
-import type { AgentMessage } from "@hansjm10/volt-agent-core";
+/**
+ * Completion notifications for paired devices (completion-notifications.ts)
+ * over a phone stream on the remote profile, the push relay client and
+ * dispatcher, and the transcript views a phone receives for message entries.
+ * Notifications go through push delivery only.
+ */
+
+import { Buffer } from "node:buffer";
+import { join } from "node:path";
+import type { ToolResultMessage } from "@hansjm10/volt-ai";
+import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
+import type { HostFrame, ProjectedEntry, RemoteGrant } from "@hansjm10/volt-protocol";
+import { REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
+import type { IrohRemotePushNotificationDeliveryStatus } from "@hansjm10/volt-protocol/push";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { PromptPreflightResult } from "../src/core/agent-session.ts";
-import {
-	type HostedConversation,
-	isConversationTranscriptCommittedEvent,
-} from "../src/core/host/hosted-conversation.ts";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import type { PlanningState } from "../src/core/planning.ts";
-import type { IrohRemoteClientAuthorizationSuccess } from "../src/core/remote/iroh/authorization.ts";
+import type { IntentServices } from "../src/core/protocol/intents/types.ts";
+import type { ProtocolConnection } from "../src/core/protocol/server/connection.ts";
+import type { CompletionNotificationsOptions } from "../src/core/remote/iroh/completion-notifications.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import {
 	createEmptyIrohRemoteHostState,
 	createIrohRemotePresetAccess,
@@ -15,31 +26,25 @@ import {
 	IrohRemoteAuditLogger,
 	IrohRemoteHostStateManager,
 	IrohRemotePushNotificationDispatcher,
+	type IrohRemotePushNotificationIntent,
 	type IrohRemotePushRelayClient,
 	IrohRemotePushRelayHttpClient,
 	type IrohRemotePushRelayNotificationRequest,
 	type IrohRemotePushTarget,
 } from "../src/core/remote/iroh/index.ts";
+import type * as ReviewModule from "../src/core/review.ts";
 import type { ExecuteReviewWorkflowResult } from "../src/core/review.ts";
 import type { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
-import type { SessionEntry } from "../src/core/session-manager.ts";
-import {
-	createTestConversation,
-	createTestIrohConversationOptions,
-	createTestSession,
-	isRecord,
-	ManualIrohRecvStream,
-	ManualIrohSendStream,
-	parseWrittenObjects,
-	startIrohRpcMode,
-} from "./iroh-stream-doubles.ts";
-
-const REVIEW_UNCOMMITTED_ACTION_ID = "review.uncommitted";
+import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 
 const reviewMocks = vi.hoisted(() => ({
 	prepareReviewWorkflow: vi.fn(async (options: { target: unknown }) => ({
 		workflowId: "review:test",
 		action: "review.uncommitted",
+		startedAt: 1_782_470_400_000,
 		target: options.target,
 		resolution: {
 			description: "uncommitted changes",
@@ -76,7 +81,7 @@ const reviewMocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../src/core/review.ts", async (importOriginal) => {
-	const actual = await importOriginal<typeof import("../src/core/review.ts")>();
+	const actual = await importOriginal<typeof ReviewModule>();
 	return {
 		...actual,
 		prepareReviewWorkflow: reviewMocks.prepareReviewWorkflow,
@@ -84,73 +89,10 @@ vi.mock("../src/core/review.ts", async (importOriginal) => {
 	};
 });
 
-import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import { createRemoteConversationTranscriptEntry } from "../src/daemon/conversation-commands.ts";
-
 const TEST_HOST_NODE_ID = "a".repeat(64);
+const GRANT: RemoteGrant = { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] };
 
-function getNotifications(send: ManualIrohSendStream): Array<Record<string, unknown>> {
-	return parseWrittenObjects(send).filter((record) => record.type === "notification_request");
-}
-
-function withCurrentConversationAuthority(send: ManualIrohSendStream, command: object): object {
-	const bootstrap = parseWrittenObjects(send)
-		.slice()
-		.reverse()
-		.find((record) => record.type === "conversation_bootstrap");
-	const conversation = bootstrap?.conversation;
-	const delivery = bootstrap?.delivery;
-	const transcript = bootstrap?.transcript;
-	if (!isRecord(conversation) || !isRecord(delivery) || !isRecord(transcript)) {
-		throw new Error("Conversation bootstrap authority is unavailable");
-	}
-	if (
-		typeof conversation.sessionId !== "string" ||
-		typeof delivery.subscriptionId !== "string" ||
-		typeof transcript.branchEpoch !== "string"
-	) {
-		throw new Error("Conversation bootstrap authority is malformed");
-	}
-	return {
-		...command,
-		conversationAuthority: {
-			sessionId: conversation.sessionId,
-			subscriptionId: delivery.subscriptionId,
-			branchEpoch: transcript.branchEpoch,
-		},
-	};
-}
-
-class ThrowingIrohSendStream extends ManualIrohSendStream {
-	override async writeAll(bytes: Array<number>): Promise<void> {
-		if (this.writes.length === 0) {
-			await super.writeAll(bytes);
-			return;
-		}
-		throw new Error("send closed");
-	}
-}
-
-const TEST_TRANSCRIPT_AUTHORIZATION = {
-	ok: true,
-	allowTools: "",
-	client: {
-		nodeId: "test-client",
-		label: "test-client",
-		allowedWorkspaces: ["workspace"],
-		allowedTools: "",
-		rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-		pairedAt: 1,
-		lastSeenAt: 2,
-	},
-	paired: true,
-	pairingSecretConsumed: false,
-	workspace: { name: "workspace", path: "/workspace" },
-	workspaceNames: ["workspace"],
-	workspaces: [{ name: "workspace", status: "available" }],
-} satisfies IrohRemoteClientAuthorizationSuccess;
-
-type AssistantAgentMessage = Extract<AgentMessage, { role: "assistant" }>;
+type EntryFrame = Extract<HostFrame, { type: "entry" }>;
 
 function completedReview(
 	findingsCount: number,
@@ -183,52 +125,12 @@ function completedReview(
 	};
 }
 
-function createAssistantMessage(overrides: Partial<AssistantAgentMessage> = {}): AssistantAgentMessage {
-	return {
-		role: "assistant",
-		content: [{ type: "text", text: "" }],
-		api: "openai-codex-responses",
-		provider: "openai-codex",
-		model: "gpt-5.5",
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: 1,
-		...overrides,
-	};
-}
-
-function createTestTranscriptExternalProjection(conversation: HostedConversation): (event: object) => object | null {
-	return (event) => {
-		if (!isConversationTranscriptCommittedEvent(event)) {
-			return event;
-		}
-		const entry = createRemoteConversationTranscriptEntry(event.entry, TEST_TRANSCRIPT_AUTHORIZATION, conversation);
-		return entry === undefined ? null : { type: "transcript_entry", entry, final: true };
-	};
-}
-
-function publishTestTranscriptCommit(conversation: HostedConversation, entry: SessionEntry): void {
-	conversation.projectionFeed.publishExternal({ type: "conversation_transcript_committed", entry });
-}
-
 function startTestReview(
 	manager: ReviewWorkflowManager,
 	workflowId: string,
 	targetDescription = "uncommitted changes",
-): {
-	finish(result: ExecuteReviewWorkflowResult): void;
-} {
-	let finish: (result: ExecuteReviewWorkflowResult) => void = () => {};
-	const result = new Promise<ExecuteReviewWorkflowResult>((resolve) => {
-		finish = resolve;
-	});
+): { finish(result: ExecuteReviewWorkflowResult): void } {
+	const result = Promise.withResolvers<ExecuteReviewWorkflowResult>();
 	const { launch } = manager.start({
 		prepared: {
 			workflowId,
@@ -251,11 +153,11 @@ function startTestReview(
 				status: "running",
 				startedAt: 1_782_470_400_000,
 			});
-			return result;
+			return result.promise;
 		},
 	});
 	launch();
-	return { finish };
+	return { finish: (value) => result.resolve(value) };
 }
 
 function createStateManagerWithClient(pushTargets: IrohRemotePushTarget[] = []): IrohRemoteHostStateManager {
@@ -299,12 +201,99 @@ function createRelayClient(overrides: Partial<IrohRemotePushRelayClient> = {}): 
 	};
 }
 
-afterEach(() => {
-	reviewMocks.prepareReviewWorkflow.mockClear();
-	reviewMocks.executeReviewWorkflow.mockClear();
-});
+function createDispatcher(relayClient: IrohRemotePushRelayClient, stateManager: IrohRemoteHostStateManager) {
+	return new IrohRemotePushNotificationDispatcher({
+		clientNodeId: "paired-client",
+		relayClient,
+		retryDelayMs: 0,
+		stateManager,
+	});
+}
 
-describe("Iroh remote notification requests", () => {
+/** A push delivery that records what it was asked to deliver and answers `status`. */
+function recordingDelivery(status: () => IrohRemotePushNotificationDeliveryStatus = () => "sent") {
+	const delivered: IrohRemotePushNotificationIntent[] = [];
+	const deliverNotification = vi.fn(async (notification: IrohRemotePushNotificationIntent) => {
+		delivered.push(notification);
+		return status();
+	});
+	return { delivered, deliverNotification };
+}
+
+function isEntry(frame: HostFrame): frame is EntryFrame {
+	return frame.type === "entry";
+}
+
+/** The projected entry the phone received for log entry `id`. */
+async function entryOf(phone: RemotePhone, id: string): Promise<ProjectedEntry> {
+	const frame = await phone.waitFor(
+		(candidate): candidate is EntryFrame => isEntry(candidate) && candidate.entry.id === id,
+	);
+	return frame.entry;
+}
+
+describe("Iroh remote completion notifications", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
+		reviewMocks.prepareReviewWorkflow.mockClear();
+		reviewMocks.executeReviewWorkflow.mockClear();
+	});
+
+	async function setup(): Promise<{ harness: HostHarness; conversation: HostedConversation }> {
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		return { harness, conversation };
+	}
+
+	/** A paired device's stream to `conversation`, said hello and subscribed. */
+	async function connectDevice(
+		harness: HostHarness,
+		conversation: HostedConversation,
+		options: {
+			notifications?: CompletionNotificationsOptions;
+			services?: IntentServices;
+			stream?: (stream: IrohBiStreamLike) => IrohBiStreamLike;
+			subscribe?: boolean;
+		} = {},
+	): Promise<{ phone: RemotePhone; connection: ProtocolConnection }> {
+		const pair = createIrohStreamPair();
+		const services = options.services;
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: options.stream ? options.stream(pair.host) : pair.host,
+			grant: GRANT,
+			redaction: { workspacePath: conversation.cwd },
+			redirect: {},
+			...(services === undefined ? {} : { services: () => services }),
+			...(options.notifications === undefined ? {} : { notifications: options.notifications }),
+		});
+		void connection.closed.catch(() => undefined);
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		if (options.subscribe !== false) await phone.subscribe(conversation.id);
+		return { phone, connection };
+	}
+
+	async function prompt(phone: RemotePhone, message: string): Promise<void> {
+		expect(await phone.intent("prompt", { message })).toMatchObject({ type: "accepted" });
+	}
+
+	async function idle(conversation: HostedConversation): Promise<void> {
+		await vi.waitFor(() => expect(conversation.session.isBusy).toBe(false));
+		await conversation.session.waitForIdle();
+	}
+
+	function completedEventId(conversation: HostedConversation): string {
+		return `conversation:${conversation.session.sessionId}:${conversation.session.sessionManager.getLeafId()}:completed`;
+	}
+
 	test("relay HTTP client posts scoped target credentials to the notification endpoint", async () => {
 		const fetcher = vi.fn(async (_input: string, _init: RequestInit): Promise<Response> => {
 			return new Response("{}", { status: 200 });
@@ -329,14 +318,8 @@ describe("Iroh remote notification requests", () => {
 			expect.objectContaining({ method: "POST" }),
 		);
 		const init = fetcher.mock.calls[0]?.[1];
-		if (!init) {
-			throw new Error("Expected notification fetch init");
-		}
-		const body = JSON.parse(String(init.body)) as unknown;
-		if (!isRecord(body)) {
-			throw new Error("Expected notification body object");
-		}
-		expect(body).toMatchObject({
+		if (!init) throw new Error("Expected notification fetch init");
+		expect(JSON.parse(String(init.body))).toMatchObject({
 			pushTargetId: "relay-target-1",
 			pushTargetAuthToken: "relay-target-auth-token",
 			eventId: "event-1",
@@ -388,10 +371,7 @@ describe("Iroh remote notification requests", () => {
 		});
 
 		const init = fetcher.mock.calls[0]?.[1];
-		if (!init || !isRecord(init.headers)) {
-			throw new Error("Expected notification fetch headers");
-		}
-		expect(init.headers).toMatchObject({
+		expect(init?.headers).toMatchObject({
 			authorization: "Bearer relay-secret",
 			"content-type": "application/json",
 		});
@@ -426,18 +406,14 @@ describe("Iroh remote notification requests", () => {
 			expect.objectContaining({ method: "POST" }),
 		);
 		const init = fetcher.mock.calls[0]?.[1];
-		if (!init) {
-			throw new Error("Expected notification fetch init");
-		}
+		if (!init) throw new Error("Expected notification fetch init");
 		expect(fetcher.mock.calls[0]?.[0]).not.toContain("attacker.example.test");
 		expect(String(init.body)).not.toContain("attacker.example.test");
 	});
 
 	test("register_push_target persists app-issued relay credentials with redacted audit metadata", async () => {
-		const now = 100;
-		const session = createTestSession("session-one", "before-run");
+		const { harness, conversation } = await setup();
 		const stateManager = createStateManagerWithClient();
-		const relayClient = createRelayClient();
 		const auditEvents: object[] = [];
 		const dispatcher = new IrohRemotePushNotificationDispatcher({
 			auditLogger: new IrohRemoteAuditLogger({
@@ -448,66 +424,42 @@ describe("Iroh remote notification requests", () => {
 				},
 			}),
 			clientNodeId: "paired-client",
-			now: () => now,
-			relayClient,
+			now: () => 100,
+			relayClient: createRelayClient(),
 			stateManager,
 		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			registerPushTarget: (args) => dispatcher.registerPushTarget(args),
+		const { phone } = await connectDevice(harness, conversation, {
+			services: { pushTargets: { register: (args) => dispatcher.registerPushTarget(args) } },
 		});
 
 		// A client-supplied clientNodeId is contract drift: the schema rejects the
-		// command outright, so the untrusted identity can never reach the dispatcher.
-		recv.pushLine(
-			JSON.stringify({
-				id: "push-0",
-				type: "register_push_target",
-				args: {
-					provider: "fcm",
-					platform: "ios",
-					pushTargetId: "relay-target-1",
-					pushTargetAuthToken: "secret-target-auth-token",
-					enabled: true,
-					clientNodeId: "untrusted-client",
-				},
+		// intent outright, so the untrusted identity can never reach the dispatcher.
+		expect(
+			await phone.intent("register_push_target", {
+				provider: "fcm",
+				platform: "ios",
+				pushTargetId: "relay-target-1",
+				pushTargetAuthToken: "secret-target-auth-token",
+				enabled: true,
+				clientNodeId: "untrusted-client",
 			}),
-		);
-		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual({
-				id: "push-0",
-				type: "response",
-				command: "register_push_target",
-				success: false,
-				error: 'Invalid RPC command payload: "args.clientNodeId" is not a recognized field',
-			}),
-		);
+		).toMatchObject({
+			type: "rejected",
+			reason: { code: "invalid_input", message: expect.stringContaining("clientNodeId") },
+		});
+		expect((await stateManager.getState()).clients[0].pushTargets).toBeUndefined();
 
-		recv.pushLine(
-			JSON.stringify({
-				id: "push-1",
-				type: "register_push_target",
-				args: {
-					provider: "fcm",
-					platform: "ios",
-					pushTargetId: "relay-target-1",
-					pushTargetAuthToken: "secret-target-auth-token",
-					relayUrl: "https://push.example.test",
-					tokenHash: hashIrohRemotePushToken("secret-fcm-token"),
-					enabled: true,
-				},
+		expect(
+			await phone.intent("register_push_target", {
+				provider: "fcm",
+				platform: "ios",
+				pushTargetId: "relay-target-1",
+				pushTargetAuthToken: "secret-target-auth-token",
+				relayUrl: "https://push.example.test",
+				tokenHash: hashIrohRemotePushToken("secret-fcm-token"),
+				enabled: true,
 			}),
-		);
-
-		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual({
-				id: "push-1",
-				type: "response",
-				command: "register_push_target",
-				success: true,
-				data: { status: "registered", pushTargetId: "relay-target-1" },
-			}),
-		);
+		).toMatchObject({ type: "accepted", result: { status: "registered", pushTargetId: "relay-target-1" } });
 		const state = await stateManager.getState();
 		expect(state.clients[0].pushTargets).toEqual([
 			{
@@ -531,87 +483,61 @@ describe("Iroh remote notification requests", () => {
 				details: expect.objectContaining({ tokenHash: hashIrohRemotePushToken("secret-fcm-token") }),
 			}),
 		);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		// The device's own stream never echoes the auth token back.
+		expect(JSON.stringify(phone.frames)).not.toContain("secret-target-auth-token");
 	});
 
 	test("sends conversation completion notifications through the push relay when a target exists", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-			},
-		);
+		const { harness, conversation } = await setup();
 		const stateManager = createStateManagerWithClient([
 			createEnabledPushTarget({ relayUrl: "https://attacker.example.test/steal" }),
 		]);
 		const relayClient = createRelayClient();
-		const dispatcher = new IrohRemotePushNotificationDispatcher({
-			clientNodeId: "paired-client",
-			relayClient,
-			retryDelayMs: 0,
-			stateManager,
-		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			notificationDelivery: dispatcher,
-			workspaceName: "volt-app",
+		const { phone } = await connectDevice(harness, conversation, {
+			notifications: {
+				hostNodeId: TEST_HOST_NODE_ID,
+				clientNodeId: "paired-client",
+				workspaceName: "volt-app",
+				delivery: createDispatcher(relayClient, stateManager),
+			},
 		});
 
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
-				}),
-			),
-		);
-
+		await prompt(phone, "hello");
+		await idle(conversation);
+		const eventId = completedEventId(conversation);
+		const sessionId = conversation.session.sessionId;
 		const expectedNotification: IrohRemotePushRelayNotificationRequest = {
 			pushTargetId: "relay-target-1",
 			pushTargetAuthToken: "relay-target-auth-token",
-			eventId: "conversation:session-one:conversation-run:completed",
+			eventId,
 			hostNodeId: TEST_HOST_NODE_ID,
 			kind: "conversation_completed",
 			title: "Volt finished in volt-app",
 			body: "Your conversation is ready.",
 			workspaceName: "volt-app",
 			data: {
-				eventId: "conversation:session-one:conversation-run:completed",
+				eventId,
 				hostNodeId: TEST_HOST_NODE_ID,
 				kind: "conversation_completed",
-				sessionId: "session-one",
+				sessionId,
 				workspaceName: "volt-app",
 			},
 		};
 		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledWith(expectedNotification));
-		expect(getNotifications(send)).toEqual([]);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		expect(relayClient.sendNotification).toHaveBeenCalledTimes(1);
+		// Push only: the phone's stream carries no notification frames.
+		expect(phone.frames.map((frame) => frame.type)).not.toContain("notification_request");
 	});
 
 	test("emits plan-ready instead of generic completion and preserves equivalent push metadata", async () => {
-		const session = createTestSession("session-one", "before-run");
+		const { harness, conversation } = await setup();
 		let planning: PlanningState = {
 			mode: "plan",
 			plan: { id: "plan-one", revision: 1, phase: "draft", steps: [] },
 		};
-		Object.defineProperty(session, "getPlanningState", { value: () => planning });
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "plan-run";
+		vi.spyOn(conversation.session, "getPlanningState").mockImplementation(() => planning);
+		harness.faux.setResponses([
+			() => {
 				planning = {
 					mode: "plan",
 					plan: {
@@ -622,122 +548,80 @@ describe("Iroh remote notification requests", () => {
 						steps: [],
 					},
 				};
+				return fauxAssistantMessage("Here is the plan.");
 			},
-		);
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			workspaceName: "volt-app",
-		});
-
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "make a plan",
-				}),
-			),
-		);
-
-		const expectedIntent = {
-			eventId: "plan:session-one:plan-run:ready",
-			hostNodeId: TEST_HOST_NODE_ID,
-			kind: "plan_ready",
-			title: "Your plan is ready",
-			body: "Open Volt to review and approve it.",
-			sessionId: "session-one",
-			workspaceName: "volt-app",
-			planId: "plan-one",
-		};
-		await vi.waitFor(() =>
-			expect(getNotifications(send)).toEqual([{ type: "notification_request", ...expectedIntent }]),
-		);
-		expect(getNotifications(send)).not.toContainEqual(expect.objectContaining({ kind: "conversation_completed" }));
-		expect(JSON.stringify(getNotifications(send))).not.toContain("Users/private");
-		expect(JSON.stringify(getNotifications(send))).not.toContain("git diff");
-
+		]);
 		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
 		const relayClient = createRelayClient();
-		const dispatcher = new IrohRemotePushNotificationDispatcher({
-			clientNodeId: "paired-client",
-			relayClient,
-			retryDelayMs: 0,
-			stateManager,
-		});
-		await expect(dispatcher.deliverNotification(expectedIntent)).resolves.toBe("sent");
-		expect(relayClient.sendNotification).toHaveBeenCalledWith({
-			pushTargetId: "relay-target-1",
-			pushTargetAuthToken: "relay-target-auth-token",
-			eventId: expectedIntent.eventId,
-			hostNodeId: TEST_HOST_NODE_ID,
-			kind: expectedIntent.kind,
-			title: expectedIntent.title,
-			body: expectedIntent.body,
-			workspaceName: expectedIntent.workspaceName,
-			planId: expectedIntent.planId,
-			data: {
-				eventId: expectedIntent.eventId,
+		const { phone } = await connectDevice(harness, conversation, {
+			notifications: {
 				hostNodeId: TEST_HOST_NODE_ID,
-				kind: expectedIntent.kind,
-				sessionId: expectedIntent.sessionId,
-				workspaceName: expectedIntent.workspaceName,
-				planId: expectedIntent.planId,
+				clientNodeId: "paired-client",
+				workspaceName: "volt-app",
+				delivery: createDispatcher(relayClient, stateManager),
 			},
 		});
 
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		await prompt(phone, "make a plan");
+		await idle(conversation);
+		const sessionId = conversation.session.sessionId;
+		const eventId = `plan:${sessionId}:${conversation.session.sessionManager.getLeafId()}:ready`;
+		await vi.waitFor(() =>
+			expect(relayClient.sendNotification).toHaveBeenCalledWith({
+				pushTargetId: "relay-target-1",
+				pushTargetAuthToken: "relay-target-auth-token",
+				eventId,
+				hostNodeId: TEST_HOST_NODE_ID,
+				kind: "plan_ready",
+				title: "Your plan is ready",
+				body: "Open Volt to review and approve it.",
+				workspaceName: "volt-app",
+				planId: "plan-one",
+				data: {
+					eventId,
+					hostNodeId: TEST_HOST_NODE_ID,
+					kind: "plan_ready",
+					sessionId,
+					workspaceName: "volt-app",
+					planId: "plan-one",
+				},
+			}),
+		);
+		expect(relayClient.sendNotification).not.toHaveBeenCalledWith(
+			expect.objectContaining({ kind: "conversation_completed" }),
+		);
+		const pushed = JSON.stringify(vi.mocked(relayClient.sendNotification).mock.calls);
+		expect(pushed).not.toContain("Users/private");
+		expect(pushed).not.toContain("git diff");
 	});
 
 	test("sends failure notice instead of completion notification when a prompt ends with an assistant error", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-				session.messages = [
-					createAssistantMessage({
-						stopReason: "error",
-						error: { kind: "auth", retryable: false, message: "No API key for provider: openai-codex" },
-					}),
-				];
-			},
-		);
+		const { harness, conversation } = await setup();
+		harness.faux.setResponses([
+			fauxAssistantMessage("", {
+				stopReason: "error",
+				error: { kind: "auth", retryable: false, message: "No API key for provider: openai-codex" },
+			}),
+		]);
 		const stateManager = createStateManagerWithClient([
 			createEnabledPushTarget({ relayUrl: "https://attacker.example.test/steal" }),
 		]);
 		const relayClient = createRelayClient();
-		const dispatcher = new IrohRemotePushNotificationDispatcher({
-			clientNodeId: "paired-client",
-			relayClient,
-			retryDelayMs: 0,
-			stateManager,
-		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			notificationDelivery: dispatcher,
-			workspaceName: "volt-app",
+		const { phone } = await connectDevice(harness, conversation, {
+			notifications: {
+				hostNodeId: TEST_HOST_NODE_ID,
+				clientNodeId: "paired-client",
+				workspaceName: "volt-app",
+				delivery: createDispatcher(relayClient, stateManager),
+			},
 		});
 
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
-				}),
-			),
-		);
-
+		await prompt(phone, "hello");
+		await idle(conversation);
 		await vi.waitFor(() =>
 			expect(relayClient.sendNotification).toHaveBeenCalledWith(
 				expect.objectContaining({
-					eventId: "conversation:session-one:conversation-run:failed",
+					eventId: `conversation:${conversation.session.sessionId}:${conversation.session.sessionManager.getLeafId()}:failed`,
 					hostNodeId: TEST_HOST_NODE_ID,
 					kind: "host_notice",
 					title: "Volt needs attention in volt-app",
@@ -748,785 +632,177 @@ describe("Iroh remote notification requests", () => {
 		expect(relayClient.sendNotification).not.toHaveBeenCalledWith(
 			expect.objectContaining({ kind: "conversation_completed" }),
 		);
-		expect(getNotifications(send)).toEqual([]);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		expect(JSON.stringify(vi.mocked(relayClient.sendNotification).mock.calls)).not.toContain("No API key");
 	});
 
 	test("does not send a completion notification when a prompt is aborted", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-				session.messages = [createAssistantMessage({ stopReason: "aborted" })];
-			},
-		);
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
+		const { harness, conversation } = await setup();
+		harness.faux.setResponses([fauxAssistantMessage("", { stopReason: "aborted" }), fauxAssistantMessage("done")]);
+		const delivery = recordingDelivery();
+		const { phone } = await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
+		});
 
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
-				}),
-			),
-		);
-
+		await prompt(phone, "hello");
+		await idle(conversation);
+		// A later run's notification is pushed after anything the aborted run would have pushed.
+		await prompt(phone, "again");
+		await idle(conversation);
+		const completed = completedEventId(conversation);
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({ id: "prompt-1", type: "response", command: "prompt", success: true }),
-			),
+			expect(delivery.delivered.map((notification) => notification.eventId)).toContain(completed),
 		);
-		await new Promise((resolve) => setImmediate(resolve));
-		expect(getNotifications(send)).toEqual([]);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		expect(delivery.delivered).toEqual([
+			expect.objectContaining({ eventId: completed, kind: "conversation_completed" }),
+		]);
 	});
 
-	test("sends push completion notification when accepted prompt response cannot be written", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-			},
-		);
+	test("sends push completion notification when the accepted prompt outcome cannot be written", async () => {
+		const { harness, conversation } = await setup();
 		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
 		const relayClient = createRelayClient();
-		const dispatcher = new IrohRemotePushNotificationDispatcher({
-			clientNodeId: "paired-client",
-			relayClient,
-			retryDelayMs: 0,
-			stateManager,
+		const failAccepted = (stream: IrohBiStreamLike): IrohBiStreamLike => ({
+			recv: stream.recv,
+			send: {
+				writeAll: async (bytes) => {
+					if (Buffer.from(bytes).toString("utf8").includes('"type":"accepted"')) throw new Error("send closed");
+					await stream.send.writeAll(bytes);
+				},
+				finish: async () => stream.send.finish?.(),
+				reset: (errorCode) => stream.send.reset?.(errorCode),
+			},
 		});
-		const target = createTestConversation(session);
-		const recv = new ManualIrohRecvStream();
-		const send = new ThrowingIrohSendStream();
-		const modePromise = runIrohRemoteRpcMode(target.host, target.conversation, {
-			...createTestIrohConversationOptions(target.conversation),
-			anchor: false,
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			notificationDelivery: dispatcher,
-			stream: { recv, send },
-			workspacePath: "/workspace",
-		});
-		void modePromise.catch(() => {});
-		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalledOnce());
-		expect(parseWrittenObjects(send)[0]).toMatchObject({
-			type: "conversation_bootstrap",
-			delivery: { cursor: 0 },
-			conversation: { sessionId: "session-one" },
+		const { phone, connection } = await connectDevice(harness, conversation, {
+			stream: failAccepted,
+			notifications: {
+				hostNodeId: TEST_HOST_NODE_ID,
+				clientNodeId: "paired-client",
+				delivery: createDispatcher(relayClient, stateManager),
+			},
 		});
 
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
-				}),
-			),
-		);
-
+		phone.send({
+			type: "prompt",
+			intentId: "prompt-1",
+			expectedOrdinal: phone.position(),
+			input: { message: "hello" },
+		});
+		await expect(connection.closed).rejects.toThrow("send closed");
+		await idle(conversation);
 		await vi.waitFor(() =>
 			expect(relayClient.sendNotification).toHaveBeenCalledWith(
 				expect.objectContaining({
-					eventId: "conversation:session-one:conversation-run:completed",
-					hostNodeId: TEST_HOST_NODE_ID,
-				}),
-			),
-		);
-		await expect(modePromise).rejects.toThrow("send closed");
-	});
-
-	test("streams displayed review custom messages as transcript entries", async () => {
-		const reviewSession = createTestSession("review-session", "review-entry");
-		const reviewContent = [{ type: "text" as const, text: "Review findings" }];
-		const reviewEntry = {
-			type: "custom_message",
-			id: "review-entry",
-			parentId: null,
-			ordinal: 1,
-			timestamp: "2026-06-27T00:00:00.000Z",
-			customType: "review",
-			content: reviewContent,
-			display: true,
-		} as unknown as SessionEntry;
-		reviewSession.sessionManager.getBranch.mockReturnValue([reviewEntry]);
-		const target = createTestConversation(reviewSession);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, reviewSession, {
-			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
-		});
-
-		publishTestTranscriptCommit(target.conversation, reviewEntry);
-
-		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					delivery: expect.objectContaining({ cursor: 1 }),
-					entry: {
-						entryId: "review-entry",
-						ordinal: 1,
-						createdAt: "2026-06-27T00:00:00.000Z",
-						role: "assistant",
-						text: "Review findings",
-						truncated: false,
-					},
-					final: true,
-				}),
-			),
-		);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("streams assistant transcript entries with preserved Markdown formatting", async () => {
-		const session = createTestSession("session-one", "leaf-one");
-		const formattedText =
-			"Here is the plan:\n\n- Keep Markdown lists\n- Preserve code fences\n\n```swift\nlet value = 1\n```";
-		const assistantMessage = createAssistantMessage({
-			content: [{ type: "text" as const, text: formattedText }],
-		});
-		const assistantEntry = {
-			type: "message",
-			id: "assistant-entry",
-			parentId: null,
-			ordinal: 1,
-			timestamp: "2026-06-27T00:00:00.000Z",
-			message: assistantMessage,
-		} as unknown as SessionEntry;
-		session.sessionManager.getBranch.mockReturnValue([assistantEntry]);
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
-		});
-		publishTestTranscriptCommit(target.conversation, assistantEntry);
-
-		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					delivery: expect.objectContaining({ cursor: 1 }),
-					entry: expect.objectContaining({
-						entryId: "assistant-entry",
-						ordinal: 1,
-						createdAt: "2026-06-27T00:00:00.000Z",
-						role: "assistant",
-						text: formattedText,
-						truncated: false,
-						parts: [{ type: "text", text: formattedText, truncated: false }],
-					}),
-					final: true,
-				}),
-			),
-		);
-
-		expect(JSON.stringify(parseWrittenObjects(send))).not.toContain(
-			"Here is the plan: - Keep Markdown lists - Preserve code fences",
-		);
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("streams assistant transcript entries with canonical text across multiple text parts", async () => {
-		const session = createTestSession("session-one", "leaf-one");
-		const expectedText = ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join(
-			"\n",
-		);
-		// The ordered conversation projection preserves the exact text-part boundaries,
-		// while the legacy get_transcript command still inserts a separator between parts.
-		const expectedLegacyTranscriptText = [
-			"Here is a plan:",
-			"- Step one",
-			"",
-			"- Step two",
-			"```swift",
-			"\tlet value = 1",
-			"```",
-		].join("\n");
-		const assistantMessage = createAssistantMessage({
-			content: [
-				{ type: "text" as const, text: "Here is a plan:\n- Step one" },
-				{ type: "text" as const, text: "\n- Step two\n```swift\n\tlet value = 1\n```" },
-			],
-		});
-		const assistantEntry = {
-			type: "message",
-			id: "assistant-entry",
-			parentId: null,
-			ordinal: 1,
-			timestamp: "2026-06-27T00:00:00.000Z",
-			message: assistantMessage,
-		} as unknown as SessionEntry;
-		session.sessionManager.getBranch.mockReturnValue([assistantEntry]);
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
-		});
-		publishTestTranscriptCommit(target.conversation, assistantEntry);
-
-		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					delivery: expect.objectContaining({ cursor: 1 }),
-					entry: expect.objectContaining({
-						entryId: "assistant-entry",
-						ordinal: 1,
-						createdAt: "2026-06-27T00:00:00.000Z",
-						role: "assistant",
-						text: expectedText,
-						truncated: false,
-						parts: [
-							{ type: "text", text: "Here is a plan:\n- Step one", truncated: false },
-							{ type: "text", text: "\n- Step two\n```swift\n\tlet value = 1\n```", truncated: false },
-						],
-					}),
-					final: true,
-				}),
-			),
-		);
-
-		recv.pushLine(JSON.stringify({ id: "transcript-1", type: "get_transcript", limit: 10 }));
-		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual({
-				id: "transcript-1",
-				type: "response",
-				command: "get_transcript",
-				success: true,
-				data: {
-					sessionId: "session-one",
-					items: [
-						{
-							id: "assistant-entry",
-							role: "assistant",
-							text: expectedLegacyTranscriptText,
-							timestamp: "2026-06-27T00:00:00.000Z",
-						},
-					],
-					hasMore: false,
-					nextBeforeEntryId: null,
-				},
-			}),
-		);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("streams completed tool transcript entries with projected metadata", async () => {
-		const session = createTestSession("session-one", "leaf-one");
-		const assistantMessage = {
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: "bash-call",
-					name: "bash",
-					arguments: { command: "pwd && cat /workspace/src/index.ts", timeout: 5 },
-				},
-				{
-					type: "toolCall",
-					id: "read-call",
-					name: "read",
-					arguments: { path: "/workspace/src/index.ts", offset: 3 },
-				},
-				{
-					type: "toolCall",
-					id: "registry-call",
-					name: "subagent_registry",
-					arguments: { list: true, cursor: 50 },
-				},
-				{
-					type: "toolCall",
-					id: "follow-call",
-					name: "subagent_registry",
-					arguments: { follow: "sa_existing" },
-				},
-			],
-			timestamp: 1,
-		};
-		const bashResult = {
-			role: "toolResult",
-			toolCallId: "bash-call",
-			toolName: "bash",
-			content: [{ type: "text", text: "private output" }],
-			isError: false,
-			timestamp: 2,
-		};
-		const readResult = {
-			role: "toolResult",
-			toolCallId: "read-call",
-			toolName: "read",
-			content: [{ type: "text", text: "private file contents" }],
-			isError: false,
-			timestamp: 3,
-		};
-		const registryResult = {
-			role: "toolResult",
-			toolCallId: "registry-call",
-			toolName: "subagent_registry",
-			content: [{ type: "text", text: "bounded registry page" }],
-			details: {
-				mode: "list",
-				status: "completed",
-				summary: { total: 120, returned: 50, nextCursor: 20 },
-			},
-			isError: false,
-			timestamp: 4,
-		};
-		const followResult = {
-			role: "toolResult",
-			toolCallId: "follow-call",
-			toolName: "subagent_registry",
-			content: [{ type: "text", text: "existing result" }],
-			details: {
-				mode: "follow",
-				status: "completed",
-				subagentId: "sa_existing",
-				agent: { name: "researcher", source: "built-in" },
-			},
-			isError: false,
-			timestamp: 5,
-		};
-		const branch = [
-			{
-				type: "message",
-				id: "assistant-entry",
-				parentId: null,
-				ordinal: 1,
-				timestamp: "2026-06-27T00:00:00.000Z",
-				message: assistantMessage,
-			},
-			{
-				type: "message",
-				id: "bash-entry",
-				parentId: "assistant-entry",
-				ordinal: 2,
-				timestamp: "2026-06-27T00:00:01.000Z",
-				message: bashResult,
-			},
-			{
-				type: "message",
-				id: "read-entry",
-				parentId: "bash-entry",
-				ordinal: 3,
-				timestamp: "2026-06-27T00:00:02.000Z",
-				message: readResult,
-			},
-			{
-				type: "message",
-				id: "registry-entry",
-				parentId: "read-entry",
-				ordinal: 4,
-				timestamp: "2026-06-27T00:00:03.000Z",
-				message: registryResult,
-			},
-			{
-				type: "message",
-				id: "follow-entry",
-				parentId: "registry-entry",
-				ordinal: 5,
-				timestamp: "2026-06-27T00:00:04.000Z",
-				message: followResult,
-			},
-		] as unknown as SessionEntry[];
-		session.sessionManager.getBranch.mockReturnValue(branch);
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
-		});
-		for (let index = 1; index < branch.length; index++) {
-			const entry = branch[index]!;
-			session.leafId = entry.id;
-			session.sessionManager.getBranch.mockReturnValue(branch.slice(0, index + 1));
-			publishTestTranscriptCommit(target.conversation, entry);
-		}
-
-		await vi.waitFor(() => {
-			const objects = parseWrittenObjects(send);
-			const transcriptEntries = objects.filter((record) => record.type === "transcript_entry");
-			expect(transcriptEntries).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					entry: expect.objectContaining({
-						entryId: "bash-entry",
-						role: "tool",
-						toolName: "bash",
-						status: "completed",
-						summary: "Ran command: pwd && cat /workspace/src/index.ts (completed)",
-						args: { command: "pwd && cat /workspace/src/index.ts", timeout: 5 },
-						output: "private output",
-						outputTruncated: false,
-					}),
-				}),
-			);
-			expect(transcriptEntries).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					entry: expect.objectContaining({
-						entryId: "read-entry",
-						role: "tool",
-						toolName: "read",
-						status: "completed",
-						path: "/workspace/src/index.ts",
-						args: { path: "/workspace/src/index.ts", offset: 3 },
-						output: "private file contents",
-						outputTruncated: false,
-					}),
-				}),
-			);
-			expect(transcriptEntries).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					entry: expect.objectContaining({
-						entryId: "registry-entry",
-						role: "tool",
-						toolName: "subagent_registry",
-						status: "completed",
-						args: { list: true, cursor: 50 },
-						details: {
-							mode: "list",
-							status: "completed",
-							summary: { total: 120, returned: 50, nextCursor: 20 },
-						},
-						output: "bounded registry page",
-						outputTruncated: false,
-					}),
-				}),
-			);
-			expect(transcriptEntries).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					entry: expect.objectContaining({
-						entryId: "follow-entry",
-						role: "tool",
-						toolName: "subagent_registry",
-						status: "completed",
-						args: { follow: "sa_existing" },
-						details: {
-							mode: "follow",
-							status: "completed",
-							subagentId: "sa_existing",
-							agent: { name: "researcher", source: "built-in" },
-						},
-						output: "existing result",
-						outputTruncated: false,
-					}),
-				}),
-			);
-		});
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("streams tool transcript entries advertising imageCount without inline image data", async () => {
-		const session = createTestSession("session-one", "leaf-one");
-		const assistantMessage = {
-			role: "assistant",
-			content: [
-				{
-					type: "toolCall",
-					id: "read-image-call",
-					name: "read",
-					arguments: { path: "/workspace/logo.png" },
-				},
-			],
-			timestamp: 1,
-		};
-		const imageReadResult = {
-			role: "toolResult",
-			toolCallId: "read-image-call",
-			toolName: "read",
-			content: [
-				{ type: "text", text: "Read image file [image/png]" },
-				{ type: "image", data: "aW1hZ2UtYnl0ZXM=", mimeType: "image/png" },
-			],
-			isError: false,
-			timestamp: 2,
-		};
-		const branch = [
-			{
-				type: "message",
-				id: "assistant-entry",
-				parentId: null,
-				ordinal: 1,
-				timestamp: "2026-06-27T00:00:00.000Z",
-				message: assistantMessage,
-			},
-			{
-				type: "message",
-				id: "read-image-entry",
-				parentId: "assistant-entry",
-				ordinal: 2,
-				timestamp: "2026-06-27T00:00:01.000Z",
-				message: imageReadResult,
-			},
-		] as unknown as SessionEntry[];
-		session.sessionManager.getBranch.mockReturnValue(branch);
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			projectConversationExternal: createTestTranscriptExternalProjection(target.conversation),
-		});
-		publishTestTranscriptCommit(target.conversation, branch[1]!);
-
-		await vi.waitFor(() => {
-			const objects = parseWrittenObjects(send);
-			const transcriptEntries = objects.filter((record) => record.type === "transcript_entry");
-			expect(transcriptEntries).toContainEqual(
-				expect.objectContaining({
-					type: "transcript_entry",
-					entry: expect.objectContaining({
-						entryId: "read-image-entry",
-						role: "tool",
-						toolName: "read",
-						status: "completed",
-						imageCount: 1,
-					}),
-				}),
-			);
-			// Live transcript frames stay text-only; the blocks are fetched per
-			// entry via get_message_images.
-			expect(JSON.stringify(transcriptEntries)).not.toContain("aW1hZ2UtYnl0ZXM=");
-		});
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("falls back to Iroh notification_request when no push target exists", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-			},
-		);
-		const stateManager = createStateManagerWithClient();
-		const relayClient = createRelayClient();
-		const dispatcher = new IrohRemotePushNotificationDispatcher({
-			clientNodeId: "paired-client",
-			relayClient,
-			stateManager,
-		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			notificationDelivery: dispatcher,
-			workspaceName: "volt-app",
-		});
-
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
-				}),
-			),
-		);
-
-		await vi.waitFor(() =>
-			expect(getNotifications(send)).toEqual([
-				{
-					type: "notification_request",
-					eventId: "conversation:session-one:conversation-run:completed",
+					eventId: completedEventId(conversation),
 					hostNodeId: TEST_HOST_NODE_ID,
 					kind: "conversation_completed",
-					title: "Volt finished in volt-app",
-					body: "Your conversation is ready.",
-					sessionId: "session-one",
-					workspaceName: "volt-app",
-				},
-			]),
-		);
-		expect(relayClient.sendNotification).not.toHaveBeenCalled();
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
-	});
-
-	test("does not send duplicate push notifications for the same eventId", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-			},
-		);
-		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
-		const relayClient = createRelayClient();
-		const dispatcher = new IrohRemotePushNotificationDispatcher({
-			clientNodeId: "paired-client",
-			relayClient,
-			retryDelayMs: 0,
-			stateManager,
-		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			notificationDelivery: dispatcher,
-		});
-
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
 				}),
 			),
 		);
-		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledTimes(1));
-		session.leafId = "before-run";
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-2",
-					type: "prompt",
-					clientMessageId: "client-prompt-2",
-					message: "hello again",
-				}),
-			),
-		);
-		await vi.waitFor(() => expect(session.prompt).toHaveBeenCalledTimes(2));
-		await new Promise((resolve) => setImmediate(resolve));
-		expect(relayClient.sendNotification).toHaveBeenCalledTimes(1);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
 	});
 
 	test("disables push targets reported invalid by the relay", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-			},
-		);
+		const { harness, conversation } = await setup();
 		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
 		const relayClient = createRelayClient({
 			sendNotification: vi.fn(async () => ({ status: "invalid_target" as const })),
 		});
-		const dispatcher = new IrohRemotePushNotificationDispatcher({
-			clientNodeId: "paired-client",
-			now: () => 500,
-			relayClient,
-			retryDelayMs: 0,
-			stateManager,
-		});
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session, {
-			notificationDelivery: dispatcher,
-		});
-
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
+		const { phone } = await connectDevice(harness, conversation, {
+			notifications: {
+				hostNodeId: TEST_HOST_NODE_ID,
+				clientNodeId: "paired-client",
+				delivery: new IrohRemotePushNotificationDispatcher({
+					clientNodeId: "paired-client",
+					now: () => 500,
+					relayClient,
+					retryDelayMs: 0,
+					stateManager,
 				}),
-			),
-		);
+			},
+		});
 
+		await prompt(phone, "hello");
 		await vi.waitFor(async () => {
 			const state = await stateManager.getState();
 			expect(state.clients[0].pushTargets?.[0]).toMatchObject({ enabled: false, updatedAt: 500 });
 		});
-		await vi.waitFor(() =>
-			expect(getNotifications(send)).toEqual([
-				{
-					type: "notification_request",
-					eventId: "conversation:session-one:conversation-run:completed",
-					hostNodeId: TEST_HOST_NODE_ID,
-					kind: "conversation_completed",
-					title: "Volt finished",
-					body: "Your conversation is ready.",
-					sessionId: "session-one",
-				},
-			]),
-		);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		expect(relayClient.sendNotification).toHaveBeenCalledOnce();
 	});
 
-	test("emits one conversation completion notification after prompt completion", async () => {
-		const session = createTestSession("session-one", "before-run");
-		session.prompt.mockImplementation(
-			async (
-				_message: string,
-				options?: { preflightResult?: (result: PromptPreflightResult) => void },
-			): Promise<void> => {
-				options?.preflightResult?.({ success: true, outcome: "admitted" });
-				session.leafId = "conversation-run";
-			},
-		);
-		const target = createTestConversation(session);
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
+	test("emits one completion notification per prompt run", async () => {
+		const { harness, conversation } = await setup();
+		const delivery = recordingDelivery();
+		const { phone } = await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
+		});
+		const sessionId = conversation.session.sessionId;
 
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "prompt-1",
-					type: "prompt",
-					clientMessageId: "client-prompt-1",
-					message: "hello",
-				}),
+		await prompt(phone, "hello");
+		await idle(conversation);
+		const first = completedEventId(conversation);
+		await vi.waitFor(() => expect(delivery.delivered).toHaveLength(1));
+		await prompt(phone, "hello again");
+		await idle(conversation);
+		const second = completedEventId(conversation);
+		await vi.waitFor(() => expect(delivery.delivered).toHaveLength(2));
+
+		expect(first).not.toBe(second);
+		expect(delivery.delivered).toEqual([
+			{
+				eventId: first,
+				hostNodeId: TEST_HOST_NODE_ID,
+				kind: "conversation_completed",
+				title: "Volt finished",
+				body: "Your conversation is ready.",
+				sessionId,
+			},
+			{
+				eventId: second,
+				hostNodeId: TEST_HOST_NODE_ID,
+				kind: "conversation_completed",
+				title: "Volt finished",
+				body: "Your conversation is ready.",
+				sessionId,
+			},
+		]);
+	});
+
+	test("does not push an event a device already received when its streams reattach", async () => {
+		const { harness, conversation } = await setup();
+		const stateManager = createStateManagerWithClient([createEnabledPushTarget()]);
+		const relayClient = createRelayClient();
+		const notifications = {
+			hostNodeId: TEST_HOST_NODE_ID,
+			clientNodeId: "paired-client",
+			delivery: createDispatcher(relayClient, stateManager),
+		};
+		const first = await connectDevice(harness, conversation, { notifications });
+		await prompt(first.phone, "hello");
+		await idle(conversation);
+		startTestReview(conversation.reviewWorkflows, "review:once", "PR #7").finish(completedReview(0));
+		await vi.waitFor(() => expect(relayClient.sendNotification).toHaveBeenCalledTimes(2));
+		await first.connection.close();
+
+		// The device's next stream shares its delivery history: neither event is pushed again.
+		await connectDevice(harness, conversation, { notifications });
+		startTestReview(conversation.reviewWorkflows, "review:later", "PR #8").finish(completedReview(1));
+		await vi.waitFor(() =>
+			expect(relayClient.sendNotification).toHaveBeenCalledWith(
+				expect.objectContaining({ eventId: "review:later:completed" }),
 			),
 		);
-
-		await vi.waitFor(() =>
-			expect(getNotifications(send)).toEqual([
-				{
-					type: "notification_request",
-					eventId: "conversation:session-one:conversation-run:completed",
-					hostNodeId: TEST_HOST_NODE_ID,
-					kind: "conversation_completed",
-					title: "Volt finished",
-					body: "Your conversation is ready.",
-					sessionId: "session-one",
-				},
-			]),
-		);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		expect(vi.mocked(relayClient.sendNotification).mock.calls.map(([request]) => request.eventId)).toEqual([
+			completedEventId(conversation),
+			"review:once:completed",
+			"review:later:completed",
+		]);
 	});
 
 	test("formats complete and incomplete review results from retained workflow records", async () => {
-		const session = createTestSession("session-one", "review-run");
-		const target = createTestConversation(session);
-		const reviewWorkflows = target.conversation.reviewWorkflows;
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
+		const { harness, conversation } = await setup();
+		const delivery = recordingDelivery();
+		await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
+		});
 		const completions: Array<[string, ExecuteReviewWorkflowResult]> = [
 			["review:zero", completedReview(0)],
 			["review:one", completedReview(1)],
@@ -1534,32 +810,40 @@ describe("Iroh remote notification requests", () => {
 			["review:incomplete", completedReview(0, "incomplete")],
 		];
 		for (const [index, [workflowId, result]] of completions.entries()) {
-			startTestReview(reviewWorkflows, workflowId, "PR #123").finish(result);
-			await vi.waitFor(() => expect(getNotifications(send)).toHaveLength(index + 1));
+			startTestReview(conversation.reviewWorkflows, workflowId, "PR #123").finish(result);
+			await vi.waitFor(() => expect(delivery.delivered).toHaveLength(index + 1));
 		}
 
-		expect(getNotifications(send).map((notification) => notification.body)).toEqual([
+		expect(delivery.delivered.map((notification) => notification.body)).toEqual([
 			"PR #123 completed with no issues found.",
 			"PR #123 completed with 1 finding.",
 			"PR #123 completed with 4 findings.",
 			"PR #123 review is incomplete.",
 		]);
-		expect(getNotifications(send).map((notification) => notification.workflowId)).toEqual([
+		expect(delivery.delivered.map((notification) => notification.workflowId)).toEqual([
 			"review:zero",
 			"review:one",
 			"review:many",
 			"review:incomplete",
 		]);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		expect(delivery.delivered[0]).toEqual({
+			eventId: "review:zero:completed",
+			hostNodeId: TEST_HOST_NODE_ID,
+			kind: "review_completed",
+			title: "Your review is ready",
+			body: "PR #123 completed with no issues found.",
+			sessionId: conversation.session.sessionId,
+			workflowId: "review:zero",
+		});
 	});
 
 	test("omits malicious review targets and cancelled reviews from lock-screen delivery", async () => {
-		const session = createTestSession("session-one", "review-run");
-		const target = createTestConversation(session);
-		const reviewWorkflows = target.conversation.reviewWorkflows;
-		const { modePromise, recv, send } = await startIrohRpcMode(target, session);
+		const { harness, conversation } = await setup();
+		const reviewWorkflows = conversation.reviewWorkflows;
+		const delivery = recordingDelivery();
+		await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
+		});
 		const privateContextResult = completedReview(2);
 		if (privateContextResult.status !== "completed") throw new Error("Expected a completed review fixture");
 		privateContextResult.parsed.summary = "PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT";
@@ -1577,98 +861,316 @@ describe("Iroh remote notification requests", () => {
 			"review:malicious",
 			`${"PR #123".repeat(100)}\n/Users/private/project\ngit diff HEAD`,
 		).finish(privateContextResult);
-		await vi.waitFor(() => expect(getNotifications(send)).toHaveLength(1));
-		expect(getNotifications(send)[0]).toMatchObject({
+		await vi.waitFor(() => expect(delivery.delivered).toHaveLength(1));
+		expect(delivery.delivered[0]).toMatchObject({
 			body: "Review completed with 2 findings.",
 			workflowId: "review:malicious",
 		});
-		expect(JSON.stringify(getNotifications(send))).not.toContain("Users/private");
-		expect(JSON.stringify(getNotifications(send))).not.toContain("git diff");
-		expect(JSON.stringify(getNotifications(send))).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
+		expect(JSON.stringify(delivery.delivered)).not.toContain("Users/private");
+		expect(JSON.stringify(delivery.delivered)).not.toContain("git diff");
+		expect(JSON.stringify(delivery.delivered)).not.toContain("PRIVATE_LINKED_ISSUE_AND_REVIEW_TEXT");
 
 		startTestReview(reviewWorkflows, "review:cancelled").finish({ status: "cancelled" });
 		await reviewWorkflows.waitForIdle();
-		await new Promise((resolve) => setImmediate(resolve));
-		expect(getNotifications(send)).toHaveLength(1);
-
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+		// A later completion is pushed after anything the cancelled review would have pushed.
+		startTestReview(reviewWorkflows, "review:after").finish(completedReview(0));
+		await vi.waitFor(() => expect(delivery.delivered).toHaveLength(2));
+		expect(delivery.delivered.map((notification) => notification.workflowId)).toEqual([
+			"review:malicious",
+			"review:after",
+		]);
 	});
 
-	test("retains detached review completion for reconnect and does not repeat an already delivered event", async () => {
-		const session = createTestSession("session-one", "review-run");
-		const target = createTestConversation(session);
-		const reviewWorkflows = target.conversation.reviewWorkflows;
-		const firstMode = await startIrohRpcMode(target, session, { clientNodeId: "paired-client" });
+	test("retries a review completion whose push failed when the device reconnects, and never repeats a delivered one", async () => {
+		const { harness, conversation } = await setup();
+		const reviewWorkflows = conversation.reviewWorkflows;
+		const unreachable = recordingDelivery(() => "failed");
+		const first = await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery: unreachable },
+		});
 		const review = startTestReview(reviewWorkflows, "review:reconnect", "PR #151");
-		firstMode.recv.end();
-		await expect(firstMode.modePromise).resolves.toBeUndefined();
+		await first.connection.close();
 		review.finish(completedReview(0));
 		await reviewWorkflows.waitForIdle();
-		expect(getNotifications(firstMode.send)).toEqual([]);
+		await vi.waitFor(() => expect(unreachable.deliverNotification).toHaveBeenCalledOnce());
 
-		session.attachExtensionClient.mockClear();
-		const secondMode = await startIrohRpcMode(target, session, { clientNodeId: "paired-client" });
+		const reachable = recordingDelivery();
+		await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery: reachable },
+		});
 		await vi.waitFor(() =>
-			expect(getNotifications(secondMode.send)).toEqual([
+			expect(reachable.delivered).toEqual([
 				{
-					type: "notification_request",
 					eventId: "review:reconnect:completed",
 					hostNodeId: TEST_HOST_NODE_ID,
 					kind: "review_completed",
 					title: "Your review is ready",
 					body: "PR #151 completed with no issues found.",
-					sessionId: "session-one",
+					sessionId: conversation.session.sessionId,
 					workflowId: "review:reconnect",
 				},
 			]),
 		);
-		secondMode.recv.end();
-		await expect(secondMode.modePromise).resolves.toBeUndefined();
 
-		session.attachExtensionClient.mockClear();
-		const thirdMode = await startIrohRpcMode(target, session, { clientNodeId: "paired-client" });
-		await new Promise((resolve) => setImmediate(resolve));
-		expect(getNotifications(thirdMode.send)).toEqual([]);
-		thirdMode.recv.end();
-		await expect(thirdMode.modePromise).resolves.toBeUndefined();
+		const third = recordingDelivery();
+		await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery: third },
+		});
+		startTestReview(reviewWorkflows, "review:next").finish(completedReview(1));
+		await vi.waitFor(() => expect(third.delivered).toHaveLength(1));
+		expect(third.delivered[0]).toMatchObject({ eventId: "review:next:completed" });
+		expect(reachable.delivered).toHaveLength(1);
 	});
 
 	test("emits one review completion notification after a detached remote review completes", async () => {
-		const startupSession = createTestSession("initial-session", "initial-run");
-		const target = createTestConversation(startupSession, { agentDir: "/agent" });
-		const { modePromise, recv, send } = await startIrohRpcMode(target, startupSession);
+		const { harness, conversation } = await setup();
+		const delivery = recordingDelivery();
+		const { phone } = await connectDevice(harness, conversation, {
+			notifications: { hostNodeId: TEST_HOST_NODE_ID, clientNodeId: "paired-client", delivery },
+		});
 
-		recv.pushLine(
-			JSON.stringify(
-				withCurrentConversationAuthority(send, {
-					id: "review-1",
-					type: "invoke_ui_action",
-					action: REVIEW_UNCOMMITTED_ACTION_ID,
-				}),
-			),
-		);
-
+		expect(await phone.intent("review_uncommitted", {})).toMatchObject({
+			type: "accepted",
+			result: { workflowId: "review:test" },
+		});
 		await vi.waitFor(() =>
-			expect(getNotifications(send)).toEqual([
+			expect(delivery.delivered).toEqual([
 				{
-					type: "notification_request",
 					eventId: "review:test:completed",
 					hostNodeId: TEST_HOST_NODE_ID,
 					kind: "review_completed",
 					title: "Your review is ready",
 					body: "uncommitted changes completed with 1 finding.",
-					sessionId: "initial-session",
+					sessionId: conversation.session.sessionId,
 					workflowId: "review:test",
 				},
 			]),
 		);
 		expect(reviewMocks.executeReviewWorkflow).toHaveBeenCalledOnce();
 		// The detached review never moves the client to another conversation.
-		expect(target.host.list()).toEqual([target.conversation]);
-		expect(target.conversation.closed).toBe(false);
+		expect(harness.host.list()).toEqual([conversation]);
+		expect(conversation.closed).toBe(false);
+	});
+});
 
-		recv.end();
-		await expect(modePromise).resolves.toBeUndefined();
+describe("Iroh remote transcript views", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
+	});
+
+	async function subscribedPhone(): Promise<{ conversation: HostedConversation; phone: RemotePhone }> {
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: GRANT,
+			redaction: { workspacePath: conversation.cwd },
+			redirect: {},
+		});
+		void connection.closed.catch(() => undefined);
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		await phone.subscribe(conversation.id);
+		return { conversation, phone };
+	}
+
+	test("streams displayed review custom messages as assistant transcript entries", async () => {
+		const { conversation, phone } = await subscribedPhone();
+		const id = await conversation.session.sessionWriter.appendMessage({
+			role: "custom",
+			customType: "review",
+			content: [{ type: "text", text: "Review findings" }],
+			display: true,
+			timestamp: 1,
+		});
+
+		const entry = await entryOf(phone, id);
+		expect(entry).not.toHaveProperty("payload");
+		expect("view" in entry ? entry.view : undefined).toEqual({
+			role: "assistant",
+			text: "Review findings",
+			truncated: false,
+		});
+	});
+
+	test("streams assistant transcript entries with preserved Markdown formatting", async () => {
+		const { conversation, phone } = await subscribedPhone();
+		const formattedText =
+			"Here is the plan:\n\n- Keep Markdown lists\n- Preserve code fences\n\n```swift\nlet value = 1\n```";
+		const id = await conversation.session.sessionWriter.appendMessage(fauxAssistantMessage(formattedText));
+
+		const entry = await entryOf(phone, id);
+		expect("view" in entry ? entry.view : undefined).toMatchObject({
+			role: "assistant",
+			text: formattedText,
+			truncated: false,
+			parts: [{ type: "text", text: formattedText, truncated: false }],
+		});
+		expect(JSON.stringify(phone.frames)).not.toContain(
+			"Here is the plan: - Keep Markdown lists - Preserve code fences",
+		);
+	});
+
+	test("streams assistant transcript entries with canonical text across multiple text parts", async () => {
+		const { conversation, phone } = await subscribedPhone();
+		const id = await conversation.session.sessionWriter.appendMessage(
+			fauxAssistantMessage([
+				{ type: "text", text: "Here is a plan:\n- Step one" },
+				{ type: "text", text: "\n- Step two\n```swift\n\tlet value = 1\n```" },
+			]),
+		);
+
+		const entry = await entryOf(phone, id);
+		expect("view" in entry ? entry.view : undefined).toMatchObject({
+			role: "assistant",
+			text: ["Here is a plan:", "- Step one", "- Step two", "```swift", "\tlet value = 1", "```"].join("\n"),
+			truncated: false,
+			parts: [
+				{ type: "text", text: "Here is a plan:\n- Step one", truncated: false },
+				{ type: "text", text: "\n- Step two\n```swift\n\tlet value = 1\n```", truncated: false },
+			],
+		});
+	});
+
+	test("streams completed tool transcript entries with projected metadata and redacted paths", async () => {
+		const { conversation, phone } = await subscribedPhone();
+		const file = join(conversation.cwd, "src", "index.ts");
+		const writer = conversation.session.sessionWriter;
+		await writer.appendMessage(
+			fauxAssistantMessage(
+				[
+					fauxToolCall("bash", { command: `pwd && cat ${file}`, timeout: 5 }, { id: "bash-call" }),
+					fauxToolCall("read", { path: file, offset: 3 }, { id: "read-call" }),
+					fauxToolCall("subagent_registry", { list: true, cursor: 50 }, { id: "registry-call" }),
+					fauxToolCall("subagent_registry", { follow: "sa_existing" }, { id: "follow-call" }),
+				],
+				{ stopReason: "toolUse" },
+			),
+		);
+		const result = (
+			toolCallId: string,
+			toolName: string,
+			text: string,
+			details?: Record<string, unknown>,
+		): ToolResultMessage => ({
+			role: "toolResult",
+			toolCallId,
+			toolName,
+			content: [{ type: "text", text }],
+			...(details === undefined ? {} : { details }),
+			isError: false,
+			timestamp: 2,
+		});
+		const bashId = await writer.appendMessage(result("bash-call", "bash", "private output"));
+		const readId = await writer.appendMessage(result("read-call", "read", "private file contents"));
+		const registryId = await writer.appendMessage(
+			result("registry-call", "subagent_registry", "bounded registry page", {
+				mode: "list",
+				status: "completed",
+				summary: { total: 120, returned: 50, nextCursor: 20 },
+			}),
+		);
+		const followId = await writer.appendMessage(
+			result("follow-call", "subagent_registry", "existing result", {
+				mode: "follow",
+				status: "completed",
+				subagentId: "sa_existing",
+				agent: { name: "researcher", source: "built-in" },
+			}),
+		);
+
+		const view = async (id: string) => {
+			const entry = await entryOf(phone, id);
+			return "view" in entry ? entry.view : undefined;
+		};
+		expect(await view(bashId)).toMatchObject({
+			role: "tool",
+			toolName: "bash",
+			status: "completed",
+			summary: "Ran command: pwd && cat /workspace/src/index.ts (completed)",
+			args: { command: "pwd && cat /workspace/src/index.ts", timeout: 5 },
+			output: "private output",
+			outputTruncated: false,
+		});
+		expect(await view(readId)).toMatchObject({
+			role: "tool",
+			toolName: "read",
+			status: "completed",
+			path: "/workspace/src/index.ts",
+			args: { path: "/workspace/src/index.ts", offset: 3 },
+			output: "private file contents",
+			outputTruncated: false,
+		});
+		expect(await view(registryId)).toMatchObject({
+			role: "tool",
+			toolName: "subagent_registry",
+			status: "completed",
+			args: { list: true, cursor: 50 },
+			details: {
+				mode: "list",
+				status: "completed",
+				summary: { total: 120, returned: 50, nextCursor: 20 },
+			},
+			output: "bounded registry page",
+			outputTruncated: false,
+		});
+		expect(await view(followId)).toMatchObject({
+			role: "tool",
+			toolName: "subagent_registry",
+			status: "completed",
+			args: { follow: "sa_existing" },
+			details: {
+				mode: "follow",
+				status: "completed",
+				subagentId: "sa_existing",
+				agent: { name: "researcher", source: "built-in" },
+			},
+			output: "existing result",
+			outputTruncated: false,
+		});
+		expect(JSON.stringify(phone.frames)).not.toContain(conversation.cwd);
+	});
+
+	test("streams tool transcript entries advertising imageCount without inline image data", async () => {
+		const { conversation, phone } = await subscribedPhone();
+		const writer = conversation.session.sessionWriter;
+		await writer.appendMessage(
+			fauxAssistantMessage(
+				fauxToolCall("read", { path: join(conversation.cwd, "logo.png") }, { id: "image-call" }),
+				{
+					stopReason: "toolUse",
+				},
+			),
+		);
+		const id = await writer.appendMessage({
+			role: "toolResult",
+			toolCallId: "image-call",
+			toolName: "read",
+			content: [
+				{ type: "text", text: "Read image file [image/png]" },
+				{ type: "image", data: "aW1hZ2UtYnl0ZXM=", mimeType: "image/png" },
+			],
+			isError: false,
+			timestamp: 2,
+		});
+
+		const entry = await entryOf(phone, id);
+		expect("view" in entry ? entry.view : undefined).toMatchObject({
+			role: "tool",
+			toolName: "read",
+			status: "completed",
+			imageCount: 1,
+		});
+		// Transcript frames stay text-only; the blocks are fetched per entry with the `content` query.
+		expect(JSON.stringify(phone.frames)).not.toContain("aW1hZ2UtYnl0ZXM=");
 	});
 });

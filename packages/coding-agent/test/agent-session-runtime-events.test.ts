@@ -4,11 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { createFauxProvider, fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { type HostFrame, REMOTE_CAPABILITIES, type RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession, type AgentSessionEvent } from "../src/core/agent-session.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
+import type { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import {
 	acknowledgeReviewRun,
 	appendReviewFindingTransition,
@@ -18,7 +21,6 @@ import {
 	listReviewRuns,
 	type ReviewRunRecord,
 } from "../src/core/review-state.ts";
-import type { ConversationProjectionSnapshot } from "../src/core/rpc/conversation-projection-feed.ts";
 import { buildRpcSessionState } from "../src/core/rpc/session-state.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
@@ -31,7 +33,13 @@ import type {
 } from "../src/index.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";
 import { connectTestClient, openTestHost } from "./utilities/host-client.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
 import { type SeedLogBuild, seedSession } from "./utilities/seed-log.ts";
+
+type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
+
+const ALL: RemoteGrant = { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] };
 
 type RecordedSessionEvent =
 	| SessionBeforeSwitchEvent
@@ -122,6 +130,26 @@ describe("conversation host client session lifecycle events", () => {
 		});
 
 		return { runtimeHost, faux, hooks, host, factory: createRuntime };
+	}
+
+	/** A paired device on `conversation`, past its hello; it disconnects at cleanup. */
+	async function connectPhone(host: ConversationHost, conversation: HostedConversation): Promise<RemotePhone> {
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host,
+			conversation,
+			stream: pair.host,
+			grant: ALL,
+			redaction: { workspacePath: conversation.cwd },
+			redirect: {},
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await phone.close();
+		});
+		await phone.hello();
+		return phone;
 	}
 
 	it("uses only session disposal after conversation construction fails", async () => {
@@ -286,7 +314,7 @@ describe("conversation host client session lifecycle events", () => {
 		const moved = vi.fn();
 		hooks.prepare = prepare;
 		hooks.onMoved = moved;
-		const feed = runtimeHost.conversation.projectionFeed;
+		const conversation = runtimeHost.conversation;
 		events.length = 0;
 
 		await expect(runtimeHost.switchSession(currentSessionRef!)).resolves.toEqual({
@@ -297,7 +325,8 @@ describe("conversation host client session lifecycle events", () => {
 
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(events).toEqual([]);
-		expect(runtimeHost.conversation.projectionFeed).toBe(feed);
+		expect(runtimeHost.conversation).toBe(conversation);
+		expect(conversation.closed).toBe(false);
 		expect(prepare).not.toHaveBeenCalled();
 		expect(moved).not.toHaveBeenCalled();
 	});
@@ -837,7 +866,7 @@ describe("conversation host client session lifecycle events", () => {
 		const moved = vi.fn();
 		hooks.prepare = prepare;
 		hooks.onMoved = moved;
-		const feed = runtimeHost.conversation.projectionFeed;
+		const conversation = runtimeHost.conversation;
 		events.length = 0;
 
 		await expect(runtimeHost.switchSession(collisionRef!)).rejects.toThrow(
@@ -846,12 +875,13 @@ describe("conversation host client session lifecycle events", () => {
 
 		expect(runtimeHost.session).toBe(originalSession);
 		expect(events).toEqual([]);
-		expect(runtimeHost.conversation.projectionFeed).toBe(feed);
+		expect(runtimeHost.conversation).toBe(conversation);
+		expect(conversation.closed).toBe(false);
 		expect(prepare).not.toHaveBeenCalled();
 		expect(moved).not.toHaveBeenCalled();
 	});
 
-	it("moves the client to the new conversation's feed and session before the old one shuts down", async () => {
+	it("moves the client to the new conversation before the old one shuts down, then closes the old one", async () => {
 		const phases: string[] = [];
 		const { runtimeHost, hooks } = await createRuntimeHost((volt) => {
 			volt.on("session_shutdown", () => {
@@ -864,15 +894,14 @@ describe("conversation host client session lifecycle events", () => {
 		hooks.onMoved = async () => {
 			phases.push("moved");
 		};
-		const sourceFeed = runtimeHost.conversation.projectionFeed;
+		const source = runtimeHost.conversation;
 
 		await runtimeHost.newSession();
 		expect(phases).toEqual(["prepare", "moved", "session_shutdown"]);
-		// A stream never follows the move: the source's feed ended with it.
-		expect(runtimeHost.conversation.projectionFeed).not.toBe(sourceFeed);
-		expect(() =>
-			sourceFeed.attach({ write: () => {}, buildSnapshot: () => ({}) as ConversationProjectionSnapshot }),
-		).toThrow("disposed");
+		// The source closed with its anchor's move; the client is on the new conversation.
+		expect(runtimeHost.conversation).not.toBe(source);
+		expect(source.closed).toBe(true);
+		expect(runtimeHost.conversation.closed).toBe(false);
 	});
 
 	it("leaves the old runtime live and retains the candidate row when the move is refused before it starts", async () => {
@@ -1225,8 +1254,8 @@ describe("conversation host client session lifecycle events", () => {
 		expect(moved).toHaveBeenCalledOnce();
 	});
 
-	it("keeps the source and its projection feed when the new conversation cannot open", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
+	it("keeps the source conversation serving devices when the new conversation cannot open", async () => {
+		const { runtimeHost, host } = await createRuntimeHost(() => {});
 		const originalSession = runtimeHost.session;
 		const subscribeEntries = SessionManager.prototype.subscribeEntries;
 		let candidateSubscriptions = 0;
@@ -1244,15 +1273,11 @@ describe("conversation host client session lifecycle events", () => {
 			subscribe.mockRestore();
 		}
 		expect(runtimeHost.session).toBe(originalSession);
-		// The feed is neither fenced nor disposed: an attach reaches its snapshot.
-		expect(() =>
-			runtimeHost.conversation.projectionFeed.attach({
-				write: () => {},
-				buildSnapshot: () => {
-					throw new Error("snapshot built");
-				},
-			}),
-		).toThrow("snapshot built");
+		// The source is neither fenced nor closed: a device's subscription reaches its snapshot.
+		expect(runtimeHost.conversation.closed).toBe(false);
+		const phone = await connectPhone(host, runtimeHost.conversation);
+		await phone.subscribe(runtimeHost.conversation.id);
+		expect(phone.frames.some((frame) => frame.type === "snapshot")).toBe(true);
 		await expect(originalSession.prompt("source still works")).resolves.toBeUndefined();
 	});
 
@@ -1305,124 +1330,51 @@ describe("conversation host client session lifecycle events", () => {
 		await other.dispose();
 	});
 
-	it("keeps an attached conversation projection healthy while host-only input WAL is committed", async () => {
-		const { runtimeHost } = await createRuntimeHost((volt) => {
+	it("keeps a device's subscription healthy while input WAL commits without a transcript message", async () => {
+		const { runtimeHost, host } = await createRuntimeHost((volt) => {
 			volt.registerCommand("private-wal", { handler: async () => {} });
 		});
-		const writes: object[] = [];
-		const subscription = runtimeHost.conversation.projectionFeed.attach({
-			write: (value) => {
-				writes.push(value);
-			},
-			buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-				conversation: { workspaceName: "test", sessionId: runtimeHost.session.sessionId },
-				state: {
-					thinkingLevel: "off",
-					availableThinkingLevels: ["off"],
-					fastModeEnabled: false,
-					planning: { mode: "build", plan: null },
-					gitContext: null,
-					isStreaming: false,
-					isCompacting: false,
-					steeringMode: "one-at-a-time",
-					followUpMode: "one-at-a-time",
-					sessionId: runtimeHost.session.sessionId,
-					autoCompactionEnabled: true,
-					messageCount: 0,
-					pendingMessageCount: 0,
-					steeringQueue: [],
-					followUpQueue: [],
-					backgroundJobs: [],
-				},
-				transcript: {
-					sessionId: runtimeHost.session.sessionId,
-					items: [],
-					hasMore: false,
-					nextBeforeEntryId: null,
-					projectionVersion: 3,
-					branchEpoch,
-					head: null,
-				},
-				activeAssistant,
-				activeWorkflows: [],
-			}),
-			projectExternal: (event) => ({
-				type: "visible-transcript-commit",
-				entryType: (event as { entry: { type: string } }).entry.type,
-			}),
-		});
-		await subscription.ready;
+		const phone = await connectPhone(host, runtimeHost.conversation);
+		await phone.subscribe(runtimeHost.conversation.id);
 		const manager = runtimeHost.session.sessionManager;
-		const transcriptCommits = () =>
-			writes.filter((write) => (write as { type?: string }).type === "visible-transcript-commit");
+		const caughtUp = () => vi.waitFor(() => expect(phone.position()).toBe(manager.getOrdinal()));
+		const messages = () =>
+			phone.frames.flatMap((frame) =>
+				frame.type === "entry" && frame.entry.type === "message" ? [frame.entry] : [],
+			);
 
-		// A handled command commits only host-only input WAL: its receipt and states.
+		// A handled command commits only its input WAL: its receipt and states.
 		await runtimeHost.session.prompt("/private-wal", { clientMessageId: "runtime-private-wal" });
-		await subscription.flush();
+		await caughtUp();
 		expect(manager.getClientInput("runtime-private-wal")?.state).toBe("completed");
-		expect(transcriptCommits()).toEqual([]);
+		expect(messages()).toEqual([]);
 
 		await runtimeHost.session.sessionWriter.appendPlanningState({ mode: "plan", plan: null });
-		await subscription.flush();
-		expect(transcriptCommits()).toEqual([]);
+		await caughtUp();
+		expect(messages()).toEqual([]);
 
 		await runtimeHost.session.prompt("visible", { clientMessageId: "runtime-visible" });
-		// Transcript commits publish after the store transaction commits.
-		await subscription.flush();
-		expect(transcriptCommits()).toMatchObject([
-			{ entryType: "message", delivery: { subscriptionId: subscription.subscriptionId } },
-			{ entryType: "message", delivery: { subscriptionId: subscription.subscriptionId } },
-		]);
+		await caughtUp();
+		expect(messages().map((entry) => entry.view?.role)).toEqual(["user", "assistant"]);
 
-		subscription.requestCheckpoint({
-			requestId: "still-healthy",
-			lastAppliedCursor: 0,
-			reason: "cursor_gap",
-		});
-		await subscription.flush();
-		expect(writes.at(-1)).toMatchObject({ type: "conversation_bootstrap", reason: "resync" });
-		subscription.detach();
+		// The subscription is still healthy: nothing ended it, and a fresh snapshot holds the transcript.
+		expect(phone.frames.some((frame) => frame.type === "ended" || frame.type === "fatal")).toBe(false);
+		await phone.subscribe(runtimeHost.conversation.id, "still-healthy");
+		const snapshot = phone.frames.find(
+			(frame): frame is Frame<"snapshot"> => frame.type === "snapshot" && frame.subscriptionId === "still-healthy",
+		);
+		expect(snapshot?.ordinal).toBe(manager.getOrdinal());
+		expect(snapshot?.state.entries.flatMap((entry) => (entry.type === "message" ? [entry.view?.role] : []))).toEqual([
+			"user",
+			"assistant",
+		]);
 	});
 
 	it("leaves the client on the new conversation and closes the source when its move handler fails", async () => {
-		const { runtimeHost, hooks } = await createRuntimeHost(() => {});
+		const { runtimeHost, hooks, host } = await createRuntimeHost(() => {});
 		const source = runtimeHost.conversation;
-		const subscription = source.projectionFeed.attach({
-			write: () => {},
-			buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-				conversation: { workspaceName: "test", sessionId: runtimeHost.session.sessionId },
-				state: {
-					thinkingLevel: "off",
-					availableThinkingLevels: ["off"],
-					fastModeEnabled: false,
-					planning: { mode: "build", plan: null },
-					gitContext: null,
-					isStreaming: false,
-					isCompacting: false,
-					steeringMode: "one-at-a-time",
-					followUpMode: "one-at-a-time",
-					sessionId: runtimeHost.session.sessionId,
-					autoCompactionEnabled: true,
-					messageCount: 0,
-					pendingMessageCount: 0,
-					steeringQueue: [],
-					followUpQueue: [],
-					backgroundJobs: [],
-				},
-				transcript: {
-					sessionId: runtimeHost.session.sessionId,
-					items: [],
-					hasMore: false,
-					nextBeforeEntryId: null,
-					projectionVersion: 3,
-					branchEpoch,
-					head: null,
-				},
-				activeAssistant,
-				activeWorkflows: [],
-			}),
-		});
-		await subscription.ready;
+		const observer = await connectPhone(host, source);
+		await observer.subscribe(source.id);
 		hooks.onMoved = () => {
 			throw new Error("mode rebind refused");
 		};
@@ -1435,33 +1387,17 @@ describe("conversation host client session lifecycle events", () => {
 		expect(target).not.toBe(source);
 		expect(source.closed).toBe(true);
 		expect(target.closed).toBe(false);
-		// The closed source's feed admits no new stream; it ends once its last stream detaches.
-		expect(() =>
-			source.projectionFeed.attach({
-				write: () => {},
-				buildSnapshot: () => {
-					throw new Error("must not build from a closed conversation");
-				},
-			}),
-		).toThrow(/closed/);
-		subscription.detach();
-		expect(() =>
-			source.projectionFeed.attach({
-				write: () => {},
-				buildSnapshot: () => {
-					throw new Error("must not build from a closed conversation");
-				},
-			}),
-		).toThrow(/disposed/);
-		// The new conversation serves the client.
-		expect(() =>
-			target.projectionFeed.attach({
-				write: () => {},
-				buildSnapshot: () => {
-					throw new Error("snapshot built");
-				},
-			}),
-		).toThrow("snapshot built");
+		// A device on the closed source is told its subscription ended, and its stream ends.
+		await observer.ended;
+		expect(observer.frames.find((frame) => frame.type === "ended")).toEqual({
+			type: "ended",
+			subscriptionId: "s1",
+			reason: "closed",
+		});
+		// The new conversation serves devices.
+		const device = await connectPhone(host, target);
+		await device.subscribe(target.id);
+		expect(device.frames.find((frame) => frame.type === "snapshot")).toMatchObject({ conversation: target.id });
 		await expect(runtimeHost.newSession()).resolves.toMatchObject({ cancelled: false });
 	});
 
@@ -1489,14 +1425,7 @@ describe("conversation host client session lifecycle events", () => {
 		const reopened = await SessionManager.open(replacementRef!);
 		expect(reopened.getConversationState().planning).toEqual({ mode: "plan", plan: null });
 		await reopened.closePersistence();
-		expect(() =>
-			replacement.projectionFeed.attach({
-				write: () => {},
-				buildSnapshot: () => {
-					throw new Error("must not build from a closed conversation");
-				},
-			}),
-		).toThrow(/disposed/);
+		expect(replacement.closed).toBe(true);
 	});
 
 	it("keeps the source session active when fork destination persistence fails", async () => {

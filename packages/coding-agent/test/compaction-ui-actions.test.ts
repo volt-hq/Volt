@@ -1,14 +1,17 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
-import { RpcUiActionStateChangedEventSchema, UiActionDescriptorSchema } from "@hansjm10/volt-protocol";
+import {
+	type HostFrame,
+	type QueryResult,
+	RpcUiActionStateChangedEventSchema,
+	UiActionDescriptorSchema,
+} from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { type IntentContext, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
 import { createIrohRemotePresetAccess, createIrohRemoteRpcGrant } from "../src/core/remote/iroh/access-grant.ts";
-import { sanitizeIrohRemoteOutbound } from "../src/core/remote/iroh/outbound-filter.ts";
-import { getIrohRemoteRpcFilterResult } from "../src/core/remote/iroh/rpc-command-filter.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import { subscribeRpcSessionEvents } from "../src/core/rpc/background-jobs.ts";
-import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import type { UiActionDescriptor } from "../src/core/rpc/types.ts";
 import {
 	CONTEXT_AUTO_COMPACTION_ACTION_ID as autoAction,
@@ -19,8 +22,9 @@ import {
 	type UiActionDiscoverySession,
 } from "../src/core/rpc/ui-actions.ts";
 import { InMemorySettingsStorage, type Settings, SettingsManager } from "../src/core/settings-manager.ts";
-import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
+import { createHostHarness } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { connectRemotePhone } from "./utilities/remote-phone.ts";
 
 const model: Model<Api> = {
 	id: "test-model",
@@ -354,129 +358,83 @@ describe("compaction host actions", () => {
 		expect(listener).toHaveBeenCalledOnce();
 		unsubscribe();
 	});
-
-	it("allows exactly the reviewed actions through Iroh and preserves captured defaults after redaction", () => {
-		const grant = createIrohRemotePresetAccess("coding").rpcGrant;
-		const { descriptor } = setup();
-		for (const action of [autoAction, thresholdAction]) {
-			expect(
-				getIrohRemoteRpcFilterResult(
-					JSON.stringify({
-						id: "action",
-						type: "invoke_ui_action",
-						action,
-						args: capturedTarget(descriptor(action)),
-					}),
-					grant,
-				).allowed,
-			).toBe(true);
-			const response = {
-				type: "response",
-				command: "get_ui_actions",
-				success: true,
-				data: { actions: [descriptor(action)] },
-			};
-			expect(sanitizeIrohRemoteOutbound(response, { workspacePath: "/repo" })).toMatchObject({
-				data: { actions: [expect.objectContaining({ args: descriptor(action).args })] },
-			});
-		}
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "manual", type: "invoke_ui_action", action: "context.compact" }),
-				grant,
-			).allowed,
-		).toBe(false);
-	});
 });
 
-it("invokes compaction actions through RPC with durable replies and shared state events", async () => {
-	const { session, settingsManager, descriptor } = setup();
-	const backgroundJobs = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-	const rpcSession = {
-		...session,
-		backgroundJobs,
-		sessionId: "session",
-		attachExtensionClient: () => ({ ready: Promise.resolve(), detach: () => {} }),
-		subscribe: () => () => {},
-		subscribeRuntimeEvents: () => () => {},
-		extensionRunner: { getRegisteredCommands: () => [] },
-		promptTemplates: [],
-		resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
-		sessionManager: { flush: async () => {}, getCwd: () => "/repo", getOrdinal: () => 0 },
-	};
-	const { host } = createFakeHost();
-	const { conversation } = createFakeConversation(rpcSession);
-	let onLine: ((line: string) => void) | undefined;
-	let onClose: RpcCloseHandler | undefined;
-	const writes: object[] = [];
-	const transport: RpcTransport = {
-		write: (value) => {
-			writes.push(value);
-		},
-		onLine: (handler) => {
-			onLine = handler;
-			return () => {};
-		},
-		onClose: (handler) => {
-			onClose = handler;
-			return () => {};
-		},
-		close: () => {},
-	};
-	let ready!: () => void;
-	const started = new Promise<void>((resolve) => {
-		ready = resolve;
+describe("compaction settings intents on the remote profile", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
-	const running = runLegacyRemoteRpcMode(host, conversation, {
-		transport,
-		onReady: ready,
-		anchor: false,
-		remoteGrant: createIrohRemotePresetAccess("coding").rpcGrant,
+
+	it("saves through intents with durable outcomes, tells the device to refetch settings, and updates the live intent state", async () => {
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		const conversation = await harness.openStartup();
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant: createIrohRemotePresetAccess("coding").rpcGrant,
+			redaction: { workspacePath: conversation.cwd },
+		});
+		const phone = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await phone.close();
+			await connection.close().catch(() => undefined);
+		});
+		await phone.hello();
+		await phone.subscribe(conversation.id);
+		const session = conversation.session;
+		const current = session.model!;
+		const ref = `${current.provider}/${current.id}`;
+		// The device names the settings profile it saw in the `settings` query.
+		const settings = await phone.query("settings");
+		if (settings.type !== "result") throw new Error("Expected the settings");
+		const target = {
+			provider: current.provider,
+			modelId: current.id,
+			expectedProfile: (settings.data as QueryResult<"settings">).profile,
+		};
+		expect(target.expectedProfile).toBe("");
+		const intentState = (name: string) => {
+			const states = phone.frames.flatMap((frame) =>
+				frame.type === "live"
+					? frame.items.flatMap((item) =>
+							item.type === "set" && item.value.kind === "intents"
+								? item.value.availability.filter((intent) => intent.name === name)
+								: [],
+						)
+					: [],
+			);
+			return states.at(-1);
+		};
+
+		const from = phone.frames.length;
+		const saved = await phone.intent("set_compaction_threshold", { ...target, tokens: 350000 });
+		expect(saved).toMatchObject({ type: "accepted" });
+		await phone.waitFor((frame): frame is HostFrame => frame.type === "changed" && frame.catalog === "settings", {
+			from,
+		});
+		await vi.waitFor(() =>
+			expect(intentState("set_compaction_threshold")).toMatchObject({ state: { type: "integer", value: 350000 } }),
+		);
+		await session.settingsManager.reload();
+		expect(session.settingsManager.getCompactionThresholdTokens(ref)).toBe(350000);
+
+		// A device that saw another model saves nothing.
+		expect(
+			await phone.intent("set_auto_compaction", { ...target, modelId: "wrong-model", enabled: false }),
+		).toMatchObject({
+			type: "rejected",
+			reason: { code: "failed", message: expect.stringContaining("target changed") },
+		});
+		expect(session.settingsManager.getCompactionEnabled()).toBe(true);
+
+		expect(await phone.intent("set_auto_compaction", { ...target, enabled: false })).toMatchObject({
+			type: "accepted",
+		});
+		await vi.waitFor(() => expect(intentState("set_auto_compaction")).toMatchObject({ state: { value: false } }));
+		expect(await phone.query("settings")).toMatchObject({ type: "result", data: { autoCompaction: false } });
 	});
-	try {
-		await started;
-		onLine?.(
-			JSON.stringify({
-				id: "save",
-				type: "invoke_ui_action",
-				action: thresholdAction,
-				args: { ...capturedTarget(descriptor(thresholdAction)), tokens: 350000 },
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(writes).toContainEqual(
-				expect.objectContaining({
-					id: "save",
-					success: true,
-					data: expect.objectContaining({ state: expect.objectContaining({ value: 350000 }) }),
-				}),
-			),
-		);
-		expect(writes).toContainEqual(
-			expect.objectContaining({
-				type: "ui_action_state_changed",
-				action: thresholdAction,
-				state: expect.objectContaining({ value: 350000 }),
-			}),
-		);
-		await settingsManager.reload();
-		expect(settingsManager.getCompactionThresholdTokens(modelRef)).toBe(350000);
-		onLine?.(
-			JSON.stringify({
-				id: "stale",
-				type: "invoke_ui_action",
-				action: autoAction,
-				args: { provider: "openai", modelId: "wrong-model", expectedProfile: "", enabled: false },
-			}),
-		);
-		await vi.waitFor(() =>
-			expect(writes).toContainEqual(
-				expect.objectContaining({ id: "stale", success: false, error: expect.stringContaining("target changed") }),
-			),
-		);
-	} finally {
-		onClose?.();
-		await running;
-		await backgroundJobs.close();
-	}
 });

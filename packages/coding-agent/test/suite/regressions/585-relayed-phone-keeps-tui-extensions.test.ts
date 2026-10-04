@@ -1,53 +1,58 @@
+import type { HostFrame, HostRequestKind, LiveItem, RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtensionError, ExtensionMode, SessionStartEvent } from "../../../src/core/extensions/types.ts";
 import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import type { ProtocolConnection } from "../../../src/core/protocol/server/connection.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
 } from "../../../src/core/remote/iroh/access-grant.ts";
-import type { IrohRemoteRpcGrant } from "../../../src/core/remote/iroh/index.ts";
-import { runIrohRemoteRpcMode } from "../../../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import {
-	createTestIrohConversationOptions,
-	ManualIrohRecvStream,
-	ManualIrohSendStream,
-	parseWrittenObjects,
-} from "../../iroh-stream-doubles.ts";
+import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import { connectTestClient } from "../../utilities/host-client.ts";
+import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { createLiveRecorder } from "../../utilities/live-recorder.ts";
+import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
+
+const DIALOGS: HostRequestKind[] = ["select", "confirm", "input", "editor", "approval"];
 
 /**
  * A phone stream on a conversation another client already holds, as the daemon
  * serves it or as a TUI relays it: a client whose moves redirect it alone.
  */
-function servePhone(
+async function servePhone(
 	host: ConversationHost,
 	conversation: HostedConversation,
 	tempDir: string,
-	options: { rpcGrant: IrohRemoteRpcGrant; relayed: boolean },
-): { recv: ManualIrohRecvStream; send: ManualIrohSendStream; closed: Promise<void>; ready: Promise<void> } {
-	const recv = new ManualIrohRecvStream();
-	const send = new ManualIrohSendStream();
-	const ready = Promise.withResolvers<void>();
-	const sessionId = conversation.id;
-	const closed = runIrohRemoteRpcMode(host, conversation, {
-		...createTestIrohConversationOptions(conversation),
-		rpcGrant: options.rpcGrant,
-		stream: { recv, send },
+	grant: RemoteGrant,
+): Promise<{ phone: RemotePhone; connection: ProtocolConnection }> {
+	const pair = createIrohStreamPair();
+	const connection = serveIrohRemoteConnection({
+		host,
+		conversation,
+		stream: pair.host,
+		grant,
+		redaction: { workspacePath: tempDir },
 		redirect: {},
-		suppressExtensionUiRequests: options.relayed,
-		detachedTerminal: (detachment) => ({
-			type: "remote_terminal",
-			reason: detachment.kind === "redirected" ? "conversation_moved" : "lease_transferred",
-			workspace: "test",
-			sessionId,
-		}),
-		workspacePath: tempDir,
-		onReady: ready.resolve,
 	});
-	return { recv, send, closed, ready: Promise.race([ready.promise, closed]) };
+	const phone = connectRemotePhone(pair.phone);
+	await phone.hello(DIALOGS);
+	await connection.ready;
+	await phone.subscribe(conversation.id);
+	return { phone, connection };
+}
+
+/** The live items the phone received. */
+function liveItems(phone: RemotePhone): LiveItem[] {
+	return phone.frames.flatMap((frame) => (frame.type === "live" ? frame.items : []));
+}
+
+/** The host requests the phone was asked, by id. */
+function hostRequestIds(phone: RemotePhone): string[] {
+	return liveItems(phone).flatMap((item) =>
+		item.type === "set" && item.value.kind === "host_request" ? [item.value.requestId] : [],
+	);
 }
 
 describe("regression #585: a phone relayed through a TUI does not rebind the TUI's extensions", () => {
@@ -56,7 +61,7 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		while (cleanups.length > 0) await cleanups.pop()?.();
 	});
 
-	it("keeps session_start, ctx.mode, extension UI, and host actions with the TUI; the phone stays when the TUI moves", async () => {
+	it("keeps session_start and ctx.mode with the TUI, shares its dialogs first answer wins, and the phone stays when the TUI moves", async () => {
 		const starts: SessionStartEvent[] = [];
 		const seen: Array<{ event: string; mode: ExtensionMode; hasUI: boolean }> = [];
 		const fixture: ExtensionRuntime = await createExtensionRuntime(
@@ -77,13 +82,19 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 						throw new Error("command failed");
 					},
 				});
+				volt.registerCommand("proceed", {
+					handler: async (_args, ctx) => {
+						const confirmed = await ctx.ui.confirm("Proceed?", "Either client may answer");
+						ctx.ui.notify(confirmed ? "proceeding" : "stopped", "info");
+					},
+				});
 			},
 			{ extensionMode: "tui" },
 		);
 		cleanups.push(() => fixture.dispose());
 
 		// The TUI attaches first; its host attaches its live view and surface again on each conversation it moves to.
-		const tuiLive = createLiveRecorder(["select", "confirm", "input", "editor", "approval"]);
+		const tuiLive = createLiveRecorder(DIALOGS);
 		const tuiErrors: ExtensionError[] = [];
 		const runtime = await connectTestClient(fixture.host, fixture.conversation, {
 			id: "tui",
@@ -93,34 +104,48 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
 
 		// Serve a phone stream the way the TUI serves a relay offer.
-		const {
-			recv,
-			send,
-			closed: phone,
-			ready,
-		} = servePhone(runtime.host, runtime.conversation, fixture.tempDir, {
-			rpcGrant: createIrohRemotePresetAccess("full").rpcGrant,
-			relayed: true,
-		});
-		cleanups.push(async () => {
-			recv.end();
-			await phone.catch(() => undefined);
-		});
-		await ready;
+		const { phone, connection } = await servePhone(
+			runtime.host,
+			runtime.conversation,
+			fixture.tempDir,
+			createIrohRemotePresetAccess("full").rpcGrant,
+		);
+		cleanups.push(() => connection.close());
 
+		// The phone's attach binds nothing again: session_start ran once, through the TUI.
 		expect(starts.map((event) => event.reason)).toEqual(["startup"]);
-		// Approvals stay with the TUI, which answers them.
+		// An approval reaches the TUI and the phone, whose grant manages the host; the first answer wins.
 		const approval = runtime.conversation.liveState.hostInteraction.requestAction({
 			id: "relay-approval",
 			action: "test.action",
 			title: "Approve?",
 		});
 		expect(tuiLive.pending().map((pending) => pending.requestId)).toEqual(["relay-approval"]);
+		await vi.waitFor(() => expect(hostRequestIds(phone)).toEqual(["relay-approval"]));
 		expect(runtime.conversation.liveState.answer("relay-approval", { decision: "approved" }, "tui")).toBe("accepted");
 		await expect(approval).resolves.toEqual({ decision: "approved" });
+		await vi.waitFor(() =>
+			expect(liveItems(phone)).toContainEqual({ type: "clear", key: "host_request/relay-approval" }),
+		);
+		const before = phone.frames.length;
+		phone.send({ type: "host_response", requestId: "relay-approval", response: { decision: "denied" } });
+
+		// A dialog the TUI's extension asks reaches the phone too; here the phone answers first.
+		const proceeding = runtime.session.prompt("/proceed");
+		await vi.waitFor(() => expect(tuiLive.pending().map((pending) => pending.request.kind)).toEqual(["confirm"]));
+		const [dialog] = tuiLive.pending();
+		await vi.waitFor(() => expect(hostRequestIds(phone)).toContain(dialog!.requestId));
+		phone.send({ type: "host_response", requestId: dialog!.requestId, response: { confirmed: true } });
+		await proceeding;
+		expect(tuiLive.pending()).toEqual([]);
+		expect(runtime.conversation.liveState.answer(dialog!.requestId, { confirmed: false }, "tui")).toBe("unknown");
+
 		await runtime.session.prompt("/ask");
 		await runtime.session.prompt("/fail");
-		expect(tuiLive.notices()).toEqual([["info", "asked"]]);
+		expect(tuiLive.notices()).toEqual([
+			["info", "proceeding"],
+			["info", "asked"],
+		]);
 		expect(seen).toEqual([
 			{ event: "session_start", mode: "tui", hasUI: true },
 			{ event: "ask", mode: "tui", hasUI: true },
@@ -128,22 +153,25 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		// Errors reach every client: the TUI and the phone.
 		expect(tuiErrors).toEqual([expect.objectContaining({ extensionPath: "command:fail" })]);
 		await vi.waitFor(() =>
-			expect(parseWrittenObjects(send)).toContainEqual(
-				expect.objectContaining({ type: "extension_error", extensionPath: "command:fail" }),
+			expect(liveItems(phone)).toContainEqual(
+				expect.objectContaining({ type: "notice", level: "error", source: "command:fail" }),
 			),
 		);
+		// The phone's late answer found nothing to answer, and its stream goes on.
+		expect(phone.frames.slice(before).some((frame) => frame.type === "fatal")).toBe(false);
+		expect(runtime.conversation.liveState.pendingRequests()).toEqual([]);
 
 		// The TUI moves: the phone stays with the session it was on, which closed,
 		// and is told to reconnect to it; the new session binds once, through the TUI.
 		const sourceId = runtime.session.sessionId;
 		await runtime.newSession();
-		await phone;
-		expect(parseWrittenObjects(send).at(-1)).toEqual({
-			type: "remote_terminal",
-			reason: "lease_transferred",
-			workspace: "test",
-			sessionId: sourceId,
-		});
+		await phone.ended;
+		const ended = phone.frames.filter(
+			(frame): frame is Extract<HostFrame, { type: "ended" }> => frame.type === "ended",
+		);
+		expect(ended).toEqual([{ type: "ended", subscriptionId: "s1", reason: "closed" }]);
+		expect(phone.frames.at(-1)).toEqual(ended[0]);
+		expect(runtime.session.sessionId).not.toBe(sourceId);
 		await runtime.session.prompt("/ask");
 		expect(starts.map((event) => event.reason)).toEqual(["startup", "new"]);
 		expect(seen.slice(2)).toEqual([
@@ -151,6 +179,7 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			{ event: "ask", mode: "tui", hasUI: true },
 		]);
 		expect(tuiLive.notices()).toEqual([
+			["info", "proceeding"],
 			["info", "asked"],
 			["info", "asked"],
 		]);
@@ -159,16 +188,16 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 			["ext", "ready:new"],
 		]);
 		expect(starts).toHaveLength(2);
-		expect(
-			parseWrittenObjects(send).filter(
-				(frame) => frame.type === "extension_ui_request" || frame.type === "host_action_request",
-			),
-		).toEqual([]);
 	});
 
 	it("leaves extension UI with the clients that can answer it when a phone may only observe", async () => {
 		const fixture = await createExtensionRuntime((volt) => {
-			volt.registerCommand("ask", { handler: async (_args, ctx) => ctx.ui.notify("asked", "info") });
+			volt.registerCommand("ask", {
+				handler: async (_args, ctx) => {
+					const confirmed = await ctx.ui.confirm("Proceed?", "From the first phone");
+					ctx.ui.notify(confirmed ? "confirmed" : "declined", "info");
+				},
+			});
 		});
 		cleanups.push(() => fixture.dispose());
 		const session = fixture.conversation.session;
@@ -176,18 +205,28 @@ describe("regression #585: a phone relayed through a TUI does not rebind the TUI
 		fixture.conversation.liveState.attach("first-phone", firstPhone);
 		await session.attachExtensionClient({ id: "first-phone", mode: "rpc" }).ready;
 
-		const observer = servePhone(fixture.host, fixture.conversation, fixture.tempDir, {
-			rpcGrant: createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant,
-			relayed: false,
-		});
-		cleanups.push(async () => {
-			observer.recv.end();
-			await observer.closed.catch(() => undefined);
-		});
-		await observer.ready;
+		// The observer accepts every dialog in its hello; its grant answers none.
+		const observer = await servePhone(
+			fixture.host,
+			fixture.conversation,
+			fixture.tempDir,
+			createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant,
+		);
+		cleanups.push(() => observer.connection.close());
 
-		await session.prompt("/ask");
-		expect(firstPhone.notices()).toEqual([["info", "asked"]]);
-		expect(parseWrittenObjects(observer.send).filter((frame) => frame.type === "extension_ui_request")).toEqual([]);
+		const asked = session.prompt("/ask");
+		await vi.waitFor(() => expect(firstPhone.pending().map((pending) => pending.request.kind)).toEqual(["confirm"]));
+		const [request] = firstPhone.pending();
+		expect(fixture.conversation.liveState.answer(request!.requestId, { confirmed: true }, "first-phone")).toBe(
+			"accepted",
+		);
+		await asked;
+		expect(firstPhone.notices()).toEqual([["info", "confirmed"]]);
+		await vi.waitFor(() =>
+			expect(liveItems(observer.phone)).toContainEqual(
+				expect.objectContaining({ type: "notice", level: "info", message: "confirmed" }),
+			),
+		);
+		expect(hostRequestIds(observer.phone)).toEqual([]);
 	});
 });

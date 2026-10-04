@@ -5,16 +5,15 @@ import { DatabaseSync } from "node:sqlite";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
+import { REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
 import * as undici from "undici";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
 import { restoreStdout } from "../../../src/core/output-guard.ts";
+import { remoteProfile } from "../../../src/core/protocol/profiles.ts";
+import type { FrameRedactor } from "../../../src/core/protocol/remote-redaction.ts";
 import { createIrohRemoteHandshakeFailure } from "../../../src/core/remote/iroh/handshake.ts";
-import {
-	createIrohRemoteOutboundFilteredRpcTransport,
-	sanitizeIrohRemoteOutbound,
-} from "../../../src/core/remote/iroh/outbound-filter.ts";
 import { IrohRemoteOutcomeError } from "../../../src/core/remote/iroh/protocol.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import {
@@ -309,8 +308,16 @@ afterEach(async () => {
 });
 
 describe("PR #329 remote SQLite locator privacy", () => {
-	it("removes nested and flattened host-local SQLite locators without dropping public output", async () => {
-		const writes: object[] = [];
+	/** The redactor every frame a paired device receives passes through. */
+	function remoteRedactor(): FrameRedactor {
+		return remoteProfile({
+			grant: { schemaVersion: 1, revision: 1, capabilities: [...REMOTE_CAPABILITIES] },
+			redaction: { workspacePath: "/Users/private/workspace" },
+			bound: "public-session-id-329",
+		}).redactor();
+	}
+
+	it("removes nested and flattened host-local SQLite locators without dropping public output", () => {
 		const locator = {
 			sessionDirectory: "/Users/private/.volt/agent/sessions/--secret--",
 			storeId: "private-store-id-329",
@@ -323,46 +330,78 @@ describe("PR #329 remote SQLite locator privacy", () => {
 			parentSessionGeneration: "private-parent-session-generation-329",
 		};
 		const publicPayload = { status: "completed", count: 329 };
-		const transport = createIrohRemoteOutboundFilteredRpcTransport({
-			workspacePath: "/Users/private/workspace",
-			transport: {
-				write(value) {
-					writes.push(value);
+		const details = { output: [{ nested: { locator, ...parentLocator, publicPayload } }] };
+		const redactor = remoteRedactor();
+
+		// A tool's progress, streamed live.
+		const live = redactor.redact({
+			type: "live",
+			subscriptionId: "s1",
+			basedOn: 1,
+			seq: 1,
+			items: [
+				{
+					type: "tool",
+					op: "update",
+					toolCallId: "nested-locator-output",
+					toolName: "read",
+					partial: { content: [{ type: "text", text: "completed" }], details },
 				},
-				onLine: () => () => {},
-				close: () => {},
+			],
+		});
+		// The tool's result, committed.
+		const entry = redactor.redact({
+			type: "entry",
+			subscriptionId: "s1",
+			entry: {
+				ordinal: 2,
+				id: "result-entry-329",
+				parentId: null,
+				type: "message",
+				timestamp: "2026-01-01T00:00:00.000Z",
+				view: {
+					role: "tool",
+					text: "completed",
+					truncated: false,
+					toolCallId: "nested-locator-output",
+					toolName: "read",
+					details,
+				},
 			},
 		});
 
-		await transport.write({
-			type: "tool_execution_end",
-			toolCallId: "nested-locator-output",
-			result: {
-				content: [{ type: "text", text: "completed" }],
-				details: { output: [{ nested: { locator, ...parentLocator, publicPayload } }] },
-			},
+		expect(live).toMatchObject({
+			items: [
+				{
+					partial: {
+						content: [{ type: "text", text: "completed" }],
+						details: { output: [{ nested: { publicPayload } }] },
+					},
+				},
+			],
 		});
-
-		expect(writes).toHaveLength(1);
-		expect(writes[0]).toMatchObject({
-			result: { details: { output: [{ nested: { publicPayload } }] } },
+		expect(entry).toMatchObject({
+			type: "entry",
+			entry: { view: { text: "completed", details: { output: [{ nested: { publicPayload } }] } } },
 		});
-		const wire = JSON.stringify(writes[0]);
-		for (const forbidden of [
-			"sessionDirectory",
-			locator.sessionDirectory,
-			"storeId",
-			locator.storeId,
-			"sessionGeneration",
-			locator.sessionGeneration,
-			"parentSessionDirectory",
-			parentLocator.parentSessionDirectory,
-			"parentStoreId",
-			parentLocator.parentStoreId,
-			"parentSessionGeneration",
-			parentLocator.parentSessionGeneration,
-		]) {
-			expect(wire).not.toContain(forbidden);
+		for (const frame of [live, entry]) {
+			const wire = JSON.stringify(frame);
+			for (const forbidden of [
+				"sessionDirectory",
+				locator.sessionDirectory,
+				"storeId",
+				locator.storeId,
+				"sessionGeneration",
+				locator.sessionGeneration,
+				"parentSessionDirectory",
+				parentLocator.parentSessionDirectory,
+				"parentStoreId",
+				parentLocator.parentStoreId,
+				"parentSessionGeneration",
+				parentLocator.parentSessionGeneration,
+			]) {
+				expect(wire).not.toContain(forbidden);
+			}
 		}
 	});
 
@@ -374,7 +413,9 @@ describe("PR #329 remote SQLite locator privacy", () => {
 			sessionGeneration: "direct-private-generation-329",
 		};
 		for (const value of [sessionReference, { ref: sessionReference }, { references: [sessionReference] }]) {
-			const wire = JSON.stringify(sanitizeIrohRemoteOutbound(value, { workspacePath: "/Users/private/workspace" }));
+			const redacted = remoteRedactor().redact({ type: "result", queryId: "q-329", data: value });
+			expect(redacted).toMatchObject({ type: "result", queryId: "q-329" });
+			const wire = JSON.stringify(redacted);
 			for (const forbidden of [
 				"sessionDirectory",
 				sessionReference.sessionDirectory,

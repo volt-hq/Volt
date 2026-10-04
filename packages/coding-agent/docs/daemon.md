@@ -258,13 +258,13 @@ and concurrent attempts wait for the same runtime publication. Reusing the ID
 with a different workspace, worktree, or working directory fails closed.
 
 After attach, clients apply model, thinking level, Fast mode, and Build/Plan
-mode as session-only commands, in that order, before sending the initial prompt.
+mode as session-only intents, in that order, before sending the initial prompt.
 A configuration failure leaves one empty resumable session and sends no prompt.
 A successfully provisioned worktree is intentionally retained if a later step
 fails; the client offers retry or explicit removal instead of expecting the
-daemon to roll unrelated resources back. Prompt retries use the normal stable
-command-ID receipt path, so neither configured attach nor prompt delivery needs
-a launch receipt or transaction store.
+daemon to roll unrelated resources back. Prompt retries reuse the prompt's
+intent ID, which is its durable client message ID, so neither configured attach
+nor prompt delivery needs a launch receipt or transaction store.
 
 ## App-started pull-request reviews
 
@@ -312,8 +312,8 @@ conversation at a time:
 - **daemon-draining** — a TUI asked to take over while a remote turn is
   streaming. At startup the TUI prints a waiting line, and `/resume` shows the
   wait in the TUI (the interrupt key stops the remote turn, Ctrl+C cancels the
-  open); phones get transient `lease_draining` errors on new prompts, and
-  ownership transfers at the turn boundary.
+  open); new prompts from phones are rejected `busy` with a one-second retry
+  hint, and ownership transfers at the turn boundary.
 
 Every process that writes a session holds that session's lock (see
 [Sessions](sessions.md#one-volt-process-per-session)), so the TUI takes the
@@ -323,8 +323,8 @@ another Volt process (for example `volt -p` or an SDK embedding) has open is
 rejected with `conversation_locked`.
 
 Handoffs are invisible on the phone: when a TUI takes over or quits, the
-phone stream ends with reason `lease_transferred` and the app reconnects
-immediately to the new owner. Abort is non-destructive everywhere: stopping a
+phone stream ends (`ended{closed}`) and the app reconnects immediately to the
+new owner. Abort is non-destructive everywhere: stopping a
 turn never closes streams or disposes runtimes.
 
 Each session keeps its own lease. When the TUI starts or switches to another
@@ -332,13 +332,13 @@ session (`/new`, `/resume`, `/fork`, `/clone`, `/import`, `/worktree`, or an
 extension), it opens the new session, closes the one it left, releases that
 session's lease, and takes the new session's lease; `/resume` takes the
 target's lease before it opens it. Phones on the session the TUI left stay on
-it: their streams end with `lease_transferred`, and they reconnect to the same
+it: their streams end (`ended{closed}`), and they reconnect to the same
 session, which the daemon hosts again.
 
 A phone that starts a new session, forks, or switches moves alone, and other
-clients of its session stay on it. The phone gets its command's response, then
-its stream ends with `conversation_moved` naming the new session, and the
-phone reconnects to that session, which is also recorded as its last session.
+clients of its session stay on it. The phone gets its intent's `accepted`, then
+its stream ends with `ended{moved}` naming the new session, and the phone
+reconnects to that session, which is also recorded as its last session.
 On a session the daemon hosts, the daemon opens the new session itself, with
 the tool set and worktree of the session the phone left, and keeps it until
 the phone reconnects; the session left behind keeps running a turn in
@@ -357,7 +357,7 @@ runtimes — see [Security](security.md).
 The daemon observes fresh path-free Git branch state from whichever process
 owns a conversation lease. Daemon runtimes publish directly; a TUI may publish
 only over the exact local control connection holding that `(workspace,
-session)` lease. Phone input and `list_sessions` requests cannot choose an
+session)` lease. Phone input and `sessions` queries cannot choose an
 association or start provider discovery.
 
 For trusted workspaces, the daemon uses configured Git remotes plus the local
@@ -384,9 +384,10 @@ Associations are stored separately in private `work-state.json`. The file uses
 opaque local IDs and a salted hash of the common Git directory, and stores each
 linked PR's repository host, owner, and name so its status can be refreshed
 after the branch is gone. Checkout paths, repository identities, credentials,
-raw provider output, and provider diagnostics are not projected to phones. `list_sessions.workContext` contains only the opaque change ID,
+raw provider output, and provider diagnostics are not projected to phones. A
+`sessions` entry's `workContext` contains only the opaque change ID,
 repository display name, effective branch, resolution state, and bounded PR
-summary described in [Iroh Remote Protocol](iroh-remote-protocol.md#remote-rpc-command-allowlist).
+summary described in [Iroh Remote Protocol](iroh-remote-protocol.md#workspace-streams).
 
 ## Git worktrees
 
@@ -467,10 +468,10 @@ running `volt remote worktree prune` quarantines them.
 ## Optional: theme token push (experimental)
 
 With `VOLT_HOST_THEME_TOKENS=1` in the daemon's environment (or
-`settings.themeTokenPush` in `state.json`), the daemon pushes its resolved
-theme colors to phones that advertise the `host_theme_tokens.v1` capability as
-`host_theme_tokens` frames (hex color values only — nothing path-like ever
-crosses the wire). Off by default; clients that ignore the frame are fully
+`settings.themeTokenPush` in `state.json`), the daemon shares its resolved
+theme colors with phones in the `host_status` query's `theme` (hex color values
+only — nothing path-like ever crosses the wire) and announces a theme change
+with `changed{host}`. Off by default; clients that ignore the field are fully
 supported.
 
 ## Troubleshooting
@@ -489,6 +490,9 @@ supported.
   `ready` and managed relay access is not `expired`, `subscription_inactive`, or
   `revocation_pending`; local daemon workspace/client maintenance remains
   available while it is not ready.
+- A protocol mismatch → the running daemon is from another Volt version and
+  speaks another control protocol, so the TUI and CLI cannot use it. Run
+  `volt daemon restart` after upgrading Volt.
 - `native_binding_missing` → reinstall without `--omit=optional` on a supported
   platform. Darwin x64 is intentionally local CLI/TUI only.
 - `endpoint_start_failed` → inspect `volt daemon logs`, fix the reported host

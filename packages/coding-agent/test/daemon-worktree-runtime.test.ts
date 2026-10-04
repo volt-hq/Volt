@@ -35,7 +35,7 @@ let newSessionSequence = 0;
 function createConversationHello(conversation: Record<string, unknown>): IrohRemoteHello {
 	return {
 		type: "volt_iroh_hello",
-		protocol: "volt-rpc/0",
+		protocol: "volt/1",
 		workspace: "ws",
 		mode: "conversation",
 		conversation:

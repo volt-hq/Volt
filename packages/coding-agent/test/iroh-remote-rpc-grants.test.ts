@@ -1,20 +1,19 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { RemoteCapability, RemoteGrant } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it } from "vitest";
+import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { remoteProfile } from "../src/core/protocol/profiles.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
-	getIrohRemoteRpcCommandCapabilities,
 	IROH_REMOTE_RPC_CAPABILITIES,
 	parseIrohRemoteRpcGrant,
 } from "../src/core/remote/iroh/access-grant.ts";
+import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import { IrohRemoteHostEngine } from "../src/core/remote/iroh/engine.ts";
 import { DEFAULT_IROH_REMOTE_ALLOW_TOOLS } from "../src/core/remote/iroh/protocol.ts";
-import {
-	getIrohRemoteRpcFilterResult,
-	IROH_REMOTE_RPC_PASSTHROUGH_TYPES,
-} from "../src/core/remote/iroh/rpc-command-filter.ts";
 import {
 	createEmptyIrohRemoteHostState,
 	parseIrohRemoteHostState,
@@ -22,6 +21,14 @@ import {
 } from "../src/core/remote/iroh/state.ts";
 import { IrohRemoteHostStateManager } from "../src/core/remote/iroh/state-manager.ts";
 import { admitControlRequest } from "../src/daemon/control-protocol.ts";
+import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
+import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import {
+	connectRemotePhone,
+	type IntentOutcome,
+	type QueryOutcome,
+	type RemotePhone,
+} from "./utilities/remote-phone.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -74,209 +81,6 @@ describe("Iroh remote RPC grants", () => {
 		expect(review.rpcGrant.capabilities).toEqual(coding.rpcGrant.capabilities);
 		expect(chat.rpcGrant.capabilities).toEqual(coding.rpcGrant.capabilities);
 		expect(full.rpcGrant.capabilities).toEqual(IROH_REMOTE_RPC_CAPABILITIES);
-	});
-
-	it("classifies parameter-sensitive and management commands centrally", () => {
-		for (const type of IROH_REMOTE_RPC_PASSTHROUGH_TYPES) {
-			expect(getIrohRemoteRpcCommandCapabilities({ type }), `classification for ${type}`).toBeDefined();
-		}
-		for (const type of [
-			"invoke_ui_action",
-			"get_ui_action_completions",
-			"start_mcp_server_auth",
-			"remove_worktree",
-			"list_workspace_directories",
-		]) {
-			expect(getIrohRemoteRpcCommandCapabilities({ type }), `classification for ${type}`).toBeDefined();
-		}
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "prompt" })).toEqual(["conversation.control.v1"]);
-		for (const type of ["set_agent_mode", "plan_execute", "plan_change", "plan_discard"]) {
-			expect(getIrohRemoteRpcCommandCapabilities({ type })).toEqual(["conversation.control.v1"]);
-		}
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "set_client_capabilities", features: [] })).toEqual([]);
-		expect(
-			getIrohRemoteRpcCommandCapabilities({
-				type: "set_client_capabilities",
-				features: ["host_action_requests.v1"],
-			}),
-		).toEqual(["host.manage.v1"]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "get_transcript" })).toEqual(["conversation.observe.v1"]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "get_transcript_entry_text" })).toEqual([
-			"conversation.observe.v1",
-		]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "get_subscription_usage" })).toEqual(["host.manage.v1"]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "set_model", persistDefault: false })).toEqual([
-			"model.select.v1",
-		]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "set_model" })).toEqual(["model.select.v1", "host.manage.v1"]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "set_thinking_level", persistDefault: true })).toEqual([
-			"model.select.v1",
-			"host.manage.v1",
-		]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "create_worktree" })).toEqual(["worktrees.manage.v1"]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "list_worktrees" })).toEqual(["conversation.observe.v1"]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "unregister_workspace" })).toEqual(["workspace.manage.v1"]);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "upload_device_logs" })).toEqual(["diagnostics.upload.v1"]);
-	});
-
-	it("admits review lifecycle commands as conversation controls while keeping feedback export local-only", () => {
-		const controlGrant = createIrohRemotePresetAccess("coding").rpcGrant;
-		const observeOnlyGrant = createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant;
-		for (const type of ["acknowledge_review", "record_review_finding_outcome", "rerun_review", "publish_review"]) {
-			expect(IROH_REMOTE_RPC_PASSTHROUGH_TYPES.has(type)).toBe(true);
-			expect(getIrohRemoteRpcCommandCapabilities({ type })).toEqual(["conversation.control.v1"]);
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-allowed`, type }), controlGrant)).toEqual({
-				allowed: true,
-				command: { id: `${type}-allowed`, type },
-			});
-			expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: `${type}-denied`, type }), observeOnlyGrant)).toEqual(
-				{
-					allowed: false,
-					response: {
-						id: `${type}-denied`,
-						type: "response",
-						command: type,
-						success: false,
-						error: {
-							code: "rpc_capability_denied",
-							message: "RPC capability required: conversation.control.v1",
-							requiredCapability: "conversation.control.v1",
-						},
-					},
-				},
-			);
-		}
-
-		expect(IROH_REMOTE_RPC_PASSTHROUGH_TYPES.has("export_review_feedback")).toBe(false);
-		expect(getIrohRemoteRpcCommandCapabilities({ type: "export_review_feedback" })).toBeUndefined();
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "export-review-feedback", type: "export_review_feedback" }),
-				createIrohRemotePresetAccess("full").rpcGrant,
-			),
-		).toEqual({
-			allowed: false,
-			response: {
-				id: "export-review-feedback",
-				type: "response",
-				command: "export_review_feedback",
-				success: false,
-				error: "RPC command not allowed over remote host: export_review_feedback",
-			},
-		});
-	});
-
-	it("returns stable structured denials without bypassing the static ceiling", () => {
-		expect(
-			getIrohRemoteRpcFilterResult(JSON.stringify({ id: "missing-grant", type: "get_state" }), undefined as never),
-		).toMatchObject({
-			allowed: false,
-			response: { id: "missing-grant", error: "Remote RPC grant is missing or malformed" },
-		});
-		const observeOnly = createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant;
-		expect(getIrohRemoteRpcFilterResult(JSON.stringify({ id: "1", type: "prompt" }), observeOnly)).toEqual({
-			allowed: false,
-			response: {
-				id: "1",
-				type: "response",
-				command: "prompt",
-				success: false,
-				error: {
-					code: "rpc_capability_denied",
-					message: "RPC capability required: conversation.control.v1",
-					requiredCapability: "conversation.control.v1",
-				},
-			},
-		});
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({
-					id: "invoke-capability-denied",
-					type: "invoke_ui_action",
-					action: "session.new",
-				}),
-				observeOnly,
-			),
-		).toEqual({
-			allowed: false,
-			response: {
-				id: "invoke-capability-denied",
-				type: "response",
-				command: "invoke_ui_action",
-				success: false,
-				error: {
-					code: "rpc_capability_denied",
-					message: "RPC capability required: conversation.control.v1",
-					requiredCapability: "conversation.control.v1",
-				},
-			},
-		});
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({
-					id: "caps",
-					type: "set_client_capabilities",
-					features: ["host_action_requests.v1"],
-				}),
-				createIrohRemotePresetAccess("coding").rpcGrant,
-			),
-		).toMatchObject({ allowed: true });
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({
-					id: "caps-observe",
-					type: "set_client_capabilities",
-					features: ["host_action_requests.v1"],
-				}),
-				createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant,
-			),
-		).toMatchObject({
-			allowed: false,
-			response: {
-				command: "set_client_capabilities",
-				error: { code: "rpc_capability_denied", requiredCapability: "host.manage.v1" },
-			},
-		});
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "caps-empty", type: "set_client_capabilities", features: [] }),
-				createIrohRemotePresetAccess("coding").rpcGrant,
-			),
-		).toMatchObject({ allowed: true });
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "usage-allowed", type: "get_subscription_usage" }),
-				createIrohRemotePresetAccess("coding").rpcGrant,
-			),
-		).toEqual({
-			allowed: true,
-			command: { id: "usage-allowed", type: "get_subscription_usage" },
-		});
-		expect(
-			getIrohRemoteRpcFilterResult(
-				JSON.stringify({ id: "usage-denied", type: "get_subscription_usage" }),
-				observeOnly,
-			),
-		).toMatchObject({
-			allowed: false,
-			response: {
-				id: "usage-denied",
-				command: "get_subscription_usage",
-				error: { code: "rpc_capability_denied", requiredCapability: "host.manage.v1" },
-			},
-		});
-
-		const unsupported = getIrohRemoteRpcFilterResult(
-			JSON.stringify({ id: "2", type: "local_only_command" }),
-			createIrohRemotePresetAccess("full").rpcGrant,
-		);
-		expect(unsupported).toMatchObject({
-			allowed: false,
-			response: {
-				command: "local_only_command",
-				error: "RPC command not allowed over remote host: local_only_command",
-			},
-		});
 	});
 
 	it("requires grants on every persisted active, revoked, and pending record", () => {
@@ -448,7 +252,7 @@ describe("Iroh remote RPC grants", () => {
 		expect(persisted.pendingPairingTickets).toHaveLength(1);
 		const hello = {
 			type: "volt_iroh_hello" as const,
-			protocol: "volt-rpc/0" as const,
+			protocol: "volt/1" as const,
 			workspace: "ws",
 			secret: "durable-secret",
 			clientLabel: "phone",
@@ -517,5 +321,184 @@ describe("Iroh remote RPC grants", () => {
 			}),
 		).toBe(false);
 		expect(createIrohRemoteExplicitAccess([], []).rpcGrant.capabilities).toEqual([]);
+	});
+});
+
+/** An intent or query and the capabilities its admission requires of a remote grant. */
+interface GrantCase {
+	readonly kind: "intent" | "query";
+	readonly name: string;
+	readonly requires: readonly RemoteCapability[];
+}
+
+const control = "conversation.control.v1";
+const observe = "conversation.observe.v1";
+
+const GRANT_CASES: readonly GrantCase[] = [
+	{ kind: "intent", name: "prompt", requires: [control] },
+	{ kind: "intent", name: "abort", requires: [control] },
+	{ kind: "intent", name: "cancel_job", requires: [control] },
+	{ kind: "intent", name: "set_agent_mode", requires: [control] },
+	{ kind: "intent", name: "plan_execute", requires: [control] },
+	{ kind: "intent", name: "plan_change", requires: [control] },
+	{ kind: "intent", name: "plan_discard", requires: [control] },
+	{ kind: "intent", name: "new_session", requires: [control] },
+	{ kind: "intent", name: "review_acknowledge", requires: [control] },
+	{ kind: "intent", name: "review_record_finding_outcome", requires: [control] },
+	{ kind: "intent", name: "review_rerun", requires: [control] },
+	{ kind: "intent", name: "review_publish", requires: [control] },
+	{ kind: "intent", name: "set_model", requires: ["model.select.v1"] },
+	{ kind: "intent", name: "set_thinking_level", requires: ["model.select.v1"] },
+	{ kind: "intent", name: "set_default_model", requires: ["model.select.v1", "host.manage.v1"] },
+	{ kind: "intent", name: "set_default_thinking_level", requires: ["model.select.v1", "host.manage.v1"] },
+	{ kind: "intent", name: "set_keep_awake", requires: ["host.manage.v1"] },
+	{ kind: "intent", name: "set_web_search_key", requires: ["integrations.manage.v1"] },
+	{ kind: "intent", name: "mcp.connect", requires: ["integrations.manage.v1"] },
+	{ kind: "intent", name: "create_worktree", requires: ["worktrees.manage.v1"] },
+	{ kind: "intent", name: "remove_worktree", requires: ["worktrees.manage.v1"] },
+	{ kind: "intent", name: "prepare_pr_review", requires: [control, "worktrees.manage.v1"] },
+	{ kind: "intent", name: "unregister_workspace", requires: ["workspace.manage.v1"] },
+	{ kind: "intent", name: "upload_device_logs", requires: ["diagnostics.upload.v1"] },
+	{ kind: "intent", name: "register_push_target", requires: [] },
+	{ kind: "query", name: "history", requires: [observe] },
+	{ kind: "query", name: "content", requires: [observe] },
+	{ kind: "query", name: "intents", requires: [observe] },
+	{ kind: "query", name: "intent_completions", requires: [observe] },
+	{ kind: "query", name: "job_output", requires: [observe] },
+	{ kind: "query", name: "sessions", requires: [observe] },
+	{ kind: "query", name: "worktrees", requires: [observe] },
+	{ kind: "query", name: "models", requires: ["model.select.v1"] },
+	{ kind: "query", name: "agent_options", requires: ["model.select.v1"] },
+	{ kind: "query", name: "subscription_usage", requires: ["host.manage.v1"] },
+	{ kind: "query", name: "web_search_status", requires: ["integrations.manage.v1"] },
+	{ kind: "query", name: "mcp.servers", requires: ["integrations.manage.v1"] },
+];
+
+function grantWithout(...missing: RemoteCapability[]): RemoteGrant {
+	return {
+		schemaVersion: 1,
+		revision: 1,
+		capabilities: IROH_REMOTE_RPC_CAPABILITIES.filter((capability) => !missing.includes(capability)),
+	};
+}
+
+describe("remote grant admission on a paired device's stream", () => {
+	const cleanups: Array<() => Promise<void>> = [];
+	afterEach(async () => {
+		while (cleanups.length > 0) await cleanups.pop()?.();
+	});
+
+	async function setup(): Promise<{ harness: HostHarness; conversation: HostedConversation }> {
+		const harness = await createHostHarness({ whenUnattached: "keep" });
+		cleanups.push(() => harness.cleanup());
+		return { harness, conversation: await harness.openStartup() };
+	}
+
+	async function phone(
+		harness: HostHarness,
+		conversation: HostedConversation,
+		grant: RemoteGrant,
+	): Promise<RemotePhone> {
+		const pair = createIrohStreamPair();
+		const connection = serveIrohRemoteConnection({
+			host: harness.host,
+			conversation,
+			stream: pair.host,
+			grant,
+			redaction: { workspacePath: conversation.cwd },
+			redirect: {},
+		});
+		const device = connectRemotePhone(pair.phone);
+		cleanups.push(async () => {
+			await connection.close().catch(() => undefined);
+			await device.close();
+		});
+		await device.hello();
+		await device.subscribe(conversation.id);
+		return device;
+	}
+
+	/** Send a case with input its schema refuses: admission checks the grant first, then the input. */
+	function send(device: RemotePhone, entry: GrantCase): Promise<IntentOutcome | QueryOutcome> {
+		return entry.kind === "intent"
+			? device.intent(entry.name, { unexpectedField: true })
+			: device.query(entry.name, { unexpectedField: true });
+	}
+
+	it("rejects each intent and query without every capability it requires, naming the missing one", async () => {
+		const { harness, conversation } = await setup();
+		for (const capability of IROH_REMOTE_RPC_CAPABILITIES) {
+			const device = await phone(harness, conversation, grantWithout(capability));
+			for (const entry of GRANT_CASES.filter((candidate) => candidate.requires.includes(capability))) {
+				const outcome = await send(device, entry);
+				const reason = outcome.type === "rejected" || outcome.type === "query_error" ? outcome.reason : undefined;
+				expect(reason, `${entry.name} without ${capability}`).toMatchObject({
+					code: "not_allowed",
+					requiredCapability: capability,
+				});
+			}
+		}
+	});
+
+	it("admits each intent and query past the grant when every capability it requires is granted", async () => {
+		const { harness, conversation } = await setup();
+		const full = await phone(harness, conversation, grantWithout());
+		const minimal = new Map<string, RemotePhone>();
+		for (const entry of GRANT_CASES) {
+			const exact = [...entry.requires].sort().join(",");
+			let device = minimal.get(exact);
+			if (!device) {
+				device = await phone(harness, conversation, {
+					schemaVersion: 1,
+					revision: 1,
+					capabilities: [...new Set<RemoteCapability>([observe, ...entry.requires])],
+				});
+				minimal.set(exact, device);
+			}
+			for (const [label, client] of [
+				["full", full],
+				["minimal", device],
+			] as const) {
+				const outcome = await send(client, entry);
+				const reason = outcome.type === "rejected" || outcome.type === "query_error" ? outcome.reason : undefined;
+				expect(reason, `${entry.name} with the ${label} grant`).toMatchObject({ code: "invalid_input" });
+			}
+		}
+	});
+
+	it("keeps local-only intents and queries off the remote profile whatever the grant", async () => {
+		const { harness, conversation } = await setup();
+		const device = await phone(harness, conversation, createIrohRemotePresetAccess("full").rpcGrant);
+		for (const name of ["review_export_feedback", "bash", "set_steering_mode", "mcp.auth_start_browser"]) {
+			expect(await device.intent(name, {}), name).toMatchObject({
+				type: "rejected",
+				reason: { code: "not_allowed", message: `Intent not available over remote host: ${name}` },
+			});
+		}
+		const rejected = await device.intent("review_export_feedback", {});
+		expect(rejected.type === "rejected" ? rejected.reason : undefined).not.toHaveProperty("requiredCapability");
+		expect(await device.query("subagent_definitions")).toMatchObject({
+			type: "query_error",
+			reason: { code: "not_allowed", message: "Query not available over remote host: subagent_definitions" },
+		});
+		expect(await device.intent("local_only_command", {})).toMatchObject({
+			type: "rejected",
+			reason: { code: "unknown_intent" },
+		});
+	});
+
+	it("asks a device only the host requests its grant allows", () => {
+		const accepts = ["select", "confirm", "approval", "mcp_auth"] as const;
+		const asked = (grant: RemoteGrant) =>
+			[...remoteProfile({ grant, redaction: { workspacePath: "/tmp/ws" } }).hostRequests(accepts)].sort();
+		expect(asked(createIrohRemotePresetAccess("full").rpcGrant)).toEqual([
+			"approval",
+			"confirm",
+			"mcp_auth",
+			"select",
+		]);
+		// Approvals of host actions need host management; MCP sign-in needs integrations.
+		expect(asked(createIrohRemotePresetAccess("coding").rpcGrant)).toEqual(["approval", "confirm", "select"]);
+		expect(asked(createIrohRemoteExplicitAccess([], ["conversation.observe.v1"]).rpcGrant)).toEqual([]);
 	});
 });

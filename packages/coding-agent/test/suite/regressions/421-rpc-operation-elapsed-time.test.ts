@@ -1,10 +1,6 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ConversationProjectionSubscription } from "../../../src/core/rpc/conversation-projection-feed.ts";
-import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/loopback-transport.ts";
-import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
-import { runLegacyRemoteRpcMode } from "../../../src/modes/rpc/legacy-remote-rpc-mode.ts";
-import { RpcTransportClient } from "../../../src/modes/rpc/rpc-transport-client.ts";
+import { createLoopbackClient, type LoopbackClient } from "../../../src/client/protocol-client.ts";
 import { adoptTestSession, connectTestClient, type TestHost } from "../../utilities/host-client.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
@@ -18,87 +14,28 @@ function deferred() {
 
 const harnesses: Harness[] = [];
 const hosts: TestHost[] = [];
-const connections: Array<() => Promise<void>> = [];
+const clients: LoopbackClient[] = [];
 const releases: Array<() => void> = [];
 
-async function connect(target: TestHost) {
-	const conversation = target.conversation;
-	const pair = createLoopbackRpcTransportPair();
-	const frames: unknown[] = [];
-	const unsubscribe = pair.client.onValue!((value) => {
-		frames.push(value);
-	});
-	const subscription: ConversationProjectionSubscription = conversation.projectionFeed.attach({
-		write: (value) => pair.server.write(value),
-		buildSnapshot: ({ activeAssistant, branchEpoch }) => ({
-			conversation: { workspaceName: "workspace", sessionId: conversation.session.sessionId },
-			state: buildRpcSessionState(conversation.session),
-			transcript: {
-				sessionId: conversation.session.sessionId,
-				items: [],
-				hasMore: false,
-				nextBeforeEntryId: null,
-				projectionVersion: 3,
-				branchEpoch,
-				head: null,
-			},
-			activeAssistant,
-			activeWorkflows: [],
-		}),
-	});
-	await subscription.ready;
-	const ready = deferred();
-	const mode = runLegacyRemoteRpcMode(target.host, conversation, {
-		transport: pair.server,
-		onReady: ready.resolve,
-		anchor: false,
-		orderedConversation: {
-			get subscriptionId() {
-				return subscription.subscriptionId;
-			},
-			get branchEpoch() {
-				return subscription.branchEpoch;
-			},
-			enqueueControl: (value) => subscription.enqueueControl(value),
-			requestCheckpoint: (command) =>
-				subscription.requestCheckpoint({
-					requestId: command.id,
-					lastAppliedCursor: command.lastAppliedCursor,
-					reason: command.reason,
-					assistantPosition: command.assistantPosition,
-				}),
-			publishExternal: (event) => conversation.projectionFeed.publishExternal(event),
-		},
-		requireConversationAuthority: true,
-	});
-	await Promise.race([ready.promise, mode]);
-	const client = new RpcTransportClient({ transport: pair.client });
-	await client.start();
-	let closed = false;
-	const close = async () => {
-		if (closed) return;
-		closed = true;
-		subscription.detach();
-		unsubscribe();
-		await client.stop();
-		await mode;
-	};
-	connections.push(close);
-	return { client, frames, close, subscription };
+/** A protocol client of the conversation; the host keeps the conversation open between clients. */
+async function connect(target: TestHost): Promise<LoopbackClient> {
+	const client = await createLoopbackClient(target.host, target.conversation, { anchor: false });
+	clients.push(client);
+	return client;
 }
 
 afterEach(async () => {
 	for (const release of releases.splice(0)) release();
 	vi.useRealTimers();
-	for (const close of connections.splice(0)) await close();
+	for (const client of clients.splice(0)) await client.stop();
 	for (const target of hosts.splice(0)) await target.host.dispose();
 	for (const harness of harnesses.splice(0)) await harness.cleanupAsync();
 	vi.restoreAllMocks();
 });
 
-describe("#421 authoritative timing on ordered reconnect", () => {
+describe("#421 authoritative timing on reconnect", () => {
 	it.each(["compaction", "retry"] as const)(
-		"restores the operation during %s and after continuation",
+		"restores the operation's start time during %s and after continuation",
 		async (kind) => {
 			let now = Date.now();
 			vi.spyOn(Date, "now").mockImplementation(() => now);
@@ -152,7 +89,7 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 				},
 			);
 			hosts.push(target);
-			// The host keeps the conversation open between the reconnecting RPC clients.
+			// The host keeps the conversation open between the reconnecting clients.
 			await connectTestClient(target.host, target.conversation);
 			const initial = await connect(target);
 			harness.session.subscribe((event) => {
@@ -178,47 +115,52 @@ describe("#421 authoritative timing on ordered reconnect", () => {
 			]);
 			const prompt = harness.session.prompt("Keep the timer");
 			await recovery.promise;
-			await initial.subscription.flush();
 			const startedAt = harness.eventsOfType("agent_start")[0]!.startedAt;
-			expect(initial.frames).toContainEqual(expect.objectContaining({ type: "agent_start", startedAt }));
-			await initial.close();
-			now += 10_000;
-			const during = await connect(target);
-			expect(during.frames[0]).toMatchObject({
-				type: "conversation_bootstrap",
-				state: {
-					activeAgentRun: { startedAt },
-					isStreaming: true,
-					isCompacting: kind === "compaction",
-				},
+			// The live phase carries the run's start; vi.waitFor would advance the faked retry backoff.
+			await new Promise<void>((resolve) => {
+				const done = () => {
+					if (initial.phase?.run?.startedAt !== startedAt) return false;
+					unsubscribe();
+					resolve();
+					return true;
+				};
+				const unsubscribe = initial.onChange(() => void done());
+				done();
 			});
-			expect(await during.client.getState()).toMatchObject({ activeAgentRun: { startedAt }, isStreaming: true });
-			await during.close();
+			await initial.stop();
+			now += 10_000;
+
+			// A client that subscribes mid-operation reads the run's authoritative start from its live reset.
+			const during = await connect(target);
+			expect(during.phase).toMatchObject({ busy: true, run: { startedAt } });
+			if (kind === "compaction") {
+				expect(during.phase).toMatchObject({ compaction: { reason: "overflow" } });
+				expect(during.phase?.retry).toBeUndefined();
+			} else {
+				expect(during.phase).toMatchObject({ retry: { attempt: 1, maxAttempts: 1 } });
+				expect(during.phase?.compaction).toBeUndefined();
+			}
+			await during.stop();
 			if (kind === "retry") {
 				await vi.advanceTimersByTimeAsync(60_000);
 				vi.useRealTimers();
 			} else releaseRecovery.resolve();
 			await continued.promise;
+
+			// After the recovery the run continues under its original start.
 			const after = await connect(target);
-			expect(after.frames[0]).toMatchObject({
-				type: "conversation_bootstrap",
-				state: {
-					activeAgentRun: { startedAt },
-					isStreaming: true,
-					isCompacting: false,
-				},
-			});
-			expect(await after.client.getState()).toMatchObject({ activeAgentRun: { startedAt }, isStreaming: true });
+			expect(after.phase).toMatchObject({ busy: true, run: { startedAt } });
+			expect(after.phase?.compaction).toBeUndefined();
 			expect(harness.eventsOfType("agent_start").map((event) => event.startedAt)).toEqual([startedAt, startedAt]);
 			releaseContinuation.resolve();
 			await prompt;
-			await after.subscription.flush();
-			expect(after.frames).toContainEqual(expect.objectContaining({ type: "agent_settled" }));
-			expect((await after.client.getState()).activeAgentRun).toBeUndefined();
-			await after.close();
+			await vi.waitFor(() => expect(after.phase).toMatchObject({ busy: false }));
+			expect(after.phase?.run).toBeUndefined();
+			await after.stop();
+
 			const settled = await connect(target);
-			expect(settled.frames[0]).toMatchObject({ type: "conversation_bootstrap", state: { isStreaming: false } });
-			expect(settled.frames[0]).not.toHaveProperty("state.activeAgentRun");
+			expect(settled.phase).toMatchObject({ busy: false });
+			expect(settled.phase?.run).toBeUndefined();
 		},
 	);
 });

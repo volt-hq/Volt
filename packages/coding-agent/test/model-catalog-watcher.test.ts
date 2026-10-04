@@ -232,6 +232,7 @@ describe("model catalog watcher", () => {
 			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => () => {}),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
+			subscribeReloads: vi.fn(() => () => {}),
 			modelRegistry: registry,
 			sessionId: "session-1",
 		};

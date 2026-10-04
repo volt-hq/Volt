@@ -316,6 +316,7 @@ describe("intent runs", () => {
 			followUpMode: client.session.followUpMode,
 			autoCompaction: false,
 			autoRetry: client.session.autoRetryEnabled,
+			profile: "",
 		});
 	});
 
