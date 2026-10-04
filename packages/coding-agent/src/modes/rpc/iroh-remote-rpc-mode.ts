@@ -39,7 +39,7 @@ import {
 	StreamProjector,
 	serializeJsonLine,
 } from "../../core/rpc/index.ts";
-import { isRpcSessionInterruptionCommand, type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
+import { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc-mode.ts";
 import type { RpcRegisterPushTargetResponse } from "./rpc-types.ts";
 
 export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
@@ -273,10 +273,7 @@ export function runIrohRemoteRpcMode(
 	});
 	const remoteHostCommandTransport = options.remoteCommandHandler
 		? createIrohRemoteHostCommandRpcTransport({
-				handleCommand: (command) =>
-					isRpcSessionInterruptionCommand(command)
-						? options.remoteCommandHandler?.(command)
-						: runtimeHost.runWithStableSession(() => options.remoteCommandHandler?.(command)),
+				handleCommand: (command) => options.remoteCommandHandler?.(command),
 				transport: filteredTransport,
 				writeResponse: (value) => writeOrderedControl(value),
 			})

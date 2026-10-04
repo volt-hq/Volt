@@ -195,7 +195,8 @@ describe("regression #2860: replaced session callbacks", () => {
 
 		await runtime.session.prompt("/repro");
 
-		expect(events).toEqual(["start:1", "shutdown:1", "start:2", "with:1"]);
+		// The new session starts before the old one shuts down; withSession runs after both.
+		expect(events).toEqual(["start:1", "start:2", "shutdown:1", "with:1"]);
 		expect(replacementSessionRef).toBeDefined();
 		expect(replacementSessionRef).not.toEqual(oldSessionRef);
 		expect(staleCtxThrows).toBe(true);

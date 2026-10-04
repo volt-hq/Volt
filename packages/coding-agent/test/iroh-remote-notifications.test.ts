@@ -83,17 +83,6 @@ import { runIrohRemoteRpcMode } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
 
 const TEST_HOST_NODE_ID = "a".repeat(64);
 
-function createStableSessionRunner<TSession>(getSession: () => TSession) {
-	return {
-		async runWithStableSession<TResult>(
-			operation: (session: TSession) => Promise<TResult> | TResult,
-		): Promise<TResult> {
-			const session = getSession();
-			return operation(session);
-		},
-	};
-}
-
 function getNotifications(send: ManualIrohSendStream): Array<Record<string, unknown>> {
 	return parseWrittenObjects(send).filter((record) => record.type === "notification_request");
 }
@@ -458,7 +447,6 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -571,7 +559,6 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -646,7 +633,6 @@ describe("Iroh remote notification requests", () => {
 			},
 		);
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -747,7 +733,6 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -804,7 +789,6 @@ describe("Iroh remote notification requests", () => {
 			},
 		);
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -857,7 +841,6 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1053,7 +1036,6 @@ describe("Iroh remote notification requests", () => {
 		} as unknown as SessionEntry;
 		session.sessionManager.getBranch.mockReturnValue([assistantEntry]);
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1429,7 +1411,6 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1493,7 +1474,6 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1558,7 +1538,6 @@ describe("Iroh remote notification requests", () => {
 			stateManager,
 		});
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1615,7 +1594,6 @@ describe("Iroh remote notification requests", () => {
 			},
 		);
 		const runtimeHost = {
-			...createStableSessionRunner(() => session),
 			session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -1793,7 +1771,6 @@ describe("Iroh remote notification requests", () => {
 	test("emits one review completion notification after a detached remote review completes", async () => {
 		const currentSession = createTestSession("initial-session", "initial-run");
 		const runtimeHost = {
-			...createStableSessionRunner(() => currentSession),
 			get session() {
 				return currentSession;
 			},

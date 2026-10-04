@@ -15,15 +15,9 @@ import {
 	withCurrentConversationAuthority,
 } from "./iroh-stream-doubles.ts";
 
-function createStableRuntimeHost(session: ReturnType<typeof createTestSession>): AgentSessionRuntime {
+function createRuntimeHost(session: ReturnType<typeof createTestSession>): AgentSessionRuntime {
 	return {
 		session,
-		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
-			return operation(session as unknown as AgentSession);
-		},
-		runSessionInterruption<T>(operation: (stableSession: AgentSession) => T): T {
-			return operation(session as unknown as AgentSession);
-		},
 		newSession: vi.fn(async () => ({ cancelled: true })),
 		switchSessionById: vi.fn(async () => ({ cancelled: true })),
 		dispose: vi.fn(async () => {}),
@@ -57,7 +51,7 @@ describe("conversation mutation authority", () => {
 			setThinkingLevel,
 			steer,
 		});
-		const runtimeHost = createStableRuntimeHost(session);
+		const runtimeHost = createRuntimeHost(session);
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
 		const authority = getCurrentConversationAuthority(send);
 
@@ -184,7 +178,7 @@ describe("conversation mutation authority", () => {
 		await expect(modePromise).resolves.toBeUndefined();
 	});
 
-	test("rejects a co-attached client's queued stale mutations after another client rebinds", async () => {
+	test("rejects a co-attached client's stale mutations after another client rebinds", async () => {
 		const oldSession = createTestSession("old-session", null);
 		const newSession = createTestSession("new-session", null);
 		const newAbort = vi.fn(async () => {});
@@ -192,7 +186,6 @@ describe("conversation mutation authority", () => {
 		Object.assign(newSession, { abort: newAbort, setThinkingLevel: newSetThinkingLevel });
 
 		let currentSession = oldSession;
-		let lifecycleTail = Promise.resolve();
 		let releaseReplacement = () => {};
 		const replacementGate = new Promise<void>((resolve) => {
 			releaseReplacement = resolve;
@@ -202,17 +195,6 @@ describe("conversation mutation authority", () => {
 		const runtime = {
 			get session() {
 				return currentSession;
-			},
-			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
-				const result = lifecycleTail.then(() => operation(currentSession as unknown as AgentSession));
-				lifecycleTail = result.then(
-					() => undefined,
-					() => undefined,
-				);
-				return result;
-			},
-			runSessionInterruption<T>(operation: (session: AgentSession) => T): T {
-				return operation(currentSession as unknown as AgentSession);
 			},
 			subscribeSessionWillProject(listener: (session: AgentSession) => Promise<void> | void) {
 				willProjectListeners.add(listener);
@@ -247,7 +229,20 @@ describe("conversation mutation authority", () => {
 			JSON.stringify(withCurrentConversationAuthority(modeB.send, { id: "rebind", type: "new_session" })),
 		);
 		await vi.waitFor(() => expect(runtime.newSession).toHaveBeenCalledOnce());
+		releaseReplacement();
 
+		await vi.waitFor(() => {
+			const initiatingFrames = parseWrittenObjects(modeB.send);
+			const initiatingBootstrapIndex = initiatingFrames.findIndex(
+				(frame) =>
+					frame.type === "conversation_bootstrap" &&
+					frame.reason === "session_rebind" &&
+					frame.requestId === "rebind",
+			);
+			const initiatingResponseIndex = initiatingFrames.findIndex((frame) => frame.id === "rebind");
+			expect(initiatingBootstrapIndex).toBeGreaterThanOrEqual(0);
+			expect(initiatingResponseIndex).toBeGreaterThan(initiatingBootstrapIndex);
+		});
 		modeA.recv.pushLine(
 			JSON.stringify({
 				id: "queued-prompt",
@@ -265,20 +260,8 @@ describe("conversation mutation authority", () => {
 				conversationAuthority: staleAuthority,
 			}),
 		);
-		releaseReplacement();
 
 		await vi.waitFor(() => {
-			const initiatingFrames = parseWrittenObjects(modeB.send);
-			const initiatingBootstrapIndex = initiatingFrames.findIndex(
-				(frame) =>
-					frame.type === "conversation_bootstrap" &&
-					frame.reason === "session_rebind" &&
-					frame.requestId === "rebind",
-			);
-			const initiatingResponseIndex = initiatingFrames.findIndex((frame) => frame.id === "rebind");
-			expect(initiatingBootstrapIndex).toBeGreaterThanOrEqual(0);
-			expect(initiatingResponseIndex).toBeGreaterThan(initiatingBootstrapIndex);
-
 			const frames = parseWrittenObjects(modeA.send);
 			const replacementBootstrapIndex = frames.findIndex(
 				(frame) => frame.type === "conversation_bootstrap" && frame.reason === "session_rebind",
@@ -333,7 +316,7 @@ describe("conversation mutation authority", () => {
 			},
 			setModel,
 		});
-		const runtimeHost = createStableRuntimeHost(session);
+		const runtimeHost = createRuntimeHost(session);
 		const { modePromise, recv, send } = await startIrohRpcMode(runtimeHost, session);
 		recv.pushLine(
 			JSON.stringify(
@@ -370,7 +353,7 @@ describe("conversation mutation authority", () => {
 
 	test("keeps transport-neutral local RPC prompts compatible without authority", async () => {
 		const session = createTestSession("local-session", null);
-		const runtimeHost = createStableRuntimeHost(session);
+		const runtimeHost = createRuntimeHost(session);
 		const pair = createLoopbackRpcTransportPair();
 		const received: Array<Record<string, unknown>> = [];
 		pair.client.onValue?.((value) => {
@@ -432,12 +415,6 @@ describe("correlated conversation controls", () => {
 		const runtimeHost = {
 			get session() {
 				return current;
-			},
-			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
-				return operation(current as unknown as AgentSession);
-			},
-			runSessionInterruption<T>(operation: (session: AgentSession) => T): T {
-				return operation(current as unknown as AgentSession);
 			},
 			subscribeSessionWillProject(listener: (session: AgentSession) => Promise<void> | void) {
 				willProjectListeners.add(listener);

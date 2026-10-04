@@ -54,9 +54,6 @@ test("closed Iroh stream does not crash on a queued transcript write", async () 
 		dispose: vi.fn(async () => {}),
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		newSession: vi.fn(async () => ({ cancelled: true })),
-		runWithStableSession: vi.fn(async (operation: (session: typeof harness.session) => Promise<unknown> | unknown) =>
-			operation(harness.session),
-		),
 		services: { agentDir: harness.tempDir },
 		session: harness.session,
 		setRebindSession: vi.fn(),

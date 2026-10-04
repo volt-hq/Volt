@@ -172,9 +172,6 @@ async function createRuntimeHost(options: {
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose: vi.fn(async () => {}),
 		setRebindSession: vi.fn(),
-		async runWithStableSession<T>(operation: (stableSession: AgentSession) => Promise<T> | T): Promise<T> {
-			return operation(session);
-		},
 	} as unknown as AgentSessionRuntime;
 
 	return {

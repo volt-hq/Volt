@@ -841,7 +841,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		detach();
 	});
 
-	it("reserves replacement ownership before invalidating the old runtime", async () => {
+	it("commits replacement ownership and rebinds the new session before the old one shuts down", async () => {
 		const phases: string[] = [];
 		const { runtimeHost } = await createRuntimeHost((volt) => {
 			volt.on("session_shutdown", () => {
@@ -880,7 +880,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		await runtimeHost.newSession({ rebindRequestId: "new-session-request" });
 		expect(publish).toHaveBeenCalledWith("new-session-request");
-		expect(phases).toEqual(["prepare", "session_shutdown", "commit", "publish", "finalize", "rebind"]);
+		expect(phases).toEqual(["prepare", "commit", "publish", "finalize", "rebind", "session_shutdown"]);
 	});
 
 	it("leaves the old runtime live and retains the candidate row when replacement ownership preflight rejects", async () => {
@@ -953,186 +953,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(shutdownReasons).toEqual(["new"]);
 	});
 
-	it("leases a stable session across streams and supports nested structural replacement", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		let releasePreparation!: () => void;
-		let markPreparationStarted!: () => void;
-		const preparationStarted = new Promise<void>((resolve) => {
-			markPreparationStarted = resolve;
-		});
-		const preparationGate = new Promise<void>((resolve) => {
-			releasePreparation = resolve;
-		});
-		let prepareCount = 0;
-		runtimeHost.setPrepareSessionReplacement(async () => {
-			prepareCount++;
-			if (prepareCount === 1) {
-				markPreparationStarted();
-				await preparationGate;
-			}
-			return undefined;
-		});
-
-		const replacement = runtimeHost.newSession();
-		await preparationStarted;
-		expect(runtimeHost.isSessionOperationInProgress).toBe(true);
-		let stableReadStarted = false;
-		const stableRead = runtimeHost.runWithStableSession((session) => {
-			stableReadStarted = true;
-			return session.sessionId;
-		});
-		await Promise.resolve();
-		expect(stableReadStarted).toBe(false);
-
-		releasePreparation();
-		await replacement;
-		expect(await stableRead).toBe(runtimeHost.session.sessionId);
-		expect(runtimeHost.isSessionOperationInProgress).toBe(false);
-
-		const nestedSourceSession = runtimeHost.session;
-		const nestedResult = await runtimeHost.runWithStableSession(async (leasedSession) => {
-			await runtimeHost.newSession();
-			return { leasedSession, replacementSession: runtimeHost.session };
-		});
-		expect(nestedResult.leasedSession).toBe(nestedSourceSession);
-		expect(nestedResult.replacementSession).not.toBe(nestedSourceSession);
-	});
-
-	it("rejects interruption acquisition while a replacement generation is unpublished", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		const originalSession = runtimeHost.session;
-		let releasePublication = (): void => {};
-		let markPublicationStarted = (): void => {};
-		const publicationStarted = new Promise<void>((resolve) => {
-			markPublicationStarted = resolve;
-		});
-		const publicationGate = new Promise<void>((resolve) => {
-			releasePublication = resolve;
-		});
-		const detach = runtimeHost.subscribeSessionWillProject(async () => {
-			markPublicationStarted();
-			await publicationGate;
-		});
-
-		const replacement = runtimeHost.newSession();
-		await publicationStarted;
-		const duringReplacement = vi.fn();
-		expect(() => runtimeHost.runSessionInterruption(duringReplacement)).toThrow(
-			"Agent session generation is changing; retry the interruption",
-		);
-		expect(duringReplacement).not.toHaveBeenCalled();
-
-		releasePublication();
-		await replacement;
-		const replacementSession = runtimeHost.session;
-		expect(replacementSession).not.toBe(originalSession);
-		const afterPublication = vi.fn();
-		runtimeHost.runSessionInterruption(afterPublication);
-		expect(afterPublication).toHaveBeenCalledOnce();
-		expect(afterPublication).toHaveBeenCalledWith(replacementSession);
-		detach();
-	});
-
-	it("recursively drains fire-and-forget actor children before advancing the lifecycle FIFO", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		let releaseChild = () => {};
-		let markChildStarted = () => {};
-		const childStarted = new Promise<void>((resolve) => {
-			markChildStarted = resolve;
-		});
-		const childGate = new Promise<void>((resolve) => {
-			releaseChild = resolve;
-		});
-		let releaseGrandchild = () => {};
-		let markGrandchildStarted = () => {};
-		const grandchildStarted = new Promise<void>((resolve) => {
-			markGrandchildStarted = resolve;
-		});
-		const grandchildGate = new Promise<void>((resolve) => {
-			releaseGrandchild = resolve;
-		});
-
-		let rootSettled = false;
-		const root = runtimeHost
-			.runWithStableSession(async () => {
-				void runtimeHost.runWithStableSession(async () => {
-					markChildStarted();
-					await childGate;
-					void runtimeHost.runWithStableSession(async () => {
-						markGrandchildStarted();
-						await grandchildGate;
-					});
-				});
-				await childStarted;
-			})
-			.then(() => {
-				rootSettled = true;
-			});
-		await childStarted;
-
-		let followingStarted = false;
-		const following = runtimeHost.runWithStableSession(() => {
-			followingStarted = true;
-		});
-		try {
-			releaseChild();
-			await grandchildStarted;
-			await Promise.resolve();
-			expect(rootSettled).toBe(false);
-			expect(followingStarted).toBe(false);
-		} finally {
-			releaseChild();
-			releaseGrandchild();
-		}
-		await root;
-		await following;
-		expect(rootSettled).toBe(true);
-		expect(followingStarted).toBe(true);
-	});
-
-	it("revokes actor authority from detached descendants after their parent settles", async () => {
-		const { runtimeHost } = await createRuntimeHost(() => {});
-		let triggerDetached = () => {};
-		const detachedTrigger = new Promise<void>((resolve) => {
-			triggerDetached = resolve;
-		});
-		let detachedOperation: Promise<void> | undefined;
-		let detachedStarted = false;
-
-		await runtimeHost.runWithStableSession(() => {
-			void detachedTrigger.then(() => {
-				detachedOperation = runtimeHost.runWithStableSession(() => {
-					detachedStarted = true;
-				});
-			});
-		});
-
-		let releaseBlocker = () => {};
-		let markBlockerStarted = () => {};
-		const blockerStarted = new Promise<void>((resolve) => {
-			markBlockerStarted = resolve;
-		});
-		const blockerGate = new Promise<void>((resolve) => {
-			releaseBlocker = resolve;
-		});
-		const blocker = runtimeHost.runWithStableSession(async () => {
-			markBlockerStarted();
-			await blockerGate;
-		});
-		await blockerStarted;
-		try {
-			triggerDetached();
-			await vi.waitFor(() => expect(detachedOperation).toBeDefined());
-			expect(detachedStarted).toBe(false);
-		} finally {
-			releaseBlocker();
-		}
-		await blocker;
-		await detachedOperation;
-		expect(detachedStarted).toBe(true);
-	});
-
-	it("orders disposal after an admitted replacement and exposes its drain barrier", async () => {
+	it("orders disposal after an admitted replacement", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		let releasePublication!: () => void;
 		let markPublicationStarted!: () => void;
@@ -1149,24 +970,17 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		const replacement = runtimeHost.newSession();
 		await publicationStarted;
-		let drainSettled = false;
-		const drain = runtimeHost.waitForSessionOperations().then(() => {
-			drainSettled = true;
-		});
 		let disposeSettled = false;
 		const disposal = runtimeHost.dispose().then(() => {
 			disposeSettled = true;
 		});
 		await Promise.resolve();
-		expect(drainSettled).toBe(false);
 		expect(disposeSettled).toBe(false);
 		await expect(runtimeHost.newSession()).rejects.toThrow(/no longer accepting structural operations/);
 
 		releasePublication();
 		await replacement;
-		await drain;
 		await disposal;
-		expect(drainSettled).toBe(true);
 		expect(disposeSettled).toBe(true);
 	});
 
@@ -1329,13 +1143,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		]);
 	});
 
-	it("rechecks the session after an in-flight prompt admission settles", async () => {
+	it("keeps the source when its turn starts while the new session opens", async () => {
 		const { runtimeHost, faux } = await createRuntimeHost(() => {});
 		const originalSession = runtimeHost.session;
-		let releaseAdmission!: () => void;
-		const admissionGate = new Promise<void>((resolve) => {
-			releaseAdmission = resolve;
-		});
 		let releaseTurn!: () => void;
 		const turnGate = new Promise<void>((resolve) => {
 			releaseTurn = resolve;
@@ -1348,24 +1158,28 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				return fauxAssistantMessage("late reply");
 			},
 		]);
-		await runtimeHost.runWithStableSession((stableSession) => {
-			const admission = (async () => {
-				await admissionGate;
-				await stableSession.steer("queued during hook", undefined, "late-admission-queue");
-			})();
-			runtimeHost.trackClientInputAdmission(stableSession, admission);
-		});
+		let candidateRef: SessionReference | undefined;
+		let turn: Promise<void> | undefined;
 
-		const replacement = runtimeHost.newSession();
-		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(runtimeHost.session).toBe(originalSession);
-		releaseAdmission();
-		// The late steer starts a turn on the idle session, which the recheck refuses to replace.
-		await expect(replacement).rejects.toThrow("Cannot change sessions while an agent run is active");
+		await expect(
+			runtimeHost.newSession({
+				setup: async (writer) => {
+					candidateRef = writer.sessionManager.getSessionRef();
+					// The source was idle when the move was admitted; a turn starts before it is fenced.
+					turn = originalSession.prompt("started while the new session opened");
+					await vi.waitFor(() => expect(originalSession.isStreaming).toBe(true));
+				},
+			}),
+		).rejects.toThrow("Cannot change sessions while an agent run is active");
+
 		expect(runtimeHost.session).toBe(originalSession);
 		releaseTurn();
+		await turn;
 		await originalSession.waitForIdle();
-		expect(originalSession.sessionManager.getClientInput("late-admission-queue")?.state).toBe("completed");
+		expect(originalSession.messages.at(-1)).toMatchObject({ role: "assistant" });
+		// The candidate closed, releasing its lock; its row stays in the store.
+		const reopened = await SessionManager.open(candidateRef!);
+		await reopened.closePersistence();
 	});
 
 	it("blocks session replacement from an identified extension command after dispatch starts", async () => {
@@ -1419,41 +1233,38 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		expect(rebind).not.toHaveBeenCalled();
 	});
 
-	it("fences the old feed before staging transcript commits and swapping the runtime session", async () => {
+	it("keeps the source and its projection feed when the new conversation cannot open", async () => {
 		const { runtimeHost } = await createRuntimeHost(() => {});
 		const originalSession = runtimeHost.session;
 		const subscribeEntries = SessionManager.prototype.subscribeEntries;
-		let replacementSubscriptions = 0;
+		let candidateSubscriptions = 0;
 		const subscribe = vi.spyOn(SessionManager.prototype, "subscribeEntries");
 		subscribe.mockImplementation(function (this: SessionManager, listener) {
-			// The replacement session subscribes its own planning observer first; the runtime's transcript subscription is next.
-			if (++replacementSubscriptions !== 2) return subscribeEntries.call(this, listener);
+			// The candidate session subscribes its own planning observer first; its conversation's transcript subscription is next.
+			if (++candidateSubscriptions !== 2) return subscribeEntries.call(this, listener);
 			expect(runtimeHost.session).toBe(originalSession);
-			expect(() =>
-				runtimeHost.conversationProjectionFeed.attach({
-					write: () => {},
-					buildSnapshot: () => {
-						throw new Error("replacement generation must remain unpublished");
-					},
-				}),
-			).toThrow(/awaiting host ownership rekey/);
 			throw new Error("transcript subscription failed");
 		});
 
-		await expect(runtimeHost.newSession()).rejects.toThrow("transcript subscription failed");
+		try {
+			await expect(runtimeHost.newSession()).rejects.toThrow("transcript subscription failed");
+		} finally {
+			subscribe.mockRestore();
+		}
 		expect(runtimeHost.session).toBe(originalSession);
+		// The feed is neither fenced nor disposed: an attach reaches its snapshot.
 		expect(() =>
 			runtimeHost.conversationProjectionFeed.attach({
 				write: () => {},
 				buildSnapshot: () => {
-					throw new Error("disposed feed must not snapshot");
+					throw new Error("snapshot built");
 				},
 			}),
-		).toThrow(/disposed/);
-		subscribe.mockRestore();
+		).toThrow("snapshot built");
+		await expect(originalSession.prompt("source still works")).resolves.toBeUndefined();
 	});
 
-	it("runs beforeSessionInvalidate after session_shutdown and before rebindSession", async () => {
+	it("runs beforeSessionInvalidate and rebindSession before the old session shuts down", async () => {
 		const phases: string[] = [];
 		const { runtimeHost } = await createRuntimeHost((volt) => {
 			volt.on("session_shutdown", () => {
@@ -1471,7 +1282,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		await runtimeHost.newSession();
 
-		expect(phases).toEqual(["session_shutdown", "beforeSessionInvalidate", "rebindSession"]);
+		expect(phases).toEqual(["beforeSessionInvalidate", "rebindSession", "session_shutdown"]);
 		expect(() => oldSession.extensionRunner.createContext().cwd).toThrow(
 			"This extension ctx is stale after session replacement or reload. Do not use a captured volt or command ctx after ctx.newSession(), ctx.fork(), ctx.switchSession(), or ctx.reload(). For newSession, fork, and switchSession, move post-replacement work into withSession and use the ctx passed to withSession. For reload, do not use the old ctx after await ctx.reload().",
 		);

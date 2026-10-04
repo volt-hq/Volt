@@ -218,12 +218,6 @@ type RpcModeStartupAwareTransport = RpcTransport & {
 };
 
 const MAX_PENDING_RPC_INPUT_TASKS = 64;
-const RPC_SESSION_INTERRUPTION_TYPES: ReadonlySet<string> = new Set([
-	"abort",
-	"abort_retry",
-	"abort_bash",
-	"cancel_job",
-]);
 const RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES: ReadonlySet<RpcCommand["type"]> = new Set([
 	"prompt",
 	"steer",
@@ -252,11 +246,6 @@ class StaleConversationAuthorityError extends Error {
 		super("Conversation authority is stale; apply the latest conversation bootstrap and retry");
 		this.name = "StaleConversationAuthorityError";
 	}
-}
-
-/** Commands that must reach the active session even while another stream owns the lifecycle actor. */
-export function isRpcSessionInterruptionCommand(command: { type?: unknown }): boolean {
-	return typeof command.type === "string" && RPC_SESSION_INTERRUPTION_TYPES.has(command.type);
 }
 
 function createStdioRpcTransport(): RpcTransport {
@@ -1772,18 +1761,12 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime, options: RpcM
 		const command = parsed as RpcCommand;
 		let response: RpcResponse | undefined;
 		try {
-			// Extension actions the command reaches go to this client.
-			response = await ClientScope.run(extensionClientId, () =>
-				isRpcSessionInterruptionCommand(command)
-					? runtimeHost.runSessionInterruption((interruptionSession) => {
-							assertConversationAuthority(command, interruptionSession);
-							return handleRpcCommand(command, createRpcCommandContext(command, interruptionSession));
-						})
-					: runtimeHost.runWithStableSession((stableSession) => {
-							assertConversationAuthority(command, stableSession);
-							return handleRpcCommand(command, createRpcCommandContext(command, stableSession));
-						}),
-			);
+			// Extension actions the command reaches go to this client. The command acts on the current session.
+			response = await ClientScope.run(extensionClientId, () => {
+				const currentSession = runtimeHost.session;
+				assertConversationAuthority(command, currentSession);
+				return handleRpcCommand(command, createRpcCommandContext(command, currentSession));
+			});
 		} catch (commandError: unknown) {
 			const target = getRpcErrorResponseTarget(command);
 			output(createRpcErrorResponse(target.id, target.command, toError(commandError).message, commandError));

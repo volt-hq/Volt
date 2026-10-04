@@ -230,7 +230,7 @@ describe("regression #527: extension cleanup when a session ends", () => {
 		expect(runtime.session).not.toBe(outgoing);
 		await new Promise((resolve) => setTimeout(resolve, 0));
 		expect(ended).toBe(false);
-		expect(lifecycle).toEqual(["1:start:startup", "1:shutdown:new", "2:start:new"]);
+		expect(lifecycle).toEqual(["1:start:startup", "2:start:new", "1:shutdown:new"]);
 		expect(resources.map((resource) => resource.signal.aborted)).toEqual([true, false]);
 		expect(errors).toEqual([]);
 	});

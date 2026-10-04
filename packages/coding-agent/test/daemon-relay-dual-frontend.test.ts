@@ -87,20 +87,6 @@ function getPhoneConversationAuthority(phone: FakePhoneIrohStream): RpcConversat
 	};
 }
 
-function createStableSessionRunner<TSession>(getSession: () => TSession) {
-	return {
-		async runWithStableSession<TResult>(
-			operation: (session: TSession) => Promise<TResult> | TResult,
-		): Promise<TResult> {
-			const session = getSession();
-			return operation(session);
-		},
-		runSessionInterruption<TResult>(operation: (session: TSession) => TResult): TResult {
-			return operation(getSession());
-		},
-	};
-}
-
 function createFanoutSession(sessionId: string) {
 	const session = createTestSession(sessionId, null);
 	Object.assign(session.sessionManager, { getSessionRef: vi.fn(() => undefined) });
@@ -637,7 +623,6 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		const fanout = createFanoutSession(SESSION_ID);
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = {
-			...createStableSessionRunner(() => fanout.session),
 			session: fanout.session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),
@@ -813,7 +798,6 @@ describe("dual-frontend relayed conversation (§12.3.3)", () => {
 		const fanout = createFanoutSession(SESSION_ID);
 		const dispose = vi.fn(async () => {});
 		const runtimeHost = {
-			...createStableSessionRunner(() => fanout.session),
 			session: fanout.session,
 			newSession: vi.fn(async () => ({ cancelled: true })),
 			switchSession: vi.fn(async () => ({ cancelled: true })),

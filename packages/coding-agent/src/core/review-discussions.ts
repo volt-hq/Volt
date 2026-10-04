@@ -182,7 +182,7 @@ export class HostReviewDiscussionService {
 							throw new Error("Unknown review finding");
 						return appendReviewFindingTransition(writer, transition);
 					};
-					if (source) return source.runWithStableSession((session) => write(session.sessionWriter));
+					if (source) return write(source.session.sessionWriter);
 					if (!this.host.withSourceWrite) throw new Error("Canonical source writer is unavailable");
 					return this.host.withSourceWrite(runtime, sourceRef, async () => {
 						assertCurrent();
@@ -528,32 +528,29 @@ export class HostReviewDiscussionService {
 			return;
 		const child = await this.prepareChild(runtime, ref, row, assertCurrent);
 		assertCurrent();
-		await child.runWithStableSession(async (session) => {
-			assertCurrent();
-			if (session.sessionManager.getClientInput(row.current.kickoffClientMessageId)) return;
-			let resolve!: () => void;
-			let reject!: (error: unknown) => void;
-			const admission = new Promise<void>((yes, no) => {
-				resolve = yes;
-				reject = no;
-			});
-			// Uses ordinary durable prompt admission and turn events, not a scheduler or app-owned task.
-			void session
-				.prompt(
-					"Explain this finding, evaluate its evidence, and discuss possible fixes. This kickoff requests analysis only, not implementation. When the user later requests a fix, implement and verify it here under normal session permissions. Canonical finding outcomes remain owned by the source review.",
-					{
-						source: "rpc",
-						clientMessageId: row.current.kickoffClientMessageId,
-						assertConversationGenerationCurrent: assertCurrent,
-						preflightResult: (result) => {
-							if (result.success) resolve();
-						},
-					},
-				)
-				.then(resolve, reject);
-			child.trackClientInputAdmission(session, admission);
-			await admission;
+		const session = child.session;
+		if (session.sessionManager.getClientInput(row.current.kickoffClientMessageId)) return;
+		let resolve!: () => void;
+		let reject!: (error: unknown) => void;
+		const admission = new Promise<void>((yes, no) => {
+			resolve = yes;
+			reject = no;
 		});
+		// Uses ordinary durable prompt admission and turn events, not a scheduler or app-owned task.
+		void session
+			.prompt(
+				"Explain this finding, evaluate its evidence, and discuss possible fixes. This kickoff requests analysis only, not implementation. When the user later requests a fix, implement and verify it here under normal session permissions. Canonical finding outcomes remain owned by the source review.",
+				{
+					source: "rpc",
+					clientMessageId: row.current.kickoffClientMessageId,
+					assertConversationGenerationCurrent: assertCurrent,
+					preflightResult: (result) => {
+						if (result.success) resolve();
+					},
+				},
+			)
+			.then(resolve, reject);
+		await admission;
 	}
 
 	private async reset(
@@ -625,15 +622,14 @@ export class HostReviewDiscussionService {
 				return { requestId, status: "busy", discussion: await this.project(runtime, store, ref, row) };
 			return reset();
 		}
-		return child.runWithStableSession(async (session) => {
-			if (
-				session.isBusy ||
-				session.pendingMessageCount > 0 ||
-				session.isCompacting ||
-				clientInputRecovery(session.sessionManager.getConversationState()).kind !== "idle"
-			)
-				return { requestId, status: "busy", discussion: await this.project(runtime, store, ref, row) };
-			return reset();
-		});
+		const session = child.session;
+		if (
+			session.isBusy ||
+			session.pendingMessageCount > 0 ||
+			session.isCompacting ||
+			clientInputRecovery(session.sessionManager.getConversationState()).kind !== "idle"
+		)
+			return { requestId, status: "busy", discussion: await this.project(runtime, store, ref, row) };
+		return reset();
 	}
 }

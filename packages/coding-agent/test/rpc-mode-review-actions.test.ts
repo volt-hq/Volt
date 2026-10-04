@@ -1,5 +1,4 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
-import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { convertToLlm, createCustomMessage } from "../src/core/messages.ts";
@@ -381,9 +380,6 @@ function makeRuntimeHost(
 		fork: vi.fn(async () => ({ cancelled: true, selectedText: "" })),
 		dispose: vi.fn(async () => {}),
 		setRebindSession: vi.fn(),
-		async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
-			return operation(currentSession as unknown as AgentSession);
-		},
 	} as unknown as AgentSessionRuntime;
 	return runtimeHost;
 }

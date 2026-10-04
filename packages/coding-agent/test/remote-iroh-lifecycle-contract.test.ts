@@ -1,5 +1,5 @@
 import { describe, expect, test, vi } from "vitest";
-import type { AgentSession, PromptPreflightResult } from "../src/core/agent-session.ts";
+import type { PromptPreflightResult } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import {
@@ -16,25 +16,7 @@ import {
 	createIrohRemoteCloseDeferringRpcTransport,
 	createIrohRemoteHostCommandRpcTransport,
 } from "../src/modes/rpc/iroh-remote-rpc-mode.ts";
-import { runRpcMode as runRpcModeImpl } from "../src/modes/rpc/rpc-mode.ts";
-
-function runRpcMode(runtimeHost: AgentSessionRuntime, options?: Parameters<typeof runRpcModeImpl>[1]): Promise<void> {
-	if (typeof runtimeHost.runWithStableSession !== "function") {
-		Object.assign(runtimeHost, {
-			async runWithStableSession<T>(operation: (session: AgentSession) => Promise<T> | T): Promise<T> {
-				return operation(runtimeHost.session);
-			},
-		});
-	}
-	if (typeof runtimeHost.runSessionInterruption !== "function") {
-		Object.assign(runtimeHost, {
-			runSessionInterruption<T>(operation: (session: AgentSession) => T): T {
-				return operation(runtimeHost.session);
-			},
-		});
-	}
-	return runRpcModeImpl(runtimeHost, options);
-}
+import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 
 class ManualRpcTransport implements RpcTransport {
 	readonly writes: object[] = [];

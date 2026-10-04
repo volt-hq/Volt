@@ -2,7 +2,6 @@ import type { Api, Model } from "@hansjm10/volt-ai";
 import { RpcUiActionStateChangedEventSchema, UiActionDescriptorSchema } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { describe, expect, it, vi } from "vitest";
-import type { AgentSession } from "../src/core/agent-session.ts";
 import type { AgentSessionRuntime } from "../src/core/agent-session-runtime.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import {
@@ -400,8 +399,6 @@ it("invokes compaction actions through RPC with durable replies and shared state
 	const runtime = {
 		session: rpcSession,
 		setRebindSession: () => {},
-		runWithStableSession: (operation: (session: AgentSession) => Promise<unknown>) =>
-			operation(rpcSession as unknown as AgentSession),
 	} as unknown as AgentSessionRuntime;
 	let onLine: ((line: string) => void) | undefined;
 	let onClose: RpcCloseHandler | undefined;
