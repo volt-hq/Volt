@@ -4,10 +4,10 @@ import type { RepositoryObservation } from "../tools/repository-observation.ts";
 import type {
 	ExtensionOperationEvent,
 	ExtensionOperationOrigin,
+	ExtensionServiceName,
 	ExtensionServicesCause,
 	ExtensionServicesFailure,
 	ExtensionServicesLimits,
-	ExtensionServicesService,
 	ExtensionServicesSnapshot,
 	RequestBoundaryEvent,
 } from "./services-types.ts";
@@ -21,7 +21,7 @@ export interface ExtensionServicesCollection {
 }
 
 export interface ExtensionServicesExecution {
-	service: ExtensionServicesService;
+	service: ExtensionServiceName;
 	input: JsonObject;
 	signal: AbortSignal;
 	origin: Extract<ExtensionOperationOrigin, { kind: "extension" }>;

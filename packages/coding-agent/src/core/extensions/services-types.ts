@@ -2,7 +2,7 @@ import type { FindToolInput } from "../tools/find.ts";
 import type { GrepToolInput } from "../tools/grep.ts";
 import type { ReadToolInput } from "../tools/read.ts";
 
-export type ExtensionServicesService =
+export type ExtensionServiceName =
 	| "readText"
 	| "findPaths"
 	| "searchText"
@@ -65,7 +65,7 @@ export interface ExtensionServicesSnapshot {
 	mode: "build" | "plan";
 	model?: { provider: string; id: string };
 	inputs: readonly ExtensionServicesInput[];
-	services: readonly ExtensionServicesService[];
+	services: readonly ExtensionServiceName[];
 	skills: readonly ExtensionServicesSkill[];
 	skillsTruncated: boolean;
 }
@@ -193,7 +193,7 @@ export interface ExtensionOperationEvent {
 	operationId: string;
 	ownerId: string;
 	ownerKind: "task" | "validation";
-	service: ExtensionServicesService;
+	service: ExtensionServiceName;
 	status: "ok" | ExtensionServicesFailureStatus;
 	durationMs: number;
 	bytes: number;

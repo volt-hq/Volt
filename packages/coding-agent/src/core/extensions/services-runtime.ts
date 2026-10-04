@@ -11,13 +11,13 @@ import type {
 } from "./services-host.ts";
 import type {
 	ExtensionOperationOrigin,
+	ExtensionServiceName,
 	ExtensionServicesContext,
 	ExtensionServicesContribution,
 	ExtensionServicesEvidence,
 	ExtensionServicesFailure,
 	ExtensionServicesLimits,
 	ExtensionServicesReadResult,
-	ExtensionServicesService,
 	ExtensionServicesSnapshot,
 	ExtensionServicesStatus,
 	ExtensionServicesTaskAdmission,
@@ -498,7 +498,7 @@ export class ExtensionServicesManager {
 
 	private taskOperation(
 		task: Task,
-		service: ExtensionServicesService,
+		service: ExtensionServiceName,
 		input: JsonObject,
 	): Promise<ExtensionServicesExecutionResult> {
 		const denied = this.taskFailure(task);
@@ -526,7 +526,7 @@ export class ExtensionServicesManager {
 		owner: string,
 		ownerId: string,
 		ownerKind: "task" | "validation",
-		service: ExtensionServicesService,
+		service: ExtensionServiceName,
 		rawInput: JsonObject,
 		signal: AbortSignal,
 		taskBudget?: Budget,

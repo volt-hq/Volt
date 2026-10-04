@@ -32,9 +32,9 @@ import type { ExtensionServicesExecution, ExtensionServicesExecutionResult } fro
 import { ExtensionServicesManager, withoutExtensionServices } from "../extensions/services-runtime.ts";
 import { ExtensionSkillCatalog } from "../extensions/services-skills.ts";
 import type {
+	ExtensionServiceName,
 	ExtensionServicesFailure,
 	ExtensionServicesLimits,
-	ExtensionServicesService,
 } from "../extensions/services-types.ts";
 import { withManagedLspObservation } from "../lsp/managed-observation.ts";
 import {
@@ -232,7 +232,7 @@ export class SessionExtensionServices {
 						kind: delivery.kind,
 					})),
 				),
-				services: (Object.keys(EXTENSION_SERVICES_TOOLS) as ExtensionServicesService[]).filter((service) => {
+				services: (Object.keys(EXTENSION_SERVICES_TOOLS) as ExtensionServiceName[]).filter((service) => {
 					const name = EXTENSION_SERVICES_TOOLS[service];
 					return (
 						(service === "readSkill" ? catalog.skills.length > 0 : this.host.isToolActive(name)) &&

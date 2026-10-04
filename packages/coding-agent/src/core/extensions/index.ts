@@ -22,6 +22,7 @@ export { ExtensionMessageRoleMismatchError, ExtensionRunner } from "./runner.ts"
 export type {
 	ExtensionOperationEvent,
 	ExtensionOperationOrigin,
+	ExtensionServiceName,
 	ExtensionServicesCause,
 	ExtensionServicesContext,
 	ExtensionServicesContribution,
@@ -36,7 +37,6 @@ export type {
 	ExtensionServicesReadResult,
 	ExtensionServicesRepository,
 	ExtensionServicesSearchResult,
-	ExtensionServicesService,
 	ExtensionServicesSkill,
 	ExtensionServicesSnapshot,
 	ExtensionServicesStatus,
