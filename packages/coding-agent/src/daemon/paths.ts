@@ -129,7 +129,7 @@ export interface DaemonPaths {
 	lockDirPath: string;
 	logPath: string;
 	statePath: string;
-	workStatePath: string;
+	changesPath: string;
 	auditPath: string;
 }
 
@@ -203,7 +203,7 @@ export function getDaemonPaths(agentDir: string = getAgentDir()): DaemonPaths {
 		lockDirPath: join(daemonDir, "voltd.lock"),
 		logPath: join(daemonDir, "voltd.log"),
 		statePath: join(daemonDir, "state.json"),
-		workStatePath: join(daemonDir, "work-state.json"),
+		changesPath: join(daemonDir, "changes.json"),
 		auditPath: join(daemonDir, "audit.jsonl"),
 	};
 }

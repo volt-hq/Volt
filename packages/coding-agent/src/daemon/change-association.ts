@@ -11,16 +11,16 @@ import type {
 	CodeHostPullRequestStatusTarget,
 } from "../core/code-host/types.ts";
 import {
-	isActiveWorkPullRequestStatus,
-	isSameWorkPullRequestRepository,
-	type WorkBindingMutationResult,
-	type WorkChangeRecord,
-	type WorkDiscoveryApplyOutcome,
-	type WorkDiscoveryFence,
-	type WorkPullRequestStatusUpdate,
-	type WorkStateStore,
-	type WorkStateWireContext,
-} from "./work-state.ts";
+	type ChangeBindingMutationResult,
+	type ChangeDiscoveryApplyOutcome,
+	type ChangeDiscoveryFence,
+	type ChangePullRequestStatusUpdate,
+	type ChangeRecord,
+	type ChangeStore,
+	type ChangeWireContext,
+	isActiveChangePullRequestStatus,
+	isSameChangePullRequestRepository,
+} from "./changes-store.ts";
 
 const DEFAULT_BASE_BRANCHES = ["main", "master", "trunk", "develop", "development"] as const;
 const DEFAULT_PROVIDER_CONCURRENCY = 2;
@@ -42,7 +42,7 @@ const CLIENT_ACTIVITY_WINDOW_MS = 3 * 60_000;
 const STATUS_STALE_GRACE_MS = 30_000;
 const STATUS_WATCH_LIMIT = 200;
 
-export interface WorkAssociationObservation {
+export interface ChangeAssociationObservation {
 	workspaceName: string;
 	workspaceGeneration: number;
 	sessionId: string;
@@ -55,17 +55,17 @@ export interface WorkAssociationObservation {
 	baseBranches?: readonly string[];
 }
 
-export type WorkAssociationRevisionGuard = () => boolean;
+export type ChangeAssociationRevisionGuard = () => boolean;
 
 interface ActiveObservation {
 	readonly key: string;
 	readonly cwd: string;
 	readonly trusted: boolean;
-	readonly fence: WorkDiscoveryFence;
-	readonly change: WorkChangeRecord;
+	readonly fence: ChangeDiscoveryFence;
+	readonly change: ChangeRecord;
 	/** The session currently observes the bound change's own repository and branch. */
 	readonly onChangeBranch: boolean;
-	readonly isCurrentRevision: WorkAssociationRevisionGuard;
+	readonly isCurrentRevision: ChangeAssociationRevisionGuard;
 }
 
 type StatusPollResult = "succeeded" | "failed" | "idle";
@@ -75,10 +75,10 @@ interface CachedDiscovery {
 	readonly expiresAt: number;
 }
 
-export type WorkAssociationRefreshFailurePhase = "discovery" | "scheduled_refresh" | "status_refresh";
+export type ChangeAssociationRefreshFailurePhase = "discovery" | "scheduled_refresh" | "status_refresh";
 
-export interface WorkAssociationServiceOptions {
-	store: WorkStateStore;
+export interface ChangeAssociationServiceOptions {
+	store: ChangeStore;
 	discoveryProvider?: CodeHostPullRequestDiscoveryProvider;
 	/** Batched status refresh for already-associated pull requests. */
 	statusProvider?: CodeHostPullRequestStatusProvider;
@@ -89,7 +89,7 @@ export interface WorkAssociationServiceOptions {
 	now?: () => number;
 	providerConcurrency?: number;
 	cacheMaxEntries?: number;
-	onRefreshError?: (phase: WorkAssociationRefreshFailurePhase, error: unknown) => void;
+	onRefreshError?: (phase: ChangeAssociationRefreshFailurePhase, error: unknown) => void;
 }
 
 function observationKey(workspaceName: string, workspaceGeneration: number, sessionId: string): string {
@@ -110,11 +110,11 @@ export function isConfiguredBaseBranch(branch: string, configured: readonly stri
 	return candidates.has(normalizedBaseBranch(branch));
 }
 
-function discoveryKey(fence: WorkDiscoveryFence): string {
+function discoveryKey(fence: ChangeDiscoveryFence): string {
 	return `${fence.repositoryId}\0${fence.branch}\0${fence.headOid}`;
 }
 
-function toStoreOutcome(outcome: CodeHostPullRequestDiscoveryOutcome): WorkDiscoveryApplyOutcome {
+function toStoreOutcome(outcome: CodeHostPullRequestDiscoveryOutcome): ChangeDiscoveryApplyOutcome {
 	if (outcome.state !== "resolved") return { state: outcome.state };
 	return {
 		state: "resolved",
@@ -133,22 +133,22 @@ function toStoreOutcome(outcome: CodeHostPullRequestDiscoveryOutcome): WorkDisco
 	};
 }
 
-function isSameResolvedPullRequest(change: WorkChangeRecord, outcome: CodeHostPullRequestDiscoveryOutcome): boolean {
+function isSameResolvedPullRequest(change: ChangeRecord, outcome: CodeHostPullRequestDiscoveryOutcome): boolean {
 	return (
 		change.resolutionState === "resolved" &&
 		change.pullRequest !== undefined &&
 		outcome.state === "resolved" &&
 		change.pullRequest.provider === outcome.pullRequest.providerId &&
 		change.pullRequest.number === outcome.pullRequest.number &&
-		isSameWorkPullRequestRepository(change.pullRequest.repository, outcome.pullRequest.repository)
+		isSameChangePullRequestRepository(change.pullRequest.repository, outcome.pullRequest.repository)
 	);
 }
 
-function isWatchedChange(change: WorkChangeRecord): boolean {
+function isWatchedChange(change: ChangeRecord): boolean {
 	return (
 		change.resolutionState === "resolved" &&
 		change.pullRequest !== undefined &&
-		isActiveWorkPullRequestStatus(change.pullRequest.status)
+		isActiveChangePullRequestStatus(change.pullRequest.status)
 	);
 }
 
@@ -172,15 +172,15 @@ function ttlForOutcome(outcome: CodeHostPullRequestDiscoveryOutcome): number {
 	}
 }
 
-export class WorkAssociationService {
-	private readonly store: WorkStateStore;
+export class ChangeAssociationService {
+	private readonly store: ChangeStore;
 	private readonly discoveryProvider: CodeHostPullRequestDiscoveryProvider;
 	private readonly enabled: boolean;
 	private readonly isOnline: () => boolean;
 	private readonly now: () => number;
 	private readonly providerConcurrency: number;
 	private readonly cacheMaxEntries: number;
-	private readonly onRefreshError: NonNullable<WorkAssociationServiceOptions["onRefreshError"]>;
+	private readonly onRefreshError: NonNullable<ChangeAssociationServiceOptions["onRefreshError"]>;
 	private readonly active = new Map<string, ActiveObservation>();
 	private readonly timers = new Map<string, NodeJS.Timeout>();
 	private readonly cache = new Map<string, CachedDiscovery>();
@@ -201,7 +201,7 @@ export class WorkAssociationService {
 	private clientActivityHolds = 0;
 	private lastClientActivityAt = Number.NEGATIVE_INFINITY;
 
-	constructor(options: WorkAssociationServiceOptions) {
+	constructor(options: ChangeAssociationServiceOptions) {
 		this.store = options.store;
 		this.discoveryProvider = options.discoveryProvider ?? githubCliPullRequestDiscoveryProvider;
 		this.statusProvider = options.statusProvider ?? githubCliPullRequestStatusProvider;
@@ -215,8 +215,8 @@ export class WorkAssociationService {
 	}
 
 	async observe(
-		observation: WorkAssociationObservation,
-		isCurrentRevision: WorkAssociationRevisionGuard = () => true,
+		observation: ChangeAssociationObservation,
+		isCurrentRevision: ChangeAssociationRevisionGuard = () => true,
 	): Promise<void> {
 		if (this.closed || !isCurrentRevision()) return;
 		const now = this.now();
@@ -329,18 +329,18 @@ export class WorkAssociationService {
 		return this.store.flush();
 	}
 
-	getWorkContext(
+	getChangeContext(
 		workspaceName: string,
 		workspaceGeneration: number,
 		sessionId: string,
-	): WorkStateWireContext | undefined {
-		return this.store.getWorkContext(workspaceName, workspaceGeneration, sessionId, this.now());
+	): ChangeWireContext | undefined {
+		return this.store.getChangeContext(workspaceName, workspaceGeneration, sessionId, this.now());
 	}
 
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
-		this.abortController.abort(new Error("Work association service closed"));
+		this.abortController.abort(new Error("Change association service closed"));
 		for (const timer of this.timers.values()) clearTimeout(timer);
 		this.timers.clear();
 		this.clearStatusTimer();
@@ -479,7 +479,7 @@ export class WorkAssociationService {
 				);
 			});
 		}
-		const updates: WorkPullRequestStatusUpdate[] = watched.map((entry) => {
+		const updates: ChangePullRequestStatusUpdate[] = watched.map((entry) => {
 			const outcome = outcomes.get(`${entry.repository.host}\0${targetKey(entry)}`);
 			return {
 				...entry,
@@ -600,7 +600,7 @@ export class WorkAssociationService {
 		}
 	}
 
-	private reportRefreshError(phase: WorkAssociationRefreshFailurePhase, error: unknown): void {
+	private reportRefreshError(phase: ChangeAssociationRefreshFailurePhase, error: unknown): void {
 		try {
 			this.onRefreshError(phase, error);
 		} catch {
@@ -641,13 +641,13 @@ export class WorkAssociationService {
 	}
 }
 
-export function createWorkAssociationService(
-	store: WorkStateStore,
-	options: Omit<WorkAssociationServiceOptions, "store"> = {},
-): WorkAssociationService {
-	return new WorkAssociationService({ store, ...options });
+export function createChangeAssociationService(
+	store: ChangeStore,
+	options: Omit<ChangeAssociationServiceOptions, "store"> = {},
+): ChangeAssociationService {
+	return new ChangeAssociationService({ store, ...options });
 }
 
-export function workBindingNeedsDiscovery(binding: WorkBindingMutationResult): boolean {
+export function changeBindingNeedsDiscovery(binding: ChangeBindingMutationResult): boolean {
 	return binding.shouldDiscover;
 }

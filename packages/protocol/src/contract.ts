@@ -273,9 +273,9 @@ import {
 	RpcListSubagentsResponseSchema,
 	RpcPromptCacheStatusSchema,
 	RpcRegisterPushTargetResponseSchema,
+	RpcSessionChangeContextSchema,
+	RpcSessionChangePullRequestSchema,
 	RpcSessionListItemSchema,
-	RpcSessionWorkContextSchema,
-	RpcSessionWorkPullRequestSchema,
 	RpcSubagentDefinitionSchema,
 	RpcSubagentDefinitionSourceSchema,
 	RpcSubagentSourceInfoSchema,
@@ -468,8 +468,8 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcBackgroundJobs: RpcBackgroundJobsSchema,
 
 	// Session catalog, run state, models, subagents, plans, and host status
-	RpcSessionWorkPullRequest: RpcSessionWorkPullRequestSchema,
-	RpcSessionWorkContext: RpcSessionWorkContextSchema,
+	RpcSessionChangePullRequest: RpcSessionChangePullRequestSchema,
+	RpcSessionChangeContext: RpcSessionChangeContextSchema,
 	RpcSessionListItem: RpcSessionListItemSchema,
 	RpcActiveAgentRun: RpcActiveAgentRunSchema,
 	RpcActiveCompaction: RpcActiveCompactionSchema,

@@ -1,8 +1,8 @@
 /**
- * Extension work: optional read-only preparation extensions run at a turn's
+ * Extension services: optional read-only preparation extensions run at a turn's
  * request boundaries. Each boundary opens a scope over the batch it delivers;
  * collected text joins the request when it fits the model's headroom and its
- * authorization is still current. Work runs trusted built-in read tools
+ * authorization is still current. Tasks run trusted built-in read tools
  * through the same tool-call and tool-result gates as the agent, and is
  * invalidated whenever the session's authority over it changes.
  */
@@ -28,10 +28,14 @@ import type { AgentSessionTurnPolicy } from "../agent-session.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import { estimateMessagesTokens } from "../compaction/index.ts";
 import type { ExtensionRunner, ToolDefinition } from "../extensions/index.ts";
-import type { ExtensionWorkExecution, ExtensionWorkExecutionResult } from "../extensions/work-host.ts";
-import { ExtensionWorkManager, withoutExtensionWork } from "../extensions/work-runtime.ts";
-import { ExtensionSkillCatalog } from "../extensions/work-skills.ts";
-import type { ExtensionWorkFailure, ExtensionWorkLimits, ExtensionWorkService } from "../extensions/work-types.ts";
+import type { ExtensionServicesExecution, ExtensionServicesExecutionResult } from "../extensions/services-host.ts";
+import { ExtensionServicesManager, withoutExtensionServices } from "../extensions/services-runtime.ts";
+import { ExtensionSkillCatalog } from "../extensions/services-skills.ts";
+import type {
+	ExtensionServiceName,
+	ExtensionServicesFailure,
+	ExtensionServicesLimits,
+} from "../extensions/services-types.ts";
 import { withManagedLspObservation } from "../lsp/managed-observation.ts";
 import {
 	authorizeToolOperation,
@@ -44,8 +48,8 @@ import type { Skill } from "../skills.ts";
 import { RepositoryObservationError, withRepositoryObservation } from "../tools/repository-observation.ts";
 import { extractUserMessageText } from "./session-info.ts";
 
-/** The built-in tool each extension work service runs. */
-const EXTENSION_WORK_TOOLS = {
+/** The built-in tool each extension service runs. */
+const EXTENSION_SERVICES_TOOLS = {
 	readText: "read",
 	findPaths: "find",
 	searchText: "grep",
@@ -54,16 +58,16 @@ const EXTENSION_WORK_TOOLS = {
 	definition: "lsp",
 	references: "lsp",
 } as const;
-const EXTENSION_WORK_GRANT: OperationGrantProfile = {
+const EXTENSION_SERVICES_GRANT: OperationGrantProfile = {
 	id: "extension-preparation-read",
 	capabilities: new Set(["workspace.read"]),
 };
 
-export interface SessionExtensionWorkHost {
+export interface SessionExtensionServicesHost {
 	readonly settingsManager: SettingsManager;
 	/** The session's working directory. */
 	readonly cwd: string;
-	/** Whether the session can run extension work: open, not reloading, admitting operations, and holding its log. */
+	/** Whether the session can run extension services: open, not reloading, admitting operations, and holding its log. */
 	isCurrent(): boolean;
 	conversation(): Conversation<AgentTool> | undefined;
 	extensionRunner(): ExtensionRunner;
@@ -92,15 +96,15 @@ export interface SessionExtensionWorkHost {
 	isExtensionInput(clientMessageId: string): boolean;
 }
 
-export class SessionExtensionWork {
-	private readonly host: SessionExtensionWorkHost;
-	private readonly limits: Partial<ExtensionWorkLimits> | undefined;
-	private manager!: ExtensionWorkManager;
+export class SessionExtensionServices {
+	private readonly host: SessionExtensionServicesHost;
+	private readonly limits: Partial<ExtensionServicesLimits> | undefined;
+	private manager!: ExtensionServicesManager;
 	private skills!: ExtensionSkillCatalog;
 	private key: string | undefined;
 	private signal: AbortSignal | undefined;
 	private abortListener: (() => void) | undefined;
-	/** The implementation each trusted work tool had when it was registered; a replacement invalidates work on it. */
+	/** The implementation each trusted service tool had when it was registered; a replacement invalidates tasks on it. */
 	private readonly implementations = new WeakMap<
 		AgentTool,
 		{
@@ -111,7 +115,7 @@ export class SessionExtensionWork {
 	>();
 
 	/** @throws TypeError when `limits` loosens a host ceiling */
-	constructor(host: SessionExtensionWorkHost, limits: Partial<ExtensionWorkLimits> | undefined) {
+	constructor(host: SessionExtensionServicesHost, limits: Partial<ExtensionServicesLimits> | undefined) {
 		this.host = host;
 		this.limits = limits;
 		this.open();
@@ -120,7 +124,7 @@ export class SessionExtensionWork {
 	/** A fresh manager and skill catalog. */
 	private open(): void {
 		this.skills = new ExtensionSkillCatalog();
-		const manager = new ExtensionWorkManager({
+		const manager = new ExtensionServicesManager({
 			limits: this.limits,
 			isCurrent: () => this.manager === manager && this.host.isCurrent(),
 			execute: (request) => this.execute(request),
@@ -132,8 +136,8 @@ export class SessionExtensionWork {
 		this.manager = manager;
 	}
 
-	/** The manager extensions bind their work to. */
-	get workManager(): ExtensionWorkManager {
+	/** The manager extensions bind their tasks to. */
+	get servicesManager(): ExtensionServicesManager {
 		return this.manager;
 	}
 
@@ -151,7 +155,7 @@ export class SessionExtensionWork {
 		return this.manager.drain();
 	}
 
-	/** Revoke the current scope: its collected work no longer joins any request. */
+	/** Revoke the current scope: its collected context no longer joins any request. */
 	invalidate(): void {
 		this.key = undefined;
 		if (this.abortListener) this.signal?.removeEventListener("abort", this.abortListener);
@@ -161,12 +165,12 @@ export class SessionExtensionWork {
 		this.manager.invalidate();
 	}
 
-	/** Record the implementation of each trusted work tool, so work on a replaced tool is invalidated. */
+	/** Record the implementation of each trusted service tool, so tasks on a replaced tool are invalidated. */
 	retainImplementations(
 		tools: ReadonlyMap<string, AgentTool>,
 		trustedDefinition: (name: string) => ToolDefinition | undefined,
 	): void {
-		for (const name of Object.values(EXTENSION_WORK_TOOLS)) {
+		for (const name of Object.values(EXTENSION_SERVICES_TOOLS)) {
 			const tool = tools.get(name);
 			const definition = trustedDefinition(name);
 			if (tool && definition) {
@@ -181,7 +185,7 @@ export class SessionExtensionWork {
 
 	/**
 	 * The policy's request-boundary hook: open the batch's scope and collect
-	 * the work that fits the request, or nothing.
+	 * the context that fits the request, or nothing.
 	 */
 	async collect(
 		boundary: ConversationRequestBoundary,
@@ -191,7 +195,7 @@ export class SessionExtensionWork {
 		if (!this.host.isCurrent() || signal?.aborted) return undefined;
 		const batch = boundary.batch;
 		if (!batch || (!boundary.newInput && this.key !== batch.id)) return undefined;
-		// Input an extension sent itself does not start extension work.
+		// Input an extension sent itself does not start extension tasks.
 		if (
 			batch.deliveries.every(
 				(delivery) =>
@@ -228,8 +232,8 @@ export class SessionExtensionWork {
 						kind: delivery.kind,
 					})),
 				),
-				services: (Object.keys(EXTENSION_WORK_TOOLS) as ExtensionWorkService[]).filter((service) => {
-					const name = EXTENSION_WORK_TOOLS[service];
+				services: (Object.keys(EXTENSION_SERVICES_TOOLS) as ExtensionServiceName[]).filter((service) => {
+					const name = EXTENSION_SERVICES_TOOLS[service];
 					return (
 						(service === "readSkill" ? catalog.skills.length > 0 : this.host.isToolActive(name)) &&
 						this.host.trustedOperationResolver(name) !== undefined
@@ -275,8 +279,8 @@ export class SessionExtensionWork {
 		};
 	}
 
-	private async execute(request: ExtensionWorkExecution): Promise<ExtensionWorkExecutionResult> {
-		const name = EXTENSION_WORK_TOOLS[request.service];
+	private async execute(request: ExtensionServicesExecution): Promise<ExtensionServicesExecutionResult> {
+		const name = EXTENSION_SERVICES_TOOLS[request.service];
 		const resourceId =
 			request.service === "readSkill" && typeof request.input.resourceId === "string"
 				? request.input.resourceId
@@ -305,7 +309,7 @@ export class SessionExtensionWork {
 		) {
 			return { status: "unavailable", reason: "inactive_or_untrusted_tool" };
 		}
-		const check = (input: JsonObject): ExtensionWorkExecutionResult | undefined => {
+		const check = (input: JsonObject): ExtensionServicesExecutionResult | undefined => {
 			if (request.signal.aborted) return { status: "cancelled", reason: "cancelled" };
 			if (
 				!this.host.isCurrent() ||
@@ -333,7 +337,7 @@ export class SessionExtensionWork {
 			const profile = this.host.operationGrantProfile();
 			if (
 				(!resource && !this.host.isToolActive(name)) ||
-				!authorizeToolOperation(resolver, input, EXTENSION_WORK_GRANT).allowed ||
+				!authorizeToolOperation(resolver, input, EXTENSION_SERVICES_GRANT).allowed ||
 				(profile && !authorizeToolOperation(resolver, input, profile).allowed)
 			) {
 				return { status: "denied", reason: "read_grant_denied" };
@@ -364,7 +368,7 @@ export class SessionExtensionWork {
 		if (failure) return failure;
 		const event = { type: "tool_call" as const, toolName: name, toolCallId, input };
 		try {
-			const decision = await withoutExtensionWork(() =>
+			const decision = await withoutExtensionServices(() =>
 				runner.emitToolCall(event, {
 					signal: request.signal,
 					origin: request.origin,
@@ -378,7 +382,7 @@ export class SessionExtensionWork {
 			failure = check(input);
 			if (failure) return failure;
 			for (const { policy, callback } of policies) {
-				const result = await withoutExtensionWork(() =>
+				const result = await withoutExtensionServices(() =>
 					callback?.call(policy, { ...event, input }, request.signal),
 				);
 				failure = check(input);
@@ -388,7 +392,7 @@ export class SessionExtensionWork {
 			}
 			failure = check(input);
 			if (failure) return failure;
-			let producerFailure: ExtensionWorkFailure | undefined;
+			let producerFailure: ExtensionServicesFailure | undefined;
 			const execute = async (): Promise<Awaited<ReturnType<AgentTool["execute"]>>> => {
 				try {
 					return await tool.execute(toolCallId, input, request.signal);
@@ -422,7 +426,7 @@ export class SessionExtensionWork {
 				input,
 				...structuredClone(original),
 			};
-			const patch = await withoutExtensionWork(() =>
+			const patch = await withoutExtensionServices(() =>
 				runner.emitToolResult(resultEvent, {
 					signal: request.signal,
 					origin: request.origin,

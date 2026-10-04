@@ -44,7 +44,7 @@ import type {
 	ToolInfo,
 } from "./extensions/index.ts";
 import type { PolicyRegistration } from "./extensions/policy-registration.ts";
-import type { ExtensionWorkLimits } from "./extensions/work-types.ts";
+import type { ExtensionServicesLimits } from "./extensions/services-types.ts";
 import { GitContextProvider } from "./git-context-provider.ts";
 import { ClientScope } from "./host/client-scope.ts";
 import { LiveState } from "./host/live-state.ts";
@@ -70,7 +70,7 @@ import {
 	type ExtensionClientAttachment,
 	SessionExtensionBinding,
 } from "./session/extension-binding.ts";
-import { SessionExtensionWork } from "./session/extension-work.ts";
+import { SessionExtensionServices } from "./session/extension-services.ts";
 import { SessionLifecycle } from "./session/lifecycle.ts";
 import { type DefaultPersistenceOptions, ModelSettings } from "./session/model-settings.ts";
 import { type NavigateTreeOptions, type NavigateTreeResult, SessionNavigation } from "./session/navigation.ts";
@@ -236,8 +236,8 @@ export interface AgentSessionConfig {
 	promptCacheRefresh?: PromptCacheRefresher;
 	convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	streamOptions?: ConversationStreamOptions;
-	/** Optional managed extension-work limits; may only tighten the host ceilings. */
-	extensionWorkLimits?: Partial<ExtensionWorkLimits>;
+	/** Optional managed extension-services limits; may only tighten the host ceilings. */
+	extensionServicesLimits?: Partial<ExtensionServicesLimits>;
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
 	settingsManager: SettingsManager;
@@ -450,7 +450,7 @@ export class AgentSession {
 	private _unsubscribeBackgroundJobs?: () => void;
 
 	// Extension system
-	private _extensionWork!: SessionExtensionWork;
+	private _extensionServices!: SessionExtensionServices;
 	/** Aborted when the session loses its log or is disposed; command handlers see it as `ctx.signal`. */
 	private readonly _lifetimeAbort = new AbortController();
 	/** The first loss of this session's log; nothing the session does afterwards can be saved. */
@@ -611,7 +611,7 @@ export class AgentSession {
 				liveState: this.liveState,
 				conversation: () => this._conversation,
 				extensions: () => this._extensions,
-				extensionWork: () => this._extensionWork,
+				extensionServices: () => this._extensionServices,
 				background: () => this._background,
 				sessionWriter: () => this._sessionWriter,
 				isDisposed: () => this._disposed,
@@ -651,7 +651,7 @@ export class AgentSession {
 				liveState: this.liveState,
 				conversation: () => this._conversation,
 				tools: () => this._tools,
-				extensionWork: () => this._extensionWork,
+				extensionServices: () => this._extensionServices,
 				background: () => this._background,
 				sessionWriter: () => this._sessionWriter,
 				assertActive: () => this._assertActive(),
@@ -675,7 +675,7 @@ export class AgentSession {
 			retry: this._retry,
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
-			extensionWork: () => this._extensionWork,
+			extensionServices: () => this._extensionServices,
 			tools: () => this._tools,
 			background: () => this._background,
 			isDisposed: () => this._disposed,
@@ -727,7 +727,7 @@ export class AgentSession {
 			retry: this._retry,
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
-			extensionWork: () => this._extensionWork,
+			extensionServices: () => this._extensionServices,
 			background: () => this._background,
 			promptCache: () => this._promptCache,
 			turnPolicy: () => this._turnPolicy,
@@ -767,7 +767,7 @@ export class AgentSession {
 			lost: this.lost,
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
-			extensionWork: () => this._extensionWork,
+			extensionServices: () => this._extensionServices,
 			tools: () => this._tools,
 			bash: () => this._bash,
 			lifecycle: () => this._lifecycle,
@@ -820,7 +820,7 @@ export class AgentSession {
 			backgroundJobs: this._backgroundJobs,
 			conversation: () => this._conversation,
 			extensionRunner: () => this.extensionRunner,
-			extensionWork: () => this._extensionWork,
+			extensionServices: () => this._extensionServices,
 			background: () => this._background,
 			planning: () => this._planning,
 			turnActive: () => this._turnActive,
@@ -841,7 +841,7 @@ export class AgentSession {
 		try {
 			if (ownsGitContextProvider) void this.gitContextProvider.refresh();
 			this._tools.attachMcpManagerEvents();
-			this._extensionWork = this._createExtensionWork(config.extensionWorkLimits);
+			this._extensionServices = this._createExtensionServices(config.extensionServicesLimits);
 			await this._modelSettings.applyInitialSelection(config.model, config.thinkingLevel);
 			this._log = this.sessionManager.takeLog();
 			this._conversation = await Conversation.open<AgentTool>({
@@ -920,7 +920,7 @@ export class AgentSession {
 			});
 		} catch (error) {
 			this._disposed = true;
-			void this._extensionWork?.close();
+			void this._extensionServices?.close();
 			void this._backgroundJobs.close();
 			void this._backgroundDiagnostics.close();
 			void this._promptCache.close();
@@ -1015,7 +1015,7 @@ export class AgentSession {
 		this._lostDeferred.resolve(error);
 		this._lostAbort.abort(error);
 		if (this._disposed) return;
-		this._extensionWork.invalidate();
+		this._extensionServices.invalidate();
 		this._clientInputs.lost(error);
 		queueMicrotask(() => {
 			if (this._disposed) return;
@@ -1092,9 +1092,9 @@ export class AgentSession {
 		return this._conversation?.state.branchSwitchOrdinal ?? 0;
 	}
 
-	/** The session's extension work: invalid limits reject the session's open. */
-	private _createExtensionWork(limits: Partial<ExtensionWorkLimits> | undefined): SessionExtensionWork {
-		return new SessionExtensionWork(
+	/** The session's extension services: invalid limits reject the session's open. */
+	private _createExtensionServices(limits: Partial<ExtensionServicesLimits> | undefined): SessionExtensionServices {
+		return new SessionExtensionServices(
 			{
 				settingsManager: this.settingsManager,
 				cwd: this._cwd,
@@ -1267,7 +1267,7 @@ export class AgentSession {
 			extensionRunner: () => this.extensionRunner,
 			extensionRunnerRef: () => this._extensions.runnerRef,
 			bash: () => this._bash,
-			extensionWork: () => this._extensionWork,
+			extensionServices: () => this._extensionServices,
 			promptCache: () => this._promptCache,
 			isDisposed: () => this._disposed,
 			hasSessionOperationBarrier: () => this._hasSessionOperationBarrier,
@@ -1276,7 +1276,7 @@ export class AgentSession {
 			appendNotice: (message) => this._prompting.sendCustomMessage(message, undefined, false, true),
 			fence: () => {
 				this._disposed = true;
-				this._extensionWork.invalidate();
+				this._extensionServices.invalidate();
 				this._events.endOperation();
 				this._unsubscribeBackgroundJobs?.();
 				this._unsubscribeBackgroundJobs = undefined;
@@ -1865,7 +1865,7 @@ export class AgentSession {
 		const queueDelivery = { requested: options?.deliverQueuedMessages === true };
 		this._abortQueueDelivery = queueDelivery;
 		const releaseAdmission = this._admissionGate.suspend();
-		this._extensionWork.invalidate();
+		this._extensionServices.invalidate();
 		this._backgroundJobs.suppressContinuations();
 		this._background.cancelSchedule();
 		let resolveAbort!: () => void;
@@ -1902,7 +1902,7 @@ export class AgentSession {
 			() => this.abortRetry(),
 			() => this.abortCompaction(),
 			() => this._backgroundJobs.cancelAll(),
-			() => this._extensionWork.drain(),
+			() => this._extensionServices.drain(),
 			// Queued input committing meanwhile stays queued; the stop does not wait for it.
 			() => this._waitForIdle(false),
 		]) {

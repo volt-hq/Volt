@@ -4,15 +4,15 @@ import { type Context, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSessionTurnPolicy } from "../../src/core/agent-session.ts";
-import type { ExtensionAPI, ExtensionFactory, PolicyRegistration } from "../../src/core/extensions/types.ts";
 import type {
-	ExtensionWorkContext,
-	ExtensionWorkReadResult,
-	ExtensionWorkSnapshot,
-	ExtensionWorkTaskContext,
-	ExtensionWorkTaskHandle,
+	ExtensionServicesContext,
+	ExtensionServicesReadResult,
+	ExtensionServicesSnapshot,
+	ExtensionServicesTaskContext,
+	ExtensionServicesTaskHandle,
 	RequestBoundaryEvent,
-} from "../../src/core/extensions/work-types.ts";
+} from "../../src/core/extensions/services-types.ts";
+import type { ExtensionAPI, ExtensionFactory, PolicyRegistration } from "../../src/core/extensions/types.ts";
 import { createHarness, getMessageText, type Harness, type HarnessOptions } from "./harness.ts";
 
 const harnesses: Harness[] = [];
@@ -54,21 +54,21 @@ async function setup(options: HarnessOptions = {}) {
 		...options,
 	});
 	harnesses.push(harness);
-	await harness.session.setSessionName("extension work test");
+	await harness.session.setSessionName("extension services test");
 	return harness;
 }
 
-function consumer(run: (task: ExtensionWorkTaskContext) => Promise<void>, extra?: ExtensionFactory) {
-	let handle: ExtensionWorkTaskHandle | undefined;
+function consumer(run: (task: ExtensionServicesTaskContext) => Promise<void>, extra?: ExtensionFactory) {
+	let handle: ExtensionServicesTaskHandle | undefined;
 	let api: ExtensionAPI | undefined;
-	const boundaries: Array<{ event: RequestBoundaryEvent; snapshot: ExtensionWorkSnapshot }> = [];
+	const boundaries: Array<{ event: RequestBoundaryEvent; snapshot: ExtensionServicesSnapshot }> = [];
 	const factory: ExtensionFactory = async (volt) => {
 		api = volt;
 		volt.on("request_boundary", (event, ctx) => {
-			expect(ctx.work).toBeDefined();
-			boundaries.push({ event, snapshot: ctx.work!.snapshot });
+			expect(ctx.services).toBeDefined();
+			boundaries.push({ event, snapshot: ctx.services!.snapshot });
 			if (!event.first) return;
-			const admission = ctx.work!.tasks.start({ key: "prepare", label: "Prepare" }, run);
+			const admission = ctx.services!.tasks.start({ key: "prepare", label: "Prepare" }, run);
 			expect(admission.status).toBe("started");
 			if (admission.status === "started") handle = admission.task;
 		});
@@ -96,9 +96,9 @@ function throughCheckpoint(harness: Harness, inspect: (context: Context) => void
 	]);
 }
 
-describe("managed extension work through AgentSession", () => {
+describe("managed extension services through AgentSession", () => {
 	it("uses active native reads and ready-only source evidence without canonical or tool-event pollution", async () => {
-		let result: ExtensionWorkReadResult | undefined;
+		let result: ExtensionServicesReadResult | undefined;
 		const origins: string[] = [];
 		const extension = consumer(
 			async (task) => {
@@ -117,12 +117,12 @@ describe("managed extension work through AgentSession", () => {
 				volt.on("tool_call", (event, ctx) => {
 					if (event.toolName === "read") {
 						origins.push(event.origin?.kind ?? "missing");
-						expect(ctx.work).toBeUndefined();
+						expect(ctx.services).toBeUndefined();
 						expect(ctx.signal).toBeDefined();
 					}
 				});
 				volt.on("tool_result", (event, ctx) => {
-					if (event.toolName === "read") expect(ctx.work).toBeUndefined();
+					if (event.toolName === "read") expect(ctx.services).toBeUndefined();
 				});
 			},
 		);
@@ -172,7 +172,7 @@ describe("managed extension work through AgentSession", () => {
 	it.each(["inactive", "override"] as const)(
 		"rejects %s reads rather than invoking a hidden native factory",
 		async (kind) => {
-			let result: ExtensionWorkReadResult | undefined;
+			let result: ExtensionServicesReadResult | undefined;
 			let executed = 0;
 			const extension = consumer(
 				async (task) => {
@@ -204,7 +204,7 @@ describe("managed extension work through AgentSession", () => {
 	);
 
 	it("returns typed unsupported outcomes for binary reads without source data", async () => {
-		let result: ExtensionWorkReadResult | undefined;
+		let result: ExtensionServicesReadResult | undefined;
 		const extension = consumer(async (task) => {
 			result = await task.repository.readText({ path: "source.bin" });
 		});
@@ -218,7 +218,7 @@ describe("managed extension work through AgentSession", () => {
 	it.each(["redact", "details", "throw"] as const)(
 		"withholds structured data after a %s result reducer",
 		async (kind) => {
-			let result: ExtensionWorkReadResult | undefined;
+			let result: ExtensionServicesReadResult | undefined;
 			const extension = consumer(
 				async (task) => {
 					result = await task.repository.readText({ path: "source.txt" });
@@ -244,7 +244,7 @@ describe("managed extension work through AgentSession", () => {
 	);
 
 	it("revalidates arguments after call gates and honors host before-tool restrictions", async () => {
-		const results: ExtensionWorkReadResult[] = [];
+		const results: ExtensionServicesReadResult[] = [];
 		let hostCalls = 0;
 		const extension = consumer(
 			async (task) => {
@@ -273,7 +273,7 @@ describe("managed extension work through AgentSession", () => {
 	});
 
 	it.each(["before", "during"] as const)("honors host policy mutation %s a managed operation", async (timing) => {
-		let result: ExtensionWorkReadResult | undefined;
+		let result: ExtensionServicesReadResult | undefined;
 		const extension = consumer(async (task) => {
 			result = await task.repository.readText({ path: "source.txt" });
 		});
@@ -303,7 +303,7 @@ describe("managed extension work through AgentSession", () => {
 	it.each(["tool_call", "tool_result"] as const)(
 		"fences policies registered after earlier extensions were visited in %s",
 		async (kind) => {
-			let result: ExtensionWorkReadResult | undefined;
+			let result: ExtensionServicesReadResult | undefined;
 			const extension = consumer(async (task) => {
 				result = await task.repository.readText({ path: "source.txt" });
 			});
@@ -357,7 +357,7 @@ describe("managed extension work through AgentSession", () => {
 	});
 
 	it("does not publish a result when a gate replaces the active implementation", async () => {
-		let result: ExtensionWorkReadResult | undefined;
+		let result: ExtensionServicesReadResult | undefined;
 		let replacementCalls = 0;
 		const extension = consumer(
 			async (task) => {
@@ -407,7 +407,7 @@ describe("managed extension work through AgentSession", () => {
 			expect(JSON.stringify(context.messages)).not.toContain("old observation");
 		});
 		await harness.session.prompt("inspect");
-		expect(extension.getApi().getWorkStatus().contributions).toContainEqual({
+		expect(extension.getApi().getServicesStatus().contributions).toContainEqual({
 			key: "source",
 			status: "omitted",
 			reason: "source_unverified",
@@ -442,7 +442,7 @@ describe("managed extension work through AgentSession", () => {
 	});
 
 	it("rejects post-await recursive work from host policy lineage", async () => {
-		let retained: ExtensionWorkContext | undefined;
+		let retained: ExtensionServicesContext | undefined;
 		let recursiveStatus = "";
 		const extension = consumer(
 			async (task) => {
@@ -450,7 +450,7 @@ describe("managed extension work through AgentSession", () => {
 			},
 			(volt) => {
 				volt.on("request_boundary", (_event, ctx) => {
-					retained = ctx.work;
+					retained = ctx.services;
 				});
 			},
 		);

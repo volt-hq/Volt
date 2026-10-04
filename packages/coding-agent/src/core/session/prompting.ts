@@ -32,7 +32,7 @@ import type { SessionBackgroundContinuation } from "./background-continuation.ts
 import type { SessionBash } from "./bash.ts";
 import { createLocalClientInputId, type LiveClientInput, type SessionClientInputs } from "./client-inputs.ts";
 import type { SessionEvents } from "./events.ts";
-import type { SessionExtensionWork } from "./extension-work.ts";
+import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionLifecycle } from "./lifecycle.ts";
 import type { SessionToolRuntime } from "./tool-runtime.ts";
 
@@ -48,7 +48,7 @@ export interface SessionPromptingHost {
 	readonly lost: Promise<Error>;
 	conversation(): Conversation<AgentTool>;
 	extensionRunner(): ExtensionRunner;
-	extensionWork(): SessionExtensionWork;
+	extensionServices(): SessionExtensionServices;
 	tools(): SessionToolRuntime;
 	bash(): SessionBash;
 	lifecycle(): SessionLifecycle;
@@ -82,7 +82,7 @@ export class SessionPrompting {
 	private readonly host: SessionPromptingHost;
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	private readonly pendingNextTurnMessages: CustomMessage[] = [];
-	/** Inputs extensions sent (`sendUserMessage`) that have not settled; they start no extension work. */
+	/** Inputs extensions sent (`sendUserMessage`) that have not settled; they start no extension tasks. */
 	private readonly extensionInputIds = new Set<string>();
 	private activeExtensionCommandHandlers = 0;
 	/** The identified input whose extension command handler the current asynchronous chain runs in. */
@@ -373,7 +373,7 @@ export class SessionPrompting {
 					);
 				}
 				clientInputs.assertQueueCapacity();
-				if (options.streamingBehavior === "steer") this.host.extensionWork().invalidate();
+				if (options.streamingBehavior === "steer") this.host.extensionServices().invalidate();
 				const admission = await clientInputs.trackQueueAdmission(this.host.conversation().prompt(input));
 				if (admission.ordinals.length > 0) clientInputs.reportQueuedOutcome(admission);
 				if (identifiedClientMessageId !== undefined) {
@@ -687,7 +687,7 @@ export class SessionPrompting {
 		let admission: ConversationInputAdmission;
 		try {
 			if (command === "steer") {
-				this.host.extensionWork().invalidate();
+				this.host.extensionServices().invalidate();
 				admission = await clientInputs.trackQueueAdmission(this.host.conversation().steer(prepared));
 			} else {
 				admission = await clientInputs.trackQueueAdmission(this.host.conversation().followUp(prepared));
@@ -747,7 +747,7 @@ export class SessionPrompting {
 		if (options?.deliverAs === "nextTurn") {
 			this.pendingNextTurnMessages.push(appMessage);
 		} else if (this.host.turnActive() && !appendDuringReservedTurn) {
-			if (options?.deliverAs !== "followUp") this.host.extensionWork().invalidate();
+			if (options?.deliverAs !== "followUp") this.host.extensionServices().invalidate();
 			await clientInputs.trackQueueAdmission(
 				conversation.queueMessages(options?.deliverAs === "followUp" ? "followUp" : "steer", [appMessage]),
 			);

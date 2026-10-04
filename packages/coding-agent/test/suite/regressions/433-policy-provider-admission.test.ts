@@ -6,6 +6,12 @@ import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionTurnPolicy } from "../../../src/core/agent-session.ts";
 import type {
+	ExtensionOperationOrigin,
+	ExtensionServicesReadResult,
+	ExtensionServicesStatus,
+	ExtensionServicesTaskHandle,
+} from "../../../src/core/extensions/services-types.ts";
+import type {
 	ExtensionAPI,
 	ExtensionHandler,
 	PolicyRegistration,
@@ -14,12 +20,6 @@ import type {
 	ToolResultEvent,
 	ToolResultEventResult,
 } from "../../../src/core/extensions/types.ts";
-import type {
-	ExtensionOperationOrigin,
-	ExtensionWorkReadResult,
-	ExtensionWorkStatus,
-	ExtensionWorkTaskHandle,
-} from "../../../src/core/extensions/work-types.ts";
 import { createHarness, getMessageText } from "../harness.ts";
 
 function deferred() {
@@ -69,18 +69,18 @@ describe("#433 provider handoff diagnostics", () => {
 			let api!: ExtensionAPI;
 			let policy!: PolicyRegistration<AgentSessionTurnPolicy>;
 			let contextText = "";
-			const statuses: ExtensionWorkStatus["contributions"][] = [];
+			const statuses: ExtensionServicesStatus["contributions"][] = [];
 			let boundaries = 0;
 			const harness = await createHarness({
 				settings: { compaction: { enabled: false } },
-				extensionWorkLimits: { firstRequestWaitMs: 100 },
+				extensionServicesLimits: { firstRequestWaitMs: 100 },
 				extensionFactories: [
 					(volt) => {
 						api = volt;
 						volt.on("request_boundary", (_event, ctx) => {
 							boundaries++;
-							ctx.work!.context.requestWait(100);
-							ctx.work!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
+							ctx.services!.context.requestWait(100);
+							ctx.services!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
 								task.context.put({ key: "suggestion", text: "prepared suggestion" });
 							});
 						});
@@ -93,10 +93,10 @@ describe("#433 provider handoff diagnostics", () => {
 				const stream = harness.control.getStreamFn();
 				harness.control.setStreamFn((model, context, options) => {
 					contextText = context.messages.map(getMessageText).join("\n");
-					statuses.push(api.getWorkStatus().contributions);
+					statuses.push(api.getServicesStatus().contributions);
 					if (change === "policy") policy.invalidate();
 					else harness.session.setActiveToolsByName([]);
-					statuses.push(api.getWorkStatus().contributions);
+					statuses.push(api.getServicesStatus().contributions);
 					return stream(model, context, options);
 				});
 				harness.setResponses([fauxAssistantMessage("done")]);
@@ -104,7 +104,7 @@ describe("#433 provider handoff diagnostics", () => {
 				expect(contextText).toContain("prepared suggestion");
 				expect(contextText).toContain("mandatory request");
 				expect(statuses).toEqual(Array(2).fill([{ key: "suggestion", status: "admitted" }]));
-				expect(api.getWorkStatus().contributions).toEqual([{ key: "suggestion", status: "admitted" }]);
+				expect(api.getServicesStatus().contributions).toEqual([{ key: "suggestion", status: "admitted" }]);
 				expect(boundaries).toBe(1);
 				expect(harness.faux.state.callCount).toBe(1);
 				expect(JSON.stringify(harness.session.messages)).not.toContain("prepared suggestion");
@@ -124,8 +124,8 @@ describe("#433 managed task result exposure", () => {
 		const release = deferred();
 		let change = () => {};
 		let restricted = false;
-		let result: ExtensionWorkReadResult | undefined;
-		let handle: ExtensionWorkTaskHandle | undefined;
+		let result: ExtensionServicesReadResult | undefined;
+		let handle: ExtensionServicesTaskHandle | undefined;
 		let operations = 0;
 		const harness = await createHarness({
 			settings: { compaction: { enabled: false }, retry: { enabled: false } },
@@ -165,7 +165,7 @@ describe("#433 managed task result exposure", () => {
 							);
 					}
 					volt.on("request_boundary", (_event, ctx) => {
-						const admission = ctx.work!.tasks.start({ key: "read", label: "Read" }, async (task) => {
+						const admission = ctx.services!.tasks.start({ key: "read", label: "Read" }, async (task) => {
 							result = await task.repository.readText({ path: "source.txt" });
 						});
 						if (admission.status === "started") handle = admission.task;
@@ -294,7 +294,7 @@ describe.each(["collection", "final validation"] as const)("#433 policy authoriz
 		const release = deferred();
 		const releaseB = deferred();
 		let api!: ExtensionAPI;
-		let handle: ExtensionWorkTaskHandle | undefined;
+		let handle: ExtensionServicesTaskHandle | undefined;
 		let providerContext: Context | undefined;
 		let change = () => {};
 		let restricted = false;
@@ -356,7 +356,7 @@ describe.each(["collection", "final validation"] as const)("#433 policy authoriz
 					volt.on("request_boundary", (event, ctx) => {
 						boundaries++;
 						if (!event.first) return;
-						const admission = ctx.work!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
+						const admission = ctx.services!.tasks.start({ key: "prepare", label: "Prepare" }, async (task) => {
 							for (const key of ["a", "b", "c"]) {
 								const read = await task.repository.readText({ path: `${key}.txt` });
 								if (read.status !== "ok") throw new Error(read.status);
@@ -463,7 +463,7 @@ describe.each(["collection", "final validation"] as const)("#433 policy authoriz
 				if (action === "unchanged") expect(text).toContain(`prepared source ${key}`);
 				else expect(text).not.toContain(`prepared source ${key}`);
 			}
-			expect(api.getWorkStatus().contributions).toEqual(
+			expect(api.getServicesStatus().contributions).toEqual(
 				["a", "b", "c"].map((key) =>
 					action === "unchanged"
 						? { key, status: "admitted" }

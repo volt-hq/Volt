@@ -29,6 +29,8 @@ import {
 	setTheme,
 } from "../core/theme/runtime.ts";
 import { BRAVE_SEARCH_AUTH_PROVIDER } from "../core/tools/web-search.ts";
+import { ChangeAssociationService } from "./change-association.ts";
+import { ChangeStore } from "./changes-store.ts";
 import type {
 	ControlClientStatus,
 	ControlLeaseStatus,
@@ -70,8 +72,6 @@ import {
 } from "./paths.ts";
 import { verifyPidfileProcess, verifyVoltdProcessIdentity } from "./process-identity.ts";
 import { VoltdStateStore } from "./state.ts";
-import { WorkAssociationService } from "./work-association.ts";
-import { WorkStateStore } from "./work-state.ts";
 import { handleWorktreeControlRequest, isWorktreeControlRequest, WorktreeManager } from "./worktree-manager.ts";
 
 export interface Clock {
@@ -164,7 +164,7 @@ export interface VoltdRuntimeServices {
 	logger: DaemonLogger;
 	state: VoltdStateStore;
 	stateManager: IrohRemoteHostStateManager;
-	work: WorkAssociationService;
+	changes: ChangeAssociationService;
 	auditLogger: IrohRemoteAuditLogger;
 	controlServer: ControlServer;
 	keepAwake: KeepAwakeController;
@@ -395,20 +395,20 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		},
 	});
 	const auditLogger = new IrohRemoteAuditLogger({ path: paths.auditPath });
-	const workState = new WorkStateStore({ path: paths.workStatePath, now: () => clock.now() });
+	const changeStore = new ChangeStore({ path: paths.changesPath, now: () => clock.now() });
 	try {
-		const workLoad = await workState.load();
-		if (workLoad.corruptBackupPath) {
-			log("warn", "replaced invalid Work association state with an empty private store", {
-				backupPath: workLoad.corruptBackupPath,
+		const changesLoad = await changeStore.load();
+		if (changesLoad.corruptBackupPath) {
+			log("warn", "replaced an invalid changes file with an empty private store", {
+				backupPath: changesLoad.corruptBackupPath,
 			});
 		}
 	} catch (error) {
-		log("error", `failed to load Work association state: ${error instanceof Error ? error.message : String(error)}`);
+		log("error", `failed to load the changes file: ${error instanceof Error ? error.message : String(error)}`);
 		return finishBeforeServing(1);
 	}
-	const work = new WorkAssociationService({
-		store: workState,
+	const changes = new ChangeAssociationService({
+		store: changeStore,
 		enabled: remoteSettings.pullRequestDiscovery !== false,
 		now: () => clock.now(),
 		onRefreshError: (phase, error) => {
@@ -418,7 +418,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 					: phase === "status_refresh"
 						? "PR status refresh"
 						: "scheduled refresh";
-			log("warn", `Work association ${operation} failed; retrying with backoff`, {
+			log("warn", `Change association ${operation} failed; retrying with backoff`, {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		},
@@ -511,7 +511,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 			}
 		}
 		await keepAwake.shutdown().catch(() => {});
-		await work.close().catch(() => {});
+		await changes.close().catch(() => {});
 		await state.close().catch(() => {});
 
 		shutdownPhase = "disposing";
@@ -1045,8 +1045,8 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 	);
 
 	// Background PR status refresh starts only once this daemon is committed to serving:
-	// earlier bind-failure exits return without closing `work`.
-	work.start();
+	// earlier bind-failure exits return without closing `changes`.
+	changes.start();
 
 	// Broadcast every successful theme change (control theme_set, or an extension
 	// calling ctx.ui.setTheme inside a daemon-owned runtime) to all control
@@ -1069,7 +1069,7 @@ export async function runVoltDaemon(config: VoltdConfig, extensions: VoltdServic
 		logger,
 		state,
 		stateManager,
-		work,
+		changes,
 		auditLogger,
 		controlServer,
 		keepAwake,

@@ -27,7 +27,7 @@ import type { AgentSessionTurnPolicy } from "../agent-session.ts";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import { ExtensionMessageRoleMismatchError, type ExtensionRunner, type ToolResultEvent } from "../extensions/index.ts";
 import type { PolicyRegistration } from "../extensions/policy-registration.ts";
-import { withoutExtensionWork } from "../extensions/work-runtime.ts";
+import { withoutExtensionServices } from "../extensions/services-runtime.ts";
 import { getClientMessageId } from "../messages.ts";
 import {
 	authorizeToolOperation,
@@ -40,7 +40,7 @@ import {
 import type { PlanningState } from "../planning.ts";
 import type { SessionManager } from "../session-manager.ts";
 import type { SessionBackgroundContinuation } from "./background-continuation.ts";
-import type { SessionExtensionWork } from "./extension-work.ts";
+import type { SessionExtensionServices } from "./extension-services.ts";
 import { subagentDetailsForAbortedCall } from "./lifecycle.ts";
 import type { SessionRetry } from "./retry-policy.ts";
 import type { SessionToolRuntime } from "./tool-runtime.ts";
@@ -178,7 +178,7 @@ export interface SessionTurnPolicyHost {
 	readonly retry: SessionRetry;
 	conversation(): Conversation<AgentTool>;
 	extensionRunner(): ExtensionRunner;
-	extensionWork(): SessionExtensionWork;
+	extensionServices(): SessionExtensionServices;
 	tools(): SessionToolRuntime;
 	background(): SessionBackgroundContinuation;
 	isDisposed(): boolean;
@@ -237,7 +237,7 @@ export class SessionTurnPolicy {
 	/**
 	 * The session's conversation policy: extension context, payload, and tool
 	 * hooks; message hooks; the ready-plan transition; the composed next-action
-	 * policies; extension work at request boundaries; retry; and compaction.
+	 * policies; extension services at request boundaries; retry; and compaction.
 	 */
 	createPolicy(): ConversationPolicy {
 		return {
@@ -278,7 +278,7 @@ export class SessionTurnPolicy {
 				return reduceNextAction(context, this.nextActionPolicies(), signal);
 			},
 			requestBoundary: async (boundary, context, signal) =>
-				await this.host.extensionWork().collect(boundary, context, signal),
+				await this.host.extensionServices().collect(boundary, context, signal),
 			retry: (_error, attempt, message) => this.host.retry.delay(message, attempt),
 			compaction: (_usage, cause, check) => this.host.compactionDecision(cause, check),
 		};
@@ -366,7 +366,7 @@ export class SessionTurnPolicy {
 		for (const registration of this.workToolPolicies) {
 			yield (context, signal) => {
 				const snapshot = registration.policy;
-				return withoutExtensionWork(() => snapshot.nextAction?.(context, signal));
+				return withoutExtensionServices(() => snapshot.nextAction?.(context, signal));
 			};
 		}
 	}
@@ -378,7 +378,7 @@ export class SessionTurnPolicy {
 			yield async (event) => {
 				const snapshot = registration.policy;
 				if (!signal) return undefined;
-				return await withoutExtensionWork(() => snapshot.beforeToolCall?.(event, signal));
+				return await withoutExtensionServices(() => snapshot.beforeToolCall?.(event, signal));
 			};
 		}
 	}

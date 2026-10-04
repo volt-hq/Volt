@@ -1,6 +1,6 @@
 # RFC: Volt Architecture Rewrite
 
-- Status: Draft (proposed). Open questions resolved 2026-10-02 (§14). §6.1 amended 2026-10-04 (live-lane scoping, history query, long resume gaps). §7.1 and §7.3 amended 2026-10-04 (explicit resume, retention on running work).
+- Status: Draft (proposed). Open questions resolved 2026-10-02 (§14). §6.1 amended 2026-10-04 (live-lane scoping, history query, long resume gaps). §7.1 and §7.3 amended 2026-10-04 (explicit resume, retention on running work). §4.3, §8.1, and §8.3 amended 2026-10-04 (presentations from presenters, single-file manifest trust, settings subset, theme removal).
 - Date: 2026-10-02
 - Scope: all four packages (`packages/ai`, `packages/agent`, `packages/tui`, `packages/coding-agent`) plus a new `packages/protocol`. `volt-hq/volt-app` adapts through filed issues.
 - Release: ships in the next release (0.3.0), together with the removal of Pi extension compatibility (#573). There is no intermediate release.
@@ -168,6 +168,7 @@ Non-goals:
 - **One fold.** Runtime state is `fold(log)`, owned by the kernel: leaf, model context, delivery queue, open work, plan state, and client-input recovery. It replaces both context builders.
 - **Replay policy moves into the fold.** ai's `transformMessages` drops errored turns, synthesizes missing tool results, and injects rejection feedback. That logic is exported as a pure function the fold calls, so the log stays the source of truth.
 - **Pure projections.** Projections are pure functions of `(log, profile)`: the transcript (one implementation, replacing both), session tree, search chunks, and HTML and JSONL export.
+  - **Presentations (amended).** Tool-call and custom-message presentation is a pure function of `(log, profile, presenter set)`: presentations are computed from the registered `present()` functions rather than stored in the log, and an entry whose presenter is not registered (for example, a disabled extension) falls back to generic presentation.
 - **Snapshots are caches.** A snapshot is a fold result tagged with its ordinal.
 
 ### 4.4 Branches, forks, imports
@@ -295,12 +296,12 @@ Not work items:
 
 ### 8.1 Manifest
 
-The `volt` field in `package.json`, or `export const manifest` for single-file extensions, declares:
+The `volt` field in `package.json`, or `export const manifest` for single-file extensions, declares the fields below. Reading a single-file manifest evaluates the module, so single-file extensions load only from trusted locations, and store entries must be packages (amended).
 - `id`;
 - `displayName`;
 - `description`;
 - `entry`;
-- `settings`, a TypeBox schema;
+- `settings`, a TypeBox schema restricted to a flat object of string, boolean, enum, and integer properties (amended), so every client can render it as a `UiNode` form;
 - `permissions`, from `exec`, `network`, `fs-write`, `secrets`, and `providers`.
 
 The version comes from the package. The manifest id replaces path-derived identity.
@@ -347,6 +348,7 @@ The version comes from the package. The manifest id replaces path-derived identi
   - dialogs;
   - `notify`, status, title, and editor-text operations;
   - `registerShortcut`, as data mapping a key to an intent.
+- **Also removed (amended):** `ctx.ui.theme` and `getTheme`, which exist only to produce ANSI; extensions style text with semantic tokens.
 - **Built-in tools render the same way** (Q9). Bash, edit, read, subagent, and every other built-in tool define `present()`, and clients contain no tool-specific rendering code. The 16 built-in `renderCall`/`renderResult` implementations become `present()` functions, and the phone renders `UiNode` only.
 
 ### 8.4 Hub

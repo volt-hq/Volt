@@ -7,8 +7,8 @@ import type {
 	CodeHostPullRequestStatusProvider,
 	CodeHostPullRequestStatusRequest,
 } from "../../../src/core/code-host/types.ts";
-import { type WorkAssociationObservation, WorkAssociationService } from "../../../src/daemon/work-association.ts";
-import { WorkStateStore } from "../../../src/daemon/work-state.ts";
+import { type ChangeAssociationObservation, ChangeAssociationService } from "../../../src/daemon/change-association.ts";
+import { ChangeStore } from "../../../src/daemon/changes-store.ts";
 import { createHarness, type Harness } from "../harness.ts";
 
 const FEATURE_OID = "0123456789abcdef0123456789abcdef01234567";
@@ -62,7 +62,7 @@ class GitHubStatus implements CodeHostPullRequestStatusProvider {
 let harness: Harness;
 let now: number;
 
-function observation(branch: string, headOid: string): WorkAssociationObservation {
+function observation(branch: string, headOid: string): ChangeAssociationObservation {
 	return {
 		workspaceName: "volt-app",
 		workspaceGeneration: 1,
@@ -76,10 +76,10 @@ function observation(branch: string, headOid: string): WorkAssociationObservatio
 	};
 }
 
-async function openService(status: GitHubStatus): Promise<{ store: WorkStateStore; service: WorkAssociationService }> {
-	const store = new WorkStateStore({ path: join(harness.tempDir, "daemon", "work-state.json"), now: () => now });
+async function openService(status: GitHubStatus): Promise<{ store: ChangeStore; service: ChangeAssociationService }> {
+	const store = new ChangeStore({ path: join(harness.tempDir, "daemon", "changes.json"), now: () => now });
 	await store.load();
-	const service = new WorkAssociationService({
+	const service = new ChangeAssociationService({
 		store,
 		discoveryProvider,
 		statusProvider: status,
@@ -97,8 +97,8 @@ async function waitFor(condition: () => boolean): Promise<void> {
 	}
 }
 
-function pullRequestStatus(service: WorkAssociationService): string | undefined {
-	const context = service.getWorkContext("volt-app", 1, "session-340");
+function pullRequestStatus(service: ChangeAssociationService): string | undefined {
+	const context = service.getChangeContext("volt-app", 1, "session-340");
 	return context?.resolutionState === "resolved" ? context.pullRequest.status : undefined;
 }
 
@@ -117,7 +117,7 @@ describe("#468 Work PR status refresh", () => {
 		const { service } = await openService(status);
 		service.start();
 		await service.observe(observation("fix/work-running-orange", FEATURE_OID));
-		expect(service.getWorkContext("volt-app", 1, "session-340")).toMatchObject({
+		expect(service.getChangeContext("volt-app", 1, "session-340")).toMatchObject({
 			pullRequest: { number: 340, status: "open", stale: false },
 		});
 
@@ -125,7 +125,7 @@ describe("#468 Work PR status refresh", () => {
 		now += 20_000;
 		await service.observe(observation("main", MAIN_OID));
 		await waitFor(() => pullRequestStatus(service) === "merged");
-		expect(service.getWorkContext("volt-app", 1, "session-340")).toMatchObject({
+		expect(service.getChangeContext("volt-app", 1, "session-340")).toMatchObject({
 			branch: "fix/work-running-orange",
 			pullRequest: { number: 340, status: "merged", stale: false },
 		});
@@ -146,7 +146,7 @@ describe("#468 Work PR status refresh", () => {
 		now += 20_000;
 		await service.retireSession("volt-app", 1, "session-340");
 		await waitFor(() => pullRequestStatus(service) === "merged");
-		expect(service.getWorkContext("volt-app", 1, "session-340")).toMatchObject({
+		expect(service.getChangeContext("volt-app", 1, "session-340")).toMatchObject({
 			pullRequest: { status: "merged", stale: false },
 		});
 		await service.close();
@@ -162,22 +162,22 @@ describe("#468 Work PR status refresh", () => {
 		const status = new GitHubStatus();
 		status.merged.add(340);
 		const after = await openService(status);
-		expect(after.service.getWorkContext("volt-app", 1, "session-340")).toMatchObject({
+		expect(after.service.getChangeContext("volt-app", 1, "session-340")).toMatchObject({
 			pullRequest: { status: "open", stale: true },
 		});
 		expect(status.requests).toHaveLength(0);
 
 		after.service.start();
 		await waitFor(() => pullRequestStatus(after.service) === "merged");
-		expect(after.service.getWorkContext("volt-app", 1, "session-340")).toMatchObject({
+		expect(after.service.getChangeContext("volt-app", 1, "session-340")).toMatchObject({
 			pullRequest: { status: "merged", stale: false },
 		});
 		expect(status.requests).toHaveLength(1);
 		await after.service.close();
 
-		const reopened = new WorkStateStore({ path: join(harness.tempDir, "daemon", "work-state.json") });
+		const reopened = new ChangeStore({ path: join(harness.tempDir, "daemon", "changes.json") });
 		await reopened.load();
-		expect(reopened.getWorkContext("volt-app", 1, "session-340", now)).toMatchObject({
+		expect(reopened.getChangeContext("volt-app", 1, "session-340", now)).toMatchObject({
 			pullRequest: { status: "merged" },
 		});
 		await reopened.close();

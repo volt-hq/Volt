@@ -50,7 +50,7 @@ A failed run pushes nothing; read `gh run view <run-id> --log-failed`, fix throu
   gh api -X POST repos/volt-hq/Volt/actions/runs/<run-id>/approve
   ```
   Commits you push to the release branch trigger CI without approval.
-- Known flakes: `test/suite/extension-work.test.ts` evidence validation (#509) and Windows PowerShell `spawnSync ... ETIMEDOUT`. Confirm the failure is unrelated, then `gh run rerun <run-id> --failed`.
+- Known flakes: `test/suite/extension-services.test.ts` evidence validation (#509) and Windows PowerShell `spawnSync ... ETIMEDOUT`. Confirm the failure is unrelated, then `gh run rerun <run-id> --failed`.
 - Merge with `gh pr merge <n> --squash`; GitHub's default `Release v<version> (#<n>)` subject is accepted. Confirm `git diff <pr-head> origin/main` is empty and record the new `main` SHA. Do not merge anything else to `main` until approval.
 
 ## 3. Build and verify the candidate

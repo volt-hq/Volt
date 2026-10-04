@@ -1,13 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { type Skill, type SkillFileIdentity, skillFileIdentities } from "../skills.ts";
-import type { ExtensionWorkSkill } from "./work-types.ts";
+import type { ExtensionServicesSkill } from "./services-types.ts";
 
 interface Resource {
 	skill: Skill;
 	filePath: string;
 	identity: Readonly<SkillFileIdentity>;
-	metadata: ExtensionWorkSkill;
+	metadata: ExtensionServicesSkill;
 }
 
 /** Runtime-local exact-file grants derived only from the already loaded native catalog. */
@@ -16,7 +16,7 @@ export class ExtensionSkillCatalog {
 	private loaded: Skill[] = [];
 	private truncated = false;
 
-	snapshot(skills: Skill[]): { skills: ExtensionWorkSkill[]; skillsTruncated: boolean } {
+	snapshot(skills: Skill[]): { skills: ExtensionServicesSkill[]; skillsTruncated: boolean } {
 		if (skills.length !== this.loaded.length || skills.some((skill, i) => skill !== this.loaded[i])) {
 			this.loaded = [...skills];
 			this.resources.clear();
@@ -25,7 +25,7 @@ export class ExtensionSkillCatalog {
 			for (const skill of skills) {
 				const identity = skillFileIdentities.get(skill);
 				if (skill.disableModelInvocation || !identity) continue;
-				const metadata: ExtensionWorkSkill = {
+				const metadata: ExtensionServicesSkill = {
 					resourceId: randomUUID(),
 					name: skill.name,
 					description: skill.description,

@@ -3,20 +3,20 @@ import contextPreparation from "../examples/extensions/context-preparation.ts";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
-	ExtensionWorkContext,
-	ExtensionWorkReadResult,
-	ExtensionWorkSkill,
-	ExtensionWorkSnapshot,
-	ExtensionWorkTaskContext,
+	ExtensionServicesContext,
+	ExtensionServicesReadResult,
+	ExtensionServicesSkill,
+	ExtensionServicesSnapshot,
+	ExtensionServicesTaskContext,
 	RequestBoundaryEvent,
 } from "../src/index.ts";
 
 type BoundaryHandler = (event: RequestBoundaryEvent, ctx: ExtensionContext) => void;
 
-function skill(name: string, description = ""): ExtensionWorkSkill {
+function skill(name: string, description = ""): ExtensionServicesSkill {
 	return { resourceId: `id-${name}`, name, description, scope: "user", origin: "top-level" };
 }
-function readResult(path: string, text = "observed source"): ExtensionWorkReadResult {
+function readResult(path: string, text = "observed source"): ExtensionServicesReadResult {
 	return {
 		status: "ok",
 		text,
@@ -24,11 +24,11 @@ function readResult(path: string, text = "observed source"): ExtensionWorkReadRe
 		evidence: { id: path, path, startLine: 1, endLine: 1, observedAt: 0 },
 	};
 }
-function setup(skills: ExtensionWorkSkill[] = []) {
+function setup(skills: ExtensionServicesSkill[] = []) {
 	let handler!: BoundaryHandler;
 	const pending: Promise<void>[] = [];
 	const controller = new AbortController();
-	const snapshot: ExtensionWorkSnapshot = {
+	const snapshot: ExtensionServicesSnapshot = {
 		scopeId: "scope",
 		branchId: "branch",
 		runtimeId: "runtime",
@@ -41,13 +41,13 @@ function setup(skills: ExtensionWorkSkill[] = []) {
 		skillsTruncated: false,
 	};
 	const repository = {
-		readText: vi.fn<ExtensionWorkTaskContext["repository"]["readText"]>(async ({ path }) =>
+		readText: vi.fn<ExtensionServicesTaskContext["repository"]["readText"]>(async ({ path }) =>
 			readResult(`/repo/${path}`),
 		),
-		readSkill: vi.fn<ExtensionWorkTaskContext["repository"]["readSkill"]>(async ({ resourceId }) =>
+		readSkill: vi.fn<ExtensionServicesTaskContext["repository"]["readSkill"]>(async ({ resourceId }) =>
 			readResult(resourceId, "skill guidance"),
 		),
-		symbols: vi.fn<ExtensionWorkTaskContext["repository"]["symbols"]>(async ({ path }) => ({
+		symbols: vi.fn<ExtensionServicesTaskContext["repository"]["symbols"]>(async ({ path }) => ({
 			status: "ok",
 			coverage: "unknown",
 			observedAt: 0,
@@ -64,13 +64,13 @@ function setup(skills: ExtensionWorkSkill[] = []) {
 				},
 			],
 		})),
-		findPaths: vi.fn<ExtensionWorkTaskContext["repository"]["findPaths"]>(),
-		searchText: vi.fn<ExtensionWorkTaskContext["repository"]["searchText"]>(),
-		definition: vi.fn<ExtensionWorkTaskContext["repository"]["definition"]>(),
-		references: vi.fn<ExtensionWorkTaskContext["repository"]["references"]>(),
+		findPaths: vi.fn<ExtensionServicesTaskContext["repository"]["findPaths"]>(),
+		searchText: vi.fn<ExtensionServicesTaskContext["repository"]["searchText"]>(),
+		definition: vi.fn<ExtensionServicesTaskContext["repository"]["definition"]>(),
+		references: vi.fn<ExtensionServicesTaskContext["repository"]["references"]>(),
 	};
-	const put = vi.fn<ExtensionWorkTaskContext["context"]["put"]>(() => ({ status: "accepted" }));
-	const task: ExtensionWorkTaskContext = {
+	const put = vi.fn<ExtensionServicesTaskContext["context"]["put"]>(() => ({ status: "accepted" }));
+	const task: ExtensionServicesTaskContext = {
 		snapshot,
 		signal: controller.signal,
 		deadline: Date.now() + 1000,
@@ -78,7 +78,7 @@ function setup(skills: ExtensionWorkSkill[] = []) {
 		context: { put, remove: vi.fn() },
 	};
 	const summary = { id: "task", key: "prepare-context", state: "completed" as const, startedAt: 0 };
-	const start = vi.fn<ExtensionWorkContext["tasks"]["start"]>((_spec, callback) => {
+	const start = vi.fn<ExtensionServicesContext["tasks"]["start"]>((_spec, callback) => {
 		pending.push(Promise.resolve().then(() => callback(task)));
 		return {
 			status: "started",
@@ -86,7 +86,7 @@ function setup(skills: ExtensionWorkSkill[] = []) {
 		};
 	});
 	const requestWait = vi.fn((ms: number) => ms);
-	const work: ExtensionWorkContext = { snapshot, tasks: { start }, context: { requestWait } };
+	const services: ExtensionServicesContext = { snapshot, tasks: { start }, context: { requestWait } };
 	contextPreparation({
 		on: (_name: string, callback: BoundaryHandler) => {
 			handler = callback;
@@ -102,7 +102,7 @@ function setup(skills: ExtensionWorkSkill[] = []) {
 		async emit(input: string | string[], first = true, available = true) {
 			snapshot.inputs = (typeof input === "string" ? [input] : input).map((text) => ({ text, kind: "prompt" }));
 			handler({ type: "request_boundary", first, cause: "input", attemptId: "attempt", waitAvailableMs: 100 }, {
-				work: available ? work : undefined,
+				services: available ? services : undefined,
 			} as ExtensionContext);
 			await Promise.all(pending);
 		},

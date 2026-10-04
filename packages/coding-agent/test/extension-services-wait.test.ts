@@ -1,21 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
-	ExtensionWorkBoundary,
-	ExtensionWorkExecutionResult,
-	ExtensionWorkManagerOptions,
-} from "../src/core/extensions/work-host.ts";
+	ExtensionServicesBoundary,
+	ExtensionServicesExecutionResult,
+	ExtensionServicesManagerOptions,
+} from "../src/core/extensions/services-host.ts";
 import {
-	DEFAULT_EXTENSION_WORK_LIMITS,
-	ExtensionWorkManager,
-	withoutExtensionWork,
-} from "../src/core/extensions/work-runtime.ts";
+	DEFAULT_EXTENSION_SERVICES_LIMITS,
+	ExtensionServicesManager,
+	withoutExtensionServices,
+} from "../src/core/extensions/services-runtime.ts";
 import type {
-	ExtensionWorkContext,
-	ExtensionWorkTaskHandle,
+	ExtensionServicesContext,
+	ExtensionServicesTaskHandle,
 	RequestBoundaryEvent,
-} from "../src/core/extensions/work-types.ts";
+} from "../src/core/extensions/services-types.ts";
 
-const managers: ExtensionWorkManager[] = [];
+const managers: ExtensionServicesManager[] = [];
 const release: Array<() => void> = [];
 afterEach(async () => {
 	for (const done of release.splice(0)) done();
@@ -31,7 +31,7 @@ function deferred() {
 	release.push(resolve);
 	return { promise, resolve };
 }
-function boundary(key = "request"): ExtensionWorkBoundary {
+function boundary(key = "request"): ExtensionServicesBoundary {
 	return {
 		key,
 		attemptId: "attempt",
@@ -50,11 +50,11 @@ function boundary(key = "request"): ExtensionWorkBoundary {
 	};
 }
 function setup(
-	onBoundary: (work: ExtensionWorkContext, event: RequestBoundaryEvent) => void,
+	onBoundary: (work: ExtensionServicesContext, event: RequestBoundaryEvent) => void,
 	wait?: number,
-	execute: ExtensionWorkManagerOptions["execute"] = async () => ({ status: "unavailable", reason: "test" }),
+	execute: ExtensionServicesManagerOptions["execute"] = async () => ({ status: "unavailable", reason: "test" }),
 ) {
-	const manager = new ExtensionWorkManager({
+	const manager = new ExtensionServicesManager({
 		limits: wait === undefined ? {} : { firstRequestWaitMs: wait },
 		isCurrent: () => true,
 		execute,
@@ -68,7 +68,7 @@ function setup(
 async function prepareCollection(wait: number) {
 	const gate = deferred();
 	const validation = vi.fn<(signal: AbortSignal) => Promise<void>>(() => gate.promise);
-	const result: ExtensionWorkExecutionResult = {
+	const result: ExtensionServicesExecutionResult = {
 		status: "ok",
 		implementation: {},
 		observation: {
@@ -117,7 +117,7 @@ describe("bounded first-request preparation wait", () => {
 	it("shares a maximum, not a sum, and grants no renewed allowance", async () => {
 		vi.useFakeTimers();
 		const gate = deferred();
-		let retained!: ExtensionWorkContext;
+		let retained!: ExtensionServicesContext;
 		const manager = setup((work, event) => {
 			retained = work;
 			if (!event.first) {
@@ -149,7 +149,7 @@ describe("bounded first-request preparation wait", () => {
 		vi.useFakeTimers();
 		const gate = deferred();
 		let current = true;
-		let handle: ExtensionWorkTaskHandle | undefined;
+		let handle: ExtensionServicesTaskHandle | undefined;
 		const manager = setup((work, event) => {
 			if (!event.first) {
 				expect(work.context.requestWait(100)).toBe(0);
@@ -179,7 +179,7 @@ describe("bounded first-request preparation wait", () => {
 
 	it("clamps requests and collects completed preparation without spending the remaining wait", async () => {
 		vi.useFakeTimers();
-		let handle: ExtensionWorkTaskHandle | undefined;
+		let handle: ExtensionServicesTaskHandle | undefined;
 		const manager = setup((work) => {
 			expect(work.context.requestWait(500)).toBe(25);
 			const admission = work.tasks.start({ key: "ready", label: "ready" }, async (task) => {
@@ -206,7 +206,7 @@ describe("bounded first-request preparation wait", () => {
 		expect(runtimes[4].manager.getStatus("one").contributions).toEqual([{ key: "source", status: "ready" }]);
 
 		// Timeouts abort validation, but cannot release capacity before the operations drain.
-		await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_WORK_LIMITS.collectionMs);
+		await vi.advanceTimersByTimeAsync(DEFAULT_EXTENSION_SERVICES_LIMITS.collectionMs);
 		expect(await Promise.all(collecting)).toEqual(Array(5).fill(undefined));
 		for (const { validation } of runtimes.slice(0, 4)) expect(validation.mock.calls[0][0].aborted).toBe(true);
 		expect(await runtimes[4].manager.collect(1, () => true)).toBeUndefined();
@@ -287,7 +287,7 @@ describe("bounded first-request preparation wait", () => {
 	it("rejects asynchronous and policy-lineage wait requests", async () => {
 		const observed = deferred();
 		const manager = setup((work) => {
-			expect(withoutExtensionWork(() => work.context.requestWait(100))).toBe(0);
+			expect(withoutExtensionServices(() => work.context.requestWait(100))).toBe(0);
 			void Promise.resolve().then(() => {
 				expect(work.context.requestWait(100)).toBe(0);
 				observed.resolve();
@@ -299,7 +299,7 @@ describe("bounded first-request preparation wait", () => {
 	});
 
 	it("rejects host ceilings above 100 ms and does not grant waits for final responses", async () => {
-		expect(() => setup(() => {}, 101)).toThrow("Invalid extension work limit");
+		expect(() => setup(() => {}, 101)).toThrow("Invalid extension services limit");
 		const manager = setup((work, event) => {
 			expect(event.waitAvailableMs).toBe(0);
 			expect(work.context.requestWait(1)).toBe(0);

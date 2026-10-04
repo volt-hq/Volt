@@ -10,11 +10,11 @@ import {
 	PRIVATE_FILE_MODE,
 } from "../utils/private-files.ts";
 
-export const WORK_STATE_VERSION = 1;
-export const WORK_STATE_MAX_BYTES = 2 * 1024 * 1024;
-export const WORK_STATE_MAX_REPOSITORIES = 512;
-export const WORK_STATE_MAX_CHANGES = 2048;
-export const WORK_STATE_MAX_BINDINGS = 4096;
+export const CHANGE_STORE_VERSION = 1;
+export const CHANGE_STORE_MAX_BYTES = 2 * 1024 * 1024;
+export const CHANGE_STORE_MAX_REPOSITORIES = 512;
+export const CHANGE_STORE_MAX_CHANGES = 2048;
+export const CHANGE_STORE_MAX_BINDINGS = 4096;
 const MAX_ID_CHARS = 128;
 const MAX_WORKSPACE_CHARS = 256;
 const MAX_REPOSITORY_DISPLAY_CHARS = 256;
@@ -27,25 +27,25 @@ const PR_REPOSITORY_FORBIDDEN_PATTERN = /[\0-\x20\x7f/]/;
 const OID_PATTERN = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 
-export type WorkResolutionState = "resolved" | "none" | "ambiguous" | "unavailable";
+export type ChangeResolutionState = "resolved" | "none" | "ambiguous" | "unavailable";
 
 /** Host-private base repository of a linked pull request. Never projected to clients. */
-export interface WorkPullRequestRepositoryRecord {
+export interface ChangePullRequestRepositoryRecord {
 	host: string;
 	owner: string;
 	name: string;
 }
 
-export interface WorkPullRequestRecord {
+export interface ChangePullRequestRecord {
 	provider: string;
-	repository: WorkPullRequestRepositoryRecord;
+	repository: ChangePullRequestRepositoryRecord;
 	number: number;
 	title: string;
 	status: "open" | "draft" | "merged" | "closed";
 	matchedHeadOid: string;
 }
 
-export interface WorkRepositoryRecord {
+export interface ChangeRepositoryRecord {
 	id: string;
 	workspaceName: string;
 	workspaceGeneration: number;
@@ -54,14 +54,14 @@ export interface WorkRepositoryRecord {
 	updatedAt: number;
 }
 
-export interface WorkChangeRecord {
+export interface ChangeRecord {
 	id: string;
 	repositoryId: string;
 	branch: string;
 	headOid: string;
 	baseBranch: boolean;
-	resolutionState: WorkResolutionState;
-	pullRequest?: WorkPullRequestRecord;
+	resolutionState: ChangeResolutionState;
+	pullRequest?: ChangePullRequestRecord;
 	checkedAt: number;
 	nextRefreshAt: number;
 	failureCount: number;
@@ -69,7 +69,7 @@ export interface WorkChangeRecord {
 	updatedAt: number;
 }
 
-export interface WorkSessionBindingRecord {
+export interface ChangeSessionBindingRecord {
 	workspaceName: string;
 	workspaceGeneration: number;
 	sessionId: string;
@@ -82,34 +82,34 @@ export interface WorkSessionBindingRecord {
 	updatedAt: number;
 }
 
-export interface WorkStateFileV1 {
+export interface ChangesFileV1 {
 	version: 1;
 	repositoryHashSalt: string;
-	repositories: WorkRepositoryRecord[];
-	changes: WorkChangeRecord[];
-	bindings: WorkSessionBindingRecord[];
+	repositories: ChangeRepositoryRecord[];
+	changes: ChangeRecord[];
+	bindings: ChangeSessionBindingRecord[];
 }
 
-interface WorkStateWireContextBase {
+interface ChangeWireContextBase {
 	changeId: string;
 	repository: string;
 	branch: string;
 }
 
-export type WorkStateWireContext =
-	| (WorkStateWireContextBase & {
+export type ChangeWireContext =
+	| (ChangeWireContextBase & {
 			resolutionState: "resolved";
 			pullRequest: {
 				provider: string;
 				number: number;
 				title: string;
-				status: WorkPullRequestRecord["status"];
+				status: ChangePullRequestRecord["status"];
 				stale: boolean;
 			};
 	  })
-	| (WorkStateWireContextBase & { resolutionState: "none" | "ambiguous" | "unavailable" });
+	| (ChangeWireContextBase & { resolutionState: "none" | "ambiguous" | "unavailable" });
 
-export interface WorkObservationInput {
+export interface ChangeObservationInput {
 	workspaceName: string;
 	workspaceGeneration: number;
 	sessionId: string;
@@ -121,9 +121,9 @@ export interface WorkObservationInput {
 	now: number;
 }
 
-export type WorkObservationRevisionGuard = () => boolean;
+export type ChangeObservationRevisionGuard = () => boolean;
 
-export interface WorkBindingInheritanceInput {
+export interface ChangeBindingInheritanceInput {
 	workspaceName: string;
 	workspaceGeneration: number;
 	sourceSessionId: string;
@@ -131,7 +131,7 @@ export interface WorkBindingInheritanceInput {
 	now: number;
 }
 
-export interface WorkDiscoveryFence {
+export interface ChangeDiscoveryFence {
 	workspaceName: string;
 	workspaceGeneration: number;
 	sessionId: string;
@@ -142,55 +142,55 @@ export interface WorkDiscoveryFence {
 	headOid: string;
 }
 
-export interface WorkBindingMutationResult {
-	binding: WorkSessionBindingRecord;
-	change: WorkChangeRecord;
-	repository: WorkRepositoryRecord;
-	fence: WorkDiscoveryFence;
+export interface ChangeBindingMutationResult {
+	binding: ChangeSessionBindingRecord;
+	change: ChangeRecord;
+	repository: ChangeRepositoryRecord;
+	fence: ChangeDiscoveryFence;
 	shouldDiscover: boolean;
 }
 
-export type WorkDiscoveryApplyOutcome =
-	| { state: "resolved"; pullRequest: WorkPullRequestRecord }
+export type ChangeDiscoveryApplyOutcome =
+	| { state: "resolved"; pullRequest: ChangePullRequestRecord }
 	| { state: "none" }
 	| { state: "ambiguous" }
 	| { state: "unavailable" };
 
 /** A bound change whose linked pull request is still open or draft. */
-export interface WorkWatchedPullRequest {
+export interface ChangeWatchedPullRequest {
 	changeId: string;
 	/** Snapshot fence: status updates apply only while `checkedAt` is unchanged. */
 	checkedAt: number;
 	provider: string;
 	number: number;
-	repository: WorkPullRequestRepositoryRecord;
+	repository: ChangePullRequestRepositoryRecord;
 }
 
-export interface WorkPullRequestStatusUpdate extends WorkWatchedPullRequest {
-	outcome: { state: "resolved"; status: WorkPullRequestRecord["status"]; title: string } | { state: "unavailable" };
+export interface ChangePullRequestStatusUpdate extends ChangeWatchedPullRequest {
+	outcome: { state: "resolved"; status: ChangePullRequestRecord["status"]; title: string } | { state: "unavailable" };
 }
 
 /** Mutation key that protects no session binding during trimming. */
 const NO_PROTECTED_BINDING_KEY = "";
 
-export function isActiveWorkPullRequestStatus(status: WorkPullRequestRecord["status"]): boolean {
+export function isActiveChangePullRequestStatus(status: ChangePullRequestRecord["status"]): boolean {
 	return status === "open" || status === "draft";
 }
 
-export interface WorkStateStoreOptions {
+export interface ChangeStoreOptions {
 	path: string;
 	now?: () => number;
 	writeStateFile?: (path: string, content: string) => Promise<void>;
 }
 
-export interface WorkStateLoadResult {
-	state: WorkStateFileV1;
+export interface ChangeStoreLoadResult {
+	state: ChangesFileV1;
 	corruptBackupPath?: string;
 }
 
-function emptyWorkState(): WorkStateFileV1 {
+function emptyChangesFile(): ChangesFileV1 {
 	return {
-		version: WORK_STATE_VERSION,
+		version: CHANGE_STORE_VERSION,
 		repositoryHashSalt: randomBytes(32).toString("hex"),
 		repositories: [],
 		changes: [],
@@ -232,7 +232,7 @@ function pullRequestRepositoryPart(value: unknown, maximum: number): value is st
 	);
 }
 
-function parsePullRequestRepository(value: unknown): WorkPullRequestRepositoryRecord {
+function parsePullRequestRepository(value: unknown): ChangePullRequestRepositoryRecord {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(value, ["host", "owner", "name"]) ||
@@ -240,24 +240,24 @@ function parsePullRequestRepository(value: unknown): WorkPullRequestRepositoryRe
 		!pullRequestRepositoryPart(value.owner, MAX_PR_REPOSITORY_SEGMENT_CHARS) ||
 		!pullRequestRepositoryPart(value.name, MAX_PR_REPOSITORY_SEGMENT_CHARS)
 	) {
-		throw new Error("invalid Work pull request repository");
+		throw new Error("invalid change pull request repository");
 	}
 	return { host: value.host, owner: value.owner, name: value.name };
 }
 
-export function isSameWorkPullRequestRepository(
-	left: WorkPullRequestRepositoryRecord,
-	right: WorkPullRequestRepositoryRecord,
+export function isSameChangePullRequestRepository(
+	left: ChangePullRequestRepositoryRecord,
+	right: ChangePullRequestRepositoryRecord,
 ): boolean {
 	return left.host === right.host && left.owner === right.owner && left.name === right.name;
 }
 
-function parsePullRequest(value: unknown): WorkPullRequestRecord {
+function parsePullRequest(value: unknown): ChangePullRequestRecord {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(value, ["provider", "repository", "number", "title", "status", "matchedHeadOid"])
 	) {
-		throw new Error("invalid Work pull request record");
+		throw new Error("invalid change pull request record");
 	}
 	const repository = parsePullRequestRepository(value.repository);
 	if (
@@ -269,7 +269,7 @@ function parsePullRequest(value: unknown): WorkPullRequestRecord {
 		typeof value.matchedHeadOid !== "string" ||
 		!OID_PATTERN.test(value.matchedHeadOid)
 	) {
-		throw new Error("invalid Work pull request record");
+		throw new Error("invalid change pull request record");
 	}
 	return {
 		provider: value.provider,
@@ -281,7 +281,7 @@ function parsePullRequest(value: unknown): WorkPullRequestRecord {
 	};
 }
 
-function parseRepository(value: unknown): WorkRepositoryRecord {
+function parseRepository(value: unknown): ChangeRepositoryRecord {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(value, [
@@ -300,12 +300,12 @@ function parseRepository(value: unknown): WorkRepositoryRecord {
 		!boundedString(value.displayName, MAX_REPOSITORY_DISPLAY_CHARS) ||
 		!safeNonNegativeInteger(value.updatedAt)
 	) {
-		throw new Error("invalid Work repository record");
+		throw new Error("invalid change repository record");
 	}
-	return { ...value } as unknown as WorkRepositoryRecord;
+	return { ...value } as unknown as ChangeRepositoryRecord;
 }
 
-function parseChange(value: unknown): WorkChangeRecord {
+function parseChange(value: unknown): ChangeRecord {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(
@@ -341,11 +341,11 @@ function parseChange(value: unknown): WorkChangeRecord {
 		typeof value.lastRefreshSucceeded !== "boolean" ||
 		!safeNonNegativeInteger(value.updatedAt)
 	) {
-		throw new Error("invalid Work change record");
+		throw new Error("invalid change record");
 	}
 	const pullRequest = value.pullRequest === undefined ? undefined : parsePullRequest(value.pullRequest);
 	if ((value.resolutionState === "resolved") !== (pullRequest !== undefined)) {
-		throw new Error("resolved Work change must have exactly one pull request record");
+		throw new Error("resolved change must have exactly one pull request record");
 	}
 	return {
 		id: value.id,
@@ -363,7 +363,7 @@ function parseChange(value: unknown): WorkChangeRecord {
 	};
 }
 
-function parseBinding(value: unknown): WorkSessionBindingRecord {
+function parseBinding(value: unknown): ChangeSessionBindingRecord {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(value, [
@@ -390,26 +390,26 @@ function parseBinding(value: unknown): WorkSessionBindingRecord {
 		!OID_PATTERN.test(value.observedHeadOid) ||
 		!safeNonNegativeInteger(value.updatedAt)
 	) {
-		throw new Error("invalid Work session binding record");
+		throw new Error("invalid change session binding record");
 	}
-	return { ...value } as unknown as WorkSessionBindingRecord;
+	return { ...value } as unknown as ChangeSessionBindingRecord;
 }
 
-export function parseWorkState(value: unknown): WorkStateFileV1 {
+export function parseChangesFile(value: unknown): ChangesFileV1 {
 	if (
 		!isRecord(value) ||
 		!hasExactKeys(value, ["version", "repositoryHashSalt", "repositories", "changes", "bindings"]) ||
-		value.version !== WORK_STATE_VERSION ||
+		value.version !== CHANGE_STORE_VERSION ||
 		typeof value.repositoryHashSalt !== "string" ||
 		!HASH_PATTERN.test(value.repositoryHashSalt) ||
 		!Array.isArray(value.repositories) ||
-		value.repositories.length > WORK_STATE_MAX_REPOSITORIES ||
+		value.repositories.length > CHANGE_STORE_MAX_REPOSITORIES ||
 		!Array.isArray(value.changes) ||
-		value.changes.length > WORK_STATE_MAX_CHANGES ||
+		value.changes.length > CHANGE_STORE_MAX_CHANGES ||
 		!Array.isArray(value.bindings) ||
-		value.bindings.length > WORK_STATE_MAX_BINDINGS
+		value.bindings.length > CHANGE_STORE_MAX_BINDINGS
 	) {
-		throw new Error("invalid or unsupported Work state file");
+		throw new Error("invalid or unsupported changes file");
 	}
 	const repositories = value.repositories.map(parseRepository);
 	const changes = value.changes.map(parseChange);
@@ -417,26 +417,26 @@ export function parseWorkState(value: unknown): WorkStateFileV1 {
 	const repositoryIds = new Set(repositories.map((record) => record.id));
 	const changeIds = new Set(changes.map((record) => record.id));
 	if (repositoryIds.size !== repositories.length || changeIds.size !== changes.length) {
-		throw new Error("Work state contains duplicate opaque identities");
+		throw new Error("Changes file contains duplicate opaque identities");
 	}
 	for (const change of changes) {
-		if (!repositoryIds.has(change.repositoryId)) throw new Error("Work change references an unknown repository");
+		if (!repositoryIds.has(change.repositoryId)) throw new Error("Change references an unknown repository");
 	}
 	const bindingKeys = new Set<string>();
 	for (const binding of bindings) {
 		const key = bindingKey(binding.workspaceName, binding.workspaceGeneration, binding.sessionId);
-		if (bindingKeys.has(key)) throw new Error("Work state contains duplicate session bindings");
+		if (bindingKeys.has(key)) throw new Error("Changes file contains duplicate session bindings");
 		bindingKeys.add(key);
 		if (
 			!repositoryIds.has(binding.repositoryId) ||
 			!repositoryIds.has(binding.observedRepositoryId) ||
 			!changeIds.has(binding.changeId)
 		) {
-			throw new Error("Work session binding references unknown state");
+			throw new Error("Change session binding references unknown state");
 		}
 	}
 	return {
-		version: WORK_STATE_VERSION,
+		version: CHANGE_STORE_VERSION,
 		repositoryHashSalt: value.repositoryHashSalt,
 		repositories,
 		changes,
@@ -452,12 +452,12 @@ function cloneRecord<T>(value: T): T {
 	return structuredClone(value);
 }
 
-function serializeWorkState(state: WorkStateFileV1): string {
+function serializeChangesFile(state: ChangesFileV1): string {
 	return `${JSON.stringify(state, null, 2)}\n`;
 }
 
-function serializedWorkStateBytes(state: WorkStateFileV1): number {
-	return Buffer.byteLength(serializeWorkState(state), "utf8");
+function serializedChangesFileBytes(state: ChangesFileV1): number {
+	return Buffer.byteLength(serializeChangesFile(state), "utf8");
 }
 
 function oldestRecordIndex<T extends { updatedAt: number }>(
@@ -476,14 +476,14 @@ function oldestRecordIndex<T extends { updatedAt: number }>(
 	return oldestIndex;
 }
 
-function trimState(state: WorkStateFileV1, protectedBindingKey: string): void {
-	const isProtectedBinding = (binding: WorkSessionBindingRecord): boolean =>
+function trimState(state: ChangesFileV1, protectedBindingKey: string): void {
+	const isProtectedBinding = (binding: ChangeSessionBindingRecord): boolean =>
 		bindingKey(binding.workspaceName, binding.workspaceGeneration, binding.sessionId) === protectedBindingKey;
 	state.bindings.sort(
 		(left, right) =>
 			Number(isProtectedBinding(right)) - Number(isProtectedBinding(left)) || right.updatedAt - left.updatedAt,
 	);
-	state.bindings.splice(WORK_STATE_MAX_BINDINGS);
+	state.bindings.splice(CHANGE_STORE_MAX_BINDINGS);
 	const protectedBinding = state.bindings.find(isProtectedBinding);
 	const protectedChangeId = protectedBinding?.changeId;
 	const boundChangeIds = new Set(state.bindings.map((binding) => binding.changeId));
@@ -493,7 +493,7 @@ function trimState(state: WorkStateFileV1, protectedBindingKey: string): void {
 			Number(boundChangeIds.has(right.id)) - Number(boundChangeIds.has(left.id)) ||
 			right.updatedAt - left.updatedAt,
 	);
-	state.changes.splice(WORK_STATE_MAX_CHANGES);
+	state.changes.splice(CHANGE_STORE_MAX_CHANGES);
 	const retainedChanges = new Set(state.changes.map((change) => change.id));
 	state.bindings = state.bindings.filter((binding) => retainedChanges.has(binding.changeId));
 	const protectedRepositoryIds = new Set<string>();
@@ -515,7 +515,7 @@ function trimState(state: WorkStateFileV1, protectedBindingKey: string): void {
 			Number(usedRepositoryIds.has(right.id)) - Number(usedRepositoryIds.has(left.id)) ||
 			right.updatedAt - left.updatedAt,
 	);
-	state.repositories.splice(WORK_STATE_MAX_REPOSITORIES);
+	state.repositories.splice(CHANGE_STORE_MAX_REPOSITORIES);
 	const retainedRepositories = new Set(state.repositories.map((repository) => repository.id));
 	state.changes = state.changes.filter((change) => retainedRepositories.has(change.repositoryId));
 	const finalChanges = new Set(state.changes.map((change) => change.id));
@@ -526,7 +526,7 @@ function trimState(state: WorkStateFileV1, protectedBindingKey: string): void {
 			finalChanges.has(binding.changeId),
 	);
 
-	while (serializedWorkStateBytes(state) > WORK_STATE_MAX_BYTES) {
+	while (serializedChangesFileBytes(state) > CHANGE_STORE_MAX_BYTES) {
 		const referencedRepositoryIds = new Set<string>();
 		for (const change of state.changes) referencedRepositoryIds.add(change.repositoryId);
 		for (const binding of state.bindings) {
@@ -554,18 +554,18 @@ function trimState(state: WorkStateFileV1, protectedBindingKey: string): void {
 			state.bindings.splice(bindingIndex, 1);
 			continue;
 		}
-		throw new Error("Work state cannot retain its protected binding within the size bound");
+		throw new Error("Change store cannot retain its protected binding within the size bound");
 	}
 }
 
-export class WorkStateStore {
+export class ChangeStore {
 	private readonly path: string;
 	private readonly now: () => number;
 	private readonly writeStateFile: (path: string, content: string) => Promise<void>;
-	private current: WorkStateFileV1 | undefined;
+	private current: ChangesFileV1 | undefined;
 	private mutationQueue: Promise<void> = Promise.resolve();
 
-	constructor(options: WorkStateStoreOptions) {
+	constructor(options: ChangeStoreOptions) {
 		this.path = options.path;
 		this.now = options.now ?? (() => Date.now());
 		this.writeStateFile =
@@ -577,42 +577,42 @@ export class WorkStateStore {
 				}));
 	}
 
-	async load(): Promise<WorkStateLoadResult> {
+	async load(): Promise<ChangeStoreLoadResult> {
 		if (this.current) return { state: this.current };
 		ensurePrivateDirectorySync(dirname(this.path));
-		let next: WorkStateFileV1;
+		let next: ChangesFileV1;
 		let corruptBackupPath: string | undefined;
 		if (existsSync(this.path)) {
 			try {
 				const handle = await openPrivateRegularFile(this.path, constants.O_RDONLY);
 				let content: string;
 				try {
-					if ((await handle.stat()).size > WORK_STATE_MAX_BYTES) {
-						throw new Error("Work state exceeds its size bound");
+					if ((await handle.stat()).size > CHANGE_STORE_MAX_BYTES) {
+						throw new Error("Changes file exceeds its size bound");
 					}
 					content = await handle.readFile({ encoding: "utf8" });
 				} finally {
 					await handle.close();
 				}
-				next = parseWorkState(JSON.parse(content) as unknown);
+				next = parseChangesFile(JSON.parse(content) as unknown);
 			} catch {
 				corruptBackupPath = `${this.path}.corrupt-${this.now()}`;
 				await rename(this.path, corruptBackupPath).catch(() => {
 					corruptBackupPath = undefined;
 				});
-				next = emptyWorkState();
+				next = emptyChangesFile();
 				await this.write(next);
 			}
 		} else {
-			next = emptyWorkState();
+			next = emptyChangesFile();
 			await this.write(next);
 		}
 		this.current = next;
 		return { state: next, ...(corruptBackupPath === undefined ? {} : { corruptBackupPath }) };
 	}
 
-	get state(): WorkStateFileV1 {
-		if (!this.current) throw new Error("Work state store is not loaded");
+	get state(): ChangesFileV1 {
+		if (!this.current) throw new Error("Change store is not loaded");
 		return this.current;
 	}
 
@@ -621,15 +621,15 @@ export class WorkStateStore {
 		return createHmac("sha256", Buffer.from(this.state.repositoryHashSalt, "hex")).update(commonGitDir).digest("hex");
 	}
 
-	async bindObservation(input: WorkObservationInput): Promise<WorkBindingMutationResult>;
+	async bindObservation(input: ChangeObservationInput): Promise<ChangeBindingMutationResult>;
 	async bindObservation(
-		input: WorkObservationInput,
-		isCurrentRevision: WorkObservationRevisionGuard,
-	): Promise<WorkBindingMutationResult | undefined>;
+		input: ChangeObservationInput,
+		isCurrentRevision: ChangeObservationRevisionGuard,
+	): Promise<ChangeBindingMutationResult | undefined>;
 	async bindObservation(
-		input: WorkObservationInput,
-		isCurrentRevision: WorkObservationRevisionGuard = () => true,
-	): Promise<WorkBindingMutationResult | undefined> {
+		input: ChangeObservationInput,
+		isCurrentRevision: ChangeObservationRevisionGuard = () => true,
+	): Promise<ChangeBindingMutationResult | undefined> {
 		if (!isCurrentRevision()) return undefined;
 		if (
 			!boundedString(input.workspaceName, MAX_WORKSPACE_CHARS) ||
@@ -640,7 +640,7 @@ export class WorkStateStore {
 			!OID_PATTERN.test(input.headOid) ||
 			!safeNonNegativeInteger(input.now)
 		) {
-			throw new Error("invalid Work observation");
+			throw new Error("invalid change observation");
 		}
 		const commonGitDirHash = this.hashCommonGitDirectory(input.commonGitDir);
 		const protectedBindingKey = bindingKey(input.workspaceName, input.workspaceGeneration, input.sessionId);
@@ -701,7 +701,7 @@ export class WorkStateStore {
 				}
 				sticky = change.resolutionState === "resolved";
 			}
-			if (!change) throw new Error("Work observation did not resolve a change record");
+			if (!change) throw new Error("Change observation did not resolve a change record");
 			if (!sticky || (change.repositoryId === repository.id && change.branch === input.branch)) {
 				change.headOid = input.headOid;
 			}
@@ -729,7 +729,7 @@ export class WorkStateStore {
 			} else {
 				if (observationChanged) {
 					if (binding.bindingGeneration === Number.MAX_SAFE_INTEGER) {
-						throw new Error("Work binding generation is exhausted");
+						throw new Error("Change binding generation is exhausted");
 					}
 					binding.bindingGeneration++;
 				}
@@ -763,7 +763,7 @@ export class WorkStateStore {
 		});
 	}
 
-	async inheritSessionBinding(input: WorkBindingInheritanceInput): Promise<boolean> {
+	async inheritSessionBinding(input: ChangeBindingInheritanceInput): Promise<boolean> {
 		if (
 			!boundedString(input.workspaceName, MAX_WORKSPACE_CHARS) ||
 			!safePositiveInteger(input.workspaceGeneration) ||
@@ -772,7 +772,7 @@ export class WorkStateStore {
 			input.sourceSessionId === input.targetSessionId ||
 			!safeNonNegativeInteger(input.now)
 		) {
-			throw new Error("invalid Work binding inheritance");
+			throw new Error("invalid change binding inheritance");
 		}
 		const targetKey = bindingKey(input.workspaceName, input.workspaceGeneration, input.targetSessionId);
 		return this.mutate(targetKey, (state) => {
@@ -801,8 +801,8 @@ export class WorkStateStore {
 	}
 
 	async applyDiscovery(
-		fence: WorkDiscoveryFence,
-		outcome: WorkDiscoveryApplyOutcome,
+		fence: ChangeDiscoveryFence,
+		outcome: ChangeDiscoveryApplyOutcome,
 		options: { now: number; nextRefreshAt: number; refreshSucceeded: boolean },
 	): Promise<boolean> {
 		const protectedBindingKey = bindingKey(fence.workspaceName, fence.workspaceGeneration, fence.sessionId);
@@ -841,7 +841,7 @@ export class WorkStateStore {
 					outcome.state === "resolved" &&
 					outcome.pullRequest.provider === change.pullRequest.provider &&
 					outcome.pullRequest.number === change.pullRequest.number &&
-					isSameWorkPullRequestRepository(outcome.pullRequest.repository, change.pullRequest.repository)
+					isSameChangePullRequestRepository(outcome.pullRequest.repository, change.pullRequest.repository)
 				) {
 					change.pullRequest = cloneRecord(outcome.pullRequest);
 					change.headOid = fence.headOid;
@@ -867,7 +867,7 @@ export class WorkStateStore {
 		workspaceName: string,
 		workspaceGeneration: number,
 		sessionId: string,
-	): WorkSessionBindingRecord | undefined {
+	): ChangeSessionBindingRecord | undefined {
 		const binding = this.state.bindings.find(
 			(candidate) =>
 				candidate.workspaceName === workspaceName &&
@@ -877,22 +877,22 @@ export class WorkStateStore {
 		return binding ? cloneRecord(binding) : undefined;
 	}
 
-	getChange(changeId: string): WorkChangeRecord | undefined {
+	getChange(changeId: string): ChangeRecord | undefined {
 		const change = this.state.changes.find((candidate) => candidate.id === changeId);
 		return change ? cloneRecord(change) : undefined;
 	}
 
 	/** Bound open/draft pull requests, most recently updated first. */
-	listWatchedPullRequests(limit: number): WorkWatchedPullRequest[] {
+	listWatchedPullRequests(limit: number): ChangeWatchedPullRequest[] {
 		const boundChangeIds = new Set(this.state.bindings.map((binding) => binding.changeId));
-		const watched: Array<{ updatedAt: number; entry: WorkWatchedPullRequest }> = [];
+		const watched: Array<{ updatedAt: number; entry: ChangeWatchedPullRequest }> = [];
 		for (const change of this.state.changes) {
 			const pullRequest = change.pullRequest;
 			if (
 				!boundChangeIds.has(change.id) ||
 				change.resolutionState !== "resolved" ||
 				!pullRequest ||
-				!isActiveWorkPullRequestStatus(pullRequest.status)
+				!isActiveChangePullRequestStatus(pullRequest.status)
 			) {
 				continue;
 			}
@@ -920,7 +920,7 @@ export class WorkStateStore {
 	 * status or title changed.
 	 */
 	async applyPullRequestStatuses(
-		updates: readonly WorkPullRequestStatusUpdate[],
+		updates: readonly ChangePullRequestStatusUpdate[],
 		options: { now: number; nextRefreshAt: number },
 	): Promise<string[]> {
 		if (updates.length === 0) return [];
@@ -934,10 +934,10 @@ export class WorkStateStore {
 					!pullRequest ||
 					change.resolutionState !== "resolved" ||
 					change.checkedAt !== update.checkedAt ||
-					!isActiveWorkPullRequestStatus(pullRequest.status) ||
+					!isActiveChangePullRequestStatus(pullRequest.status) ||
 					pullRequest.provider !== update.provider ||
 					pullRequest.number !== update.number ||
-					!isSameWorkPullRequestRepository(pullRequest.repository, update.repository)
+					!isSameChangePullRequestRepository(pullRequest.repository, update.repository)
 				) {
 					continue;
 				}
@@ -957,12 +957,12 @@ export class WorkStateStore {
 		});
 	}
 
-	getWorkContext(
+	getChangeContext(
 		workspaceName: string,
 		workspaceGeneration: number,
 		sessionId: string,
 		now: number = this.now(),
-	): WorkStateWireContext | undefined {
+	): ChangeWireContext | undefined {
 		const binding = this.state.bindings.find(
 			(candidate) =>
 				candidate.workspaceName === workspaceName &&
@@ -1004,7 +1004,7 @@ export class WorkStateStore {
 		await this.flush();
 	}
 
-	private mutate<T>(protectedBindingKey: string, mutation: (draft: WorkStateFileV1) => T): Promise<T> {
+	private mutate<T>(protectedBindingKey: string, mutation: (draft: ChangesFileV1) => T): Promise<T> {
 		const operation = this.mutationQueue.then(async () => {
 			const draft = cloneRecord(this.state);
 			const result = mutation(draft);
@@ -1021,9 +1021,9 @@ export class WorkStateStore {
 	}
 
 	private mutateGuarded<T>(
-		isCurrentRevision: WorkObservationRevisionGuard,
+		isCurrentRevision: ChangeObservationRevisionGuard,
 		protectedBindingKey: string,
-		mutation: (draft: WorkStateFileV1) => T,
+		mutation: (draft: ChangesFileV1) => T,
 	): Promise<T | undefined> {
 		if (!isCurrentRevision()) return Promise.resolve(undefined);
 		const operation = this.mutationQueue.then(async () => {
@@ -1042,10 +1042,10 @@ export class WorkStateStore {
 		return operation;
 	}
 
-	private async write(state: WorkStateFileV1): Promise<void> {
-		const content = serializeWorkState(state);
-		if (Buffer.byteLength(content, "utf8") > WORK_STATE_MAX_BYTES) {
-			throw new Error("Work state exceeds its size bound");
+	private async write(state: ChangesFileV1): Promise<void> {
+		const content = serializeChangesFile(state);
+		if (Buffer.byteLength(content, "utf8") > CHANGE_STORE_MAX_BYTES) {
+			throw new Error("Changes file exceeds its size bound");
 		}
 		await this.writeStateFile(this.path, content);
 	}

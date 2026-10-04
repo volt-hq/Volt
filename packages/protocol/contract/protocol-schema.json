@@ -1414,7 +1414,7 @@
 					"$ref": "#/$defs/Control.Request.lease_release"
 				},
 				{
-					"$ref": "#/$defs/Control.Request.work_observe"
+					"$ref": "#/$defs/Control.Request.change_observe"
 				},
 				{
 					"$ref": "#/$defs/Control.Request.pair_request"
@@ -1486,6 +1486,73 @@
 					"$ref": "#/$defs/Control.Request.relay_notification_delivery"
 				}
 			]
+		},
+		"Control.Request.change_observe": {
+			"type": "object",
+			"required": [
+				"type",
+				"id",
+				"workspaceName",
+				"sessionId",
+				"gitContext"
+			],
+			"properties": {
+				"type": {
+					"type": "string",
+					"const": "change_observe"
+				},
+				"id": {
+					"type": "string"
+				},
+				"workspaceName": {
+					"type": "string",
+					"maxLength": 256,
+					"pattern": "^[\\s\\S]{1,256}$"
+				},
+				"sessionId": {
+					"type": "string",
+					"maxLength": 128,
+					"pattern": "^[\\s\\S]{1,128}$"
+				},
+				"gitContext": {
+					"anyOf": [
+						{
+							"type": "object",
+							"required": [
+								"repository",
+								"branch",
+								"headOid"
+							],
+							"properties": {
+								"repository": {
+									"type": "string",
+									"maxLength": 256,
+									"pattern": "^[^\\u0000\\r\\n]{1,256}$"
+								},
+								"branch": {
+									"type": "string",
+									"maxLength": 1024,
+									"pattern": "^[^\\u0000\\r\\n]{1,1024}$"
+								},
+								"headOid": {
+									"type": "string",
+									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+								},
+								"baseRef": {
+									"type": "string",
+									"maxLength": 1024,
+									"pattern": "^[^\\u0000\\r\\n]{0,1024}$"
+								}
+							},
+							"additionalProperties": false
+						},
+						{
+							"type": "null"
+						}
+					]
+				}
+			},
+			"additionalProperties": false
 		},
 		"Control.Request.client_access_update": {
 			"anyOf": [
@@ -1970,73 +2037,6 @@
 				},
 				"viewerFeedId": {
 					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"Control.Request.work_observe": {
-			"type": "object",
-			"required": [
-				"type",
-				"id",
-				"workspaceName",
-				"sessionId",
-				"gitContext"
-			],
-			"properties": {
-				"type": {
-					"type": "string",
-					"const": "work_observe"
-				},
-				"id": {
-					"type": "string"
-				},
-				"workspaceName": {
-					"type": "string",
-					"maxLength": 256,
-					"pattern": "^[\\s\\S]{1,256}$"
-				},
-				"sessionId": {
-					"type": "string",
-					"maxLength": 128,
-					"pattern": "^[\\s\\S]{1,128}$"
-				},
-				"gitContext": {
-					"anyOf": [
-						{
-							"type": "object",
-							"required": [
-								"repository",
-								"branch",
-								"headOid"
-							],
-							"properties": {
-								"repository": {
-									"type": "string",
-									"maxLength": 256,
-									"pattern": "^[^\\u0000\\r\\n]{1,256}$"
-								},
-								"branch": {
-									"type": "string",
-									"maxLength": 1024,
-									"pattern": "^[^\\u0000\\r\\n]{1,1024}$"
-								},
-								"headOid": {
-									"type": "string",
-									"pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
-								},
-								"baseRef": {
-									"type": "string",
-									"maxLength": 1024,
-									"pattern": "^[^\\u0000\\r\\n]{0,1024}$"
-								}
-							},
-							"additionalProperties": false
-						},
-						{
-							"type": "null"
-						}
-					]
 				}
 			},
 			"additionalProperties": false
@@ -13630,7 +13630,7 @@
 						"required": [
 							"sessionId",
 							"startingGitContext",
-							"workContext"
+							"changeContext"
 						],
 						"properties": {
 							"sessionId": {
@@ -13648,10 +13648,10 @@
 									}
 								]
 							},
-							"workContext": {
+							"changeContext": {
 								"anyOf": [
 									{
-										"$ref": "#/$defs/RpcSessionWorkContext"
+										"$ref": "#/$defs/RpcSessionChangeContext"
 									},
 									{
 										"type": "null"
@@ -18819,6 +18819,115 @@
 			"maximum": 9007199254740991,
 			"x-volt-expected": "be a safe non-negative integer"
 		},
+		"RpcSessionChangeContext": {
+			"anyOf": [
+				{
+					"type": "object",
+					"required": [
+						"changeId",
+						"repository",
+						"branch",
+						"resolutionState",
+						"pullRequest"
+					],
+					"properties": {
+						"changeId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 128
+						},
+						"repository": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 256
+						},
+						"branch": {
+							"$ref": "#/$defs/RpcGitRef"
+						},
+						"resolutionState": {
+							"type": "string",
+							"const": "resolved"
+						},
+						"pullRequest": {
+							"$ref": "#/$defs/RpcSessionChangePullRequest"
+						}
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": [
+						"changeId",
+						"repository",
+						"branch",
+						"resolutionState"
+					],
+					"properties": {
+						"changeId": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 128
+						},
+						"repository": {
+							"type": "string",
+							"minLength": 1,
+							"maxLength": 256
+						},
+						"branch": {
+							"$ref": "#/$defs/RpcGitRef"
+						},
+						"resolutionState": {
+							"type": "string",
+							"enum": [
+								"none",
+								"ambiguous",
+								"unavailable"
+							]
+						}
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+		"RpcSessionChangePullRequest": {
+			"type": "object",
+			"required": [
+				"provider",
+				"number",
+				"title",
+				"status",
+				"stale"
+			],
+			"properties": {
+				"provider": {
+					"type": "string",
+					"minLength": 1,
+					"maxLength": 64
+				},
+				"number": {
+					"type": "integer",
+					"minimum": 1,
+					"maximum": 9007199254740991
+				},
+				"title": {
+					"type": "string",
+					"maxLength": 512
+				},
+				"status": {
+					"type": "string",
+					"enum": [
+						"open",
+						"draft",
+						"merged",
+						"closed"
+					]
+				},
+				"stale": {
+					"type": "boolean"
+				}
+			},
+			"additionalProperties": false
+		},
 		"RpcSessionListItem": {
 			"type": "object",
 			"required": [
@@ -18868,8 +18977,8 @@
 						}
 					]
 				},
-				"workContext": {
-					"$ref": "#/$defs/RpcSessionWorkContext"
+				"changeContext": {
+					"$ref": "#/$defs/RpcSessionChangeContext"
 				},
 				"runtimeState": {
 					"type": "string",
@@ -18885,115 +18994,6 @@
 				},
 				"workingDirectory": {
 					"type": "string"
-				}
-			},
-			"additionalProperties": false
-		},
-		"RpcSessionWorkContext": {
-			"anyOf": [
-				{
-					"type": "object",
-					"required": [
-						"changeId",
-						"repository",
-						"branch",
-						"resolutionState",
-						"pullRequest"
-					],
-					"properties": {
-						"changeId": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 128
-						},
-						"repository": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 256
-						},
-						"branch": {
-							"$ref": "#/$defs/RpcGitRef"
-						},
-						"resolutionState": {
-							"type": "string",
-							"const": "resolved"
-						},
-						"pullRequest": {
-							"$ref": "#/$defs/RpcSessionWorkPullRequest"
-						}
-					},
-					"additionalProperties": false
-				},
-				{
-					"type": "object",
-					"required": [
-						"changeId",
-						"repository",
-						"branch",
-						"resolutionState"
-					],
-					"properties": {
-						"changeId": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 128
-						},
-						"repository": {
-							"type": "string",
-							"minLength": 1,
-							"maxLength": 256
-						},
-						"branch": {
-							"$ref": "#/$defs/RpcGitRef"
-						},
-						"resolutionState": {
-							"type": "string",
-							"enum": [
-								"none",
-								"ambiguous",
-								"unavailable"
-							]
-						}
-					},
-					"additionalProperties": false
-				}
-			]
-		},
-		"RpcSessionWorkPullRequest": {
-			"type": "object",
-			"required": [
-				"provider",
-				"number",
-				"title",
-				"status",
-				"stale"
-			],
-			"properties": {
-				"provider": {
-					"type": "string",
-					"minLength": 1,
-					"maxLength": 64
-				},
-				"number": {
-					"type": "integer",
-					"minimum": 1,
-					"maximum": 9007199254740991
-				},
-				"title": {
-					"type": "string",
-					"maxLength": 512
-				},
-				"status": {
-					"type": "string",
-					"enum": [
-						"open",
-						"draft",
-						"merged",
-						"closed"
-					]
-				},
-				"stale": {
-					"type": "boolean"
 				}
 			},
 			"additionalProperties": false

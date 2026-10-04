@@ -635,7 +635,7 @@ export class InteractiveMode {
 	// a reconnecting client even when auto-start is off, so a daemon started by
 	// another process can discover every already-running agent.
 	private daemonAttach: DaemonAttach = createDisabledDaemonAttach();
-	private readonly daemonWorkObservation = new GitContextObservationBinding((observation) => {
+	private readonly daemonChangeObservation = new GitContextObservationBinding((observation) => {
 		if (observation.status !== "definitive") return;
 		void this.daemonAttach.publishGitObservation(this.session.sessionId, observation.gitContext);
 	});
@@ -2057,7 +2057,7 @@ export class InteractiveMode {
 		});
 		if (!started) await this.daemonAttach.start();
 		const acquireOutcome = await this.acquireCurrentSessionLease();
-		this.bindDaemonWorkObservation(this.session);
+		this.bindDaemonChangeObservation(this.session);
 		// The TUI leaves a session by closing it; the lease follows once it closed.
 		this.host.onClosed(({ id: sessionId }) => {
 			void this.queueDaemonLeaseWork(() => this.handOverDaemonLease(sessionId)).catch(() => undefined);
@@ -2106,7 +2106,7 @@ export class InteractiveMode {
 		if (this.isShuttingDown || this.endingLostSession || this.session.sessionId === closedSessionId) return;
 		await this.daemonAttach.release(closedSessionId, "switch");
 		await this.acquireCurrentSessionLease();
-		this.bindDaemonWorkObservation(this.session);
+		this.bindDaemonChangeObservation(this.session);
 	}
 
 	/** Run lease work after the handovers before it, so leases change in order. */
@@ -2380,7 +2380,7 @@ export class InteractiveMode {
 	}
 
 	private async releaseDaemonLeaseOnQuit(): Promise<void> {
-		this.daemonWorkObservation.dispose();
+		this.daemonChangeObservation.dispose();
 		if (this.daemonAttach.connectionState() === "disabled") {
 			return;
 		}
@@ -2436,7 +2436,7 @@ export class InteractiveMode {
 	 */
 	private async followMove(to: HostedConversation): Promise<void> {
 		this.observeLoss(to);
-		this.bindDaemonWorkObservation(to.session);
+		this.bindDaemonChangeObservation(to.session);
 		await this.followSession(to.session);
 		this.ui.requestRender(true);
 		const suspension = this.sessionRenderSuspension;
@@ -2451,9 +2451,9 @@ export class InteractiveMode {
 		});
 	}
 
-	private bindDaemonWorkObservation(session: AgentSession): void {
+	private bindDaemonChangeObservation(session: AgentSession): void {
 		if (this.daemonAttach.connectionState() === "disabled") return;
-		this.daemonWorkObservation.bind(session.gitContextProvider);
+		this.daemonChangeObservation.bind(session.gitContextProvider);
 	}
 
 	/** Point the TUI's own state at `session`, before its extensions bind. */

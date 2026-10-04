@@ -24,7 +24,7 @@ import type { SettingsManager } from "../settings-manager.ts";
 import type { ToolProgressDiagnostics } from "../tool-progress-diagnostics.ts";
 import type { SubagentToolManager, SubagentToolMode } from "../tools/index.ts";
 import type { SessionBash } from "./bash.ts";
-import type { SessionExtensionWork } from "./extension-work.ts";
+import type { SessionExtensionServices } from "./extension-services.ts";
 import type { SessionPromptCache } from "./prompt-cache.ts";
 
 /** Custom-message type of the persisted §4 subagent recovery notice (issue #129). */
@@ -73,7 +73,7 @@ export interface SessionLifecycleHost {
 	/** Where a host bound to the session reads its current extension runner. */
 	extensionRunnerRef(): { current?: ExtensionRunner } | undefined;
 	bash(): SessionBash;
-	extensionWork(): SessionExtensionWork;
+	extensionServices(): SessionExtensionServices;
 	promptCache(): SessionPromptCache;
 	isDisposed(): boolean;
 	/** A structural operation holds the conversation: compaction, tree navigation, or reload. */
@@ -159,7 +159,7 @@ export class SessionLifecycle {
 		// A delivery already committing lands before the aborted operation settles.
 		await conversation.waitForIdle().catch(() => undefined);
 		this.host.settleLiveClientInputs();
-		await this.host.extensionWork().close();
+		await this.host.extensionServices().close();
 		try {
 			this.host.bash().abort();
 			this.host.stopToolServers();
