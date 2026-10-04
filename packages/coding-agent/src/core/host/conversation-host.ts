@@ -201,7 +201,7 @@ function shutdownReasonFor(conversation: HostedConversation): "new" | "resume" |
 export class ConversationHost {
 	private readonly factory: ConversationFactory;
 	private readonly agentDir: string;
-	private extensionMode: ExtensionMode;
+	private readonly extensionMode: ExtensionMode;
 	private readonly whenUnattached: WhenUnattached;
 	private readonly conversations = new Set<HostedConversation>();
 	private readonly closing = new Map<HostedConversation, Promise<void>>();
@@ -218,16 +218,6 @@ export class ConversationHost {
 		this.agentDir = options.agentDir;
 		this.extensionMode = options.extensionMode;
 		this.whenUnattached = options.whenUnattached ?? "close";
-	}
-
-	/**
-	 * Change the mode conversations bind their extensions in from now on, for a
-	 * host whose run mode settles after its first conversation opened (the CLI's
-	 * interactive start that piped input turns into a print run). Conversations
-	 * whose extensions already bound keep their mode.
-	 */
-	setExtensionMode(mode: ExtensionMode): void {
-		this.extensionMode = mode;
 	}
 
 	/** The open conversation of `sessionId`, if any. */

@@ -877,7 +877,7 @@ export async function main(args: string[], options?: MainOptions) {
 		process.exit(0);
 	}
 
-	let appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
+	const appMode = resolveAppMode(parsed, process.stdin.isTTY, process.stdout.isTTY);
 	const shouldTakeOverStdout = appMode !== "interactive" && !isPlainRuntimeMetadataCommand(parsed);
 	if (shouldTakeOverStdout) {
 		takeOverStdout();
@@ -1222,15 +1222,9 @@ export async function main(args: string[], options?: MainOptions) {
 			return;
 		}
 
-		// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC
-		let stdinContent: string | undefined;
-		if (appMode !== "rpc") {
-			stdinContent = await readPipedStdin();
-			if (stdinContent !== undefined && appMode === "interactive") {
-				appMode = "print";
-				host.setExtensionMode(toExtensionMode(appMode));
-			}
-		}
+		// Read piped stdin content (if any) - skip for RPC mode which uses stdin for JSON-RPC.
+		// Interactive mode starts only with a terminal on stdin, so it reads nothing here.
+		const stdinContent = appMode !== "rpc" ? await readPipedStdin() : undefined;
 		time("readPipedStdin");
 
 		const { initialMessage, initialImages } = await prepareInitialMessage(
