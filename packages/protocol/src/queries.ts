@@ -14,14 +14,9 @@ import { RpcBackgroundJobSnapshotSchema } from "./background-jobs.ts";
 import { ClientModelRefSchema } from "./client-fold.ts";
 import { LogEntryIdSchema, LogEntryOrdinalSchema, LogSessionIdSchema } from "./entries.ts";
 import { stringEnum } from "./helpers.ts";
-import { EmptyInputSchema, IntentDescriptorSchema, IntentNameSchema } from "./intents.ts";
-import { RpcMcpCapabilitiesResponseSchema } from "./mcp.ts";
-import { RpcPrReviewSourceRequestSchema, RpcResolvePrReviewResponseSchema } from "./pr-review.ts";
-import { RpcConversationIdentifierSchema, RpcQueueModeSchema } from "./primitives.ts";
-import { ProjectedEntrySchema } from "./projected.ts";
-import { RpcReviewWorkflowListResponseSchema, RpcReviewWorkflowResultResponseSchema } from "./projections.ts";
-import { IrohRemoteSessionIdSchema, IrohRemoteWorkingDirectorySchema } from "./remote-handshake.ts";
+import { EmptyInputSchema, IntentDescriptorSchema, IntentNameSchema, IntentOptionSchema } from "./intents.ts";
 import {
+	RpcMcpCapabilitiesResponseSchema,
 	RpcMcpPromptContentResponseSchema,
 	RpcMcpPromptsResponseSchema,
 	RpcMcpRecentCallsResponseSchema,
@@ -31,7 +26,12 @@ import {
 	RpcMcpServersResponseSchema,
 	RpcMcpToolResponseSchema,
 	RpcMcpToolsResponseSchema,
-} from "./responses.ts";
+} from "./mcp.ts";
+import { RpcPrReviewSourceRequestSchema, RpcResolvePrReviewResponseSchema } from "./pr-review.ts";
+import { RpcConversationIdentifierSchema, RpcQueueModeSchema } from "./primitives.ts";
+import { ProjectedEntrySchema } from "./projected.ts";
+import { RpcReviewWorkflowListResponseSchema, RpcReviewWorkflowResultResponseSchema } from "./projections.ts";
+import { IrohRemoteSessionIdSchema, IrohRemoteWorkingDirectorySchema } from "./remote-handshake.ts";
 import {
 	RpcListReviewDiscussionsSchema,
 	RpcReviewDiscussionSchema,
@@ -46,7 +46,6 @@ import {
 	RpcWebSearchStatusSchema,
 } from "./session.ts";
 import { RpcSubscriptionUsageReportSchema } from "./subscription-usage.ts";
-import { UiActionCompletionListResponseSchema } from "./ui-actions.ts";
 import { IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS } from "./wire-limits.ts";
 import { IrohRemoteWorkspaceDirectorySchema, IrohRemoteWorktreeSummarySchema } from "./workspace.ts";
 
@@ -79,7 +78,7 @@ export const QUERY_SCHEMAS = {
 			{ intent: IntentNameSchema, field: Type.String(), prefix: Type.Optional(Type.String()) },
 			closed,
 		),
-		result: UiActionCompletionListResponseSchema,
+		result: Type.Object({ completions: Type.Array(IntentOptionSchema) }, closed),
 	},
 
 	// Conversation log

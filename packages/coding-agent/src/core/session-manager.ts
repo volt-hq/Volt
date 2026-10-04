@@ -37,6 +37,7 @@ import {
 	type SubagentSpawnEntryPayload,
 	type ThinkingLevelChangeEntryPayload,
 } from "@hansjm10/volt-protocol";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { randomUUID } from "crypto";
 import { closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readSync } from "fs";
 import { readdir } from "fs/promises";
@@ -58,7 +59,6 @@ import { ConversationLock } from "./conversation-log/conversation-lock.ts";
 import { toLogEntry, toLogEntryDraft, toSessionEntry } from "./conversation-log/entry-codec.ts";
 import { SqliteConversationLog } from "./conversation-log/sqlite-conversation-log.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
-import type { RpcGitContext } from "./rpc/types.ts";
 import {
 	decodeStoredSessionEntry,
 	digestClientInputPayload,

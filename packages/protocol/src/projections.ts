@@ -119,35 +119,6 @@ export const RpcProjectionTruncationSchema = Type.Unsafe<RpcProjectionTruncation
 	),
 );
 
-/** Describes a bounded ordered collection. Included entries always retain source order. */
-export const RpcProjectionCollectionTruncationSchema = Type.Object(
-	{
-		truncated: Type.Literal(true),
-		originalBytes: Type.Union([Type.Number(), Type.Null()]),
-		projectedBytes: Type.Number(),
-		omittedEntries: Type.Optional(Type.Number()),
-		fields: Type.Optional(Type.Record(Type.String(), RpcProjectionTruncationSchema)),
-		totalCount: Type.Number(),
-		projectedCount: Type.Number(),
-		omittedCount: Type.Number(),
-		truncatedItems: Type.Optional(
-			Type.Array(
-				Type.Object(
-					{
-						index: Type.Number(),
-						originalBytes: Type.Union([Type.Number(), Type.Null()]),
-						projectedBytes: Type.Number(),
-					},
-					{ additionalProperties: false },
-				),
-			),
-		),
-		/** Stable source identifiers for entries omitted after the projected prefix. */
-		omittedItemIds: Type.Optional(Type.Array(Type.String())),
-	},
-	{ additionalProperties: false },
-);
-
 export const RpcWorkflowEventSchema = Type.Object(
 	{
 		type: stringEnum(["workflow_start", "workflow_update", "workflow_end"]),

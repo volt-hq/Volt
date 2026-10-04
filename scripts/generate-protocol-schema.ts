@@ -137,8 +137,6 @@ const artifact = {
 	title: "Volt protocol contract",
 	"x-volt-generated":
 		"Generated from packages/protocol/src — run `npm run contract:protocol`; do not edit by hand.",
-	"x-volt-open-events":
-		"The RpcServerEvent union is the declared vocabulary; plain-mode hosts pass additional session events through verbatim. Clients must ignore unknown event types.",
 	"x-volt-limits": CONTRACT_LIMITS,
 	$defs: sortedDefs,
 };

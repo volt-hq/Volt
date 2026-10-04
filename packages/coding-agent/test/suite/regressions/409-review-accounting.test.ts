@@ -2,11 +2,17 @@ import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type JsonValue, type Usage } from "@hansjm10/volt-ai";
-import { type ReviewUsageAccounting, RPC_RESPONSE_SCHEMAS } from "@hansjm10/volt-protocol";
+import { QUERY_SCHEMAS, type ReviewUsageAccounting } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { CodeHostProvider } from "../../../src/core/code-host/index.ts";
 import { convertToLlm, createCustomMessage } from "../../../src/core/messages.ts";
+import {
+	type IntentContext,
+	type IntentTarget,
+	LOCAL_INTENT_PROFILE,
+} from "../../../src/core/protocol/intents/index.ts";
+import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import {
 	type ExecuteReviewWorkflowOptions,
 	executeReviewWorkflow,
@@ -41,7 +47,6 @@ import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { initTheme } from "../../../src/core/theme/runtime.ts";
 import { CustomMessageComponent } from "../../../src/modes/interactive/components/custom-message.ts";
-import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { createHarness } from "../harness.ts";
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -584,7 +589,7 @@ describe("#409 initial review accounting", () => {
 		).toBe(true);
 	});
 
-	it("returns canonical usage through RPC, with historical accounting explicitly unavailable", async () => {
+	it("returns canonical usage through review queries, with historical accounting explicitly unavailable", async () => {
 		const h = await harness();
 		const collector = new ReviewUsageCollector();
 		const request = await collector.start(identity, h.getModel());
@@ -593,29 +598,29 @@ describe("#409 initial review accounting", () => {
 		await appendReviewRun(h.session.sessionWriter, record);
 		const { usage: _usage, ...historical } = record;
 		await appendReviewRun(h.session.sessionWriter, { ...historical, runId: "historical" });
-		const context = {
-			session: h.session,
-			conversation: { reviewWorkflows: new ReviewWorkflowManager() },
-			options: {},
+		const context: IntentContext = {
+			target: {
+				session: h.session,
+				conversation: { reviewWorkflows: new ReviewWorkflowManager() },
+			} as unknown as IntentTarget,
 			services: {},
-		} as unknown as RpcCommandDispatcherContext;
-		const response = await handleRpcCommand({ type: "get_review_result", runId: record.runId }, context);
-		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_result).Errors(response)).toEqual([]);
-		expect(response).toMatchObject({
-			success: true,
-			data: { usage: record.usage.summary, usageBreakdown: record.usage.attempts },
-		});
-		expect(await handleRpcCommand({ type: "get_review_result", runId: "historical" }, context)).toMatchObject({
-			data: { usage: { status: "unavailable" } },
+			profile: LOCAL_INTENT_PROFILE,
+		};
+		const resultSchema = Compile(QUERY_SCHEMAS["review.result"].result);
+		const result = await queryRegistry.run(context, "review.result", { runId: record.runId });
+		expect(resultSchema.Errors(result)).toEqual([]);
+		expect(result).toMatchObject({ usage: record.usage.summary, usageBreakdown: record.usage.attempts });
+		expect(await queryRegistry.run(context, "review.result", { runId: "historical" })).toMatchObject({
+			usage: { status: "unavailable" },
 		});
 		const live = new ReviewUsageCollector();
 		await live.start(identity, h.getModel());
 		await appendReviewRun(h.session.sessionWriter, { ...unfinished("interrupted"), usage: live.snapshot() });
-		const interrupted = await handleRpcCommand({ type: "get_review_result", runId: "interrupted" }, context);
-		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_result).Errors(interrupted)).toEqual([]);
-		expect(interrupted).toMatchObject({ data: { status: "unfinished", usage: { pendingRequests: 1 } } });
-		const listed = await handleRpcCommand({ type: "list_review_workflows" }, context);
-		expect(Compile(RPC_RESPONSE_SCHEMAS.list_review_workflows).Errors(listed)).toEqual([]);
+		const interrupted = await queryRegistry.run(context, "review.result", { runId: "interrupted" });
+		expect(resultSchema.Errors(interrupted)).toEqual([]);
+		expect(interrupted).toMatchObject({ status: "unfinished", usage: { pendingRequests: 1 } });
+		const listed = await queryRegistry.run(context, "review.workflows", {});
+		expect(Compile(QUERY_SCHEMAS["review.workflows"].result).Errors(listed)).toEqual([]);
 		expect(JSON.stringify(listed)).toContain("pendingRequests");
 	});
 

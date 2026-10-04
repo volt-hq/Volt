@@ -45,7 +45,6 @@ export interface PlanningState {
 }
 
 export const RpcAgentModeSchema = stringEnum(["build", "plan"]);
-export const RpcPlanPhaseSchema = stringEnum(["draft", "ready", "active", "completed", "handed_off"]);
 export const RpcPlanStepStatusSchema = stringEnum(["pending", "in_progress", "completed"]);
 export const RpcPlanExecutionStrategySchema = stringEnum(["retain_context", "new_session"]);
 
@@ -115,32 +114,6 @@ export const RpcPlanningStateSchema = Type.Object(
 	{
 		mode: RpcAgentModeSchema,
 		plan: Type.Union([RpcPlanStateSchema, Type.Null()]),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcPlanningStateChangedEventSchema = Type.Object(
-	{
-		type: Type.Literal("planning_state_changed"),
-		planning: RpcPlanningStateSchema,
-		delivery: Type.Optional(
-			Type.Object(
-				{
-					subscriptionId: Type.String(),
-					cursor: Type.Integer({ minimum: 0 }),
-				},
-				{ additionalProperties: false },
-			),
-		),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcPlanExecutionResultSchema = Type.Object(
-	{
-		planning: RpcPlanningStateSchema,
-		selectedSessionId: Type.String(),
-		started: Type.Boolean(),
 	},
 	{ additionalProperties: false },
 );

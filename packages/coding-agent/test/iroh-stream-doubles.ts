@@ -18,7 +18,7 @@ import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { LiveState } from "../src/core/host/live-state.ts";
-import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
+import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/protocol/transport/index.ts";
 import type { SessionEntry } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 

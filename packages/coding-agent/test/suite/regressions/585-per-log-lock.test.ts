@@ -14,7 +14,7 @@ import {
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { ConversationLock, ConversationLockedError } from "../../../src/core/conversation-log/conversation-lock.ts";
 import type { ConversationFactory } from "../../../src/core/host/hosted-conversation.ts";
-import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair } from "../../../src/core/protocol/transport/index.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import type { ExtensionAPI } from "../../../src/index.ts";
 import { runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
@@ -307,7 +307,7 @@ describe("regression #585: one writer per conversation log", () => {
 	});
 
 	it.each([
-		["an embedded RPC host settles its close promise", false],
+		["an embedded RPC host rejects its close promise", false],
 		["an RPC process exits non-zero with the error message", true],
 	] as const)("ends when its session loses its log: %s", async (_label, exitProcess) => {
 		const root = temporaryDirectory();
@@ -326,9 +326,13 @@ describe("regression #585: one writer per conversation log", () => {
 
 		const lost = await loseLog(conversation.session.sessionWriter);
 
-		await expect(mode).resolves.toBeUndefined();
-		if (exitProcess) expect(exit).toHaveBeenCalledExactlyOnceWith(1);
-		else expect(exit).not.toHaveBeenCalled();
+		if (exitProcess) {
+			await expect(mode).resolves.toBeUndefined();
+			expect(exit).toHaveBeenCalledExactlyOnceWith(1);
+		} else {
+			await expect(mode).rejects.toBe(lost);
+			expect(exit).not.toHaveBeenCalled();
+		}
 		expect(consoleError).toHaveBeenCalledExactlyOnceWith(
 			`Volt stopped session ${ref.sessionId} because its saved state could not be confirmed: ${lost.message}`,
 		);

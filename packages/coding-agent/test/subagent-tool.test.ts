@@ -13,7 +13,6 @@ import type {
 	SubagentRuntimeContext,
 } from "../src/core/host/hosted-conversation.ts";
 import type { ResourceLoader } from "../src/core/resource-loader.ts";
-import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/types.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
@@ -527,12 +526,6 @@ describe("subagent tool", () => {
 			abort: async () => {
 				options.onAbort?.();
 			},
-			getState: async (): Promise<RpcSessionState> => {
-				throw new Error("not used");
-			},
-			getTranscript: async (): Promise<RpcTranscriptResponse> => {
-				throw new Error("not used");
-			},
 			getSessionStats: async () => createStats(result.sessionId),
 			waitForEnd: async () => options.resultPromise ?? result,
 			dispose: async () => {
@@ -559,12 +552,6 @@ describe("subagent tool", () => {
 					options.prompts.push({ agent: options.agent, task });
 				},
 				abort: async () => undefined,
-				getState: async (): Promise<RpcSessionState> => {
-					throw new Error("not used");
-				},
-				getTranscript: async (): Promise<RpcTranscriptResponse> => {
-					throw new Error("not used");
-				},
 				getSessionStats: async () => createStats(options.sessionId),
 				waitForEnd: async () => completion.promise,
 				dispose: async () => undefined,
@@ -2768,12 +2755,6 @@ describe("subagent tool", () => {
 			abort: async () => {
 				abortCalled = true;
 			},
-			getState: async (): Promise<RpcSessionState> => {
-				throw new Error("not used");
-			},
-			getTranscript: async (): Promise<RpcTranscriptResponse> => {
-				throw new Error("not used");
-			},
 			getSessionStats: async () => {
 				throw new Error("not used");
 			},
@@ -2819,12 +2800,6 @@ describe("subagent tool", () => {
 			abort: async () => {
 				abortCalled = true;
 				await never;
-			},
-			getState: async (): Promise<RpcSessionState> => {
-				throw new Error("not used");
-			},
-			getTranscript: async (): Promise<RpcTranscriptResponse> => {
-				throw new Error("not used");
 			},
 			getSessionStats: async () => {
 				throw new Error("not used");
@@ -2948,12 +2923,6 @@ describe("subagent tool", () => {
 			conversation: {} as HostedConversation,
 			prompt: async () => undefined,
 			abort: async () => undefined,
-			getState: async (): Promise<RpcSessionState> => {
-				throw new Error("not used");
-			},
-			getTranscript: async (): Promise<RpcTranscriptResponse> => {
-				throw new Error("not used");
-			},
 			getSessionStats: async () => ({
 				sessionRef: undefined,
 				sessionId: result.sessionId,

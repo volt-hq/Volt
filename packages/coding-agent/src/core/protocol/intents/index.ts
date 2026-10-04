@@ -1,7 +1,7 @@
 /**
- * The host's intents (RFC §6.1). Every wire that invokes an intent goes
- * through {@link intentRegistry}: protocol frames, the legacy RPC commands and
- * UI actions, the Iroh remote commands, and TUI slash commands.
+ * The host's intents (RFC §6.1). Everything that invokes an intent goes
+ * through {@link intentRegistry}: protocol intent frames, local or relayed,
+ * and TUI slash commands.
  */
 
 import { createBuiltinIntents } from "./builtin.ts";

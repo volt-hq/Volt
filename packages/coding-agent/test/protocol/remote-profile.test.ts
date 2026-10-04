@@ -14,9 +14,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import type { ProfileLimits } from "../../src/core/protocol/profiles.ts";
 import type { AuthorityLoss, ProtocolConnection } from "../../src/core/protocol/server/connection.ts";
+import { createIrohRpcTransport } from "../../src/core/protocol/transport/iroh-transport.ts";
+import type { RpcTransport } from "../../src/core/protocol/transport/transport.ts";
 import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
-import { createIrohRpcTransport } from "../../src/core/rpc/iroh-transport.ts";
-import type { RpcTransport } from "../../src/core/rpc/transport.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "../suite/host-harness.ts";
 import { createIrohStreamPair } from "../utilities/iroh-stream-pair.ts";
 

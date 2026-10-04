@@ -8,11 +8,15 @@ import {
 	fauxAssistantMessage,
 	fauxToolCall,
 } from "@hansjm10/volt-ai";
+import type { TranscriptItem } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { createAgentSessionFromServices, createAgentSessionServices } from "../src/core/agent-session-services.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
 import type { ConversationFactory, SubagentRuntimeContext } from "../src/core/host/hosted-conversation.ts";
+import { localProfile } from "../src/core/protocol/profiles.ts";
+import { sessionProjectionSource } from "../src/core/protocol/projection/entries.ts";
+import { projectTranscriptItem } from "../src/core/protocol/projection/transcript.ts";
 import type { ResourceDiagnostic, ResourceLoader } from "../src/core/resource-loader.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import type { Settings } from "../src/core/settings-manager.ts";
@@ -26,6 +30,7 @@ import {
 	SubagentDelegationScope,
 	type SubagentDelegationScopeLimits,
 	type SubagentEndEvent,
+	type SubagentHandle,
 	SubagentManager,
 	SubagentRegistry,
 	type SubagentRuntimeCreatedEvent,
@@ -89,6 +94,16 @@ function createSubagentResourceLoader(
 		...createTestResourceLoader(),
 		getSubagents: () => ({ definitions, diagnostics }),
 	};
+}
+
+/** The transcript views of a child's committed log, as a local client sees them. */
+function childTranscript(handle: SubagentHandle): TranscriptItem[] {
+	const sessionManager = handle.conversation.session.sessionManager;
+	const source = sessionProjectionSource(sessionManager);
+	return sessionManager.committedEntriesAfter(0).flatMap((entry) => {
+		const item = projectTranscriptItem(entry, source, localProfile);
+		return item === undefined ? [] : [item];
+	});
 }
 
 function createDeferred(): { promise: Promise<void>; resolve(): void } {
@@ -250,7 +265,7 @@ describe("SubagentManager", () => {
 
 		expect(handle.id).toMatch(/^sa_/);
 		expect(handle.sessionId).toBeTruthy();
-		await expect(handle.getState()).resolves.toMatchObject({ sessionId: handle.sessionId });
+		await expect(handle.getSessionStats()).resolves.toMatchObject({ sessionId: handle.sessionId });
 	});
 
 	it("persists child sessions beside a persisted parent and records the parent session", async () => {
@@ -431,7 +446,7 @@ describe("SubagentManager", () => {
 		finishRegistration.resolve();
 		const handle = await starting;
 		await disposal;
-		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+		await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 	});
 
 	it("prompts the child and waits for terminal agent_end", async () => {
@@ -447,10 +462,9 @@ describe("SubagentManager", () => {
 		expect(result.event.type).toBe("agent_end");
 		expect(result.event.willRetry).toBe(false);
 
-		const transcript = await handle.getTranscript();
-		expect(transcript.sessionId).toBe(handle.sessionId);
+		expect(handle.conversation.session.sessionManager.getSessionId()).toBe(handle.sessionId);
 		expect(
-			transcript.items.some((item) => item.role === "assistant" && item.text.includes("child result text")),
+			childTranscript(handle).some((item) => item.role === "assistant" && item.text.includes("child result text")),
 		).toBe(true);
 	});
 
@@ -498,7 +512,7 @@ describe("SubagentManager", () => {
 		expect(manager.listActivities()).toEqual([]);
 		expect(manager.listDelegations()).toEqual([]);
 		expect(scope.snapshot()).toMatchObject({ aborted: true, activeDescendants: 0 });
-		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+		await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 		const retainedRef = await SessionManager.findForResume(parentSessionManager.getSessionDir(), handle.sessionId);
 		expect(retainedRef).toBeDefined();
 	});
@@ -560,7 +574,7 @@ describe("SubagentManager", () => {
 		expect(registrationRollbacks).toBe(1);
 		expect(manager.listActivities()).toEqual([]);
 		expect(manager.listDelegations()).toEqual([]);
-		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+		await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 	});
 
 	it("rejects the first prompt when the scope deadline expires during runtime registration", async () => {
@@ -610,7 +624,7 @@ describe("SubagentManager", () => {
 		expect(manager.listActivities()).toEqual([]);
 		expect(manager.listDelegations()).toEqual([]);
 		expect(scope.snapshot()).toMatchObject({ aborted: true, activeDescendants: 0 });
-		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+		await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 	});
 
 	it("rejects cancellation that races queued first-prompt admission", async () => {
@@ -647,7 +661,7 @@ describe("SubagentManager", () => {
 		expect(manager.listActivities()).toEqual([]);
 		expect(manager.listDelegations()).toEqual([]);
 		expect(scope.snapshot()).toMatchObject({ aborted: true, activeDescendants: 0 });
-		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+		await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 	});
 
 	it("waits through overflow compaction and returns the continuation agent_end", async () => {
@@ -1136,10 +1150,9 @@ describe("SubagentManager", () => {
 		await completion;
 
 		expect(observedSystemPrompt).toContain("Always answer as the scout subagent.");
-		const transcript = await handle.getTranscript();
-		expect(transcript.items.some((item) => item.role === "assistant" && item.text === "scout prompt observed")).toBe(
-			true,
-		);
+		expect(
+			childTranscript(handle).some((item) => item.role === "assistant" && item.text === "scout prompt observed"),
+		).toBe(true);
 	});
 
 	it("intersects definition tools with the inherited allowed tool policy", async () => {
@@ -1341,8 +1354,7 @@ describe("SubagentManager", () => {
 		expect(maxDepthSystemPrompt).toContain(`- ${firstId} completed`);
 		expect(maxDepthSystemPrompt).not.toContain("research prior work");
 		expect(maxDepthSystemPrompt).toContain("subagent_registry tool");
-		const transcript = await second.getTranscript();
-		expect(transcript.items).toContainEqual(
+		expect(childTranscript(second)).toContainEqual(
 			expect.objectContaining({ role: "tool", toolName: "subagent_registry", status: "completed" }),
 		);
 		await second.dispose();
@@ -2775,10 +2787,8 @@ describe("SubagentManager", () => {
 		});
 
 		const handle = await manager.startByName("planner");
-		const state = await handle.getState();
-
-		expect(state.model).toMatchObject({ id: "specialist-model" });
-		expect(state.thinkingLevel).toBe("high");
+		expect(handle.conversation.session.model).toMatchObject({ id: "specialist-model" });
+		expect(handle.conversation.session.thinkingLevel).toBe("high");
 	});
 
 	it("throws clear definition errors when no definitions are present", async () => {
@@ -3048,6 +3058,6 @@ describe("SubagentManager", () => {
 		expect(getDisposedSessionCount()).toBe(1);
 		expect(completionResolved).toBe(false);
 		await expect(completion).rejects.toThrow(`Subagent ${handle.id} was disposed before completion`);
-		await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+		await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 	});
 });

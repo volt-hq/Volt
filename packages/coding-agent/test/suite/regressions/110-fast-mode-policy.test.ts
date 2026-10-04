@@ -7,15 +7,12 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { AgentSession, AgentSessionEvent } from "../../../src/core/agent-session.ts";
 import { AuthStorage } from "../../../src/core/auth-storage.ts";
 import { ModelRegistry } from "../../../src/core/model-registry.ts";
-import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
-import { getUiActionDescriptors } from "../../../src/core/rpc/ui-actions.ts";
+import { intentRegistry, intentStateOf, LOCAL_INTENT_PROFILE } from "../../../src/core/protocol/intents/index.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SettingsManager } from "../../../src/core/settings-manager.ts";
 import { appendsEntryType, injectFaultyLog } from "../../utilities/faulty-log.ts";
 import { createTestResourceLoader } from "../../utilities.ts";
-
-const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
 
 interface TestRuntime {
 	session: AgentSession;
@@ -107,8 +104,8 @@ async function createRuntime(options: {
 }
 
 function fastDescriptorEnabled(session: AgentSession): boolean | undefined {
-	return getUiActionDescriptors(session, "primary").find((action) => action.id === THINKING_FAST_MODE_ACTION_ID)?.state
-		?.value as boolean | undefined;
+	const view = { state: intentStateOf(session), services: {}, profile: LOCAL_INTENT_PROFILE };
+	return intentRegistry.descriptor(intentRegistry.resolve("set_fast_mode")!, view).state?.value as boolean | undefined;
 }
 
 function settingsSnapshot(settings: SettingsManager): object {
@@ -141,7 +138,7 @@ describe("issue #110: durable Fast mode state", () => {
 			expect(first.session.fastModeEnabled).toBe(true);
 			expect(first.session.thinkingLevel).toBe("high");
 			expect(first.manager.getConversationState().context.fastMode).toBe(true);
-			expect(buildRpcSessionState(first.session).fastModeEnabled).toBe(true);
+			expect(fastDescriptorEnabled(first.session)).toBe(true);
 			const sessionRef = first.manager.getSessionRef()!;
 			first.session.dispose();
 			await first.session.waitForClosed();
@@ -247,7 +244,7 @@ describe("issue #110: durable Fast mode state", () => {
 		const initialSettings = settingsSnapshot(runtime.settings);
 		const fastStates: boolean[] = [];
 		runtime.session.subscribe((event) => {
-			if (event.type === "ui_action_state_changed") fastStates.push(event.state.value === true);
+			if (event.type === "fast_mode_changed") fastStates.push(event.enabled);
 		});
 
 		await runtime.session.setFastModeEnabled(true);
@@ -331,7 +328,7 @@ describe("issue #110: durable Fast mode state", () => {
 		const baselineEntries = runtime.manager.getEntries().length;
 		runtime.session.subscribe((event) => {
 			firstEvents.push(event);
-			if (event.type === "ui_action_state_changed") {
+			if (event.type === "fast_mode_changed") {
 				expect(runtime.manager.getConversationState().context.fastMode).toBe(true);
 				expect(runtime.session.thinkingLevel).toBe("high");
 			}
@@ -341,13 +338,7 @@ describe("issue #110: durable Fast mode state", () => {
 		await runtime.session.setFastModeEnabled(true);
 		await runtime.session.setFastModeEnabled(true);
 
-		expect(firstEvents).toEqual([
-			{
-				type: "ui_action_state_changed",
-				action: "thinking.fast_mode",
-				state: { type: "boolean", value: true, label: "Fast mode enabled" },
-			},
-		]);
+		expect(firstEvents).toEqual([{ type: "fast_mode_changed", enabled: true }]);
 		expect(secondEvents).toEqual(firstEvents);
 		expect(runtime.manager.getEntries()).toHaveLength(baselineEntries + 1);
 		expect(runtime.manager.getEntries().filter((entry) => entry.type === "thinking_level_change")).toHaveLength(1);
@@ -364,6 +355,6 @@ describe("issue #110: durable Fast mode state", () => {
 		await runtime.session.setFastModeEnabled(true);
 		expect(runtime.session.fastModeEnabled).toBe(true);
 		expect(runtime.session.thinkingLevel).toBe("high");
-		expect(observed.filter((event) => event.type === "ui_action_state_changed")).toHaveLength(1);
+		expect(observed.filter((event) => event.type === "fast_mode_changed")).toHaveLength(1);
 	});
 });

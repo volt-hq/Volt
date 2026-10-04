@@ -2,16 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	type HostFrame,
-	type RemoteCapability,
-	RPC_COMMAND_SCHEMAS,
-	RPC_RESPONSE_SCHEMAS,
-} from "@hansjm10/volt-protocol";
+import { type HostFrame, INTENT_SCHEMAS, QUERY_SCHEMAS, type RemoteCapability } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationFactory } from "../../src/core/host/hosted-conversation.ts";
+import { type IntentContext, intentRegistry, LOCAL_INTENT_PROFILE } from "../../src/core/protocol/intents/index.ts";
 import { localProfile } from "../../src/core/protocol/profiles.ts";
+import { queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import { Subscription } from "../../src/core/protocol/server/subscription.ts";
 import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
 import {
@@ -19,12 +16,11 @@ import {
 	registerReviewHandoffAliases,
 	resolveCanonicalReviewSource,
 } from "../../src/core/review-anchors.ts";
+import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../src/core/review-discussion-policy.ts";
 import { getReviewGeneral } from "../../src/core/review-general.ts";
 import { appendReviewRunDurably } from "../../src/core/review-state.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { acquireSharedSQLiteSessionStore } from "../../src/core/session-store/client.ts";
-import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../src/modes/rpc/rpc-command-dispatcher.ts";
-import { validateRpcCommandPayload } from "../../src/modes/rpc/rpc-command-validation.ts";
 import { connectTestClient, openTestHost, type TestClient, type TestClientOptions } from "../utilities/host-client.ts";
 import { createIrohStreamPair } from "../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type QueryOutcome } from "../utilities/remote-phone.ts";
@@ -36,18 +32,13 @@ interface MoveHooks {
 	onMoved?: () => Promise<void>;
 }
 
-/** An RPC dispatcher context for `client`'s current conversation. */
-function dispatcherContext(client: TestClient, extra: Record<string, unknown> = {}) {
+/** A local intent context for `client`'s current conversation. */
+function contextOf(client: TestClient): IntentContext {
 	return {
-		session: client.session,
-		conversation: client.conversation,
-		host: client.host,
-		client: client.client,
-		options: {},
+		target: { session: client.session, conversation: client.conversation, host: client.host, client: client.client },
 		services: {},
-		assertConversationGenerationCurrent: () => {},
-		...extra,
-	} as unknown as RpcCommandDispatcherContext;
+		profile: LOCAL_INTENT_PROFILE,
+	};
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -347,7 +338,7 @@ describe("durable review General publication", () => {
 		expect(await getReviewGeneral(client.session.sessionManager, "run")).toMatchObject({ generalRevision: 1 });
 	});
 
-	it("authorizes RPC lookup from current and historical same-run children without canonical mutation authority", async () => {
+	it("authorizes General lookup from current and historical same-run children without canonical mutation authority", async () => {
 		const { source, root, original, own } = await fixture();
 		const lease = await acquireSharedSQLiteSessionStore(original.sessionDirectory);
 		try {
@@ -388,20 +379,19 @@ describe("durable review General publication", () => {
 			await lease.client.registerReviewAnchor({ runId: "foreign", source: member, createdAt });
 			for (const identity of [discussion.current.child, reset.child.child]) {
 				const client = await own(await SessionManager.open({ ...original, ...identity }));
-				const context = dispatcherContext(client);
-				expect(await handleRpcCommand({ type: "get_review_general", runId: "run" }, context)).toMatchObject({
-					success: true,
-					data: await getReviewGeneral(source, "run"),
-				});
-				await expect(handleRpcCommand({ type: "get_review_general", runId: "foreign" }, context)).rejects.toThrow(
+				const context = contextOf(client);
+				expect(await queryRegistry.run(context, "review.general", { runId: "run" })).toEqual(
+					await getReviewGeneral(source, "run"),
+				);
+				await expect(queryRegistry.run(context, "review.general", { runId: "foreign" })).rejects.toThrow(
 					"exact member",
 				);
 				await expect(
-					handleRpcCommand(
-						{ type: "new_session", preserveReviewRunId: "run", replaceReviewGeneral: true },
-						context,
-					),
-				).rejects.toThrow("source review");
+					intentRegistry.invoke(context, "new_session", {
+						preserveReviewRunId: "run",
+						replaceReviewGeneral: true,
+					}),
+				).rejects.toMatchObject({ code: "unavailable", message: REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE });
 				expect(await resolveCanonicalReviewSource(client.session.sessionManager, "run")).toBeUndefined();
 			}
 		} finally {
@@ -428,7 +418,7 @@ describe("durable review General publication", () => {
 		await expect(getReviewGeneral(foreign, "run")).rejects.toThrow("exact member");
 	});
 
-	it("serves the required RPC shape as a read, rejects malformed flags and forwards explicit General replacement", async () => {
+	it("serves the required query shape as a read, rejects malformed input and forwards explicit General replacement", async () => {
 		const { client, original } = await fixture();
 		await appendReviewRunDurably(client.session.sessionWriter, {
 			schemaVersion: 1,
@@ -445,14 +435,10 @@ describe("durable review General publication", () => {
 			},
 			options: { scope: [], effort: "standard", includeOptional: false, scopeMode: "full" },
 		});
-		const context = () => dispatcherContext(client);
-		const command = { type: "get_review_general", runId: "run" } as const;
-		const response = await handleRpcCommand(command, context());
-		expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_general).Errors(response)).toEqual([]);
-		expect(response).toMatchObject({
-			success: true,
-			data: { sourceSessionId: original.sessionId, generalRevision: 0 },
-		});
+		const generalResult = Compile(QUERY_SCHEMAS["review.general"].result);
+		const general = await queryRegistry.run(contextOf(client), "review.general", { runId: "run" });
+		expect(generalResult.Errors(general)).toEqual([]);
+		expect(general).toMatchObject({ sourceSessionId: original.sessionId, generalRevision: 0 });
 		for (const field of [
 			"runId",
 			"sourceSessionId",
@@ -461,9 +447,9 @@ describe("durable review General publication", () => {
 			"generalRevision",
 			"generalAvailable",
 		]) {
-			const data = { ...(response as { data: Record<string, unknown> }).data };
+			const data: Record<string, unknown> = { ...general };
 			delete data[field];
-			expect(Compile(RPC_RESPONSE_SCHEMAS.get_review_general).Check({ ...response, data })).toBe(false);
+			expect(generalResult.Check(data)).toBe(false);
 		}
 		// A paired device reads General with observe access alone.
 		expect(await remoteQuery(client, ["conversation.observe.v1"], "review.general", { runId: "run" })).toMatchObject({
@@ -474,22 +460,31 @@ describe("durable review General publication", () => {
 			type: "query_error",
 			reason: { code: "not_allowed", requiredCapability: "conversation.observe.v1" },
 		});
-		expect(validateRpcCommandPayload({ type: "get_review_general", runId: "é".repeat(200) })).toContain("UTF-8");
+		await expect(
+			queryRegistry.run(contextOf(client), "review.general", { runId: "é".repeat(200) }),
+		).rejects.toMatchObject({
+			code: "invalid_input",
+			message: expect.stringContaining("UTF-8"),
+		});
 		for (const invalid of [
-			{ type: "new_session", replaceReviewGeneral: true },
-			{ type: "new_session", replaceReviewGeneral: "true", preserveReviewRunId: "run" },
+			{ replaceReviewGeneral: true },
+			{ replaceReviewGeneral: "true", preserveReviewRunId: "run" },
 		]) {
-			expect(Compile(RPC_COMMAND_SCHEMAS.new_session).Check(invalid)).toBe(false);
-			expect(validateRpcCommandPayload(invalid)).toBeDefined();
+			expect(Compile(INTENT_SCHEMAS.new_session.input).Check(invalid)).toBe(false);
+			await expect(intentRegistry.invokeFrame(contextOf(client), "new_session", invalid)).rejects.toMatchObject({
+				code: "invalid_input",
+			});
 		}
-		expect(
-			await handleRpcCommand(
-				{ type: "new_session", preserveReviewRunId: "run", replaceReviewGeneral: true },
-				context(),
-			),
-		).toMatchObject({ success: true, data: { cancelled: false } });
-		expect(await handleRpcCommand(command, context())).toMatchObject({ success: true, data: { generalRevision: 1 } });
-		await expect(handleRpcCommand({ type: "get_review_general", runId: "foreign" }, context())).rejects.toThrow(
+		const replaced = await intentRegistry.invoke(contextOf(client), "new_session", {
+			preserveReviewRunId: "run",
+			replaceReviewGeneral: true,
+		});
+		expect(replaced.conversation).toBe(client.session.sessionId);
+		expect(replaced.conversation).not.toBe(original.sessionId);
+		expect(await queryRegistry.run(contextOf(client), "review.general", { runId: "run" })).toMatchObject({
+			generalRevision: 1,
+		});
+		await expect(queryRegistry.run(contextOf(client), "review.general", { runId: "foreign" })).rejects.toThrow(
 			"exact member",
 		);
 	});

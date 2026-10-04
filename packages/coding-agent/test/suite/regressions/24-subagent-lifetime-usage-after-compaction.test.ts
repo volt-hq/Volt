@@ -115,12 +115,6 @@ describe("issue #24", () => {
 				conversation: {} as HostedConversation,
 				prompt: async () => undefined,
 				abort: async () => undefined,
-				getState: async () => {
-					throw new Error("not used");
-				},
-				getTranscript: async () => {
-					throw new Error("not used");
-				},
 				getSessionStats: async () => harness.session.getSessionStats(),
 				waitForEnd: async () => ({
 					id: "sa_issue_24",

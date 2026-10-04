@@ -1,6 +1,6 @@
 /**
  * MCP management contract schemas: server/tool/resource/prompt summaries,
- * OAuth flow results, and the shared source-info descriptor. SDK-shaped
+ * OAuth flow results, and the `mcp.*` query and intent results. SDK-shaped
  * fields (tool schemas, prompt arguments) stay opaque by design.
  */
 
@@ -214,31 +214,65 @@ export const RpcMcpCapabilitiesResponseSchema = Type.Object(
 );
 
 // ============================================================================
-// Source info + slash commands
+// Query and intent results
 // ============================================================================
 
-/** Wire projection of core/source-info.ts SourceInfo (pinned in type-assertions.ts). */
-export const RpcSourceInfoSchema = Type.Object(
+export const RpcMcpServersResponseSchema = Type.Object(
+	{ servers: Type.Array(RpcMcpServerSummarySchema) },
+	{ additionalProperties: false },
+);
+
+export const RpcMcpToolsResponseSchema = Type.Object(
 	{
-		path: Type.String(),
-		source: Type.String(),
-		scope: stringEnum(["user", "project", "temporary"]),
-		origin: stringEnum(["package", "top-level"]),
-		baseDir: Type.Optional(Type.String()),
+		server: Type.String(),
+		tools: Type.Array(RpcMcpToolSummarySchema),
+		metadataHash: Type.Optional(Type.String()),
+		stale: Type.Boolean(),
 	},
 	{ additionalProperties: false },
 );
 
-export const RpcSlashCommandSchema = Type.Object(
+export const RpcMcpToolResponseSchema = Type.Object({ tool: RpcMcpToolSummarySchema }, { additionalProperties: false });
+
+export const RpcMcpResourcesResponseSchema = Type.Object(
 	{
-		/** Command name (without leading slash) */
-		name: Type.String(),
-		/** Human-readable description */
-		description: Type.Optional(Type.String()),
-		/** What kind of command this is */
-		source: stringEnum(["extension", "prompt", "skill"]),
-		/** Source metadata for the owning resource */
-		sourceInfo: RpcSourceInfoSchema,
+		server: Type.String(),
+		resources: Type.Array(RpcMcpResourceSummarySchema),
+		nextCursor: Type.Optional(Type.String()),
+	},
+	{ additionalProperties: false },
+);
+
+export const RpcMcpResourceContentResponseSchema = Type.Object(
+	{ result: opaque<unknown>("MCP SDK resource content; passed through verbatim") },
+	{ additionalProperties: false },
+);
+
+export const RpcMcpPromptsResponseSchema = Type.Object(
+	{
+		server: Type.String(),
+		prompts: Type.Array(RpcMcpPromptSummarySchema),
+		nextCursor: Type.Optional(Type.String()),
+	},
+	{ additionalProperties: false },
+);
+
+export const RpcMcpPromptContentResponseSchema = Type.Object(
+	{ result: opaque<unknown>("MCP SDK prompt content; passed through verbatim") },
+	{ additionalProperties: false },
+);
+
+export const RpcMcpRecentCallsResponseSchema = Type.Object(
+	{ calls: Type.Array(RpcMcpRecentCallSummarySchema) },
+	{ additionalProperties: false },
+);
+
+export const RpcMcpServerResponseSchema = Type.Object(
+	{
+		server: RpcMcpServerSummarySchema,
+		persisted: Type.Optional(
+			Type.Object({ path: Type.String(), scope: Type.String() }, { additionalProperties: false }),
+		),
 	},
 	{ additionalProperties: false },
 );

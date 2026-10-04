@@ -4327,7 +4327,7 @@ export class InteractiveMode {
 				this.ui.requestRender();
 				break;
 
-			case "ui_action_state_changed":
+			case "fast_mode_changed":
 				this.ui.requestRender();
 				break;
 

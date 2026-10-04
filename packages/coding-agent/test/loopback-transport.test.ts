@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { createLoopbackRpcTransportPair } from "../src/core/rpc/loopback-transport.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/protocol/transport/loopback-transport.ts";
 
 describe("loopback RPC transport", () => {
 	test("delivers frames as structured values without serialization", () => {

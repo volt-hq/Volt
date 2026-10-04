@@ -1,14 +1,14 @@
 /**
- * Shared leaf schemas of the RPC wire contract.
+ * Shared leaf schemas of the wire contract.
  *
  * Byte budgets appear as `x-volt-max-utf8-bytes` annotations only: JSON Schema
- * `maxLength` counts code points, not UTF-8 bytes, so byte limits are enforced
- * by the layered checks in rpc-command-validation.ts and documented here for
- * clients. `x-volt-expected` carries the human phrasing validation errors use.
+ * `maxLength` counts code points, not UTF-8 bytes, so hosts enforce them with a
+ * layered check after schema validation and document them here for clients.
+ * `x-volt-expected` carries the human phrasing validation errors use.
  */
 
 import { ImageContentSchema } from "@hansjm10/volt-ai/schemas";
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
 import {
 	RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE,
@@ -24,9 +24,9 @@ import {
 export const RPC_TRIMMED_NON_EMPTY_PATTERN = "^\\S(?:[\\s\\S]*\\S)?$";
 
 /**
- * A conversation-scoped identifier: session, subscription, branch epoch,
- * workflow, and recovery-request ids. Trimmed, non-empty, and (layered) at
- * most 256 UTF-8 bytes.
+ * A client- or host-chosen identifier: subscription, intent, query, job,
+ * workflow, and request ids. Trimmed, non-empty, and (layered) at most 256
+ * UTF-8 bytes.
  */
 export const RpcConversationIdentifierSchema = Type.String({
 	pattern: RPC_TRIMMED_NON_EMPTY_PATTERN,
@@ -45,40 +45,6 @@ export const RpcSafeNonNegativeIntegerSchema = Type.Integer({
 	maximum: RPC_WIRE_MAX_SAFE_INTEGER,
 	"x-volt-expected": "be a safe non-negative integer",
 });
-
-/**
- * Optimistic authority captured from one ordered-conversation bootstrap.
- * Exactly these three fields; each trimmed, non-empty, and byte-bounded by the
- * layered check.
- */
-export const RpcConversationAuthoritySchema = Type.Object(
-	{
-		sessionId: RpcConversationIdentifierSchema,
-		subscriptionId: RpcConversationIdentifierSchema,
-		branchEpoch: RpcConversationIdentifierSchema,
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcAssistantStreamPositionSchema = Type.Object(
-	{
-		epoch: RpcSafeNonNegativeIntegerSchema,
-		seq: RpcSafeNonNegativeIntegerSchema,
-	},
-	{
-		additionalProperties: false,
-		"x-volt-expected": "be a safe non-negative epoch/seq position",
-	},
-);
-
-export const RpcConversationDiscontinuityReasonSchema = stringEnum([
-	"cursor_gap",
-	"assistant_position_gap",
-	"reducer_divergence",
-]);
-
-/** `branch_rebase` retains conversation identity: a stream never changes conversations. */
-export const RpcConversationBootstrapReasonSchema = stringEnum(["bootstrap", "branch_rebase", "resync", "overflow"]);
 
 /** volt-ai's ImageContent annotated with the conversation-input byte limits. */
 export const RpcImageContentSchema = Type.Object(
@@ -108,8 +74,6 @@ export const RpcStreamingBehaviorSchema = stringEnum(["steer", "followUp"]);
 
 export const RpcQueueModeSchema = stringEnum(["all", "one-at-a-time"]);
 
-export const RpcUiActionListScopeSchema = stringEnum(["primary", "palette", "all"]);
-
 // ============================================================================
 // Push registration
 // ============================================================================
@@ -132,3 +96,4 @@ export const RpcRegisterPushTargetArgsSchema = Type.Object(
 		"x-volt-expected": "be a push target registration object",
 	},
 );
+export type RpcRegisterPushTargetArgs = Static<typeof RpcRegisterPushTargetArgsSchema>;

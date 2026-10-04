@@ -5,7 +5,7 @@ import type { ExtensionMode, SessionStartEvent } from "../../../src/core/extensi
 import { ClientScope } from "../../../src/core/host/client-scope.ts";
 import { localProfile } from "../../../src/core/protocol/profiles.ts";
 import { type ProtocolConnection, serveConnection } from "../../../src/core/protocol/server/connection.ts";
-import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair } from "../../../src/core/protocol/transport/index.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "../extension-runtime.ts";
 import { createHarness } from "../harness.ts";
 

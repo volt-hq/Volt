@@ -9,10 +9,9 @@ import type { AgentSession } from "../../agent-session.ts";
 import { executePlan } from "../../host/plan-handoff.ts";
 import { openFork, openNewSession, openStoredSessionById } from "../../host/session-intents.ts";
 import { acknowledgeReviewRun, appendReviewRun, getCanonicalReviewRun } from "../../review-state.ts";
-import { projectRpcBackgroundJob } from "../../rpc/background-jobs.ts";
-import type { RpcPromptResponse } from "../../rpc/types.ts";
 import { SessionManager } from "../../session-manager.ts";
 import type { SessionWriter } from "../../session-writer.ts";
+import { projectRpcBackgroundJob } from "../projection/background-jobs.ts";
 import { agentModeState, fastModeAvailability, fastModeState } from "./state.ts";
 import { defineIntent, INTENT_ENABLED, type IntentContext, IntentRejectedError, type IntentTarget } from "./types.ts";
 
@@ -34,6 +33,14 @@ function promptExtensionCommandName(message: string): string | undefined {
 	const spaceIndex = message.indexOf(" ");
 	const name = spaceIndex === -1 ? message.slice(1) : message.slice(1, spaceIndex);
 	return name.length > 0 ? name : undefined;
+}
+
+/** How a prompt was taken: admitted to run or queue, or completed by an earlier delivery of the same input. */
+export interface PromptOutcome {
+	readonly clientMessageId: string;
+	readonly outcome: "admitted" | "completed";
+	/** Present when a canonical identified user entry completed this input. */
+	readonly canonicalEntryId?: string;
 }
 
 function requireClientMessageId(ctx: IntentContext): string {
@@ -66,7 +73,7 @@ export const promptIntent = defineIntent({
 				}
 			: INTENT_ENABLED;
 	},
-	run(ctx, input): Promise<RpcPromptResponse> {
+	run(ctx, input): Promise<PromptOutcome> {
 		const { session } = targetOf(ctx);
 		const clientMessageId = requireClientMessageId(ctx);
 		// Accepted once the prompt passes admission; a failure after that belongs to the run.

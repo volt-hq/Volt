@@ -1,12 +1,13 @@
 /**
  * The intent registry: the one place a host admits and runs an intent,
- * whatever wire carried it (protocol frames, the legacy RPC commands and UI
- * actions, the Iroh remote commands, TUI slash commands).
+ * whatever carried it (protocol intent frames, relayed frames, TUI slash
+ * commands).
  *
  * Admission order: resolve the name (built-in or the target session's
  * dynamic catalog), the profile (remote safety, then each required
- * capability), the input schema, the branch fence, the review-discussion
- * boundary, and availability. Only then does the definition run.
+ * capability), the input schema and the byte budgets it annotates, the branch
+ * fence, the review-discussion boundary, and availability. Only then does the
+ * definition run.
  */
 
 import {
@@ -16,12 +17,12 @@ import {
 	INTENT_SCHEMAS,
 	type IntentDescriptor,
 	type IntentInput,
+	type IntentOption,
 } from "@hansjm10/volt-protocol";
 import type { Static, TObject } from "typebox";
 import { Compile, type Validator } from "typebox/compile";
 import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../review-discussion-policy.ts";
-import type { UiActionOptionDescriptor } from "../../rpc/types.ts";
-import { formatSchemaError } from "../schema-errors.ts";
+import { formatSchemaBoundError, formatSchemaError } from "../schema-errors.ts";
 import {
 	completeDynamicIntentArguments,
 	type DynamicIntent,
@@ -211,12 +212,7 @@ export class IntentRegistry {
 	 * none. Completing reads, so a remote profile needs the intent to be
 	 * remote-safe but not the capabilities invoking it requires.
 	 */
-	async complete(
-		ctx: IntentContext,
-		name: string,
-		field: string,
-		prefix: string,
-	): Promise<UiActionOptionDescriptor[]> {
+	async complete(ctx: IntentContext, name: string, field: string, prefix: string): Promise<IntentOption[]> {
 		const resolved = this.resolve(name, ctx.target);
 		if (!resolved) throw new IntentRejectedError("unknown_intent", `Unknown intent: ${name}`);
 		if (ctx.profile.name === "remote" && metadataOf(resolved).remote !== "safe") {
@@ -287,15 +283,13 @@ export class IntentRegistry {
 		const admittedInput = input ?? {};
 		const validator =
 			resolved.kind === "builtin" ? this.validator(resolved.definition.name) : DYNAMIC_INPUT_VALIDATOR;
-		if (!validator.Check(admittedInput)) {
-			const schema = (
-				resolved.kind === "builtin" ? INTENT_SCHEMAS[resolved.definition.name].input : DynamicIntentInputSchema
-			) as TObject;
-			throw new IntentRejectedError(
-				"invalid_input",
-				`Invalid ${name} input: ${formatSchemaError(schema, validator.Errors(admittedInput))}`,
-			);
-		}
+		const schema = (
+			resolved.kind === "builtin" ? INTENT_SCHEMAS[resolved.definition.name].input : DynamicIntentInputSchema
+		) as TObject;
+		const invalid = validator.Check(admittedInput)
+			? formatSchemaBoundError(schema, admittedInput)
+			: formatSchemaError(schema, validator.Errors(admittedInput));
+		if (invalid !== undefined) throw new IntentRejectedError("invalid_input", `Invalid ${name} input: ${invalid}`);
 		const target = ctx.target;
 		if (metadata.scope === "conversation" && !target) {
 			throw new IntentRejectedError("unavailable", `${name} needs a conversation`);
@@ -455,7 +449,7 @@ function admitDynamicIntent(
 		if (input.streamingBehavior === undefined) {
 			throw new IntentRejectedError(
 				"busy",
-				"UI action requires streamingBehavior ('steer' or 'followUp') while the agent is streaming",
+				`${intent.name} needs streamingBehavior ('steer' or 'followUp') while the agent is streaming`,
 			);
 		}
 		queuedAs = input.streamingBehavior;

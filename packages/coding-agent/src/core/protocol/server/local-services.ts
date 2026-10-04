@@ -5,6 +5,7 @@
  * usage.
  */
 
+import type { RpcListSubagentsResponse, RpcSubagentDefinition } from "@hansjm10/volt-protocol";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { liveKey } from "../../host/live-state.ts";
 import {
@@ -15,7 +16,6 @@ import {
 } from "../../review.ts";
 import { appendReviewRun, createReviewRunRecord } from "../../review-state.ts";
 import { createEmptyReviewUsage } from "../../review-usage.ts";
-import type { RpcListSubagentsResponse, RpcSubagentDefinition, RpcSubagentStartResponse } from "../../rpc/types.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../subagents/index.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
 import type { IntentServices, IntentSubagentServices } from "../intents/types.ts";
@@ -74,7 +74,7 @@ export class ConnectionSubagents implements IntentSubagentServices {
 		return undefined;
 	}
 
-	async start(agent: string, prompt: string): Promise<RpcSubagentStartResponse> {
+	async start(agent: string, prompt: string): Promise<{ subagentId: string; sessionId: string }> {
 		const parent = this.parent();
 		const session = parent.session;
 		const manager = session.getSubagentToolManager();

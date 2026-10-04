@@ -23,12 +23,15 @@
  * a `host_response` frame, and the first answer wins.
  */
 
-import { AssistantMessageSchema, ImageContentSchema, TextContentSchema } from "@hansjm10/volt-ai/schemas";
+import {
+	AssistantMessageSchema,
+	ImageContentSchema,
+	TextContentSchema,
+	ToolCallSchema,
+} from "@hansjm10/volt-ai/schemas";
 import { type Static, Type } from "typebox";
 import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
-import { RpcSlimAssistantEventSchema } from "./conversation.ts";
 import { LogSessionIdSchema } from "./entries.ts";
-import { RpcHostActionMetadataValueSchema } from "./events.ts";
 import { RpcGitContextSchema } from "./git-context.ts";
 import { opaque, stringEnum } from "./helpers.ts";
 import { IntentAvailabilitySchema } from "./intents.ts";
@@ -98,7 +101,9 @@ export const HostRequestSchema = Type.Union([
 			commandPreview: Type.Optional(Type.String()),
 			blocking: Type.Optional(Type.Boolean()),
 			destructive: Type.Optional(Type.Boolean()),
-			metadata: Type.Optional(Type.Record(Type.String(), RpcHostActionMetadataValueSchema)),
+			metadata: Type.Optional(
+				Type.Record(Type.String(), Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()])),
+			),
 			timeoutMs,
 		},
 		closed,
@@ -344,9 +349,44 @@ export const LiveAssistantStartItemSchema = Type.Object(
 	closed,
 );
 
+const contentIndex = Type.Integer();
+
+/**
+ * The nine incremental assistant events: the volt-ai `AssistantMessageEvent`
+ * content variants without their `seq`, `snapshot`, and `toolState` fields.
+ */
+export const LiveAssistantEventSchema = Type.Union([
+	Type.Object({ type: Type.Literal("text_start"), contentIndex }, closed),
+	Type.Object({ type: Type.Literal("text_delta"), contentIndex, delta: Type.String() }, closed),
+	Type.Object({ type: Type.Literal("text_end"), contentIndex, content: Type.String() }, closed),
+	Type.Object({ type: Type.Literal("thinking_start"), contentIndex, redacted: Type.Optional(Type.Boolean()) }, closed),
+	Type.Object({ type: Type.Literal("thinking_delta"), contentIndex, delta: Type.String() }, closed),
+	Type.Object(
+		{
+			type: Type.Literal("thinking_end"),
+			contentIndex,
+			content: Type.String(),
+			redacted: Type.Optional(Type.Boolean()),
+		},
+		closed,
+	),
+	Type.Object({ type: Type.Literal("toolcall_start"), contentIndex, id: Type.String(), name: Type.String() }, closed),
+	Type.Object(
+		{
+			type: Type.Literal("toolcall_delta"),
+			contentIndex,
+			argsTextDelta: Type.String(),
+			id: Type.Optional(Type.String()),
+			name: Type.Optional(Type.String()),
+		},
+		closed,
+	),
+	Type.Object({ type: Type.Literal("toolcall_end"), contentIndex, toolCall: ToolCallSchema }, closed),
+]);
+
 /** One incremental assistant event. */
 export const LiveAssistantDeltaItemSchema = Type.Object(
-	{ type: Type.Literal("assistant_delta"), event: RpcSlimAssistantEventSchema },
+	{ type: Type.Literal("assistant_delta"), event: LiveAssistantEventSchema },
 	closed,
 );
 

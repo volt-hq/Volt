@@ -1,4 +1,4 @@
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
 import { RpcSafeNonNegativeIntegerSchema } from "./primitives.ts";
 import {
@@ -108,3 +108,4 @@ export const RpcGitContextSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+export type RpcGitContext = Static<typeof RpcGitContextSchema>;

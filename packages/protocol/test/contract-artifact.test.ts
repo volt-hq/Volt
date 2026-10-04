@@ -1,7 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, test } from "vitest";
-import { RPC_COMMAND_SCHEMAS } from "../src/commands.ts";
 import { CONTRACT_LIMITS, CONTRACT_SCHEMA_REGISTRY } from "../src/contract.ts";
 import { CONTROL_EVENT_SCHEMAS, CONTROL_REQUEST_SCHEMAS, CONTROL_RESPONSE_SCHEMAS } from "../src/daemon-control.ts";
 import { CORE_LOG_ENTRY_TYPES } from "../src/entries.ts";
@@ -10,15 +9,13 @@ import { BUILTIN_INTENT_NAMES, INTENT_SCHEMAS } from "../src/intents.ts";
 import { LIVE_ITEM_SCHEMAS, LIVE_VALUE_SCHEMAS } from "../src/live.ts";
 import { PROJECTED_ENTRY_TYPES } from "../src/projected.ts";
 import { QUERY_NAMES } from "../src/queries.ts";
-import { RPC_RESPONSE_SCHEMAS } from "../src/responses.ts";
 import { UI_NODE_TERMINAL_MAX_LINES } from "../src/ui-node.ts";
 import {
-	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
+	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
 	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
+	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES,
-	RPC_SESSION_STATE_MAX_SERIALIZED_BYTES,
-	RPC_STABLE_ERROR_CODES,
-	RPC_TRANSCRIPT_PAGE_MAX_ITEMS,
+	RPC_SESSION_QUEUE_MAX_ITEMS,
 } from "../src/wire-limits.ts";
 
 const artifactPath = join(import.meta.dirname, "..", "contract", "protocol-schema.json");
@@ -69,17 +66,12 @@ describe("committed protocol contract artifact", () => {
 		}
 	});
 
-	test("wire unions cover every command and response", () => {
+	test("declares the closed protocol only: no open event vocabulary or RPC command unions", () => {
 		const artifact = loadArtifact();
-		const commandUnion = artifact.$defs.RpcCommand as { anyOf: Array<{ $ref: string }> };
-		expect(commandUnion.anyOf.map((member) => member.$ref)).toEqual(
-			Object.keys(RPC_COMMAND_SCHEMAS).map((type) => `#/$defs/RpcCommand.${type}`),
-		);
-		const responseUnion = artifact.$defs.RpcResponse as { anyOf: Array<{ $ref: string }> };
-		expect(responseUnion.anyOf.map((member) => member.$ref)).toEqual([
-			...Object.keys(RPC_RESPONSE_SCHEMAS).map((command) => `#/$defs/RpcResponse.${command}`),
-			"#/$defs/RpcErrorResponse",
-		]);
+		expect(Object.keys(artifact)).toEqual(["$schema", "title", "x-volt-generated", "x-volt-limits", "$defs"]);
+		for (const name of Object.keys(artifact.$defs)) {
+			expect(name).not.toMatch(/^Rpc(Command|Response|ServerEvent|ClientMessage)(\.|$)/);
+		}
 	});
 
 	test("control unions cover every daemon request, response, and event", () => {
@@ -101,13 +93,10 @@ describe("committed protocol contract artifact", () => {
 		const limits = artifact["x-volt-limits"];
 		expect(limits).toEqual(JSON.parse(JSON.stringify(CONTRACT_LIMITS)));
 		expect(limits.conversationInput.messageMaxUtf8Bytes).toBe(RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES);
-		expect(limits.sessionState.maxSerializedBytes).toBe(RPC_SESSION_STATE_MAX_SERIALIZED_BYTES);
-		expect(limits.conversationProjection.assistantMaxContentBlocks).toBe(
-			DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
-		);
-		expect(limits.transcript.pageMaxItems).toBe(RPC_TRANSCRIPT_PAGE_MAX_ITEMS);
+		expect(limits.conversationInput.queueMaxItems).toBe(RPC_SESSION_QUEUE_MAX_ITEMS);
+		expect(limits.remoteProfile.liveQueueBytes).toBe(DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES);
+		expect(limits.remoteProfile.textMaxScalars).toBe(IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS);
 		expect(limits.jsonl.maxEncodedLineBytes).toBe(DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES);
-		expect(limits.stableErrorCodes).toEqual([...RPC_STABLE_ERROR_CODES]);
 		expect(limits.uiNode.terminalMaxLines).toBe(UI_NODE_TERMINAL_MAX_LINES);
 	});
 

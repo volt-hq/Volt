@@ -6,10 +6,14 @@ import { join } from "node:path";
 import { createFauxProvider } from "@hansjm10/volt-ai";
 import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import {
+	createIrohRpcTransport,
+	type IrohBiStreamLike,
+	readIrohJsonlLine,
+} from "../src/core/protocol/transport/iroh-transport.ts";
 import { parseIrohRemoteHandshakeResponse } from "../src/core/remote/iroh/handshake.ts";
 import { IROH_REMOTE_ALPN } from "../src/core/remote/iroh/protocol.ts";
 import { decodeIrohRemoteTicketPayload } from "../src/core/remote/iroh/ticket.ts";
-import { createIrohRpcTransport, type IrohBiStreamLike, readIrohJsonlLine } from "../src/core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir, SessionManager } from "../src/core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../src/daemon/control-client.ts";
 import {

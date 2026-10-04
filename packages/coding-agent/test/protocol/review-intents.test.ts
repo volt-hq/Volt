@@ -15,7 +15,6 @@ import {
 	getReviewRun,
 	type ReviewRunRecord,
 } from "../../src/core/review-state.ts";
-import { prepareUiActionInvocation } from "../../src/core/rpc/ui-actions.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import type { SessionWriter } from "../../src/core/session-writer.ts";
 
@@ -131,12 +130,8 @@ function contextOf(manager: SessionManager, services: IntentServices = {}): Inte
 }
 
 describe("durable review lifecycle intents", () => {
-	test.each([
-		{ via: "intent", findingIds: undefined, acknowledgedAt: undefined },
-		{ via: "ui action", findingIds: "", acknowledgedAt: undefined },
-		{ via: "ui action", findingIds: " \t ", acknowledgedAt: 123 },
-	])(
-		"seeds all durable findings and preserves acknowledgment without selected ids ($via, $findingIds)",
+	test.each([{ acknowledgedAt: undefined }, { acknowledgedAt: 123 }])(
+		"seeds all durable findings and preserves acknowledgment without selected ids (acknowledged: $acknowledgedAt)",
 		async (testCase) => {
 			const manager = SessionManager.inMemory("/workspace");
 			await appendReviewRun(manager.logWriter, durableRecord());
@@ -161,17 +156,9 @@ describe("durable review lifecycle intents", () => {
 				},
 			);
 
-			if (testCase.via === "intent") {
-				const opened = await intentRegistry.invoke(ctx, "review_open_session", { runId: "review:test" });
-				expect(opened.conversation).toBe(replacementManager.getSessionId());
-			} else {
-				await expect(
-					prepareUiActionInvocation(ctx, {
-						action: "review.fix",
-						args: { runId: "review:test", findingIds: testCase.findingIds },
-					}).run(),
-				).resolves.toMatchObject({ status: "completed", message: "Opened 2 selected review findings" });
-			}
+			const opened = await intentRegistry.invoke(ctx, "review_open_session", { runId: "review:test" });
+			expect(opened.conversation).toBe(replacementManager.getSessionId());
+			expect(opened.outcome.selectedCount).toBe(2);
 			const seedMessages = replacementManager.getBranch().filter((entry) => entry.type === "custom_message");
 			expect(seedMessages).toHaveLength(1);
 			const seedMessage = seedMessages[0] as { details?: { findings?: Array<{ id: string }> } };

@@ -5,7 +5,7 @@
  */
 
 import { Buffer } from "node:buffer";
-import type { IrohBiStreamLike, IrohBytes } from "../../src/core/rpc/iroh-transport.ts";
+import type { IrohBiStreamLike, IrohBytes } from "../../src/core/protocol/transport/iroh-transport.ts";
 
 class Pipe {
 	private readonly chunks: Buffer[] = [];

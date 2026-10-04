@@ -1,9 +1,9 @@
 import type { ThinkingLevel } from "@hansjm10/volt-agent-core";
 import { type Api, getSupportedThinkingLevels, type Model, supportsFastInference } from "@hansjm10/volt-ai";
+import type { AgentMode, RpcCatalogModel } from "@hansjm10/volt-protocol";
 import type { AgentSessionServices } from "../../agent-session-services.ts";
 import { DEFAULT_THINKING_LEVEL } from "../../defaults.ts";
 import { findInitialModel } from "../../model-resolver.ts";
-import type { RpcAgentMode, RpcCatalogModel } from "../../rpc/types.ts";
 
 export interface IrohRemoteAgentOptionsModelSelection {
 	provider: string;
@@ -14,7 +14,7 @@ export interface IrohRemoteAgentOptionsDefaultConfig {
 	model: IrohRemoteAgentOptionsModelSelection;
 	thinkingLevel: ThinkingLevel;
 	fastModeEnabled: boolean;
-	agentMode: RpcAgentMode;
+	agentMode: AgentMode;
 }
 
 export interface IrohRemoteAgentOptions {

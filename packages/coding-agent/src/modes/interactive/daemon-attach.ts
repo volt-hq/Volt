@@ -1,6 +1,7 @@
 import { basename, resolve } from "node:path";
 import type { Duplex } from "node:stream";
 import type { ControlRelayFrame, ControlRelayOutcome } from "@hansjm10/volt-protocol";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { isStandaloneBinary, VERSION } from "../../config.ts";
 import { parseIrohRemoteRpcGrant } from "../../core/remote/iroh/access-grant.ts";
 import type { IrohRemoteClientAuthorizationSuccess } from "../../core/remote/iroh/authorization.ts";
@@ -8,7 +9,6 @@ import type {
 	IrohRemotePushNotificationDeliveryStatus,
 	IrohRemotePushNotificationIntent,
 } from "../../core/remote/iroh/push.ts";
-import type { RpcGitContext } from "../../core/rpc/types.ts";
 import { SessionManager, type SessionReference } from "../../core/session-manager.ts";
 import { createDaemonClient, type DaemonClient } from "../../daemon/control-client.ts";
 import {

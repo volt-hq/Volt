@@ -9,11 +9,10 @@
 import type { ImageContent, TextContent, ToolCall } from "@hansjm10/volt-ai";
 import type { TranscriptItem } from "@hansjm10/volt-protocol";
 import { extractVisibleTextContent } from "../../messages.ts";
-import { projectRpcBackgroundJobDetails } from "../../rpc/background-jobs.ts";
-import { getRemoteVisibleCustomMessageRole } from "../../rpc/custom-message-projection.ts";
 import type { CommittedSessionEntry } from "../../session-manager.ts";
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "../../subagents/tool-names.ts";
-import type { Profile } from "../profiles.ts";
+import { getRemoteVisibleCustomMessageRole, type Profile } from "../profiles.ts";
+import { projectRpcBackgroundJobDetails } from "./background-jobs.ts";
 import {
 	boundSummaryWithMetadata,
 	boundText,

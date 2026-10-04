@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { expect, test } from "vitest";
-import type { IrohBiStreamLike } from "../../../src/core/rpc/iroh-transport.ts";
+import type { IrohBiStreamLike } from "../../../src/core/protocol/transport/iroh-transport.ts";
 import { IrohConnectionSupervisor } from "../../../src/daemon/iroh-connection-supervisor.ts";
 import type { IrohConnectionLike, IrohNodeIdLike } from "../../../src/daemon/iroh-native.ts";
 import { createHarness } from "../harness.ts";

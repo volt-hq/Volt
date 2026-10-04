@@ -5,7 +5,7 @@ import {
 	type IrohRecvStreamLike,
 	type IrohSendStreamLike,
 	serializeJsonLine,
-} from "../../rpc/index.ts";
+} from "../../protocol/transport/index.ts";
 import type { IrohRemoteHandshakeResponse, IrohRemoteHello } from "./handshake.ts";
 
 export const DEFAULT_IROH_REMOTE_HANDSHAKE_MAX_LINE_BYTES = 16 * 1024;

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { clampThinkingLevel, getSupportedThinkingLevels } from "@hansjm10/volt-ai";
 import type {
+	IntentInput,
 	RpcListReviewDiscussions,
 	RpcResetReviewDiscussion,
 	RpcReviewDiscussion,
@@ -12,7 +13,6 @@ import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { HostedConversation } from "./host/hosted-conversation.ts";
 import { findInitialModel } from "./model-resolver.ts";
 import { appendReviewFindingTransition, getReviewRun, type ReviewFindingTransitionRecord } from "./review-state.ts";
-import type { RpcCommand } from "./rpc/types.ts";
 import { decodeStoredSessionEntry } from "./session-entry-codec.ts";
 import { SessionManager, type SessionReference, type ThinkingLevelChangeEntry } from "./session-manager.ts";
 import { acquireSharedSQLiteSessionStore, type SQLiteSessionStoreClient } from "./session-store/client.ts";
@@ -25,7 +25,7 @@ import type {
 } from "./session-store/types.ts";
 import type { SessionWriter } from "./session-writer.ts";
 
-type DiscussionConfiguration = Extract<RpcCommand, { type: "start_review_discussions" }>["discussionConfiguration"];
+type DiscussionConfiguration = IntentInput<"review_start_discussions">["discussionConfiguration"];
 
 export class ReviewDiscussionConfigurationError extends Error {}
 

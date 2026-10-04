@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve, sep } from "node:path";
 import { describe, expect, test } from "vitest";
+import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/protocol/transport/index.ts";
 import {
 	assertIrohRemoteHandshakeHostIdentity,
 	assertIrohRemoteTicketNotExpired,
@@ -68,7 +69,6 @@ import {
 	writeIrohRemoteHostState,
 } from "../src/core/remote/iroh/index.ts";
 import { IROH_REMOTE_HOST_STORAGE_FULL_MESSAGE } from "../src/core/remote/iroh/protocol.ts";
-import type { IrohBytes, IrohRecvStreamLike, IrohSendStreamLike } from "../src/core/rpc/index.ts";
 
 const CODING_RPC_GRANT = createIrohRemotePresetAccess("coding").rpcGrant;
 

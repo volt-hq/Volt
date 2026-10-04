@@ -1,6 +1,6 @@
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { DuplexWriteGate, StreamClosedError } from "../src/core/rpc/duplex-write-gate.ts";
+import { DuplexWriteGate, StreamClosedError } from "../src/core/protocol/transport/duplex-write-gate.ts";
 
 describe("DuplexWriteGate", () => {
 	it("rejects a backpressure write when the stream closes", async () => {

@@ -18,6 +18,7 @@ import {
 	queryErrorReason,
 	rejectionReason,
 } from "../core/protocol/server/connection.ts";
+import type { IrohBiStreamLike } from "../core/protocol/transport/iroh-transport.ts";
 import {
 	createIrohRemoteExplicitAccess,
 	createIrohRemotePresetAccess,
@@ -83,7 +84,6 @@ import {
 } from "../core/remote/iroh/state-manager.ts";
 import { getIrohRemoteWorkspaceAvailabilityStatus } from "../core/remote/iroh/workspace.ts";
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
-import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
 import { getDefaultSessionDir, getDefaultSessionDirPath, SessionManager } from "../core/session-manager.ts";
 import { SettingsManager } from "../core/settings-manager.ts";
 import { getCurrentThemeName, getResolvedThemeColors } from "../core/theme/runtime.ts";

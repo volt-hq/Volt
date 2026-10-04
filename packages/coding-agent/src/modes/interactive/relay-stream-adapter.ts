@@ -1,7 +1,7 @@
 import { Buffer } from "node:buffer";
 import type { Duplex } from "node:stream";
-import { DuplexWriteGate } from "../../core/rpc/duplex-write-gate.ts";
-import type { IrohBiStreamLike, IrohBytes } from "../../core/rpc/iroh-transport.ts";
+import { DuplexWriteGate } from "../../core/protocol/transport/duplex-write-gate.ts";
+import type { IrohBiStreamLike, IrohBytes } from "../../core/protocol/transport/iroh-transport.ts";
 
 export interface RelayedIrohStreamLike extends IrohBiStreamLike {
 	/** Close both directions; maps to socket.destroy(). */

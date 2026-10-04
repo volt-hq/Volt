@@ -1,10 +1,10 @@
 /** Summaries of a workspace's sessions, with a live conversation's own summary taken from its open log. */
 
 import type { RpcReviewDiscussionLink } from "@hansjm10/volt-protocol";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { canonicalizePath, resolvePath } from "../../utils/paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { getReviewDiscussionLink, projectReviewDiscussionLink } from "../review-discussions.ts";
-import type { RpcGitContext } from "../rpc/types.ts";
 import { type SessionInfo, SessionManager, type SessionOrigin } from "../session-manager.ts";
 
 export interface WorkspaceSessionSummary {

@@ -3,16 +3,22 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
 import { type FauxModelDefinition, fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import { REMOTE_CAPABILITIES, type RemoteGrant, RpcReviewDiscussionLinkSchema } from "@hansjm10/volt-protocol";
+import { QUERY_SCHEMAS, REMOTE_CAPABILITIES, type RemoteGrant } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
-import { intentRegistry, intentStateOf, LOCAL_INTENT_PROFILE } from "../../../src/core/protocol/intents/index.ts";
+import {
+	type IntentContext,
+	intentRegistry,
+	intentStateOf,
+	LOCAL_INTENT_PROFILE,
+} from "../../../src/core/protocol/intents/index.ts";
+import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import { registerReviewHandoffAliases } from "../../../src/core/review-anchors.ts";
-import { assertReviewDiscussionRpcAllowed } from "../../../src/core/review-discussion-policy.ts";
+import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../../src/core/review-discussion-policy.ts";
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../../src/core/review-discussions.ts";
 import {
 	appendReviewRun,
@@ -20,17 +26,9 @@ import {
 	getReviewRun,
 	type ReviewRunRecord,
 } from "../../../src/core/review-state.ts";
-import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
-import { prepareUiActionInvocation } from "../../../src/core/rpc/ui-actions.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SQLiteSessionStoreClient } from "../../../src/core/session-store/client.ts";
-import {
-	createRpcIntentContext,
-	handleRpcCommand,
-	type RpcCommandDispatcherContext,
-} from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
-import { validateRpcCommandPayload } from "../../../src/modes/rpc/rpc-command-validation.ts";
 import { connectTestClient, openTestHost, type TestClient } from "../../utilities/host-client.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "../../utilities/remote-phone.ts";
@@ -40,21 +38,16 @@ import { createHarness, type Harness } from "../harness.ts";
 /** A test client of a hosted conversation, with the review discussion service a daemon would give it. */
 type Owned = TestClient & { reviewDiscussions?: ReviewDiscussionService };
 
-/** An RPC dispatcher context for the conversation `owned` is on. */
-function rpcContext(owned: Owned, extra: Record<string, unknown> = {}): RpcCommandDispatcherContext {
+/** A local intent context for the conversation `owned` is on. */
+function contextOf(owned: Owned): IntentContext {
 	return {
-		session: owned.session,
-		conversation: owned.conversation,
-		host: owned.host,
-		client: owned.client,
+		target: { session: owned.session, conversation: owned.conversation, host: owned.host, client: owned.client },
 		services: {
 			abortRun: (session: AgentSession) => session.abort(),
 			...(owned.reviewDiscussions === undefined ? {} : { reviewDiscussions: owned.reviewDiscussions }),
 		},
-		options: {},
-		assertConversationGenerationCurrent: () => {},
-		...extra,
-	} as unknown as RpcCommandDispatcherContext;
+		profile: LOCAL_INTENT_PROFILE,
+	};
 }
 
 const cleanups: Array<() => Promise<void>> = [];
@@ -283,17 +276,9 @@ describe("Regression #341 host sibling lifecycle", () => {
 								: {}),
 							...(selection === "both" || selection === "thinking" ? { thinkingLevel: "medium" } : {}),
 						};
-			const command = {
-				type: "start_review_discussions",
-				runId: "review-341",
-				findingIds: ["f1"],
-				requestId: "start",
-				discussionConfiguration,
-			} as const;
-			expect(validateRpcCommandPayload(command)).toBeUndefined();
+			const input = { runId: "review-341", findingIds: ["f1"], requestId: "start", discussionConfiguration };
 			// A paired device's intent carries the nested configuration across the remote profile unchanged.
 			const phone = await connectPhone(source);
-			const { type: _type, ...input } = command;
 			expect(await phone.intent("review_start_discussions", JSON.parse(JSON.stringify(input)))).toMatchObject({
 				type: "accepted",
 				result: { results: [{ outcome: "created" }] },
@@ -326,21 +311,15 @@ describe("Regression #341 host sibling lifecycle", () => {
 			{ thinkingLevel: "high" },
 			{ thinkingLevel: "unknown" },
 		]) {
-			const response = await handleRpcCommand(
-				{
-					type: "start_review_discussions",
+			// A thinking level outside the protocol's set fails the intent's input schema.
+			await expect(
+				intentRegistry.invokeFrame(contextOf(source), "review_start_discussions", {
 					runId: "review-341",
 					findingIds: ["f1", "f2"],
 					requestId: "invalid",
 					discussionConfiguration,
-				},
-				rpcContext(source),
-			);
-			// A thinking level outside the protocol's set fails the intent's input schema.
-			expect(response).toMatchObject({
-				success: false,
-				error: expect.stringMatching(/unavailable|Unsupported|Invalid/),
-			});
+				}),
+			).rejects.toThrow(/unavailable|Unsupported|Invalid/);
 			expect((await api.list("review-341")).discussions).toEqual([]);
 			expect(runtimes).toHaveLength(1);
 		}
@@ -351,7 +330,7 @@ describe("Regression #341 host sibling lifecycle", () => {
 		expect((await api.list("review-341")).discussions).toEqual([]);
 	});
 
-	it("rejects malformed nested discussion configuration at the shared RPC boundary", () => {
+	it("rejects malformed nested discussion configuration at the intent boundary", () => {
 		for (const discussionConfiguration of [
 			null,
 			{ model: { provider: "p", id: "m" } },
@@ -359,18 +338,17 @@ describe("Regression #341 host sibling lifecycle", () => {
 			{ thinkingLevel: 2 },
 			{ extra: true },
 		]) {
-			expect(
-				validateRpcCommandPayload({
-					type: "start_review_discussions",
+			expect(() =>
+				intentRegistry.prepareFrame({ services: {}, profile: LOCAL_INTENT_PROFILE }, "review_start_discussions", {
 					runId: "review-341",
 					findingIds: ["f1"],
 					requestId: "invalid",
 					discussionConfiguration,
 				}),
-			).toBeDefined();
+			).toThrow(expect.objectContaining({ code: "invalid_input" }));
 		}
 	});
-	it("projects identity without permission claims and executes RPC bash and current-context plans", async () => {
+	it("projects identity without permission claims and executes intent bash and current-context plans", async () => {
 		const { api, harness, runtimes, root, source } = await fixture();
 		await source.session.setAgentMode("plan");
 		expect(source.session.getActiveToolNames()).not.toContain("write");
@@ -379,15 +357,14 @@ describe("Regression #341 host sibling lifecycle", () => {
 		const child = runtimes[1]!;
 		await child.session.waitForIdle();
 		expect(child.session.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "write", "bash", "lsp"]));
-		const link = buildRpcSessionState(child.session).reviewDiscussion!;
-		expect(Compile(RpcReviewDiscussionLinkSchema).Errors(link)).toEqual([]);
+		const context = contextOf(child);
+		const served = await queryRegistry.run(context, "review.discussion_source", {});
+		expect(Compile(QUERY_SCHEMAS["review.discussion_source"].result).Errors(served)).toEqual([]);
+		const link = served.discussion!;
 		expect(link).not.toHaveProperty("readOnly");
-		const context = rpcContext(child, { options: { allowUiActionInvocation: true } });
-		const intentContext = createRpcIntentContext(context);
-		expect(await handleRpcCommand({ type: "bash", command: "printf rpc-fixed > rpc.txt" }, context)).toMatchObject({
-			success: true,
-			data: { exitCode: 0 },
-		});
+		expect(
+			(await intentRegistry.invoke(context, "bash", { command: "printf rpc-fixed > rpc.txt" })).result,
+		).toMatchObject({ exitCode: 0 });
 		expect(readFileSync(join(root, "rpc.txt"), "utf8")).toBe("rpc-fixed");
 		await child.session.setAgentMode("plan");
 		let plan = await child.session.updatePlan({ steps: [{ text: "Apply fix" }] });
@@ -405,14 +382,16 @@ describe("Regression #341 host sibling lifecycle", () => {
 			}).enabled,
 		).toBe(true);
 		expect(() =>
-			prepareUiActionInvocation(intentContext, {
-				action: "plan.execute",
-				args: { planId: plan.id, expectedRevision: plan.revision, strategy: "new_session" },
+			intentRegistry.prepare(context, "plan_execute", {
+				planId: plan.id,
+				expectedRevision: plan.revision,
+				strategy: "new_session",
 			}),
 		).toThrow("source review");
 		expect(
-			await handleRpcCommand({ type: "plan_change", planId: plan.id, expectedRevision: plan.revision }, context),
-		).toMatchObject({ success: true, data: { plan: { phase: "draft" } } });
+			(await intentRegistry.invoke(context, "plan_change", { planId: plan.id, expectedRevision: plan.revision }))
+				.outcome,
+		).toMatchObject({ plan: { phase: "draft" } });
 		plan = child.session.planningState.plan!;
 		plan = await child.session.submitPlan({
 			planId: plan.id,
@@ -426,63 +405,43 @@ describe("Regression #341 host sibling lifecycle", () => {
 			}),
 			fauxAssistantMessage("Fix applied"),
 		]);
-		const command = {
-			type: "plan_execute",
+		const execute = {
 			planId: plan.id,
 			expectedRevision: plan.revision,
 			strategy: "retain_context",
 		} as const;
-		expect(
-			await handleRpcCommand(
-				{
-					id: "execute",
-					type: "invoke_ui_action",
-					action: "plan.execute",
-					args: { planId: plan.id, expectedRevision: plan.revision, strategy: "retain_context" },
-				},
-				context,
-			),
-		).toMatchObject({ success: true, data: { status: "completed", stateChanged: true } });
+		const executed = await intentRegistry.invoke(context, "plan_execute", execute);
+		expect(executed).toMatchObject({ result: { started: true }, outcome: { selectedSessionId: link.sessionId } });
+		expect(executed.conversation).toBeUndefined();
 		await child.session.waitForIdle();
 		expect(readFileSync(join(root, "plan-fix.txt"), "utf8")).toBe("fixed");
-		expect(await handleRpcCommand(command, context)).toMatchObject({
-			success: true,
-			data: { started: false, selectedSessionId: link.sessionId },
+		expect((await intentRegistry.invoke(context, "plan_execute", execute)).outcome).toMatchObject({
+			started: false,
+			selectedSessionId: link.sessionId,
 		});
 		plan = child.session.planningState.plan!;
 		expect(
-			await handleRpcCommand({ type: "plan_discard", planId: plan.id, expectedRevision: plan.revision }, context),
-		).toMatchObject({ success: true, data: { plan: null } });
+			(await intentRegistry.invoke(context, "plan_discard", { planId: plan.id, expectedRevision: plan.revision }))
+				.outcome,
+		).toMatchObject({ plan: null });
 		expect(child.session.sessionId).toBe(link.sessionId);
 	});
-	it("dispatches co-client create/list and returns explicit unavailable without a sibling service", async () => {
+	it("invokes co-client create/list and rejects explicitly without a sibling service", async () => {
 		const { source, harness, runtimes } = await fixture();
 		harness.setResponses([fauxAssistantMessage("answer")]);
-		const context = () => rpcContext(source);
-		const first = await handleRpcCommand(
-			{ id: "one", type: "start_review_discussions", runId: "review-341", findingIds: ["f1"], requestId: "stable" },
-			context(),
-		);
-		expect(first).toMatchObject({ id: "one", success: true, data: { results: [{ outcome: "created" }] } });
+		const start = { runId: "review-341", findingIds: ["f1"], requestId: "stable" };
+		const first = await intentRegistry.invoke(contextOf(source), "review_start_discussions", start);
+		expect(first.result).toMatchObject({ results: [{ outcome: "created" }] });
 		await runtimes[1]!.session.waitForIdle();
-		const second = await handleRpcCommand(
-			{ id: "two", type: "start_review_discussions", runId: "review-341", findingIds: ["f1"], requestId: "stable" },
-			{ ...context() },
-		);
-		expect(second).toMatchObject({ id: "two", success: true, data: { results: [{ outcome: "existing" }] } });
-		expect(await handleRpcCommand({ type: "list_review_discussions", runId: "review-341" }, context())).toMatchObject(
-			{
-				success: true,
-				data: { discussions: [{ status: "completed" }] },
-			},
-		);
+		const second = await intentRegistry.invoke(contextOf(source), "review_start_discussions", start);
+		expect(second.result).toMatchObject({ results: [{ outcome: "existing" }] });
+		expect(await queryRegistry.run(contextOf(source), "review.discussions", { runId: "review-341" })).toMatchObject({
+			discussions: [{ status: "completed" }],
+		});
 		source.reviewDiscussions = undefined;
-		expect(await handleRpcCommand({ type: "list_review_discussions", runId: "review-341" }, context())).toMatchObject(
-			{
-				success: false,
-				errorCode: "review_discussions_unavailable",
-			},
-		);
+		await expect(
+			queryRegistry.run(contextOf(source), "review.discussions", { runId: "review-341" }),
+		).rejects.toMatchObject({ code: "review_discussions_unavailable" });
 	});
 	it("starts four overlapping turns, co-client deduplicates and lists, and keeps one-child cancellation isolated", async () => {
 		const { api, harness, runtimes, source, service, gates, root } = await fixture();
@@ -505,9 +464,9 @@ describe("Regression #341 host sibling lifecycle", () => {
 		expect((await second.list("review-341")).discussions).toHaveLength(4);
 		expect(gates).toHaveLength(4);
 		const child = runtimes[1]!;
-		expect(buildRpcSessionState(child.session).reviewDiscussion).toMatchObject({
-			sourceSessionId: source.session.sessionId,
-		});
+		expect(child.session.sessionManager.getReviewDiscussion()?.discussion.source.sessionId).toBe(
+			source.session.sessionId,
+		);
 		expect((await child.reviewDiscussions!.source())?.sourceSessionId).toBe(source.session.sessionId);
 		const abort = child.session.abort();
 		for (const release of gates) release();
@@ -750,45 +709,37 @@ describe("Regression #341 host sibling lifecycle", () => {
 		expect(reset).toMatchObject({ status: "reset", discussion: { available: true, status: "idle" } });
 	});
 
-	it("limits source-owned RPC lifecycle only, bounds requests and preserves general conversations", async () => {
+	it("limits source-owned lifecycle intents only, bounds requests and preserves general conversations", async () => {
 		const { api, harness, runtimes, source } = await fixture();
 		harness.setResponses([fauxAssistantMessage("answer")]);
 		await api.start("review-341", ["f1"], "start");
-		const child = runtimes[1]!.session;
-		for (const command of [
-			{ type: "new_session" },
-			{ type: "record_review_finding_outcome", runId: "review-341", findingId: "f1", status: "fixed" },
-			{ type: "plan_execute", planId: "p", expectedRevision: 1, strategy: "new_session" },
-			{ type: "invoke_ui_action", id: "action", action: "review.fix" },
+		const child = contextOf(runtimes[1]!);
+		for (const [name, input] of [
+			["new_session", {}],
+			["review_record_finding_outcome", { runId: "review-341", findingId: "f1", status: "fixed" }],
+			["plan_execute", { planId: "p", expectedRevision: 1, strategy: "new_session" }],
+			["review_open_session", { runId: "review-341" }],
 		] as const) {
-			expect(() => assertReviewDiscussionRpcAllowed(child, command)).toThrow("requires the source review");
-			expect(() => assertReviewDiscussionRpcAllowed(source.session, command)).not.toThrow();
+			expect(() => intentRegistry.prepareFrame(child, name, input)).toThrow(REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE);
+			expect(() => intentRegistry.prepareFrame(contextOf(source), name, input)).not.toThrow();
 		}
-		for (const command of [
-			{ type: "subagent_start", agent: "general", prompt: "fix" },
-			{ type: "subagent_abort", subagentId: "sa_1" },
-			{ type: "get_mcp_prompt", server: "x", prompt: "x" },
-			{ type: "connect_mcp_server", server: "x" },
-			{ type: "bash", command: "echo allowed" },
-			{ type: "plan_execute", planId: "p", expectedRevision: 1, strategy: "retain_context" },
-			{ type: "invoke_ui_action", id: "action", action: "custom.fix" },
+		for (const [name, input] of [
+			["subagent_start", { agent: "general", prompt: "fix" }],
+			["subagent_abort", { subagentId: "sa_1" }],
+			["mcp.connect", { server: "x" }],
+			["bash", { command: "echo allowed" }],
+			["plan_execute", { planId: "p", expectedRevision: 1, strategy: "retain_context" }],
 		] as const)
-			expect(() => assertReviewDiscussionRpcAllowed(child, command)).not.toThrow();
-		expect(
-			validateRpcCommandPayload({
-				type: "start_review_discussions",
-				runId: "review-341",
+			expect(() => intentRegistry.prepareFrame(child, name, input)).not.toThrow();
+		const start = { runId: "review-341", requestId: "request" };
+		expect(() =>
+			intentRegistry.prepare(contextOf(source), "review_start_discussions", {
+				...start,
 				findingIds: Array.from({ length: 51 }, (_, n) => String(n)),
-				requestId: "request",
 			}),
-		).toBeDefined();
-		expect(
-			validateRpcCommandPayload({
-				type: "start_review_discussions",
-				runId: "review-341",
-				findingIds: ["f1"],
-				requestId: "request",
-			}),
-		).toBeUndefined();
+		).toThrow(expect.objectContaining({ code: "invalid_input" }));
+		expect(() =>
+			intentRegistry.prepare(contextOf(source), "review_start_discussions", { ...start, findingIds: ["f1"] }),
+		).not.toThrow();
 	});
 });

@@ -6,7 +6,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { LspClient } from "../src/core/lsp/client.ts";
 import { resolveLspConfig } from "../src/core/lsp/config.ts";
 import { LspManager } from "../src/core/lsp/manager.ts";
-import { projectSessionTranscript } from "../src/core/rpc/transcript.ts";
+import { localProfile } from "../src/core/protocol/profiles.ts";
+import { sessionProjectionSource } from "../src/core/protocol/projection/entries.ts";
+import { projectTranscriptItem } from "../src/core/protocol/projection/transcript.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createLspTool } from "../src/core/tools/lsp.ts";
 import { createWriteTool } from "../src/core/tools/write.ts";
@@ -257,7 +259,7 @@ describe("built-in TypeScript compatibility and consent", () => {
 	});
 });
 
-it("persists failed explicit calls and successful writes with bounded evidence and truthful RPC status", async () => {
+it("persists failed explicit calls and successful writes with bounded evidence and truthful transcript status", async () => {
 	const root = directory();
 	const sm = await SessionManager.create(root, join(root, "sessions"));
 	const ref = sm.getSessionRef()!;
@@ -296,10 +298,12 @@ it("persists failed explicit calls and successful writes with bounded evidence a
 		expect(new Set(evidence.map((operation) => operation.operationId)).size).toBe(2);
 		expect(JSON.stringify(evidence)).not.toContain("SECRET-SOURCE");
 		expect(JSON.stringify(evidence).length).toBeLessThan(2000);
+		const source = sessionProjectionSource(reopened);
 		expect(
-			projectSessionTranscript(reopened)
-				.items.filter((item) => item.role === "tool")
-				.map((item) => item.status),
+			reopened.committedEntriesAfter(0).flatMap((entry) => {
+				const item = projectTranscriptItem(entry, source, localProfile);
+				return item?.role === "tool" ? [item.status] : [];
+			}),
 		).toEqual(["failed", "completed"]);
 	} finally {
 		await reopened.closePersistence();

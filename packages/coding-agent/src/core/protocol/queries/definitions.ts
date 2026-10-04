@@ -7,13 +7,13 @@ import { getReviewGeneral } from "../../review-general.ts";
 import { getCanonicalReviewRun, type HydratedReviewRunRecord, listCanonicalReviewRuns } from "../../review-state.ts";
 import { UNAVAILABLE_REVIEW_USAGE } from "../../review-usage.ts";
 import { createReviewFileMetadata, createReviewPullRequestMetadata } from "../../review-workflows.ts";
-import { projectRpcBackgroundJob } from "../../rpc/background-jobs.ts";
 import type { SubscriptionUsageReport } from "../../subscription-usage.ts";
 import { targetOf } from "../intents/conversation.ts";
 import { mcpManagerOf, workspaceService } from "../intents/host.ts";
 import { intentRegistry } from "../intents/index.ts";
 import { runReviewDiscussion } from "../intents/review.ts";
 import { intentStateOf } from "../intents/state.ts";
+import { projectRpcBackgroundJob } from "../projection/background-jobs.ts";
 import { contentQuery, historyQuery } from "./log.ts";
 import { defineQuery, type QueryDefinition, QueryRejectedError } from "./types.ts";
 

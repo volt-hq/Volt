@@ -26,7 +26,6 @@ import {
 	type TUnion,
 	Type,
 } from "typebox";
-import { RpcConversationAssistantPartSchema } from "./conversation.ts";
 import {
 	CORE_LOG_ENTRY_TYPES,
 	type CoreLogEntryTypeName,
@@ -43,6 +42,20 @@ const closed = { additionalProperties: false } as const;
 // ============================================================================
 // Transcript item
 // ============================================================================
+
+/** One text or thinking block of an assistant transcript item, bounded by the profile. */
+export const TranscriptAssistantPartSchema = Type.Union([
+	Type.Object({ type: Type.Literal("text"), text: Type.String(), truncated: Type.Boolean() }, closed),
+	Type.Object(
+		{
+			type: Type.Literal("thinking"),
+			text: Type.String(),
+			truncated: Type.Optional(Type.Boolean()),
+			redacted: Type.Optional(Type.Boolean()),
+		},
+		closed,
+	),
+]);
 
 /**
  * The transcript view of a message-like entry: one shape for every profile.
@@ -68,7 +81,7 @@ export const TranscriptItemSchema = Type.Object(
 		details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 		output: Type.Optional(Type.String()),
 		outputTruncated: Type.Optional(Type.Boolean()),
-		parts: Type.Optional(Type.Array(RpcConversationAssistantPartSchema)),
+		parts: Type.Optional(Type.Array(TranscriptAssistantPartSchema)),
 		stopReason: Type.Optional(StopReasonSchema),
 		diffPreview: Type.Optional(Type.String()),
 		patchPreview: Type.Optional(Type.String()),

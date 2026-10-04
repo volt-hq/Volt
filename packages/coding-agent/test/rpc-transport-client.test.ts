@@ -17,8 +17,8 @@ import { createLoopbackClient, ProtocolClient } from "../src/client/protocol-cli
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { localProfile } from "../src/core/protocol/profiles.ts";
 import { serveConnection } from "../src/core/protocol/server/connection.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/protocol/transport/index.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
-import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
@@ -343,7 +343,7 @@ describe("protocol client of an in-process host", () => {
 		await expect(client.intent(template, { arguments: "after current turn" })).rejects.toMatchObject({
 			reason: {
 				code: "busy",
-				message: "UI action requires streamingBehavior ('steer' or 'followUp') while the agent is streaming",
+				message: `${template} needs streamingBehavior ('steer' or 'followUp') while the agent is streaming`,
 			},
 		});
 		await client.intent(template, { arguments: "after current turn", streamingBehavior: "followUp" });

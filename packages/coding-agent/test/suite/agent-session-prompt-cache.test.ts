@@ -1,7 +1,7 @@
 import type { AssistantMessage } from "@hansjm10/volt-ai";
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildRpcSessionState } from "../../src/core/rpc/session-state.ts";
+import { feedLiveState } from "../../src/core/host/live-feed.ts";
 import { createHarness, type Harness } from "./harness.ts";
 
 function lastAssistant(harness: Harness): AssistantMessage {
@@ -21,10 +21,12 @@ describe("AgentSession prompt cache status", () => {
 		}
 	});
 
-	it("publishes the latest request after a turn settles and exposes it in RPC state", async () => {
+	it("publishes the latest request after a turn settles and serves it as the live prompt cache value", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
+		feedLiveState(harness.session);
 		expect(harness.session.getPromptCacheStatus()).toBeUndefined();
+		expect(harness.session.liveState.get("prompt_cache")).toEqual({ kind: "prompt_cache", promptCache: null });
 
 		harness.setResponses([fauxAssistantMessage("hello")]);
 		await harness.session.prompt("hi");
@@ -34,7 +36,7 @@ describe("AgentSession prompt cache status", () => {
 		const expected = { kind: "retained", lastRequestAt: lastAssistant(harness).timestamp };
 		expect(harness.session.getPromptCacheStatus()).toEqual(expected);
 		expect(harness.eventsOfType("prompt_cache_changed").map((event) => event.promptCache)).toEqual([expected]);
-		expect(buildRpcSessionState(harness.session).promptCache).toEqual(expected);
+		expect(harness.session.liveState.get("prompt_cache")).toEqual({ kind: "prompt_cache", promptCache: expected });
 	});
 
 	it("reports a cold cache after switching to a model without prior requests", async () => {

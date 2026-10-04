@@ -1,13 +1,15 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { describe, expect, it, vi } from "vitest";
-import { type IntentContext, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import {
-	getUiActionDescriptors,
-	prepareUiActionInvocation,
-	type UiActionDiscoverySession,
-} from "../src/core/rpc/ui-actions.ts";
+	type IntentContext,
+	intentRegistry,
+	intentStateOf,
+	LOCAL_INTENT_PROFILE,
+} from "../src/core/protocol/intents/index.ts";
+import { describeFastModeChange } from "../src/core/protocol/intents/state.ts";
 
-const THINKING_FAST_MODE_ACTION_ID = "thinking.fast_mode";
+const UNSUPPORTED = { code: "unavailable", message: "Fast mode is not supported for the current provider and model" };
 
 function model(): Model<Api> {
 	return {
@@ -39,10 +41,7 @@ function fastModeSession(options: { model: Model<Api>; enabled: boolean }) {
 			return fastModeEnabled;
 		},
 		setFastModeEnabled,
-		extensionRunner: { getRegisteredCommands: () => [] },
-		promptTemplates: [],
-		resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
-		sessionManager: { getCwd: () => "/repo", getOrdinal: () => 0 },
+		sessionManager: { getOrdinal: () => 0 },
 	};
 	const context: IntentContext = {
 		target: { session, conversation: {}, host: {}, client: {} } as unknown as IntentContext["target"],
@@ -50,28 +49,24 @@ function fastModeSession(options: { model: Model<Api>; enabled: boolean }) {
 		profile: LOCAL_INTENT_PROFILE,
 	};
 	const descriptor = () =>
-		getUiActionDescriptors(session as unknown as UiActionDiscoverySession, "all").find(
-			(candidate) => candidate.id === THINKING_FAST_MODE_ACTION_ID,
-		);
+		intentRegistry.descriptor(intentRegistry.resolve("set_fast_mode")!, {
+			state: intentStateOf(session as unknown as AgentSession),
+			services: {},
+			profile: LOCAL_INTENT_PROFILE,
+		});
 	const invoke = async (enabled: boolean) =>
-		prepareUiActionInvocation(context, { action: THINKING_FAST_MODE_ACTION_ID, args: { enabled } }).run();
+		(await intentRegistry.invoke(context, "set_fast_mode", { enabled })).outcome;
 	return { session, setFastModeEnabled, descriptor, invoke };
 }
 
-describe("Fast mode UI action", () => {
+describe("Fast mode intent", () => {
 	it("delegates each toggle without changing thinking", async () => {
-		const { session, setFastModeEnabled, invoke } = fastModeSession({ model: model(), enabled: false });
+		const { session, setFastModeEnabled, descriptor, invoke } = fastModeSession({ model: model(), enabled: false });
 
-		await expect(invoke(true)).resolves.toMatchObject({
-			action: THINKING_FAST_MODE_ACTION_ID,
-			status: "completed",
-			state: { type: "boolean", value: true, label: "Fast mode enabled" },
-			stateChanged: true,
-		});
-		await expect(invoke(false)).resolves.toMatchObject({
-			state: { type: "boolean", value: false, label: "Fast mode disabled" },
-			stateChanged: true,
-		});
+		await expect(invoke(true)).resolves.toEqual({ requested: true, wasEnabled: false, enabled: true });
+		expect(descriptor().state).toEqual({ type: "boolean", value: true, label: "Fast mode enabled" });
+		await expect(invoke(false)).resolves.toEqual({ requested: false, wasEnabled: true, enabled: false });
+		expect(descriptor().state).toEqual({ type: "boolean", value: false, label: "Fast mode disabled" });
 		expect(setFastModeEnabled.mock.calls).toEqual([[true], [false]]);
 		expect(session.thinkingLevel).toBe("high");
 	});
@@ -84,20 +79,16 @@ describe("Fast mode UI action", () => {
 
 		expect(descriptor()).toMatchObject({
 			enabled: true,
-			disabledReason: null,
 			state: { type: "boolean", value: true, label: "Fast mode enabled" },
 		});
-		await expect(invoke(true)).resolves.toMatchObject({
-			state: { type: "boolean", value: true, label: "Fast mode enabled" },
-			stateChanged: false,
-			message: "Fast mode already enabled. Priority processing may cost more.",
-		});
-		await expect(invoke(false)).resolves.toMatchObject({
-			state: { type: "boolean", value: false, label: "Fast mode disabled" },
-			stateChanged: true,
-		});
+		expect(descriptor()).not.toHaveProperty("reason");
+		const unchanged = await invoke(true);
+		expect(unchanged).toEqual({ requested: true, wasEnabled: true, enabled: true });
+		expect(describeFastModeChange(unchanged)).toBe("Fast mode already enabled. Priority processing may cost more.");
+		await expect(invoke(false)).resolves.toEqual({ requested: false, wasEnabled: true, enabled: false });
+		expect(descriptor().state).toEqual({ type: "boolean", value: false, label: "Fast mode disabled" });
 		expect(setFastModeEnabled.mock.calls).toEqual([[true], [false]]);
-		await expect(invoke(true)).rejects.toThrow("Fast mode is not supported for the current provider and model");
+		await expect(invoke(true)).rejects.toMatchObject(UNSUPPORTED);
 	});
 
 	it.each([
@@ -110,10 +101,7 @@ describe("Fast mode UI action", () => {
 			enabled: false,
 		});
 
-		expect(descriptor()).toMatchObject({
-			enabled: false,
-			disabledReason: "Fast mode is not supported for the current provider and model",
-		});
-		await expect(invoke(true)).rejects.toThrow("Fast mode is not supported for the current provider and model");
+		expect(descriptor()).toMatchObject({ enabled: false, reason: UNSUPPORTED.message });
+		await expect(invoke(true)).rejects.toMatchObject(UNSUPPORTED);
 	});
 });

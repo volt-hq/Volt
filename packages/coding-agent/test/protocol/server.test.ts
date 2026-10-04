@@ -11,7 +11,7 @@ import { createLoopbackClient, ProtocolClient, ProtocolRejectedError } from "../
 import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
 import { localProfile } from "../../src/core/protocol/profiles.ts";
 import { serveConnection } from "../../src/core/protocol/server/connection.ts";
-import { createLoopbackRpcTransportPair, type RpcTransport } from "../../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair, type RpcTransport } from "../../src/core/protocol/transport/index.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "../suite/host-harness.ts";
 
 /** A raw client end that records every frame the host writes. */

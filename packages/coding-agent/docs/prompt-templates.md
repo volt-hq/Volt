@@ -62,18 +62,18 @@ Type `/` followed by the template name in the editor. Autocomplete shows availab
 /component Button "click handler" # Multiple arguments
 ```
 
-### Native UI Actions
+### Intents
 
-When the host supports native UI actions, prompt templates are also exposed as palette descriptors through `get_ui_actions`. Native clients can render those descriptors in a command palette and invoke them by action id with `invoke_ui_action`.
+Protocol clients see each prompt template as a dynamic intent named `prompt.template.<id>` (see [rpc.md](rpc.md#dynamic-intents)). The `intents` query lists it with the template's name and description, so clients can render it in a command palette and invoke it by name with `{arguments?, streamingBehavior?}`.
 
 The descriptor is a safe projection:
 
-- The action id is opaque and session-local, under `prompt.template.*`.
-- The slash alias remains display/compatibility metadata; native clients should invoke the action id instead of constructing raw slash text.
+- The id is opaque and stays the same while the session's extension commands, prompt templates, and skills do.
+- The slash alias is display metadata; clients should invoke the intent instead of constructing raw slash text.
 - Template bodies and template file paths are not included in descriptors.
-- Arguments are passed through the host template-expansion path, so the host remains responsible for parsing, expansion, streaming behavior, and stale-id rejection.
+- Arguments are passed through the host template-expansion path, so the host remains responsible for parsing and expansion. While the agent streams, `streamingBehavior` (`steer` or `followUp`) says how to queue the prompt. An intent from a catalog that changed after a reload or a session change is rejected `unknown_intent`.
 
-Over Iroh, prompt-template actions are allowed only through the native action allowlist and existing prompt expansion path. Raw `get_commands` remains blocked remotely because it may include local source metadata.
+Paired remote clients may invoke prompt-template intents with `conversation.control.v1`.
 
 ## Arguments
 

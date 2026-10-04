@@ -1,6 +1,6 @@
 # RFC: Atomic Conversation Bootstrap and Ordered Subscription Ingress
 
-> **Superseded in part.** The [architecture rewrite](architecture-rewrite-design.md) replaced the host source revisions this design cuts snapshots at with conversation log ordinals, and replaces its per-subscription cursors and re-bootstrap on gaps with subscription by log ordinal in Phase 3 (§6.1).
+> **Superseded.** The [architecture rewrite](architecture-rewrite-design.md) replaced this design in Phase 3 (§6.1). Clients subscribe by conversation log ordinal, resume after the newest ordinal they hold, and receive a snapshot at an ordinal instead of a bootstrap; ephemeral state travels on the live lane. The `ConversationProjectionFeed`, `conversation_bootstrap` and its reasons, per-subscription cursors and `delivery` positions, `report_stream_discontinuity`, conversation authority fencing, and the second (remote) transcript projection are deleted. The current contract is [rpc.md](rpc.md) and [iroh-remote-protocol.md](iroh-remote-protocol.md); this document is kept as history.
 
 - Status: Accepted; Phases 1–6, relay ownership consolidation, and the presentation/reconciliation invariants are implemented, regression-clean, and live re-accepted from current branch source; the proposed `PreparedConversationActivation` API in §5.7 remains an optional API-consolidation follow-up
 - Date: 2026-07-17

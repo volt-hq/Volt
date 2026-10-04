@@ -1,17 +1,16 @@
 /**
- * Session-state, transcript, subagent, and host-status contract schemas —
- * the payload shapes of the state-oriented responses.
+ * Session catalog, run-state, model, subagent, and host-status schemas: the
+ * shapes the `sessions`, `models`, `session_contexts`, `subagent_definitions`,
+ * and `host_status` queries, the live `phase` and `prompt_cache` values, and
+ * the host intents return.
  */
 
 import type { Api, Model } from "@hansjm10/volt-ai";
 import { ModelSchema } from "@hansjm10/volt-ai/schemas";
-import { Type } from "typebox";
-import { RpcBackgroundJobsSchema } from "./background-jobs.ts";
+import { type Static, Type } from "typebox";
 import { RpcGitContextSchema } from "./git-context.ts";
-import { opaque, readonlyArrayOf, stringEnum } from "./helpers.ts";
-import { RpcPlanningStateSchema } from "./planning.ts";
+import { opaque, stringEnum } from "./helpers.ts";
 import { RpcThinkingLevelSchema } from "./primitives.ts";
-import { RpcProjectionCollectionTruncationSchema, RpcProjectionTruncationSchema } from "./projections.ts";
 import { RpcReviewDiscussionLinkSchema } from "./review-discussions.ts";
 import {
 	RPC_WORK_BRANCH_MAX_CHARS,
@@ -56,6 +55,7 @@ export const RpcSessionWorkContextSchema = Type.Union([
 		{ additionalProperties: false },
 	),
 ]);
+export type RpcSessionWorkContext = Static<typeof RpcSessionWorkContextSchema>;
 
 export const RpcSessionContextSchema = Type.Object(
 	{
@@ -91,20 +91,7 @@ export const RpcSessionListItemSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-
-export const RpcActiveToolExecutionSchema = Type.Object(
-	{
-		toolCallId: Type.String(),
-		toolName: Type.String(),
-		status: Type.Literal("started"),
-		args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		/** Projected details from the newest tool_execution_update, so clients that
-		 *  attach mid-turn can restore live tool state (currently `subagent` only). */
-		details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		projection: Type.Optional(RpcProjectionTruncationSchema),
-	},
-	{ additionalProperties: false },
-);
+export type RpcSessionListItem = Static<typeof RpcSessionListItemSchema>;
 
 export const RpcActiveAgentRunSchema = Type.Object(
 	{
@@ -151,38 +138,7 @@ export const RpcPromptCacheStatusSchema = Type.Union([
 	/** Earlier requests used other models, so the next request starts uncached. */
 	Type.Object({ kind: Type.Literal("model_changed") }, { additionalProperties: false }),
 ]);
-
-/** One authoritative queued user message exposed to remote clients. */
-export const RpcQueuedMessageSchema = Type.Object(
-	{
-		/** Stable semantic identity supplied by the remote client, or an opaque
-		 * queue-only identity for locally originated input. */
-		clientMessageId: Type.String(),
-		text: Type.String(),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcQueueUpdateProjectionSchema = Type.Object(
-	{
-		steering: Type.Optional(RpcProjectionCollectionTruncationSchema),
-		followUp: Type.Optional(RpcProjectionCollectionTruncationSchema),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcSessionStateProjectionSchema = Type.Object(
-	{
-		model: Type.Optional(RpcProjectionTruncationSchema),
-		sessionName: Type.Optional(RpcProjectionTruncationSchema),
-		steeringQueue: Type.Optional(RpcProjectionCollectionTruncationSchema),
-		followUpQueue: Type.Optional(RpcProjectionCollectionTruncationSchema),
-		activeTools: Type.Optional(RpcProjectionCollectionTruncationSchema),
-		/** Top-level workflow collection metadata carried here so the atomic snapshot remains one envelope. */
-		activeWorkflows: Type.Optional(RpcProjectionCollectionTruncationSchema),
-	},
-	{ additionalProperties: false },
-);
+export type RpcPromptCacheStatus = Static<typeof RpcPromptCacheStatusSchema>;
 
 /** volt-ai model metadata with `compat` opaque: provider tuning that clients never interpret. */
 export const RpcModelSchema = Type.Object(
@@ -191,48 +147,6 @@ export const RpcModelSchema = Type.Object(
 		compat: Type.Optional(
 			opaque<NonNullable<Model<Api>["compat"]>>("provider compatibility tuning; clients never interpret this"),
 		),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcSessionStateSchema = Type.Object(
-	{
-		reviewDiscussion: Type.Optional(RpcReviewDiscussionLinkSchema),
-		model: Type.Optional(RpcModelSchema),
-		thinkingLevel: RpcThinkingLevelSchema,
-		availableThinkingLevels: Type.Array(RpcThinkingLevelSchema),
-		/** Authoritative branch-local Fast mode state for bootstrap/checkpoint recovery. */
-		fastModeEnabled: Type.Boolean(),
-		/** Authoritative branch-local agent mode and structured plan snapshot. */
-		planning: RpcPlanningStateSchema,
-		/** Path-free host Git metadata, or null when the cwd is not a usable worktree. */
-		gitContext: Type.Union([RpcGitContextSchema, Type.Null()]),
-		/** First host-observed path-free Git state, when captured for this session. */
-		startingGitContext: Type.Optional(Type.Union([RpcGitContextSchema, Type.Null()])),
-		/** Whether a provider run or session-level continuation is active. */
-		isStreaming: Type.Boolean(),
-		/** Whether any prompt work, including asynchronous preflight, is active. */
-		isBusy: Type.Optional(Type.Boolean()),
-		isCompacting: Type.Boolean(),
-		steeringMode: stringEnum(["all", "one-at-a-time"]),
-		followUpMode: stringEnum(["all", "one-at-a-time"]),
-		sessionId: Type.String(),
-		sessionName: Type.Optional(Type.String()),
-		autoCompactionEnabled: Type.Boolean(),
-		messageCount: Type.Number(),
-		pendingMessageCount: Type.Number(),
-		/** Authoritative queue contents for atomic bootstrap/checkpoint recovery. Always emitted; the iOS bootstrap decoder fails closed without them. */
-		steeringQueue: readonlyArrayOf(RpcQueuedMessageSchema),
-		followUpQueue: readonlyArrayOf(RpcQueuedMessageSchema),
-		/** Accessible live-runtime jobs, including retained terminal results. Never contains output. */
-		backgroundJobs: RpcBackgroundJobsSchema,
-		activeTools: Type.Optional(Type.Array(RpcActiveToolExecutionSchema)),
-		activeAgentRun: Type.Optional(RpcActiveAgentRunSchema),
-		activeCompaction: Type.Optional(RpcActiveCompactionSchema),
-		activeRetry: Type.Optional(RpcActiveRetrySchema),
-		/** Absent when the model does not cache or the active prefix has no prior request. */
-		promptCache: Type.Optional(RpcPromptCacheStatusSchema),
-		projection: Type.Optional(RpcSessionStateProjectionSchema),
 	},
 	{ additionalProperties: false },
 );
@@ -246,80 +160,7 @@ export const RpcCatalogModelSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-
-// ============================================================================
-// Transcript projection (local RPC)
-// ============================================================================
-
-export const RpcTranscriptToolStatusSchema = stringEnum(["started", "completed", "failed"]);
-
-const transcriptBaseProperties = {
-	id: Type.String(),
-	timestamp: Type.String(),
-};
-
-export const RpcTranscriptTextItemSchema = Type.Object(
-	{
-		...transcriptBaseProperties,
-		role: stringEnum(["user", "assistant", "system"]),
-		text: Type.String(),
-		/** Stable submitting-client identity. Present only on remotely submitted user messages. */
-		clientMessageId: Type.Optional(Type.String()),
-		/** Number of inline image blocks on the persisted user message. Transcript
-		 *  projections are text-only; clients recover the blocks per entry via
-		 *  `get_message_images`. */
-		imageCount: Type.Optional(Type.Number()),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcTranscriptToolItemSchema = Type.Object(
-	{
-		...transcriptBaseProperties,
-		role: Type.Literal("tool"),
-		toolName: Type.String(),
-		status: RpcTranscriptToolStatusSchema,
-		path: Type.Optional(Type.String()),
-		summary: Type.String(),
-		/** Number of inline image blocks on the persisted tool result (for example
-		 *  a `read` of an image file). Transcript projections are text-only;
-		 *  clients recover the blocks per entry via `get_message_images`. */
-		imageCount: Type.Optional(Type.Number()),
-		args: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		details: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
-		diffPreview: Type.Optional(Type.String()),
-		patchPreview: Type.Optional(Type.String()),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcTranscriptSummaryItemSchema = Type.Object(
-	{
-		...transcriptBaseProperties,
-		role: Type.Literal("summary"),
-		title: Type.Literal("Conversation compacted"),
-		text: Type.String(),
-	},
-	{ additionalProperties: false },
-);
-
-export const RpcTranscriptItemSchema = Type.Union([
-	RpcTranscriptTextItemSchema,
-	RpcTranscriptToolItemSchema,
-	RpcTranscriptSummaryItemSchema,
-]);
-
-export const RpcTranscriptResponseSchema = Type.Object(
-	{
-		sessionId: Type.String(),
-		items: Type.Array(RpcTranscriptItemSchema),
-		hasMore: Type.Boolean(),
-		nextBeforeEntryId: Type.Union([Type.String(), Type.Null()]),
-		/** Present for ordered remote pagination and correlated to the request's bootstrap generation. */
-		branchEpoch: Type.Optional(Type.String()),
-	},
-	{ additionalProperties: false },
-);
+export type RpcCatalogModel = Static<typeof RpcCatalogModelSchema>;
 
 // ============================================================================
 // Subagents
@@ -352,19 +193,13 @@ export const RpcSubagentDefinitionSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+export type RpcSubagentDefinition = Static<typeof RpcSubagentDefinitionSchema>;
 
 export const RpcListSubagentsResponseSchema = Type.Object(
 	{ subagents: Type.Array(RpcSubagentDefinitionSchema) },
 	{ additionalProperties: false },
 );
-
-export const RpcSubagentStartResponseSchema = Type.Object(
-	{
-		subagentId: Type.String(),
-		sessionId: Type.String(),
-	},
-	{ additionalProperties: false },
-);
+export type RpcListSubagentsResponse = Static<typeof RpcListSubagentsResponseSchema>;
 
 // ============================================================================
 // Push registration responses
@@ -377,9 +212,10 @@ export const RpcRegisterPushTargetResponseSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+export type RpcRegisterPushTargetResponse = Static<typeof RpcRegisterPushTargetResponseSchema>;
 
 // ============================================================================
-// Host status + prompt admission
+// Host status
 // ============================================================================
 
 /**
@@ -395,19 +231,11 @@ export const RpcKeepAwakeStatusSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
+export type RpcKeepAwakeStatus = Static<typeof RpcKeepAwakeStatusSchema>;
 
 /**
  * Host web-search key state as reported to phones. Deliberately omits the key
  * itself; only whether one is stored.
  */
 export const RpcWebSearchStatusSchema = Type.Object({ configured: Type.Boolean() }, { additionalProperties: false });
-
-export const RpcPromptResponseSchema = Type.Object(
-	{
-		clientMessageId: Type.String(),
-		outcome: stringEnum(["admitted", "completed"]),
-		/** Present when a canonical identified user entry completed this input. */
-		canonicalEntryId: Type.Optional(Type.String()),
-	},
-	{ additionalProperties: false },
-);
+export type RpcWebSearchStatus = Static<typeof RpcWebSearchStatusSchema>;
