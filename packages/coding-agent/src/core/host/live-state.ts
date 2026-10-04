@@ -209,15 +209,354 @@ const FORM_PATTERN_MAX_REPEATS = 3;
 /** Most choice points (quantifiers, `?`, and `|` alternatives) a form field pattern holds. */
 const FORM_PATTERN_MAX_CHOICES = 4;
 
+/** Characters, as sorted, disjoint, inclusive code point ranges. */
+type CharSet = readonly (readonly [number, number])[];
+
+const ANY_CHAR: CharSet = [[0, 0x10ffff]];
+/** What `.` matches without the `s` flag. */
+const DOT_CHARS: CharSet = complement([
+	[0x0a, 0x0a],
+	[0x0d, 0x0d],
+	[0x2028, 0x2029],
+]);
+const DIGIT_CHARS: CharSet = [[0x30, 0x39]];
+const WORD_CHARS: CharSet = [
+	[0x30, 0x39],
+	[0x41, 0x5a],
+	[0x5f, 0x5f],
+	[0x61, 0x7a],
+];
+const SPACE_CHARS: CharSet = [
+	[0x09, 0x0d],
+	[0x20, 0x20],
+	[0xa0, 0xa0],
+	[0x1680, 0x1680],
+	[0x2000, 0x200a],
+	[0x2028, 0x2029],
+	[0x202f, 0x202f],
+	[0x205f, 0x205f],
+	[0x3000, 0x3000],
+	[0xfeff, 0xfeff],
+];
+const CLASS_ESCAPES: ReadonlyMap<string, CharSet> = new Map([
+	["d", DIGIT_CHARS],
+	["D", complement(DIGIT_CHARS)],
+	["w", WORD_CHARS],
+	["W", complement(WORD_CHARS)],
+	["s", SPACE_CHARS],
+	["S", complement(SPACE_CHARS)],
+]);
+/** Escapes for one character other than itself; `\b` is a backspace only in a class. */
+const CHARACTER_ESCAPES: ReadonlyMap<string, number> = new Map([
+	["0", 0x00],
+	["b", 0x08],
+	["t", 0x09],
+	["n", 0x0a],
+	["v", 0x0b],
+	["f", 0x0c],
+	["r", 0x0d],
+]);
+
+function charSet(ranges: readonly (readonly [number, number])[]): CharSet {
+	const merged: [number, number][] = [];
+	for (const [low, high] of ranges.toSorted(([a], [b]) => a - b)) {
+		const last = merged.at(-1);
+		if (last && low <= last[1] + 1) last[1] = Math.max(last[1], high);
+		else merged.push([low, high]);
+	}
+	return merged;
+}
+
+function complement(chars: CharSet): CharSet {
+	const result: [number, number][] = [];
+	let next = 0;
+	for (const [low, high] of chars) {
+		if (low > next) result.push([next, low - 1]);
+		next = high + 1;
+	}
+	if (next <= 0x10ffff) result.push([next, 0x10ffff]);
+	return result;
+}
+
+function intersect(a: CharSet, b: CharSet): CharSet {
+	const result: [number, number][] = [];
+	for (let i = 0, j = 0; i < a.length && j < b.length; ) {
+		const low = Math.max(a[i]![0], b[j]![0]);
+		const high = Math.min(a[i]![1], b[j]![1]);
+		if (low <= high) result.push([low, high]);
+		if (a[i]![1] < b[j]![1]) i++;
+		else j++;
+	}
+	return result;
+}
+
+/** A step of one path through a pattern: a character, or a group without choices inside, as quantified. */
+interface PatternStep {
+	/** What each character of one repetition matches, in order. */
+	readonly chars: readonly CharSet[];
+	/** Whether it may match nothing. */
+	readonly optional: boolean;
+	/** Whether it repeats a varying number of times: `*`, `+`, `{n,}`, or `{n,m}`. */
+	readonly repeating: boolean;
+}
+
+/**
+ * A parsed part of a pattern: its paths, one per combination of alternatives
+ * and optional groups, and whether it holds a quantifier or an alternation.
+ */
+interface PatternPart {
+	readonly paths: PatternStep[][];
+	readonly holds: boolean;
+}
+
+interface PatternScan {
+	readonly source: string;
+	index: number;
+	repeats: number;
+	choices: number;
+}
+
+interface Quantifier {
+	/** `?`, `*`, `+`, or `{`; empty when unquantified. */
+	readonly symbol: string;
+	readonly optional: boolean;
+	readonly repeating: boolean;
+}
+
+const UNQUANTIFIED: Quantifier = { symbol: "", optional: false, repeating: false };
+
+function choose(scan: PatternScan): boolean {
+	scan.choices++;
+	return scan.choices <= FORM_PATTERN_MAX_CHOICES;
+}
+
+/*
+ * The parsers below read a pattern that compiles with the `u` flag; each
+ * returns undefined when the pattern is refused.
+ */
+
+function parseAlternatives(scan: PatternScan): PatternPart | undefined {
+	const paths: PatternStep[][] = [];
+	let holds = false;
+	for (;;) {
+		const sequence = parseSequence(scan);
+		if (!sequence) return undefined;
+		paths.push(...sequence.paths);
+		holds ||= sequence.holds;
+		if (scan.source[scan.index] !== "|") return { paths, holds };
+		scan.index++;
+		holds = true;
+		if (!choose(scan)) return undefined;
+	}
+}
+
+function parseSequence(scan: PatternScan): PatternPart | undefined {
+	const { source } = scan;
+	let paths: PatternStep[][] = [[]];
+	let holds = false;
+	while (scan.index < source.length && source[scan.index] !== "|" && source[scan.index] !== ")") {
+		const term = parseTerm(scan);
+		if (!term) return undefined;
+		holds ||= term.holds;
+		if (term.paths.length === 1) for (const path of paths) path.push(...term.paths[0]!);
+		else paths = paths.flatMap((path) => term.paths.map((steps) => [...path, ...steps]));
+	}
+	return { paths, holds };
+}
+
+function parseTerm(scan: PatternScan): PatternPart | undefined {
+	const { source } = scan;
+	const char = source[scan.index];
+	if (char === "^" || char === "$") {
+		scan.index++;
+		return { paths: [[]], holds: false };
+	}
+	if (char === "\\" && (source[scan.index + 1] === "b" || source[scan.index + 1] === "B")) {
+		scan.index += 2;
+		return { paths: [[]], holds: false };
+	}
+	if (char === "(") return parseGroup(scan);
+	let chars: CharSet | undefined;
+	if (char === "[") chars = parseClass(scan);
+	else if (char === ".") {
+		scan.index++;
+		chars = DOT_CHARS;
+	} else chars = parseCharacter(scan);
+	if (!chars) return undefined;
+	const quantifier = parseQuantifier(scan);
+	if (!quantifier) return undefined;
+	return {
+		paths: [[{ chars: [chars], optional: quantifier.optional, repeating: quantifier.repeating }]],
+		holds: quantifier !== UNQUANTIFIED,
+	};
+}
+
+function parseGroup(scan: PatternScan): PatternPart | undefined {
+	const { source } = scan;
+	scan.index++;
+	if (source[scan.index] === "?") {
+		// Non-capturing and named groups only: no lookarounds or modifiers.
+		if (source[scan.index + 1] === ":") scan.index += 2;
+		else if (/^<[^=!]/.test(source.slice(scan.index + 1, scan.index + 3))) {
+			const close = source.indexOf(">", scan.index);
+			if (close === -1) return undefined;
+			scan.index = close + 1;
+		} else return undefined;
+	}
+	const inner = parseAlternatives(scan);
+	if (!inner || source[scan.index] !== ")") return undefined;
+	scan.index++;
+	const quantifier = parseQuantifier(scan);
+	if (!quantifier) return undefined;
+	if (quantifier === UNQUANTIFIED) return inner;
+	if (!inner.holds) {
+		// One path of single characters, quantified as a whole.
+		const chars = inner.paths[0]!.flatMap((step) => step.chars);
+		return { paths: [[{ chars, optional: quantifier.optional, repeating: quantifier.repeating }]], holds: true };
+	}
+	// A group holding a choice may only be optional: repeating one (`(a+)+`, `(a|ab)*`) backtracks exponentially.
+	if (quantifier.symbol !== "?") return undefined;
+	return { paths: [...inner.paths, []], holds: true };
+}
+
+function parseQuantifier(scan: PatternScan): Quantifier | undefined {
+	const { source } = scan;
+	const symbol = source[scan.index];
+	let quantifier: Quantifier;
+	if (symbol === "?" || symbol === "*" || symbol === "+") {
+		scan.index++;
+		quantifier = { symbol, optional: symbol !== "+", repeating: symbol !== "?" };
+	} else if (symbol === "{") {
+		const bounds = /^\{(\d+)(,\d*)?\}/.exec(source.slice(scan.index));
+		if (!bounds) return undefined;
+		scan.index += bounds[0].length;
+		quantifier = { symbol, optional: Number(bounds[1]) === 0, repeating: bounds[2] !== undefined };
+	} else return UNQUANTIFIED;
+	if (quantifier.repeating && ++scan.repeats > FORM_PATTERN_MAX_REPEATS) return undefined;
+	if ((quantifier.repeating || symbol === "?") && !choose(scan)) return undefined;
+	if (source[scan.index] === "?") {
+		// Lazy: one more choice point.
+		scan.index++;
+		if (!choose(scan)) return undefined;
+	}
+	return quantifier;
+}
+
+/** A class holding a Unicode property is taken, negated or not, to match any character. */
+function parseClass(scan: PatternScan): CharSet | undefined {
+	const { source } = scan;
+	scan.index++;
+	const negated = source[scan.index] === "^";
+	if (negated) scan.index++;
+	const ranges: (readonly [number, number])[] = [];
+	let property = false;
+	while (source[scan.index] !== "]") {
+		if (scan.index >= source.length) return undefined;
+		property ||= /^\\[pP]/.test(source.slice(scan.index, scan.index + 2));
+		const low = parseCharacter(scan);
+		if (!low) return undefined;
+		if (
+			source[scan.index] === "-" &&
+			source[scan.index + 1] !== "]" &&
+			low.length === 1 &&
+			low[0]![0] === low[0]![1]
+		) {
+			scan.index++;
+			const high = parseCharacter(scan);
+			if (!high) return undefined;
+			ranges.push([low[0]![0], high.at(-1)![1]]);
+		} else ranges.push(...low);
+	}
+	scan.index++;
+	if (property) return ANY_CHAR;
+	return negated ? complement(charSet(ranges)) : charSet(ranges);
+}
+
+/** A literal character or an escape; a Unicode property is taken to match any character. */
+function parseCharacter(scan: PatternScan): CharSet | undefined {
+	const { source } = scan;
+	if (source[scan.index] !== "\\") {
+		const code = source.codePointAt(scan.index)!;
+		scan.index += code > 0xffff ? 2 : 1;
+		return [[code, code]];
+	}
+	const kind = source[scan.index + 1]!;
+	scan.index += 2;
+	const escaped = CLASS_ESCAPES.get(kind);
+	if (escaped) return escaped;
+	if (/[1-9k]/.test(kind)) return undefined; // a backreference
+	if (kind === "p" || kind === "P") {
+		const close = source.indexOf("}", scan.index);
+		if (close === -1) return undefined;
+		scan.index = close + 1;
+		return ANY_CHAR;
+	}
+	let code = CHARACTER_ESCAPES.get(kind) ?? kind.codePointAt(0)!;
+	if (kind === "c") code = source.charCodeAt(scan.index++) % 32;
+	else if (kind === "x" || kind === "u") {
+		const parsed = parseHexEscape(scan, kind);
+		if (parsed === undefined) return undefined;
+		code = parsed;
+	}
+	return [[code, code]];
+}
+
+/** The code point of a `\xHH`, `\uHHHH`, or `\u{H...}` escape, after its `x` or `u`. */
+function parseHexEscape(scan: PatternScan, kind: "x" | "u"): number | undefined {
+	const { source } = scan;
+	if (kind === "u" && source[scan.index] === "{") {
+		const close = source.indexOf("}", scan.index);
+		if (close === -1) return undefined;
+		const code = Number.parseInt(source.slice(scan.index + 1, close), 16);
+		scan.index = close + 1;
+		return code;
+	}
+	const digits = kind === "x" ? 2 : 4;
+	const code = Number.parseInt(source.slice(scan.index, scan.index + digits), 16);
+	scan.index += digits;
+	if (kind === "x" || code < 0xd800 || code > 0xdbff) return code;
+	// An escaped surrogate pair is one character.
+	const trail = /^\\u(d[c-f][0-9a-f]{2})/i.exec(source.slice(scan.index, scan.index + 6));
+	if (!trail) return code;
+	scan.index += 6;
+	return 0x10000 + ((code - 0xd800) << 10) + (Number.parseInt(trail[1]!, 16) - 0xdc00);
+}
+
+/**
+ * Whether two repeating steps of a path can trade characters: some character
+ * matches both, and every step between them may match nothing or such a
+ * character. A value that fails such a path is backtracked through every way
+ * of splitting a run of those characters among the steps (`a*a*`, `\w+.\w+`),
+ * quadratic in the value's length for two steps and cubic for three.
+ */
+function tradesCharacters(path: readonly PatternStep[]): boolean {
+	for (let first = 0; first < path.length; first++) {
+		if (!path[first]!.repeating) continue;
+		const firstChars = charSet(path[first]!.chars.flat());
+		for (let second = first + 1; second < path.length; second++) {
+			if (!path[second]!.repeating) continue;
+			const shared = intersect(firstChars, charSet(path[second]!.chars.flat()));
+			if (shared.length === 0) continue;
+			const passable = path
+				.slice(first + 1, second)
+				.every((step) => step.optional || step.chars.every((chars) => intersect(chars, shared).length > 0));
+			if (passable) return true;
+		}
+	}
+	return false;
+}
+
 /**
  * Whether a form field pattern is cheap to test against any value a client
- * may send: it compiles, has no backreferences or lookarounds, repeats no
- * group that itself repeats or alternates (no `(a+)+`, `(a|ab)*`), and holds
- * at most four choice points (quantifiers, optionals, and alternatives), at
- * most three of them repeating, so its backtracking stays polynomial (at most
- * cubic, times a small constant) in a value of at most 256 characters. A
- * client answers forms with values of its choosing, so another pattern is
- * refused when the form is asked.
+ * may send. It must compile, have no backreferences or lookarounds, repeat no
+ * group that itself repeats or alternates (no `(a+)+`, `(a|ab)*`), hold at
+ * most four choice points (quantifiers, optionals, and alternatives), at most
+ * three of them repeating, and no path through it may hold two repeating
+ * steps that trade characters (no `a*a*`, `a+.a+`; see `tradesCharacters`).
+ * Then any prefix of a value matches the pattern's start in a number of ways
+ * bounded by the pattern alone, so backtracking stays linear in the value's
+ * length (at most 256 characters). A client answers forms with values of its
+ * choosing, so another pattern is refused when the form is asked.
  */
 export function isSafeFormPattern(pattern: string): boolean {
 	if (pattern.length > FORM_PATTERN_MAX_CHARS) return false;
@@ -226,74 +565,9 @@ export function isSafeFormPattern(pattern: string): boolean {
 	} catch {
 		return false;
 	}
-	/** Per open group: whether it holds a quantifier or an alternation. */
-	const groups: boolean[] = [];
-	const markOpenGroup = (): void => {
-		if (groups.length > 0) groups[groups.length - 1] = true;
-	};
-	let inClass = false;
-	let repeats = 0;
-	let choices = 0;
-	const choose = (): boolean => {
-		choices++;
-		markOpenGroup();
-		return choices <= FORM_PATTERN_MAX_CHOICES;
-	};
-	for (let index = 0; index < pattern.length; index++) {
-		const char = pattern[index]!;
-		if (char === "\\") {
-			if (/[1-9k]/.test(pattern[index + 1] ?? "")) return false;
-			index++;
-			continue;
-		}
-		if (inClass) {
-			if (char === "]") inClass = false;
-			continue;
-		}
-		switch (char) {
-			case "[":
-				inClass = true;
-				break;
-			case "(": {
-				if (pattern[index + 1] === "?") {
-					const modifier = pattern.slice(index + 2);
-					if (modifier.startsWith(":")) index += 2;
-					else if (modifier.startsWith("<") && !/^<[=!]/.test(modifier)) {
-						const close = pattern.indexOf(">", index);
-						if (close === -1) return false;
-						index = close;
-					} else return false;
-				}
-				groups.push(false);
-				break;
-			}
-			case ")": {
-				const holds = groups.pop() ?? false;
-				const next = pattern[index + 1];
-				const repeated = next === "*" || next === "+" || next === "{";
-				if (holds && repeated) return false;
-				if (holds || repeated || next === "?") markOpenGroup();
-				break;
-			}
-			case "*":
-			case "+":
-			case "{": {
-				const repeating = char !== "{" || /^\{\d*,\d*\}/.test(pattern.slice(index));
-				if (!repeating) {
-					markOpenGroup();
-					break;
-				}
-				repeats++;
-				if (repeats > FORM_PATTERN_MAX_REPEATS || !choose()) return false;
-				break;
-			}
-			case "?":
-			case "|":
-				if (!choose()) return false;
-				break;
-		}
-	}
-	return true;
+	const scan: PatternScan = { source: pattern, index: 0, repeats: 0, choices: 0 };
+	const parsed = parseAlternatives(scan);
+	return parsed !== undefined && scan.index === pattern.length && !parsed.paths.some(tradesCharacters);
 }
 
 function isFormValue(field: UiNodeFormField, value: string | boolean | number): boolean {
