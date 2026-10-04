@@ -380,9 +380,8 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(volt).toBeDefined();
 
 		volt!.sendUserMessage("Steer from extension", { deliverAs: "steer" });
-		await new Promise((resolve) => setTimeout(resolve, 25));
-
-		expect(session.pendingMessageCount).toBe(1);
+		// Steering admission commits durably before the queue reflects it.
+		await vi.waitFor(() => expect(session.pendingMessageCount).toBe(1));
 		expect(session.getSteeringMessages().map((message) => message.text)).toContain("Steer from extension");
 		expect(lastInputSource).toBe("extension");
 		expect(
