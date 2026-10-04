@@ -21,11 +21,12 @@ import {
 	type RemoteGrant,
 	RPC_COMMAND_SCHEMAS,
 } from "@hansjm10/volt-protocol";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
 	IDLE_INTENT_STATE,
 	type IntentContext,
 	IntentRejectedError,
+	type IntentTarget,
 	intentRegistry,
 } from "../../src/core/protocol/intents/index.ts";
 import {
@@ -52,6 +53,8 @@ import {
 	isRemoteSafeBuiltinUiAction,
 	listBuiltinUiActionIds,
 } from "../../src/core/rpc/ui-actions.ts";
+import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../src/modes/rpc/rpc-command-dispatcher.ts";
+import type { RpcCommand } from "../../src/modes/rpc/rpc-types.ts";
 
 // ============================================================================
 // Frozen oracle: the legacy remote access rules
@@ -708,6 +711,41 @@ describe("the remote profile decides exactly as the legacy filters", () => {
 			}
 		}
 	});
+
+	it("decides completions of every built-in UI action for every grant as get_ui_action_completions did", async () => {
+		// A conversation with an empty extension, prompt, and skill catalog.
+		const target = {
+			session: {
+				sessionManager: { getCwd: () => "/nonexistent-volt-parity" },
+				extensionRunner: { getRegisteredCommands: () => [] },
+				promptTemplates: [],
+				resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
+			},
+		} as unknown as IntentTarget;
+		for (const action of listBuiltinUiActionIds()) {
+			const intent = getBuiltinUiActionIntent(action) as BuiltinIntentName;
+			for (const grant of everyGrant()) {
+				let decision: "allowed" | RemoteCapability | "unsafe" = "allowed";
+				try {
+					await queryRegistry.run(
+						{ target, services: {}, profile: { name: "remote", grant } },
+						"intent_completions",
+						{
+							intent,
+							field: "base",
+						},
+					);
+				} catch (error) {
+					if (!(error instanceof IntentRejectedError || error instanceof QueryRejectedError)) throw error;
+					decision = error.requiredCapability ?? "unsafe";
+				}
+				const legacy = legacyDecision({ type: "get_ui_action_completions", action, argument: "base" }, grant);
+				// The completion query's own capability is checked before the intent's remote safety.
+				if (legacy === "unsafe") expect(decision, `${action} ${grant.capabilities}`).not.toBe("allowed");
+				else expect(decision, `${action} ${grant.capabilities}`).toEqual(legacy);
+			}
+		}
+	});
 });
 
 describe("branch fences and review-discussion boundaries carry over", () => {
@@ -759,3 +797,224 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 		expect(sourceOwned("plan_execute", { strategy: "retain_context" })).toBe(false);
 	});
 });
+
+describe("the dispatcher runs each command through the intents and queries the parity rests on", () => {
+	/** A minimal valid payload for every command the RPC dispatcher serves through the registries. */
+	const SAMPLES: ReadonlyArray<Record<string, unknown> & { type: string }> = [
+		{ type: "prompt", clientMessageId: "c", message: "m" },
+		{ type: "steer", clientMessageId: "c", message: "m" },
+		{ type: "follow_up", clientMessageId: "c", message: "m" },
+		{ type: "abort" },
+		{ type: "new_session" },
+		{ type: "set_agent_mode", mode: "plan" },
+		{ type: "plan_execute", planId: "p", expectedRevision: 1, strategy: "retain_context" },
+		{ type: "plan_change", planId: "p", expectedRevision: 1 },
+		{ type: "plan_discard", planId: "p", expectedRevision: 1 },
+		{ type: "start_review_discussions", runId: "r", findingIds: ["f"], requestId: "q" },
+		{ type: "list_review_discussions", runId: "r" },
+		{ type: "reset_review_discussion", discussionId: "d", expectedSessionId: "s", requestId: "q" },
+		{ type: "get_review_discussion_source" },
+		{ type: "get_review_general", runId: "r" },
+		{ type: "cancel_workflow", workflowId: "w" },
+		{ type: "get_review_result", runId: "r" },
+		{ type: "list_review_workflows" },
+		{ type: "open_review_session", runId: "r" },
+		{ type: "acknowledge_review", runId: "r" },
+		{ type: "record_review_finding_outcome", runId: "r", findingId: "f", status: "accepted" },
+		{ type: "rerun_review", runId: "r" },
+		{ type: "publish_review", runId: "r", confirmed: true },
+		{ type: "export_review_feedback" },
+		{
+			type: "register_push_target",
+			args: { provider: "fcm", platform: "ios", pushTargetId: "t", pushTargetAuthToken: "a", enabled: true },
+		},
+		{ type: "get_mcp_capabilities" },
+		{ type: "list_mcp_servers" },
+		{ type: "get_mcp_server", server: "s" },
+		{ type: "connect_mcp_server", server: "s" },
+		{ type: "disconnect_mcp_server", server: "s" },
+		{ type: "refresh_mcp_server", server: "s" },
+		{ type: "complete_mcp_server_auth", server: "s", redirectUrl: "u", code: "c" },
+		{ type: "poll_mcp_server_auth", server: "s" },
+		{ type: "cancel_mcp_server_auth", server: "s" },
+		{ type: "logout_mcp_server", server: "s" },
+		{ type: "set_mcp_server_enabled", server: "s", enabled: true },
+		{ type: "list_mcp_tools", server: "s" },
+		{ type: "get_mcp_tool", server: "s", tool: "t" },
+		{ type: "list_mcp_resources", server: "s" },
+		{ type: "read_mcp_resource", server: "s", resourceUri: "u" },
+		{ type: "list_mcp_prompts", server: "s" },
+		{ type: "get_mcp_prompt", server: "s", prompt: "p" },
+		{ type: "list_mcp_recent_calls" },
+		{ type: "read_job", jobId: "j" },
+		{ type: "cancel_job", jobId: "j" },
+		{ type: "list_subagents" },
+		{ type: "subagent_start", agent: "a", prompt: "p" },
+		{ type: "subagent_abort", subagentId: "s" },
+		{ type: "subagent_dispose", subagentId: "s" },
+		{ type: "get_available_models" },
+		{ type: "set_steering_mode", mode: "all" },
+		{ type: "set_follow_up_mode", mode: "all" },
+		{ type: "compact" },
+		{ type: "set_auto_compaction", enabled: true },
+		{ type: "set_auto_retry", enabled: true },
+		{ type: "abort_retry" },
+		{ type: "bash", command: "ls" },
+		{ type: "abort_bash" },
+		{ type: "get_subscription_usage" },
+		{ type: "list_sessions" },
+		{ type: "export_html" },
+		{ type: "switch_session", sessionId: "s" },
+		{ type: "switch_session_by_id", sessionId: "s" },
+		{ type: "fork", entryId: "e" },
+		{ type: "clone" },
+		{ type: "set_session_name", name: "n" },
+	];
+	/** Variants whose payload picks the intents. */
+	const VARIANT_SAMPLES: ReadonlyArray<Record<string, unknown> & { type: string }> = [
+		{ type: "set_model", provider: "p", modelId: "m", persistDefault: false },
+		{ type: "set_model", provider: "p", modelId: "m", persistDefault: true },
+		{ type: "set_model", provider: "p", modelId: "m" },
+		{ type: "set_thinking_level", level: "low", persistDefault: false },
+		{ type: "set_thinking_level", level: "low", persistDefault: true },
+		{ type: "set_thinking_level", level: "low" },
+		{ type: "start_mcp_server_auth", server: "s", flow: "device" },
+		{ type: "start_mcp_server_auth", server: "s", flow: "browser" },
+		{ type: "start_mcp_server_auth", server: "s" },
+	];
+
+	/** The intents and queries a command reached, in order, without running any of them. */
+	async function reached(
+		command: Record<string, unknown> & { type: string },
+		state: Record<string, unknown> = {},
+	): Promise<string[]> {
+		const names: string[] = [];
+		const stop = new Error("parity: stop before running");
+		const prepared = { run: () => Promise.reject(stop) };
+		const spies = [
+			vi.spyOn(intentRegistry, "prepare").mockImplementation((_ctx, name) => {
+				names.push(name);
+				return prepared as never;
+			}),
+			vi.spyOn(intentRegistry, "invoke").mockImplementation(async (_ctx, name) => {
+				names.push(name);
+				throw stop;
+			}),
+			vi.spyOn(queryRegistry, "run").mockImplementation(async (_ctx, name) => {
+				names.push(name);
+				throw stop;
+			}),
+		];
+		const session = { sessionId: "s", isReviewDiscussion: false, thinkingLevel: "off", ...state };
+		try {
+			await handleRpcCommand(
+				{ id: "parity", ...command } as RpcCommand,
+				{
+					session,
+					conversation: {},
+					options: { allowUiActionInvocation: true },
+					services: {},
+					output: () => {},
+					assertConversationGenerationCurrent: () => {},
+				} as unknown as RpcCommandDispatcherContext,
+			);
+			// Commands that answer once their admitted run settles.
+			await new Promise((resolve) => setImmediate(resolve));
+		} catch (error) {
+			if (error !== stop) throw error;
+		} finally {
+			for (const spy of spies) spy.mockRestore();
+		}
+		return names;
+	}
+
+	it("reaches exactly the mapped intents or queries for every command", async () => {
+		for (const command of SAMPLES) {
+			const mapping = mapped(command.type);
+			const expected = "intents" in mapping ? mapping.intents : "queries" in mapping ? mapping.queries : [];
+			expect(await reached(command), command.type).toEqual(expected);
+		}
+		for (const { command, mapping } of VARIANTS) {
+			const sample = VARIANT_SAMPLES.find(
+				(candidate) =>
+					candidate.type === command.type &&
+					candidate.persistDefault === command.persistDefault &&
+					candidate.flow === command.flow,
+			);
+			expect(sample, JSON.stringify(command)).toBeDefined();
+			const expected = "intents" in mapping ? mapping.intents : [];
+			expect(await reached(sample!), JSON.stringify(command)).toEqual(expected);
+		}
+		const served = new Set([...SAMPLES, ...VARIANT_SAMPLES].map((command) => command.type));
+		const dispatcherMapped = Object.entries(LEGACY_COMMANDS)
+			.filter(([, mapping]) => "intents" in mapping || "queries" in mapping)
+			.map(([type]) => type)
+			.filter((type) => !LEGACY_WORKSPACE_STREAM_COMMANDS.includes(type) || LEGACY_PASSTHROUGH.includes(type))
+			.filter((type) => !DAEMON_ONLY_COMMANDS.has(type));
+		expect(dispatcherMapped.filter((type) => !served.has(type))).toEqual([]);
+	});
+
+	it("invokes each built-in UI action through its intent", async () => {
+		const model = { provider: "p", id: "m" };
+		const settingsManager = {
+			getActiveProfile: () => undefined,
+			getCompactionEnabled: () => true,
+			getCompactionThresholdTokens: () => 0,
+			getCompactionWriteDisabledReason: () => undefined,
+		};
+		const target = { provider: "p", modelId: "m", expectedProfile: "" };
+		const plan = { planId: "p", expectedRevision: 1 };
+		const samples: Record<string, { args: Record<string, unknown>; state?: Record<string, unknown> }> = {
+			"agent.mode": { args: { mode: "plan" } },
+			"plan.execute": {
+				args: { ...plan, strategy: "retain_context" },
+				state: { planningState: { mode: "plan", plan: { phase: "ready" } } },
+			},
+			"plan.change": { args: plan, state: { planningState: { mode: "plan", plan: { phase: "ready" } } } },
+			"plan.discard": { args: plan, state: { planningState: { mode: "plan", plan: { phase: "draft" } } } },
+			"session.new": { args: {} },
+			"run.cancel": { args: {}, state: { isBusy: true } },
+			"context.auto_compaction": { args: { enabled: false, ...target }, state: { model, settingsManager } },
+			"context.compaction_threshold": { args: { tokens: 0, ...target }, state: { model, settingsManager } },
+			"context.compact": { args: {} },
+			"session.rename": { args: { name: "n" } },
+			"thinking.fast_mode": { args: { enabled: false } },
+			"review.uncommitted": { args: {} },
+			"review.branch": { args: {} },
+			"review.pr": { args: {} },
+			"review.commit": { args: { ref: "HEAD" } },
+			"review.fix": { args: { runId: "r" } },
+			"review.feedback": { args: { runId: "r", findingId: "f", status: "accepted" } },
+			"review.rerun": { args: { runId: "r" } },
+			"review.publish": { args: { runId: "r" } },
+			"review.export_feedback": { args: { path: "feedback.json" } },
+		};
+		expect(Object.keys(samples).sort()).toEqual(listBuiltinUiActionIds().sort());
+		for (const action of listBuiltinUiActionIds()) {
+			const { args, state } = samples[action]!;
+			expect(await reached({ type: "invoke_ui_action", action, args }, state), action).toEqual([
+				getBuiltinUiActionIntent(action),
+			]);
+		}
+	});
+});
+
+/** Commands the daemon serves on its own streams or before the RPC mode, never through the dispatcher. */
+const DAEMON_ONLY_COMMANDS: ReadonlySet<string> = new Set([
+	"set_keep_awake",
+	"get_keep_awake",
+	"set_web_search_key",
+	"get_web_search_status",
+	"upload_device_logs",
+	"unregister_workspace",
+	"create_worktree",
+	"list_worktrees",
+	"remove_worktree",
+	"list_workspace_directories",
+	"get_agent_options",
+	"get_session_contexts",
+	"resolve_pr_review",
+	"prepare_pr_review",
+	"get_ui_actions",
+	"get_ui_action_completions",
+]);

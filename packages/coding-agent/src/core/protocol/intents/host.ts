@@ -505,17 +505,20 @@ export const mcpAuthStartDeviceIntent = defineIntent({
 	accept: (result) => ({ result: result as never }),
 });
 
-/** Browser sign-in redirects to a callback on the host, so only local clients start it. */
+/**
+ * Browser sign-in redirects to a callback on the host, so only local clients
+ * start it. Without a redirect URL it starts the server's configured flow.
+ */
 export const mcpAuthStartBrowserIntent = defineIntent({
 	...mcp,
 	name: "mcp.auth_start_browser",
 	label: "Sign in to MCP server (browser)",
 	remote: "unsafe",
 	run: (ctx, input) =>
-		mcpManagerOf(ctx).startServerAuth(input.server, {
-			flow: "browser",
-			...(input.redirectUrl === undefined ? {} : { redirectUrl: input.redirectUrl }),
-		}),
+		mcpManagerOf(ctx).startServerAuth(
+			input.server,
+			input.redirectUrl === undefined ? {} : { flow: "browser", redirectUrl: input.redirectUrl },
+		),
 	accept: (result) => ({ result: result as never }),
 });
 

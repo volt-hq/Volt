@@ -7,10 +7,12 @@ import {
 	type IntentTarget,
 	intentRegistry,
 	LOCAL_INTENT_PROFILE,
+	listDynamicIntents,
 } from "../../src/core/protocol/intents/index.ts";
 import { QueryRejectedError, queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import { createIrohRemoteRpcGrant } from "../../src/core/remote/iroh/access-grant.ts";
 import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../src/core/review-discussion-policy.ts";
+import { getUiActionCompletions } from "../../src/core/rpc/ui-actions.ts";
 import { INTENT_SLASH_COMMANDS } from "../../src/core/slash-commands.ts";
 import { createHarness, type Harness } from "../suite/harness.ts";
 import { adoptTestSession, connectTestClient, type TestClient } from "../utilities/host-client.ts";
@@ -237,6 +239,51 @@ describe("intent admission", () => {
 			code: "unavailable",
 			message: "Fast mode is not available while the agent is streaming",
 		});
+	});
+});
+
+describe("intent completions", () => {
+	it("complete remote-safe intents on an observe-only grant, as the completion query requires", async () => {
+		const ctx: IntentContext = {
+			target: fakeTarget({
+				sessionManager: { getCwd: () => "/nonexistent-volt-repo" },
+			} as unknown as Partial<AgentSession>),
+			services: {},
+			profile: remote("conversation.observe.v1"),
+		};
+		await expect(intentRegistry.complete(ctx, "review_branch", "base", "")).resolves.toEqual([]);
+		await expect(intentRegistry.complete(ctx, "review_branch", "focus", "")).resolves.toEqual([]);
+		await expect(intentRegistry.complete(ctx, "bash", "command", "")).rejects.toMatchObject({
+			code: "not_allowed",
+		});
+		// The UI action wire completes through the same intent.
+		await expect(
+			getUiActionCompletions(ctx, { action: "review.branch", argument: "base", prefix: "" }),
+		).resolves.toEqual([]);
+	});
+});
+
+describe("dynamic intents", () => {
+	it("keep a remote prompt template from reaching an extension command that is not remote-safe", () => {
+		const deploy = { invocationName: "deploy", name: "deploy", remoteSafe: false, sourceInfo: { scope: "project" } };
+		const target = fakeTarget({
+			isStreaming: false,
+			extensionRunner: {
+				getRegisteredCommands: () => [deploy],
+				getCommand: (name: string) => (name === "deploy" ? deploy : undefined),
+			},
+			promptTemplates: [{ name: "deploy", content: "Ship it", sourceInfo: { scope: "user" } }],
+		} as unknown as Partial<AgentSession>);
+		const template = listDynamicIntents(target.session).find((intent) => intent.source === "prompt");
+		expect(template?.remote).toBe("safe");
+		const remoteCtx: IntentContext = { target, services: {}, profile: remote("conversation.control.v1") };
+		expect(rejection(() => intentRegistry.prepareFrame(remoteCtx, template!.name, {}))).toMatchObject({
+			code: "not_allowed",
+			message: "Extension command is not available over remote host: /deploy",
+		});
+		expect(
+			intentRegistry.prepareFrame({ ...remoteCtx, profile: LOCAL_INTENT_PROFILE }, template!.name, {}),
+		).toHaveProperty("run");
 	});
 });
 

@@ -41,6 +41,7 @@ import {
 	writeRawStdout,
 } from "../../core/output-guard.ts";
 import type { IntentServices } from "../../core/protocol/intents/index.ts";
+import { parseIrohRemoteRpcGrant } from "../../core/remote/iroh/access-grant.ts";
 import {
 	executeReviewWorkflow,
 	prepareReviewWorkflow,
@@ -269,6 +270,15 @@ const RPC_CONVERSATION_AUTHORITY_MUTATION_TYPES: ReadonlySet<RpcCommand["type"]>
 	"reset_review_discussion",
 	"acknowledge_review",
 ]);
+
+/** A remote client's grant as stored; a malformed grant holds no capabilities, so its client never runs locally. */
+function admittedRemoteGrant(grant: RemoteGrant): RemoteGrant {
+	try {
+		return parseIrohRemoteRpcGrant(grant, "remote RPC grant");
+	} catch {
+		return { schemaVersion: 1, revision: 1, capabilities: [] };
+	}
+}
 
 class StaleConversationAuthorityError extends Error {
 	readonly code = "stale_conversation_authority";
@@ -627,6 +637,7 @@ export async function runRpcMode(
 	/** Whether this client anchors its conversation; a client that follows moves by redirect never does. */
 	const anchorsConversation = redirect === undefined && (options.anchor ?? true);
 	const allowUiActionInvocation = options.allowUiActionInvocation ?? true;
+	const remoteGrant = options.remoteGrant === undefined ? undefined : admittedRemoteGrant(options.remoteGrant);
 	const showsExtensionUi = options.extensionUi ?? true;
 	const takesHostActions = options.hostActions ?? true;
 	/** Set once a redirect client left its conversation: the stream only writes its final frame. */
@@ -1387,7 +1398,7 @@ export async function runRpcMode(
 			client,
 			options: {
 				allowUiActionInvocation,
-				...(options.remoteGrant === undefined ? {} : { remoteGrant: options.remoteGrant }),
+				...(remoteGrant === undefined ? {} : { remoteGrant }),
 			},
 			services: createIntentServices(commandConversation),
 			output,

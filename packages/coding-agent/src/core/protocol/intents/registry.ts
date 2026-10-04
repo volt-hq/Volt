@@ -206,7 +206,11 @@ export class IntentRegistry {
 			.map((intent) => this.descriptor(intent, view));
 	}
 
-	/** Completions for one input field; fields the intent does not complete have none. */
+	/**
+	 * Completions for one input field; fields the intent does not complete have
+	 * none. Completing reads, so a remote profile needs the intent to be
+	 * remote-safe but not the capabilities invoking it requires.
+	 */
 	async complete(
 		ctx: IntentContext,
 		name: string,
@@ -215,7 +219,9 @@ export class IntentRegistry {
 	): Promise<UiActionOptionDescriptor[]> {
 		const resolved = this.resolve(name, ctx.target);
 		if (!resolved) throw new IntentRejectedError("unknown_intent", `Unknown intent: ${name}`);
-		assertProfileAllows(metadataOf(resolved), ctx, name);
+		if (ctx.profile.name === "remote" && metadataOf(resolved).remote !== "safe") {
+			throw new IntentRejectedError("not_allowed", `Intent not available over remote host: ${name}`);
+		}
 		if (!(metadataOf(resolved).completions ?? []).includes(field)) return [];
 		if (resolved.kind === "dynamic") return completeDynamicIntentArguments(resolved.intent, prefix);
 		return (await resolved.definition.complete?.(ctx, field, prefix)) ?? [];
@@ -418,6 +424,17 @@ function admitDynamicIntent(
 	input: Static<typeof DynamicIntentInputSchema>,
 ): () => Promise<DynamicIntentOutcome> {
 	const session = (ctx.target as IntentTarget).session;
+	// The slash text runs any extension command of that name first: a remote
+	// template or skill must not reach a command that is not remote-safe.
+	if (ctx.profile.name === "remote") {
+		const command = session.extensionRunner.getCommand(intent.promptName);
+		if (command && command.remoteSafe !== true) {
+			throw new IntentRejectedError(
+				"not_allowed",
+				`Extension command is not available over remote host: /${intent.promptName}`,
+			);
+		}
+	}
 	const promptText = dynamicIntentPromptText(intent, input.arguments ?? "");
 	let queuedAs: "steer" | "followUp" | undefined;
 	if (intent.source !== "extension" && session.isStreaming) {

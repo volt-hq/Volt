@@ -2114,7 +2114,7 @@ async function unregisterWorkspaceIntent(
 				profile: remoteIntentProfile(authorization),
 			},
 			"unregister_workspace",
-			{ workspaceName: authorization.workspace.name },
+			{ workspaceName: typeof command.workspaceName === "string" ? command.workspaceName : "" },
 		);
 	} catch (error) {
 		if (error instanceof WorkspaceIntentError && result) return result;
