@@ -1,6 +1,6 @@
 import { describe, expect, test, vi } from "vitest";
 import { createLoopbackRpcTransportPair } from "../src/core/rpc/loopback-transport.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import {
 	createTestConversation,
 	createTestModel,
@@ -230,7 +230,7 @@ describe("conversation mutation authority", () => {
 				received.push(value as Record<string, unknown>);
 			}
 		});
-		const modePromise = runRpcMode(target.host, target.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(target.host, target.conversation, {
 			anchor: false,
 			exitProcess: false,
 			transport: pair.server,
@@ -278,7 +278,7 @@ describe("host requests across conversation authority cuts", () => {
 				received.push(value as Record<string, unknown>);
 			}
 		});
-		const modePromise = runRpcMode(fake.host, oldConversation, {
+		const modePromise = runLegacyRemoteRpcMode(fake.host, oldConversation, {
 			anchor: false,
 			exitProcess: false,
 			orderedConversation: {

@@ -668,11 +668,6 @@ class SubagentTaskLiveActivity {
 
 	/** Apply one child event. Returns true when displayable progress state changed. */
 	apply(event: SubagentEvent): boolean {
-		if ("workflowId" in event) {
-			// Workflow-scoped tool frames (review timelines) are not the child's
-			// own tool calls and carry no result payload.
-			return false;
-		}
 		switch (event.type) {
 			case "tool_execution_start": {
 				this.toolCalls += 1;

@@ -46,6 +46,7 @@ import type {
 } from "../../rpc/types.ts";
 import type { SettingsManager } from "../../settings-manager.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
+import type { Profile } from "../profiles.ts";
 
 // ============================================================================
 // Profiles
@@ -175,6 +176,8 @@ export interface IntentContext {
 	readonly intentId?: string;
 	/** Recheck the caller's authority (transport lease, branch) before a mutation; throws when stale. */
 	readonly assertCurrent?: () => void;
+	/** A protocol connection's subscriber profile: what `history` and `content` project. */
+	readonly subscriber?: Profile;
 }
 
 // ============================================================================

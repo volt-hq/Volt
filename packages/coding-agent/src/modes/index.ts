@@ -5,12 +5,6 @@
 export { InteractiveMode, type InteractiveModeOptions } from "./interactive/interactive-mode.ts";
 export { type PrintModeOptions, runPrintMode } from "./print-mode.ts";
 export {
-	createInProcessRpcClient,
-	InProcessRpcClient,
-	type InProcessRpcClientEventListener,
-	type InProcessRpcClientOptions,
-} from "./rpc/in-process-rpc-client.ts";
-export {
 	createIrohRemoteAgentRuntime,
 	createIrohRemoteAgentRuntimeWithSessionSelection,
 	type IrohRemoteAgentRuntimeOptions,
@@ -26,19 +20,7 @@ export {
 	type IrohRemoteRpcModeOptions,
 	runIrohRemoteRpcMode,
 } from "./rpc/iroh-remote-rpc-mode.ts";
-export {
-	type ModelInfo,
-	RpcClient,
-	type RpcClientEvent,
-	type RpcClientOptions,
-	type RpcEventListener,
-	type RpcExtensionErrorEvent,
-	type RpcSubagentDisposedEvent,
-	type RpcSubagentEndEvent,
-	type RpcSubagentEvent,
-} from "./rpc/rpc-client.ts";
-export { type RpcModeOptions, type RpcSessionChange, runRpcMode } from "./rpc/rpc-mode.ts";
-export { RpcTransportClient, type RpcTransportClientOptions } from "./rpc/rpc-transport-client.ts";
+export { type RpcModeOptions, runRpcMode } from "./rpc/rpc-mode.ts";
 export type {
 	RpcActiveCompaction,
 	RpcActiveToolExecution,

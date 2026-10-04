@@ -32,7 +32,7 @@ import {
 	type IrohRemoteAgentRuntimeConversationTarget,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
 } from "../modes/rpc/iroh-remote-agent-runtime.ts";
-import type { RpcRedirectOptions } from "../modes/rpc/rpc-mode.ts";
+import type { RpcRedirectOptions } from "../modes/rpc/legacy-remote-rpc-mode.ts";
 import {
 	type DetachedRuntimeRetentionHandle,
 	scheduleDetachedRuntimeRetention,

@@ -9,7 +9,7 @@ import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import type { ExtensionUIContext } from "../src/core/extensions/types.ts";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
 import { Theme } from "../src/core/theme/runtime.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
 function createSession() {
@@ -68,7 +68,7 @@ describe("rpc-mode extension theme facade", () => {
 		const ready = new Promise<void>((resolve) => {
 			resolveReady = resolve;
 		});
-		const modePromise = runRpcMode(runtimeHost.host, runtimeHost.conversation, {
+		const modePromise = runLegacyRemoteRpcMode(runtimeHost.host, runtimeHost.conversation, {
 			transport: createFakeTransport(),
 			onReady: resolveReady,
 		});

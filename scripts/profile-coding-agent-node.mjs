@@ -43,7 +43,7 @@ Options:
 Notes:
   - By default the benchmark uses your normal configured agent dir, so global models/auth/settings work.
   - TUI mode measures startup until the interactive UI reaches first usable state.
-  - RPC mode measures startup until a real get_state request receives a response, then closes stdin to exit cleanly.
+  - RPC mode measures startup until the host answers a protocol subscription with its snapshot, then closes stdin to exit cleanly.
   - CPU profiles are kept in the selected profile directory for later analysis.
 `);
 }
@@ -457,7 +457,7 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	let stderr = "";
 	let readyElapsedMs;
 	let responseError;
-	const requestId = `startup-benchmark-${runNumber}`;
+	const subscriptionId = `startup-benchmark-${runNumber}`;
 	const startedAt = performance.now();
 
 	child.stdout.setEncoding("utf8");
@@ -474,12 +474,20 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 				return;
 			}
 
-			if (parsed?.type !== "response" || parsed.id !== requestId || parsed.command !== "get_state") {
+			if (parsed?.type === "fatal") {
+				responseError = `${parsed.code}: ${parsed.message}`;
+				child.stdin.end();
 				return;
 			}
 
-			if (parsed.success !== true) {
-				responseError = typeof parsed.error === "string" ? parsed.error : "get_state failed";
+			if (parsed?.type === "welcome") {
+				child.stdin.write(
+					`${JSON.stringify({ type: "subscribe", subscriptionId, conversation: parsed.conversation, after: "snapshot", live: false })}\n`,
+				);
+				return;
+			}
+
+			if (parsed?.type !== "snapshot" || parsed.subscriptionId !== subscriptionId) {
 				return;
 			}
 
@@ -496,7 +504,9 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 	});
 
 	child.stdin.setDefaultEncoding("utf8");
-	child.stdin.write(`${JSON.stringify({ id: requestId, type: "get_state" })}\n`);
+	child.stdin.write(
+		`${JSON.stringify({ type: "hello", protocol: 1, client: { name: "startup-benchmark", version: "1" }, accepts: { hostRequests: [] } })}\n`,
+	);
 
 	const exitCode = await waitForExit(child, `Benchmark ${measuredIndex === undefined ? `warmup ${runNumber}` : `run ${measuredIndex}`}`);
 
@@ -505,7 +515,7 @@ async function runRpcBenchmarkRun({ runtime, runIndex, measuredIndex, options, p
 			throw new Error(responseError);
 		}
 		if (readyElapsedMs === undefined) {
-			throw new Error(stderr.trim() || "RPC benchmark did not receive get_state response");
+			throw new Error(stderr.trim() || "RPC benchmark did not receive a snapshot");
 		}
 		if (exitCode !== 0) {
 			throw new Error(stderr.trim() || `Benchmark child exited with code ${exitCode}`);

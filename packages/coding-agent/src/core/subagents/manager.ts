@@ -1,15 +1,17 @@
 import { randomUUID } from "node:crypto";
 import type { AgentAbortSource, AgentMessage, ThinkingLevel } from "@hansjm10/volt-agent-core";
 import type { AssistantMessage, Message, TextContent } from "@hansjm10/volt-ai";
-import { createInProcessRpcClient, type InProcessRpcClient } from "../../modes/rpc/in-process-rpc-client.ts";
-import type { RpcClientEvent } from "../../modes/rpc/rpc-client-base.ts";
-import type { SessionStats } from "../agent-session.ts";
+import type { AgentSessionEvent, SessionStats } from "../agent-session.ts";
 import { ConversationLockedError } from "../conversation-log/conversation-lock.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import { ConversationHost } from "../host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation, SubagentRuntimeContext } from "../host/hosted-conversation.ts";
+import { openFork, openNewSession, openStoredSession } from "../host/session-intents.ts";
+import type { HostClient } from "../host/targets.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
+import { buildRpcSessionState } from "../rpc/session-state.ts";
+import { projectSessionTranscript } from "../rpc/transcript.ts";
 import type { RpcSessionState, RpcTranscriptResponse } from "../rpc/types.ts";
 import { SessionManager, type SessionReference } from "../session-manager.ts";
 import type { SessionWriter } from "../session-writer.ts";
@@ -39,7 +41,7 @@ import {
 import { SUBAGENT_REGISTRY_TOOL_NAME } from "./tool-names.ts";
 import { SubagentTurnBudget, type SubagentTurnLimits } from "./turn-budget.ts";
 
-export type SubagentEvent = RpcClientEvent;
+export type SubagentEvent = AgentSessionEvent;
 export type SubagentEndEvent = Extract<SubagentEvent, { type: "agent_end" }>;
 export type SubagentEventListener = (event: SubagentEvent) => void;
 export type SubagentActivityStatus = "running" | "completed" | "failed" | "aborted";
@@ -84,6 +86,8 @@ export interface SubagentResult {
 export interface SubagentHandle {
 	id: string;
 	sessionId: string;
+	/** The child's conversation, in the manager's host for its children: a client subscribes to it for the child's log. */
+	readonly conversation: HostedConversation;
 	/**
 	 * Send a message to the child. A rejection before the run is published
 	 * (prompt preflight, cancellation, or the host's runtime registration commit)
@@ -139,8 +143,7 @@ export interface SubagentManagerOptions {
 	delegationLimits?: SubagentDelegationScopeLimits;
 	/** Per-child turn safeguards; every parallel, chained, or nested runtime receives its own budget. */
 	turnLimits?: SubagentTurnLimits;
-	requestTimeoutMs?: number;
-	/** Keep child conversations open after the hidden loopback client detaches. Another owner must close them. */
+	/** Keep child conversations open after the manager's client of each one detaches. Another owner must close them. */
 	retainRuntimeOnDispose?: boolean;
 	/** Called after a child runtime is ready so hosts can prepare it for live attachment. */
 	onRuntimeCreated?: (
@@ -173,7 +176,6 @@ export interface SubagentStartOptions {
 	cwd?: string;
 	agentDir?: string;
 	sessionManager?: SessionManager;
-	requestTimeoutMs?: number;
 	/** Shared root admission and accounting scope for all descendants created by one delegation tool call. */
 	delegationScope?: SubagentDelegationScope;
 	/** Whole-batch admission issued by this manager for a confirmed spawn request. */
@@ -536,7 +538,9 @@ function deriveHydratedChildState(child: SessionManager, fallbackTime: number): 
 class LocalSubagentHandle implements SubagentHandle {
 	readonly id: string;
 	readonly sessionId: string;
-	private readonly client: InProcessRpcClient;
+	readonly conversation: HostedConversation;
+	/** Leaves the child conversation, which closes it unless its runtime is retained. */
+	private readonly leave: () => Promise<void>;
 	private readonly sessionRef: SessionReference | undefined;
 	private readonly abortRuntime: (source?: AgentAbortSource) => Promise<void>;
 	private readonly removeFromManager: (id: string) => void;
@@ -567,8 +571,9 @@ class LocalSubagentHandle implements SubagentHandle {
 	constructor(options: {
 		id: string;
 		sessionId: string;
+		conversation: HostedConversation;
 		sessionRef: SessionReference | undefined;
-		client: InProcessRpcClient;
+		leave: () => Promise<void>;
 		abortRuntime: (source?: AgentAbortSource) => Promise<void>;
 		removeFromManager: (id: string) => void;
 		onPromptAccepted: (message: string) => void;
@@ -583,8 +588,9 @@ class LocalSubagentHandle implements SubagentHandle {
 	}) {
 		this.id = options.id;
 		this.sessionId = options.sessionId;
+		this.conversation = options.conversation;
 		this.sessionRef = options.sessionRef;
-		this.client = options.client;
+		this.leave = options.leave;
 		this.abortRuntime = options.abortRuntime;
 		this.removeFromManager = options.removeFromManager;
 		this.onPromptAccepted = options.onPromptAccepted;
@@ -610,10 +616,10 @@ class LocalSubagentHandle implements SubagentHandle {
 			if (this.isAbortRequested()) {
 				throw new Error(`Subagent ${this.id} was aborted before prompt acceptance`);
 			}
-			await this.client.prompt(message, undefined, () => {
-				// Cancellation can land after the command is queued but before its
-				// preflight response reaches this handle. Abort again at that boundary
-				// so an earlier idle-session abort cannot admit provider work.
+			await this.promptChild(message, () => {
+				// Cancellation can land after the prompt is queued but before its
+				// preflight admits it. Abort again at that boundary so an earlier
+				// idle-session abort cannot admit provider work.
 				if (this.isAbortRequested()) {
 					void this.abortRuntime().catch(() => undefined);
 					throw new Error(`Subagent ${this.id} was aborted before prompt acceptance`);
@@ -625,9 +631,8 @@ class LocalSubagentHandle implements SubagentHandle {
 				this.onPromptAccepted(message);
 				this.promptAccepted = true;
 			});
-			// Handler-owned prompts may settle before their success response reaches
-			// this client. Join that buffered settlement only after this prompt's RPC
-			// admission is authoritative.
+			// Handler-owned prompts may settle before their admission is reported.
+			// Join that settlement only once the admission is authoritative.
 			if (this.promptSettlementObserved) this.startSettlementWatcher();
 		} catch (error) {
 			const cleanupErrors: unknown[] = [];
@@ -665,17 +670,45 @@ class LocalSubagentHandle implements SubagentHandle {
 
 	async getState(): Promise<RpcSessionState> {
 		this.assertOpen();
-		return this.client.getState();
+		return buildRpcSessionState(this.conversation.session);
 	}
 
 	async getTranscript(options: { limit?: number; beforeEntryId?: string } = {}): Promise<RpcTranscriptResponse> {
 		this.assertOpen();
-		return this.client.getTranscript(options);
+		return projectSessionTranscript(this.conversation.session.sessionManager, options);
 	}
 
 	async getSessionStats(): Promise<SessionStats> {
 		this.assertOpen();
-		return { ...(await this.client.getSessionStats()), sessionRef: this.sessionRef };
+		return { ...this.conversation.session.getSessionStats(), sessionRef: this.sessionRef };
+	}
+
+	/**
+	 * Prompt the child; `onAccepted` runs once its preflight admitted the
+	 * prompt, before this resolves. A failure before admission rejects.
+	 */
+	private promptChild(message: string, onAccepted: () => void): Promise<void> {
+		return new Promise((resolve, reject) => {
+			let admitted = false;
+			void this.conversation.session
+				.prompt(message, {
+					clientMessageId: randomUUID(),
+					source: "rpc",
+					preflightResult: (result) => {
+						if (!result.success || admitted) return;
+						admitted = true;
+						try {
+							onAccepted();
+							resolve();
+						} catch (error) {
+							reject(error);
+						}
+					},
+				})
+				.catch((error: unknown) => {
+					if (!admitted) reject(error);
+				});
+		});
 	}
 
 	waitForEnd(): Promise<SubagentResult> {
@@ -699,7 +732,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		if (abortInFlightRun) {
 			// Disposing a still-running child must not orphan its turn: when the
 			// runtime is retained (daemon hosts keep child runtimes attachable),
-			// client.stop() only closes the loopback transport and the child would
+			// leaving only detaches the manager's client and the child would
 			// keep running on a result nobody can receive. Abort the runtime
 			// directly — the public abort() asserts the handle is still open — and
 			// do it fire-and-forget so a slow-to-cancel child cannot wedge
@@ -719,7 +752,7 @@ class LocalSubagentHandle implements SubagentHandle {
 		this.disposePromise = Promise.resolve().then(async () => {
 			const cleanupErrors: unknown[] = [];
 			try {
-				await this.client.stop();
+				await this.leave();
 			} catch (cleanupError) {
 				cleanupErrors.push(cleanupError);
 			}
@@ -760,7 +793,7 @@ class LocalSubagentHandle implements SubagentHandle {
 			try {
 				listener(event);
 			} catch {
-				// Listener failures should not break the child RPC event stream.
+				// Listener failures should not break the child's event stream.
 			}
 		}
 		// agent_end is a turn projection, not the prompt transaction's terminal
@@ -843,7 +876,6 @@ export class SubagentManager {
 	private readonly subagentContext?: SubagentRuntimeContext;
 	private readonly delegationLimits?: SubagentDelegationScopeLimits;
 	private readonly turnLimits?: SubagentTurnLimits;
-	private readonly requestTimeoutMs?: number;
 	private readonly retainRuntimeOnDispose: boolean;
 	private readonly onRuntimeCreated?: (
 		event: SubagentRuntimeCreatedEvent,
@@ -872,7 +904,6 @@ export class SubagentManager {
 		this.subagentContext = options.subagentContext;
 		this.delegationLimits = options.delegationLimits;
 		this.turnLimits = options.turnLimits;
-		this.requestTimeoutMs = options.requestTimeoutMs;
 		this.retainRuntimeOnDispose = options.retainRuntimeOnDispose ?? false;
 		this.onRuntimeCreated = options.onRuntimeCreated;
 	}
@@ -1530,8 +1561,9 @@ export class SubagentManager {
 				throw new AggregateError(cleanupErrors, "Subagent turn-budget cleanup did not complete");
 			}
 		};
-		let client: InProcessRpcClient | undefined;
-		let runtimeFinalizerTransferredToRpc = false;
+		/** Leaves the child: detaches the manager's client, which closes the child unless its runtime is retained. */
+		let leaveChild: (() => Promise<void>) | undefined;
+		let runtimeFinalizerTransferredToClient = false;
 		let runtimeRegistration: SubagentRuntimeRegistration | undefined;
 		let rollbackRuntimeRegistrationPromise: Promise<void> | undefined;
 		let rollbackRuntimeRegistrationErrorReported = false;
@@ -1669,18 +1701,23 @@ export class SubagentManager {
 
 			let handle: LocalSubagentHandle | undefined;
 			const disposeRuntimeOnClose = !this.retainRuntimeOnDispose;
-			const pendingClient = createInProcessRpcClient(childHost, runtime, {
-				anchor: disposeRuntimeOnClose,
-				requestTimeoutMs: options.requestTimeoutMs ?? this.requestTimeoutMs,
-				onEvent: (event) => {
+			const childClient = this.createChildClient(childHost, runtime, id, disposeRuntimeOnClose);
+			const unsubscribeEvents = runtime.session.subscribe(
+				(event) => {
 					this.recordActivityEvent(id, event);
 					handle?.handleEvent(event);
 				},
-			});
-			// The in-process RPC mode consumes finalizer ownership at invocation,
-			// including when its asynchronous startup later rejects.
-			runtimeFinalizerTransferredToRpc = disposeRuntimeOnClose;
-			client = await pendingClient;
+				{ monitorGitContext: false },
+			);
+			// An anchoring client owns the runtime's close from here, including when attaching fails.
+			runtimeFinalizerTransferredToClient = disposeRuntimeOnClose;
+			leaveChild = async () => {
+				unsubscribeEvents();
+				if (childHost.conversationOf(childClient) !== undefined) await childHost.detach(childClient);
+				else if (disposeRuntimeOnClose && !runtime.closed) await childHost.close(runtime);
+			};
+			await childHost.attach(childClient, runtime);
+			void runtime.startRecoveredClientInputs().catch(() => undefined);
 			runtimeRegistration = await this.notifyRuntimeCreated({
 				id,
 				host: childHost,
@@ -1709,8 +1746,9 @@ export class SubagentManager {
 			handle = new LocalSubagentHandle({
 				id,
 				sessionId: runtime.session.sessionId,
+				conversation: runtime,
 				sessionRef: runtime.session.sessionRef,
-				client,
+				leave: leaveChild,
 				abortRuntime: (source) => runtime.session.abort(source),
 				removeFromManager: (handleId) => {
 					this.handles.delete(handleId);
@@ -1781,9 +1819,9 @@ export class SubagentManager {
 			} catch (cleanupError) {
 				cleanupErrors.push(cleanupError);
 			}
-			if (client) {
+			if (leaveChild) {
 				try {
-					await client.stop();
+					await leaveChild();
 				} catch (cleanupError) {
 					cleanupErrors.push(cleanupError);
 				}
@@ -1793,7 +1831,7 @@ export class SubagentManager {
 			} catch (cleanupError) {
 				cleanupErrors.push(cleanupError);
 			}
-			if (!runtimeFinalizerTransferredToRpc) {
+			if (!runtimeFinalizerTransferredToClient) {
 				try {
 					await childHost.close(runtime);
 				} catch (cleanupError) {
@@ -2229,9 +2267,52 @@ export class SubagentManager {
 	}
 
 	/**
+	 * The manager's client of one child conversation: it binds the child's
+	 * extensions and, when it anchors the child, closes it as it leaves. It
+	 * answers no host requests, so the child's dialogs resolve to their
+	 * defaults. A child is pinned, so its session changes fail.
+	 */
+	private createChildClient(
+		host: ConversationHost,
+		conversation: HostedConversation,
+		id: string,
+		anchor: boolean,
+	): HostClient {
+		const client: HostClient = {
+			id: `subagent:${id}`,
+			...(anchor ? { anchor: true } : {}),
+			surface: {
+				commandContextActions: {
+					waitForIdle: () => conversation.session.waitForIdle(),
+					newSession: (options) => openNewSession(host, client, options),
+					fork: async (entryId, options) => {
+						const result = await openFork(host, client, entryId, options);
+						return result.cancelled
+							? result
+							: { cancelled: false, sessionId: result.sessionId, seeded: result.seeded };
+					},
+					navigateTree: async (targetId, options) => {
+						const result = await conversation.session.navigateTree(targetId, {
+							summarize: options?.summarize,
+							customInstructions: options?.customInstructions,
+							replaceInstructions: options?.replaceInstructions,
+							label: options?.label,
+						});
+						return { cancelled: result.cancelled };
+					},
+					switchSession: (sessionRef, options) => openStoredSession(host, client, sessionRef, options),
+					reload: () => conversation.session.reload(),
+				},
+			},
+			move: { kind: "in_place", onMoved: () => {} },
+		};
+		return client;
+	}
+
+	/**
 	 * The host of this manager's child conversations under `agentDir`. A child
-	 * stays open until its in-process client, or the owner that retains it,
-	 * closes it.
+	 * stays open until the manager's client of it, or the owner that retains
+	 * it, closes it.
 	 */
 	private childHost(agentDir: string): ConversationHost {
 		let host = this.childHosts.get(agentDir);

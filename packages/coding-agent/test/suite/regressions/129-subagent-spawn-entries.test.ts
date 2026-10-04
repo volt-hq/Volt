@@ -82,7 +82,6 @@ async function createTestContext(options: {
 		cwd: tmpdir(),
 		agentDir: tmpdir(),
 		resourceLoader,
-		requestTimeoutMs: 5_000,
 		parentSessionManager: options.parentSessionManager,
 	});
 	return {
@@ -132,7 +131,6 @@ function createRestartedManager(parentSessionManager: SessionManager): SubagentM
 			...createTestResourceLoader(),
 			getSubagents: () => ({ definitions: [definition], diagnostics: [] }),
 		},
-		requestTimeoutMs: 5_000,
 		parentSessionManager,
 	});
 }
@@ -791,7 +789,6 @@ describe("issue #129", () => {
 				...createTestResourceLoader(),
 				getSubagents: () => ({ definitions: [createDefinition()], diagnostics: [] }),
 			},
-			requestTimeoutMs: 5_000,
 			subagentContext: {
 				depth: 1,
 				agentName: "researcher",

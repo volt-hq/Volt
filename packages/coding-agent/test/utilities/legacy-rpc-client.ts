@@ -1,43 +1,50 @@
-import type { ConversationHost } from "../../core/host/conversation-host.ts";
-import type { HostedConversation } from "../../core/host/hosted-conversation.ts";
-import { createLoopbackRpcTransportPair } from "../../core/rpc/index.ts";
-import type { RpcClientEvent } from "./rpc-client-base.ts";
-import { runRpcMode } from "./rpc-mode.ts";
-import { RpcTransportClient } from "./rpc-transport-client.ts";
+/**
+ * A client of the legacy RPC command wire in the same process, for tests of
+ * that wire while it serves the remote path: the legacy mode on one end of a
+ * loopback pair, the legacy client on the other. Local clients speak protocol
+ * frames (`createLoopbackClient`).
+ */
 
-export type InProcessRpcClientEventListener = (event: RpcClientEvent, client: InProcessRpcClient) => void;
+import type { ConversationHost } from "../../src/core/host/conversation-host.ts";
+import type { HostedConversation } from "../../src/core/host/hosted-conversation.ts";
+import { createLoopbackRpcTransportPair } from "../../src/core/rpc/index.ts";
+import { runLegacyRemoteRpcMode } from "../../src/modes/rpc/legacy-remote-rpc-mode.ts";
+import type { RpcClientEvent } from "../../src/modes/rpc/rpc-client-base.ts";
+import { RpcTransportClient } from "../../src/modes/rpc/rpc-transport-client.ts";
 
-export interface InProcessRpcClientOptions {
+export type LegacyRpcClientEventListener = (event: RpcClientEvent, client: LegacyRpcClient) => void;
+
+export interface LegacyRpcClientOptions {
 	/** Milliseconds to wait for a command response. Defaults to 30 seconds. */
 	requestTimeoutMs?: number;
 	/**
 	 * Defaults to true. The client anchors its conversation: stopping it closes
-	 * the conversation, and createInProcessRpcClient takes over closing it from
+	 * the conversation, and createLegacyRpcClient takes over closing it from
 	 * the call on. Set false when another owner keeps the conversation open after
 	 * this loopback client stops.
 	 */
 	anchor?: boolean;
 	/** Initial event listener registered before startup completes. */
-	onEvent?: InProcessRpcClientEventListener;
+	onEvent?: LegacyRpcClientEventListener;
 }
 
-interface InProcessRpcClientConstructorOptions extends InProcessRpcClientOptions {
+interface LegacyRpcClientConstructorOptions extends LegacyRpcClientOptions {
 	host: ConversationHost;
 	conversation: HostedConversation;
 }
 
 /**
- * RPC client backed by runRpcMode in the same Node.js process, attached to a
+ * RPC client backed by runLegacyRemoteRpcMode in the same Node.js process, attached to a
  * hosted conversation.
  *
  * stop() closes the client transport and waits for RPC mode shutdown. By default
  * the client anchors the conversation, and shutdown closes it.
  */
-export class InProcessRpcClient extends RpcTransportClient {
+export class LegacyRpcClient extends RpcTransportClient {
 	private readonly modeClosed: Promise<void>;
 	private readonly modeReady: Promise<void>;
 
-	constructor(options: InProcessRpcClientConstructorOptions) {
+	constructor(options: LegacyRpcClientConstructorOptions) {
 		const pair = createLoopbackRpcTransportPair();
 		super({ transport: pair.client, requestTimeoutMs: options.requestTimeoutMs });
 
@@ -63,7 +70,7 @@ export class InProcessRpcClient extends RpcTransportClient {
 		});
 		void this.modeReady.catch(() => {});
 
-		this.modeClosed = runRpcMode(options.host, options.conversation, {
+		this.modeClosed = runLegacyRemoteRpcMode(options.host, options.conversation, {
 			transport: pair.server,
 			...(options.anchor === undefined ? {} : { anchor: options.anchor }),
 			exitProcess: false,
@@ -91,15 +98,15 @@ export class InProcessRpcClient extends RpcTransportClient {
 	}
 }
 
-export async function createInProcessRpcClient(
+export async function createLegacyRpcClient(
 	host: ConversationHost,
 	conversation: HostedConversation,
-	options: InProcessRpcClientOptions = {},
-): Promise<InProcessRpcClient> {
+	options: LegacyRpcClientOptions = {},
+): Promise<LegacyRpcClient> {
 	const anchor = options.anchor ?? true;
-	let client: InProcessRpcClient;
+	let client: LegacyRpcClient;
 	try {
-		client = new InProcessRpcClient({ host, conversation, ...options, anchor });
+		client = new LegacyRpcClient({ host, conversation, ...options, anchor });
 	} catch (constructionError) {
 		if (!anchor) {
 			throw constructionError;

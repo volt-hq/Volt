@@ -2,37 +2,47 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { AgentEvent } from "@hansjm10/volt-agent-core";
+import type { ProjectedEntry } from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { type RpcProcessClient, spawnRpcClient } from "../src/client/protocol-client.ts";
 import { type SessionEntry, SessionManager } from "../src/core/session-manager.ts";
-import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/** The texts of the transcript views of `role` the client holds. */
+function texts(entries: readonly ProjectedEntry[], role: "user" | "assistant" | "tool"): string[] {
+	return entries.flatMap((entry) => (entry.type === "message" && entry.view?.role === role ? [entry.view.text] : []));
+}
+
 /**
- * RPC mode tests.
+ * RPC mode over stdio against a real provider: protocol frames end to end.
  */
 describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_TOKEN)("RPC mode", () => {
-	let client: RpcClient;
+	let client: RpcProcessClient | undefined;
 	let sessionDir: string;
 
 	beforeEach(() => {
 		sessionDir = join(tmpdir(), `volt-rpc-test-${Date.now()}`);
-		client = new RpcClient({
+	});
+
+	afterEach(async () => {
+		await client?.stop();
+		client = undefined;
+		if (sessionDir && existsSync(sessionDir)) {
+			rmSync(sessionDir, { recursive: true });
+		}
+	});
+
+	async function start(): Promise<RpcProcessClient> {
+		client = await spawnRpcClient({
 			cliPath: join(__dirname, "..", "dist", "cli.js"),
 			cwd: join(__dirname, ".."),
 			env: { VOLT_CODING_AGENT_DIR: sessionDir },
 			provider: "anthropic",
 			model: "claude-sonnet-4-5",
 		});
-	});
-
-	afterEach(async () => {
-		await client.stop();
-		if (sessionDir && existsSync(sessionDir)) {
-			rmSync(sessionDir, { recursive: true });
-		}
-	});
+		return client;
+	}
 
 	async function readPersistedEntries(): Promise<SessionEntry[]> {
 		const sessionsPath = join(sessionDir, "sessions");
@@ -45,243 +55,101 @@ describe.skipIf(!process.env.ANTHROPIC_API_KEY && !process.env.ANTHROPIC_OAUTH_T
 		return (await SessionManager.open(sessions[0]!.ref)).getEntries();
 	}
 
-	test("should get state", async () => {
-		await client.start();
-		const state = await client.getState();
-
-		expect(state.model).toBeDefined();
-		expect(state.model?.provider).toBe("anthropic");
-		expect(state.model?.id).toBe("claude-sonnet-4-5");
-		expect(state.isStreaming).toBe(false);
-		expect(state.messageCount).toBe(0);
+	test("subscribes from a snapshot and serves the model and the live phase", async () => {
+		const rpc = await start();
+		expect(rpc.state.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
+		expect(rpc.phase?.busy).toBe(false);
+		expect(rpc.state.entries.filter((entry) => entry.type === "message")).toHaveLength(0);
 	}, 30000);
 
 	test("should save messages to session file", async () => {
-		await client.start();
-
-		// Send prompt and wait for completion
-		const events = await client.promptAndWait("Reply with just the word 'hello'");
-
-		// Should have message events
-		const messageEndEvents = events.filter((e) => e.type === "message_end");
-		expect(messageEndEvents.length).toBeGreaterThanOrEqual(2); // user + assistant
-
-		// Wait for file writes
-		await new Promise((resolve) => setTimeout(resolve, 200));
+		const rpc = await start();
+		await rpc.promptAndWait("Reply with just the word 'hello'");
+		expect(texts(rpc.state.entries, "user")).toEqual(["Reply with just the word 'hello'"]);
+		expect(texts(rpc.state.entries, "assistant").length).toBeGreaterThanOrEqual(1);
 
 		const entries = await readPersistedEntries();
-
-		// Should have user and assistant messages
-		const messages = entries.filter((entry) => entry.type === "message");
-		expect(messages.length).toBeGreaterThanOrEqual(2);
-
-		const roles = messages.map((message) => message.message.role);
+		const roles = entries.flatMap((entry) => (entry.type === "message" ? [entry.message.role] : []));
 		expect(roles).toContain("user");
 		expect(roles).toContain("assistant");
 	}, 90000);
 
 	test("should handle manual compaction", async () => {
-		await client.start();
-
-		// First send a prompt to have messages to compact
-		await client.promptAndWait("Say hello");
-
-		// Compact
-		const result = await client.compact();
-		expect(result.summary).toBeDefined();
-		expect(result.tokensBefore).toBeGreaterThan(0);
-
-		// Wait for file writes
-		await new Promise((resolve) => setTimeout(resolve, 200));
-
+		const rpc = await start();
+		await rpc.promptAndWait("Say hello");
+		const accepted = await rpc.intent("compact", {});
+		expect(accepted.result).toMatchObject({ summary: expect.any(String) });
+		await rpc.waitForIdle();
+		expect(rpc.state.entries.filter((entry) => entry.type === "compaction")).toHaveLength(1);
 		const entries = await readPersistedEntries();
-
-		const compactionEntries = entries.filter((entry) => entry.type === "compaction");
-		expect(compactionEntries.length).toBe(1);
-		expect(compactionEntries[0].summary).toBeDefined();
+		expect(entries.filter((entry) => entry.type === "compaction")).toHaveLength(1);
 	}, 120000);
 
-	test("should execute bash command", async () => {
-		await client.start();
-
-		const result = await client.bash("echo hello");
-		expect(result.output.trim()).toBe("hello");
-		expect(result.exitCode).toBe(0);
-		expect(result.cancelled).toBe(false);
-	}, 30000);
-
-	test("should add bash output to context", async () => {
-		await client.start();
-
-		// First send a prompt to initialize session
-		await client.promptAndWait("Say hi");
-
-		// Run bash command
-		const uniqueValue = `test-${Date.now()}`;
-		await client.bash(`echo ${uniqueValue}`);
-
-		// Wait for file writes
-		await new Promise((resolve) => setTimeout(resolve, 200));
-
-		const entries = await readPersistedEntries();
-
-		const bashMessages = entries.filter(
-			(entry) => entry.type === "message" && entry.message.role === "bashExecution",
-		);
-		expect(bashMessages).toHaveLength(1);
-		expect(bashMessages[0]).toMatchObject({ message: { output: expect.stringContaining(uniqueValue) } });
-	}, 90000);
-
-	test("should include bash output in LLM context", async () => {
-		await client.start();
-
-		// Run a bash command with a unique value
+	test("should execute bash command and add its output to the context", async () => {
+		const rpc = await start();
 		const uniqueValue = `unique-${Date.now()}`;
-		await client.bash(`echo ${uniqueValue}`);
+		const accepted = await rpc.intent("bash", { command: `echo ${uniqueValue}` });
+		expect(accepted.result).toMatchObject({ exitCode: 0, cancelled: false });
+		expect(accepted.result?.output.trim()).toBe(uniqueValue);
 
-		// Ask the LLM what the output was
-		const events = await client.promptAndWait(
+		await rpc.promptAndWait(
 			"What was the exact output of the echo command I just ran? Reply with just the value, nothing else.",
 		);
-
-		// Find assistant's response
-		const messageEndEvents = events.filter((e) => e.type === "message_end") as AgentEvent[];
-		const assistantMessage = messageEndEvents.find(
-			(e) => e.type === "message_end" && e.message?.role === "assistant",
-		) as any;
-
-		expect(assistantMessage).toBeDefined();
-
-		const textContent = assistantMessage.message.content.find((c: any) => c.type === "text");
-		expect(textContent?.text).toContain(uniqueValue);
+		expect(texts(rpc.state.entries, "assistant").at(-1)).toContain(uniqueValue);
 	}, 90000);
 
-	test("should set and get thinking level", async () => {
-		await client.start();
-
-		// Set thinking level
-		await client.setThinkingLevel("high");
-
-		// Verify via state
-		const state = await client.getState();
-		expect(state.thinkingLevel).toBe("high");
+	test("should set the thinking level", async () => {
+		const rpc = await start();
+		await rpc.intent("set_thinking_level", { level: "high" });
+		await rpc.waitForIdle();
+		expect(rpc.state.thinkingLevel).toBe("high");
 	}, 30000);
 
-	test("should cycle thinking level", async () => {
-		await client.start();
-
-		// Get initial level
-		const initialState = await client.getState();
-		const initialLevel = initialState.thinkingLevel;
-
-		// Cycle
-		const result = await client.cycleThinkingLevel();
-		expect(result).toBeDefined();
-		expect(result!.level).not.toBe(initialLevel);
-
-		// Verify via state
-		const newState = await client.getState();
-		expect(newState.thinkingLevel).toBe(result!.level);
-	}, 30000);
-
-	test("should get available models", async () => {
-		await client.start();
-
-		const models = await client.getAvailableModels();
+	test("should list models", async () => {
+		const rpc = await start();
+		const { models } = await rpc.query("models");
 		expect(models.length).toBeGreaterThan(0);
-
-		// All models should have required fields
 		for (const model of models) {
 			expect(model.provider).toBeDefined();
 			expect(model.id).toBeDefined();
-			expect(model.contextWindow).toBeGreaterThan(0);
-			expect(typeof model.reasoning).toBe("boolean");
 		}
 	}, 30000);
 
-	test("should get session stats", async () => {
-		await client.start();
-
-		// Send a prompt first
-		await client.promptAndWait("Hello");
-
-		const stats = await client.getSessionStats();
-		expect(stats).not.toHaveProperty("sessionRef");
-		expect(stats.sessionId).toBeDefined();
-		expect(stats.userMessages).toBeGreaterThanOrEqual(1);
-		expect(stats.assistantMessages).toBeGreaterThanOrEqual(1);
+	test("should report usage in the live state", async () => {
+		const rpc = await start();
+		await rpc.promptAndWait("Hello");
+		const usage = rpc.live.values.get("usage");
+		expect(usage?.kind === "usage" && usage.tokens.total).toBeGreaterThan(0);
 	}, 90000);
 
-	test("should create new session", async () => {
-		await client.start();
-
-		// Send a prompt
-		await client.promptAndWait("Hello");
-
-		// Verify messages exist
-		let state = await client.getState();
-		expect(state.messageCount).toBeGreaterThan(0);
-
-		// New session
-		await client.newSession();
-
-		// Verify messages cleared
-		state = await client.getState();
-		expect(state.messageCount).toBe(0);
+	test("should move to a new session", async () => {
+		const rpc = await start();
+		await rpc.promptAndWait("Hello");
+		const first = rpc.conversation;
+		const accepted = await rpc.intent("new_session", {});
+		expect(accepted.conversation).toBeDefined();
+		await expect.poll(() => rpc.conversation).toBe(accepted.conversation);
+		await rpc.caughtUp();
+		expect(rpc.conversation).not.toBe(first);
+		expect(rpc.state.entries.filter((entry) => entry.type === "message")).toHaveLength(0);
 	}, 90000);
 
 	test("should export to HTML", async () => {
-		await client.start();
-
-		// Send a prompt first
-		await client.promptAndWait("Hello");
-
-		// Export
-		const result = await client.exportHtml();
-		expect(result.path).toBeDefined();
-		expect(result.path.endsWith(".html")).toBe(true);
-		expect(existsSync(result.path)).toBe(true);
+		const rpc = await start();
+		await rpc.promptAndWait("Hello");
+		const accepted = await rpc.intent("export_html", {});
+		expect(accepted.result?.path.endsWith(".html")).toBe(true);
+		expect(existsSync(accepted.result!.path)).toBe(true);
 	}, 90000);
 
-	test("should get last assistant text", async () => {
-		await client.start();
-
-		// Initially null
-		let text = await client.getLastAssistantText();
-		expect(text).toBeUndefined();
-
-		// Send prompt
-		await client.promptAndWait("Reply with just: test123");
-
-		// Should have text now
-		text = await client.getLastAssistantText();
-		expect(text).toContain("test123");
-	}, 90000);
-
-	test("should set and get session name", async () => {
-		await client.start();
-
-		// Initially undefined
-		let state = await client.getState();
-		expect(state.sessionName).toBeUndefined();
-
-		// Send a prompt first - session files are only written after first assistant message
-		await client.promptAndWait("Reply with just 'ok'");
-
-		// Set name
-		await client.setSessionName("my-test-session");
-
-		// Verify via state
-		state = await client.getState();
-		expect(state.sessionName).toBe("my-test-session");
-
-		// Wait for file writes
-		await new Promise((resolve) => setTimeout(resolve, 200));
-
+	test("should set the session name", async () => {
+		const rpc = await start();
+		expect(rpc.state.name).toBeNull();
+		await rpc.promptAndWait("Reply with just 'ok'");
+		await rpc.intent("set_session_name", { name: "my-test-session" });
+		await expect.poll(() => rpc.state.name).toBe("my-test-session");
 		const entries = await readPersistedEntries();
-
-		const sessionInfoEntries = entries.filter((entry) => entry.type === "session_info");
-		expect(sessionInfoEntries.length).toBe(1);
-		expect(sessionInfoEntries[0].name).toBe("my-test-session");
+		const names = entries.flatMap((entry) => (entry.type === "session_info" ? [entry.name] : []));
+		expect(names).toEqual(["my-test-session"]);
 	}, 60000);
 });

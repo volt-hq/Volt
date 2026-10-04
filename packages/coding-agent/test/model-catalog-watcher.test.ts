@@ -225,7 +225,7 @@ describe("model catalog watcher", () => {
 		stop();
 	});
 
-	test("rpc mode pushes models_changed to connected clients when logins change on disk", async () => {
+	test("rpc mode tells connected clients the models changed when logins change on disk", async () => {
 		const registry = createRegistry();
 		const session = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
@@ -239,12 +239,16 @@ describe("model catalog watcher", () => {
 		const { conversation } = createFakeConversation(session, { services: { agentDir } });
 
 		let closeHandler: RpcCloseHandler | undefined;
+		let lineHandler: ((line: string) => void | Promise<void>) | undefined;
 		const writes: Record<string, unknown>[] = [];
 		const transport: RpcTransport = {
 			write: vi.fn((value) => {
 				writes.push(value as Record<string, unknown>);
 			}),
-			onLine: vi.fn(() => vi.fn()),
+			onLine: vi.fn((handler) => {
+				lineHandler = handler;
+				return vi.fn();
+			}),
 			onClose: vi.fn((handler) => {
 				closeHandler = handler;
 				return vi.fn();
@@ -259,6 +263,14 @@ describe("model catalog watcher", () => {
 			ready = resolve;
 		});
 		const modePromise = runRpcMode(host, conversation, { transport, onReady: ready });
+		await lineHandler?.(
+			JSON.stringify({
+				type: "hello",
+				protocol: 1,
+				client: { name: "test", version: "1" },
+				accepts: { hostRequests: [] },
+			}),
+		);
 		await readyPromise;
 
 		try {
@@ -266,7 +278,7 @@ describe("model catalog watcher", () => {
 
 			await vi.waitFor(
 				() => {
-					expect(writes).toContainEqual({ type: "models_changed" });
+					expect(writes).toContainEqual({ type: "changed", catalog: "models" });
 				},
 				{ timeout: 5000 },
 			);

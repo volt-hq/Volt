@@ -254,7 +254,7 @@ The intents `openNewSession()`, `openStoredSession()`, `openStoredSessionById()`
 
 ### SubagentManager
 
-`SubagentManager` starts isolated child conversations through a `ConversationFactory`, in a `ConversationHost` of its own. Each child conversation has an `owner` lifetime: no client can move away from it, and it closes when its in-process RPC client stops or, with `retainRuntimeOnDispose`, when the owner that retained it closes it. Named starts use definitions from `ResourceLoader.getSubagents()`; project definitions are present only when project trust is active.
+`SubagentManager` starts isolated child conversations through a `ConversationFactory`, in a `ConversationHost` of its own. The manager attaches one client to each child through the host and reads the child's session directly: `handle.onEvent()` delivers its session events, and `handle.conversation` is the child's conversation, which a protocol client subscribes to for its log. Each child conversation has an `owner` lifetime: no client can move away from it, and it closes when its handle is disposed or, with `retainRuntimeOnDispose`, when the owner that retained it closes it. The manager's client answers no host requests, so a child's extension dialogs resolve to their defaults. Named starts use definitions from `ResourceLoader.getSubagents()`; project definitions are present only when project trust is active.
 
 ```typescript
 import {
@@ -385,7 +385,7 @@ While `session.abort()` drains cleanup, a shared admission gate prevents new for
 
 Jobs are conversation- and branch-scoped. Running work and retained output are not recovered after a restart or once their conversation closes. Existing transcript acknowledgements and completion notices remain historical records. A remote transport disconnect does not cancel jobs while the host runtime is retained.
 
-RPC clients expose `listJobs()`, `readJob(jobId)`, and `cancelJob(jobId, { conversationAuthority })`. Results include the owning `sessionId`; ordered responses also carry `branchEpoch`. `getState().backgroundJobs` and conversation bootstraps contain metadata-only snapshots, while `background_jobs_changed` invalidates the list and inspected output even after foreground settlement. RPC inspection does not acknowledge model collection. See [RPC background jobs](rpc.md#background-jobs) for remote grants, cancellation authority, and reconnect semantics.
+Protocol clients read job metadata from the live `jobs` value, a job's retained output with the `job_output` query, and cancel one with the `cancel_job` intent. Reads do not acknowledge model collection. See [RPC mode](rpc.md#live-lane).
 
 Native `tool_result` hooks run once for actual background completion rather than for the start acknowledgement. Completion hooks receive the job's abort signal through `ctx.signal`. Progress snapshots are available through `jobs` before completion hooks; `jobs` result hooks can inspect or transform those reads. Keep asynchronous completion hooks cancellation-aware and avoid assuming they run during a foreground model turn.
 
@@ -1324,7 +1324,7 @@ await runPrintMode(host, conversation, {
 
 ### runRpcMode
 
-JSON-RPC mode for subprocess or custom transport integration (host `extensionMode: "rpc"`). The RPC client anchors its conversation by default (`anchor: true`): the conversation closes when the mode ends, and the mode ends when its conversation loses its log. Pass `anchor: false` when the host keeps the conversation open for other clients.
+RPC mode serves one protocol client on stdio, on the local profile (host `extensionMode: "rpc"`). The client anchors its conversation: the conversation closes when the connection ends, and the mode ends when its conversation loses its log.
 
 ```typescript
 import { runRpcMode } from "@hansjm10/volt-coding-agent";
@@ -1332,19 +1332,34 @@ import { runRpcMode } from "@hansjm10/volt-coding-agent";
 await runRpcMode(host, conversation);
 ```
 
-For same-process RPC clients, use the in-memory transport adapter:
+`runRpcMode(host, conversation, { transport })` serves the protocol on another `RpcTransport` instead of stdio.
+
+See [RPC mode](rpc.md) for the protocol.
+
+## Protocol clients
+
+`ProtocolClient` speaks protocol 1 on any `RpcTransport`: it says hello, subscribes to the conversation the host attached it to, and keeps that conversation's client fold (`client.state`) and live fold (`client.live`). It follows the moves its intents make, resubscribes after a gap in the live lane, and on another `connect` resumes after its position.
+
+For a conversation of an in-process host, `createLoopbackClient` serves the conversation to a new client over an in-memory transport, on the local profile:
 
 ```typescript
-import { createInProcessRpcClient } from "@hansjm10/volt-coding-agent";
+import { createLoopbackClient } from "@hansjm10/volt-coding-agent";
 
-const client = await createInProcessRpcClient(host, conversation);
-const state = await client.getState();
-await client.stop(); // also closes the conversation through RPC mode shutdown
+const client = await createLoopbackClient(host, conversation, { hostRequests: ["confirm"] });
+await client.promptAndWait("List the files here");
+console.log(client.state.entries.length, client.live.values.get("usage"));
+const { models } = await client.query("models");
+await client.intent("set_model", { provider: models[0]!.provider, modelId: models[0]!.id });
+await client.stop(); // also closes the conversation: the client anchors it
 ```
 
-For custom transports, pass any `RpcTransport` to `RpcTransportClient`. This is the client-side adapter used by non-stdio transports such as Iroh streams.
+- `client.intent(name, input, { intentId?, conversation?, expectedOrdinal? })` resolves with the `accepted` frame and rejects with `ProtocolRejectedError` (its `reason` has the rejection code).
+- `client.query(name, params)` resolves with the result and rejects with `ProtocolQueryError`.
+- `client.prompt(message)` sends a prompt intent with a fresh durable `clientMessageId`; `client.waitForIdle()` resolves once no operation runs and no input is pending, and `client.promptAndWait(message)` does both.
+- `client.answer(requestId, response)` answers a host request; `client.onFrame(listener)` sees every host frame and `client.onChange(listener)` every state change.
+- Pass `anchor: false` when another owner keeps the conversation open after the client stops.
 
-See [RPC documentation](rpc.md) for the JSON protocol.
+`spawnRpcClient(options)` runs `volt --mode rpc` as a child process and connects to it; `client.stop()` ends the process. For another transport, connect a `ProtocolClient` yourself and serve the other end with `serveConnection(transport, localProfile, { host, conversation })`.
 
 ## RPC Mode Alternative
 
@@ -1354,7 +1369,7 @@ For subprocess-based integration without building with the SDK, use the CLI dire
 volt --mode rpc --no-session
 ```
 
-See [RPC documentation](rpc.md) for the JSON protocol.
+See [RPC documentation](rpc.md) for the protocol.
 
 The SDK is preferred when:
 - You want type safety
@@ -1388,11 +1403,17 @@ openFork
 openImport
 executePlan
 
-// RPC clients and transports
-RpcClient
-RpcTransportClient
-InProcessRpcClient
-createInProcessRpcClient
+// Protocol clients, the protocol server, and transports
+ProtocolClient
+LoopbackClient
+createLoopbackClient
+RpcProcessClient
+spawnRpcClient
+ProtocolRejectedError
+ProtocolQueryError
+serveConnection
+localProfile
+foldLiveFrame
 createLoopbackRpcTransportPair
 
 // Auth and Models

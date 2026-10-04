@@ -8,6 +8,21 @@ export type {
 	JsonValue,
 } from "@hansjm10/volt-ai";
 export { type Args, parseArgs } from "./cli/args.ts";
+// Protocol clients: in-process loopback, a `volt --mode rpc` child, or any transport
+export {
+	createLoopbackClient,
+	LoopbackClient,
+	type LoopbackClientOptions,
+	ProtocolClient,
+	type ProtocolClientOptions,
+	type ProtocolIntentOptions,
+	type ProtocolPromptOptions,
+	ProtocolQueryError,
+	ProtocolRejectedError,
+	RpcProcessClient,
+	type SpawnRpcClientOptions,
+	spawnRpcClient,
+} from "./client/protocol-client.ts";
 // Config paths
 export { getAgentDir, getDocsPath, getExamplesPath, getPackageDir, getReadmePath, VERSION } from "./config.ts";
 export {
@@ -331,6 +346,23 @@ export type {
 export { DefaultPackageManager } from "./core/package-manager.ts";
 export type { Personality } from "./core/personality.ts";
 export type { PromptCacheStatus } from "./core/prompt-cache-status.ts";
+export {
+	emptyLiveFold,
+	foldLiveCommit,
+	foldLiveFrame,
+	foldLiveItems,
+	type LiveFoldState,
+	type LiveStreamingAssistant,
+	type LiveStreamingTool,
+	liveCommitOf,
+} from "./core/protocol/live-fold.ts";
+export { localProfile, type Profile, type ProfileLimits } from "./core/protocol/profiles.ts";
+export {
+	type ProtocolConnection,
+	type ProtocolPeer,
+	type ServeConnectionOptions,
+	serveConnection,
+} from "./core/protocol/server/connection.ts";
 export {
 	type AuthorizeIrohRemoteClientOptions,
 	assertIrohRemoteHandshakeHostIdentity,
@@ -947,12 +979,8 @@ export {
 export { type MainOptions, main } from "./main.ts";
 // Run modes for programmatic SDK usage
 export {
-	createInProcessRpcClient,
 	createIrohRemoteAgentRuntime,
 	createIrohRemoteAgentRuntimeWithSessionSelection,
-	InProcessRpcClient,
-	type InProcessRpcClientEventListener,
-	type InProcessRpcClientOptions,
 	InteractiveMode,
 	type InteractiveModeOptions,
 	type IrohRemoteAgentRuntimeOptions,
@@ -964,7 +992,6 @@ export {
 	type IrohRemoteNotificationRequest,
 	type IrohRemoteRpcModeOptions,
 	type IrohRemoteSubagentRuntimeCreatedEvent,
-	type ModelInfo,
 	type PrintModeOptions,
 	type RpcActiveCompaction,
 	type RpcActiveToolExecution,
@@ -972,13 +999,8 @@ export {
 	type RpcBackgroundJobSummary,
 	type RpcBackgroundJobsChangedEvent,
 	type RpcCancelJobResponse,
-	RpcClient,
 	type RpcClientCapabilityFeature,
-	type RpcClientEvent,
-	type RpcClientOptions,
 	type RpcCommand,
-	type RpcEventListener,
-	type RpcExtensionErrorEvent,
 	type RpcExtensionUIRequest,
 	type RpcExtensionUIResponse,
 	type RpcGitContext,
@@ -1013,22 +1035,16 @@ export {
 	type RpcReviewWorkflowLifecycleStatus,
 	type RpcReviewWorkflowListResponse,
 	type RpcReviewWorkflowResultResponse,
-	type RpcSessionChange,
 	type RpcSessionListItem,
 	type RpcSessionState,
 	type RpcSubagentDefinition,
 	type RpcSubagentDefinitionSource,
-	type RpcSubagentDisposedEvent,
-	type RpcSubagentEndEvent,
-	type RpcSubagentEvent,
 	type RpcSubagentSourceInfo,
 	type RpcSubagentStartResponse,
 	type RpcSubscriptionUsageReport,
 	type RpcTranscriptItem,
 	type RpcTranscriptResponse,
 	type RpcTranscriptToolStatus,
-	RpcTransportClient,
-	type RpcTransportClientOptions,
 	type RpcWorkflowEvent,
 	type RpcWorkflowKind,
 	type RpcWorkflowStatus,

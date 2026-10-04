@@ -11,7 +11,7 @@ import type { ExtensionUIContext } from "../../src/core/extensions/index.ts";
 import type { ExtensionTerminalUI } from "../../src/core/session/extension-binding.ts";
 import { theme } from "../../src/core/theme/runtime.ts";
 import { connectTestClient } from "../utilities/host-client.ts";
-import { createLiveRecorder, type LiveRecorder } from "../utilities/live-recorder.ts";
+import { createLiveRecorder, type LiveRecorder, SESSION_FED_LIVE_KEYS } from "../utilities/live-recorder.ts";
 import { createExtensionRuntime, type ExtensionRuntime } from "./extension-runtime.ts";
 
 const DIALOGS: HostRequestKind[] = ["select", "confirm", "input", "editor"];
@@ -94,7 +94,7 @@ describe("the extensions' UI through the live state", () => {
 		ui.setWorkingMessage("thinking");
 		expect(ui.getEditorText()).toBe("terminal text");
 
-		expect(live.items()).toEqual([
+		expect(live.uiItems()).toEqual([
 			{ type: "set", key: "ext_status/build", value: { kind: "ext_status", text: "building" } },
 			{
 				type: "set",
@@ -190,7 +190,7 @@ describe("the extensions' UI through the live state", () => {
 		await expect(ui.select("Pick", ["a"])).resolves.toBeUndefined();
 		await expect(ui.input("Name")).resolves.toBeUndefined();
 		await expect(ui.editor("Edit")).resolves.toBeUndefined();
-		expect(observer.items()).toEqual([]);
+		expect(observer.uiItems()).toEqual([]);
 	});
 
 	it("ends the extensions' dialogs and clears their declarations when they reload", async () => {
@@ -225,11 +225,12 @@ describe("the extensions' UI through the live state", () => {
 			["ext", undefined],
 			["ext", "ready:reload"],
 		]);
-		expect(fixture.conversation.liveState.entries().map(([key]) => key)).toEqual([
-			"host_request/approval",
-			"ext_status/ext",
-			"ext_title",
-		]);
+		expect(
+			fixture.conversation.liveState
+				.entries()
+				.map(([key]) => key)
+				.filter((key) => !SESSION_FED_LIVE_KEYS.has(key)),
+		).toEqual(["host_request/approval", "ext_status/ext", "ext_title"]);
 		fixture.conversation.liveState.close();
 		await expect(approval).resolves.toEqual({ status: "cancelled", reason: "closed" });
 	});
@@ -250,6 +251,6 @@ describe("the extensions' UI through the live state", () => {
 		await vi.waitFor(() => expect(live.pending()).toHaveLength(1));
 		await client.dispose();
 		await expect(pending).resolves.toBe(false);
-		expect(live.updates.at(-1)).toEqual({ reset: true, items: [] });
+		expect(live.updates.at(-1)).toEqual({ reset: true, basedOn: expect.any(Number), items: [] });
 	});
 });

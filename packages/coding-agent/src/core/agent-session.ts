@@ -18,6 +18,7 @@ import type {
 	AgentEvent,
 	AgentMessage,
 	AgentTool,
+	ConversationOperationKind,
 	ConversationStreamOptions,
 	PendingToolExecution,
 	StreamFn,
@@ -382,10 +383,12 @@ export class AgentSession {
 	readonly gitContextProvider: GitContextProvider;
 	/**
 	 * The conversation's live state: extension status, widgets, and title,
-	 * dialogs, approvals, and MCP authorization flows, which every attached
-	 * client sees. Disposing the session closes it.
+	 * dialogs, approvals, and MCP authorization flows, the run phase, and
+	 * what streams, which every attached client sees. Its changes build on the
+	 * log position. Disposing the session closes it.
 	 */
-	readonly liveState: LiveState = new LiveState();
+	readonly liveState: LiveState = new LiveState({ head: () => this.sessionManager.getOrdinal() });
+	private readonly _activityListeners = new Set<() => void>();
 	private readonly _releaseGitContextProvider: () => void;
 
 	/** The conversation kernel this session runs on, over its session manager's log. */
@@ -1440,12 +1443,35 @@ export class AgentSession {
 		return this._conversation.busy;
 	}
 
+	/** The exclusive operation that holds the conversation, if any. */
+	get operation(): ConversationOperationKind | null {
+		return this._conversation?.operation?.kind ?? null;
+	}
+
+	/**
+	 * Observe changes of what `isBusy`, `operation`, and `hasBackgroundJobs`
+	 * read. Listeners run synchronously; their failures are ignored.
+	 */
+	subscribeActivity(listener: () => void): () => void {
+		this._activityListeners.add(listener);
+		return () => {
+			this._activityListeners.delete(listener);
+		};
+	}
+
 	/**
 	 * An `isBusy` or `hasBackgroundJobs` input changed. Prompt-cache keepalive measures its idle
 	 * window from these transitions.
 	 */
 	private _activityChanged(): void {
 		this._promptCache.activityChanged();
+		for (const listener of [...this._activityListeners]) {
+			try {
+				listener();
+			} catch {
+				// Activity observers are passive.
+			}
+		}
 	}
 
 	/** A structural operation holds the conversation: compaction, tree navigation, or reload. */

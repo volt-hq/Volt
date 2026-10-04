@@ -1,9 +1,19 @@
 import type { AssistantMessage, ImageContent } from "@hansjm10/volt-ai";
+import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ConversationHost } from "../src/core/host/conversation-host.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import { LiveState } from "../src/core/host/live-state.ts";
+import { writeRawStdout } from "../src/core/output-guard.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import type { SessionShutdownEvent } from "../src/index.ts";
 import { runPrintMode } from "../src/modes/print-mode.ts";
+
+vi.mock("../src/core/output-guard.ts", async (importOriginal) => ({
+	...(await importOriginal<Record<string, unknown>>()),
+	writeRawStdout: vi.fn(),
+	flushRawStdout: vi.fn(async () => {}),
+}));
 
 type EmitEvent = SessionShutdownEvent;
 
@@ -18,9 +28,9 @@ type AttachExtensionOptions = {
 
 type FakeSession = {
 	sessionId: string;
-	sessionManager: {
-		getHeader: () => object | undefined;
-	};
+	sessionManager: SessionManager;
+	liveState: LiveState;
+	gitContextProvider: { retainObservation(): () => void };
 	waitForIdle: ReturnType<typeof vi.fn<() => Promise<void>>>;
 	state: { messages: AssistantMessage[] };
 	extensionRunner: FakeExtensionRunner;
@@ -77,11 +87,12 @@ function createHost(assistantMessage: AssistantMessage): FakeHost {
 	const state = { messages: [assistantMessage] };
 	const lost = Promise.withResolvers<Error>();
 
+	const sessionManager = SessionManager.inMemory("/tmp/volt-print-mode");
 	const session: FakeSession = {
 		sessionId: "print-session",
-		sessionManager: {
-			getHeader: () => undefined,
-		},
+		sessionManager,
+		liveState: new LiveState({ head: () => sessionManager.getOrdinal() }),
+		gitContextProvider: { retainObservation: () => () => {} },
 		waitForIdle: vi.fn(async () => undefined),
 		state,
 		extensionRunner,
@@ -93,7 +104,12 @@ function createHost(assistantMessage: AssistantMessage): FakeHost {
 		prompt: vi.fn(async () => {}),
 		reload: vi.fn(async () => {}),
 	};
-	const conversation = { id: session.sessionId, session, lost: lost.promise } as unknown as HostedConversation;
+	const conversation = {
+		id: session.sessionId,
+		session,
+		lost: lost.promise,
+		liveState: session.liveState,
+	} as unknown as HostedConversation;
 	let attached: FakeHostClient | undefined;
 	const close = vi.fn(async () => {
 		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" });
@@ -116,7 +132,13 @@ function createHost(assistantMessage: AssistantMessage): FakeHost {
 
 afterEach(() => {
 	vi.restoreAllMocks();
+	vi.mocked(writeRawStdout).mockClear();
 });
+
+/** The frames JSON mode wrote to stdout. */
+function writtenFrames(): HostFrame[] {
+	return vi.mocked(writeRawStdout).mock.calls.map(([line]) => JSON.parse(String(line)) as HostFrame);
+}
 
 describe("runPrintMode", () => {
 	it("emits session_shutdown in text mode", async () => {
@@ -152,6 +174,18 @@ describe("runPrintMode", () => {
 		expect(session.prompt).toHaveBeenCalledWith("hello");
 		expect(session.extensionRunner.emit).toHaveBeenCalledTimes(1);
 		expect(session.extensionRunner.emit).toHaveBeenCalledWith({ type: "session_shutdown", reason: "quit" });
+		// The conversation as one local-profile subscription: a snapshot, the live lane, and its end.
+		expect(writtenFrames()).toEqual([
+			{
+				type: "snapshot",
+				subscriptionId: "json-1",
+				conversation: "print-session",
+				ordinal: 0,
+				state: expect.objectContaining({ entries: [], earlier: false }),
+			},
+			{ type: "live", subscriptionId: "json-1", basedOn: 0, seq: 1, reset: true, items: [] },
+			{ type: "ended", subscriptionId: "json-1", reason: "closed" },
+		]);
 	});
 
 	it("emits session_shutdown and returns non-zero on assistant error", async () => {

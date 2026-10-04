@@ -11,7 +11,7 @@ import type { RpcSessionState, RpcTranscriptResponse } from "../src/core/rpc/typ
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import type { SubagentDefinition, SubagentEvent, SubagentHandle, SubagentResult } from "../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../src/core/tools/index.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 
 interface Deferred<T> {
 	promise: Promise<T>;
@@ -124,6 +124,7 @@ function createControlledSubagent(subagentId: string, sessionId: string): Contro
 		handle: {
 			id: subagentId,
 			sessionId,
+			conversation: {} as HostedConversation,
 			prompt,
 			abort,
 			getState: async () => createState(sessionId),
@@ -253,7 +254,7 @@ async function startHarness({ host, conversation }: FakeHost): Promise<RpcHarnes
 	const ready = new Promise<void>((resolve) => {
 		resolveReady = resolve;
 	});
-	const modePromise = runRpcMode(host, conversation, { transport, onReady: resolveReady });
+	const modePromise = runLegacyRemoteRpcMode(host, conversation, { transport, onReady: resolveReady });
 	await ready;
 	await vi.waitFor(() => expect(lineHandler).toBeDefined());
 	return {

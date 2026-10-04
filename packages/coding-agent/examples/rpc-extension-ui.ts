@@ -3,8 +3,10 @@ import { concatRenderFrames, createRenderFrame, type RenderFrame } from "@hansjm
  * RPC Extension UI Example (TUI)
  *
  * A lightweight TUI chat client that spawns the agent in RPC mode.
- * Demonstrates how to build a custom UI on top of the RPC protocol,
- * including handling extension UI requests (select, confirm, input, editor).
+ * Demonstrates how to build a custom UI on the RPC protocol's frames:
+ * hello, a snapshot subscription, the live lane (streaming text, tools, the
+ * run phase, extension status and widgets), prompt intents, and answering the
+ * host requests extensions ask (select, confirm, input, editor).
  *
  * Usage: npx tsx examples/rpc-extension-ui.ts
  *
@@ -16,6 +18,7 @@ import { concatRenderFrames, createRenderFrame, type RenderFrame } from "@hansjm
  */
 
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -46,23 +49,25 @@ const BOLD = "\x1b[1m";
 const RESET = "\x1b[0m";
 
 // ============================================================================
-// Extension UI request type (subset of rpc-types.ts)
+// Host requests and live items (subset of @hansjm10/volt-protocol)
 // ============================================================================
 
-interface ExtensionUIRequest {
-	type: "extension_ui_request";
-	id: string;
-	method: string;
-	title?: string;
-	options?: string[];
+type HostRequest =
+	| { kind: "select"; title: string; options: string[] }
+	| { kind: "confirm"; title: string; message: string }
+	| { kind: "input"; title: string; placeholder?: string }
+	| { kind: "editor"; title: string; prefill?: string };
+
+interface LiveItem {
+	type: string;
+	key?: string;
+	value?: Record<string, unknown> & { kind: string };
+	event?: { type: string; delta?: string };
+	op?: string;
+	toolName?: string;
+	level?: string;
 	message?: string;
-	placeholder?: string;
-	prefill?: string;
-	notifyType?: "info" | "warning" | "error";
-	statusKey?: string;
-	statusText?: string;
-	widgetKey?: string;
-	widgetLines?: string[];
+	directive?: string;
 	text?: string;
 }
 
@@ -384,86 +389,97 @@ async function main() {
 		tui.setFocus(dialog.inputComponent);
 	}
 
-	function handleExtensionUI(req: ExtensionUIRequest): void {
-		const { id, method } = req;
+	/** Answer a host request; the first answer of any client wins. */
+	function answer(requestId: string, response: Record<string, unknown>): void {
+		send({ type: "host_response", requestId, response });
+	}
 
-		switch (method) {
-			// Dialog methods: replace prompt with interactive component
-			case "select": {
-				showSelectDialog(req.title ?? "Select", req.options ?? [], (value) => {
-					if (value !== undefined) {
-						send({ type: "extension_ui_response", id, value });
-					} else {
-						send({ type: "extension_ui_response", id, cancelled: true });
-					}
+	function showHostRequest(requestId: string, request: HostRequest): void {
+		switch (request.kind) {
+			case "select":
+				showSelectDialog(request.title, request.options, (value) => {
+					answer(requestId, value !== undefined ? { value } : { cancelled: true });
 				});
 				break;
-			}
-
-			case "confirm": {
-				const title = req.message ? `${req.title}: ${req.message}` : (req.title ?? "Confirm");
-				showSelectDialog(title, ["Yes", "No"], (value) => {
-					send({ type: "extension_ui_response", id, confirmed: value === "Yes" });
+			case "confirm":
+				showSelectDialog(`${request.title}: ${request.message}`, ["Yes", "No"], (value) => {
+					answer(requestId, { confirmed: value === "Yes" });
 				});
 				break;
-			}
-
 			case "input": {
-				const title = req.placeholder ? `${req.title} (${req.placeholder})` : (req.title ?? "Input");
+				const title = request.placeholder ? `${request.title} (${request.placeholder})` : request.title;
 				showInputDialog(title, undefined, (value) => {
-					if (value !== undefined) {
-						send({ type: "extension_ui_response", id, value });
-					} else {
-						send({ type: "extension_ui_response", id, cancelled: true });
-					}
+					answer(requestId, value !== undefined ? { value } : { cancelled: true });
 				});
 				break;
 			}
-
-			case "editor": {
-				const prefill = req.prefill?.replace(/\n/g, " ");
-				showInputDialog(req.title ?? "Editor", prefill, (value) => {
-					if (value !== undefined) {
-						send({ type: "extension_ui_response", id, value });
-					} else {
-						send({ type: "extension_ui_response", id, cancelled: true });
-					}
+			case "editor":
+				showInputDialog(request.title, request.prefill?.replace(/\n/g, " "), (value) => {
+					answer(requestId, value !== undefined ? { value } : { cancelled: true });
 				});
 				break;
+		}
+	}
+
+	/** One live item: streaming text and tools, the run phase, extension UI, notices. */
+	function handleLiveItem(item: LiveItem): void {
+		if (item.type === "assistant_delta" && item.event?.type === "text_delta") {
+			if (!hasTextOutput) {
+				hasTextOutput = true;
+				outputLog.append("");
+				outputLog.append(`${BLUE}${BOLD}Agent:${RESET}`);
 			}
-
-			// Fire-and-forget methods: display as notification
-			case "notify": {
-				const notifyType = (req.notifyType as string) ?? "info";
-				const color = notifyType === "error" ? RED : notifyType === "warning" ? YELLOW : MAGENTA;
-				outputLog.append(`${color}${BOLD}Notification:${RESET} ${req.message}`);
-				tui.requestRender();
-				break;
+			const parts = (item.event.delta ?? "").split("\n");
+			for (let i = 0; i < parts.length; i++) {
+				if (i > 0) outputLog.append("");
+				if (parts[i]) outputLog.appendRaw(parts[i]);
 			}
-
-			case "setStatus":
-				outputLog.append(
-					`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${req.statusKey}]${RESET} ${req.statusText ?? "(cleared)"}`,
-				);
-				tui.requestRender();
-				break;
-
-			case "setWidget": {
-				const lines = req.widgetLines;
-				if (lines && lines.length > 0) {
-					outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[widget: ${req.widgetKey}]${RESET}`);
-					for (const wl of lines) {
-						outputLog.append(`  ${DIM}${wl}${RESET}`);
-					}
-					tui.requestRender();
+			return;
+		}
+		if (item.type === "tool" && item.op === "start") {
+			outputLog.append(`${DIM}[tool: ${item.toolName}]${RESET}`);
+			return;
+		}
+		if (item.type === "notice") {
+			const color = item.level === "error" ? RED : item.level === "warning" ? YELLOW : MAGENTA;
+			outputLog.append(`${color}${BOLD}Notification:${RESET} ${item.message}`);
+			return;
+		}
+		if (item.type === "directive" && item.directive === "set_editor_text") {
+			promptInput.input.setValue(item.text ?? "");
+			return;
+		}
+		if (item.type === "clear" && item.key?.startsWith("ext_status/")) {
+			outputLog.append(
+				`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${item.key.slice(11)}]${RESET} (cleared)`,
+			);
+			return;
+		}
+		if (item.type !== "set" || !item.key || !item.value) return;
+		const value = item.value;
+		switch (value.kind) {
+			case "phase":
+				if (value.busy === true) showLoading();
+				else if (isStreaming) {
+					isStreaming = false;
+					hideLoading();
+					outputLog.append("");
 				}
-				break;
-			}
-
-			case "set_editor_text":
-				promptInput.input.setValue((req.text as string) ?? "");
-				tui.requestRender();
-				break;
+				return;
+			case "host_request":
+				showHostRequest(value.requestId as string, value.request as HostRequest);
+				return;
+			case "ext_status":
+				outputLog.append(
+					`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[status: ${item.key.slice(11)}]${RESET} ${value.text}`,
+				);
+				return;
+			case "ext_widget":
+				outputLog.append(`${MAGENTA}${BOLD}Notification:${RESET} ${DIM}[widget: ${item.key.slice(11)}]${RESET}`);
+				for (const line of value.lines as string[]) outputLog.append(`  ${DIM}${line}${RESET}`);
+				return;
+			default:
+				return;
 		}
 	}
 
@@ -517,73 +533,46 @@ async function main() {
 		}
 	}
 
-	// -- Process agent stdout --
+	// -- Process agent stdout: protocol frames --
 
 	const stdoutRl = readline.createInterface({ input: agent.stdout!, terminal: false });
 
 	stdoutRl.on("line", (line) => {
-		let data: Record<string, unknown>;
+		let frame: Record<string, unknown>;
 		try {
-			data = JSON.parse(line);
+			frame = JSON.parse(line);
 		} catch {
 			return;
 		}
 
-		if (data.type === "response" && !data.success) {
-			outputLog.append(`${RED}[error]${RESET} ${data.command}: ${data.error}`);
-			tui.requestRender();
-			return;
-		}
-
-		if (data.type === "agent_start") {
-			showLoading();
-			return;
-		}
-
-		if (data.type === "extension_ui_request") {
-			handleExtensionUI(data as unknown as ExtensionUIRequest);
-			return;
-		}
-
-		if (data.type === "message_update") {
-			const evt = data.assistantMessageEvent as Record<string, unknown> | undefined;
-			if (evt?.type === "text_delta") {
-				if (!hasTextOutput) {
-					hasTextOutput = true;
-					outputLog.append("");
-					outputLog.append(`${BLUE}${BOLD}Agent:${RESET}`);
-				}
-				const delta = evt.delta as string;
-				const parts = delta.split("\n");
-				for (let i = 0; i < parts.length; i++) {
-					if (i > 0) outputLog.append("");
-					if (parts[i]) outputLog.appendRaw(parts[i]);
-				}
+		switch (frame.type) {
+			case "welcome":
+				// Subscribe to the conversation the host attached this client to.
+				send({ type: "subscribe", subscriptionId: "main", conversation: frame.conversation, after: "snapshot" });
+				return;
+			case "live":
+				for (const item of frame.items as LiveItem[]) handleLiveItem(item);
 				tui.requestRender();
-			}
-			return;
+				return;
+			case "rejected":
+				outputLog.append(`${RED}[rejected]${RESET} ${(frame.reason as { message: string }).message}`);
+				tui.requestRender();
+				return;
+			case "fatal":
+				outputLog.append(`${RED}[fatal]${RESET} ${frame.code}`);
+				tui.requestRender();
+				return;
+			default:
+				return;
 		}
+	});
 
-		if (data.type === "tool_execution_start") {
-			outputLog.append(`${DIM}[tool: ${data.toolName}]${RESET}`);
-			tui.requestRender();
-			return;
-		}
-
-		if (data.type === "tool_execution_end") {
-			const result = JSON.stringify(data.result).slice(0, 120);
-			outputLog.append(`${DIM}[result: ${result}...]${RESET}`);
-			tui.requestRender();
-			return;
-		}
-
-		if (data.type === "agent_settled") {
-			isStreaming = false;
-			hideLoading();
-			outputLog.append("");
-			tui.requestRender();
-			return;
-		}
+	// Say hello: this client answers dialogs.
+	send({
+		type: "hello",
+		protocol: 1,
+		client: { name: "rpc-extension-ui-example", version: "1" },
+		accepts: { hostRequests: ["select", "confirm", "input", "editor"] },
 	});
 
 	// -- User input --
@@ -601,7 +590,8 @@ async function main() {
 		}
 
 		outputLog.append(`${GREEN}${BOLD}You:${RESET} ${trimmed}`);
-		send({ type: "prompt", message: trimmed });
+		// A prompt's intent id is its durable client message id.
+		send({ type: "prompt", intentId: randomUUID(), input: { message: trimmed } });
 		tui.requestRender();
 	};
 
@@ -609,7 +599,7 @@ async function main() {
 
 	promptInput.input.onEscape = () => {
 		if (isStreaming) {
-			send({ type: "abort" });
+			send({ type: "abort", intentId: randomUUID() });
 			outputLog.append(`${YELLOW}[aborted]${RESET}`);
 			tui.requestRender();
 		} else {

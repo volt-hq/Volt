@@ -16,6 +16,7 @@ import {
 	type BuiltinIntentName,
 	INTENT_SCHEMAS,
 	QUERY_NAMES,
+	type QueryName,
 	REMOTE_CAPABILITIES,
 	type RemoteCapability,
 	type RemoteGrant,
@@ -29,12 +30,7 @@ import {
 	type IntentTarget,
 	intentRegistry,
 } from "../../src/core/protocol/intents/index.ts";
-import {
-	type DeferredQueryName,
-	QueryRejectedError,
-	queryRegistry,
-	type RegisteredQueryName,
-} from "../../src/core/protocol/queries/index.ts";
+import { QueryRejectedError, queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import {
 	createIrohRemoteRpcGrant,
 	getIrohRemoteRpcCommandCapabilities,
@@ -314,14 +310,14 @@ const LEGACY_SOURCE_OWNED_COMMANDS = new Set([
 
 type Mapping =
 	| { readonly intents: readonly BuiltinIntentName[] }
-	| { readonly queries: readonly RegisteredQueryName[] }
-	/** Served later from the projected log; the requirement the query will carry. */
-	| { readonly deferred: DeferredQueryName; readonly requires: readonly RemoteCapability[] }
+	| { readonly queries: readonly QueryName[] }
+	/** Read from the projected log by a protocol query; the legacy wire answers it from its own projection. */
+	| { readonly projected: QueryName }
 	/** Replaced by a frame, the subscription, or a catalog field; never an intent or query. */
 	| { readonly removed: string };
 
 const intents = (...names: BuiltinIntentName[]): Mapping => ({ intents: names });
-const queries = (...names: RegisteredQueryName[]): Mapping => ({ queries: names });
+const queries = (...names: QueryName[]): Mapping => ({ queries: names });
 const removed = (replacement: string): Mapping => ({ removed: replacement });
 
 /** Every legacy command a client can send, by type; command-sensitive commands map per variant below. */
@@ -389,8 +385,8 @@ const LEGACY_COMMANDS: Readonly<Record<string, Mapping>> = {
 	get_state: removed("snapshot"),
 	get_transcript: removed("snapshot and history"),
 	get_session_tree: removed("snapshot"),
-	get_message_images: { deferred: "content", requires: [OBSERVE] },
-	get_transcript_entry_text: { deferred: "content", requires: [OBSERVE] },
+	get_message_images: { projected: "content" },
+	get_transcript_entry_text: { projected: "content" },
 	list_jobs: removed("live jobs"),
 	read_job: queries("job_output"),
 	cancel_job: intents("cancel_job"),
@@ -472,7 +468,7 @@ const GUARDED_INTENTS: ReadonlySet<string> = new Set(["set_auto_compaction"]);
 function mappedRequires(mapping: Mapping): readonly RemoteCapability[] | undefined {
 	if ("intents" in mapping) return unionRequires(mapping.intents.map((name) => intentRegistry.get(name).requires));
 	if ("queries" in mapping) return unionRequires(mapping.queries.map((name) => queryRegistry.get(name).requires));
-	if ("deferred" in mapping) return mapping.requires;
+	if ("projected" in mapping) return queryRegistry.get(mapping.projected).requires;
 	return undefined;
 }
 
@@ -485,7 +481,7 @@ function unionRequires(lists: readonly (readonly RemoteCapability[])[]): RemoteC
 function mappedRemoteSafe(mapping: Mapping): boolean | undefined {
 	if ("intents" in mapping) return mapping.intents.every((name) => intentRegistry.get(name).remote === "safe");
 	if ("queries" in mapping) return mapping.queries.every((name) => queryRegistry.get(name).remote === "safe");
-	if ("deferred" in mapping) return true;
+	if ("projected" in mapping) return queryRegistry.get(mapping.projected).remote === "safe";
 	return undefined;
 }
 
@@ -499,7 +495,14 @@ async function registryDecision(
 	grant: RemoteGrant,
 ): Promise<"allowed" | RemoteCapability | "unsafe"> {
 	const ctx = remoteContext(grant);
-	const names = "intents" in mapping ? mapping.intents : "queries" in mapping ? mapping.queries : [];
+	const names =
+		"intents" in mapping
+			? mapping.intents
+			: "queries" in mapping
+				? mapping.queries
+				: "projected" in mapping
+					? [mapping.projected]
+					: [];
 	for (const name of names) {
 		try {
 			if ("intents" in mapping) {
@@ -558,11 +561,9 @@ const remoteCommands = [...new Set([...LEGACY_PASSTHROUGH, ...LEGACY_WORKSPACE_S
 // ============================================================================
 
 describe("intent and query registries cover the protocol", () => {
-	it("defines every built-in intent and every query but the projected-log reads", () => {
+	it("defines every built-in intent and every query", () => {
 		expect(intentRegistry.names().sort()).toEqual(Object.keys(INTENT_SCHEMAS).sort());
-		expect(queryRegistry.names().sort()).toEqual(
-			QUERY_NAMES.filter((name) => name !== "history" && name !== "content").sort(),
-		);
+		expect(queryRegistry.names().sort()).toEqual([...QUERY_NAMES].sort());
 	});
 
 	it("maps every legacy command, and nothing else", () => {
@@ -690,7 +691,7 @@ describe("the remote profile decides exactly as the legacy filters", () => {
 				.filter((type) => !VARIANTS.some((variant) => variant.command.type === type))
 				.map((type) => ({ command: { type }, mapping: mapped(type) })),
 			...VARIANTS,
-		].filter(({ mapping }) => "intents" in mapping || "queries" in mapping);
+		].filter(({ mapping }) => "intents" in mapping || "queries" in mapping || "projected" in mapping);
 		expect(cases.length).toBeGreaterThan(60);
 		for (const { command, mapping } of cases) {
 			for (const grant of grants) {

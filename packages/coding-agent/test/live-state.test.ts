@@ -21,6 +21,7 @@ describe("LiveState keyed values", () => {
 		expect(client.updates).toEqual([
 			{
 				reset: true,
+				basedOn: 0,
 				items: [
 					{ type: "set", key: "ext_status/build", value: { kind: "ext_status", text: "building" } },
 					{ type: "set", key: "ext_title", value: { kind: "ext_title", title: "volt" } },
@@ -36,16 +37,17 @@ describe("LiveState keyed values", () => {
 		expect(client.updates.slice(1)).toEqual([
 			{
 				reset: false,
+				basedOn: 0,
 				items: [{ type: "set", key: "ext_status/build", value: { kind: "ext_status", text: "done" } }],
 			},
-			{ reset: false, items: [{ type: "clear", key: "ext_title" }] },
-			{ reset: false, items: [{ type: "notice", level: "warning", message: "careful" }] },
-			{ reset: false, items: [{ type: "directive", directive: "set_editor_text", text: "draft" }] },
+			{ reset: false, basedOn: 0, items: [{ type: "clear", key: "ext_title" }] },
+			{ reset: false, basedOn: 0, items: [{ type: "notice", level: "warning", message: "careful" }] },
+			{ reset: false, basedOn: 0, items: [{ type: "directive", directive: "set_editor_text", text: "draft" }] },
 		]);
 		expect(live.entries()).toEqual([["ext_status/build", { kind: "ext_status", text: "done" }]]);
 
 		detach();
-		expect(client.updates.at(-1)).toEqual({ reset: true, items: [] });
+		expect(client.updates.at(-1)).toEqual({ reset: true, basedOn: 0, items: [] });
 		live.notice("info", "after");
 		expect(client.updates).toHaveLength(6);
 	});
@@ -215,10 +217,10 @@ describe("LiveState host requests", () => {
 		const closing = live.request(confirm);
 		live.close();
 		await expect(closing).resolves.toEqual({ status: "cancelled", reason: "closed" });
-		expect(client.updates.at(-1)).toEqual({ reset: true, items: [] });
+		expect(client.updates.at(-1)).toEqual({ reset: true, basedOn: 0, items: [] });
 		await expect(live.request(confirm)).resolves.toEqual({ status: "cancelled", reason: "closed" });
 		live.notice("info", "closed");
-		expect(client.updates.at(-1)).toEqual({ reset: true, items: [] });
+		expect(client.updates.at(-1)).toEqual({ reset: true, basedOn: 0, items: [] });
 	});
 
 	it("outlives the clients that saw it and reaches a client that attaches later", async () => {
@@ -233,6 +235,7 @@ describe("LiveState host requests", () => {
 		live.attach("second", second);
 		expect(second.updates[0]).toEqual({
 			reset: true,
+			basedOn: 0,
 			items: [
 				{
 					type: "set",

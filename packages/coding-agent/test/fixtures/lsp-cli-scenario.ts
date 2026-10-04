@@ -22,6 +22,7 @@ import {
 	type JsonObject,
 	type ToolResultMessage,
 } from "@hansjm10/volt-ai";
+import type { HostFrame, LiveItem, LiveValue } from "@hansjm10/volt-protocol";
 import { ModelRegistry } from "../../src/core/model-registry.ts";
 
 export const LSP_CLI_SCENARIOS = [
@@ -57,17 +58,14 @@ interface Evidence {
 	resultCount: number;
 	projectContext?: string;
 }
+/** A committed tool result, from its entry frame (the local profile sends payloads whole). */
 interface ToolEnd {
-	type: "tool_execution_end";
 	toolCallId: string;
 	toolName: string;
 	isError: boolean;
 	result: { content: ToolResultMessage["content"]; details: { lsp: Evidence; diagnostics?: string } };
-}
-interface WireEvent {
-	type: string;
-	id?: string;
-	message?: { role: string; content: ToolResultMessage["content"]; stopReason?: string };
+	/** The index of its entry frame in the stream. */
+	frame: number;
 }
 interface RequestSnapshot {
 	type: "request";
@@ -100,7 +98,7 @@ export interface LspCliReport {
 	root: string;
 	workspace: string;
 	steps: Step[];
-	events: WireEvent[];
+	frames: HostFrame[];
 	toolEnds: ToolEnd[];
 	requests: RequestSnapshot[];
 	serverEvents: ServerEvent[];
@@ -414,10 +412,10 @@ export async function runLspCliScenario(scenario: LspCliScenario, signal?: Abort
 			);
 		}
 		assert.equal(exit.code, 0, `CLI failed (signal ${exit.signal}):\n${stderr}\n${stdout.slice(-4000)}`);
-		const events = stdout
+		const frames = stdout
 			.split("\n")
 			.filter(Boolean)
-			.map((line) => JSON.parse(line) as WireEvent);
+			.map((line) => JSON.parse(line) as HostFrame);
 		const storePath = join(root, "sessions", "sessions.sqlite");
 		assert.ok(existsSync(storePath), `CLI did not persist its session:\n${stderr}`);
 		const store = new DatabaseSync(storePath, { readOnly: true });
@@ -439,8 +437,8 @@ export async function runLspCliScenario(scenario: LspCliScenario, signal?: Abort
 			root,
 			workspace,
 			steps: definition.steps,
-			events,
-			toolEnds: events.filter((event) => event.type === "tool_execution_end") as unknown as ToolEnd[],
+			frames,
+			toolEnds: committedToolResults(frames),
 			requests: readJsonLines<RequestSnapshot>(join(root, "requests.jsonl")),
 			serverEvents,
 			persisted,
@@ -473,6 +471,32 @@ export async function runLspCliScenario(scenario: LspCliScenario, signal?: Abort
 	}
 }
 
+/** The tool results the JSON stream committed, in stream order. */
+function committedToolResults(frames: readonly HostFrame[]): ToolEnd[] {
+	return frames.flatMap((frame, index) => {
+		if (frame.type !== "entry" || frame.entry.type !== "message") return [];
+		const message = frame.entry.payload?.message;
+		if (message?.role !== "toolResult") return [];
+		const details = message.details as ToolEnd["result"]["details"];
+		return [
+			{
+				toolCallId: message.toolCallId,
+				toolName: message.toolName,
+				isError: message.isError,
+				result: { content: message.content, details },
+				frame: index,
+			},
+		];
+	});
+}
+
+/** Every live item of the stream with the index of its frame. */
+function liveItems(frames: readonly HostFrame[]): { item: LiveItem; frame: number }[] {
+	return frames.flatMap((frame, index) =>
+		frame.type === "live" ? frame.items.map((item) => ({ item, frame: index })) : [],
+	);
+}
+
 export function toolResultText(result: { content: ToolResultMessage["content"] }): string {
 	return result.content
 		.filter((block) => block.type === "text")
@@ -494,17 +518,43 @@ export function assertLspCliScenario(report: LspCliReport): void {
 	assert.equal(report.signal, null);
 	assert.deepEqual(report.cleanup, { tempRemoved: true, childClosed: true, serversExited: true });
 	assert.equal(existsSync(report.root), false);
-	assert.equal(report.events[0].type, "session");
-	assert.equal(report.events.filter((event) => event.type === "agent_settled").length, 1);
+	const { frames } = report;
+	assert.equal(frames[0]?.type, "snapshot", "the stream starts with the conversation's snapshot");
+	assert.deepEqual(
+		frames.flatMap((frame) => (frame.type === "ended" ? [frame.reason] : [])),
+		["closed"],
+	);
+	assert.equal(frames.at(-1)?.type, "ended", "the subscription ends the stream");
+	const live = liveItems(frames);
+	const phases = live.flatMap(({ item }) =>
+		item.type === "set" && item.value.kind === "phase" ? [item.value as Extract<LiveValue, { kind: "phase" }>] : [],
+	);
+	assert.equal(
+		phases.filter((phase, index) => !phase.busy && phases[index - 1]?.busy).length,
+		1,
+		"the run settles once",
+	);
+	assert.equal(phases.at(-1)?.busy, false);
 	assert.ok(
-		report.events.some(
-			(event) =>
-				event.type === "message_end" &&
-				event.message?.role === "assistant" &&
-				event.message.stopReason === "stop" &&
-				toolResultText(event.message) === TERMINAL_RESPONSE,
+		frames.some(
+			(frame) =>
+				frame.type === "entry" &&
+				frame.entry.type === "message" &&
+				frame.entry.payload?.message.role === "assistant" &&
+				frame.entry.payload.message.stopReason === "stop" &&
+				frame.entry.payload.message.content
+					.flatMap((block) => (block.type === "text" ? [block.text] : []))
+					.join("\n") === TERMINAL_RESPONSE,
 		),
 	);
+	for (const end of toolEnds) {
+		const streamed = live.find(
+			({ item }) => item.type === "tool" && item.op === "end" && item.toolCallId === end.toolCallId,
+		);
+		assert.ok(streamed, `${end.toolCallId} streamed its end`);
+		assert.ok(streamed.frame < end.frame, `${end.toolCallId} streamed its end before its result entry`);
+		assert.equal(streamed.item.type === "tool" && streamed.item.isError, end.isError);
+	}
 	assert.deepEqual(
 		toolEnds.map((event) => event.toolCallId),
 		steps.map((step) => step.id),

@@ -1,5 +1,6 @@
 import type { AssistantMessage, Model, ToolResultMessage, Usage } from "@hansjm10/volt-ai";
 import { describe, expect, it } from "vitest";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { createSyntheticSourceInfo } from "../../../src/core/source-info.ts";
 import type { SubagentDefinition, SubagentHandle } from "../../../src/core/subagents/index.ts";
 import { createSubagentTool, type SubagentToolManager } from "../../../src/core/tools/subagent.ts";
@@ -111,6 +112,7 @@ describe("issue #24", () => {
 			const handle: SubagentHandle = {
 				id: "sa_issue_24",
 				sessionId: harness.session.sessionId,
+				conversation: {} as HostedConversation,
 				prompt: async () => undefined,
 				abort: async () => undefined,
 				getState: async () => {

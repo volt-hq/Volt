@@ -1,48 +1,40 @@
 import { dirname, join } from "node:path";
 import * as readline from "node:readline";
 import { fileURLToPath } from "node:url";
-import { RpcClient } from "../src/modes/rpc/rpc-client.ts";
+import { spawnRpcClient } from "../src/client/protocol-client.ts";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 /**
- * Interactive example of using coding-agent via RpcClient.
+ * Interactive example of using coding-agent over RPC mode's protocol frames.
  * Usage: npx tsx test/rpc-example.ts
  */
 
 async function main() {
-	const client = new RpcClient({
+	const client = await spawnRpcClient({
 		cliPath: join(__dirname, "../dist/cli.js"),
 		provider: "anthropic",
 		model: "claude-sonnet-4-20250514",
 		args: ["--no-session"],
 	});
 
-	// Stream events to console
-	client.onEvent((event) => {
-		if (event.type === "message_update") {
-			const { assistantMessageEvent } = event;
-			if (assistantMessageEvent.type === "text_delta" || assistantMessageEvent.type === "thinking_delta") {
-				process.stdout.write(assistantMessageEvent.delta);
+	// Stream the assistant's text and tool progress from the live lane.
+	client.onFrame((frame) => {
+		if (frame.type !== "live") return;
+		for (const item of frame.items) {
+			if (
+				item.type === "assistant_delta" &&
+				(item.event.type === "text_delta" || item.event.type === "thinking_delta")
+			) {
+				process.stdout.write(item.event.delta);
 			}
-		}
-
-		if (event.type === "tool_execution_start") {
-			console.log(`\n[Tool: ${event.toolName}]`);
-		}
-
-		if (event.type === "tool_execution_end" && "result" in event) {
-			console.log(`[Result: ${JSON.stringify(event.result).slice(0, 200)}...]\n`);
+			if (item.type === "tool" && item.op === "start") console.log(`\n[Tool: ${item.toolName}]`);
 		}
 	});
 
-	await client.start();
+	console.log(`Model: ${client.state.model?.provider}/${client.state.model?.modelId}`);
+	console.log(`Thinking: ${client.state.thinkingLevel}\n`);
 
-	const state = await client.getState();
-	console.log(`Model: ${state.model?.provider}/${state.model?.id}`);
-	console.log(`Thinking: ${state.thinkingLevel ?? "off"}\n`);
-
-	// Handle user input
 	const rl = readline.createInterface({
 		input: process.stdin,
 		output: process.stdout,
@@ -72,9 +64,9 @@ async function main() {
 	rl.on("SIGINT", () => {
 		if (isWaiting) {
 			console.log("\n[Aborting...]");
-			client.abort();
+			void client.intent("abort", {});
 		} else {
-			client.stop();
+			void client.stop();
 			process.exit(0);
 		}
 	});

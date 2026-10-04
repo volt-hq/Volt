@@ -1,7 +1,7 @@
 import { fauxAssistantMessage } from "@hansjm10/volt-ai";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
-import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
+import { runLegacyRemoteRpcMode } from "../src/modes/rpc/legacy-remote-rpc-mode.ts";
 import { createHarness, type Harness } from "./suite/harness.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 
@@ -73,7 +73,7 @@ async function startRpcModeForHarness(harness: Harness): Promise<RpcHarness> {
 	});
 	const { host } = createFakeHost();
 	const { conversation } = createFakeConversation(harness.session);
-	const modePromise = runRpcMode(host, conversation, {
+	const modePromise = runLegacyRemoteRpcMode(host, conversation, {
 		anchor: false,
 		onReady: resolveReady,
 		transport,

@@ -7,6 +7,7 @@ import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
+import type { HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
 import { LspManager } from "../../../src/core/lsp/manager.ts";
 import { lspResult } from "../../../src/core/lsp/outcome.ts";
 import { DefaultMcpClientFactory } from "../../../src/core/mcp/client-factory.ts";
@@ -549,6 +550,7 @@ describe("Regression #341: persisted review discussion policy", () => {
 			return {
 				id: "sa_fix",
 				sessionId: worker.session.sessionId,
+				conversation: {} as HostedConversation,
 				prompt: async (task) => {
 					await worker.session.prompt(task);
 					resolve({

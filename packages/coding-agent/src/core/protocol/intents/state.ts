@@ -4,9 +4,18 @@
  * the view, so legacy event emitters read them without the definitions.
  */
 
+import { supportsFastInference } from "@hansjm10/volt-ai";
+import type { IntentAvailability as IntentAvailabilityValue } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../agent-session.ts";
 import type { UiActionStateDescriptor } from "../../rpc/types.ts";
-import { IDLE_INTENT_STATE, type IntentState, type IntentView } from "./types.ts";
+import {
+	IDLE_INTENT_STATE,
+	INTENT_ENABLED,
+	type IntentAvailability,
+	type IntentState,
+	type IntentView,
+	LOCAL_INTENT_PROFILE,
+} from "./types.ts";
 
 /** The state intent availability reads, from the target session; idle for host-scope invocations. */
 export function intentStateOf(session: AgentSession | undefined): IntentState {
@@ -68,6 +77,82 @@ export function compactionThresholdState(view: IntentView): UiActionStateDescrip
 			label: tokens === 0 ? "Default" : `${tokens.toLocaleString("en-US")} tokens`,
 		})),
 	};
+}
+
+export function fastModeAvailability(view: IntentView, input?: { enabled: boolean }): IntentAvailability {
+	const { state } = view;
+	if (state.isStreaming) {
+		return { enabled: false, reason: "Fast mode is not available while the agent is streaming" };
+	}
+	if (isIntentStateBusy(state)) {
+		return { enabled: false, reason: "Fast mode is not available while an agent operation is running" };
+	}
+	if (state.isCompacting) {
+		return { enabled: false, reason: "Fast mode is not available while compaction is running" };
+	}
+	if (state.fastModeEnabled === true || input?.enabled === false) return INTENT_ENABLED;
+	if (!state.model || !supportsFastInference(state.model)) {
+		return { enabled: false, reason: "Fast mode is not supported for the current provider and model" };
+	}
+	return INTENT_ENABLED;
+}
+
+export type CompactionField = "enabled" | "modelThresholds";
+
+export function compactionSaveScope(view: IntentView): string {
+	const profile = view.state.settingsManager?.getActiveProfile();
+	return profile ? `in global profile "${profile}" on the connected host` : "globally on the connected host";
+}
+
+export function compactionSettingsAvailability(view: IntentView, field: CompactionField): IntentAvailability {
+	const { state } = view;
+	if (state.isStreaming) return { enabled: false, reason: "Compaction settings are unavailable while streaming" };
+	if (isIntentStateBusy(state)) {
+		return { enabled: false, reason: "Compaction settings are unavailable while an agent operation is running" };
+	}
+	if (state.isCompacting) return { enabled: false, reason: "Compaction settings are unavailable while compacting" };
+	const { model, settingsManager } = state;
+	if (!model) return { enabled: false, reason: "Select a model to configure compaction" };
+	if (!settingsManager) return { enabled: false, reason: "Compaction settings are unavailable in this host" };
+	const reason = settingsManager.getCompactionWriteDisabledReason(field, `${model.provider}/${model.id}`);
+	return reason ? { enabled: false, reason } : INTENT_ENABLED;
+}
+
+function liveAvailability(
+	name: string,
+	availability: IntentAvailability,
+	state: UiActionStateDescriptor,
+): IntentAvailabilityValue {
+	return {
+		name,
+		enabled: availability.enabled,
+		...(availability.enabled ? {} : { reason: availability.reason }),
+		state,
+	};
+}
+
+/**
+ * The intents whose availability and state follow the conversation (the
+ * built-in intents with a state), as the live `intents` value carries them.
+ * Pure functions of the session, so the live state reads them without the
+ * registry.
+ */
+export function liveIntentAvailability(session: AgentSession): IntentAvailabilityValue[] {
+	const view: IntentView = { state: intentStateOf(session), services: {}, profile: LOCAL_INTENT_PROFILE };
+	return [
+		liveAvailability("set_fast_mode", fastModeAvailability(view), fastModeState(view)),
+		liveAvailability("set_agent_mode", INTENT_ENABLED, agentModeState(view)),
+		liveAvailability(
+			"set_auto_compaction",
+			compactionSettingsAvailability(view, "enabled"),
+			autoCompactionState(view),
+		),
+		liveAvailability(
+			"set_compaction_threshold",
+			compactionSettingsAvailability(view, "modelThresholds"),
+			compactionThresholdState(view),
+		),
+	];
 }
 
 /** How a fast mode change reads to the user: what changed, and that priority processing may cost more. */

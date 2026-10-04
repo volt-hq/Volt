@@ -521,7 +521,7 @@ For non-Node.js integrations, use RPC mode over stdin/stdout:
 volt --mode rpc
 ```
 
-RPC mode uses strict LF-delimited JSONL framing. Clients must split records on `\n` only. Do not use generic line readers like Node `readline`, which also split on Unicode separators inside JSON payloads.
+RPC mode serves the Volt protocol (subscriptions by log position, a live lane, intents, and queries) as strict LF-delimited JSONL. Clients must split records on `\n` only. Do not use generic line readers like Node `readline`, which also split on Unicode separators inside JSON payloads.
 
 See [docs/rpc.md](docs/rpc.md) for the protocol.
 
@@ -574,7 +574,7 @@ volt config                    # Enable/disable package resources
 |------|-------------|
 | (default) | Interactive mode |
 | `-p`, `--print` | Print response and exit |
-| `--mode json` | Output all events as JSON lines (see [docs/json.md](docs/json.md)) |
+| `--mode json` | Output the conversation as protocol frames, one JSON line each (see [docs/json.md](docs/json.md)) |
 | `--mode rpc` | RPC mode for process integration (see [docs/rpc.md](docs/rpc.md)) |
 | `--plan` | Start the initial session in read-only Plan mode |
 | `--export <in> [out]` | Export session to HTML |

@@ -10,14 +10,14 @@ import { Compile, type Validator } from "typebox/compile";
 import { type IntentContext, missingCapability } from "../intents/types.ts";
 import { formatSchemaError } from "../schema-errors.ts";
 import type { BUILTIN_QUERIES } from "./definitions.ts";
-import { type QueryDefinition, QueryRejectedError, type RegisteredQueryName } from "./types.ts";
+import { type QueryDefinition, QueryRejectedError } from "./types.ts";
 
 export type BuiltinQueryDefinitions = typeof BUILTIN_QUERIES;
 
 export class QueryRegistry {
 	private readonly load: () => BuiltinQueryDefinitions;
 	private loaded: BuiltinQueryDefinitions | undefined;
-	private readonly validators = new Map<RegisteredQueryName, Validator>();
+	private readonly validators = new Map<QueryName, Validator>();
 
 	/** `load` returns the definitions; the registry reads them on first use. */
 	constructor(load: () => BuiltinQueryDefinitions) {
@@ -27,28 +27,28 @@ export class QueryRegistry {
 	private get definitions(): BuiltinQueryDefinitions {
 		if (this.loaded) return this.loaded;
 		const definitions = this.load();
-		for (const name of Object.keys(definitions) as RegisteredQueryName[]) {
-			const definition: QueryDefinition<RegisteredQueryName> = definitions[name];
+		for (const name of Object.keys(definitions) as QueryName[]) {
+			const definition: QueryDefinition<QueryName> = definitions[name];
 			if (definition.name !== name) throw new Error(`Query ${name} is defined as ${definition.name}`);
 		}
 		this.loaded = definitions;
 		return definitions;
 	}
 
-	names(): RegisteredQueryName[] {
-		return Object.keys(this.definitions) as RegisteredQueryName[];
+	names(): QueryName[] {
+		return Object.keys(this.definitions) as QueryName[];
 	}
 
-	get<N extends RegisteredQueryName>(name: N): BuiltinQueryDefinitions[N] {
+	get<N extends QueryName>(name: N): BuiltinQueryDefinitions[N] {
 		return this.definitions[name];
 	}
 
-	has(name: string): name is RegisteredQueryName {
+	has(name: string): name is QueryName {
 		return Object.hasOwn(this.definitions, name);
 	}
 
 	/** Admit and run a query with typed parameters. */
-	run<N extends RegisteredQueryName>(ctx: IntentContext, name: N, params: QueryParams<N>): Promise<QueryResult<N>> {
+	run<N extends QueryName>(ctx: IntentContext, name: N, params: QueryParams<N>): Promise<QueryResult<N>> {
 		return this.runUnchecked(ctx, name, params) as Promise<QueryResult<N>>;
 	}
 
@@ -60,8 +60,8 @@ export class QueryRegistry {
 		return this.runUnchecked(ctx, name, params);
 	}
 
-	private async runUnchecked(ctx: IntentContext, name: RegisteredQueryName, params: unknown): Promise<unknown> {
-		const definition: QueryDefinition<RegisteredQueryName> = this.definitions[name];
+	private async runUnchecked(ctx: IntentContext, name: QueryName, params: unknown): Promise<unknown> {
+		const definition: QueryDefinition<QueryName> = this.definitions[name];
 		if (ctx.profile.name === "remote") {
 			if (definition.remote !== "safe") {
 				throw new QueryRejectedError("not_allowed", `Query not available over remote host: ${name}`);
@@ -88,11 +88,10 @@ export class QueryRegistry {
 	}
 
 	private validator(name: QueryName): Validator {
-		const key = name as RegisteredQueryName;
-		let validator = this.validators.get(key);
+		let validator = this.validators.get(name);
 		if (validator === undefined) {
 			validator = Compile(QUERY_SCHEMAS[name].params);
-			this.validators.set(key, validator);
+			this.validators.set(name, validator);
 		}
 		return validator;
 	}

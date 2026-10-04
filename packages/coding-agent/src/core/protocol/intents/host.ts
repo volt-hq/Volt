@@ -5,7 +5,14 @@
 
 import type { McpManager } from "../../mcp/manager.ts";
 import { findAvailableModel, targetOf } from "./conversation.ts";
-import { autoCompactionState, compactionThresholdState, intentStateOf, isIntentStateBusy } from "./state.ts";
+import {
+	autoCompactionState,
+	type CompactionField,
+	compactionSaveScope,
+	compactionSettingsAvailability,
+	compactionThresholdState,
+	intentStateOf,
+} from "./state.ts";
 import {
 	defineIntent,
 	INTENT_ENABLED,
@@ -110,27 +117,6 @@ export const setAutoRetryIntent = defineIntent({
 // ============================================================================
 // Compaction settings
 // ============================================================================
-
-type CompactionField = "enabled" | "modelThresholds";
-
-function compactionSaveScope(view: IntentView): string {
-	const profile = view.state.settingsManager?.getActiveProfile();
-	return profile ? `in global profile "${profile}" on the connected host` : "globally on the connected host";
-}
-
-export function compactionSettingsAvailability(view: IntentView, field: CompactionField): IntentAvailability {
-	const { state } = view;
-	if (state.isStreaming) return { enabled: false, reason: "Compaction settings are unavailable while streaming" };
-	if (isIntentStateBusy(state)) {
-		return { enabled: false, reason: "Compaction settings are unavailable while an agent operation is running" };
-	}
-	if (state.isCompacting) return { enabled: false, reason: "Compaction settings are unavailable while compacting" };
-	const { model, settingsManager } = state;
-	if (!model) return { enabled: false, reason: "Select a model to configure compaction" };
-	if (!settingsManager) return { enabled: false, reason: "Compaction settings are unavailable in this host" };
-	const reason = settingsManager.getCompactionWriteDisabledReason(field, `${model.provider}/${model.id}`);
-	return reason ? { enabled: false, reason } : INTENT_ENABLED;
-}
 
 interface CompactionTarget {
 	provider?: string;
