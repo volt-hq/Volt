@@ -319,7 +319,7 @@ function makeSession(sessionId: string, sessionManager = SessionManager.inMemory
 	let fastModeEnabled = false;
 	return {
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		bindExtensions: vi.fn(async () => {}),
+		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		subscribe: vi.fn(() => vi.fn()),
 		activeToolExecutions: new Map(),
 		subscribeRuntimeEvents: vi.fn(() => vi.fn()),

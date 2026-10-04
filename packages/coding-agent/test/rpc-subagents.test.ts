@@ -159,7 +159,7 @@ function createSession(options: {
 	sessionId?: string;
 }) {
 	return {
-		bindExtensions: vi.fn(async () => undefined),
+		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
 		subscribe: vi.fn(() => () => undefined),
 		activeToolExecutions: new Map(),

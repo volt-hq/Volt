@@ -43,7 +43,7 @@ type InteractiveAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	bindCurrentSessionExtensions(session: AgentSession): Promise<void>;
+	attachSessionExtensions(session: AgentSession): Promise<void>;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	handleFatalRuntimeError: (prefix: string, error: unknown, options?: { unsentDraft?: string }) => Promise<void>;
@@ -127,9 +127,9 @@ describe("regression #525: ending a session whose saved state could not be confi
 		if (!options.interactive) {
 			// Bind replacements the way interactive mode does.
 			runtime.setRebindSession(async (session) => {
-				await session.bindExtensions({});
+				await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 			});
-			await runtime.session.bindExtensions({});
+			await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		}
 
 		cleanups.push(async () => {
@@ -206,7 +206,7 @@ describe("regression #525: ending a session whose saved state could not be confi
 		access.activateView(access.conversationView, access.editor, false);
 		access.isInitialized = true;
 		access.ui.start();
-		await access.bindCurrentSessionExtensions(runtime.session);
+		await access.attachSessionExtensions(runtime.session);
 		access.subscribeToAgent(runtime.session);
 		return { access, terminal, handleFatalRuntimeError, exit };
 	}

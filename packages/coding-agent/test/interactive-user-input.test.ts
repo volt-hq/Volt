@@ -29,7 +29,7 @@ type TestAccess = {
 	setupPlanPaneInputRouting(): void;
 	setupEditorSubmitHandler(): void;
 	renderWidgets(): void;
-	bindCurrentSessionExtensions(session: AgentSession): Promise<void>;
+	attachSessionExtensions(session: AgentSession): Promise<void>;
 	subscribeToAgent(session: AgentSession): void;
 	activateView(view: View, focus: Component, forceRender?: boolean): void;
 	showExtensionCustom: ExtensionUIContext["custom"];
@@ -106,7 +106,7 @@ async function fixture(tuiMode: TuiMode, columns = 80, withPlan = false) {
 	access.activateView(access.conversationView, access.editor, false);
 	access.isInitialized = true;
 	access.ui.start();
-	await access.bindCurrentSessionExtensions(harness.session);
+	await access.attachSessionExtensions(harness.session);
 	access.subscribeToAgent(harness.session);
 	await terminal.waitForRender();
 	return { harness, access, terminal };

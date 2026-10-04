@@ -2020,7 +2020,9 @@ Some `ExtensionUIContext` methods are not supported or degraded in RPC mode beca
 
 The theme facade is fully functional in RPC mode: `getAllThemes()` returns the real theme list (builtin plus extension-registered), `getTheme()` resolves by name, and `setTheme()` applies the theme to the process and persists the choice. Under the background daemon, a successful `setTheme()` also broadcasts a `theme_snapshot` to connected desktop TUIs, which apply it unless the user explicitly picked a theme in that TUI session.
 
-For conversations owned by a desktop TUI and served to phones over the daemon's byte relay, `extension_ui_request` frames are suppressed on the relayed stream: dialogs are answered on the desktop where the extension's UI actually lives, and phones receive none of them.
+Extensions are bound once per session, by the first client to attach. When several RPC clients share a session (phones on a daemon-hosted conversation), the others attach without another `session_start`; `extension_ui_request` frames go to the most recently attached client that shows UI, which receives the latest `setStatus`, `setWidget`, and `setTitle` values when it attaches or when a later client detaches; `extension_error` frames go to every client. A phone whose access does not include `conversation.control.v1` cannot send `extension_ui_response`, so it attaches without UI. Session control from an extension command (`ctx.newSession()` and the like) and `ctx.shutdown()` act for the client that invoked it.
+
+For conversations owned by a desktop TUI and served to phones over the daemon's byte relay, the relayed stream attaches without extension UI: dialogs and status stay on the desktop where the extension's UI lives, phones receive no `extension_ui_request` frames, and `ctx.mode` stays `"tui"`. Phones still receive `extension_error` frames.
 
 Note: `ctx.mode` is `"rpc"` and `ctx.hasUI` is `true` in RPC mode because the dialog and fire-and-forget methods are functional via the extension UI sub-protocol. Use `ctx.mode === "tui"` to guard TUI-specific features like `custom()` that require a real terminal.
 

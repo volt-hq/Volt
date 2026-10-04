@@ -26,7 +26,7 @@ interface OrderedConversationFixture {
 	readonly recv: ManualIrohRecvStream;
 	readonly runtimeHost: AgentSessionRuntime;
 	readonly send: ManualIrohSendStream;
-	readonly session: Pick<ReturnType<typeof createIrohTestSession>, "bindExtensions">;
+	readonly session: Pick<ReturnType<typeof createIrohTestSession>, "attachExtensionClient">;
 	readonly sessionId: string;
 	emit(event: object): void;
 	close(): Promise<void>;
@@ -264,7 +264,7 @@ async function createFixture(
 		await vi.waitFor(() => {
 			expect(parseWrittenObjects(send)[0]?.type).toBe("conversation_bootstrap");
 		});
-		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalledOnce());
+		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalledOnce());
 	}
 
 	return {
@@ -808,7 +808,7 @@ describe("Iroh ordered conversation integration", () => {
 			await bootstrapWriteStarted;
 			// Bootstrap already owns cursor zero even though no bytes have reached
 			// the peer, so bounded input admission and RPC startup must be live.
-			await vi.waitFor(() => expect(fixture.session.bindExtensions).toHaveBeenCalledOnce());
+			await vi.waitFor(() => expect(fixture.session.attachExtensionClient).toHaveBeenCalledOnce());
 			fixture.recv.pushLine(
 				JSON.stringify({ id: "caps-behind-bootstrap", type: "set_client_capabilities", features: [] }),
 			);

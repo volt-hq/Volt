@@ -121,7 +121,7 @@ describe("AgentSessionRuntime characterization", () => {
 			agentDir: tempDir,
 			sessionManager: await SessionManager.create(tempDir),
 		});
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		cleanups.push(async () => {
 			await runtime.dispose();
@@ -374,7 +374,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 		const newSessionResult = await runtime.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(runtime.session).not.toBe(originalSession);
 		expect(runtime.session.messages).toEqual([]);
 		const secondSessionRef = runtime.session.sessionRef;
@@ -388,7 +388,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 		const switchResult = await runtime.switchSession(originalSessionRef!);
 		expect(switchResult.cancelled).toBe(false);
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(events).toEqual([
 			{ type: "session_before_switch", reason: "resume", targetSessionRef: originalSessionRef },
 			{ type: "session_shutdown", reason: "resume", targetSessionRef: originalSessionRef },
@@ -513,7 +513,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 		const newSessionResult = await runtime.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		await runtime.session.setSessionName("Second session");
 		await runtime.session.prompt("second prompt");
 		const secondSessionId = runtime.session.sessionId;
@@ -552,7 +552,7 @@ describe("AgentSessionRuntime characterization", () => {
 
 		const switchResult = await runtime.switchSessionById(firstSessionId);
 		expect(switchResult.cancelled).toBe(false);
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(runtime.session.sessionId).toBe(firstSessionId);
 		expect(runtime.session.messages.find((message) => message.role === "user")).toMatchObject({
 			content: [{ text: "first prompt", type: "text" }],
@@ -568,12 +568,12 @@ describe("AgentSessionRuntime characterization", () => {
 
 		const newSessionResult = await runtime.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect((await runtime.listSessions()).some((session) => session.sessionId === fastSessionId)).toBe(false);
 
 		const switchResult = await runtime.switchSessionById(fastSessionId);
 		expect(switchResult.cancelled).toBe(false);
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(runtime.session.sessionId).toBe(fastSessionId);
 		expect(runtime.session.fastModeEnabled).toBe(true);
 		expect(runtime.session.thinkingLevel).toBe("high");
@@ -597,7 +597,7 @@ describe("AgentSessionRuntime characterization", () => {
 			cancelled: false,
 			seeded: false,
 		});
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		expect(runtime.session.sessionId).toBe(target.getSessionId());
 		expect(realpathSync(runtime.cwd)).toBe(realpathSync(tempDir));
@@ -835,7 +835,7 @@ describe("AgentSessionRuntime characterization", () => {
 		const successResult = await runtime.fork(userMessage.entryId);
 		expect(successResult.cancelled).toBe(false);
 		expect(successResult.selectedText).toBe("hello");
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(events).toEqual([
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
 			{ type: "session_shutdown", reason: "fork", targetSessionRef: runtime.session.sessionRef },
@@ -965,7 +965,7 @@ describe("AgentSessionRuntime characterization", () => {
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 		});
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		cleanups.push(async () => {
 			await runtime.dispose();
 			if (existsSync(tempDir)) {

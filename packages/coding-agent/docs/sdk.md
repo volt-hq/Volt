@@ -207,7 +207,7 @@ Important behavior:
 
 - `runtime.session` changes after those operations
 - event subscriptions are attached to a specific `AgentSession`, so re-subscribe after replacement
-- if you use extensions, call `runtime.session.bindExtensions(...)` again for the new session
+- if you use extensions, attach your client to the new session with `await runtime.session.attachExtensionClient({ id, mode, ... }).ready`; the first client to attach a session binds its extensions and fires `session_start` once, and later clients only add their UI, error listener, and session actions; the returned `detach()` removes the client
 - creation returns diagnostics on `runtime.diagnostics`
 - if runtime creation or replacement fails, the method throws and the caller decides how to handle it
 

@@ -405,7 +405,7 @@ Obtain references from `ctx.sessionManager.getSessionRef()` or indexed `SessionM
 
 #### session_start
 
-Fired when a session is started, loaded, or reloaded.
+Fired when a session is started, loaded, or reloaded. It fires once per session, when the first client attaches to it: further clients of the same session (a second RPC client, phones on a daemon-hosted conversation, a phone relayed through the desktop TUI) attach without another `session_start`. See [Clients](#clients).
 
 ```typescript
 volt.on("session_start", async (event, ctx) => {
@@ -942,11 +942,11 @@ UI methods for user interaction. See [Custom UI](#custom-ui) for full details.
 
 ### ctx.mode
 
-Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. Use `ctx.mode === "tui"` to guard terminal-only features such as `custom()`, component factories, terminal input, and direct TUI rendering.
+Current run mode: `"tui"`, `"rpc"`, `"json"`, or `"print"`. It is the mode of the client that opened the session and does not change while other clients attach, so a phone relayed through the desktop TUI leaves it `"tui"`. Use `ctx.mode === "tui"` to guard terminal-only features such as `custom()`, component factories, terminal input, and direct TUI rendering.
 
 ### ctx.hasUI
 
-`true` in TUI and RPC modes. `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`) and fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `setEditorText`) that work in both TUI and RPC modes. In RPC mode, some TUI-specific methods are no-ops or return defaults (see [rpc.md](rpc.md#extension-ui-protocol)).
+`true` in TUI and RPC modes, also while no client that shows UI is attached (dialogs then resolve to their defaults, so `confirm()` returns `false`). `false` in print mode (`-p`) and JSON mode. Use this to guard dialog methods (`select`, `confirm`, `input`, `editor`) and fire-and-forget methods (`notify`, `setStatus`, `setWidget`, `setTitle`, `setEditorText`) that work in both TUI and RPC modes. In RPC mode, some TUI-specific methods are no-ops or return defaults (see [rpc.md](rpc.md#extension-ui-protocol)).
 
 ### ctx.cwd
 
@@ -1020,7 +1020,7 @@ Control flow helpers.
 
 ### ctx.shutdown()
 
-Request a graceful shutdown of volt.
+Request a graceful shutdown of the client the call runs for: the client whose command, prompt, or turn is running, or the session's first client for calls outside any client's request (see [Clients](#clients)). For a phone or another RPC client sharing the session, that ends its connection. A call for a client that has already left does nothing.
 
 - **Interactive mode:** Deferred until the agent becomes idle (after processing all queued steering and follow-up messages).
 - **RPC mode:** Deferred until the next idle state (after completing the current command response, when waiting for the next command).
@@ -2385,6 +2385,14 @@ Extensions can interact with users via `ctx.ui` methods and customize how messag
 - Widgets above/below editor (setWidget)
 - Autocomplete providers layered on top of built-in slash/path completion (addAutocompleteProvider)
 - Custom footers (setFooter)
+
+### Clients
+
+A session's extensions are bound once, by the first client to attach: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. That client's mode becomes `ctx.mode` and `session_start` fires. Later clients attach their own surface:
+
+- **UI** (`ctx.ui`) goes to the most recently attached client that shows UI. When a client starts showing UI (it attaches, or a later client leaves), it receives the latest `setStatus`, `setWidget`, and `setTitle` values. A phone relayed through the desktop TUI, or a phone whose access cannot answer dialogs, shows no extension UI: dialogs and status stay with the other clients.
+- **Errors** reach every attached client.
+- **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
 
 ### Dialogs
 

@@ -146,11 +146,13 @@ describe("AgentSession dispose inertness", () => {
 		});
 
 		const extensionErrors: ExtensionError[] = [];
-		await session.bindExtensions({
+		await session.attachExtensionClient({
+			id: "test",
+			mode: "print",
 			onError: (error) => {
 				extensionErrors.push(error);
 			},
-		});
+		}).ready;
 
 		return {
 			control: createAgentSessionTestControl(session),

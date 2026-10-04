@@ -286,7 +286,7 @@ describe("#585 forked_from lineage", () => {
 			sessionManager: initial,
 		});
 		runtimes.push(runtime);
-		await runtime.session.bindExtensions({});
+		await runtime.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		await expect(runtime.fork(replyId, { position: "at" })).resolves.toMatchObject({ cancelled: false });
 		const clone = runtime.session.sessionManager;

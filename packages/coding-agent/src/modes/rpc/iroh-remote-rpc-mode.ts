@@ -9,6 +9,7 @@ import {
 	createIrohRemoteOutboundFilteredRpcTransport,
 	createIrohRemoteProjectionSanitizer,
 	createIrohRemoteRpcErrorResponse,
+	hasIrohRemoteRpcCapability,
 	type IrohRemoteOutboundValueDecorator,
 	type IrohRemotePushNotificationDelivery,
 	type IrohRemotePushNotificationIntent,
@@ -66,7 +67,10 @@ export interface IrohRemoteRpcModeOptions extends IrohRpcTransportOptions {
 	registerPushTarget?: (args: unknown) => Promise<RpcRegisterPushTargetResponse>;
 	remoteCommandHandler?: (command: Record<string, unknown>) => object | Promise<object | undefined> | undefined;
 	remoteWorkspacePath?: string;
-	/** Drop extension_ui_request frames (relayed streams: dialogs are answered in the owning TUI). */
+	/**
+	 * Relayed streams: attach without an extension UI surface (dialogs and status
+	 * stay in the owning TUI) and drop any extension_ui_request frame.
+	 */
 	suppressExtensionUiRequests?: boolean;
 	workspaceName?: string;
 	workspacePath: string;
@@ -409,6 +413,10 @@ export function runIrohRemoteRpcMode(
 	void orderedSubscription.ready.catch(() => {});
 	return runRpcMode(runtimeHost, {
 		allowUiActionInvocation: true,
+		// Only a client that may answer dialogs (extension_ui_response is a control command) shows extension UI.
+		extensionUi:
+			options.suppressExtensionUiRequests !== true &&
+			hasIrohRemoteRpcCapability(options.rpcGrant, "conversation.control.v1"),
 		disposeRuntimeOnClose: options.disposeRuntimeOnClose,
 		onReady: options.onReady,
 		onSessionChanged: options.onSessionChanged,

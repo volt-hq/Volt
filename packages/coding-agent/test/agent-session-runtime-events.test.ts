@@ -101,7 +101,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			agentDir: tempDir,
 			sessionManager,
 		});
-		await runtimeHost.session.bindExtensions({});
+		await runtimeHost.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		cleanups.push(async () => {
 			await runtimeHost.dispose();
@@ -210,7 +210,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		const newSessionResult = await runtimeHost.newSession();
 		expect(newSessionResult.cancelled).toBe(false);
-		await runtimeHost.session.bindExtensions({});
+		await runtimeHost.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		const secondSessionRef = runtimeHost.session.sessionRef;
 		expect(events).toEqual([
 			{ type: "session_before_switch", reason: "new", targetSessionRef: undefined },
@@ -223,7 +223,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 
 		const switchResult = await runtimeHost.switchSession(originalSessionRef!);
 		expect(switchResult.cancelled).toBe(false);
-		await runtimeHost.session.bindExtensions({});
+		await runtimeHost.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(events).toEqual([
 			{ type: "session_before_switch", reason: "resume", targetSessionRef: originalSessionRef },
 			{ type: "session_shutdown", reason: "resume", targetSessionRef: originalSessionRef },
@@ -1383,7 +1383,9 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 			});
 		});
 		const originalSession = runtimeHost.session;
-		await originalSession.bindExtensions({
+		await originalSession.attachExtensionClient({
+			id: "test",
+			mode: "print",
 			commandContextActions: {
 				waitForIdle: () => originalSession.waitForIdle(),
 				newSession: (options) => runtimeHost.newSession(options),
@@ -1398,7 +1400,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 				switchSession: (sessionPath, options) => runtimeHost.switchSession(sessionPath, options),
 				reload: () => originalSession.reload(),
 			},
-		});
+		}).ready;
 		const prepare = vi.fn(async () => undefined);
 		const rebind = vi.fn(async () => {});
 		runtimeHost.setPrepareSessionReplacement(prepare);
@@ -1874,7 +1876,7 @@ describe("AgentSessionRuntime session lifecycle events", () => {
 		const successResult = await runtimeHost.fork(userMessage.entryId);
 		expect(successResult.cancelled).toBe(false);
 		expect(successResult.selectedText).toBe("hello");
-		await runtimeHost.session.bindExtensions({});
+		await runtimeHost.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		expect(events).toEqual([
 			{ type: "session_before_fork", entryId: userMessage.entryId, position: "before" },
 			{ type: "session_shutdown", reason: "fork", targetSessionRef: runtimeHost.session.sessionRef },

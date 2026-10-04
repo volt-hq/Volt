@@ -387,7 +387,9 @@ export class SessionCompaction {
 		this.lastCompactionResult = undefined;
 		// Compaction preempts a running turn; the stop is attributed to whoever asked for it.
 		if (this.host.turnActive())
-			this.host.conversation().abort(this.host.extensions().mode === "rpc" ? "remote_request" : "host_action");
+			this.host
+				.conversation()
+				.abort(this.host.extensions().invokingMode === "rpc" ? "remote_request" : "host_action");
 		try {
 			const outcome = await this.host
 				.conversation()

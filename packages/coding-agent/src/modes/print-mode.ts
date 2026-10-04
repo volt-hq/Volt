@@ -6,6 +6,7 @@
  * - `volt --mode json "prompt"` - JSON event stream
  */
 
+import { randomUUID } from "node:crypto";
 import type { AssistantMessage, ImageContent } from "@hansjm10/volt-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
@@ -40,6 +41,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 	let streamProjector: StreamProjector | undefined;
 	let disposed = false;
 	const signalCleanupHandlers: Array<() => void> = [];
+	const extensionClientId = randomUUID();
 
 	const disposeRuntime = async (): Promise<void> => {
 		if (disposed) return;
@@ -80,7 +82,8 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 
 	const rebindSession = async (): Promise<void> => {
 		session = runtimeHost.session;
-		await session.bindExtensions({
+		await session.attachExtensionClient({
+			id: extensionClientId,
 			mode: mode === "json" ? "json" : "print",
 			commandContextActions: {
 				waitForIdle: () => session.waitForIdle(),
@@ -108,7 +111,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			onError: (err) => {
 				console.error(`Extension error (${err.extensionPath}): ${err.error}`);
 			},
-		});
+		}).ready;
 
 		unsubscribe?.();
 		reportProjectionDiagnostics("json-print", streamProjector?.endStream().diagnostics ?? []);

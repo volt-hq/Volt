@@ -133,7 +133,7 @@ export function createTestSession(sessionId: string, leafId: string | null) {
 		leafId,
 		autoCompactionEnabled: false,
 		backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-		bindExtensions: vi.fn(async () => {}),
+		attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 		followUpMode: "all" as const,
 		gitContextProvider: {
 			getSnapshot: () => null,
@@ -278,7 +278,9 @@ export function createTestIrohConversationOptions(runtimeHost: AgentSessionRunti
 
 export async function startIrohRpcMode(
 	runtimeHost: AgentSessionRuntime,
-	startupSession: Pick<AgentSession, "bindExtensions"> | Pick<ReturnType<typeof createTestSession>, "bindExtensions">,
+	startupSession:
+		| Pick<AgentSession, "attachExtensionClient">
+		| Pick<ReturnType<typeof createTestSession>, "attachExtensionClient">,
 	options: Partial<Parameters<typeof runIrohRemoteRpcMode>[1]> = {},
 ) {
 	const recv = new ManualIrohRecvStream();
@@ -295,7 +297,7 @@ export async function startIrohRpcMode(
 		stream: { recv, send },
 		workspacePath: "/workspace",
 	});
-	await vi.waitFor(() => expect(startupSession.bindExtensions).toHaveBeenCalledOnce());
+	await vi.waitFor(() => expect(startupSession.attachExtensionClient).toHaveBeenCalledOnce());
 	const bootstrap = parseWrittenObjects(send)[0];
 	expect(bootstrap).toMatchObject({
 		type: "conversation_bootstrap",

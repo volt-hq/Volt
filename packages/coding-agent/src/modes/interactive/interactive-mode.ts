@@ -3,6 +3,7 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -659,6 +660,8 @@ export class InteractiveMode {
 	 */
 	private readonly relayStateManager = new IrohRemoteHostStateManager();
 	private daemonLeaseSessionId: string | undefined;
+	/** This TUI's identity on each session's extensions: it attaches first, so it is their anchor. */
+	private readonly extensionClientId = randomUUID();
 	/** The runtime ended because its session lost its log, and the TUI is exiting. */
 	private endingLostSession = false;
 	/** Set once the user explicitly picks a theme this session; daemon theme_snapshot broadcasts then stop applying (local explicit choice wins). */
@@ -1921,13 +1924,14 @@ export class InteractiveMode {
 	}
 
 	/**
-	 * Initialize the extension system with TUI-based UI context.
+	 * Attach this TUI to the session's extensions. It attaches before any relayed
+	 * phone, so it binds them in TUI mode and keeps their UI.
 	 */
-	private async bindCurrentSessionExtensions(session: AgentSession): Promise<void> {
-		const uiContext = this.createExtensionUIContext();
-		await session.bindExtensions({
-			uiContext,
+	private async attachSessionExtensions(session: AgentSession): Promise<void> {
+		await session.attachExtensionClient({
+			id: this.extensionClientId,
 			mode: "tui",
+			ui: this.createExtensionUIContext(),
 			abortHandler: () => {
 				void this.restoreQueuedMessagesToEditor({ abortSource: "host_action" }).catch((error) => {
 					this.showError(`Failed to persist queued-message cancellation: ${String(error)}`);
@@ -2001,7 +2005,7 @@ export class InteractiveMode {
 			onError: (error) => {
 				this.showExtensionError(error.extensionPath, error.error, error.stack);
 			},
-		});
+		}).ready;
 
 		setRegisteredThemes(session.resourceLoader.getThemes().themes);
 		this.setupAutocompleteProvider();
@@ -2374,7 +2378,7 @@ export class InteractiveMode {
 		this.workSummary = undefined;
 		this.applyRuntimeSettings(session);
 		session.setHostInteraction(this.createHostInteraction());
-		await this.bindCurrentSessionExtensions(session);
+		await this.attachSessionExtensions(session);
 		if (this.session !== session) {
 			throw new Error("Agent session changed during interactive rebind");
 		}

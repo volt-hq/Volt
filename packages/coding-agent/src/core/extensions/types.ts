@@ -337,7 +337,7 @@ export interface ExtensionContext {
 	readonly work?: ExtensionWorkContext;
 	/** UI methods for user interaction */
 	ui: ExtensionUIContext;
-	/** Current run mode. Use "tui" to guard terminal-only UI such as custom components. */
+	/** Run mode of the client that opened the session. Use "tui" to guard terminal-only UI such as custom components. */
 	mode: ExtensionMode;
 	/** Whether dialog-capable UI is available (true in TUI and RPC modes) */
 	hasUI: boolean;

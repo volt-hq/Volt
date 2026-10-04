@@ -229,7 +229,7 @@ describe("model catalog watcher", () => {
 		const registry = createRegistry();
 		const session = {
 			backgroundJobs: new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 }),
-			bindExtensions: vi.fn(async () => {}),
+			attachExtensionClient: vi.fn(() => ({ ready: Promise.resolve(), detach: () => {} })),
 			subscribe: vi.fn(() => () => {}),
 			subscribeRuntimeEvents: vi.fn(() => () => {}),
 			modelRegistry: registry,

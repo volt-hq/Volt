@@ -19,6 +19,7 @@ import type {
 	SessionStartEvent,
 } from "./extensions/index.ts";
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
+import { ClientScope } from "./host/client-scope.ts";
 import {
 	clonePlanState,
 	createPlanExecutionPrompt,
@@ -1149,7 +1150,8 @@ export class AgentSessionRuntime {
 			// can submit fresh work. Recovery failures are already diagnosed and leave
 			// their exact queue visible; they do not invalidate the replacement.
 			try {
-				await this.startRecoveredClientInputs();
+				// Recovered turns belong to no client, whoever asked for the replacement.
+				await ClientScope.exit(() => this.startRecoveredClientInputs());
 			} catch {
 				// The replacement session and its durable queue remain authoritative,
 				// but post-replacement callbacks may submit fresh work. Skip them until

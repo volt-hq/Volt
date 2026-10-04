@@ -45,7 +45,7 @@ describe("regression #5109: exclude tools", () => {
 			extensionFactories,
 		});
 		try {
-			await harness.session.bindExtensions({});
+			await harness.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 			const allToolNames = toolNames(harness.session.getAllTools());
 			expect(allToolNames).not.toContain("read");
@@ -77,7 +77,7 @@ describe("regression #5109: exclude tools", () => {
 			extensionFactories,
 		});
 		try {
-			await harness.session.bindExtensions({});
+			await harness.session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 			expect(toolNames(harness.session.getAllTools())).toEqual(["bash"]);
 			expect(harness.session.getActiveToolNames()).toEqual(["bash"]);

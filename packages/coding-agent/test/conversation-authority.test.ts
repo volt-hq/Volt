@@ -383,7 +383,7 @@ describe("conversation mutation authority", () => {
 			exitProcess: false,
 			transport: pair.server,
 		});
-		await vi.waitFor(() => expect(session.bindExtensions).toHaveBeenCalledOnce());
+		await vi.waitFor(() => expect(session.attachExtensionClient).toHaveBeenCalledOnce());
 		pair.client.write({
 			id: "local-prompt",
 			type: "prompt",
@@ -483,7 +483,7 @@ describe("correlated conversation controls", () => {
 			},
 			transport: pair.server,
 		});
-		await vi.waitFor(() => expect(old.session.bindExtensions).toHaveBeenCalledOnce());
+		await vi.waitFor(() => expect(old.session.attachExtensionClient).toHaveBeenCalledOnce());
 		pair.client.write({
 			id: "capabilities",
 			type: "set_client_capabilities",
@@ -495,13 +495,13 @@ describe("correlated conversation controls", () => {
 
 		const startControls = async (suffix: string) => {
 			const bindingCalls = (
-				old.session.bindExtensions as unknown as {
-					mock: { calls: Array<[{ uiContext: ExtensionUIContext }]> };
+				old.session.attachExtensionClient as unknown as {
+					mock: { calls: Array<[{ ui: ExtensionUIContext }]> };
 				}
 			).mock.calls;
-			const binding = bindingCalls[bindingCalls.length - 1]?.[0] as { uiContext: ExtensionUIContext } | undefined;
+			const binding = bindingCalls[bindingCalls.length - 1]?.[0] as { ui: ExtensionUIContext } | undefined;
 			if (!binding || !old.hostInteraction) throw new Error("RPC control bindings are unavailable");
-			const extensionResult = binding.uiContext.confirm(`Confirm ${suffix}`, "Proceed?");
+			const extensionResult = binding.ui.confirm(`Confirm ${suffix}`, "Proceed?");
 			const hostResult = old.hostInteraction.requestAction({
 				id: `host-${suffix}`,
 				action: "test.action",

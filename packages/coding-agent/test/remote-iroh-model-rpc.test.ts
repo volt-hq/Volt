@@ -30,13 +30,16 @@ describe("Iroh remote model RPC", () => {
 		let resourcesInitialized = false;
 		const session = {
 			...createTestSession("session-recovery-order", null),
-			bindExtensions: vi.fn(async () => {
-				sessionStartInitialized = true;
-				bindingOrder.push("session_start");
-				await Promise.resolve();
-				resourcesInitialized = true;
-				bindingOrder.push("resources");
-			}),
+			attachExtensionClient: vi.fn(() => ({
+				ready: (async () => {
+					sessionStartInitialized = true;
+					bindingOrder.push("session_start");
+					await Promise.resolve();
+					resourcesInitialized = true;
+					bindingOrder.push("resources");
+				})(),
+				detach: () => {},
+			})),
 		};
 		const runtimeHost = {
 			...createStableSessionRunner(() => session),

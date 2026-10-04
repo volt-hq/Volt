@@ -154,7 +154,7 @@ describe("AgentSession dynamic provider registration", () => {
 			},
 		]);
 
-		await session.bindExtensions({});
+		await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/session-start");
 		expect(await capturePromptBaseUrl(session)).toBe("http://localhost:8080/session-start");
@@ -174,7 +174,7 @@ describe("AgentSession dynamic provider registration", () => {
 			},
 		]);
 
-		await session.bindExtensions({});
+		await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 		await session.prompt("/use-proxy");
 
 		expect(session.model?.baseUrl).toBe("http://localhost:8080/command");

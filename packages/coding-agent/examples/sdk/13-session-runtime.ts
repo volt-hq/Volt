@@ -5,7 +5,9 @@
  * for example for new-session, resume, fork, or import flows.
  *
  * The important pattern is: after the runtime replaces the active session,
- * rebind any session-local subscriptions and extension bindings to `runtime.session`.
+ * attach to `runtime.session` again: session-local subscriptions and the
+ * extension client. The first client to attach to a session starts its
+ * extensions (`session_start`).
  */
 
 import {
@@ -40,7 +42,7 @@ let unsubscribe: (() => void) | undefined;
 async function bindSession() {
 	unsubscribe?.();
 	const session = runtime.session;
-	await session.bindExtensions({});
+	await session.attachExtensionClient({ id: "sdk-example", mode: "print" }).ready;
 	unsubscribe = session.subscribe((event) => {
 		if (event.type === "queue_update") {
 			console.log("Queued:", event.steering.length + event.followUp.length);

@@ -65,7 +65,7 @@ describe("AgentSession dynamic tool registration", () => {
 
 		expect(session.getAllTools().map((tool) => tool.name)).not.toContain("dynamic_tool");
 
-		await session.bindExtensions({});
+		await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		const allTools = session.getAllTools();
 		const dynamicTool = allTools.find((tool) => tool.name === "dynamic_tool");
@@ -173,7 +173,7 @@ describe("AgentSession dynamic tool registration", () => {
 			resourceLoader,
 		});
 
-		await session.bindExtensions({});
+		await session.attachExtensionClient({ id: "test", mode: "print" }).ready;
 
 		expect(session.getAllTools().map((tool) => tool.name)).toContain("hidden_tool");
 		expect(session.getActiveToolNames()).toContain("hidden_tool");
