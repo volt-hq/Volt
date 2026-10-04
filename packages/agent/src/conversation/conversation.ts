@@ -14,6 +14,11 @@
  * intent) commits before the input is acknowledged, and the pending set is
  * seeded from the fold's durable queue on open. Messages the host queues are
  * durable inputs with a host origin.
+ *
+ * Work (RFC §7) is written only through `work`: each start, checkpoint, and
+ * finish is one batch, and a delivered result's notice commits with its
+ * finish. A notice queued without waking (`message` delivery) never makes a
+ * request by itself; it rides the next request a turn makes.
  */
 
 import {
@@ -32,11 +37,15 @@ import {
 import {
 	type ClientInputCommand,
 	type ClientInputPayload,
+	type ClientInputQueuedPayload,
 	ClientInputQueuedPayloadSchema,
 	CORE_LOG_ENTRY_TYPES,
 	clientInputDigestMaterial,
 	type LogEntryType,
+	type WorkFinishedEntryPayload,
+	type WorkNoticeDetails,
 } from "@hansjm10/volt-protocol/entries";
+import { WORK_NOTICE_CUSTOM_TYPE, type WorkEntryPayload, workPayloadBoundsError } from "@hansjm10/volt-protocol/work";
 import { Check } from "typebox/value";
 import { AgentDeliverySettlementError, runAgentLoop } from "../agent-loop.ts";
 import { DeliveryInbox, type DeliveryLease, type InboxDelivery } from "../delivery-inbox.ts";
@@ -90,6 +99,11 @@ import {
 	type ConversationStreamOptions,
 	type ConversationSummarizer,
 	type ConversationTurnReservation,
+	type ConversationWork,
+	type ConversationWorkCheckpoint,
+	type ConversationWorkFinish,
+	type ConversationWorkFinished,
+	type ConversationWorkStart,
 } from "./api.ts";
 import { buildContext } from "./context.ts";
 import { type ConversationActivityKind, OperationCoordinator, type OperationLease } from "./coordinator.ts";
@@ -111,7 +125,7 @@ import {
 	ConversationLogLostError,
 	isCoreLogEntry,
 } from "./log.ts";
-import { convertToLlm as convertRuntimeMessages } from "./messages.ts";
+import { type CustomMessage, convertToLlm as convertRuntimeMessages } from "./messages.ts";
 import {
 	cloneAgentMessages,
 	cloneNextAction,
@@ -123,6 +137,7 @@ import {
 	toError,
 	withRuntimeAbortDiagnostic,
 } from "./runtime-support.ts";
+import { type WorkReconciliation, type WorkRecord, workReconciliation } from "./work.ts";
 
 type EntryBody = ConversationLogEntryDraft extends infer T
 	? T extends unknown
@@ -146,11 +161,16 @@ const DELIVERY_ENTRY_CORE_TYPES: ReadonlyMap<string, LogEntryType> = new Map([
 
 type ClientUserMessage = UserMessage & { clientMessageId?: string };
 
+/** The input of a host input that queues messages instead of a user message. */
+const HOST_INPUT: ClientInputPayload = { message: "", images: [] };
+
 interface DeliveryMeta {
 	readonly kind: AgentDeliveryKind;
 	readonly clientMessageId?: string;
 	/** User-bearing input that establishes a new request batch. */
 	readonly requestInput: boolean;
+	/** Quiet host input: it rides a request a turn makes anyway and never makes one itself. */
+	readonly wake?: false;
 }
 
 interface InputWaiter {
@@ -331,6 +351,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	readonly conversationId: string;
 	/** Resolves once, when the conversation ends: closed, or its log was lost. */
 	readonly ended: Promise<ConversationEnd>;
+	/** The conversation's work items: start, checkpoint, finish with delivery, and reconciliation on open. */
+	readonly work: ConversationWork;
 	private readonly log: ConversationLog;
 	private readonly productTypes: ReadonlyMap<string, LogEntryType>;
 	private readonly baseStream: StreamFn;
@@ -371,6 +393,8 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	private endState: ConversationEnd | undefined;
 	private resolveEnded: (end: ConversationEnd) => void = () => {};
 	private closePromise: Promise<void> | undefined;
+	private reconciliation: Promise<WorkReconciliation> | undefined;
+	private workReconciled = false;
 
 	private constructor(options: ConversationOptions<TTool>, state: ConversationState) {
 		this.conversationId = options.log.conversationId;
@@ -407,6 +431,14 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		});
 		this.ended = new Promise((resolve) => {
 			this.resolveEnded = resolve;
+		});
+		this.work = Object.freeze({
+			reconcile: () => this.reconcileWork(),
+			start: (work: ConversationWorkStart) => this.startWork(work),
+			checkpoint: (workId: string, checkpoint: ConversationWorkCheckpoint) =>
+				this.checkpointWork(workId, checkpoint),
+			finish: (workId: string, finish: ConversationWorkFinish) => this.finishWork(workId, finish),
+			withdrawHostInput: (clientMessageId: string) => this.withdrawHostInput(clientMessageId),
 		});
 		void this.log.lost.then((error) => this.handleLoss(error));
 		this.seedRecoveredInputs();
@@ -560,7 +592,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			cancel: () => {
 				if (this.reservation?.handle !== handle) return false;
 				this.releaseReservation();
-				if (this.inbox.hasPending()) this.startTurnForQueuedInput();
+				if (this.hasWakingInput()) this.startTurnForQueuedInput();
 				return true;
 			},
 		});
@@ -622,20 +654,10 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 			throw new ConversationError("invalid_argument", "Host messages must be log messages");
 		}
 		const clientMessageId = this.createId();
-		const input: ClientInputPayload = { message: "", images: [] };
 		const admission = await this.enqueueLane(async (): Promise<ConversationInputAdmission> => {
-			const digest = await clientInputDigest(command, input);
+			const digest = await clientInputDigest(command, HOST_INPUT);
 			const entries = await this.commitInLane((drafts) => {
-				const receipt = drafts.add({
-					type: "client_input_receipt",
-					visibility: "host",
-					payload: { clientMessageId, command, semanticDigest: digest, input, origin: "host" },
-				});
-				drafts.add({
-					type: "client_input_queued",
-					visibility: "host",
-					payload: { receiptId: receipt.id, clientMessageId, queuedInput },
-				});
+				this.addHostInput(drafts, clientMessageId, digest, queuedInput);
 			});
 			this.enqueueDelivery(kind, owned, { kind, clientMessageId, requestInput: false });
 			return {
@@ -646,6 +668,31 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		});
 		this.startTurnForQueuedInput();
 		return admission;
+	}
+
+	/** A host input's receipt and queue intent: its messages are delivered as one batch. */
+	private addHostInput(
+		drafts: EntryDrafts,
+		clientMessageId: string,
+		digest: string,
+		queuedInput: ClientInputQueuedPayload,
+	): void {
+		const receipt = drafts.add({
+			type: "client_input_receipt",
+			visibility: "host",
+			payload: {
+				clientMessageId,
+				command: queuedInput.delivery,
+				semanticDigest: digest,
+				input: HOST_INPUT,
+				origin: "host",
+			},
+		});
+		drafts.add({
+			type: "client_input_queued",
+			visibility: "host",
+			payload: { receiptId: receipt.id, clientMessageId, queuedInput },
+		});
 	}
 
 	/** Withdraw every queued steer and follow-up; durable inputs record `withdrawn`. */
@@ -973,6 +1020,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 				kind,
 				clientMessageId: record.clientMessageId,
 				requestInput: queued.messages === undefined,
+				...(queued.wake === false ? { wake: false } : {}),
 			});
 		}
 	}
@@ -1000,13 +1048,22 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		void successor.ready.then(() => {
 			if (this.successorTurn === successor) this.successorTurn = undefined;
 			if (this.coordinator.current !== successor.lease) return;
-			if (!this.inbox.hasPending()) {
+			if (!this.hasWakingInput()) {
 				// The previous turn delivered the input after all.
 				this.coordinator.finish(successor.lease);
 				return;
 			}
 			void this.runTurn(successor.lease, this.continueStart()).catch(() => undefined);
 		});
+	}
+
+	/** Whether a pending delivery starts or extends a turn; quiet host input never does. */
+	private wakes(delivery: InboxDelivery<AgentDeliveryKind, AgentMessage>): boolean {
+		return this.deliveryMeta.get(delivery.deliveryId)?.wake !== false;
+	}
+
+	private hasWakingInput(kind?: AgentDeliveryKind): boolean {
+		return this.inbox.list(kind).some((delivery) => this.wakes(delivery));
 	}
 
 	// ==========================================================================
@@ -1023,7 +1080,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		const lease = this.coordinator.reserve("turn");
 		if (!lease) throw new ConversationError("busy", "The conversation is busy");
 		const tail = this.foldState.context.messages.at(-1);
-		const pending = this.inbox.hasPending();
+		const pending = this.hasWakingInput();
 		if (!tail && !pending) {
 			this.coordinator.finish(lease);
 			throw new ConversationError("invalid_state", "No messages to continue from");
@@ -1270,9 +1327,17 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		if (!hasIndependentRequest) run.holdPrompts = false;
 		const prompts = run.holdPrompts ? [] : this.inbox.select("prompt", "all");
 		let selected = [...prompts, ...this.inbox.select("steer", this.modes.steer)];
-		if (selected.length === 0 && ((firstDecision && start.drainFollowUpsFirst) || !hasIndependentRequest)) {
+		const followUps = (firstDecision && start.drainFollowUpsFirst) || !hasIndependentRequest;
+		if (selected.length === 0 && followUps) {
 			selected = [...this.inbox.select("followUp", this.modes.followUp)];
 		}
+		// Quiet host input rides a request the turn makes anyway; alone it never makes one.
+		const requesting =
+			hasIndependentRequest ||
+			selected.some((delivery) => this.wakes(delivery)) ||
+			this.hasWakingInput("steer") ||
+			(followUps && this.inbox.hasPending("followUp"));
+		if (!requesting) selected = [];
 		const suggested: AgentLoopNextAction =
 			selected.length > 0
 				? { type: "request", reason: hasIndependentRequest ? "continuation" : "delivery" }
@@ -1874,7 +1939,7 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 					return undefined;
 				}
 				const terminal = event.message.role === "assistant" && event.message.stopReason !== "toolUse";
-				run.terminalSettling = terminal && !this.inbox.hasPending();
+				run.terminalSettling = terminal && !this.hasWakingInput();
 				let message = this.withAbortDiagnostic(event.message, run);
 				const hook = this.policy.messageEnd;
 				if (hook) {
@@ -2262,7 +2327,11 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		);
 	}
 
-	/** Append host entries in one batch: registered product types, or core `custom`, `custom_message`, `message`, `subagent_spawn`. */
+	/**
+	 * Append host entries in one batch: registered product types, or core
+	 * `custom`, `custom_message`, `message`, `subagent_spawn`. Work entries are
+	 * rejected; `work` writes them.
+	 */
 	async append(entries: readonly ConversationEntryInput[]): Promise<readonly ConversationLogEntry[]> {
 		this.assertActive();
 		const bodies = entries.map((entry) => this.entryBody(entry, HOST_APPENDABLE_CORE_TYPES));
@@ -2308,6 +2377,158 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 	beginActivity(kind: ConversationActivityKind): () => void {
 		this.assertActive();
 		return this.coordinator.beginActivity(kind);
+	}
+
+	// ==========================================================================
+	// Work
+	// ==========================================================================
+
+	private async reconcileWork(): Promise<WorkReconciliation> {
+		this.assertActive();
+		this.reconciliation ??= this.enqueueLane(async () => {
+			const reconciliation = workReconciliation(this.foldState);
+			await this.commitInLane((drafts) => {
+				for (const workId of reconciliation.interrupt) {
+					drafts.add({ type: "work_finished", visibility: "host", payload: { workId, outcome: "interrupted" } });
+				}
+			});
+			this.workReconciled = true;
+			return reconciliation;
+		});
+		const pending = this.reconciliation;
+		try {
+			return await pending;
+		} catch (error) {
+			// A batch that did not commit may be retried.
+			if (this.reconciliation === pending) this.reconciliation = undefined;
+			throw error;
+		}
+	}
+
+	private async startWork(work: ConversationWorkStart): Promise<WorkRecord> {
+		this.assertActive();
+		if (!this.workReconciled) {
+			throw new ConversationError("invalid_state", "Open work must be reconciled before new work starts");
+		}
+		const { workId, state, ...rest } = work;
+		return await this.commitWork({
+			type: "work_started",
+			payload: { ...rest, workId: workId ?? this.createId(), state: state ?? "running" },
+		});
+	}
+
+	private async checkpointWork(workId: string, checkpoint: ConversationWorkCheckpoint): Promise<WorkRecord> {
+		this.assertActive();
+		return await this.commitWork({ type: "work_checkpoint", payload: { ...checkpoint, workId } });
+	}
+
+	/** Commit one work entry; the fold rejects one that breaks the work lifecycle. */
+	private async commitWork(entry: WorkEntryPayload): Promise<WorkRecord> {
+		this.assertWorkPayload(entry);
+		return await this.enqueueLane(async () => {
+			await this.commitInLane((drafts) => {
+				drafts.add({ type: entry.type, visibility: "host", payload: entry.payload } as EntryBody);
+			});
+			return this.workRecord(entry.payload.workId);
+		});
+	}
+
+	private assertWorkPayload(entry: WorkEntryPayload): void {
+		if (!Check(CORE_LOG_ENTRY_TYPES[entry.type].payload, entry.payload)) {
+			throw new ConversationError("invalid_argument", `Work payload does not match ${entry.type}`);
+		}
+		const bounds = workPayloadBoundsError(entry);
+		if (bounds !== undefined) throw new ConversationError("invalid_argument", bounds);
+	}
+
+	private workRecord(workId: string): WorkRecord {
+		const record = this.foldState.work.get(workId);
+		if (!record) throw new ConversationError("invalid_argument", `Unknown work ${JSON.stringify(workId)}`);
+		return record;
+	}
+
+	/**
+	 * Finish open work. A completed or failed result of a delivering kind
+	 * commits its notice in the same batch, as a host steer; a `wake` notice
+	 * then starts a turn on an idle conversation.
+	 */
+	private async finishWork(workId: string, finish: ConversationWorkFinish): Promise<ConversationWorkFinished> {
+		this.assertActive();
+		const { deliver, ...rest } = finish;
+		const payload: WorkFinishedEntryPayload = { ...rest, workId };
+		this.assertWorkPayload({ type: "work_finished", payload });
+		const finished = await this.enqueueLane(async (): Promise<ConversationWorkFinished> => {
+			const record = this.foldState.work.get(workId);
+			if (!record || record.outcome !== undefined) {
+				throw new ConversationError("invalid_argument", `Work ${JSON.stringify(workId)} is not open`);
+			}
+			const notice =
+				deliver !== false &&
+				record.delivery !== "none" &&
+				(payload.outcome === "completed" || payload.outcome === "failed")
+					? workNotice(record, payload, deliver?.text)
+					: undefined;
+			if (!notice) {
+				await this.commitInLane((drafts) => {
+					drafts.add({ type: "work_finished", visibility: "host", payload });
+				});
+				return { record: this.workRecord(workId) };
+			}
+			const wake = record.delivery === "wake";
+			const queuedInput: ClientInputQueuedPayload = {
+				delivery: "steer",
+				message: "",
+				images: [],
+				messages: [notice],
+				...(wake ? {} : { wake: false }),
+			};
+			if (!Check(ClientInputQueuedPayloadSchema, queuedInput)) {
+				throw new ConversationError("invalid_argument", "The work notice must be a log message");
+			}
+			const clientMessageId = this.createId();
+			const digest = await clientInputDigest("steer", HOST_INPUT);
+			await this.commitInLane((drafts) => {
+				drafts.add({ type: "work_finished", visibility: "host", payload });
+				this.addHostInput(drafts, clientMessageId, digest, queuedInput);
+			});
+			this.enqueueDelivery("steer", [notice], {
+				kind: "steer",
+				clientMessageId,
+				requestInput: false,
+				...(wake ? {} : { wake: false }),
+			});
+			return { record: this.workRecord(workId), notice: { clientMessageId, wake } };
+		});
+		if (finished.notice?.wake) this.startTurnForQueuedInput();
+		return finished;
+	}
+
+	private async withdrawHostInput(clientMessageId: string): Promise<boolean> {
+		this.assertActive();
+		const record = this.foldState.clientInputs.inputs.get(clientMessageId);
+		if (record?.origin !== "host") {
+			throw new ConversationError("invalid_argument", `${JSON.stringify(clientMessageId)} is not a host input`);
+		}
+		if (record.state !== "accepted") return false;
+		const pending = [...this.deliveryMeta].find(([, meta]) => meta.clientMessageId === clientMessageId);
+		if (pending) {
+			// A delivery a turn already leased is being delivered.
+			if (!this.inbox.withdraw(pending[0])) return false;
+			this.deliveryMeta.delete(pending[0]);
+			this.publishQueue();
+		}
+		const entries = await this.commit((drafts, state) => {
+			const current = state.clientInputs.inputs.get(clientMessageId);
+			if (current?.state !== "accepted") return;
+			drafts.add({
+				type: "client_input_state",
+				visibility: "host",
+				payload: { receiptId: current.receiptId, clientMessageId, state: "withdrawn" },
+			});
+		});
+		if (entries.length === 0) return false;
+		this.settleWaiter(clientMessageId, { state: "withdrawn" });
+		return true;
 	}
 
 	// ==========================================================================
@@ -2498,6 +2719,32 @@ export class Conversation<TTool extends AgentTool = AgentTool> {
 		this.eventTail = delivery;
 		return delivery;
 	}
+}
+
+/** The notice a delivered result queues: a custom message carrying the result's metadata, never its output. */
+function workNotice(record: WorkRecord, payload: WorkFinishedEntryPayload, text: string | undefined): CustomMessage {
+	const { summary, child, output } = payload.result ?? {};
+	const details: WorkNoticeDetails = {
+		workId: record.workId,
+		kind: record.kind,
+		title: record.title,
+		outcome: payload.outcome === "failed" ? "failed" : "completed",
+		...(summary === undefined ? {} : { summary }),
+		...(payload.error === undefined ? {} : { error: payload.error }),
+		...(child === undefined ? {} : { child }),
+		...(output === undefined ? {} : { output: { truncated: output.truncated } }),
+	};
+	const lines = [`${record.title} (${record.kind} ${record.workId}) ${details.outcome}.`];
+	if (summary) lines.push(summary);
+	if (payload.error) lines.push(`Error: ${payload.error}`);
+	return {
+		role: "custom",
+		customType: WORK_NOTICE_CUSTOM_TYPE,
+		content: text ?? lines.join("\n"),
+		display: true,
+		details,
+		timestamp: Date.now(),
+	};
 }
 
 /** The abandoned branch after its common ancestor with `targetId`, oldest first. */

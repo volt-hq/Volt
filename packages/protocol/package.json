@@ -51,6 +51,11 @@
 			"volt-source": "./src/workspace.ts",
 			"import": "./dist/workspace.js"
 		},
+		"./work": {
+			"types": "./dist/work.d.ts",
+			"volt-source": "./src/work.ts",
+			"import": "./dist/work.js"
+		},
 		"./contract/protocol-schema.json": "./contract/protocol-schema.json",
 		"./package.json": "./package.json"
 	},

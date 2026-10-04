@@ -35,10 +35,13 @@ import {
 	RpcBackgroundJobsSchema,
 } from "./background-jobs.ts";
 import {
+	CLIENT_WORK_FINISHED_MAX,
 	ClientLabelSchema,
 	ClientModelRefSchema,
 	ClientQueuedInputSchema,
 	ClientSnapshotSchema,
+	ClientWorkItemSchema,
+	ClientWorkResultSchema,
 } from "./client-fold.ts";
 import {
 	CONTROL_EVENT_SCHEMAS,
@@ -81,6 +84,10 @@ import {
 	LogEntryVisibilitySchema,
 	LogMessageSchema,
 	SessionReferenceSchema,
+	WorkChildSchema,
+	WorkNoticeDetailsSchema,
+	WorkResultChildSchema,
+	WorkResultSchema,
 } from "./entries.ts";
 import {
 	CatalogNameSchema,
@@ -337,6 +344,17 @@ import {
 	RPC_WIRE_MAX_SAFE_INTEGER,
 } from "./wire-limits.ts";
 import {
+	WORK_LIMITS,
+	WorkDeliverySchema,
+	WorkKindSchema,
+	WorkOutcomeSchema,
+	WorkProgressSchema,
+	WorkProgressStepSchema,
+	WorkStateSchema,
+	WorkTextSchema,
+	WorkTitleSchema,
+} from "./work.ts";
+import {
 	IrohRemoteWorkspaceAvailabilityStatusSchema,
 	IrohRemoteWorkspaceMetadataSnapshotSchema,
 	IrohRemoteWorkspaceNameSchema,
@@ -497,6 +515,20 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	ClientInputPayload: ClientInputPayloadSchema,
 	ClientInputQueuedPayload: ClientInputQueuedPayloadSchema,
 
+	// Work
+	WorkKind: WorkKindSchema,
+	WorkState: WorkStateSchema,
+	WorkOutcome: WorkOutcomeSchema,
+	WorkDelivery: WorkDeliverySchema,
+	WorkTitle: WorkTitleSchema,
+	WorkText: WorkTextSchema,
+	WorkProgressStep: WorkProgressStepSchema,
+	WorkProgress: WorkProgressSchema,
+	WorkChild: WorkChildSchema,
+	WorkResultChild: WorkResultChildSchema,
+	WorkResult: WorkResultSchema,
+	WorkNoticeDetails: WorkNoticeDetailsSchema,
+
 	// UiNode
 	UiNodeToken: UiNodeTokenSchema,
 	UiNodeText: UiNodeTextSchema,
@@ -585,6 +617,8 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	ClientModelRef: ClientModelRefSchema,
 	ClientLabel: ClientLabelSchema,
 	ClientQueuedInput: ClientQueuedInputSchema,
+	ClientWorkResult: ClientWorkResultSchema,
+	ClientWorkItem: ClientWorkItemSchema,
 
 	// Intents
 	EmptyInput: EmptyInputSchema,
@@ -747,5 +781,14 @@ export const RPC_WIRE_LIMITS = {
 	retryAfterMsMax: RPC_RETRY_AFTER_MS_MAX,
 } as const;
 
-/** Everything exported into the artifact as `x-volt-limits`: the wire limits, the `UiNode` bounds, and the protocol constants. */
-export const CONTRACT_LIMITS = { ...RPC_WIRE_LIMITS, uiNode: UI_NODE_LIMITS, protocol: PROTOCOL_LIMITS } as const;
+/**
+ * Everything exported into the artifact as `x-volt-limits`: the wire limits,
+ * the `UiNode` and work entry bounds, and the protocol constants.
+ */
+export const CONTRACT_LIMITS = {
+	...RPC_WIRE_LIMITS,
+	uiNode: UI_NODE_LIMITS,
+	/** `clientFinishedMax`: the finished work items a client fold keeps beside the open ones. */
+	work: { ...WORK_LIMITS, clientFinishedMax: CLIENT_WORK_FINISHED_MAX },
+	protocol: PROTOCOL_LIMITS,
+} as const;

@@ -32,9 +32,9 @@ export const UI_NODE_LINE_MAX_CHARS = 4_096;
 export const UI_NODE_IMAGE_DATA_MAX_CHARS = 1024 * 1024;
 
 /** Text: any characters except C0/C1 controls other than tab and line feed. Rejects ESC and CSI, so no ANSI. */
-const UI_TEXT_PATTERN = "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$";
+export const UI_NODE_TEXT_PATTERN = "^[^\\u0000-\\u0008\\u000b-\\u001f\\u007f-\\u009f]*$";
 /** One line: as text, without line feeds. */
-const UI_LINE_PATTERN = "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$";
+export const UI_NODE_LINE_PATTERN = "^[^\\u0000-\\u0008\\u000a-\\u001f\\u007f-\\u009f]*$";
 
 // ============================================================================
 // Text and styling
@@ -44,13 +44,13 @@ export const UiNodeTokenSchema = stringEnum(["text", "muted", "accent", "success
 export type UiNodeToken = Static<typeof UiNodeTokenSchema>;
 
 export const UiNodeTextSchema = Type.String({
-	pattern: UI_TEXT_PATTERN,
+	pattern: UI_NODE_TEXT_PATTERN,
 	"x-volt-expected": "be text without terminal control sequences",
 });
 
 export const UiNodeLineSchema = Type.String({
 	maxLength: UI_NODE_LINE_MAX_CHARS,
-	pattern: UI_LINE_PATTERN,
+	pattern: UI_NODE_LINE_PATTERN,
 	"x-volt-expected": "be one line without terminal control sequences",
 });
 

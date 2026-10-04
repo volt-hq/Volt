@@ -2,6 +2,7 @@ import * as fc from "fast-check";
 import { Check } from "typebox/value";
 import { describe, expect, it } from "vitest";
 import {
+	CLIENT_WORK_FINISHED_MAX,
 	ClientFoldError,
 	ClientSnapshotSchema,
 	type ClientState,
@@ -50,6 +51,7 @@ function expectMatches(state: ClientState, expected: ExpectedClientState): void 
 	expect(clientSnapshot(state).labels).toEqual(expected.labels);
 	expect(state.queue).toEqual(expected.queue);
 	expect(state.forkedFrom).toEqual(expected.forkedFrom);
+	expect([...state.work.values()]).toEqual(expected.work);
 }
 
 /** A log and a cut point inside it. */
@@ -150,6 +152,82 @@ describe("clientFold", () => {
 			),
 			RUNS,
 		);
+	});
+});
+
+describe("clientFold work", () => {
+	const at = (ordinal: number) => new Date(Date.UTC(2026, 0, 1) + ordinal * 1000).toISOString();
+	const started = (ordinal: number, workId: string): ProjectedEntry => ({
+		ordinal,
+		id: `e${ordinal}`,
+		parentId: null,
+		type: "work_started",
+		timestamp: at(ordinal),
+		payload: {
+			workId,
+			kind: "job",
+			title: workId,
+			input: { command: "true" },
+			cancellable: true,
+			delivery: "wake",
+			resume: false,
+			state: "running",
+		},
+	});
+	const finished = (ordinal: number, workId: string): ProjectedEntry => ({
+		ordinal,
+		id: `e${ordinal}`,
+		parentId: null,
+		type: "work_finished",
+		timestamp: at(ordinal),
+		payload: { workId, outcome: "completed", result: { output: { text: "x".repeat(1_000), truncated: false } } },
+	});
+
+	it("keeps open work and the newest finished items, and restores them from a snapshot", () => {
+		const entries: ProjectedEntry[] = [started(1, "open")];
+		const count = CLIENT_WORK_FINISHED_MAX + 6;
+		for (let index = 0; index < count; index++) entries.push(started(entries.length + 1, `job-${index}`));
+		// Finish in reverse start order: the oldest finished are the newest started.
+		for (let index = count - 1; index >= 0; index--) entries.push(finished(entries.length + 1, `job-${index}`));
+		const state = clientFold(entries);
+		const kept = [...state.work.keys()];
+		expect(kept).toHaveLength(CLIENT_WORK_FINISHED_MAX + 1);
+		expect(kept[0]).toBe("open");
+		expect(kept.slice(1)).toEqual(Array.from({ length: CLIENT_WORK_FINISHED_MAX }, (_, index) => `job-${index}`));
+		expect(state.work.get("job-0")).toMatchObject({ outcome: "completed", result: { output: { truncated: false } } });
+		const snapshot = wireSnapshot(state);
+		expect(Check(ClientSnapshotSchema, snapshot)).toBe(true);
+		expect(clientRestore(state.ordinal, snapshot)).toEqual(state);
+	});
+
+	it("ignores work it never saw, payloads a profile hid, and changes to finished work", () => {
+		const base = clientFold([started(1, "a"), finished(2, "a")]);
+		const next = clientFold(
+			[
+				started(3, "a"),
+				{
+					ordinal: 4,
+					id: "e4",
+					parentId: null,
+					type: "work_checkpoint",
+					timestamp: at(4),
+					payload: { workId: "a" },
+				},
+				{
+					ordinal: 5,
+					id: "e5",
+					parentId: null,
+					type: "work_checkpoint",
+					timestamp: at(5),
+					payload: { workId: "zz" },
+				},
+				finished(6, "zz"),
+				{ ordinal: 7, id: "e7", parentId: null, type: "work_started", timestamp: at(7) },
+			],
+			base,
+		);
+		expect(next.work).toBe(base.work);
+		expect(clientSnapshot(clientFold([])).work).toBeUndefined();
 	});
 });
 

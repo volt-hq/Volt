@@ -43,7 +43,7 @@ export default defineConfig({
 			{ find: /^@hansjm10\/volt-ai\/schemas$/, replacement: aiSrcSchemas },
 			{ find: /^@hansjm10\/volt-protocol$/, replacement: `${protocolSrc}index.ts` },
 			{
-				find: /^@hansjm10\/volt-protocol\/(entries|git-context|wire-limits|daemon-control|remote-handshake|remote-access|push|workspace)$/,
+				find: /^@hansjm10\/volt-protocol\/(entries|git-context|wire-limits|daemon-control|remote-handshake|remote-access|push|workspace|work)$/,
 				replacement: `${protocolSrc}$1.ts`,
 			},
 			{ find: /^@hansjm10\/volt-agent-core$/, replacement: agentSrcIndex },

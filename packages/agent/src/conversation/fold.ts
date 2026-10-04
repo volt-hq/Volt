@@ -18,7 +18,8 @@
  * {@link ConversationFoldError} for a log that breaks them: contiguous
  * ordinals, unique ids, existing parents (a public entry's parent is public),
  * leaf and label targets, compaction and branch-summary references, and the
- * client-input lifecycle. Payload schemas are the log's concern.
+ * client-input and work lifecycles (work.ts). Payload schemas are the log's
+ * concern.
  */
 
 import type { UserMessage } from "@hansjm10/volt-ai";
@@ -33,6 +34,7 @@ import type {
 import type { AgentMessage, ThinkingLevel } from "../types.ts";
 import { type ConversationLogEntry, isCoreLogEntry } from "./log.ts";
 import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "./messages.ts";
+import { isWorkLogEntry, reduceWork, type WorkRecord } from "./work.ts";
 
 /** A complete branch-local Plan mode snapshot; the kernel stores it without interpreting it. */
 export type PlanningSnapshot = PlanningStateChangeEntryPayload["planning"];
@@ -131,8 +133,10 @@ export interface ConversationState {
 	/** The latest non-blank conversation name, trimmed. */
 	readonly name: string | null;
 	readonly clientInputs: ClientInputQueue;
-	/** Open work items; filled from work entries in Phase 4, always empty until then. */
-	readonly openWork: readonly never[];
+	/** Every work item by id, in start order. A finished record never changes. */
+	readonly work: ReadonlyMap<string, WorkRecord>;
+	/** Open work ids, in start order. */
+	readonly openWork: readonly string[];
 }
 
 /** Automatic recovery of client inputs left behind by a previous runtime. */
@@ -179,8 +183,6 @@ export interface ConversationSnapshot {
 
 type CoreEntry<K extends LogEntry["type"]> = Extract<LogEntry, { type: K }>;
 
-const NO_WORK: readonly never[] = Object.freeze([]);
-
 interface BranchDerivation {
 	readonly context: ConversationContext;
 	readonly planning: PlanningSnapshot | null;
@@ -200,7 +202,8 @@ function emptyState(): ConversationState {
 		labels: new Map(),
 		name: null,
 		clientInputs: Object.freeze({ inputs: new Map(), queued: Object.freeze([]), started: Object.freeze([]) }),
-		openWork: NO_WORK,
+		work: new Map(),
+		openWork: Object.freeze([]),
 	});
 }
 
@@ -327,6 +330,10 @@ class StateBuilder {
 	private inputs: ReadonlyMap<string, ClientInputRecord>;
 	private queued: readonly string[];
 	private started: readonly string[];
+	private work: ReadonlyMap<string, WorkRecord>;
+	private openWork: readonly string[];
+	/** Every parent id the work records name; computed when a work item first starts in this builder. */
+	private workParents: Set<string> | undefined;
 
 	constructor(base: ConversationState) {
 		this.base = base;
@@ -348,6 +355,8 @@ class StateBuilder {
 		this.inputs = base.clientInputs.inputs;
 		this.queued = base.clientInputs.queued;
 		this.started = base.clientInputs.started;
+		this.work = base.work;
+		this.openWork = base.openWork;
 	}
 
 	apply(entry: ConversationLogEntry): void {
@@ -355,12 +364,24 @@ class StateBuilder {
 		const core = isCoreLogEntry(entry) ? entry : undefined;
 		if (core) this.validateReferences(core);
 		const input = core ? this.nextClientInput(core) : undefined;
+		const work =
+			core && isWorkLogEntry(core)
+				? reduceWork(
+						this.work,
+						() => this.namedWorkParents(),
+						core,
+						(message): never => {
+							throw new ConversationFoldError(entry, message);
+						},
+					)
+				: undefined;
 
 		const byId = this.writable(this.byId);
 		this.byId = byId;
 		byId.set(entry.id, entry);
 		if (entry.visibility === "public") this.appendChild(entry.parentId, entry.id);
 		if (input) this.setClientInput(input);
+		if (work) this.setWork(work);
 		if (core?.type === "label") this.setLabel(core);
 		if (core?.type === "session_info") this.name = core.payload.name?.trim() || null;
 		if (core?.type === "leaf") this.moveLeaf(core.payload.targetId, entry.ordinal);
@@ -410,7 +431,8 @@ class StateBuilder {
 			labels: this.labels,
 			name: this.name,
 			clientInputs,
-			openWork: NO_WORK,
+			work: this.work,
+			openWork: this.openWork,
 		});
 	}
 
@@ -471,6 +493,9 @@ class StateBuilder {
 			}
 			if (entry.payload.queuedInput.messages !== undefined && existing.origin !== "host") {
 				throw new ConversationFoldError(entry, "only a host input queues messages");
+			}
+			if (entry.payload.queuedInput.wake !== undefined && existing.origin !== "host") {
+				throw new ConversationFoldError(entry, "only a host input is queued without waking");
 			}
 			return Object.freeze({
 				...withoutLifecycleFields(existing),
@@ -537,6 +562,29 @@ class StateBuilder {
 		const record = this.inputs.get(clientMessageId);
 		const admissionId = record?.queuedEntryId ?? record?.receiptId;
 		return (admissionId === undefined ? undefined : this.byId.get(admissionId)?.ordinal) ?? Number.MAX_SAFE_INTEGER;
+	}
+
+	private namedWorkParents(): ReadonlySet<string> {
+		this.workParents ??= new Set(
+			[...this.work.values()].flatMap((record) => (record.parentWorkId === undefined ? [] : [record.parentWorkId])),
+		);
+		return this.workParents;
+	}
+
+	private setWork(record: WorkRecord): void {
+		const work = this.writable(this.work);
+		this.work = work;
+		work.set(record.workId, record);
+		if (record.parentWorkId !== undefined) this.workParents?.add(record.parentWorkId);
+		const open = record.outcome === undefined;
+		if (this.openWork.includes(record.workId) === open) return;
+		if (open) {
+			this.openWork = this.appended(this.openWork, record.workId);
+		} else {
+			const next = this.openWork.filter((workId) => workId !== record.workId);
+			this.owned.add(next);
+			this.openWork = next;
+		}
 	}
 
 	private setLabel(entry: CoreEntry<"label">): void {
@@ -673,7 +721,7 @@ export function clientInputRecovery(state: ConversationState): ClientInputRecove
 	return records.length > 0 ? { kind: "replay", records } : { kind: "idle", records: [] };
 }
 
-/** Serialize a state; its context and planning are recomputed from the branch on restore. */
+/** Serialize a state; its context, planning, and work are recomputed from its entries on restore. */
 export function snapshot(state: ConversationState): ConversationSnapshot {
 	return {
 		ordinal: state.ordinal,
@@ -686,6 +734,27 @@ export function snapshot(state: ConversationState): ConversationSnapshot {
 		name: state.name,
 		clientInputs: [...state.clientInputs.inputs.values()],
 	};
+}
+
+/** The work records of entries folded before, rebuilt in ordinal order. */
+function rebuildWork(entries: readonly ConversationLogEntry[]): Pick<ConversationState, "work" | "openWork"> {
+	const work = new Map<string, WorkRecord>();
+	const parents = new Set<string>();
+	for (const entry of entries) {
+		if (!isCoreLogEntry(entry) || !isWorkLogEntry(entry)) continue;
+		const record = reduceWork(
+			work,
+			() => parents,
+			entry,
+			(message): never => {
+				throw new ConversationFoldError(entry, message);
+			},
+		);
+		work.set(record.workId, record);
+		if (record.parentWorkId !== undefined) parents.add(record.parentWorkId);
+	}
+	const openWork = [...work.values()].filter((record) => record.outcome === undefined).map((record) => record.workId);
+	return { work, openWork: Object.freeze(openWork) };
 }
 
 /** Rebuild the state a snapshot was taken from. Entries are adopted by reference. */
@@ -734,6 +803,6 @@ export function restore(value: ConversationSnapshot): ConversationState {
 			queued: lifecycle((record) => record.state === "accepted" && record.queuedInput !== undefined),
 			started: lifecycle((record) => record.state === "started"),
 		}),
-		openWork: NO_WORK,
+		...rebuildWork(value.entries),
 	});
 }
