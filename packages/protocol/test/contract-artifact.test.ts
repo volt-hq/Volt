@@ -4,6 +4,11 @@ import { describe, expect, test } from "vitest";
 import { RPC_COMMAND_SCHEMAS } from "../src/commands.ts";
 import { CONTRACT_LIMITS, CONTRACT_SCHEMA_REGISTRY } from "../src/contract.ts";
 import { CORE_LOG_ENTRY_TYPES } from "../src/entries.ts";
+import { CLIENT_FRAME_SCHEMAS, HOST_FRAME_SCHEMAS } from "../src/frames.ts";
+import { BUILTIN_INTENT_NAMES, INTENT_SCHEMAS } from "../src/intents.ts";
+import { LIVE_ITEM_SCHEMAS, LIVE_VALUE_SCHEMAS } from "../src/live.ts";
+import { PROJECTED_ENTRY_TYPES } from "../src/projected.ts";
+import { QUERY_NAMES } from "../src/queries.ts";
 import { RPC_RESPONSE_SCHEMAS } from "../src/responses.ts";
 import { UI_NODE_TERMINAL_MAX_LINES } from "../src/ui-node.ts";
 import {
@@ -106,6 +111,61 @@ describe("committed protocol contract artifact", () => {
 			expect(entry.additionalProperties).toBe(false);
 			expect(entry.required).toEqual(["ordinal", "id", "parentId", "type", "timestamp", "visibility", "payload"]);
 			expect(entry.properties.payload).toEqual({ $ref: `#/$defs/LogEntryPayload.${type}` });
+		}
+	});
+
+	test("the protocol frame unions are closed and cover every frame, intent, and query", () => {
+		const artifact = loadArtifact();
+		const refs = (name: string) =>
+			(artifact.$defs[name] as { anyOf: Array<{ $ref: string }> }).anyOf.map((member) => member.$ref);
+		expect(refs("ClientFrame")).toEqual([
+			...Object.keys(CLIENT_FRAME_SCHEMAS).map((type) => `#/$defs/Frame.${type}`),
+			"#/$defs/Frame.intent",
+			"#/$defs/Frame.query",
+		]);
+		expect(refs("HostFrame")).toEqual(Object.keys(HOST_FRAME_SCHEMAS).map((type) => `#/$defs/Frame.${type}`));
+		expect(refs("Frame.intent")).toEqual([
+			...BUILTIN_INTENT_NAMES.map((name) => `#/$defs/Frame.intent.${name}`),
+			"#/$defs/Frame.intent.dynamic",
+		]);
+		expect(refs("Frame.query")).toEqual(QUERY_NAMES.map((name) => `#/$defs/Frame.query.${name}`));
+		expect(refs("ProjectedEntry")).toEqual(
+			Object.keys(PROJECTED_ENTRY_TYPES).map((type) => `#/$defs/ProjectedEntry.${type}`),
+		);
+		expect(refs("LiveValue")).toEqual(Object.keys(LIVE_VALUE_SCHEMAS).map((kind) => `#/$defs/LiveValue.${kind}`));
+		expect(refs("LiveItem")).toEqual(Object.keys(LIVE_ITEM_SCHEMAS).map((type) => `#/$defs/LiveItem.${type}`));
+
+		const closedObjects = (name: string): boolean => {
+			const definition = artifact.$defs[name] as {
+				$ref?: string;
+				type?: string;
+				anyOf?: unknown[];
+				additionalProperties?: boolean;
+			};
+			if (definition.$ref !== undefined) return closedObjects(definition.$ref.slice("#/$defs/".length));
+			if (definition.type !== "object" && definition.anyOf !== undefined) {
+				return definition.anyOf.every((member) => {
+					const ref = (member as { $ref?: string }).$ref;
+					return ref === undefined
+						? (member as { additionalProperties?: boolean }).additionalProperties === false
+						: closedObjects(ref.slice("#/$defs/".length));
+				});
+			}
+			return definition.additionalProperties === false;
+		};
+		for (const name of Object.keys(artifact.$defs)) {
+			if (/^(Frame|IntentInput|QueryParams|LiveValue|LiveItem|ProjectedEntry)\./.test(name)) {
+				expect(closedObjects(name), `${name} is not closed`).toBe(true);
+			}
+		}
+		for (const name of BUILTIN_INTENT_NAMES) {
+			expect(artifact.$defs).toHaveProperty([`IntentInput.${name}`]);
+			const output = (INTENT_SCHEMAS[name] as { output?: unknown }).output;
+			expect(`IntentOutput.${name}` in artifact.$defs).toBe(output !== undefined);
+		}
+		for (const name of QUERY_NAMES) {
+			expect(artifact.$defs).toHaveProperty([`QueryParams.${name}`]);
+			expect(artifact.$defs).toHaveProperty([`QueryResult.${name}`]);
 		}
 	});
 
