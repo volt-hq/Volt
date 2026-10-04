@@ -26,8 +26,8 @@ import { type ProfileLimits, remoteProfile } from "../../src/core/protocol/profi
 import { projectSubagentDetails } from "../../src/core/protocol/projection/tool-view.ts";
 import type { ProtocolConnection } from "../../src/core/protocol/server/connection.ts";
 import { Subscription } from "../../src/core/protocol/server/subscription.ts";
+import type { IrohBiStreamLike } from "../../src/core/protocol/transport/iroh-transport.ts";
 import { serveIrohRemoteConnection } from "../../src/core/remote/iroh/connection.ts";
-import type { IrohBiStreamLike } from "../../src/core/rpc/iroh-transport.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "../suite/host-harness.ts";
 import { createIrohStreamPair } from "../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "../utilities/remote-phone.ts";

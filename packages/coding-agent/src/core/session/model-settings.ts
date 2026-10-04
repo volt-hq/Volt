@@ -348,16 +348,7 @@ export class ModelSettings {
 	}
 
 	emitFastModeStateChanged(): void {
-		const enabled = this.fastModeEnabled;
-		this.host.emit({
-			type: "ui_action_state_changed",
-			action: "thinking.fast_mode",
-			state: {
-				type: "boolean",
-				value: enabled,
-				label: enabled ? "Fast mode enabled" : "Fast mode disabled",
-			},
-		});
+		this.host.emit({ type: "fast_mode_changed", enabled: this.fastModeEnabled });
 	}
 
 	private clampThinkingLevel(level: ThinkingLevel, _availableLevels: ThinkingLevel[]): ThinkingLevel {

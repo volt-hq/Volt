@@ -15,6 +15,7 @@
 import { randomUUID } from "node:crypto";
 import type { ImageContent, JsonCompatibleInput, JsonValue, Message, TextContent } from "@hansjm10/volt-ai";
 import { RpcGitContextSchema } from "@hansjm10/volt-protocol";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import { isDeepStrictEqual } from "util";
@@ -28,7 +29,6 @@ import {
 } from "./messages.ts";
 import { type PlanningState, parsePlanningState } from "./planning.ts";
 import type { PrReviewPlacement } from "./pr-review-placement.ts";
-import type { RpcGitContext } from "./rpc/types.ts";
 import { digestClientInputPayload, parseSessionEntryForAdmission } from "./session-entry-codec.ts";
 import type {
 	BranchSummaryEntry,

@@ -12,7 +12,13 @@ import { LspManager } from "../../../src/core/lsp/manager.ts";
 import { lspResult } from "../../../src/core/lsp/outcome.ts";
 import { DefaultMcpClientFactory } from "../../../src/core/mcp/client-factory.ts";
 import type { McpClientConnection } from "../../../src/core/mcp/types.ts";
-import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
+import {
+	type IntentContext,
+	type IntentTarget,
+	intentRegistry,
+	LOCAL_INTENT_PROFILE,
+} from "../../../src/core/protocol/intents/index.ts";
+import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import { type CreateAgentSessionOptions, createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager, type SessionReference } from "../../../src/core/session-manager.ts";
 import {
@@ -21,7 +27,6 @@ import {
 } from "../../../src/core/session-store/index.ts";
 import { createBuiltInSubagentDefinitions, type SubagentResult } from "../../../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../../../src/core/tools/subagent.ts";
-import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
 import { seedSession } from "../../utilities/seed-log.ts";
 import { createHarness, type Harness, type HarnessOptions } from "../harness.ts";
 
@@ -567,11 +572,7 @@ describe("Regression #341: persisted review discussion policy", () => {
 					await worker.session.waitForClosed();
 				},
 				onEvent: () => () => {},
-				getState: async () => buildRpcSessionState(worker.session),
 				getSessionStats: async () => worker.session.getSessionStats(),
-				getTranscript: async () => {
-					throw new Error("unused");
-				},
 			};
 		});
 		const session = await sdk(provider, childRef, root, {
@@ -718,15 +719,16 @@ describe("Regression #341: persisted review discussion policy", () => {
 			expect.arrayContaining(["mcp", "mcp__trusted__write_note", "write"]),
 		);
 		expect(connect.mock.calls.map(([server]) => server.id).sort()).toEqual(["ordinary", "trusted"]);
-		const context = { session, options: {}, services: {} } as unknown as RpcCommandDispatcherContext;
-		for (const command of [
-			{ type: "connect_mcp_server", server: "ordinary" },
-			{ type: "list_mcp_tools", server: "ordinary" },
-			{ type: "get_mcp_tool", server: "ordinary", tool: "write_note" },
-			{ type: "read_mcp_resource", server: "ordinary", resourceUri: "fake:note" },
-			{ type: "get_mcp_prompt", server: "ordinary", prompt: "fix" },
-		] as const)
-			expect(await handleRpcCommand(command, context)).toMatchObject({ success: true });
+		const context: IntentContext = {
+			target: { session } as unknown as IntentTarget,
+			services: {},
+			profile: LOCAL_INTENT_PROFILE,
+		};
+		await intentRegistry.invoke(context, "mcp.connect", { server: "ordinary" });
+		await queryRegistry.run(context, "mcp.tools", { server: "ordinary" });
+		await queryRegistry.run(context, "mcp.tool", { server: "ordinary", tool: "write_note" });
+		await queryRegistry.run(context, "mcp.resource", { server: "ordinary", resourceUri: "fake:note" });
+		await queryRegistry.run(context, "mcp.prompt", { server: "ordinary", prompt: "fix" });
 		expect(readResource).toHaveBeenCalledOnce();
 		expect(getPrompt).toHaveBeenCalledOnce();
 		await session.state.tools.find((tool) => tool.name === "mcp__trusted__write_note")!.execute("direct", {});

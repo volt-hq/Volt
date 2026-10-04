@@ -89,18 +89,18 @@ Toggle skill commands via `/settings` in interactive mode or in `settings.json`:
 }
 ```
 
-### Native UI Actions
+### Intents
 
-When the host supports native UI actions, skills are also exposed as palette descriptors through `get_ui_actions`. Native clients can show those descriptors in a command palette and invoke the skill by action id with `invoke_ui_action`.
+Protocol clients see each skill as a dynamic intent named `skill.<id>` (see [rpc.md](rpc.md#dynamic-intents)). The `intents` query lists it with the skill's name and description, so clients can show it in a command palette and invoke it by name with `{arguments?, streamingBehavior?}`.
 
 The descriptor is a safe projection:
 
-- The action id is opaque and session-local, under `skill.*`.
-- The slash alias remains display/compatibility metadata; native clients should invoke the action id instead of constructing raw `/skill:name` text.
+- The id is opaque and stays the same while the session's extension commands, prompt templates, and skills do.
+- The slash alias is display metadata; clients should invoke the intent instead of constructing raw `/skill:name` text.
 - The skill body, skill file path, and skill base directory are not included in descriptors.
-- Invocation still runs through the host's skill expansion path. The host loads the skill content, appends any arguments as `User: <args>`, applies streaming policy, and rejects stale ids after reloads or a session change.
+- Invocation still runs through the host's skill expansion path. The host loads the skill content, appends any arguments as `User: <args>`, and applies the streaming policy: while the agent streams, `streamingBehavior` (`steer` or `followUp`) says how to queue it. An intent from a catalog that changed after a reload or a session change is rejected `unknown_intent`.
 
-Over Iroh, skill actions are allowed only through the native action allowlist and sanitized descriptors. Raw `get_commands` remains blocked remotely because it may include local source metadata.
+Paired remote clients may invoke skill intents with `conversation.control.v1`.
 
 ## Skill Structure
 

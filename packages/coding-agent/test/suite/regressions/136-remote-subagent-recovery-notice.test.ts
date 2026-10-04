@@ -1,7 +1,9 @@
 import { type HostFrame, type ProjectedEntry, REMOTE_CAPABILITIES } from "@hansjm10/volt-protocol";
 import { expect, test } from "vitest";
+import { localProfile } from "../../../src/core/protocol/profiles.ts";
+import { sessionProjectionSource } from "../../../src/core/protocol/projection/entries.ts";
+import { projectTranscriptItem } from "../../../src/core/protocol/projection/transcript.ts";
 import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
-import { projectSessionTranscript } from "../../../src/core/rpc/transcript.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone } from "../../utilities/remote-phone.ts";
 import { createHostHarness } from "../host-harness.ts";
@@ -31,11 +33,16 @@ test("remote transcripts surface subagent recovery notices as system text", asyn
 			true,
 		);
 
-		const localTranscript = projectSessionTranscript(session.sessionManager);
-		expect(localTranscript.items).toEqual([
-			expect.objectContaining({ id: recoveryEntryId, role: "system", text: noticeText }),
-			expect.objectContaining({ id: reviewEntryId, role: "assistant", text: "Review result" }),
-		]);
+		const source = sessionProjectionSource(session.sessionManager);
+		const localView = (id: string) => {
+			const entry = session.sessionManager.getCommittedEntry(id);
+			if (!entry) throw new Error(`No entry ${id}`);
+			return projectTranscriptItem(entry, source, localProfile);
+		};
+		expect(localView(recoveryEntryId)).toMatchObject({ role: "system", text: noticeText });
+		expect(localView(reviewEntryId)).toMatchObject({ role: "assistant", text: "Review result" });
+		expect(localView(hiddenRecoveryEntryId)).toBeUndefined();
+		expect(localView(extensionEntryId)).toMatchObject({ role: "system", text: "Displayed extension note" });
 
 		const connection = serveIrohRemoteConnection({
 			host: harness.host,

@@ -1,13 +1,12 @@
 /**
  * Intent state: what availability and descriptor state read from the target
  * conversation, and the descriptor states clients render. Pure functions of
- * the view, so legacy event emitters read them without the definitions.
+ * the view, so the live feed reads them without the definitions.
  */
 
 import { supportsFastInference } from "@hansjm10/volt-ai";
-import type { IntentAvailability as IntentAvailabilityValue } from "@hansjm10/volt-protocol";
+import type { IntentAvailability as IntentAvailabilityValue, IntentStateValue } from "@hansjm10/volt-protocol";
 import type { AgentSession } from "../../agent-session.ts";
-import type { UiActionStateDescriptor } from "../../rpc/types.ts";
 import {
 	IDLE_INTENT_STATE,
 	INTENT_ENABLED,
@@ -39,12 +38,12 @@ export function isIntentStateBusy(state: IntentState): boolean {
 	return state.isBusy ?? state.isStreaming;
 }
 
-export function fastModeState(view: IntentView): UiActionStateDescriptor {
+export function fastModeState(view: IntentView): IntentStateValue {
 	const enabled = view.state.fastModeEnabled === true;
 	return { type: "boolean", value: enabled, label: enabled ? "Fast mode enabled" : "Fast mode disabled" };
 }
 
-export function agentModeState(view: IntentView): UiActionStateDescriptor {
+export function agentModeState(view: IntentView): IntentStateValue {
 	const mode = view.state.planningState?.mode ?? "build";
 	return {
 		type: "enum",
@@ -57,12 +56,12 @@ export function agentModeState(view: IntentView): UiActionStateDescriptor {
 	};
 }
 
-export function autoCompactionState(view: IntentView): UiActionStateDescriptor {
+export function autoCompactionState(view: IntentView): IntentStateValue {
 	const value = view.state.settingsManager?.getCompactionEnabled() ?? true;
 	return { type: "boolean", value, label: value ? "Auto-compaction enabled" : "Auto-compaction disabled" };
 }
 
-export function compactionThresholdState(view: IntentView): UiActionStateDescriptor {
+export function compactionThresholdState(view: IntentView): IntentStateValue {
 	const { model, settingsManager } = view.state;
 	const value = model ? (settingsManager?.getCompactionThresholdTokens(`${model.provider}/${model.id}`) ?? 0) : 0;
 	const presets = [...new Set([0, 100_000, 150_000, 200_000, 250_000, 350_000, 500_000, 750_000, value])].sort(
@@ -121,7 +120,7 @@ export function compactionSettingsAvailability(view: IntentView, field: Compacti
 function liveAvailability(
 	name: string,
 	availability: IntentAvailability,
-	state: UiActionStateDescriptor,
+	state: IntentStateValue,
 ): IntentAvailabilityValue {
 	return {
 		name,

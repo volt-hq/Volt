@@ -4,7 +4,7 @@ import { ProtocolClient } from "../src/client/protocol-client.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { localProfile } from "../src/core/protocol/profiles.ts";
 import { serveConnection } from "../src/core/protocol/server/connection.ts";
-import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/protocol/transport/index.ts";
 import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 
 /** The pending host requests the client's live state shows, by request id. */

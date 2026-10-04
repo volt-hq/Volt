@@ -12,7 +12,6 @@ import {
 import { QueryRejectedError, queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import { createIrohRemoteRpcGrant } from "../../src/core/remote/iroh/access-grant.ts";
 import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../src/core/review-discussion-policy.ts";
-import { getUiActionCompletions } from "../../src/core/rpc/ui-actions.ts";
 import { INTENT_SLASH_COMMANDS } from "../../src/core/slash-commands.ts";
 import { createHarness, type Harness } from "../suite/harness.ts";
 import { adoptTestSession, connectTestClient, type TestClient } from "../utilities/host-client.ts";
@@ -256,10 +255,6 @@ describe("intent completions", () => {
 		await expect(intentRegistry.complete(ctx, "bash", "command", "")).rejects.toMatchObject({
 			code: "not_allowed",
 		});
-		// The UI action wire completes through the same intent.
-		await expect(
-			getUiActionCompletions(ctx, { action: "review.branch", argument: "base", prefix: "" }),
-		).resolves.toEqual([]);
 	});
 });
 

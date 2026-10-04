@@ -2,8 +2,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Message } from "@hansjm10/volt-ai";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import type { RpcGitContext } from "../../src/core/rpc/types.ts";
 import { SessionManager } from "../../src/core/session-manager.ts";
 import { createSessionManagerTestOwner } from "../session-manager-owner.ts";
 

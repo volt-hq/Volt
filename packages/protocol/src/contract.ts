@@ -1,15 +1,13 @@
 /**
- * The protocol contract: the top-level RPC wire unions, the protocol frames
- * (`ClientFrame`, `HostFrame`, and their intents, queries, live values, and
- * projected entries), the daemon control plane, the Iroh remote handshake,
- * every named schema (wire frames, log entries, and `UiNode`), and the
- * numeric limits block — everything the JSON Schema artifact
- * (contract/protocol-schema.json) is generated from by
+ * The protocol contract: the protocol frames (`ClientFrame`, `HostFrame`, and
+ * their intents, queries, live values, and projected entries), the daemon
+ * control plane, the Iroh remote handshake, every named schema (wire frames,
+ * log entries, and `UiNode`), and the numeric limits block — everything the
+ * JSON Schema artifact (contract/protocol-schema.json) is generated from by
  * scripts/generate-protocol-schema.ts.
  */
 
 import {
-	ActiveToolCallStateSchema,
 	ApiSchema,
 	AssistantContentSchema,
 	AssistantMessageDiagnosticSchema,
@@ -25,7 +23,7 @@ import {
 	UsageSchema,
 	UserMessageSchema,
 } from "@hansjm10/volt-ai/schemas";
-import { type TSchema, Type } from "typebox";
+import type { TSchema } from "typebox";
 import {
 	RpcAgentOptionsDefaultConfigSchema,
 	RpcAgentOptionsModelSelectionSchema,
@@ -35,9 +33,6 @@ import {
 	RpcBackgroundJobSnapshotSchema,
 	RpcBackgroundJobSummarySchema,
 	RpcBackgroundJobsSchema,
-	RpcCancelJobResponseSchema,
-	RpcListJobsResponseSchema,
-	RpcReadJobResponseSchema,
 } from "./background-jobs.ts";
 import {
 	ClientLabelSchema,
@@ -45,24 +40,6 @@ import {
 	ClientQueuedInputSchema,
 	ClientSnapshotSchema,
 } from "./client-fold.ts";
-import { RPC_COMMAND_SCHEMAS, RpcClientCapabilityFeatureSchema, RpcMcpAuthFlowSchema } from "./commands.ts";
-import {
-	RpcConversationActiveAssistantSchema,
-	RpcConversationAssistantPartSchema,
-	RpcConversationBootstrapEventSchema,
-	RpcConversationDeliveryPositionSchema,
-	RpcConversationTranscriptItemSchema,
-	RpcConversationTranscriptPageSchema,
-	RpcConversationWorkflowSnapshotSchema,
-	RpcMessageEndFrameSchema,
-	RpcMessageStartFrameSchema,
-	RpcMessageUpdateFrameSchema,
-	RpcQueueUpdateEventSchema,
-	RpcSessionTreeNodeSchema,
-	RpcSessionTreePageSchema,
-	RpcSlimAssistantEventSchema,
-	RpcTranscriptEntryEventSchema,
-} from "./conversation.ts";
 import {
 	CONTROL_EVENT_SCHEMAS,
 	CONTROL_REQUEST_SCHEMAS,
@@ -106,25 +83,6 @@ import {
 	SessionReferenceSchema,
 } from "./entries.ts";
 import {
-	RpcAgentStartEventSchema,
-	RpcBackgroundJobsChangedEventSchema,
-	RpcExtensionErrorEventSchema,
-	RpcExtensionUIRequestSchema,
-	RpcExtensionUIResponseSchema,
-	RpcGitContextChangedEventSchema,
-	RpcHostActionMetadataValueSchema,
-	RpcHostActionRequestSchema,
-	RpcHostActionResponseSchema,
-	RpcHostActionUpdateSchema,
-	RpcModelsChangedEventSchema,
-	RpcPendingHostActionsResponseSchema,
-	RpcPromptCacheChangedEventSchema,
-	RpcSubagentDisposedEventSchema,
-	RpcSubagentEndEventSchema,
-	RpcSubagentEventSchema,
-	RpcUiActionStateChangedEventSchema,
-} from "./events.ts";
-import {
 	CatalogNameSchema,
 	CLIENT_FRAME_SCHEMAS,
 	ClientFrameSchema,
@@ -164,10 +122,17 @@ import {
 	IntentFenceSchema,
 	IntentFrameSchema,
 	IntentNameSchema,
+	IntentOptionSchema,
+	IntentPresentationSchema,
 	type IntentSchemas,
 	IntentScopeSchema,
+	IntentSlashAliasSchema,
+	IntentSourceSchema,
+	IntentStateValueSchema,
 	IntentWhileBusySchema,
 	ReviewWorkflowStartedSchema,
+	RpcBashResultSchema,
+	RpcCompactionResultSchema,
 } from "./intents.ts";
 import {
 	HostRequestKindSchema,
@@ -175,6 +140,7 @@ import {
 	HostResponseSchema,
 	LIVE_ITEM_SCHEMAS,
 	LIVE_VALUE_SCHEMAS,
+	LiveAssistantEventSchema,
 	LiveItemSchema,
 	LiveKeySchema,
 	LiveToolPartialSchema,
@@ -188,36 +154,36 @@ import {
 	RpcMcpOAuthBrowserStartResultSchema,
 	RpcMcpOAuthDevicePollResultSchema,
 	RpcMcpOAuthDeviceStartResultSchema,
+	RpcMcpPromptContentResponseSchema,
 	RpcMcpPromptSummarySchema,
+	RpcMcpPromptsResponseSchema,
 	RpcMcpRecentCallStatusSchema,
 	RpcMcpRecentCallSummarySchema,
+	RpcMcpRecentCallsResponseSchema,
+	RpcMcpResourceContentResponseSchema,
 	RpcMcpResourceSummarySchema,
+	RpcMcpResourcesResponseSchema,
 	RpcMcpRiskSchema,
+	RpcMcpServerResponseSchema,
 	RpcMcpServerStatusSchema,
 	RpcMcpServerSummarySchema,
+	RpcMcpServersResponseSchema,
 	RpcMcpSourceScopeSchema,
+	RpcMcpToolResponseSchema,
 	RpcMcpToolSummarySchema,
-	RpcSlashCommandSchema,
-	RpcSourceInfoSchema,
+	RpcMcpToolsResponseSchema,
 } from "./mcp.ts";
 import {
 	RpcAgentModeSchema,
-	RpcPlanExecutionResultSchema,
 	RpcPlanExecutionSchema,
 	RpcPlanExecutionStrategySchema,
-	RpcPlanningStateChangedEventSchema,
 	RpcPlanningStateSchema,
-	RpcPlanPhaseSchema,
 	RpcPlanStateSchema,
 	RpcPlanStepSchema,
 	RpcPlanStepStatusSchema,
 } from "./planning.ts";
 import {
-	RpcAssistantStreamPositionSchema,
 	RpcClientMessageIdSchema,
-	RpcConversationAuthoritySchema,
-	RpcConversationBootstrapReasonSchema,
-	RpcConversationDiscontinuityReasonSchema,
 	RpcConversationIdentifierSchema,
 	RpcConversationInputImagesSchema,
 	RpcImageContentSchema,
@@ -228,11 +194,14 @@ import {
 	RpcSafeNonNegativeIntegerSchema,
 	RpcStreamingBehaviorSchema,
 	RpcThinkingLevelSchema,
-	RpcUiActionListScopeSchema,
 } from "./primitives.ts";
-import { PROJECTED_ENTRY_TYPES, ProjectedEntrySchema, TranscriptItemSchema } from "./projected.ts";
 import {
-	RpcProjectionCollectionTruncationSchema,
+	PROJECTED_ENTRY_TYPES,
+	ProjectedEntrySchema,
+	TranscriptAssistantPartSchema,
+	TranscriptItemSchema,
+} from "./projected.ts";
+import {
 	RpcProjectionTruncationSchema,
 	RpcReviewAcknowledgmentResponseSchema,
 	RpcReviewCompletionStatusSchema,
@@ -282,27 +251,6 @@ import {
 	IrohRemoteWorktreeIdSchema,
 } from "./remote-handshake.ts";
 import {
-	RPC_RESPONSE_SCHEMAS,
-	RpcBashResultSchema,
-	RpcCompactionResultSchema,
-	RpcErrorResponseSchema,
-	RpcForkResponseSchema,
-	RpcMcpPromptContentResponseSchema,
-	RpcMcpPromptsResponseSchema,
-	RpcMcpRecentCallsResponseSchema,
-	RpcMcpResourceContentResponseSchema,
-	RpcMcpResourcesResponseSchema,
-	RpcMcpServerResponseSchema,
-	RpcMcpServersResponseSchema,
-	RpcMcpToolResponseSchema,
-	RpcMcpToolsResponseSchema,
-	RpcMessageImageSchema,
-	RpcMessageImagesResponseSchema,
-	RpcSessionIntentResponseSchema,
-	RpcSessionStatsSchema,
-	RpcTranscriptEntryTextResponseSchema,
-} from "./responses.ts";
-import {
 	RpcListReviewDiscussionsSchema,
 	RpcResetReviewDiscussionSchema,
 	RpcReviewDiscussionLinkSchema,
@@ -313,31 +261,17 @@ import {
 	RpcActiveAgentRunSchema,
 	RpcActiveCompactionSchema,
 	RpcActiveRetrySchema,
-	RpcActiveToolExecutionSchema,
 	RpcCatalogModelSchema,
 	RpcKeepAwakeStatusSchema,
 	RpcListSubagentsResponseSchema,
-	RpcModelSchema,
 	RpcPromptCacheStatusSchema,
-	RpcPromptResponseSchema,
-	RpcQueuedMessageSchema,
-	RpcQueueUpdateProjectionSchema,
 	RpcRegisterPushTargetResponseSchema,
 	RpcSessionListItemSchema,
-	RpcSessionStateProjectionSchema,
-	RpcSessionStateSchema,
 	RpcSessionWorkContextSchema,
 	RpcSessionWorkPullRequestSchema,
 	RpcSubagentDefinitionSchema,
 	RpcSubagentDefinitionSourceSchema,
 	RpcSubagentSourceInfoSchema,
-	RpcSubagentStartResponseSchema,
-	RpcTranscriptItemSchema,
-	RpcTranscriptResponseSchema,
-	RpcTranscriptSummaryItemSchema,
-	RpcTranscriptTextItemSchema,
-	RpcTranscriptToolItemSchema,
-	RpcTranscriptToolStatusSchema,
 	RpcWebSearchStatusSchema,
 } from "./session.ts";
 import {
@@ -348,28 +282,6 @@ import {
 	RpcSubscriptionUsageResultSchema,
 	RpcSubscriptionUsageSnapshotSchema,
 } from "./subscription-usage.ts";
-import {
-	UiActionArgumentDescriptorSchema,
-	UiActionArgumentTypeSchema,
-	UiActionCapabilitiesSchema,
-	UiActionCapabilityFeatureSchema,
-	UiActionCategorySchema,
-	UiActionCompletionListResponseSchema,
-	UiActionDescriptorSchema,
-	UiActionInvocationQueueBehaviorSchema,
-	UiActionInvocationResponseSchema,
-	UiActionInvocationStatusSchema,
-	UiActionListResponseSchema,
-	UiActionOptionDescriptorSchema,
-	UiActionPresentationHintSchema,
-	UiActionPresentationKindSchema,
-	UiActionScalarSchema,
-	UiActionSlashAliasSchema,
-	UiActionSourceSchema,
-	UiActionStateDescriptorSchema,
-	UiActionStateTypeSchema,
-	UiActionStreamingBehaviorSchema,
-} from "./ui-actions.ts";
 import {
 	UI_NODE_LIMITS,
 	UiActionsNodeSchema,
@@ -396,21 +308,12 @@ import {
 	UiTreeNodeSchema,
 } from "./ui-node.ts";
 import {
-	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
 	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
-	DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
 	DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
 	DEFAULT_IROH_RPC_MAX_LINE_BYTES,
 	IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
-	MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
-	MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
-	MESSAGE_IMAGES_PAGE_MAX_ITEMS,
-	MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
-	MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
-	REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
 	RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
 	RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
 	RPC_CLIENT_MESSAGE_ID_MAX_CHARS,
@@ -428,24 +331,9 @@ import {
 	RPC_GIT_CONTEXT_OID_PATTERN,
 	RPC_GIT_CONTEXT_REF_MAX_CHARS,
 	RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS,
-	RPC_PROJECTION_STRING_MAX_UTF8_BYTES,
-	RPC_REMOTE_ERROR_STRINGS,
 	RPC_RETRY_AFTER_MS_MAX,
 	RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX,
-	RPC_SESSION_ACTIVE_TOOLS_MAX_ITEMS,
-	RPC_SESSION_ACTIVE_TOOLS_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_MODEL_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_QUEUE_ID_MAX_UTF8_BYTES,
-	RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES,
 	RPC_SESSION_QUEUE_MAX_ITEMS,
-	RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_STATE_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_TREE_MAX_SERIALIZED_BYTES,
-	RPC_SESSION_TREE_PAGE_DEFAULT_ITEMS,
-	RPC_SESSION_TREE_PAGE_MAX_ITEMS,
-	RPC_STABLE_ERROR_CODES,
-	RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS,
-	RPC_TRANSCRIPT_PAGE_MAX_ITEMS,
 	RPC_WIRE_MAX_SAFE_INTEGER,
 } from "./wire-limits.ts";
 import {
@@ -456,56 +344,6 @@ import {
 } from "./workspace.ts";
 
 // ============================================================================
-// Top-level wire unions
-// ============================================================================
-
-/** All client→host commands. */
-export const RpcCommandSchema = Type.Union(Object.values(RPC_COMMAND_SCHEMAS) as TSchema[]);
-
-/** Everything a client may write to the wire: commands plus control messages. */
-export const RpcClientMessageSchema = Type.Union([
-	...(Object.values(RPC_COMMAND_SCHEMAS) as TSchema[]),
-	RpcExtensionUIResponseSchema,
-	RpcHostActionResponseSchema,
-]);
-
-/** All host→client responses: one success member per command plus the error member. */
-export const RpcResponseSchema = Type.Union([
-	...(Object.values(RPC_RESPONSE_SCHEMAS) as TSchema[]),
-	RpcErrorResponseSchema,
-]);
-
-/**
- * The declared host→client event vocabulary. Deliberately open: in plain
- * (non-ordered) mode the host passes further session events through verbatim
- * (`x-volt-open-events` in the artifact); clients must ignore unknown types.
- */
-export const RpcServerEventSchema = Type.Union([
-	RpcAgentStartEventSchema,
-	RpcBackgroundJobsChangedEventSchema,
-	RpcConversationBootstrapEventSchema,
-	RpcMessageStartFrameSchema,
-	RpcMessageUpdateFrameSchema,
-	RpcMessageEndFrameSchema,
-	RpcQueueUpdateEventSchema,
-	RpcTranscriptEntryEventSchema,
-	RpcWorkflowEventSchema,
-	RpcWorkflowToolEventSchema,
-	RpcExtensionUIRequestSchema,
-	RpcExtensionErrorEventSchema,
-	RpcHostActionRequestSchema,
-	RpcHostActionUpdateSchema,
-	RpcSubagentEventSchema,
-	RpcSubagentEndEventSchema,
-	RpcSubagentDisposedEventSchema,
-	RpcModelsChangedEventSchema,
-	RpcGitContextChangedEventSchema,
-	RpcPromptCacheChangedEventSchema,
-	RpcUiActionStateChangedEventSchema,
-	RpcPlanningStateChangedEventSchema,
-]);
-
-// ============================================================================
 // Registry: $defs name → schema
 // ============================================================================
 
@@ -514,21 +352,14 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcConversationIdentifier: RpcConversationIdentifierSchema,
 	RpcClientMessageId: RpcClientMessageIdSchema,
 	RpcSafeNonNegativeInteger: RpcSafeNonNegativeIntegerSchema,
-	RpcConversationAuthority: RpcConversationAuthoritySchema,
-	RpcAssistantStreamPosition: RpcAssistantStreamPositionSchema,
-	RpcConversationDiscontinuityReason: RpcConversationDiscontinuityReasonSchema,
-	RpcConversationBootstrapReason: RpcConversationBootstrapReasonSchema,
 	RpcImageContent: RpcImageContentSchema,
 	RpcConversationInputImages: RpcConversationInputImagesSchema,
 	RpcThinkingLevel: RpcThinkingLevelSchema,
 	RpcStreamingBehavior: RpcStreamingBehaviorSchema,
 	RpcQueueMode: RpcQueueModeSchema,
-	RpcUiActionListScope: RpcUiActionListScopeSchema,
 	RpcPushProvider: RpcPushProviderSchema,
 	RpcPushPlatform: RpcPushPlatformSchema,
 	RpcRegisterPushTargetArgs: RpcRegisterPushTargetArgsSchema,
-	RpcClientCapabilityFeature: RpcClientCapabilityFeatureSchema,
-	RpcMcpAuthFlow: RpcMcpAuthFlowSchema,
 
 	// Configurable agent options
 	RpcAgentOptionsModelSelection: RpcAgentOptionsModelSelectionSchema,
@@ -544,7 +375,6 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcGitStatusCounts: RpcGitStatusCountsSchema,
 	RpcGitOperation: RpcGitOperationSchema,
 	RpcGitContext: RpcGitContextSchema,
-	RpcGitContextChangedEvent: RpcGitContextChangedEventSchema,
 
 	// Assistant message family (volt-ai schemas and their wire projections)
 	RpcTextContent: TextContentSchema,
@@ -559,32 +389,6 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcDiagnosticErrorInfo: DiagnosticErrorInfoSchema,
 	RpcAssistantMessageDiagnostic: AssistantMessageDiagnosticSchema,
 	RpcAssistantMessage: AssistantMessageSchema,
-	RpcActiveToolCallState: ActiveToolCallStateSchema,
-	RpcModel: RpcModelSchema,
-	RpcSlimAssistantEvent: RpcSlimAssistantEventSchema,
-
-	// UI actions
-	UiActionSource: UiActionSourceSchema,
-	UiActionCategory: UiActionCategorySchema,
-	UiActionPresentationKind: UiActionPresentationKindSchema,
-	UiActionArgumentType: UiActionArgumentTypeSchema,
-	UiActionStateType: UiActionStateTypeSchema,
-	UiActionStreamingBehavior: UiActionStreamingBehaviorSchema,
-	UiActionScalar: UiActionScalarSchema,
-	UiActionInvocationQueueBehavior: UiActionInvocationQueueBehaviorSchema,
-	UiActionInvocationStatus: UiActionInvocationStatusSchema,
-	UiActionCapabilityFeature: UiActionCapabilityFeatureSchema,
-	UiActionOptionDescriptor: UiActionOptionDescriptorSchema,
-	UiActionPresentationHint: UiActionPresentationHintSchema,
-	UiActionArgumentDescriptor: UiActionArgumentDescriptorSchema,
-	UiActionStateDescriptor: UiActionStateDescriptorSchema,
-	UiActionSlashAlias: UiActionSlashAliasSchema,
-	UiActionDescriptor: UiActionDescriptorSchema,
-	UiActionCapabilities: UiActionCapabilitiesSchema,
-	UiActionListResponse: UiActionListResponseSchema,
-	UiActionCompletionListResponse: UiActionCompletionListResponseSchema,
-	UiActionInvocationResponse: UiActionInvocationResponseSchema,
-	RpcUiActionStateChangedEvent: RpcUiActionStateChangedEventSchema,
 
 	// Projection metadata + workflows + review
 	RpcReviewDiscussionLink: RpcReviewDiscussionLinkSchema,
@@ -595,7 +399,6 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcWorkflowKind: RpcWorkflowKindSchema,
 	RpcWorkflowStatus: RpcWorkflowStatusSchema,
 	RpcProjectionTruncation: RpcProjectionTruncationSchema,
-	RpcProjectionCollectionTruncation: RpcProjectionCollectionTruncationSchema,
 	RpcWorkflowEvent: RpcWorkflowEventSchema,
 	RpcWorkflowToolEvent: RpcWorkflowToolEventSchema,
 	RpcReviewAcknowledgmentResponse: RpcReviewAcknowledgmentResponseSchema,
@@ -631,105 +434,6 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcMcpOAuthDevicePollResult: RpcMcpOAuthDevicePollResultSchema,
 	RpcMcpAuthResponse: RpcMcpAuthResponseSchema,
 	RpcMcpCapabilitiesResponse: RpcMcpCapabilitiesResponseSchema,
-	RpcSourceInfo: RpcSourceInfoSchema,
-	RpcSlashCommand: RpcSlashCommandSchema,
-
-	// Session-owned background jobs
-	RpcBackgroundJobSummary: RpcBackgroundJobSummarySchema,
-	RpcBackgroundJobSnapshot: RpcBackgroundJobSnapshotSchema,
-	RpcBackgroundJobs: RpcBackgroundJobsSchema,
-	RpcListJobsResponse: RpcListJobsResponseSchema,
-	RpcReadJobResponse: RpcReadJobResponseSchema,
-	RpcCancelJobResponse: RpcCancelJobResponseSchema,
-	RpcBackgroundJobsChangedEvent: RpcBackgroundJobsChangedEventSchema,
-
-	// Session state + transcript + subagents + host status
-	RpcSessionWorkPullRequest: RpcSessionWorkPullRequestSchema,
-	RpcSessionWorkContext: RpcSessionWorkContextSchema,
-	RpcSessionListItem: RpcSessionListItemSchema,
-	RpcActiveToolExecution: RpcActiveToolExecutionSchema,
-	RpcActiveAgentRun: RpcActiveAgentRunSchema,
-	RpcActiveCompaction: RpcActiveCompactionSchema,
-	RpcActiveRetry: RpcActiveRetrySchema,
-	RpcPromptCacheStatus: RpcPromptCacheStatusSchema,
-	RpcPromptCacheChangedEvent: RpcPromptCacheChangedEventSchema,
-	RpcQueuedMessage: RpcQueuedMessageSchema,
-	RpcQueueUpdateProjection: RpcQueueUpdateProjectionSchema,
-	RpcAgentMode: RpcAgentModeSchema,
-	RpcPlanPhase: RpcPlanPhaseSchema,
-	RpcPlanStepStatus: RpcPlanStepStatusSchema,
-	RpcPlanExecutionStrategy: RpcPlanExecutionStrategySchema,
-	RpcPlanStep: RpcPlanStepSchema,
-	RpcPlanExecution: RpcPlanExecutionSchema,
-	RpcPlanState: RpcPlanStateSchema,
-	RpcPlanningState: RpcPlanningStateSchema,
-	RpcPlanningStateChangedEvent: RpcPlanningStateChangedEventSchema,
-	RpcPlanExecutionResult: RpcPlanExecutionResultSchema,
-	RpcSessionStateProjection: RpcSessionStateProjectionSchema,
-	RpcSessionState: RpcSessionStateSchema,
-	RpcCatalogModel: RpcCatalogModelSchema,
-	RpcTranscriptToolStatus: RpcTranscriptToolStatusSchema,
-	RpcTranscriptTextItem: RpcTranscriptTextItemSchema,
-	RpcTranscriptToolItem: RpcTranscriptToolItemSchema,
-	RpcTranscriptSummaryItem: RpcTranscriptSummaryItemSchema,
-	RpcTranscriptItem: RpcTranscriptItemSchema,
-	RpcTranscriptResponse: RpcTranscriptResponseSchema,
-	RpcSubagentDefinitionSource: RpcSubagentDefinitionSourceSchema,
-	RpcSubagentSourceInfo: RpcSubagentSourceInfoSchema,
-	RpcSubagentDefinition: RpcSubagentDefinitionSchema,
-	RpcListSubagentsResponse: RpcListSubagentsResponseSchema,
-	RpcSubagentStartResponse: RpcSubagentStartResponseSchema,
-	RpcRegisterPushTargetResponse: RpcRegisterPushTargetResponseSchema,
-	RpcKeepAwakeStatus: RpcKeepAwakeStatusSchema,
-	RpcWebSearchStatus: RpcWebSearchStatusSchema,
-	RpcPromptResponse: RpcPromptResponseSchema,
-
-	// Subscription usage
-	RpcSubscriptionUsageErrorCode: RpcSubscriptionUsageErrorCodeSchema,
-	RpcSubscriptionUsageLimit: RpcSubscriptionUsageLimitSchema,
-	RpcSubscriptionUsageSnapshot: RpcSubscriptionUsageSnapshotSchema,
-	RpcSubscriptionUsageResult: RpcSubscriptionUsageResultSchema,
-	RpcSubscriptionUsageProviderReport: RpcSubscriptionUsageProviderReportSchema,
-	RpcSubscriptionUsageReport: RpcSubscriptionUsageReportSchema,
-
-	// Ordered conversation + stream frames
-	RpcConversationDeliveryPosition: RpcConversationDeliveryPositionSchema,
-	RpcConversationActiveAssistant: RpcConversationActiveAssistantSchema,
-	RpcConversationAssistantPart: RpcConversationAssistantPartSchema,
-	RpcConversationTranscriptItem: RpcConversationTranscriptItemSchema,
-	RpcConversationTranscriptPage: RpcConversationTranscriptPageSchema,
-	RpcSessionTreeNode: RpcSessionTreeNodeSchema,
-	RpcSessionTreePage: RpcSessionTreePageSchema,
-	RpcConversationWorkflowSnapshot: RpcConversationWorkflowSnapshotSchema,
-	RpcConversationBootstrapEvent: RpcConversationBootstrapEventSchema,
-	RpcMessageStartFrame: RpcMessageStartFrameSchema,
-	RpcMessageUpdateFrame: RpcMessageUpdateFrameSchema,
-	RpcMessageEndFrame: RpcMessageEndFrameSchema,
-	RpcQueueUpdateEvent: RpcQueueUpdateEventSchema,
-	RpcTranscriptEntryEvent: RpcTranscriptEntryEventSchema,
-
-	// Events + control messages
-	RpcAgentStartEvent: RpcAgentStartEventSchema,
-	RpcHostActionMetadataValue: RpcHostActionMetadataValueSchema,
-	RpcHostActionRequest: RpcHostActionRequestSchema,
-	RpcHostActionUpdate: RpcHostActionUpdateSchema,
-	RpcHostActionResponse: RpcHostActionResponseSchema,
-	RpcPendingHostActionsResponse: RpcPendingHostActionsResponseSchema,
-	RpcExtensionUIRequest: RpcExtensionUIRequestSchema,
-	RpcExtensionUIResponse: RpcExtensionUIResponseSchema,
-	RpcExtensionErrorEvent: RpcExtensionErrorEventSchema,
-	RpcSubagentEvent: RpcSubagentEventSchema,
-	RpcSubagentEndEvent: RpcSubagentEndEventSchema,
-	RpcSubagentDisposedEvent: RpcSubagentDisposedEventSchema,
-	RpcModelsChangedEvent: RpcModelsChangedEventSchema,
-
-	// Response bodies without another home
-	RpcSessionStats: RpcSessionStatsSchema,
-	RpcBashResult: RpcBashResultSchema,
-	RpcCompactionResult: RpcCompactionResultSchema,
-	RpcMessageImage: RpcMessageImageSchema,
-	RpcMessageImagesResponse: RpcMessageImagesResponseSchema,
-	RpcTranscriptEntryTextResponse: RpcTranscriptEntryTextResponseSchema,
 	RpcMcpServersResponse: RpcMcpServersResponseSchema,
 	RpcMcpServerResponse: RpcMcpServerResponseSchema,
 	RpcMcpToolsResponse: RpcMcpToolsResponseSchema,
@@ -739,9 +443,45 @@ const SHARED_SCHEMAS: Record<string, TSchema> = {
 	RpcMcpPromptsResponse: RpcMcpPromptsResponseSchema,
 	RpcMcpPromptContentResponse: RpcMcpPromptContentResponseSchema,
 	RpcMcpRecentCallsResponse: RpcMcpRecentCallsResponseSchema,
-	RpcSessionIntentResponse: RpcSessionIntentResponseSchema,
-	RpcForkResponse: RpcForkResponseSchema,
-	RpcErrorResponse: RpcErrorResponseSchema,
+
+	// Session-owned background jobs
+	RpcBackgroundJobSummary: RpcBackgroundJobSummarySchema,
+	RpcBackgroundJobSnapshot: RpcBackgroundJobSnapshotSchema,
+	RpcBackgroundJobs: RpcBackgroundJobsSchema,
+
+	// Session catalog, run state, models, subagents, plans, and host status
+	RpcSessionWorkPullRequest: RpcSessionWorkPullRequestSchema,
+	RpcSessionWorkContext: RpcSessionWorkContextSchema,
+	RpcSessionListItem: RpcSessionListItemSchema,
+	RpcActiveAgentRun: RpcActiveAgentRunSchema,
+	RpcActiveCompaction: RpcActiveCompactionSchema,
+	RpcActiveRetry: RpcActiveRetrySchema,
+	RpcPromptCacheStatus: RpcPromptCacheStatusSchema,
+	RpcAgentMode: RpcAgentModeSchema,
+	RpcPlanStepStatus: RpcPlanStepStatusSchema,
+	RpcPlanExecutionStrategy: RpcPlanExecutionStrategySchema,
+	RpcPlanStep: RpcPlanStepSchema,
+	RpcPlanExecution: RpcPlanExecutionSchema,
+	RpcPlanState: RpcPlanStateSchema,
+	RpcPlanningState: RpcPlanningStateSchema,
+	RpcCatalogModel: RpcCatalogModelSchema,
+	RpcSubagentDefinitionSource: RpcSubagentDefinitionSourceSchema,
+	RpcSubagentSourceInfo: RpcSubagentSourceInfoSchema,
+	RpcSubagentDefinition: RpcSubagentDefinitionSchema,
+	RpcListSubagentsResponse: RpcListSubagentsResponseSchema,
+	RpcRegisterPushTargetResponse: RpcRegisterPushTargetResponseSchema,
+	RpcKeepAwakeStatus: RpcKeepAwakeStatusSchema,
+	RpcWebSearchStatus: RpcWebSearchStatusSchema,
+	RpcBashResult: RpcBashResultSchema,
+	RpcCompactionResult: RpcCompactionResultSchema,
+
+	// Subscription usage
+	RpcSubscriptionUsageErrorCode: RpcSubscriptionUsageErrorCodeSchema,
+	RpcSubscriptionUsageLimit: RpcSubscriptionUsageLimitSchema,
+	RpcSubscriptionUsageSnapshot: RpcSubscriptionUsageSnapshotSchema,
+	RpcSubscriptionUsageResult: RpcSubscriptionUsageResultSchema,
+	RpcSubscriptionUsageProviderReport: RpcSubscriptionUsageProviderReportSchema,
+	RpcSubscriptionUsageReport: RpcSubscriptionUsageReportSchema,
 
 	// Conversation log: envelope vocabulary, stored messages, client input
 	LogEntryVisibility: LogEntryVisibilitySchema,
@@ -840,6 +580,7 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	RemoteAccessPresetName: RemoteAccessPresetNameSchema,
 
 	// Projected entries and the client fold
+	TranscriptAssistantPart: TranscriptAssistantPartSchema,
 	TranscriptItem: TranscriptItemSchema,
 	ClientModelRef: ClientModelRefSchema,
 	ClientLabel: ClientLabelSchema,
@@ -857,6 +598,11 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	IntentScope: IntentScopeSchema,
 	IntentFence: IntentFenceSchema,
 	IntentWhileBusy: IntentWhileBusySchema,
+	IntentSource: IntentSourceSchema,
+	IntentOption: IntentOptionSchema,
+	IntentStateValue: IntentStateValueSchema,
+	IntentPresentation: IntentPresentationSchema,
+	IntentSlashAlias: IntentSlashAliasSchema,
 	IntentAvailability: IntentAvailabilitySchema,
 	IntentDescriptor: IntentDescriptorSchema,
 
@@ -868,6 +614,7 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 	HostRequest: HostRequestSchema,
 	HostResponse: HostResponseSchema,
 	LiveKey: LiveKeySchema,
+	LiveAssistantEvent: LiveAssistantEventSchema,
 	LiveToolPartial: LiveToolPartialSchema,
 
 	// Outcomes
@@ -881,13 +628,11 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
 };
 
 /**
- * Every named definition of the artifact. Per-command and per-response
- * members are keyed `RpcCommand.<type>` / `RpcResponse.<command>`, and the
- * four wire unions follow them. Daemon control messages are keyed
+ * Every named definition of the artifact. Daemon control messages are keyed
  * `Control.Request.<type>` / `Control.Response.<type>` / `Control.Event.<type>`,
  * each followed by its union. Each core log entry type contributes
- * `LogEntryPayload.<type>` and `LogEntry.<type>`; the `LogEntry` union closes
- * the legacy map.
+ * `LogEntryPayload.<type>` and `LogEntry.<type>`, closed by the `LogEntry`
+ * union.
  *
  * Protocol 1 follows: each projected entry type contributes
  * `ProjectedPayload.<type>` and `ProjectedEntry.<type>`; each built-in intent
@@ -900,16 +645,6 @@ const PROTOCOL_SCHEMAS: Record<string, TSchema> = {
  */
 export const CONTRACT_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 	const registry = new Map<string, TSchema>(Object.entries(SHARED_SCHEMAS));
-	for (const [type, schema] of Object.entries(RPC_COMMAND_SCHEMAS)) {
-		registry.set(`RpcCommand.${type}`, schema);
-	}
-	for (const [command, schema] of Object.entries(RPC_RESPONSE_SCHEMAS)) {
-		registry.set(`RpcResponse.${command}`, schema);
-	}
-	registry.set("RpcCommand", RpcCommandSchema);
-	registry.set("RpcClientMessage", RpcClientMessageSchema);
-	registry.set("RpcResponse", RpcResponseSchema);
-	registry.set("RpcServerEvent", RpcServerEventSchema);
 	for (const [type, schema] of Object.entries(CONTROL_REQUEST_SCHEMAS)) {
 		registry.set(`Control.Request.${type}`, schema);
 	}
@@ -965,9 +700,9 @@ export const CONTRACT_SCHEMA_REGISTRY: ReadonlyMap<string, TSchema> = (() => {
 // ============================================================================
 
 /**
- * The numeric bounds and stable vocabularies of the RPC wire that clients
- * mirror. Values come from the same constants the host enforces — the
- * artifact cannot drift from the runtime.
+ * The numeric bounds of the wire that clients mirror. Values come from the
+ * same constants the host enforces — the artifact cannot drift from the
+ * runtime.
  */
 export const RPC_WIRE_LIMITS = {
 	conversationIdentifierMaxUtf8Bytes: RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
@@ -984,6 +719,8 @@ export const RPC_WIRE_LIMITS = {
 		imageDataMaxUtf8Bytes: RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES,
 		imagesMaxUtf8Bytes: RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES,
 		maxSerializedBytes: RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES,
+		/** Accepted and started inputs a conversation's queue holds. */
+		queueMaxItems: RPC_SESSION_QUEUE_MAX_ITEMS,
 	},
 	gitContext: {
 		repositoryMaxChars: RPC_GIT_CONTEXT_REPOSITORY_MAX_CHARS,
@@ -992,46 +729,14 @@ export const RPC_WIRE_LIMITS = {
 		oidPattern: RPC_GIT_CONTEXT_OID_PATTERN,
 		observedAtMaxChars: RPC_GIT_CONTEXT_OBSERVED_AT_MAX_CHARS,
 	},
-	sessionState: {
-		maxSerializedBytes: RPC_SESSION_STATE_MAX_SERIALIZED_BYTES,
-		modelMaxSerializedBytes: RPC_SESSION_MODEL_MAX_SERIALIZED_BYTES,
-		queueMaxSerializedBytes: RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES,
-		queueMaxItems: RPC_SESSION_QUEUE_MAX_ITEMS,
-		queueItemMaxUtf8Bytes: RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES,
-		queueIdMaxUtf8Bytes: RPC_SESSION_QUEUE_ID_MAX_UTF8_BYTES,
-		activeToolsMaxSerializedBytes: RPC_SESSION_ACTIVE_TOOLS_MAX_SERIALIZED_BYTES,
-		activeToolsMaxItems: RPC_SESSION_ACTIVE_TOOLS_MAX_ITEMS,
-		activeToolArgsMaxSerializedBytes: RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
-		activeToolDetailsMaxSerializedBytes: RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
-		projectionStringMaxUtf8Bytes: RPC_PROJECTION_STRING_MAX_UTF8_BYTES,
-	},
-	conversationProjection: {
-		maxQueuedBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
-		maxQueuedEnvelopes: DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES,
-		assistantMaxContentBlocks: DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS,
-		assistantMaxCumulativeContentUtf8Bytes:
-			DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
-		assistantMaxToolCallSerializedBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES,
-		assistantMaxSnapshotSerializedBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
-	},
-	transcript: {
-		pageDefaultItems: RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS,
-		pageMaxItems: RPC_TRANSCRIPT_PAGE_MAX_ITEMS,
-		remotePageMaxSerializedBytes: REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES,
-		/** Scalar cap per projected item text and per get_transcript_entry_text continuation chunk. */
-		remoteEntryTextMaxScalars: IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
-	},
-	sessionTree: {
-		pageDefaultItems: RPC_SESSION_TREE_PAGE_DEFAULT_ITEMS,
-		pageMaxItems: RPC_SESSION_TREE_PAGE_MAX_ITEMS,
-		pageMaxSerializedBytes: RPC_SESSION_TREE_MAX_SERIALIZED_BYTES,
-	},
-	messageImages: {
-		responseEnvelopeHeadroomBytes: MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES,
-		responseBudgetBytes: MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES,
-		pageMaxItems: MESSAGE_IMAGES_PAGE_MAX_ITEMS,
-		entryMaxItems: MESSAGE_IMAGES_ENTRY_MAX_ITEMS,
-		entryMaxSerializedBytes: MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES,
+	remoteProfile: {
+		liveQueueBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES,
+		assistantContentMaxUtf8Bytes: DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES,
+		assistantSnapshotMaxBytes: DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES,
+		toolArgsMaxSerializedBytes: RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES,
+		toolDetailsMaxSerializedBytes: RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES,
+		/** Scalar cap per transcript view text and per `content` chunk. */
+		textMaxScalars: IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS,
 	},
 	jsonl: {
 		maxEncodedLineBytes: DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES,
@@ -1040,9 +745,7 @@ export const RPC_WIRE_LIMITS = {
 	wireMaxSafeInteger: RPC_WIRE_MAX_SAFE_INTEGER,
 	/** Client-enforced ceiling on retryAfterMs backoff hints. */
 	retryAfterMsMax: RPC_RETRY_AFTER_MS_MAX,
-	stableErrorCodes: RPC_STABLE_ERROR_CODES,
-	remoteErrorStrings: RPC_REMOTE_ERROR_STRINGS,
 } as const;
 
-/** Everything exported into the artifact as `x-volt-limits`: the RPC wire limits, the `UiNode` bounds, and the protocol constants. */
+/** Everything exported into the artifact as `x-volt-limits`: the wire limits, the `UiNode` bounds, and the protocol constants. */
 export const CONTRACT_LIMITS = { ...RPC_WIRE_LIMITS, uiNode: UI_NODE_LIMITS, protocol: PROTOCOL_LIMITS } as const;

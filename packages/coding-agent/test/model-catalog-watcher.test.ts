@@ -6,7 +6,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
 import { isModelCatalogSourceWatchEvent, startModelCatalogWatcher } from "../src/core/model-catalog-watcher.ts";
 import { ModelRegistry } from "../src/core/model-registry.ts";
-import type { RpcCloseHandler, RpcTransport } from "../src/core/rpc/transport.ts";
+import type { RpcCloseHandler, RpcTransport } from "../src/core/protocol/transport/transport.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createFakeConversation, createFakeHost } from "./utilities/fake-conversation-host.ts";
 

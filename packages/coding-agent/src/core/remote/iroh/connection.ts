@@ -22,7 +22,7 @@ import {
 	type IrohBiStreamLike,
 	type IrohBytes,
 	type IrohSendQueueBudget,
-} from "../../rpc/iroh-transport.ts";
+} from "../../protocol/transport/iroh-transport.ts";
 import { attachCompletionNotifications, type CompletionNotificationsOptions } from "./completion-notifications.ts";
 
 export interface IrohRemoteConnectionOptions

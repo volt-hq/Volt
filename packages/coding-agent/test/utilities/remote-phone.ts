@@ -8,7 +8,11 @@
 import { randomUUID } from "node:crypto";
 import type { HostFrame, HostRequestKind } from "@hansjm10/volt-protocol";
 import { expect, vi } from "vitest";
-import { createIrohRpcTransport, type IrohBiStreamLike, type IrohBytes } from "../../src/core/rpc/iroh-transport.ts";
+import {
+	createIrohRpcTransport,
+	type IrohBiStreamLike,
+	type IrohBytes,
+} from "../../src/core/protocol/transport/iroh-transport.ts";
 
 type Frame<T extends HostFrame["type"]> = Extract<HostFrame, { type: T }>;
 export type IntentOutcome = Frame<"accepted"> | Frame<"rejected">;

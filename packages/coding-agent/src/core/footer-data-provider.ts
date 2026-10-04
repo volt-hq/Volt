@@ -1,5 +1,5 @@
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import type { GitContextProvider } from "./git-context-provider.ts";
-import type { RpcGitContext } from "./rpc/types.ts";
 
 function branchFromSnapshot(snapshot: RpcGitContext | null): string | null {
 	if (!snapshot) return null;

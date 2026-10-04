@@ -10,9 +10,6 @@ import { openFork, openNewSession, openStoredSession } from "../host/session-int
 import type { HostClient } from "../host/targets.ts";
 import { parseModelPattern } from "../model-resolver.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
-import { buildRpcSessionState } from "../rpc/session-state.ts";
-import { projectSessionTranscript } from "../rpc/transcript.ts";
-import type { RpcSessionState, RpcTranscriptResponse } from "../rpc/types.ts";
 import { SessionManager, type SessionReference } from "../session-manager.ts";
 import type { SessionWriter } from "../session-writer.ts";
 import type {
@@ -97,8 +94,6 @@ export interface SubagentHandle {
 	 */
 	prompt(message: string): Promise<void>;
 	abort(source?: AgentAbortSource): Promise<void>;
-	getState(): Promise<RpcSessionState>;
-	getTranscript(options?: { limit?: number; beforeEntryId?: string }): Promise<RpcTranscriptResponse>;
 	getSessionStats(): Promise<SessionStats>;
 	waitForEnd(): Promise<SubagentResult>;
 	dispose(): Promise<void>;
@@ -666,16 +661,6 @@ class LocalSubagentHandle implements SubagentHandle {
 		// Abort the in-process runtime directly so cancellation is signalled before
 		// concurrent disposal can close the loopback transport.
 		await this.abortRuntime(source);
-	}
-
-	async getState(): Promise<RpcSessionState> {
-		this.assertOpen();
-		return buildRpcSessionState(this.conversation.session);
-	}
-
-	async getTranscript(options: { limit?: number; beforeEntryId?: string } = {}): Promise<RpcTranscriptResponse> {
-		this.assertOpen();
-		return projectSessionTranscript(this.conversation.session.sessionManager, options);
 	}
 
 	async getSessionStats(): Promise<SessionStats> {

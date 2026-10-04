@@ -498,7 +498,7 @@ describe("InteractiveMode profile selector", () => {
 			await session.setFastModeEnabled(true);
 			const fastStates: boolean[] = [];
 			session.subscribe((event) => {
-				if (event.type === "ui_action_state_changed") fastStates.push(event.state.value === true);
+				if (event.type === "fast_mode_changed") fastStates.push(event.enabled);
 			});
 			const context = Object.create(InteractiveMode.prototype) as SwitchProfileContext;
 			Object.defineProperties(context, {

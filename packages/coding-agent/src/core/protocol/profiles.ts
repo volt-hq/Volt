@@ -31,7 +31,6 @@ import {
 	type RemoteGrant,
 } from "@hansjm10/volt-protocol";
 import { createIrohRemoteProjectionSanitizer } from "../remote/iroh/sanitizer.ts";
-import { getRemoteVisibleCustomMessageRole } from "../rpc/custom-message-projection.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
 import { type IntentProfile, LOCAL_INTENT_PROFILE } from "./intents/types.ts";
 import {
@@ -161,6 +160,26 @@ const REMOTE_STATE_ENTRY_TYPES: ReadonlySet<string> = new Set([
 	"subagent_spawn",
 	"forked_from",
 ]);
+
+/**
+ * The transcript role of a custom message remote clients see, or undefined
+ * for the custom messages that stay on the host.
+ */
+export function getRemoteVisibleCustomMessageRole(
+	customType: string,
+	display: boolean,
+): "assistant" | "system" | undefined {
+	if (!display) return undefined;
+	switch (customType) {
+		case "review":
+			return "assistant";
+		case "background_job_notification":
+		case "subagent_recovery":
+			return "system";
+		default:
+			return undefined;
+	}
+}
 
 /** Whether a remote client sees `entry`: messages, summaries, remote-visible custom messages, and state entries. */
 function remoteIncludes(entry: CommittedSessionEntry): boolean {

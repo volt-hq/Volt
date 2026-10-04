@@ -117,7 +117,6 @@ export type {
 } from "./host-interaction.ts";
 export * from "./mcp/index.ts";
 export type { CustomMessage, CustomMessageInput } from "./messages.ts";
-export * from "./remote/iroh/index.ts";
 export {
 	attachJsonlLineReader,
 	createIrohRpcTransport,
@@ -133,34 +132,12 @@ export {
 	type JsonlRpcTransportOptions,
 	type JsonlStreamRpcTransportOptions,
 	type LoopbackRpcTransportPair,
-	type RpcClientCapabilityFeature,
 	type RpcCloseHandler,
-	type RpcCommand,
-	type RpcCommandType,
-	type RpcExtensionUIRequest,
-	type RpcExtensionUIResponse,
-	type RpcHostActionRequest,
-	type RpcHostActionResponse,
-	type RpcHostActionUpdate,
 	type RpcLineHandler,
-	type RpcListSubagentsResponse,
-	type RpcMcpCapabilitiesResponse,
-	type RpcMcpRecentCallsResponse,
-	type RpcMcpServerResponse,
-	type RpcMcpServersResponse,
-	type RpcModel,
-	type RpcPendingHostActionsResponse,
-	type RpcResponse,
-	type RpcSessionState,
-	type RpcSlashCommand,
-	type RpcSubagentDefinition,
-	type RpcSubagentDefinitionSource,
-	type RpcSubagentSourceInfo,
-	type RpcSubagentStartResponse,
-	type RpcSubscriptionUsageReport,
 	type RpcTransport,
 	serializeJsonLine,
-} from "./rpc/index.ts";
+} from "./protocol/transport/index.ts";
+export * from "./remote/iroh/index.ts";
 export { createSyntheticSourceInfo } from "./source-info.ts";
 export {
 	createBuiltInSubagentDefinitions,

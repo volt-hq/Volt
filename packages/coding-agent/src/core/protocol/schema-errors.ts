@@ -2,10 +2,14 @@
  * One readable message for a schema validation failure: the first missing
  * field, else the first unrecognized field, else the deepest mismatch, worded
  * from the failing sub-schema's `x-volt-expected` annotation when it has one.
+ * Byte and item budgets the schemas only annotate are checked separately,
+ * once a value passed its schema.
  */
 
+import { Buffer } from "node:buffer";
 import type { TObject, TSchema } from "typebox";
 import type { TLocalizedValidationError } from "typebox/error";
+import { Check } from "typebox/value";
 
 function instancePathSegments(instancePath: string): string[] {
 	if (instancePath === "") return [];
@@ -102,7 +106,7 @@ function expectedPhrase(schema: TSchema | undefined): string {
 }
 
 /**
- * Turns compiled-validator errors into one legacy-shaped message. Precedence:
+ * Turns compiled-validator errors into one message. Precedence:
  * missing required field, then unrecognized field, then the most specific
  * (deepest, non-anyOf) mismatch.
  */
@@ -136,4 +140,53 @@ export function formatSchemaError(schema: TObject, errors: TLocalizedValidationE
 	if (pick === undefined) return "does not match the command schema";
 	const segments = instancePathSegments(pick.instancePath);
 	return `"${formatFieldPath(segments)}" must ${expectedPhrase(resolveSubSchema(schema, segments))}`;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function boundError(schema: TSchema, value: unknown, segments: string[]): string | undefined {
+	const node = schema as Record<string, unknown>;
+	const maxBytes = node["x-volt-max-utf8-bytes"];
+	if (typeof maxBytes === "number" && typeof value === "string" && Buffer.byteLength(value, "utf8") > maxBytes) {
+		return `"${formatFieldPath(segments)}" exceeds the ${maxBytes}-byte UTF-8 limit`;
+	}
+	const maxItems = node["x-volt-max-items"];
+	if (typeof maxItems === "number" && Array.isArray(value) && value.length > maxItems) {
+		return `"${formatFieldPath(segments)}" exceeds the ${maxItems}-item limit`;
+	}
+	if (Array.isArray(value) && isRecord(node.items)) {
+		for (let index = 0; index < value.length; index++) {
+			const error = boundError(node.items as TSchema, value[index], [...segments, String(index)]);
+			if (error) return error;
+		}
+	}
+	const properties = node.properties as Record<string, TSchema> | undefined;
+	if (isRecord(value) && properties) {
+		for (const [key, property] of Object.entries(properties)) {
+			if (!Object.hasOwn(value, key)) continue;
+			const error = boundError(property, value[key], [...segments, key]);
+			if (error) return error;
+		}
+	}
+	if (Array.isArray(node.anyOf)) {
+		for (const branch of node.anyOf as TSchema[]) {
+			if (!Check(branch, value)) continue;
+			const error = boundError(branch, value, segments);
+			if (error) return error;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * The first budget a value that passed `schema` exceeds: a string longer than
+ * its `x-volt-max-utf8-bytes` annotation, or an array with more items than its
+ * `x-volt-max-items` annotation. JSON Schema cannot express either (its
+ * `maxLength` counts code points), so the host checks them here. Undefined
+ * when every bound holds.
+ */
+export function formatSchemaBoundError(schema: TSchema, value: unknown): string | undefined {
+	return boundError(schema, value, []);
 }

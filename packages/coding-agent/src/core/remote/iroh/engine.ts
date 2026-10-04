@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 import { randomBytes } from "node:crypto";
-import type { IrohBiStreamLike, IrohBytes, IrohRecvStreamLike } from "../../rpc/index.ts";
+import type { IrohBiStreamLike, IrohBytes, IrohRecvStreamLike } from "../../protocol/transport/index.ts";
 import { cloneIrohRemoteRpcGrant, createIrohRemotePresetAccess, type IrohRemoteRpcGrant } from "./access-grant.ts";
 import { type IrohRemoteAuditEventInput, IrohRemoteAuditLogger } from "./audit.ts";
 import {

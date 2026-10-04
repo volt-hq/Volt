@@ -26,6 +26,7 @@ import type {
 } from "@hansjm10/volt-agent-core";
 import { AdmissionGate, Conversation, type ConversationLog } from "@hansjm10/volt-agent-core";
 import type { ImageContent, Message, Model, PromptCacheRefresher, TextContent } from "@hansjm10/volt-ai";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { BackgroundJobDiagnostics } from "./background-job-diagnostics.ts";
@@ -59,7 +60,6 @@ import type { AgentMode, PlanExecution, PlanningState, PlanState, PlanStepStatus
 import type { PromptCacheStatus } from "./prompt-cache-status.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
-import type { RpcGitContext, UiActionStateDescriptor } from "./rpc/types.ts";
 import { SessionBackgroundContinuation } from "./session/background-continuation.ts";
 import { SessionBash } from "./session/bash.ts";
 import { SessionClientInputs } from "./session/client-inputs.ts";
@@ -188,11 +188,7 @@ export type AgentSessionEvent =
 	| { type: "planning_state_changed"; planning: PlanningState }
 	| { type: "git_context_changed"; gitContext: RpcGitContext | null }
 	| { type: "prompt_cache_changed"; promptCache: PromptCacheStatus | null }
-	| {
-			type: "ui_action_state_changed";
-			action: string;
-			state: UiActionStateDescriptor;
-	  }
+	| { type: "fast_mode_changed"; enabled: boolean }
 	| {
 			type: "compaction_end";
 			reason: CompactionReason;

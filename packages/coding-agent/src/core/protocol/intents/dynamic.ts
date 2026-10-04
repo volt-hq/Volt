@@ -9,10 +9,10 @@
  */
 
 import { randomBytes } from "node:crypto";
+import type { IntentOption } from "@hansjm10/volt-protocol";
 import type { ResolvedCommand } from "../../extensions/types.ts";
 import type { PromptTemplate } from "../../prompt-templates.ts";
 import type { ResourceLoader } from "../../resource-loader.ts";
-import type { UiActionOptionDescriptor } from "../../rpc/types.ts";
 import type { Skill } from "../../skills.ts";
 import type { SourceInfo } from "../../source-info.ts";
 import type { IntentMetadata } from "./types.ts";
@@ -80,10 +80,7 @@ export function dynamicIntentPromptText(intent: DynamicIntent, rawArguments: str
 }
 
 /** Completions for an extension command's arguments, bounded and redacted. */
-export async function completeDynamicIntentArguments(
-	intent: DynamicIntent,
-	prefix: string,
-): Promise<UiActionOptionDescriptor[]> {
+export async function completeDynamicIntentArguments(intent: DynamicIntent, prefix: string): Promise<IntentOption[]> {
 	if (!intent.command?.getArgumentCompletions) return [];
 	const completions = await intent.command.getArgumentCompletions(prefix);
 	return (completions ?? [])

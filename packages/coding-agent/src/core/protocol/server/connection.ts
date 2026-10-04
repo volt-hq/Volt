@@ -58,7 +58,7 @@ import {
 	UnsubscribeFrameSchema,
 } from "@hansjm10/volt-protocol";
 import { type Static, type TObject, type TSchema, Type } from "typebox";
-import { Compile, type Validator } from "typebox/compile";
+import { Compile } from "typebox/compile";
 import { VERSION } from "../../../config.ts";
 import type { ExtensionError } from "../../extensions/index.ts";
 import { ClientScope } from "../../host/client-scope.ts";
@@ -66,13 +66,14 @@ import type { ConversationHost } from "../../host/conversation-host.ts";
 import type { HostedConversation } from "../../host/hosted-conversation.ts";
 import { openFork, openNewSession, openStoredSession } from "../../host/session-intents.ts";
 import type { HostClient, HostClientMove, HostedRedirect, RedirectTarget } from "../../host/targets.ts";
-import { RpcFrameTooLargeError, type RpcTransport } from "../../rpc/transport.ts";
 import { SubscriptionUsageService } from "../../subscription-usage.ts";
 import { intentRegistry, isBuiltinIntentName } from "../intents/index.ts";
 import { type IntentContext, IntentRejectedError, type IntentServices } from "../intents/types.ts";
 import type { Profile } from "../profiles.ts";
 import { queryRegistry } from "../queries/index.ts";
 import { QueryRejectedError } from "../queries/types.ts";
+import { formatSchemaBoundError } from "../schema-errors.ts";
+import { RpcFrameTooLargeError, type RpcTransport } from "../transport/transport.ts";
 import { ConnectionSubagents, createLocalIntentServices, PendingReviewWorkflows } from "./local-services.ts";
 import { Subscription, type SubscriptionEnd, subscriptionReads } from "./subscription.ts";
 
@@ -311,20 +312,27 @@ const UnknownIntentEnvelopeSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
-const validators = new Map<string, Validator>();
+/** A frame check: the frame's schema, then the byte budgets the schema annotates (identifiers are at most 256 bytes). */
+interface FrameValidator {
+	Check(value: unknown): boolean;
+}
 
-/** A compiled validator, cached by key. */
-function validator(key: string, schema: () => TSchema): Validator {
+const validators = new Map<string, FrameValidator>();
+
+/** A compiled frame check, cached by key. */
+function validator(key: string, schema: () => TSchema): FrameValidator {
 	let compiled = validators.get(key);
 	if (!compiled) {
-		compiled = Compile(schema());
+		const resolved = schema();
+		const check = Compile(resolved);
+		compiled = { Check: (value) => check.Check(value) && formatSchemaBoundError(resolved, value) === undefined };
 		validators.set(key, compiled);
 	}
 	return compiled;
 }
 
 /** The envelope schema of an intent frame: its frame schema with the input left to the registry. */
-function intentEnvelopeValidator(type: string): Validator {
+function intentEnvelopeValidator(type: string): FrameValidator {
 	if (isBuiltinIntentName(type)) {
 		return validator(`intent:${type}`, () => {
 			const frame: TObject = INTENT_FRAME_SCHEMAS[type];

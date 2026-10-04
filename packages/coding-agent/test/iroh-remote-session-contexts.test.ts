@@ -1,7 +1,12 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { REMOTE_CAPABILITIES, type RemoteCapability } from "@hansjm10/volt-protocol";
+import {
+	REMOTE_CAPABILITIES,
+	type RemoteCapability,
+	type RpcGitContext,
+	type RpcSessionWorkContext,
+} from "@hansjm10/volt-protocol";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import {
 	createEmptyIrohRemoteHostState,
@@ -15,7 +20,6 @@ import {
 	createIrohRemoteSessionContextsRpcBackend,
 	type IrohRemoteSessionContextsRpcBackend,
 } from "../src/core/remote/iroh/session-contexts.ts";
-import type { RpcGitContext, RpcSessionWorkContext } from "../src/core/rpc/types.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { type RemoteIntentHost, remoteIntentServices, remoteStreamAllows } from "../src/daemon/remote-intents.ts";
 import { createSessionManagerTestOwner } from "./session-manager-owner.ts";

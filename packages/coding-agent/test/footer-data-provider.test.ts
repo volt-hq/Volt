@@ -1,7 +1,7 @@
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { describe, expect, it, vi } from "vitest";
 import { FooterDataProvider } from "../src/core/footer-data-provider.ts";
 import type { GitContextListener, GitContextProvider } from "../src/core/git-context-provider.ts";
-import type { RpcGitContext } from "../src/core/rpc/types.ts";
 
 const OID = "0123456789abcdef0123456789abcdef01234567";
 

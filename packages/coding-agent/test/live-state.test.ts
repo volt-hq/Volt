@@ -187,7 +187,7 @@ describe("LiveState host requests", () => {
 		expect(live.entries()).toEqual([]);
 	});
 
-	it("is unavailable without an accepting client and ends on abort, timeout, replacement, decline, and close", async () => {
+	it("is unavailable without an accepting client and ends on abort, timeout, and close", async () => {
 		vi.useFakeTimers();
 		const live = new LiveState();
 		await expect(live.request(confirm)).resolves.toEqual({ status: "cancelled", reason: "unavailable" });
@@ -195,9 +195,8 @@ describe("LiveState host requests", () => {
 			decision: "unavailable",
 		});
 
-		let accepting = true;
 		const client = createLiveRecorder();
-		live.attach("tui", { ...client, acceptsHostRequest: () => accepting });
+		live.attach("tui", { ...client, acceptsHostRequest: () => true });
 
 		const controller = new AbortController();
 		const aborted = live.request(confirm, { signal: controller.signal });
@@ -213,16 +212,10 @@ describe("LiveState host requests", () => {
 		await expect(live.request(confirm, { id: "same" })).rejects.toThrow(/already pending/);
 		expect(live.pendingRequest("same")?.request).toEqual({ kind: "input", title: "Name" });
 
-		accepting = false;
-		live.cancelUnanswerable("confirm");
-		expect(live.pendingRequest("same")).toBeDefined();
-		live.cancelUnanswerable();
-		await expect(pending).resolves.toEqual({ status: "cancelled", reason: "declined" });
-
-		accepting = true;
 		const closing = live.request(confirm);
 		live.close();
 		await expect(closing).resolves.toEqual({ status: "cancelled", reason: "closed" });
+		await expect(pending).resolves.toEqual({ status: "cancelled", reason: "closed" });
 		expect(client.updates.at(-1)).toEqual({ reset: true, basedOn: 0, items: [] });
 		await expect(live.request(confirm)).resolves.toEqual({ status: "cancelled", reason: "closed" });
 		live.notice("info", "closed");

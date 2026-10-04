@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { describe, expect, test } from "vitest";
+import type { IrohBytes, IrohRecvStreamLike } from "../src/core/protocol/transport/index.ts";
 import {
 	createEmptyIrohRemoteHostState,
 	createIrohRemoteHandshakeSuccess,
@@ -13,7 +14,6 @@ import {
 	parseIrohRemoteHandshakeResponseLine,
 	parseIrohRemoteHelloLine,
 } from "../src/core/remote/iroh/index.ts";
-import type { IrohBytes, IrohRecvStreamLike } from "../src/core/rpc/index.ts";
 
 type QueuedIrohRead = { type: "data"; bytes: IrohBytes } | { type: "end" };
 

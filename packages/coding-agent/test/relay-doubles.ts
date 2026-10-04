@@ -11,7 +11,7 @@ import type {
 	IrohBytes,
 	IrohRecvStreamLike,
 	IrohSendStreamLike,
-} from "../src/core/rpc/iroh-transport.ts";
+} from "../src/core/protocol/transport/iroh-transport.ts";
 import { encodeControlLine, PROTOCOL_VERSION } from "../src/daemon/control-protocol.ts";
 
 type QueuedPhoneRead = { type: "data"; bytes: Buffer } | { type: "end" };

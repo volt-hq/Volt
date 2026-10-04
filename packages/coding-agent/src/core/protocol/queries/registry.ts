@@ -1,14 +1,14 @@
 /**
- * The query registry: admission (profile, then parameters) and the run, for
- * every wire that reads a catalog — protocol query frames and the legacy RPC
- * and Iroh read commands.
+ * The query registry: admission (profile, then parameters and the byte budgets
+ * they annotate) and the run, for every query frame a host serves, local or
+ * relayed.
  */
 
 import { QUERY_SCHEMAS, type QueryName, type QueryParams, type QueryResult } from "@hansjm10/volt-protocol";
 import type { TObject } from "typebox";
 import { Compile, type Validator } from "typebox/compile";
 import { type IntentContext, missingCapability } from "../intents/types.ts";
-import { formatSchemaError } from "../schema-errors.ts";
+import { formatSchemaBoundError, formatSchemaError } from "../schema-errors.ts";
 import type { BUILTIN_QUERIES } from "./definitions.ts";
 import { type QueryDefinition, QueryRejectedError } from "./types.ts";
 
@@ -75,12 +75,12 @@ export class QueryRegistry {
 		}
 		const admitted = params ?? {};
 		const validator = this.validator(name);
-		if (!validator.Check(admitted)) {
-			throw new QueryRejectedError(
-				"invalid_input",
-				`Invalid ${name} parameters: ${formatSchemaError(QUERY_SCHEMAS[name].params as TObject, validator.Errors(admitted))}`,
-			);
-		}
+		const schema = QUERY_SCHEMAS[name].params as TObject;
+		const invalid = validator.Check(admitted)
+			? formatSchemaBoundError(schema, admitted)
+			: formatSchemaError(schema, validator.Errors(admitted));
+		if (invalid !== undefined)
+			throw new QueryRejectedError("invalid_input", `Invalid ${name} parameters: ${invalid}`);
 		if (definition.scope === "conversation" && !ctx.target) {
 			throw new QueryRejectedError("unavailable", `${name} needs a conversation`);
 		}

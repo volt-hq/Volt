@@ -185,7 +185,7 @@ describe("issue #56", () => {
 
 			// The rollback disposed the prepared child runtime, so the handle is
 			// dead: later calls must fail with a clear disposed-handle error.
-			await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+			await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 			await expect(handle.prompt("retry")).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 			await expect(handle.waitForEnd()).rejects.toThrow(/disposed before completion/);
 			await handle.dispose();
@@ -209,7 +209,7 @@ describe("issue #56", () => {
 			// still take the unpublished rollback path and dispose the handle.
 			await expect(handle.prompt("inspect authentication")).rejects.toThrow("Parent runtime is not active");
 
-			await expect(handle.getState()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
+			await expect(handle.getSessionStats()).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 			await expect(handle.prompt("retry")).rejects.toThrow(`Subagent ${handle.id} is disposed`);
 			await expect(handle.waitForEnd()).rejects.toThrow(/disposed before completion/);
 			expect(context.manager.listActivities()).toEqual([]);

@@ -8,9 +8,9 @@ import {
 	type IrohRecvStreamLike,
 	type IrohSendStreamLike,
 	readIrohJsonlLine,
-} from "../src/core/rpc/iroh-transport.ts";
-import { serializeJsonLine } from "../src/core/rpc/jsonl.ts";
-import { RpcFrameTooLargeError, type RpcTransport } from "../src/core/rpc/transport.ts";
+} from "../src/core/protocol/transport/iroh-transport.ts";
+import { serializeJsonLine } from "../src/core/protocol/transport/jsonl.ts";
+import { RpcFrameTooLargeError, type RpcTransport } from "../src/core/protocol/transport/transport.ts";
 
 type QueuedRead = { type: "data"; bytes: IrohBytes } | { type: "end" } | { type: "error"; error: Error };
 

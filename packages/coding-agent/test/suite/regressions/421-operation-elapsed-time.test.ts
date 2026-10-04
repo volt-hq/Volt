@@ -2,7 +2,7 @@ import type { AgentTool } from "@hansjm10/volt-agent-core";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
 import { Type } from "typebox";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { buildRpcSessionState } from "../../../src/core/rpc/session-state.ts";
+import { feedLiveState } from "../../../src/core/host/live-feed.ts";
 import { createHarness, getUserTexts, type Harness, type HarnessOptions } from "../harness.ts";
 
 const harnesses: Harness[] = [];
@@ -57,12 +57,12 @@ function observe(harness: Harness) {
 			].includes(event.type)
 		)
 			return;
-		const state = buildRpcSessionState(harness.session);
+		const timing = harness.session.activeAgentRun;
 		states.push({
 			type: event.type,
-			isStreaming: state.isStreaming,
+			isStreaming: harness.session.isStreaming,
 			...(event.type === "agent_start" ? { startedAt: event.startedAt } : {}),
-			...(state.activeAgentRun ? { timing: state.activeAgentRun } : {}),
+			...(timing ? { timing } : {}),
 		});
 	});
 	return states;
@@ -71,7 +71,6 @@ function observe(harness: Harness) {
 function expectSettled(harness: Harness) {
 	expect(harness.session.activeAgentRun).toBeUndefined();
 	expect(harness.session.isStreaming).toBe(false);
-	expect(buildRpcSessionState(harness.session).activeAgentRun).toBeUndefined();
 }
 
 function expectOneOperation(harness: Harness, states: ReturnType<typeof observe>, runs: number) {
@@ -139,6 +138,7 @@ describe("#421 operation elapsed timing", () => {
 				],
 			});
 			const states = observe(harness);
+			feedLiveState(harness.session);
 			expectSettled(harness);
 			harness.setResponses([
 				() =>
@@ -165,11 +165,10 @@ describe("#421 operation elapsed timing", () => {
 			await compacting.promise;
 			const original = harness.session.activeAgentRun;
 			expect(original).toBeDefined();
-			expect(buildRpcSessionState(harness.session)).toMatchObject({
-				activeAgentRun: original,
-				isStreaming: true,
-				isCompacting: true,
-			});
+			expect(harness.session.isStreaming).toBe(true);
+			expect(harness.session.isCompacting).toBe(true);
+			// Clients read the operation's timing from the live phase.
+			expect(harness.session.liveState.get("phase")).toMatchObject({ busy: true, run: original });
 			let idleResolved = false;
 			const idle = harness.session.waitForIdle().then(() => {
 				idleResolved = true;

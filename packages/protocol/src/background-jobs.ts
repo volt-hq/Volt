@@ -1,8 +1,8 @@
-import { Type } from "typebox";
+import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
 import { RpcConversationIdentifierSchema } from "./primitives.ts";
 
-/** Session-owned job metadata. Output is available only through read_job. */
+/** Session-owned job metadata. Output is available only through the `job_output` query. */
 export const RpcBackgroundJobSummarySchema = Type.Object(
 	{
 		id: RpcConversationIdentifierSchema,
@@ -19,6 +19,8 @@ export const RpcBackgroundJobSummarySchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+export type RpcBackgroundJobSummary = Static<typeof RpcBackgroundJobSummarySchema>;
+
 export const RpcBackgroundJobsSchema = Type.Array(RpcBackgroundJobSummarySchema, { maxItems: 64 });
 
 export const RpcBackgroundJobSnapshotSchema = Type.Object(
@@ -29,24 +31,4 @@ export const RpcBackgroundJobSnapshotSchema = Type.Object(
 	},
 	{ additionalProperties: false },
 );
-
-const jobResponseScope = {
-	sessionId: RpcConversationIdentifierSchema,
-	/** Present on ordered transports; stale queued responses are discarded after a branch change. */
-	branchEpoch: Type.Optional(RpcConversationIdentifierSchema),
-};
-
-export const RpcListJobsResponseSchema = Type.Object(
-	{ ...jobResponseScope, jobs: RpcBackgroundJobsSchema },
-	{ additionalProperties: false },
-);
-
-export const RpcReadJobResponseSchema = Type.Object(
-	{ ...jobResponseScope, job: RpcBackgroundJobSnapshotSchema },
-	{ additionalProperties: false },
-);
-
-export const RpcCancelJobResponseSchema = Type.Object(
-	{ ...jobResponseScope, job: RpcBackgroundJobSummarySchema },
-	{ additionalProperties: false },
-);
+export type RpcBackgroundJobSnapshot = Static<typeof RpcBackgroundJobSnapshotSchema>;

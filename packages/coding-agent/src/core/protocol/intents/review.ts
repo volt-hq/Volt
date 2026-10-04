@@ -6,6 +6,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import type { IntentOption } from "@hansjm10/volt-protocol";
 import { createReviewFixHandoff } from "../../host/review-handoff.ts";
 import { openNewSession } from "../../host/session-intents.ts";
 import { listBaseBranches, type ReviewTarget, reviewTargetForRerun } from "../../review.ts";
@@ -18,7 +19,6 @@ import {
 	getCanonicalReviewRun,
 	recordReviewFindingOutcome,
 } from "../../review-state.ts";
-import type { UiActionOptionDescriptor } from "../../rpc/types.ts";
 import { targetOf } from "./conversation.ts";
 import { boundedDisplayString, MAX_INTENT_COMPLETIONS, MAX_INTENT_LABEL_LENGTH } from "./dynamic.ts";
 import { isIntentStateBusy } from "./state.ts";
@@ -118,7 +118,7 @@ const reviewStart = {
  * upstream set as the TUI picker), prefix-filtered and bounded. Not a git
  * repository: no candidates.
  */
-async function completeBaseBranches(ctx: IntentContext, prefix: string): Promise<UiActionOptionDescriptor[]> {
+async function completeBaseBranches(ctx: IntentContext, prefix: string): Promise<IntentOption[]> {
 	const branches = await listBaseBranches(targetOf(ctx).session.sessionManager.getCwd());
 	if (!Array.isArray(branches)) return [];
 	const normalizedPrefix = prefix.toLowerCase();

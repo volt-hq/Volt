@@ -13,7 +13,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
 import { localProfile } from "../src/core/protocol/profiles.ts";
 import { type ProtocolConnection, serveConnection } from "../src/core/protocol/server/connection.ts";
-import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/protocol/transport/index.ts";
 import { createSyntheticSourceInfo } from "../src/core/source-info.ts";
 import type { SubagentDefinition, SubagentHandle, SubagentResult } from "../src/core/subagents/index.ts";
 import type { SubagentToolManager } from "../src/core/tools/index.ts";
@@ -146,9 +146,6 @@ function createControlledSubagent(
 	const prompt = vi.fn(run);
 	const abort = vi.fn(async (_source?: string) => undefined);
 	const dispose = vi.fn(async () => undefined);
-	const unused = async (): Promise<never> => {
-		throw new Error("not used");
-	};
 	return {
 		handle: {
 			id: subagentId,
@@ -156,9 +153,9 @@ function createControlledSubagent(
 			conversation,
 			prompt,
 			abort,
-			getState: unused,
-			getTranscript: unused,
-			getSessionStats: unused,
+			getSessionStats: async () => {
+				throw new Error("not used");
+			},
 			waitForEnd: () => completion.promise,
 			dispose,
 			onEvent: () => () => undefined,

@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { AgentSessionServices } from "../../../src/core/agent-session-services.ts";
 import { ConversationHost } from "../../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
-import { createLoopbackRpcTransportPair } from "../../../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair } from "../../../src/core/protocol/transport/index.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
 import { SubagentManager } from "../../../src/core/subagents/index.ts";

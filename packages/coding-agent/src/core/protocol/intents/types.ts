@@ -13,7 +13,11 @@ import type { Api, Model } from "@hansjm10/volt-ai";
 import type {
 	BuiltinIntentName,
 	IntentInput,
+	IntentOption,
 	IntentOutput,
+	IntentPresentation,
+	IntentSlashAlias,
+	IntentStateValue,
 	IrohRemoteWorktreeSummary,
 	PrReviewPrepareRequest,
 	PrReviewPrepareResponse,
@@ -23,6 +27,10 @@ import type {
 	RemoteCapability,
 	RemoteGrant,
 	RpcAgentOptionsSchema,
+	RpcKeepAwakeStatus,
+	RpcListSubagentsResponse,
+	RpcRegisterPushTargetArgs,
+	RpcRegisterPushTargetResponse,
 	RpcSessionContextSchema,
 	RpcSessionListItemSchema,
 } from "@hansjm10/volt-protocol";
@@ -34,17 +42,6 @@ import type { HostClient } from "../../host/targets.ts";
 import type { PlanningState } from "../../planning.ts";
 import type { ReviewRunControls, ReviewTarget, ReviewWorkflowResult } from "../../review.ts";
 import type { ReviewDiscussionService } from "../../review-discussions.ts";
-import type {
-	RpcKeepAwakeStatus,
-	RpcListSubagentsResponse,
-	RpcRegisterPushTargetArgs,
-	RpcRegisterPushTargetResponse,
-	RpcSubagentStartResponse,
-	UiActionOptionDescriptor,
-	UiActionPresentationHint,
-	UiActionSlashAlias,
-	UiActionStateDescriptor,
-} from "../../rpc/types.ts";
 import type { SettingsManager } from "../../settings-manager.ts";
 import type { SubscriptionUsageService } from "../../subscription-usage.ts";
 import type { Profile } from "../profiles.ts";
@@ -83,7 +80,7 @@ export interface IntentReviewOptions {
 
 export interface IntentSubagentServices {
 	list(): RpcListSubagentsResponse;
-	start(agent: string, prompt: string): Promise<RpcSubagentStartResponse>;
+	start(agent: string, prompt: string): Promise<{ readonly subagentId: string; readonly sessionId: string }>;
 	abort(subagentId: string): Promise<void>;
 	dispose(subagentId: string): Promise<void>;
 }
@@ -269,8 +266,8 @@ export interface IntentMetadata {
 	/** While the conversation is busy: rejected, run at once, or queued as a prompt. */
 	readonly whileBusy: "reject" | "run" | "queue";
 	readonly confirm?: { readonly message?: string; readonly destructive?: boolean };
-	readonly presentation?: UiActionPresentationHint;
-	readonly slash?: UiActionSlashAlias;
+	readonly presentation?: IntentPresentation;
+	readonly slash?: IntentSlashAlias;
 	/** Input fields the `intent_completions` query completes. */
 	readonly completions?: readonly string[];
 }
@@ -283,8 +280,8 @@ export interface IntentDefinition<N extends BuiltinIntentName, O> extends Intent
 	 */
 	readonly sourceOwned?: boolean | ((input: IntentInput<N>) => boolean);
 	available?(view: IntentView, input?: IntentInput<N>): IntentAvailability;
-	state?(view: IntentView): UiActionStateDescriptor | undefined;
-	complete?(ctx: IntentContext, field: string, prefix: string): Promise<UiActionOptionDescriptor[]>;
+	state?(view: IntentView): IntentStateValue | undefined;
+	complete?(ctx: IntentContext, field: string, prefix: string): Promise<IntentOption[]>;
 	run(ctx: IntentContext, input: IntentInput<N>): Promise<O>;
 	accept?(outcome: O): IntentAcceptance<N>;
 }

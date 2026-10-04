@@ -1556,7 +1556,7 @@ volt.registerCommand("status", {
 });
 ```
 
-`remoteSafe: true` exposes the command through remote native UI actions and permits remote slash invocation; it is a security classification, not a sandbox. The handler still runs on the host with the extension's full process permissions. Do not mark commands remote-safe if remote-controlled arguments can read secrets, mutate host configuration, execute arbitrary commands, or trigger UI flows that the remote client cannot safely answer. The default is `false`/omitted.
+`remoteSafe: true` lets paired remote clients invoke the command's intent and send its slash text; it is a security classification, not a sandbox. The handler still runs on the host with the extension's full process permissions. Do not mark commands remote-safe if remote-controlled arguments can read secrets, mutate host configuration, execute arbitrary commands, or trigger UI flows that the remote client cannot safely answer. The default is `false`/omitted.
 
 If multiple extensions register the same command name, volt keeps them all and assigns numeric invocation suffixes in load order, for example `/review:1` and `/review:2`.
 
@@ -1589,22 +1589,23 @@ volt.registerCommand("deploy", {
 });
 ```
 
-Native action projection: extension commands are also exposed through the native UI action protocol as palette actions when the host supports `get_ui_actions`. They use an opaque session-local action id, keep `presentation.kind` as `"palette"`, and accept one optional string argument named `arguments`. If the command defines `getArgumentCompletions`, the projected action advertises `completion: "commandArguments"` and remote clients can request the same completions through the UI action completion RPC.
+Intents: protocol clients see each extension command as a dynamic intent named `extension.command.<id>` (see [rpc.md](rpc.md#dynamic-intents)). The `intents` query lists it with an opaque id that is stable while the session's commands, prompt templates, and skills stay the same, the command's label and description, `presentation.kind: "palette"`, its slash alias, and the input `{arguments?, streamingBehavior?}`. If the command defines `getArgumentCompletions`, the descriptor lists `completions: ["arguments"]`, and clients read the same completions with the `intent_completions` query.
 
-Projection is a native presentation layer over the existing command handler:
+The intent is a presentation layer over the command handler:
 
-- Native clients invoke the projected action by id with `invoke_ui_action`; they should not synthesize `/<command>` when an action id is available.
-- The command still runs in the host and may return terminal `handled` without starting an agent turn.
-- `ctx.ui` dialog and notification requests continue through the existing RPC extension UI protocol. Terminal-only APIs such as `ctx.ui.custom()` remain unavailable or degraded in RPC mode.
-- Descriptors expose only safe labels and source scope/origin metadata. They do not expose extension source paths or raw `sourceInfo`.
+- Clients invoke the intent by name; they should not synthesize `/<command>` when the intent is listed. Invoking it sends the command's slash text as a prompt.
+- The command still runs in the host and may finish without starting an agent turn.
+- `ctx.ui` dialogs reach clients as host requests on the protocol's live lane (see [Clients](#clients)). Terminal-only APIs such as `ctx.ui.custom()` do nothing in RPC mode.
+- Descriptors expose only bounded labels and source scope/origin metadata. They do not expose extension source paths or raw `sourceInfo`.
+- Paired remote clients see only commands registered with `remoteSafe: true`.
 - Project-local extension commands appear only after the same project-trust/resource-loading path that exposes them locally.
 
-There is no first-class `volt.registerAction()` API in v1. Use `volt.registerCommand()` for user-invokable extension actions; native card/toggle metadata for extensions is deferred until stable extension-owned action ids, descriptor validation, project trust, and remote-safety rules are defined.
+There is no `volt.registerAction()` API. Use `volt.registerCommand()` for user-invokable extension actions; extension-defined intents with their own input schema and presentation are not available yet.
 
 ### volt.getCommands()
 
 Get the slash commands available for invocation via `prompt` in the current session. Includes extension commands, prompt templates, and skill commands.
-The list matches the RPC `get_commands` ordering: extensions first, then templates, then skills.
+The list has the order of the dynamic intents the `intents` query lists: extensions first, then templates, then skills.
 
 ```typescript
 const commands = volt.getCommands();
@@ -2408,7 +2409,7 @@ Extensions can interact with users via `ctx.ui` methods and customize how messag
 
 A session's extensions are bound once, when the first client attaches: the TUI, the stdio RPC client, print mode, or the first phone of a daemon-hosted conversation. They bind in the mode of the host the session runs in (`ctx.mode`), and `session_start` fires. The host attaches each client's surface whenever the client joins a session, including the session a session change moves it to. Later clients attach their own surface:
 
-- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`), `notify`, `setStatus`, string-array `setWidget`, `setTitle`, and `setEditorText` belong to the conversation and reach every attached client that shows UI. A client that attaches receives the latest status, widgets, and title and every pending dialog. The first answer to a dialog wins; a dialog stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes. The terminal-only members (`custom()`, component widgets, header, footer, editor components, terminal input, working indicators) go to the most recently attached client with a terminal. A phone relayed through the desktop TUI, or a phone whose access cannot answer dialogs, shows no extension UI: dialogs and status stay with the other clients.
+- **UI** (`ctx.ui`): dialogs (`select`, `confirm`, `input`, `editor`), `notify`, `setStatus`, string-array `setWidget`, `setTitle`, and `setEditorText` belong to the conversation and reach every attached client that shows UI. A dialog is asked of every attached client that can answer it, and the first answer wins. It stays pending until it is answered, its `signal` aborts, its `timeout` passes, the extensions reload, or the conversation closes, and it outlives the clients that saw it: a client that attaches, or reconnects, while it is pending is asked again, and receives the latest status, widgets, and title too. A phone is asked only the dialogs its access can answer (`conversation.control.v1`), whether it connects to a daemon-hosted conversation or is relayed through the desktop TUI; notifications, status, widgets, and title reach every phone. The terminal-only members (`custom()`, component widgets, header, footer, editor components, terminal input, working indicators) go to the most recently attached client with a terminal.
 - **Errors** reach every attached client.
 - **Session control** (`ctx.newSession()`, `ctx.fork()`, `ctx.switchSession()`, `ctx.navigateTree()`, `ctx.reload()`, `ctx.waitForIdle()`), `ctx.abort()`, and `ctx.shutdown()` act for the client whose request is running (its command, prompt, or the turn it started). Calls outside any client's request, such as from `session_start`, act for the first attached client. Calls for a client that has left do nothing; `ctx.abort()` then stops the session's work.
 - A phone changes sessions alone: `ctx.newSession()`, `ctx.fork()`, and `ctx.switchSession()` for it create the new session (`setup` runs), and the phone reconnects to it. Other clients stay on the source, which sees `session_before_switch` or `session_before_fork` but no `session_shutdown` until it closes. On a daemon-hosted session the daemon opens the new session right away, and its extensions start when the phone reconnects; for a phone relayed through the desktop TUI, the TUI writes the new session and the daemon opens it when the phone reconnects. `withSession` does not run for a phone, so the result reports `seeded: false`.
@@ -2458,7 +2459,7 @@ if (confirmed) {
 
 #### Host Dismissal
 
-Volt dismisses pending dialogs when it tears down extension UI: when the session is replaced or reloaded (including `/reload`), and when the session ends because a write could not be confirmed as saved. Dismissed dialogs return the same values as a cancel: `select()`, `input()`, and `editor()` return `undefined`, and `confirm()` returns `false`.
+Volt dismisses pending dialogs when it tears down extension UI: when the extensions reload (including `/reload`), and when the conversation closes, also because a write could not be confirmed as saved. A dialog asked while no attached client can answer it is dismissed at once. Dismissed dialogs return the same values as a cancel: `select()`, `input()`, and `editor()` return `undefined`, and `confirm()` returns `false`.
 
 #### Manual Dismissal with AbortSignal
 

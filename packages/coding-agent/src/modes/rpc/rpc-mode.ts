@@ -5,6 +5,8 @@
  *
  * The process ends when stdin closes, on SIGTERM or SIGHUP, when an extension
  * asks to shut down, or when the conversation the client is on loses its log.
+ * A lost log exits the process non-zero; an embedded mode (`exitProcess:
+ * false`) rejects with the log's error instead.
  */
 
 import type { ConversationHost } from "../../core/host/conversation-host.ts";
@@ -19,9 +21,9 @@ import {
 } from "../../core/output-guard.ts";
 import { localProfile } from "../../core/protocol/profiles.ts";
 import { serveConnection } from "../../core/protocol/server/connection.ts";
-import type { RpcTransport } from "../../core/rpc/transport.ts";
+import { attachJsonlLineReader, serializeJsonLine } from "../../core/protocol/transport/jsonl.ts";
+import type { RpcTransport } from "../../core/protocol/transport/transport.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
-import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 
 export interface RpcModeOptions {
 	/** Where frames travel; the process's stdin and stdout by default. */
@@ -69,15 +71,17 @@ export async function runRpcMode(
 	const exitProcess = options.exitProcess ?? stdio;
 	const transport = options.transport ?? createStdioTransport();
 	let exitCode = 0;
+	let lost: { error: Error } | undefined;
 	let shuttingDown: Promise<void> | undefined;
 	const connection = serveConnection(transport, localProfile, {
 		host,
 		conversation,
 		onShutdownRequested: () => void shutdown(0),
-		onLost: (lost, error) => {
+		onLost: (lostConversation, error) => {
 			console.error(
-				`Volt stopped session ${lost.id} because its saved state could not be confirmed: ${error.message}`,
+				`Volt stopped session ${lostConversation.id} because its saved state could not be confirmed: ${error.message}`,
 			);
+			lost ??= { error };
 			void shutdown(1, "The conversation lost its log");
 		},
 	});
@@ -123,6 +127,7 @@ export async function runRpcMode(
 	try {
 		await connection.closed;
 		if (readyFailure) throw readyFailure.error;
+		if (lost && !exitProcess) throw lost.error;
 	} catch (error) {
 		failure = error;
 		exitCode = Math.max(exitCode, 1);

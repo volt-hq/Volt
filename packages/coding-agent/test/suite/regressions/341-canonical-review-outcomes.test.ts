@@ -3,21 +3,23 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall } from "@hansjm10/volt-ai";
-import {
-	REMOTE_CAPABILITIES,
-	type RemoteGrant,
-	RPC_RESPONSE_SCHEMAS,
-	RPC_STABLE_ERROR_CODES,
-	RpcErrorResponseSchema,
-} from "@hansjm10/volt-protocol";
+import { INTENT_SCHEMAS, type IntentInput, REMOTE_CAPABILITIES, type RemoteGrant } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSession } from "../../../src/core/agent-session.ts";
 import type { CodeHostProvider, ReviewCodeHostPublishRequest } from "../../../src/core/code-host/index.ts";
 import type { ConversationHost } from "../../../src/core/host/conversation-host.ts";
 import type { ConversationFactory, HostedConversation } from "../../../src/core/host/hosted-conversation.ts";
+import {
+	type IntentContext,
+	type IntentTarget,
+	intentRegistry,
+	LOCAL_INTENT_PROFILE,
+} from "../../../src/core/protocol/intents/index.ts";
+import { queryRegistry } from "../../../src/core/protocol/queries/index.ts";
 import { serveIrohRemoteConnection } from "../../../src/core/remote/iroh/connection.ts";
 import { registerReviewHandoffAliases, resolveCanonicalReviewSource } from "../../../src/core/review-anchors.ts";
+import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../../src/core/review-discussion-policy.ts";
 import { HostReviewDiscussionService, type ReviewDiscussionService } from "../../../src/core/review-discussions.ts";
 import { publishReviewRun } from "../../../src/core/review-publish.ts";
 import type { ReviewSnapshot } from "../../../src/core/review-snapshot.ts";
@@ -36,12 +38,6 @@ import {
 } from "../../../src/core/review-state.ts";
 import { createAgentSession } from "../../../src/core/sdk.ts";
 import { SessionManager } from "../../../src/core/session-manager.ts";
-import {
-	createRpcErrorResponse,
-	handleRpcCommand,
-	type RpcCommandDispatcherContext,
-} from "../../../src/modes/rpc/rpc-command-dispatcher.ts";
-import type { RpcCommand, RpcResponse } from "../../../src/modes/rpc/rpc-types.ts";
 import { openTestHost } from "../../utilities/host-client.ts";
 import { createIrohStreamPair } from "../../utilities/iroh-stream-pair.ts";
 import { connectRemotePhone } from "../../utilities/remote-phone.ts";
@@ -214,36 +210,28 @@ async function fixture() {
 		await registerReviewHandoffAliases(source.session.sessionManager, manager, ["review:341"]);
 		aliases.push(await own(manager));
 	}
-	async function dispatch(runtime: Owned, command: RpcCommand): Promise<RpcResponse | undefined> {
-		try {
-			return await handleRpcCommand(command, {
-				session: runtime.session,
-				conversation: runtime.conversation,
-				host: runtime.host,
-				services: runtime.reviewDiscussions === undefined ? {} : { reviewDiscussions: runtime.reviewDiscussions },
-				options: {},
-				assertConversationGenerationCurrent: () => {},
-			} as unknown as RpcCommandDispatcherContext);
-		} catch (error) {
-			return createRpcErrorResponse(
-				command.id,
-				command.type,
-				error instanceof Error ? error.message : String(error),
-				error,
-			);
-		}
-	}
-	return { root, directory, source, aliases, runtimes, managers, own, dispatch, harness };
+	return { root, directory, source, aliases, runtimes, managers, own, harness };
 }
 
-function expectErrorEnvelope(response: unknown, errorCode: string) {
-	expect(response).toMatchObject({ type: "response", success: false, errorCode });
-	expect(Compile(RpcErrorResponseSchema).Errors(response)).toEqual([]);
+/** A local intent context on `runtime`'s conversation, with the review discussion service it was given. */
+function contextOf(runtime: Owned): IntentContext {
+	return {
+		// No test client: these intents and queries act on the conversation alone.
+		target: { session: runtime.session, conversation: runtime.conversation, host: runtime.host } as IntentTarget,
+		services: runtime.reviewDiscussions === undefined ? {} : { reviewDiscussions: runtime.reviewDiscussions },
+		profile: LOCAL_INTENT_PROFILE,
+	};
 }
+
+function recordOutcome(runtime: Owned, input: IntentInput<"review_record_finding_outcome">) {
+	return intentRegistry.invoke(contextOf(runtime), "review_record_finding_outcome", input);
+}
+
+const SOURCE_UNAVAILABLE = { code: "review_source_unavailable" };
 
 describe("Regression #341 canonical finding hydration and outcomes", () => {
 	it("applies discussion code fixes without granting canonical outcome authority", async () => {
-		const { source, directory, root, own, dispatch, harness } = await fixture();
+		const { source, directory, root, own, harness } = await fixture();
 		const started = await source.reviewDiscussions!.start("review:341", ["f1"], "start");
 		const ref = await SessionManager.findForResume(directory, started.results[0]!.discussion!.sessionId);
 		const child = await own(await SessionManager.open(ref!));
@@ -259,41 +247,39 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			"Canonical finding outcomes belong to the source review",
 		);
 		await expect(child.reviewDiscussions!.recordOutcome(outcome)).rejects.toThrow("requires the source review");
-		expect(await dispatch(child, { type: "record_review_finding_outcome", ...outcome })).toMatchObject({
-			success: false,
-			error: expect.stringContaining("source review"),
+		await expect(recordOutcome(child, outcome)).rejects.toMatchObject({
+			code: "unavailable",
+			message: REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE,
 		});
 		expect(
 			(await getCanonicalReviewRun(source.session.sessionManager, "review:341"))!.result!.findings[0]!.status,
 		).toBe("open");
 		expect(exportReviewFeedback(child.session.sessionManager).outcomes).toEqual([]);
-		expect(await dispatch(source, { type: "record_review_finding_outcome", ...outcome })).toMatchObject({
-			success: true,
-		});
+		expect((await recordOutcome(source, outcome)).result).toMatchObject({ status: "fixed" });
 	});
 	it("converges source and persisted aliases after every manual outcome, including reopened readers", async () => {
-		const { source, aliases, managers, dispatch } = await fixture();
+		const { source, aliases, managers } = await fixture();
 		const sourceManager = source.session.sessionManager;
 		const staleSource = await SessionManager.openReadOnly(sourceManager.getSessionRef()!);
 		managers.push(staleSource);
 		await acknowledgeReviewRun(aliases[0]!.session.sessionWriter, "review:341", 123);
 		for (const [index, status] of (["accepted", "fixed", "dismissed"] as const).entries()) {
 			const writer = [aliases[0]!, source, aliases[1]!][index]!;
-			const response = await dispatch(writer, {
-				type: "record_review_finding_outcome",
+			const { result } = await recordOutcome(writer, {
 				runId: "review:341",
 				findingId: "f1",
 				status,
 				...(status === "dismissed" ? { reason: "false_positive" as const, note: "Manually verified" } : {}),
 			});
-			expect(response).toMatchObject({ success: true, data: { status } });
-			expect(Compile(RPC_RESPONSE_SCHEMAS.record_review_finding_outcome).Errors(response)).toEqual([]);
+			expect(result).toMatchObject({ status });
+			expect(Compile(INTENT_SCHEMAS.review_record_finding_outcome.output).Errors(result)).toEqual([]);
 			const expected = (await getCanonicalReviewRun(sourceManager, "review:341"))!.result!.findings;
 			for (const runtime of [source, ...aliases]) {
-				expect(await dispatch(runtime, { type: "get_review_result", runId: "review:341" })).toMatchObject({
-					success: true,
-					data: { findings: expected },
-				});
+				expect(await queryRegistry.run(contextOf(runtime), "review.result", { runId: "review:341" })).toMatchObject(
+					{
+						findings: expected,
+					},
+				);
 				expect((await listCanonicalReviewRuns(runtime.session.sessionManager)).runs[0]!.result!.findings).toEqual(
 					expected,
 				);
@@ -313,25 +299,20 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 	});
 
 	it("hydrates canonical writes when the source runtime is no longer active", async () => {
-		const { source, aliases, runtimes, dispatch } = await fixture();
+		const { source, aliases, runtimes } = await fixture();
 		const sourceManager = source.session.sessionManager;
 		await source.dispose();
 		runtimes.splice(runtimes.indexOf(source), 1);
 		expect(
-			await dispatch(aliases[0]!, {
-				type: "record_review_finding_outcome",
-				runId: "review:341",
-				findingId: "f1",
-				status: "fixed",
-			}),
-		).toMatchObject({ success: true });
+			(await recordOutcome(aliases[0]!, { runId: "review:341", findingId: "f1", status: "fixed" })).result,
+		).toMatchObject({ status: "fixed" });
 		for (const manager of [sourceManager, ...aliases.map((alias) => alias.session.sessionManager)]) {
 			expect((await getCanonicalReviewRun(manager, "review:341"))!.result!.findings[0]!.status).toBe("fixed");
 		}
 	});
 
 	it("uses canonical outcomes for incremental review and publishing, preserving local pagination", async () => {
-		const { source, aliases, dispatch } = await fixture();
+		const { source, aliases } = await fixture();
 		const alias = aliases[0]!.session.sessionManager;
 		await appendReviewRun(aliases[0]!.session.sessionWriter, review("review:local", 1));
 		for (const [findingId, status] of [
@@ -340,14 +321,15 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			["f3", "accepted"],
 		] as const) {
 			expect(
-				await dispatch(source, {
-					type: "record_review_finding_outcome",
-					runId: "review:341",
-					findingId,
-					status,
-					...(status === "dismissed" ? { reason: "intentional" as const } : {}),
-				}),
-			).toMatchObject({ success: true });
+				(
+					await recordOutcome(source, {
+						runId: "review:341",
+						findingId,
+						status,
+						...(status === "dismissed" ? { reason: "intentional" as const } : {}),
+					})
+				).result,
+			).toMatchObject({ status });
 		}
 		const first = await listCanonicalReviewRuns(alias, { limit: 1 });
 		expect(first.runs[0]!.result!.findings.map((finding) => finding.status)).toEqual([
@@ -407,7 +389,7 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 	});
 
 	it("keeps ephemeral, unregistered, forked and imported reviews local even with a discussion backend", async () => {
-		const { root, directory, source, managers, own, dispatch } = await fixture();
+		const { root, directory, source, managers, own } = await fixture();
 		const ref = source.session.sessionRef!;
 		const exported = join(root, "source.jsonl");
 		await SessionManager.exportJsonlSnapshot(ref, exported);
@@ -423,13 +405,8 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 			const writeCanonical = vi.spyOn(runtime.reviewDiscussions!, "recordOutcome");
 			expect(await resolveCanonicalReviewSource(manager, "review:341")).toBeUndefined();
 			expect(
-				await dispatch(runtime, {
-					type: "record_review_finding_outcome",
-					runId: "review:341",
-					findingId: "f1",
-					status: "fixed",
-				}),
-			).toMatchObject({ success: true });
+				(await recordOutcome(runtime, { runId: "review:341", findingId: "f1", status: "fixed" })).result,
+			).toMatchObject({ status: "fixed" });
 			expect(writeCanonical).not.toHaveBeenCalled();
 			expect((await getCanonicalReviewRun(manager, "review:341"))!.result!.findings[0]!.status).toBe("fixed");
 		}
@@ -464,24 +441,29 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 	});
 
 	it("fails explicitly when the canonical run is no longer on the source branch", async () => {
-		const { source, aliases, dispatch } = await fixture();
+		const { source, aliases } = await fixture();
 		// Move the live source's branch back to its first entry, before the run was recorded.
 		const [first] = source.session.sessionManager.getEntries();
 		await source.session.navigateTree(first!.id);
 		expect(getReviewRun(source.session.sessionManager, "review:341")).toBeUndefined();
 		const alias = aliases[0]!;
-		for (const command of [
-			{ type: "get_review_result", runId: "review:341" },
-			{ type: "list_review_workflows" },
-			{ type: "export_review_feedback" },
-			{ type: "record_review_finding_outcome", runId: "review:341", findingId: "f1", status: "fixed" },
-		] as const)
-			expectErrorEnvelope(await dispatch(alias, command), "review_source_unavailable");
+		await expect(queryRegistry.run(contextOf(alias), "review.result", { runId: "review:341" })).rejects.toMatchObject(
+			SOURCE_UNAVAILABLE,
+		);
+		await expect(queryRegistry.run(contextOf(alias), "review.workflows", {})).rejects.toMatchObject(
+			SOURCE_UNAVAILABLE,
+		);
+		await expect(intentRegistry.invoke(contextOf(alias), "review_export_feedback", {})).rejects.toMatchObject(
+			SOURCE_UNAVAILABLE,
+		);
+		await expect(
+			recordOutcome(alias, { runId: "review:341", findingId: "f1", status: "fixed" }),
+		).rejects.toMatchObject(SOURCE_UNAVAILABLE);
 		expect(getReviewRun(alias.session.sessionManager, "review:341")!.result!.findings[0]!.status).toBe("open");
 	});
 
 	it("does not fall back to aliases after source deletion or same-id recreation", async () => {
-		const { root, directory, source, aliases, runtimes, managers, dispatch } = await fixture();
+		const { root, directory, source, aliases, runtimes, managers } = await fixture();
 		const ref = source.session.sessionRef!;
 		await source.dispose();
 		runtimes.splice(runtimes.indexOf(source), 1);
@@ -491,44 +473,28 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		await appendReviewRun(replacement.logWriter, review());
 		expect(replacement.getSessionRef()!.sessionGeneration).not.toBe(ref.sessionGeneration);
 		for (const alias of aliases) {
-			expectErrorEnvelope(
-				await dispatch(alias, { type: "get_review_result", runId: "review:341" }),
-				"review_source_unavailable",
+			await expect(
+				queryRegistry.run(contextOf(alias), "review.result", { runId: "review:341" }),
+			).rejects.toMatchObject(SOURCE_UNAVAILABLE);
+			await expect(queryRegistry.run(contextOf(alias), "review.workflows", {})).rejects.toMatchObject(
+				SOURCE_UNAVAILABLE,
 			);
-			expectErrorEnvelope(await dispatch(alias, { type: "list_review_workflows" }), "review_source_unavailable");
-			expectErrorEnvelope(
-				await dispatch(alias, {
-					type: "record_review_finding_outcome",
-					runId: "review:341",
-					findingId: "f1",
-					status: "fixed",
-				}),
-				"review_source_unavailable",
-			);
+			await expect(
+				recordOutcome(alias, { runId: "review:341", findingId: "f1", status: "fixed" }),
+			).rejects.toMatchObject(SOURCE_UNAVAILABLE);
 		}
 	});
 
 	it("requires a canonical writer on aliases but permits direct source outcomes without the sibling backend", async () => {
-		const { source, aliases, dispatch } = await fixture();
+		const { source, aliases } = await fixture();
 		source.reviewDiscussions = undefined;
 		aliases[0]!.reviewDiscussions = undefined;
 		expect(
-			await dispatch(source, {
-				type: "record_review_finding_outcome",
-				runId: "review:341",
-				findingId: "f1",
-				status: "fixed",
-			}),
-		).toMatchObject({ success: true });
-		expectErrorEnvelope(
-			await dispatch(aliases[0]!, {
-				type: "record_review_finding_outcome",
-				runId: "review:341",
-				findingId: "f1",
-				status: "accepted",
-			}),
-			"review_source_unavailable",
-		);
+			(await recordOutcome(source, { runId: "review:341", findingId: "f1", status: "fixed" })).result,
+		).toMatchObject({ status: "fixed" });
+		await expect(
+			recordOutcome(aliases[0]!, { runId: "review:341", findingId: "f1", status: "accepted" }),
+		).rejects.toMatchObject(SOURCE_UNAVAILABLE);
 		expect(exportReviewFeedback(aliases[0]!.session.sessionManager).outcomes).toEqual([]);
 		expect(
 			(await getCanonicalReviewRun(aliases[0]!.session.sessionManager, "review:341"))!.result!.findings[0]!.status,
@@ -571,32 +537,18 @@ describe("Regression #341 canonical finding hydration and outcomes", () => {
 		}
 	});
 
-	it("registers emitted review errors and validates both correlated and uncorrelated envelopes", async () => {
-		const { source, dispatch } = await fixture();
-		for (const code of ["review_discussions_unavailable", "review_source_unavailable"] as const) {
-			expect(RPC_STABLE_ERROR_CODES).toContain(code);
-			for (const id of [undefined, "request"])
-				expectErrorEnvelope(createRpcErrorResponse(id, "get_review_result", "Unavailable", { code }), code);
-			expectErrorEnvelope(createRpcErrorResponse("request", "invoke_ui_action", "Unavailable", { code }), code);
-		}
-		expectErrorEnvelope(
-			await dispatch(source, { id: "missing", type: "list_review_discussions", runId: "unknown" }),
-			"review_source_unavailable",
-		);
+	it("fails review discussion reads and canonical writes with stable review error codes", async () => {
+		const { source } = await fixture();
+		await expect(
+			queryRegistry.run(contextOf(source), "review.discussions", { runId: "unknown" }),
+		).rejects.toMatchObject(SOURCE_UNAVAILABLE);
 		vi.spyOn(source.reviewDiscussions!, "recordOutcome").mockRejectedValueOnce(new Error("source retired"));
-		expectErrorEnvelope(
-			await dispatch(source, {
-				type: "record_review_finding_outcome",
-				runId: "review:341",
-				findingId: "f1",
-				status: "fixed",
-			}),
-			"review_source_unavailable",
-		);
+		await expect(
+			recordOutcome(source, { runId: "review:341", findingId: "f1", status: "fixed" }),
+		).rejects.toMatchObject(SOURCE_UNAVAILABLE);
 		source.reviewDiscussions = undefined;
-		expectErrorEnvelope(
-			await dispatch(source, { type: "get_review_discussion_source" }),
-			"review_discussions_unavailable",
-		);
+		await expect(queryRegistry.run(contextOf(source), "review.discussion_source", {})).rejects.toMatchObject({
+			code: "review_discussions_unavailable",
+		});
 	});
 });

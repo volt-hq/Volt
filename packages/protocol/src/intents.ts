@@ -20,12 +20,13 @@
  * Frame type names are reserved: no intent is named like a frame.
  */
 
+import type { JsonValue } from "@hansjm10/volt-ai";
 import { type Static, type TObject, type TSchema, type TString, type TUnion, Type } from "typebox";
 import { RpcAgentOptionsModelSelectionSchema } from "./agent-options.ts";
 import { RpcBackgroundJobSummarySchema } from "./background-jobs.ts";
 import { LogEntryIdSchema, LogSessionIdSchema } from "./entries.ts";
-import { opaque, stringEnum } from "./helpers.ts";
-import { RpcMcpAuthResponseSchema } from "./mcp.ts";
+import { opaque, openStringEnum, stringEnum } from "./helpers.ts";
+import { RpcMcpAuthResponseSchema, RpcMcpServerResponseSchema } from "./mcp.ts";
 import { RpcAgentModeSchema, RpcPlanExecutionStrategySchema } from "./planning.ts";
 import { RpcPreparePrReviewResponseSchema, RpcPrReviewPrepareRequestSchema } from "./pr-review.ts";
 import {
@@ -41,15 +42,9 @@ import {
 import { RpcReviewAcknowledgmentResponseSchema } from "./projections.ts";
 import { RemoteCapabilitiesSchema } from "./remote-access.ts";
 import { IrohRemoteWorkingDirectorySchema, IrohRemoteWorktreeIdSchema } from "./remote-handshake.ts";
-import { RpcBashResultSchema, RpcCompactionResultSchema, RpcMcpServerResponseSchema } from "./responses.ts";
 import { RpcResetReviewDiscussionSchema, RpcStartReviewDiscussionsSchema } from "./review-discussions.ts";
 import { RpcKeepAwakeStatusSchema, RpcRegisterPushTargetResponseSchema, RpcWebSearchStatusSchema } from "./session.ts";
-import {
-	UiActionPresentationHintSchema,
-	UiActionSlashAliasSchema,
-	UiActionSourceSchema,
-	UiActionStateDescriptorSchema,
-} from "./ui-actions.ts";
+import { RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES } from "./wire-limits.ts";
 import { IrohRemoteWorkspaceNameSchema, IrohRemoteWorktreeSummarySchema } from "./workspace.ts";
 
 const closed = { additionalProperties: false } as const;
@@ -82,12 +77,40 @@ export const IntentCancelledSchema = Type.Object(
 /** The output of an intent that started a review workflow. */
 export const ReviewWorkflowStartedSchema = Type.Object({ workflowId: RpcConversationIdentifierSchema }, closed);
 
+/** The output of `bash`: the command's combined output, sanitized and possibly truncated. */
+export const RpcBashResultSchema = Type.Object(
+	{
+		/** Combined stdout + stderr output (sanitized, possibly truncated) */
+		output: Type.String(),
+		/** Process exit code (absent if killed/cancelled) */
+		exitCode: Type.Optional(Type.Number()),
+		cancelled: Type.Boolean(),
+		truncated: Type.Boolean(),
+		/** Path to temp file containing full output (if output exceeded truncation threshold) */
+		fullOutputPath: Type.Optional(Type.String()),
+	},
+	closed,
+);
+
+/** The output of `compact`. */
+export const RpcCompactionResultSchema = Type.Object(
+	{
+		summary: Type.String(),
+		firstKeptEntryId: Type.String(),
+		tokensBefore: Type.Number(),
+		/** Estimated context tokens after rebuilding from the new compaction boundary. */
+		estimatedTokensAfter: Type.Optional(Type.Number()),
+		details: Type.Optional(opaque<JsonValue>("extension-specific compaction data")),
+	},
+	closed,
+);
+
 // ============================================================================
 // Input fragments
 // ============================================================================
 
 const conversationInput = {
-	message: Type.String(),
+	message: Type.String({ "x-volt-max-utf8-bytes": RPC_CONVERSATION_INPUT_MESSAGE_MAX_UTF8_BYTES }),
 	images: Type.Optional(RpcConversationInputImagesSchema),
 };
 
@@ -516,6 +539,51 @@ export type IntentFrame =
 // Descriptors
 // ============================================================================
 
+/** Where an intent comes from: built in, or an extension command, prompt template, skill, or package. */
+export const IntentSourceSchema = stringEnum(["builtin", "extension", "prompt", "skill", "package"]);
+
+/** One choice for an intent's state or an input completion. */
+export const IntentOptionSchema = Type.Object(
+	{
+		value: Type.String(),
+		label: Type.Optional(Type.String()),
+		description: Type.Optional(Type.String()),
+	},
+	closed,
+);
+export type IntentOption = Static<typeof IntentOptionSchema>;
+
+/** The current value an intent sets, such as a toggle's state or a picker's selection. */
+export const IntentStateValueSchema = Type.Object(
+	{
+		type: openStringEnum(["boolean", "string", "enum", "integer"]),
+		value: Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]),
+		label: Type.Optional(Type.String()),
+		options: Type.Optional(Type.Array(IntentOptionSchema)),
+	},
+	closed,
+);
+export type IntentStateValue = Static<typeof IntentStateValueSchema>;
+
+/** How a client may present an intent. Clients ignore kinds they do not know. */
+export const IntentPresentationSchema = Type.Object(
+	{
+		kind: openStringEnum(["card", "button", "toggle", "picker", "palette", "detail", "hidden"]),
+		group: Type.Optional(Type.String()),
+		priority: Type.Optional(Type.Number()),
+		icon: Type.Optional(Type.String()),
+	},
+	closed,
+);
+export type IntentPresentation = Static<typeof IntentPresentationSchema>;
+
+/** The slash command that invokes an intent in a text client. */
+export const IntentSlashAliasSchema = Type.Object(
+	{ name: Type.String(), example: Type.Optional(Type.String()) },
+	closed,
+);
+export type IntentSlashAlias = Static<typeof IntentSlashAliasSchema>;
+
 export const IntentCategorySchema = stringEnum([
 	"session",
 	"model",
@@ -552,7 +620,7 @@ export const IntentDescriptorSchema = Type.Object(
 		label: Type.String(),
 		description: Type.Optional(Type.String()),
 		category: IntentCategorySchema,
-		source: UiActionSourceSchema,
+		source: IntentSourceSchema,
 		sourceLabel: Type.Optional(Type.String()),
 		scope: IntentScopeSchema,
 		input: opaque<Record<string, unknown>>("JSON Schema of the intent's input"),
@@ -567,13 +635,13 @@ export const IntentDescriptorSchema = Type.Object(
 		confirm: Type.Optional(
 			Type.Object({ message: Type.Optional(Type.String()), destructive: Type.Optional(Type.Boolean()) }, closed),
 		),
-		presentation: Type.Optional(UiActionPresentationHintSchema),
-		slash: Type.Optional(UiActionSlashAliasSchema),
+		presentation: Type.Optional(IntentPresentationSchema),
+		slash: Type.Optional(IntentSlashAliasSchema),
 		/** Input fields the `intent_completions` query completes. */
 		completions: Type.Optional(Type.Array(Type.String())),
 		enabled: Type.Boolean(),
 		reason: Type.Optional(Type.String()),
-		state: Type.Optional(UiActionStateDescriptorSchema),
+		state: Type.Optional(IntentStateValueSchema),
 	},
 	closed,
 );
@@ -585,7 +653,7 @@ export const IntentAvailabilitySchema = Type.Object(
 		name: IntentNameSchema,
 		enabled: Type.Boolean(),
 		reason: Type.Optional(Type.String()),
-		state: Type.Optional(UiActionStateDescriptorSchema),
+		state: Type.Optional(IntentStateValueSchema),
 	},
 	closed,
 );

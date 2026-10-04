@@ -1,6 +1,6 @@
 /**
- * The numeric bounds, grammars, and stable string vocabularies of the RPC wire
- * contract, in one dependency-free module.
+ * The numeric bounds and grammars of the wire contract, in one
+ * dependency-free module.
  *
  * Everything here is contract, not tuning: clients (volt-app mirrors these in
  * VoltRPCConversationInputLimits / VoltRPCConversationProjectionLimits and its
@@ -13,7 +13,7 @@
 // Identifiers
 // ============================================================================
 
-/** UTF-8 budget for conversation-scoped identifiers (session, subscription, branch epoch, workflow, request ids). */
+/** UTF-8 budget for client- and host-chosen identifiers (subscription, intent, query, job, workflow, request ids). */
 export const RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES = 256;
 
 /**
@@ -27,8 +27,7 @@ export const RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE = "[A-Za-z0-9][A-Za-z0-9._:-]{
 export const RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX = "local-queue:";
 /**
  * Self-contained JSON Schema `pattern` for `clientMessageId`: the grammar plus
- * the reserved-prefix exclusion. Kept equivalent to `isValidClientMessageId`
- * (asserted by a property test in rpc-command-validation.test.ts).
+ * the reserved-prefix exclusion. Kept equivalent to `isValidClientMessageId`.
  */
 export const RPC_CLIENT_MESSAGE_ID_SCHEMA_PATTERN = `^(?!${RPC_RUNTIME_QUEUE_ENTRY_ID_PREFIX})${RPC_CLIENT_MESSAGE_ID_PATTERN_SOURCE}$`;
 
@@ -43,22 +42,8 @@ export const RPC_CONVERSATION_INPUT_IMAGE_DATA_MAX_UTF8_BYTES = 1024 * 1024;
 export const RPC_CONVERSATION_INPUT_IMAGES_MAX_UTF8_BYTES = 1536 * 1024;
 export const RPC_CONVERSATION_INPUT_MAX_SERIALIZED_BYTES = 2 * 1024 * 1024;
 
-// ============================================================================
-// Session-state projection budgets
-// ============================================================================
-
-export const RPC_SESSION_STATE_MAX_SERIALIZED_BYTES = 768 * 1024;
-export const RPC_SESSION_MODEL_MAX_SERIALIZED_BYTES = 32 * 1024;
-export const RPC_SESSION_QUEUE_MAX_SERIALIZED_BYTES = 128 * 1024;
-/** Also the host-side recoverable client-input queue depth (`CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES`). */
+/** The host-side recoverable client-input queue depth (`CLIENT_INPUT_MAX_RECOVERABLE_QUEUE_ENTRIES`). */
 export const RPC_SESSION_QUEUE_MAX_ITEMS = 128;
-export const RPC_SESSION_QUEUE_ITEM_MAX_UTF8_BYTES = 16 * 1024;
-export const RPC_SESSION_QUEUE_ID_MAX_UTF8_BYTES = 256;
-export const RPC_SESSION_ACTIVE_TOOLS_MAX_SERIALIZED_BYTES = 256 * 1024;
-export const RPC_SESSION_ACTIVE_TOOLS_MAX_ITEMS = 128;
-export const RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES = 12 * 1024;
-export const RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES = 20 * 1024;
-export const RPC_PROJECTION_STRING_MAX_UTF8_BYTES = 4 * 1024;
 
 // ============================================================================
 // Git context
@@ -81,65 +66,24 @@ export const RPC_WORK_PROVIDER_MAX_CHARS = 64;
 export const RPC_WORK_PULL_REQUEST_TITLE_MAX_CHARS = 512;
 
 // ============================================================================
-// UI action-state events
+// Remote profile bounds
 // ============================================================================
 
-export const RPC_UI_ACTION_ID_MAX_CHARS = 160;
-export const RPC_UI_ACTION_STATE_TYPE_MAX_CHARS = 64;
-export const RPC_UI_ACTION_STATE_VALUE_MAX_CHARS = 240;
-export const RPC_UI_ACTION_STATE_LABEL_MAX_CHARS = 80;
-export const RPC_UI_ACTION_STATE_MAX_OPTIONS = 50;
-export const RPC_UI_ACTION_STATE_OPTION_VALUE_MAX_CHARS = 80;
-export const RPC_UI_ACTION_STATE_OPTION_LABEL_MAX_CHARS = 80;
-export const RPC_UI_ACTION_STATE_OPTION_DESCRIPTION_MAX_CHARS = 240;
-
-// ============================================================================
-// Ordered-conversation projection budgets
-// ============================================================================
-
-/** Hard wire envelope shared by the projection feed and subscriber snapshot builders. */
+/** Live-lane bytes a remote connection may queue before the host drops them and resets the lane. */
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_BYTES = 4 * 1024 * 1024;
-export const DEFAULT_CONVERSATION_PROJECTION_MAX_QUEUED_ENVELOPES = 512;
-export const DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CONTENT_BLOCKS = 128;
+/** Assistant text and thinking bytes one streamed message carries on the remote profile. */
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_CUMULATIVE_CONTENT_UTF8_BYTES = 256 * 1024;
-export const DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_TOOL_CALL_SERIALIZED_BYTES = 64 * 1024;
+/** Bytes of a streaming assistant message a remote live reset carries. */
 export const DEFAULT_CONVERSATION_PROJECTION_MAX_ASSISTANT_SNAPSHOT_SERIALIZED_BYTES = 384 * 1024;
-
-// ============================================================================
-// Transcript paging
-// ============================================================================
-
-export const RPC_TRANSCRIPT_PAGE_DEFAULT_ITEMS = 100;
-export const RPC_TRANSCRIPT_PAGE_MAX_ITEMS = 200;
-/** Serialized budget for one remote transcript page: half the ordered feed's queue envelope. */
-export const REMOTE_TRANSCRIPT_DEFAULT_MAX_SERIALIZED_BYTES = 2 * 1024 * 1024;
+/** Serialized bytes of a tool call's arguments on the remote profile. */
+export const RPC_ACTIVE_TOOL_ARGS_MAX_SERIALIZED_BYTES = 12 * 1024;
+/** Serialized bytes of a tool's partial-result details on the remote profile. */
+export const RPC_ACTIVE_TOOL_DETAILS_MAX_SERIALIZED_BYTES = 20 * 1024;
 /**
- * Scalar cap on one remote transcript item's projected text and on one
- * get_transcript_entry_text continuation chunk. Clients page a truncated
- * entry's canonical text in chunks of this size.
+ * Scalar cap on one remote transcript item's text and on one `content` chunk.
+ * Clients page a truncated entry's text in chunks of this size.
  */
 export const IROH_REMOTE_TRANSCRIPT_TEXT_MAX_SCALARS = 12_000;
-
-// ============================================================================
-// Session-tree paging
-// ============================================================================
-
-export const RPC_SESSION_TREE_PAGE_DEFAULT_ITEMS = 100;
-export const RPC_SESSION_TREE_PAGE_MAX_ITEMS = 200;
-/** Serialized budget for one local or remote session-tree page. */
-export const RPC_SESSION_TREE_MAX_SERIALIZED_BYTES = 2 * 1024 * 1024;
-
-// ============================================================================
-// Message-image recovery paging (get_message_images)
-// ============================================================================
-
-/** Headroom for the response envelope, identifiers, array commas, and the LF framing byte. */
-export const MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES = 64 * 1024;
-export const MESSAGE_IMAGES_PAGE_MAX_ITEMS = 32;
-/** A recovered transcript entry may span pages, but never an unbounded number of images. */
-export const MESSAGE_IMAGES_ENTRY_MAX_ITEMS = 64;
-/** Aggregate serialized image-component bytes recoverable for one transcript entry. */
-export const MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES = 16 * 1024 * 1024;
 
 // ============================================================================
 // JSONL framing
@@ -149,8 +93,6 @@ export const MESSAGE_IMAGES_ENTRY_MAX_SERIALIZED_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES = 4 * 1024 * 1024;
 /** JSON content bytes before the required LF framing byte. */
 export const DEFAULT_IROH_RPC_MAX_LINE_BYTES = DEFAULT_IROH_RPC_MAX_ENCODED_LINE_BYTES - 1;
-export const MESSAGE_IMAGES_RESPONSE_BUDGET_BYTES =
-	DEFAULT_IROH_RPC_MAX_LINE_BYTES - MESSAGE_IMAGES_RESPONSE_ENVELOPE_HEADROOM_BYTES;
 
 // ============================================================================
 // Numeric wire domain
@@ -165,44 +107,3 @@ export const RPC_WIRE_MAX_SAFE_INTEGER = Number.MAX_SAFE_INTEGER;
  * 500/1000 ms hints well inside it.
  */
 export const RPC_RETRY_AFTER_MS_MAX = 30_000;
-
-// ============================================================================
-// Stable error vocabularies
-// ============================================================================
-
-/**
- * `errorCode` values on error responses that clients may branch on.
- * Everything else in `error` is prose.
- */
-export const RPC_STABLE_ERROR_CODES = [
-	"client_input_conflict",
-	"client_input_outcome_ambiguous",
-	"stale_plan_revision",
-	"stale_conversation_authority",
-	"conversation_locked",
-	"review_discussions_unavailable",
-	"review_source_unavailable",
-	"review_preparation_failed",
-	"review_preparation_stale",
-	"review_preparation_conflict",
-	"worktree_limit_reached",
-] as const;
-export type RpcStableErrorCode = (typeof RPC_STABLE_ERROR_CODES)[number];
-
-/**
- * Stable machine-readable strings the remote host surfaces in the `error`
- * field of error responses (mirrored by volt-app's VoltRPCErrorCode).
- */
-export const RPC_REMOTE_ERROR_STRINGS = [
-	"invalid_cursor",
-	"invalid_limit",
-	"invalid_request",
-	"invalid_workspace_payload",
-	"session_mismatch",
-	"unexpected_session_id",
-	"unknown_entry",
-	"unsupported_on_workspace_discovery_stream",
-	"unsupported_on_workspace_management_stream",
-	"unsupported_remote_command",
-] as const;
-export type RpcRemoteErrorString = (typeof RPC_REMOTE_ERROR_STRINGS)[number];

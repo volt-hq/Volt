@@ -1,13 +1,13 @@
 /**
  * Authorization parity between the intent and query registries and the
- * remote access rules the legacy wire enforces today: every command and UI
- * action a paired device can send keeps exactly its capability requirements
- * and remote safety. An intent or query is allowed for a remote profile iff it
- * is remote-safe and its `requires` is within the grant.
+ * remote access rules the RPC wire enforced before protocol 1: every command
+ * and UI action a paired device could send keeps exactly its capability
+ * requirements and remote safety. An intent or query is allowed for a remote
+ * profile iff it is remote-safe and its `requires` is within the grant.
  *
- * The oracle is a frozen copy of the legacy rules (access-grant.ts,
- * rpc-command-filter.ts, and host-actions.ts at 31ad0fe83); the remote
- * cut-over deleted the filters themselves.
+ * The oracle is a frozen copy of those rules (access-grant.ts,
+ * rpc-command-filter.ts, host-actions.ts, and the built-in UI actions at
+ * 31ad0fe83); the RPC wire and its filters are deleted.
  */
 
 import {
@@ -18,9 +18,8 @@ import {
 	REMOTE_CAPABILITIES,
 	type RemoteCapability,
 	type RemoteGrant,
-	RPC_COMMAND_SCHEMAS,
 } from "@hansjm10/volt-protocol";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
 	IDLE_INTENT_STATE,
 	type IntentContext,
@@ -30,17 +29,7 @@ import {
 } from "../../src/core/protocol/intents/index.ts";
 import { QueryRejectedError, queryRegistry } from "../../src/core/protocol/queries/index.ts";
 import { createIrohRemoteRpcGrant } from "../../src/core/remote/iroh/access-grant.ts";
-import {
-	isReviewDiscussionHostActionAllowed,
-	REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE,
-} from "../../src/core/review-discussion-policy.ts";
-import {
-	getBuiltinUiActionIntent,
-	isRemoteSafeBuiltinUiAction,
-	listBuiltinUiActionIds,
-} from "../../src/core/rpc/ui-actions.ts";
-import { handleRpcCommand, type RpcCommandDispatcherContext } from "../../src/modes/rpc/rpc-command-dispatcher.ts";
-import type { RpcCommand } from "../../src/modes/rpc/rpc-types.ts";
+import { REVIEW_DISCUSSION_SOURCE_ACTION_MESSAGE } from "../../src/core/review-discussion-policy.ts";
 
 // ============================================================================
 // Frozen oracle: the legacy remote access rules
@@ -62,7 +51,6 @@ const LEGACY_OBSERVE = new Set([
 	"list_review_workflows",
 	"list_review_discussions",
 	"get_review_discussion_source",
-	"report_stream_discontinuity",
 	"get_message_images",
 	"get_transcript_entry_text",
 	"get_ui_capabilities",
@@ -162,7 +150,6 @@ const LEGACY_PASSTHROUGH = [
 	"plan_change",
 	"plan_discard",
 	"set_client_capabilities",
-	"report_stream_discontinuity",
 	"get_pending_host_actions",
 	"host_action_response",
 	"get_state",
@@ -257,6 +244,45 @@ const LEGACY_REMOTE_SAFE_UI_ACTIONS = new Set([
 ]);
 const LEGACY_LOCAL_UI_ACTIONS = ["context.compact", "session.rename", "review.export_feedback"];
 
+/** The intent each built-in UI action invoked. */
+const BUILTIN_UI_ACTION_INTENTS: Readonly<Record<string, BuiltinIntentName>> = {
+	"agent.mode": "set_agent_mode",
+	"plan.execute": "plan_execute",
+	"plan.change": "plan_change",
+	"plan.discard": "plan_discard",
+	"session.new": "new_session",
+	"run.cancel": "abort",
+	"context.auto_compaction": "set_auto_compaction",
+	"context.compaction_threshold": "set_compaction_threshold",
+	"context.compact": "compact",
+	"session.rename": "set_session_name",
+	"thinking.fast_mode": "set_fast_mode",
+	"review.uncommitted": "review_uncommitted",
+	"review.branch": "review_branch",
+	"review.pr": "review_pr",
+	"review.commit": "review_commit",
+	"review.fix": "review_open_session",
+	"review.feedback": "review_record_finding_outcome",
+	"review.rerun": "review_rerun",
+	"review.publish": "review_publish",
+	"review.export_feedback": "review_export_feedback",
+};
+const BUILTIN_UI_ACTIONS = Object.keys(BUILTIN_UI_ACTION_INTENTS);
+
+/** UI actions a review discussion left to its source review (`plan.execute` only with `strategy: "new_session"`). */
+const LEGACY_SOURCE_OWNED_UI_ACTIONS = new Set([
+	"session.new",
+	"review.branch",
+	"review.commit",
+	"review.pr",
+	"review.uncommitted",
+	"review.fix",
+	"review.feedback",
+	"review.rerun",
+	"review.publish",
+	"review.export_feedback",
+]);
+
 /** Remote commands that required generation-bound conversation authority. */
 const LEGACY_AUTHORITY_COMMANDS = new Set([
 	"prompt",
@@ -323,7 +349,6 @@ const LEGACY_COMMANDS: Readonly<Record<string, Mapping>> = {
 	plan_discard: intents("plan_discard"),
 	set_client_capabilities: removed("hello.accepts"),
 	get_pending_host_actions: removed("host request replay"),
-	report_stream_discontinuity: removed("resume by ordinal"),
 	get_ui_capabilities: removed("welcome"),
 	get_ui_actions: queries("intents"),
 	get_ui_action_completions: queries("intent_completions"),
@@ -570,17 +595,16 @@ describe("intent and query registries cover the protocol", () => {
 		expect(queryRegistry.names().sort()).toEqual([...QUERY_NAMES].sort());
 	});
 
-	it("maps every legacy command, and nothing else", () => {
-		const legacyTypes = [
-			...Object.keys(RPC_COMMAND_SCHEMAS),
-			"create_worktree",
-			"list_worktrees",
-			"remove_worktree",
-			"list_workspace_directories",
-			"extension_ui_response",
-			"host_action_response",
-		];
-		expect(Object.keys(LEGACY_COMMANDS).sort()).toEqual([...new Set(legacyTypes)].sort());
+	it("maps every legacy command to intents and queries the registries define", () => {
+		for (const { mapping } of [
+			...Object.values(LEGACY_COMMANDS).map((mapping) => ({ mapping })),
+			...VARIANTS,
+			...BUILTIN_UI_ACTIONS.map((action) => ({ mapping: intents(BUILTIN_UI_ACTION_INTENTS[action]!) })),
+		]) {
+			if ("intents" in mapping) for (const name of mapping.intents) expect(intentRegistry.names()).toContain(name);
+			if ("queries" in mapping) for (const name of mapping.queries) expect(queryRegistry.names()).toContain(name);
+			if ("projected" in mapping) expect(queryRegistry.names()).toContain(mapping.projected);
+		}
 	});
 });
 
@@ -604,12 +628,9 @@ describe("commands keep their capability requirements", () => {
 	});
 
 	it("requires control for every built-in UI action, as invoke_ui_action did", () => {
-		for (const action of listBuiltinUiActionIds()) {
-			const intent = getBuiltinUiActionIntent(action);
-			expect(intent, action).toBeDefined();
-			expect(intentRegistry.get(intent as BuiltinIntentName).requires, action).toEqual(
-				legacyRequires({ type: "invoke_ui_action" }),
-			);
+		for (const action of BUILTIN_UI_ACTIONS) {
+			const intent = BUILTIN_UI_ACTION_INTENTS[action]!;
+			expect(intentRegistry.get(intent).requires, action).toEqual(legacyRequires({ type: "invoke_ui_action" }));
 		}
 	});
 });
@@ -652,11 +673,13 @@ describe("commands keep their remote safety", () => {
 	});
 
 	it("keeps every built-in UI action's remote safety", () => {
-		expect(listBuiltinUiActionIds().sort()).toEqual(
+		expect([...BUILTIN_UI_ACTIONS].sort()).toEqual(
 			[...LEGACY_REMOTE_SAFE_UI_ACTIONS, ...LEGACY_LOCAL_UI_ACTIONS].sort(),
 		);
-		for (const action of listBuiltinUiActionIds()) {
-			expect(isRemoteSafeBuiltinUiAction(action), action).toBe(LEGACY_REMOTE_SAFE_UI_ACTIONS.has(action));
+		for (const action of BUILTIN_UI_ACTIONS) {
+			expect(intentRegistry.get(BUILTIN_UI_ACTION_INTENTS[action]!).remote === "safe", action).toBe(
+				LEGACY_REMOTE_SAFE_UI_ACTIONS.has(action),
+			);
 		}
 	});
 });
@@ -681,8 +704,8 @@ describe("the remote profile decides exactly as the legacy filters", () => {
 	});
 
 	it("decides every built-in UI action for every grant as invoke_ui_action did", async () => {
-		for (const action of listBuiltinUiActionIds()) {
-			const mapping = intents(getBuiltinUiActionIntent(action) as BuiltinIntentName);
+		for (const action of BUILTIN_UI_ACTIONS) {
+			const mapping = intents(BUILTIN_UI_ACTION_INTENTS[action]!);
 			for (const grant of everyGrant()) {
 				expect(await registryDecision(mapping, grant), `${action} ${grant.capabilities}`).toEqual(
 					legacyDecision({ type: "invoke_ui_action", action }, grant),
@@ -701,8 +724,8 @@ describe("the remote profile decides exactly as the legacy filters", () => {
 				resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
 			},
 		} as unknown as IntentTarget;
-		for (const action of listBuiltinUiActionIds()) {
-			const intent = getBuiltinUiActionIntent(action) as BuiltinIntentName;
+		for (const action of BUILTIN_UI_ACTIONS) {
+			const intent = BUILTIN_UI_ACTION_INTENTS[action]!;
 			for (const grant of everyGrant()) {
 				let decision: "allowed" | RemoteCapability | "unsafe" = "allowed";
 				try {
@@ -740,8 +763,7 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 			}
 		}
 		// invoke_ui_action required authority for every action.
-		for (const action of LEGACY_REMOTE_SAFE_UI_ACTIONS)
-			fencedByLegacy.add(getBuiltinUiActionIntent(action) as BuiltinIntentName);
+		for (const action of LEGACY_REMOTE_SAFE_UI_ACTIONS) fencedByLegacy.add(BUILTIN_UI_ACTION_INTENTS[action]!);
 		for (const name of intentRegistry.names()) {
 			const definition = intentRegistry.get(name);
 			if (definition.remote !== "safe" || definition.scope === "host") {
@@ -767,233 +789,13 @@ describe("branch fences and review-discussion boundaries carry over", () => {
 				expect(sourceOwned(name, {}), `${type} -> ${name}`).toBe(LEGACY_SOURCE_OWNED_COMMANDS.has(type));
 			}
 		}
-		for (const action of listBuiltinUiActionIds()) {
+		for (const action of BUILTIN_UI_ACTIONS) {
 			if (action === "plan.execute") continue;
-			const name = getBuiltinUiActionIntent(action) as BuiltinIntentName;
-			expect(sourceOwned(name, {}), action).toBe(!isReviewDiscussionHostActionAllowed(action, {}));
+			expect(sourceOwned(BUILTIN_UI_ACTION_INTENTS[action]!, {}), action).toBe(
+				LEGACY_SOURCE_OWNED_UI_ACTIONS.has(action),
+			);
 		}
 		expect(sourceOwned("plan_execute", { strategy: "new_session" })).toBe(true);
 		expect(sourceOwned("plan_execute", { strategy: "retain_context" })).toBe(false);
 	});
 });
-
-describe("the dispatcher runs each command through the intents and queries the parity rests on", () => {
-	/** A minimal valid payload for every command the RPC dispatcher serves through the registries. */
-	const SAMPLES: ReadonlyArray<Record<string, unknown> & { type: string }> = [
-		{ type: "prompt", clientMessageId: "c", message: "m" },
-		{ type: "steer", clientMessageId: "c", message: "m" },
-		{ type: "follow_up", clientMessageId: "c", message: "m" },
-		{ type: "abort" },
-		{ type: "new_session" },
-		{ type: "set_agent_mode", mode: "plan" },
-		{ type: "plan_execute", planId: "p", expectedRevision: 1, strategy: "retain_context" },
-		{ type: "plan_change", planId: "p", expectedRevision: 1 },
-		{ type: "plan_discard", planId: "p", expectedRevision: 1 },
-		{ type: "start_review_discussions", runId: "r", findingIds: ["f"], requestId: "q" },
-		{ type: "list_review_discussions", runId: "r" },
-		{ type: "reset_review_discussion", discussionId: "d", expectedSessionId: "s", requestId: "q" },
-		{ type: "get_review_discussion_source" },
-		{ type: "get_review_general", runId: "r" },
-		{ type: "cancel_workflow", workflowId: "w" },
-		{ type: "get_review_result", runId: "r" },
-		{ type: "list_review_workflows" },
-		{ type: "open_review_session", runId: "r" },
-		{ type: "acknowledge_review", runId: "r" },
-		{ type: "record_review_finding_outcome", runId: "r", findingId: "f", status: "accepted" },
-		{ type: "rerun_review", runId: "r" },
-		{ type: "publish_review", runId: "r", confirmed: true },
-		{ type: "export_review_feedback" },
-		{
-			type: "register_push_target",
-			args: { provider: "fcm", platform: "ios", pushTargetId: "t", pushTargetAuthToken: "a", enabled: true },
-		},
-		{ type: "get_mcp_capabilities" },
-		{ type: "list_mcp_servers" },
-		{ type: "get_mcp_server", server: "s" },
-		{ type: "connect_mcp_server", server: "s" },
-		{ type: "disconnect_mcp_server", server: "s" },
-		{ type: "refresh_mcp_server", server: "s" },
-		{ type: "complete_mcp_server_auth", server: "s", redirectUrl: "u", code: "c" },
-		{ type: "poll_mcp_server_auth", server: "s" },
-		{ type: "cancel_mcp_server_auth", server: "s" },
-		{ type: "logout_mcp_server", server: "s" },
-		{ type: "set_mcp_server_enabled", server: "s", enabled: true },
-		{ type: "list_mcp_tools", server: "s" },
-		{ type: "get_mcp_tool", server: "s", tool: "t" },
-		{ type: "list_mcp_resources", server: "s" },
-		{ type: "read_mcp_resource", server: "s", resourceUri: "u" },
-		{ type: "list_mcp_prompts", server: "s" },
-		{ type: "get_mcp_prompt", server: "s", prompt: "p" },
-		{ type: "list_mcp_recent_calls" },
-		{ type: "read_job", jobId: "j" },
-		{ type: "cancel_job", jobId: "j" },
-		{ type: "list_subagents" },
-		{ type: "subagent_start", agent: "a", prompt: "p" },
-		{ type: "subagent_abort", subagentId: "s" },
-		{ type: "subagent_dispose", subagentId: "s" },
-		{ type: "get_available_models" },
-		{ type: "set_steering_mode", mode: "all" },
-		{ type: "set_follow_up_mode", mode: "all" },
-		{ type: "compact" },
-		{ type: "set_auto_compaction", enabled: true },
-		{ type: "set_auto_retry", enabled: true },
-		{ type: "abort_retry" },
-		{ type: "bash", command: "ls" },
-		{ type: "abort_bash" },
-		{ type: "get_subscription_usage" },
-		{ type: "list_sessions" },
-		{ type: "export_html" },
-		{ type: "switch_session", sessionId: "s" },
-		{ type: "switch_session_by_id", sessionId: "s" },
-		{ type: "fork", entryId: "e" },
-		{ type: "clone" },
-		{ type: "set_session_name", name: "n" },
-	];
-	/** Variants whose payload picks the intents. */
-	const VARIANT_SAMPLES: ReadonlyArray<Record<string, unknown> & { type: string }> = [
-		{ type: "set_model", provider: "p", modelId: "m", persistDefault: false },
-		{ type: "set_model", provider: "p", modelId: "m", persistDefault: true },
-		{ type: "set_model", provider: "p", modelId: "m" },
-		{ type: "set_thinking_level", level: "low", persistDefault: false },
-		{ type: "set_thinking_level", level: "low", persistDefault: true },
-		{ type: "set_thinking_level", level: "low" },
-		{ type: "start_mcp_server_auth", server: "s", flow: "device" },
-		{ type: "start_mcp_server_auth", server: "s", flow: "browser" },
-		{ type: "start_mcp_server_auth", server: "s" },
-	];
-
-	/** The intents and queries a command reached, in order, without running any of them. */
-	async function reached(
-		command: Record<string, unknown> & { type: string },
-		state: Record<string, unknown> = {},
-	): Promise<string[]> {
-		const names: string[] = [];
-		const stop = new Error("parity: stop before running");
-		const prepared = { run: () => Promise.reject(stop) };
-		const spies = [
-			vi.spyOn(intentRegistry, "prepare").mockImplementation((_ctx, name) => {
-				names.push(name);
-				return prepared as never;
-			}),
-			vi.spyOn(intentRegistry, "invoke").mockImplementation(async (_ctx, name) => {
-				names.push(name);
-				throw stop;
-			}),
-			vi.spyOn(queryRegistry, "run").mockImplementation(async (_ctx, name) => {
-				names.push(name);
-				throw stop;
-			}),
-		];
-		const session = { sessionId: "s", isReviewDiscussion: false, thinkingLevel: "off", ...state };
-		try {
-			await handleRpcCommand(
-				{ id: "parity", ...command } as RpcCommand,
-				{
-					session,
-					conversation: {},
-					options: { allowUiActionInvocation: true },
-					services: {},
-					output: () => {},
-					assertConversationGenerationCurrent: () => {},
-				} as unknown as RpcCommandDispatcherContext,
-			);
-			// Commands that answer once their admitted run settles.
-			await new Promise((resolve) => setImmediate(resolve));
-		} catch (error) {
-			if (error !== stop) throw error;
-		} finally {
-			for (const spy of spies) spy.mockRestore();
-		}
-		return names;
-	}
-
-	it("reaches exactly the mapped intents or queries for every command", async () => {
-		for (const command of SAMPLES) {
-			const mapping = mapped(command.type);
-			const expected = "intents" in mapping ? mapping.intents : "queries" in mapping ? mapping.queries : [];
-			expect(await reached(command), command.type).toEqual(expected);
-		}
-		for (const { command, mapping } of VARIANTS) {
-			const sample = VARIANT_SAMPLES.find(
-				(candidate) =>
-					candidate.type === command.type &&
-					candidate.persistDefault === command.persistDefault &&
-					candidate.flow === command.flow,
-			);
-			expect(sample, JSON.stringify(command)).toBeDefined();
-			const expected = "intents" in mapping ? mapping.intents : [];
-			expect(await reached(sample!), JSON.stringify(command)).toEqual(expected);
-		}
-		const served = new Set([...SAMPLES, ...VARIANT_SAMPLES].map((command) => command.type));
-		const dispatcherMapped = Object.entries(LEGACY_COMMANDS)
-			.filter(([, mapping]) => "intents" in mapping || "queries" in mapping)
-			.map(([type]) => type)
-			.filter((type) => !LEGACY_WORKSPACE_STREAM_COMMANDS.includes(type) || LEGACY_PASSTHROUGH.includes(type))
-			.filter((type) => !DAEMON_ONLY_COMMANDS.has(type));
-		expect(dispatcherMapped.filter((type) => !served.has(type))).toEqual([]);
-	});
-
-	it("invokes each built-in UI action through its intent", async () => {
-		const model = { provider: "p", id: "m" };
-		const settingsManager = {
-			getActiveProfile: () => undefined,
-			getCompactionEnabled: () => true,
-			getCompactionThresholdTokens: () => 0,
-			getCompactionWriteDisabledReason: () => undefined,
-		};
-		const target = { provider: "p", modelId: "m", expectedProfile: "" };
-		const plan = { planId: "p", expectedRevision: 1 };
-		const samples: Record<string, { args: Record<string, unknown>; state?: Record<string, unknown> }> = {
-			"agent.mode": { args: { mode: "plan" } },
-			"plan.execute": {
-				args: { ...plan, strategy: "retain_context" },
-				state: { planningState: { mode: "plan", plan: { phase: "ready" } } },
-			},
-			"plan.change": { args: plan, state: { planningState: { mode: "plan", plan: { phase: "ready" } } } },
-			"plan.discard": { args: plan, state: { planningState: { mode: "plan", plan: { phase: "draft" } } } },
-			"session.new": { args: {} },
-			"run.cancel": { args: {}, state: { isBusy: true } },
-			"context.auto_compaction": { args: { enabled: false, ...target }, state: { model, settingsManager } },
-			"context.compaction_threshold": { args: { tokens: 0, ...target }, state: { model, settingsManager } },
-			"context.compact": { args: {} },
-			"session.rename": { args: { name: "n" } },
-			"thinking.fast_mode": { args: { enabled: false } },
-			"review.uncommitted": { args: {} },
-			"review.branch": { args: {} },
-			"review.pr": { args: {} },
-			"review.commit": { args: { ref: "HEAD" } },
-			"review.fix": { args: { runId: "r" } },
-			"review.feedback": { args: { runId: "r", findingId: "f", status: "accepted" } },
-			"review.rerun": { args: { runId: "r" } },
-			"review.publish": { args: { runId: "r" } },
-			"review.export_feedback": { args: { path: "feedback.json" } },
-		};
-		expect(Object.keys(samples).sort()).toEqual(listBuiltinUiActionIds().sort());
-		for (const action of listBuiltinUiActionIds()) {
-			const { args, state } = samples[action]!;
-			expect(await reached({ type: "invoke_ui_action", action, args }, state), action).toEqual([
-				getBuiltinUiActionIntent(action),
-			]);
-		}
-	});
-});
-
-/** Commands the daemon serves on its own streams or before the RPC mode, never through the dispatcher. */
-const DAEMON_ONLY_COMMANDS: ReadonlySet<string> = new Set([
-	"set_keep_awake",
-	"get_keep_awake",
-	"set_web_search_key",
-	"get_web_search_status",
-	"upload_device_logs",
-	"unregister_workspace",
-	"create_worktree",
-	"list_worktrees",
-	"remove_worktree",
-	"list_workspace_directories",
-	"get_agent_options",
-	"get_session_contexts",
-	"resolve_pr_review",
-	"prepare_pr_review",
-	"get_ui_actions",
-	"get_ui_action_completions",
-]);

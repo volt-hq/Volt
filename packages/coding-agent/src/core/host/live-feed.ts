@@ -13,8 +13,8 @@ import type { LiveItem, LiveValue } from "@hansjm10/volt-protocol";
 import type { AgentSession, AgentSessionEvent } from "../agent-session.ts";
 import { liveIntentAvailability } from "../protocol/intents/state.ts";
 import type { LiveToolPartial } from "../protocol/live-fold.ts";
+import { listRpcBackgroundJobs } from "../protocol/projection/background-jobs.ts";
 import type { ReviewWorkflowEvent, ReviewWorkflowToolEvent } from "../review.ts";
-import { listRpcBackgroundJobs } from "../rpc/background-jobs.ts";
 import type { CommittedSessionEntry } from "../session-manager.ts";
 import { liveKey } from "./live-state.ts";
 
@@ -278,7 +278,7 @@ export function feedLiveState(session: AgentSession): LiveFeed {
 				return;
 			case "thinking_level_changed":
 			case "planning_state_changed":
-			case "ui_action_state_changed":
+			case "fast_mode_changed":
 				updateIntents();
 				return;
 			default:

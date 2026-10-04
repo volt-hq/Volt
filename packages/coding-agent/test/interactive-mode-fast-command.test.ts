@@ -162,11 +162,7 @@ describe("InteractiveMode /fast command", () => {
 
 		await handleEvent.call(
 			{ isInitialized: true, footer: { invalidate }, ui: { requestRender } },
-			{
-				type: "ui_action_state_changed",
-				action: "thinking.fast_mode",
-				state: { type: "boolean", value: true, label: "Fast mode enabled" },
-			},
+			{ type: "fast_mode_changed", enabled: true },
 		);
 
 		expect(invalidate).toHaveBeenCalledOnce();

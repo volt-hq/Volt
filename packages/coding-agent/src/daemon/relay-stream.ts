@@ -1,8 +1,8 @@
 import { Buffer } from "node:buffer";
 import { randomBytes, randomUUID } from "node:crypto";
 import type { Socket } from "node:net";
-import { DuplexWriteGate, StreamClosedError } from "../core/rpc/duplex-write-gate.ts";
-import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
+import { DuplexWriteGate, StreamClosedError } from "../core/protocol/transport/duplex-write-gate.ts";
+import type { IrohBiStreamLike } from "../core/protocol/transport/iroh-transport.ts";
 import { encodeControlLine, type RelayCloseReason, type RelayPreamble } from "./control-protocol.ts";
 import {
 	createLifecycleFencedIrohStream,

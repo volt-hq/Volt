@@ -3,9 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { clientInputRecovery } from "@hansjm10/volt-agent-core";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import * as fc from "fast-check";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { RpcGitContext } from "../../../src/core/rpc/types.ts";
 import {
 	type BranchSummaryEntry,
 	CLIENT_INPUT_MAX_OUTSTANDING_BYTES,

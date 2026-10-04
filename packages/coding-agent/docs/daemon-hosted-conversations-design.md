@@ -229,6 +229,8 @@ Some replacements start in the runtime: an extension's `ctx.newSession()`, `ctx.
 
 ### 6.1 Local subscriber profile
 
+> **Superseded by protocol 1.** The [architecture rewrite](architecture-rewrite-design.md) implemented subscriber profiles in Phase 3 (§6.1, §6.2) as protocol profiles (`src/core/protocol/profiles.ts`: `localProfile` and `remoteProfile`), served by one `serveConnection` (`src/core/protocol/server/connection.ts`) over stdio, loopback, the daemon relay, and Iroh. Both profiles share one projection (`src/core/protocol/projection/`) and the ordering of the conversation log; the remote profile's redaction, wire bounds, and intent and query admission replace the phone column below, and the local profile replaces the local column. The modules this table names (`src/core/rpc/transcript.ts`, `src/daemon/conversation-projection.ts`, `src/core/rpc/custom-message-projection.ts`, `src/core/remote/iroh/rpc-command-filter.ts`), the `ConversationProjectionFeed`, and `conversation_bootstrap` are deleted.
+
 The worker serves each stream with a subscriber profile chosen by the daemon at admission and carried in the relay preamble:
 
 | | Phone profile (unchanged) | Local profile (new) |

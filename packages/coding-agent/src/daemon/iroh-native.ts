@@ -1,4 +1,4 @@
-import type { IrohBiStreamLike } from "../core/rpc/iroh-transport.ts";
+import type { IrohBiStreamLike } from "../core/protocol/transport/iroh-transport.ts";
 import nativeAdapter from "../remote/iroh-native-adapter.cjs";
 
 /** Minimal structural typings for the Volt-owned Iroh binding surface. */

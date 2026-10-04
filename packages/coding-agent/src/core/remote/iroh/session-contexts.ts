@@ -1,6 +1,5 @@
-import { RpcSessionContextSchema } from "@hansjm10/volt-protocol";
+import { type RpcGitContext, RpcSessionContextSchema, type RpcSessionWorkContext } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
-import type { RpcGitContext, RpcSessionWorkContext } from "../../rpc/types.ts";
 import { SessionManager } from "../../session-manager.ts";
 
 export interface IrohRemoteSessionContext {

@@ -50,9 +50,9 @@ import {
 } from "../core/protocol/live-fold.ts";
 import { localProfile } from "../core/protocol/profiles.ts";
 import { serveConnection } from "../core/protocol/server/connection.ts";
-import { attachJsonlLineReader, serializeJsonLine } from "../core/rpc/jsonl.ts";
-import { createLoopbackRpcTransportPair } from "../core/rpc/loopback-transport.ts";
-import type { RpcTransport } from "../core/rpc/transport.ts";
+import { attachJsonlLineReader, serializeJsonLine } from "../core/protocol/transport/jsonl.ts";
+import { createLoopbackRpcTransportPair } from "../core/protocol/transport/loopback-transport.ts";
+import type { RpcTransport } from "../core/protocol/transport/transport.ts";
 
 type AcceptedFrame = Extract<HostFrame, { type: "accepted" }>;
 type WelcomeFrame = Extract<HostFrame, { type: "welcome" }>;

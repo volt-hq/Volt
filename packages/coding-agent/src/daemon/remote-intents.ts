@@ -22,6 +22,7 @@ import type {
 	PrReviewPullRequest,
 	PrReviewResolveResponse,
 	PrReviewSourceRequest,
+	RpcKeepAwakeStatus,
 	RpcSessionListItemSchema,
 	RpcSessionWorkContextSchema,
 } from "@hansjm10/volt-protocol";
@@ -58,7 +59,6 @@ import type { IrohRemoteHostStateManager } from "../core/remote/iroh/state-manag
 import type { IrohRemoteWorktreeRpcBackend } from "../core/remote/iroh/worktree-rpc.ts";
 import type { ReviewDiscussionService } from "../core/review-discussions.ts";
 import { getReviewDiscussionLink } from "../core/review-discussions.ts";
-import type { RpcKeepAwakeStatus } from "../core/rpc/types.ts";
 import { getDefaultSessionDir, SessionManager } from "../core/session-manager.ts";
 import type { KeepAwakeStatus } from "./keep-awake.ts";
 import type { LeaseState } from "./lease-broker.ts";

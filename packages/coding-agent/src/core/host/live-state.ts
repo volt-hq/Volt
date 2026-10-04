@@ -78,8 +78,6 @@ export interface LiveClient {
 export type HostRequestCancelReason =
 	/** No attached client accepted its kind when it was asked. */
 	| "unavailable"
-	/** Every client that could answer it stopped accepting its kind. */
-	| "declined"
 	/** Its requester aborted it. */
 	| "aborted"
 	| "timeout"
@@ -361,7 +359,6 @@ function answers(request: HostRequest, response: HostResponse): boolean {
 }
 
 const HOST_ACTION_CANCEL_MESSAGES: Record<Exclude<HostRequestCancelReason, "unavailable">, string> = {
-	declined: "No client accepts host actions",
 	aborted: "Host action cancelled",
 	timeout: "Host action timed out",
 	closed: "The conversation closed",
@@ -590,14 +587,6 @@ export class LiveState {
 		if (!answers(entry.request, response)) return "invalid";
 		this.settle(entry, { status: "answered", response, clientId });
 		return "accepted";
-	}
-
-	/** End the pending requests (of `kind`, or every kind) that no attached client accepts any more. */
-	cancelUnanswerable(kind?: HostRequestKind): void {
-		for (const entry of [...this.pending.values()]) {
-			if (entry.request.kind === "mcp_auth" || (kind !== undefined && entry.request.kind !== kind)) continue;
-			if (!this.accepts(entry.request.kind)) this.settle(entry, { status: "cancelled", reason: "declined" });
-		}
 	}
 
 	/**

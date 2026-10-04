@@ -597,33 +597,39 @@ Direct tools must:
 
 ## RPC, daemon, and mobile API
 
-### RPC commands
+### Protocol queries and intents
 
-Add typed RPC commands:
+Clients read MCP state with queries and change it with intents (see [rpc.md](rpc.md#queries)):
 
 ```text
-get_mcp_capabilities
-list_mcp_servers
-get_mcp_server
-set_mcp_server_enabled
-connect_mcp_server
-disconnect_mcp_server
-refresh_mcp_server
-list_mcp_tools
-get_mcp_tool
-list_mcp_resources
-read_mcp_resource
-list_mcp_prompts
-get_mcp_prompt
-list_mcp_recent_calls
-start_mcp_server_auth
-poll_mcp_server_auth
-cancel_mcp_server_auth
-complete_mcp_server_auth
-logout_mcp_server
+mcp.capabilities
+mcp.servers
+mcp.server
+mcp.tools
+mcp.tool
+mcp.resources
+mcp.resource
+mcp.prompts
+mcp.prompt
+mcp.recent_calls
+```
+
+```text
+mcp.connect
+mcp.disconnect
+mcp.refresh
+mcp.set_enabled
+mcp.auth_start_device
+mcp.auth_start_browser
+mcp.auth_complete
+mcp.auth_poll
+mcp.auth_cancel
+mcp.logout
 ```
 
 ### Events
+
+The manager emits these session events:
 
 ```text
 mcp_servers_changed
@@ -634,6 +640,8 @@ mcp_call_start
 mcp_call_update
 mcp_call_end
 ```
+
+Protocol clients see them as `changed{catalog: "mcp"}` (refetch the MCP queries), an `mcp_auth` host request while a sign-in waits for the user, and live `tool` items for MCP calls.
 
 ### DTOs
 
@@ -1016,9 +1024,9 @@ Implemented:
 
 - OAuth/bearer/env-missing auth states.
 - Host-side OAuth token/client/discovery storage in `~/.volt/agent/mcp-auth.json` with owner-only file permissions.
-- Browser authorization-code + PKCE auth via `volt mcp auth <server>` and local RPC `start_mcp_server_auth` / `complete_mcp_server_auth`.
-- OAuth device-code auth via `volt mcp auth-device <server>` and local/remote-safe RPC `start_mcp_server_auth` with `flow: "device"`, `poll_mcp_server_auth`, and `cancel_mcp_server_auth`.
-- Logout/credential clearing via `volt mcp logout <server>` and local RPC `logout_mcp_server`.
+- Browser authorization-code + PKCE auth via `volt mcp auth <server>` and the local `mcp.auth_start_browser` / `mcp.auth_complete` intents.
+- OAuth device-code auth via `volt mcp auth-device <server>` and the local and remote-safe `mcp.auth_start_device`, `mcp.auth_poll`, and `mcp.auth_cancel` intents.
+- Logout/credential clearing via `volt mcp logout <server>` and the `mcp.logout` intent.
 
 Implemented since: first-class streaming auth events (`mcp_auth_request` / `mcp_auth_update`) for TUI/RPC/mobile via `mcp_events.v1`.
 
@@ -1029,7 +1037,7 @@ Still to do:
 Likely files:
 
 - `packages/coding-agent/src/core/mcp/auth.ts`
-- `packages/coding-agent/src/core/rpc/types.ts`
+- `packages/protocol/src/mcp.ts`
 - `packages/coding-agent/src/modes/interactive/interactive-mode.ts`
 
 ### 7. TUI and CLI UX
@@ -1048,16 +1056,16 @@ Likely files:
 
 ### 8. RPC and daemon
 
-- Add MCP RPC command/response/event types.
-- Add dispatch handlers.
-- Add daemon/Iroh allowlist updates and `mcp_management.v1` feature.
-- Add remote-safe allowlist tests.
+- Add the `mcp.*` query and intent schemas.
+- Add their definitions to the query and intent registries.
+- Add remote safety and capability requirements to those definitions.
+- Add remote profile parity tests.
 
 Likely files:
 
-- `packages/coding-agent/src/core/rpc/types.ts`
-- `packages/coding-agent/src/modes/rpc/rpc-mode.ts`
-- `packages/coding-agent/src/core/remote/iroh/rpc-command-filter.ts`
+- `packages/protocol/src/mcp.ts`
+- `packages/coding-agent/src/core/protocol/intents/host.ts`
+- `packages/coding-agent/src/core/protocol/queries/definitions.ts`
 - `packages/coding-agent/src/core/remote/iroh/control.ts`
 
 ### 9. Mobile app

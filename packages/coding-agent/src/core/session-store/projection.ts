@@ -2,10 +2,10 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentMessage } from "@hansjm10/volt-agent-core";
 import type { Message } from "@hansjm10/volt-ai";
 import type { ForkedFromEntryPayload } from "@hansjm10/volt-protocol/entries";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { RPC_SESSION_QUEUE_MAX_ITEMS } from "@hansjm10/volt-protocol/wire-limits";
 import { cloneCanonicalData } from "../canonical-data.ts";
 import type { PrReviewPlacement } from "../pr-review-placement.ts";
-import type { RpcGitContext } from "../rpc/types.ts";
 import {
 	CLIENT_INPUT_ERROR_MAX_SCALARS,
 	digestClientInputPayload,

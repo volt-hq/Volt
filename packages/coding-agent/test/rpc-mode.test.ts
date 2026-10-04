@@ -5,7 +5,7 @@
 import type { HostFrame } from "@hansjm10/volt-protocol";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isStdoutTakenOver } from "../src/core/output-guard.ts";
-import { createLoopbackRpcTransportPair } from "../src/core/rpc/index.ts";
+import { createLoopbackRpcTransportPair } from "../src/core/protocol/transport/index.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./suite/host-harness.ts";
 

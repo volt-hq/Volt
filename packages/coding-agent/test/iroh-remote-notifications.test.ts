@@ -17,6 +17,7 @@ import type { HostedConversation } from "../src/core/host/hosted-conversation.ts
 import type { PlanningState } from "../src/core/planning.ts";
 import type { IntentServices } from "../src/core/protocol/intents/types.ts";
 import type { ProtocolConnection } from "../src/core/protocol/server/connection.ts";
+import type { IrohBiStreamLike } from "../src/core/protocol/transport/iroh-transport.ts";
 import type { CompletionNotificationsOptions } from "../src/core/remote/iroh/completion-notifications.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
 import {
@@ -35,7 +36,6 @@ import {
 import type * as ReviewModule from "../src/core/review.ts";
 import type { ExecuteReviewWorkflowResult } from "../src/core/review.ts";
 import type { ReviewWorkflowManager } from "../src/core/review-workflows.ts";
-import type { IrohBiStreamLike } from "../src/core/rpc/iroh-transport.ts";
 import { createHostHarness, type HostHarness } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
 import { connectRemotePhone, type RemotePhone } from "./utilities/remote-phone.ts";
@@ -726,6 +726,37 @@ describe("Iroh remote completion notifications", () => {
 			expect(state.clients[0].pushTargets?.[0]).toMatchObject({ enabled: false, updatedAt: 500 });
 		});
 		expect(relayClient.sendNotification).toHaveBeenCalledOnce();
+	});
+
+	test("audits a notification it skips because the device has no enabled push target", async () => {
+		const auditEvents: object[] = [];
+		const relayClient = createRelayClient();
+		const dispatcher = new IrohRemotePushNotificationDispatcher({
+			auditLogger: new IrohRemoteAuditLogger({ sink: { write: (event) => void auditEvents.push(event) } }),
+			clientNodeId: "paired-client",
+			relayClient,
+			stateManager: createStateManagerWithClient(),
+		});
+		const notification: IrohRemotePushNotificationIntent = {
+			eventId: "event-1",
+			hostNodeId: TEST_HOST_NODE_ID,
+			kind: "conversation_completed",
+			sessionId: "session-1",
+			title: "Volt",
+			body: "Done",
+		};
+
+		await expect(dispatcher.deliverNotification(notification)).resolves.toBe("no_push_target");
+		await vi.waitFor(() =>
+			expect(auditEvents).toContainEqual(
+				expect.objectContaining({
+					type: "push_notification_skipped",
+					success: true,
+					details: { eventId: "event-1", kind: "conversation_completed", reason: "no_push_target" },
+				}),
+			),
+		);
+		expect(relayClient.sendNotification).not.toHaveBeenCalled();
 	});
 
 	test("emits one completion notification per prompt run", async () => {

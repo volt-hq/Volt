@@ -1,4 +1,4 @@
-import type { IrohBiStreamLike, IrohBytes } from "../core/rpc/iroh-transport.ts";
+import type { IrohBiStreamLike, IrohBytes } from "../core/protocol/transport/iroh-transport.ts";
 
 export type IrohPhysicalTaskObserver = (task: Promise<unknown>) => void;
 

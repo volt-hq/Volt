@@ -1,12 +1,12 @@
 /**
- * Generic TypeBox helpers for the RPC contract schemas.
+ * Generic TypeBox helpers for the contract schemas.
  *
- * Contract schemas serve three masters at once: `Static` types re-exported
- * from `types.ts`, compiled runtime validation, and the JSON Schema artifact
- * consumed by clients. Helpers here keep those three views in lockstep.
+ * Contract schemas serve three masters at once: their `Static` types,
+ * compiled runtime validation, and the JSON Schema artifact consumed by
+ * clients. Helpers here keep those three views in lockstep.
  */
 
-import { type Static, type TSchema, type TUnsafe, Type } from "typebox";
+import { type TUnsafe, Type } from "typebox";
 
 /** Options bag accepted by every helper; extra `x-volt-*` keys flow into the artifact. */
 export type WireSchemaOptions = Record<string, unknown>;
@@ -40,14 +40,6 @@ export function openStringEnum<const T extends readonly string[]>(
  */
 export function opaque<T>(note: string): TUnsafe<T> {
 	return Type.Unsafe<T>(Type.Unknown({ "x-volt-opaque": note }));
-}
-
-/** Array schema whose static type preserves the hand-written `readonly` modifier. */
-export function readonlyArrayOf<S extends TSchema>(
-	items: S,
-	options?: WireSchemaOptions,
-): TUnsafe<readonly Static<S>[]> {
-	return Type.Unsafe<readonly Static<S>[]>(Type.Array(items, options));
 }
 
 /**

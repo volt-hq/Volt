@@ -1,7 +1,6 @@
 import { type Static, Type } from "typebox";
 import { stringEnum } from "./helpers.ts";
-import { RpcConversationIdentifierSchema } from "./primitives.ts";
-import { RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES, RPC_GIT_CONTEXT_OID_PATTERN } from "./wire-limits.ts";
+import { RPC_GIT_CONTEXT_OID_PATTERN } from "./wire-limits.ts";
 
 export const RPC_PR_REVIEW_ERROR_CODES = [
 	"review_preparation_failed",
@@ -11,10 +10,6 @@ export const RPC_PR_REVIEW_ERROR_CODES = [
 ] as const;
 export type PrReviewPreparationErrorCode = (typeof RPC_PR_REVIEW_ERROR_CODES)[number];
 
-const correlationId = Type.String({
-	...RpcConversationIdentifierSchema,
-	maxLength: RPC_CONVERSATION_IDENTIFIER_MAX_UTF8_BYTES,
-});
 // JavaScript's $ also matches before a final newline; the lookahead requires actual end of input.
 const workspaceName = Type.String({
 	minLength: 1,
@@ -58,25 +53,6 @@ export const RpcPrReviewPrepareRequestSchema = Type.Object(
 	},
 	sourceOptions,
 );
-export const RpcResolvePrReviewCommandSchema = Type.Object(
-	{
-		id: Type.Optional(correlationId),
-		type: Type.Literal("resolve_pr_review"),
-		workspaceName,
-		...sourceProperties,
-	},
-	sourceOptions,
-);
-export const RpcPreparePrReviewCommandSchema = Type.Object(
-	{
-		id: Type.Optional(correlationId),
-		type: Type.Literal("prepare_pr_review"),
-		workspaceName,
-		...RpcPrReviewPrepareRequestSchema.properties,
-	},
-	sourceOptions,
-);
-
 export const RpcPrReviewPullRequestSchema = Type.Object(
 	{
 		provider: Type.Literal("github"),

@@ -21,7 +21,6 @@ import {
 	listReviewRuns,
 	type ReviewRunRecord,
 } from "../src/core/review-state.ts";
-import { buildRpcSessionState } from "../src/core/rpc/session-state.ts";
 import { SessionManager, type SessionReference } from "../src/core/session-manager.ts";
 import type { BashOperations } from "../src/core/tools/bash.ts";
 import type {
@@ -189,7 +188,7 @@ describe("conversation host client session lifecycle events", () => {
 		const { runtimeHost } = await createRuntimeHost(() => undefined);
 		const events: AgentSessionEvent[] = [];
 		await vi.waitFor(() => expect(runtimeHost.session.sessionManager.getStartingGitContext()).toBeNull());
-		expect(buildRpcSessionState(runtimeHost.session).startingGitContext).toBeNull();
+		expect(runtimeHost.conversation.summary().startingGitContext).toBeNull();
 		const unsubscribe = runtimeHost.session.subscribe((event) => events.push(event));
 		execFileSync("git", ["init", "--initial-branch=main"], { cwd: runtimeHost.cwd, stdio: "ignore" });
 

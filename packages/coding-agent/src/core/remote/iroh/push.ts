@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { createHash } from "node:crypto";
+import type { RpcRegisterPushTargetArgs, RpcRegisterPushTargetResponse } from "@hansjm10/volt-protocol";
 import {
 	IROH_REMOTE_NOTIFICATION_KINDS,
 	type IrohRemotePushNotificationDeliveryStatus,
@@ -9,7 +10,6 @@ import {
 	MAX_IROH_REMOTE_NOTIFICATION_TITLE_UTF8_BYTES,
 	MAX_IROH_REMOTE_NOTIFICATION_WORKSPACE_UTF8_BYTES,
 } from "@hansjm10/volt-protocol/push";
-import type { RpcRegisterPushTargetArgs, RpcRegisterPushTargetResponse } from "../../rpc/types.ts";
 import type { IrohRemoteAuditEventInput, IrohRemoteAuditLogger } from "./audit.ts";
 import type {
 	IrohRemoteClient,
@@ -593,7 +593,7 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 		const pushTarget = selectEnabledPushTarget(client?.pushTargets ?? []);
 		if (!pushTarget) {
 			this.deduper.unmark(this.clientNodeId, sanitized.eventId);
-			await this.logPushFallback(sanitized.eventId, sanitized.kind, "no_push_target");
+			await this.logPushSkipped(sanitized.eventId, sanitized.kind, "no_push_target");
 			return "no_push_target";
 		}
 
@@ -637,9 +637,10 @@ export class IrohRemotePushNotificationDispatcher implements IrohRemotePushNotif
 		return false;
 	}
 
-	private async logPushFallback(eventId: string, kind: string, reason: string): Promise<void> {
+	/** No notification was sent: the device has no enabled push target. */
+	private async logPushSkipped(eventId: string, kind: string, reason: string): Promise<void> {
 		await this.log({
-			type: "push_notification_fallback",
+			type: "push_notification_skipped",
 			clientNodeId: this.clientNodeId,
 			workspace: this.workspace,
 			success: true,

@@ -9,13 +9,17 @@
  */
 
 import type { HostFrame, HostRequestKind, QueryParams, RemoteCapability } from "@hansjm10/volt-protocol";
+import type { RpcGitContext } from "@hansjm10/volt-protocol/git-context";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createLoopbackClient, ProtocolClient, ProtocolRejectedError } from "../src/client/protocol-client.ts";
 import { GitContextProvider } from "../src/core/git-context-provider.ts";
 import type { HostedConversation } from "../src/core/host/hosted-conversation.ts";
+import {
+	createLoopbackRpcTransportPair,
+	type RpcCloseHandler,
+	type RpcTransport,
+} from "../src/core/protocol/transport/index.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
-import { createLoopbackRpcTransportPair, type RpcCloseHandler, type RpcTransport } from "../src/core/rpc/index.ts";
-import type { RpcGitContext } from "../src/core/rpc/types.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
 import { createHostHarness, type HostHarness, type HostHarnessOptions } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";

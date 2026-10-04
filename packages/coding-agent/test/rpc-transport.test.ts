@@ -1,11 +1,11 @@
 import { PassThrough, Writable } from "node:stream";
 import { describe, expect, test } from "vitest";
-import { serializeJsonLine } from "../src/core/rpc/jsonl.ts";
+import { serializeJsonLine } from "../src/core/protocol/transport/jsonl.ts";
 import {
 	createJsonlRpcTransport,
 	createJsonlStreamRpcTransport,
 	type RpcTransport,
-} from "../src/core/rpc/transport.ts";
+} from "../src/core/protocol/transport/transport.ts";
 
 function waitForTransportClose(transport: RpcTransport): Promise<void> {
 	return new Promise((resolve) => {

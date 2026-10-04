@@ -1,30 +1,35 @@
 import type { Api, Model } from "@hansjm10/volt-ai";
 import {
 	type HostFrame,
+	IntentDescriptorSchema,
+	type IntentStateValue,
+	LiveIntentsValueSchema,
 	type QueryResult,
-	RpcUiActionStateChangedEventSchema,
-	UiActionDescriptorSchema,
 } from "@hansjm10/volt-protocol";
 import { Compile } from "typebox/compile";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AgentSession } from "../src/core/agent-session.ts";
 import { BackgroundJobManager } from "../src/core/background-jobs.ts";
-import { type IntentContext, LOCAL_INTENT_PROFILE } from "../src/core/protocol/intents/index.ts";
+import { feedLiveState } from "../src/core/host/live-feed.ts";
+import { LiveState } from "../src/core/host/live-state.ts";
+import {
+	type IntentContext,
+	type IntentProfile,
+	intentRegistry,
+	intentStateOf,
+	LOCAL_INTENT_PROFILE,
+} from "../src/core/protocol/intents/index.ts";
 import { createIrohRemotePresetAccess, createIrohRemoteRpcGrant } from "../src/core/remote/iroh/access-grant.ts";
 import { serveIrohRemoteConnection } from "../src/core/remote/iroh/connection.ts";
-import { subscribeRpcSessionEvents } from "../src/core/rpc/background-jobs.ts";
-import type { UiActionDescriptor } from "../src/core/rpc/types.ts";
-import {
-	CONTEXT_AUTO_COMPACTION_ACTION_ID as autoAction,
-	getUiActionDescriptors,
-	isRemoteSafeBuiltinUiAction,
-	prepareUiActionInvocation,
-	CONTEXT_COMPACTION_THRESHOLD_ACTION_ID as thresholdAction,
-	type UiActionDiscoverySession,
-} from "../src/core/rpc/ui-actions.ts";
 import { InMemorySettingsStorage, type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 import { createHostHarness } from "./suite/host-harness.ts";
 import { createIrohStreamPair } from "./utilities/iroh-stream-pair.ts";
+import { createLiveRecorder } from "./utilities/live-recorder.ts";
 import { connectRemotePhone } from "./utilities/remote-phone.ts";
+
+const autoIntent = "set_auto_compaction";
+const thresholdIntent = "set_compaction_threshold";
+type CompactionIntent = typeof autoIntent | typeof thresholdIntent;
 
 const model: Model<Api> = {
 	id: "test-model",
@@ -40,6 +45,11 @@ const model: Model<Api> = {
 };
 const modelRef = `${model.provider}/${model.id}`;
 
+const controlProfile: IntentProfile = {
+	name: "remote",
+	grant: createIrohRemoteRpcGrant(["conversation.control.v1"]),
+};
+
 function setup(global: Settings = {}, project: Settings = {}, profile?: string, projectTrusted = true) {
 	const storage = new InMemorySettingsStorage();
 	storage.withLock("global", () => JSON.stringify(global));
@@ -51,66 +61,72 @@ function setup(global: Settings = {}, project: Settings = {}, profile?: string, 
 		isStreaming: false,
 		isBusy: false,
 		isCompacting: false,
-		extensionRunner: { getRegisteredCommands: () => [] },
-		promptTemplates: [],
-		resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
-		sessionManager: { getCwd: () => "/repo", getOrdinal: () => 0 },
+		sessionManager: { getOrdinal: () => 0 },
 	};
 	const target = { session, conversation: {}, host: {}, client: {} } as unknown as IntentContext["target"];
-	// A paired device invokes the actions; tests swap its authority check to simulate a stale lease.
+	// A paired device invokes the intents; tests swap its authority check to simulate a stale lease.
 	const context: Mutable<IntentContext> = {
 		target,
 		services: {},
-		profile: { name: "remote", grant: createIrohRemoteRpcGrant(["conversation.control.v1"]) },
+		profile: controlProfile,
 		assertCurrent: vi.fn(),
 	};
 	const local: IntentContext = { target, services: {}, profile: LOCAL_INTENT_PROFILE };
-	const descriptor = (action: string) =>
-		getUiActionDescriptors(session as unknown as UiActionDiscoverySession, "all").find(
-			(candidate) => candidate.id === action,
-		)!;
-	const invokeAction = async (ctx: IntentContext, action: string, args: unknown) =>
-		prepareUiActionInvocation(ctx, { action, args }).run();
-	const invoke = (action: string, value: boolean | number, target = capturedTarget(descriptor(action))) =>
-		invokeAction(context, action, { ...target, [action === autoAction ? "enabled" : "tokens"]: value });
-	return { storage, settingsManager, session, context, local, descriptor, invoke, invokeAction };
+	const descriptor = (name: CompactionIntent, viewProfile: IntentProfile = LOCAL_INTENT_PROFILE) =>
+		intentRegistry.descriptor(intentRegistry.resolve(name)!, {
+			state: intentStateOf(session as unknown as AgentSession),
+			services: {},
+			profile: viewProfile,
+		});
+	/** The model and settings profile a client sees now, which its compaction changes name. */
+	const capturedTarget = () => ({
+		provider: session.model?.provider ?? "",
+		modelId: session.model?.id ?? "",
+		expectedProfile: settingsManager.getActiveProfile() ?? "",
+	});
+	const invokeIntent = async (ctx: IntentContext, name: CompactionIntent, input: unknown) =>
+		(await intentRegistry.invokeFrame(ctx, name, input)).outcome;
+	const invoke = (name: CompactionIntent, value: boolean | number, target = capturedTarget()) =>
+		invokeIntent(context, name, { ...target, [name === autoIntent ? "enabled" : "tokens"]: value });
+	return { storage, settingsManager, session, context, local, descriptor, capturedTarget, invoke, invokeIntent };
 }
 
 type Mutable<T> = { -readonly [K in keyof T]: T[K] };
 
-function capturedTarget(descriptor: UiActionDescriptor) {
-	return Object.fromEntries(
-		(descriptor.args ?? [])
-			.filter((arg) => arg.defaultValue !== undefined)
-			.map((arg) => [arg.name, arg.defaultValue]),
-	);
-}
-
-describe("compaction host actions", () => {
-	it("advertises scalar states, exact captured defaults, presets, scope and remote safety", () => {
-		const { settingsManager, descriptor, session } = setup({
+describe("compaction settings intents", () => {
+	it("describes scalar states, presets, save scope, the target a client names, and remote safety", () => {
+		const { settingsManager, descriptor } = setup({
 			compaction: { modelThresholds: { [modelRef]: 123456 } },
 		});
-		for (const action of [autoAction, thresholdAction]) {
-			const item = descriptor(action);
-			expect(Compile(UiActionDescriptorSchema).Check(JSON.parse(JSON.stringify(item)))).toBe(true);
+		for (const name of [autoIntent, thresholdIntent] as const) {
+			const item = descriptor(name);
+			expect(Compile(IntentDescriptorSchema).Check(JSON.parse(JSON.stringify(item)))).toBe(true);
 			expect(item).toMatchObject({
 				source: "builtin",
 				enabled: true,
-				remoteSafe: true,
-				streamingBehavior: "disabled",
+				remote: "safe",
+				requires: ["conversation.control.v1"],
+				whileBusy: "reject",
 			});
-			expect(capturedTarget(item)).toEqual({ provider: "openai", modelId: "test-model", expectedProfile: "" });
-			for (const name of ["provider", "modelId", "expectedProfile"])
-				expect(item.args).toContainEqual(expect.objectContaining({ name, type: "string", required: true }));
+			expect(item.input).toMatchObject({
+				properties: {
+					provider: { type: "string" },
+					modelId: { type: "string" },
+					expectedProfile: { type: "string" },
+				},
+			});
 			expect(item.description).toContain("globally on the connected host");
 			expect(item.description).toContain("overrides take precedence");
-			expect(isRemoteSafeBuiltinUiAction(action)).toBe(true);
 		}
-		expect(descriptor(autoAction).state).toMatchObject({ type: "boolean", value: true });
-		expect(descriptor(thresholdAction).state).toMatchObject({ type: "integer", value: 123456 });
-		expect(descriptor(thresholdAction).description).toContain(modelRef);
-		expect(descriptor(thresholdAction).state?.options?.map((option) => option.value)).toEqual([
+		// A threshold always names its target; a local auto-compaction toggle may omit it.
+		expect(descriptor(thresholdIntent).input.required).toEqual(
+			expect.arrayContaining(["provider", "modelId", "expectedProfile"]),
+		);
+		expect(descriptor(autoIntent).input.required).toEqual(["enabled"]);
+		expect(descriptor(autoIntent).state).toMatchObject({ type: "boolean", value: true });
+		expect(descriptor(thresholdIntent).state).toMatchObject({ type: "integer", value: 123456 });
+		expect(descriptor(thresholdIntent).description).toContain(modelRef);
+		expect(descriptor(thresholdIntent).state?.options?.map((option) => option.value)).toEqual([
 			"0",
 			"100000",
 			"123456",
@@ -121,17 +137,15 @@ describe("compaction host actions", () => {
 			"500000",
 			"750000",
 		]);
-		expect(isRemoteSafeBuiltinUiAction("context.compact")).toBe(false);
-		const discovery = {
-			...session,
-			extensionRunner: { getRegisteredCommands: () => [] },
-			promptTemplates: [],
-			resourceLoader: { getSkills: () => ({ skills: [], diagnostics: [] }) },
-			sessionManager: { getCwd: () => "/repo" },
+		expect(intentRegistry.get("compact").remote).toBe("unsafe");
+		const remoteView = {
+			state: { isStreaming: false, isCompacting: false, model, settingsManager },
+			services: {},
+			profile: controlProfile,
 		};
-		expect(getUiActionDescriptors(discovery, "all", { remoteSafeOnly: true })).toContainEqual(
-			descriptor(thresholdAction),
-		);
+		const remoteNames = intentRegistry.descriptors(remoteView).map((item) => item.name);
+		expect(remoteNames).toEqual(expect.arrayContaining([autoIntent, thresholdIntent]));
+		expect(remoteNames).not.toContain("compact");
 		expect(settingsManager.getCompactionThresholdTokens(modelRef)).toBe(123456);
 	});
 
@@ -139,14 +153,10 @@ describe("compaction host actions", () => {
 		const { settingsManager, invoke, descriptor } = setup({
 			compaction: { reserveTokens: 10000, keepRecentTokens: 20000, modelThresholds: { "other/model": 750000 } },
 		});
-		await expect(invoke(thresholdAction, 345678)).resolves.toMatchObject({
-			status: "completed",
-			state: { type: "integer", value: 345678 },
-			actionsChanged: true,
-			stateChanged: true,
-		});
-		await invoke(autoAction, false);
-		expect(descriptor(thresholdAction).enabled).toBe(true);
+		await invoke(thresholdIntent, 345678);
+		expect(descriptor(thresholdIntent).state).toMatchObject({ type: "integer", value: 345678 });
+		await invoke(autoIntent, false);
+		expect(descriptor(thresholdIntent).enabled).toBe(true);
 		await settingsManager.reload();
 		expect(settingsManager.getCompactionSettings(model)).toEqual({
 			enabled: false,
@@ -154,25 +164,24 @@ describe("compaction host actions", () => {
 			keepRecentTokens: 20000,
 			thresholdTokens: 345678,
 		});
-		await invoke(thresholdAction, 0);
+		await invoke(thresholdIntent, 0);
 		await settingsManager.reload();
 		expect(settingsManager.getCompactionThresholdTokens(modelRef)).toBe(0);
 		expect(settingsManager.getCompactionThresholdTokens("other/model")).toBe(750000);
-		await invoke(autoAction, true);
+		await invoke(autoIntent, true);
 		expect(settingsManager.getCompactionEnabled()).toBe(true);
 	});
 
-	it("saves into the captured global profile and explicitly resets an inherited threshold", async () => {
+	it("saves into the client's global profile and explicitly resets an inherited threshold", async () => {
 		const { settingsManager, descriptor, invoke } = setup(
 			{ profiles: { work: {} }, compaction: { modelThresholds: { [modelRef]: 350000 } } },
 			{},
 			"work",
 		);
-		expect(capturedTarget(descriptor(thresholdAction)).expectedProfile).toBe("work");
-		expect(descriptor(thresholdAction).description).toContain('global profile "work"');
-		expect(descriptor(thresholdAction).state?.value).toBe(350000);
-		await invoke(thresholdAction, 0);
-		await invoke(autoAction, false);
+		expect(descriptor(thresholdIntent).description).toContain('global profile "work"');
+		expect(descriptor(thresholdIntent).state?.value).toBe(350000);
+		await invoke(thresholdIntent, 0);
+		await invoke(autoIntent, false);
 		await settingsManager.reload();
 		expect(settingsManager.getGlobalSettings()).toMatchObject({
 			compaction: { modelThresholds: { [modelRef]: 350000 } },
@@ -181,7 +190,7 @@ describe("compaction host actions", () => {
 	});
 
 	it.each([false, true])(
-		"shows effective project overrides and disables only the affected action (profile=%s)",
+		"shows effective project overrides and disables only the affected intent (profile=%s)",
 		async (profile) => {
 			const override = { compaction: { modelThresholds: { [modelRef]: 250000 } } };
 			const { descriptor, invoke, settingsManager } = setup(
@@ -189,14 +198,17 @@ describe("compaction host actions", () => {
 				profile ? { profiles: { work: override } } : override,
 				profile ? "work" : undefined,
 			);
-			expect(descriptor(thresholdAction)).toMatchObject({
+			expect(descriptor(thresholdIntent)).toMatchObject({
 				enabled: false,
 				state: { value: 250000 },
-				disabledReason: expect.stringContaining(profile ? 'project profile "work"' : "project settings"),
+				reason: expect.stringContaining(profile ? 'project profile "work"' : "project settings"),
 			});
-			expect(descriptor(autoAction).enabled).toBe(true);
-			await expect(invoke(thresholdAction, 350000)).rejects.toThrow("override");
-			await invoke(autoAction, false);
+			expect(descriptor(autoIntent).enabled).toBe(true);
+			await expect(invoke(thresholdIntent, 350000)).rejects.toMatchObject({
+				code: "unavailable",
+				message: expect.stringContaining("override"),
+			});
+			await invoke(autoIntent, false);
 			expect(settingsManager.getCompactionEnabled()).toBe(false);
 			expect(settingsManager.getGlobalSettings().compaction?.modelThresholds).toBeUndefined();
 		},
@@ -205,79 +217,77 @@ describe("compaction host actions", () => {
 	it("ignores untrusted overrides and does not disable unrelated-model or reserve overrides", () => {
 		expect(
 			setup({}, { compaction: { enabled: false, modelThresholds: { [modelRef]: 1 } } }, undefined, false).descriptor(
-				autoAction,
+				autoIntent,
 			),
 		).toMatchObject({ enabled: true, state: { value: true } });
 		const { descriptor } = setup({}, { compaction: { reserveTokens: 12345, modelThresholds: { "other/model": 5 } } });
-		expect(descriptor(autoAction).enabled).toBe(true);
-		expect(descriptor(thresholdAction).enabled).toBe(true);
+		expect(descriptor(autoIntent).enabled).toBe(true);
+		expect(descriptor(thresholdIntent).enabled).toBe(true);
 		const overridden = setup({}, { compaction: { enabled: false } });
-		expect(overridden.descriptor(autoAction)).toMatchObject({ enabled: false, state: { value: false } });
-		expect(overridden.descriptor(thresholdAction).enabled).toBe(true);
+		expect(overridden.descriptor(autoIntent)).toMatchObject({ enabled: false, state: { value: false } });
+		expect(overridden.descriptor(thresholdIntent).enabled).toBe(true);
 	});
 
 	it("blocks runtime overrides, explicit project default resets and null clears", () => {
 		const target = setup({}, { compaction: { modelThresholds: { [modelRef]: 0 } } });
-		expect(target.descriptor(thresholdAction)).toMatchObject({ enabled: false, state: { value: 0 } });
+		expect(target.descriptor(thresholdIntent)).toMatchObject({ enabled: false, state: { value: 0 } });
 		target.settingsManager.applyOverrides({ compaction: { enabled: false } });
-		expect(target.descriptor(autoAction).disabledReason).toContain("runtime override");
+		expect(target.descriptor(autoIntent).reason).toContain("runtime override");
 		const clears = JSON.parse('{"compaction":null}') as Settings;
-		expect(setup({}, clears).descriptor(thresholdAction).enabled).toBe(false);
+		expect(setup({}, clears).descriptor(thresholdIntent).enabled).toBe(false);
 	});
 
 	it.each([-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, NaN, "350000", null])(
 		"rejects invalid/unsafe token count %s without saving",
 		async (tokens) => {
-			const { descriptor, local, invokeAction, settingsManager } = setup();
-			await expect(
-				invokeAction(local, thresholdAction, { ...capturedTarget(descriptor(thresholdAction)), tokens }),
-			).rejects.toThrow();
+			const { local, capturedTarget, invokeIntent, settingsManager } = setup();
+			await expect(invokeIntent(local, thresholdIntent, { ...capturedTarget(), tokens })).rejects.toThrow();
 			expect(settingsManager.getGlobalSettings()).toEqual({});
 		},
 	);
 
-	it.each([autoAction, thresholdAction])(
-		"requires exact target args and rejects model/profile/session races for %s",
-		async (action) => {
-			const { context, local, descriptor, invoke, invokeAction, session, settingsManager } = setup(
+	it.each([autoIntent, thresholdIntent] as const)(
+		"requires the target from a remote client and rejects model/profile/session races for %s",
+		async (name) => {
+			const { context, capturedTarget, invoke, invokeIntent, session, settingsManager } = setup(
 				{ profiles: { work: {}, personal: {} } },
 				{},
 				"work",
 			);
-			const target = capturedTarget(descriptor(action));
-			const value = action === autoAction ? false : 350000;
+			const target = capturedTarget();
+			const value = name === autoIntent ? false : 350000;
 			await expect(
-				invokeAction(local, action, { [action === autoAction ? "enabled" : "tokens"]: value }),
-			).rejects.toThrow("Missing required");
+				invokeIntent(context, name, { [name === autoIntent ? "enabled" : "tokens"]: value }),
+			).rejects.toMatchObject({ code: "invalid_input" });
 			session.model = { ...model, id: "new-model" };
-			await expect(invoke(action, value, target)).rejects.toThrow("target changed");
+			await expect(invoke(name, value, target)).rejects.toThrow("target changed");
 			session.model = { ...model, provider: "other-provider" };
-			await expect(invoke(action, value, target)).rejects.toThrow("target changed");
+			await expect(invoke(name, value, target)).rejects.toThrow("target changed");
 			session.model = model;
 			settingsManager.setActiveProfile("personal");
-			await expect(invoke(action, value, target)).rejects.toThrow("target changed");
+			await expect(invoke(name, value, target)).rejects.toThrow("target changed");
 			settingsManager.setActiveProfile("work");
 			context.assertCurrent = () => {
 				throw new Error("stale conversation authority");
 			};
-			await expect(invoke(action, value, target)).rejects.toThrow("stale conversation authority");
+			await expect(invoke(name, value, target)).rejects.toThrow("stale conversation authority");
 			expect(settingsManager.getGlobalSettings()).toEqual({ profiles: { work: {}, personal: {} } });
 		},
 	);
 
 	it.each(["isStreaming", "isBusy", "isCompacting"] as const)(
-		"disables and rejects both actions when %s",
+		"disables and rejects both intents when %s",
 		async (busy) => {
 			const { descriptor, invoke, session } = setup();
 			session[busy] = true;
-			for (const action of [autoAction, thresholdAction]) {
-				expect(descriptor(action).enabled).toBe(false);
-				await expect(invoke(action, action === autoAction ? true : 0)).rejects.toThrow("unavailable");
+			for (const name of [autoIntent, thresholdIntent] as const) {
+				expect(descriptor(name).enabled).toBe(false);
+				await expect(invoke(name, name === autoIntent ? true : 0)).rejects.toMatchObject({ code: "unavailable" });
 			}
 			session[busy] = false;
 			session.model = undefined;
-			expect(descriptor(autoAction).enabled).toBe(false);
-			expect(descriptor(thresholdAction).enabled).toBe(false);
+			expect(descriptor(autoIntent).enabled).toBe(false);
+			expect(descriptor(thresholdIntent).enabled).toBe(false);
 		},
 	);
 
@@ -286,48 +296,59 @@ describe("compaction host actions", () => {
 		vi.spyOn(storage, "withLock").mockImplementation(() => {
 			throw new Error("disk full");
 		});
-		await expect(invoke(thresholdAction, 350000)).rejects.toThrow("disk full");
+		await expect(invoke(thresholdIntent, 350000)).rejects.toThrow("disk full");
 		const settingsManager = SettingsManager.fromStorage(storage);
 		const { session, descriptor } = setup();
 		session.settingsManager = settingsManager;
-		expect(descriptor(autoAction)).toMatchObject({
+		expect(descriptor(autoIntent)).toMatchObject({
 			enabled: false,
-			disabledReason: expect.stringContaining("could not be loaded"),
+			reason: expect.stringContaining("could not be loaded"),
 		});
 	});
 
-	it("emits schema-valid shared events after persistence and on profile/reload changes, then detaches", async () => {
-		const { session, settingsManager, invoke, storage } = setup({ profiles: { work: {} } });
+	it("updates the live intents value after persistence and on profile/reload changes, then detaches", async () => {
+		const { session, settingsManager, invoke, storage } = setup({
+			profiles: { work: { compaction: { modelThresholds: { [modelRef]: 500000 } } } },
+		});
 		const backgroundJobs = new BackgroundJobManager({ isToolAllowed: () => true, getGeneration: () => 0 });
-		const listener = vi.fn();
-		const unsubscribe = subscribeRpcSessionEvents(
-			{ ...session, backgroundJobs, subscribe: () => () => {} },
-			listener,
+		const live = new LiveState();
+		// The feed reads nothing else of the session: it skips the values it cannot read.
+		const feed = feedLiveState(
+			Object.assign(session, {
+				liveState: live,
+				backgroundJobs,
+				subscribe: () => () => {},
+				subscribeActivity: () => () => {},
+				sessionManager: { ...session.sessionManager, subscribeEntries: () => () => {} },
+			}) as unknown as AgentSession,
 		);
+		const recorder = createLiveRecorder();
+		live.attach("observer", recorder);
+		const intentValues = () =>
+			recorder.items().flatMap((item) => (item.type === "set" && item.value.kind === "intents" ? [item.value] : []));
+		const latestState = (name: CompactionIntent): IntentStateValue | undefined =>
+			intentValues()
+				.at(-1)
+				?.availability.find((intent) => intent.name === name)?.state;
 		try {
-			const saved = invoke(thresholdAction, 350000);
-			expect(listener).not.toHaveBeenCalled();
+			const delivered = intentValues().length;
+			const saved = invoke(thresholdIntent, 350000);
+			expect(intentValues()).toHaveLength(delivered);
 			await saved;
-			expect(listener).toHaveBeenCalledWith(
-				expect.objectContaining({ action: thresholdAction, state: expect.objectContaining({ value: 350000 }) }),
-			);
-			for (const [event] of listener.mock.calls)
-				expect(Compile(RpcUiActionStateChangedEventSchema).Check(event)).toBe(true);
-			listener.mockClear();
+			expect(latestState(thresholdIntent)).toMatchObject({ value: 350000 });
+			for (const value of intentValues()) expect(Compile(LiveIntentsValueSchema).Check(value)).toBe(true);
 			settingsManager.setActiveProfile("work");
-			expect(listener).toHaveBeenCalledTimes(2);
-			listener.mockClear();
+			expect(latestState(thresholdIntent)).toMatchObject({ value: 500000 });
 			storage.withLock("global", () => JSON.stringify({ profiles: { work: { compaction: { enabled: false } } } }));
 			await settingsManager.reload();
-			expect(listener).toHaveBeenCalledWith(
-				expect.objectContaining({ action: autoAction, state: expect.objectContaining({ value: false }) }),
-			);
-			unsubscribe();
-			listener.mockClear();
-			await invoke(autoAction, true);
-			expect(listener).not.toHaveBeenCalled();
+			expect(latestState(autoIntent)).toMatchObject({ value: false });
+			feed.close();
+			const after = recorder.items().length;
+			await invoke(autoIntent, true);
+			expect(settingsManager.getCompactionEnabled()).toBe(true);
+			expect(recorder.items()).toHaveLength(after);
 		} finally {
-			unsubscribe();
+			feed.close();
 			await backgroundJobs.close();
 		}
 	});
@@ -354,7 +375,7 @@ describe("compaction host actions", () => {
 		const unsubscribe = settingsManager.subscribeCompactionSettings(listener);
 		storage.withLock("project", () => '{"compaction":null}');
 		await settingsManager.reload();
-		expect(descriptor(autoAction)).toMatchObject({ enabled: false, state: { value: true } });
+		expect(descriptor(autoIntent)).toMatchObject({ enabled: false, state: { value: true } });
 		expect(listener).toHaveBeenCalledOnce();
 		unsubscribe();
 	});
